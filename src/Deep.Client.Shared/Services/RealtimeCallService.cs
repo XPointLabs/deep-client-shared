@@ -1,0 +1,470 @@
+﻿using System.Collections.Concurrent;
+using System.Net.Http.Json;
+using System.Text.Json;
+using Deep.Client.Shared.Domain;
+
+namespace Deep.Client.Shared.Services;
+
+public enum CallSessionState
+{
+    Signaling,
+    Ringing,
+    Connecting,
+    Connected,
+    Reconnecting,
+    Ended,
+    Failed
+}
+
+public enum CallSignalType
+{
+    Offer,
+    Answer,
+    IceCandidate,
+    Reconnect,
+    Bye
+}
+
+public sealed record CallSignalEnvelope(
+    string CallId,
+    string ConversationId,
+    SessionId Sender,
+    SessionId Recipient,
+    CallSignalType Type,
+    string Payload,
+    DateTimeOffset CreatedAt);
+
+public sealed record CallNetworkSample(
+    double RttMs,
+    double JitterMs,
+    double PacketLossRatio,
+    double AvailableBitrateKbps);
+
+public sealed record CallQualityMetrics(
+    double QualityScore,
+    double AverageRttMs,
+    double AverageJitterMs,
+    double AveragePacketLossRatio,
+    double AvailableBitrateKbps,
+    DateTimeOffset UpdatedAt);
+
+public sealed record CallDegradationDiagnostic(
+    string Reason,
+    string Details,
+    DateTimeOffset RecordedAt);
+
+public sealed record CallSessionSnapshot(
+    string CallId,
+    string ConversationId,
+    SessionId LocalParty,
+    SessionId RemoteParty,
+    CallSessionState State,
+    CallQualityMetrics Quality,
+    int ReconnectAttempts,
+    string? FailureReason,
+    IReadOnlyList<CallDegradationDiagnostic> Diagnostics);
+
+public sealed record ReconnectStrategyOptions(
+    int MaxAttempts = 3,
+    int TriggerPoorSamples = 3,
+    double MaxPacketLossRatio = 0.08,
+    double MaxRttMs = 350,
+    double MaxJitterMs = 80,
+    double MinBitrateKbps = 24);
+
+public interface ICallSignalingTransport
+{
+    Task SendAsync(CallSignalEnvelope envelope, CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyList<CallSignalEnvelope>> ReceiveAsync(SessionId recipient, CancellationToken cancellationToken = default);
+}
+
+public sealed record HttpCallSignalingTransportOptions(
+    string BaseUrl,
+    string SignalPath = "/api/calls/signal",
+    string InboxPathFormat = "/api/calls/inbox/{recipient}");
+
+public sealed class HttpCallSignalingTransport : ICallSignalingTransport
+{
+    private readonly HttpClient _httpClient;
+    private readonly HttpCallSignalingTransportOptions _options;
+
+    public HttpCallSignalingTransport(HttpClient httpClient, HttpCallSignalingTransportOptions options)
+    {
+        _httpClient = httpClient;
+        _options = options;
+
+        if (string.IsNullOrWhiteSpace(_options.BaseUrl))
+        {
+            throw new ArgumentException("Call signaling base URL is required.", nameof(options));
+        }
+
+        if (_httpClient.BaseAddress is null)
+        {
+            _httpClient.BaseAddress = new Uri(_options.BaseUrl.EndsWith('/')
+                ? _options.BaseUrl
+                : _options.BaseUrl + "/", UriKind.Absolute);
+        }
+    }
+
+    public async Task SendAsync(CallSignalEnvelope envelope, CancellationToken cancellationToken = default)
+    {
+        var response = await _httpClient.PostAsJsonAsync(_options.SignalPath, envelope, cancellationToken).ConfigureAwait(false);
+        response.EnsureSuccessStatusCode();
+    }
+
+    public async Task<IReadOnlyList<CallSignalEnvelope>> ReceiveAsync(SessionId recipient, CancellationToken cancellationToken = default)
+    {
+        var path = _options.InboxPathFormat.Replace("{recipient}", Uri.EscapeDataString(recipient.Value), StringComparison.Ordinal);
+        var payload = await _httpClient.GetFromJsonAsync<List<CallSignalEnvelope>>(path, cancellationToken).ConfigureAwait(false)
+            ?? [];
+
+        return payload;
+    }
+}
+
+public sealed class InMemoryCallSignalingTransport : ICallSignalingTransport
+{
+    private readonly ConcurrentDictionary<string, ConcurrentQueue<CallSignalEnvelope>> _inboxes = new(StringComparer.Ordinal);
+
+    public Task SendAsync(CallSignalEnvelope envelope, CancellationToken cancellationToken = default)
+    {
+        _inboxes.GetOrAdd(envelope.Recipient.Value, static _ => new ConcurrentQueue<CallSignalEnvelope>()).Enqueue(envelope);
+        return Task.CompletedTask;
+    }
+
+    public Task<IReadOnlyList<CallSignalEnvelope>> ReceiveAsync(SessionId recipient, CancellationToken cancellationToken = default)
+    {
+        if (!_inboxes.TryGetValue(recipient.Value, out var queue))
+        {
+            return Task.FromResult<IReadOnlyList<CallSignalEnvelope>>([]);
+        }
+
+        var result = new List<CallSignalEnvelope>();
+        while (queue.TryDequeue(out var envelope))
+        {
+            result.Add(envelope);
+        }
+
+        return Task.FromResult<IReadOnlyList<CallSignalEnvelope>>(result);
+    }
+}
+
+public sealed class RealtimeCallService
+{
+    private readonly ICallSignalingTransport _transport;
+    private readonly IClock _clock;
+    private readonly ReconnectStrategyOptions _options;
+    private readonly ConcurrentDictionary<string, RuntimeCallSession> _sessions = new(StringComparer.Ordinal);
+
+    public RealtimeCallService(
+        ICallSignalingTransport transport,
+        ReconnectStrategyOptions? options = null,
+        IClock? clock = null)
+    {
+        _transport = transport;
+        _options = options ?? new ReconnectStrategyOptions();
+        _clock = clock ?? new SystemClock();
+    }
+
+    public async Task<CallSessionSnapshot> StartOutgoingAsync(
+        SessionId local,
+        SessionId remote,
+        string conversationId,
+        CancellationToken cancellationToken = default)
+    {
+        var callId = Guid.NewGuid().ToString("N");
+        var session = new RuntimeCallSession(callId, conversationId, local, remote, _clock.UtcNow);
+        _sessions[callId] = session;
+
+        session.State = CallSessionState.Signaling;
+        await SendSignalAsync(session, CallSignalType.Offer, new { sdp = "offer" }, cancellationToken).ConfigureAwait(false);
+        session.State = CallSessionState.Connecting;
+        session.Touch(_clock.UtcNow);
+
+        return session.ToSnapshot();
+    }
+
+    public async Task<IReadOnlyList<CallSessionSnapshot>> PollAsync(SessionId local, CancellationToken cancellationToken = default)
+    {
+        var inbound = await _transport.ReceiveAsync(local, cancellationToken).ConfigureAwait(false);
+        var changed = new List<CallSessionSnapshot>();
+
+        foreach (var envelope in inbound)
+        {
+            var session = _sessions.GetOrAdd(
+                envelope.CallId,
+                _ => new RuntimeCallSession(envelope.CallId, envelope.ConversationId, local, envelope.Sender, _clock.UtcNow));
+
+            switch (envelope.Type)
+            {
+                case CallSignalType.Offer:
+                    session.State = CallSessionState.Ringing;
+                    session.Touch(_clock.UtcNow);
+                    changed.Add(session.ToSnapshot());
+                    break;
+
+                case CallSignalType.Answer:
+                    session.State = CallSessionState.Connected;
+                    session.ConsecutivePoorSamples = 0;
+                    session.Touch(_clock.UtcNow);
+                    changed.Add(session.ToSnapshot());
+                    break;
+
+                case CallSignalType.Reconnect:
+                    if (session.State is not (CallSessionState.Ended or CallSessionState.Failed))
+                    {
+                        session.State = CallSessionState.Reconnecting;
+                        session.RecordDiagnostic("reconnect-request", "Peer requested reconnection due to degraded link.", _clock.UtcNow);
+                        await SendSignalAsync(session, CallSignalType.Answer, new { sdp = "reconnect-answer" }, cancellationToken).ConfigureAwait(false);
+                        session.State = CallSessionState.Connected;
+                        session.Touch(_clock.UtcNow);
+                        changed.Add(session.ToSnapshot());
+                    }
+
+                    break;
+
+                case CallSignalType.Bye:
+                    session.State = CallSessionState.Ended;
+                    session.FailureReason = "remote-hangup";
+                    session.Touch(_clock.UtcNow);
+                    changed.Add(session.ToSnapshot());
+                    break;
+            }
+        }
+
+        return changed;
+    }
+
+    public async Task<CallSessionSnapshot?> AcceptIncomingAsync(string callId, SessionId local, CancellationToken cancellationToken = default)
+    {
+        if (!_sessions.TryGetValue(callId, out var session))
+        {
+            return null;
+        }
+
+        if (session.State != CallSessionState.Ringing)
+        {
+            return session.ToSnapshot();
+        }
+
+        session.State = CallSessionState.Connecting;
+        await SendSignalAsync(session, CallSignalType.Answer, new { sdp = "answer" }, cancellationToken).ConfigureAwait(false);
+        session.State = CallSessionState.Connected;
+        session.Touch(_clock.UtcNow);
+        return session.ToSnapshot();
+    }
+
+    public async Task<CallSessionSnapshot?> EndAsync(
+        string callId,
+        SessionId local,
+        string reason = "local-hangup",
+        CancellationToken cancellationToken = default)
+    {
+        if (!_sessions.TryGetValue(callId, out var session))
+        {
+            return null;
+        }
+
+        session.State = CallSessionState.Ended;
+        session.FailureReason = reason;
+        session.Touch(_clock.UtcNow);
+        await SendSignalAsync(session, CallSignalType.Bye, new { reason }, cancellationToken).ConfigureAwait(false);
+        return session.ToSnapshot();
+    }
+
+    public async Task<CallSessionSnapshot?> ApplyNetworkSampleAsync(
+        string callId,
+        SessionId local,
+        CallNetworkSample sample,
+        CancellationToken cancellationToken = default)
+    {
+        if (!_sessions.TryGetValue(callId, out var session))
+        {
+            return null;
+        }
+
+        session.ApplyQuality(sample, _clock.UtcNow);
+
+        var reasons = EvaluateDegradation(sample);
+        if (reasons.Count == 0)
+        {
+            session.ConsecutivePoorSamples = 0;
+            return session.ToSnapshot();
+        }
+
+        session.ConsecutivePoorSamples++;
+        foreach (var reason in reasons)
+        {
+            session.RecordDiagnostic(reason.Reason, reason.Details, _clock.UtcNow);
+        }
+
+        if (session.ConsecutivePoorSamples < _options.TriggerPoorSamples)
+        {
+            return session.ToSnapshot();
+        }
+
+        if (session.ReconnectAttempts >= _options.MaxAttempts)
+        {
+            session.State = CallSessionState.Failed;
+            session.FailureReason = "reconnect-attempts-exhausted";
+            session.RecordDiagnostic(
+                "reconnect-attempts-exhausted",
+                "Maximum reconnect attempts exhausted during degraded link handling.",
+                _clock.UtcNow);
+            return session.ToSnapshot();
+        }
+
+        session.ReconnectAttempts++;
+        session.State = CallSessionState.Reconnecting;
+        await SendSignalAsync(session, CallSignalType.Reconnect, new { attempt = session.ReconnectAttempts }, cancellationToken).ConfigureAwait(false);
+        session.State = CallSessionState.Connecting;
+        session.Touch(_clock.UtcNow);
+        return session.ToSnapshot();
+    }
+
+    public CallSessionSnapshot? GetSnapshot(string callId)
+    {
+        return _sessions.TryGetValue(callId, out var session) ? session.ToSnapshot() : null;
+    }
+
+    private async Task SendSignalAsync(RuntimeCallSession session, CallSignalType type, object payload, CancellationToken cancellationToken)
+    {
+        var envelope = new CallSignalEnvelope(
+            session.CallId,
+            session.ConversationId,
+            session.LocalParty,
+            session.RemoteParty,
+            type,
+            JsonSerializer.Serialize(payload),
+            _clock.UtcNow);
+
+        await _transport.SendAsync(envelope, cancellationToken).ConfigureAwait(false);
+    }
+
+    private List<(string Reason, string Details)> EvaluateDegradation(CallNetworkSample sample)
+    {
+        var reasons = new List<(string Reason, string Details)>();
+
+        if (sample.PacketLossRatio > _options.MaxPacketLossRatio)
+        {
+            reasons.Add(("high-packet-loss", $"Packet loss ratio {sample.PacketLossRatio:P1} exceeds {_options.MaxPacketLossRatio:P1}."));
+        }
+
+        if (sample.RttMs > _options.MaxRttMs)
+        {
+            reasons.Add(("high-rtt", $"RTT {sample.RttMs:F0}ms exceeds {_options.MaxRttMs:F0}ms."));
+        }
+
+        if (sample.JitterMs > _options.MaxJitterMs)
+        {
+            reasons.Add(("high-jitter", $"Jitter {sample.JitterMs:F0}ms exceeds {_options.MaxJitterMs:F0}ms."));
+        }
+
+        if (sample.AvailableBitrateKbps < _options.MinBitrateKbps)
+        {
+            reasons.Add(("low-bitrate", $"Bitrate {sample.AvailableBitrateKbps:F0}kbps below {_options.MinBitrateKbps:F0}kbps."));
+        }
+
+        return reasons;
+    }
+
+    private sealed class RuntimeCallSession
+    {
+        private double _samples;
+        private double _rttAcc;
+        private double _jitterAcc;
+        private double _lossAcc;
+
+        public RuntimeCallSession(
+            string callId,
+            string conversationId,
+            SessionId localParty,
+            SessionId remoteParty,
+            DateTimeOffset now)
+        {
+            CallId = callId;
+            ConversationId = conversationId;
+            LocalParty = localParty;
+            RemoteParty = remoteParty;
+            State = CallSessionState.Signaling;
+            Quality = new CallQualityMetrics(100, 0, 0, 0, 0, now);
+            Diagnostics = [];
+        }
+
+        public string CallId { get; }
+
+        public string ConversationId { get; }
+
+        public SessionId LocalParty { get; }
+
+        public SessionId RemoteParty { get; }
+
+        public CallSessionState State { get; set; }
+
+        public CallQualityMetrics Quality { get; private set; }
+
+        public List<CallDegradationDiagnostic> Diagnostics { get; }
+
+        public int ReconnectAttempts { get; set; }
+
+        public int ConsecutivePoorSamples { get; set; }
+
+        public string? FailureReason { get; set; }
+
+        public void Touch(DateTimeOffset at)
+        {
+            Quality = Quality with { UpdatedAt = at };
+        }
+
+        public void RecordDiagnostic(string reason, string details, DateTimeOffset at)
+        {
+            Diagnostics.Add(new CallDegradationDiagnostic(reason, details, at));
+            if (Diagnostics.Count > 32)
+            {
+                Diagnostics.RemoveRange(0, Diagnostics.Count - 32);
+            }
+        }
+
+        public void ApplyQuality(CallNetworkSample sample, DateTimeOffset at)
+        {
+            _samples += 1;
+            _rttAcc += sample.RttMs;
+            _jitterAcc += sample.JitterMs;
+            _lossAcc += sample.PacketLossRatio;
+
+            var avgRtt = _rttAcc / _samples;
+            var avgJitter = _jitterAcc / _samples;
+            var avgLoss = _lossAcc / _samples;
+
+            var score = 100d;
+            score -= avgLoss * 100d * 1.5d;
+            score -= avgRtt / 10d;
+            score -= avgJitter / 5d;
+            score += Math.Min(sample.AvailableBitrateKbps, 512d) / 64d;
+            score = Math.Clamp(score, 1d, 100d);
+
+            Quality = new CallQualityMetrics(
+                score,
+                avgRtt,
+                avgJitter,
+                avgLoss,
+                sample.AvailableBitrateKbps,
+                at);
+        }
+
+        public CallSessionSnapshot ToSnapshot()
+        {
+            return new CallSessionSnapshot(
+                CallId,
+                ConversationId,
+                LocalParty,
+                RemoteParty,
+                State,
+                Quality,
+                ReconnectAttempts,
+                FailureReason,
+                Diagnostics.ToArray());
+        }
+    }
+}

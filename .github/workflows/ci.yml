@@ -1,0 +1,36 @@
+﻿name: shared-ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: test-${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - run: dotnet restore Deep.Client.Shared.slnx
+      - run: dotnet test Deep.Client.Shared.slnx --configuration Release --no-restore
+
+  package-placeholder:
+    name: build-shared-artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - run: dotnet pack src/Deep.Client.Shared/Deep.Client.Shared.csproj --configuration Release --output artifacts
+      - run: echo "Signing placeholder. Wire repository secrets and signing identity here." > artifacts/SIGNING-PLACEHOLDER.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deep-client-shared
+          path: artifacts

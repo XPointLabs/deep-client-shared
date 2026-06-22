@@ -1,0 +1,64 @@
+﻿# Deep Client Shared
+
+`deep-client-shared` is the portable .NET domain/state/services layer for a Session-style client.
+It intentionally ports shared behavior and boundaries rather than UI line-by-line.
+
+## Agent Specs
+
+- Start with [`AGENTS.md`](AGENTS.md) before changing shared runtime behavior.
+- Use [`docs/SESSION_PORTING.md`](docs/SESSION_PORTING.md) when migrating Session domain, storage, sync, push, attachment, group, or call semantics.
+- UI-specific behavior belongs in `deep-client-maui`; this repo owns portable contracts and runtime state.
+
+## Scope
+
+- Conversation, contact, group, message, attachment, read receipt, and disappearing-message domain models.
+- Sync orchestration primitives matching Session config/message namespaces.
+- Local persistence abstractions with production `SqliteSessionStore` (SQLCipher-compatible key hook) plus in-memory implementation for tests.
+- Notification planning abstractions.
+- Platform service boundaries for push, media codec, permissions, background tasks, share extension equivalents, and calls.
+- Session-compatible storage transport (`SessionStorageMessageTransport`) for local real message exchange via `/storage/store` and `/storage/retrieve`.
+- Session-compatible group sync transport (`SessionStorageGroupSyncTransport`) for local real group-state and group-message exchange via `/storage/store` and `/storage/retrieve`.
+- Encrypted attachment file transport (`HttpAttachmentFileTransport`) for local real upload/download via `/file`.
+- HTTP call signaling transport (`HttpCallSignalingTransport`) for real call offer/answer/bye exchange via `/api/calls`.
+- HTTP transport integration (`HttpSessionTransport`) for custom production message APIs, plus `StubSessionBackend` for isolated tests.
+
+Persistent runtime includes:
+
+- SQLite-backed local store (`ClientRuntime.CreatePersistent`)
+- optional SQLCipher key path (`sqlCipherKey`)
+- legacy in-memory JSON snapshot migration (`legacyInMemoryStatePath`) without data loss (backup `.migrated.bak`)
+- read-receipt cursor sync and disappearing-message pruning helpers in `MessageService`
+
+## Verify
+
+```powershell
+dotnet test Deep.Client.Shared.slnx
+```
+
+To include the live local storage round-trip tests for 1:1 messages, group state, and group messages, start the main repository docker stack and set:
+
+```powershell
+$env:DEEP_STORAGE_URL = "http://127.0.0.1:18100"
+dotnet test Deep.Client.Shared.slnx --configuration Release
+```
+
+To include the live local push subscribe/unsubscribe test as well, set:
+
+```powershell
+$env:DEEP_PUSH_URL = "http://127.0.0.1:18102"
+dotnet test Deep.Client.Shared.slnx --configuration Release
+```
+
+To include the live local encrypted attachment upload/download test and the message-with-attachment e2e, set:
+
+```powershell
+$env:DEEP_FILE_URL = "http://127.0.0.1:18101"
+dotnet test Deep.Client.Shared.slnx --configuration Release
+```
+
+To include the live local call signaling lifecycle test, set:
+
+```powershell
+$env:DEEP_CALL_SIGNALING_BASE_URL = "http://127.0.0.1:18103"
+dotnet test Deep.Client.Shared.slnx --configuration Release
+```

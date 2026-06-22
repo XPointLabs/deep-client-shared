@@ -1,0 +1,8 @@
+﻿<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Deep.Client.Shared/Deep.Client.Shared.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Deep.Client.Shared.Tests/Deep.Client.Shared.Tests.csproj" />
+  </Folder>
+</Solution>
