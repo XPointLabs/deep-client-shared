@@ -15,7 +15,15 @@ public sealed record TransportRouteNode(
     bool IsReachable,
     IReadOnlyList<string> Capabilities,
     string X25519PublicKey = "",
-    string RpcEndpoint = "");
+    string RpcEndpoint = "",
+    string PublicHost = "",
+    string PublicIp = "",
+    int PublicPort = 0,
+    DateTimeOffset SignedAt = default,
+    DateTimeOffset ExpiresAt = default,
+    string RouterVersion = "",
+    string SignatureAlgorithm = "",
+    string Signature = "");
 
 public sealed record TransportRouteSnapshot(
     string Mode,
@@ -239,6 +247,7 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
                 : nodes.Count;
             var routerId = GetString(node, "routerId") ?? $"node-{index + 1}";
             var host = GetString(node, "publicHost") ?? "";
+            var publicIp = GetString(node, "publicIp") ?? "";
             var port = node.TryGetProperty("publicPort", out var portElement) && portElement.TryGetInt32(out var parsedPort)
                 ? parsedPort
                 : 0;
@@ -257,8 +266,30 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
                     .Select(static value => value!)
                     .ToArray()
                 : [];
+            var signedAt = GetDateTimeOffset(node, "signedAt");
+            var expiresAt = GetDateTimeOffset(node, "expiresAt");
+            var routeNode = new TransportRouteNode(
+                index,
+                routerId,
+                endpoint,
+                reachable,
+                capabilities,
+                x25519PublicKey,
+                rpcEndpoint,
+                host,
+                publicIp,
+                port,
+                signedAt,
+                expiresAt,
+                GetString(node, "routerVersion") ?? "",
+                GetString(node, "signatureAlgorithm") ?? "",
+                GetString(node, "signature") ?? "");
+            if (!RelayContactSignatureVerifier.Verify(routeNode, DateTimeOffset.UtcNow))
+            {
+                throw new HttpRequestException($"Router returned an invalid signed relay contact for {routerId}.");
+            }
 
-            nodes.Add(new TransportRouteNode(index, routerId, endpoint, reachable, capabilities, x25519PublicKey, rpcEndpoint));
+            nodes.Add(routeNode);
         }
 
         if (nodes.Count > 0)
@@ -272,6 +303,15 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
         return element.TryGetProperty(name, out var property) && property.ValueKind == JsonValueKind.String
             ? property.GetString()
             : null;
+    }
+
+    private static DateTimeOffset GetDateTimeOffset(JsonElement element, string name)
+    {
+        return element.TryGetProperty(name, out var property)
+            && property.ValueKind == JsonValueKind.String
+            && property.TryGetDateTimeOffset(out var value)
+                ? value
+                : default;
     }
 
     private sealed record RouterRpcRequest(string Id, string Method, object Payload);

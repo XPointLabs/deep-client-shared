@@ -277,12 +277,16 @@ public sealed class SessionTransportTests
             DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
         };
 
-        public static readonly string[] RouterIds =
+        private static readonly KeyPair[] SigningKeys =
         [
-            "00000000000000000000000000000000000000000000000000000000000000a1",
-            "00000000000000000000000000000000000000000000000000000000000000b2",
-            "00000000000000000000000000000000000000000000000000000000000000c3"
+            PublicKeyAuth.GenerateKeyPair(Seed(0xa1)),
+            PublicKeyAuth.GenerateKeyPair(Seed(0xb2)),
+            PublicKeyAuth.GenerateKeyPair(Seed(0xc3))
         ];
+
+        public static readonly string[] RouterIds = SigningKeys
+            .Select(static key => Convert.ToHexString(key.PublicKey).ToLowerInvariant())
+            .ToArray();
 
         private readonly KeyPair[] _keys =
         [
@@ -337,17 +341,59 @@ public sealed class SessionTransportTests
                 Convert.ToBase64String(ciphertext));
         }
 
-        private object RouteNode(int index, int port) => new
+        private object RouteNode(int index, int port)
         {
-            index,
-            routerId = RouterIds[index],
-            publicHost = "192.168.1.44",
-            publicPort = port,
-            x25519PublicKey = Convert.ToHexString(_keys[index].PublicKey).ToLowerInvariant(),
-            rpcEndpoint = $"http://xnode-{index + 1}:8080",
-            isReachable = true,
-            capabilities = new[] { "session-rpc", "onion-v1" }
-        };
+            var signedAt = DateTimeOffset.UtcNow.AddMinutes(-1);
+            var expiresAt = signedAt.AddDays(30);
+            var capabilities = new[] { "session-rpc", "onion-v1" };
+            var publicHost = "192.168.1.44";
+            var publicIp = "192.168.1.44";
+            var x25519PublicKey = Convert.ToHexString(_keys[index].PublicKey).ToLowerInvariant();
+            var rpcEndpoint = $"http://xnode-{index + 1}:8080";
+            var routerVersion = "1.0.0";
+            var payload = new
+            {
+                version = "deep-relay-contact-v1",
+                routerId = RouterIds[index],
+                publicHost,
+                publicIp,
+                publicPort = port,
+                x25519PublicKey,
+                rpcEndpoint,
+                signedAtUnixMs = signedAt.ToUnixTimeMilliseconds(),
+                expiresAtUnixMs = expiresAt.ToUnixTimeMilliseconds(),
+                routerVersion,
+                isReachable = true,
+                capabilities = capabilities.Order(StringComparer.Ordinal).ToArray()
+            };
+            var signature = PublicKeyAuth.SignDetached(
+                JsonSerializer.SerializeToUtf8Bytes(payload, JsonOptions),
+                SigningKeys[index].PrivateKey);
+            return new
+            {
+                index,
+                routerId = RouterIds[index],
+                publicHost,
+                publicIp,
+                publicPort = port,
+                x25519PublicKey,
+                rpcEndpoint,
+                isReachable = true,
+                capabilities,
+                signedAt,
+                expiresAt,
+                routerVersion,
+                signatureAlgorithm = "ed25519",
+                signature = Convert.ToHexString(signature).ToLowerInvariant()
+            };
+        }
+
+        private static byte[] Seed(byte value)
+        {
+            var seed = new byte[32];
+            seed[^1] = value;
+            return seed;
+        }
 
         private static TestOnionLayer DecryptLayer(TestOnionEnvelope envelope, byte[] privateKey)
         {
