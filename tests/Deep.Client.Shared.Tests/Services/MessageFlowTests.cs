@@ -90,6 +90,28 @@ public sealed class MessageFlowTests
     }
 
     [Fact]
+    public async Task DispatchPendingMessages_RetriesPersistedFailureAfterRestartCycle()
+    {
+        var transport = new QueuedMessageTransport { SendException = new HttpRequestException("offline") };
+        var runtime = new ClientRuntime(
+            new InMemorySessionStore(),
+            Deep.Client.Shared.Features.ClientFeatureFlags.Defaults,
+            new FrozenClock(DateTimeOffset.Parse("2026-05-28T00:00:00Z")),
+            transport);
+        var sender = await runtime.Accounts.RegisterAsync("Sender");
+        var pending = await runtime.Messages.QueueOneToOneAsync(sender.SessionId, SessionId.CreateNew(), "retry me");
+        await Assert.ThrowsAsync<HttpRequestException>(() => runtime.Messages.DispatchOneToOneAsync(pending));
+        transport.SendException = null;
+
+        var dispatched = await runtime.Messages.DispatchPendingMessagesAsync(sender.SessionId);
+        var stored = await ((IMessageRepository)runtime.Store).GetAsync(pending.Id);
+
+        Assert.Equal(1, dispatched);
+        Assert.Equal(2, transport.SendCount);
+        Assert.Equal(MessageDeliveryState.Sent, stored?.DeliveryState);
+    }
+
+    [Fact]
     public async Task ReceiveAsync_RemovesLegacySelfEcho()
     {
         var clock = new FrozenClock(DateTimeOffset.Parse("2026-05-28T00:00:00Z"));
@@ -452,7 +474,7 @@ public sealed class MessageFlowTests
     {
         private readonly Queue<InboundMessageEnvelope> envelopes = new();
 
-        public Exception? SendException { get; init; }
+        public Exception? SendException { get; set; }
 
         public int SendCount { get; private set; }
 

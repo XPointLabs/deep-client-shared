@@ -306,6 +306,50 @@ public sealed class MessageService(
         }
     }
 
+    public async Task<int> DispatchPendingMessagesAsync(
+        SessionId sender,
+        CancellationToken cancellationToken = default)
+    {
+        var dispatched = 0;
+        await foreach (var conversation in conversations.ListAsync(cancellationToken).ConfigureAwait(false))
+        {
+            var pendingMessages = new List<Message>();
+            await foreach (var message in messages.ListForConversationAsync(conversation.Id, cancellationToken).ConfigureAwait(false))
+            {
+                if (message.Sender == sender &&
+                    message.Direction == MessageDirection.Outgoing &&
+                    message.DeliveryState is MessageDeliveryState.Sending or MessageDeliveryState.Failed)
+                {
+                    pendingMessages.Add(message);
+                }
+            }
+
+            foreach (var pending in pendingMessages.OrderBy(static message => message.CreatedAt))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                try
+                {
+                    if (pending.Recipient is null)
+                    {
+                        await DispatchGroupAsync(pending, cancellationToken).ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        await DispatchOneToOneAsync(pending, cancellationToken).ConfigureAwait(false);
+                    }
+
+                    dispatched++;
+                }
+                catch when (!cancellationToken.IsCancellationRequested)
+                {
+                    // Keep the failed message persisted for the next retry cycle.
+                }
+            }
+        }
+
+        return dispatched;
+    }
+
     public async Task<IReadOnlyList<Message>> ReceiveGroupAsync(
         SessionId recipient,
         ConversationId groupId,
