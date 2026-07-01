@@ -19,13 +19,22 @@ public sealed class MessageService(
         IEnumerable<AttachmentMetadata>? attachments = null,
         CancellationToken cancellationToken = default)
     {
+        var pending = await QueueOneToOneAsync(sender, recipient, body, attachments, cancellationToken).ConfigureAwait(false);
+        return await DispatchOneToOneAsync(pending, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<Message> QueueOneToOneAsync(
+        SessionId sender,
+        SessionId recipient,
+        string body,
+        IEnumerable<AttachmentMetadata>? attachments = null,
+        CancellationToken cancellationToken = default)
+    {
         ArgumentException.ThrowIfNullOrWhiteSpace(body);
 
         var conversation = await conversationService.GetOrCreateOneToOneAsync(recipient, cancellationToken: cancellationToken)
             .ConfigureAwait(false);
         var now = clock.UtcNow;
-        var expiresAt = CalculateExpiry(conversation.Settings.DisappearingMessages, now);
-        var attachmentList = attachments?.ToArray() ?? [];
         var pending = new Message(
             MessageId.NewId(),
             conversation.Id,
@@ -35,18 +44,42 @@ public sealed class MessageService(
             MessageDirection.Outgoing,
             MessageDeliveryState.Sending,
             now,
-            attachmentList,
-            expiresAt);
+            attachments?.ToArray() ?? [],
+            CalculateExpiry(conversation.Settings.DisappearingMessages, now));
 
         await messages.AppendAsync(pending, cancellationToken).ConfigureAwait(false);
-        await transport.SendAsync(new OutboundMessageEnvelope(sender, recipient, pending.Body, attachmentList, now, expiresAt, pending.Id), cancellationToken)
-            .ConfigureAwait(false);
-
-        var sent = pending.Mark(MessageDeliveryState.Sent);
-        await messages.UpdateAsync(sent, cancellationToken).ConfigureAwait(false);
         await conversations.UpsertAsync(conversation.Touch(now), cancellationToken).ConfigureAwait(false);
         await PruneExpiredConversationMessagesAsync(conversation.Id, cancellationToken).ConfigureAwait(false);
-        return sent;
+        return pending;
+    }
+
+    public async Task<Message> DispatchOneToOneAsync(Message pending, CancellationToken cancellationToken = default)
+    {
+        if (pending.Direction != MessageDirection.Outgoing || pending.Recipient is null)
+        {
+            throw new ArgumentException("Only queued one-to-one messages can be dispatched.", nameof(pending));
+        }
+
+        try
+        {
+            await transport.SendAsync(new OutboundMessageEnvelope(
+                pending.Sender,
+                pending.Recipient.Value,
+                pending.Body,
+                pending.Attachments,
+                pending.CreatedAt,
+                pending.ExpiresAt,
+                pending.Id), cancellationToken).ConfigureAwait(false);
+
+            var sent = pending.Mark(MessageDeliveryState.Sent);
+            await messages.UpdateAsync(sent, cancellationToken).ConfigureAwait(false);
+            return sent;
+        }
+        catch
+        {
+            await messages.UpdateAsync(pending.Mark(MessageDeliveryState.Failed), CancellationToken.None).ConfigureAwait(false);
+            throw;
+        }
     }
 
     public async Task<IReadOnlyList<Message>> ReceiveAsync(SessionId recipient, CancellationToken cancellationToken = default)
@@ -192,6 +225,17 @@ public sealed class MessageService(
         IEnumerable<AttachmentMetadata>? attachments = null,
         CancellationToken cancellationToken = default)
     {
+        var pending = await QueueGroupAsync(sender, groupId, body, attachments, cancellationToken).ConfigureAwait(false);
+        return await DispatchGroupAsync(pending, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<Message> QueueGroupAsync(
+        SessionId sender,
+        ConversationId groupId,
+        string body,
+        IEnumerable<AttachmentMetadata>? attachments = null,
+        CancellationToken cancellationToken = default)
+    {
         ArgumentException.ThrowIfNullOrWhiteSpace(body);
 
         var group = await conversationService.GetGroupAsync(groupId, cancellationToken).ConfigureAwait(false);
@@ -215,8 +259,6 @@ public sealed class MessageService(
                 now,
                 now);
 
-        var expiresAt = CalculateExpiry(conversation.Settings.DisappearingMessages, now);
-        var attachmentList = attachments?.ToArray() ?? [];
         var pending = new Message(
             MessageId.NewId(),
             conversation.Id,
@@ -226,24 +268,42 @@ public sealed class MessageService(
             MessageDirection.Outgoing,
             MessageDeliveryState.Sending,
             now,
-            attachmentList,
-            expiresAt);
+            attachments?.ToArray() ?? [],
+            CalculateExpiry(conversation.Settings.DisappearingMessages, now));
 
         await messages.AppendAsync(pending, cancellationToken).ConfigureAwait(false);
-        await groupSync.SendGroupMessageAsync(new OutboundGroupMessageEnvelope(
-            pending.Id,
-            conversation.Id,
-            sender,
-            pending.Body,
-            attachmentList,
-            now,
-            expiresAt), cancellationToken).ConfigureAwait(false);
-
-        var sent = pending.Mark(MessageDeliveryState.Sent);
-        await messages.UpdateAsync(sent, cancellationToken).ConfigureAwait(false);
         await conversations.UpsertAsync(conversation.Touch(now), cancellationToken).ConfigureAwait(false);
         await PruneExpiredConversationMessagesAsync(conversation.Id, cancellationToken).ConfigureAwait(false);
-        return sent;
+        return pending;
+    }
+
+    public async Task<Message> DispatchGroupAsync(Message pending, CancellationToken cancellationToken = default)
+    {
+        if (pending.Direction != MessageDirection.Outgoing || pending.Recipient is not null)
+        {
+            throw new ArgumentException("Only queued group messages can be dispatched.", nameof(pending));
+        }
+
+        try
+        {
+            await groupSync.SendGroupMessageAsync(new OutboundGroupMessageEnvelope(
+                pending.Id,
+                pending.ConversationId,
+                pending.Sender,
+                pending.Body,
+                pending.Attachments,
+                pending.CreatedAt,
+                pending.ExpiresAt), cancellationToken).ConfigureAwait(false);
+
+            var sent = pending.Mark(MessageDeliveryState.Sent);
+            await messages.UpdateAsync(sent, cancellationToken).ConfigureAwait(false);
+            return sent;
+        }
+        catch
+        {
+            await messages.UpdateAsync(pending.Mark(MessageDeliveryState.Failed), CancellationToken.None).ConfigureAwait(false);
+            throw;
+        }
     }
 
     public async Task<IReadOnlyList<Message>> ReceiveGroupAsync(

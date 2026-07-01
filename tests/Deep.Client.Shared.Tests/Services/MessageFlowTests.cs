@@ -49,6 +49,47 @@ public sealed class MessageFlowTests
     }
 
     [Fact]
+    public async Task QueueAndDispatchOneToOne_ExposeSendingBeforeNetworkCompletion()
+    {
+        var transport = new QueuedMessageTransport();
+        var runtime = new ClientRuntime(
+            new InMemorySessionStore(),
+            Deep.Client.Shared.Features.ClientFeatureFlags.Defaults,
+            new FrozenClock(DateTimeOffset.Parse("2026-05-28T00:00:00Z")),
+            transport);
+        var sender = await runtime.Accounts.RegisterAsync("Sender");
+        var recipient = SessionId.CreateNew();
+
+        var pending = await runtime.Messages.QueueOneToOneAsync(sender.SessionId, recipient, "optimistic");
+
+        Assert.Equal(MessageDeliveryState.Sending, pending.DeliveryState);
+        Assert.Equal(0, transport.SendCount);
+
+        var sent = await runtime.Messages.DispatchOneToOneAsync(pending);
+
+        Assert.Equal(MessageDeliveryState.Sent, sent.DeliveryState);
+        Assert.Equal(1, transport.SendCount);
+    }
+
+    [Fact]
+    public async Task DispatchOneToOne_MarksQueuedMessageFailedWhenTransportFails()
+    {
+        var transport = new QueuedMessageTransport { SendException = new HttpRequestException("offline") };
+        var runtime = new ClientRuntime(
+            new InMemorySessionStore(),
+            Deep.Client.Shared.Features.ClientFeatureFlags.Defaults,
+            new FrozenClock(DateTimeOffset.Parse("2026-05-28T00:00:00Z")),
+            transport);
+        var sender = await runtime.Accounts.RegisterAsync("Sender");
+        var pending = await runtime.Messages.QueueOneToOneAsync(sender.SessionId, SessionId.CreateNew(), "retry me");
+
+        await Assert.ThrowsAsync<HttpRequestException>(() => runtime.Messages.DispatchOneToOneAsync(pending));
+        var stored = await ((IMessageRepository)runtime.Store).GetAsync(pending.Id);
+
+        Assert.Equal(MessageDeliveryState.Failed, stored?.DeliveryState);
+    }
+
+    [Fact]
     public async Task ReceiveAsync_RemovesLegacySelfEcho()
     {
         var clock = new FrozenClock(DateTimeOffset.Parse("2026-05-28T00:00:00Z"));
@@ -411,10 +452,17 @@ public sealed class MessageFlowTests
     {
         private readonly Queue<InboundMessageEnvelope> envelopes = new();
 
+        public Exception? SendException { get; init; }
+
+        public int SendCount { get; private set; }
+
         public void Enqueue(InboundMessageEnvelope envelope) => envelopes.Enqueue(envelope);
 
-        public Task SendAsync(OutboundMessageEnvelope envelope, CancellationToken cancellationToken = default) =>
-            Task.CompletedTask;
+        public Task SendAsync(OutboundMessageEnvelope envelope, CancellationToken cancellationToken = default)
+        {
+            SendCount++;
+            return SendException is null ? Task.CompletedTask : Task.FromException(SendException);
+        }
 
         public Task<IReadOnlyList<InboundMessageEnvelope>> ReceiveAsync(
             SessionId recipient,
