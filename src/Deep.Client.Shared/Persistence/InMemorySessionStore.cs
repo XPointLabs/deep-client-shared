@@ -117,7 +117,8 @@ public sealed class InMemorySessionStore : ILocalSessionStore
     {
         foreach (var item in messages.Values
                      .Where(item => item.ConversationId == conversationId)
-                     .OrderBy(item => item.CreatedAt))
+                     .OrderBy(item => item.CreatedAt)
+                     .ThenBy(item => item.Id.Value, StringComparer.Ordinal))
         {
             cancellationToken.ThrowIfCancellationRequested();
             yield return item;
@@ -133,8 +134,10 @@ public sealed class InMemorySessionStore : ILocalSessionStore
         foreach (var item in messages.Values
                      .Where(item => item.ConversationId == conversationId)
                      .OrderByDescending(item => item.CreatedAt)
+                     .ThenByDescending(item => item.Id.Value, StringComparer.Ordinal)
                      .Take(limit)
-                     .OrderBy(item => item.CreatedAt))
+                     .OrderBy(item => item.CreatedAt)
+                     .ThenBy(item => item.Id.Value, StringComparer.Ordinal))
         {
             cancellationToken.ThrowIfCancellationRequested();
             yield return item;
@@ -151,8 +154,10 @@ public sealed class InMemorySessionStore : ILocalSessionStore
         foreach (var item in messages.Values
                      .Where(item => item.ConversationId == conversationId && item.CreatedAt < beforeCreatedAt)
                      .OrderByDescending(item => item.CreatedAt)
+                     .ThenByDescending(item => item.Id.Value, StringComparer.Ordinal)
                      .Take(limit)
-                     .OrderBy(item => item.CreatedAt))
+                     .OrderBy(item => item.CreatedAt)
+                     .ThenBy(item => item.Id.Value, StringComparer.Ordinal))
         {
             cancellationToken.ThrowIfCancellationRequested();
             yield return item;

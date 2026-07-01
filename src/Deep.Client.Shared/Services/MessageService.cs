@@ -39,7 +39,7 @@ public sealed class MessageService(
             expiresAt);
 
         await messages.AppendAsync(pending, cancellationToken).ConfigureAwait(false);
-        await transport.SendAsync(new OutboundMessageEnvelope(sender, recipient, pending.Body, attachmentList, now, expiresAt), cancellationToken)
+        await transport.SendAsync(new OutboundMessageEnvelope(sender, recipient, pending.Body, attachmentList, now, expiresAt, pending.Id), cancellationToken)
             .ConfigureAwait(false);
 
         var sent = pending.Mark(MessageDeliveryState.Sent);
@@ -51,6 +51,7 @@ public sealed class MessageService(
 
     public async Task<IReadOnlyList<Message>> ReceiveAsync(SessionId recipient, CancellationToken cancellationToken = default)
     {
+        await PruneLegacySelfEchoesAsync(recipient, cancellationToken).ConfigureAwait(false);
         var envelopes = await transport.ReceiveAsync(recipient, cancellationToken).ConfigureAwait(false);
         var received = new List<Message>(envelopes.Count);
 
@@ -63,6 +64,11 @@ public sealed class MessageService(
 
             var conversation = await conversationService.GetOrCreateOneToOneAsync(envelope.Sender, cancellationToken: cancellationToken)
                 .ConfigureAwait(false);
+
+            if (await messages.GetAsync(envelope.Id, cancellationToken).ConfigureAwait(false) is not null)
+            {
+                continue;
+            }
 
             if (await HasMessageWithServerHashAsync(conversation.Id, envelope.ServerHash, cancellationToken).ConfigureAwait(false))
             {
@@ -94,6 +100,44 @@ public sealed class MessageService(
 
         return received;
     }
+
+    private async Task<int> PruneLegacySelfEchoesAsync(
+        SessionId account,
+        CancellationToken cancellationToken)
+    {
+        var conversation = await conversationService.GetOrCreateOneToOneAsync(account, cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+        var selfMessages = new List<Message>();
+
+        await foreach (var message in messages.ListForConversationAsync(conversation.Id, cancellationToken).ConfigureAwait(false))
+        {
+            if (message.Sender == account && message.Recipient == account)
+            {
+                selfMessages.Add(message);
+            }
+        }
+
+        var outgoing = selfMessages
+            .Where(static message => message.Direction == MessageDirection.Outgoing)
+            .ToArray();
+        var duplicates = selfMessages
+            .Where(message =>
+                message.Direction == MessageDirection.Incoming &&
+                outgoing.Any(candidate => IsSameSelfMessage(candidate, message)))
+            .ToArray();
+
+        foreach (var duplicate in duplicates)
+        {
+            await messages.DeleteAsync(duplicate.Id, cancellationToken).ConfigureAwait(false);
+        }
+
+        return duplicates.Length;
+    }
+
+    private static bool IsSameSelfMessage(Message outgoing, Message incoming) =>
+        outgoing.CreatedAt == incoming.CreatedAt &&
+        string.Equals(outgoing.Body, incoming.Body, StringComparison.Ordinal) &&
+        outgoing.Attachments.SequenceEqual(incoming.Attachments);
 
     private async Task<bool> HasMessageWithServerHashAsync(
         ConversationId conversationId,

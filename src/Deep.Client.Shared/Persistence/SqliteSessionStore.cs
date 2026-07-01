@@ -186,7 +186,7 @@ public sealed class SqliteSessionStore : ILocalSessionStore
         ConversationId conversationId,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        const string sql = "SELECT payload_json FROM messages WHERE conversation_id = $conversationId ORDER BY created_at;";
+        const string sql = "SELECT payload_json FROM messages WHERE conversation_id = $conversationId ORDER BY created_at, id;";
         foreach (var payload in await QueryJsonAsync(sql, cancellationToken, ("$conversationId", conversationId.Value)).ConfigureAwait(false))
         {
             yield return JsonSerializer.Deserialize<Message>(payload, SerializerOptions)!;
@@ -201,13 +201,13 @@ public sealed class SqliteSessionStore : ILocalSessionStore
         const string sql = """
             SELECT payload_json
             FROM (
-                SELECT payload_json, created_at
+                SELECT payload_json, created_at, id
                 FROM messages
                 WHERE conversation_id = $conversationId
-                ORDER BY created_at DESC
+                ORDER BY created_at DESC, id DESC
                 LIMIT $limit
             )
-            ORDER BY created_at;
+            ORDER BY created_at, id;
             """;
 
         foreach (var payload in await QueryJsonAsync(
@@ -229,14 +229,14 @@ public sealed class SqliteSessionStore : ILocalSessionStore
         const string sql = """
             SELECT payload_json
             FROM (
-                SELECT payload_json, created_at
+                SELECT payload_json, created_at, id
                 FROM messages
                 WHERE conversation_id = $conversationId
                     AND created_at < $beforeCreatedAt
-                ORDER BY created_at DESC
+                ORDER BY created_at DESC, id DESC
                 LIMIT $limit
             )
-            ORDER BY created_at;
+            ORDER BY created_at, id;
             """;
 
         foreach (var payload in await QueryJsonAsync(

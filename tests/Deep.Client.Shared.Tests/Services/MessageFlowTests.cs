@@ -27,6 +27,49 @@ public sealed class MessageFlowTests
     }
 
     [Fact]
+    public async Task SendReceiveToSelf_PreservesSingleOutgoingMessage()
+    {
+        var backend = new StubSessionBackend();
+        var runtime = ClientRuntime.CreateStubbed(
+            clock: new FrozenClock(DateTimeOffset.Parse("2026-05-28T00:00:00Z")),
+            backend: backend);
+        var account = await runtime.Accounts.RegisterAsync("Notes");
+
+        var sent = await runtime.Messages.SendOneToOneAsync(account.SessionId, account.SessionId, "remember this");
+        var received = await runtime.Messages.ReceiveAsync(account.SessionId);
+        var messages = await runtime.Messages.ListConversationMessagesAsync(sent.ConversationId);
+
+        Assert.Empty(received);
+        Assert.Collection(messages, message =>
+        {
+            Assert.Equal(sent.Id, message.Id);
+            Assert.Equal(MessageDirection.Outgoing, message.Direction);
+            Assert.Equal("remember this", message.Body);
+        });
+    }
+
+    [Fact]
+    public async Task ReceiveAsync_RemovesLegacySelfEcho()
+    {
+        var clock = new FrozenClock(DateTimeOffset.Parse("2026-05-28T00:00:00Z"));
+        var runtime = ClientRuntime.CreateStubbed(clock: clock, backend: new StubSessionBackend());
+        var account = await runtime.Accounts.RegisterAsync("Notes");
+        var conversation = await runtime.Conversations.GetOrCreateOneToOneAsync(account.SessionId);
+        var sent = new Message(
+            MessageId.NewId(), conversation.Id, account.SessionId, account.SessionId, "legacy",
+            MessageDirection.Outgoing, MessageDeliveryState.Sent, clock.UtcNow, []);
+        var echo = sent with { Id = MessageId.NewId(), Direction = MessageDirection.Incoming };
+        var store = (IMessageRepository)runtime.Store;
+        await store.AppendAsync(sent);
+        await store.AppendAsync(echo);
+
+        await runtime.Messages.ReceiveAsync(account.SessionId);
+        var messages = await runtime.Messages.ListConversationMessagesAsync(conversation.Id);
+
+        Assert.Collection(messages, message => Assert.Equal(sent.Id, message.Id));
+    }
+
+    [Fact]
     public async Task CreateGroupScaffoldPersistsConversationAndAdmin()
     {
         var runtime = ClientRuntime.CreateStubbed(clock: new FrozenClock(DateTimeOffset.Parse("2026-05-28T00:00:00Z")));

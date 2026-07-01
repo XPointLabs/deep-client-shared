@@ -14,7 +14,8 @@ public sealed record OutboundMessageEnvelope(
     string Body,
     IReadOnlyList<AttachmentMetadata> Attachments,
     DateTimeOffset CreatedAt,
-    DateTimeOffset? ExpiresAt);
+    DateTimeOffset? ExpiresAt,
+    MessageId? Id = null);
 
 public sealed record InboundMessageEnvelope(
     MessageId Id,
@@ -71,6 +72,7 @@ public sealed class HttpSessionTransport : ISessionMessageTransport, IRecoveryPr
     {
         var response = await _httpClient.PostAsJsonAsync(_options.SendPath, new
         {
+            id = envelope.Id?.Value,
             sender = envelope.Sender.Value,
             recipient = envelope.Recipient.Value,
             body = envelope.Body,
@@ -167,7 +169,7 @@ public sealed class SessionStorageMessageTransport : ISessionMessageTransport
     public async Task SendAsync(OutboundMessageEnvelope envelope, CancellationToken cancellationToken = default)
     {
         var payload = new StoredMessagePayload(
-            MessageId.NewId().Value,
+            (envelope.Id ?? MessageId.NewId()).Value,
             envelope.Sender.Value,
             envelope.Recipient.Value,
             envelope.Body,
@@ -319,7 +321,7 @@ public sealed class StubSessionBackend : ISessionMessageTransport, IRecoveryProf
     {
         var serverHash = Convert.ToHexString(Guid.NewGuid().ToByteArray()).ToLowerInvariant();
         var inbound = new InboundMessageEnvelope(
-            MessageId.NewId(),
+            envelope.Id ?? MessageId.NewId(),
             envelope.Sender,
             envelope.Recipient,
             envelope.Body,

@@ -344,7 +344,7 @@ public sealed class RoutedSessionStorageMessageTransport : ISessionMessageTransp
     public async Task SendAsync(OutboundMessageEnvelope envelope, CancellationToken cancellationToken = default)
     {
         var payload = new StoredMessagePayload(
-            MessageId.NewId().Value,
+            (envelope.Id ?? MessageId.NewId()).Value,
             envelope.Sender.Value,
             envelope.Recipient.Value,
             envelope.Body,
