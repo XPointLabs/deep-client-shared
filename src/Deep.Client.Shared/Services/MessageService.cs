@@ -51,7 +51,7 @@ public sealed class MessageService(
 
     public async Task<IReadOnlyList<Message>> ReceiveAsync(SessionId recipient, CancellationToken cancellationToken = default)
     {
-        await PruneLegacySelfEchoesAsync(recipient, cancellationToken).ConfigureAwait(false);
+        await RepairSelfConversationAsync(recipient, cancellationToken).ConfigureAwait(false);
         var envelopes = await transport.ReceiveAsync(recipient, cancellationToken).ConfigureAwait(false);
         var received = new List<Message>(envelopes.Count);
 
@@ -101,7 +101,7 @@ public sealed class MessageService(
         return received;
     }
 
-    private async Task<int> PruneLegacySelfEchoesAsync(
+    public async Task<int> RepairSelfConversationAsync(
         SessionId account,
         CancellationToken cancellationToken)
     {

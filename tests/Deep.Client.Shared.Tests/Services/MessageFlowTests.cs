@@ -63,9 +63,10 @@ public sealed class MessageFlowTests
         await store.AppendAsync(sent);
         await store.AppendAsync(echo);
 
-        await runtime.Messages.ReceiveAsync(account.SessionId);
+        var removed = await runtime.Messages.RepairSelfConversationAsync(account.SessionId, CancellationToken.None);
         var messages = await runtime.Messages.ListConversationMessagesAsync(conversation.Id);
 
+        Assert.Equal(1, removed);
         Assert.Collection(messages, message => Assert.Equal(sent.Id, message.Id));
     }
 
