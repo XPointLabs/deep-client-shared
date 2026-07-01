@@ -71,6 +71,53 @@ public sealed class MessageFlowTests
     }
 
     [Fact]
+    public async Task ReceiveAsync_DoesNotReinsertLegacySelfEchoReturnedByTransport()
+    {
+        var clock = new FrozenClock(DateTimeOffset.Parse("2026-05-28T00:00:00Z"));
+        var transport = new QueuedMessageTransport();
+        var runtime = new ClientRuntime(
+            new InMemorySessionStore(),
+            Deep.Client.Shared.Features.ClientFeatureFlags.Defaults,
+            clock,
+            transport);
+        var account = await runtime.Accounts.RegisterAsync("Notes");
+        var conversation = await runtime.Conversations.GetOrCreateOneToOneAsync(account.SessionId);
+        var sent = new Message(
+            MessageId.NewId(), conversation.Id, account.SessionId, account.SessionId, "legacy",
+            MessageDirection.Outgoing, MessageDeliveryState.Sent, clock.UtcNow, []);
+        await ((IMessageRepository)runtime.Store).AppendAsync(sent);
+        transport.Enqueue(new InboundMessageEnvelope(
+            MessageId.NewId(), account.SessionId, account.SessionId, sent.Body, sent.Attachments,
+            sent.CreatedAt, sent.ExpiresAt, "legacy-server-hash"));
+
+        var received = await runtime.Messages.ReceiveAsync(account.SessionId);
+        var stored = await runtime.Messages.ListConversationMessagesAsync(conversation.Id);
+
+        Assert.Empty(received);
+        Assert.Collection(stored, message => Assert.Equal(sent.Id, message.Id));
+    }
+
+    [Fact]
+    public async Task ReceiveAsync_StoresUnseenSelfMessageFromAnotherDeviceAsOutgoing()
+    {
+        var clock = new FrozenClock(DateTimeOffset.Parse("2026-05-28T00:00:00Z"));
+        var transport = new QueuedMessageTransport();
+        var runtime = new ClientRuntime(
+            new InMemorySessionStore(),
+            Deep.Client.Shared.Features.ClientFeatureFlags.Defaults,
+            clock,
+            transport);
+        var account = await runtime.Accounts.RegisterAsync("Notes");
+        transport.Enqueue(new InboundMessageEnvelope(
+            MessageId.NewId(), account.SessionId, account.SessionId, "from another device", [],
+            clock.UtcNow, null, "other-device-hash"));
+
+        var received = await runtime.Messages.ReceiveAsync(account.SessionId);
+
+        Assert.Collection(received, message => Assert.Equal(MessageDirection.Outgoing, message.Direction));
+    }
+
+    [Fact]
     public async Task CreateGroupScaffoldPersistsConversationAndAdmin()
     {
         var runtime = ClientRuntime.CreateStubbed(clock: new FrozenClock(DateTimeOffset.Parse("2026-05-28T00:00:00Z")));
@@ -358,5 +405,26 @@ public sealed class MessageFlowTests
         Assert.NotNull(conversation);
         Assert.Equal("Renamed", conversation!.DisplayName);
         Assert.True(conversation.IsHidden);
+    }
+
+    private sealed class QueuedMessageTransport : ISessionMessageTransport
+    {
+        private readonly Queue<InboundMessageEnvelope> envelopes = new();
+
+        public void Enqueue(InboundMessageEnvelope envelope) => envelopes.Enqueue(envelope);
+
+        public Task SendAsync(OutboundMessageEnvelope envelope, CancellationToken cancellationToken = default) =>
+            Task.CompletedTask;
+
+        public Task<IReadOnlyList<InboundMessageEnvelope>> ReceiveAsync(
+            SessionId recipient,
+            CancellationToken cancellationToken = default)
+        {
+            var result = envelopes
+                .Where(envelope => envelope.Recipient == recipient)
+                .ToArray();
+            envelopes.Clear();
+            return Task.FromResult<IReadOnlyList<InboundMessageEnvelope>>(result);
+        }
     }
 }

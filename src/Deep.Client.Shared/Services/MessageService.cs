@@ -65,6 +65,12 @@ public sealed class MessageService(
             var conversation = await conversationService.GetOrCreateOneToOneAsync(envelope.Sender, cancellationToken: cancellationToken)
                 .ConfigureAwait(false);
 
+            var isSelfMessage = envelope.Sender == recipient;
+            if (isSelfMessage && await HasMatchingSelfOutgoingAsync(conversation.Id, envelope, cancellationToken).ConfigureAwait(false))
+            {
+                continue;
+            }
+
             if (await messages.GetAsync(envelope.Id, cancellationToken).ConfigureAwait(false) is not null)
             {
                 continue;
@@ -81,7 +87,7 @@ public sealed class MessageService(
                 envelope.Sender,
                 recipient,
                 envelope.Body,
-                MessageDirection.Incoming,
+                isSelfMessage ? MessageDirection.Outgoing : MessageDirection.Incoming,
                 MessageDeliveryState.Delivered,
                 envelope.CreatedAt,
                 envelope.Attachments,
@@ -138,6 +144,25 @@ public sealed class MessageService(
         outgoing.CreatedAt == incoming.CreatedAt &&
         string.Equals(outgoing.Body, incoming.Body, StringComparison.Ordinal) &&
         outgoing.Attachments.SequenceEqual(incoming.Attachments);
+
+    private async Task<bool> HasMatchingSelfOutgoingAsync(
+        ConversationId conversationId,
+        InboundMessageEnvelope envelope,
+        CancellationToken cancellationToken)
+    {
+        await foreach (var existing in messages.ListForConversationAsync(conversationId, cancellationToken).ConfigureAwait(false))
+        {
+            if (existing.Direction == MessageDirection.Outgoing &&
+                existing.CreatedAt == envelope.CreatedAt &&
+                string.Equals(existing.Body, envelope.Body, StringComparison.Ordinal) &&
+                existing.Attachments.SequenceEqual(envelope.Attachments))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     private async Task<bool> HasMessageWithServerHashAsync(
         ConversationId conversationId,
