@@ -11,12 +11,14 @@ internal sealed class SessionIdentityMaterial
         SessionId sessionId,
         byte[] ed25519PublicKey,
         byte[] ed25519PrivateKey,
-        byte[] x25519PublicKey)
+        byte[] x25519PublicKey,
+        byte[] x25519PrivateKey)
     {
         SessionId = sessionId;
         Ed25519PublicKey = ed25519PublicKey;
         Ed25519PrivateKey = ed25519PrivateKey;
         X25519PublicKey = x25519PublicKey;
+        X25519PrivateKey = x25519PrivateKey;
     }
 
     public SessionId SessionId { get; }
@@ -26,6 +28,8 @@ internal sealed class SessionIdentityMaterial
     public byte[] Ed25519PrivateKey { get; }
 
     public byte[] X25519PublicKey { get; }
+
+    public byte[] X25519PrivateKey { get; }
 
     public string Ed25519PublicKeyHex => Convert.ToHexString(Ed25519PublicKey).ToLowerInvariant();
 
@@ -43,13 +47,15 @@ internal sealed class SessionIdentityMaterial
 
         var ed25519KeyPair = PublicKeyAuth.GenerateKeyPair(seed);
         var x25519PublicKey = PublicKeyAuth.ConvertEd25519PublicKeyToCurve25519PublicKey(ed25519KeyPair.PublicKey);
+        var x25519PrivateKey = PublicKeyAuth.ConvertEd25519SecretKeyToCurve25519SecretKey(ed25519KeyPair.PrivateKey);
         var sessionId = new SessionId($"05{Convert.ToHexString(x25519PublicKey).ToLowerInvariant()}");
 
         return new SessionIdentityMaterial(
             sessionId,
             ed25519KeyPair.PublicKey,
             ed25519KeyPair.PrivateKey,
-            x25519PublicKey);
+            x25519PublicKey,
+            x25519PrivateKey);
     }
 
     public string SignPushSubscribe(long timestamp, bool wantData, IReadOnlyList<int> namespaces)
@@ -66,6 +72,8 @@ internal sealed class SessionIdentityMaterial
         var message = Encoding.UTF8.GetBytes($"UNSUBSCRIBE{SessionId.Value}{timestamp}");
         return Convert.ToBase64String(PublicKeyAuth.SignDetached(message, Ed25519PrivateKey));
     }
+
+    public byte[] SignDetached(byte[] message) => PublicKeyAuth.SignDetached(message, Ed25519PrivateKey);
 
     public static string NormalizeRecoveryPhrase(string phrase) =>
         string.Join(' ', phrase

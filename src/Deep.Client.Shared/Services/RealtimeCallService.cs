@@ -1,7 +1,10 @@
 ﻿using System.Collections.Concurrent;
 using System.Net.Http.Json;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Deep.Client.Shared.Domain;
+using Sodium;
 
 namespace Deep.Client.Shared.Services;
 
@@ -32,7 +35,9 @@ public sealed record CallSignalEnvelope(
     SessionId Recipient,
     CallSignalType Type,
     string Payload,
-    DateTimeOffset CreatedAt);
+    DateTimeOffset CreatedAt,
+    string? SenderEd25519 = null,
+    string? Signature = null);
 
 public sealed record CallNetworkSample(
     double RttMs,
@@ -88,11 +93,16 @@ public sealed class HttpCallSignalingTransport : ICallSignalingTransport
 {
     private readonly HttpClient _httpClient;
     private readonly HttpCallSignalingTransportOptions _options;
+    private readonly Func<CancellationToken, Task<string?>>? _recoveryPhraseProvider;
 
-    public HttpCallSignalingTransport(HttpClient httpClient, HttpCallSignalingTransportOptions options)
+    public HttpCallSignalingTransport(
+        HttpClient httpClient,
+        HttpCallSignalingTransportOptions options,
+        Func<CancellationToken, Task<string?>>? recoveryPhraseProvider = null)
     {
         _httpClient = httpClient;
         _options = options;
+        _recoveryPhraseProvider = recoveryPhraseProvider;
 
         if (string.IsNullOrWhiteSpace(_options.BaseUrl))
         {
@@ -109,18 +119,164 @@ public sealed class HttpCallSignalingTransport : ICallSignalingTransport
 
     public async Task SendAsync(CallSignalEnvelope envelope, CancellationToken cancellationToken = default)
     {
-        var response = await _httpClient.PostAsJsonAsync(_options.SignalPath, envelope, cancellationToken).ConfigureAwait(false);
+        var outgoing = _recoveryPhraseProvider is null
+            ? envelope
+            : await EncryptAndSignAsync(envelope, cancellationToken).ConfigureAwait(false);
+        var response = await _httpClient.PostAsJsonAsync(_options.SignalPath, outgoing, cancellationToken).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
     }
 
     public async Task<IReadOnlyList<CallSignalEnvelope>> ReceiveAsync(SessionId recipient, CancellationToken cancellationToken = default)
     {
         var path = _options.InboxPathFormat.Replace("{recipient}", Uri.EscapeDataString(recipient.Value), StringComparison.Ordinal);
-        var payload = await _httpClient.GetFromJsonAsync<List<CallSignalEnvelope>>(path, cancellationToken).ConfigureAwait(false)
-            ?? [];
+        List<CallSignalEnvelope> payload;
+        SessionIdentityMaterial? recipientIdentity = null;
+        if (_recoveryPhraseProvider is null)
+        {
+            payload = await _httpClient.GetFromJsonAsync<List<CallSignalEnvelope>>(path, cancellationToken).ConfigureAwait(false)
+                ?? [];
+        }
+        else
+        {
+            var recoveryPhrase = await _recoveryPhraseProvider(cancellationToken).ConfigureAwait(false);
+            if (string.IsNullOrWhiteSpace(recoveryPhrase))
+            {
+                return [];
+            }
 
-        return payload;
+            recipientIdentity = SessionIdentityMaterial.FromRecoveryPhrase(recoveryPhrase);
+            if (recipientIdentity.SessionId != recipient)
+            {
+                return [];
+            }
+
+            var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            using var request = new HttpRequestMessage(HttpMethod.Get, path);
+            request.Headers.TryAddWithoutValidation("X-Deep-Ed25519", recipientIdentity.Ed25519PublicKeyHex);
+            request.Headers.TryAddWithoutValidation("X-Deep-Timestamp", timestamp.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            request.Headers.TryAddWithoutValidation(
+                "X-Deep-Signature",
+                Convert.ToBase64String(recipientIdentity.SignDetached(CallSignalAuthentication.BuildInboxSigningPayload(recipient, timestamp))));
+            using var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+            response.EnsureSuccessStatusCode();
+            payload = await response.Content.ReadFromJsonAsync<List<CallSignalEnvelope>>(cancellationToken: cancellationToken)
+                .ConfigureAwait(false) ?? [];
+        }
+
+        if (recipientIdentity is null)
+        {
+            return payload;
+        }
+        var result = new List<CallSignalEnvelope>(payload.Count);
+        foreach (var envelope in payload)
+        {
+            if (TryVerifyAndDecrypt(envelope, recipientIdentity, out var decrypted))
+            {
+                result.Add(decrypted);
+            }
+        }
+
+        return result;
     }
+
+    private async Task<CallSignalEnvelope> EncryptAndSignAsync(
+        CallSignalEnvelope envelope,
+        CancellationToken cancellationToken)
+    {
+        var recoveryPhrase = await _recoveryPhraseProvider!(cancellationToken).ConfigureAwait(false);
+        if (string.IsNullOrWhiteSpace(recoveryPhrase))
+        {
+            throw new InvalidOperationException("An active account is required for call signaling.");
+        }
+
+        var identity = SessionIdentityMaterial.FromRecoveryPhrase(recoveryPhrase);
+        if (identity.SessionId != envelope.Sender)
+        {
+            throw new InvalidOperationException("Call signaling sender does not match the active account.");
+        }
+
+        var cipher = SealedPublicKeyBox.Create(
+            Encoding.UTF8.GetBytes(envelope.Payload),
+            DecodeSessionPublicKey(envelope.Recipient));
+        var encrypted = envelope with
+        {
+            Payload = "sealed-v1:" + Convert.ToBase64String(cipher),
+            SenderEd25519 = identity.Ed25519PublicKeyHex,
+            Signature = null
+        };
+        return encrypted with
+        {
+            Signature = Convert.ToBase64String(identity.SignDetached(CallSignalAuthentication.BuildSigningPayload(encrypted)))
+        };
+    }
+
+    private static bool TryVerifyAndDecrypt(
+        CallSignalEnvelope envelope,
+        SessionIdentityMaterial recipient,
+        out CallSignalEnvelope decrypted)
+    {
+        decrypted = default!;
+        try
+        {
+            if (!envelope.Payload.StartsWith("sealed-v1:", StringComparison.Ordinal)
+                || string.IsNullOrWhiteSpace(envelope.SenderEd25519)
+                || string.IsNullOrWhiteSpace(envelope.Signature))
+            {
+                return false;
+            }
+
+            var senderEd25519 = Convert.FromHexString(envelope.SenderEd25519);
+            var senderX25519 = PublicKeyAuth.ConvertEd25519PublicKeyToCurve25519PublicKey(senderEd25519);
+            if (!senderX25519.SequenceEqual(DecodeSessionPublicKey(envelope.Sender)))
+            {
+                return false;
+            }
+
+            var unsigned = envelope with { Signature = null };
+            if (!PublicKeyAuth.VerifyDetached(
+                    Convert.FromBase64String(envelope.Signature),
+                    CallSignalAuthentication.BuildSigningPayload(unsigned),
+                    senderEd25519))
+            {
+                return false;
+            }
+
+            var cipher = Convert.FromBase64String(envelope.Payload["sealed-v1:".Length..]);
+            var plain = SealedPublicKeyBox.Open(cipher, recipient.X25519PrivateKey, recipient.X25519PublicKey);
+            decrypted = envelope with { Payload = Encoding.UTF8.GetString(plain) };
+            return true;
+        }
+        catch (Exception exception) when (exception is ArgumentException or FormatException or CryptographicException)
+        {
+            return false;
+        }
+    }
+
+    private static byte[] DecodeSessionPublicKey(SessionId sessionId) =>
+        Convert.FromHexString(sessionId.Value[2..]);
+}
+
+public static class CallSignalAuthentication
+{
+    private const string Version = "deep-call-signal-v1";
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+
+    public static byte[] BuildSigningPayload(CallSignalEnvelope envelope) =>
+        JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            version = Version,
+            envelope.CallId,
+            envelope.ConversationId,
+            sender = envelope.Sender.Value,
+            recipient = envelope.Recipient.Value,
+            type = envelope.Type.ToString(),
+            envelope.Payload,
+            createdAtUnixMs = envelope.CreatedAt.ToUnixTimeMilliseconds(),
+            senderEd25519 = envelope.SenderEd25519
+        }, JsonOptions);
+
+    public static byte[] BuildInboxSigningPayload(SessionId recipient, long timestamp) =>
+        Encoding.UTF8.GetBytes($"deep-call-inbox-v1\n{recipient.Value}\n{timestamp}");
 }
 
 public sealed class InMemoryCallSignalingTransport : ICallSignalingTransport

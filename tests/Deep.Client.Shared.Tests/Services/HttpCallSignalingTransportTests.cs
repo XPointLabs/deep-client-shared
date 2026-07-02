@@ -1,6 +1,7 @@
 ﻿using System.Net;
 using System.Net.Http;
 using System.Text;
+using System.Text.Json;
 using Deep.Client.Shared.Domain;
 using Deep.Client.Shared.Services;
 
@@ -69,6 +70,52 @@ public sealed class HttpCallSignalingTransportTests
         Assert.Equal(CallSignalType.Offer, inbound[0].Type);
         Assert.Equal(sender, inbound[0].Sender);
         Assert.Equal(recipient, inbound[0].Recipient);
+    }
+
+    [Fact]
+    public async Task AuthenticatedTransportEncryptsAndDecryptsSignalingPayload()
+    {
+        string? storedEnvelope = null;
+        var handler = new RecordingHandler(async (request, cancellationToken) =>
+        {
+            if (request.Method == HttpMethod.Post)
+            {
+                storedEnvelope = await request.Content!.ReadAsStringAsync(cancellationToken);
+                return new HttpResponseMessage(HttpStatusCode.Accepted);
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent($"[{storedEnvelope}]", Encoding.UTF8, "application/json")
+            };
+        });
+        var aliceRuntime = Deep.Client.Shared.State.ClientRuntime.CreateStubbed();
+        var bobRuntime = Deep.Client.Shared.State.ClientRuntime.CreateStubbed();
+        var alice = await aliceRuntime.Accounts.RegisterAsync("Alice");
+        var bob = await bobRuntime.Accounts.RegisterAsync("Bob");
+        var alicePhrase = await aliceRuntime.Accounts.GetRecoveryPhraseAsync();
+        var bobPhrase = await bobRuntime.Accounts.GetRecoveryPhraseAsync();
+        var client = new HttpClient(handler);
+        var options = new HttpCallSignalingTransportOptions("http://localhost:18082");
+        var aliceTransport = new HttpCallSignalingTransport(client, options, _ => Task.FromResult(alicePhrase));
+        var bobTransport = new HttpCallSignalingTransport(client, options, _ => Task.FromResult(bobPhrase));
+        var envelope = new CallSignalEnvelope(
+            "call-private",
+            bob.SessionId.Value,
+            alice.SessionId,
+            bob.SessionId,
+            CallSignalType.Offer,
+            "{\"sdp\":\"private-offer\"}",
+            DateTimeOffset.UtcNow);
+
+        await aliceTransport.SendAsync(envelope);
+        var wire = JsonDocument.Parse(storedEnvelope!).RootElement;
+        var received = Assert.Single(await bobTransport.ReceiveAsync(bob.SessionId));
+
+        Assert.StartsWith("sealed-v1:", wire.GetProperty("payload").GetString());
+        Assert.DoesNotContain("private-offer", storedEnvelope, StringComparison.Ordinal);
+        Assert.False(string.IsNullOrWhiteSpace(wire.GetProperty("signature").GetString()));
+        Assert.Equal(envelope.Payload, received.Payload);
     }
 
     private static CallSignalEnvelope BuildEnvelope()
