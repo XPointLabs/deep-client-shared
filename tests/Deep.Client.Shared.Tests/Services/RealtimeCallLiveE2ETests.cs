@@ -15,22 +15,26 @@ public sealed class RealtimeCallLiveE2ETests
             return;
         }
 
-        var alice = SessionId.CreateNew();
-        var bob = SessionId.CreateNew();
-        var conversationId = ConversationId.ForOneToOne(bob).Value;
-        var aliceCalls = CreateService(callUrl);
-        var bobCalls = CreateService(callUrl);
+        var aliceRuntime = Deep.Client.Shared.State.ClientRuntime.CreateStubbed();
+        var bobRuntime = Deep.Client.Shared.State.ClientRuntime.CreateStubbed();
+        var alice = await aliceRuntime.Accounts.RegisterAsync("Alice");
+        var bob = await bobRuntime.Accounts.RegisterAsync("Bob");
+        var alicePhrase = await aliceRuntime.Accounts.GetRecoveryPhraseAsync();
+        var bobPhrase = await bobRuntime.Accounts.GetRecoveryPhraseAsync();
+        var conversationId = ConversationId.ForOneToOne(bob.SessionId).Value;
+        var aliceCalls = CreateService(callUrl, alicePhrase);
+        var bobCalls = CreateService(callUrl, bobPhrase);
 
-        var outgoing = await aliceCalls.StartOutgoingAsync(alice, bob, conversationId);
-        var bobIncoming = await bobCalls.PollAsync(bob);
+        var outgoing = await aliceCalls.StartOutgoingAsync(alice.SessionId, bob.SessionId, conversationId);
+        var bobIncoming = await bobCalls.PollAsync(bob.SessionId);
 
         var ringing = Assert.Single(bobIncoming);
         Assert.Equal(outgoing.CallId, ringing.CallId);
         Assert.Equal(CallSessionState.Ringing, ringing.State);
-        Assert.Equal(alice, ringing.RemoteParty);
+        Assert.Equal(alice.SessionId, ringing.RemoteParty);
 
-        var accepted = await bobCalls.AcceptIncomingAsync(ringing.CallId, bob);
-        var aliceUpdated = await aliceCalls.PollAsync(alice);
+        var accepted = await bobCalls.AcceptIncomingAsync(ringing.CallId, bob.SessionId);
+        var aliceUpdated = await aliceCalls.PollAsync(alice.SessionId);
 
         Assert.NotNull(accepted);
         Assert.Equal(CallSessionState.Connected, accepted!.State);
@@ -38,14 +42,17 @@ public sealed class RealtimeCallLiveE2ETests
             snapshot.CallId == outgoing.CallId &&
             snapshot.State == CallSessionState.Connected);
 
-        await aliceCalls.EndAsync(outgoing.CallId, alice);
-        var bobEnded = await bobCalls.PollAsync(bob);
+        await aliceCalls.EndAsync(outgoing.CallId, alice.SessionId);
+        var bobEnded = await bobCalls.PollAsync(bob.SessionId);
 
         Assert.Contains(bobEnded, snapshot =>
             snapshot.CallId == outgoing.CallId &&
             snapshot.State == CallSessionState.Ended);
     }
 
-    private static RealtimeCallService CreateService(string callUrl) =>
-        new(new HttpCallSignalingTransport(new HttpClient(), new HttpCallSignalingTransportOptions(callUrl)));
+    private static RealtimeCallService CreateService(string callUrl, string? recoveryPhrase) =>
+        new(new HttpCallSignalingTransport(
+            new HttpClient(),
+            new HttpCallSignalingTransportOptions(callUrl),
+            _ => Task.FromResult(recoveryPhrase)));
 }
