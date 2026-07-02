@@ -144,8 +144,13 @@ public sealed class MessageService(
         SessionId account,
         CancellationToken cancellationToken)
     {
-        var conversation = await conversationService.GetOrCreateOneToOneAsync(account, cancellationToken: cancellationToken)
+        var conversation = await conversations.GetAsync(ConversationId.ForOneToOne(account), cancellationToken)
             .ConfigureAwait(false);
+        if (conversation is null)
+        {
+            return 0;
+        }
+
         var selfMessages = new List<Message>();
 
         await foreach (var message in messages.ListForConversationAsync(conversation.Id, cancellationToken).ConfigureAwait(false))

@@ -52,6 +52,17 @@ public sealed class MessageFlowTests
     }
 
     [Fact]
+    public async Task InboxSync_DoesNotCreateEmptySelfConversation()
+    {
+        var runtime = ClientRuntime.CreateStubbed();
+        await runtime.Accounts.RegisterAsync("Owner");
+
+        await runtime.Inbox.SynchronizeAsync();
+
+        Assert.Empty(await runtime.Conversations.ListAsync());
+    }
+
+    [Fact]
     public async Task SendReceiveToSelf_PreservesSingleOutgoingMessage()
     {
         var backend = new StubSessionBackend();
