@@ -63,6 +63,39 @@ public sealed class MessageFlowTests
     }
 
     [Fact]
+    public async Task OutgoingConversationApprovesContact()
+    {
+        var runtime = ClientRuntime.CreateStubbed();
+        var sender = await runtime.Accounts.RegisterAsync("Sender");
+        var recipient = SessionId.CreateNew();
+
+        await runtime.Messages.SendOneToOneAsync(sender.SessionId, recipient, "hello");
+        var contact = await runtime.Conversations.GetContactAsync(recipient);
+
+        Assert.NotNull(contact);
+        Assert.True(contact!.IsApproved);
+        Assert.True(contact.IsTrusted);
+    }
+
+    [Fact]
+    public async Task BlockedContactCannotSendOrReceiveMessages()
+    {
+        var backend = new StubSessionBackend();
+        var alice = ClientRuntime.CreateStubbed(backend: backend);
+        var bob = ClientRuntime.CreateStubbed(backend: backend);
+        var aliceAccount = await alice.Accounts.RegisterAsync("Alice");
+        var bobAccount = await bob.Accounts.RegisterAsync("Bob");
+        await bob.Conversations.SetContactBlockedAsync(aliceAccount.SessionId, true);
+        await alice.Messages.SendOneToOneAsync(aliceAccount.SessionId, bobAccount.SessionId, "blocked inbound");
+
+        var received = await bob.Messages.ReceiveAsync(bobAccount.SessionId);
+
+        Assert.Empty(received);
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            bob.Messages.SendOneToOneAsync(bobAccount.SessionId, aliceAccount.SessionId, "blocked outbound"));
+    }
+
+    [Fact]
     public async Task SendReceiveToSelf_PreservesSingleOutgoingMessage()
     {
         var backend = new StubSessionBackend();

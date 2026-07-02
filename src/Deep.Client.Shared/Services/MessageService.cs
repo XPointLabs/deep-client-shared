@@ -32,8 +32,13 @@ public sealed class MessageService(
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(body);
 
-        var conversation = await conversationService.GetOrCreateOneToOneAsync(recipient, cancellationToken: cancellationToken)
+        var conversation = await conversationService.GetOrCreateOneToOneAsync(recipient, approve: true, cancellationToken: cancellationToken)
             .ConfigureAwait(false);
+        var contact = await conversationService.GetContactAsync(recipient, cancellationToken).ConfigureAwait(false);
+        if (contact?.IsBlocked == true)
+        {
+            throw new InvalidOperationException("Cannot send a message to a blocked contact.");
+        }
         var now = clock.UtcNow;
         var pending = new Message(
             MessageId.NewId(),
@@ -97,6 +102,11 @@ public sealed class MessageService(
 
             var conversation = await conversationService.GetOrCreateOneToOneAsync(envelope.Sender, cancellationToken: cancellationToken)
                 .ConfigureAwait(false);
+            var contact = await conversationService.GetContactAsync(envelope.Sender, cancellationToken).ConfigureAwait(false);
+            if (contact?.IsBlocked == true)
+            {
+                continue;
+            }
 
             var isSelfMessage = envelope.Sender == recipient;
             if (isSelfMessage && await HasMatchingSelfOutgoingAsync(conversation.Id, envelope, cancellationToken).ConfigureAwait(false))

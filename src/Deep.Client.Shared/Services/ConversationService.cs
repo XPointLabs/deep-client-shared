@@ -16,22 +16,30 @@ public sealed class ConversationService(
     public async Task<Conversation> GetOrCreateOneToOneAsync(
         SessionId counterpart,
         string? displayName = null,
+        bool approve = false,
         CancellationToken cancellationToken = default)
     {
         var id = ConversationId.ForOneToOne(counterpart);
         var existing = await conversations.GetAsync(id, cancellationToken).ConfigureAwait(false);
-        if (existing is not null)
-        {
-            return existing;
-        }
-
         var now = clock.UtcNow;
         var contact = await contacts.GetAsync(counterpart, cancellationToken).ConfigureAwait(false)
             ?? Contact.Request(counterpart, displayName, now);
 
-        if (!string.IsNullOrWhiteSpace(displayName) && contact.DisplayName != displayName)
+        if ((!string.IsNullOrWhiteSpace(displayName) && contact.DisplayName != displayName) || (approve && !contact.IsApproved))
         {
-            contact = contact with { DisplayName = displayName, UpdatedAt = now };
+            contact = contact with
+            {
+                DisplayName = string.IsNullOrWhiteSpace(displayName) ? contact.DisplayName : displayName,
+                IsApproved = contact.IsApproved || approve,
+                IsTrusted = contact.IsTrusted || approve,
+                UpdatedAt = now
+            };
+        }
+
+        await contacts.UpsertAsync(contact, cancellationToken).ConfigureAwait(false);
+        if (existing is not null)
+        {
+            return existing;
         }
 
         var conversation = new Conversation(
@@ -42,9 +50,38 @@ public sealed class ConversationService(
             now,
             now);
 
-        await contacts.UpsertAsync(contact, cancellationToken).ConfigureAwait(false);
         await conversations.UpsertAsync(conversation, cancellationToken).ConfigureAwait(false);
         return conversation;
+    }
+
+    public Task<Contact?> GetContactAsync(SessionId contactId, CancellationToken cancellationToken = default) =>
+        contacts.GetAsync(contactId, cancellationToken);
+
+    public async Task<Contact> ApproveContactAsync(SessionId contactId, CancellationToken cancellationToken = default)
+    {
+        var contact = await contacts.GetAsync(contactId, cancellationToken).ConfigureAwait(false)
+            ?? Contact.Request(contactId, null, clock.UtcNow);
+        var updated = contact with
+        {
+            IsApproved = true,
+            IsTrusted = true,
+            IsBlocked = false,
+            UpdatedAt = clock.UtcNow
+        };
+        await contacts.UpsertAsync(updated, cancellationToken).ConfigureAwait(false);
+        return updated;
+    }
+
+    public async Task<Contact> SetContactBlockedAsync(
+        SessionId contactId,
+        bool blocked,
+        CancellationToken cancellationToken = default)
+    {
+        var contact = await contacts.GetAsync(contactId, cancellationToken).ConfigureAwait(false)
+            ?? Contact.Request(contactId, null, clock.UtcNow);
+        var updated = contact with { IsBlocked = blocked, UpdatedAt = clock.UtcNow };
+        await contacts.UpsertAsync(updated, cancellationToken).ConfigureAwait(false);
+        return updated;
     }
 
     public async Task<Group> CreateGroupScaffoldAsync(
