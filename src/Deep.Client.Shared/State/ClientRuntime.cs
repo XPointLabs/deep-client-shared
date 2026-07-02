@@ -23,6 +23,7 @@ public sealed class ClientRuntime
         Accounts = new SessionAccountService(store, store, clock, messageTransport as IRecoveryProfileLookup);
         Conversations = new ConversationService(store, store, store, store, clock, featureFlags, GroupSyncTransport);
         Messages = new MessageService(Conversations, store, store, store, messageTransport, GroupSyncTransport, clock);
+        Inbox = new InboxSyncService(Accounts, Conversations, Messages);
         Sync = new SyncOrchestrator();
         Notifications = new NotificationPlanner();
         Migrations = new LocalSchemaMigrator(LocalSchemaMigrations.Default);
@@ -45,6 +46,8 @@ public sealed class ClientRuntime
     public ConversationService Conversations { get; }
 
     public MessageService Messages { get; }
+
+    public InboxSyncService Inbox { get; }
 
     public SyncOrchestrator Sync { get; }
 

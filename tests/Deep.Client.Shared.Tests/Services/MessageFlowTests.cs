@@ -27,6 +27,31 @@ public sealed class MessageFlowTests
     }
 
     [Fact]
+    public async Task InboxSync_CreatesConversationForPreviouslyUnknownSender()
+    {
+        var backend = new StubSessionBackend();
+        var alice = ClientRuntime.CreateStubbed(
+            clock: new FrozenClock(DateTimeOffset.Parse("2026-05-28T00:00:00Z")),
+            backend: backend);
+        var bob = ClientRuntime.CreateStubbed(
+            clock: new FrozenClock(DateTimeOffset.Parse("2026-05-28T00:00:01Z")),
+            backend: backend);
+        var aliceAccount = await alice.Accounts.RegisterAsync("Alice");
+        var bobAccount = await bob.Accounts.RegisterAsync("Bob");
+        await alice.Messages.SendOneToOneAsync(aliceAccount.SessionId, bobAccount.SessionId, "hello from unknown sender");
+
+        var sync = await bob.Inbox.SynchronizeAsync();
+        var conversations = await bob.Conversations.ListAsync();
+        var contact = await ((IContactRepository)bob.Store).GetAsync(aliceAccount.SessionId);
+
+        Assert.Equal(1, sync.DirectMessages);
+        Assert.Contains(conversations, conversation => conversation.Id == ConversationId.ForOneToOne(aliceAccount.SessionId));
+        Assert.NotNull(contact);
+        Assert.False(contact!.IsApproved);
+        Assert.False(contact.IsBlocked);
+    }
+
+    [Fact]
     public async Task SendReceiveToSelf_PreservesSingleOutgoingMessage()
     {
         var backend = new StubSessionBackend();
