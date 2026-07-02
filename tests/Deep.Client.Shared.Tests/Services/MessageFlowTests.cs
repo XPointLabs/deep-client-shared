@@ -96,6 +96,41 @@ public sealed class MessageFlowTests
     }
 
     [Fact]
+    public async Task RepliesAndReactionsRoundTripThroughMessageTransport()
+    {
+        var backend = new StubSessionBackend();
+        var alice = ClientRuntime.CreateStubbed(backend: backend);
+        var bob = ClientRuntime.CreateStubbed(backend: backend);
+        var aliceAccount = await alice.Accounts.RegisterAsync("Alice");
+        var bobAccount = await bob.Accounts.RegisterAsync("Bob");
+        var original = await alice.Messages.SendOneToOneAsync(
+            aliceAccount.SessionId,
+            bobAccount.SessionId,
+            "original");
+        var bobOriginal = Assert.Single(await bob.Messages.ReceiveAsync(bobAccount.SessionId));
+
+        var reply = await bob.Messages.SendOneToOneAsync(
+            bobAccount.SessionId,
+            aliceAccount.SessionId,
+            "reply",
+            replyToMessageId: bobOriginal.Id);
+        var aliceReply = Assert.Single(await alice.Messages.ReceiveAsync(aliceAccount.SessionId));
+        await alice.Messages.SendReactionOneToOneAsync(
+            aliceAccount.SessionId,
+            bobAccount.SessionId,
+            aliceReply.Id,
+            "👍");
+        await bob.Messages.ReceiveAsync(bobAccount.SessionId);
+        var bobReply = await ((IMessageRepository)bob.Store).GetAsync(reply.Id);
+
+        Assert.Equal(original.Id, aliceReply.ReplyTo?.MessageId);
+        Assert.Equal("original", aliceReply.ReplyTo?.Body);
+        var reaction = Assert.Single(bobReply!.ReactionItems);
+        Assert.Equal("👍", reaction.Emoji);
+        Assert.Equal(aliceAccount.SessionId, reaction.Reactor);
+    }
+
+    [Fact]
     public async Task SendReceiveToSelf_PreservesSingleOutgoingMessage()
     {
         var backend = new StubSessionBackend();

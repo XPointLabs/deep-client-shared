@@ -36,6 +36,44 @@ public sealed class ClientRuntimeStorageE2ETests
     }
 
     [Fact]
+    public async Task ClientRuntime_RoundTripsRepliesAndReactionsThroughLiveStorage_WhenConfigured()
+    {
+        var storageUrl = Environment.GetEnvironmentVariable("DEEP_STORAGE_URL");
+        if (string.IsNullOrWhiteSpace(storageUrl))
+        {
+            return;
+        }
+
+        var alice = CreateRuntime(storageUrl);
+        var bob = CreateRuntime(storageUrl);
+        var aliceAccount = await alice.Accounts.RegisterAsync("Alice Reply Live");
+        var bobAccount = await bob.Accounts.RegisterAsync("Bob Reply Live");
+        var original = await alice.Messages.SendOneToOneAsync(
+            aliceAccount.SessionId,
+            bobAccount.SessionId,
+            $"reply-root-{Guid.NewGuid():N}");
+        var bobOriginal = Assert.Single(await bob.Messages.ReceiveAsync(bobAccount.SessionId));
+        var reply = await bob.Messages.SendOneToOneAsync(
+            bobAccount.SessionId,
+            aliceAccount.SessionId,
+            "reply-live",
+            replyToMessageId: bobOriginal.Id);
+        var aliceReply = Assert.Single(await alice.Messages.ReceiveAsync(aliceAccount.SessionId));
+        await alice.Messages.SendReactionOneToOneAsync(
+            aliceAccount.SessionId,
+            bobAccount.SessionId,
+            aliceReply.Id,
+            "👍");
+        await bob.Messages.ReceiveAsync(bobAccount.SessionId);
+        var bobReply = await ((IMessageRepository)bob.Store).GetAsync(reply.Id);
+
+        Assert.Equal(original.Id, aliceReply.ReplyTo?.MessageId);
+        Assert.Equal(original.Body, aliceReply.ReplyTo?.Body);
+        Assert.Contains(bobReply!.ReactionItems, reaction =>
+            reaction.Emoji == "👍" && reaction.Reactor == aliceAccount.SessionId);
+    }
+
+    [Fact]
     public async Task ClientRuntime_RoundTripsAttachmentMetadataThroughLiveFileAndStorage_WhenConfigured()
     {
         var storageUrl = Environment.GetEnvironmentVariable("DEEP_STORAGE_URL");
@@ -112,6 +150,25 @@ public sealed class ClientRuntimeStorageE2ETests
             message.Sender == aliceAccount.SessionId &&
             message.Recipient is null &&
             !string.IsNullOrWhiteSpace(message.ServerHash));
+
+        var bobOriginal = received.Single(message => message.Body == body);
+        var reply = await bob.Messages.SendGroupAsync(
+            bobAccount.SessionId,
+            group.Id,
+            "group-live-reply",
+            replyToMessageId: bobOriginal.Id);
+        var aliceReply = Assert.Single(await alice.Messages.ReceiveGroupAsync(aliceAccount.SessionId, group.Id));
+        await alice.Messages.SendGroupReactionAsync(
+            aliceAccount.SessionId,
+            group.Id,
+            aliceReply.Id,
+            "❤️");
+        await bob.Messages.ReceiveGroupAsync(bobAccount.SessionId, group.Id);
+        var bobReply = await ((IMessageRepository)bob.Store).GetAsync(reply.Id);
+
+        Assert.Equal(sent.Id, aliceReply.ReplyTo?.MessageId);
+        Assert.Contains(bobReply!.ReactionItems, reaction =>
+            reaction.Emoji == "❤️" && reaction.Reactor == aliceAccount.SessionId);
     }
 
     private static ClientRuntime CreateRuntime(string storageUrl) =>

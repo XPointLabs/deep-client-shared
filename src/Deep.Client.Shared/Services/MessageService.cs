@@ -17,9 +17,10 @@ public sealed class MessageService(
         SessionId recipient,
         string body,
         IEnumerable<AttachmentMetadata>? attachments = null,
+        MessageId? replyToMessageId = null,
         CancellationToken cancellationToken = default)
     {
-        var pending = await QueueOneToOneAsync(sender, recipient, body, attachments, cancellationToken).ConfigureAwait(false);
+        var pending = await QueueOneToOneAsync(sender, recipient, body, attachments, replyToMessageId, cancellationToken).ConfigureAwait(false);
         return await DispatchOneToOneAsync(pending, cancellationToken).ConfigureAwait(false);
     }
 
@@ -28,6 +29,7 @@ public sealed class MessageService(
         SessionId recipient,
         string body,
         IEnumerable<AttachmentMetadata>? attachments = null,
+        MessageId? replyToMessageId = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(body);
@@ -40,6 +42,7 @@ public sealed class MessageService(
             throw new InvalidOperationException("Cannot send a message to a blocked contact.");
         }
         var now = clock.UtcNow;
+        var replyTo = await CreateReplyAsync(conversation.Id, replyToMessageId, cancellationToken).ConfigureAwait(false);
         var pending = new Message(
             MessageId.NewId(),
             conversation.Id,
@@ -50,7 +53,8 @@ public sealed class MessageService(
             MessageDeliveryState.Sending,
             now,
             attachments?.ToArray() ?? [],
-            CalculateExpiry(conversation.Settings.DisappearingMessages, now));
+            CalculateExpiry(conversation.Settings.DisappearingMessages, now),
+            ReplyTo: replyTo);
 
         await messages.AppendAsync(pending, cancellationToken).ConfigureAwait(false);
         await conversations.UpsertAsync(conversation.Touch(now), cancellationToken).ConfigureAwait(false);
@@ -74,7 +78,8 @@ public sealed class MessageService(
                 pending.Attachments,
                 pending.CreatedAt,
                 pending.ExpiresAt,
-                pending.Id), cancellationToken).ConfigureAwait(false);
+                pending.Id,
+                pending.ReplyTo), cancellationToken).ConfigureAwait(false);
 
             var sent = pending.Mark(MessageDeliveryState.Sent);
             await messages.UpdateAsync(sent, cancellationToken).ConfigureAwait(false);
@@ -108,6 +113,17 @@ public sealed class MessageService(
                 continue;
             }
 
+            if (envelope.Reaction is not null)
+            {
+                var reacted = await ApplyReactionAsync(conversation.Id, envelope.Sender, envelope.Reaction, cancellationToken)
+                    .ConfigureAwait(false);
+                if (reacted is not null)
+                {
+                    received.Add(reacted);
+                }
+                continue;
+            }
+
             var isSelfMessage = envelope.Sender == recipient;
             if (isSelfMessage && await HasMatchingSelfOutgoingAsync(conversation.Id, envelope, cancellationToken).ConfigureAwait(false))
             {
@@ -135,7 +151,8 @@ public sealed class MessageService(
                 envelope.CreatedAt,
                 envelope.Attachments,
                 envelope.ExpiresAt,
-                ServerHash: envelope.ServerHash);
+                ServerHash: envelope.ServerHash,
+                ReplyTo: envelope.ReplyTo);
 
             await messages.AppendAsync(message, cancellationToken).ConfigureAwait(false);
             await conversations.UpsertAsync(conversation.Touch(clock.UtcNow), cancellationToken).ConfigureAwait(false);
@@ -238,9 +255,10 @@ public sealed class MessageService(
         ConversationId groupId,
         string body,
         IEnumerable<AttachmentMetadata>? attachments = null,
+        MessageId? replyToMessageId = null,
         CancellationToken cancellationToken = default)
     {
-        var pending = await QueueGroupAsync(sender, groupId, body, attachments, cancellationToken).ConfigureAwait(false);
+        var pending = await QueueGroupAsync(sender, groupId, body, attachments, replyToMessageId, cancellationToken).ConfigureAwait(false);
         return await DispatchGroupAsync(pending, cancellationToken).ConfigureAwait(false);
     }
 
@@ -249,6 +267,7 @@ public sealed class MessageService(
         ConversationId groupId,
         string body,
         IEnumerable<AttachmentMetadata>? attachments = null,
+        MessageId? replyToMessageId = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(body);
@@ -273,6 +292,7 @@ public sealed class MessageService(
                 ConversationSettings.Default(ConversationKind.GroupV2),
                 now,
                 now);
+        var replyTo = await CreateReplyAsync(conversation.Id, replyToMessageId, cancellationToken).ConfigureAwait(false);
 
         var pending = new Message(
             MessageId.NewId(),
@@ -284,7 +304,8 @@ public sealed class MessageService(
             MessageDeliveryState.Sending,
             now,
             attachments?.ToArray() ?? [],
-            CalculateExpiry(conversation.Settings.DisappearingMessages, now));
+            CalculateExpiry(conversation.Settings.DisappearingMessages, now),
+            ReplyTo: replyTo);
 
         await messages.AppendAsync(pending, cancellationToken).ConfigureAwait(false);
         await conversations.UpsertAsync(conversation.Touch(now), cancellationToken).ConfigureAwait(false);
@@ -308,7 +329,8 @@ public sealed class MessageService(
                 pending.Body,
                 pending.Attachments,
                 pending.CreatedAt,
-                pending.ExpiresAt), cancellationToken).ConfigureAwait(false);
+                pending.ExpiresAt,
+                pending.ReplyTo), cancellationToken).ConfigureAwait(false);
 
             var sent = pending.Mark(MessageDeliveryState.Sent);
             await messages.UpdateAsync(sent, cancellationToken).ConfigureAwait(false);
@@ -365,6 +387,55 @@ public sealed class MessageService(
         return dispatched;
     }
 
+    public async Task<Message?> SendReactionOneToOneAsync(
+        SessionId sender,
+        SessionId recipient,
+        MessageId targetMessageId,
+        string emoji,
+        bool remove = false,
+        CancellationToken cancellationToken = default)
+    {
+        var conversationId = ConversationId.ForOneToOne(recipient);
+        var update = new MessageReactionUpdate(targetMessageId, NormalizeEmoji(emoji), remove);
+        await transport.SendAsync(new OutboundMessageEnvelope(
+            sender,
+            recipient,
+            string.Empty,
+            [],
+            clock.UtcNow,
+            null,
+            MessageId.NewId(),
+            Reaction: update), cancellationToken).ConfigureAwait(false);
+        return await ApplyReactionAsync(conversationId, sender, update, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<Message?> SendGroupReactionAsync(
+        SessionId sender,
+        ConversationId groupId,
+        MessageId targetMessageId,
+        string emoji,
+        bool remove = false,
+        CancellationToken cancellationToken = default)
+    {
+        var group = await conversationService.GetGroupAsync(groupId, cancellationToken).ConfigureAwait(false);
+        if (group is null || group.IsDestroyed || group.Members.All(member => member.SessionId != sender))
+        {
+            throw new InvalidOperationException("Only active group members can react to messages.");
+        }
+
+        var update = new MessageReactionUpdate(targetMessageId, NormalizeEmoji(emoji), remove);
+        await groupSync.SendGroupMessageAsync(new OutboundGroupMessageEnvelope(
+            MessageId.NewId(),
+            groupId,
+            sender,
+            string.Empty,
+            [],
+            clock.UtcNow,
+            null,
+            Reaction: update), cancellationToken).ConfigureAwait(false);
+        return await ApplyReactionAsync(groupId, sender, update, cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<IReadOnlyList<Message>> ReceiveGroupAsync(
         SessionId recipient,
         ConversationId groupId,
@@ -405,6 +476,17 @@ public sealed class MessageService(
                 continue;
             }
 
+            if (envelope.Reaction is not null)
+            {
+                var reacted = await ApplyReactionAsync(groupId, envelope.Sender, envelope.Reaction, cancellationToken)
+                    .ConfigureAwait(false);
+                if (reacted is not null)
+                {
+                    received.Add(reacted);
+                }
+                continue;
+            }
+
             if (await HasMessageWithServerHashAsync(groupId, envelope.ServerHash, cancellationToken).ConfigureAwait(false))
             {
                 continue;
@@ -421,7 +503,8 @@ public sealed class MessageService(
                 envelope.CreatedAt,
                 envelope.Attachments,
                 envelope.ExpiresAt,
-                ServerHash: envelope.ServerHash);
+                ServerHash: envelope.ServerHash,
+                ReplyTo: envelope.ReplyTo);
 
             await messages.AppendAsync(message, cancellationToken).ConfigureAwait(false);
             received.Add(message);
@@ -584,6 +667,68 @@ public sealed class MessageService(
     }
 
     private static string ReadCursorSettingKey(ConversationId conversationId) => $"sync.read-cursor.{conversationId.Value}";
+
+    private async Task<MessageReply?> CreateReplyAsync(
+        ConversationId conversationId,
+        MessageId? replyToMessageId,
+        CancellationToken cancellationToken)
+    {
+        if (replyToMessageId is null)
+        {
+            return null;
+        }
+
+        var target = await messages.GetAsync(replyToMessageId.Value, cancellationToken).ConfigureAwait(false);
+        if (target is null || target.ConversationId != conversationId)
+        {
+            throw new InvalidOperationException("The replied-to message does not belong to this conversation.");
+        }
+
+        var quote = string.IsNullOrWhiteSpace(target.Body) ? "[Вложение]" : target.Body.Trim();
+        if (quote.Length > 240)
+        {
+            quote = quote[..240] + "...";
+        }
+
+        return new MessageReply(target.Id, target.Sender, quote);
+    }
+
+    private async Task<Message?> ApplyReactionAsync(
+        ConversationId conversationId,
+        SessionId reactor,
+        MessageReactionUpdate update,
+        CancellationToken cancellationToken)
+    {
+        var target = await messages.GetAsync(update.TargetMessageId, cancellationToken).ConfigureAwait(false);
+        if (target is null || target.ConversationId != conversationId)
+        {
+            return null;
+        }
+
+        var reactions = target.ReactionItems
+            .Where(item => item.Reactor != reactor)
+            .ToList();
+        if (!update.Remove)
+        {
+            reactions.Add(new MessageReaction(NormalizeEmoji(update.Emoji), reactor));
+        }
+
+        var updated = target with { Reactions = reactions };
+        await messages.UpdateAsync(updated, cancellationToken).ConfigureAwait(false);
+        return updated;
+    }
+
+    private static string NormalizeEmoji(string emoji)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(emoji);
+        var normalized = emoji.Trim();
+        if (normalized.Length > 16)
+        {
+            throw new ArgumentException("Reaction emoji is too long.", nameof(emoji));
+        }
+
+        return normalized;
+    }
 
     private static DateTimeOffset? CalculateExpiry(DisappearingMessageSettings settings, DateTimeOffset now) =>
         settings.Mode == DisappearingMode.Disabled ? null : now.Add(settings.Duration!.Value);

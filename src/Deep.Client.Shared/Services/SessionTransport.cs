@@ -15,7 +15,9 @@ public sealed record OutboundMessageEnvelope(
     IReadOnlyList<AttachmentMetadata> Attachments,
     DateTimeOffset CreatedAt,
     DateTimeOffset? ExpiresAt,
-    MessageId? Id = null);
+    MessageId? Id = null,
+    MessageReply? ReplyTo = null,
+    MessageReactionUpdate? Reaction = null);
 
 public sealed record InboundMessageEnvelope(
     MessageId Id,
@@ -25,7 +27,9 @@ public sealed record InboundMessageEnvelope(
     IReadOnlyList<AttachmentMetadata> Attachments,
     DateTimeOffset CreatedAt,
     DateTimeOffset? ExpiresAt,
-    string ServerHash);
+    string ServerHash,
+    MessageReply? ReplyTo = null,
+    MessageReactionUpdate? Reaction = null);
 
 public interface ISessionMessageTransport
 {
@@ -78,7 +82,9 @@ public sealed class HttpSessionTransport : ISessionMessageTransport, IRecoveryPr
             body = envelope.Body,
             attachments = envelope.Attachments,
             createdAt = envelope.CreatedAt,
-            expiresAt = envelope.ExpiresAt
+            expiresAt = envelope.ExpiresAt,
+            replyTo = envelope.ReplyTo,
+            reaction = envelope.Reaction
         }, cancellationToken).ConfigureAwait(false);
 
         response.EnsureSuccessStatusCode();
@@ -98,7 +104,9 @@ public sealed class HttpSessionTransport : ISessionMessageTransport, IRecoveryPr
             item.Attachments,
             item.CreatedAt,
             item.ExpiresAt,
-            item.ServerHash)).ToArray();
+            item.ServerHash,
+            item.ReplyTo,
+            item.Reaction)).ToArray();
     }
 
     public async Task<string?> TryGetDisplayNameAsync(SessionId sessionId, CancellationToken cancellationToken = default)
@@ -128,7 +136,9 @@ public sealed class HttpSessionTransport : ISessionMessageTransport, IRecoveryPr
         IReadOnlyList<AttachmentMetadata> Attachments,
         DateTimeOffset CreatedAt,
         DateTimeOffset? ExpiresAt,
-        string ServerHash);
+        string ServerHash,
+        MessageReply? ReplyTo,
+        MessageReactionUpdate? Reaction);
 
     private sealed record ProfileLookupDto(string? DisplayName);
 }
@@ -175,7 +185,9 @@ public sealed class SessionStorageMessageTransport : ISessionMessageTransport
             envelope.Body,
             envelope.Attachments,
             envelope.CreatedAt,
-            envelope.ExpiresAt);
+            envelope.ExpiresAt,
+            envelope.ReplyTo,
+            envelope.Reaction);
 
         var payloadJson = JsonSerializer.Serialize(payload, JsonOptions);
         var payloadBytes = Encoding.UTF8.GetBytes(payloadJson);
@@ -258,7 +270,9 @@ public sealed class SessionStorageMessageTransport : ISessionMessageTransport
                 payload.Attachments,
                 payload.CreatedAt,
                 payload.ExpiresAt,
-                stored.Hash);
+                stored.Hash,
+                payload.ReplyTo,
+                payload.Reaction);
             return true;
         }
         catch (ArgumentException)
@@ -302,7 +316,9 @@ public sealed class SessionStorageMessageTransport : ISessionMessageTransport
         string Body,
         IReadOnlyList<AttachmentMetadata> Attachments,
         DateTimeOffset CreatedAt,
-        DateTimeOffset? ExpiresAt);
+        DateTimeOffset? ExpiresAt,
+        MessageReply? ReplyTo,
+        MessageReactionUpdate? Reaction);
 
     private sealed record StorageRetrieveResponse(
         [property: JsonPropertyName("messages")] IReadOnlyList<StorageMessageDto> Messages);
@@ -328,7 +344,9 @@ public sealed class StubSessionBackend : ISessionMessageTransport, IRecoveryProf
             envelope.Attachments,
             envelope.CreatedAt,
             envelope.ExpiresAt,
-            serverHash);
+            serverHash,
+            envelope.ReplyTo,
+            envelope.Reaction);
 
         inboxes.GetOrAdd(envelope.Recipient.Value, _ => new ConcurrentQueue<InboundMessageEnvelope>()).Enqueue(inbound);
         return Task.CompletedTask;

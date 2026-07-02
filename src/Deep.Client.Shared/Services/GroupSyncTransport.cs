@@ -15,7 +15,9 @@ public sealed record OutboundGroupMessageEnvelope(
     string Body,
     IReadOnlyList<AttachmentMetadata> Attachments,
     DateTimeOffset CreatedAt,
-    DateTimeOffset? ExpiresAt);
+    DateTimeOffset? ExpiresAt,
+    MessageReply? ReplyTo = null,
+    MessageReactionUpdate? Reaction = null);
 
 public sealed record InboundGroupMessageEnvelope(
     MessageId Id,
@@ -25,7 +27,9 @@ public sealed record InboundGroupMessageEnvelope(
     IReadOnlyList<AttachmentMetadata> Attachments,
     DateTimeOffset CreatedAt,
     DateTimeOffset? ExpiresAt,
-    string ServerHash);
+    string ServerHash,
+    MessageReply? ReplyTo = null,
+    MessageReactionUpdate? Reaction = null);
 
 public sealed record InboundGroupStateEnvelope(
     Group Group,
@@ -186,7 +190,9 @@ public sealed class SessionStorageGroupSyncTransport : IGroupSyncTransport
             envelope.Body,
             envelope.Attachments,
             envelope.CreatedAt,
-            envelope.ExpiresAt);
+            envelope.ExpiresAt,
+            envelope.ReplyTo,
+            envelope.Reaction);
 
         var payloadJson = JsonSerializer.Serialize(payload, JsonOptions);
         var timestamp = envelope.CreatedAt.ToUnixTimeMilliseconds();
@@ -356,7 +362,9 @@ public sealed class SessionStorageGroupSyncTransport : IGroupSyncTransport
                 payload.Attachments,
                 payload.CreatedAt,
                 payload.ExpiresAt,
-                stored.Hash);
+                stored.Hash,
+                payload.ReplyTo,
+                payload.Reaction);
             return true;
         }
         catch (ArgumentException)
@@ -402,7 +410,9 @@ public sealed class SessionStorageGroupSyncTransport : IGroupSyncTransport
         string Body,
         IReadOnlyList<AttachmentMetadata> Attachments,
         DateTimeOffset CreatedAt,
-        DateTimeOffset? ExpiresAt);
+        DateTimeOffset? ExpiresAt,
+        MessageReply? ReplyTo,
+        MessageReactionUpdate? Reaction);
 
     private sealed record StorageRetrieveResponse(
         [property: JsonPropertyName("messages")] IReadOnlyList<StorageMessageDto> Messages);

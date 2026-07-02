@@ -350,7 +350,9 @@ public sealed class RoutedSessionStorageMessageTransport : ISessionMessageTransp
             envelope.Body,
             envelope.Attachments,
             envelope.CreatedAt,
-            envelope.ExpiresAt);
+            envelope.ExpiresAt,
+            envelope.ReplyTo,
+            envelope.Reaction);
 
         var payloadJson = JsonSerializer.Serialize(payload, JsonOptions);
         var timestamp = envelope.CreatedAt.ToUnixTimeMilliseconds();
@@ -422,7 +424,9 @@ public sealed class RoutedSessionStorageMessageTransport : ISessionMessageTransp
                 payload.Attachments,
                 payload.CreatedAt,
                 payload.ExpiresAt,
-                stored.Hash);
+                stored.Hash,
+                payload.ReplyTo,
+                payload.Reaction);
             return true;
         }
         catch (ArgumentException)
@@ -456,7 +460,9 @@ public sealed class RoutedSessionStorageMessageTransport : ISessionMessageTransp
         string Body,
         IReadOnlyList<AttachmentMetadata> Attachments,
         DateTimeOffset CreatedAt,
-        DateTimeOffset? ExpiresAt);
+        DateTimeOffset? ExpiresAt,
+        MessageReply? ReplyTo,
+        MessageReactionUpdate? Reaction);
 
     private sealed record StorageRetrieveResponse(
         [property: JsonPropertyName("messages")] IReadOnlyList<StorageMessageDto> Messages);
@@ -559,7 +565,9 @@ public sealed class RoutedSessionStorageGroupSyncTransport : IGroupSyncTransport
             envelope.Body,
             envelope.Attachments,
             envelope.CreatedAt,
-            envelope.ExpiresAt);
+            envelope.ExpiresAt,
+            envelope.ReplyTo,
+            envelope.Reaction);
 
         var payloadJson = JsonSerializer.Serialize(payload, JsonOptions);
         await _router.PostStorageAsync("storage_store", new
@@ -715,7 +723,9 @@ public sealed class RoutedSessionStorageGroupSyncTransport : IGroupSyncTransport
                 payload.Attachments,
                 payload.CreatedAt,
                 payload.ExpiresAt,
-                stored.Hash);
+                stored.Hash,
+                payload.ReplyTo,
+                payload.Reaction);
             return true;
         }
         catch (ArgumentException)
@@ -761,7 +771,9 @@ public sealed class RoutedSessionStorageGroupSyncTransport : IGroupSyncTransport
         string Body,
         IReadOnlyList<AttachmentMetadata> Attachments,
         DateTimeOffset CreatedAt,
-        DateTimeOffset? ExpiresAt);
+        DateTimeOffset? ExpiresAt,
+        MessageReply? ReplyTo,
+        MessageReactionUpdate? Reaction);
 
     private sealed record StorageRetrieveResponse(
         [property: JsonPropertyName("messages")] IReadOnlyList<StorageMessageDto> Messages);
