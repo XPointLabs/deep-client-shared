@@ -6,6 +6,33 @@ namespace Deep.Client.Shared.Tests.Services;
 public sealed class RealtimeCallLiveE2ETests
 {
     [Fact]
+    public async Task CallServiceReturnsAuthenticatedProductionIceConfiguration_WhenConfigured()
+    {
+        var callUrl = Environment.GetEnvironmentVariable("DEEP_CALL_SIGNALING_BASE_URL")
+            ?? Environment.GetEnvironmentVariable("DEEP_CALL_SIGNALING_URL");
+        if (string.IsNullOrWhiteSpace(callUrl))
+        {
+            return;
+        }
+
+        var runtime = Deep.Client.Shared.State.ClientRuntime.CreateStubbed();
+        var account = await runtime.Accounts.RegisterAsync("ICE acceptance");
+        var phrase = await runtime.Accounts.GetRecoveryPhraseAsync();
+        var transport = new HttpCallSignalingTransport(
+            new HttpClient(),
+            new HttpCallSignalingTransportOptions(callUrl),
+            _ => Task.FromResult(phrase));
+
+        var configuration = await transport.GetAsync(account.SessionId);
+
+        Assert.True(configuration.ExpiresAt > DateTimeOffset.UtcNow.AddMinutes(5));
+        Assert.Contains(configuration.IceServers, static server =>
+            server.Urls.Any(static url => url.StartsWith("turn:", StringComparison.OrdinalIgnoreCase))
+            && !string.IsNullOrWhiteSpace(server.Username)
+            && !string.IsNullOrWhiteSpace(server.Credential));
+    }
+
+    [Fact]
     public async Task RealtimeCallService_RoundTripsCallLifecycleThroughLiveSignaling_WhenConfigured()
     {
         var callUrl = Environment.GetEnvironmentVariable("DEEP_CALL_SIGNALING_BASE_URL")
