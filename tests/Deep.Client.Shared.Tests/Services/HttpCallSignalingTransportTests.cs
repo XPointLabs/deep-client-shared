@@ -118,6 +118,51 @@ public sealed class HttpCallSignalingTransportTests
         Assert.Equal(envelope.Payload, received.Payload);
     }
 
+    [Fact]
+    public async Task GetAsyncAuthenticatesAndReadsEphemeralIceConfiguration()
+    {
+        var runtime = Deep.Client.Shared.State.ClientRuntime.CreateStubbed();
+        var account = await runtime.Accounts.RegisterAsync("Alice");
+        var phrase = await runtime.Accounts.GetRecoveryPhraseAsync();
+        var handler = new RecordingHandler((request, _) =>
+        {
+            Assert.Equal(HttpMethod.Get, request.Method);
+            Assert.Contains("/api/calls/ice-servers/", request.RequestUri?.AbsolutePath, StringComparison.Ordinal);
+            Assert.Equal(64, request.Headers.GetValues("X-Deep-Ed25519").Single().Length);
+            var timestamp = long.Parse(request.Headers.GetValues("X-Deep-Timestamp").Single(), System.Globalization.CultureInfo.InvariantCulture);
+            Assert.True(Sodium.PublicKeyAuth.VerifyDetached(
+                Convert.FromBase64String(request.Headers.GetValues("X-Deep-Signature").Single()),
+                CallSignalAuthentication.BuildIceSigningPayload(account.SessionId, timestamp),
+                Convert.FromHexString(request.Headers.GetValues("X-Deep-Ed25519").Single())));
+
+            const string json = """
+                {
+                  "iceServers": [
+                    {
+                      "urls": ["turn:registry.xpoint.network:3478?transport=udp"],
+                      "username": "1800000000:05abc",
+                      "credential": "temporary"
+                    }
+                  ],
+                  "expiresAt": "2027-01-15T08:00:00Z"
+                }
+                """;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(json, Encoding.UTF8, "application/json")
+            });
+        });
+        var transport = new HttpCallSignalingTransport(
+            new HttpClient(handler),
+            new HttpCallSignalingTransportOptions("http://localhost:18082"),
+            _ => Task.FromResult(phrase));
+
+        var configuration = await transport.GetAsync(account.SessionId);
+
+        var server = Assert.Single(configuration.IceServers);
+        Assert.Equal("temporary", server.Credential);
+    }
+
     private static CallSignalEnvelope BuildEnvelope()
     {
         return new CallSignalEnvelope(

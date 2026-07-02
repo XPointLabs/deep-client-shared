@@ -84,12 +84,22 @@ public interface ICallSignalingTransport
     Task<IReadOnlyList<CallSignalEnvelope>> ReceiveAsync(SessionId recipient, CancellationToken cancellationToken = default);
 }
 
+public sealed record CallIceServer(IReadOnlyList<string> Urls, string? Username = null, string? Credential = null);
+
+public sealed record CallIceConfiguration(IReadOnlyList<CallIceServer> IceServers, DateTimeOffset ExpiresAt);
+
+public interface ICallIceConfigurationProvider
+{
+    Task<CallIceConfiguration> GetAsync(SessionId recipient, CancellationToken cancellationToken = default);
+}
+
 public sealed record HttpCallSignalingTransportOptions(
     string BaseUrl,
     string SignalPath = "/api/calls/signal",
-    string InboxPathFormat = "/api/calls/inbox/{recipient}");
+    string InboxPathFormat = "/api/calls/inbox/{recipient}",
+    string IceServersPathFormat = "/api/calls/ice-servers/{recipient}");
 
-public sealed class HttpCallSignalingTransport : ICallSignalingTransport
+public sealed class HttpCallSignalingTransport : ICallSignalingTransport, ICallIceConfigurationProvider
 {
     private readonly HttpClient _httpClient;
     private readonly HttpCallSignalingTransportOptions _options;
@@ -177,6 +187,45 @@ public sealed class HttpCallSignalingTransport : ICallSignalingTransport
         }
 
         return result;
+    }
+
+    public async Task<CallIceConfiguration> GetAsync(
+        SessionId recipient,
+        CancellationToken cancellationToken = default)
+    {
+        if (_recoveryPhraseProvider is null)
+        {
+            throw new InvalidOperationException("Authenticated call signaling is required for ICE configuration.");
+        }
+
+        var recoveryPhrase = await _recoveryPhraseProvider(cancellationToken).ConfigureAwait(false);
+        if (string.IsNullOrWhiteSpace(recoveryPhrase))
+        {
+            throw new InvalidOperationException("An active account is required for ICE configuration.");
+        }
+
+        var identity = SessionIdentityMaterial.FromRecoveryPhrase(recoveryPhrase);
+        if (identity.SessionId != recipient)
+        {
+            throw new InvalidOperationException("ICE configuration recipient does not match the active account.");
+        }
+
+        var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        var path = _options.IceServersPathFormat.Replace(
+            "{recipient}",
+            Uri.EscapeDataString(recipient.Value),
+            StringComparison.Ordinal);
+        using var request = new HttpRequestMessage(HttpMethod.Get, path);
+        request.Headers.TryAddWithoutValidation("X-Deep-Ed25519", identity.Ed25519PublicKeyHex);
+        request.Headers.TryAddWithoutValidation("X-Deep-Timestamp", timestamp.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        request.Headers.TryAddWithoutValidation(
+            "X-Deep-Signature",
+            Convert.ToBase64String(identity.SignDetached(CallSignalAuthentication.BuildIceSigningPayload(recipient, timestamp))));
+        using var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        response.EnsureSuccessStatusCode();
+        return await response.Content.ReadFromJsonAsync<CallIceConfiguration>(cancellationToken: cancellationToken)
+                   .ConfigureAwait(false)
+               ?? throw new InvalidOperationException("The call service returned an empty ICE configuration.");
     }
 
     private async Task<CallSignalEnvelope> EncryptAndSignAsync(
@@ -277,9 +326,12 @@ public static class CallSignalAuthentication
 
     public static byte[] BuildInboxSigningPayload(SessionId recipient, long timestamp) =>
         Encoding.UTF8.GetBytes($"deep-call-inbox-v1\n{recipient.Value}\n{timestamp}");
+
+    public static byte[] BuildIceSigningPayload(SessionId recipient, long timestamp) =>
+        Encoding.UTF8.GetBytes($"deep-call-ice-v1\n{recipient.Value}\n{timestamp}");
 }
 
-public sealed class InMemoryCallSignalingTransport : ICallSignalingTransport
+public sealed class InMemoryCallSignalingTransport : ICallSignalingTransport, ICallIceConfigurationProvider
 {
     private readonly ConcurrentDictionary<string, ConcurrentQueue<CallSignalEnvelope>> _inboxes = new(StringComparer.Ordinal);
 
@@ -304,6 +356,9 @@ public sealed class InMemoryCallSignalingTransport : ICallSignalingTransport
 
         return Task.FromResult<IReadOnlyList<CallSignalEnvelope>>(result);
     }
+
+    public Task<CallIceConfiguration> GetAsync(SessionId recipient, CancellationToken cancellationToken = default) =>
+        Task.FromResult(new CallIceConfiguration([], DateTimeOffset.MaxValue));
 }
 
 public sealed class RealtimeCallService
