@@ -132,7 +132,7 @@ public sealed class HttpCallSignalingTransport : ICallSignalingTransport, ICallI
         var outgoing = _recoveryPhraseProvider is null
             ? envelope
             : await EncryptAndSignAsync(envelope, cancellationToken).ConfigureAwait(false);
-        var response = await _httpClient.PostAsJsonAsync(_options.SignalPath, outgoing, cancellationToken).ConfigureAwait(false);
+        using var response = await _httpClient.PostAsJsonAsync(_options.SignalPath, outgoing, cancellationToken).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
     }
 
