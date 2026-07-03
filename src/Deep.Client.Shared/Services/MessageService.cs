@@ -666,6 +666,24 @@ public sealed class MessageService(
         return removed;
     }
 
+    public async Task<int> ClearConversationMessagesAsync(
+        ConversationId conversationId,
+        CancellationToken cancellationToken = default)
+    {
+        var messageIds = new List<MessageId>();
+        await foreach (var message in messages.ListForConversationAsync(conversationId, cancellationToken).ConfigureAwait(false))
+        {
+            messageIds.Add(message.Id);
+        }
+
+        foreach (var messageId in messageIds)
+        {
+            await messages.DeleteAsync(messageId, cancellationToken).ConfigureAwait(false);
+        }
+
+        return messageIds.Count;
+    }
+
     private static string ReadCursorSettingKey(ConversationId conversationId) => $"sync.read-cursor.{conversationId.Value}";
 
     private async Task<MessageReply?> CreateReplyAsync(

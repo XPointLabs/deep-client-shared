@@ -39,6 +39,12 @@ public sealed class ConversationService(
         await contacts.UpsertAsync(contact, cancellationToken).ConfigureAwait(false);
         if (existing is not null)
         {
+            if (existing.IsHidden)
+            {
+                existing = existing with { IsHidden = false, UpdatedAt = now };
+                await conversations.UpsertAsync(existing, cancellationToken).ConfigureAwait(false);
+            }
+
             return existing;
         }
 
@@ -56,6 +62,22 @@ public sealed class ConversationService(
 
     public Task<Contact?> GetContactAsync(SessionId contactId, CancellationToken cancellationToken = default) =>
         contacts.GetAsync(contactId, cancellationToken);
+
+    public async Task SetConversationHiddenAsync(
+        ConversationId conversationId,
+        bool hidden,
+        CancellationToken cancellationToken = default)
+    {
+        var conversation = await conversations.GetAsync(conversationId, cancellationToken).ConfigureAwait(false);
+        if (conversation is null || conversation.IsHidden == hidden)
+        {
+            return;
+        }
+
+        await conversations.UpsertAsync(
+            conversation with { IsHidden = hidden, UpdatedAt = clock.UtcNow },
+            cancellationToken).ConfigureAwait(false);
+    }
 
     public async Task<Contact> ApproveContactAsync(SessionId contactId, CancellationToken cancellationToken = default)
     {
