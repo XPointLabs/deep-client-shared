@@ -1,4 +1,5 @@
 ﻿using System.Collections.Concurrent;
+using System.Net;
 using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text;
@@ -132,7 +133,9 @@ public sealed class HttpCallSignalingTransport : ICallSignalingTransport, ICallI
         var outgoing = _recoveryPhraseProvider is null
             ? envelope
             : await EncryptAndSignAsync(envelope, cancellationToken).ConfigureAwait(false);
-        using var response = await _httpClient.PostAsJsonAsync(_options.SignalPath, outgoing, cancellationToken).ConfigureAwait(false);
+        using var request = CreateRequest(HttpMethod.Post, _options.SignalPath);
+        request.Content = JsonContent.Create(outgoing);
+        using var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
     }
 
@@ -161,7 +164,7 @@ public sealed class HttpCallSignalingTransport : ICallSignalingTransport, ICallI
             }
 
             var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-            using var request = new HttpRequestMessage(HttpMethod.Get, path);
+            using var request = CreateRequest(HttpMethod.Get, path);
             request.Headers.TryAddWithoutValidation("X-Deep-Ed25519", recipientIdentity.Ed25519PublicKeyHex);
             request.Headers.TryAddWithoutValidation("X-Deep-Timestamp", timestamp.ToString(System.Globalization.CultureInfo.InvariantCulture));
             request.Headers.TryAddWithoutValidation(
@@ -215,7 +218,7 @@ public sealed class HttpCallSignalingTransport : ICallSignalingTransport, ICallI
             "{recipient}",
             Uri.EscapeDataString(recipient.Value),
             StringComparison.Ordinal);
-        using var request = new HttpRequestMessage(HttpMethod.Get, path);
+        using var request = CreateRequest(HttpMethod.Get, path);
         request.Headers.TryAddWithoutValidation("X-Deep-Ed25519", identity.Ed25519PublicKeyHex);
         request.Headers.TryAddWithoutValidation("X-Deep-Timestamp", timestamp.ToString(System.Globalization.CultureInfo.InvariantCulture));
         request.Headers.TryAddWithoutValidation(
@@ -226,6 +229,17 @@ public sealed class HttpCallSignalingTransport : ICallSignalingTransport, ICallI
         return await response.Content.ReadFromJsonAsync<CallIceConfiguration>(cancellationToken: cancellationToken)
                    .ConfigureAwait(false)
                ?? throw new InvalidOperationException("The call service returned an empty ICE configuration.");
+    }
+
+    private static HttpRequestMessage CreateRequest(HttpMethod method, string path)
+    {
+        var request = new HttpRequestMessage(method, path)
+        {
+            Version = HttpVersion.Version11,
+            VersionPolicy = HttpVersionPolicy.RequestVersionExact
+        };
+        request.Headers.ConnectionClose = true;
+        return request;
     }
 
     private async Task<CallSignalEnvelope> EncryptAndSignAsync(
