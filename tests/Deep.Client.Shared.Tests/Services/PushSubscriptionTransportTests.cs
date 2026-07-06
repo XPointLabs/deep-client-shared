@@ -87,7 +87,7 @@ public sealed class PushSubscriptionTransportTests
         Assert.Single(transport.SubscribeRequests);
         Assert.Equal("firebase", transport.SubscribeRequests[0].Service);
         Assert.Equal("token-123", transport.SubscribeRequests[0].ServiceInfo.Token);
-        Assert.Equal([0], transport.SubscribeRequests[0].Namespaces);
+        Assert.Equal([0, 10], transport.SubscribeRequests[0].Namespaces);
         Assert.Equal(activeAccount!.SessionId.Value, transport.SubscribeRequests[0].Pubkey);
         Assert.Equal(storedEncKey, transport.SubscribeRequests[0].EncKey);
         Assert.False(string.IsNullOrWhiteSpace(transport.SubscribeRequests[0].SessionEd25519));

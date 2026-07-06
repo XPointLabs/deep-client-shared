@@ -574,6 +574,32 @@ public sealed class MessageFlowTests
         Assert.True(conversation.IsHidden);
     }
 
+    [Fact]
+    public async Task SendGroupAsync_IncludesMemberWakeRecipientsForPushDrivenSync()
+    {
+        var groupSync = new RecordingGroupSyncTransport();
+        var runtime = new ClientRuntime(
+            new InMemorySessionStore(),
+            Deep.Client.Shared.Features.ClientFeatureFlags.Defaults,
+            new FrozenClock(DateTimeOffset.Parse("2026-05-28T00:00:00Z")),
+            new QueuedMessageTransport(),
+            groupSync);
+        var owner = await runtime.Accounts.RegisterAsync("Owner");
+        var firstMember = SessionId.CreateNew();
+        var secondMember = SessionId.CreateNew();
+        var group = await runtime.Conversations.CreateGroupScaffoldAsync(
+            owner.SessionId,
+            "Push group",
+            [firstMember, secondMember]);
+
+        await runtime.Messages.SendGroupAsync(owner.SessionId, group.Id, "wake everyone");
+
+        var envelope = Assert.Single(groupSync.SentMessages);
+        Assert.Equal(group.Id, envelope.GroupId);
+        Assert.Equal([firstMember, secondMember], envelope.NotifyRecipients);
+        Assert.DoesNotContain(owner.SessionId, envelope.NotifyRecipients ?? []);
+    }
+
     private sealed class QueuedMessageTransport : ISessionMessageTransport
     {
         private readonly Queue<InboundMessageEnvelope> envelopes = new();
@@ -600,5 +626,35 @@ public sealed class MessageFlowTests
             envelopes.Clear();
             return Task.FromResult<IReadOnlyList<InboundMessageEnvelope>>(result);
         }
+    }
+
+    private sealed class RecordingGroupSyncTransport : IGroupSyncTransport
+    {
+        public List<OutboundGroupMessageEnvelope> SentMessages { get; } = [];
+
+        public Task PublishGroupStateAsync(
+            Group group,
+            DateTimeOffset updatedAt,
+            IEnumerable<SessionId>? recipients = null,
+            CancellationToken cancellationToken = default) =>
+            Task.CompletedTask;
+
+        public Task<IReadOnlyList<InboundGroupStateEnvelope>> ReceiveGroupStatesAsync(
+            SessionId member,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<InboundGroupStateEnvelope>>([]);
+
+        public Task SendGroupMessageAsync(
+            OutboundGroupMessageEnvelope envelope,
+            CancellationToken cancellationToken = default)
+        {
+            SentMessages.Add(envelope);
+            return Task.CompletedTask;
+        }
+
+        public Task<IReadOnlyList<InboundGroupMessageEnvelope>> ReceiveGroupMessagesAsync(
+            ConversationId groupId,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<InboundGroupMessageEnvelope>>([]);
     }
 }

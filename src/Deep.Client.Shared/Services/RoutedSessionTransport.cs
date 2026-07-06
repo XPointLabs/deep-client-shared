@@ -579,6 +579,9 @@ public sealed class RoutedSessionStorageGroupSyncTransport : IGroupSyncTransport
             data = Convert.ToBase64String(Encoding.UTF8.GetBytes(payloadJson)),
             idempotency_key = BuildIdempotencyKey("group-message", envelope.GroupId.Value, payloadJson)
         }, envelope.GroupId.Value, cancellationToken).ConfigureAwait(false);
+
+        await PublishGroupMessageWakeupsAsync(envelope, envelope.CreatedAt.ToUnixTimeMilliseconds(), cancellationToken)
+            .ConfigureAwait(false);
     }
 
     public async Task<IReadOnlyList<InboundGroupMessageEnvelope>> ReceiveGroupMessagesAsync(
@@ -653,6 +656,42 @@ public sealed class RoutedSessionStorageGroupSyncTransport : IGroupSyncTransport
             group.IsDestroyed,
             group.IsKicked,
             updatedAt);
+
+    private async Task PublishGroupMessageWakeupsAsync(
+        OutboundGroupMessageEnvelope envelope,
+        long timestamp,
+        CancellationToken cancellationToken)
+    {
+        var recipients = envelope.NotifyRecipients?
+            .Where(recipient => recipient != envelope.Sender)
+            .Distinct()
+            .ToArray() ?? [];
+        if (recipients.Length == 0)
+        {
+            return;
+        }
+
+        var wake = new StoredGroupWakePayload(
+            "group-message",
+            envelope.GroupId.Value,
+            envelope.Id.Value,
+            envelope.CreatedAt);
+        var payloadJson = JsonSerializer.Serialize(wake, JsonOptions);
+        var data = Convert.ToBase64String(Encoding.UTF8.GetBytes(payloadJson));
+
+        foreach (var recipient in recipients)
+        {
+            await _router.PostStorageAsync("storage_store", new
+            {
+                pubkey = recipient.Value,
+                @namespace = _options.GroupStateNamespace,
+                timestamp,
+                ttl = _options.TtlMilliseconds,
+                data,
+                idempotency_key = BuildIdempotencyKey("group-message-wake", recipient.Value, payloadJson)
+            }, recipient.Value, cancellationToken).ConfigureAwait(false);
+        }
+    }
 
     private static bool TryDecodeGroupState(
         StorageMessageDto stored,
@@ -774,6 +813,12 @@ public sealed class RoutedSessionStorageGroupSyncTransport : IGroupSyncTransport
         DateTimeOffset? ExpiresAt,
         MessageReply? ReplyTo,
         MessageReactionUpdate? Reaction);
+
+    private sealed record StoredGroupWakePayload(
+        string Type,
+        string GroupId,
+        string MessageId,
+        DateTimeOffset CreatedAt);
 
     private sealed record StorageRetrieveResponse(
         [property: JsonPropertyName("messages")] IReadOnlyList<StorageMessageDto> Messages);

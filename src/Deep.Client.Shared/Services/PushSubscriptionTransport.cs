@@ -127,7 +127,7 @@ public sealed class HttpPushSubscriptionTransport : IPushSubscriptionTransport
 public sealed class PushRegistrationCoordinator : IPushRegistrationCoordinator
 {
     public const string NotificationEncryptionKeySetting = "push.notification-encryption-key";
-    private static readonly IReadOnlyList<int> RegularPushNamespaces = [0];
+    private static readonly IReadOnlyList<int> RegularPushNamespaces = [0, 10];
 
     private readonly ClientRuntime runtime;
     private readonly IPushNotificationService pushNotifications;

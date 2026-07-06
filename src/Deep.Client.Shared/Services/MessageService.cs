@@ -330,7 +330,11 @@ public sealed class MessageService(
                 pending.Attachments,
                 pending.CreatedAt,
                 pending.ExpiresAt,
-                pending.ReplyTo), cancellationToken).ConfigureAwait(false);
+                pending.ReplyTo,
+                NotifyRecipients: await ResolveGroupNotifyRecipientsAsync(
+                    pending.ConversationId,
+                    pending.Sender,
+                    cancellationToken).ConfigureAwait(false)), cancellationToken).ConfigureAwait(false);
 
             var sent = pending.Mark(MessageDeliveryState.Sent);
             await messages.UpdateAsync(sent, cancellationToken).ConfigureAwait(false);
@@ -432,7 +436,8 @@ public sealed class MessageService(
             [],
             clock.UtcNow,
             null,
-            Reaction: update), cancellationToken).ConfigureAwait(false);
+            Reaction: update,
+            NotifyRecipients: GroupNotifyRecipients(group, sender)), cancellationToken).ConfigureAwait(false);
         return await ApplyReactionAsync(groupId, sender, update, cancellationToken).ConfigureAwait(false);
     }
 
@@ -685,6 +690,22 @@ public sealed class MessageService(
     }
 
     private static string ReadCursorSettingKey(ConversationId conversationId) => $"sync.read-cursor.{conversationId.Value}";
+
+    private async Task<IReadOnlyList<SessionId>> ResolveGroupNotifyRecipientsAsync(
+        ConversationId groupId,
+        SessionId sender,
+        CancellationToken cancellationToken)
+    {
+        var group = await conversationService.GetGroupAsync(groupId, cancellationToken).ConfigureAwait(false);
+        return group is null ? [] : GroupNotifyRecipients(group, sender);
+    }
+
+    private static IReadOnlyList<SessionId> GroupNotifyRecipients(Group group, SessionId sender) =>
+        group.Members
+            .Select(static member => member.SessionId)
+            .Where(member => member != sender)
+            .Distinct()
+            .ToArray();
 
     private async Task<MessageReply?> CreateReplyAsync(
         ConversationId conversationId,
