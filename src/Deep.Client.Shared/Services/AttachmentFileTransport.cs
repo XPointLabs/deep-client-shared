@@ -10,7 +10,10 @@ namespace Deep.Client.Shared.Services;
 public sealed record AttachmentFileUpload(
     string FileName,
     string ContentType,
-    Stream Content);
+    Stream Content,
+    int? Width = null,
+    int? Height = null,
+    TimeSpan? Duration = null);
 
 public sealed record AttachmentFileDownload(
     string FileName,
@@ -103,7 +106,10 @@ public sealed class HttpAttachmentFileTransport : IAttachmentFileTransport
             plain.Length,
             new Uri(httpClient.BaseAddress!, PathFor(payload.Id)),
             Convert.ToBase64String(key),
-            Convert.ToBase64String(SHA256.HashData(plain)));
+            Convert.ToBase64String(SHA256.HashData(plain)),
+            upload.Width,
+            upload.Height,
+            upload.Duration);
     }
 
     public async Task<AttachmentFileDownload> DownloadAsync(
