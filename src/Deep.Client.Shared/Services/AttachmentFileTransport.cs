@@ -88,8 +88,20 @@ public sealed class HttpAttachmentFileTransport : IAttachmentFileTransport
         var encrypted = Encrypt(plain, key);
         using var content = new ByteArrayContent(encrypted);
         content.Headers.ContentType = new("application/octet-stream");
+        content.Headers.ContentLength = encrypted.Length;
 
-        using var response = await httpClient.PostAsync(options.UploadPath, content, cancellationToken).ConfigureAwait(false);
+        using var request = new HttpRequestMessage(HttpMethod.Post, options.UploadPath)
+        {
+            Content = content,
+            Version = HttpVersion.Version11,
+            VersionPolicy = HttpVersionPolicy.RequestVersionExact
+        };
+        request.Headers.ExpectContinue = false;
+
+        using var response = await httpClient.SendAsync(
+            request,
+            HttpCompletionOption.ResponseHeadersRead,
+            cancellationToken).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
 
         var payload = await response.Content.ReadFromJsonAsync<FileUploadResponse>(JsonOptions, cancellationToken)
