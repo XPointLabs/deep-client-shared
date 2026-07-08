@@ -77,7 +77,8 @@ public sealed class ClientRuntime
         IGroupSyncTransport? groupSyncTransport = null,
         IAvatarProfileTransport? avatarProfiles = null,
         string? legacyInMemoryStatePath = null,
-        string? sqlCipherKey = null)
+        string? sqlCipherKey = null,
+        Func<ILocalSessionStore, ILocalSessionStore>? storeDecorator = null)
     {
         var store = new SqliteSessionStore(new SqliteSessionStoreOptions(statePath, sqlCipherKey));
         if (!string.IsNullOrWhiteSpace(legacyInMemoryStatePath))
@@ -93,12 +94,14 @@ public sealed class ClientRuntime
             .GetAwaiter()
             .GetResult();
 
+        var runtimeStore = storeDecorator?.Invoke(store) ?? store;
+
         var transport = backend ?? new HttpSessionTransport(
             new HttpClient(),
             new HttpSessionTransportOptions("http://127.0.0.1:8080"));
 
         return new(
-            store,
+            runtimeStore,
             featureFlags ?? ClientFeatureFlags.Defaults,
             clock ?? new SystemClock(),
             transport,

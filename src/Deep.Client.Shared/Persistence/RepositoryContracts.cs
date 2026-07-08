@@ -51,6 +51,12 @@ public interface IMessageRepository
         DateTimeOffset beforeCreatedAt,
         int limit,
         CancellationToken cancellationToken = default);
+
+    Task<int> CountUnreadForConversationAsync(
+        ConversationId conversationId,
+        DateTimeOffset? readCursor,
+        DateTimeOffset now,
+        CancellationToken cancellationToken = default);
 }
 
 public interface ISettingsRepository

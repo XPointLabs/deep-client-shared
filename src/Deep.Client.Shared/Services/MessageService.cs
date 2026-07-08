@@ -566,6 +566,16 @@ public sealed class MessageService(
         return result;
     }
 
+    public Task<int> CountUnreadConversationMessagesAsync(
+        ConversationId conversationId,
+        DateTimeOffset? readCursor,
+        CancellationToken cancellationToken = default) =>
+        messages.CountUnreadForConversationAsync(
+            conversationId,
+            readCursor,
+            clock.UtcNow,
+            cancellationToken);
+
     public async Task<IReadOnlyList<Message>> ListConversationMessagesBeforeAsync(
         ConversationId conversationId,
         DateTimeOffset beforeCreatedAt,
@@ -669,6 +679,18 @@ public sealed class MessageService(
         }
 
         return removed;
+    }
+
+    public async Task<bool> DeleteMessageAsync(MessageId messageId, CancellationToken cancellationToken = default)
+    {
+        var existing = await messages.GetAsync(messageId, cancellationToken).ConfigureAwait(false);
+        if (existing is null)
+        {
+            return false;
+        }
+
+        await messages.DeleteAsync(messageId, cancellationToken).ConfigureAwait(false);
+        return true;
     }
 
     public async Task<int> ClearConversationMessagesAsync(

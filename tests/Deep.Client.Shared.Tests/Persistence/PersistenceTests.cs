@@ -275,6 +275,41 @@ public sealed class PersistenceTests
         }
     }
 
+    [Fact]
+    public async Task StoresCountUnreadMessagesWithoutLoadingConversationHistory()
+    {
+        var sqlitePath = Path.Combine(Path.GetTempPath(), $"deep-client-unread-{Guid.NewGuid():N}.db");
+        try
+        {
+            await AssertUnreadCountAsync(new InMemorySessionStore());
+            await AssertUnreadCountAsync(new SqliteSessionStore(sqlitePath));
+        }
+        finally
+        {
+            DeleteSqliteFiles(sqlitePath);
+        }
+    }
+
+    private static async Task AssertUnreadCountAsync(ILocalSessionStore store)
+    {
+        var repository = (IMessageRepository)store;
+        var sender = SessionId.CreateNew();
+        var recipient = SessionId.CreateNew();
+        var conversationId = ConversationId.ForOneToOne(sender);
+        var now = DateTimeOffset.Parse("2026-05-28T00:00:00Z");
+        var readCursor = now.AddMinutes(-10);
+
+        await repository.AppendAsync(new Message(MessageId.NewId(), conversationId, sender, recipient, "old", MessageDirection.Incoming, MessageDeliveryState.Delivered, now.AddMinutes(-20), []));
+        await repository.AppendAsync(new Message(MessageId.NewId(), conversationId, sender, recipient, "new", MessageDirection.Incoming, MessageDeliveryState.Delivered, now.AddMinutes(-5), []));
+        await repository.AppendAsync(new Message(MessageId.NewId(), conversationId, sender, recipient, "read", MessageDirection.Incoming, MessageDeliveryState.Read, now.AddMinutes(-3), []));
+        await repository.AppendAsync(new Message(MessageId.NewId(), conversationId, sender, recipient, "sent", MessageDirection.Outgoing, MessageDeliveryState.Sent, now.AddMinutes(-2), []));
+        await repository.AppendAsync(new Message(MessageId.NewId(), conversationId, sender, recipient, "expired", MessageDirection.Incoming, MessageDeliveryState.Delivered, now.AddMinutes(-1), [], ExpiresAt: now.AddSeconds(-1)));
+
+        var count = await repository.CountUnreadForConversationAsync(conversationId, readCursor, now);
+
+        Assert.Equal(1, count);
+    }
+
     private static void DeleteSqliteFiles(string statePath)
     {
         foreach (var path in new[] { statePath, statePath + "-wal", statePath + "-shm" })

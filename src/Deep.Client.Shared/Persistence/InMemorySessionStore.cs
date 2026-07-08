@@ -165,6 +165,22 @@ public sealed class InMemorySessionStore : ILocalSessionStore
         }
     }
 
+    Task<int> IMessageRepository.CountUnreadForConversationAsync(
+        ConversationId conversationId,
+        DateTimeOffset? readCursor,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        var count = messages.Values.Count(message =>
+            message.ConversationId == conversationId
+            && message.Direction == MessageDirection.Incoming
+            && message.DeliveryState != MessageDeliveryState.Read
+            && (readCursor is null || message.CreatedAt > readCursor.Value)
+            && !message.IsExpired(now));
+
+        return Task.FromResult(count);
+    }
+
     public Task SetAsync<T>(string key, T value, CancellationToken cancellationToken = default)
     {
         settings[key] = JsonSerializer.Serialize(value);

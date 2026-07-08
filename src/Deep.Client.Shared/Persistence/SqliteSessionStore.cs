@@ -250,6 +250,37 @@ public sealed class SqliteSessionStore : ILocalSessionStore
         }
     }
 
+    async Task<int> IMessageRepository.CountUnreadForConversationAsync(
+        ConversationId conversationId,
+        DateTimeOffset? readCursor,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        const string sql = """
+            SELECT COUNT(*)
+            FROM messages
+            WHERE conversation_id = $conversationId
+              AND ($readCursor IS NULL OR created_at > $readCursor)
+              AND json_extract(payload_json, '$.direction') = $incomingDirection
+              AND json_extract(payload_json, '$.deliveryState') != $readState
+              AND (
+                    json_extract(payload_json, '$.expiresAt') IS NULL
+                    OR json_extract(payload_json, '$.expiresAt') > $now
+                  );
+            """;
+
+        var count = await ExecuteScalarAsync<long>(
+            sql,
+            cancellationToken,
+            ("$conversationId", conversationId.Value),
+            ("$readCursor", readCursor?.ToUnixTimeMilliseconds()),
+            ("$incomingDirection", (int)MessageDirection.Incoming),
+            ("$readState", (int)MessageDeliveryState.Read),
+            ("$now", now.ToString("O", CultureInfo.InvariantCulture))).ConfigureAwait(false);
+
+        return (int)count;
+    }
+
     public Task SetAsync<T>(string key, T value, CancellationToken cancellationToken = default)
     {
         const string sql = """

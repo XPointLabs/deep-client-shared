@@ -22,14 +22,18 @@ public sealed class ConversationService(
         var id = ConversationId.ForOneToOne(counterpart);
         var existing = await conversations.GetAsync(id, cancellationToken).ConfigureAwait(false);
         var now = clock.UtcNow;
+        var normalizedDisplayName = NormalizeDisplayName(counterpart, displayName);
         var contact = await contacts.GetAsync(counterpart, cancellationToken).ConfigureAwait(false)
-            ?? Contact.Request(counterpart, displayName, now);
+            ?? Contact.Request(counterpart, normalizedDisplayName, now);
+        var normalizedContactDisplayName = NormalizeDisplayName(counterpart, contact.DisplayName);
 
-        if ((!string.IsNullOrWhiteSpace(displayName) && contact.DisplayName != displayName) || (approve && !contact.IsApproved))
+        if (!string.Equals(contact.DisplayName, normalizedContactDisplayName, StringComparison.Ordinal)
+            || (!string.IsNullOrWhiteSpace(normalizedDisplayName) && contact.DisplayName != normalizedDisplayName)
+            || (approve && !contact.IsApproved))
         {
             contact = contact with
             {
-                DisplayName = string.IsNullOrWhiteSpace(displayName) ? contact.DisplayName : displayName,
+                DisplayName = string.IsNullOrWhiteSpace(normalizedDisplayName) ? normalizedContactDisplayName : normalizedDisplayName,
                 IsApproved = contact.IsApproved || approve,
                 IsTrusted = contact.IsTrusted || approve,
                 UpdatedAt = now
@@ -39,9 +43,22 @@ public sealed class ConversationService(
         await contacts.UpsertAsync(contact, cancellationToken).ConfigureAwait(false);
         if (existing is not null)
         {
+            var desiredDisplayName = contact.DisplayName ?? counterpart.Value;
+            var shouldPersistExisting = false;
+            if (!string.Equals(existing.DisplayName, desiredDisplayName, StringComparison.Ordinal))
+            {
+                existing = existing with { DisplayName = desiredDisplayName };
+                shouldPersistExisting = true;
+            }
+
             if (existing.IsHidden)
             {
                 existing = existing with { IsHidden = false, UpdatedAt = now };
+                shouldPersistExisting = true;
+            }
+
+            if (shouldPersistExisting)
+            {
                 await conversations.UpsertAsync(existing, cancellationToken).ConfigureAwait(false);
             }
 
@@ -62,6 +79,37 @@ public sealed class ConversationService(
 
     public Task<Contact?> GetContactAsync(SessionId contactId, CancellationToken cancellationToken = default) =>
         contacts.GetAsync(contactId, cancellationToken);
+
+    public async Task<Contact> UpdateContactDisplayNameAsync(
+        SessionId contactId,
+        string? displayName,
+        CancellationToken cancellationToken = default)
+    {
+        var normalizedDisplayName = string.IsNullOrWhiteSpace(displayName)
+            ? null
+            : displayName.Trim();
+        normalizedDisplayName = NormalizeDisplayName(contactId, normalizedDisplayName);
+        var now = clock.UtcNow;
+        var contact = await contacts.GetAsync(contactId, cancellationToken).ConfigureAwait(false)
+            ?? Contact.Request(contactId, normalizedDisplayName, now);
+        var updated = contact with
+        {
+            DisplayName = normalizedDisplayName,
+            UpdatedAt = now
+        };
+        await contacts.UpsertAsync(updated, cancellationToken).ConfigureAwait(false);
+
+        var conversationId = ConversationId.ForOneToOne(contactId);
+        var conversation = await conversations.GetAsync(conversationId, cancellationToken).ConfigureAwait(false);
+        if (conversation is not null)
+        {
+            await conversations.UpsertAsync(
+                conversation with { DisplayName = normalizedDisplayName ?? contactId.Value },
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        return updated;
+    }
 
     public async Task SetConversationHiddenAsync(
         ConversationId conversationId,
@@ -454,4 +502,26 @@ public sealed class ConversationService(
             .Append(group.CreatedBy)
             .Distinct()
             .ToArray();
+
+    private static string? NormalizeDisplayName(SessionId contactId, string? displayName)
+    {
+        var trimmed = displayName?.Trim();
+        if (string.IsNullOrWhiteSpace(trimmed)
+            || string.Equals(trimmed, contactId.Value, StringComparison.Ordinal)
+            || (trimmed.Length == 11
+                && trimmed.StartsWith("Deep ", StringComparison.Ordinal)
+                && trimmed[5..].All(IsHex))
+            || (trimmed.Length >= 48 && trimmed.All(static ch =>
+                IsHex(ch))))
+        {
+            return null;
+        }
+
+        return trimmed;
+    }
+
+    private static bool IsHex(char ch) =>
+        ch is >= '0' and <= '9'
+        || ch is >= 'a' and <= 'f'
+        || ch is >= 'A' and <= 'F';
 }
