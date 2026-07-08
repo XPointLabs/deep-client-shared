@@ -24,7 +24,12 @@ public sealed record PushRegistration(string Token, string Provider, DateTimeOff
 
 public sealed record MediaTranscodeRequest(string SourcePath, string TargetContentType, long MaxBytes);
 
-public sealed record MediaTranscodeResult(string OutputPath, string ContentType, long SizeBytes);
+public sealed record MediaTranscodeResult(
+    string OutputPath,
+    string ContentType,
+    long SizeBytes,
+    int? Width = null,
+    int? Height = null);
 
 public sealed record SharePayload(string? Text, IReadOnlyList<string> FilePaths);
 

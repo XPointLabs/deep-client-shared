@@ -13,7 +13,8 @@ public sealed record AttachmentFileUpload(
     Stream Content,
     int? Width = null,
     int? Height = null,
-    TimeSpan? Duration = null);
+    TimeSpan? Duration = null,
+    bool IsDocument = false);
 
 public sealed record AttachmentFileDownload(
     string FileName,
@@ -121,7 +122,8 @@ public sealed class HttpAttachmentFileTransport : IAttachmentFileTransport
             Convert.ToBase64String(SHA256.HashData(plain)),
             upload.Width,
             upload.Height,
-            upload.Duration);
+            upload.Duration,
+            upload.IsDocument);
     }
 
     public async Task<AttachmentFileDownload> DownloadAsync(

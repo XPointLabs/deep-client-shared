@@ -10,12 +10,28 @@ public sealed record AttachmentMetadata(
     string? DigestBase64 = null,
     int? Width = null,
     int? Height = null,
-    TimeSpan? Duration = null)
+    TimeSpan? Duration = null,
+    bool IsDocument = false)
 {
     public bool IsUploaded => RemoteUri is not null;
 
     public bool HasEncryptedPointer => RemoteUri is not null && !string.IsNullOrWhiteSpace(EncryptionKeyBase64);
 
-    public static AttachmentMetadata Local(string fileName, string contentType, long sizeBytes) =>
-        new(Guid.NewGuid().ToString("n"), fileName, contentType, sizeBytes);
+    public static AttachmentMetadata Local(
+        string fileName,
+        string contentType,
+        long sizeBytes,
+        int? width = null,
+        int? height = null,
+        TimeSpan? duration = null,
+        bool isDocument = false) =>
+        new(
+            Guid.NewGuid().ToString("n"),
+            fileName,
+            contentType,
+            sizeBytes,
+            Width: width,
+            Height: height,
+            Duration: duration,
+            IsDocument: isDocument);
 }

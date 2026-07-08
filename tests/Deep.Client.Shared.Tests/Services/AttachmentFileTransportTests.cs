@@ -55,10 +55,39 @@ public sealed class AttachmentFileTransportTests
         Assert.Equal("note.txt", metadata.FileName);
         Assert.Equal("text/plain", metadata.ContentType);
         Assert.Equal(plain.Length, metadata.SizeBytes);
+        Assert.False(metadata.IsDocument);
         Assert.Equal(new Uri("http://file.local/file/file-abc"), metadata.RemoteUri);
         Assert.Equal("note.txt", download.FileName);
         Assert.Equal("text/plain", download.ContentType);
         Assert.Equal(plain, download.Content);
+    }
+
+    [Fact]
+    public async Task HttpAttachmentFileTransport_PreservesImageDocumentClassification()
+    {
+        using var client = new HttpClient(new FakeHandler((request, _) =>
+            request.Method == HttpMethod.Post && request.RequestUri!.AbsolutePath == "/file"
+                ? JsonResponse("""{"id":"file-image","expires":1781814400}""")
+                : new HttpResponseMessage(HttpStatusCode.NotFound)))
+        {
+            BaseAddress = new Uri("http://file.local/")
+        };
+
+        var transport = new HttpAttachmentFileTransport(client, new HttpAttachmentFileTransportOptions("http://file.local"));
+        await using var upload = new MemoryStream([1, 2, 3, 4]);
+
+        var metadata = await transport.UploadAsync(new AttachmentFileUpload(
+            "diagram.png",
+            "image/png",
+            upload,
+            Width: 400,
+            Height: 240,
+            IsDocument: true));
+
+        Assert.True(metadata.IsDocument);
+        Assert.Equal(400, metadata.Width);
+        Assert.Equal(240, metadata.Height);
+        Assert.Equal("image/png", metadata.ContentType);
     }
 
     [Fact]
