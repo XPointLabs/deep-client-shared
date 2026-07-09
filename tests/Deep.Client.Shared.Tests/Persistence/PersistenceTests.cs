@@ -216,9 +216,9 @@ public sealed class PersistenceTests
             Assert.Equal("Bob", snapshot.Conversation.DisplayName);
             Assert.Equal("Bob", snapshot.Contact?.DisplayName);
             Assert.Equal([message.Id], snapshot.RecentMessages.Select(item => item.Id));
-            Assert.Equal(now.AddMinutes(1), snapshot.ReadAt);
+            Assert.Equal(message.CreatedAt, snapshot.ReadAt);
             Assert.Equal(
-                now.AddMinutes(1).ToString("O", CultureInfo.InvariantCulture),
+                message.CreatedAt.ToString("O", CultureInfo.InvariantCulture),
                 await store.GetAsync<string>("sync.read-cursor." + conversationId.Value));
         }
         finally

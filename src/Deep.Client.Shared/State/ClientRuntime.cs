@@ -4,7 +4,7 @@ using Deep.Client.Shared.Services;
 
 namespace Deep.Client.Shared.State;
 
-public sealed class ClientRuntime
+public sealed class ClientRuntime : IDisposable
 {
     public ClientRuntime(
         ILocalSessionStore store,
@@ -107,5 +107,13 @@ public sealed class ClientRuntime
             transport,
             groupSyncTransport,
             avatarProfiles);
+    }
+
+    public void Dispose()
+    {
+        if (Store is IDisposable disposableStore)
+        {
+            disposableStore.Dispose();
+        }
     }
 }

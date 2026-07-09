@@ -233,7 +233,8 @@ public sealed class InMemorySessionStore : ILocalSessionStore, IOneToOneConversa
         string? displayName,
         int messageLimit,
         DateTimeOffset now,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool markAsRead = true)
     {
         if (messageLimit <= 0)
         {
@@ -304,8 +305,17 @@ public sealed class InMemorySessionStore : ILocalSessionStore, IOneToOneConversa
             .ThenBy(message => message.Id.Value, StringComparer.Ordinal)
             .Where(message => !message.IsExpired(now))
             .ToArray();
-        var readAt = LatestIncomingOrNow(recentMessages, now);
-        settings[ReadCursorSettingKey(conversationId)] = JsonSerializer.Serialize(readAt.ToString("O"), SerializerOptions);
+        DateTimeOffset readAt;
+        if (markAsRead)
+        {
+            readAt = LatestIncomingOrNow(recentMessages, now);
+            settings[ReadCursorSettingKey(conversationId)] = JsonSerializer.Serialize(readAt.ToString("O"), SerializerOptions);
+        }
+        else
+        {
+            readAt = ReadCursorFor(conversationId) ?? DateTimeOffset.MinValue;
+        }
+
         PersistState();
 
         return Task.FromResult<OneToOneConversationOpenSnapshot?>(new OneToOneConversationOpenSnapshot(

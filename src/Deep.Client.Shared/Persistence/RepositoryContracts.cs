@@ -88,7 +88,8 @@ public interface IOneToOneConversationOpenRepository
         string? displayName,
         int messageLimit,
         DateTimeOffset now,
-        CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default,
+        bool markAsRead = true);
 }
 
 public interface ISettingsRepository
