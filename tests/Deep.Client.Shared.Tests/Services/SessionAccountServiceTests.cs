@@ -76,6 +76,8 @@ public sealed class SessionAccountServiceTests
         var runtime = ClientRuntime.CreateStubbed(clock: new FrozenClock(DateTimeOffset.Parse("2026-05-28T00:00:00Z")));
 
         await runtime.Accounts.RegisterAsync("Alice");
+        Assert.NotNull(await runtime.Accounts.GetActiveAccountAsync());
+
         await runtime.Accounts.SignOutAsync();
 
         var account = await runtime.Accounts.GetActiveAccountAsync();

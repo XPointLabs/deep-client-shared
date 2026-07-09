@@ -503,7 +503,7 @@ public sealed class ConversationService(
             .Distinct()
             .ToArray();
 
-    private static string? NormalizeDisplayName(SessionId contactId, string? displayName)
+    internal static string? NormalizeDisplayName(SessionId contactId, string? displayName)
     {
         var trimmed = displayName?.Trim();
         if (string.IsNullOrWhiteSpace(trimmed)

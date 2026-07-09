@@ -2,6 +2,7 @@
 using Deep.Client.Shared.Persistence;
 using Deep.Client.Shared.Services;
 using Deep.Client.Shared.State;
+using System.Globalization;
 
 namespace Deep.Client.Shared.Tests.Persistence;
 
@@ -171,6 +172,54 @@ public sealed class PersistenceTests
 
             Assert.Equal("safe", await store.GetSchemaValueAsync(maliciousKey));
             Assert.Equal("still-there", await store.GetSchemaValueAsync("schema.safe"));
+        }
+        finally
+        {
+            DeleteSqliteFiles(statePath);
+        }
+    }
+
+    [Fact]
+    public async Task SqliteSessionStore_OpenOneToOneConversation_ReturnsEncryptedLocalSnapshot()
+    {
+        var statePath = Path.Combine(Path.GetTempPath(), $"deep-client-shared-{Guid.NewGuid():N}.db");
+        const string encryptionKey = "fast-open-test-key";
+        try
+        {
+            var now = DateTimeOffset.Parse("2026-05-28T00:00:00Z");
+            var store = new SqliteSessionStore(new SqliteSessionStoreOptions(statePath, encryptionKey));
+            var account = new SessionAccount(SessionId.CreateNew(), "Alice", now);
+            var recipient = SessionId.CreateNew();
+            var conversationId = ConversationId.ForOneToOne(recipient);
+            var message = new Message(
+                MessageId.NewId(),
+                conversationId,
+                recipient,
+                account.SessionId,
+                "hello from sqlite",
+                MessageDirection.Incoming,
+                MessageDeliveryState.Delivered,
+                now.AddSeconds(5),
+                []);
+
+            await store.SetAsync(LocalSettingsKeys.ActiveAccount, account);
+            await store.AppendAsync(message);
+
+            var snapshot = await store.OpenOneToOneConversationAsync(
+                recipient,
+                "Bob",
+                messageLimit: 60,
+                now: now.AddMinutes(1));
+
+            Assert.NotNull(snapshot);
+            Assert.Equal(account.SessionId, snapshot!.ActiveAccount.SessionId);
+            Assert.Equal("Bob", snapshot.Conversation.DisplayName);
+            Assert.Equal("Bob", snapshot.Contact?.DisplayName);
+            Assert.Equal([message.Id], snapshot.RecentMessages.Select(item => item.Id));
+            Assert.Equal(now.AddMinutes(1), snapshot.ReadAt);
+            Assert.Equal(
+                now.AddMinutes(1).ToString("O", CultureInfo.InvariantCulture),
+                await store.GetAsync<string>("sync.read-cursor." + conversationId.Value));
         }
         finally
         {

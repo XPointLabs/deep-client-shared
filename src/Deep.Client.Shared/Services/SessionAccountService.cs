@@ -12,9 +12,12 @@ public sealed class SessionAccountService
     private readonly IContactRepository contacts;
     private readonly IClock clock;
     private readonly IRecoveryProfileLookup? recoveryProfileLookup;
+    private readonly SemaphoreSlim activeAccountGate = new(1, 1);
+    private SessionAccount? activeAccountCache;
+    private bool activeAccountCacheLoaded;
 
-    public const string ActiveAccountKey = "account.active";
-    public const string ActiveRecoveryPhraseKey = "account.recovery-phrase";
+    public const string ActiveAccountKey = LocalSettingsKeys.ActiveAccount;
+    public const string ActiveRecoveryPhraseKey = LocalSettingsKeys.ActiveRecoveryPhrase;
     public static readonly TimeSpan RecoveryProfileLookupTimeout = TimeSpan.FromSeconds(12);
 
     public SessionAccountService(
@@ -87,8 +90,25 @@ public sealed class SessionAccountService
         return account;
     }
 
-    public Task<SessionAccount?> GetActiveAccountAsync(CancellationToken cancellationToken = default) =>
-        settings.GetAsync<SessionAccount>(ActiveAccountKey, cancellationToken);
+    public async Task<SessionAccount?> GetActiveAccountAsync(CancellationToken cancellationToken = default)
+    {
+        await activeAccountGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (activeAccountCacheLoaded)
+            {
+                return activeAccountCache;
+            }
+
+            activeAccountCache = await settings.GetAsync<SessionAccount>(ActiveAccountKey, cancellationToken).ConfigureAwait(false);
+            activeAccountCacheLoaded = true;
+            return activeAccountCache;
+        }
+        finally
+        {
+            activeAccountGate.Release();
+        }
+    }
 
     public Task<string?> GetRecoveryPhraseAsync(CancellationToken cancellationToken = default) =>
         settings.GetAsync<string>(ActiveRecoveryPhraseKey, cancellationToken);
@@ -107,14 +127,34 @@ public sealed class SessionAccountService
 
     public async Task SignOutAsync(CancellationToken cancellationToken = default)
     {
-        await settings.DeleteAsync(ActiveAccountKey, cancellationToken).ConfigureAwait(false);
-        await settings.DeleteAsync(ActiveRecoveryPhraseKey, cancellationToken).ConfigureAwait(false);
+        await activeAccountGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await settings.DeleteAsync(ActiveAccountKey, cancellationToken).ConfigureAwait(false);
+            activeAccountCache = null;
+            activeAccountCacheLoaded = true;
+            await settings.DeleteAsync(ActiveRecoveryPhraseKey, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            activeAccountGate.Release();
+        }
     }
 
     private async Task PersistAccountAsync(SessionAccount account, CancellationToken cancellationToken)
     {
-        await settings.SetAsync(ActiveAccountKey, account, cancellationToken).ConfigureAwait(false);
-        await contacts.UpsertAsync(Contact.Self(account.SessionId, account.DisplayName, clock.UtcNow), cancellationToken).ConfigureAwait(false);
+        await activeAccountGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await settings.SetAsync(ActiveAccountKey, account, cancellationToken).ConfigureAwait(false);
+            await contacts.UpsertAsync(Contact.Self(account.SessionId, account.DisplayName, clock.UtcNow), cancellationToken).ConfigureAwait(false);
+            activeAccountCache = account;
+            activeAccountCacheLoaded = true;
+        }
+        finally
+        {
+            activeAccountGate.Release();
+        }
     }
 
     private async Task<string?> TryRecoverDisplayNameAsync(SessionId sessionId, CancellationToken cancellationToken)

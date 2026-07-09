@@ -2,10 +2,11 @@ using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using Deep.Client.Shared.Domain;
+using Deep.Client.Shared.Services;
 
 namespace Deep.Client.Shared.Persistence;
 
-public sealed class InMemorySessionStore : ILocalSessionStore
+public sealed class InMemorySessionStore : ILocalSessionStore, IOneToOneConversationOpenRepository
 {
     private static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerDefaults.Web)
     {
@@ -227,6 +228,94 @@ public sealed class InMemorySessionStore : ILocalSessionStore
         return Task.FromResult<IReadOnlyDictionary<ConversationId, ConversationListSummary>>(result);
     }
 
+    public Task<OneToOneConversationOpenSnapshot?> OpenOneToOneConversationAsync(
+        SessionId recipient,
+        string? displayName,
+        int messageLimit,
+        DateTimeOffset now,
+        CancellationToken cancellationToken = default)
+    {
+        if (messageLimit <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(messageLimit), "Message limit must be greater than zero.");
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!settings.TryGetValue(LocalSettingsKeys.ActiveAccount, out var accountJson))
+        {
+            return Task.FromResult<OneToOneConversationOpenSnapshot?>(null);
+        }
+
+        var account = JsonSerializer.Deserialize<SessionAccount>(accountJson, SerializerOptions);
+        if (account is null)
+        {
+            return Task.FromResult<OneToOneConversationOpenSnapshot?>(null);
+        }
+
+        var conversationId = ConversationId.ForOneToOne(recipient);
+        var normalizedDisplayName = ConversationService.NormalizeDisplayName(recipient, displayName);
+        var contact = contacts.GetValueOrDefault(recipient.Value) ?? Contact.Request(recipient, normalizedDisplayName, now);
+        var normalizedContactDisplayName = ConversationService.NormalizeDisplayName(recipient, contact.DisplayName);
+        if (!string.Equals(contact.DisplayName, normalizedContactDisplayName, StringComparison.Ordinal)
+            || (!string.IsNullOrWhiteSpace(normalizedDisplayName) && contact.DisplayName != normalizedDisplayName))
+        {
+            contact = contact with
+            {
+                DisplayName = string.IsNullOrWhiteSpace(normalizedDisplayName) ? normalizedContactDisplayName : normalizedDisplayName,
+                UpdatedAt = now
+            };
+        }
+
+        contacts[recipient.Value] = contact;
+
+        var desiredDisplayName = contact.DisplayName ?? recipient.Value;
+        var conversation = conversations.GetValueOrDefault(conversationId.Value);
+        if (conversation is null)
+        {
+            conversation = new Conversation(
+                conversationId,
+                ConversationKind.OneToOne,
+                desiredDisplayName,
+                ConversationSettings.Default(ConversationKind.OneToOne),
+                now,
+                now);
+        }
+        else
+        {
+            if (!string.Equals(conversation.DisplayName, desiredDisplayName, StringComparison.Ordinal))
+            {
+                conversation = conversation with { DisplayName = desiredDisplayName };
+            }
+
+            if (conversation.IsHidden)
+            {
+                conversation = conversation with { IsHidden = false, UpdatedAt = now };
+            }
+        }
+
+        conversations[conversationId.Value] = conversation;
+
+        var recentMessages = messages.Values
+            .Where(message => message.ConversationId == conversationId)
+            .OrderByDescending(message => message.CreatedAt)
+            .ThenByDescending(message => message.Id.Value, StringComparer.Ordinal)
+            .Take(messageLimit)
+            .OrderBy(message => message.CreatedAt)
+            .ThenBy(message => message.Id.Value, StringComparer.Ordinal)
+            .Where(message => !message.IsExpired(now))
+            .ToArray();
+        var readAt = LatestIncomingOrNow(recentMessages, now);
+        settings[ReadCursorSettingKey(conversationId)] = JsonSerializer.Serialize(readAt.ToString("O"), SerializerOptions);
+        PersistState();
+
+        return Task.FromResult<OneToOneConversationOpenSnapshot?>(new OneToOneConversationOpenSnapshot(
+            account,
+            conversation,
+            contact,
+            recentMessages,
+            readAt));
+    }
+
     public Task SetAsync<T>(string key, T value, CancellationToken cancellationToken = default)
     {
         settings[key] = JsonSerializer.Serialize(value);
@@ -284,6 +373,20 @@ public sealed class InMemorySessionStore : ILocalSessionStore
 
     private static string ReadCursorSettingKey(ConversationId conversationId) =>
         $"sync.read-cursor.{conversationId.Value}";
+
+    private static DateTimeOffset LatestIncomingOrNow(IEnumerable<Message> messages, DateTimeOffset now)
+    {
+        var readAt = now;
+        foreach (var message in messages)
+        {
+            if (message.Direction == MessageDirection.Incoming && message.CreatedAt > readAt)
+            {
+                readAt = message.CreatedAt;
+            }
+        }
+
+        return readAt;
+    }
 
     private void LoadState()
     {

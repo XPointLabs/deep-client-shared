@@ -74,6 +74,23 @@ public interface IConversationListSummaryRepository
         CancellationToken cancellationToken = default);
 }
 
+public sealed record OneToOneConversationOpenSnapshot(
+    SessionAccount ActiveAccount,
+    Conversation Conversation,
+    Contact? Contact,
+    IReadOnlyList<Message> RecentMessages,
+    DateTimeOffset ReadAt);
+
+public interface IOneToOneConversationOpenRepository
+{
+    Task<OneToOneConversationOpenSnapshot?> OpenOneToOneConversationAsync(
+        SessionId recipient,
+        string? displayName,
+        int messageLimit,
+        DateTimeOffset now,
+        CancellationToken cancellationToken = default);
+}
+
 public interface ISettingsRepository
 {
     Task SetAsync<T>(string key, T value, CancellationToken cancellationToken = default);
@@ -81,6 +98,12 @@ public interface ISettingsRepository
     Task<T?> GetAsync<T>(string key, CancellationToken cancellationToken = default);
 
     Task DeleteAsync(string key, CancellationToken cancellationToken = default);
+}
+
+public static class LocalSettingsKeys
+{
+    public const string ActiveAccount = "account.active";
+    public const string ActiveRecoveryPhrase = "account.recovery-phrase";
 }
 
 public interface ILocalSessionStore :

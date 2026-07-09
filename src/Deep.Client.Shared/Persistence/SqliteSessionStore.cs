@@ -2,11 +2,12 @@ using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Globalization;
 using Deep.Client.Shared.Domain;
+using Deep.Client.Shared.Services;
 using Microsoft.Data.Sqlite;
 
 namespace Deep.Client.Shared.Persistence;
 
-public sealed class SqliteSessionStore : ILocalSessionStore
+public sealed class SqliteSessionStore : ILocalSessionStore, IOneToOneConversationOpenRepository
 {
     private const string ReadCursorSettingPrefix = "sync.read-cursor.";
     private static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerDefaults.Web);
@@ -358,10 +359,11 @@ public sealed class SqliteSessionStore : ILocalSessionStore
             return new Dictionary<ConversationId, ConversationListSummary>();
         }
 
-        var readCursors = await LoadReadCursorsAsync(ids, cancellationToken).ConfigureAwait(false);
-        var lastMessages = await LoadLastMessagesAsync(ids, now, cancellationToken).ConfigureAwait(false);
-        var unreadCounts = await LoadUnreadCountsAsync(ids, readCursors, now, cancellationToken).ConfigureAwait(false);
-        var contacts = await LoadContactsAsync(ids, cancellationToken).ConfigureAwait(false);
+        await using var connection = await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        var readCursors = await LoadReadCursorsAsync(connection, ids, cancellationToken).ConfigureAwait(false);
+        var lastMessages = await LoadLastMessagesAsync(connection, ids, now, cancellationToken).ConfigureAwait(false);
+        var unreadCounts = await LoadUnreadCountsAsync(connection, ids, readCursors, now, cancellationToken).ConfigureAwait(false);
+        var contacts = await LoadContactsAsync(connection, ids, cancellationToken).ConfigureAwait(false);
 
         var summaries = new Dictionary<ConversationId, ConversationListSummary>(ids.Length);
         foreach (var conversationId in ids)
@@ -375,6 +377,171 @@ public sealed class SqliteSessionStore : ILocalSessionStore
         }
 
         return summaries;
+    }
+
+    public async Task<OneToOneConversationOpenSnapshot?> OpenOneToOneConversationAsync(
+        SessionId recipient,
+        string? displayName,
+        int messageLimit,
+        DateTimeOffset now,
+        CancellationToken cancellationToken = default)
+    {
+        if (messageLimit <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(messageLimit), "Message limit must be greater than zero.");
+        }
+
+        await using var connection = await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        var accountPayload = await ExecuteScalarOnConnectionAsync<string?>(
+            connection,
+            "SELECT payload_json FROM settings WHERE key = $key;",
+            cancellationToken,
+            ("$key", LocalSettingsKeys.ActiveAccount)).ConfigureAwait(false);
+        if (accountPayload is null)
+        {
+            return null;
+        }
+
+        var account = JsonSerializer.Deserialize<SessionAccount>(accountPayload, SerializerOptions);
+        if (account is null)
+        {
+            return null;
+        }
+
+        var conversationId = ConversationId.ForOneToOne(recipient);
+        var normalizedDisplayName = ConversationService.NormalizeDisplayName(recipient, displayName);
+
+        var contactPayload = await ExecuteScalarOnConnectionAsync<string?>(
+            connection,
+            "SELECT payload_json FROM contacts WHERE id = $id;",
+            cancellationToken,
+            ("$id", recipient.Value)).ConfigureAwait(false);
+        var contact = contactPayload is null
+            ? Contact.Request(recipient, normalizedDisplayName, now)
+            : JsonSerializer.Deserialize<Contact>(contactPayload, SerializerOptions)
+                ?? Contact.Request(recipient, normalizedDisplayName, now);
+        var originalContact = contact;
+        var normalizedContactDisplayName = ConversationService.NormalizeDisplayName(recipient, contact.DisplayName);
+        if (!string.Equals(contact.DisplayName, normalizedContactDisplayName, StringComparison.Ordinal)
+            || (!string.IsNullOrWhiteSpace(normalizedDisplayName) && contact.DisplayName != normalizedDisplayName))
+        {
+            contact = contact with
+            {
+                DisplayName = string.IsNullOrWhiteSpace(normalizedDisplayName) ? normalizedContactDisplayName : normalizedDisplayName,
+                UpdatedAt = now
+            };
+        }
+
+        if (contactPayload is null || !Equals(contact, originalContact))
+        {
+            await ExecuteNonQueryOnConnectionAsync(
+                connection,
+                """
+                INSERT INTO contacts (id, sort_name, payload_json)
+                VALUES ($id, $sortName, $payload)
+                ON CONFLICT(id) DO UPDATE SET
+                    sort_name = excluded.sort_name,
+                    payload_json = excluded.payload_json;
+                """,
+                cancellationToken,
+                ("$id", contact.Id.Value),
+                ("$sortName", contact.DisplayName ?? contact.Id.Value),
+                ("$payload", JsonSerializer.Serialize(contact, SerializerOptions))).ConfigureAwait(false);
+        }
+
+        var conversationPayload = await ExecuteScalarOnConnectionAsync<string?>(
+            connection,
+            "SELECT payload_json FROM conversations WHERE id = $id;",
+            cancellationToken,
+            ("$id", conversationId.Value)).ConfigureAwait(false);
+        var desiredDisplayName = contact.DisplayName ?? recipient.Value;
+        var conversation = conversationPayload is null
+            ? new Conversation(
+                conversationId,
+                ConversationKind.OneToOne,
+                desiredDisplayName,
+                ConversationSettings.Default(ConversationKind.OneToOne),
+                now,
+                now)
+            : JsonSerializer.Deserialize<Conversation>(conversationPayload, SerializerOptions)
+                ?? new Conversation(
+                    conversationId,
+                    ConversationKind.OneToOne,
+                    desiredDisplayName,
+                    ConversationSettings.Default(ConversationKind.OneToOne),
+                    now,
+                    now);
+        var originalConversation = conversation;
+        if (!string.Equals(conversation.DisplayName, desiredDisplayName, StringComparison.Ordinal))
+        {
+            conversation = conversation with { DisplayName = desiredDisplayName };
+        }
+
+        if (conversation.IsHidden)
+        {
+            conversation = conversation with { IsHidden = false, UpdatedAt = now };
+        }
+
+        if (conversationPayload is null || !Equals(conversation, originalConversation))
+        {
+            await ExecuteNonQueryOnConnectionAsync(
+                connection,
+                """
+                INSERT INTO conversations (id, updated_at, payload_json)
+                VALUES ($id, $updatedAt, $payload)
+                ON CONFLICT(id) DO UPDATE SET
+                    updated_at = excluded.updated_at,
+                    payload_json = excluded.payload_json;
+                """,
+                cancellationToken,
+                ("$id", conversation.Id.Value),
+                ("$updatedAt", conversation.UpdatedAt.ToUnixTimeMilliseconds()),
+                ("$payload", JsonSerializer.Serialize(conversation, SerializerOptions))).ConfigureAwait(false);
+        }
+
+        var recentMessages = new List<Message>(messageLimit);
+        await using (var command = connection.CreateCommand())
+        {
+            command.CommandText = """
+                SELECT payload_json
+                FROM (
+                    SELECT payload_json, created_at, id
+                    FROM messages
+                    WHERE conversation_id = $conversationId
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT $limit
+                )
+                ORDER BY created_at, id;
+                """;
+            command.Parameters.AddWithValue("$conversationId", conversationId.Value);
+            command.Parameters.AddWithValue("$limit", messageLimit);
+            await command.PrepareAsync(cancellationToken).ConfigureAwait(false);
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                var message = JsonSerializer.Deserialize<Message>(reader.GetString(0), SerializerOptions);
+                if (message is not null && !message.IsExpired(now))
+                {
+                    recentMessages.Add(message);
+                }
+            }
+        }
+
+        var readAt = LatestIncomingOrNow(recentMessages, now);
+        await ExecuteNonQueryOnConnectionAsync(
+            connection,
+            """
+            INSERT INTO settings (key, payload_json)
+            VALUES ($key, $payload)
+            ON CONFLICT(key) DO UPDATE SET
+                payload_json = excluded.payload_json;
+            """,
+            cancellationToken,
+            ("$key", ReadCursorSettingKey(conversationId)),
+            ("$payload", JsonSerializer.Serialize(readAt.ToString("O", CultureInfo.InvariantCulture), SerializerOptions))).ConfigureAwait(false);
+
+        return new OneToOneConversationOpenSnapshot(account, conversation, contact, recentMessages, readAt);
     }
 
     public Task SetAsync<T>(string key, T value, CancellationToken cancellationToken = default)
@@ -507,6 +674,23 @@ public sealed class SqliteSessionStore : ILocalSessionStore
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    private static async Task ExecuteNonQueryOnConnectionAsync(
+        SqliteConnection connection,
+        string sql,
+        CancellationToken cancellationToken,
+        params (string Name, object? Value)[] parameters)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        foreach (var parameter in parameters)
+        {
+            command.Parameters.AddWithValue(parameter.Name, parameter.Value ?? DBNull.Value);
+        }
+
+        await command.PrepareAsync(cancellationToken).ConfigureAwait(false);
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
     private async Task<T?> ExecuteScalarAsync<T>(string sql, CancellationToken cancellationToken, params (string Name, object? Value)[] parameters)
     {
         await using var connection = await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
@@ -519,6 +703,35 @@ public sealed class SqliteSessionStore : ILocalSessionStore
 
         await command.PrepareAsync(cancellationToken).ConfigureAwait(false);
 
+        var result = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+        if (result is null || result is DBNull)
+        {
+            return default;
+        }
+
+        if (result is T typed)
+        {
+            return typed;
+        }
+
+        var targetType = Nullable.GetUnderlyingType(typeof(T)) ?? typeof(T);
+        return (T?)Convert.ChangeType(result, targetType, CultureInfo.InvariantCulture);
+    }
+
+    private static async Task<T?> ExecuteScalarOnConnectionAsync<T>(
+        SqliteConnection connection,
+        string sql,
+        CancellationToken cancellationToken,
+        params (string Name, object? Value)[] parameters)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        foreach (var parameter in parameters)
+        {
+            command.Parameters.AddWithValue(parameter.Name, parameter.Value ?? DBNull.Value);
+        }
+
+        await command.PrepareAsync(cancellationToken).ConfigureAwait(false);
         var result = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
         if (result is null || result is DBNull)
         {
@@ -557,12 +770,12 @@ public sealed class SqliteSessionStore : ILocalSessionStore
         return result;
     }
 
-    private async Task<IReadOnlyDictionary<ConversationId, DateTimeOffset?>> LoadReadCursorsAsync(
+    private static async Task<IReadOnlyDictionary<ConversationId, DateTimeOffset?>> LoadReadCursorsAsync(
+        SqliteConnection connection,
         IReadOnlyList<ConversationId> conversationIds,
         CancellationToken cancellationToken)
     {
         var result = new Dictionary<ConversationId, DateTimeOffset?>();
-        await using var connection = await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         var keys = conversationIds
             .Select(ReadCursorSettingKey)
@@ -589,13 +802,13 @@ public sealed class SqliteSessionStore : ILocalSessionStore
         return result;
     }
 
-    private async Task<IReadOnlyDictionary<ConversationId, Message>> LoadLastMessagesAsync(
+    private static async Task<IReadOnlyDictionary<ConversationId, Message>> LoadLastMessagesAsync(
+        SqliteConnection connection,
         IReadOnlyList<ConversationId> conversationIds,
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
         var result = new Dictionary<ConversationId, Message>();
-        await using var connection = await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         var idsClause = AddInParameters(command, "$id", conversationIds.Select(static id => id.Value));
         command.Parameters.AddWithValue("$now", now.ToString("O", CultureInfo.InvariantCulture));
@@ -636,14 +849,14 @@ public sealed class SqliteSessionStore : ILocalSessionStore
         return result;
     }
 
-    private async Task<IReadOnlyDictionary<ConversationId, int>> LoadUnreadCountsAsync(
+    private static async Task<IReadOnlyDictionary<ConversationId, int>> LoadUnreadCountsAsync(
+        SqliteConnection connection,
         IReadOnlyList<ConversationId> conversationIds,
         IReadOnlyDictionary<ConversationId, DateTimeOffset?> readCursors,
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
         var result = new Dictionary<ConversationId, int>();
-        await using var connection = await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         var terms = new List<string>(conversationIds.Count);
         for (var index = 0; index < conversationIds.Count; index++)
@@ -683,12 +896,12 @@ public sealed class SqliteSessionStore : ILocalSessionStore
         return result;
     }
 
-    private async Task<IReadOnlyDictionary<ConversationId, Contact>> LoadContactsAsync(
+    private static async Task<IReadOnlyDictionary<ConversationId, Contact>> LoadContactsAsync(
+        SqliteConnection connection,
         IReadOnlyList<ConversationId> conversationIds,
         CancellationToken cancellationToken)
     {
         var result = new Dictionary<ConversationId, Contact>();
-        await using var connection = await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         var idsClause = AddInParameters(command, "$contactId", conversationIds.Select(static id => id.Value));
         command.CommandText = $"SELECT id, payload_json FROM contacts WHERE id IN ({idsClause});";
@@ -724,6 +937,20 @@ public sealed class SqliteSessionStore : ILocalSessionStore
 
     private static string ReadCursorSettingKey(ConversationId conversationId) =>
         ReadCursorSettingPrefix + conversationId.Value;
+
+    private static DateTimeOffset LatestIncomingOrNow(IEnumerable<Message> messages, DateTimeOffset now)
+    {
+        var readAt = now;
+        foreach (var message in messages)
+        {
+            if (message.Direction == MessageDirection.Incoming && message.CreatedAt > readAt)
+            {
+                readAt = message.CreatedAt;
+            }
+        }
+
+        return readAt;
+    }
 
     private SqliteConnection OpenConnection()
     {
