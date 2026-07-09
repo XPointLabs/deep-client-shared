@@ -1,4 +1,4 @@
-﻿using System.Runtime.CompilerServices;
+using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Globalization;
 using Deep.Client.Shared.Domain;
@@ -8,9 +8,15 @@ namespace Deep.Client.Shared.Persistence;
 
 public sealed class SqliteSessionStore : ILocalSessionStore
 {
+    private const string ReadCursorSettingPrefix = "sync.read-cursor.";
     private static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerDefaults.Web);
     private readonly string _connectionString;
     private readonly string? _encryptionKey;
+
+    static SqliteSessionStore()
+    {
+        SQLitePCL.Batteries_V2.Init();
+    }
 
     public SqliteSessionStore(string statePath)
         : this(new SqliteSessionStoreOptions(statePath))
@@ -31,17 +37,75 @@ public sealed class SqliteSessionStore : ILocalSessionStore
             Directory.CreateDirectory(directory);
         }
 
-        _connectionString = new SqliteConnectionStringBuilder
-        {
-            DataSource = statePath,
-            Mode = SqliteOpenMode.ReadWriteCreate,
-            Cache = SqliteCacheMode.Shared,
-            Pooling = false
-        }.ToString();
+        _connectionString = ConnectionStringFor(statePath);
 
         _encryptionKey = string.IsNullOrWhiteSpace(options.EncryptionKey) ? null : options.EncryptionKey;
 
         InitializeSchema();
+    }
+
+    public static void EnsureEncryptedDatabase(string statePath, string encryptionKey)
+    {
+        if (string.IsNullOrWhiteSpace(statePath))
+        {
+            throw new ArgumentException("State path is required.", nameof(statePath));
+        }
+
+        if (string.IsNullOrWhiteSpace(encryptionKey))
+        {
+            throw new ArgumentException("Encryption key is required.", nameof(encryptionKey));
+        }
+
+        if (!File.Exists(statePath) || CanOpenDatabase(statePath, encryptionKey))
+        {
+            return;
+        }
+
+        if (!CanOpenDatabase(statePath, null))
+        {
+            throw new InvalidOperationException("Local state database cannot be opened with the configured key and is not a plaintext database.");
+        }
+
+        var tempPath = statePath + ".encrypted-migration";
+        var backupPath = statePath + ".plaintext-migration";
+        DeleteSqliteFileSet(tempPath);
+        DeleteSqliteFileSet(backupPath);
+
+        using (var source = OpenConnectionForPath(statePath, null))
+        {
+            ExecuteNonQuery(source, "PRAGMA wal_checkpoint(TRUNCATE);");
+            ExecuteNonQuery(
+                source,
+                $"""
+                ATTACH DATABASE '{EscapePragmaString(tempPath)}' AS encrypted KEY '{EscapePragmaString(encryptionKey)}';
+                SELECT sqlcipher_export('encrypted');
+                DETACH DATABASE encrypted;
+                """);
+        }
+
+        if (!CanOpenDatabase(tempPath, encryptionKey))
+        {
+            DeleteSqliteFileSet(tempPath);
+            throw new InvalidOperationException("Encrypted local state migration did not produce a readable SQLCipher database.");
+        }
+
+        try
+        {
+            File.Move(statePath, backupPath);
+            DeleteSqliteSidecars(statePath);
+            File.Move(tempPath, statePath);
+            DeleteSqliteFileSet(backupPath);
+            DeleteSqliteSidecars(tempPath);
+        }
+        catch
+        {
+            if (!File.Exists(statePath) && File.Exists(backupPath))
+            {
+                File.Move(backupPath, statePath);
+            }
+
+            throw;
+        }
     }
 
     public async Task UpsertAsync(Conversation conversation, CancellationToken cancellationToken = default)
@@ -281,6 +345,38 @@ public sealed class SqliteSessionStore : ILocalSessionStore
         return (int)count;
     }
 
+    public async Task<IReadOnlyDictionary<ConversationId, ConversationListSummary>> GetConversationSummariesAsync(
+        IReadOnlyCollection<ConversationId> conversationIds,
+        DateTimeOffset now,
+        CancellationToken cancellationToken = default)
+    {
+        var ids = conversationIds
+            .Distinct()
+            .ToArray();
+        if (ids.Length == 0)
+        {
+            return new Dictionary<ConversationId, ConversationListSummary>();
+        }
+
+        var readCursors = await LoadReadCursorsAsync(ids, cancellationToken).ConfigureAwait(false);
+        var lastMessages = await LoadLastMessagesAsync(ids, now, cancellationToken).ConfigureAwait(false);
+        var unreadCounts = await LoadUnreadCountsAsync(ids, readCursors, now, cancellationToken).ConfigureAwait(false);
+        var contacts = await LoadContactsAsync(ids, cancellationToken).ConfigureAwait(false);
+
+        var summaries = new Dictionary<ConversationId, ConversationListSummary>(ids.Length);
+        foreach (var conversationId in ids)
+        {
+            summaries[conversationId] = new ConversationListSummary(
+                conversationId,
+                readCursors.GetValueOrDefault(conversationId),
+                lastMessages.GetValueOrDefault(conversationId),
+                unreadCounts.GetValueOrDefault(conversationId),
+                contacts.GetValueOrDefault(conversationId));
+        }
+
+        return summaries;
+    }
+
     public Task SetAsync<T>(string key, T value, CancellationToken cancellationToken = default)
     {
         const string sql = """
@@ -461,11 +557,179 @@ public sealed class SqliteSessionStore : ILocalSessionStore
         return result;
     }
 
+    private async Task<IReadOnlyDictionary<ConversationId, DateTimeOffset?>> LoadReadCursorsAsync(
+        IReadOnlyList<ConversationId> conversationIds,
+        CancellationToken cancellationToken)
+    {
+        var result = new Dictionary<ConversationId, DateTimeOffset?>();
+        await using var connection = await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        var keys = conversationIds
+            .Select(ReadCursorSettingKey)
+            .ToArray();
+        var keysClause = AddInParameters(command, "$key", keys);
+        command.CommandText = $"SELECT key, payload_json FROM settings WHERE key IN ({keysClause});";
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            var key = reader.GetString(0);
+            var conversationValue = key[ReadCursorSettingPrefix.Length..];
+            var value = JsonSerializer.Deserialize<string>(reader.GetString(1), SerializerOptions);
+            if (DateTimeOffset.TryParse(
+                    value,
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.RoundtripKind,
+                    out var parsed))
+            {
+                result[new ConversationId(conversationValue)] = parsed;
+            }
+        }
+
+        return result;
+    }
+
+    private async Task<IReadOnlyDictionary<ConversationId, Message>> LoadLastMessagesAsync(
+        IReadOnlyList<ConversationId> conversationIds,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        var result = new Dictionary<ConversationId, Message>();
+        await using var connection = await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        var idsClause = AddInParameters(command, "$id", conversationIds.Select(static id => id.Value));
+        command.Parameters.AddWithValue("$now", now.ToString("O", CultureInfo.InvariantCulture));
+        command.CommandText = $"""
+            SELECT m.conversation_id, m.payload_json
+            FROM messages m
+            WHERE m.conversation_id IN ({idsClause})
+              AND (
+                    json_extract(m.payload_json, '$.expiresAt') IS NULL
+                    OR json_extract(m.payload_json, '$.expiresAt') > $now
+                  )
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM messages newer
+                    WHERE newer.conversation_id = m.conversation_id
+                      AND (
+                            newer.created_at > m.created_at
+                            OR (newer.created_at = m.created_at AND newer.id > m.id)
+                          )
+                      AND (
+                            json_extract(newer.payload_json, '$.expiresAt') IS NULL
+                            OR json_extract(newer.payload_json, '$.expiresAt') > $now
+                          )
+                  );
+            """;
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            var conversationId = new ConversationId(reader.GetString(0));
+            var message = JsonSerializer.Deserialize<Message>(reader.GetString(1), SerializerOptions);
+            if (message is not null)
+            {
+                result[conversationId] = message;
+            }
+        }
+
+        return result;
+    }
+
+    private async Task<IReadOnlyDictionary<ConversationId, int>> LoadUnreadCountsAsync(
+        IReadOnlyList<ConversationId> conversationIds,
+        IReadOnlyDictionary<ConversationId, DateTimeOffset?> readCursors,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        var result = new Dictionary<ConversationId, int>();
+        await using var connection = await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        var terms = new List<string>(conversationIds.Count);
+        for (var index = 0; index < conversationIds.Count; index++)
+        {
+            var idName = $"$cid{index}";
+            var cursorName = $"$cursor{index}";
+            var readCursor = readCursors.GetValueOrDefault(conversationIds[index]);
+            command.Parameters.AddWithValue(idName, conversationIds[index].Value);
+            command.Parameters.AddWithValue(
+                cursorName,
+                readCursor is null ? DBNull.Value : readCursor.Value.ToUnixTimeMilliseconds());
+            terms.Add($"(conversation_id = {idName} AND ({cursorName} IS NULL OR created_at > {cursorName}))");
+        }
+
+        command.Parameters.AddWithValue("$incomingDirection", (int)MessageDirection.Incoming);
+        command.Parameters.AddWithValue("$readState", (int)MessageDeliveryState.Read);
+        command.Parameters.AddWithValue("$now", now.ToString("O", CultureInfo.InvariantCulture));
+        command.CommandText = $"""
+            SELECT conversation_id, COUNT(*)
+            FROM messages
+            WHERE ({string.Join(" OR ", terms)})
+              AND json_extract(payload_json, '$.direction') = $incomingDirection
+              AND json_extract(payload_json, '$.deliveryState') != $readState
+              AND (
+                    json_extract(payload_json, '$.expiresAt') IS NULL
+                    OR json_extract(payload_json, '$.expiresAt') > $now
+                  )
+            GROUP BY conversation_id;
+            """;
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            result[new ConversationId(reader.GetString(0))] = (int)reader.GetInt64(1);
+        }
+
+        return result;
+    }
+
+    private async Task<IReadOnlyDictionary<ConversationId, Contact>> LoadContactsAsync(
+        IReadOnlyList<ConversationId> conversationIds,
+        CancellationToken cancellationToken)
+    {
+        var result = new Dictionary<ConversationId, Contact>();
+        await using var connection = await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        var idsClause = AddInParameters(command, "$contactId", conversationIds.Select(static id => id.Value));
+        command.CommandText = $"SELECT id, payload_json FROM contacts WHERE id IN ({idsClause});";
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            var id = new ConversationId(reader.GetString(0));
+            var contact = JsonSerializer.Deserialize<Contact>(reader.GetString(1), SerializerOptions);
+            if (contact is not null)
+            {
+                result[id] = contact;
+            }
+        }
+
+        return result;
+    }
+
+    private static string AddInParameters(SqliteCommand command, string prefix, IEnumerable<string> values)
+    {
+        var names = new List<string>();
+        var index = 0;
+        foreach (var value in values)
+        {
+            var name = $"{prefix}{index}";
+            command.Parameters.AddWithValue(name, value);
+            names.Add(name);
+            index++;
+        }
+
+        return string.Join(", ", names);
+    }
+
+    private static string ReadCursorSettingKey(ConversationId conversationId) =>
+        ReadCursorSettingPrefix + conversationId.Value;
+
     private SqliteConnection OpenConnection()
     {
         var connection = new SqliteConnection(_connectionString);
         connection.Open();
-        ApplyEncryptionKey(connection);
+        ApplyEncryptionKey(connection, _encryptionKey);
         return connection;
     }
 
@@ -473,21 +737,94 @@ public sealed class SqliteSessionStore : ILocalSessionStore
     {
         var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-        ApplyEncryptionKey(connection);
+        ApplyEncryptionKey(connection, _encryptionKey);
         return connection;
     }
 
-    private void ApplyEncryptionKey(SqliteConnection connection)
+    private static string ConnectionStringFor(string statePath) =>
+        new SqliteConnectionStringBuilder
+        {
+            DataSource = statePath,
+            Mode = SqliteOpenMode.ReadWriteCreate,
+            Cache = SqliteCacheMode.Shared,
+            Pooling = false
+        }.ToString();
+
+    private static SqliteConnection OpenConnectionForPath(string statePath, string? encryptionKey)
     {
-        if (string.IsNullOrWhiteSpace(_encryptionKey))
+        var connection = new SqliteConnection(ConnectionStringFor(statePath));
+        connection.Open();
+        ApplyEncryptionKey(connection, encryptionKey);
+        return connection;
+    }
+
+    private static void ApplyEncryptionKey(SqliteConnection connection, string? encryptionKey)
+    {
+        if (string.IsNullOrWhiteSpace(encryptionKey))
         {
             return;
         }
 
         using var pragma = connection.CreateCommand();
-        pragma.CommandText = "PRAGMA key = $key;";
-        pragma.Parameters.AddWithValue("$key", _encryptionKey);
+        pragma.CommandText = $"PRAGMA key = '{EscapePragmaString(encryptionKey)}';";
         pragma.ExecuteNonQuery();
+
+        using var cipherVersion = connection.CreateCommand();
+        cipherVersion.CommandText = "PRAGMA cipher_version;";
+        var version = cipherVersion.ExecuteScalar()?.ToString();
+        if (string.IsNullOrWhiteSpace(version))
+        {
+            throw new InvalidOperationException("SQLCipher support is not available for the local state database.");
+        }
+    }
+
+    private static string EscapePragmaString(string value) =>
+        value.Replace("'", "''", StringComparison.Ordinal);
+
+    private static bool CanOpenDatabase(string statePath, string? encryptionKey)
+    {
+        try
+        {
+            using var connection = OpenConnectionForPath(statePath, encryptionKey);
+            ExecuteNonQuery(connection, "SELECT count(*) FROM sqlite_master;");
+            return true;
+        }
+        catch (SqliteException)
+        {
+            return false;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+    private static void ExecuteNonQuery(SqliteConnection connection, string sql)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.ExecuteNonQuery();
+    }
+
+    private static void DeleteSqliteFileSet(string statePath)
+    {
+        if (File.Exists(statePath))
+        {
+            File.Delete(statePath);
+        }
+
+        DeleteSqliteSidecars(statePath);
+    }
+
+    private static void DeleteSqliteSidecars(string statePath)
+    {
+        foreach (var sidecarPath in new[] { statePath + "-wal", statePath + "-shm" })
+        {
+            if (File.Exists(sidecarPath))
+            {
+                File.Delete(sidecarPath);
+            }
+        }
     }
 
 }

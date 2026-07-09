@@ -1,4 +1,4 @@
-﻿using Deep.Client.Shared.Domain;
+using Deep.Client.Shared.Domain;
 
 namespace Deep.Client.Shared.Persistence;
 
@@ -59,6 +59,21 @@ public interface IMessageRepository
         CancellationToken cancellationToken = default);
 }
 
+public sealed record ConversationListSummary(
+    ConversationId ConversationId,
+    DateTimeOffset? ReadCursor,
+    Message? LastMessage,
+    int UnreadCount,
+    Contact? Contact);
+
+public interface IConversationListSummaryRepository
+{
+    Task<IReadOnlyDictionary<ConversationId, ConversationListSummary>> GetConversationSummariesAsync(
+        IReadOnlyCollection<ConversationId> conversationIds,
+        DateTimeOffset now,
+        CancellationToken cancellationToken = default);
+}
+
 public interface ISettingsRepository
 {
     Task SetAsync<T>(string key, T value, CancellationToken cancellationToken = default);
@@ -73,5 +88,6 @@ public interface ILocalSessionStore :
     IContactRepository,
     IGroupRepository,
     IMessageRepository,
+    IConversationListSummaryRepository,
     ISettingsRepository,
     ISchemaStore;

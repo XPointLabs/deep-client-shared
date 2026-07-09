@@ -310,6 +310,88 @@ public sealed class PersistenceTests
         Assert.Equal(1, count);
     }
 
+    [Fact]
+    public async Task StoresConversationListSummariesInBatch()
+    {
+        var sqlitePath = Path.Combine(Path.GetTempPath(), $"deep-client-summary-{Guid.NewGuid():N}.db");
+        try
+        {
+            await AssertConversationListSummaryAsync(new InMemorySessionStore());
+            await AssertConversationListSummaryAsync(new SqliteSessionStore(sqlitePath));
+        }
+        finally
+        {
+            DeleteSqliteFiles(sqlitePath);
+        }
+    }
+
+    private static async Task AssertConversationListSummaryAsync(ILocalSessionStore store)
+    {
+        var sender = SessionId.CreateNew();
+        var recipient = SessionId.CreateNew();
+        var conversationId = ConversationId.ForOneToOne(sender);
+        var now = DateTimeOffset.Parse("2026-05-28T00:00:00Z");
+        var readCursor = now.AddMinutes(-10);
+
+        await store.UpsertAsync(new Conversation(
+            conversationId,
+            ConversationKind.OneToOne,
+            "Alice",
+            ConversationSettings.Default(ConversationKind.OneToOne),
+            now,
+            now));
+        await store.UpsertAsync(Contact.Request(sender, "Alice", now));
+        await store.SetAsync($"sync.read-cursor.{conversationId.Value}", readCursor.ToString("O"));
+        await store.AppendAsync(new Message(MessageId.NewId(), conversationId, sender, recipient, "old", MessageDirection.Incoming, MessageDeliveryState.Delivered, now.AddMinutes(-20), []));
+        await store.AppendAsync(new Message(MessageId.NewId(), conversationId, sender, recipient, "new", MessageDirection.Incoming, MessageDeliveryState.Delivered, now.AddMinutes(-5), []));
+        await store.AppendAsync(new Message(MessageId.NewId(), conversationId, sender, recipient, "sent", MessageDirection.Outgoing, MessageDeliveryState.Sent, now.AddMinutes(-2), []));
+        await store.AppendAsync(new Message(MessageId.NewId(), conversationId, sender, recipient, "expired", MessageDirection.Incoming, MessageDeliveryState.Delivered, now.AddMinutes(1), [], ExpiresAt: now.AddSeconds(-1)));
+
+        var summaries = await store.GetConversationSummariesAsync([conversationId], now);
+
+        var summary = Assert.Single(summaries).Value;
+        Assert.Equal(conversationId, summary.ConversationId);
+        Assert.Equal(readCursor, summary.ReadCursor);
+        Assert.Equal("sent", summary.LastMessage?.Body);
+        Assert.Equal(1, summary.UnreadCount);
+        Assert.Equal("Alice", summary.Contact?.DisplayName);
+    }
+
+    [Fact]
+    public async Task SqliteSessionStore_MigratesPlaintextDatabaseToSqlCipher()
+    {
+        var sqlitePath = Path.Combine(Path.GetTempPath(), $"deep-client-encrypted-{Guid.NewGuid():N}.db");
+        var encryptionKey = Convert.ToHexString(Guid.NewGuid().ToByteArray()).ToLowerInvariant();
+        var conversationId = ConversationId.CreateGroupV2();
+        var now = DateTimeOffset.Parse("2026-05-28T00:00:00Z");
+        try
+        {
+            var plaintext = new SqliteSessionStore(sqlitePath);
+            await plaintext.UpsertAsync(new Conversation(
+                conversationId,
+                ConversationKind.GroupV2,
+                "Encrypted",
+                ConversationSettings.Default(ConversationKind.GroupV2),
+                now,
+                now));
+
+            SqliteSessionStore.EnsureEncryptedDatabase(sqlitePath, encryptionKey);
+            Assert.ThrowsAny<Exception>(() => new SqliteSessionStore(sqlitePath));
+
+            var encrypted = new SqliteSessionStore(new SqliteSessionStoreOptions(sqlitePath, encryptionKey));
+            var recovered = await encrypted.GetAsync(conversationId);
+
+            Assert.NotNull(recovered);
+            Assert.Equal("Encrypted", recovered!.DisplayName);
+        }
+        finally
+        {
+            DeleteSqliteFiles(sqlitePath);
+            DeleteSqliteFiles(sqlitePath + ".encrypted-migration");
+            DeleteSqliteFiles(sqlitePath + ".plaintext-migration");
+        }
+    }
+
     private static void DeleteSqliteFiles(string statePath)
     {
         foreach (var path in new[] { statePath, statePath + "-wal", statePath + "-shm" })

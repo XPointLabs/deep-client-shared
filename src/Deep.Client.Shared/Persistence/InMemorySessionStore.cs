@@ -1,4 +1,4 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using Deep.Client.Shared.Domain;
@@ -181,6 +181,52 @@ public sealed class InMemorySessionStore : ILocalSessionStore
         return Task.FromResult(count);
     }
 
+    public Task<IReadOnlyDictionary<ConversationId, ConversationListSummary>> GetConversationSummariesAsync(
+        IReadOnlyCollection<ConversationId> conversationIds,
+        DateTimeOffset now,
+        CancellationToken cancellationToken = default)
+    {
+        var idSet = conversationIds
+            .Select(static id => id.Value)
+            .ToHashSet(StringComparer.Ordinal);
+        var messagesByConversation = messages.Values
+            .Where(message => idSet.Contains(message.ConversationId.Value))
+            .GroupBy(static message => message.ConversationId.Value, StringComparer.Ordinal)
+            .ToDictionary(
+                static group => group.Key,
+                static group => group
+                    .OrderBy(static message => message.CreatedAt)
+                    .ThenBy(static message => message.Id.Value, StringComparer.Ordinal)
+                    .ToArray(),
+                StringComparer.Ordinal);
+
+        var result = new Dictionary<ConversationId, ConversationListSummary>();
+        foreach (var conversationId in conversationIds)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var readCursor = ReadCursorFor(conversationId);
+            messagesByConversation.TryGetValue(conversationId.Value, out var conversationMessages);
+            conversationMessages ??= [];
+            var lastMessage = conversationMessages
+                .LastOrDefault(message => !message.IsExpired(now));
+            var unreadCount = conversationMessages.Count(message =>
+                message.Direction == MessageDirection.Incoming
+                && message.DeliveryState != MessageDeliveryState.Read
+                && (readCursor is null || message.CreatedAt > readCursor.Value)
+                && !message.IsExpired(now));
+            contacts.TryGetValue(conversationId.Value, out var contact);
+
+            result[conversationId] = new ConversationListSummary(
+                conversationId,
+                readCursor,
+                lastMessage,
+                unreadCount,
+                contact);
+        }
+
+        return Task.FromResult<IReadOnlyDictionary<ConversationId, ConversationListSummary>>(result);
+    }
+
     public Task SetAsync<T>(string key, T value, CancellationToken cancellationToken = default)
     {
         settings[key] = JsonSerializer.Serialize(value);
@@ -224,6 +270,20 @@ public sealed class InMemorySessionStore : ILocalSessionStore
 
     public Task<string?> GetSchemaValueAsync(string key, CancellationToken cancellationToken = default) =>
         Task.FromResult(schemaValues.GetValueOrDefault(key));
+
+    private DateTimeOffset? ReadCursorFor(ConversationId conversationId)
+    {
+        if (!settings.TryGetValue(ReadCursorSettingKey(conversationId), out var raw))
+        {
+            return null;
+        }
+
+        var value = JsonSerializer.Deserialize<string>(raw);
+        return DateTimeOffset.TryParse(value, out var parsed) ? parsed : null;
+    }
+
+    private static string ReadCursorSettingKey(ConversationId conversationId) =>
+        $"sync.read-cursor.{conversationId.Value}";
 
     private void LoadState()
     {
