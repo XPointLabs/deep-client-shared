@@ -735,10 +735,21 @@ public sealed class SqliteSessionStore : ILocalSessionStore
 
     private async Task<SqliteConnection> OpenConnectionAsync(CancellationToken cancellationToken)
     {
+        await LeaveCallingSynchronizationContextAsync(cancellationToken).ConfigureAwait(false);
         var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
         ApplyEncryptionKey(connection, _encryptionKey);
         return connection;
+    }
+
+    private static async Task LeaveCallingSynchronizationContextAsync(CancellationToken cancellationToken)
+    {
+        if (SynchronizationContext.Current is null)
+        {
+            return;
+        }
+
+        await Task.Run(static () => { }, cancellationToken).ConfigureAwait(false);
     }
 
     private static string ConnectionStringFor(string statePath) =>
