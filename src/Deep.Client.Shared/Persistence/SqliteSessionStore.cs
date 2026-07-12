@@ -737,7 +737,7 @@ public sealed class SqliteSessionStore :
             transaction.Commit();
         }, cancellationToken);
 
-    public async Task<IReadOnlyList<MessageId>> ListPendingIncomingMessageNotificationIdsAsync(
+    public async Task<IReadOnlyList<PendingIncomingMessageNotification>> ListPendingIncomingMessageNotificationIdsAsync(
         int limit,
         CancellationToken cancellationToken = default)
     {
@@ -764,7 +764,7 @@ public sealed class SqliteSessionStore :
         {
             await using var command = connection.CreateCommand();
             command.CommandText = """
-                SELECT notification.message_id
+                SELECT notification.message_id, message.conversation_id
                 FROM incoming_message_notifications AS notification
                 INNER JOIN messages AS message ON message.id = notification.message_id
                 WHERE message.direction = $incomingDirection
@@ -783,13 +783,15 @@ public sealed class SqliteSessionStore :
             await command.PrepareAsync(cancellationToken).ConfigureAwait(false);
 
             await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-            var result = new List<MessageId>();
+            var result = new List<PendingIncomingMessageNotification>();
             while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
             {
-                result.Add(new MessageId(reader.GetString(0)));
+                result.Add(new PendingIncomingMessageNotification(
+                    new MessageId(reader.GetString(0)),
+                    new ConversationId(reader.GetString(1))));
             }
 
-            return (IReadOnlyList<MessageId>)result;
+            return (IReadOnlyList<PendingIncomingMessageNotification>)result;
         }, cancellationToken).ConfigureAwait(false);
     }
 

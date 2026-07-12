@@ -28,7 +28,7 @@ Persistent runtime includes:
 - optional SQLCipher key path (`sqlCipherKey`)
 - legacy in-memory JSON snapshot migration (`legacyInMemoryStatePath`) without data loss (backup `.migrated.bak`)
 - read-receipt cursor sync and disappearing-message pruning helpers in `MessageService`
-- durable incoming-message notification handoff in `MessageService`, acknowledged only after platform presentation
+- durable incoming-message notification handoff in `MessageService`, carrying message and conversation IDs and acknowledged only after platform presentation or active-foreground suppression
 
 ## Verify
 

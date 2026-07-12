@@ -522,7 +522,7 @@ public sealed class InMemorySessionStore :
         return Task.CompletedTask;
     }
 
-    public Task<IReadOnlyList<MessageId>> ListPendingIncomingMessageNotificationIdsAsync(
+    public Task<IReadOnlyList<PendingIncomingMessageNotification>> ListPendingIncomingMessageNotificationIdsAsync(
         int limit,
         CancellationToken cancellationToken = default)
     {
@@ -556,10 +556,12 @@ public sealed class InMemorySessionStore :
                 }
             }
 
-            return Task.FromResult<IReadOnlyList<MessageId>>(incomingMessageNotifications
+            return Task.FromResult<IReadOnlyList<PendingIncomingMessageNotification>>(incomingMessageNotifications
                 .OrderBy(static item => item.Value)
                 .Take(limit)
-                .Select(static item => new MessageId(item.Key))
+                .Select(item => new PendingIncomingMessageNotification(
+                    messages[item.Key].Id,
+                    messages[item.Key].ConversationId))
                 .ToArray());
         }
     }

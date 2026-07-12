@@ -42,7 +42,7 @@ public sealed class IncomingMessageNotificationRepositoryTests
             await store.AppendMessageAndTouchConversationAsync(selfSync, conversation.Touch(now.AddSeconds(1)));
 
             Assert.Equal(
-                [incoming.Id],
+                [NotificationFor(incoming)],
                 await store.ListPendingIncomingMessageNotificationIdsAsync(16));
 
             await store.MarkIncomingMessageNotificationsPresentedAsync([incoming.Id, incoming.Id]);
@@ -84,7 +84,7 @@ public sealed class IncomingMessageNotificationRepositoryTests
             await store.DeleteAsync(deleted.Id);
 
             Assert.Equal(
-                [pending.Id],
+                [NotificationFor(pending)],
                 await store.ListPendingIncomingMessageNotificationIdsAsync(16));
 
             await store.UpdateAsync(read);
@@ -92,7 +92,7 @@ public sealed class IncomingMessageNotificationRepositoryTests
             await store.UpdateAsync(expired with { ExpiresAt = now.AddMinutes(5) });
 
             Assert.Equal(
-                [pending.Id],
+                [NotificationFor(pending)],
                 await store.ListPendingIncomingMessageNotificationIdsAsync(16));
         });
     }
@@ -107,7 +107,7 @@ public sealed class IncomingMessageNotificationRepositoryTests
 
             var restarted = new InMemorySessionStore(statePath);
             Assert.Equal(
-                [message.Id],
+                [NotificationFor(message)],
                 await restarted.ListPendingIncomingMessageNotificationIdsAsync(16));
 
             await restarted.MarkIncomingMessageNotificationsPresentedAsync([message.Id]);
@@ -136,7 +136,7 @@ public sealed class IncomingMessageNotificationRepositoryTests
             using (var restarted = new SqliteSessionStore(statePath))
             {
                 Assert.Equal(
-                    [message.Id],
+                    [NotificationFor(message)],
                     await restarted.ListPendingIncomingMessageNotificationIdsAsync(16));
                 await restarted.MarkIncomingMessageNotificationsPresentedAsync([message.Id]);
             }
@@ -218,7 +218,7 @@ public sealed class IncomingMessageNotificationRepositoryTests
         var message = await AppendIncomingAsync(runtime.Store);
 
         Assert.Equal(
-            [message.Id],
+            [NotificationFor(message)],
             await runtime.Messages.ListPendingIncomingMessageNotificationIdsAsync(16));
 
         await runtime.Messages.MarkIncomingMessageNotificationsPresentedAsync([message.Id]);
@@ -253,6 +253,9 @@ public sealed class IncomingMessageNotificationRepositoryTests
             ConversationSettings.Default(ConversationKind.OneToOne),
             now,
             now);
+
+    private static PendingIncomingMessageNotification NotificationFor(Message message) =>
+        new(message.Id, message.ConversationId);
 
     private static Message NewMessage(
         ConversationId conversationId,

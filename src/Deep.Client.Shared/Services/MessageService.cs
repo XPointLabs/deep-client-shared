@@ -21,7 +21,7 @@ public sealed class MessageService(
 
     public bool SupportsDurableGroupInboxMaintenance => groupSync is IGroupInboxMaintenance;
 
-    public Task<IReadOnlyList<MessageId>> ListPendingIncomingMessageNotificationIdsAsync(
+    public Task<IReadOnlyList<PendingIncomingMessageNotification>> ListPendingIncomingMessageNotificationIdsAsync(
         int limit,
         CancellationToken cancellationToken = default) =>
         IncomingMessageNotifications.ListPendingIncomingMessageNotificationIdsAsync(limit, cancellationToken);

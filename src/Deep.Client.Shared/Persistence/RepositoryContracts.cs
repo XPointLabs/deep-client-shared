@@ -170,13 +170,18 @@ public static class IncomingMessageNotificationLimits
     public const int MaxBatchCount = 256;
 }
 
+public readonly record struct PendingIncomingMessageNotification(
+    MessageId MessageId,
+    ConversationId ConversationId);
+
 /// <summary>
 /// Durable handoff of newly persisted incoming messages to platform notification presenters.
-/// A message remains pending until the presenter explicitly acknowledges its ID.
+/// A message remains pending until the platform explicitly acknowledges its ID after presentation
+/// or intentional foreground suppression.
 /// </summary>
 public interface IIncomingMessageNotificationRepository
 {
-    Task<IReadOnlyList<MessageId>> ListPendingIncomingMessageNotificationIdsAsync(
+    Task<IReadOnlyList<PendingIncomingMessageNotification>> ListPendingIncomingMessageNotificationIdsAsync(
         int limit,
         CancellationToken cancellationToken = default);
 

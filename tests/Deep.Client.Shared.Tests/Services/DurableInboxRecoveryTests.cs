@@ -85,7 +85,9 @@ public sealed class DurableInboxRecoveryTests
 
                 Assert.NotNull(await store.GetAsync(MessageId.Parse("domain-boundary")));
                 Assert.Equal(
-                    [MessageId.Parse("domain-boundary")],
+                    [new PendingIncomingMessageNotification(
+                        MessageId.Parse("domain-boundary"),
+                        ConversationId.ForOneToOne(aliceIdentity.SessionId))],
                     await messages.ListPendingIncomingMessageNotificationIdsAsync(16));
                 Assert.Equal(
                     1,
@@ -108,7 +110,9 @@ public sealed class DurableInboxRecoveryTests
                     ((IMessageRepository)restartedStore).ListForConversationAsync(
                         ConversationId.ForOneToOne(aliceIdentity.SessionId))));
                 Assert.Equal(
-                    [MessageId.Parse("domain-boundary")],
+                    [new PendingIncomingMessageNotification(
+                        MessageId.Parse("domain-boundary"),
+                        ConversationId.ForOneToOne(aliceIdentity.SessionId))],
                     await messages.ListPendingIncomingMessageNotificationIdsAsync(16));
             }
 
@@ -124,7 +128,9 @@ public sealed class DurableInboxRecoveryTests
                 ((IMessageRepository)finalStore).ListForConversationAsync(
                     ConversationId.ForOneToOne(aliceIdentity.SessionId))));
             Assert.Equal(
-                [MessageId.Parse("domain-boundary")],
+                [new PendingIncomingMessageNotification(
+                    MessageId.Parse("domain-boundary"),
+                    ConversationId.ForOneToOne(aliceIdentity.SessionId))],
                 await finalMessages.ListPendingIncomingMessageNotificationIdsAsync(16));
 
             await finalMessages.MarkIncomingMessageNotificationsPresentedAsync(
