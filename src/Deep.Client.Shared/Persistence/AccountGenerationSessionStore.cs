@@ -121,6 +121,17 @@ internal class AccountGenerationSessionStore : ILocalSessionStore, IDisposable
             innerToken => Inner.ListPendingIncomingMessageNotificationIdsAsync(limit, innerToken),
             token);
 
+    public Task<IReadOnlyList<PendingIncomingMessageNotification>> ListPendingIncomingMessageNotificationIdsAsync(
+        int limit,
+        IReadOnlyCollection<ConversationId> excludedConversationIds,
+        CancellationToken token = default) =>
+        MutateAsync(
+            innerToken => Inner.ListPendingIncomingMessageNotificationIdsAsync(
+                limit,
+                excludedConversationIds,
+                innerToken),
+            token);
+
     public Task MarkIncomingMessageNotificationsPresentedAsync(
         IReadOnlyCollection<MessageId> ids,
         CancellationToken token = default) =>

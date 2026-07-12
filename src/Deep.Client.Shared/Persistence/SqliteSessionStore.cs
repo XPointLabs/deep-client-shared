@@ -739,9 +739,20 @@ public sealed class SqliteSessionStore :
 
     public async Task<IReadOnlyList<PendingIncomingMessageNotification>> ListPendingIncomingMessageNotificationIdsAsync(
         int limit,
+        CancellationToken cancellationToken = default) =>
+        await ListPendingIncomingMessageNotificationIdsAsync(limit, [], cancellationToken).ConfigureAwait(false);
+
+    public async Task<IReadOnlyList<PendingIncomingMessageNotification>> ListPendingIncomingMessageNotificationIdsAsync(
+        int limit,
+        IReadOnlyCollection<ConversationId> excludedConversationIds,
         CancellationToken cancellationToken = default)
     {
         ValidateIncomingMessageNotificationLimit(limit);
+        ArgumentNullException.ThrowIfNull(excludedConversationIds);
+        var excluded = excludedConversationIds
+            .Select(static id => id.Value)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
         var now = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture);
         await ExecuteNonQueryAsync(
             """
@@ -763,7 +774,13 @@ public sealed class SqliteSessionStore :
         return await WithConnectionAsync(async connection =>
         {
             await using var command = connection.CreateCommand();
-            command.CommandText = """
+            var exclusionParameters = Enumerable.Range(0, excluded.Length)
+                .Select(static index => $"$excluded{index}")
+                .ToArray();
+            var exclusionClause = exclusionParameters.Length == 0
+                ? string.Empty
+                : $"AND message.conversation_id NOT IN ({string.Join(", ", exclusionParameters)})";
+            command.CommandText = $$"""
                 SELECT notification.message_id, message.conversation_id
                 FROM incoming_message_notifications AS notification
                 INNER JOIN messages AS message ON message.id = notification.message_id
@@ -771,6 +788,7 @@ public sealed class SqliteSessionStore :
                   AND message.delivery_state != $readState
                   AND message.read_at IS NULL
                   AND (message.expires_at IS NULL OR julianday(message.expires_at) > julianday($now))
+                  {{exclusionClause}}
                 ORDER BY notification.sequence
                 LIMIT $limit;
                 """;
@@ -780,6 +798,10 @@ public sealed class SqliteSessionStore :
                 "$now",
                 now);
             command.Parameters.AddWithValue("$limit", limit);
+            for (var index = 0; index < excluded.Length; index++)
+            {
+                command.Parameters.AddWithValue(exclusionParameters[index], excluded[index]);
+            }
             await command.PrepareAsync(cancellationToken).ConfigureAwait(false);
 
             await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);

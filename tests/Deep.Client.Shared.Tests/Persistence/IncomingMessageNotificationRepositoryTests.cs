@@ -56,6 +56,48 @@ public sealed class IncomingMessageNotificationRepositoryTests
     }
 
     [Fact]
+    public async Task ExcludingActiveConversationDoesNotStarveLaterNotifications()
+    {
+        await ForEachStoreAsync(async store =>
+        {
+            var now = DateTimeOffset.UtcNow;
+            var account = SessionId.CreateNew();
+            var activeCounterpart = SessionId.CreateNew();
+            var otherCounterpart = SessionId.CreateNew();
+            var activeConversation = NewConversation(activeCounterpart, now);
+            var otherConversation = NewConversation(otherCounterpart, now);
+            for (var index = 0; index < IncomingMessageNotificationLimits.MaxBatchCount; index++)
+            {
+                var message = NewMessage(
+                    activeConversation.Id,
+                    activeCounterpart,
+                    account,
+                    MessageDirection.Incoming,
+                    now.AddMilliseconds(index));
+                await store.AppendMessageAndTouchConversationAsync(message, activeConversation.Touch(message.CreatedAt));
+            }
+
+            var other = NewMessage(
+                otherConversation.Id,
+                otherCounterpart,
+                account,
+                MessageDirection.Incoming,
+                now.AddMinutes(1));
+            await store.AppendMessageAndTouchConversationAsync(other, otherConversation.Touch(other.CreatedAt));
+
+            Assert.Equal(
+                [NotificationFor(other)],
+                await store.ListPendingIncomingMessageNotificationIdsAsync(
+                    IncomingMessageNotificationLimits.MaxBatchCount,
+                    [activeConversation.Id]));
+            Assert.Equal(
+                IncomingMessageNotificationLimits.MaxBatchCount,
+                (await store.ListPendingIncomingMessageNotificationIdsAsync(
+                    IncomingMessageNotificationLimits.MaxBatchCount)).Count);
+        });
+    }
+
+    [Fact]
     public async Task StoresExcludeReadDeletedAndExpiredIncomingMessages()
     {
         await ForEachStoreAsync(async store =>

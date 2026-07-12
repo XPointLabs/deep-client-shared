@@ -177,12 +177,17 @@ public readonly record struct PendingIncomingMessageNotification(
 /// <summary>
 /// Durable handoff of newly persisted incoming messages to platform notification presenters.
 /// A message remains pending until the platform explicitly acknowledges its ID after presentation
-/// or intentional foreground suppression.
+/// or the active conversation advances its durable read cursor.
 /// </summary>
 public interface IIncomingMessageNotificationRepository
 {
     Task<IReadOnlyList<PendingIncomingMessageNotification>> ListPendingIncomingMessageNotificationIdsAsync(
         int limit,
+        CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyList<PendingIncomingMessageNotification>> ListPendingIncomingMessageNotificationIdsAsync(
+        int limit,
+        IReadOnlyCollection<ConversationId> excludedConversationIds,
         CancellationToken cancellationToken = default);
 
     Task MarkIncomingMessageNotificationsPresentedAsync(

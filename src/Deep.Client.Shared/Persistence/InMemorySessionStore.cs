@@ -524,12 +524,22 @@ public sealed class InMemorySessionStore :
 
     public Task<IReadOnlyList<PendingIncomingMessageNotification>> ListPendingIncomingMessageNotificationIdsAsync(
         int limit,
+        CancellationToken cancellationToken = default) =>
+        ListPendingIncomingMessageNotificationIdsAsync(limit, [], cancellationToken);
+
+    public Task<IReadOnlyList<PendingIncomingMessageNotification>> ListPendingIncomingMessageNotificationIdsAsync(
+        int limit,
+        IReadOnlyCollection<ConversationId> excludedConversationIds,
         CancellationToken cancellationToken = default)
     {
         ValidateIncomingMessageNotificationLimit(limit);
+        ArgumentNullException.ThrowIfNull(excludedConversationIds);
         cancellationToken.ThrowIfCancellationRequested();
         lock (durableStateGate)
         {
+            var excluded = excludedConversationIds
+                .Select(static id => id.Value)
+                .ToHashSet(StringComparer.Ordinal);
             var now = DateTimeOffset.UtcNow;
             var stale = incomingMessageNotifications
                 .Where(item => !IsPendingIncomingMessageNotification(item.Key, now))
@@ -558,6 +568,7 @@ public sealed class InMemorySessionStore :
 
             return Task.FromResult<IReadOnlyList<PendingIncomingMessageNotification>>(incomingMessageNotifications
                 .OrderBy(static item => item.Value)
+                .Where(item => !excluded.Contains(messages[item.Key].ConversationId.Value))
                 .Take(limit)
                 .Select(item => new PendingIncomingMessageNotification(
                     messages[item.Key].Id,

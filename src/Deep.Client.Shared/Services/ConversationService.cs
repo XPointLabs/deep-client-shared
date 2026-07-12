@@ -14,12 +14,22 @@ public sealed class ConversationService(
     IGroupSyncTransport groupSync)
 {
     private readonly SemaphoreSlim groupOutboxGate = new(1, 1);
+    private readonly SemaphoreSlim contactMutationGate = new(1, 1);
 
-    public async Task<Conversation> GetOrCreateOneToOneAsync(
+    public Task<Conversation> GetOrCreateOneToOneAsync(
         SessionId counterpart,
         string? displayName = null,
         bool approve = false,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        SerializeContactMutationAsync(
+            ct => GetOrCreateOneToOneCoreAsync(counterpart, displayName, approve, ct),
+            cancellationToken);
+
+    private async Task<Conversation> GetOrCreateOneToOneCoreAsync(
+        SessionId counterpart,
+        string? displayName,
+        bool approve,
+        CancellationToken cancellationToken)
     {
         var id = ConversationId.ForOneToOne(counterpart);
         var existing = await conversations.GetAsync(id, cancellationToken).ConfigureAwait(false);
@@ -82,10 +92,18 @@ public sealed class ConversationService(
     public Task<Contact?> GetContactAsync(SessionId contactId, CancellationToken cancellationToken = default) =>
         contacts.GetAsync(contactId, cancellationToken);
 
-    public async Task<Contact> UpdateContactDisplayNameAsync(
+    public Task<Contact> UpdateContactDisplayNameAsync(
         SessionId contactId,
         string? displayName,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        SerializeContactMutationAsync(
+            ct => UpdateContactDisplayNameCoreAsync(contactId, displayName, ct),
+            cancellationToken);
+
+    private async Task<Contact> UpdateContactDisplayNameCoreAsync(
+        SessionId contactId,
+        string? displayName,
+        CancellationToken cancellationToken)
     {
         var normalizedDisplayName = string.IsNullOrWhiteSpace(displayName)
             ? null
@@ -129,7 +147,14 @@ public sealed class ConversationService(
             cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<Contact> ApproveContactAsync(SessionId contactId, CancellationToken cancellationToken = default)
+    public Task<Contact> ApproveContactAsync(SessionId contactId, CancellationToken cancellationToken = default) =>
+        SerializeContactMutationAsync(
+            ct => ApproveContactCoreAsync(contactId, ct),
+            cancellationToken);
+
+    private async Task<Contact> ApproveContactCoreAsync(
+        SessionId contactId,
+        CancellationToken cancellationToken)
     {
         var contact = await contacts.GetAsync(contactId, cancellationToken).ConfigureAwait(false)
             ?? Contact.Request(contactId, null, clock.UtcNow);
@@ -144,16 +169,39 @@ public sealed class ConversationService(
         return updated;
     }
 
-    public async Task<Contact> SetContactBlockedAsync(
+    public Task<Contact> SetContactBlockedAsync(
         SessionId contactId,
         bool blocked,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        SerializeContactMutationAsync(
+            ct => SetContactBlockedCoreAsync(contactId, blocked, ct),
+            cancellationToken);
+
+    private async Task<Contact> SetContactBlockedCoreAsync(
+        SessionId contactId,
+        bool blocked,
+        CancellationToken cancellationToken)
     {
         var contact = await contacts.GetAsync(contactId, cancellationToken).ConfigureAwait(false)
             ?? Contact.Request(contactId, null, clock.UtcNow);
         var updated = contact with { IsBlocked = blocked, UpdatedAt = clock.UtcNow };
         await contacts.UpsertAsync(updated, cancellationToken).ConfigureAwait(false);
         return updated;
+    }
+
+    private async Task<T> SerializeContactMutationAsync<T>(
+        Func<CancellationToken, Task<T>> mutation,
+        CancellationToken cancellationToken)
+    {
+        await contactMutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await mutation(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            contactMutationGate.Release();
+        }
     }
 
     public async Task<Group> CreateGroupScaffoldAsync(
