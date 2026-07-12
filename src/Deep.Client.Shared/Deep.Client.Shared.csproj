@@ -12,4 +12,9 @@
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlcipher" Version="2.1.11" />
   </ItemGroup>
 
+  <ItemGroup>
+    <EmbeddedResource Include="Resources\Mnemonic\english.txt"
+                      LogicalName="Deep.Client.Shared.Resources.Mnemonic.english.txt" />
+  </ItemGroup>
+
 </Project>

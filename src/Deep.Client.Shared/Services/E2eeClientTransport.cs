@@ -1,0 +1,1241 @@
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using Deep.Client.Shared.Domain;
+using Deep.Client.Shared.Persistence;
+
+namespace Deep.Client.Shared.Services;
+
+public sealed record AuthenticatedInboxBatch(
+    IReadOnlyList<DurableInboxWireEntry> Entries,
+    string? NextCursor);
+
+public interface IAuthenticatedInboxTransport
+{
+    int InboxNamespace => 0;
+
+    Task<IReadOnlyList<InboundMessageEnvelope>> ReceiveAuthenticatedAsync(
+        SessionIdentityProvider identity,
+        CancellationToken cancellationToken = default);
+
+    async Task<AuthenticatedInboxBatch> RetrieveAuthenticatedAsync(
+        SessionIdentityProvider identity,
+        string? cursor,
+        int limit,
+        CancellationToken cancellationToken = default)
+    {
+        if (limit is <= 0 or > DurableInboxLimits.MaxBatchCount)
+        {
+            throw new ArgumentOutOfRangeException(nameof(limit));
+        }
+
+        var envelopes = await ReceiveAuthenticatedAsync(identity, cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidOperationException("The authenticated inbox transport returned a null batch.");
+        var entries = envelopes
+            .Take(limit)
+            .Where(static envelope => envelope is not null && !string.IsNullOrWhiteSpace(envelope.ServerHash))
+            .Select(AuthenticatedInboxEnvelopeCodec.Encode)
+            .ToArray();
+        return new AuthenticatedInboxBatch(entries, entries.Length == 0 ? cursor : entries[^1].ServerHash);
+    }
+
+    bool TryDecodeInboxEntry(
+        DurableInboxWireEntry entry,
+        SessionId recipient,
+        out InboundMessageEnvelope envelope) =>
+        AuthenticatedInboxEnvelopeCodec.TryDecode(entry, recipient, out envelope);
+}
+
+internal static class AuthenticatedInboxEnvelopeCodec
+{
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+
+    public static DurableInboxWireEntry Encode(InboundMessageEnvelope envelope)
+    {
+        var payload = JsonSerializer.Serialize(envelope, JsonOptions);
+        return DurableInboxWireEntry.CreateBounded(
+            envelope.ServerHash,
+            envelope.CreatedAt.ToUnixTimeMilliseconds(),
+            payload);
+    }
+
+    public static bool TryDecode(
+        DurableInboxWireEntry entry,
+        SessionId recipient,
+        out InboundMessageEnvelope envelope)
+    {
+        envelope = default!;
+        try
+        {
+            var decoded = JsonSerializer.Deserialize<InboundMessageEnvelope>(entry.WirePayload, JsonOptions);
+            if (decoded is null
+                || decoded.Recipient != recipient
+                || !string.Equals(decoded.ServerHash, entry.ServerHash, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            envelope = decoded;
+            return true;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+        catch (NotSupportedException)
+        {
+            return false;
+        }
+    }
+}
+
+public interface IDurableInboxAcknowledger
+{
+    Task AcknowledgeInboxItemAsync(
+        SessionId account,
+        string serverHash,
+        CancellationToken cancellationToken = default);
+}
+
+public interface IKnownGroupInboxReceiver
+{
+    Task<IReadOnlyList<InboundGroupMessageEnvelope>> ReceiveKnownGroupMessagesAsync(
+        SessionId account,
+        IReadOnlyCollection<ConversationId> groupIds,
+        CancellationToken cancellationToken = default);
+}
+
+public interface IGroupInboxMaintenance
+{
+    Task<int> DiscardUnknownGroupMessagesAsync(
+        SessionId account,
+        IReadOnlyCollection<ConversationId> knownGroupIds,
+        CancellationToken cancellationToken = default);
+}
+
+public sealed class E2eeClientTransport :
+    ISessionMessageTransport,
+    IGroupSyncTransport,
+    IDurableInboxAcknowledger,
+    IKnownGroupInboxReceiver,
+    IGroupInboxMaintenance,
+    IDisposable
+{
+    public const string WireBodyPrefix = "dpe1:";
+    public const int MaxRawBatchCount = 256;
+    public const int MaxCachedDirectMessages = 512;
+    public const int MaxCachedGroupStates = 256;
+    public const int MaxCachedGroupMessages = 1024;
+    public const int MaxServerHashChars = 512;
+
+    private const int ReplayClaimsPerPrune = 128;
+    private const int GroupFanOutConcurrency = 8;
+    private static readonly TimeSpan ReplayPruneInterval = TimeSpan.FromMinutes(30);
+    private static readonly int MaxWireBodyChars =
+        WireBodyPrefix.Length + (((E2eeEnvelopeCodec.MaxEnvelopeBytes + 2) / 3) * 4);
+
+    private readonly ISessionMessageTransport rawTransport;
+    private readonly Func<CancellationToken, Task<string?>> recoveryPhraseProvider;
+    private readonly IClock clock;
+    private readonly IDurableInboxRepository inboxRepository;
+    private readonly object identityGate = new();
+    private readonly SemaphoreSlim receiveGate = new(1, 1);
+    private readonly object deliveredItemsGate = new();
+    private readonly HashSet<InboxDeliveryKey> deliveredItems = [];
+
+    private IdentityCacheEntry? cachedIdentity;
+    private int replayClaimsSincePrune;
+    private DateTimeOffset? lastReplayPruneAt;
+    private int disposed;
+
+    public E2eeClientTransport(
+        ISessionMessageTransport rawTransport,
+        Func<CancellationToken, Task<string?>> recoveryPhraseProvider,
+        IClock clock,
+        IDurableInboxRepository inboxRepository)
+    {
+        this.rawTransport = rawTransport ?? throw new ArgumentNullException(nameof(rawTransport));
+        this.recoveryPhraseProvider = recoveryPhraseProvider ?? throw new ArgumentNullException(nameof(recoveryPhraseProvider));
+        this.clock = clock ?? throw new ArgumentNullException(nameof(clock));
+        this.inboxRepository = inboxRepository ?? throw new ArgumentNullException(nameof(inboxRepository));
+    }
+
+    public async Task SendAsync(OutboundMessageEnvelope envelope, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(envelope);
+        var copies = await WithIdentityAsync(
+            identity => BuildDirectCopies(identity, envelope),
+            cancellationToken).ConfigureAwait(false);
+        await SendCopiesSequentiallyAsync(copies, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<InboundMessageEnvelope>> ReceiveAsync(
+        SessionId recipient,
+        CancellationToken cancellationToken = default)
+    {
+        await receiveGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await WithIdentityAsync(
+                async identity =>
+                {
+                    EnsureLocalAccount(identity, recipient, nameof(recipient));
+                    var candidates = await ReceiveCandidatesAsync(
+                        identity,
+                        DurableInboxItemKind.DirectMessage,
+                        routeKey: null,
+                        cancellationToken).ConfigureAwait(false);
+                    return candidates.Select(static candidate => ToDirectEnvelope(candidate)).ToArray();
+                },
+                cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            receiveGate.Release();
+        }
+    }
+
+    public async Task PublishGroupStateAsync(
+        Group group,
+        DateTimeOffset updatedAt,
+        IEnumerable<SessionId>? recipients = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(group);
+        var copies = await WithIdentityAsync(
+            identity => BuildGroupStateCopies(identity, group, updatedAt, recipients),
+            cancellationToken).ConfigureAwait(false);
+        await SendCopiesWithBoundedConcurrencyAsync(copies, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<InboundGroupStateEnvelope>> ReceiveGroupStatesAsync(
+        SessionId member,
+        CancellationToken cancellationToken = default)
+    {
+        await receiveGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await WithIdentityAsync(
+                async identity =>
+                {
+                    EnsureLocalAccount(identity, member, nameof(member));
+                    var candidates = await ReceiveCandidatesAsync(
+                        identity,
+                        DurableInboxItemKind.GroupState,
+                        routeKey: null,
+                        cancellationToken).ConfigureAwait(false);
+                    return candidates.Select(static candidate => ToGroupStateEnvelope(candidate)).ToArray();
+                },
+                cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            receiveGate.Release();
+        }
+    }
+
+    public async Task SendGroupMessageAsync(
+        OutboundGroupMessageEnvelope envelope,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(envelope);
+        var copies = await WithIdentityAsync(
+            identity => BuildGroupMessageCopies(identity, envelope),
+            cancellationToken).ConfigureAwait(false);
+        await SendCopiesWithBoundedConcurrencyAsync(copies, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<InboundGroupMessageEnvelope>> ReceiveGroupMessagesAsync(
+        ConversationId groupId,
+        CancellationToken cancellationToken = default)
+    {
+        EnsureCanonicalGroupId(groupId, nameof(groupId));
+        await receiveGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await WithIdentityAsync(
+                async identity =>
+                {
+                    var candidates = await ReceiveCandidatesAsync(
+                        identity,
+                        DurableInboxItemKind.GroupMessage,
+                        groupId.Value,
+                        cancellationToken).ConfigureAwait(false);
+                    return candidates.Select(static candidate => ToGroupMessageEnvelope(candidate)).ToArray();
+                },
+                cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            receiveGate.Release();
+        }
+    }
+
+    public async Task<IReadOnlyList<InboundGroupMessageEnvelope>> ReceiveKnownGroupMessagesAsync(
+        SessionId account,
+        IReadOnlyCollection<ConversationId> groupIds,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(groupIds);
+        var routeKeys = groupIds
+            .Distinct()
+            .Select(groupId =>
+            {
+                EnsureCanonicalGroupId(groupId, nameof(groupIds));
+                return groupId.Value;
+            })
+            .ToHashSet(StringComparer.Ordinal);
+        if (routeKeys.Count == 0)
+        {
+            return [];
+        }
+
+        await receiveGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await WithIdentityAsync(
+                async identity =>
+                {
+                    EnsureLocalAccount(identity, account, nameof(account));
+                    var candidates = await ReceiveCandidatesAsync(
+                        identity,
+                        DurableInboxItemKind.GroupMessage,
+                        routeKey: null,
+                        cancellationToken,
+                        routeKeys).ConfigureAwait(false);
+                    return candidates.Select(static candidate => ToGroupMessageEnvelope(candidate)).ToArray();
+                },
+                cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            receiveGate.Release();
+        }
+    }
+
+    public async Task<int> DiscardUnknownGroupMessagesAsync(
+        SessionId account,
+        IReadOnlyCollection<ConversationId> knownGroupIds,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(knownGroupIds);
+        var retainedRouteKeys = knownGroupIds
+            .Distinct()
+            .Select(groupId =>
+            {
+                EnsureCanonicalGroupId(groupId, nameof(knownGroupIds));
+                return groupId.Value;
+            })
+            .ToHashSet(StringComparer.Ordinal);
+
+        await receiveGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await WithIdentityAsync(
+                async identity =>
+                {
+                    EnsureLocalAccount(identity, account, nameof(account));
+                    if (rawTransport is not IAuthenticatedInboxTransport authenticatedTransport)
+                    {
+                        throw new InvalidOperationException(
+                            "The raw personal-inbox transport does not support authenticated retrieval.");
+                    }
+
+                    var scope = new DurableInboxScope(account, authenticatedTransport.InboxNamespace);
+                    while (await ClassifyStagedItemsAsync(
+                               identity,
+                               authenticatedTransport,
+                               scope,
+                               cancellationToken).ConfigureAwait(false) == MaxRawBatchCount)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                    }
+
+                    var discarded = await inboxRepository.DiscardDecodedInboxItemsOutsideRoutesAsync(
+                        scope,
+                        DurableInboxItemKind.GroupMessage,
+                        retainedRouteKeys,
+                        cancellationToken).ConfigureAwait(false);
+                    if (discarded > 0)
+                    {
+                        ForgetDelivered(scope);
+                    }
+
+                    return discarded;
+                },
+                cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            receiveGate.Release();
+        }
+    }
+
+    public void Dispose()
+    {
+        IdentityCacheEntry? identityToDestroy;
+        lock (identityGate)
+        {
+            if (disposed != 0)
+            {
+                return;
+            }
+
+            Volatile.Write(ref disposed, 1);
+            identityToDestroy = RetireIdentityEntry(cachedIdentity);
+            cachedIdentity = null;
+        }
+
+        identityToDestroy?.Destroy();
+
+        lock (deliveredItemsGate)
+        {
+            deliveredItems.Clear();
+        }
+    }
+
+    public void RetireCachedIdentity()
+    {
+        IdentityCacheEntry? identityToDestroy;
+        lock (identityGate)
+        {
+            if (disposed != 0)
+            {
+                return;
+            }
+
+            identityToDestroy = RetireIdentityEntry(cachedIdentity);
+            cachedIdentity = null;
+        }
+
+        identityToDestroy?.Destroy();
+        lock (deliveredItemsGate)
+        {
+            deliveredItems.Clear();
+        }
+    }
+
+    private IReadOnlyList<OutboundMessageEnvelope> BuildDirectCopies(
+        SessionIdentityProvider identity,
+        OutboundMessageEnvelope envelope)
+    {
+        EnsureLocalAccount(identity, envelope.Sender, nameof(envelope.Sender));
+        var now = clock.UtcNow;
+        var protocolExpiresAt = GetProtocolExpiry(envelope.CreatedAt, now);
+        ValidateUserExpiry(envelope.ExpiresAt, envelope.CreatedAt, protocolExpiresAt, now);
+        var content = new E2eeContent(
+            envelope.Reaction is null ? E2eeContentKind.Message : E2eeContentKind.Reaction,
+            envelope.Id ?? MessageId.NewId(),
+            ConversationKind.OneToOne,
+            ConversationId.ForOneToOne(envelope.Recipient),
+            envelope.Sender,
+            envelope.Recipient,
+            envelope.CreatedAt,
+            protocolExpiresAt,
+            envelope.ExpiresAt,
+            envelope.Body,
+            envelope.Attachments,
+            envelope.ReplyTo,
+            envelope.Reaction);
+
+        var targets = new[] { envelope.Recipient, envelope.Sender }.Distinct().ToArray();
+        return BuildWireCopies(identity, content, targets, now);
+    }
+
+    private IReadOnlyList<OutboundMessageEnvelope> BuildGroupMessageCopies(
+        SessionIdentityProvider identity,
+        OutboundGroupMessageEnvelope envelope)
+    {
+        EnsureLocalAccount(identity, envelope.Sender, nameof(envelope.Sender));
+        EnsureCanonicalGroupId(envelope.GroupId, nameof(envelope.GroupId));
+        var now = clock.UtcNow;
+        var protocolExpiresAt = GetProtocolExpiry(envelope.CreatedAt, now);
+        ValidateUserExpiry(envelope.ExpiresAt, envelope.CreatedAt, protocolExpiresAt, now);
+        var targets = (envelope.NotifyRecipients ?? [])
+            .Append(envelope.Sender)
+            .Distinct()
+            .ToArray();
+        var copies = new List<OutboundMessageEnvelope>(targets.Length);
+
+        foreach (var target in targets)
+        {
+            var content = new E2eeContent(
+                envelope.Reaction is null ? E2eeContentKind.Message : E2eeContentKind.Reaction,
+                envelope.Id,
+                ConversationKind.GroupV2,
+                envelope.GroupId,
+                envelope.Sender,
+                target,
+                envelope.CreatedAt,
+                protocolExpiresAt,
+                envelope.ExpiresAt,
+                envelope.Body,
+                envelope.Attachments,
+                envelope.ReplyTo,
+                envelope.Reaction);
+            copies.Add(BuildWireCopy(identity, content, target, now));
+        }
+
+        return copies;
+    }
+
+    private IReadOnlyList<OutboundMessageEnvelope> BuildGroupStateCopies(
+        SessionIdentityProvider identity,
+        Group group,
+        DateTimeOffset updatedAt,
+        IEnumerable<SessionId>? recipients)
+    {
+        EnsureCanonicalGroupId(group.Id, nameof(group));
+        var now = clock.UtcNow;
+        var protocolExpiresAt = GetProtocolExpiry(updatedAt, now);
+        var targets = (recipients ?? group.Members.Select(static member => member.SessionId))
+            .Append(group.CreatedBy)
+            .Append(identity.SessionId)
+            .Distinct()
+            .ToArray();
+        var stateId = DeterministicMessageId(
+            "group-state",
+            group.Id.Value,
+            group.Revision.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        var copies = new List<OutboundMessageEnvelope>(targets.Length);
+
+        foreach (var target in targets)
+        {
+            var content = new E2eeContent(
+                E2eeContentKind.GroupState,
+                stateId,
+                ConversationKind.GroupV2,
+                group.Id,
+                identity.SessionId,
+                target,
+                updatedAt,
+                protocolExpiresAt,
+                null,
+                string.Empty,
+                [],
+                GroupState: group);
+            copies.Add(BuildWireCopy(identity, content, target, now));
+        }
+
+        return copies;
+    }
+
+    private static IReadOnlyList<OutboundMessageEnvelope> BuildWireCopies(
+        SessionIdentityProvider identity,
+        E2eeContent content,
+        IReadOnlyList<SessionId> targets,
+        DateTimeOffset wireCreatedAt)
+    {
+        var copies = new OutboundMessageEnvelope[targets.Count];
+        for (var index = 0; index < targets.Count; index++)
+        {
+            copies[index] = BuildWireCopy(identity, content, targets[index], wireCreatedAt);
+        }
+
+        return copies;
+    }
+
+    private static OutboundMessageEnvelope BuildWireCopy(
+        SessionIdentityProvider identity,
+        E2eeContent content,
+        SessionId target,
+        DateTimeOffset wireCreatedAt)
+    {
+        var encrypted = identity.CreateEnvelopeCodec().EncryptContent(content, target);
+        try
+        {
+            return new OutboundMessageEnvelope(
+                identity.SessionId,
+                target,
+                EncodeWireBody(encrypted),
+                [],
+                wireCreatedAt,
+                content.ProtocolExpiresAt,
+                DeterministicMessageId("wire", content.MessageId.Value, target.Value));
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(encrypted);
+        }
+    }
+
+    private async Task SendCopiesSequentiallyAsync(
+        IReadOnlyList<OutboundMessageEnvelope> copies,
+        CancellationToken cancellationToken)
+    {
+        foreach (var copy in copies)
+        {
+            await rawTransport.SendAsync(copy, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private Task SendCopiesWithBoundedConcurrencyAsync(
+        IReadOnlyList<OutboundMessageEnvelope> copies,
+        CancellationToken cancellationToken) =>
+        Parallel.ForEachAsync(
+            copies,
+            new ParallelOptions
+            {
+                MaxDegreeOfParallelism = GroupFanOutConcurrency,
+                CancellationToken = cancellationToken
+            },
+            async (copy, itemCancellationToken) =>
+                await rawTransport.SendAsync(copy, itemCancellationToken).ConfigureAwait(false));
+
+    public async Task AcknowledgeInboxItemAsync(
+        SessionId account,
+        string serverHash,
+        CancellationToken cancellationToken = default)
+    {
+        var result = await WithIdentityAsync(
+            async identity =>
+            {
+                EnsureLocalAccount(identity, account, nameof(account));
+                if (rawTransport is not IAuthenticatedInboxTransport authenticatedTransport)
+                {
+                    throw new InvalidOperationException(
+                        "The raw personal-inbox transport does not support authenticated retrieval.");
+                }
+
+                var scope = new DurableInboxScope(account, authenticatedTransport.InboxNamespace);
+                var ack = await inboxRepository.AcknowledgeInboxItemAsync(
+                    scope,
+                    serverHash,
+                    cancellationToken).ConfigureAwait(false);
+                ForgetDelivered(scope, serverHash);
+                return ack;
+            },
+            cancellationToken).ConfigureAwait(false);
+
+        await PruneReplayClaimsIfNeededAsync(cancellationToken).ConfigureAwait(false);
+        if (result == DurableInboxAckResult.RejectedDigestMismatch)
+        {
+            throw new E2eeProtocolException("The durable inbox replay digest changed before acknowledgement.");
+        }
+    }
+
+    private async Task<IReadOnlyList<DecodedCandidate>> ReceiveCandidatesAsync(
+        SessionIdentityProvider identity,
+        DurableInboxItemKind kind,
+        string? routeKey,
+        CancellationToken cancellationToken,
+        IReadOnlySet<string>? retainedRouteKeys = null)
+    {
+        if (rawTransport is not IAuthenticatedInboxTransport authenticatedTransport)
+        {
+            throw new InvalidOperationException(
+                "The raw personal-inbox transport does not support authenticated retrieval.");
+        }
+
+        var scope = new DurableInboxScope(identity.SessionId, authenticatedTransport.InboxNamespace);
+        await ClassifyStagedItemsAsync(identity, authenticatedTransport, scope, cancellationToken)
+            .ConfigureAwait(false);
+        var items = await inboxRepository.ListDecodedInboxItemsAsync(
+            scope,
+            kind,
+            routeKey,
+            MaxRawBatchCount,
+            cancellationToken).ConfigureAwait(false);
+        items = RetainRoutes(items, retainedRouteKeys);
+
+        if ((items.Count == 0 || items.All(item => WasDelivered(scope, item.ServerHash)))
+            && await inboxRepository.CountPendingInboxItemsAsync(scope, cancellationToken).ConfigureAwait(false)
+                < DurableInboxLimits.MaxPendingItemCount)
+        {
+            await RetrieveAndStageAsync(identity, authenticatedTransport, scope, cancellationToken)
+                .ConfigureAwait(false);
+            await ClassifyStagedItemsAsync(identity, authenticatedTransport, scope, cancellationToken)
+                .ConfigureAwait(false);
+            items = await inboxRepository.ListDecodedInboxItemsAsync(
+                scope,
+                kind,
+                routeKey,
+                MaxRawBatchCount,
+                cancellationToken).ConfigureAwait(false);
+            items = RetainRoutes(items, retainedRouteKeys);
+        }
+
+        var candidates = new List<DecodedCandidate>(items.Count);
+        foreach (var item in items)
+        {
+            try
+            {
+                var candidate = DecodeCandidate(identity, authenticatedTransport, item);
+                if (!Equals(CreateDecodedMetadata(candidate.Content, candidate.EnvelopeDigest), item.Decoded))
+                {
+                    throw new E2eeProtocolException("Staged inbox metadata no longer matches its wire entry.");
+                }
+
+                candidates.Add(candidate);
+                MarkDelivered(scope, item.ServerHash);
+            }
+            catch (Exception exception) when (IsRejectedWireEntry(exception))
+            {
+                await inboxRepository.DiscardInboxItemAsync(scope, item.ServerHash, cancellationToken)
+                    .ConfigureAwait(false);
+                ForgetDelivered(scope, item.ServerHash);
+            }
+        }
+
+        return candidates;
+    }
+
+    private static IReadOnlyList<DurableInboxItem> RetainRoutes(
+        IReadOnlyList<DurableInboxItem> items,
+        IReadOnlySet<string>? retainedRouteKeys)
+    {
+        if (retainedRouteKeys is null)
+        {
+            return items;
+        }
+
+        return items
+            .Where(item => item.Decoded is { } decoded && retainedRouteKeys.Contains(decoded.RouteKey))
+            .ToArray();
+    }
+
+    private async Task RetrieveAndStageAsync(
+        SessionIdentityProvider identity,
+        IAuthenticatedInboxTransport authenticatedTransport,
+        DurableInboxScope scope,
+        CancellationToken cancellationToken)
+    {
+        var cursor = await inboxRepository.GetInboxCursorAsync(scope, cancellationToken).ConfigureAwait(false);
+        var batch = await authenticatedTransport.RetrieveAuthenticatedAsync(
+            identity,
+            cursor,
+            MaxRawBatchCount,
+            cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidOperationException("The authenticated inbox transport returned a null batch.");
+        if (batch.Entries is null || batch.Entries.Count > MaxRawBatchCount)
+        {
+            throw new InvalidOperationException("The authenticated inbox transport returned an invalid batch.");
+        }
+
+        if (batch.Entries.Count == 0)
+        {
+            if (!string.Equals(batch.NextCursor, cursor, StringComparison.Ordinal))
+            {
+                throw new E2eeProtocolException("An empty authenticated inbox batch attempted to advance its cursor.");
+            }
+
+            return;
+        }
+
+        await inboxRepository.StageInboxBatchAsync(
+            scope,
+            cursor,
+            batch.NextCursor,
+            batch.Entries,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<int> ClassifyStagedItemsAsync(
+        SessionIdentityProvider identity,
+        IAuthenticatedInboxTransport authenticatedTransport,
+        DurableInboxScope scope,
+        CancellationToken cancellationToken)
+    {
+        var staged = await inboxRepository.ListStagedInboxItemsAsync(
+            scope,
+            MaxRawBatchCount,
+            cancellationToken).ConfigureAwait(false);
+        foreach (var item in staged)
+        {
+            try
+            {
+                var candidate = DecodeCandidate(identity, authenticatedTransport, item);
+                await inboxRepository.PrepareInboxItemAsync(
+                    scope,
+                    item.ServerHash,
+                    CreateDecodedMetadata(candidate.Content, candidate.EnvelopeDigest),
+                    cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (IsRejectedWireEntry(exception))
+            {
+                await inboxRepository.DiscardInboxItemAsync(scope, item.ServerHash, cancellationToken)
+                    .ConfigureAwait(false);
+                ForgetDelivered(scope, item.ServerHash);
+            }
+        }
+
+        return staged.Count;
+    }
+
+    private bool WasDelivered(DurableInboxScope scope, string serverHash)
+    {
+        lock (deliveredItemsGate)
+        {
+            return deliveredItems.Contains(ToDeliveryKey(scope, serverHash));
+        }
+    }
+
+    private void MarkDelivered(DurableInboxScope scope, string serverHash)
+    {
+        lock (deliveredItemsGate)
+        {
+            deliveredItems.Add(ToDeliveryKey(scope, serverHash));
+        }
+    }
+
+    private void ForgetDelivered(DurableInboxScope scope, string serverHash)
+    {
+        lock (deliveredItemsGate)
+        {
+            deliveredItems.Remove(ToDeliveryKey(scope, serverHash));
+        }
+    }
+
+    private void ForgetDelivered(DurableInboxScope scope)
+    {
+        lock (deliveredItemsGate)
+        {
+            deliveredItems.RemoveWhere(key =>
+                string.Equals(key.AccountSessionId, scope.Account.Value, StringComparison.Ordinal)
+                && key.Namespace == scope.Namespace);
+        }
+    }
+
+    private static InboxDeliveryKey ToDeliveryKey(DurableInboxScope scope, string serverHash) =>
+        new(scope.Account.Value, scope.Namespace, serverHash);
+
+    private DecodedCandidate DecodeCandidate(
+        SessionIdentityProvider identity,
+        IAuthenticatedInboxTransport authenticatedTransport,
+        DurableInboxItem item)
+    {
+        var entry = new DurableInboxWireEntry(
+            item.ServerHash,
+            item.StorageTimestamp,
+            item.WirePayload,
+            item.WireDigest);
+        if (!authenticatedTransport.TryDecodeInboxEntry(entry, identity.SessionId, out var raw))
+        {
+            throw new E2eeProtocolException("Staged storage data is not a valid raw inbox entry.");
+        }
+
+        return DecodeCandidate(identity, raw);
+    }
+
+    private DecodedCandidate DecodeCandidate(SessionIdentityProvider identity, InboundMessageEnvelope raw)
+    {
+        if (raw is null || raw.Recipient != identity.SessionId || raw.Attachments is null || raw.Attachments.Count != 0 ||
+            raw.ReplyTo is not null || raw.Reaction is not null || string.IsNullOrWhiteSpace(raw.ServerHash) ||
+            raw.ServerHash.Length > MaxServerHashChars || !TryDecodeWireBody(raw.Body, out var envelope))
+        {
+            throw new E2eeProtocolException("Raw inbox entry is not a valid DPE1 wire blob.");
+        }
+
+        try
+        {
+            var decoded = identity.CreateEnvelopeCodec().DecryptContent(
+                envelope,
+                clock.UtcNow,
+                E2eeContentCodec.DefaultMaxFutureSkew);
+            if (raw.Sender != decoded.Envelope.Sender)
+            {
+                throw new E2eeProtocolException("Raw sender does not match the authenticated DPE1 sender.");
+            }
+
+            ValidateLocalSemanticBinding(decoded.Content, identity.SessionId);
+            return new DecodedCandidate(decoded.Content, decoded.Envelope.EnvelopeDigestHex, raw.ServerHash);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(envelope);
+        }
+    }
+
+    private static void ValidateLocalSemanticBinding(E2eeContent content, SessionId localSessionId)
+    {
+        if (content.Kind == E2eeContentKind.GroupState)
+        {
+            if (content.Recipient != localSessionId || content.GroupState is null)
+            {
+                throw new E2eeProtocolException("DMC1 group state is not addressed to the local account.");
+            }
+
+            return;
+        }
+
+        if (content.ConversationKind == ConversationKind.OneToOne)
+        {
+            if (content.Sender != localSessionId && content.Recipient != localSessionId)
+            {
+                throw new E2eeProtocolException("DMC1 direct message does not involve the local account.");
+            }
+
+            return;
+        }
+
+        if (content.ConversationKind != ConversationKind.GroupV2 || content.Recipient != localSessionId)
+        {
+            throw new E2eeProtocolException("DMC1 group message is not addressed to the local account.");
+        }
+    }
+
+    private static DurableInboxDecodedMetadata CreateDecodedMetadata(E2eeContent content, string envelopeDigest) =>
+        new(
+            content.Kind == E2eeContentKind.GroupState
+                ? DurableInboxItemKind.GroupState
+                : content.ConversationKind == ConversationKind.OneToOne
+                    ? DurableInboxItemKind.DirectMessage
+                    : DurableInboxItemKind.GroupMessage,
+            content.ConversationId.Value,
+            content.Sender,
+            content.MessageId,
+            envelopeDigest,
+            content.ProtocolExpiresAt);
+
+    private static MessageId DeterministicMessageId(string scope, params string[] values)
+    {
+        var material = Encoding.UTF8.GetBytes(string.Join('\n', ["deep-message-id-v1", scope, .. values]));
+        try
+        {
+            return new MessageId(Convert.ToHexStringLower(SHA256.HashData(material)));
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(material);
+        }
+    }
+
+    private static InboundMessageEnvelope ToDirectEnvelope(DecodedCandidate candidate)
+    {
+        var content = candidate.Content;
+        return new InboundMessageEnvelope(
+            content.MessageId,
+            content.Sender,
+            content.Recipient,
+            content.Body,
+            content.Attachments,
+            content.IssuedAt,
+            content.UserExpiresAt,
+            candidate.ServerHash,
+            content.Reply,
+            content.Reaction);
+    }
+
+    private static InboundGroupStateEnvelope ToGroupStateEnvelope(DecodedCandidate candidate)
+    {
+        var content = candidate.Content;
+        return new InboundGroupStateEnvelope(
+            content.GroupState!,
+            content.IssuedAt,
+            candidate.ServerHash,
+            content.Sender);
+    }
+
+    private static InboundGroupMessageEnvelope ToGroupMessageEnvelope(DecodedCandidate candidate)
+    {
+        var content = candidate.Content;
+        return new InboundGroupMessageEnvelope(
+            content.MessageId,
+            content.ConversationId,
+            content.Sender,
+            content.Body,
+            content.Attachments,
+            content.IssuedAt,
+            content.UserExpiresAt,
+            candidate.ServerHash,
+            content.Reply,
+            content.Reaction);
+    }
+
+    private async Task PruneReplayClaimsIfNeededAsync(CancellationToken cancellationToken)
+    {
+        replayClaimsSincePrune++;
+        var now = clock.UtcNow;
+        if (lastReplayPruneAt is { } lastPrune &&
+            replayClaimsSincePrune < ReplayClaimsPerPrune &&
+            now - lastPrune < ReplayPruneInterval)
+        {
+            return;
+        }
+
+        await inboxRepository.PruneExpiredAsync(now, cancellationToken).ConfigureAwait(false);
+        replayClaimsSincePrune = 0;
+        lastReplayPruneAt = now;
+    }
+
+    private async Task<T> WithIdentityAsync<T>(
+        Func<SessionIdentityProvider, T> operation,
+        CancellationToken cancellationToken)
+    {
+        using var identityLease = await AcquireIdentityLeaseAsync(cancellationToken).ConfigureAwait(false);
+        return operation(identityLease.Identity);
+    }
+
+    private async Task<T> WithIdentityAsync<T>(
+        Func<SessionIdentityProvider, Task<T>> operation,
+        CancellationToken cancellationToken)
+    {
+        using var identityLease = await AcquireIdentityLeaseAsync(cancellationToken).ConfigureAwait(false);
+        return await operation(identityLease.Identity).ConfigureAwait(false);
+    }
+
+    private async Task<IdentityLease> AcquireIdentityLeaseAsync(CancellationToken cancellationToken)
+    {
+        ThrowIfDisposed();
+        var phrase = await recoveryPhraseProvider(cancellationToken).ConfigureAwait(false);
+        if (string.IsNullOrWhiteSpace(phrase))
+        {
+            throw new InvalidOperationException("An active recovery phrase is required for E2EE transport.");
+        }
+
+        var fingerprint = ComputePhraseFingerprint(phrase);
+        IdentityCacheEntry? identityToDestroy = null;
+        var identityChanged = false;
+        try
+        {
+            lock (identityGate)
+            {
+                ThrowIfDisposed();
+                if (cachedIdentity is null ||
+                    !CryptographicOperations.FixedTimeEquals(cachedIdentity.PhraseFingerprint, fingerprint))
+                {
+                    var replacement = new IdentityCacheEntry(
+                        new SessionIdentityProvider(phrase),
+                        fingerprint.ToArray());
+                    identityToDestroy = RetireIdentityEntry(cachedIdentity);
+                    cachedIdentity = replacement;
+                    identityChanged = true;
+                }
+
+                cachedIdentity.LeaseCount++;
+                return new IdentityLease(this, cachedIdentity);
+            }
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(fingerprint);
+            identityToDestroy?.Destroy();
+            if (identityChanged)
+            {
+                lock (deliveredItemsGate)
+                {
+                    deliveredItems.Clear();
+                }
+            }
+        }
+    }
+
+    private void ReleaseIdentity(IdentityCacheEntry entry)
+    {
+        IdentityCacheEntry? identityToDestroy;
+        lock (identityGate)
+        {
+            if (entry.LeaseCount <= 0)
+            {
+                throw new InvalidOperationException("An E2EE identity lease was released more than once.");
+            }
+
+            entry.LeaseCount--;
+            identityToDestroy = TryClaimIdentityForDestruction(entry);
+        }
+
+        identityToDestroy?.Destroy();
+    }
+
+    private static IdentityCacheEntry? RetireIdentityEntry(IdentityCacheEntry? entry)
+    {
+        if (entry is null)
+        {
+            return null;
+        }
+
+        entry.Retired = true;
+        return TryClaimIdentityForDestruction(entry);
+    }
+
+    private static IdentityCacheEntry? TryClaimIdentityForDestruction(IdentityCacheEntry entry)
+    {
+        if (!entry.Retired || entry.LeaseCount != 0 || entry.DestructionClaimed)
+        {
+            return null;
+        }
+
+        entry.DestructionClaimed = true;
+        return entry;
+    }
+
+    private static byte[] ComputePhraseFingerprint(string phrase)
+    {
+        var normalized = SessionIdentityMaterial.NormalizeRecoveryPhrase(phrase)
+            .Normalize(NormalizationForm.FormKD);
+        var bytes = Encoding.UTF8.GetBytes(normalized);
+        try
+        {
+            return SHA256.HashData(bytes);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(bytes);
+        }
+    }
+
+    private static DateTimeOffset GetProtocolExpiry(DateTimeOffset issuedAt, DateTimeOffset now)
+    {
+        DateTimeOffset latestIssueTime;
+        DateTimeOffset protocolExpiresAt;
+        try
+        {
+            latestIssueTime = now.Add(E2eeContentCodec.DefaultMaxFutureSkew);
+            protocolExpiresAt = issuedAt.Add(E2eeContentCodec.MaxProtocolLifetime);
+        }
+        catch (ArgumentOutOfRangeException exception)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(issuedAt),
+                issuedAt,
+                $"The E2EE protocol timestamp is out of range: {exception.Message}");
+        }
+
+        if (issuedAt > latestIssueTime || protocolExpiresAt <= now)
+        {
+            throw new ArgumentOutOfRangeException(nameof(issuedAt), "The E2EE protocol timestamp is expired or too far in the future.");
+        }
+
+        return protocolExpiresAt;
+    }
+
+    private static void ValidateUserExpiry(
+        DateTimeOffset? userExpiresAt,
+        DateTimeOffset issuedAt,
+        DateTimeOffset protocolExpiresAt,
+        DateTimeOffset now)
+    {
+        if (userExpiresAt is { } expiry &&
+            (expiry <= issuedAt || expiry > protocolExpiresAt || expiry <= now))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(userExpiresAt),
+                "Message expiry must be active and contained within the 15-day protocol lifetime.");
+        }
+    }
+
+    private static void EnsureLocalAccount(
+        SessionIdentityProvider identity,
+        SessionId expected,
+        string parameterName)
+    {
+        if (identity.SessionId != expected)
+        {
+            throw new InvalidOperationException(
+                $"The active recovery phrase does not match {parameterName}.");
+        }
+    }
+
+    private static void EnsureCanonicalGroupId(ConversationId groupId, string parameterName)
+    {
+        var value = groupId.Value;
+        if (value is null || value.Length != 66 || !value.StartsWith("03", StringComparison.Ordinal) ||
+            value.Any(static character => character is not (>= '0' and <= '9') and not (>= 'a' and <= 'f')))
+        {
+            throw new ArgumentException("A canonical group-v2 ID is required.", parameterName);
+        }
+    }
+
+    private static string EncodeWireBody(ReadOnlySpan<byte> envelope) =>
+        WireBodyPrefix + Convert.ToBase64String(envelope)
+            .TrimEnd('=')
+            .Replace('+', '-')
+            .Replace('/', '_');
+
+    private static bool TryDecodeWireBody(string? body, out byte[] envelope)
+    {
+        envelope = [];
+        if (body is null || body.Length <= WireBodyPrefix.Length || body.Length > MaxWireBodyChars ||
+            !body.StartsWith(WireBodyPrefix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var payload = body[WireBodyPrefix.Length..];
+        if (payload.Any(char.IsWhiteSpace) || payload.Contains('=') && !payload.EndsWith("=", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var standard = payload.Replace('-', '+').Replace('_', '/');
+        var remainder = standard.Length % 4;
+        if (remainder == 1)
+        {
+            return false;
+        }
+
+        if (remainder != 0)
+        {
+            standard = standard.PadRight(standard.Length + (4 - remainder), '=');
+        }
+
+        try
+        {
+            envelope = Convert.FromBase64String(standard);
+            return envelope.Length <= E2eeEnvelopeCodec.MaxEnvelopeBytes;
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
+    }
+
+    private static bool IsRejectedWireEntry(Exception exception) =>
+        exception is E2eeProtocolException or ArgumentException or FormatException or OverflowException;
+
+    private void ThrowIfDisposed() =>
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
+
+    private sealed class IdentityLease(
+        E2eeClientTransport owner,
+        IdentityCacheEntry entry) : IDisposable
+    {
+        private IdentityCacheEntry? leasedEntry = entry;
+
+        public SessionIdentityProvider Identity =>
+            leasedEntry?.Identity ?? throw new ObjectDisposedException(nameof(IdentityLease));
+
+        public void Dispose()
+        {
+            var releasedEntry = Interlocked.Exchange(ref leasedEntry, null);
+            if (releasedEntry is not null)
+            {
+                owner.ReleaseIdentity(releasedEntry);
+            }
+        }
+    }
+
+    private sealed class IdentityCacheEntry(
+        SessionIdentityProvider identity,
+        byte[] phraseFingerprint)
+    {
+        public SessionIdentityProvider Identity { get; } = identity;
+
+        public byte[] PhraseFingerprint { get; } = phraseFingerprint;
+
+        public int LeaseCount { get; set; }
+
+        public bool Retired { get; set; }
+
+        public bool DestructionClaimed { get; set; }
+
+        public void Destroy()
+        {
+            try
+            {
+                Identity.Dispose();
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(PhraseFingerprint);
+            }
+        }
+    }
+
+    private sealed record DecodedCandidate(
+        E2eeContent Content,
+        string EnvelopeDigest,
+        string ServerHash);
+
+    private sealed record InboxDeliveryKey(string AccountSessionId, int Namespace, string ServerHash);
+}

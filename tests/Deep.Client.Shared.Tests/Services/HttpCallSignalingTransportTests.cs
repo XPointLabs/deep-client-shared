@@ -16,6 +16,7 @@ public sealed class HttpCallSignalingTransportTests
         {
             Assert.Equal(HttpMethod.Post, request.Method);
             Assert.Equal("http://localhost:18082/api/calls/signal", request.RequestUri?.ToString());
+            Assert.NotEqual(true, request.Headers.ConnectionClose);
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Accepted));
         });
 
@@ -119,6 +120,62 @@ public sealed class HttpCallSignalingTransportTests
     }
 
     [Fact]
+    public async Task AuthenticatedTransport_RejectsReplayAndStaleSignal()
+    {
+        string? storedEnvelope = null;
+        var handler = new RecordingHandler(async (request, cancellationToken) =>
+        {
+            if (request.Method == HttpMethod.Post)
+            {
+                storedEnvelope = await request.Content!.ReadAsStringAsync(cancellationToken);
+                return new HttpResponseMessage(HttpStatusCode.Accepted);
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent($"[{storedEnvelope}]", Encoding.UTF8, "application/json")
+            };
+        });
+        var aliceRuntime = Deep.Client.Shared.State.ClientRuntime.CreateStubbed();
+        var bobRuntime = Deep.Client.Shared.State.ClientRuntime.CreateStubbed();
+        var alice = await aliceRuntime.Accounts.RegisterAsync("Alice");
+        var bob = await bobRuntime.Accounts.RegisterAsync("Bob");
+        var alicePhrase = await aliceRuntime.Accounts.GetRecoveryPhraseAsync();
+        var bobPhrase = await bobRuntime.Accounts.GetRecoveryPhraseAsync();
+        var now = DateTimeOffset.Parse("2026-07-11T00:00:00Z");
+        var client = new HttpClient(handler);
+        var options = new HttpCallSignalingTransportOptions("http://localhost:18082");
+        var aliceTransport = new HttpCallSignalingTransport(client, options, _ => Task.FromResult(alicePhrase));
+        var bobTransport = new HttpCallSignalingTransport(
+            client,
+            options,
+            _ => Task.FromResult(bobPhrase),
+            new FixedTimeProvider(now));
+
+        await aliceTransport.SendAsync(new CallSignalEnvelope(
+            "call-replay",
+            bob.SessionId.Value,
+            alice.SessionId,
+            bob.SessionId,
+            CallSignalType.Offer,
+            "{\"sdp\":\"offer\"}",
+            now));
+
+        Assert.Single(await bobTransport.ReceiveAsync(bob.SessionId));
+        Assert.Empty(await bobTransport.ReceiveAsync(bob.SessionId));
+
+        await aliceTransport.SendAsync(new CallSignalEnvelope(
+            "call-stale",
+            bob.SessionId.Value,
+            alice.SessionId,
+            bob.SessionId,
+            CallSignalType.Offer,
+            "{\"sdp\":\"stale\"}",
+            now.Subtract(TimeSpan.FromMinutes(6))));
+        Assert.Empty(await bobTransport.ReceiveAsync(bob.SessionId));
+    }
+
+    [Fact]
     public async Task GetAsyncAuthenticatesAndReadsEphemeralIceConfiguration()
     {
         var runtime = Deep.Client.Shared.State.ClientRuntime.CreateStubbed();
@@ -191,5 +248,10 @@ public sealed class HttpCallSignalingTransportTests
             RequestCount++;
             return await _responder(request, cancellationToken).ConfigureAwait(false);
         }
+    }
+
+    private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now;
     }
 }

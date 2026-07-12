@@ -73,7 +73,9 @@ public sealed class SessionTransportTests
     public async Task SessionStorageMessageTransport_SendAndReceive_UsesStorageStoreRetrieveContract()
     {
         var sender = SessionId.CreateNew();
-        var recipient = SessionId.CreateNew();
+        using var recipientIdentity = new SessionIdentityProvider(
+            "amber anchor april arrow atom aurora autumn badge bamboo beacon berry blade");
+        var recipient = recipientIdentity.SessionId;
         var storedMessages = new List<JsonElement>();
         var retrieveRequests = new List<JsonElement>();
 
@@ -106,6 +108,12 @@ public sealed class SessionTransportTests
                 Assert.Equal(recipient.Value, root.GetProperty("pubkey").GetString());
                 Assert.Equal(0, root.GetProperty("namespace").GetInt32());
                 Assert.False(string.IsNullOrWhiteSpace(root.GetProperty("signature").GetString()));
+                Assert.Equal(64, root.GetProperty("pubkey_ed25519").GetString()!.Length);
+                var signedTimestamp = root.GetProperty("timestamp").GetInt64();
+                Assert.True(PublicKeyAuth.VerifyDetached(
+                    Convert.FromBase64String(root.GetProperty("signature").GetString()!),
+                    Encoding.UTF8.GetBytes($"retrieve{signedTimestamp}"),
+                    Convert.FromHexString(root.GetProperty("pubkey_ed25519").GetString()!)));
                 retrieveRequests.Add(root);
 
                 var stored = storedMessages.Single();
@@ -137,7 +145,7 @@ public sealed class SessionTransportTests
             new SessionStorageMessageTransportOptions("http://storage.local", TtlMilliseconds: 60_000));
 
         await transport.SendAsync(new OutboundMessageEnvelope(sender, recipient, "hello-storage", [], DateTimeOffset.Parse("2026-06-10T00:00:00Z"), null));
-        var received = await transport.ReceiveAsync(recipient);
+        var received = await transport.ReceiveAuthenticatedAsync(recipientIdentity);
 
         Assert.Single(storedMessages);
         Assert.Single(retrieveRequests);
@@ -149,10 +157,86 @@ public sealed class SessionTransportTests
     }
 
     [Fact]
+    public async Task SessionStorageMessageTransport_RetrievePreservesServerCursorOrder()
+    {
+        using var recipientIdentity = new SessionIdentityProvider(
+            "amber anchor april arrow atom aurora autumn badge bamboo beacon berry blade");
+        var sender = SessionId.CreateNew();
+        var stored = new List<JsonElement>();
+
+        using var client = new HttpClient(new FakeHandler((request, cancellationToken) =>
+        {
+            var json = request.Content!.ReadAsStringAsync(cancellationToken).GetAwaiter().GetResult();
+            using var document = JsonDocument.Parse(json);
+            if (request.RequestUri!.AbsolutePath == "/storage/store")
+            {
+                stored.Add(document.RootElement.Clone());
+                return Json(new { hash = $"hash-{stored.Count}" });
+            }
+
+            if (request.RequestUri.AbsolutePath == "/storage/retrieve")
+            {
+                return Json(new
+                {
+                    messages = new[]
+                    {
+                        new
+                        {
+                            hash = "server-first",
+                            timestamp = 2_000L,
+                            data = stored[0].GetProperty("data").GetString()
+                        },
+                        new
+                        {
+                            hash = "server-second",
+                            timestamp = 1_000L,
+                            data = stored[1].GetProperty("data").GetString()
+                        }
+                    }
+                });
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.NotFound);
+        }))
+        {
+            BaseAddress = new Uri("http://storage.local/")
+        };
+        var transport = new SessionStorageMessageTransport(
+            client,
+            new SessionStorageMessageTransportOptions("http://storage.local"));
+
+        await transport.SendAsync(new OutboundMessageEnvelope(
+            sender,
+            recipientIdentity.SessionId,
+            "first on server",
+            [],
+            DateTimeOffset.Parse("2026-07-10T00:00:02Z"),
+            null));
+        await transport.SendAsync(new OutboundMessageEnvelope(
+            sender,
+            recipientIdentity.SessionId,
+            "second on server",
+            [],
+            DateTimeOffset.Parse("2026-07-10T00:00:01Z"),
+            null));
+
+        var batch = await transport.RetrieveAuthenticatedAsync(recipientIdentity, null, 10);
+
+        Assert.Equal(["server-first", "server-second"], batch.Entries.Select(static item => item.ServerHash));
+        Assert.Equal("server-second", batch.NextCursor);
+        Assert.True(transport.TryDecodeInboxEntry(batch.Entries[0], recipientIdentity.SessionId, out var first));
+        Assert.True(transport.TryDecodeInboxEntry(batch.Entries[1], recipientIdentity.SessionId, out var second));
+        Assert.Equal("first on server", first.Body);
+        Assert.Equal("second on server", second.Body);
+    }
+
+    [Fact]
     public async Task RoutedSessionStorageMessageTransport_SendAndReceive_UsesRouterRpcAndTracksRoute()
     {
         var sender = SessionId.CreateNew();
-        var recipient = SessionId.CreateNew();
+        using var recipientIdentity = new SessionIdentityProvider(
+            "amber anchor april arrow atom aurora autumn badge bamboo beacon berry blade");
+        var recipient = recipientIdentity.SessionId;
         JsonElement? storedMessage = null;
         var rpcMethods = new List<string>();
         var onionRoute = new TestOnionRoute();
@@ -171,9 +255,9 @@ public sealed class SessionTransportTests
 
             if (method == "storage_route")
             {
-                return RouterJson(id, new
+                return onionRoute.RouterJson(root, new
                 {
-                    targetKey = recipient.Value,
+                    routeNonce = root.GetProperty("payload").GetProperty("routeNonce").GetString(),
                     route = onionRoute.RouteDocument()
                 });
             }
@@ -184,7 +268,7 @@ public sealed class SessionTransportTests
                 if (final.StoragePath == "/storage/store")
                 {
                     storedMessage = final.Body.Clone();
-                    return RouterJson(id, new
+                    return onionRoute.RouterJson(root, new
                     {
                         onionResponse = onionRoute.EncryptResponse(final.ResponsePublicKey, new
                         {
@@ -196,8 +280,13 @@ public sealed class SessionTransportTests
                 }
 
                 Assert.Equal("/storage/retrieve", final.StoragePath);
+                var retrieveTimestamp = final.Body.GetProperty("timestamp").GetInt64();
+                Assert.True(PublicKeyAuth.VerifyDetached(
+                    Convert.FromBase64String(final.Body.GetProperty("signature").GetString()!),
+                    Encoding.UTF8.GetBytes($"retrieve{retrieveTimestamp}"),
+                    Convert.FromHexString(final.Body.GetProperty("pubkey_ed25519").GetString()!)));
                 var stored = storedMessage!.Value;
-                return RouterJson(id, new
+                return onionRoute.RouterJson(root, new
                 {
                     onionResponse = onionRoute.EncryptResponse(final.ResponsePublicKey, new
                     {
@@ -224,13 +313,15 @@ public sealed class SessionTransportTests
 
         var router = new XNodeRpcClient(
             client,
-            new XNodeRpcClientOptions(["http://router-one.local", "http://router-two.local"]));
+            new XNodeRpcClientOptions(
+                [new PinnedRouterEndpoint("http://router-one.local", TestOnionRoute.RouterIds[0])],
+                TrustedRouterIds: TestOnionRoute.RouterIds));
         var transport = new RoutedSessionStorageMessageTransport(
             router,
             new RoutedSessionStorageTransportOptions(TtlMilliseconds: 60_000));
 
         await transport.SendAsync(new OutboundMessageEnvelope(sender, recipient, "hello-routed", [], DateTimeOffset.Parse("2026-06-10T00:00:00Z"), null));
-        var received = await transport.ReceiveAsync(recipient);
+        var received = await transport.ReceiveAuthenticatedAsync(recipientIdentity);
 
         Assert.Equal(new[] { "storage_route", "onion_request", "storage_route", "onion_request" }, rpcMethods);
         Assert.Single(received);
@@ -260,15 +351,6 @@ public sealed class SessionTransportTests
         {
             Content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json")
         };
-
-    private static HttpResponseMessage RouterJson<T>(string id, T result) =>
-        Json(new
-        {
-            id,
-            success = true,
-            result,
-            error = (string?)null
-        });
 
     private sealed class TestOnionRoute
     {
@@ -301,6 +383,49 @@ public sealed class SessionTransportTests
             RouteNode(1, 20444),
             RouteNode(2, 20445)
         ];
+
+        public HttpResponseMessage RouterJson<T>(JsonElement request, T result)
+        {
+            var id = request.GetProperty("id").GetString()!;
+            var method = request.GetProperty("method").GetString()!;
+            var nonce = request.GetProperty("nonce").GetString()!;
+            var payload = request.GetProperty("payload");
+            var resultElement = JsonSerializer.SerializeToElement(result, JsonOptions);
+            var issuedAtUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var requestPayloadSha256 = RpcCanonicalJson.Sha256Hex(payload);
+            var outcomeSha256 = RpcCanonicalJson.Sha256Hex(resultElement);
+            var signingPayload = JsonSerializer.SerializeToElement(new
+            {
+                version = "xpoint-rpc-response-v1",
+                responderRouterId = RouterIds[0],
+                requestId = id,
+                method,
+                nonce,
+                requestPayloadSha256,
+                issuedAtUnixMs,
+                success = true,
+                outcomeSha256
+            }, JsonOptions);
+            var signature = PublicKeyAuth.SignDetached(
+                RpcCanonicalJson.Serialize(signingPayload),
+                SigningKeys[0].PrivateKey);
+            return Json(new
+            {
+                id,
+                success = true,
+                result = resultElement,
+                error = (string?)null,
+                version = "xpoint-rpc-response-v1",
+                responderRouterId = RouterIds[0],
+                method,
+                nonce,
+                requestPayloadSha256,
+                issuedAtUnixMs,
+                outcomeSha256,
+                signatureAlgorithm = "ed25519",
+                signature = Convert.ToHexString(signature).ToLowerInvariant()
+            });
+        }
 
         public FinalStorageLayer OpenStorageLayer(JsonElement payload)
         {

@@ -98,22 +98,32 @@ public sealed record HttpCallSignalingTransportOptions(
     string BaseUrl,
     string SignalPath = "/api/calls/signal",
     string InboxPathFormat = "/api/calls/inbox/{recipient}",
-    string IceServersPathFormat = "/api/calls/ice-servers/{recipient}");
+    string IceServersPathFormat = "/api/calls/ice-servers/{recipient}",
+    TimeSpan SignalFreshness = default,
+    int MaxResponseBytes = 1_048_576);
 
 public sealed class HttpCallSignalingTransport : ICallSignalingTransport, ICallIceConfigurationProvider
 {
     private readonly HttpClient _httpClient;
     private readonly HttpCallSignalingTransportOptions _options;
     private readonly Func<CancellationToken, Task<string?>>? _recoveryPhraseProvider;
+    private readonly TimeProvider _timeProvider;
+    private readonly TimeSpan _signalFreshness;
+    private readonly ConcurrentDictionary<string, long> _replayCache = new(StringComparer.Ordinal);
 
     public HttpCallSignalingTransport(
         HttpClient httpClient,
         HttpCallSignalingTransportOptions options,
-        Func<CancellationToken, Task<string?>>? recoveryPhraseProvider = null)
+        Func<CancellationToken, Task<string?>>? recoveryPhraseProvider = null,
+        TimeProvider? timeProvider = null)
     {
         _httpClient = httpClient;
         _options = options;
         _recoveryPhraseProvider = recoveryPhraseProvider;
+        _timeProvider = timeProvider ?? TimeProvider.System;
+        _signalFreshness = options.SignalFreshness == default
+            ? TimeSpan.FromMinutes(5)
+            : options.SignalFreshness;
 
         if (string.IsNullOrWhiteSpace(_options.BaseUrl))
         {
@@ -125,6 +135,13 @@ public sealed class HttpCallSignalingTransport : ICallSignalingTransport, ICallI
             _httpClient.BaseAddress = new Uri(_options.BaseUrl.EndsWith('/')
                 ? _options.BaseUrl
                 : _options.BaseUrl + "/", UriKind.Absolute);
+        }
+
+        if (_signalFreshness <= TimeSpan.Zero
+            || _signalFreshness > TimeSpan.FromMinutes(15)
+            || _options.MaxResponseBytes is < 1_024 or > 16_777_216)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options), "Call signaling limits are invalid.");
         }
     }
 
@@ -142,44 +159,44 @@ public sealed class HttpCallSignalingTransport : ICallSignalingTransport, ICallI
     public async Task<IReadOnlyList<CallSignalEnvelope>> ReceiveAsync(SessionId recipient, CancellationToken cancellationToken = default)
     {
         var path = _options.InboxPathFormat.Replace("{recipient}", Uri.EscapeDataString(recipient.Value), StringComparison.Ordinal);
-        List<CallSignalEnvelope> payload;
-        SessionIdentityMaterial? recipientIdentity = null;
         if (_recoveryPhraseProvider is null)
         {
-            payload = await _httpClient.GetFromJsonAsync<List<CallSignalEnvelope>>(path, cancellationToken).ConfigureAwait(false)
-                ?? [];
-        }
-        else
-        {
-            var recoveryPhrase = await _recoveryPhraseProvider(cancellationToken).ConfigureAwait(false);
-            if (string.IsNullOrWhiteSpace(recoveryPhrase))
-            {
-                return [];
-            }
-
-            recipientIdentity = SessionIdentityMaterial.FromRecoveryPhrase(recoveryPhrase);
-            if (recipientIdentity.SessionId != recipient)
-            {
-                return [];
-            }
-
-            var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-            using var request = CreateRequest(HttpMethod.Get, path);
-            request.Headers.TryAddWithoutValidation("X-Deep-Ed25519", recipientIdentity.Ed25519PublicKeyHex);
-            request.Headers.TryAddWithoutValidation("X-Deep-Timestamp", timestamp.ToString(System.Globalization.CultureInfo.InvariantCulture));
-            request.Headers.TryAddWithoutValidation(
-                "X-Deep-Signature",
-                Convert.ToBase64String(recipientIdentity.SignDetached(CallSignalAuthentication.BuildInboxSigningPayload(recipient, timestamp))));
-            using var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
-            response.EnsureSuccessStatusCode();
-            payload = await response.Content.ReadFromJsonAsync<List<CallSignalEnvelope>>(cancellationToken: cancellationToken)
+            using var unauthenticatedResponse = await _httpClient.GetAsync(
+                path,
+                HttpCompletionOption.ResponseHeadersRead,
+                cancellationToken).ConfigureAwait(false);
+            unauthenticatedResponse.EnsureSuccessStatusCode();
+            return await ReadJsonBoundedAsync<List<CallSignalEnvelope>>(unauthenticatedResponse.Content, cancellationToken)
                 .ConfigureAwait(false) ?? [];
         }
 
-        if (recipientIdentity is null)
+        var recoveryPhrase = await _recoveryPhraseProvider(cancellationToken).ConfigureAwait(false);
+        if (string.IsNullOrWhiteSpace(recoveryPhrase))
         {
-            return payload;
+            return [];
         }
+
+        using var recipientIdentity = SessionIdentityMaterial.FromRecoveryPhrase(recoveryPhrase);
+        if (recipientIdentity.SessionId != recipient)
+        {
+            return [];
+        }
+
+        var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        using var request = CreateRequest(HttpMethod.Get, path);
+        request.Headers.TryAddWithoutValidation("X-Deep-Ed25519", recipientIdentity.Ed25519PublicKeyHex);
+        request.Headers.TryAddWithoutValidation("X-Deep-Timestamp", timestamp.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        request.Headers.TryAddWithoutValidation(
+            "X-Deep-Signature",
+            Convert.ToBase64String(recipientIdentity.SignDetached(CallSignalAuthentication.BuildInboxSigningPayload(recipient, timestamp))));
+        using var response = await _httpClient.SendAsync(
+            request,
+            HttpCompletionOption.ResponseHeadersRead,
+            cancellationToken).ConfigureAwait(false);
+        response.EnsureSuccessStatusCode();
+        var payload = await ReadJsonBoundedAsync<List<CallSignalEnvelope>>(response.Content, cancellationToken)
+            .ConfigureAwait(false) ?? [];
+
         var result = new List<CallSignalEnvelope>(payload.Count);
         foreach (var envelope in payload)
         {
@@ -207,7 +224,7 @@ public sealed class HttpCallSignalingTransport : ICallSignalingTransport, ICallI
             throw new InvalidOperationException("An active account is required for ICE configuration.");
         }
 
-        var identity = SessionIdentityMaterial.FromRecoveryPhrase(recoveryPhrase);
+        using var identity = SessionIdentityMaterial.FromRecoveryPhrase(recoveryPhrase);
         if (identity.SessionId != recipient)
         {
             throw new InvalidOperationException("ICE configuration recipient does not match the active account.");
@@ -224,23 +241,17 @@ public sealed class HttpCallSignalingTransport : ICallSignalingTransport, ICallI
         request.Headers.TryAddWithoutValidation(
             "X-Deep-Signature",
             Convert.ToBase64String(identity.SignDetached(CallSignalAuthentication.BuildIceSigningPayload(recipient, timestamp))));
-        using var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        using var response = await _httpClient.SendAsync(
+            request,
+            HttpCompletionOption.ResponseHeadersRead,
+            cancellationToken).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
-        return await response.Content.ReadFromJsonAsync<CallIceConfiguration>(cancellationToken: cancellationToken)
+        return await ReadJsonBoundedAsync<CallIceConfiguration>(response.Content, cancellationToken)
                    .ConfigureAwait(false)
                ?? throw new InvalidOperationException("The call service returned an empty ICE configuration.");
     }
 
-    private static HttpRequestMessage CreateRequest(HttpMethod method, string path)
-    {
-        var request = new HttpRequestMessage(method, path)
-        {
-            Version = HttpVersion.Version11,
-            VersionPolicy = HttpVersionPolicy.RequestVersionExact
-        };
-        request.Headers.ConnectionClose = true;
-        return request;
-    }
+    private static HttpRequestMessage CreateRequest(HttpMethod method, string path) => new(method, path);
 
     private async Task<CallSignalEnvelope> EncryptAndSignAsync(
         CallSignalEnvelope envelope,
@@ -252,15 +263,22 @@ public sealed class HttpCallSignalingTransport : ICallSignalingTransport, ICallI
             throw new InvalidOperationException("An active account is required for call signaling.");
         }
 
-        var identity = SessionIdentityMaterial.FromRecoveryPhrase(recoveryPhrase);
+        using var identity = SessionIdentityMaterial.FromRecoveryPhrase(recoveryPhrase);
         if (identity.SessionId != envelope.Sender)
         {
             throw new InvalidOperationException("Call signaling sender does not match the active account.");
         }
 
-        var cipher = SealedPublicKeyBox.Create(
-            Encoding.UTF8.GetBytes(envelope.Payload),
-            DecodeSessionPublicKey(envelope.Recipient));
+        var plain = Encoding.UTF8.GetBytes(envelope.Payload);
+        byte[] cipher;
+        try
+        {
+            cipher = SealedPublicKeyBox.Create(plain, DecodeSessionPublicKey(envelope.Recipient));
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(plain);
+        }
         var encrypted = envelope with
         {
             Payload = "sealed-v1:" + Convert.ToBase64String(cipher),
@@ -273,7 +291,7 @@ public sealed class HttpCallSignalingTransport : ICallSignalingTransport, ICallI
         };
     }
 
-    private static bool TryVerifyAndDecrypt(
+    private bool TryVerifyAndDecrypt(
         CallSignalEnvelope envelope,
         SessionIdentityMaterial recipient,
         out CallSignalEnvelope decrypted)
@@ -283,7 +301,10 @@ public sealed class HttpCallSignalingTransport : ICallSignalingTransport, ICallI
         {
             if (!envelope.Payload.StartsWith("sealed-v1:", StringComparison.Ordinal)
                 || string.IsNullOrWhiteSpace(envelope.SenderEd25519)
-                || string.IsNullOrWhiteSpace(envelope.Signature))
+                || string.IsNullOrWhiteSpace(envelope.Signature)
+                || envelope.Recipient != recipient.SessionId
+                || (_timeProvider.GetUtcNow() - envelope.CreatedAt).Duration() > _signalFreshness
+                || envelope.Payload.Length > _options.MaxResponseBytes)
             {
                 return false;
             }
@@ -296,8 +317,9 @@ public sealed class HttpCallSignalingTransport : ICallSignalingTransport, ICallI
             }
 
             var unsigned = envelope with { Signature = null };
+            var signature = Convert.FromBase64String(envelope.Signature);
             if (!PublicKeyAuth.VerifyDetached(
-                    Convert.FromBase64String(envelope.Signature),
+                    signature,
                     CallSignalAuthentication.BuildSigningPayload(unsigned),
                     senderEd25519))
             {
@@ -306,8 +328,25 @@ public sealed class HttpCallSignalingTransport : ICallSignalingTransport, ICallI
 
             var cipher = Convert.FromBase64String(envelope.Payload["sealed-v1:".Length..]);
             var plain = SealedPublicKeyBox.Open(cipher, recipient.X25519PrivateKey, recipient.X25519PublicKey);
-            decrypted = envelope with { Payload = Encoding.UTF8.GetString(plain) };
-            return true;
+            try
+            {
+                decrypted = envelope with { Payload = Encoding.UTF8.GetString(plain) };
+                var replayKey = Convert.ToHexString(SHA256.HashData(signature)).ToLowerInvariant();
+                PruneReplayCache();
+                if (!_replayCache.TryAdd(
+                        replayKey,
+                        envelope.CreatedAt.Add(_signalFreshness).ToUnixTimeMilliseconds()))
+                {
+                    decrypted = default!;
+                    return false;
+                }
+
+                return true;
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(plain);
+            }
         }
         catch (Exception exception) when (exception is ArgumentException or FormatException or CryptographicException)
         {
@@ -317,12 +356,64 @@ public sealed class HttpCallSignalingTransport : ICallSignalingTransport, ICallI
 
     private static byte[] DecodeSessionPublicKey(SessionId sessionId) =>
         Convert.FromHexString(sessionId.Value[2..]);
+
+    private async Task<T?> ReadJsonBoundedAsync<T>(
+        HttpContent content,
+        CancellationToken cancellationToken)
+    {
+        if (content.Headers.ContentLength is > 0 and var declaredLength
+            && declaredLength > _options.MaxResponseBytes)
+        {
+            throw new HttpRequestException("Call signaling response exceeds the configured byte limit.");
+        }
+
+        await using var input = await content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+        using var output = new MemoryStream();
+        var buffer = new byte[16 * 1024];
+        while (true)
+        {
+            var read = await input.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
+            if (read == 0)
+            {
+                return JsonSerializer.Deserialize<T>(output.ToArray(), CallSignalAuthentication.JsonOptions);
+            }
+
+            if (output.Length + read > _options.MaxResponseBytes)
+            {
+                throw new HttpRequestException("Call signaling response exceeds the configured byte limit.");
+            }
+
+            output.Write(buffer, 0, read);
+        }
+    }
+
+    private void PruneReplayCache()
+    {
+        var now = _timeProvider.GetUtcNow().ToUnixTimeMilliseconds();
+        foreach (var item in _replayCache)
+        {
+            if (item.Value <= now)
+            {
+                _replayCache.TryRemove(item.Key, out _);
+            }
+        }
+
+        if (_replayCache.Count <= 8_192)
+        {
+            return;
+        }
+
+        foreach (var item in _replayCache.OrderBy(static item => item.Value).Take(_replayCache.Count - 8_192))
+        {
+            _replayCache.TryRemove(item.Key, out _);
+        }
+    }
 }
 
 public static class CallSignalAuthentication
 {
     private const string Version = "deep-call-signal-v1";
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    internal static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     public static byte[] BuildSigningPayload(CallSignalEnvelope envelope) =>
         JsonSerializer.SerializeToUtf8Bytes(new
@@ -402,10 +493,19 @@ public sealed class RealtimeCallService
         var session = new RuntimeCallSession(callId, conversationId, local, remote, _clock.UtcNow);
         _sessions[callId] = session;
 
-        session.State = CallSessionState.Signaling;
+        lock (session.SyncRoot)
+        {
+            session.State = CallSessionState.Signaling;
+        }
         await SendSignalAsync(session, CallSignalType.Offer, new { sdp = "offer" }, cancellationToken).ConfigureAwait(false);
-        session.State = CallSessionState.Connecting;
-        session.Touch(_clock.UtcNow);
+        lock (session.SyncRoot)
+        {
+            if (!session.IsTerminal)
+            {
+                session.State = CallSessionState.Connecting;
+                session.Touch(_clock.UtcNow);
+            }
+        }
 
         return session.ToSnapshot();
     }
@@ -424,36 +524,69 @@ public sealed class RealtimeCallService
             switch (envelope.Type)
             {
                 case CallSignalType.Offer:
-                    session.State = CallSessionState.Ringing;
-                    session.Touch(_clock.UtcNow);
-                    changed.Add(session.ToSnapshot());
+                    lock (session.SyncRoot)
+                    {
+                        if (!session.IsTerminal)
+                        {
+                            session.State = CallSessionState.Ringing;
+                            session.Touch(_clock.UtcNow);
+                            changed.Add(session.ToSnapshot());
+                        }
+                    }
                     break;
 
                 case CallSignalType.Answer:
-                    session.State = CallSessionState.Connected;
-                    session.ConsecutivePoorSamples = 0;
-                    session.Touch(_clock.UtcNow);
-                    changed.Add(session.ToSnapshot());
+                    lock (session.SyncRoot)
+                    {
+                        if (!session.IsTerminal)
+                        {
+                            session.State = CallSessionState.Connected;
+                            session.ConsecutivePoorSamples = 0;
+                            session.Touch(_clock.UtcNow);
+                            changed.Add(session.ToSnapshot());
+                        }
+                    }
                     break;
 
                 case CallSignalType.Reconnect:
-                    if (session.State is not (CallSessionState.Ended or CallSessionState.Failed))
+                    var reconnectAccepted = false;
+                    lock (session.SyncRoot)
                     {
-                        session.State = CallSessionState.Reconnecting;
-                        session.RecordDiagnostic("reconnect-request", "Peer requested reconnection due to degraded link.", _clock.UtcNow);
+                        if (!session.IsTerminal)
+                        {
+                            session.State = CallSessionState.Reconnecting;
+                            session.RecordDiagnostic("reconnect-request", "Peer requested reconnection due to degraded link.", _clock.UtcNow);
+                            reconnectAccepted = true;
+                        }
+                    }
+
+                    if (reconnectAccepted)
+                    {
                         await SendSignalAsync(session, CallSignalType.Answer, new { sdp = "reconnect-answer" }, cancellationToken).ConfigureAwait(false);
-                        session.State = CallSessionState.Connected;
-                        session.Touch(_clock.UtcNow);
-                        changed.Add(session.ToSnapshot());
+                        lock (session.SyncRoot)
+                        {
+                            if (!session.IsTerminal)
+                            {
+                                session.State = CallSessionState.Connected;
+                                session.Touch(_clock.UtcNow);
+                                changed.Add(session.ToSnapshot());
+                            }
+                        }
                     }
 
                     break;
 
                 case CallSignalType.Bye:
-                    session.State = CallSessionState.Ended;
-                    session.FailureReason = "remote-hangup";
-                    session.Touch(_clock.UtcNow);
-                    changed.Add(session.ToSnapshot());
+                    lock (session.SyncRoot)
+                    {
+                        if (!session.IsTerminal)
+                        {
+                            session.State = CallSessionState.Ended;
+                            session.FailureReason = "remote-hangup";
+                            session.Touch(_clock.UtcNow);
+                            changed.Add(session.ToSnapshot());
+                        }
+                    }
                     break;
             }
         }
@@ -468,15 +601,25 @@ public sealed class RealtimeCallService
             return null;
         }
 
-        if (session.State != CallSessionState.Ringing)
+        lock (session.SyncRoot)
         {
-            return session.ToSnapshot();
+            if (session.State != CallSessionState.Ringing)
+            {
+                return session.ToSnapshot();
+            }
+
+            session.State = CallSessionState.Connecting;
         }
 
-        session.State = CallSessionState.Connecting;
         await SendSignalAsync(session, CallSignalType.Answer, new { sdp = "answer" }, cancellationToken).ConfigureAwait(false);
-        session.State = CallSessionState.Connected;
-        session.Touch(_clock.UtcNow);
+        lock (session.SyncRoot)
+        {
+            if (!session.IsTerminal)
+            {
+                session.State = CallSessionState.Connected;
+                session.Touch(_clock.UtcNow);
+            }
+        }
         return session.ToSnapshot();
     }
 
@@ -491,9 +634,15 @@ public sealed class RealtimeCallService
             return null;
         }
 
-        session.State = CallSessionState.Ended;
-        session.FailureReason = reason;
-        session.Touch(_clock.UtcNow);
+        lock (session.SyncRoot)
+        {
+            if (!session.IsTerminal)
+            {
+                session.State = CallSessionState.Ended;
+                session.FailureReason = reason;
+                session.Touch(_clock.UtcNow);
+            }
+        }
         await SendSignalAsync(session, CallSignalType.Bye, new { reason }, cancellationToken).ConfigureAwait(false);
         return session.ToSnapshot();
     }
@@ -509,42 +658,65 @@ public sealed class RealtimeCallService
             return null;
         }
 
-        session.ApplyQuality(sample, _clock.UtcNow);
-
-        var reasons = EvaluateDegradation(sample);
-        if (reasons.Count == 0)
+        var sendReconnect = false;
+        var reconnectAttempt = 0;
+        lock (session.SyncRoot)
         {
-            session.ConsecutivePoorSamples = 0;
-            return session.ToSnapshot();
+            if (session.IsTerminal)
+            {
+                return session.ToSnapshot();
+            }
+
+            session.ApplyQuality(sample, _clock.UtcNow);
+
+            var reasons = EvaluateDegradation(sample);
+            if (reasons.Count == 0)
+            {
+                session.ConsecutivePoorSamples = 0;
+                return session.ToSnapshot();
+            }
+
+            session.ConsecutivePoorSamples++;
+            foreach (var reason in reasons)
+            {
+                session.RecordDiagnostic(reason.Reason, reason.Details, _clock.UtcNow);
+            }
+
+            if (session.ConsecutivePoorSamples < _options.TriggerPoorSamples)
+            {
+                return session.ToSnapshot();
+            }
+
+            if (session.ReconnectAttempts >= _options.MaxAttempts)
+            {
+                session.State = CallSessionState.Failed;
+                session.FailureReason = "reconnect-attempts-exhausted";
+                session.RecordDiagnostic(
+                    "reconnect-attempts-exhausted",
+                    "Maximum reconnect attempts exhausted during degraded link handling.",
+                    _clock.UtcNow);
+                return session.ToSnapshot();
+            }
+
+            session.ReconnectAttempts++;
+            reconnectAttempt = session.ReconnectAttempts;
+            session.State = CallSessionState.Reconnecting;
+            sendReconnect = true;
         }
 
-        session.ConsecutivePoorSamples++;
-        foreach (var reason in reasons)
+        if (sendReconnect)
         {
-            session.RecordDiagnostic(reason.Reason, reason.Details, _clock.UtcNow);
+            await SendSignalAsync(session, CallSignalType.Reconnect, new { attempt = reconnectAttempt }, cancellationToken).ConfigureAwait(false);
         }
 
-        if (session.ConsecutivePoorSamples < _options.TriggerPoorSamples)
+        lock (session.SyncRoot)
         {
-            return session.ToSnapshot();
+            if (!session.IsTerminal)
+            {
+                session.State = CallSessionState.Connecting;
+                session.Touch(_clock.UtcNow);
+            }
         }
-
-        if (session.ReconnectAttempts >= _options.MaxAttempts)
-        {
-            session.State = CallSessionState.Failed;
-            session.FailureReason = "reconnect-attempts-exhausted";
-            session.RecordDiagnostic(
-                "reconnect-attempts-exhausted",
-                "Maximum reconnect attempts exhausted during degraded link handling.",
-                _clock.UtcNow);
-            return session.ToSnapshot();
-        }
-
-        session.ReconnectAttempts++;
-        session.State = CallSessionState.Reconnecting;
-        await SendSignalAsync(session, CallSignalType.Reconnect, new { attempt = session.ReconnectAttempts }, cancellationToken).ConfigureAwait(false);
-        session.State = CallSessionState.Connecting;
-        session.Touch(_clock.UtcNow);
         return session.ToSnapshot();
     }
 
@@ -619,6 +791,8 @@ public sealed class RealtimeCallService
 
         public string CallId { get; }
 
+        public object SyncRoot { get; } = new();
+
         public string ConversationId { get; }
 
         public SessionId LocalParty { get; }
@@ -636,6 +810,8 @@ public sealed class RealtimeCallService
         public int ConsecutivePoorSamples { get; set; }
 
         public string? FailureReason { get; set; }
+
+        public bool IsTerminal => State is CallSessionState.Ended or CallSessionState.Failed;
 
         public void Touch(DateTimeOffset at)
         {
@@ -680,16 +856,19 @@ public sealed class RealtimeCallService
 
         public CallSessionSnapshot ToSnapshot()
         {
-            return new CallSessionSnapshot(
-                CallId,
-                ConversationId,
-                LocalParty,
-                RemoteParty,
-                State,
-                Quality,
-                ReconnectAttempts,
-                FailureReason,
-                Diagnostics.ToArray());
+            lock (SyncRoot)
+            {
+                return new CallSessionSnapshot(
+                    CallId,
+                    ConversationId,
+                    LocalParty,
+                    RemoteParty,
+                    State,
+                    Quality,
+                    ReconnectAttempts,
+                    FailureReason,
+                    Diagnostics.ToArray());
+            }
         }
     }
 }

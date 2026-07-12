@@ -35,7 +35,7 @@ public sealed class ConversationServiceTests
         try
         {
             var store = new SqliteSessionStore(statePath);
-            var runtime = ClientRuntime.CreatePersistent(
+            var runtime = ClientRuntime.CreatePersistentForTests(
                 statePath,
                 clock: new FrozenClock(DateTimeOffset.Parse("2026-05-28T00:00:00Z")));
             var contactId = SessionId.Parse("05" + new string('2', 64));

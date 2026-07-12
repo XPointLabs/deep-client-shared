@@ -29,10 +29,10 @@ public sealed class PushSubscriptionTransportTests
             };
         }))
         {
-            BaseAddress = new Uri("http://push.local/")
+            BaseAddress = new Uri("http://localhost/")
         };
 
-        var transport = new HttpPushSubscriptionTransport(client, new HttpPushSubscriptionTransportOptions("http://push.local"));
+        var transport = new HttpPushSubscriptionTransport(client, new HttpPushSubscriptionTransportOptions("http://localhost"));
 
         await transport.SubscribeAsync(new PushSubscriptionRequest(
             "05abc",
@@ -60,10 +60,27 @@ public sealed class PushSubscriptionTransportTests
         Assert.Equal("firebase", subscribeJson.RootElement.GetProperty("service").GetString());
         Assert.Equal("token-1", subscribeJson.RootElement.GetProperty("service_info").GetProperty("token").GetString());
         Assert.Equal("00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff", subscribeJson.RootElement.GetProperty("enc_key").GetString());
+        Assert.Equal(2, subscribeJson.RootElement.GetProperty("sig_v").GetInt32());
 
         using var unsubscribeJson = JsonDocument.Parse(requestBodies[1]);
         Assert.Equal("token-2", unsubscribeJson.RootElement.GetProperty("service_info").GetProperty("token").GetString());
         Assert.False(unsubscribeJson.RootElement.TryGetProperty("enc_key", out _));
+        Assert.Equal(2, unsubscribeJson.RootElement.GetProperty("sig_v").GetInt32());
+    }
+
+    [Fact]
+    public void HttpPushSubscriptionTransport_RequiresHttpsOutsideExplicitLoopback()
+    {
+        using var client = new HttpClient(new FakeHandler((_, _) => new HttpResponseMessage(HttpStatusCode.OK)));
+
+        Assert.Throws<ArgumentException>(() => new HttpPushSubscriptionTransport(
+            client,
+            new HttpPushSubscriptionTransportOptions("http://push.example.test")));
+
+        var loopback = new HttpPushSubscriptionTransport(
+            client,
+            new HttpPushSubscriptionTransportOptions("http://127.0.0.1:8080"));
+        Assert.True(loopback.IsEnabled);
     }
 
     [Fact]
@@ -77,10 +94,14 @@ public sealed class PushSubscriptionTransportTests
             "fcm",
             DateTimeOffset.Parse("2026-05-28T00:00:00Z")));
         var transport = new FakePushSubscriptionTransport();
-        var coordinator = new PushRegistrationCoordinator(runtime, pushNotifications, transport, runtime.Clock);
+        var coordinator = new PushRegistrationCoordinator(
+            runtime,
+            pushNotifications,
+            transport,
+            runtime.Clock,
+            new PushClientMetadata(PushNotificationCrypto.PackageName, "0.2.8"));
 
         var registration = await coordinator.RegisterAsync();
-        var storedEncKey = await runtime.Store.GetAsync<string>(PushRegistrationCoordinator.NotificationEncryptionKeySetting);
         var activeAccount = await runtime.Accounts.GetActiveAccountAsync();
 
         Assert.NotNull(registration);
@@ -89,8 +110,14 @@ public sealed class PushSubscriptionTransportTests
         Assert.Equal("token-123", transport.SubscribeRequests[0].ServiceInfo.Token);
         Assert.Equal([0, 10], transport.SubscribeRequests[0].Namespaces);
         Assert.Equal(activeAccount!.SessionId.Value, transport.SubscribeRequests[0].Pubkey);
-        Assert.Equal(storedEncKey, transport.SubscribeRequests[0].EncKey);
+        Assert.Equal(pushNotifications.EncryptionState?.KeyHex, transport.SubscribeRequests[0].EncKey);
+        Assert.Equal(PushNotificationCrypto.PackageName, transport.SubscribeRequests[0].AppId);
+        Assert.Equal("0.2.8", transport.SubscribeRequests[0].AppVersion);
         Assert.False(string.IsNullOrWhiteSpace(transport.SubscribeRequests[0].SessionEd25519));
+        Assert.NotNull(pushNotifications.EncryptionState);
+        Assert.True(pushNotifications.EncryptionState!.RemoteSubscribed);
+        Assert.Equal(registration, pushNotifications.EncryptionState!.Registration);
+        Assert.Equal(transport.SubscribeRequests[0].Pubkey, pushNotifications.EncryptionState.SessionBinding);
     }
 
     [Fact]
@@ -99,7 +126,7 @@ public sealed class PushSubscriptionTransportTests
         var runtime = ClientRuntime.CreateStubbed(clock: new FrozenClock(DateTimeOffset.Parse("2026-05-28T00:00:00Z")));
         await runtime.Accounts.LoginAsync(ValidRecoveryPhrase, "Alice");
 
-        var cachedRegistration = new PushRegistration("token-123", "apns", DateTimeOffset.Parse("2026-05-28T00:00:00Z"));
+        var cachedRegistration = new PushRegistration("token-123", "fcm", DateTimeOffset.Parse("2026-05-28T00:00:00Z"));
         var pushNotifications = new FakePushNotificationService(cachedRegistration);
         var transport = new FakePushSubscriptionTransport();
         var coordinator = new PushRegistrationCoordinator(runtime, pushNotifications, transport, runtime.Clock);
@@ -107,7 +134,7 @@ public sealed class PushSubscriptionTransportTests
         await coordinator.UnregisterAsync();
 
         Assert.Single(transport.UnsubscribeRequests);
-        Assert.Equal("apns", transport.UnsubscribeRequests[0].Service);
+        Assert.Equal("firebase", transport.UnsubscribeRequests[0].Service);
         Assert.Equal("token-123", transport.UnsubscribeRequests[0].ServiceInfo.Token);
         Assert.True(pushNotifications.UnregisterCalled);
     }
@@ -120,15 +147,270 @@ public sealed class PushSubscriptionTransportTests
 
         var pushNotifications = new FakePushNotificationService(new PushRegistration(
             "token-123",
-            "wns",
+            "apns",
             DateTimeOffset.Parse("2026-05-28T00:00:00Z")));
         var transport = new FakePushSubscriptionTransport();
         var coordinator = new PushRegistrationCoordinator(runtime, pushNotifications, transport, runtime.Clock);
 
         var registration = await coordinator.RegisterAsync();
 
-        Assert.NotNull(registration);
+        Assert.Null(registration);
         Assert.Empty(transport.SubscribeRequests);
+        Assert.Null(pushNotifications.EncryptionState);
+    }
+
+    [Fact]
+    public async Task PushRegistrationCoordinator_UnregisterCancelsLateSubscribeAndAllowsSameAccountReregister()
+    {
+        var runtime = ClientRuntime.CreateStubbed(clock: new FrozenClock(DateTimeOffset.Parse("2026-05-28T00:00:00Z")));
+        await runtime.Accounts.LoginAsync(ValidRecoveryPhrase, "Alice");
+        var pushNotifications = new FakePushNotificationService(
+            new PushRegistration("token-race", "fcm", DateTimeOffset.UtcNow));
+        var transport = new BlockingPushSubscriptionTransport();
+        var coordinator = new PushRegistrationCoordinator(runtime, pushNotifications, transport, runtime.Clock);
+
+        var registration = coordinator.RegisterAsync();
+        await transport.SubscribeStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var logout = coordinator.UnregisterAsync();
+        transport.ReleaseSubscribe();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await registration);
+        await logout;
+
+        Assert.False(transport.RemoteSubscribed);
+        Assert.Null(pushNotifications.EncryptionState);
+        Assert.True(pushNotifications.UnregisterCalled);
+        Assert.NotNull(await coordinator.RegisterAsync());
+        await coordinator.UnregisterAsync();
+
+        await runtime.Accounts.SignOutAsync();
+        await runtime.Accounts.RegisterAsync("Bob");
+        Assert.NotNull(await coordinator.RegisterAsync());
+        Assert.True(transport.RemoteSubscribed);
+    }
+
+    [Theory]
+    [InlineData("apns")]
+    [InlineData("huawei")]
+    public void PushRegistrationCoordinator_DoesNotAdvertiseUnconfiguredServerProviders(string provider)
+    {
+        Assert.False(PushRegistrationCoordinator.TryResolvePushService(provider, out _));
+    }
+
+    [Theory]
+    [InlineData("wns")]
+    [InlineData("WNS")]
+    public void PushRegistrationCoordinator_MapsWindowsProviderToWns(string provider)
+    {
+        Assert.True(PushRegistrationCoordinator.TryResolvePushService(provider, out var service));
+        Assert.Equal("wns", service);
+    }
+
+    [Fact]
+    public async Task PushRegistrationCoordinator_UnregisterWithoutAccountDoesNotBlockFutureLogin()
+    {
+        var runtime = ClientRuntime.CreateStubbed();
+        var pushNotifications = new FakePushNotificationService(
+            new PushRegistration("token-new-account", "fcm", DateTimeOffset.UtcNow));
+        var coordinator = new PushRegistrationCoordinator(
+            runtime,
+            pushNotifications,
+            new FakePushSubscriptionTransport(),
+            runtime.Clock);
+
+        await coordinator.UnregisterAsync();
+        await runtime.Accounts.RegisterAsync("Alice");
+
+        Assert.NotNull(await coordinator.RegisterAsync());
+    }
+
+    [Fact]
+    public async Task PushRegistrationCoordinator_DoesNotPersistLocalStateWhenRemoteSubscribeFails()
+    {
+        var runtime = ClientRuntime.CreateStubbed(clock: new FrozenClock(DateTimeOffset.Parse("2026-05-28T00:00:00Z")));
+        await runtime.Accounts.LoginAsync(ValidRecoveryPhrase, "Alice");
+        var pushNotifications = new FakePushNotificationService(new PushRegistration("token-123", "fcm", DateTimeOffset.UtcNow));
+        var transport = new FakePushSubscriptionTransport { SubscribeFailure = new InvalidOperationException("backend unavailable") };
+        var coordinator = new PushRegistrationCoordinator(
+            runtime,
+            pushNotifications,
+            transport,
+            runtime.Clock,
+            new PushClientMetadata(PushNotificationCrypto.PackageName, "0.2.8"));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => coordinator.RegisterAsync());
+
+        Assert.Null(pushNotifications.EncryptionState);
+        Assert.Null(await runtime.Store.GetAsync<string>(PushRegistrationCoordinator.NotificationEncryptionKeySetting));
+    }
+
+    [Fact]
+    public async Task PushRegistrationCoordinator_InvalidatesAndResubscribesAfterTokenRotation()
+    {
+        var runtime = ClientRuntime.CreateStubbed(clock: new FrozenClock(DateTimeOffset.Parse("2026-05-28T00:00:00Z")));
+        await runtime.Accounts.LoginAsync(ValidRecoveryPhrase, "Alice");
+        var pushNotifications = new FakePushNotificationService(new PushRegistration("token-old", "fcm", DateTimeOffset.UtcNow));
+        var transport = new FakePushSubscriptionTransport();
+        var coordinator = new PushRegistrationCoordinator(runtime, pushNotifications, transport, runtime.Clock);
+
+        await coordinator.RegisterAsync();
+        pushNotifications.Registration = new PushRegistration("token-new", "fcm", DateTimeOffset.UtcNow);
+        await coordinator.RegisterAsync();
+
+        Assert.Equal(["token-old", "token-new"], transport.SubscribeRequests.Select(static request => request.ServiceInfo.Token));
+        Assert.Equal("token-new", pushNotifications.EncryptionState!.Registration.Token);
+        Assert.True(pushNotifications.RemoveCalls >= 1);
+    }
+
+    [Fact]
+    public async Task PushRegistrationCoordinator_CurrentAccountRegistrationIsIdempotent()
+    {
+        var runtime = ClientRuntime.CreateStubbed();
+        await runtime.Accounts.LoginAsync(ValidRecoveryPhrase, "Alice");
+        var pushNotifications = new FakePushNotificationService(
+            new PushRegistration("token-123", "fcm", DateTimeOffset.UtcNow));
+        var transport = new FakePushSubscriptionTransport();
+        var coordinator = new PushRegistrationCoordinator(runtime, pushNotifications, transport, runtime.Clock);
+
+        var first = await coordinator.RegisterAsync();
+        var second = await coordinator.RegisterAsync();
+
+        Assert.Equal(first, second);
+        Assert.Single(transport.SubscribeRequests);
+    }
+
+    [Fact]
+    public async Task PushRegistrationCoordinator_AccountSwitchReRegistersForTheNewSession()
+    {
+        var runtime = ClientRuntime.CreateStubbed();
+        var firstAccount = await runtime.Accounts.LoginAsync(ValidRecoveryPhrase, "Alice");
+        var pushNotifications = new FakePushNotificationService(
+            new PushRegistration("token-123", "fcm", DateTimeOffset.UtcNow));
+        var transport = new FakePushSubscriptionTransport();
+        var coordinator = new PushRegistrationCoordinator(runtime, pushNotifications, transport, runtime.Clock);
+
+        await coordinator.RegisterAsync();
+        await runtime.Accounts.SignOutAsync();
+        var secondAccount = await runtime.Accounts.RegisterAsync("Bob");
+        await coordinator.RegisterAsync();
+
+        Assert.Equal(
+            [firstAccount.SessionId.Value, secondAccount.SessionId.Value],
+            transport.SubscribeRequests.Select(static request => request.Pubkey));
+        Assert.Equal(secondAccount.SessionId.Value, pushNotifications.EncryptionState!.SessionBinding);
+    }
+
+    [Fact]
+    public async Task PushRegistrationCoordinator_FailedUnsubscribeRetriesAfterSeedIsPurged()
+    {
+        var runtime = ClientRuntime.CreateStubbed();
+        await runtime.Accounts.LoginAsync(ValidRecoveryPhrase, "Alice");
+        var pushNotifications = new FakePushNotificationService(
+            new PushRegistration("token-123", "fcm", DateTimeOffset.UtcNow));
+        var transport = new FakePushSubscriptionTransport();
+        var coordinator = new PushRegistrationCoordinator(runtime, pushNotifications, transport, runtime.Clock);
+        await coordinator.RegisterAsync();
+        transport.UnsubscribeFailure = new InvalidOperationException("offline");
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => coordinator.UnregisterAsync());
+        var pending = Assert.IsType<PushUnsubscribeRequest>(pushNotifications.PendingUnsubscribe);
+        Assert.Equal("token-123", pending.ServiceInfo.Token);
+
+        await runtime.Accounts.SignOutAsync();
+        Assert.Null(await runtime.Accounts.GetRecoveryPhraseAsync());
+        transport.UnsubscribeFailure = null;
+
+        Assert.True(await coordinator.RetryPendingUnsubscribeAsync());
+        Assert.Null(pushNotifications.PendingUnsubscribe);
+        Assert.False(transport.RemoteSubscribed);
+    }
+
+    [Fact]
+    public async Task PushRegistrationCoordinator_LateSubscribeAfterTimedOutLogoutIsCompensated()
+    {
+        var runtime = ClientRuntime.CreateStubbed();
+        await runtime.Accounts.LoginAsync(ValidRecoveryPhrase, "Alice");
+        var pushNotifications = new FakePushNotificationService(
+            new PushRegistration("token-race", "fcm", DateTimeOffset.UtcNow));
+        var transport = new BlockingPushSubscriptionTransport();
+        var coordinator = new PushRegistrationCoordinator(runtime, pushNotifications, transport, runtime.Clock);
+
+        var registration = coordinator.RegisterAsync();
+        await transport.SubscribeStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        using var logoutCancellation = new CancellationTokenSource();
+        var unregister = coordinator.UnregisterAsync(logoutCancellation.Token);
+        logoutCancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await unregister);
+
+        var durableUnsubscribe = Assert.IsType<PushUnsubscribeRequest>(pushNotifications.PendingUnsubscribe);
+        Assert.Equal("token-race", durableUnsubscribe.ServiceInfo.Token);
+        Assert.Equal(64, Convert.FromBase64String(durableUnsubscribe.Signature).Length);
+        Assert.Equal(32, Convert.FromHexString(durableUnsubscribe.SessionEd25519).Length);
+        Assert.True(pushNotifications.UnregisterCalled);
+        Assert.Null(pushNotifications.EncryptionState);
+
+        await runtime.Accounts.SignOutAsync();
+        transport.ReleaseSubscribe();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await registration);
+        Assert.False(transport.RemoteSubscribed);
+        Assert.Null(pushNotifications.EncryptionState);
+        Assert.Null(pushNotifications.PendingUnsubscribe);
+    }
+
+    [Fact]
+    public async Task PushRegistrationCoordinator_SameAccountCanRegisterAfterOffOnAndRelogin()
+    {
+        var runtime = ClientRuntime.CreateStubbed();
+        var firstLogin = await runtime.Accounts.LoginAsync(ValidRecoveryPhrase, "Alice");
+        var pushNotifications = new FakePushNotificationService(
+            new PushRegistration("token-same-account", "fcm", DateTimeOffset.UtcNow));
+        var transport = new FakePushSubscriptionTransport();
+        var coordinator = new PushRegistrationCoordinator(runtime, pushNotifications, transport, runtime.Clock);
+
+        Assert.NotNull(await coordinator.RegisterAsync());
+        await coordinator.UnregisterAsync();
+        Assert.NotNull(await coordinator.RegisterAsync());
+
+        await coordinator.UnregisterAsync();
+        await runtime.Accounts.SignOutAsync();
+        var secondLogin = await runtime.Accounts.LoginAsync(ValidRecoveryPhrase, "Alice again");
+        Assert.Equal(firstLogin.SessionId, secondLogin.SessionId);
+        Assert.NotNull(await coordinator.RegisterAsync());
+
+        Assert.Equal(3, transport.SubscribeRequests.Count);
+        Assert.All(
+            transport.SubscribeRequests,
+            request => Assert.Equal(firstLogin.SessionId.Value, request.Pubkey));
+    }
+
+    [Fact]
+    public async Task PushRegistrationCoordinator_CancelledRemoteUnsubscribeKeepsLocalStateInvalidAndSignedRetryDurable()
+    {
+        var runtime = ClientRuntime.CreateStubbed();
+        await runtime.Accounts.LoginAsync(ValidRecoveryPhrase, "Alice");
+        var pushNotifications = new FakePushNotificationService(
+            new PushRegistration("token-timeout", "fcm", DateTimeOffset.UtcNow));
+        var transport = new BlockingUnsubscribeTransport();
+        var coordinator = new PushRegistrationCoordinator(runtime, pushNotifications, transport, runtime.Clock);
+        Assert.NotNull(await coordinator.RegisterAsync());
+
+        using var timeout = new CancellationTokenSource();
+        var unregister = coordinator.UnregisterAsync(timeout.Token);
+        await transport.UnsubscribeStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        timeout.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await unregister);
+        var pending = Assert.IsType<PushUnsubscribeRequest>(pushNotifications.PendingUnsubscribe);
+        Assert.False(string.IsNullOrWhiteSpace(pending.Signature));
+        Assert.Null(pushNotifications.EncryptionState);
+        Assert.True(pushNotifications.UnregisterCalled);
+        Assert.True(transport.RemoteSubscribed);
+
+        transport.ReleaseUnsubscribe();
+        Assert.True(await coordinator.RetryPendingUnsubscribeAsync());
+        Assert.Null(pushNotifications.PendingUnsubscribe);
+        Assert.False(transport.RemoteSubscribed);
     }
 
     [Fact]
@@ -195,19 +477,60 @@ public sealed class PushSubscriptionTransportTests
         return false;
     }
 
-    private sealed class FakePushNotificationService(PushRegistration registration) : IPushNotificationService
+    private sealed class FakePushNotificationService(PushRegistration registration) :
+        IPushNotificationService,
+        IPushNotificationEncryptionKeyStore,
+        IPushUnsubscribeRetryStore
     {
         public bool UnregisterCalled { get; private set; }
+        public PushNotificationKeyState? EncryptionState { get; private set; }
+        public int RemoveCalls { get; private set; }
+        public PushRegistration Registration { get; set; } = registration;
+        public PushUnsubscribeRequest? PendingUnsubscribe { get; private set; }
 
         public Task<PushRegistration?> RegisterAsync(CancellationToken cancellationToken = default) =>
-            Task.FromResult<PushRegistration?>(registration);
+            Task.FromResult<PushRegistration?>(Registration);
 
         public Task<PushRegistration?> GetCachedRegistrationAsync(CancellationToken cancellationToken = default) =>
-            Task.FromResult<PushRegistration?>(registration);
+            Task.FromResult<PushRegistration?>(EncryptionState?.RemoteSubscribed == true ? EncryptionState.Registration : Registration);
 
         public Task UnregisterAsync(CancellationToken cancellationToken = default)
         {
             UnregisterCalled = true;
+            return Task.CompletedTask;
+        }
+
+        public Task<PushNotificationKeyState?> GetAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult(EncryptionState);
+
+        public Task SetAsync(PushNotificationKeyState state, CancellationToken cancellationToken = default)
+        {
+            EncryptionState = state;
+            return Task.CompletedTask;
+        }
+
+        public Task RemoveAsync(CancellationToken cancellationToken = default)
+        {
+            RemoveCalls++;
+            EncryptionState = null;
+            return Task.CompletedTask;
+        }
+
+        public Task<PushUnsubscribeRequest?> GetPendingUnsubscribeAsync(
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(PendingUnsubscribe);
+
+        public Task SetPendingUnsubscribeAsync(
+            PushUnsubscribeRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            PendingUnsubscribe = request;
+            return Task.CompletedTask;
+        }
+
+        public Task RemovePendingUnsubscribeAsync(CancellationToken cancellationToken = default)
+        {
+            PendingUnsubscribe = null;
             return Task.CompletedTask;
         }
     }
@@ -215,6 +538,9 @@ public sealed class PushSubscriptionTransportTests
     private sealed class FakePushSubscriptionTransport : IPushSubscriptionTransport
     {
         public bool IsEnabled => true;
+        public Exception? SubscribeFailure { get; init; }
+        public Exception? UnsubscribeFailure { get; set; }
+        public bool RemoteSubscribed { get; private set; }
 
         public List<PushSubscriptionRequest> SubscribeRequests { get; } = [];
 
@@ -223,14 +549,74 @@ public sealed class PushSubscriptionTransportTests
         public Task SubscribeAsync(PushSubscriptionRequest request, CancellationToken cancellationToken = default)
         {
             SubscribeRequests.Add(request);
+            if (SubscribeFailure is not null)
+            {
+                return Task.FromException(SubscribeFailure);
+            }
+
+            RemoteSubscribed = true;
             return Task.CompletedTask;
         }
 
         public Task UnsubscribeAsync(PushUnsubscribeRequest request, CancellationToken cancellationToken = default)
         {
             UnsubscribeRequests.Add(request);
+            if (UnsubscribeFailure is not null)
+            {
+                return Task.FromException(UnsubscribeFailure);
+            }
+
+            RemoteSubscribed = false;
             return Task.CompletedTask;
         }
+    }
+
+    private sealed class BlockingPushSubscriptionTransport : IPushSubscriptionTransport
+    {
+        private readonly TaskCompletionSource release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public bool IsEnabled => true;
+        public bool RemoteSubscribed { get; private set; }
+        public TaskCompletionSource SubscribeStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task SubscribeAsync(PushSubscriptionRequest request, CancellationToken cancellationToken = default)
+        {
+            SubscribeStarted.TrySetResult();
+            await release.Task.ConfigureAwait(false);
+            RemoteSubscribed = true;
+        }
+
+        public Task UnsubscribeAsync(PushUnsubscribeRequest request, CancellationToken cancellationToken = default)
+        {
+            RemoteSubscribed = false;
+            return Task.CompletedTask;
+        }
+
+        public void ReleaseSubscribe() => release.TrySetResult();
+    }
+
+    private sealed class BlockingUnsubscribeTransport : IPushSubscriptionTransport
+    {
+        private readonly TaskCompletionSource release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public bool IsEnabled => true;
+        public bool RemoteSubscribed { get; private set; }
+        public TaskCompletionSource UnsubscribeStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task SubscribeAsync(PushSubscriptionRequest request, CancellationToken cancellationToken = default)
+        {
+            RemoteSubscribed = true;
+            return Task.CompletedTask;
+        }
+
+        public async Task UnsubscribeAsync(PushUnsubscribeRequest request, CancellationToken cancellationToken = default)
+        {
+            UnsubscribeStarted.TrySetResult();
+            await release.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+            RemoteSubscribed = false;
+        }
+
+        public void ReleaseUnsubscribe() => release.TrySetResult();
     }
 
     private sealed class FakeHandler : HttpMessageHandler

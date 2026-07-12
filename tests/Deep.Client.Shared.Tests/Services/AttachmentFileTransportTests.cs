@@ -1,5 +1,6 @@
 ﻿using System.Net;
 using System.Text;
+using Deep.Client.Shared.Domain;
 using Deep.Client.Shared.Services;
 
 namespace Deep.Client.Shared.Tests.Services;
@@ -40,10 +41,10 @@ public sealed class AttachmentFileTransportTests
             return new HttpResponseMessage(HttpStatusCode.NotFound);
         }))
         {
-            BaseAddress = new Uri("http://file.local/")
+            BaseAddress = new Uri("https://file.local/")
         };
 
-        var transport = new HttpAttachmentFileTransport(client, new HttpAttachmentFileTransportOptions("http://file.local"));
+        var transport = new HttpAttachmentFileTransport(client, new HttpAttachmentFileTransportOptions("https://file.local"));
         await using var upload = new MemoryStream(plain);
 
         var metadata = await transport.UploadAsync(new AttachmentFileUpload("note.txt", "text/plain", upload));
@@ -56,7 +57,7 @@ public sealed class AttachmentFileTransportTests
         Assert.Equal("text/plain", metadata.ContentType);
         Assert.Equal(plain.Length, metadata.SizeBytes);
         Assert.False(metadata.IsDocument);
-        Assert.Equal(new Uri("http://file.local/file/file-abc"), metadata.RemoteUri);
+        Assert.Equal(new Uri("https://file.local/file/file-abc"), metadata.RemoteUri);
         Assert.Equal("note.txt", download.FileName);
         Assert.Equal("text/plain", download.ContentType);
         Assert.Equal(plain, download.Content);
@@ -70,10 +71,10 @@ public sealed class AttachmentFileTransportTests
                 ? JsonResponse("""{"id":"file-image","expires":1781814400}""")
                 : new HttpResponseMessage(HttpStatusCode.NotFound)))
         {
-            BaseAddress = new Uri("http://file.local/")
+            BaseAddress = new Uri("https://file.local/")
         };
 
-        var transport = new HttpAttachmentFileTransport(client, new HttpAttachmentFileTransportOptions("http://file.local"));
+        var transport = new HttpAttachmentFileTransport(client, new HttpAttachmentFileTransportOptions("https://file.local"));
         await using var upload = new MemoryStream([1, 2, 3, 4]);
 
         var metadata = await transport.UploadAsync(new AttachmentFileUpload(
@@ -88,6 +89,64 @@ public sealed class AttachmentFileTransportTests
         Assert.Equal(400, metadata.Width);
         Assert.Equal(240, metadata.Height);
         Assert.Equal("image/png", metadata.ContentType);
+    }
+
+    [Theory]
+    [InlineData("https://other.local/file/file-abc")]
+    [InlineData("http://file.local/file/file-abc")]
+    [InlineData("https://user:password@file.local/file/file-abc")]
+    [InlineData("https://file.local:22/file/file-abc")]
+    public async Task HttpAttachmentFileTransport_RejectsUnsafeInboundRemoteUri(string remoteUri)
+    {
+        using var client = new HttpClient(new FakeHandler((_, _) =>
+            new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(Encoding.UTF8.GetBytes("unexpected"))
+            }))
+        {
+            BaseAddress = new Uri("https://file.local/")
+        };
+        var transport = new HttpAttachmentFileTransport(
+            client,
+            new HttpAttachmentFileTransportOptions("https://file.local"));
+        var metadata = new AttachmentMetadata(
+            "file-abc",
+            "note.txt",
+            "text/plain",
+            10,
+            new Uri(remoteUri));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => transport.DownloadAsync(metadata));
+    }
+
+    [Fact]
+    public async Task HttpAttachmentFileTransport_AllowsLoopbackHttpForLocalTests()
+    {
+        var plain = Encoding.UTF8.GetBytes("loopback attachment");
+        using var client = new HttpClient(new FakeHandler((request, _) =>
+        {
+            Assert.Equal("http://127.0.0.1:18082/file/file-abc", request.RequestUri?.ToString());
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(plain)
+            };
+        }))
+        {
+            BaseAddress = new Uri("http://127.0.0.1:18082/")
+        };
+        var transport = new HttpAttachmentFileTransport(
+            client,
+            new HttpAttachmentFileTransportOptions("http://127.0.0.1:18082"));
+        var metadata = new AttachmentMetadata(
+            "file-abc",
+            "note.txt",
+            "text/plain",
+            plain.Length,
+            new Uri("http://127.0.0.1:18082/file/file-abc"));
+
+        var download = await transport.DownloadAsync(metadata);
+
+        Assert.Equal(plain, download.Content);
     }
 
     [Fact]

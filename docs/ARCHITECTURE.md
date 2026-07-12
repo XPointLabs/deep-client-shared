@@ -34,6 +34,14 @@ E4 adds group admin/member-state lifecycle behavior into `ConversationService`: 
 - E4 onboarding/recovery edge-cases are validated by runtime tests (restore flow, malformed Session ID guard, persistence across restart), and acceptance evidence is tracked in `docs/e4-acceptance-checklist.md`.
 - Full upstream Session account-linking restore semantics (network/profile fetch stage handling) remain a parity follow-up beyond current local deterministic restore flow.
 
+## Route Trust V1
+
+Routed storage bootstrap uses `PinnedRouterEndpoint` values containing both the router base URL and expected Ed25519 RouterId. `XNodeRpcClient` sends a cryptographically random nonce and accepts only fresh `xpoint-rpc-response-v1` responses whose signature binds the responder pin, request id, method, nonce, canonical request digest, success state, and canonical result/error digest.
+
+Storage routes are parsed as request-local immutable results before `CurrentRoute` is updated as a diagnostic snapshot. A valid route has exactly three nodes at indices 0, 1, and 2; unique RouterIds, X25519 keys, and peer RPC endpoints; a first RouterId matching the pinned responder; reachable contacts; required `onion-v1` and `session-rpc` capabilities; and fresh valid contact self-signatures. The returned target must exactly match the requested target.
+
+Dynamic membership authorization currently comes from XNode's exact `NodeDb` registered catalog plus the pinned seed response. A relay contact self-signature establishes contact integrity and key possession, never registry authority. A future quorum-backed catalog checkpoint may replace this authorization source; route trust v1 intentionally does not add a Merkle or on-chain checkpoint.
+
 ## E3 MVP Notes
 
 - Current signaling transport is in-memory and intended for deterministic runtime/tests until secure network signaling is wired.

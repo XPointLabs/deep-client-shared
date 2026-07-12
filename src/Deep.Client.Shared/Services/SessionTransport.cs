@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Deep.Client.Shared.Domain;
+using Deep.Client.Shared.Persistence;
 
 namespace Deep.Client.Shared.Services;
 
@@ -150,13 +151,12 @@ public sealed record SessionStorageMessageTransportOptions(
     string StorePath = "/storage/store",
     string RetrievePath = "/storage/retrieve");
 
-public sealed class SessionStorageMessageTransport : ISessionMessageTransport
+public sealed class SessionStorageMessageTransport : ISessionMessageTransport, IAuthenticatedInboxTransport
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     private readonly HttpClient _httpClient;
     private readonly SessionStorageMessageTransportOptions _options;
-    private readonly ConcurrentDictionary<string, string> _lastHashes = new(StringComparer.Ordinal);
 
     public SessionStorageMessageTransport(HttpClient httpClient, SessionStorageMessageTransportOptions options)
     {
@@ -207,47 +207,93 @@ public sealed class SessionStorageMessageTransport : ISessionMessageTransport
         response.EnsureSuccessStatusCode();
     }
 
-    public async Task<IReadOnlyList<InboundMessageEnvelope>> ReceiveAsync(SessionId recipient, CancellationToken cancellationToken = default)
+    public Task<IReadOnlyList<InboundMessageEnvelope>> ReceiveAsync(
+        SessionId recipient,
+        CancellationToken cancellationToken = default) =>
+        Task.FromException<IReadOnlyList<InboundMessageEnvelope>>(
+            new InvalidOperationException("Storage inbox retrieval requires the account signing identity."));
+
+    public int InboxNamespace => _options.Namespace;
+
+    public async Task<IReadOnlyList<InboundMessageEnvelope>> ReceiveAuthenticatedAsync(
+        SessionIdentityProvider identity,
+        CancellationToken cancellationToken = default)
     {
-        _lastHashes.TryGetValue(recipient.Value, out var lastHash);
-        var timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-
-        using var response = await PostJsonAsync(_options.RetrievePath, new
+        var batch = await RetrieveAuthenticatedAsync(
+            identity,
+            cursor: null,
+            DurableInboxLimits.MaxBatchCount,
+            cancellationToken).ConfigureAwait(false);
+        var envelopes = new List<InboundMessageEnvelope>(batch.Entries.Count);
+        foreach (var entry in batch.Entries)
         {
-            pubkey = recipient.Value,
-            @namespace = _options.Namespace,
-            timestamp,
-            signature = "deep-client-storage-retrieve",
-            last_hash = lastHash
-        }, cancellationToken).ConfigureAwait(false);
-
-        response.EnsureSuccessStatusCode();
-        var payload = await response.Content.ReadFromJsonAsync<StorageRetrieveResponse>(JsonOptions, cancellationToken)
-            .ConfigureAwait(false) ?? new StorageRetrieveResponse([]);
-
-        var envelopes = new List<InboundMessageEnvelope>();
-        foreach (var stored in payload.Messages.OrderBy(static item => item.Timestamp))
-        {
-            if (string.IsNullOrWhiteSpace(stored.Hash))
+            if (TryDecodeInboxEntry(entry, identity.SessionId, out var envelope))
             {
-                continue;
+                envelopes.Add(envelope);
             }
-
-            _lastHashes[recipient.Value] = stored.Hash;
-
-            if (!TryDecodePayload(stored, recipient, out var envelope))
-            {
-                continue;
-            }
-
-            envelopes.Add(envelope);
         }
 
         return envelopes;
     }
 
-    private static bool TryDecodePayload(
-        StorageMessageDto stored,
+    public async Task<AuthenticatedInboxBatch> RetrieveAuthenticatedAsync(
+        SessionIdentityProvider identity,
+        string? cursor,
+        int limit,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(identity);
+        if (limit is <= 0 or > DurableInboxLimits.MaxBatchCount)
+        {
+            throw new ArgumentOutOfRangeException(nameof(limit));
+        }
+
+        var recipient = identity.SessionId;
+        var timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var signatureMaterial = StorageSignatureCanonicalizer.CreateRetrieve(_options.Namespace, timestamp);
+        var signature = identity.SignDetached(signatureMaterial);
+        var ed25519PublicKey = identity.GetEd25519PublicKey();
+
+        try
+        {
+            using var response = await PostJsonAsync(_options.RetrievePath, new
+            {
+                pubkey = recipient.Value,
+                pubkey_ed25519 = Convert.ToHexString(ed25519PublicKey).ToLowerInvariant(),
+                @namespace = _options.Namespace,
+                timestamp,
+                signature = Convert.ToBase64String(signature),
+                last_hash = cursor
+            }, cancellationToken).ConfigureAwait(false);
+
+            response.EnsureSuccessStatusCode();
+            var payload = await response.Content.ReadFromJsonAsync<StorageRetrieveResponse>(JsonOptions, cancellationToken)
+                .ConfigureAwait(false) ?? new StorageRetrieveResponse([]);
+
+            var entries = payload.Messages
+                .Take(limit)
+                .Where(static item =>
+                    !string.IsNullOrWhiteSpace(item.Hash)
+                    && item.Hash.Length <= DurableInboxLimits.MaxServerHashChars)
+                .Select(static item => DurableInboxWireEntry.CreateBounded(
+                    item.Hash,
+                    item.Timestamp,
+                    item.Data ?? string.Empty))
+                .ToArray();
+            return new AuthenticatedInboxBatch(
+                entries,
+                entries.Length == 0 ? cursor : entries[^1].ServerHash);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(signatureMaterial);
+            CryptographicOperations.ZeroMemory(signature);
+            CryptographicOperations.ZeroMemory(ed25519PublicKey);
+        }
+    }
+
+    public bool TryDecodeInboxEntry(
+        DurableInboxWireEntry entry,
         SessionId recipient,
         out InboundMessageEnvelope envelope)
     {
@@ -255,7 +301,7 @@ public sealed class SessionStorageMessageTransport : ISessionMessageTransport
 
         try
         {
-            var json = Encoding.UTF8.GetString(Convert.FromBase64String(stored.Data));
+            var json = Encoding.UTF8.GetString(Convert.FromBase64String(entry.WirePayload));
             var payload = JsonSerializer.Deserialize<StoredMessagePayload>(json, JsonOptions);
             if (payload is null || !string.Equals(payload.Recipient, recipient.Value, StringComparison.Ordinal))
             {
@@ -270,7 +316,7 @@ public sealed class SessionStorageMessageTransport : ISessionMessageTransport
                 payload.Attachments,
                 payload.CreatedAt,
                 payload.ExpiresAt,
-                stored.Hash,
+                entry.ServerHash,
                 payload.ReplyTo,
                 payload.Reaction);
             return true;
@@ -292,10 +338,10 @@ public sealed class SessionStorageMessageTransport : ISessionMessageTransport
     private static string BuildIdempotencyKey(OutboundMessageEnvelope envelope, string payloadJson)
     {
         var material = string.Join('\n',
+            "deep-storage-idempotency-v2",
             envelope.Sender.Value,
             envelope.Recipient.Value,
-            envelope.CreatedAt.ToUnixTimeMilliseconds().ToString(System.Globalization.CultureInfo.InvariantCulture),
-            payloadJson);
+            envelope.Id?.Value ?? Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(payloadJson))));
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(material))).ToLowerInvariant();
     }
 
@@ -327,6 +373,18 @@ public sealed class SessionStorageMessageTransport : ISessionMessageTransport
         [property: JsonPropertyName("hash")] string Hash,
         [property: JsonPropertyName("timestamp")] long Timestamp,
         [property: JsonPropertyName("data")] string Data);
+}
+
+internal static class StorageSignatureCanonicalizer
+{
+    public static byte[] CreateRetrieve(int @namespace, long timestamp)
+    {
+        var namespaceValue = @namespace == 0
+            ? string.Empty
+            : @namespace.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        return Encoding.UTF8.GetBytes(
+            $"retrieve{namespaceValue}{timestamp.ToString(System.Globalization.CultureInfo.InvariantCulture)}");
+    }
 }
 
 public sealed class StubSessionBackend : ISessionMessageTransport, IRecoveryProfileLookup

@@ -6,24 +6,60 @@ namespace Deep.Client.Shared.State;
 
 public sealed class ClientRuntime : IDisposable
 {
+    private readonly IDisposable? ownedMessageTransport;
+    private readonly AccountGenerationMutationBarrier mutationBarrier;
+    private int disposed;
+
     public ClientRuntime(
         ILocalSessionStore store,
         ClientFeatureFlags featureFlags,
         IClock clock,
         ISessionMessageTransport messageTransport,
         IGroupSyncTransport? groupSyncTransport = null,
-        IAvatarProfileTransport? avatarProfiles = null)
+        IAvatarProfileTransport? avatarProfiles = null,
+        bool requireE2eeTransport = false)
     {
-        Store = store;
+        ArgumentNullException.ThrowIfNull(store);
+        ArgumentNullException.ThrowIfNull(featureFlags);
+        ArgumentNullException.ThrowIfNull(clock);
+        ArgumentNullException.ThrowIfNull(messageTransport);
+
+        mutationBarrier = new AccountGenerationMutationBarrier();
+        Store = AccountGenerationSessionStore.Create(store, mutationBarrier);
         FeatureFlags = featureFlags;
         Clock = clock;
-        MessageTransport = messageTransport;
-        GroupSyncTransport = groupSyncTransport ?? new DisabledGroupSyncTransport();
         AvatarProfiles = avatarProfiles ?? new DisabledAvatarProfileTransport();
         Accounts = new SessionAccountService(store, store, clock, messageTransport as IRecoveryProfileLookup);
-        Conversations = new ConversationService(store, store, store, store, clock, featureFlags, GroupSyncTransport);
-        Messages = new MessageService(Conversations, store, store, store, messageTransport, GroupSyncTransport, clock);
+
+        if (requireE2eeTransport || featureFlags.TransportRequired)
+        {
+            if (messageTransport is not IAuthenticatedInboxTransport)
+            {
+                throw new InvalidOperationException(
+                    "TransportRequired is enabled, but the configured transport is not authenticated E2EE.");
+            }
+
+            var encryptedTransport = new E2eeClientTransport(
+                messageTransport,
+                Accounts.GetRecoveryPhraseAsync,
+                clock,
+                Store);
+            MessageTransport = encryptedTransport;
+            GroupSyncTransport = encryptedTransport;
+            ownedMessageTransport = encryptedTransport;
+            Accounts.AccountStateChanged += encryptedTransport.RetireCachedIdentity;
+        }
+        else
+        {
+            MessageTransport = messageTransport;
+            GroupSyncTransport = groupSyncTransport ?? new DisabledGroupSyncTransport();
+        }
+
+        Conversations = new ConversationService(Store, Store, Store, Store, clock, featureFlags, GroupSyncTransport);
+        Messages = new MessageService(Conversations, Store, Store, Store, MessageTransport, GroupSyncTransport, clock);
         Inbox = new InboxSyncService(Accounts, Conversations, Messages);
+        Accounts.RegisterAccountGenerationLifecycle(
+            new CompositeAccountGenerationLifecycle(mutationBarrier, Inbox, Messages));
         Sync = new SyncOrchestrator();
         Notifications = new NotificationPlanner();
         Migrations = new LocalSchemaMigrator(LocalSchemaMigrations.Default);
@@ -55,6 +91,8 @@ public sealed class ClientRuntime : IDisposable
 
     public LocalSchemaMigrator Migrations { get; }
 
+    public bool IsDisposed => Volatile.Read(ref disposed) != 0;
+
     public static ClientRuntime CreateStubbed(
         ClientFeatureFlags? featureFlags = null,
         IClock? clock = null,
@@ -78,8 +116,24 @@ public sealed class ClientRuntime : IDisposable
         IAvatarProfileTransport? avatarProfiles = null,
         string? legacyInMemoryStatePath = null,
         string? sqlCipherKey = null,
-        Func<ILocalSessionStore, ILocalSessionStore>? storeDecorator = null)
+        Func<ILocalSessionStore, ILocalSessionStore>? storeDecorator = null,
+        bool requireE2eeTransport = false)
     {
+        var resolvedFeatureFlags = featureFlags ?? ClientFeatureFlags.Defaults;
+        if (backend is null)
+        {
+            throw new ArgumentNullException(
+                nameof(backend),
+                "A transport must be supplied explicitly. Use CreatePersistentForTests for a named stubbed test runtime.");
+        }
+
+        if ((requireE2eeTransport || resolvedFeatureFlags.TransportRequired) &&
+            backend is not IAuthenticatedInboxTransport)
+        {
+            throw new InvalidOperationException(
+                "TransportRequired is enabled, but the configured transport is not authenticated E2EE.");
+        }
+
         var store = new SqliteSessionStore(new SqliteSessionStoreOptions(statePath, sqlCipherKey));
         if (!string.IsNullOrWhiteSpace(legacyInMemoryStatePath))
         {
@@ -96,21 +150,48 @@ public sealed class ClientRuntime : IDisposable
 
         var runtimeStore = storeDecorator?.Invoke(store) ?? store;
 
-        var transport = backend ?? new HttpSessionTransport(
-            new HttpClient(),
-            new HttpSessionTransportOptions("http://127.0.0.1:8080"));
-
         return new(
             runtimeStore,
-            featureFlags ?? ClientFeatureFlags.Defaults,
+            resolvedFeatureFlags,
             clock ?? new SystemClock(),
-            transport,
+            backend,
             groupSyncTransport,
-            avatarProfiles);
+            avatarProfiles,
+            requireE2eeTransport);
     }
+
+    public static ClientRuntime CreatePersistentForTests(
+        string statePath,
+        ClientFeatureFlags? featureFlags = null,
+        IClock? clock = null,
+        StubSessionBackend? backend = null,
+        IGroupSyncTransport? groupSyncTransport = null,
+        IAvatarProfileTransport? avatarProfiles = null,
+        string? legacyInMemoryStatePath = null,
+        string? sqlCipherKey = null,
+        Func<ILocalSessionStore, ILocalSessionStore>? storeDecorator = null) =>
+        CreatePersistent(
+            statePath,
+            featureFlags ?? ClientFeatureFlags.Defaults,
+            clock,
+            backend ?? new StubSessionBackend(),
+            groupSyncTransport,
+            avatarProfiles,
+            legacyInMemoryStatePath,
+            sqlCipherKey,
+            storeDecorator,
+            requireE2eeTransport: false);
 
     public void Dispose()
     {
+        if (Interlocked.Exchange(ref disposed, 1) != 0)
+        {
+            return;
+        }
+
+        Inbox.Dispose();
+        mutationBarrier.Dispose();
+        ownedMessageTransport?.Dispose();
         if (Store is IDisposable disposableStore)
         {
             disposableStore.Dispose();

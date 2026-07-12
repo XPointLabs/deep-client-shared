@@ -117,4 +117,30 @@ public sealed class RealtimeCallTests
         Assert.Equal("reconnect-attempts-exhausted", second.FailureReason);
         Assert.Contains(second.Diagnostics, item => item.Reason == "reconnect-attempts-exhausted");
     }
+
+    [Fact]
+    public async Task ConcurrentNetworkSamplesAndHangup_NeverReviveTerminalCall()
+    {
+        var transport = new InMemoryCallSignalingTransport();
+        var clock = new FrozenClock(DateTimeOffset.Parse("2026-07-11T00:00:00Z"));
+        var service = new RealtimeCallService(
+            transport,
+            new ReconnectStrategyOptions(MaxAttempts: 20, TriggerPoorSamples: 1),
+            clock);
+        var local = SessionId.CreateNew();
+        var remote = SessionId.CreateNew();
+        var outgoing = await service.StartOutgoingAsync(local, remote, "03concurrent");
+        var sample = new CallNetworkSample(900, 200, 0.5, 1);
+
+        var operations = Enumerable.Range(0, 32)
+            .Select(_ => service.ApplyNetworkSampleAsync(outgoing.CallId, local, sample))
+            .Cast<Task>()
+            .Append(service.EndAsync(outgoing.CallId, local))
+            .ToArray();
+        await Task.WhenAll(operations);
+
+        var snapshot = service.GetSnapshot(outgoing.CallId);
+        Assert.NotNull(snapshot);
+        Assert.Contains(snapshot!.State, new[] { CallSessionState.Ended, CallSessionState.Failed });
+    }
 }

@@ -8,11 +8,13 @@ public sealed class ConversationService(
     IConversationRepository conversations,
     IContactRepository contacts,
     IGroupRepository groups,
-    ISettingsRepository settings,
+    IGroupStatePersistenceRepository groupStatePersistence,
     IClock clock,
     ClientFeatureFlags featureFlags,
     IGroupSyncTransport groupSync)
 {
+    private readonly SemaphoreSlim groupOutboxGate = new(1, 1);
+
     public async Task<Conversation> GetOrCreateOneToOneAsync(
         SessionId counterpart,
         string? displayName = null,
@@ -174,7 +176,7 @@ public sealed class ConversationService(
             .Select(member => new GroupMember(member, member == owner ? GroupMemberRole.Admin : GroupMemberRole.Standard, now))
             .ToArray();
 
-        var group = new Group(id, name.Trim(), owner, now, members);
+        var group = new Group(id, name.Trim(), owner, now, members, Revision: 1);
         await PersistGroupWithConversationAsync(group, cancellationToken, updatedAt: now).ConfigureAwait(false);
         return group;
     }
@@ -213,26 +215,44 @@ public sealed class ConversationService(
             return [];
         }
 
+        await TryFlushPendingGroupStatesAsync(cancellationToken).ConfigureAwait(false);
+
         var updates = await groupSync.ReceiveGroupStatesAsync(memberId, cancellationToken).ConfigureAwait(false);
         var applied = new List<Group>(updates.Count);
 
-        foreach (var update in updates.OrderBy(static item => item.UpdatedAt))
+        foreach (var update in updates
+                     .OrderBy(static item => item.Group.Revision)
+                     .ThenBy(static item => item.UpdatedAt))
         {
             var existing = await groups.GetAsync(update.Group.Id, cancellationToken).ConfigureAwait(false);
-            var existingUpdatedAt = await GetGroupStateUpdatedAtAsync(update.Group.Id, cancellationToken).ConfigureAwait(false);
-            if (existing is not null && existingUpdatedAt is not null && existingUpdatedAt >= update.UpdatedAt)
+            var shouldAcknowledge = true;
+            if (TryValidateInboundGroupState(update, existing, memberId, out var group))
             {
-                continue;
+                await PersistGroupWithConversationAsync(
+                    group,
+                    cancellationToken,
+                    publish: false,
+                    updatedAt: update.UpdatedAt).ConfigureAwait(false);
+                applied.Add(group);
+            }
+            else if (TryResumePersistedInboundGroupState(update, existing, memberId, out group))
+            {
+                await PersistGroupWithConversationAsync(
+                    group,
+                    cancellationToken,
+                    publish: false,
+                    updatedAt: update.UpdatedAt).ConfigureAwait(false);
+            }
+            else if (ShouldDeferInboundGroupState(update, existing, memberId))
+            {
+                shouldAcknowledge = false;
             }
 
-            var isMember = update.Group.Members.Any(member => member.SessionId == memberId);
-            var group = update.Group with { IsKicked = update.Group.IsKicked || !isMember };
-            await PersistGroupWithConversationAsync(
-                group,
-                cancellationToken,
-                publish: false,
-                updatedAt: update.UpdatedAt).ConfigureAwait(false);
-            applied.Add(group);
+            if (shouldAcknowledge)
+            {
+                await AcknowledgeInboxItemAsync(groupSync, memberId, update.ServerHash, cancellationToken)
+                    .ConfigureAwait(false);
+            }
         }
 
         return applied;
@@ -252,7 +272,13 @@ public sealed class ConversationService(
             return null;
         }
 
-        var updated = group with { Name = newName.Trim() };
+        var normalizedName = newName.Trim();
+        if (string.Equals(group.Name, normalizedName, StringComparison.Ordinal))
+        {
+            return group;
+        }
+
+        var updated = WithNextRevision(group with { Name = normalizedName });
         await PersistGroupWithConversationAsync(updated, cancellationToken).ConfigureAwait(false);
         return updated;
     }
@@ -275,7 +301,13 @@ public sealed class ConversationService(
             return null;
         }
 
-        var updated = group.AddMember(member with { Role = GroupMemberRole.Admin, IsPendingRemoval = false });
+        if (member.Role == GroupMemberRole.Admin && !member.IsPendingRemoval)
+        {
+            return group;
+        }
+
+        var updated = WithNextRevision(
+            group.AddMember(member with { Role = GroupMemberRole.Admin, IsPendingRemoval = false }));
         await PersistGroupWithConversationAsync(updated, cancellationToken).ConfigureAwait(false);
         return updated;
     }
@@ -304,7 +336,8 @@ public sealed class ConversationService(
             return null;
         }
 
-        var updated = group.AddMember(member with { Role = GroupMemberRole.Standard, IsPendingRemoval = false });
+        var updated = WithNextRevision(
+            group.AddMember(member with { Role = GroupMemberRole.Standard, IsPendingRemoval = false }));
         await PersistGroupWithConversationAsync(updated, cancellationToken).ConfigureAwait(false);
         return updated;
     }
@@ -328,7 +361,12 @@ public sealed class ConversationService(
             return null;
         }
 
-        var updated = group.AddMember(member with { IsPendingRemoval = isPending });
+        if (member.IsPendingRemoval == isPending)
+        {
+            return group;
+        }
+
+        var updated = WithNextRevision(group.AddMember(member with { IsPendingRemoval = isPending }));
         await PersistGroupWithConversationAsync(updated, cancellationToken).ConfigureAwait(false);
         return updated;
     }
@@ -350,7 +388,8 @@ public sealed class ConversationService(
             return group;
         }
 
-        var updated = group.AddMember(new GroupMember(memberId, GroupMemberRole.Standard, clock.UtcNow));
+        var updated = WithNextRevision(
+            group.AddMember(new GroupMember(memberId, GroupMemberRole.Standard, clock.UtcNow)));
         await PersistGroupWithConversationAsync(updated, cancellationToken).ConfigureAwait(false);
         return updated;
     }
@@ -379,11 +418,11 @@ public sealed class ConversationService(
         }
 
         var normalizedMembers = EnsureAdminPresence(withoutMember, clock.UtcNow);
-        var updated = group with
+        var updated = WithNextRevision(group with
         {
             Members = normalizedMembers,
             IsDestroyed = normalizedMembers.Length == 0
-        };
+        });
 
         var recipients = GroupStateRecipients(group);
         await PersistGroupWithConversationAsync(updated, cancellationToken, recipients: recipients).ConfigureAwait(false);
@@ -408,12 +447,12 @@ public sealed class ConversationService(
         }
 
         var normalizedMembers = EnsureAdminPresence(withoutMember, clock.UtcNow);
-        var updated = group with
+        var updated = WithNextRevision(group with
         {
             Members = normalizedMembers,
             IsDestroyed = normalizedMembers.Length == 0,
             IsKicked = false
-        };
+        });
 
         var recipients = GroupStateRecipients(group);
         await PersistGroupWithConversationAsync(updated, cancellationToken, recipients: recipients).ConfigureAwait(false);
@@ -431,7 +470,12 @@ public sealed class ConversationService(
             return null;
         }
 
-        var updated = group with { IsDestroyed = true };
+        if (group.IsDestroyed)
+        {
+            return group;
+        }
+
+        var updated = WithNextRevision(group with { IsDestroyed = true });
         var recipients = GroupStateRecipients(group);
         await PersistGroupWithConversationAsync(updated, cancellationToken, recipients: recipients).ConfigureAwait(false);
         return updated;
@@ -444,8 +488,6 @@ public sealed class ConversationService(
         IEnumerable<SessionId>? recipients = null,
         DateTimeOffset? updatedAt = null)
     {
-        await groups.UpsertAsync(group, cancellationToken).ConfigureAwait(false);
-
         var now = updatedAt ?? clock.UtcNow;
         var conversation = await conversations.GetAsync(group.Id, cancellationToken).ConfigureAwait(false)
             ?? new Conversation(
@@ -463,15 +505,87 @@ public sealed class ConversationService(
             IsHidden = group.IsDestroyed
         };
 
-        await conversations.UpsertAsync(conversation, cancellationToken).ConfigureAwait(false);
-        await settings.SetAsync(GroupStateUpdatedAtSettingKey(group.Id), now.ToString("O"), cancellationToken)
-            .ConfigureAwait(false);
+        GroupStateOutboxItem? outboxItem = null;
+        if (publish)
+        {
+            var targetRecipients = (recipients ?? GroupStateRecipients(group))
+                .Append(group.CreatedBy)
+                .Distinct()
+                .ToArray();
+            outboxItem = new GroupStateOutboxItem(
+                GroupStateOperationId(group),
+                group,
+                now,
+                targetRecipients);
+        }
+
+        await groupStatePersistence.PersistGroupStateAsync(
+            group,
+            conversation,
+            now,
+            outboxItem,
+            cancellationToken).ConfigureAwait(false);
 
         if (publish)
         {
-            await groupSync.PublishGroupStateAsync(group, now, recipients, cancellationToken).ConfigureAwait(false);
+            await TryFlushPendingGroupStatesAsync(cancellationToken).ConfigureAwait(false);
         }
     }
+
+    public async Task<int> FlushPendingGroupStatesAsync(CancellationToken cancellationToken = default)
+    {
+        await groupOutboxGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var published = 0;
+            while (true)
+            {
+                var pending = await groupStatePersistence.ListPendingGroupStatePublishesAsync(
+                    GroupStateOutboxLimits.MaxPublishBatch,
+                    cancellationToken).ConfigureAwait(false);
+                if (pending.Count == 0)
+                {
+                    return published;
+                }
+
+                foreach (var item in pending)
+                {
+                    await groupSync.PublishGroupStateAsync(
+                        item.Group,
+                        item.UpdatedAt,
+                        item.Recipients,
+                        cancellationToken).ConfigureAwait(false);
+                    await groupStatePersistence.AcknowledgeGroupStatePublishAsync(
+                        item.OperationId,
+                        cancellationToken).ConfigureAwait(false);
+                    published++;
+                }
+            }
+        }
+        finally
+        {
+            groupOutboxGate.Release();
+        }
+    }
+
+    private async Task TryFlushPendingGroupStatesAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await FlushPendingGroupStatesAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            // The committed outbox item remains durable and will be retried by the next sync cycle.
+        }
+    }
+
+    private static string GroupStateOperationId(Group group) =>
+        $"group-state:{group.Id.Value}:{group.Revision.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
 
     private static GroupMember[] EnsureAdminPresence(IReadOnlyList<GroupMember> members, DateTimeOffset now)
     {
@@ -484,17 +598,156 @@ public sealed class ConversationService(
         return [promoted, .. members.Skip(1)];
     }
 
-    private async Task<DateTimeOffset?> GetGroupStateUpdatedAtAsync(
-        ConversationId groupId,
-        CancellationToken cancellationToken)
+    private static Group WithNextRevision(Group group)
     {
-        var raw = await settings.GetAsync<string>(GroupStateUpdatedAtSettingKey(groupId), cancellationToken)
-            .ConfigureAwait(false);
-        return DateTimeOffset.TryParse(raw, out var parsed) ? parsed : null;
+        if (group.Revision < 1)
+        {
+            throw new InvalidOperationException("A group must have a valid revision before it can be mutated.");
+        }
+
+        return group with { Revision = checked(group.Revision + 1) };
     }
 
-    private static string GroupStateUpdatedAtSettingKey(ConversationId groupId) =>
-        $"sync.group-state-updated.{groupId.Value}";
+    private static bool TryValidateInboundGroupState(
+        InboundGroupStateEnvelope update,
+        Group? existing,
+        SessionId recipient,
+        out Group group)
+    {
+        group = default!;
+        var candidate = update.Group;
+        if (!HasValidGroupShape(candidate))
+        {
+            return false;
+        }
+
+        var includesRecipient = candidate.Members.Any(member => member.SessionId == recipient);
+        if (existing is null)
+        {
+            if (candidate.Revision != 1
+                || update.Sender != candidate.CreatedBy
+                || !candidate.HasAdmin(candidate.CreatedBy)
+                || !includesRecipient
+                || candidate.IsDestroyed)
+            {
+                return false;
+            }
+
+            group = candidate with { IsKicked = false };
+            return true;
+        }
+
+        if (existing.Revision < 1
+            || existing.Revision == long.MaxValue
+            || candidate.Revision != existing.Revision + 1
+            || candidate.Id != existing.Id
+            || candidate.CreatedBy != existing.CreatedBy
+            || candidate.CreatedAt != existing.CreatedAt
+            || existing.IsDestroyed
+            || existing.IsKicked
+            || !existing.HasAdmin(update.Sender))
+        {
+            return false;
+        }
+
+        var previouslyIncludedRecipient = existing.Members.Any(member => member.SessionId == recipient);
+        if (!previouslyIncludedRecipient)
+        {
+            return false;
+        }
+
+        group = candidate with { IsKicked = !includesRecipient };
+        return true;
+    }
+
+    private static bool TryResumePersistedInboundGroupState(
+        InboundGroupStateEnvelope update,
+        Group? existing,
+        SessionId recipient,
+        out Group group)
+    {
+        group = default!;
+        if (existing is null || !HasValidGroupShape(update.Group) || existing.Revision != update.Group.Revision)
+        {
+            return false;
+        }
+
+        var candidate = update.Group with
+        {
+            IsKicked = !update.Group.Members.Any(member => member.SessionId == recipient)
+        };
+        if (candidate.Id != existing.Id
+            || !string.Equals(candidate.Name, existing.Name, StringComparison.Ordinal)
+            || candidate.CreatedBy != existing.CreatedBy
+            || candidate.CreatedAt != existing.CreatedAt
+            || candidate.IsDestroyed != existing.IsDestroyed
+            || candidate.IsKicked != existing.IsKicked
+            || !candidate.Members.SequenceEqual(existing.Members))
+        {
+            return false;
+        }
+
+        group = existing;
+        return true;
+    }
+
+    private static bool ShouldDeferInboundGroupState(
+        InboundGroupStateEnvelope update,
+        Group? existing,
+        SessionId recipient)
+    {
+        var candidate = update.Group;
+        if (!HasValidGroupShape(candidate))
+        {
+            return false;
+        }
+
+        if (existing is null)
+        {
+            return candidate.Revision > 1
+                && update.Sender == candidate.CreatedBy
+                && candidate.HasAdmin(candidate.CreatedBy)
+                && candidate.Members.Any(member => member.SessionId == recipient)
+                && !candidate.IsDestroyed;
+        }
+
+        return existing.Revision is >= 1 and < long.MaxValue
+            && candidate.Revision > existing.Revision + 1
+            && candidate.Id == existing.Id
+            && candidate.CreatedBy == existing.CreatedBy
+            && candidate.CreatedAt == existing.CreatedAt
+            && !existing.IsDestroyed
+            && !existing.IsKicked
+            && existing.HasAdmin(update.Sender)
+            && existing.Members.Any(member => member.SessionId == recipient);
+    }
+
+    private static bool HasValidGroupShape(Group group)
+    {
+        if (group.Revision < 1
+            || string.IsNullOrWhiteSpace(group.Id.Value)
+            || string.IsNullOrWhiteSpace(group.Name)
+            || string.IsNullOrWhiteSpace(group.CreatedBy.Value)
+            || group.Members.Any(member =>
+                string.IsNullOrWhiteSpace(member.SessionId.Value)
+                || !Enum.IsDefined(member.Role))
+            || group.Members.Select(member => member.SessionId).Distinct().Count() != group.Members.Count)
+        {
+            return false;
+        }
+
+        return group.IsDestroyed
+            || (group.Members.Count > 0 && group.Members.Any(member => member.Role == GroupMemberRole.Admin));
+    }
+
+    private static Task AcknowledgeInboxItemAsync(
+        object source,
+        SessionId account,
+        string serverHash,
+        CancellationToken cancellationToken) =>
+        source is IDurableInboxAcknowledger acknowledger
+            ? acknowledger.AcknowledgeInboxItemAsync(account, serverHash, cancellationToken)
+            : Task.CompletedTask;
 
     private static SessionId[] GroupStateRecipients(Group group) =>
         group.Members

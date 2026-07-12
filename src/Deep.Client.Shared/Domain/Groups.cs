@@ -13,7 +13,8 @@ public sealed record Group(
     DateTimeOffset CreatedAt,
     IReadOnlyList<GroupMember> Members,
     bool IsDestroyed = false,
-    bool IsKicked = false)
+    bool IsKicked = false,
+    long Revision = 1)
 {
     public bool HasAdmin(SessionId sessionId) =>
         Members.Any(member => member.SessionId == sessionId && member.Role == GroupMemberRole.Admin);

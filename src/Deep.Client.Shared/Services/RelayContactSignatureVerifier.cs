@@ -7,6 +7,8 @@ public static class RelayContactSignatureVerifier
 {
     private const string Algorithm = "ed25519";
     private const string PayloadVersion = "deep-relay-contact-v1";
+    private static readonly TimeSpan MaximumContactAge = TimeSpan.FromHours(12);
+    private static readonly TimeSpan MaximumFutureClockSkew = TimeSpan.FromMinutes(5);
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     public static bool Verify(TransportRouteNode contact, DateTimeOffset now)
@@ -15,7 +17,8 @@ public static class RelayContactSignatureVerifier
             || contact.SignedAt == default
             || contact.ExpiresAt <= now
             || contact.ExpiresAt <= contact.SignedAt
-            || contact.SignedAt > now.AddMinutes(5))
+            || contact.SignedAt > now.Add(MaximumFutureClockSkew)
+            || now - contact.SignedAt >= MaximumContactAge)
         {
             return false;
         }

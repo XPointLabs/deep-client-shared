@@ -35,7 +35,8 @@ public sealed record InboundGroupMessageEnvelope(
 public sealed record InboundGroupStateEnvelope(
     Group Group,
     DateTimeOffset UpdatedAt,
-    string ServerHash);
+    string ServerHash,
+    SessionId Sender = default);
 
 public interface IGroupSyncTransport
 {

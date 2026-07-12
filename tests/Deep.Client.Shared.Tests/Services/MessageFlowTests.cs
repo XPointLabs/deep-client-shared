@@ -306,14 +306,14 @@ public sealed class MessageFlowTests
         var runtime = ClientRuntime.CreateStubbed(clock: clock, backend: new StubSessionBackend());
 
         var alice = await runtime.Accounts.RegisterAsync("Alice");
-        var bob = await runtime.Accounts.RegisterAsync("Bob");
-        var sent = await runtime.Messages.SendOneToOneAsync(alice.SessionId, bob.SessionId, "fresh");
+        var bob = SessionId.CreateNew();
+        var sent = await runtime.Messages.SendOneToOneAsync(alice.SessionId, bob, "fresh");
 
         var expired = new Message(
             MessageId.NewId(),
             sent.ConversationId,
             alice.SessionId,
-            bob.SessionId,
+            bob,
             "expired",
             MessageDirection.Outgoing,
             MessageDeliveryState.Sent,
@@ -336,8 +336,8 @@ public sealed class MessageFlowTests
         var runtime = ClientRuntime.CreateStubbed(clock: clock, backend: new StubSessionBackend());
 
         var sender = await runtime.Accounts.RegisterAsync("Sender");
-        var recipient = await runtime.Accounts.RegisterAsync("Recipient");
-        var conversation = await runtime.Conversations.GetOrCreateOneToOneAsync(recipient.SessionId);
+        var recipient = SessionId.CreateNew();
+        var conversation = await runtime.Conversations.GetOrCreateOneToOneAsync(recipient);
 
         for (var index = 0; index < 5; index++)
         {
@@ -345,7 +345,7 @@ public sealed class MessageFlowTests
                 MessageId.NewId(),
                 conversation.Id,
                 sender.SessionId,
-                recipient.SessionId,
+                recipient,
                 $"message-{index}",
                 MessageDirection.Outgoing,
                 MessageDeliveryState.Sent,
@@ -365,16 +365,19 @@ public sealed class MessageFlowTests
         var runtime = ClientRuntime.CreateStubbed(clock: clock, backend: new StubSessionBackend());
 
         var sender = await runtime.Accounts.RegisterAsync("Sender");
-        var recipient = await runtime.Accounts.RegisterAsync("Recipient");
-        var conversation = await runtime.Conversations.GetOrCreateOneToOneAsync(recipient.SessionId);
+        var recipient = SessionId.CreateNew();
+        var conversation = await runtime.Conversations.GetOrCreateOneToOneAsync(recipient);
 
+        var messageIds = new List<MessageId>();
         for (var index = 0; index < 6; index++)
         {
+            var messageId = MessageId.NewId();
+            messageIds.Add(messageId);
             await ((IMessageRepository)runtime.Store).AppendAsync(new Message(
-                MessageId.NewId(),
+                messageId,
                 conversation.Id,
                 sender.SessionId,
-                recipient.SessionId,
+                recipient,
                 $"message-{index}",
                 MessageDirection.Outgoing,
                 MessageDeliveryState.Sent,
@@ -385,6 +388,7 @@ public sealed class MessageFlowTests
         var before = await runtime.Messages.ListConversationMessagesBeforeAsync(
             conversation.Id,
             clock.UtcNow.AddSeconds(4),
+            messageIds[4],
             3);
 
         Assert.Equal(["message-1", "message-2", "message-3"], before.Select(item => item.Body));
@@ -437,19 +441,19 @@ public sealed class MessageFlowTests
     }
 
     [Fact]
-    public async Task MarkConversationAsRead_SetsCursorWithoutRewritingMessages()
+    public async Task MarkConversationAsRead_AtomicallyMarksIncomingMessagesAndSetsCursor()
     {
         var clock = new FrozenClock(DateTimeOffset.Parse("2026-05-28T00:00:00Z"));
         var runtime = ClientRuntime.CreateStubbed(clock: clock, backend: new StubSessionBackend());
 
         var sender = await runtime.Accounts.RegisterAsync("Sender");
-        var recipient = await runtime.Accounts.RegisterAsync("Recipient");
+        var recipient = SessionId.CreateNew();
         var conversation = await runtime.Conversations.GetOrCreateOneToOneAsync(sender.SessionId);
         var message = new Message(
             MessageId.NewId(),
             conversation.Id,
             sender.SessionId,
-            recipient.SessionId,
+            recipient,
             "incoming",
             MessageDirection.Incoming,
             MessageDeliveryState.Delivered,
@@ -462,7 +466,8 @@ public sealed class MessageFlowTests
 
         Assert.Equal(clock.UtcNow, cursor);
         Assert.Equal(cursor, await runtime.Messages.GetReadCursorAsync(conversation.Id));
-        Assert.Equal(MessageDeliveryState.Delivered, stored!.DeliveryState);
+        Assert.Equal(MessageDeliveryState.Read, stored!.DeliveryState);
+        Assert.Equal(cursor, stored.ReadAt);
     }
 
     [Fact]
@@ -472,11 +477,11 @@ public sealed class MessageFlowTests
         var runtime = ClientRuntime.CreateStubbed(clock: clock, backend: new StubSessionBackend());
 
         var sender = await runtime.Accounts.RegisterAsync("Sender");
-        var recipient = await runtime.Accounts.RegisterAsync("Recipient");
+        var recipient = SessionId.CreateNew();
         var conversation = await runtime.Conversations.GetOrCreateOneToOneAsync(sender.SessionId);
 
-        var first = new Message(MessageId.NewId(), conversation.Id, sender.SessionId, recipient.SessionId, "first", MessageDirection.Incoming, MessageDeliveryState.Delivered, clock.UtcNow.AddSeconds(-20), []);
-        var second = new Message(MessageId.NewId(), conversation.Id, sender.SessionId, recipient.SessionId, "second", MessageDirection.Incoming, MessageDeliveryState.Delivered, clock.UtcNow.AddSeconds(-10), []);
+        var first = new Message(MessageId.NewId(), conversation.Id, sender.SessionId, recipient, "first", MessageDirection.Incoming, MessageDeliveryState.Delivered, clock.UtcNow.AddSeconds(-20), []);
+        var second = new Message(MessageId.NewId(), conversation.Id, sender.SessionId, recipient, "second", MessageDirection.Incoming, MessageDeliveryState.Delivered, clock.UtcNow.AddSeconds(-10), []);
         await ((IMessageRepository)runtime.Store).AppendAsync(first);
         await ((IMessageRepository)runtime.Store).AppendAsync(second);
 
@@ -496,10 +501,10 @@ public sealed class MessageFlowTests
         var runtime = ClientRuntime.CreateStubbed(clock: clock, backend: new StubSessionBackend());
 
         var sender = await runtime.Accounts.RegisterAsync("Sender");
-        var recipient = await runtime.Accounts.RegisterAsync("Recipient");
-        var conversation = await runtime.Conversations.GetOrCreateOneToOneAsync(recipient.SessionId);
+        var recipient = SessionId.CreateNew();
+        var conversation = await runtime.Conversations.GetOrCreateOneToOneAsync(recipient);
 
-        var expired = new Message(MessageId.NewId(), conversation.Id, sender.SessionId, recipient.SessionId, "expired", MessageDirection.Outgoing, MessageDeliveryState.Sent, clock.UtcNow.AddMinutes(-2), [], clock.UtcNow.AddMinutes(-1));
+        var expired = new Message(MessageId.NewId(), conversation.Id, sender.SessionId, recipient, "expired", MessageDirection.Outgoing, MessageDeliveryState.Sent, clock.UtcNow.AddMinutes(-2), [], clock.UtcNow.AddMinutes(-1));
         await ((IMessageRepository)runtime.Store).AppendAsync(expired);
 
         var removed = await runtime.Messages.PruneExpiredConversationMessagesAsync(conversation.Id);
@@ -575,6 +580,221 @@ public sealed class MessageFlowTests
     }
 
     [Fact]
+    public async Task ReceiveGroupAsync_RejectsOutsiderMessageWithoutPersistingConversationOrMessage()
+    {
+        var clock = new FrozenClock(DateTimeOffset.Parse("2026-05-28T00:00:00Z"));
+        var groupSync = new RecordingGroupSyncTransport();
+        var runtime = new ClientRuntime(
+            new InMemorySessionStore(),
+            Deep.Client.Shared.Features.ClientFeatureFlags.Defaults,
+            clock,
+            new QueuedMessageTransport(),
+            groupSync);
+        var recipient = await runtime.Accounts.RegisterAsync("Recipient");
+        var activeMember = SessionId.CreateNew();
+        var outsider = SessionId.CreateNew();
+        var group = new Group(
+            ConversationId.CreateGroupV2(),
+            "Accepted revision",
+            recipient.SessionId,
+            clock.UtcNow.AddDays(-1),
+            [
+                new GroupMember(recipient.SessionId, GroupMemberRole.Admin, clock.UtcNow.AddDays(-1)),
+                new GroupMember(activeMember, GroupMemberRole.Standard, clock.UtcNow.AddHours(-1))
+            ],
+            Revision: 7);
+        await ((IGroupRepository)runtime.Store).UpsertAsync(group);
+        var messageId = new MessageId("outsider-message");
+        groupSync.Enqueue(new InboundGroupMessageEnvelope(
+            messageId,
+            group.Id,
+            outsider,
+            "not authorized",
+            [],
+            clock.UtcNow,
+            null,
+            "outsider-message-hash"));
+
+        var received = await runtime.Messages.ReceiveGroupAsync(recipient.SessionId, group.Id);
+
+        Assert.Empty(received);
+        Assert.Null(await ((IConversationRepository)runtime.Store).GetAsync(group.Id));
+        Assert.Null(await ((IMessageRepository)runtime.Store).GetAsync(messageId));
+    }
+
+    [Fact]
+    public async Task ReceiveGroupAsync_RejectsRemovedRecipientBeforeFetchingEntries()
+    {
+        var clock = new FrozenClock(DateTimeOffset.Parse("2026-05-28T00:00:00Z"));
+        var groupSync = new RecordingGroupSyncTransport();
+        var runtime = new ClientRuntime(
+            new InMemorySessionStore(),
+            Deep.Client.Shared.Features.ClientFeatureFlags.Defaults,
+            clock,
+            new QueuedMessageTransport(),
+            groupSync);
+        var recipient = await runtime.Accounts.RegisterAsync("Removed recipient");
+        var sender = SessionId.CreateNew();
+        var owner = SessionId.CreateNew();
+        var group = new Group(
+            ConversationId.CreateGroupV2(),
+            "Accepted revision",
+            owner,
+            clock.UtcNow.AddDays(-1),
+            [
+                new GroupMember(owner, GroupMemberRole.Admin, clock.UtcNow.AddDays(-1)),
+                new GroupMember(sender, GroupMemberRole.Standard, clock.UtcNow.AddHours(-1))
+            ],
+            Revision: 8);
+        await ((IGroupRepository)runtime.Store).UpsertAsync(group);
+        var messageId = new MessageId("removed-recipient-message");
+        groupSync.Enqueue(new InboundGroupMessageEnvelope(
+            messageId,
+            group.Id,
+            sender,
+            "not for removed recipients",
+            [],
+            clock.UtcNow,
+            null,
+            "removed-recipient-hash"));
+
+        var received = await runtime.Messages.ReceiveGroupAsync(recipient.SessionId, group.Id);
+
+        Assert.Empty(received);
+        Assert.Equal(0, groupSync.ReceiveGroupMessagesCount);
+        Assert.Null(await ((IConversationRepository)runtime.Store).GetAsync(group.Id));
+        Assert.Null(await ((IMessageRepository)runtime.Store).GetAsync(messageId));
+    }
+
+    [Fact]
+    public async Task ReceiveGroupAsync_RejectsRemovedOrPendingMemberReactionsWithoutUpdatingTarget()
+    {
+        var clock = new FrozenClock(DateTimeOffset.Parse("2026-05-28T00:00:00Z"));
+        var groupSync = new RecordingGroupSyncTransport();
+        var runtime = new ClientRuntime(
+            new InMemorySessionStore(),
+            Deep.Client.Shared.Features.ClientFeatureFlags.Defaults,
+            clock,
+            new QueuedMessageTransport(),
+            groupSync);
+        var recipient = await runtime.Accounts.RegisterAsync("Recipient");
+        var activeMember = SessionId.CreateNew();
+        var removedMember = SessionId.CreateNew();
+        var pendingRemovalMember = SessionId.CreateNew();
+        var group = new Group(
+            ConversationId.CreateGroupV2(),
+            "Accepted revision",
+            recipient.SessionId,
+            clock.UtcNow.AddDays(-1),
+            [
+                new GroupMember(recipient.SessionId, GroupMemberRole.Admin, clock.UtcNow.AddDays(-1)),
+                new GroupMember(activeMember, GroupMemberRole.Standard, clock.UtcNow.AddHours(-1)),
+                new GroupMember(pendingRemovalMember, GroupMemberRole.Standard, clock.UtcNow.AddHours(-1), IsPendingRemoval: true)
+            ],
+            Revision: 9);
+        await ((IGroupRepository)runtime.Store).UpsertAsync(group);
+        var target = new Message(
+            new MessageId("reaction-target"),
+            group.Id,
+            activeMember,
+            Recipient: null,
+            "existing message",
+            MessageDirection.Incoming,
+            MessageDeliveryState.Delivered,
+            clock.UtcNow.AddMinutes(-1),
+            []);
+        await ((IMessageRepository)runtime.Store).AppendAsync(target);
+        groupSync.Enqueue(new InboundGroupMessageEnvelope(
+            new MessageId("removed-reaction"),
+            group.Id,
+            removedMember,
+            string.Empty,
+            [],
+            clock.UtcNow,
+            null,
+            "removed-reaction-hash",
+            Reaction: new MessageReactionUpdate(target.Id, "👍", Remove: false)));
+        groupSync.Enqueue(new InboundGroupMessageEnvelope(
+            new MessageId("pending-removal-reaction"),
+            group.Id,
+            pendingRemovalMember,
+            string.Empty,
+            [],
+            clock.UtcNow,
+            null,
+            "pending-removal-reaction-hash",
+            Reaction: new MessageReactionUpdate(target.Id, "👍", Remove: false)));
+
+        var received = await runtime.Messages.ReceiveGroupAsync(recipient.SessionId, group.Id);
+        var storedTarget = await ((IMessageRepository)runtime.Store).GetAsync(target.Id);
+
+        Assert.Empty(received);
+        Assert.Null(await ((IConversationRepository)runtime.Store).GetAsync(group.Id));
+        Assert.Empty(storedTarget!.ReactionItems);
+    }
+
+    [Fact]
+    public async Task ReceiveGroupAsync_AcceptsActiveMemberMessageAndReaction()
+    {
+        var clock = new FrozenClock(DateTimeOffset.Parse("2026-05-28T00:00:00Z"));
+        var groupSync = new RecordingGroupSyncTransport();
+        var runtime = new ClientRuntime(
+            new InMemorySessionStore(),
+            Deep.Client.Shared.Features.ClientFeatureFlags.Defaults,
+            clock,
+            new QueuedMessageTransport(),
+            groupSync);
+        var recipient = await runtime.Accounts.RegisterAsync("Recipient");
+        var sender = SessionId.CreateNew();
+        var group = new Group(
+            ConversationId.CreateGroupV2(),
+            "Accepted revision",
+            recipient.SessionId,
+            clock.UtcNow.AddDays(-1),
+            [
+                new GroupMember(recipient.SessionId, GroupMemberRole.Admin, clock.UtcNow.AddDays(-1)),
+                new GroupMember(sender, GroupMemberRole.Standard, clock.UtcNow.AddHours(-1))
+            ],
+            Revision: 10);
+        await ((IGroupRepository)runtime.Store).UpsertAsync(group);
+        var messageId = new MessageId("active-member-message");
+        groupSync.Enqueue(new InboundGroupMessageEnvelope(
+            messageId,
+            group.Id,
+            sender,
+            "accepted",
+            [],
+            clock.UtcNow,
+            null,
+            "active-member-message-hash"));
+
+        var messages = await runtime.Messages.ReceiveGroupAsync(recipient.SessionId, group.Id);
+
+        Assert.Equal("accepted", Assert.Single(messages).Body);
+        Assert.NotNull(await ((IConversationRepository)runtime.Store).GetAsync(group.Id));
+        groupSync.Enqueue(new InboundGroupMessageEnvelope(
+            new MessageId("active-member-reaction"),
+            group.Id,
+            sender,
+            string.Empty,
+            [],
+            clock.UtcNow,
+            null,
+            "active-member-reaction-hash",
+            Reaction: new MessageReactionUpdate(messageId, "👍", Remove: false)));
+
+        var reactions = await runtime.Messages.ReceiveGroupAsync(recipient.SessionId, group.Id);
+        var storedMessage = await ((IMessageRepository)runtime.Store).GetAsync(messageId);
+
+        Assert.Single(reactions);
+        Assert.Collection(storedMessage!.ReactionItems, reaction =>
+        {
+            Assert.Equal(sender, reaction.Reactor);
+            Assert.Equal("👍", reaction.Emoji);
+        });
+    }
+
+    [Fact]
     public async Task SendGroupAsync_IncludesMemberWakeRecipientsForPushDrivenSync()
     {
         var groupSync = new RecordingGroupSyncTransport();
@@ -630,7 +850,13 @@ public sealed class MessageFlowTests
 
     private sealed class RecordingGroupSyncTransport : IGroupSyncTransport
     {
+        private readonly Queue<InboundGroupMessageEnvelope> incomingMessages = new();
+
         public List<OutboundGroupMessageEnvelope> SentMessages { get; } = [];
+
+        public int ReceiveGroupMessagesCount { get; private set; }
+
+        public void Enqueue(InboundGroupMessageEnvelope envelope) => incomingMessages.Enqueue(envelope);
 
         public Task PublishGroupStateAsync(
             Group group,
@@ -654,7 +880,12 @@ public sealed class MessageFlowTests
 
         public Task<IReadOnlyList<InboundGroupMessageEnvelope>> ReceiveGroupMessagesAsync(
             ConversationId groupId,
-            CancellationToken cancellationToken = default) =>
-            Task.FromResult<IReadOnlyList<InboundGroupMessageEnvelope>>([]);
+            CancellationToken cancellationToken = default)
+        {
+            ReceiveGroupMessagesCount++;
+            var envelopes = incomingMessages.ToArray();
+            incomingMessages.Clear();
+            return Task.FromResult<IReadOnlyList<InboundGroupMessageEnvelope>>(envelopes);
+        }
     }
 }

@@ -59,12 +59,19 @@ public sealed class HttpAttachmentFileTransport : IAttachmentFileTransport
     private const int ChunkSizeBytes = 64 * 1024;
     private const long MaxAttachmentPlainBytes = 25L * 1024 * 1024;
     private const long MaxAttachmentEncryptedBytes = MaxAttachmentPlainBytes + 64 * 1024;
+    private static readonly HashSet<int> DangerousPorts =
+    [
+        21, 22, 23, 25, 53, 110, 111, 135, 139, 143, 389, 445, 587, 636, 993, 995,
+        1433, 1521, 2049, 2375, 2376, 3306, 3389, 5432, 5900, 6379, 6443, 8080, 9200,
+        11211, 27017
+    ];
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly byte[] ChunkedPayloadMagic = Encoding.ASCII.GetBytes("DEEPATT2");
 
     private readonly HttpClient httpClient;
     private readonly HttpAttachmentFileTransportOptions options;
+    private readonly Uri fileServiceOrigin;
 
     public HttpAttachmentFileTransport(HttpClient httpClient, HttpAttachmentFileTransportOptions options)
     {
@@ -82,6 +89,12 @@ public sealed class HttpAttachmentFileTransport : IAttachmentFileTransport
                 ? options.BaseUrl
                 : options.BaseUrl + "/", UriKind.Absolute);
         }
+
+        fileServiceOrigin = this.httpClient.BaseAddress!;
+        if (!IsHttpUri(fileServiceOrigin) || fileServiceOrigin.UserInfo.Length > 0)
+        {
+            throw new ArgumentException("Attachment file transport base URL must be HTTP(S) without userinfo.", nameof(options));
+        }
     }
 
     public bool IsEnabled => true;
@@ -97,20 +110,19 @@ public sealed class HttpAttachmentFileTransport : IAttachmentFileTransport
 
         var key = RandomNumberGenerator.GetBytes(KeySizeBytes);
         var tempPath = Path.Combine(Path.GetTempPath(), $"deep-attachment-{Guid.NewGuid():N}.bin");
-        AttachmentEncryptionResult encrypted;
-        await using (var encryptedOutput = File.Create(tempPath))
-        {
-            encrypted = await EncryptChunkedToAsync(upload.Content, encryptedOutput, key, cancellationToken).ConfigureAwait(false);
-        }
-
-        if (encrypted.PlainLength == 0)
-        {
-            TryDelete(tempPath);
-            throw new InvalidOperationException("Attachment upload content is empty.");
-        }
-
         try
         {
+            AttachmentEncryptionResult encrypted;
+            await using (var encryptedOutput = File.Create(tempPath))
+            {
+                encrypted = await EncryptChunkedToAsync(upload.Content, encryptedOutput, key, cancellationToken).ConfigureAwait(false);
+            }
+
+            if (encrypted.PlainLength == 0)
+            {
+                throw new InvalidOperationException("Attachment upload content is empty.");
+            }
+
             await using var encryptedInput = File.OpenRead(tempPath);
             using var content = new StreamContent(encryptedInput);
             content.Headers.ContentType = new("application/octet-stream");
@@ -153,6 +165,7 @@ public sealed class HttpAttachmentFileTransport : IAttachmentFileTransport
         finally
         {
             TryDelete(tempPath);
+            CryptographicOperations.ZeroMemory(key);
         }
     }
 
@@ -174,6 +187,8 @@ public sealed class HttpAttachmentFileTransport : IAttachmentFileTransport
         {
             throw new InvalidOperationException("Attachment metadata does not include a remote URI.");
         }
+
+        ValidateRemoteUri(metadata.RemoteUri);
 
         ArgumentNullException.ThrowIfNull(destination);
         if (!destination.CanWrite)
@@ -205,7 +220,14 @@ public sealed class HttpAttachmentFileTransport : IAttachmentFileTransport
         else
         {
             var key = Convert.FromBase64String(metadata.EncryptionKeyBase64);
-            await DecryptToAsync(remote, destination, key, hash, metadata.SizeBytes, cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await DecryptToAsync(remote, destination, key, hash, metadata.SizeBytes, cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(key);
+            }
         }
 
         VerifyDigest(metadata, hash.GetHashAndReset());
@@ -214,6 +236,43 @@ public sealed class HttpAttachmentFileTransport : IAttachmentFileTransport
 
     private string PathFor(string fileId) =>
         options.DownloadPathFormat.Replace("{fileId}", Uri.EscapeDataString(fileId), StringComparison.Ordinal);
+
+    private void ValidateRemoteUri(Uri remoteUri)
+    {
+        if (!remoteUri.IsAbsoluteUri || !IsHttpUri(remoteUri))
+        {
+            throw new InvalidOperationException("Remote attachment URI must be an absolute HTTP(S) URI.");
+        }
+
+        if (remoteUri.UserInfo.Length > 0)
+        {
+            throw new InvalidOperationException("Remote attachment URI must not contain userinfo.");
+        }
+
+        if (!IsSameOrigin(remoteUri, fileServiceOrigin))
+        {
+            throw new InvalidOperationException("Remote attachment URI must be same-origin with the configured file service.");
+        }
+
+        if (remoteUri.Scheme != Uri.UriSchemeHttps &&
+            !(remoteUri.Scheme == Uri.UriSchemeHttp && remoteUri.IsLoopback))
+        {
+            throw new InvalidOperationException("Remote attachment URI must use HTTPS, except for loopback test endpoints.");
+        }
+
+        if (!remoteUri.IsLoopback && DangerousPorts.Contains(remoteUri.Port))
+        {
+            throw new InvalidOperationException("Remote attachment URI uses a blocked port.");
+        }
+    }
+
+    private static bool IsSameOrigin(Uri left, Uri right) =>
+        string.Equals(left.Scheme, right.Scheme, StringComparison.OrdinalIgnoreCase) &&
+        string.Equals(left.IdnHost, right.IdnHost, StringComparison.OrdinalIgnoreCase) &&
+        left.Port == right.Port;
+
+    private static bool IsHttpUri(Uri uri) =>
+        uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps;
 
     private static async Task<AttachmentEncryptionResult> EncryptChunkedToAsync(
         Stream plainInput,
@@ -263,9 +322,9 @@ public sealed class HttpAttachmentFileTransport : IAttachmentFileTransport
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(plainBuffer);
-            ArrayPool<byte>.Shared.Return(cipherBuffer);
-            ArrayPool<byte>.Shared.Return(headerBuffer);
+            ArrayPool<byte>.Shared.Return(plainBuffer, clearArray: true);
+            ArrayPool<byte>.Shared.Return(cipherBuffer, clearArray: true);
+            ArrayPool<byte>.Shared.Return(headerBuffer, clearArray: true);
         }
     }
 
@@ -289,13 +348,20 @@ public sealed class HttpAttachmentFileTransport : IAttachmentFileTransport
         legacyPayload.Write(prefix, 0, prefixBytes);
         await CopyWithLimitAsync(encryptedInput, legacyPayload, MaxAttachmentEncryptedBytes - prefixBytes, cancellationToken).ConfigureAwait(false);
         var plain = DecryptLegacy(legacyPayload.ToArray(), key);
-        if (expectedPlainLength > 0 && plain.LongLength != expectedPlainLength)
+        try
         {
-            throw new CryptographicException("Attachment length verification failed.");
-        }
+            if (expectedPlainLength > 0 && plain.LongLength != expectedPlainLength)
+            {
+                throw new CryptographicException("Attachment length verification failed.");
+            }
 
-        hash.AppendData(plain);
-        await plainOutput.WriteAsync(plain, cancellationToken).ConfigureAwait(false);
+            hash.AppendData(plain);
+            await plainOutput.WriteAsync(plain, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(plain);
+        }
     }
 
     private static async Task DecryptChunkedToAsync(
@@ -348,9 +414,9 @@ public sealed class HttpAttachmentFileTransport : IAttachmentFileTransport
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(header);
-            ArrayPool<byte>.Shared.Return(cipherBuffer);
-            ArrayPool<byte>.Shared.Return(plainBuffer);
+            ArrayPool<byte>.Shared.Return(header, clearArray: true);
+            ArrayPool<byte>.Shared.Return(cipherBuffer, clearArray: true);
+            ArrayPool<byte>.Shared.Return(plainBuffer, clearArray: true);
         }
 
         if (expectedPlainLength > 0 && total != expectedPlainLength)
@@ -407,7 +473,7 @@ public sealed class HttpAttachmentFileTransport : IAttachmentFileTransport
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(buffer);
+            ArrayPool<byte>.Shared.Return(buffer, clearArray: true);
         }
 
         if (expectedLength > 0 && total != expectedLength)
@@ -456,7 +522,7 @@ public sealed class HttpAttachmentFileTransport : IAttachmentFileTransport
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(buffer);
+            ArrayPool<byte>.Shared.Return(buffer, clearArray: true);
         }
     }
 
