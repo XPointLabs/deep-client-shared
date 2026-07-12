@@ -28,14 +28,14 @@ public sealed class ConversationService(
         var contact = await contacts.GetAsync(counterpart, cancellationToken).ConfigureAwait(false)
             ?? Contact.Request(counterpart, normalizedDisplayName, now);
         var normalizedContactDisplayName = NormalizeDisplayName(counterpart, contact.DisplayName);
+        var desiredContactDisplayName = normalizedContactDisplayName ?? normalizedDisplayName;
 
-        if (!string.Equals(contact.DisplayName, normalizedContactDisplayName, StringComparison.Ordinal)
-            || (!string.IsNullOrWhiteSpace(normalizedDisplayName) && contact.DisplayName != normalizedDisplayName)
+        if (!string.Equals(contact.DisplayName, desiredContactDisplayName, StringComparison.Ordinal)
             || (approve && !contact.IsApproved))
         {
             contact = contact with
             {
-                DisplayName = string.IsNullOrWhiteSpace(normalizedDisplayName) ? normalizedContactDisplayName : normalizedDisplayName,
+                DisplayName = desiredContactDisplayName,
                 IsApproved = contact.IsApproved || approve,
                 IsTrusted = contact.IsTrusted || approve,
                 UpdatedAt = now

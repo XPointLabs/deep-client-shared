@@ -788,12 +788,12 @@ public sealed class InMemorySessionStore :
         var normalizedDisplayName = ConversationService.NormalizeDisplayName(recipient, displayName);
         var contact = contacts.GetValueOrDefault(recipient.Value) ?? Contact.Request(recipient, normalizedDisplayName, now);
         var normalizedContactDisplayName = ConversationService.NormalizeDisplayName(recipient, contact.DisplayName);
-        if (!string.Equals(contact.DisplayName, normalizedContactDisplayName, StringComparison.Ordinal)
-            || (!string.IsNullOrWhiteSpace(normalizedDisplayName) && contact.DisplayName != normalizedDisplayName))
+        var desiredContactDisplayName = normalizedContactDisplayName ?? normalizedDisplayName;
+        if (!string.Equals(contact.DisplayName, desiredContactDisplayName, StringComparison.Ordinal))
         {
             contact = contact with
             {
-                DisplayName = string.IsNullOrWhiteSpace(normalizedDisplayName) ? normalizedContactDisplayName : normalizedDisplayName,
+                DisplayName = desiredContactDisplayName,
                 UpdatedAt = now
             };
         }

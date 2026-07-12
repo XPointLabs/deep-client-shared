@@ -29,6 +29,23 @@ public sealed class ConversationServiceTests
     }
 
     [Fact]
+    public async Task GetOrCreateOneToOne_DisplayNameHintDoesNotOverwriteExplicitRename()
+    {
+        var runtime = ClientRuntime.CreateStubbed(clock: new FrozenClock(DateTimeOffset.Parse("2026-05-28T00:00:00Z")));
+        var contactId = SessionId.Parse("05" + new string('5', 64));
+
+        var initial = await runtime.Conversations.GetOrCreateOneToOneAsync(contactId, "Initial", approve: true);
+        await runtime.Conversations.UpdateContactDisplayNameAsync(contactId, "Renamed");
+
+        var reopened = await runtime.Conversations.GetOrCreateOneToOneAsync(contactId, "Initial", approve: true);
+        var contact = await ((IContactRepository)runtime.Store).GetAsync(contactId);
+
+        Assert.Equal("Initial", initial.DisplayName);
+        Assert.Equal("Renamed", reopened.DisplayName);
+        Assert.Equal("Renamed", contact?.DisplayName);
+    }
+
+    [Fact]
     public async Task UpdateContactDisplayName_PersistsThroughSqliteStore()
     {
         var statePath = Path.Combine(Path.GetTempPath(), $"deep-contact-{Guid.NewGuid():N}.db");

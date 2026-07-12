@@ -342,6 +342,30 @@ public sealed class PersistenceTests
     }
 
     [Fact]
+    public async Task SqliteSessionStore_OpenOneToOneConversation_DisplayNameHintDoesNotOverwriteExplicitRename()
+    {
+        var statePath = Path.Combine(Path.GetTempPath(), $"deep-client-open-name-{Guid.NewGuid():N}.db");
+        try
+        {
+            using var store = new SqliteSessionStore(statePath);
+
+            await AssertOpenDisplayNameHintDoesNotOverwriteExplicitRenameAsync(store, store);
+        }
+        finally
+        {
+            DeleteSqliteFiles(statePath);
+        }
+    }
+
+    [Fact]
+    public async Task InMemorySessionStore_OpenOneToOneConversation_DisplayNameHintDoesNotOverwriteExplicitRename()
+    {
+        var store = new InMemorySessionStore();
+
+        await AssertOpenDisplayNameHintDoesNotOverwriteExplicitRenameAsync(store, store);
+    }
+
+    [Fact]
     public void ClientRuntime_CreatePersistent_RequiresAnExplicitTransport()
     {
         var statePath = Path.Combine(Path.GetTempPath(), $"deep-client-runtime-{Guid.NewGuid():N}.db");
@@ -687,6 +711,44 @@ public sealed class PersistenceTests
         Assert.Equal(message.Id, summary.LastMessage?.Id);
         Assert.Equal(1, summary.UnreadCount);
         Assert.Equal("Remote", summary.Contact?.DisplayName);
+    }
+
+    private static async Task AssertOpenDisplayNameHintDoesNotOverwriteExplicitRenameAsync(
+        ILocalSessionStore store,
+        IOneToOneConversationOpenRepository openRepository)
+    {
+        var now = DateTimeOffset.Parse("2026-05-28T00:00:00Z");
+        var account = new SessionAccount(SessionId.CreateNew(), "Alice", now);
+        var recipient = SessionId.CreateNew();
+        await store.SetAsync(LocalSettingsKeys.ActiveAccount, account);
+
+        var initial = await openRepository.OpenOneToOneConversationAsync(
+            recipient,
+            "Initial",
+            messageLimit: 1,
+            now: now);
+        Assert.NotNull(initial);
+        Assert.NotNull(initial!.Contact);
+        Assert.Equal("Initial", initial.Conversation.DisplayName);
+        Assert.Equal("Initial", initial.Contact!.DisplayName);
+
+        var renamedAt = now.AddMinutes(1);
+        await store.UpsertAsync(initial.Contact with { DisplayName = "Renamed", UpdatedAt = renamedAt });
+        await store.UpsertAsync(initial.Conversation with { DisplayName = "Renamed", UpdatedAt = renamedAt });
+
+        var reopened = await openRepository.OpenOneToOneConversationAsync(
+            recipient,
+            "Initial",
+            messageLimit: 1,
+            now: now.AddMinutes(2));
+        var persistedContact = await ((IContactRepository)store).GetAsync(recipient);
+        var persistedConversation = await ((IConversationRepository)store).GetAsync(initial.Conversation.Id);
+
+        Assert.NotNull(reopened);
+        Assert.Equal("Renamed", reopened!.Conversation.DisplayName);
+        Assert.Equal("Renamed", reopened.Contact?.DisplayName);
+        Assert.Equal("Renamed", persistedContact?.DisplayName);
+        Assert.Equal("Renamed", persistedConversation?.DisplayName);
     }
 
     private static async Task AssertConversationListSummaryAsync(ILocalSessionStore store)
