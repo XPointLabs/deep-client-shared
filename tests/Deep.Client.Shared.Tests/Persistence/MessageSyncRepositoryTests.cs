@@ -112,7 +112,7 @@ public sealed class MessageSyncRepositoryTests
                 connection.Open();
                 using var versionCommand = connection.CreateCommand();
                 versionCommand.CommandText = "PRAGMA user_version;";
-                Assert.Equal(6L, (long)versionCommand.ExecuteScalar()!);
+                Assert.Equal(7L, (long)versionCommand.ExecuteScalar()!);
 
                 using var columnsCommand = connection.CreateCommand();
                 columnsCommand.CommandText = "PRAGMA table_info(messages);";

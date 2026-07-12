@@ -85,6 +85,9 @@ public sealed class DurableInboxRecoveryTests
 
                 Assert.NotNull(await store.GetAsync(MessageId.Parse("domain-boundary")));
                 Assert.Equal(
+                    [MessageId.Parse("domain-boundary")],
+                    await messages.ListPendingIncomingMessageNotificationIdsAsync(16));
+                Assert.Equal(
                     1,
                     await store.CountPendingInboxItemsAsync(new DurableInboxScope(bobIdentity.SessionId, 0)));
             }
@@ -104,6 +107,9 @@ public sealed class DurableInboxRecoveryTests
                 Assert.Single(await ToListAsync(
                     ((IMessageRepository)restartedStore).ListForConversationAsync(
                         ConversationId.ForOneToOne(aliceIdentity.SessionId))));
+                Assert.Equal(
+                    [MessageId.Parse("domain-boundary")],
+                    await messages.ListPendingIncomingMessageNotificationIdsAsync(16));
             }
 
             using var finalStore = new SqliteSessionStore(statePath);
@@ -117,6 +123,13 @@ public sealed class DurableInboxRecoveryTests
             Assert.Single(await ToListAsync(
                 ((IMessageRepository)finalStore).ListForConversationAsync(
                     ConversationId.ForOneToOne(aliceIdentity.SessionId))));
+            Assert.Equal(
+                [MessageId.Parse("domain-boundary")],
+                await finalMessages.ListPendingIncomingMessageNotificationIdsAsync(16));
+
+            await finalMessages.MarkIncomingMessageNotificationsPresentedAsync(
+                [MessageId.Parse("domain-boundary")]);
+            Assert.Empty(await finalMessages.ListPendingIncomingMessageNotificationIdsAsync(16));
         }
         finally
         {

@@ -14,7 +14,7 @@ public sealed class SqliteSessionStore :
     IDisposable
 {
     private static ReadOnlySpan<byte> SqliteHeader => "SQLite format 3\0"u8;
-    private const int PhysicalSchemaVersion = 6;
+    private const int PhysicalSchemaVersion = 7;
     private const int ReplayPruneBatchSize = 256;
     private const string ReadCursorSettingPrefix = "sync.read-cursor.";
     private const string MessagePayloadProjection = "json_set(payload_json, '$.deliveryState', delivery_state, '$.readAt', read_at)";
@@ -643,6 +643,18 @@ public sealed class SqliteSessionStore :
         WithConnectionAsync(async connection =>
         {
             using var transaction = connection.BeginTransaction();
+            bool messageAlreadyExists;
+            await using (var existingMessageCommand = connection.CreateCommand())
+            {
+                existingMessageCommand.Transaction = transaction;
+                existingMessageCommand.CommandText =
+                    "SELECT EXISTS(SELECT 1 FROM messages WHERE id = $id);";
+                existingMessageCommand.Parameters.AddWithValue("$id", message.Id.Value);
+                messageAlreadyExists = Convert.ToInt32(
+                    await existingMessageCommand.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
+                    CultureInfo.InvariantCulture) != 0;
+            }
+
             await using (var messageCommand = connection.CreateCommand())
             {
                 messageCommand.Transaction = transaction;
@@ -691,6 +703,20 @@ public sealed class SqliteSessionStore :
                 await messageCommand.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             }
 
+            if (!messageAlreadyExists && message.Direction == MessageDirection.Incoming)
+            {
+                await using var notificationCommand = connection.CreateCommand();
+                notificationCommand.Transaction = transaction;
+                notificationCommand.CommandText = """
+                    INSERT INTO incoming_message_notifications (message_id)
+                    VALUES ($messageId)
+                    ON CONFLICT(message_id) DO NOTHING;
+                    """;
+                notificationCommand.Parameters.AddWithValue("$messageId", message.Id.Value);
+                await notificationCommand.PrepareAsync(cancellationToken).ConfigureAwait(false);
+                await notificationCommand.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
             await using (var conversationCommand = connection.CreateCommand())
             {
                 conversationCommand.Transaction = transaction;
@@ -710,6 +736,85 @@ public sealed class SqliteSessionStore :
 
             transaction.Commit();
         }, cancellationToken);
+
+    public async Task<IReadOnlyList<MessageId>> ListPendingIncomingMessageNotificationIdsAsync(
+        int limit,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateIncomingMessageNotificationLimit(limit);
+        var now = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture);
+        await ExecuteNonQueryAsync(
+            """
+            DELETE FROM incoming_message_notifications
+            WHERE message_id NOT IN (
+                SELECT id
+                FROM messages
+                WHERE direction = $incomingDirection
+                  AND delivery_state != $readState
+                  AND read_at IS NULL
+                  AND (expires_at IS NULL OR julianday(expires_at) > julianday($now))
+            );
+            """,
+            cancellationToken,
+            ("$incomingDirection", (int)MessageDirection.Incoming),
+            ("$readState", (int)MessageDeliveryState.Read),
+            ("$now", now)).ConfigureAwait(false);
+
+        return await WithConnectionAsync(async connection =>
+        {
+            await using var command = connection.CreateCommand();
+            command.CommandText = """
+                SELECT notification.message_id
+                FROM incoming_message_notifications AS notification
+                INNER JOIN messages AS message ON message.id = notification.message_id
+                WHERE message.direction = $incomingDirection
+                  AND message.delivery_state != $readState
+                  AND message.read_at IS NULL
+                  AND (message.expires_at IS NULL OR julianday(message.expires_at) > julianday($now))
+                ORDER BY notification.sequence
+                LIMIT $limit;
+                """;
+            command.Parameters.AddWithValue("$incomingDirection", (int)MessageDirection.Incoming);
+            command.Parameters.AddWithValue("$readState", (int)MessageDeliveryState.Read);
+            command.Parameters.AddWithValue(
+                "$now",
+                now);
+            command.Parameters.AddWithValue("$limit", limit);
+            await command.PrepareAsync(cancellationToken).ConfigureAwait(false);
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            var result = new List<MessageId>();
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                result.Add(new MessageId(reader.GetString(0)));
+            }
+
+            return (IReadOnlyList<MessageId>)result;
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task MarkIncomingMessageNotificationsPresentedAsync(
+        IReadOnlyCollection<MessageId> ids,
+        CancellationToken cancellationToken = default)
+    {
+        var messageIds = ValidateIncomingMessageNotificationIds(ids);
+        if (messageIds.Length == 0)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return;
+        }
+
+        await ExecuteNonQueryAsync(
+            """
+            DELETE FROM incoming_message_notifications
+            WHERE message_id IN (
+                SELECT CAST(value AS TEXT)
+                FROM json_each($messageIdsJson)
+            );
+            """,
+            cancellationToken,
+            ("$messageIdsJson", JsonSerializer.Serialize(messageIds, SerializerOptions))).ConfigureAwait(false);
+    }
 
     public async Task<int> DeleteExpiredMessagesAsync(
         ConversationId conversationId,
@@ -1899,7 +2004,7 @@ public sealed class SqliteSessionStore :
             using var transaction = connection.BeginTransaction();
             foreach (var table in new[]
                      {
-                         "group_state_outbox", "inbox_items", "inbox_cursors", "messages", "groups", "conversations", "contacts", "replay_claims", "settings"
+                         "group_state_outbox", "inbox_items", "inbox_cursors", "incoming_message_notifications", "messages", "groups", "conversations", "contacts", "replay_claims", "settings"
                      })
             {
                 await using var command = connection.CreateCommand();
@@ -1993,6 +2098,12 @@ public sealed class SqliteSessionStore :
                     server_hash TEXT NULL,
                     self_echo_key TEXT NULL,
                     payload_json TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS incoming_message_notifications (
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    message_id TEXT NOT NULL UNIQUE,
+                    FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE
                 );
 
                 CREATE TABLE IF NOT EXISTS settings (
@@ -3134,6 +3245,34 @@ public sealed class SqliteSessionStore :
         {
             throw new ArgumentOutOfRangeException(nameof(limit));
         }
+    }
+
+    private static void ValidateIncomingMessageNotificationLimit(int limit)
+    {
+        if (limit is <= 0 or > IncomingMessageNotificationLimits.MaxBatchCount)
+        {
+            throw new ArgumentOutOfRangeException(nameof(limit));
+        }
+    }
+
+    private static string[] ValidateIncomingMessageNotificationIds(IReadOnlyCollection<MessageId> ids)
+    {
+        ArgumentNullException.ThrowIfNull(ids);
+        var values = ids
+            .Select(static id => id.Value)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        if (values.Length > IncomingMessageNotificationLimits.MaxBatchCount)
+        {
+            throw new ArgumentOutOfRangeException(nameof(ids));
+        }
+
+        if (values.Any(string.IsNullOrWhiteSpace))
+        {
+            throw new ArgumentException("Message IDs must not be empty.", nameof(ids));
+        }
+
+        return values;
     }
 
     private static void ValidateGroupOutboxOperationId(string operationId)

@@ -165,6 +165,26 @@ public interface IMessageConversationPersistenceRepository
         CancellationToken cancellationToken = default);
 }
 
+public static class IncomingMessageNotificationLimits
+{
+    public const int MaxBatchCount = 256;
+}
+
+/// <summary>
+/// Durable handoff of newly persisted incoming messages to platform notification presenters.
+/// A message remains pending until the presenter explicitly acknowledges its ID.
+/// </summary>
+public interface IIncomingMessageNotificationRepository
+{
+    Task<IReadOnlyList<MessageId>> ListPendingIncomingMessageNotificationIdsAsync(
+        int limit,
+        CancellationToken cancellationToken = default);
+
+    Task MarkIncomingMessageNotificationsPresentedAsync(
+        IReadOnlyCollection<MessageId> ids,
+        CancellationToken cancellationToken = default);
+}
+
 public enum MessageReplayClaimResult
 {
     Accepted,
@@ -494,6 +514,7 @@ public interface ILocalSessionStore :
     IMessageRepository,
     IConversationReadRepository,
     IMessageConversationPersistenceRepository,
+    IIncomingMessageNotificationRepository,
     IDurableInboxRepository,
     IAccountDataPurger,
     IGroupStatePersistenceRepository,

@@ -26,10 +26,12 @@ public sealed class InMemorySessionStore :
     private readonly Dictionary<InboxScopeKey, string> inboxCursors = [];
     private readonly Dictionary<InboxItemKey, InboxItemState> inboxItems = [];
     private readonly Dictionary<string, GroupStateOutboxItem> groupStateOutbox = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, long> incomingMessageNotifications = new(StringComparer.Ordinal);
     private readonly object durableStateGate = new();
     private readonly object accountDataPurgeGate = new();
     private readonly string? statePath;
     private long nextInboxSequence;
+    private long nextIncomingMessageNotificationSequence;
     private int schemaVersion;
 
     private const int ReplayPruneBatchSize = 256;
@@ -483,16 +485,130 @@ public sealed class InMemorySessionStore :
         {
             var hadMessage = messages.TryGetValue(message.Id.Value, out var previousMessage);
             var hadConversation = conversations.TryGetValue(conversation.Id.Value, out var previousConversation);
+            var hadNotification = incomingMessageNotifications.TryGetValue(
+                message.Id.Value,
+                out var previousNotificationSequence);
+            var previousNextNotificationSequence = nextIncomingMessageNotificationSequence;
             try
             {
                 messages[message.Id.Value] = message;
                 conversations[conversation.Id.Value] = conversation;
+                if (!hadMessage && !hadNotification && message.Direction == MessageDirection.Incoming)
+                {
+                    incomingMessageNotifications[message.Id.Value] =
+                        ++nextIncomingMessageNotificationSequence;
+                }
+
                 PersistState();
             }
             catch
             {
                 Restore(messages, message.Id.Value, hadMessage ? previousMessage : null);
                 Restore(conversations, conversation.Id.Value, hadConversation ? previousConversation : null);
+                if (hadNotification)
+                {
+                    incomingMessageNotifications[message.Id.Value] = previousNotificationSequence;
+                }
+                else
+                {
+                    incomingMessageNotifications.Remove(message.Id.Value);
+                }
+
+                nextIncomingMessageNotificationSequence = previousNextNotificationSequence;
+                throw;
+            }
+        }
+
+        return Task.CompletedTask;
+    }
+
+    public Task<IReadOnlyList<MessageId>> ListPendingIncomingMessageNotificationIdsAsync(
+        int limit,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateIncomingMessageNotificationLimit(limit);
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (durableStateGate)
+        {
+            var now = DateTimeOffset.UtcNow;
+            var stale = incomingMessageNotifications
+                .Where(item => !IsPendingIncomingMessageNotification(item.Key, now))
+                .ToArray();
+            if (stale.Length > 0)
+            {
+                foreach (var item in stale)
+                {
+                    incomingMessageNotifications.Remove(item.Key);
+                }
+
+                try
+                {
+                    PersistState();
+                }
+                catch
+                {
+                    foreach (var item in stale)
+                    {
+                        incomingMessageNotifications[item.Key] = item.Value;
+                    }
+
+                    throw;
+                }
+            }
+
+            return Task.FromResult<IReadOnlyList<MessageId>>(incomingMessageNotifications
+                .OrderBy(static item => item.Value)
+                .Take(limit)
+                .Select(static item => new MessageId(item.Key))
+                .ToArray());
+        }
+    }
+
+    private bool IsPendingIncomingMessageNotification(string messageId, DateTimeOffset now) =>
+        messages.TryGetValue(messageId, out var message)
+        && message.Direction == MessageDirection.Incoming
+        && message.DeliveryState != MessageDeliveryState.Read
+        && message.ReadAt is null
+        && !message.IsExpired(now);
+
+    public Task MarkIncomingMessageNotificationsPresentedAsync(
+        IReadOnlyCollection<MessageId> ids,
+        CancellationToken cancellationToken = default)
+    {
+        var messageIds = ValidateIncomingMessageNotificationIds(ids);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (messageIds.Length == 0)
+        {
+            return Task.CompletedTask;
+        }
+
+        lock (durableStateGate)
+        {
+            var removed = new List<KeyValuePair<string, long>>(messageIds.Length);
+            foreach (var messageId in messageIds)
+            {
+                if (incomingMessageNotifications.Remove(messageId, out var sequence))
+                {
+                    removed.Add(new KeyValuePair<string, long>(messageId, sequence));
+                }
+            }
+
+            if (removed.Count == 0)
+            {
+                return Task.CompletedTask;
+            }
+
+            try
+            {
+                PersistState();
+            }
+            catch
+            {
+                foreach (var item in removed)
+                {
+                    incomingMessageNotifications[item.Key] = item.Value;
+                }
+
                 throw;
             }
         }
@@ -1425,7 +1541,9 @@ public sealed class InMemorySessionStore :
                 inboxCursors.Clear();
                 inboxItems.Clear();
                 groupStateOutbox.Clear();
+                incomingMessageNotifications.Clear();
                 nextInboxSequence = 0;
+                nextIncomingMessageNotificationSequence = 0;
             }
         }
 
@@ -1521,6 +1639,17 @@ public sealed class InMemorySessionStore :
         {
             groupStateOutbox[item.OperationId] = item;
         }
+
+        foreach (var item in snapshot.IncomingMessageNotifications ?? [])
+        {
+            incomingMessageNotifications[item.MessageId] = item.Sequence;
+        }
+
+        nextIncomingMessageNotificationSequence = Math.Max(
+            snapshot.NextIncomingMessageNotificationSequence,
+            incomingMessageNotifications.Count == 0
+                ? 0
+                : incomingMessageNotifications.Values.Max());
     }
 
     private void PersistState()
@@ -1549,6 +1678,10 @@ public sealed class InMemorySessionStore :
                 .OrderBy(static item => item.Group.Id.Value, StringComparer.Ordinal)
                 .ThenBy(static item => item.Group.Revision)
                 .ToArray();
+            var incomingMessageNotificationSnapshots = incomingMessageNotifications
+                .OrderBy(static item => item.Value)
+                .Select(static item => new IncomingMessageNotificationSnapshot(item.Key, item.Value))
+                .ToArray();
 
             PersistSnapshot(new SessionStoreSnapshot(
                 conversations.Values.OrderByDescending(item => item.UpdatedAt).ToArray(),
@@ -1562,7 +1695,9 @@ public sealed class InMemorySessionStore :
                 inboxCursorSnapshots,
                 inboxItemSnapshots,
                 nextInboxSequence,
-                groupOutboxSnapshots));
+                groupOutboxSnapshots,
+                incomingMessageNotificationSnapshots,
+                nextIncomingMessageNotificationSequence));
         }
     }
 
@@ -1606,7 +1741,11 @@ public sealed class InMemorySessionStore :
         IReadOnlyList<InboxCursorSnapshot>? InboxCursors = null,
         IReadOnlyList<InboxItemSnapshot>? InboxItems = null,
         long NextInboxSequence = 0,
-        IReadOnlyList<GroupStateOutboxItem>? GroupStateOutbox = null);
+        IReadOnlyList<GroupStateOutboxItem>? GroupStateOutbox = null,
+        IReadOnlyList<IncomingMessageNotificationSnapshot>? IncomingMessageNotifications = null,
+        long NextIncomingMessageNotificationSequence = 0);
+
+    private sealed record IncomingMessageNotificationSnapshot(string MessageId, long Sequence);
 
     private sealed record ReplayClaimKey(string SenderSessionId, string MessageId);
 
@@ -1706,6 +1845,34 @@ public sealed class InMemorySessionStore :
         {
             throw new ArgumentOutOfRangeException(nameof(limit));
         }
+    }
+
+    private static void ValidateIncomingMessageNotificationLimit(int limit)
+    {
+        if (limit is <= 0 or > IncomingMessageNotificationLimits.MaxBatchCount)
+        {
+            throw new ArgumentOutOfRangeException(nameof(limit));
+        }
+    }
+
+    private static string[] ValidateIncomingMessageNotificationIds(IReadOnlyCollection<MessageId> ids)
+    {
+        ArgumentNullException.ThrowIfNull(ids);
+        var values = ids
+            .Select(static id => id.Value)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        if (values.Length > IncomingMessageNotificationLimits.MaxBatchCount)
+        {
+            throw new ArgumentOutOfRangeException(nameof(ids));
+        }
+
+        if (values.Any(string.IsNullOrWhiteSpace))
+        {
+            throw new ArgumentException("Message IDs must not be empty.", nameof(ids));
+        }
+
+        return values;
     }
 
     private static void ValidateGroupOutboxOperationId(string operationId)

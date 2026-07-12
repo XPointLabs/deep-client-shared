@@ -12,28 +12,6 @@ public sealed class InboxSyncCoalescingTests
     private static readonly TimeSpan TestTimeout = TimeSpan.FromSeconds(5);
     private static readonly DateTimeOffset Now = DateTimeOffset.Parse("2026-07-11T00:00:00Z");
 
-    [Theory]
-    [InlineData(0, 0, 0, 0, false)]
-    [InlineData(0, 1, 0, 0, false)]
-    [InlineData(0, 0, 0, 1, false)]
-    [InlineData(1, 0, 0, 0, true)]
-    [InlineData(0, 0, 1, 0, true)]
-    public void UserVisibleMessageResultExcludesGroupStateAndOutgoingDispatch(
-        int directMessages,
-        int groupUpdates,
-        int groupMessages,
-        int dispatchedMessages,
-        bool expected)
-    {
-        var result = new InboxSyncResult(
-            directMessages,
-            groupUpdates,
-            groupMessages,
-            dispatchedMessages);
-
-        Assert.Equal(expected, result.HasUserVisibleMessages);
-    }
-
     [Fact]
     public async Task ConcurrentSynchronizationsForSameAccountShareCurrentCycleAndResult()
     {

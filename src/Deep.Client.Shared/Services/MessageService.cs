@@ -21,6 +21,21 @@ public sealed class MessageService(
 
     public bool SupportsDurableGroupInboxMaintenance => groupSync is IGroupInboxMaintenance;
 
+    public Task<IReadOnlyList<MessageId>> ListPendingIncomingMessageNotificationIdsAsync(
+        int limit,
+        CancellationToken cancellationToken = default) =>
+        IncomingMessageNotifications.ListPendingIncomingMessageNotificationIdsAsync(limit, cancellationToken);
+
+    public Task MarkIncomingMessageNotificationsPresentedAsync(
+        IReadOnlyCollection<MessageId> ids,
+        CancellationToken cancellationToken = default) =>
+        IncomingMessageNotifications.MarkIncomingMessageNotificationsPresentedAsync(ids, cancellationToken);
+
+    private IIncomingMessageNotificationRepository IncomingMessageNotifications =>
+        messages as IIncomingMessageNotificationRepository
+        ?? throw new InvalidOperationException(
+            "The configured message repository does not support durable incoming-message notifications.");
+
     public Task<int> DiscardUnknownGroupInboxMessagesAsync(
         SessionId account,
         IReadOnlyCollection<ConversationId> knownGroupIds,

@@ -114,6 +114,20 @@ internal class AccountGenerationSessionStore : ILocalSessionStore, IDisposable
             innerToken => Inner.AppendMessageAndTouchConversationAsync(message, conversation, innerToken),
             token);
 
+    public Task<IReadOnlyList<MessageId>> ListPendingIncomingMessageNotificationIdsAsync(
+        int limit,
+        CancellationToken token = default) =>
+        MutateAsync(
+            innerToken => Inner.ListPendingIncomingMessageNotificationIdsAsync(limit, innerToken),
+            token);
+
+    public Task MarkIncomingMessageNotificationsPresentedAsync(
+        IReadOnlyCollection<MessageId> ids,
+        CancellationToken token = default) =>
+        MutateAsync(
+            innerToken => Inner.MarkIncomingMessageNotificationsPresentedAsync(ids, innerToken),
+            token);
+
     public Task<int> DeleteExpiredMessagesAsync(
         ConversationId id,
         DateTimeOffset now,

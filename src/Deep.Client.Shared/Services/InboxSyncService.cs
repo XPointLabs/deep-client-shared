@@ -6,10 +6,7 @@ public sealed record InboxSyncResult(
     int DirectMessages,
     int GroupUpdates,
     int GroupMessages,
-    int DispatchedMessages)
-{
-    public bool HasUserVisibleMessages => DirectMessages > 0 || GroupMessages > 0;
-}
+    int DispatchedMessages);
 
 public sealed class InboxSyncService : IAccountGenerationLifecycle, IDisposable
 {
