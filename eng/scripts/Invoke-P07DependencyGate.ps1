@@ -57,7 +57,7 @@ function Assert-ExactFile {
 function Assert-ConsumerText {
     param([Parameter(Mandatory)][string] $Text)
 
-    if ($Text -notmatch '<PackageReference\s+Include="Deep\.Protocol"\s+Version="0\.3\.0-p04\.b887fa0"\s*/>') {
+    if ($Text -notmatch '<PackageReference\s+Include="Deep\.Protocol"\s+Version="\[0\.3\.0-p04\.b887fa0\]"\s*/>') {
         throw 'P07 dependency gate: exact Deep.Protocol PackageReference is required.'
     }
     if ($Text -match 'ProjectReference[^>]+deep-protocol') {
@@ -74,7 +74,9 @@ function Assert-LockText {
         $property = $target.Value.PSObject.Properties['Deep.Protocol']
         $dependency = if ($null -eq $property) { $null } else { $property.Value }
         if ($null -ne $dependency -and
-            $dependency.resolved -eq $expectedVersion) {
+            $dependency.resolved -eq $expectedVersion -and
+            ($dependency.type -ne 'Direct' -or
+             $dependency.requested -eq "[$expectedVersion, $expectedVersion]")) {
             $matched = $true
         }
     }
@@ -92,6 +94,92 @@ if ($manifest.packageVersion -ne $expectedVersion -or
     $manifest.sourceCommit -ne $expectedSourceCommit -or
     $manifest.publication -ne 'local-only-not-published') {
     throw 'P07 dependency gate: package manifest metadata mismatch.'
+}
+
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$protocolNupkg = Join-Path $packageRoot "packages\Deep.Protocol.$expectedVersion.nupkg"
+$archive = [IO.Compression.ZipFile]::OpenRead($protocolNupkg)
+try {
+    $entry = $archive.Entries | Where-Object FullName -eq 'Deep.Protocol.nuspec'
+    if ($null -eq $entry) {
+        throw 'P07 dependency gate: package nuspec is missing.'
+    }
+    $reader = [IO.StreamReader]::new($entry.Open(), [Text.Encoding]::UTF8, $true)
+    try {
+        [xml]$nuspec = $reader.ReadToEnd()
+    }
+    finally {
+        $reader.Dispose()
+    }
+    $repository = $nuspec.package.metadata.repository
+    if ($repository.type -ne 'git' -or $repository.commit -ne $expectedSourceCommit) {
+        throw 'P07 dependency gate: nupkg repository source commit mismatch.'
+    }
+}
+finally {
+    $archive.Dispose()
+}
+
+function Get-GitBlobBytes {
+    param(
+        [Parameter(Mandatory)][string] $Repository,
+        [Parameter(Mandatory)][string] $Object
+    )
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = 'git'
+    $start.Arguments = "-C `"$Repository`" show `"$Object`""
+    $start.UseShellExecute = $false
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $process = [Diagnostics.Process]::Start($start)
+    $memory = [IO.MemoryStream]::new()
+    $process.StandardOutput.BaseStream.CopyTo($memory)
+    $process.WaitForExit()
+    if ($process.ExitCode -ne 0) {
+        throw 'P07 dependency gate: pinned Git artifact is unavailable.'
+    }
+    return $memory.ToArray()
+}
+
+function Assert-BytesHash {
+    param([byte[]] $Bytes, [string] $Expected)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $actual = -join ($sha.ComputeHash($Bytes) | ForEach-Object { $_.ToString('x2') })
+    }
+    finally {
+        $sha.Dispose()
+    }
+    if ($actual -ne $Expected) {
+        throw 'P07 dependency gate: pinned Git artifact hash mismatch.'
+    }
+}
+
+$devops = (Resolve-Path (Join-Path $repoRoot '..\..\wave01b\deep-devops-w1w2-manifest')).Path
+$accepted = '1c01e24e24647a46b4f37622f3934dc2cc1284ef'
+$corrective = '1fc3fcd376f9ffc9d4bca68f0143bf12b761e7dc'
+$carrier = '524c5796aa868fa3d057fbf7eaa13cfea2e0d19c'
+if ((git -C $devops rev-parse HEAD).Trim() -ne $accepted -or
+    -not [string]::IsNullOrWhiteSpace((git -C $devops status --porcelain))) {
+    throw 'P07 dependency gate: accepted DevOps prerequisite must be clean at its exact commit.'
+}
+git -C $devops merge-base --is-ancestor $corrective $accepted
+if ($LASTEXITCODE -ne 0) {
+    throw 'P07 dependency gate: accepted prerequisite ancestry mismatch.'
+}
+$manifestBytes = Get-GitBlobBytes $devops "$accepted`:release/manifests/survival-v2.1.0-w1w2-gate.detached.local.json"
+$contractBytes = Get-GitBlobBytes $devops "$carrier`:release/contracts/survival-compatibility-v2.1.0-w1w2-gate.json"
+$closureBytes = Get-GitBlobBytes $devops "$accepted`:release/evidence/w1w2-dependency-closure.json"
+Assert-BytesHash $manifestBytes '920b24bb5bcfcc8b4f91aef56ed210127246ec9fd2d49178ed9856c8555d0b93'
+Assert-BytesHash $contractBytes 'c45f66f7a688cbd70b7ca57a777851962ce2ab59eb37a3304d9b4bf7e4c55719'
+Assert-BytesHash $closureBytes 'b2f813061e7986d1e383c2df5b5ce345367c4cca06a03cf8122221c5cfa5c51b'
+$closure = [Text.Encoding]::UTF8.GetString($closureBytes) | ConvertFrom-Json
+if ($closure.status -ne 'W1-CONTRACT-CLOSED-W2-BLOCKED' -or
+    $closure.contract.carrierCommit -ne $carrier -or
+    $closure.contract.runtimeBaseCommit -ne '1eb9a2a40ce01ce0f8c924e9dafaf3752b197d31' -or
+    $closure.P04.sourceCommit -ne $expectedSourceCommit -or
+    $closure.P04.runtimeAuthorized -ne $false) {
+    throw 'P07 dependency gate: accepted closure semantics mismatch.'
 }
 
 $nugetConfig = Get-Content -Raw -Encoding UTF8 (Join-Path $repoRoot 'NuGet.Config')
@@ -137,6 +225,7 @@ if (Test-Path -LiteralPath $assetsPath -PathType Leaf) {
 # In-memory negative controls prove the gate rejects the required substitution classes.
 $negativeControls = @(
     { Assert-ConsumerText ($projectText -replace [regex]::Escape($expectedVersion), '0.3.0-p04.stale') },
+    { Assert-ConsumerText ($projectText -replace [regex]::Escape("[$expectedVersion]"), $expectedVersion) },
     { Assert-ConsumerText ($projectText -replace '<PackageReference Include="Deep.Protocol"[^>]+/>', '<ProjectReference Include="..\..\deep-protocol\src\Deep.Protocol.csproj" />') },
     { Assert-LockText '{"version":1,"dependencies":{"net10.0":{"Deep.Protocol":{"type":"Direct","requested":"[0.3.0-p04.stale, )","resolved":"0.3.0-p04.stale"}}}}' }
 )

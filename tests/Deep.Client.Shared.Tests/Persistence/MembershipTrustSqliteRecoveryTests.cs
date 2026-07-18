@@ -37,6 +37,7 @@ public sealed class MembershipTrustSqliteRecoveryTests
     [InlineData("valid-until")]
     [InlineData("canonical-hash")]
     [InlineData("previous-hash")]
+    [InlineData("profile-binding")]
     public async Task CorruptPhysicalState_BlocksWithoutPriorFallback(string corruption)
     {
         await using var database = await TestDatabase.CreateAsync();
@@ -83,7 +84,7 @@ public sealed class MembershipTrustSqliteRecoveryTests
         {
             var store = new InMemorySessionStore(path);
             _ = await store.CommitMembershipTrustAsync(Record(1, 6, 0x10), null);
-            var other = Record(1, 6, 0x20) with { OpaqueProfileKey = "install:other" };
+            var other = Record(1, 6, 0x20, "install:other");
             _ = await store.CommitMembershipTrustAsync(other, null);
 
             var root = System.Text.Json.Nodes.JsonNode.Parse(await File.ReadAllTextAsync(path))!;
@@ -130,9 +131,13 @@ public sealed class MembershipTrustSqliteRecoveryTests
         Assert.Equal("preserved", await restarted.GetSchemaValueAsync("existing.group"));
     }
 
-    private static MembershipTrustRecord Record(ulong revision, ulong sequence, byte fill) =>
+    private static MembershipTrustRecord Record(
+        ulong revision,
+        ulong sequence,
+        byte fill,
+        string profile = "install:test") =>
         MembershipTrustRecord.Create(
-            "install:test",
+            profile,
             MembershipTrustDomain.Membership,
             revision,
             sequence,
@@ -161,18 +166,20 @@ public sealed class MembershipTrustSqliteRecoveryTests
                 "orphan" => """
                     INSERT INTO membership_trust_records
                         (profile_key, domain, revision, sequence, previous_sequence,
-                         previous_hash, envelope, payload_digest, canonical_hash, state, observed_at, valid_until)
+                         previous_hash, envelope, payload_digest, canonical_hash, profile_binding_hash,
+                         state, observed_at, valid_until)
                     VALUES
                         ('install:test', 3, 3, 8, 7, zeroblob(32), zeroblob(96),
-                         zeroblob(32), zeroblob(32), 3, 1010, 1200);
+                         zeroblob(32), zeroblob(32), zeroblob(32), 3, 1010, 1200);
                     """,
                 "other-profile-orphan" => """
                     INSERT INTO membership_trust_records
                         (profile_key, domain, revision, sequence, previous_sequence,
-                         previous_hash, envelope, payload_digest, canonical_hash, state, observed_at, valid_until)
+                         previous_hash, envelope, payload_digest, canonical_hash, profile_binding_hash,
+                         state, observed_at, valid_until)
                     VALUES
                         ('install:other', 3, 1, 6, 5, zeroblob(32), zeroblob(96),
-                         zeroblob(32), zeroblob(32), 3, 1010, 1200);
+                         zeroblob(32), zeroblob(32), zeroblob(32), 3, 1010, 1200);
                     """,
                 "missing-head" => """
                     DELETE FROM membership_trust_heads
@@ -216,6 +223,11 @@ public sealed class MembershipTrustSqliteRecoveryTests
                 "previous-hash" => """
                     UPDATE membership_trust_records
                     SET previous_hash = randomblob(32)
+                    WHERE profile_key = 'install:test' AND domain = 3 AND revision = 2;
+                    """,
+                "profile-binding" => """
+                    UPDATE membership_trust_records
+                    SET profile_binding_hash = randomblob(32)
                     WHERE profile_key = 'install:test' AND domain = 3 AND revision = 2;
                     """,
                 _ => throw new ArgumentOutOfRangeException(nameof(corruption))

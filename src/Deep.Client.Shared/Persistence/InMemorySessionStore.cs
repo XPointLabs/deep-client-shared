@@ -1075,16 +1075,6 @@ public sealed class InMemorySessionStore :
         lock (durableStateGate)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            foreach (var pair in membershipTrustRecords)
-            {
-                if (!membershipTrustHeads.TryGetValue(pair.Key, out var globalHead) ||
-                    globalHead == 0 ||
-                    pair.Value.Keys.Any(revision => revision > globalHead))
-                {
-                    return Task.FromResult(MembershipTrustRepositoryValidation.Corrupt());
-                }
-            }
-
             var key = new MembershipTrustKey(opaqueProfileKey, domain);
             var hasRecords = membershipTrustRecords.TryGetValue(key, out var records);
             var hasHead = membershipTrustHeads.TryGetValue(key, out var headRevision);
@@ -1093,6 +1083,7 @@ public sealed class InMemorySessionStore :
                 return Task.FromResult(MembershipTrustRepositoryValidation.Missing());
             }
             if (!hasRecords || !hasHead || records is null || headRevision == 0 ||
+                records.Keys.Any(revision => revision > headRevision) ||
                 !records.TryGetValue(headRevision, out var head) ||
                 !MembershipTrustRepositoryValidation.IsValid(head))
             {

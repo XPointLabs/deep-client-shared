@@ -4,7 +4,7 @@
     "net10.0": {
       "Deep.Protocol": {
         "type": "Direct",
-        "requested": "[0.3.0-p04.b887fa0, )",
+        "requested": "[0.3.0-p04.b887fa0, 0.3.0-p04.b887fa0]",
         "resolved": "0.3.0-p04.b887fa0",
         "contentHash": "SuKYcvhW1RNz/pPiQ6iac5J4XdnTOtLaxb8mFKc3MWhGseV2a6Jq5+BQg5r/AIobMvzKr85HcgQzkV6KF6jxVQ==",
         "dependencies": {

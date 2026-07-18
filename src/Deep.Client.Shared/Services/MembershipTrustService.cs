@@ -1,3 +1,5 @@
+using System.Buffers.Binary;
+using System.Security.Cryptography;
 using Deep.Client.Shared.Domain;
 using Deep.Client.Shared.Persistence;
 using Deep.Protocol.DeepExtension.Membership;
@@ -28,6 +30,7 @@ public sealed class MembershipTrustService(
         {
             ValidateOptions();
             var bootstrap = VerifyBootstrap(profile, now);
+            var profileBinding = ComputeProfileBinding(profile);
             var authority = await repository.ReadMembershipTrustAsync(
                 profile.OpaqueProfileKey,
                 MembershipTrustDomain.Authority,
@@ -37,6 +40,12 @@ public sealed class MembershipTrustService(
                 return MembershipTrustStatus.For(
                     MembershipTrustState.Corrupt,
                     MembershipTrustEvent.LocalStateRejected);
+            }
+            if (authority.Result == MembershipTrustReadResult.Found &&
+                (authority.Head is null ||
+                 !authority.Head.ProfileBindingHash.AsSpan().SequenceEqual(profileBinding)))
+            {
+                return MembershipTrustStatus.For(MembershipTrustState.ProtocolUnsupported);
             }
 
             if (authority.Result == MembershipTrustReadResult.Missing)
@@ -53,7 +62,8 @@ public sealed class MembershipTrustService(
                     observedAt: now,
                     validUntil: Unix(bootstrap.Delegation.ValidUntilUnixSeconds),
                     validFrom: Unix(bootstrap.Delegation.ValidFromUnixSeconds),
-                    canonicalHash: bootstrap.DelegationHash);
+                    canonicalHash: bootstrap.DelegationHash,
+                    profileBindingHash: profileBinding);
                 if (await repository.CommitMembershipTrustAsync(
                         authorityRecord,
                         expectedHeadRevision: null,
@@ -76,6 +86,7 @@ public sealed class MembershipTrustService(
                 MembershipTrustDomain.Bridge,
                 profile.BridgeAnchor,
                 bootstrap.Delegation,
+                profileBinding,
                 now,
                 cancellationToken).ConfigureAwait(false);
             if (bridge.State != MembershipTrustState.Healthy)
@@ -87,6 +98,7 @@ public sealed class MembershipTrustService(
                 MembershipTrustDomain.Membership,
                 profile.MembershipAnchor,
                 bootstrap.Delegation,
+                profileBinding,
                 now,
                 cancellationToken).ConfigureAwait(false);
             if (membership.State != MembershipTrustState.Healthy)
@@ -138,25 +150,32 @@ public sealed class MembershipTrustService(
         ReadOnlyMemory<byte> canonicalSignedEnvelope,
         CancellationToken cancellationToken = default)
     {
-        var ready = await RequireReadyAsync(profile, cancellationToken).ConfigureAwait(false);
-        if (ready is not null)
+        if (!options.Enabled)
         {
-            return ready;
+            return MembershipTrustStatus.For(MembershipTrustState.Disabled);
+        }
+        if (verifier is null)
+        {
+            return MembershipTrustStatus.For(MembershipTrustState.VerifierUnavailable);
         }
 
         try
         {
+            ValidateOptions();
+            var genesis = DecodePinnedGenesis(profile);
+            _ = VerifyBootstrap(profile, clock.UtcNow);
+            var profileBinding = ComputeProfileBinding(profile);
             var bytes = Bounded(canonicalSignedEnvelope);
             var candidate = MembershipContractCodec.DecodeSignedDelegation(bytes);
             RequireExact(bytes, MembershipContractCodec.EncodeSignedDelegation(candidate));
-            var genesis = DecodePinnedGenesis(profile);
             var current = await repository.ReadMembershipTrustAsync(
                 profile.OpaqueProfileKey,
                 MembershipTrustDomain.Authority,
                 cancellationToken).ConfigureAwait(false);
             if (current.Result != MembershipTrustReadResult.Found ||
                 current.Head is null ||
-                current.Head.State != MembershipTrustState.Healthy)
+                current.Head.State is not (MembershipTrustState.Healthy or MembershipTrustState.Revoked) ||
+                !current.Head.ProfileBindingHash.AsSpan().SequenceEqual(profileBinding))
             {
                 return MembershipTrustStatus.For(MembershipTrustState.Corrupt);
             }
@@ -172,7 +191,7 @@ public sealed class MembershipTrustService(
             var verified = MembershipContractVerifier.VerifyDelegation(
                 candidate,
                 genesis,
-                ToLastKnownGood(current.Head),
+                ToLastKnownGood(current.Head, genesis.NetworkId, genesis.PolicyVersion),
                 NowSeconds(),
                 AllowedSkewSeconds(),
                 options.ClientProtocol,
@@ -277,6 +296,28 @@ public sealed class MembershipTrustService(
             return MembershipTrustStatus.For(MembershipTrustState.VerifierUnavailable);
         }
 
+        byte[] profileBinding;
+        try
+        {
+            ValidateOptions();
+            _ = DecodePinnedGenesis(profile);
+            var canonicalDelegation = Bounded(profile.SignedDelegation);
+            RequireExact(
+                canonicalDelegation,
+                MembershipContractCodec.EncodeSignedDelegation(
+                    MembershipContractCodec.DecodeSignedDelegation(canonicalDelegation)));
+            profileBinding = ComputeProfileBinding(profile);
+        }
+        catch (MembershipContractException exception)
+        {
+            return FromContractError(exception.Error);
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException or InvalidDataException or OverflowException)
+        {
+            return MembershipTrustStatus.For(MembershipTrustState.Corrupt);
+        }
+
         var snapshots = new List<MembershipTrustReadSnapshot>(3);
         foreach (var domain in new[]
                  {
@@ -296,6 +337,10 @@ public sealed class MembershipTrustService(
             if (snapshot.Result == MembershipTrustReadResult.Missing || snapshot.Head is null)
             {
                 return MembershipTrustStatus.For(MembershipTrustState.MissingBootstrap);
+            }
+            if (!snapshot.Head.ProfileBindingHash.AsSpan().SequenceEqual(profileBinding))
+            {
+                return MembershipTrustStatus.For(MembershipTrustState.ProtocolUnsupported);
             }
             snapshots.Add(snapshot);
         }
@@ -372,7 +417,8 @@ public sealed class MembershipTrustService(
                 state: MembershipTrustState.MissingBootstrap,
                 observedAt: clock.UtcNow,
                 validUntil: DateTimeOffset.MaxValue,
-                canonicalHash: MembershipContractHash.Sha256(bytes));
+                canonicalHash: MembershipContractHash.Sha256(bytes),
+                profileBindingHash: ComputeSelfHostedBinding(import));
             var result = await repository.CommitMembershipTrustAsync(
                 record,
                 expectedHeadRevision: null,
@@ -507,7 +553,8 @@ public sealed class MembershipTrustService(
                 clock.UtcNow,
                 Unix(validity.ValidUntil),
                 Unix(validity.ValidFrom),
-                verifiedHash.ToArray());
+                verifiedHash.ToArray(),
+                current.Head.ProfileBindingHash);
             var result = await repository.CommitMembershipTrustAsync(
                 record,
                 current.Head.Revision,
@@ -579,7 +626,8 @@ public sealed class MembershipTrustService(
             clock.UtcNow,
             Unix(validity.ValidUntil),
             Unix(validity.ValidFrom),
-            candidateHash);
+            candidateHash,
+            current.ProfileBindingHash);
         var result = await repository.CommitMembershipTrustAsync(
             fork,
             current.Revision,
@@ -604,6 +652,7 @@ public sealed class MembershipTrustService(
         MembershipTrustDomain domain,
         MembershipTrustAnchor anchor,
         SignerDelegation delegation,
+        byte[] profileBinding,
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
@@ -625,7 +674,15 @@ public sealed class MembershipTrustService(
         }
         if (existing.Result == MembershipTrustReadResult.Found)
         {
-            return existing.Head!.State == MembershipTrustState.Healthy
+            if (existing.Head is null ||
+                !existing.Head.ProfileBindingHash.AsSpan().SequenceEqual(profileBinding) ||
+                existing.Head.Sequence < anchor.Sequence ||
+                (existing.Head.Sequence == anchor.Sequence &&
+                 !existing.Head.CanonicalHash.AsSpan().SequenceEqual(anchor.CanonicalHash)))
+            {
+                return MembershipTrustStatus.For(MembershipTrustState.ProtocolUnsupported);
+            }
+            return existing.Head.State == MembershipTrustState.Healthy
                 ? MembershipTrustStatus.For(MembershipTrustState.Healthy)
                 : MembershipTrustStatus.For(existing.Head.State);
         }
@@ -642,7 +699,8 @@ public sealed class MembershipTrustService(
             observedAt: now,
             validUntil: Unix(delegation.ValidUntilUnixSeconds),
             validFrom: Unix(delegation.ValidFromUnixSeconds),
-            canonicalHash: anchor.CanonicalHash);
+            canonicalHash: anchor.CanonicalHash,
+            profileBindingHash: profileBinding);
         var result = await repository.CommitMembershipTrustAsync(
             record,
             expectedHeadRevision: null,
@@ -675,7 +733,8 @@ public sealed class MembershipTrustService(
             clock.UtcNow,
             Unix(validUntil),
             Unix(validFrom),
-            canonicalHash);
+            canonicalHash,
+            current.ProfileBindingHash);
         var result = await repository.CommitMembershipTrustAsync(
             record,
             current.Revision,
@@ -836,6 +895,43 @@ public sealed class MembershipTrustService(
         {
             throw new InvalidDataException("Membership profile is invalid.");
         }
+    }
+
+    private static byte[] ComputeProfileBinding(MembershipTrustProfile profile)
+    {
+        if (profile.BridgeAnchor is null || profile.MembershipAnchor is null)
+        {
+            throw new InvalidDataException("Membership anchors are missing.");
+        }
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        hash.AppendData("deep.membership-trust-profile/v1"u8);
+        hash.AppendData(MembershipContractHash.Sha256(profile.CanonicalGenesis));
+        hash.AppendData(SHA256.HashData(profile.SignedDelegation));
+        AppendAnchor(hash, MembershipTrustDomain.Bridge, profile.BridgeAnchor);
+        AppendAnchor(hash, MembershipTrustDomain.Membership, profile.MembershipAnchor);
+        return hash.GetHashAndReset();
+    }
+
+    private static byte[] ComputeSelfHostedBinding(SelfHostedGenesisImport import)
+    {
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        hash.AppendData("deep.membership-trust-self-host/v1"u8);
+        hash.AppendData(SHA256.HashData(import.CanonicalGenesis));
+        hash.AppendData(import.ExpectedNetworkId);
+        hash.AppendData(import.ExpectedCanonicalGenesisSha256);
+        return hash.GetHashAndReset();
+    }
+
+    private static void AppendAnchor(
+        IncrementalHash hash,
+        MembershipTrustDomain domain,
+        MembershipTrustAnchor anchor)
+    {
+        Span<byte> bytes = stackalloc byte[12];
+        BinaryPrimitives.WriteInt32BigEndian(bytes, (int)domain);
+        BinaryPrimitives.WriteUInt64BigEndian(bytes[4..], anchor.Sequence);
+        hash.AppendData(bytes);
+        hash.AppendData(anchor.CanonicalHash);
     }
 
     private uint AllowedSkewSeconds()

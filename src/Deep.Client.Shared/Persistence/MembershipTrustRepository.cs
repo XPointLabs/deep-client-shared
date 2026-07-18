@@ -48,6 +48,7 @@ internal static class MembershipTrustRepositoryValidation
         left.CanonicalEnvelope.AsSpan().SequenceEqual(right.CanonicalEnvelope) &&
         left.PayloadDigest.AsSpan().SequenceEqual(right.PayloadDigest) &&
         left.CanonicalHash.AsSpan().SequenceEqual(right.CanonicalHash) &&
+        left.ProfileBindingHash.AsSpan().SequenceEqual(right.ProfileBindingHash) &&
         left.State == right.State &&
         left.ObservedAt == right.ObservedAt &&
         left.ValidFrom == right.ValidFrom &&

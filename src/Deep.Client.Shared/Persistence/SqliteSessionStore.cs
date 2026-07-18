@@ -1374,10 +1374,12 @@ public sealed class SqliteSessionStore :
                 insert.CommandText = """
                     INSERT INTO membership_trust_records
                         (profile_key, domain, revision, version, sequence, previous_sequence,
-                         previous_hash, envelope, payload_digest, canonical_hash, state, observed_at, valid_from, valid_until)
+                         previous_hash, envelope, payload_digest, canonical_hash, profile_binding_hash,
+                         state, observed_at, valid_from, valid_until)
                     VALUES
                         ($profile, $domain, $revision, $version, $sequence, $previousSequence,
-                         $previousHash, $envelope, $digest, $canonicalHash, $state, $observedAt, $validFrom, $validUntil);
+                         $previousHash, $envelope, $digest, $canonicalHash, $profileBindingHash,
+                         $state, $observedAt, $validFrom, $validUntil);
                     """;
                 AddMembershipTrustRecordParameters(insert, record);
                 await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
@@ -1446,8 +1448,11 @@ public sealed class SqliteSessionStore :
                     FROM membership_trust_records AS record
                     LEFT JOIN membership_trust_heads AS head
                       ON head.profile_key = record.profile_key AND head.domain = record.domain
-                    WHERE head.revision IS NULL OR record.revision > head.revision;
+                    WHERE record.profile_key = $profile AND record.domain = $domain
+                      AND (head.revision IS NULL OR record.revision > head.revision);
                     """;
+                orphan.Parameters.AddWithValue("$profile", opaqueProfileKey);
+                orphan.Parameters.AddWithValue("$domain", (int)domain);
                 var count = Convert.ToInt64(
                     await orphan.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
                     CultureInfo.InvariantCulture);
@@ -2298,6 +2303,7 @@ public sealed class SqliteSessionStore :
         command.Parameters.AddWithValue("$envelope", record.CanonicalEnvelope);
         command.Parameters.AddWithValue("$digest", record.PayloadDigest);
         command.Parameters.AddWithValue("$canonicalHash", record.CanonicalHash);
+        command.Parameters.AddWithValue("$profileBindingHash", record.ProfileBindingHash);
         command.Parameters.AddWithValue("$state", (int)record.State);
         command.Parameters.AddWithValue("$observedAt", record.ObservedAt.ToUnixTimeSeconds());
         command.Parameters.AddWithValue("$validFrom", record.ValidFrom.ToUnixTimeSeconds());
@@ -2316,7 +2322,7 @@ public sealed class SqliteSessionStore :
         command.Transaction = transaction;
         command.CommandText = """
             SELECT version, sequence, previous_sequence, previous_hash, envelope,
-                   payload_digest, canonical_hash, state, observed_at, valid_from, valid_until
+                   payload_digest, canonical_hash, profile_binding_hash, state, observed_at, valid_from, valid_until
             FROM membership_trust_records
             WHERE profile_key = $profile AND domain = $domain AND revision = $revision;
             """;
@@ -2348,10 +2354,11 @@ public sealed class SqliteSessionStore :
             CanonicalEnvelope = reader.GetFieldValue<byte[]>(4),
             PayloadDigest = reader.GetFieldValue<byte[]>(5),
             CanonicalHash = reader.GetFieldValue<byte[]>(6),
-            State = (MembershipTrustState)reader.GetInt32(7),
-            ObservedAt = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(8)),
-            ValidFrom = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(9)),
-            ValidUntil = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(10))
+            ProfileBindingHash = reader.GetFieldValue<byte[]>(7),
+            State = (MembershipTrustState)reader.GetInt32(8),
+            ObservedAt = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(9)),
+            ValidFrom = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(10)),
+            ValidUntil = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(11))
         };
     }
 
@@ -2493,6 +2500,7 @@ public sealed class SqliteSessionStore :
                     envelope BLOB NOT NULL,
                     payload_digest BLOB NOT NULL,
                     canonical_hash BLOB NOT NULL,
+                    profile_binding_hash BLOB NOT NULL,
                     state INTEGER NOT NULL,
                     observed_at INTEGER NOT NULL,
                     valid_from INTEGER NOT NULL DEFAULT 0,
@@ -2557,6 +2565,7 @@ public sealed class SqliteSessionStore :
                 envelope BLOB NOT NULL,
                 payload_digest BLOB NOT NULL,
                 canonical_hash BLOB NOT NULL,
+                profile_binding_hash BLOB NOT NULL,
                 state INTEGER NOT NULL,
                 observed_at INTEGER NOT NULL,
                 valid_from INTEGER NOT NULL DEFAULT 0,

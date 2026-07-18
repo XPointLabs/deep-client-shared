@@ -1,4 +1,6 @@
+using System.Buffers.Binary;
 using System.Security.Cryptography;
+using System.Text;
 using Deep.Protocol.DeepExtension.Membership;
 
 namespace Deep.Client.Shared.Domain;
@@ -118,6 +120,8 @@ public sealed record MembershipTrustRecord
 
     public required byte[] CanonicalHash { get; init; }
 
+    public required byte[] ProfileBindingHash { get; init; }
+
     public required MembershipTrustState State { get; init; }
 
     public required DateTimeOffset ObservedAt { get; init; }
@@ -140,7 +144,8 @@ public sealed record MembershipTrustRecord
         DateTimeOffset observedAt,
         DateTimeOffset validUntil,
         DateTimeOffset? validFrom = null,
-        byte[]? canonicalHash = null)
+        byte[]? canonicalHash = null,
+        byte[]? profileBindingHash = null)
     {
         ArgumentNullException.ThrowIfNull(previousCanonicalHash);
         ArgumentNullException.ThrowIfNull(canonicalEnvelope);
@@ -154,13 +159,16 @@ public sealed record MembershipTrustRecord
             PreviousSequence = previousSequence,
             PreviousCanonicalHash = previousCanonicalHash.ToArray(),
             CanonicalEnvelope = canonicalEnvelope.ToArray(),
-            PayloadDigest = SHA256.HashData(canonicalEnvelope),
+            PayloadDigest = [],
             CanonicalHash = (canonicalHash ?? SHA256.HashData(canonicalEnvelope)).ToArray(),
+            ProfileBindingHash = (profileBindingHash ??
+                SHA256.HashData(Encoding.UTF8.GetBytes(opaqueProfileKey))).ToArray(),
             State = state,
             ObservedAt = observedAt,
             ValidFrom = validFrom ?? DateTimeOffset.UnixEpoch,
             ValidUntil = validUntil
         };
+        record = record with { PayloadDigest = ComputePayloadDigest(record) };
         Validate(record);
         return record;
     }
@@ -184,9 +192,11 @@ public sealed record MembershipTrustRecord
             record.CanonicalEnvelope.Length is <= 0 or > MaximumEnvelopeLength ||
             record.PayloadDigest is null ||
             record.PayloadDigest.Length != MembershipLimits.HashLength ||
-            !SHA256.HashData(record.CanonicalEnvelope).AsSpan().SequenceEqual(record.PayloadDigest) ||
+            !ComputePayloadDigest(record).AsSpan().SequenceEqual(record.PayloadDigest) ||
             record.CanonicalHash is null ||
             record.CanonicalHash.Length != MembershipLimits.HashLength ||
+            record.ProfileBindingHash is null ||
+            record.ProfileBindingHash.Length != MembershipLimits.HashLength ||
             !Enum.IsDefined(record.State) ||
             record.ObservedAt < DateTimeOffset.UnixEpoch ||
             record.ValidFrom > record.ValidUntil)
@@ -194,4 +204,66 @@ public sealed record MembershipTrustRecord
             throw new InvalidDataException("Membership trust state is invalid.");
         }
     }
+
+    public static byte[] ComputePayloadDigest(MembershipTrustRecord record)
+    {
+        ArgumentNullException.ThrowIfNull(record);
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        Append(hash, "deep.membership-trust-record/v1"u8);
+        AppendInt32(hash, record.Version);
+        var profile = Encoding.UTF8.GetBytes(record.OpaqueProfileKey ?? string.Empty);
+        AppendUInt32(hash, checked((uint)profile.Length));
+        Append(hash, profile);
+        AppendInt32(hash, (int)record.Domain);
+        AppendUInt64(hash, record.Revision);
+        AppendUInt64(hash, record.Sequence);
+        AppendUInt64(hash, record.PreviousSequence);
+        AppendFixed(hash, record.PreviousCanonicalHash);
+        AppendUInt32(hash, checked((uint)(record.CanonicalEnvelope?.Length ?? 0)));
+        Append(hash, record.CanonicalEnvelope ?? []);
+        AppendFixed(hash, record.CanonicalHash);
+        AppendFixed(hash, record.ProfileBindingHash);
+        AppendInt32(hash, (int)record.State);
+        AppendInt64(hash, record.ObservedAt.ToUnixTimeSeconds());
+        AppendInt64(hash, record.ValidFrom.ToUnixTimeSeconds());
+        AppendInt64(hash, record.ValidUntil.ToUnixTimeSeconds());
+        return hash.GetHashAndReset();
+    }
+
+    private static void AppendFixed(IncrementalHash hash, byte[]? value)
+    {
+        AppendUInt32(hash, checked((uint)(value?.Length ?? 0)));
+        Append(hash, value ?? []);
+    }
+
+    private static void AppendInt32(IncrementalHash hash, int value)
+    {
+        Span<byte> bytes = stackalloc byte[sizeof(int)];
+        BinaryPrimitives.WriteInt32BigEndian(bytes, value);
+        hash.AppendData(bytes);
+    }
+
+    private static void AppendUInt32(IncrementalHash hash, uint value)
+    {
+        Span<byte> bytes = stackalloc byte[sizeof(uint)];
+        BinaryPrimitives.WriteUInt32BigEndian(bytes, value);
+        hash.AppendData(bytes);
+    }
+
+    private static void AppendInt64(IncrementalHash hash, long value)
+    {
+        Span<byte> bytes = stackalloc byte[sizeof(long)];
+        BinaryPrimitives.WriteInt64BigEndian(bytes, value);
+        hash.AppendData(bytes);
+    }
+
+    private static void AppendUInt64(IncrementalHash hash, ulong value)
+    {
+        Span<byte> bytes = stackalloc byte[sizeof(ulong)];
+        BinaryPrimitives.WriteUInt64BigEndian(bytes, value);
+        hash.AppendData(bytes);
+    }
+
+    private static void Append(IncrementalHash hash, ReadOnlySpan<byte> value) =>
+        hash.AppendData(value);
 }

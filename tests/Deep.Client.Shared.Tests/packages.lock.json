@@ -178,7 +178,7 @@
       "deep.client.shared": {
         "type": "Project",
         "dependencies": {
-          "Deep.Protocol": "[0.3.0-p04.b887fa0, )",
+          "Deep.Protocol": "[0.3.0-p04.b887fa0, 0.3.0-p04.b887fa0]",
           "Microsoft.Data.Sqlite.Core": "[10.0.9, )",
           "SQLitePCLRaw.bundle_e_sqlcipher": "[2.1.11, )",
           "Sodium.Core": "[1.4.1, )"
