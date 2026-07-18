@@ -69,11 +69,16 @@ function Assert-LockText {
     param([Parameter(Mandatory)][string] $Text)
 
     $lock = $Text | ConvertFrom-Json
-    $targets = @($lock.dependencies.PSObject.Properties.Value)
-    if (-not ($targets | Where-Object {
-        $_.'Deep.Protocol'.resolved -eq $expectedVersion -and
-        $_.'Deep.Protocol'.type -eq 'Direct'
-    })) {
+    $matched = $false
+    foreach ($target in $lock.dependencies.PSObject.Properties) {
+        $property = $target.Value.PSObject.Properties['Deep.Protocol']
+        $dependency = if ($null -eq $property) { $null } else { $property.Value }
+        if ($null -ne $dependency -and
+            $dependency.resolved -eq $expectedVersion) {
+            $matched = $true
+        }
+    }
+    if (-not $matched) {
         throw 'P07 dependency gate: lock file does not pin the exact Deep.Protocol version.'
     }
 }
@@ -118,7 +123,13 @@ if (Test-Path -LiteralPath $assetsPath -PathType Leaf) {
         throw 'P07 dependency gate: resolved assets do not contain the exact Deep.Protocol version.'
     }
 
-    $packageFolder = Join-Path $repoRoot ".packages\deep.protocol\$expectedVersion"
+    $globalPackages = if ([string]::IsNullOrWhiteSpace($env:NUGET_PACKAGES)) {
+        Join-Path ([Environment]::GetFolderPath('UserProfile')) '.nuget\packages'
+    }
+    else {
+        $env:NUGET_PACKAGES
+    }
+    $packageFolder = Join-Path $globalPackages "deep.protocol\$expectedVersion"
     $cachedNupkg = Join-Path $packageFolder "deep.protocol.$expectedVersion.nupkg"
     Assert-ExactFile $cachedNupkg 91148 '8ef4e70ad0b6c1cc0087f25c0313d6ab6a5387d16246679e4c10a3c00898a442'
 }

@@ -1,0 +1,87 @@
+{
+  "version": 1,
+  "dependencies": {
+    "net10.0": {
+      "Deep.Protocol": {
+        "type": "Direct",
+        "requested": "[0.3.0-p04.b887fa0, )",
+        "resolved": "0.3.0-p04.b887fa0",
+        "contentHash": "SuKYcvhW1RNz/pPiQ6iac5J4XdnTOtLaxb8mFKc3MWhGseV2a6Jq5+BQg5r/AIobMvzKr85HcgQzkV6KF6jxVQ==",
+        "dependencies": {
+          "Deep.Protocol.Abstractions": "0.3.0-p04.b887fa0",
+          "Deep.Protocol.Protobuf": "0.3.0-p04.b887fa0",
+          "Sodium.Core": "1.4.1"
+        }
+      },
+      "Microsoft.Data.Sqlite.Core": {
+        "type": "Direct",
+        "requested": "[10.0.9, )",
+        "resolved": "10.0.9",
+        "contentHash": "iZrONyMKPjxfVZnUktqO30QjzNwAGH+AxM61s8lKQnVhgbQ3bn0hiXI129ZmVicEbIcwljyy2OVsIYUR51ZHKQ==",
+        "dependencies": {
+          "SQLitePCLRaw.core": "2.1.11"
+        }
+      },
+      "Sodium.Core": {
+        "type": "Direct",
+        "requested": "[1.4.1, )",
+        "resolved": "1.4.1",
+        "contentHash": "K1Xhi20h9H15UPOa6NDNgW81NYN6AAvVT+v0Jz3n1qLS/nqiWzamWCyHyFxgoriCEMA90L1KQbYrIqBH+zKbrg==",
+        "dependencies": {
+          "libsodium": "[1.0.22, 1.0.23)"
+        }
+      },
+      "SQLitePCLRaw.bundle_e_sqlcipher": {
+        "type": "Direct",
+        "requested": "[2.1.11, )",
+        "resolved": "2.1.11",
+        "contentHash": "NFuxa/rD3Ah88jbFOgsoUjuWcLiBkj3iqgO2gJXola9NtjtCTRI3HMQtVjQDnrhCvdBOAJ4RqbwnqoEMLht8GQ==",
+        "dependencies": {
+          "SQLitePCLRaw.lib.e_sqlcipher": "2.1.11",
+          "SQLitePCLRaw.provider.e_sqlcipher": "2.1.11"
+        }
+      },
+      "Deep.Protocol.Abstractions": {
+        "type": "Transitive",
+        "resolved": "0.3.0-p04.b887fa0",
+        "contentHash": "T7JyXZuUXR5JXSNKEkVgMpUZWF8Y2HyQkJIQAt9RY50Ui/6XNHw6aH56aktpN2Vn4m/zgGZfd9RRxcKhH+uZCQ=="
+      },
+      "Deep.Protocol.Protobuf": {
+        "type": "Transitive",
+        "resolved": "0.3.0-p04.b887fa0",
+        "contentHash": "qou2jnQ1G4eBg8crtpIp83lF6DRGSySoZKhTt4cLdL+v0AUp+cr7tYzJK0oo/zIwUOG3PeHZ2MyfYe8OBNsIPA==",
+        "dependencies": {
+          "Google.Protobuf": "3.32.1"
+        }
+      },
+      "Google.Protobuf": {
+        "type": "Transitive",
+        "resolved": "3.32.1",
+        "contentHash": "HbFFRNU46e1E+qhGvwCDAO2EZ80WADqlkNqlOBYvGi7SNxwMPkTrReZgCg9/TrXwLO/n0za+AIiT2IplzqrjZw=="
+      },
+      "libsodium": {
+        "type": "Transitive",
+        "resolved": "1.0.22",
+        "contentHash": "KPD9SloJFclrsjnhABu7dzWrcyYkwPbvx5l1gRSPAX/0n+OBtSiVCKtGFv4n+ecWUHU0tCG9LSSwoZZx673zBQ=="
+      },
+      "SQLitePCLRaw.core": {
+        "type": "Transitive",
+        "resolved": "2.1.11",
+        "contentHash": "PK0GLFkfhZzLQeR3PJf71FmhtHox+U3vcY6ZtswoMjrefkB9k6ErNJEnwXqc5KgXDSjige2XXrezqS39gkpQKA=="
+      },
+      "SQLitePCLRaw.lib.e_sqlcipher": {
+        "type": "Transitive",
+        "resolved": "2.1.11",
+        "contentHash": "Cg6UPeDbH8jyaOs1vqXYIgeewH0wYrBnmbC5Ml3GYBo+GKzNmyxrWSO52JV68bfB7Addt/PZLMekJV1RH2ftWQ=="
+      },
+      "SQLitePCLRaw.provider.e_sqlcipher": {
+        "type": "Transitive",
+        "resolved": "2.1.11",
+        "contentHash": "5L7YXWtPzKYHeXBHmj63QsHbLQmy0SYvhQp3xWA2yzSq1SvlnGFViveLfUDr/GEmePrqzXQ9tOJG9iQnFspfBA==",
+        "dependencies": {
+          "SQLitePCLRaw.core": "2.1.11"
+        }
+      }
+    }
+  }
+}
