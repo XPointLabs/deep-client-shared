@@ -125,20 +125,95 @@ function Get-GitBlobBytes {
         [Parameter(Mandatory)][string] $Repository,
         [Parameter(Mandatory)][string] $Object
     )
-    $start = [Diagnostics.ProcessStartInfo]::new()
-    $start.FileName = 'git'
-    $start.Arguments = "-C `"$Repository`" show `"$Object`""
-    $start.UseShellExecute = $false
-    $start.RedirectStandardOutput = $true
-    $start.RedirectStandardError = $true
+    Assert-SafeGitObjectGraph $Repository
+    $start = New-SanitizedGitStartInfo
+    $start.Arguments = ConvertTo-GitArguments @('-C', $Repository, 'show', $Object)
     $process = [Diagnostics.Process]::Start($start)
     $memory = [IO.MemoryStream]::new()
     $process.StandardOutput.BaseStream.CopyTo($memory)
+    $errorText = $process.StandardError.ReadToEnd()
     $process.WaitForExit()
     if ($process.ExitCode -ne 0) {
-        throw 'P07 dependency gate: pinned Git artifact is unavailable.'
+        throw "P07 dependency gate: pinned Git artifact is unavailable: $errorText"
     }
     return $memory.ToArray()
+}
+
+function New-SanitizedGitStartInfo {
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = 'git'
+    $start.UseShellExecute = $false
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    foreach ($name in @($start.Environment.Keys)) {
+        if ($name.StartsWith('GIT_', [StringComparison]::OrdinalIgnoreCase)) {
+            $start.Environment.Remove($name)
+        }
+    }
+    $start.Environment['GIT_NO_REPLACE_OBJECTS'] = '1'
+    return $start
+}
+
+function ConvertTo-GitArguments {
+    param([string[]] $Values)
+    return (($Values | ForEach-Object {
+        '"' + ($_.Replace('"', '\"')) + '"'
+    }) -join ' ')
+}
+
+function Invoke-SanitizedGitText {
+    param(
+        [Parameter(Mandatory)][string] $Repository,
+        [Parameter(Mandatory)][string[]] $Arguments,
+        [switch] $AllowFailure
+    )
+    $start = New-SanitizedGitStartInfo
+    $start.Arguments = ConvertTo-GitArguments (@('-C', $Repository) + $Arguments)
+    $process = [Diagnostics.Process]::Start($start)
+    $text = $process.StandardOutput.ReadToEnd()
+    $errorText = $process.StandardError.ReadToEnd()
+    $process.WaitForExit()
+    if ($process.ExitCode -ne 0 -and -not $AllowFailure) {
+        throw "P07 dependency gate: pinned Git object operation failed: $errorText"
+    }
+    return [pscustomobject]@{ ExitCode = $process.ExitCode; Text = $text }
+}
+
+function Assert-SafeGitObjectGraph {
+    param([Parameter(Mandatory)][string] $Repository)
+    $replace = Invoke-SanitizedGitText $Repository @('for-each-ref', '--format=%(refname)', 'refs/replace')
+    if (-not [string]::IsNullOrWhiteSpace($replace.Text)) {
+        throw 'P07 dependency gate: Git replace refs are forbidden.'
+    }
+    foreach ($gitPathName in @('info/grafts', 'shallow')) {
+        $pathResult = Invoke-SanitizedGitText $Repository @('rev-parse', '--git-path', $gitPathName)
+        $path = $pathResult.Text.Trim()
+        if (-not [IO.Path]::IsPathRooted($path)) {
+            $path = Join-Path $Repository $path
+        }
+        if (Test-Path -LiteralPath $path) {
+            throw 'P07 dependency gate: grafted or shallow Git history is forbidden.'
+        }
+    }
+}
+
+function Assert-GitObject {
+    param([string] $Repository, [string] $Object)
+    Assert-SafeGitObjectGraph $Repository
+    $result = Invoke-SanitizedGitText $Repository @('cat-file', '-e', "$Object`^{commit}") -AllowFailure
+    if ($result.ExitCode -ne 0) {
+        throw 'P07 dependency gate: required Git commit object is unavailable.'
+    }
+}
+
+function Assert-GitAncestor {
+    param([string] $Repository, [string] $Ancestor, [string] $Descendant)
+    Assert-GitObject $Repository $Ancestor
+    Assert-GitObject $Repository $Descendant
+    $result = Invoke-SanitizedGitText $Repository @('merge-base', '--is-ancestor', $Ancestor, $Descendant) -AllowFailure
+    if ($result.ExitCode -ne 0) {
+        throw 'P07 dependency gate: pinned prerequisite ancestry mismatch.'
+    }
 }
 
 function Assert-BytesHash {
@@ -159,14 +234,7 @@ $devops = (Resolve-Path (Join-Path $repoRoot '..\..\wave01b\deep-devops-w1w2-man
 $accepted = '1c01e24e24647a46b4f37622f3934dc2cc1284ef'
 $corrective = '1fc3fcd376f9ffc9d4bca68f0143bf12b761e7dc'
 $carrier = '524c5796aa868fa3d057fbf7eaa13cfea2e0d19c'
-if ((git -C $devops rev-parse HEAD).Trim() -ne $accepted -or
-    -not [string]::IsNullOrWhiteSpace((git -C $devops status --porcelain))) {
-    throw 'P07 dependency gate: accepted DevOps prerequisite must be clean at its exact commit.'
-}
-git -C $devops merge-base --is-ancestor $corrective $accepted
-if ($LASTEXITCODE -ne 0) {
-    throw 'P07 dependency gate: accepted prerequisite ancestry mismatch.'
-}
+Assert-GitAncestor $devops $corrective $accepted
 $manifestBytes = Get-GitBlobBytes $devops "$accepted`:release/manifests/survival-v2.1.0-w1w2-gate.detached.local.json"
 $contractBytes = Get-GitBlobBytes $devops "$carrier`:release/contracts/survival-compatibility-v2.1.0-w1w2-gate.json"
 $closureBytes = Get-GitBlobBytes $devops "$accepted`:release/evidence/w1w2-dependency-closure.json"
@@ -181,6 +249,11 @@ if ($closure.status -ne 'W1-CONTRACT-CLOSED-W2-BLOCKED' -or
     $closure.P04.runtimeAuthorized -ne $false) {
     throw 'P07 dependency gate: accepted closure semantics mismatch.'
 }
+
+$reviewedP04Commit = '68da52aaf6768ee2cb41f88ae42db102eeaf1ad6'
+$finalP04Commit = 'db58937d4070eb057642c00d10a64d2f738f6e41'
+Assert-GitAncestor $protocolRoot $expectedSourceCommit $reviewedP04Commit
+Assert-GitAncestor $protocolRoot $reviewedP04Commit $finalP04Commit
 
 $nugetConfig = Get-Content -Raw -Encoding UTF8 (Join-Path $repoRoot 'NuGet.Config')
 if ($nugetConfig -notmatch '<clear\s*/>' -or
@@ -217,9 +290,20 @@ if (Test-Path -LiteralPath $assetsPath -PathType Leaf) {
     else {
         $env:NUGET_PACKAGES
     }
-    $packageFolder = Join-Path $globalPackages "deep.protocol\$expectedVersion"
-    $cachedNupkg = Join-Path $packageFolder "deep.protocol.$expectedVersion.nupkg"
-    Assert-ExactFile $cachedNupkg 91148 '8ef4e70ad0b6c1cc0087f25c0313d6ab6a5387d16246679e4c10a3c00898a442'
+    $cachePins = @(
+        @{ Id = 'deep.protocol'; Bytes = 91148; Sha256 = '8ef4e70ad0b6c1cc0087f25c0313d6ab6a5387d16246679e4c10a3c00898a442' },
+        @{ Id = 'deep.protocol.abstractions'; Bytes = 25670; Sha256 = 'fc1212a6765f5778188fcb3866ef923023c2253c3ead299a542271f4cc4f844f' },
+        @{ Id = 'deep.protocol.protobuf'; Bytes = 51180; Sha256 = '755a027c58be670151456cc0bca4764731f7c493932d9eedd00c02e704baf818' }
+    )
+    foreach ($cachePin in $cachePins) {
+        if (-not $assets.libraries.PSObject.Properties[
+                "$($cachePin.Id -replace '^deep\.protocol$', 'Deep.Protocol' -replace '^deep\.protocol\.abstractions$', 'Deep.Protocol.Abstractions' -replace '^deep\.protocol\.protobuf$', 'Deep.Protocol.Protobuf')/$expectedVersion"]) {
+            throw 'P07 dependency gate: resolved assets do not contain an exact P04 dependency.'
+        }
+        $packageFolder = Join-Path $globalPackages "$($cachePin.Id)\$expectedVersion"
+        $cachedNupkg = Join-Path $packageFolder "$($cachePin.Id).$expectedVersion.nupkg"
+        Assert-ExactFile $cachedNupkg $cachePin.Bytes $cachePin.Sha256
+    }
 }
 
 # In-memory negative controls prove the gate rejects the required substitution classes.

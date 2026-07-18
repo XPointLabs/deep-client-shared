@@ -13,8 +13,8 @@ Three installation-scoped tracks are stored independently:
 - membership commitments.
 
 Each track has immutable revisions plus a CAS head. The record digest binds the
-profile, domain, revision, sequences, predecessor and canonical hashes,
-envelope, state, and timestamps. SQLite commits record and head in one
+profile, domain, typed artifact kind, revision, sequences, predecessor and
+canonical hashes, envelope, state, and timestamps. SQLite commits record and head in one
 transaction. A corrupt current profile/domain blocks without selecting an older
 record; corruption in an unrelated opaque profile cannot deny service to the
 current profile.
@@ -23,6 +23,22 @@ Profiles bind exact genesis, initial delegation, and initial domain anchors.
 Substitution after first use fails closed. Root-signed delegation rotation can
 advance a healthy or revoked authority chain. Fork evidence is persisted as a
 blocking state and is never resolved by source count or arrival order.
+Delegation and revocation candidates use one transition reducer, including
+same-sequence and concurrent mixed-type equivocation. Restart revalidates
+persisted authority and signed content against canonical bytes and their signed
+predecessor context; immutable anchors are explicitly typed and checked against
+the profile pins.
+
+An installation-scoped, CAS-persisted observed-time high-water mark blocks
+rollback across operations and restarts. Every public trust operation samples
+the injected clock once and carries that instant through verification and
+persistence. Rotated authority remains usable after the immutable bootstrap
+delegation expires; current authority validity, rather than bootstrap
+delegation validity, controls runtime status.
+
+Self-host import accepts a bounded canonical raw signature envelope, not trusted
+P04 model objects, and is restricted to the independent
+`install:self-hosted:` profile namespace.
 
 Logical local schema migration `3 -> 4` adds installation trust metadata without
 deleting account, message, or group state. Account sign-out intentionally

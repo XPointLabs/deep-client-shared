@@ -12,6 +12,16 @@ public enum MembershipTrustDomain
     Membership = 3
 }
 
+public enum MembershipTrustArtifactKind
+{
+    Anchor = 1,
+    Delegation = 2,
+    Revocation = 3,
+    Bridge = 4,
+    Membership = 5,
+    SelfHostedGenesis = 6
+}
+
 public enum MembershipTrustState
 {
     Disabled = 0,
@@ -57,7 +67,7 @@ public sealed record SelfHostedGenesisImport(
     byte[] CanonicalGenesis,
     byte[] ExpectedNetworkId,
     byte[] ExpectedCanonicalGenesisSha256,
-    IReadOnlyList<MembershipSignature> Signatures);
+    byte[] CanonicalSignatures);
 
 public sealed record MembershipTrustOptions
 {
@@ -106,6 +116,8 @@ public sealed record MembershipTrustRecord
 
     public required MembershipTrustDomain Domain { get; init; }
 
+    public required MembershipTrustArtifactKind ArtifactKind { get; init; }
+
     public required ulong Revision { get; init; }
 
     public required ulong Sequence { get; init; }
@@ -145,7 +157,8 @@ public sealed record MembershipTrustRecord
         DateTimeOffset validUntil,
         DateTimeOffset? validFrom = null,
         byte[]? canonicalHash = null,
-        byte[]? profileBindingHash = null)
+        byte[]? profileBindingHash = null,
+        MembershipTrustArtifactKind? artifactKind = null)
     {
         ArgumentNullException.ThrowIfNull(previousCanonicalHash);
         ArgumentNullException.ThrowIfNull(canonicalEnvelope);
@@ -154,6 +167,13 @@ public sealed record MembershipTrustRecord
             Version = SchemaVersion,
             OpaqueProfileKey = opaqueProfileKey,
             Domain = domain,
+            ArtifactKind = artifactKind ?? domain switch
+            {
+                MembershipTrustDomain.Authority => MembershipTrustArtifactKind.Delegation,
+                MembershipTrustDomain.Bridge => MembershipTrustArtifactKind.Bridge,
+                MembershipTrustDomain.Membership => MembershipTrustArtifactKind.Membership,
+                _ => throw new ArgumentOutOfRangeException(nameof(domain))
+            },
             Revision = revision,
             Sequence = sequence,
             PreviousSequence = previousSequence,
@@ -180,6 +200,7 @@ public sealed record MembershipTrustRecord
             string.IsNullOrWhiteSpace(record.OpaqueProfileKey) ||
             record.OpaqueProfileKey.Length > MaximumProfileKeyLength ||
             !Enum.IsDefined(record.Domain) ||
+            !Enum.IsDefined(record.ArtifactKind) ||
             record.Revision == 0 ||
             record.Revision > long.MaxValue ||
             record.Sequence == 0 ||
@@ -215,6 +236,7 @@ public sealed record MembershipTrustRecord
         AppendUInt32(hash, checked((uint)profile.Length));
         Append(hash, profile);
         AppendInt32(hash, (int)record.Domain);
+        AppendInt32(hash, (int)record.ArtifactKind);
         AppendUInt64(hash, record.Revision);
         AppendUInt64(hash, record.Sequence);
         AppendUInt64(hash, record.PreviousSequence);
@@ -266,4 +288,71 @@ public sealed record MembershipTrustRecord
 
     private static void Append(IncrementalHash hash, ReadOnlySpan<byte> value) =>
         hash.AppendData(value);
+}
+
+public sealed record MembershipTrustClockRecord
+{
+    public const int SchemaVersion = 1;
+
+    public required int Version { get; init; }
+
+    public required string OpaqueProfileKey { get; init; }
+
+    public required ulong Revision { get; init; }
+
+    public required DateTimeOffset ObservedAt { get; init; }
+
+    public required byte[] Digest { get; init; }
+
+    public static MembershipTrustClockRecord Create(
+        string opaqueProfileKey,
+        ulong revision,
+        DateTimeOffset observedAt)
+    {
+        var record = new MembershipTrustClockRecord
+        {
+            Version = SchemaVersion,
+            OpaqueProfileKey = opaqueProfileKey,
+            Revision = revision,
+            ObservedAt = observedAt,
+            Digest = []
+        };
+        record = record with { Digest = ComputeDigest(record) };
+        Validate(record);
+        return record;
+    }
+
+    public static void Validate(MembershipTrustClockRecord record)
+    {
+        ArgumentNullException.ThrowIfNull(record);
+        if (record.Version != SchemaVersion ||
+            string.IsNullOrWhiteSpace(record.OpaqueProfileKey) ||
+            record.OpaqueProfileKey.Length > MembershipTrustRecord.MaximumProfileKeyLength ||
+            record.Revision == 0 ||
+            record.Revision > long.MaxValue ||
+            record.ObservedAt < DateTimeOffset.UnixEpoch ||
+            record.Digest is null ||
+            record.Digest.Length != MembershipLimits.HashLength ||
+            !ComputeDigest(record).AsSpan().SequenceEqual(record.Digest))
+        {
+            throw new InvalidDataException("Membership trust clock is invalid.");
+        }
+    }
+
+    public static byte[] ComputeDigest(MembershipTrustClockRecord record)
+    {
+        ArgumentNullException.ThrowIfNull(record);
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        hash.AppendData("deep.membership-trust-clock/v1"u8);
+        var profile = Encoding.UTF8.GetBytes(record.OpaqueProfileKey ?? string.Empty);
+        Span<byte> bytes = stackalloc byte[sizeof(ulong)];
+        BinaryPrimitives.WriteUInt64BigEndian(bytes, checked((ulong)profile.Length));
+        hash.AppendData(bytes);
+        hash.AppendData(profile);
+        BinaryPrimitives.WriteUInt64BigEndian(bytes, record.Revision);
+        hash.AppendData(bytes);
+        BinaryPrimitives.WriteInt64BigEndian(bytes, record.ObservedAt.ToUnixTimeSeconds());
+        hash.AppendData(bytes);
+        return hash.GetHashAndReset();
+    }
 }

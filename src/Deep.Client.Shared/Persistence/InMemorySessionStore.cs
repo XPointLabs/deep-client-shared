@@ -30,6 +30,7 @@ public sealed class InMemorySessionStore :
     private readonly Dictionary<string, long> incomingMessageNotifications = new(StringComparer.Ordinal);
     private readonly Dictionary<MembershipTrustKey, SortedDictionary<ulong, MembershipTrustRecord>> membershipTrustRecords = [];
     private readonly Dictionary<MembershipTrustKey, ulong> membershipTrustHeads = [];
+    private readonly Dictionary<string, MembershipTrustClockRecord> membershipTrustClocks = new(StringComparer.Ordinal);
     private readonly object durableStateGate = new();
     private readonly object accountDataPurgeGate = new();
     private readonly string? statePath;
@@ -1097,11 +1098,93 @@ public sealed class InMemorySessionStore :
             {
                 return Task.FromResult(MembershipTrustRepositoryValidation.Corrupt());
             }
+            if (!MembershipTrustRepositoryValidation.HasValidLinkage(head, predecessor))
+            {
+                return Task.FromResult(MembershipTrustRepositoryValidation.Corrupt());
+            }
 
             return Task.FromResult(new MembershipTrustReadSnapshot(
                 MembershipTrustReadResult.Found,
                 head,
                 predecessor));
+        }
+    }
+
+    public Task<MembershipTrustClockCommitResult> CommitMembershipTrustClockAsync(
+        MembershipTrustClockRecord record,
+        ulong? expectedRevision,
+        CancellationToken cancellationToken = default)
+    {
+        MembershipTrustClockRecord.Validate(record);
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (durableStateGate)
+        {
+            var hasCurrent = membershipTrustClocks.TryGetValue(record.OpaqueProfileKey, out var current);
+            if (hasCurrent != expectedRevision.HasValue ||
+                (hasCurrent && current!.Revision != expectedRevision!.Value) ||
+                record.Revision != (hasCurrent ? current!.Revision + 1 : 1))
+            {
+                if (hasCurrent &&
+                    current!.Revision == record.Revision &&
+                    current.Digest.AsSpan().SequenceEqual(record.Digest))
+                {
+                    return Task.FromResult(MembershipTrustClockCommitResult.Idempotent);
+                }
+                return Task.FromResult(MembershipTrustClockCommitResult.Conflict);
+            }
+            if (hasCurrent && record.ObservedAt < current!.ObservedAt)
+            {
+                return Task.FromResult(MembershipTrustClockCommitResult.Rollback);
+            }
+
+            membershipTrustClocks[record.OpaqueProfileKey] = record;
+            try
+            {
+                PersistState();
+            }
+            catch
+            {
+                if (hasCurrent)
+                {
+                    membershipTrustClocks[record.OpaqueProfileKey] = current!;
+                }
+                else
+                {
+                    membershipTrustClocks.Remove(record.OpaqueProfileKey);
+                }
+                throw;
+            }
+            return Task.FromResult(MembershipTrustClockCommitResult.Applied);
+        }
+    }
+
+    public Task<MembershipTrustClockReadSnapshot> ReadMembershipTrustClockAsync(
+        string opaqueProfileKey,
+        CancellationToken cancellationToken = default)
+    {
+        MembershipTrustRepositoryValidation.ValidateProfileKey(opaqueProfileKey);
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (durableStateGate)
+        {
+            if (!membershipTrustClocks.TryGetValue(opaqueProfileKey, out var record))
+            {
+                return Task.FromResult(new MembershipTrustClockReadSnapshot(
+                    MembershipTrustClockReadResult.Missing,
+                    null));
+            }
+            try
+            {
+                MembershipTrustClockRecord.Validate(record);
+                return Task.FromResult(new MembershipTrustClockReadSnapshot(
+                    MembershipTrustClockReadResult.Found,
+                    record));
+            }
+            catch (InvalidDataException)
+            {
+                return Task.FromResult(new MembershipTrustClockReadSnapshot(
+                    MembershipTrustClockReadResult.Corrupt,
+                    null));
+            }
         }
     }
 
@@ -1650,7 +1733,8 @@ public sealed class InMemorySessionStore :
                     schemaValues.OrderBy(static item => item.Key).ToArray(),
                     schemaVersion,
                     MembershipTrustRecords: MembershipTrustRecordSnapshots(),
-                    MembershipTrustHeads: MembershipTrustHeadSnapshots()));
+                    MembershipTrustHeads: MembershipTrustHeadSnapshots(),
+                    MembershipTrustClocks: MembershipTrustClockSnapshots()));
 
                 conversations.Clear();
                 contacts.Clear();
@@ -1787,6 +1871,11 @@ public sealed class InMemorySessionStore :
             membershipTrustHeads[
                 new MembershipTrustKey(item.OpaqueProfileKey, item.Domain)] = item.Revision;
         }
+
+        foreach (var item in snapshot.MembershipTrustClocks ?? [])
+        {
+            membershipTrustClocks[item.OpaqueProfileKey] = item;
+        }
     }
 
     private void PersistState()
@@ -1836,7 +1925,8 @@ public sealed class InMemorySessionStore :
                 incomingMessageNotificationSnapshots,
                 nextIncomingMessageNotificationSequence,
                 MembershipTrustRecordSnapshots(),
-                MembershipTrustHeadSnapshots()));
+                MembershipTrustHeadSnapshots(),
+                MembershipTrustClockSnapshots()));
         }
     }
 
@@ -1856,6 +1946,11 @@ public sealed class InMemorySessionStore :
                 item.Key.OpaqueProfileKey,
                 item.Key.Domain,
                 item.Value))
+            .ToArray();
+
+    private IReadOnlyList<MembershipTrustClockRecord> MembershipTrustClockSnapshots() =>
+        membershipTrustClocks.Values
+            .OrderBy(static item => item.OpaqueProfileKey, StringComparer.Ordinal)
             .ToArray();
 
     private void PersistSnapshot(SessionStoreSnapshot snapshot)
@@ -1902,7 +1997,8 @@ public sealed class InMemorySessionStore :
         IReadOnlyList<IncomingMessageNotificationSnapshot>? IncomingMessageNotifications = null,
         long NextIncomingMessageNotificationSequence = 0,
         IReadOnlyList<MembershipTrustRecordSnapshot>? MembershipTrustRecords = null,
-        IReadOnlyList<MembershipTrustHeadSnapshot>? MembershipTrustHeads = null);
+        IReadOnlyList<MembershipTrustHeadSnapshot>? MembershipTrustHeads = null,
+        IReadOnlyList<MembershipTrustClockRecord>? MembershipTrustClocks = null);
 
     private sealed record IncomingMessageNotificationSnapshot(string MessageId, long Sequence);
 

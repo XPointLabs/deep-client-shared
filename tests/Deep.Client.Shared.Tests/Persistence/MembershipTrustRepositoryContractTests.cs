@@ -26,7 +26,11 @@ public sealed class MembershipTrustRepositoryContractTests
             MembershipTrustCommitResult.Conflict,
             await store.CommitMembershipTrustAsync(divergent, expectedHeadRevision: null));
 
-        var second = Record(revision: 2, sequence: 7, fill: 0x33);
+        var second = Record(
+            revision: 2,
+            sequence: 7,
+            fill: 0x33,
+            previousCanonicalHash: first.CanonicalHash);
         Assert.Equal(
             MembershipTrustCommitResult.Conflict,
             await store.CommitMembershipTrustAsync(second, expectedHeadRevision: 0));
@@ -131,8 +135,11 @@ public sealed class MembershipTrustRepositoryContractTests
         try
         {
             var first = new InMemorySessionStore(path);
-            _ = await first.CommitMembershipTrustAsync(Record(1, 6, 0x10), null);
-            _ = await first.CommitMembershipTrustAsync(Record(2, 7, 0x20), 1);
+            var predecessor = Record(1, 6, 0x10);
+            _ = await first.CommitMembershipTrustAsync(predecessor, null);
+            _ = await first.CommitMembershipTrustAsync(
+                Record(2, 7, 0x20, previousCanonicalHash: predecessor.CanonicalHash),
+                1);
 
             var restarted = new InMemorySessionStore(path);
             var read = await restarted.ReadMembershipTrustAsync(
@@ -234,14 +241,16 @@ public sealed class MembershipTrustRepositoryContractTests
         ulong sequence,
         byte fill,
         MembershipTrustDomain domain = MembershipTrustDomain.Membership,
-        string profile = "install:test") =>
+        string profile = "install:test",
+        byte[]? previousCanonicalHash = null) =>
         MembershipTrustRecord.Create(
             profile,
             domain,
             revision,
             sequence,
             previousSequence: sequence - 1,
-            previousCanonicalHash: Enumerable.Repeat((byte)(fill - 1), 32).ToArray(),
+            previousCanonicalHash: previousCanonicalHash ??
+                Enumerable.Repeat((byte)(fill - 1), 32).ToArray(),
             canonicalEnvelope: Enumerable.Repeat(fill, 96).ToArray(),
             state: MembershipTrustState.Healthy,
             observedAt: DateTimeOffset.FromUnixTimeSeconds(1010),

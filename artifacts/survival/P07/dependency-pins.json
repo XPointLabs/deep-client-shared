@@ -6,6 +6,8 @@
   "contractCarrierCommit": "524c5796aa868fa3d057fbf7eaa13cfea2e0d19c",
   "contractSha256": "c45f66f7a688cbd70b7ca57a777851962ce2ab59eb37a3304d9b4bf7e4c55719",
   "p04SourceCommit": "b887fa088f486390be182cac4cbcb59b60ce8931",
+  "p04ReviewedCommit": "68da52aaf6768ee2cb41f88ae42db102eeaf1ad6",
+  "p04FinalEvidenceCommit": "db58937d4070eb057642c00d10a64d2f738f6e41",
   "p04Version": "0.3.0-p04.b887fa0",
   "p04ManifestSha256": "fd3ef27bf0b9272570d6c6e680a3c99e581f6220799d13ee3afbd86ea0e99298",
   "packageSha256": {

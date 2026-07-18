@@ -1373,11 +1373,11 @@ public sealed class SqliteSessionStore :
                 insert.Transaction = transaction;
                 insert.CommandText = """
                     INSERT INTO membership_trust_records
-                        (profile_key, domain, revision, version, sequence, previous_sequence,
+                        (profile_key, domain, revision, version, artifact_kind, sequence, previous_sequence,
                          previous_hash, envelope, payload_digest, canonical_hash, profile_binding_hash,
                          state, observed_at, valid_from, valid_until)
                     VALUES
-                        ($profile, $domain, $revision, $version, $sequence, $previousSequence,
+                        ($profile, $domain, $revision, $version, $artifactKind, $sequence, $previousSequence,
                          $previousHash, $envelope, $digest, $canonicalHash, $profileBindingHash,
                          $state, $observedAt, $validFrom, $validUntil);
                     """;
@@ -1528,6 +1528,10 @@ public sealed class SqliteSessionStore :
                     return MembershipTrustRepositoryValidation.Corrupt();
                 }
             }
+            if (!MembershipTrustRepositoryValidation.HasValidLinkage(current!, predecessor))
+            {
+                return MembershipTrustRepositoryValidation.Corrupt();
+            }
 
             return new MembershipTrustReadSnapshot(MembershipTrustReadResult.Found, current, predecessor);
         }
@@ -1535,6 +1539,151 @@ public sealed class SqliteSessionStore :
             exception is InvalidDataException or JsonException or OverflowException)
         {
             return MembershipTrustRepositoryValidation.Corrupt();
+        }
+        finally
+        {
+            _databaseGate.Release();
+        }
+    }
+
+    public async Task<MembershipTrustClockCommitResult> CommitMembershipTrustClockAsync(
+        MembershipTrustClockRecord record,
+        ulong? expectedRevision,
+        CancellationToken cancellationToken = default)
+    {
+        MembershipTrustClockRecord.Validate(record);
+        cancellationToken.ThrowIfCancellationRequested();
+        await _databaseGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            using var connection = OpenConnection();
+            using var transaction = connection.BeginTransaction();
+            MembershipTrustClockRecord? current = null;
+            await using (var read = connection.CreateCommand())
+            {
+                read.Transaction = transaction;
+                read.CommandText = """
+                    SELECT version, revision, observed_at, digest
+                    FROM membership_trust_clock
+                    WHERE profile_key = $profile;
+                    """;
+                read.Parameters.AddWithValue("$profile", record.OpaqueProfileKey);
+                await using var reader = await read.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+                if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    var revision = reader.GetInt64(1);
+                    if (revision <= 0)
+                    {
+                        return MembershipTrustClockCommitResult.Corrupt;
+                    }
+                    current = new MembershipTrustClockRecord
+                    {
+                        Version = reader.GetInt32(0),
+                        OpaqueProfileKey = record.OpaqueProfileKey,
+                        Revision = checked((ulong)revision),
+                        ObservedAt = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(2)),
+                        Digest = reader.GetFieldValue<byte[]>(3)
+                    };
+                    try
+                    {
+                        MembershipTrustClockRecord.Validate(current);
+                    }
+                    catch (InvalidDataException)
+                    {
+                        return MembershipTrustClockCommitResult.Corrupt;
+                    }
+                }
+            }
+
+            if ((current is not null) != expectedRevision.HasValue ||
+                (current is not null && current.Revision != expectedRevision!.Value) ||
+                record.Revision != (current is null ? 1UL : current.Revision + 1))
+            {
+                return current is not null &&
+                       current.Revision == record.Revision &&
+                       current.Digest.AsSpan().SequenceEqual(record.Digest)
+                    ? MembershipTrustClockCommitResult.Idempotent
+                    : MembershipTrustClockCommitResult.Conflict;
+            }
+            if (current is not null && record.ObservedAt < current.ObservedAt)
+            {
+                return MembershipTrustClockCommitResult.Rollback;
+            }
+
+            await using var write = connection.CreateCommand();
+            write.Transaction = transaction;
+            write.CommandText = """
+                INSERT INTO membership_trust_clock
+                    (profile_key, version, revision, observed_at, digest)
+                VALUES ($profile, $version, $revision, $observedAt, $digest)
+                ON CONFLICT(profile_key) DO UPDATE SET
+                    version = excluded.version,
+                    revision = excluded.revision,
+                    observed_at = excluded.observed_at,
+                    digest = excluded.digest
+                WHERE membership_trust_clock.revision = $expected;
+                """;
+            write.Parameters.AddWithValue("$profile", record.OpaqueProfileKey);
+            write.Parameters.AddWithValue("$version", record.Version);
+            write.Parameters.AddWithValue("$revision", checked((long)record.Revision));
+            write.Parameters.AddWithValue("$observedAt", record.ObservedAt.ToUnixTimeSeconds());
+            write.Parameters.AddWithValue("$digest", record.Digest);
+            write.Parameters.AddWithValue("$expected", checked((long)(expectedRevision ?? 0)));
+            if (await write.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) != 1)
+            {
+                return MembershipTrustClockCommitResult.Conflict;
+            }
+            transaction.Commit();
+            return MembershipTrustClockCommitResult.Applied;
+        }
+        finally
+        {
+            _databaseGate.Release();
+        }
+    }
+
+    public async Task<MembershipTrustClockReadSnapshot> ReadMembershipTrustClockAsync(
+        string opaqueProfileKey,
+        CancellationToken cancellationToken = default)
+    {
+        MembershipTrustRepositoryValidation.ValidateProfileKey(opaqueProfileKey);
+        cancellationToken.ThrowIfCancellationRequested();
+        await _databaseGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            using var connection = OpenConnection();
+            await using var command = connection.CreateCommand();
+            command.CommandText = """
+                SELECT version, revision, observed_at, digest
+                FROM membership_trust_clock
+                WHERE profile_key = $profile;
+                """;
+            command.Parameters.AddWithValue("$profile", opaqueProfileKey);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                return new MembershipTrustClockReadSnapshot(MembershipTrustClockReadResult.Missing, null);
+            }
+            var revision = reader.GetInt64(1);
+            if (revision <= 0)
+            {
+                return new MembershipTrustClockReadSnapshot(MembershipTrustClockReadResult.Corrupt, null);
+            }
+            var record = new MembershipTrustClockRecord
+            {
+                Version = reader.GetInt32(0),
+                OpaqueProfileKey = opaqueProfileKey,
+                Revision = checked((ulong)revision),
+                ObservedAt = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(2)),
+                Digest = reader.GetFieldValue<byte[]>(3)
+            };
+            MembershipTrustClockRecord.Validate(record);
+            return new MembershipTrustClockReadSnapshot(MembershipTrustClockReadResult.Found, record);
+        }
+        catch (Exception exception) when (
+            exception is InvalidDataException or OverflowException)
+        {
+            return new MembershipTrustClockReadSnapshot(MembershipTrustClockReadResult.Corrupt, null);
         }
         finally
         {
@@ -2297,6 +2446,7 @@ public sealed class SqliteSessionStore :
         command.Parameters.AddWithValue("$domain", (int)record.Domain);
         command.Parameters.AddWithValue("$revision", checked((long)record.Revision));
         command.Parameters.AddWithValue("$version", record.Version);
+        command.Parameters.AddWithValue("$artifactKind", (int)record.ArtifactKind);
         command.Parameters.AddWithValue("$sequence", checked((long)record.Sequence));
         command.Parameters.AddWithValue("$previousSequence", checked((long)record.PreviousSequence));
         command.Parameters.AddWithValue("$previousHash", record.PreviousCanonicalHash);
@@ -2321,7 +2471,7 @@ public sealed class SqliteSessionStore :
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = """
-            SELECT version, sequence, previous_sequence, previous_hash, envelope,
+            SELECT version, artifact_kind, sequence, previous_sequence, previous_hash, envelope,
                    payload_digest, canonical_hash, profile_binding_hash, state, observed_at, valid_from, valid_until
             FROM membership_trust_records
             WHERE profile_key = $profile AND domain = $domain AND revision = $revision;
@@ -2335,8 +2485,8 @@ public sealed class SqliteSessionStore :
             return null;
         }
 
-        var sequence = reader.GetInt64(1);
-        var previousSequence = reader.GetInt64(2);
+        var sequence = reader.GetInt64(2);
+        var previousSequence = reader.GetInt64(3);
         if (sequence <= 0 || previousSequence < 0)
         {
             return null;
@@ -2347,18 +2497,19 @@ public sealed class SqliteSessionStore :
             Version = reader.GetInt32(0),
             OpaqueProfileKey = opaqueProfileKey,
             Domain = domain,
+            ArtifactKind = (MembershipTrustArtifactKind)reader.GetInt32(1),
             Revision = revision,
             Sequence = checked((ulong)sequence),
             PreviousSequence = checked((ulong)previousSequence),
-            PreviousCanonicalHash = reader.GetFieldValue<byte[]>(3),
-            CanonicalEnvelope = reader.GetFieldValue<byte[]>(4),
-            PayloadDigest = reader.GetFieldValue<byte[]>(5),
-            CanonicalHash = reader.GetFieldValue<byte[]>(6),
-            ProfileBindingHash = reader.GetFieldValue<byte[]>(7),
-            State = (MembershipTrustState)reader.GetInt32(8),
-            ObservedAt = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(9)),
-            ValidFrom = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(10)),
-            ValidUntil = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(11))
+            PreviousCanonicalHash = reader.GetFieldValue<byte[]>(4),
+            CanonicalEnvelope = reader.GetFieldValue<byte[]>(5),
+            PayloadDigest = reader.GetFieldValue<byte[]>(6),
+            CanonicalHash = reader.GetFieldValue<byte[]>(7),
+            ProfileBindingHash = reader.GetFieldValue<byte[]>(8),
+            State = (MembershipTrustState)reader.GetInt32(9),
+            ObservedAt = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(10)),
+            ValidFrom = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(11)),
+            ValidUntil = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(12))
         };
     }
 
@@ -2494,6 +2645,7 @@ public sealed class SqliteSessionStore :
                     domain INTEGER NOT NULL,
                     revision INTEGER NOT NULL,
                     version INTEGER NOT NULL DEFAULT 1,
+                    artifact_kind INTEGER NOT NULL DEFAULT 1,
                     sequence INTEGER NOT NULL,
                     previous_sequence INTEGER NOT NULL,
                     previous_hash BLOB NOT NULL,
@@ -2514,6 +2666,14 @@ public sealed class SqliteSessionStore :
                     revision INTEGER NOT NULL,
                     payload_digest BLOB NOT NULL,
                     PRIMARY KEY(profile_key, domain)
+                );
+
+                CREATE TABLE IF NOT EXISTS membership_trust_clock (
+                    profile_key TEXT NOT NULL PRIMARY KEY,
+                    version INTEGER NOT NULL,
+                    revision INTEGER NOT NULL,
+                    observed_at INTEGER NOT NULL,
+                    digest BLOB NOT NULL
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_messages_conversation_created
@@ -2559,6 +2719,7 @@ public sealed class SqliteSessionStore :
                 domain INTEGER NOT NULL,
                 revision INTEGER NOT NULL,
                 version INTEGER NOT NULL DEFAULT 1,
+                artifact_kind INTEGER NOT NULL DEFAULT 1,
                 sequence INTEGER NOT NULL,
                 previous_sequence INTEGER NOT NULL,
                 previous_hash BLOB NOT NULL,
@@ -2581,11 +2742,45 @@ public sealed class SqliteSessionStore :
                 PRIMARY KEY(profile_key, domain)
             );
 
+            CREATE TABLE IF NOT EXISTS membership_trust_clock (
+                profile_key TEXT NOT NULL PRIMARY KEY,
+                version INTEGER NOT NULL,
+                revision INTEGER NOT NULL,
+                observed_at INTEGER NOT NULL,
+                digest BLOB NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_membership_trust_records_head
                 ON membership_trust_records(profile_key, domain, revision);
             """;
         command.ExecuteNonQuery();
+        EnsureMembershipTrustArtifactColumn(connection, transaction);
         transaction.Commit();
+    }
+
+    private static void EnsureMembershipTrustArtifactColumn(
+        SqliteConnection connection,
+        SqliteTransaction transaction)
+    {
+        var hasColumn = false;
+        using (var inspect = connection.CreateCommand())
+        {
+            inspect.Transaction = transaction;
+            inspect.CommandText = "PRAGMA table_info(membership_trust_records);";
+            using var reader = inspect.ExecuteReader();
+            while (reader.Read())
+            {
+                hasColumn |= string.Equals(reader.GetString(1), "artifact_kind", StringComparison.OrdinalIgnoreCase);
+            }
+        }
+        if (!hasColumn)
+        {
+            using var alter = connection.CreateCommand();
+            alter.Transaction = transaction;
+            alter.CommandText =
+                "ALTER TABLE membership_trust_records ADD COLUMN artifact_kind INTEGER NOT NULL DEFAULT 1;";
+            alter.ExecuteNonQuery();
+        }
     }
 
     private static void EnsureMessageHotColumns(SqliteConnection connection, SqliteTransaction transaction)

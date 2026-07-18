@@ -531,6 +531,26 @@ public sealed record MembershipTrustReadSnapshot(
     MembershipTrustRecord? Head,
     MembershipTrustRecord? Predecessor);
 
+public enum MembershipTrustClockCommitResult
+{
+    Applied,
+    Idempotent,
+    Conflict,
+    Rollback,
+    Corrupt
+}
+
+public enum MembershipTrustClockReadResult
+{
+    Missing,
+    Found,
+    Corrupt
+}
+
+public sealed record MembershipTrustClockReadSnapshot(
+    MembershipTrustClockReadResult Result,
+    MembershipTrustClockRecord? Record);
+
 public interface IMembershipTrustRepository
 {
     Task<MembershipTrustCommitResult> CommitMembershipTrustAsync(
@@ -541,6 +561,15 @@ public interface IMembershipTrustRepository
     Task<MembershipTrustReadSnapshot> ReadMembershipTrustAsync(
         string opaqueProfileKey,
         MembershipTrustDomain domain,
+        CancellationToken cancellationToken = default);
+
+    Task<MembershipTrustClockCommitResult> CommitMembershipTrustClockAsync(
+        MembershipTrustClockRecord record,
+        ulong? expectedRevision,
+        CancellationToken cancellationToken = default);
+
+    Task<MembershipTrustClockReadSnapshot> ReadMembershipTrustClockAsync(
+        string opaqueProfileKey,
         CancellationToken cancellationToken = default);
 }
 
