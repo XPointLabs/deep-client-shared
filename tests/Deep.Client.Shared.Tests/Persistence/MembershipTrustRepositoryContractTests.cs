@@ -128,6 +128,107 @@ public sealed class MembershipTrustRepositoryContractTests
                 MembershipTrustDomain.Membership)).Result);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task CancellationBeforeDurableCommit_RollsBackRecordAndHead(bool sqlite)
+    {
+        using var cancellation = new CancellationTokenSource();
+        using var scope = StoreScope.Create(
+            sqlite,
+            point =>
+            {
+                if (point == MembershipTrustCommitFaultPoint.BeforeDurableCommit)
+                {
+                    cancellation.Cancel();
+                }
+            });
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            scope.Store.CommitMembershipTrustAsync(
+                Record(revision: 1, sequence: 6, fill: 0x56),
+                expectedHeadRevision: null,
+                cancellation.Token));
+
+        Assert.Equal(
+            MembershipTrustReadResult.Missing,
+            (await scope.Store.ReadMembershipTrustAsync(
+                "install:test",
+                MembershipTrustDomain.Membership)).Result);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task CancellationAfterDurableCommit_IsUncertainButRestartRevealsAppliedState(bool sqlite)
+    {
+        using var cancellation = new CancellationTokenSource();
+        using var scope = StoreScope.Create(
+            sqlite,
+            point =>
+            {
+                if (point == MembershipTrustCommitFaultPoint.AfterDurableCommit)
+                {
+                    cancellation.Cancel();
+                }
+            });
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            scope.Store.CommitMembershipTrustAsync(
+                Record(revision: 1, sequence: 6, fill: 0x57),
+                expectedHeadRevision: null,
+                cancellation.Token));
+
+        var read = await scope.Store.ReadMembershipTrustAsync(
+            "install:test",
+            MembershipTrustDomain.Membership);
+        Assert.Equal(MembershipTrustReadResult.Found, read.Result);
+        Assert.Equal(1UL, read.Head!.Revision);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task StoredRecordsAndClocks_AreDefensiveCopies(bool sqlite)
+    {
+        using var scope = StoreScope.Create(sqlite);
+        var record = Record(revision: 1, sequence: 6, fill: 0x58);
+        var expectedEnvelope = record.CanonicalEnvelope.ToArray();
+        var expectedDigest = record.PayloadDigest.ToArray();
+        Assert.Equal(
+            MembershipTrustCommitResult.Applied,
+            await scope.Store.CommitMembershipTrustAsync(record, null));
+
+        record.CanonicalEnvelope[0] ^= 0xff;
+        record.PayloadDigest[0] ^= 0xff;
+        var firstRead = await scope.Store.ReadMembershipTrustAsync(
+            "install:test",
+            MembershipTrustDomain.Membership);
+        Assert.Equal(expectedEnvelope, firstRead.Head!.CanonicalEnvelope);
+        Assert.Equal(expectedDigest, firstRead.Head.PayloadDigest);
+
+        firstRead.Head.CanonicalEnvelope[1] ^= 0xff;
+        firstRead.Head.PayloadDigest[1] ^= 0xff;
+        var secondRead = await scope.Store.ReadMembershipTrustAsync(
+            "install:test",
+            MembershipTrustDomain.Membership);
+        Assert.Equal(expectedEnvelope, secondRead.Head!.CanonicalEnvelope);
+        Assert.Equal(expectedDigest, secondRead.Head.PayloadDigest);
+
+        var clock = MembershipTrustClockRecord.Create(
+            "install:test", 1, DateTimeOffset.FromUnixTimeSeconds(1000));
+        var expectedClockDigest = clock.Digest.ToArray();
+        Assert.Equal(
+            MembershipTrustClockCommitResult.Applied,
+            await scope.Store.CommitMembershipTrustClockAsync(clock, null));
+        clock.Digest[0] ^= 0xff;
+        var firstClockRead = await scope.Store.ReadMembershipTrustClockAsync("install:test");
+        Assert.Equal(expectedClockDigest, firstClockRead.Record!.Digest);
+        firstClockRead.Record.Digest[1] ^= 0xff;
+        var secondClockRead = await scope.Store.ReadMembershipTrustClockAsync("install:test");
+        Assert.Equal(expectedClockDigest, secondClockRead.Record!.Digest);
+    }
+
     [Fact]
     public async Task InMemoryRestart_PreservesHeadAndPredecessor()
     {
@@ -260,15 +361,19 @@ public sealed class MembershipTrustRepositoryContractTests
     {
         public IMembershipTrustRepository Store { get; } = store;
 
-        public static StoreScope Create(bool sqlite)
+        public static StoreScope Create(
+            bool sqlite,
+            Action<MembershipTrustCommitFaultPoint>? faultInjector = null)
         {
             if (!sqlite)
             {
-                return new StoreScope(new InMemorySessionStore(), null);
+                return new StoreScope(new InMemorySessionStore(null, faultInjector), null);
             }
 
             var path = Path.Combine(Path.GetTempPath(), $"deep-p07-{Guid.NewGuid():N}.db");
-            var store = new SqliteSessionStore(path);
+            var store = new SqliteSessionStore(
+                new SqliteSessionStoreOptions(path),
+                faultInjector);
             return new StoreScope(store, new Cleanup(store, path));
         }
 

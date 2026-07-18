@@ -505,6 +505,155 @@ public sealed class MembershipTrustServiceTests
     }
 
     [Fact]
+    public async Task ContentKeepsHistoricalSigningDelegationButIsNotHealthyAfterRotation()
+    {
+        var verifier = new FixtureMembershipVerifier();
+        var store = new InMemorySessionStore();
+        var profile = FixtureProfile();
+        var service = Service(store, verifier);
+        _ = await service.InitializeAsync(profile);
+        Assert.Equal(
+            MembershipTrustState.Healthy,
+            (await service.ApplyMembershipAsync(
+                profile,
+                Vector("deep-extension/membership/v1/signed-membership"))).State);
+
+        var authority = (await store.ReadMembershipTrustAsync(
+            profile.OpaqueProfileKey,
+            MembershipTrustDomain.Authority)).Head!;
+        var rotatedBytes = CreateDelegation(
+            profile,
+            verifier,
+            sequence: 3,
+            previousHash: authority.CanonicalHash,
+            keyOffset: 31);
+        var rotated = MembershipContractCodec.DecodeSignedDelegation(rotatedBytes);
+        Assert.Equal(
+            MembershipTrustState.Healthy,
+            (await service.ApplyDelegationAsync(profile, rotatedBytes)).State);
+
+        Assert.Equal(
+            MembershipTrustState.ProtocolUnsupported,
+            (await service.EvaluateAsync(profile)).State);
+        Assert.Equal(
+            MembershipTrustState.ProtocolUnsupported,
+            (await Service(store, verifier).InitializeAsync(profile)).State);
+
+        var previousContent = (await store.ReadMembershipTrustAsync(
+            profile.OpaqueProfileKey,
+            MembershipTrustDomain.Membership)).Head!;
+        var template = MembershipContractCodec.DecodeSignedMembership(
+            Vector("deep-extension/membership/v1/signed-membership"));
+        var successor = template.Statement with
+        {
+            Sequence = template.Statement.Sequence + 1,
+            PreviousHash = previousContent.CanonicalHash.ToArray()
+        };
+        var signedByRotated = ResignMembership(
+            successor,
+            template.Signatures,
+            MembershipSignatureDomain.Membership,
+            verifier,
+            rotated);
+
+        Assert.Equal(
+            MembershipTrustState.Healthy,
+            (await service.ApplyMembershipAsync(
+                profile,
+                MembershipContractCodec.EncodeSignedMembership(signedByRotated))).State);
+        Assert.Equal(
+            MembershipTrustState.Healthy,
+            (await Service(store, verifier).InitializeAsync(profile)).State);
+    }
+
+    [Fact]
+    public async Task RevocationTargetsActiveDelegationAndPersistsBoundedRecoverySet()
+    {
+        var verifier = new FixtureMembershipVerifier();
+        var store = new InMemorySessionStore();
+        var profile = FixtureProfile();
+        var service = Service(store, verifier);
+        _ = await service.InitializeAsync(profile);
+        _ = await service.ApplyMembershipAsync(
+            profile,
+            Vector("deep-extension/membership/v1/signed-membership"));
+        var authority = (await store.ReadMembershipTrustAsync(
+            profile.OpaqueProfileKey,
+            MembershipTrustDomain.Authority)).Head!;
+
+        var wrongTarget = CreateRevocation(
+            profile,
+            verifier,
+            sequence: 3,
+            previousHash: authority.CanonicalHash,
+            delegationHash: Enumerable.Repeat((byte)0x7d, MembershipLimits.HashLength).ToArray());
+        Assert.Equal(
+            MembershipTrustState.ProtocolUnsupported,
+            (await service.ApplyRevocationAsync(profile, wrongTarget)).State);
+        Assert.Equal(
+            MembershipTrustState.Healthy,
+            (await store.ReadMembershipTrustAsync(
+                profile.OpaqueProfileKey,
+                MembershipTrustDomain.Authority)).Head!.State);
+
+        var revocation = CreateRevocation(
+            profile,
+            verifier,
+            sequence: 3,
+            previousHash: authority.CanonicalHash,
+            delegationHash: authority.CanonicalHash);
+        Assert.Equal(
+            MembershipTrustState.Revoked,
+            (await service.ApplyRevocationAsync(profile, revocation)).State);
+        var revoked = (await store.ReadMembershipTrustAsync(
+            profile.OpaqueProfileKey,
+            MembershipTrustDomain.Authority)).Head!;
+
+        var rotatedBytes = CreateDelegation(
+            profile,
+            verifier,
+            sequence: 4,
+            previousHash: revoked.CanonicalHash,
+            keyOffset: 33);
+        var rotated = MembershipContractCodec.DecodeSignedDelegation(rotatedBytes);
+        Assert.Equal(
+            MembershipTrustState.Healthy,
+            (await service.ApplyDelegationAsync(profile, rotatedBytes)).State);
+
+        Assert.Equal(
+            MembershipTrustState.Revoked,
+            (await service.EvaluateAsync(profile)).State);
+        Assert.Equal(
+            MembershipTrustState.Revoked,
+            (await Service(store, verifier).InitializeAsync(profile)).State);
+
+        var previousContent = (await store.ReadMembershipTrustAsync(
+            profile.OpaqueProfileKey,
+            MembershipTrustDomain.Membership)).Head!;
+        var template = MembershipContractCodec.DecodeSignedMembership(
+            Vector("deep-extension/membership/v1/signed-membership"));
+        var successor = template.Statement with
+        {
+            Sequence = template.Statement.Sequence + 1,
+            PreviousHash = previousContent.CanonicalHash.ToArray()
+        };
+        var signedByRotated = ResignMembership(
+            successor,
+            template.Signatures,
+            MembershipSignatureDomain.Membership,
+            verifier,
+            rotated);
+        Assert.Equal(
+            MembershipTrustState.Healthy,
+            (await service.ApplyMembershipAsync(
+                profile,
+                MembershipContractCodec.EncodeSignedMembership(signedByRotated))).State);
+        Assert.Equal(
+            MembershipTrustState.Healthy,
+            (await Service(store, verifier).InitializeAsync(profile)).State);
+    }
+
+    [Fact]
     public async Task RestartCryptographicallyRevalidatesPersistedAuthorityAndContent()
     {
         var verifier = new FixtureMembershipVerifier();
@@ -610,9 +759,10 @@ public sealed class MembershipTrustServiceTests
         NodeMembershipCommitment statement,
         IReadOnlyList<MembershipSignature> signerTemplates,
         MembershipSignatureDomain domain,
-        FixtureMembershipVerifier verifier)
+        FixtureMembershipVerifier verifier,
+        SignerDelegation? delegationOverride = null)
     {
-        var delegation = MembershipContractCodec.DecodeSignedDelegation(
+        var delegation = delegationOverride ?? MembershipContractCodec.DecodeSignedDelegation(
             Vector("deep-extension/membership/v1/signed-delegation"));
         var bytes = MembershipContractCodec.GetMembershipSigningBytes(statement);
         return new SignedMembershipCommitment
@@ -676,6 +826,40 @@ public sealed class MembershipTrustServiceTests
             }).ToArray()
         };
         return MembershipContractCodec.EncodeSignedDelegation(candidate);
+    }
+
+    private static byte[] CreateRevocation(
+        MembershipTrustProfile profile,
+        FixtureMembershipVerifier verifier,
+        ulong sequence,
+        byte[] previousHash,
+        byte[] delegationHash)
+    {
+        var genesis = MembershipContractCodec.DecodeGenesis(profile.CanonicalGenesis);
+        var template = MembershipContractCodec.DecodeSignedRevocation(
+            Vector("deep-extension/membership/v1/signed-revocation"));
+        var candidate = template with
+        {
+            Sequence = sequence,
+            PreviousHash = previousHash.ToArray(),
+            DelegationHash = delegationHash.ToArray(),
+            Signatures = []
+        };
+        var signingBytes = MembershipContractCodec.GetRevocationSigningBytes(candidate);
+        candidate = candidate with
+        {
+            Signatures = genesis.OfflineRoots.Take(3).Select(root => new MembershipSignature
+            {
+                SignerId = root.SignerId.ToArray(),
+                Domain = MembershipSignatureDomain.OfflineRevocation,
+                Signature = verifier.Sign(
+                    root.SignerId.Span,
+                    root.PublicKey.Span,
+                    MembershipSignatureDomain.OfflineRevocation,
+                    signingBytes)
+            }).ToArray()
+        };
+        return MembershipContractCodec.EncodeSignedRevocation(candidate);
     }
 
     private static byte[] EncodeGenesisSignatures(

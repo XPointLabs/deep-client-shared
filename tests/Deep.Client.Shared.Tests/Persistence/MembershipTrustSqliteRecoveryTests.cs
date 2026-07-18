@@ -58,6 +58,48 @@ public sealed class MembershipTrustSqliteRecoveryTests
         Assert.Null(read.Predecessor);
     }
 
+    [Theory]
+    [InlineData("observed-at-out-of-range")]
+    [InlineData("valid-from-null")]
+    [InlineData("valid-until-null")]
+    public async Task MalformedOrOutOfRangeRecordTimestamps_ReturnCorrupt(string corruption)
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        using (var store = database.Open())
+        {
+            _ = await store.CommitMembershipTrustAsync(Record(1, 6, 0x10), null);
+        }
+        await database.MutateAsync(corruption);
+
+        using var restarted = database.Open();
+        var read = await restarted.ReadMembershipTrustAsync(
+            "install:test",
+            MembershipTrustDomain.Membership);
+        Assert.Equal(MembershipTrustReadResult.Corrupt, read.Result);
+    }
+
+    [Theory]
+    [InlineData("clock-observed-out-of-range")]
+    [InlineData("clock-observed-null")]
+    public async Task MalformedOrOutOfRangeClockTimestamps_ReturnCorrupt(string corruption)
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        using (var store = database.Open())
+        {
+            _ = await store.CommitMembershipTrustClockAsync(
+                MembershipTrustClockRecord.Create(
+                    "install:test",
+                    1,
+                    DateTimeOffset.FromUnixTimeSeconds(1000)),
+                null);
+        }
+        await database.MutateAsync(corruption);
+
+        using var restarted = database.Open();
+        var read = await restarted.ReadMembershipTrustClockAsync("install:test");
+        Assert.Equal(MembershipTrustClockReadResult.Corrupt, read.Result);
+    }
+
     [Fact]
     public async Task OrphanInAnotherProfile_DoesNotBlockCurrentProfile()
     {
@@ -229,6 +271,31 @@ public sealed class MembershipTrustSqliteRecoveryTests
                     UPDATE membership_trust_records
                     SET profile_binding_hash = randomblob(32)
                     WHERE profile_key = 'install:test' AND domain = 3 AND revision = 2;
+                    """,
+                "observed-at-out-of-range" => """
+                    UPDATE membership_trust_records
+                    SET observed_at = 9223372036854775807
+                    WHERE profile_key = 'install:test' AND domain = 3 AND revision = 1;
+                    """,
+                "valid-from-null" => """
+                    UPDATE membership_trust_records
+                    SET valid_from = NULL
+                    WHERE profile_key = 'install:test' AND domain = 3 AND revision = 1;
+                    """,
+                "valid-until-null" => """
+                    UPDATE membership_trust_records
+                    SET valid_until = NULL
+                    WHERE profile_key = 'install:test' AND domain = 3 AND revision = 1;
+                    """,
+                "clock-observed-out-of-range" => """
+                    UPDATE membership_trust_clock
+                    SET observed_at = 9223372036854775807
+                    WHERE profile_key = 'install:test';
+                    """,
+                "clock-observed-null" => """
+                    UPDATE membership_trust_clock
+                    SET observed_at = NULL
+                    WHERE profile_key = 'install:test';
                     """,
                 _ => throw new ArgumentOutOfRangeException(nameof(corruption))
             };
