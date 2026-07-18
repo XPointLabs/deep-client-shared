@@ -45,10 +45,12 @@ which returns exit `2`.
 & ./eng/scripts/Test-MetadataPrivacyGateHarness.ps1
 ```
 
-Result: exit `0`; 10 self-test scenarios passed. Eight mutation classes returned harness exit `2`:
+Result: exit `0`; 17 self-test scenarios passed. Fifteen mutation classes returned harness exit `2`:
 omitted strict environment, typo filter, zero-match, missing test, duplicate finding result,
 duplicate expectation finding, mismatched expectations count and false-green unresolved outcomes.
-The additional scenarios prove current unresolved exit `1` and exact all-resolved exit `0`.
+Additional mutations cover inconsistent passed/failed/skipped counters, mismatched
+`ResultSummary.outcome`, nonzero infrastructure counters, unresolved process exit `2` and resolved
+process exit `1`. Positive controls prove current unresolved exit `1` and exact all-resolved exit `0`.
 
 ## Evidence paths
 

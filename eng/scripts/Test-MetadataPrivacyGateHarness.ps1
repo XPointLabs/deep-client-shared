@@ -18,7 +18,13 @@ function Write-SyntheticTrx {
 
         [Parameter(Mandatory)]
         [AllowEmptyCollection()]
-        [hashtable] $Outcomes
+        [hashtable] $Outcomes,
+
+        [AllowEmptyCollection()]
+        [hashtable] $CounterOverrides = @{},
+
+        [AllowEmptyString()]
+        [string] $ResultSummaryOutcome = ''
     )
 
     $settings = [System.Xml.XmlWriterSettings]::new()
@@ -29,26 +35,37 @@ function Write-SyntheticTrx {
         $writer.WriteStartDocument()
         $writer.WriteStartElement('TestRun')
         $writer.WriteStartElement('ResultSummary')
-        $writer.WriteAttributeString('outcome', 'Completed')
-        $writer.WriteStartElement('Counters')
-        $writer.WriteAttributeString('total', [string] $ResultFindingIds.Count)
-        $writer.WriteAttributeString('executed', [string] $ResultFindingIds.Count)
         $passed = @($ResultFindingIds | Where-Object { $Outcomes[$_] -ceq 'Passed' }).Count
         $failed = $ResultFindingIds.Count - $passed
-        $writer.WriteAttributeString('passed', [string] $passed)
-        $writer.WriteAttributeString('failed', [string] $failed)
-        foreach ($attribute in @(
-            'error',
-            'timeout',
-            'aborted',
-            'inconclusive',
-            'passedButRunAborted',
-            'notRunnable',
-            'notExecuted',
-            'disconnected',
-            'warning'
-        )) {
-            $writer.WriteAttributeString($attribute, '0')
+        $summaryOutcome = if ([string]::IsNullOrEmpty($ResultSummaryOutcome)) {
+            if ($failed -gt 0) { 'Failed' } else { 'Completed' }
+        }
+        else {
+            $ResultSummaryOutcome
+        }
+        $writer.WriteAttributeString('outcome', $summaryOutcome)
+        $writer.WriteStartElement('Counters')
+        $counterValues = [ordered]@{
+            total = $ResultFindingIds.Count
+            executed = $ResultFindingIds.Count
+            passed = $passed
+            failed = $failed
+            skipped = 0
+            error = 0
+            timeout = 0
+            aborted = 0
+            inconclusive = 0
+            passedButRunAborted = 0
+            notRunnable = 0
+            notExecuted = 0
+            disconnected = 0
+            warning = 0
+        }
+        foreach ($override in $CounterOverrides.GetEnumerator()) {
+            $counterValues[$override.Key] = $override.Value
+        }
+        foreach ($counterValue in $counterValues.GetEnumerator()) {
+            $writer.WriteAttributeString($counterValue.Key, [string] $counterValue.Value)
         }
         $writer.WriteEndElement()
         $writer.WriteEndElement()
@@ -108,14 +125,22 @@ function Invoke-SyntheticValidation {
         [string] $ExecutedFilter,
 
         [Parameter(Mandatory)]
-        [int] $ExpectedHarnessExit
+        [int] $ExpectedHarnessExit,
+
+        [AllowEmptyCollection()]
+        [hashtable] $CounterOverrides = @{},
+
+        [AllowEmptyString()]
+        [string] $ResultSummaryOutcome = ''
     )
 
     $trxPath = Join-Path $script:TestDirectory "$Name.trx"
     Write-SyntheticTrx `
         -Path $trxPath `
         -ResultFindingIds $ResultFindingIds `
-        -Outcomes $Outcomes
+        -Outcomes $Outcomes `
+        -CounterOverrides $CounterOverrides `
+        -ResultSummaryOutcome $ResultSummaryOutcome
     $result = Test-MetadataPrivacyGateResult `
         -TrxPath $trxPath `
         -ExpectationsPath $ExpectationsPath `
@@ -295,8 +320,83 @@ try {
         -ExecutedFilter $script:TestContract.Filter `
         -ExpectedHarnessExit 2
 
-    Write-Output 'metadata-gate-harness-self-tests=10'
-    Write-Output 'metadata-gate-harness-mutations-rejected=8'
+    Invoke-SyntheticValidation `
+        -Name 'passed-counter-mismatch' `
+        -ExpectationsPath $expectationsPath `
+        -ResultFindingIds $findingIds `
+        -Outcomes $unresolvedOutcomes `
+        -DotnetExitCode 1 `
+        -StrictGateValue '1' `
+        -ExecutedFilter $script:TestContract.Filter `
+        -ExpectedHarnessExit 2 `
+        -CounterOverrides @{ passed = 1 }
+
+    Invoke-SyntheticValidation `
+        -Name 'failed-counter-mismatch' `
+        -ExpectationsPath $expectationsPath `
+        -ResultFindingIds $findingIds `
+        -Outcomes $unresolvedOutcomes `
+        -DotnetExitCode 1 `
+        -StrictGateValue '1' `
+        -ExecutedFilter $script:TestContract.Filter `
+        -ExpectedHarnessExit 2 `
+        -CounterOverrides @{ failed = 7 }
+
+    Invoke-SyntheticValidation `
+        -Name 'skipped-counter-mismatch' `
+        -ExpectationsPath $expectationsPath `
+        -ResultFindingIds $findingIds `
+        -Outcomes $unresolvedOutcomes `
+        -DotnetExitCode 1 `
+        -StrictGateValue '1' `
+        -ExecutedFilter $script:TestContract.Filter `
+        -ExpectedHarnessExit 2 `
+        -CounterOverrides @{ skipped = 1 }
+
+    Invoke-SyntheticValidation `
+        -Name 'result-summary-mismatch' `
+        -ExpectationsPath $expectationsPath `
+        -ResultFindingIds $findingIds `
+        -Outcomes $unresolvedOutcomes `
+        -DotnetExitCode 1 `
+        -StrictGateValue '1' `
+        -ExecutedFilter $script:TestContract.Filter `
+        -ExpectedHarnessExit 2 `
+        -ResultSummaryOutcome 'Completed'
+
+    Invoke-SyntheticValidation `
+        -Name 'infra-error-counter' `
+        -ExpectationsPath $expectationsPath `
+        -ResultFindingIds $findingIds `
+        -Outcomes $unresolvedOutcomes `
+        -DotnetExitCode 1 `
+        -StrictGateValue '1' `
+        -ExecutedFilter $script:TestContract.Filter `
+        -ExpectedHarnessExit 2 `
+        -CounterOverrides @{ error = 1 }
+
+    Invoke-SyntheticValidation `
+        -Name 'unresolved-process-exit-two' `
+        -ExpectationsPath $expectationsPath `
+        -ResultFindingIds $findingIds `
+        -Outcomes $unresolvedOutcomes `
+        -DotnetExitCode 2 `
+        -StrictGateValue '1' `
+        -ExecutedFilter $script:TestContract.Filter `
+        -ExpectedHarnessExit 2
+
+    Invoke-SyntheticValidation `
+        -Name 'resolved-process-exit-one' `
+        -ExpectationsPath $resolvedPath `
+        -ResultFindingIds $findingIds `
+        -Outcomes $resolvedOutcomes `
+        -DotnetExitCode 1 `
+        -StrictGateValue '1' `
+        -ExecutedFilter $script:TestContract.Filter `
+        -ExpectedHarnessExit 2
+
+    Write-Output 'metadata-gate-harness-self-tests=17'
+    Write-Output 'metadata-gate-harness-mutations-rejected=15'
     $exitCode = 0
 }
 catch {

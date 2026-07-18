@@ -16,7 +16,8 @@ Strict lane:
 
 The wrapper does not accept a caller-supplied filter. It internally sets
 `DEEP_SURVIVAL_METADATA_GATE=1`, uses the exact fully-qualified gate test, writes an isolated TRX,
-and verifies the TRX finding set and counters against `metadata-expectations.v1.json`.
+and verifies the TRX finding set, per-result outcomes, `ResultSummary.outcome`, aggregate counters
+and process exit against `metadata-expectations.v1.json`.
 
 - Exit `0`: the exact suite ran and every blocker is resolved.
 - Exit `1`: the exact suite ran and every current unresolved blocker failed as intended.

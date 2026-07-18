@@ -101,19 +101,67 @@ function Test-MetadataPrivacyGateResult {
         return New-MetadataGateResult -ExitCode 2 -Problems $problems
     }
 
+    $resultSummaries = @($trx.SelectNodes("//*[local-name()='ResultSummary']"))
     $counters = @($trx.SelectNodes("//*[local-name()='Counters']"))
     $results = @($trx.SelectNodes("//*[local-name()='UnitTestResult']"))
+    if ($resultSummaries.Count -ne 1) {
+        $problems.Add('trx-result-summary-count-mismatch')
+    }
+
     if ($counters.Count -ne 1) {
         $problems.Add('trx-counter-count-mismatch')
+    }
+
+    $actualPassed = @($results | Where-Object { [string] $_.outcome -ceq 'Passed' }).Count
+    $actualFailed = @($results | Where-Object { [string] $_.outcome -ceq 'Failed' }).Count
+    if ($actualPassed + $actualFailed -ne $results.Count) {
+        $problems.Add('trx-unsupported-result-outcome')
+    }
+
+    if ($resultSummaries.Count -eq 1) {
+        $expectedSummaryOutcome = if ($actualFailed -gt 0) { 'Failed' } else { 'Completed' }
+        if ([string] $resultSummaries[0].outcome -cne $expectedSummaryOutcome) {
+            $problems.Add('trx-result-summary-outcome-mismatch')
+        }
     }
 
     if ($counters.Count -eq 1) {
         $counter = $counters[0]
         $expectedCount = $findings.Count
+        foreach ($requiredAttribute in @(
+            'total',
+            'executed',
+            'passed',
+            'failed',
+            'error',
+            'timeout',
+            'aborted',
+            'inconclusive',
+            'notExecuted'
+        )) {
+            if (-not $counter.HasAttribute($requiredAttribute)) {
+                $problems.Add("trx-missing-counter-$requiredAttribute")
+            }
+        }
+
         if ([int] $counter.total -ne $expectedCount -or
             [int] $counter.executed -ne $expectedCount -or
             $results.Count -ne $expectedCount) {
             $problems.Add('trx-test-count-mismatch')
+        }
+
+        $skippedCount = if ($counter.HasAttribute('skipped')) {
+            [int] $counter.GetAttribute('skipped')
+        }
+        else {
+            0
+        }
+        if ([int] $counter.passed -ne $actualPassed -or
+            [int] $counter.failed -ne $actualFailed -or
+            [int] $counter.total -ne ($actualPassed + $actualFailed + $skippedCount) -or
+            [int] $counter.executed -ne ($actualPassed + $actualFailed) -or
+            $skippedCount -ne 0) {
+            $problems.Add('trx-result-counter-mismatch')
         }
 
         foreach ($attribute in @(
@@ -178,6 +226,11 @@ function Test-MetadataPrivacyGateResult {
     $expectedDotnetExit = if ($unresolvedCount -eq 0) { 0 } else { 1 }
     if ($DotnetExitCode -ne $expectedDotnetExit) {
         $problems.Add('dotnet-exit-mismatch')
+    }
+
+    $resultDerivedDotnetExit = if ($actualFailed -eq 0) { 0 } else { 1 }
+    if ($DotnetExitCode -ne $resultDerivedDotnetExit) {
+        $problems.Add('dotnet-exit-result-mismatch')
     }
 
     if ($problems.Count -gt 0) {
