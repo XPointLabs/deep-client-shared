@@ -412,6 +412,77 @@ public sealed class MembershipTrustServiceTests
     }
 
     [Fact]
+    public async Task AuthorityDelegationRevocationEquivocation_PersistsForkAcrossRestart()
+    {
+        var verifier = new FixtureMembershipVerifier();
+        var store = new InMemorySessionStore();
+        var profile = FixtureProfile();
+        var service = Service(store, verifier);
+        _ = await service.InitializeAsync(profile);
+        var predecessor = (await store.ReadMembershipTrustAsync(
+            profile.OpaqueProfileKey,
+            MembershipTrustDomain.Authority)).Head!;
+        var delegation = CreateDelegation(
+            profile, verifier, 3, predecessor.CanonicalHash, 21);
+
+        Assert.Equal(
+            MembershipTrustState.Healthy,
+            (await service.ApplyDelegationAsync(profile, delegation)).State);
+        Assert.Equal(
+            MembershipTrustState.ForkDetected,
+            (await service.ApplyRevocationAsync(
+                profile,
+                Vector("deep-extension/membership/v1/signed-revocation"))).State);
+        Assert.Equal(
+            MembershipTrustState.ForkDetected,
+            (await Service(store, verifier).InitializeAsync(profile)).State);
+    }
+
+    [Fact]
+    public async Task RestartCryptographicallyRevalidatesPersistedAuthorityAndContent()
+    {
+        var verifier = new FixtureMembershipVerifier();
+        var store = new InMemorySessionStore();
+        var profile = FixtureProfile();
+        var service = Service(store, verifier);
+        _ = await service.InitializeAsync(profile);
+        _ = await service.ApplyMembershipAsync(
+            profile,
+            Vector("deep-extension/membership/v1/signed-membership"));
+        var authority = (await store.ReadMembershipTrustAsync(
+            profile.OpaqueProfileKey,
+            MembershipTrustDomain.Authority)).Head!;
+        _ = await service.ApplyDelegationAsync(
+            profile,
+            CreateDelegation(profile, verifier, 3, authority.CanonicalHash, 23));
+
+        var restarted = new MembershipTrustService(
+            store,
+            new RejectingMembershipVerifier(),
+            new FrozenClock(FixtureNow),
+            EnabledOptions());
+        Assert.Equal(
+            MembershipTrustState.ProtocolUnsupported,
+            (await restarted.InitializeAsync(profile)).State);
+    }
+
+    [Fact]
+    public async Task PublicOperation_ReadsClockExactlyOnce()
+    {
+        var clock = new CountingClock(FixtureNow);
+        var profile = FixtureProfile();
+        var service = new MembershipTrustService(
+            new InMemorySessionStore(),
+            new FixtureMembershipVerifier(),
+            clock,
+            EnabledOptions());
+
+        _ = await service.InitializeAsync(profile);
+
+        Assert.Equal(1, clock.ReadCount);
+    }
+
+    [Fact]
     public void SelfHostedImportBoundary_IsRawCanonicalAndNamespaceSeparated()
     {
         var properties = typeof(SelfHostedGenesisImport).GetProperties();
@@ -583,6 +654,30 @@ public sealed class MembershipTrustServiceTests
             publicKey.CopyTo(framed.AsSpan(signerId.Length));
             signingBytes.CopyTo(framed.AsSpan(signerId.Length + publicKey.Length));
             return SHA256.HashData(framed);
+        }
+    }
+
+    private sealed class RejectingMembershipVerifier : IMembershipSignatureVerifier
+    {
+        public bool Verify(
+            ReadOnlySpan<byte> signerId,
+            ReadOnlySpan<byte> publicKey,
+            MembershipSignatureDomain domain,
+            ReadOnlySpan<byte> signingBytes,
+            ReadOnlySpan<byte> signature) => false;
+    }
+
+    private sealed class CountingClock(DateTimeOffset now) : IClock
+    {
+        public int ReadCount { get; private set; }
+
+        public DateTimeOffset UtcNow
+        {
+            get
+            {
+                ReadCount++;
+                return now;
+            }
         }
     }
 
