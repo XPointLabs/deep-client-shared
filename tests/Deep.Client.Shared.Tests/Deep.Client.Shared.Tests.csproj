@@ -21,6 +21,10 @@
   <ItemGroup>
     <None Include="Fixtures\push-signature-v2.golden.json"
           CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\metadata-expectations.v1.json"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\metadata-synthetic-fixtures.v1.json"
+          CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

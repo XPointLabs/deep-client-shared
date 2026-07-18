@@ -329,6 +329,15 @@ public sealed class SessionTransportTests
         Assert.NotNull(router.CurrentRoute);
         Assert.Equal(3, router.CurrentRoute!.Nodes.Count);
         Assert.Equal(TestOnionRoute.RouterIds[0], router.CurrentRoute.Nodes[0].RouterId);
+
+        var storageRequest = Assert.IsType<JsonElement>(storedMessage);
+        Assert.Equal(recipient.Value, storageRequest.GetProperty("pubkey").GetString());
+        Assert.Equal(0, storageRequest.GetProperty("namespace").GetInt32());
+        Assert.Equal(64, storageRequest.GetProperty("idempotency_key").GetString()!.Length);
+        using var managedPayload = JsonDocument.Parse(
+            Convert.FromBase64String(storageRequest.GetProperty("data").GetString()!));
+        Assert.Equal(sender.Value, managedPayload.RootElement.GetProperty("sender").GetString());
+        Assert.Equal(recipient.Value, managedPayload.RootElement.GetProperty("recipient").GetString());
     }
 
     private sealed class FakeHandler : HttpMessageHandler

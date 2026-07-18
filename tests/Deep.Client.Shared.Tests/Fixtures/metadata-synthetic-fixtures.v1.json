@@ -1,0 +1,41 @@
+{
+  "schema": "deep-metadata-synthetic-fixtures.v1",
+  "identifiers": {
+    "sender_session_id": "051111111111111111111111111111111111111111111111111111111111111111",
+    "recipient_session_id": "052222222222222222222222222222222222222222222222222222222222222222",
+    "push_token": "synthetic-provider-token-p01",
+    "correlation_id": "synthetic-stable-correlation-p01"
+  },
+  "cases": [
+    {
+      "id": "safe-opaque-event",
+      "domain": "managed-log",
+      "text": "event=deposit status=accepted opaque_handle=fixture-handle-a",
+      "expected_findings": []
+    },
+    {
+      "id": "raw-sender",
+      "domain": "managed-payload",
+      "text": "sender=051111111111111111111111111111111111111111111111111111111111111111",
+      "expected_findings": [ "raw-session-id" ]
+    },
+    {
+      "id": "raw-pair",
+      "domain": "managed-payload",
+      "text": "from=051111111111111111111111111111111111111111111111111111111111111111 to=052222222222222222222222222222222222222222222222222222222222222222",
+      "expected_findings": [ "raw-session-id", "raw-sender-recipient-pair" ]
+    },
+    {
+      "id": "provider-token",
+      "domain": "managed-log",
+      "text": "push retry token=synthetic-provider-token-p01",
+      "expected_findings": [ "raw-push-token" ]
+    },
+    {
+      "id": "stable-cross-transport-id",
+      "domain": "managed-log",
+      "text": "storage correlation=synthetic-stable-correlation-p01 transport=push",
+      "expected_findings": [ "stable-cross-transport-id" ]
+    }
+  ]
+}
