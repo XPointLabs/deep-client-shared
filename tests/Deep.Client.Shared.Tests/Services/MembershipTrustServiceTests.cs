@@ -256,6 +256,93 @@ public sealed class MembershipTrustServiceTests
     }
 
     [Fact]
+    public async Task ExistingState_RejectsDelegationAndAnchorSubstitution()
+    {
+        var verifier = new FixtureMembershipVerifier();
+        var store = new InMemorySessionStore();
+        var profile = FixtureProfile();
+        var service = Service(store, verifier);
+        Assert.Equal(MembershipTrustState.Healthy, (await service.InitializeAsync(profile)).State);
+
+        var substitutedDelegation = CreateDelegation(
+            profile,
+            verifier,
+            sequence: 2,
+            previousHash: MembershipContractHash.Sha256(profile.CanonicalGenesis),
+            keyOffset: 7);
+        var delegationSubstitution = profile with { SignedDelegation = substitutedDelegation };
+        Assert.NotEqual(
+            MembershipTrustState.Healthy,
+            (await service.InitializeAsync(delegationSubstitution)).State);
+        Assert.NotEqual(
+            MembershipTrustState.Healthy,
+            (await service.EvaluateAsync(delegationSubstitution)).State);
+
+        var anchorSubstitution = profile with
+        {
+            MembershipAnchor = profile.MembershipAnchor! with
+            {
+                CanonicalHash = Enumerable.Repeat((byte)0x66, MembershipLimits.HashLength).ToArray()
+            }
+        };
+        Assert.NotEqual(
+            MembershipTrustState.Healthy,
+            (await service.InitializeAsync(anchorSubstitution)).State);
+        Assert.NotEqual(
+            MembershipTrustState.Healthy,
+            (await service.EvaluateAsync(anchorSubstitution)).State);
+    }
+
+    [Fact]
+    public async Task RootSignedDelegation_RotatesFromHealthyAndAfterRevocation()
+    {
+        var verifier = new FixtureMembershipVerifier();
+        var profile = FixtureProfile();
+
+        var healthyStore = new InMemorySessionStore();
+        var healthyService = Service(healthyStore, verifier);
+        _ = await healthyService.InitializeAsync(profile);
+        var authority = (await healthyStore.ReadMembershipTrustAsync(
+            profile.OpaqueProfileKey,
+            MembershipTrustDomain.Authority)).Head!;
+        var rotation = CreateDelegation(
+            profile,
+            verifier,
+            sequence: 3,
+            previousHash: authority.CanonicalHash,
+            keyOffset: 9);
+        Assert.Equal(
+            MembershipTrustState.Healthy,
+            (await healthyService.ApplyDelegationAsync(profile, rotation)).State);
+
+        var revokedStore = new InMemorySessionStore();
+        var revokedService = Service(revokedStore, verifier);
+        _ = await revokedService.InitializeAsync(profile);
+        Assert.Equal(
+            MembershipTrustState.Revoked,
+            (await revokedService.ApplyRevocationAsync(
+                profile,
+                Vector("deep-extension/membership/v1/signed-revocation"))).State);
+        var revokedHead = (await revokedStore.ReadMembershipTrustAsync(
+            profile.OpaqueProfileKey,
+            MembershipTrustDomain.Authority)).Head!;
+        var recovery = CreateDelegation(
+            profile,
+            verifier,
+            sequence: 4,
+            previousHash: revokedHead.CanonicalHash,
+            keyOffset: 11);
+        Assert.Equal(
+            MembershipTrustState.Healthy,
+            (await revokedService.ApplyDelegationAsync(profile, recovery)).State);
+        Assert.Equal(
+            4UL,
+            (await revokedStore.ReadMembershipTrustAsync(
+                profile.OpaqueProfileKey,
+                MembershipTrustDomain.Authority)).Head!.Sequence);
+    }
+
+    [Fact]
     public void PublicApplyBoundary_HasNoTrustedP04ModelParameters()
     {
         var methods = typeof(MembershipTrustService).GetMethods()
@@ -327,6 +414,45 @@ public sealed class MembershipTrustServiceTests
                 };
             }).ToArray()
         };
+    }
+
+    private static byte[] CreateDelegation(
+        MembershipTrustProfile profile,
+        FixtureMembershipVerifier verifier,
+        ulong sequence,
+        byte[] previousHash,
+        int keyOffset)
+    {
+        var genesis = MembershipContractCodec.DecodeGenesis(profile.CanonicalGenesis);
+        var template = MembershipContractCodec.DecodeSignedDelegation(profile.SignedDelegation);
+        var candidate = template with
+        {
+            Sequence = sequence,
+            PreviousHash = previousHash.ToArray(),
+            OnlineSigners = template.OnlineSigners.Select((signer, index) => signer with
+            {
+                SignerId = Enumerable.Range(0, MembershipLimits.SignerIdLength)
+                    .Select(value => (byte)(0xa0 + keyOffset + index + value)).ToArray(),
+                PublicKey = Enumerable.Range(0, MembershipLimits.PublicKeyLength)
+                    .Select(value => (byte)(0x20 + keyOffset + index + value)).ToArray()
+            }).ToArray(),
+            Signatures = []
+        };
+        var signingBytes = MembershipContractCodec.GetDelegationSigningBytes(candidate);
+        candidate = candidate with
+        {
+            Signatures = genesis.OfflineRoots.Take(3).Select(root => new MembershipSignature
+            {
+                SignerId = root.SignerId.ToArray(),
+                Domain = MembershipSignatureDomain.OfflineDelegation,
+                Signature = verifier.Sign(
+                    root.SignerId.Span,
+                    root.PublicKey.Span,
+                    MembershipSignatureDomain.OfflineDelegation,
+                    signingBytes)
+            }).ToArray()
+        };
+        return MembershipContractCodec.EncodeSignedDelegation(candidate);
     }
 
     internal static byte[] Vector(string id)

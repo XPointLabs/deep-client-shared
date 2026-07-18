@@ -32,6 +32,11 @@ public sealed class MembershipTrustSqliteRecoveryTests
     [InlineData("digest")]
     [InlineData("payload")]
     [InlineData("revision")]
+    [InlineData("state")]
+    [InlineData("observed-at")]
+    [InlineData("valid-until")]
+    [InlineData("canonical-hash")]
+    [InlineData("previous-hash")]
     public async Task CorruptPhysicalState_BlocksWithoutPriorFallback(string corruption)
     {
         await using var database = await TestDatabase.CreateAsync();
@@ -50,6 +55,54 @@ public sealed class MembershipTrustSqliteRecoveryTests
         Assert.Equal(MembershipTrustReadResult.Corrupt, read.Result);
         Assert.Null(read.Head);
         Assert.Null(read.Predecessor);
+    }
+
+    [Fact]
+    public async Task OrphanInAnotherProfile_DoesNotBlockCurrentProfile()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        using (var store = database.Open())
+        {
+            _ = await store.CommitMembershipTrustAsync(Record(1, 6, 0x10), null);
+        }
+        await database.MutateAsync("other-profile-orphan");
+
+        using var restarted = database.Open();
+        var read = await restarted.ReadMembershipTrustAsync(
+            "install:test",
+            MembershipTrustDomain.Membership);
+        Assert.Equal(MembershipTrustReadResult.Found, read.Result);
+        Assert.Equal(1UL, read.Head!.Revision);
+    }
+
+    [Fact]
+    public async Task InMemoryCorruptionInAnotherProfile_DoesNotBlockCurrentProfile()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"deep-p07-profile-scope-{Guid.NewGuid():N}.json");
+        try
+        {
+            var store = new InMemorySessionStore(path);
+            _ = await store.CommitMembershipTrustAsync(Record(1, 6, 0x10), null);
+            var other = Record(1, 6, 0x20) with { OpaqueProfileKey = "install:other" };
+            _ = await store.CommitMembershipTrustAsync(other, null);
+
+            var root = System.Text.Json.Nodes.JsonNode.Parse(await File.ReadAllTextAsync(path))!;
+            var heads = root["membershipTrustHeads"]!.AsArray();
+            var otherHead = heads.Single(node =>
+                node!["opaqueProfileKey"]!.GetValue<string>() == "install:other");
+            heads.Remove(otherHead);
+            await File.WriteAllTextAsync(path, root.ToJsonString());
+
+            var restarted = new InMemorySessionStore(path);
+            var read = await restarted.ReadMembershipTrustAsync(
+                "install:test",
+                MembershipTrustDomain.Membership);
+            Assert.Equal(MembershipTrustReadResult.Found, read.Result);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
     }
 
     [Fact]
@@ -110,7 +163,15 @@ public sealed class MembershipTrustSqliteRecoveryTests
                         (profile_key, domain, revision, sequence, previous_sequence,
                          previous_hash, envelope, payload_digest, canonical_hash, state, observed_at, valid_until)
                     VALUES
-                        ('install:orphan', 3, 1, 6, 5, zeroblob(32), zeroblob(96),
+                        ('install:test', 3, 3, 8, 7, zeroblob(32), zeroblob(96),
+                         zeroblob(32), zeroblob(32), 3, 1010, 1200);
+                    """,
+                "other-profile-orphan" => """
+                    INSERT INTO membership_trust_records
+                        (profile_key, domain, revision, sequence, previous_sequence,
+                         previous_hash, envelope, payload_digest, canonical_hash, state, observed_at, valid_until)
+                    VALUES
+                        ('install:other', 3, 1, 6, 5, zeroblob(32), zeroblob(96),
                          zeroblob(32), zeroblob(32), 3, 1010, 1200);
                     """,
                 "missing-head" => """
@@ -131,6 +192,31 @@ public sealed class MembershipTrustSqliteRecoveryTests
                     UPDATE membership_trust_heads
                     SET revision = 0
                     WHERE profile_key = 'install:test' AND domain = 3;
+                    """,
+                "state" => """
+                    UPDATE membership_trust_records
+                    SET state = 10
+                    WHERE profile_key = 'install:test' AND domain = 3 AND revision = 2;
+                    """,
+                "observed-at" => """
+                    UPDATE membership_trust_records
+                    SET observed_at = observed_at + 600
+                    WHERE profile_key = 'install:test' AND domain = 3 AND revision = 2;
+                    """,
+                "valid-until" => """
+                    UPDATE membership_trust_records
+                    SET valid_until = valid_until + 600
+                    WHERE profile_key = 'install:test' AND domain = 3 AND revision = 2;
+                    """,
+                "canonical-hash" => """
+                    UPDATE membership_trust_records
+                    SET canonical_hash = randomblob(32)
+                    WHERE profile_key = 'install:test' AND domain = 3 AND revision = 2;
+                    """,
+                "previous-hash" => """
+                    UPDATE membership_trust_records
+                    SET previous_hash = randomblob(32)
+                    WHERE profile_key = 'install:test' AND domain = 3 AND revision = 2;
                     """,
                 _ => throw new ArgumentOutOfRangeException(nameof(corruption))
             };
