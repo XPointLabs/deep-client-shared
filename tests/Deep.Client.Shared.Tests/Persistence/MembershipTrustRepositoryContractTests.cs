@@ -148,6 +148,87 @@ public sealed class MembershipTrustRepositoryContractTests
         }
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SignedHeadLinkageMismatch_IsCorruptEvenWithValidRecordDigest(bool sqlite)
+    {
+        using var scope = StoreScope.Create(sqlite);
+        var first = Record(1, 6, 0x10);
+        _ = await scope.Store.CommitMembershipTrustAsync(first, null);
+        var second = MembershipTrustRecord.Create(
+            "install:test",
+            MembershipTrustDomain.Membership,
+            revision: 2,
+            sequence: 7,
+            previousSequence: 6,
+            previousCanonicalHash: Enumerable.Repeat((byte)0xee, 32).ToArray(),
+            canonicalEnvelope: Enumerable.Repeat((byte)0x20, 96).ToArray(),
+            state: MembershipTrustState.Healthy,
+            observedAt: DateTimeOffset.FromUnixTimeSeconds(1010),
+            validUntil: DateTimeOffset.FromUnixTimeSeconds(1200));
+        _ = await scope.Store.CommitMembershipTrustAsync(second, 1);
+
+        Assert.Equal(
+            MembershipTrustReadResult.Corrupt,
+            (await scope.Store.ReadMembershipTrustAsync(
+                "install:test",
+                MembershipTrustDomain.Membership)).Result);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ObservedClockHighWater_IsCasPersistedAndRejectsRollback(bool sqlite)
+    {
+        using var scope = StoreScope.Create(sqlite);
+        var missing = await scope.Store.ReadMembershipTrustClockAsync("install:test");
+        Assert.Equal(MembershipTrustClockReadResult.Missing, missing.Result);
+
+        var first = MembershipTrustClockRecord.Create(
+            "install:test", 1, DateTimeOffset.FromUnixTimeSeconds(1000));
+        Assert.Equal(
+            MembershipTrustClockCommitResult.Applied,
+            await scope.Store.CommitMembershipTrustClockAsync(first, null));
+        var second = MembershipTrustClockRecord.Create(
+            "install:test", 2, DateTimeOffset.FromUnixTimeSeconds(2000));
+        Assert.Equal(
+            MembershipTrustClockCommitResult.Applied,
+            await scope.Store.CommitMembershipTrustClockAsync(second, 1));
+        var rollback = MembershipTrustClockRecord.Create(
+            "install:test", 3, DateTimeOffset.FromUnixTimeSeconds(1500));
+        Assert.Equal(
+            MembershipTrustClockCommitResult.Rollback,
+            await scope.Store.CommitMembershipTrustClockAsync(rollback, 2));
+
+        var read = await scope.Store.ReadMembershipTrustClockAsync("install:test");
+        Assert.Equal(2UL, read.Record!.Revision);
+        Assert.Equal(DateTimeOffset.FromUnixTimeSeconds(2000), read.Record.ObservedAt);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ObservedClockHighWater_ConcurrentCasHasOneWinner(bool sqlite)
+    {
+        using var scope = StoreScope.Create(sqlite);
+        _ = await scope.Store.CommitMembershipTrustClockAsync(
+            MembershipTrustClockRecord.Create(
+                "install:test", 1, DateTimeOffset.FromUnixTimeSeconds(1000)),
+            null);
+        var results = await Task.WhenAll(
+            scope.Store.CommitMembershipTrustClockAsync(
+                MembershipTrustClockRecord.Create(
+                    "install:test", 2, DateTimeOffset.FromUnixTimeSeconds(2000)),
+                1),
+            scope.Store.CommitMembershipTrustClockAsync(
+                MembershipTrustClockRecord.Create(
+                    "install:test", 2, DateTimeOffset.FromUnixTimeSeconds(2100)),
+                1));
+        Assert.Single(results, result => result == MembershipTrustClockCommitResult.Applied);
+        Assert.Single(results, result => result == MembershipTrustClockCommitResult.Conflict);
+    }
+
     private static MembershipTrustRecord Record(
         ulong revision,
         ulong sequence,

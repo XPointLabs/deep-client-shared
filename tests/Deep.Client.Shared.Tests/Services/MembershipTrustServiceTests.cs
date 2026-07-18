@@ -343,6 +343,88 @@ public sealed class MembershipTrustServiceTests
     }
 
     [Fact]
+    public async Task RotatedAuthority_SurvivesOriginalBootstrapExpiryAndRestart()
+    {
+        var verifier = new FixtureMembershipVerifier();
+        var clock = new MutableClock(FixtureNow);
+        var store = new InMemorySessionStore();
+        var profile = FixtureProfile();
+        var service = new MembershipTrustService(store, verifier, clock, EnabledOptions());
+        _ = await service.InitializeAsync(profile);
+        var head = (await store.ReadMembershipTrustAsync(
+            profile.OpaqueProfileKey,
+            MembershipTrustDomain.Authority)).Head!;
+        var rotation = CreateDelegation(
+            profile,
+            verifier,
+            sequence: 3,
+            previousHash: head.CanonicalHash,
+            keyOffset: 13,
+            validUntil: 3000);
+        Assert.Equal(
+            MembershipTrustState.Healthy,
+            (await service.ApplyDelegationAsync(profile, rotation)).State);
+
+        clock.UtcNow = DateTimeOffset.FromUnixTimeSeconds(1500);
+        var restarted = new MembershipTrustService(
+            store,
+            verifier,
+            clock,
+            EnabledOptions());
+        Assert.Equal(
+            MembershipTrustState.Healthy,
+            (await restarted.InitializeAsync(profile)).State);
+        var successor = CreateDelegation(
+            profile,
+            verifier,
+            sequence: 4,
+            previousHash: (await store.ReadMembershipTrustAsync(
+                profile.OpaqueProfileKey,
+                MembershipTrustDomain.Authority)).Head!.CanonicalHash,
+            keyOffset: 15,
+            validFrom: 1400,
+            validUntil: 3200);
+        Assert.Equal(
+            MembershipTrustState.Healthy,
+            (await restarted.ApplyDelegationAsync(profile, successor)).State);
+    }
+
+    [Fact]
+    public async Task AuthorityDelegationEquivocation_PersistsForkAcrossRestart()
+    {
+        var verifier = new FixtureMembershipVerifier();
+        var store = new InMemorySessionStore();
+        var profile = FixtureProfile();
+        var service = Service(store, verifier);
+        _ = await service.InitializeAsync(profile);
+        var predecessor = (await store.ReadMembershipTrustAsync(
+            profile.OpaqueProfileKey,
+            MembershipTrustDomain.Authority)).Head!;
+        var first = CreateDelegation(
+            profile, verifier, 3, predecessor.CanonicalHash, 17);
+        var second = CreateDelegation(
+            profile, verifier, 3, predecessor.CanonicalHash, 19);
+        Assert.Equal(MembershipTrustState.Healthy, (await service.ApplyDelegationAsync(profile, first)).State);
+        Assert.Equal(MembershipTrustState.ForkDetected, (await service.ApplyDelegationAsync(profile, second)).State);
+        Assert.Equal(
+            MembershipTrustState.ForkDetected,
+            (await Service(store, verifier).InitializeAsync(profile)).State);
+    }
+
+    [Fact]
+    public void SelfHostedImportBoundary_IsRawCanonicalAndNamespaceSeparated()
+    {
+        var properties = typeof(SelfHostedGenesisImport).GetProperties();
+        Assert.DoesNotContain(
+            properties,
+            property => property.PropertyType.Namespace == typeof(MembershipSignature).Namespace ||
+                        property.PropertyType.GenericTypeArguments.Any(
+                            argument => argument.Namespace == typeof(MembershipSignature).Namespace));
+        Assert.Contains(properties, property =>
+            property.Name == "CanonicalSignatures" && property.PropertyType == typeof(byte[]));
+    }
+
+    [Fact]
     public void PublicApplyBoundary_HasNoTrustedP04ModelParameters()
     {
         var methods = typeof(MembershipTrustService).GetMethods()
@@ -421,7 +503,9 @@ public sealed class MembershipTrustServiceTests
         FixtureMembershipVerifier verifier,
         ulong sequence,
         byte[] previousHash,
-        int keyOffset)
+        int keyOffset,
+        ulong validFrom = 900,
+        ulong validUntil = 1300)
     {
         var genesis = MembershipContractCodec.DecodeGenesis(profile.CanonicalGenesis);
         var template = MembershipContractCodec.DecodeSignedDelegation(profile.SignedDelegation);
@@ -429,6 +513,8 @@ public sealed class MembershipTrustServiceTests
         {
             Sequence = sequence,
             PreviousHash = previousHash.ToArray(),
+            ValidFromUnixSeconds = validFrom,
+            ValidUntilUnixSeconds = validUntil,
             OnlineSigners = template.OnlineSigners.Select((signer, index) => signer with
             {
                 SignerId = Enumerable.Range(0, MembershipLimits.SignerIdLength)
