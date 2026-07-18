@@ -16,6 +16,7 @@
   ],
   "previousEvidenceCarrierCommit": "37c3501d61462a1403da944096ab2c113bcc46d8",
   "sourceCommit": "f8acbc605c35ec084e8f7f6fe923eb16102688a2",
+  "evidenceContentCommit": "c121411b2d14fccf88bae9920d1040856180af90",
   "tests": {
     "full": { "passed": 363, "failed": 0, "skipped": 0 },
     "focused": { "passed": 53, "failed": 0, "skipped": 0 },
