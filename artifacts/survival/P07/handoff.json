@@ -1,0 +1,21 @@
+{
+  "schema": "deep.p07.handoff.v1",
+  "sourceCommit": "03e187d50751da2b572d2245da2713ee4ffb0e64",
+  "evidenceCommit": "THIS-CARRIER-COMMIT",
+  "independentReviewRequired": true,
+  "next": ["independent exact-commit review", "P07B source policy", "P14 self-host UX"],
+  "blockers": [
+    "no approved production P04 signature profile or external cryptographic review",
+    "no live signed bootstrap/checkpoint source",
+    "P06 and P07B source composition absent",
+    "release SQLCipher/integrity guard not proven",
+    "stale, trusted-clock, and emergency legacy policy not approved",
+    "runtime and MAUI composition intentionally absent"
+  ],
+  "claims": {
+    "productionReady": false,
+    "mobileE2EComplete": false,
+    "windowsE2EComplete": false,
+    "networkRestrictionResilienceProven": false
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "schema": "deep.p07.migration-rollback.v1",
+  "migration": "logical-3-to-4-additive",
+  "preservesAccountMessageGroupState": true,
+  "trustProfilesSurviveAccountSignOut": true,
+  "profileScope": "installation-not-account",
+  "rollback": "keep tables and both flags false; do not select an older LKG",
+  "silentLegacyFallback": false
+}

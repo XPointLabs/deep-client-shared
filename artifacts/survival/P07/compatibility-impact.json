@@ -1,0 +1,12 @@
+{
+  "schema": "deep.p07.compatibility-impact.v1",
+  "runtimeCompositionChanged": false,
+  "mauiChanged": false,
+  "transportChanged": false,
+  "featureFlagsDefaultFalse": true,
+  "logicalSchemaFrom": 3,
+  "logicalSchemaTo": 4,
+  "physicalUserVersionChanged": false,
+  "p07bImpact": "Consume canonical candidate bytes only after a separately reviewed source policy.",
+  "mauiImpact": "Self-host import UX remains P14/P14B and is not registered."
+}

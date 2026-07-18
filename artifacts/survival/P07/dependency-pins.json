@@ -1,0 +1,18 @@
+{
+  "schema": "deep.p07.dependency-pins.v1",
+  "acceptedW1W2EvidenceCommit": "1c01e24e24647a46b4f37622f3934dc2cc1284ef",
+  "acceptedW1W2EvidenceSha256": "b2f813061e7986d1e383c2df5b5ce345367c4cca06a03cf8122221c5cfa5c51b",
+  "manifestSha256": "920b24bb5bcfcc8b4f91aef56ed210127246ec9fd2d49178ed9856c8555d0b93",
+  "contractCarrierCommit": "524c5796aa868fa3d057fbf7eaa13cfea2e0d19c",
+  "contractSha256": "c45f66f7a688cbd70b7ca57a777851962ce2ab59eb37a3304d9b4bf7e4c55719",
+  "p04SourceCommit": "b887fa088f486390be182cac4cbcb59b60ce8931",
+  "p04Version": "0.3.0-p04.b887fa0",
+  "p04ManifestSha256": "fd3ef27bf0b9272570d6c6e680a3c99e581f6220799d13ee3afbd86ea0e99298",
+  "packageSha256": {
+    "Deep.Protocol": "8ef4e70ad0b6c1cc0087f25c0313d6ab6a5387d16246679e4c10a3c00898a442",
+    "Deep.Protocol.Abstractions": "fc1212a6765f5778188fcb3866ef923023c2253c3ead299a542271f4cc4f844f",
+    "Deep.Protocol.Protobuf": "755a027c58be670151456cc0bca4764731f7c493932d9eedd00c02e704baf818"
+  },
+  "fixtureSha256": "758707e4705c0499f546ce1e1e5201df253ef70822225c5fd3086c43d8d9bf45",
+  "runtimeAuthorized": false
+}

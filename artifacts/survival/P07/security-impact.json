@@ -1,0 +1,15 @@
+{
+  "schema": "deep.p07.security-impact.v1",
+  "canonicalByteBoundary": true,
+  "injectedVerifierRequired": true,
+  "productionVerifierPresent": false,
+  "fullRecordDigest": true,
+  "digestClaim": "accidental-corruption-detection-only",
+  "domainSeparatedLkg": true,
+  "profileBinding": true,
+  "forkFailClosed": true,
+  "clockRollbackFailClosed": true,
+  "legacyAutomaticFallback": false,
+  "externalCryptoReviewComplete": false,
+  "productionAuthorization": false
+}
