@@ -5,6 +5,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
   </PropertyGroup>
 
   <ItemGroup>
@@ -24,6 +25,8 @@
     <None Include="Fixtures\metadata-expectations.v1.json"
           CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\metadata-synthetic-fixtures.v1.json"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\p04-membership-contract-v1.json"
           CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
