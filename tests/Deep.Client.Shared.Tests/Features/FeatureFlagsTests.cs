@@ -29,4 +29,23 @@ public sealed class FeatureFlagsTests
             Assert.False(release.StubTransportAllowed);
         }
     }
+
+    [Fact]
+    public void MembershipTrustAndLegacyRollback_AreDormantInEveryDefault()
+    {
+        Assert.False(ClientFeatureFlags.Defaults.MembershipTrustEnabled);
+        Assert.False(ClientFeatureFlags.Defaults.LegacyEmbeddedBootstrapRollbackAllowed);
+        Assert.False(ClientFeatureFlags.ReleaseDefaults.MembershipTrustEnabled);
+        Assert.False(ClientFeatureFlags.ReleaseDefaults.LegacyEmbeddedBootstrapRollbackAllowed);
+    }
+
+    [Fact]
+    public void ExistingPositionalArguments_RemainSourceCompatible()
+    {
+        var flags = new ClientFeatureFlags(
+            true, false, false, false, true, true, true, false, true);
+
+        Assert.False(flags.MembershipTrustEnabled);
+        Assert.False(flags.LegacyEmbeddedBootstrapRollbackAllowed);
+    }
 }
