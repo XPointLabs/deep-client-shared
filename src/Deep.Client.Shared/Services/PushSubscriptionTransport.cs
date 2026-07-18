@@ -1,5 +1,6 @@
 ﻿using System.Net.Http.Json;
 using System.Security.Cryptography;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 using Deep.Client.Shared.Platform;
 using Deep.Client.Shared.State;
@@ -63,8 +64,14 @@ public sealed record PushSubscriptionRequest(
     [property: JsonPropertyName("app_id")] string AppId = PushNotificationCrypto.PackageName,
     [property: JsonPropertyName("app_version")] string AppVersion = "0.0.0")
 {
+    private int sigVersion = PushSubscriptionCanonicalFormat.SignatureVersion;
+
     [JsonPropertyName("sig_v")]
-    public int SigVersion => PushSubscriptionCanonicalFormat.SignatureVersion;
+    public int SigVersion
+    {
+        get => sigVersion;
+        init => sigVersion = PushSignatureVersionGuard.RequireVersionTwo(value);
+    }
 }
 
 public sealed record PushUnsubscribeRequest(
@@ -75,8 +82,23 @@ public sealed record PushUnsubscribeRequest(
     [property: JsonPropertyName("signature")] string Signature,
     [property: JsonPropertyName("service_info")] PushSubscriptionServiceInfo ServiceInfo)
 {
+    private int sigVersion = PushSubscriptionCanonicalFormat.SignatureVersion;
+
     [JsonPropertyName("sig_v")]
-    public int SigVersion => PushSubscriptionCanonicalFormat.SignatureVersion;
+    public int SigVersion
+    {
+        get => sigVersion;
+        init => sigVersion = PushSignatureVersionGuard.RequireVersionTwo(value);
+    }
+}
+
+internal static class PushSignatureVersionGuard
+{
+    public static int RequireVersionTwo(int value) =>
+        value == PushSubscriptionCanonicalFormat.SignatureVersion
+            ? value
+            : throw new JsonException(
+                $"Push signature version must be exactly {PushSubscriptionCanonicalFormat.SignatureVersion}.");
 }
 
 public sealed record HttpPushSubscriptionTransportOptions(

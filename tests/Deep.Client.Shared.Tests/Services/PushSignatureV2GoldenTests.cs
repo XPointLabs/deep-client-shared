@@ -82,10 +82,58 @@ public sealed class PushSignatureV2GoldenTests
         }
     }
 
-    [Fact]
-    public void PushDtos_IgnoreInboundSigVersionAndAlwaysSerializeVersionTwo()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void PushDtos_AcceptAbsentOrExactVersionTwoAndAlwaysSerializeVersionTwo(bool includeVersion)
     {
-        var subscribeJson = """
+        var versionProperty = includeVersion ? ""","sig_v":2""" : string.Empty;
+        var subscribeJson = $$"""
+            {
+              "pubkey":"05abc",
+              "session_ed25519":"ed",
+              "namespaces":[0],
+              "data":true,
+              "service":"firebase",
+              "sig_ts":1,
+              "signature":"sig",
+              "service_info":{"token":"token"},
+              "enc_key":"key",
+              "app_id":"app",
+              "app_version":"1"
+              {{versionProperty}}
+            }
+            """;
+        var unsubscribeJson = $$"""
+            {
+              "pubkey":"05abc",
+              "session_ed25519":"ed",
+              "service":"firebase",
+              "sig_ts":1,
+              "signature":"sig",
+              "service_info":{"token":"token"}
+              {{versionProperty}}
+            }
+            """;
+
+        var subscribe = JsonSerializer.Deserialize<PushSubscriptionRequest>(subscribeJson);
+        var unsubscribe = JsonSerializer.Deserialize<PushUnsubscribeRequest>(unsubscribeJson);
+
+        Assert.Equal(2, subscribe!.SigVersion);
+        Assert.Equal(2, unsubscribe!.SigVersion);
+        Assert.Equal(2, JsonDocument.Parse(JsonSerializer.Serialize(subscribe)).RootElement.GetProperty("sig_v").GetInt32());
+        Assert.Equal(2, JsonDocument.Parse(JsonSerializer.Serialize(unsubscribe)).RootElement.GetProperty("sig_v").GetInt32());
+    }
+
+    [Theory]
+    [InlineData("1")]
+    [InlineData("99")]
+    [InlineData("\"2\"")]
+    [InlineData("null")]
+    [InlineData("2.5")]
+    public void PushDtos_RejectExplicitNonCanonicalInboundSignatureVersion(string jsonValue)
+    {
+        var subscribeJson = $$"""
             {
               "pubkey":"05abc",
               "session_ed25519":"ed",
@@ -98,10 +146,10 @@ public sealed class PushSignatureV2GoldenTests
               "enc_key":"key",
               "app_id":"app",
               "app_version":"1",
-              "sig_v":99
+              "sig_v":{{jsonValue}}
             }
             """;
-        var unsubscribeJson = """
+        var unsubscribeJson = $$"""
             {
               "pubkey":"05abc",
               "session_ed25519":"ed",
@@ -109,17 +157,14 @@ public sealed class PushSignatureV2GoldenTests
               "sig_ts":1,
               "signature":"sig",
               "service_info":{"token":"token"},
-              "sig_v":1
+              "sig_v":{{jsonValue}}
             }
             """;
 
-        var subscribe = JsonSerializer.Deserialize<PushSubscriptionRequest>(subscribeJson);
-        var unsubscribe = JsonSerializer.Deserialize<PushUnsubscribeRequest>(unsubscribeJson);
-
-        Assert.Equal(2, subscribe!.SigVersion);
-        Assert.Equal(2, unsubscribe!.SigVersion);
-        Assert.Equal(2, JsonDocument.Parse(JsonSerializer.Serialize(subscribe)).RootElement.GetProperty("sig_v").GetInt32());
-        Assert.Equal(2, JsonDocument.Parse(JsonSerializer.Serialize(unsubscribe)).RootElement.GetProperty("sig_v").GetInt32());
+        Assert.Throws<JsonException>(() =>
+            JsonSerializer.Deserialize<PushSubscriptionRequest>(subscribeJson));
+        Assert.Throws<JsonException>(() =>
+            JsonSerializer.Deserialize<PushUnsubscribeRequest>(unsubscribeJson));
     }
 
     private static GoldenRequest ReadRequest(JsonElement goldenCase)
