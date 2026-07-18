@@ -21,11 +21,11 @@ Result: exit `0`; 14 passed, 0 failed, 0 skipped. This includes five characteriz
 ## Explicit strict expected-red lane
 
 ```powershell
-$env:DEEP_SURVIVAL_METADATA_GATE='1'
-dotnet test Deep.Client.Shared.slnx --no-restore --filter FullyQualifiedName~BetaMetadataGate --logger "console;verbosity=minimal"
+& ./eng/scripts/Invoke-MetadataPrivacyGate.ps1
 ```
 
-Result: expected exit `1`; 0 passed, 8 failed, 0 skipped. Every unresolved Beta finding failed as an independent theory case:
+Result: expected wrapper exit `1`; exact TRX total `8`, unresolved `8`, 0 passed, 8 failed,
+0 skipped. Every unresolved Beta finding failed as an independent theory case:
 
 - `META-DPE1-CLEAR-SENDER`
 - `META-DPE1-CLEAR-RECIPIENT`
@@ -36,11 +36,26 @@ Result: expected exit `1`; 0 passed, 8 failed, 0 skipped. Every unresolved Beta 
 - `META-PUSH-RAW-ACCOUNT`
 - `META-PUSH-ROTATING-HANDLE`
 
-The nonzero strict result is the required release signal, not a test infrastructure failure.
+The wrapper distinguishes this required privacy-red signal from harness/infrastructure failure,
+which returns exit `2`.
+
+## Harness mutation tests
+
+```powershell
+& ./eng/scripts/Test-MetadataPrivacyGateHarness.ps1
+```
+
+Result: exit `0`; 10 self-test scenarios passed. Eight mutation classes returned harness exit `2`:
+omitted strict environment, typo filter, zero-match, missing test, duplicate finding result,
+duplicate expectation finding, mismatched expectations count and false-green unresolved outcomes.
+The additional scenarios prove current unresolved exit `1` and exact all-resolved exit `0`.
 
 ## Evidence paths
 
 - `tests/Deep.Client.Shared.Tests/Services/MetadataPrivacyCharacterizationTests.cs`
 - `tests/Deep.Client.Shared.Tests/Fixtures/metadata-expectations.v1.json`
 - `tests/Deep.Client.Shared.Tests/Fixtures/metadata-synthetic-fixtures.v1.json`
+- `eng/scripts/Invoke-MetadataPrivacyGate.ps1`
+- `eng/scripts/MetadataPrivacyGateHarness.psm1`
+- `eng/scripts/Test-MetadataPrivacyGateHarness.ps1`
 - `artifacts/survival/P01/observer-collusion-matrix.md`

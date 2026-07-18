@@ -17,6 +17,10 @@ Decision: **NO-GO for Beta metadata privacy**. Content encryption and onion rout
 - Failure messages contain finding IDs, not keys, provider tokens or recovery phrases.
 - No production log defaults were changed.
 - No claim is made that P01 implements sealed sender, traffic-flow confidentiality, padding or cover traffic.
+- The strict gate is executed only through a fixed-filter wrapper that validates exact TRX test IDs,
+  findings, counts, outcomes and skipped/infrastructure counters.
+- Omitted strict environment, caller filter attempts, zero-match, missing/duplicate results,
+  expectation-count mismatch and false-green outcomes are harness errors (`exit 2`).
 
 ## Review boundary
 

@@ -11,8 +11,19 @@
 Strict lane:
 
 ```powershell
-$env:DEEP_SURVIVAL_METADATA_GATE='1'
-dotnet test Deep.Client.Shared.slnx --no-restore --filter FullyQualifiedName~BetaMetadataGate
+& ./eng/scripts/Invoke-MetadataPrivacyGate.ps1
 ```
 
-This lane has one xUnit theory case per blocker and uses no skipped tests.
+The wrapper does not accept a caller-supplied filter. It internally sets
+`DEEP_SURVIVAL_METADATA_GATE=1`, uses the exact fully-qualified gate test, writes an isolated TRX,
+and verifies the TRX finding set and counters against `metadata-expectations.v1.json`.
+
+- Exit `0`: the exact suite ran and every blocker is resolved.
+- Exit `1`: the exact suite ran and every current unresolved blocker failed as intended.
+- Exit `2`: environment, filter, no-test, count, finding-set, TRX parse or infrastructure mismatch.
+
+Harness mutation tests:
+
+```powershell
+& ./eng/scripts/Test-MetadataPrivacyGateHarness.ps1
+```
