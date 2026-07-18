@@ -56,6 +56,9 @@ Use `deep-protocol` for protocol and crypto semantics. Do not recreate protocol 
 - Read cursor behavior must not mark outgoing messages as read.
 - Group admin/member rules must prevent last-admin destructive mistakes.
 - Push subscription transport must preserve provider token/service identity and unregister path.
+- Push subscribe/unsubscribe DTOs always emit `sig_v: 2`. Their Ed25519 payload is the LF-terminated,
+  UTF-8 byte-length-prefixed `deep.push/{subscribe|unsubscribe}/v2` canonical form pinned by
+  `tests/Deep.Client.Shared.Tests/Fixtures/push-signature-v2.golden.json`.
 - Release feature flags must reject stub-only launch-critical behavior.
 
 ## Persistence Migration Rules

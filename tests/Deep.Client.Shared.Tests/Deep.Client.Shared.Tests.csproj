@@ -19,6 +19,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <None Include="Fixtures\push-signature-v2.golden.json"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Using Include="Xunit" />
   </ItemGroup>
 

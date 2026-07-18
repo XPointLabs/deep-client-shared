@@ -1,0 +1,95 @@
+{
+  "schema": "deep.push-signature-v2-golden/v1",
+  "signature_version": 2,
+  "key": {
+    "private_seed_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "ed25519_public_key_hex": "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8",
+    "session_id": "054701d08488451f545a409fb58ae3e58581ca40ac3f7f114698cd71deac73ca01"
+  },
+  "cases": [
+    {
+      "id": "subscribe_ascii",
+      "operation": "subscribe",
+      "request": {
+        "pubkey": "054701d08488451f545a409fb58ae3e58581ca40ac3f7f114698cd71deac73ca01",
+        "session_ed25519": "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8",
+        "namespaces": [-10, 0, 10],
+        "data": true,
+        "service": "firebase",
+        "sig_ts": 1893456000,
+        "signature": "gEgcIvFnZ6eoeTC5Y2qJEHYsepZkIhMrqXiKk1xKMd7xufoGKGSuxxD2U5eDwTfXw3wHb0zFm/HMZS/TAP9pBw==",
+        "service_info": {
+          "token": "push-token-ASCII_01"
+        },
+        "enc_key": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "app_id": "network.deep.app",
+        "app_version": "1.2.3",
+        "sig_v": 2
+      },
+      "unsorted_namespaces_for_canonicalizer": [10, -10, 0],
+      "canonical": "deep.push/subscribe/v2\npubkey=66:054701d08488451f545a409fb58ae3e58581ca40ac3f7f114698cd71deac73ca01\nsig_ts=10:1893456000\nservice=8:firebase\ndevice_token=19:push-token-ASCII_01\nenc_key=64:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\nwant_data=1:1\nnamespaces=8:-10,0,10\napp_id=16:network.deep.app\napp_version=5:1.2.3\n",
+      "canonical_hex": "646565702e707573682f7375627363726962652f76320a7075626b65793d36363a3035343730316430383438383435316635343561343039666235386165336535383538316361343061633366376631313436393863643731646561633733636130310a7369675f74733d31303a313839333435363030300a736572766963653d383a66697265626173650a6465766963655f746f6b656e3d31393a707573682d746f6b656e2d41534349495f30310a656e635f6b65793d36343a303031313232333334343535363637373838393961616262636364646565666630303131323233333434353536363737383839396161626263636464656566660a77616e745f646174613d313a310a6e616d657370616365733d383a2d31302c302c31300a6170705f69643d31363a6e6574776f726b2e646565702e6170700a6170705f76657273696f6e3d353a312e322e330a",
+      "canonical_utf8_length": 335
+    },
+    {
+      "id": "unsubscribe_ascii",
+      "operation": "unsubscribe",
+      "request": {
+        "pubkey": "054701d08488451f545a409fb58ae3e58581ca40ac3f7f114698cd71deac73ca01",
+        "session_ed25519": "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8",
+        "service": "firebase",
+        "sig_ts": 1893456060,
+        "signature": "AkIG6GLhHRaQ8+7ns+i8e/SERmXVi4g3j05A3J/ZhIRq2VMgP32t4/GEXMYFTL73czxHt3UXykZjNAQpaOblCw==",
+        "service_info": {
+          "token": "push-token-ASCII_01"
+        },
+        "sig_v": 2
+      },
+      "canonical": "deep.push/unsubscribe/v2\npubkey=66:054701d08488451f545a409fb58ae3e58581ca40ac3f7f114698cd71deac73ca01\nsig_ts=10:1893456060\nservice=8:firebase\ndevice_token=19:push-token-ASCII_01\n",
+      "canonical_hex": "646565702e707573682f756e7375627363726962652f76320a7075626b65793d36363a3035343730316430383438383435316635343561343039666235386165336535383538316361343061633366376631313436393863643731646561633733636130310a7369675f74733d31303a313839333435363036300a736572766963653d383a66697265626173650a6465766963655f746f6b656e3d31393a707573682d746f6b656e2d41534349495f30310a",
+      "canonical_utf8_length": 178
+    },
+    {
+      "id": "subscribe_multibyte",
+      "operation": "subscribe",
+      "request": {
+        "pubkey": "054701d08488451f545a409fb58ae3e58581ca40ac3f7f114698cd71deac73ca01",
+        "session_ed25519": "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8",
+        "namespaces": [-42, 0, 10, 42],
+        "data": false,
+        "service": "firebase",
+        "sig_ts": 1893456120,
+        "signature": "LzkG6wQQYnaYTgr03o+9IAHmxbHLYScA45dj3DmE3x7Nb+dvQK/iRvCWpXgH4gLtXuub1WnCbLxdr9lDh2VnBg==",
+        "service_info": {
+          "token": "токен-東京-🚀"
+        },
+        "enc_key": "ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100",
+        "app_id": "network.deep.проба",
+        "app_version": "β-2.0",
+        "sig_v": 2
+      },
+      "unsorted_namespaces_for_canonicalizer": [42, 10, 0, -42],
+      "canonical": "deep.push/subscribe/v2\npubkey=66:054701d08488451f545a409fb58ae3e58581ca40ac3f7f114698cd71deac73ca01\nsig_ts=10:1893456120\nservice=8:firebase\ndevice_token=22:токен-東京-🚀\nenc_key=64:ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100\nwant_data=1:0\nnamespaces=11:-42,0,10,42\napp_id=23:network.deep.проба\napp_version=6:β-2.0\n",
+      "canonical_hex": "646565702e707573682f7375627363726962652f76320a7075626b65793d36363a3035343730316430383438383435316635343561343039666235386165336535383538316361343061633366376631313436393863643731646561633733636130310a7369675f74733d31303a313839333435363132300a736572766963653d383a66697265626173650a6465766963655f746f6b656e3d32323ad182d0bed0bad0b5d0bd2de69db1e4baac2df09f9a800a656e635f6b65793d36343a666665656464636362626161393938383737363635353434333332323131303066666565646463636262616139393838373736363535343433333232313130300a77616e745f646174613d313a300a6e616d657370616365733d31313a2d34322c302c31302c34320a6170705f69643d32333a6e6574776f726b2e646565702ed0bfd180d0bed0b1d0b00a6170705f76657273696f6e3d363aceb22d322e300a",
+      "canonical_utf8_length": 350
+    },
+    {
+      "id": "unsubscribe_multibyte",
+      "operation": "unsubscribe",
+      "request": {
+        "pubkey": "054701d08488451f545a409fb58ae3e58581ca40ac3f7f114698cd71deac73ca01",
+        "session_ed25519": "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8",
+        "service": "firebase",
+        "sig_ts": 1893456180,
+        "signature": "XzJupgAo99td8ERXhlAqJxOutc5o1VYq+Vwc0YO8OX7EhhF5fc+Z37dpnRp4Ssxea63uglwc8Uoq7TpNxr1VBw==",
+        "service_info": {
+          "token": "токен-東京-🚀"
+        },
+        "sig_v": 2
+      },
+      "canonical": "deep.push/unsubscribe/v2\npubkey=66:054701d08488451f545a409fb58ae3e58581ca40ac3f7f114698cd71deac73ca01\nsig_ts=10:1893456180\nservice=8:firebase\ndevice_token=22:токен-東京-🚀\n",
+      "canonical_hex": "646565702e707573682f756e7375627363726962652f76320a7075626b65793d36363a3035343730316430383438383435316635343561343039666235386165336535383538316361343061633366376631313436393863643731646561633733636130310a7369675f74733d31303a313839333435363138300a736572766963653d383a66697265626173650a6465766963655f746f6b656e3d32323ad182d0bed0bad0b5d0bd2de69db1e4baac2df09f9a800a",
+      "canonical_utf8_length": 181
+    }
+  ]
+}

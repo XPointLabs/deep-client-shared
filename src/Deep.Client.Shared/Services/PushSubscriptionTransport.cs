@@ -61,8 +61,11 @@ public sealed record PushSubscriptionRequest(
     [property: JsonPropertyName("service_info")] PushSubscriptionServiceInfo ServiceInfo,
     [property: JsonPropertyName("enc_key")] string EncKey,
     [property: JsonPropertyName("app_id")] string AppId = PushNotificationCrypto.PackageName,
-    [property: JsonPropertyName("app_version")] string AppVersion = "0.0.0",
-    [property: JsonPropertyName("sig_v")] int SigVersion = PushSubscriptionCanonicalFormat.SignatureVersion);
+    [property: JsonPropertyName("app_version")] string AppVersion = "0.0.0")
+{
+    [JsonPropertyName("sig_v")]
+    public int SigVersion => PushSubscriptionCanonicalFormat.SignatureVersion;
+}
 
 public sealed record PushUnsubscribeRequest(
     [property: JsonPropertyName("pubkey")] string Pubkey,
@@ -70,8 +73,11 @@ public sealed record PushUnsubscribeRequest(
     [property: JsonPropertyName("service")] string Service,
     [property: JsonPropertyName("sig_ts")] long SigTs,
     [property: JsonPropertyName("signature")] string Signature,
-    [property: JsonPropertyName("service_info")] PushSubscriptionServiceInfo ServiceInfo,
-    [property: JsonPropertyName("sig_v")] int SigVersion = PushSubscriptionCanonicalFormat.SignatureVersion);
+    [property: JsonPropertyName("service_info")] PushSubscriptionServiceInfo ServiceInfo)
+{
+    [JsonPropertyName("sig_v")]
+    public int SigVersion => PushSubscriptionCanonicalFormat.SignatureVersion;
+}
 
 public sealed record HttpPushSubscriptionTransportOptions(
     string BaseUrl,
