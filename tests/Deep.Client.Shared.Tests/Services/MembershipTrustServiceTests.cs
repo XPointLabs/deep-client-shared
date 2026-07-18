@@ -108,15 +108,28 @@ public sealed class MembershipTrustServiceTests
             MembershipContractCodec.EncodeSignedMembership(oneSigner));
         Assert.Equal(MembershipTrustState.ProtocolUnsupported, oneSignerStatus.State);
 
+        var invalidSignatureBytes = signed.Signatures[0].Signature.ToArray();
+        invalidSignatureBytes[0] ^= 0xff;
+        var badSignature = signed with
+        {
+            Signatures =
+            [
+                signed.Signatures[0] with { Signature = invalidSignatureBytes },
+                signed.Signatures[1]
+            ]
+        };
+        var invalidSignatureStatus = await service.ApplyMembershipAsync(
+            profile,
+            MembershipContractCodec.EncodeSignedMembership(badSignature));
+        Assert.Equal(MembershipTrustState.ProtocolUnsupported, invalidSignatureStatus.State);
+
         var wrongDomain = ResignMembership(
             signed.Statement,
             signed.Signatures,
             MembershipSignatureDomain.Bridge,
             verifier);
-        var domainStatus = await service.ApplyMembershipAsync(
-            profile,
+        Assert.Throws<MembershipContractException>(() =>
             MembershipContractCodec.EncodeSignedMembership(wrongDomain));
-        Assert.Equal(MembershipTrustState.ProtocolUnsupported, domainStatus.State);
 
         var wrongNetworkStatement = signed.Statement with
         {

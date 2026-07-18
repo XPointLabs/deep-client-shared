@@ -41,7 +41,7 @@ public sealed class LocalSchemaMigrator(IReadOnlyList<SchemaMigration> migration
 
 public static class LocalSchemaMigrations
 {
-    public const int LatestVersion = 3;
+    public const int LatestVersion = 4;
 
     public static IReadOnlyList<SchemaMigration> Default { get; } =
     [
@@ -50,6 +50,8 @@ public static class LocalSchemaMigrations
         new(1, 2, "Attachment metadata encrypted pointer columns",
             (store, ct) => store.SetSchemaValueAsync("schema.2", "attachment-pointer-metadata", ct)),
         new(2, 3, "Config sync cursors and namespace tracking",
-            (store, ct) => store.SetSchemaValueAsync("schema.3", "sync-cursors", ct))
+            (store, ct) => store.SetSchemaValueAsync("schema.3", "sync-cursors", ct)),
+        new(3, 4, "Installation scoped membership trust records",
+            (store, ct) => store.SetSchemaValueAsync("schema.4", "membership-trust-lkg", ct))
     ];
 }

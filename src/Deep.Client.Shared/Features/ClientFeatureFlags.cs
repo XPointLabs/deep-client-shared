@@ -9,7 +9,9 @@ public sealed record ClientFeatureFlags(
     bool BackgroundSyncEnabled = true,
     bool PushNotificationsEnabled = true,
     bool TransportRequired = false,
-    bool StubTransportAllowed = true)
+    bool StubTransportAllowed = true,
+    bool MembershipTrustEnabled = false,
+    bool LegacyEmbeddedBootstrapRollbackAllowed = false)
 {
     public static ClientFeatureFlags Defaults { get; } = new();
 
@@ -22,7 +24,9 @@ public sealed record ClientFeatureFlags(
         BackgroundSyncEnabled: true,
         PushNotificationsEnabled: true,
         TransportRequired: true,
-        StubTransportAllowed: false);
+        StubTransportAllowed: false,
+        MembershipTrustEnabled: false,
+        LegacyEmbeddedBootstrapRollbackAllowed: false);
 }
 
 public sealed class FeatureDisabledException(string featureName)

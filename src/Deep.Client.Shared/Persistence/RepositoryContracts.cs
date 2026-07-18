@@ -511,6 +511,39 @@ public interface ISettingsRepository
     Task DeleteAsync(string key, CancellationToken cancellationToken = default);
 }
 
+public enum MembershipTrustCommitResult
+{
+    Applied,
+    Idempotent,
+    Conflict,
+    Corrupt
+}
+
+public enum MembershipTrustReadResult
+{
+    Missing,
+    Found,
+    Corrupt
+}
+
+public sealed record MembershipTrustReadSnapshot(
+    MembershipTrustReadResult Result,
+    MembershipTrustRecord? Head,
+    MembershipTrustRecord? Predecessor);
+
+public interface IMembershipTrustRepository
+{
+    Task<MembershipTrustCommitResult> CommitMembershipTrustAsync(
+        MembershipTrustRecord record,
+        ulong? expectedHeadRevision,
+        CancellationToken cancellationToken = default);
+
+    Task<MembershipTrustReadSnapshot> ReadMembershipTrustAsync(
+        string opaqueProfileKey,
+        MembershipTrustDomain domain,
+        CancellationToken cancellationToken = default);
+}
+
 public static class LocalSettingsKeys
 {
     public const string ActiveAccount = "account.active";

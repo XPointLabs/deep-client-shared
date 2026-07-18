@@ -9,7 +9,8 @@ namespace Deep.Client.Shared.Persistence;
 public sealed class InMemorySessionStore :
     ILocalSessionStore,
     IOneToOneConversationOpenRepository,
-    IMessageSyncRepository
+    IMessageSyncRepository,
+    IMembershipTrustRepository
 {
     private static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerDefaults.Web)
     {
@@ -27,6 +28,8 @@ public sealed class InMemorySessionStore :
     private readonly Dictionary<InboxItemKey, InboxItemState> inboxItems = [];
     private readonly Dictionary<string, GroupStateOutboxItem> groupStateOutbox = new(StringComparer.Ordinal);
     private readonly Dictionary<string, long> incomingMessageNotifications = new(StringComparer.Ordinal);
+    private readonly Dictionary<MembershipTrustKey, SortedDictionary<ulong, MembershipTrustRecord>> membershipTrustRecords = [];
+    private readonly Dictionary<MembershipTrustKey, ulong> membershipTrustHeads = [];
     private readonly object durableStateGate = new();
     private readonly object accountDataPurgeGate = new();
     private readonly string? statePath;
@@ -1000,6 +1003,117 @@ public sealed class InMemorySessionStore :
     public Task<string?> GetSchemaValueAsync(string key, CancellationToken cancellationToken = default) =>
         Task.FromResult(schemaValues.GetValueOrDefault(key));
 
+    public Task<MembershipTrustCommitResult> CommitMembershipTrustAsync(
+        MembershipTrustRecord record,
+        ulong? expectedHeadRevision,
+        CancellationToken cancellationToken = default)
+    {
+        MembershipTrustRecord.Validate(record);
+        cancellationToken.ThrowIfCancellationRequested();
+        var key = new MembershipTrustKey(record.OpaqueProfileKey, record.Domain);
+
+        lock (durableStateGate)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!membershipTrustRecords.TryGetValue(key, out var records))
+            {
+                records = [];
+                membershipTrustRecords[key] = records;
+            }
+
+            if (records.TryGetValue(record.Revision, out var existing))
+            {
+                return Task.FromResult(
+                    MembershipTrustRepositoryValidation.Same(existing, record)
+                        ? MembershipTrustCommitResult.Idempotent
+                        : MembershipTrustCommitResult.Conflict);
+            }
+
+            var hasHead = membershipTrustHeads.TryGetValue(key, out var headRevision);
+            if (hasHead != expectedHeadRevision.HasValue ||
+                (hasHead && headRevision != expectedHeadRevision!.Value) ||
+                record.Revision != (hasHead ? headRevision + 1 : 1))
+            {
+                return Task.FromResult(MembershipTrustCommitResult.Conflict);
+            }
+
+            records.Add(record.Revision, record);
+            membershipTrustHeads[key] = record.Revision;
+            try
+            {
+                PersistState();
+            }
+            catch
+            {
+                records.Remove(record.Revision);
+                if (hasHead)
+                {
+                    membershipTrustHeads[key] = headRevision;
+                }
+                else
+                {
+                    membershipTrustHeads.Remove(key);
+                    if (records.Count == 0)
+                    {
+                        membershipTrustRecords.Remove(key);
+                    }
+                }
+                throw;
+            }
+
+            return Task.FromResult(MembershipTrustCommitResult.Applied);
+        }
+    }
+
+    public Task<MembershipTrustReadSnapshot> ReadMembershipTrustAsync(
+        string opaqueProfileKey,
+        MembershipTrustDomain domain,
+        CancellationToken cancellationToken = default)
+    {
+        MembershipTrustRepositoryValidation.ValidateKey(opaqueProfileKey, domain);
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (durableStateGate)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            foreach (var pair in membershipTrustRecords)
+            {
+                if (!membershipTrustHeads.TryGetValue(pair.Key, out var globalHead) ||
+                    globalHead == 0 ||
+                    pair.Value.Keys.Any(revision => revision > globalHead))
+                {
+                    return Task.FromResult(MembershipTrustRepositoryValidation.Corrupt());
+                }
+            }
+
+            var key = new MembershipTrustKey(opaqueProfileKey, domain);
+            var hasRecords = membershipTrustRecords.TryGetValue(key, out var records);
+            var hasHead = membershipTrustHeads.TryGetValue(key, out var headRevision);
+            if (!hasRecords && !hasHead)
+            {
+                return Task.FromResult(MembershipTrustRepositoryValidation.Missing());
+            }
+            if (!hasRecords || !hasHead || records is null || headRevision == 0 ||
+                !records.TryGetValue(headRevision, out var head) ||
+                !MembershipTrustRepositoryValidation.IsValid(head))
+            {
+                return Task.FromResult(MembershipTrustRepositoryValidation.Corrupt());
+            }
+
+            MembershipTrustRecord? predecessor = null;
+            if (headRevision > 1 &&
+                (!records.TryGetValue(headRevision - 1, out predecessor) ||
+                 !MembershipTrustRepositoryValidation.IsValid(predecessor)))
+            {
+                return Task.FromResult(MembershipTrustRepositoryValidation.Corrupt());
+            }
+
+            return Task.FromResult(new MembershipTrustReadSnapshot(
+                MembershipTrustReadResult.Found,
+                head,
+                predecessor));
+        }
+    }
+
     public Task<MessageReplayClaimResult> TryClaimAsync(
         SessionId sender,
         MessageId messageId,
@@ -1543,7 +1657,9 @@ public sealed class InMemorySessionStore :
                     [],
                     [],
                     schemaValues.OrderBy(static item => item.Key).ToArray(),
-                    schemaVersion));
+                    schemaVersion,
+                    MembershipTrustRecords: MembershipTrustRecordSnapshots(),
+                    MembershipTrustHeads: MembershipTrustHeadSnapshots()));
 
                 conversations.Clear();
                 contacts.Clear();
@@ -1663,6 +1779,23 @@ public sealed class InMemorySessionStore :
             incomingMessageNotifications.Count == 0
                 ? 0
                 : incomingMessageNotifications.Values.Max());
+
+        foreach (var item in snapshot.MembershipTrustRecords ?? [])
+        {
+            var key = new MembershipTrustKey(item.Record.OpaqueProfileKey, item.Record.Domain);
+            if (!membershipTrustRecords.TryGetValue(key, out var records))
+            {
+                records = [];
+                membershipTrustRecords[key] = records;
+            }
+            records[item.Record.Revision] = item.Record;
+        }
+
+        foreach (var item in snapshot.MembershipTrustHeads ?? [])
+        {
+            membershipTrustHeads[
+                new MembershipTrustKey(item.OpaqueProfileKey, item.Domain)] = item.Revision;
+        }
     }
 
     private void PersistState()
@@ -1710,9 +1843,29 @@ public sealed class InMemorySessionStore :
                 nextInboxSequence,
                 groupOutboxSnapshots,
                 incomingMessageNotificationSnapshots,
-                nextIncomingMessageNotificationSequence));
+                nextIncomingMessageNotificationSequence,
+                MembershipTrustRecordSnapshots(),
+                MembershipTrustHeadSnapshots()));
         }
     }
+
+    private IReadOnlyList<MembershipTrustRecordSnapshot> MembershipTrustRecordSnapshots() =>
+        membershipTrustRecords
+            .OrderBy(static item => item.Key.OpaqueProfileKey, StringComparer.Ordinal)
+            .ThenBy(static item => item.Key.Domain)
+            .SelectMany(static item => item.Value.Values)
+            .Select(static record => new MembershipTrustRecordSnapshot(record))
+            .ToArray();
+
+    private IReadOnlyList<MembershipTrustHeadSnapshot> MembershipTrustHeadSnapshots() =>
+        membershipTrustHeads
+            .OrderBy(static item => item.Key.OpaqueProfileKey, StringComparer.Ordinal)
+            .ThenBy(static item => item.Key.Domain)
+            .Select(static item => new MembershipTrustHeadSnapshot(
+                item.Key.OpaqueProfileKey,
+                item.Key.Domain,
+                item.Value))
+            .ToArray();
 
     private void PersistSnapshot(SessionStoreSnapshot snapshot)
     {
@@ -1756,9 +1909,22 @@ public sealed class InMemorySessionStore :
         long NextInboxSequence = 0,
         IReadOnlyList<GroupStateOutboxItem>? GroupStateOutbox = null,
         IReadOnlyList<IncomingMessageNotificationSnapshot>? IncomingMessageNotifications = null,
-        long NextIncomingMessageNotificationSequence = 0);
+        long NextIncomingMessageNotificationSequence = 0,
+        IReadOnlyList<MembershipTrustRecordSnapshot>? MembershipTrustRecords = null,
+        IReadOnlyList<MembershipTrustHeadSnapshot>? MembershipTrustHeads = null);
 
     private sealed record IncomingMessageNotificationSnapshot(string MessageId, long Sequence);
+
+    private sealed record MembershipTrustRecordSnapshot(MembershipTrustRecord Record);
+
+    private sealed record MembershipTrustHeadSnapshot(
+        string OpaqueProfileKey,
+        MembershipTrustDomain Domain,
+        ulong Revision);
+
+    private sealed record MembershipTrustKey(
+        string OpaqueProfileKey,
+        MembershipTrustDomain Domain);
 
     private sealed record ReplayClaimKey(string SenderSessionId, string MessageId);
 

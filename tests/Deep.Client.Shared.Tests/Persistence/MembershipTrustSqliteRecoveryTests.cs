@@ -11,14 +11,14 @@ public sealed class MembershipTrustSqliteRecoveryTests
     public async Task RestartWithValidHead_IsFound()
     {
         await using var database = await TestDatabase.CreateAsync();
-        await using (var first = database.Open())
+        using (var first = database.Open())
         {
             Assert.Equal(
                 MembershipTrustCommitResult.Applied,
                 await first.CommitMembershipTrustAsync(Record(1, 6, 0x10), null));
         }
 
-        await using var restarted = database.Open();
+        using var restarted = database.Open();
         var read = await restarted.ReadMembershipTrustAsync(
             "install:test",
             MembershipTrustDomain.Membership);
@@ -35,7 +35,7 @@ public sealed class MembershipTrustSqliteRecoveryTests
     public async Task CorruptPhysicalState_BlocksWithoutPriorFallback(string corruption)
     {
         await using var database = await TestDatabase.CreateAsync();
-        await using (var store = database.Open())
+        using (var store = database.Open())
         {
             _ = await store.CommitMembershipTrustAsync(Record(1, 6, 0x10), null);
             _ = await store.CommitMembershipTrustAsync(Record(2, 7, 0x20), 1);
@@ -43,7 +43,7 @@ public sealed class MembershipTrustSqliteRecoveryTests
 
         await database.MutateAsync(corruption);
 
-        await using var restarted = database.Open();
+        using var restarted = database.Open();
         var read = await restarted.ReadMembershipTrustAsync(
             "install:test",
             MembershipTrustDomain.Membership);
@@ -56,7 +56,7 @@ public sealed class MembershipTrustSqliteRecoveryTests
     public async Task LogicalSchemaThreeToFour_PreservesExistingDomainRows()
     {
         await using var database = await TestDatabase.CreateAsync();
-        await using (var store = database.Open())
+        using (var store = database.Open())
         {
             await store.SetSchemaVersionAsync(3);
             await store.SetSchemaValueAsync("existing.account", "preserved");
@@ -70,7 +70,7 @@ public sealed class MembershipTrustSqliteRecoveryTests
             Assert.Equal("preserved", await store.GetSchemaValueAsync("existing.group"));
         }
 
-        await using var restarted = database.Open();
+        using var restarted = database.Open();
         Assert.Equal(4, await restarted.GetSchemaVersionAsync());
         Assert.Equal("preserved", await restarted.GetSchemaValueAsync("existing.account"));
         Assert.Equal("preserved", await restarted.GetSchemaValueAsync("existing.message"));
@@ -100,7 +100,7 @@ public sealed class MembershipTrustSqliteRecoveryTests
 
         public async Task MutateAsync(string corruption)
         {
-            await using var connection = new SqliteConnection($"Data Source={path}");
+            await using var connection = new SqliteConnection($"Data Source={path};Pooling=False");
             await connection.OpenAsync();
             await using var command = connection.CreateCommand();
             command.CommandText = corruption switch
@@ -108,10 +108,10 @@ public sealed class MembershipTrustSqliteRecoveryTests
                 "orphan" => """
                     INSERT INTO membership_trust_records
                         (profile_key, domain, revision, sequence, previous_sequence,
-                         previous_hash, envelope, payload_digest, state, observed_at, valid_until)
+                         previous_hash, envelope, payload_digest, canonical_hash, state, observed_at, valid_until)
                     VALUES
                         ('install:orphan', 3, 1, 6, 5, zeroblob(32), zeroblob(96),
-                         zeroblob(32), 3, 1010, 1200);
+                         zeroblob(32), zeroblob(32), 3, 1010, 1200);
                     """,
                 "missing-head" => """
                     DELETE FROM membership_trust_heads
@@ -143,6 +143,7 @@ public sealed class MembershipTrustSqliteRecoveryTests
 
         public ValueTask DisposeAsync()
         {
+            SqliteConnection.ClearAllPools();
             foreach (var candidate in new[] { path, path + "-wal", path + "-shm" })
             {
                 File.Delete(candidate);
