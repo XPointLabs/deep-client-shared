@@ -47,3 +47,16 @@ Dynamic membership authorization currently comes from XNode's exact `NodeDb` reg
 - Current signaling transport is in-memory and intended for deterministic runtime/tests until secure network signaling is wired.
 - SDP/ICE payload objects are compatibility-level placeholders; native platform WebRTC media engines are a parity follow-up.
 - Parity target is to connect secure signaling + native media stack + observability export without changing shared call state semantics.
+# Dormant membership trust slice (P07)
+
+`MembershipTrustService` is a portable, fixture-driven trust reducer for the
+pinned P04 canonical contract. It is deliberately absent from `ClientRuntime`
+and every platform composition. Installation-scoped profiles keep independent
+authority, bridge, and membership LKG chains in SQLite or the in-memory store.
+Immutable records and CAS heads bind all persisted metadata with a
+domain-separated SHA-256 corruption digest.
+
+The digest detects accidental corruption only. This slice does not claim local
+tamper resistance, approved production cryptography, live bootstrap, transport
+availability, or production readiness. Both membership and legacy rollback
+feature flags remain disabled.
