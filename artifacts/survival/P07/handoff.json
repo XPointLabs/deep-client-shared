@@ -1,9 +1,9 @@
 {
   "schema": "deep.p07.handoff.v1",
-  "sourceCommit": "03e187d50751da2b572d2245da2713ee4ffb0e64",
-  "evidenceCommit": "THIS-CARRIER-COMMIT",
+  "sourceCommit": "f8acbc605c35ec084e8f7f6fe923eb16102688a2",
+  "previousEvidenceCarrierCommit": "37c3501d61462a1403da944096ab2c113bcc46d8",
   "independentReviewRequired": true,
-  "next": ["independent exact-commit review", "P07B source policy", "P14 self-host UX"],
+  "next": ["independent exact-source-and-evidence review", "P07B source policy", "P14 self-host UX"],
   "blockers": [
     "no approved production P04 signature profile or external cryptographic review",
     "no live signed bootstrap/checkpoint source",

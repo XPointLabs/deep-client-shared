@@ -2,7 +2,7 @@
   "schema": "deep.survival.work-package-report.v1",
   "workPackage": "P07",
   "humanOwner": "Mr. X",
-  "status": "DORMANT-LOCAL-FIXTURE-SLICE",
+  "status": "DORMANT-LOCAL-CORRECTIVE-SLICE",
   "baseCommit": "fb310d05a4b8bd5450695ab00569deb62aba1ff1",
   "dependencyRedCommit": "c9068a6ae152b2a5190dfc9184853eb6989bfa82",
   "dependencyGreenCommit": "17c6a251c017270b450d89f0d3f47710243d09bf",
@@ -10,11 +10,15 @@
   "persistenceRedCommit": "95d7e9d015c8ac6822937d7fce42c7075bd08fee",
   "minimalGreenCommit": "e89b7fd4ad8772e85fbb7d8b9ccb13c2781e6b7d",
   "correctiveRedCommit": "ef485c5e8d92d548ed5a50876cf0f4ed526a0a07",
-  "sourceCommit": "03e187d50751da2b572d2245da2713ee4ffb0e64",
-  "evidenceCommit": "THIS-CARRIER-COMMIT",
+  "correctiveRedCommits": [
+    "a798739168effbe2bfd3d250e9999855533f5e78",
+    "d20289800bbea96da526af614b38926fef149983"
+  ],
+  "previousEvidenceCarrierCommit": "37c3501d61462a1403da944096ab2c113bcc46d8",
+  "sourceCommit": "f8acbc605c35ec084e8f7f6fe923eb16102688a2",
   "tests": {
-    "full": { "passed": 349, "failed": 0, "skipped": 0 },
-    "focused": { "passed": 39, "failed": 0, "skipped": 0 },
+    "full": { "passed": 363, "failed": 0, "skipped": 0 },
+    "focused": { "passed": 53, "failed": 0, "skipped": 0 },
     "privacyGate": { "passed": 3, "failed": 0, "skipped": 0 }
   },
   "dormant": true,

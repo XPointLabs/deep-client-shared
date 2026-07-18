@@ -3,6 +3,8 @@
   "migration": "logical-3-to-4-additive",
   "preservesAccountMessageGroupState": true,
   "trustProfilesSurviveAccountSignOut": true,
+  "observedTimeHighWaterSurvivesAccountSignOut": true,
+  "sqliteAdditions": ["artifact_kind", "membership_trust_clock"],
   "profileScope": "installation-not-account",
   "rollback": "keep tables and both flags false; do not select an older LKG",
   "silentLegacyFallback": false

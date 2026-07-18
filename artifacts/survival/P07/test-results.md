@@ -2,11 +2,16 @@
 
 - Locked local restore: exit 0, two projects.
 - Dependency gate: PASS.
-- Full Release: 349 passed, 0 failed, 0 skipped.
-- Focused `MembershipTrust`: 39 passed, 0 failed, 0 skipped.
+- Full Release: 363 passed, 0 failed, 0 skipped.
+- Focused `MembershipTrust`: 53 passed, 0 failed, 0 skipped.
 - Privacy/source gate: 3 passed, 0 failed, 0 skipped.
-- Full TRX SHA-256: `a0ad24ba2eee2fcce5f74b0aa303d5ad84659a250bf8159461f4292777c7fec2`.
-- Focused TRX SHA-256: `58ec63008e332c2c95171136589063d39735d913cd41c9e483a3cb5f3f60c0be`.
+- Full TRX SHA-256: `fe265423b458c1f5811b067968d98eec7ec28ac9f97dc985a2d9ccab31966950`.
+- Focused TRX SHA-256: `83b24177d4011436fa0c43e7a8a09464bff52c43796729bca6aa0473d425ee64`.
+
+The commands above were run from exact source commit
+`f8acbc605c35ec084e8f7f6fe923eb16102688a2`. The dependency gate also
+verified the P04 source/review/final ancestry and all three exact global-cache
+package archives without depending on sibling repository HEAD or cleanliness.
 
 TRX files were not committed because they contain machine-local paths. No
 external, device, Docker, or network E2E lane was run or claimed.

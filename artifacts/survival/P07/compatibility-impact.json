@@ -7,6 +7,8 @@
   "logicalSchemaFrom": 3,
   "logicalSchemaTo": 4,
   "physicalUserVersionChanged": false,
+  "physicalSchemaAdditive": true,
+  "existingTrustRowsUseExplicitAnchorDefaultUntilRewritten": true,
   "p07bImpact": "Consume canonical candidate bytes only after a separately reviewed source policy.",
   "mauiImpact": "Self-host import UX remains P14/P14B and is not registered."
 }
