@@ -381,6 +381,37 @@ public sealed class MembershipTrustRepositoryContractTests
         Assert.Null(read.Predecessor);
     }
 
+    [Fact]
+    public void SqliteHistoryValidation_HasSingleOrderedQueryAndExplicitBudget()
+    {
+        var root = FindRepositoryRoot();
+        var source = File.ReadAllText(Path.Combine(
+            root,
+            "src",
+            "Deep.Client.Shared",
+            "Persistence",
+            "SqliteSessionStore.cs"));
+        var start = source.IndexOf(
+            "public async Task<MembershipTrustReadSnapshot> ReadMembershipTrustAsync(",
+            StringComparison.Ordinal);
+        var end = source.IndexOf(
+            "public async Task<MembershipTrustClockCommitResult>",
+            start,
+            StringComparison.Ordinal);
+        Assert.True(start >= 0 && end > start);
+        var implementation = source[start..end];
+
+        Assert.Contains("ORDER BY revision", implementation, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "ReadMembershipTrustRecordAsync(",
+            implementation,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "MaximumMembershipTrustHistoryRecords",
+            source,
+            StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -611,5 +642,19 @@ public sealed class MembershipTrustRepositoryContractTests
                 File.Delete(candidate);
             }
         }
+    }
+
+    private static string FindRepositoryRoot()
+    {
+        var current = new DirectoryInfo(AppContext.BaseDirectory);
+        while (current is not null)
+        {
+            if (File.Exists(Path.Combine(current.FullName, "Deep.Client.Shared.slnx")))
+            {
+                return current.FullName;
+            }
+            current = current.Parent;
+        }
+        throw new DirectoryNotFoundException("Repository root was not found.");
     }
 }

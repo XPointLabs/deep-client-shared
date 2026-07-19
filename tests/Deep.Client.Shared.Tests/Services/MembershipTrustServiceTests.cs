@@ -1201,6 +1201,98 @@ public sealed class MembershipTrustServiceTests
                 cancellation.Token));
     }
 
+    [Theory]
+    [InlineData("initialize", "verifier")]
+    [InlineData("evaluate", "verifier")]
+    [InlineData("membership", "verifier")]
+    [InlineData("bridge", "verifier")]
+    [InlineData("delegation", "verifier")]
+    [InlineData("revocation", "verifier")]
+    [InlineData("self-hosted", "verifier")]
+    [InlineData("initialize", "repository")]
+    [InlineData("evaluate", "repository")]
+    [InlineData("membership", "repository")]
+    [InlineData("bridge", "repository")]
+    [InlineData("delegation", "repository")]
+    [InlineData("revocation", "repository")]
+    [InlineData("self-hosted", "repository")]
+    public async Task PublicOperations_BoundUnrequestedDependencyCancellation(
+        string operation,
+        string dependency)
+    {
+        const string canary = "dependency-cancellation-sensitive-marker";
+        var signer = new FixtureMembershipVerifier();
+        var profile = FixtureProfile();
+        IMembershipTrustRepository repository;
+        IMembershipSignatureVerifier verifier;
+        if (dependency == "verifier")
+        {
+            repository = new InMemorySessionStore();
+            var healthy = Service(repository, signer);
+            _ = await healthy.InitializeAsync(profile);
+            _ = await healthy.ApplyMembershipAsync(
+                profile,
+                Vector("deep-extension/membership/v1/signed-membership"));
+            _ = await healthy.ApplyBridgeAsync(
+                profile,
+                Vector("deep-extension/membership/v1/signed-bridge"));
+            verifier = new CancelingMembershipVerifier(canary);
+        }
+        else
+        {
+            repository = new CancelingMembershipTrustRepository(canary);
+            verifier = signer;
+        }
+        var service = new MembershipTrustService(
+            repository,
+            verifier,
+            new FrozenClock(FixtureNow),
+            EnabledOptions());
+
+        var result = await InvokePublicOperationAsync(
+            service,
+            profile,
+            operation,
+            signer);
+
+        Assert.Equal(MembershipTrustState.Corrupt, result.State);
+    }
+
+    [Theory]
+    [InlineData("initialize")]
+    [InlineData("evaluate")]
+    [InlineData("membership")]
+    [InlineData("bridge")]
+    [InlineData("delegation")]
+    [InlineData("revocation")]
+    [InlineData("self-hosted")]
+    public async Task PublicOperations_SanitizeRequestedCancellation(
+        string operation)
+    {
+        const string canary = "dependency-cancellation-sensitive-marker";
+        var signer = new FixtureMembershipVerifier();
+        var profile = FixtureProfile();
+        var service = new MembershipTrustService(
+            new CancelingMembershipTrustRepository(canary),
+            signer,
+            new FrozenClock(FixtureNow),
+            EnabledOptions());
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        var exception = await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => InvokePublicOperationAsync(
+                service,
+                profile,
+                operation,
+                signer,
+                cancellation.Token));
+
+        Assert.Equal(cancellation.Token, exception.CancellationToken);
+        Assert.Null(exception.InnerException);
+        Assert.DoesNotContain(canary, exception.ToString(), StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task OrdinaryProfile_CannotOccupyReservedSelfHostedNamespace()
     {
@@ -1784,6 +1876,45 @@ public sealed class MembershipTrustServiceTests
             string opaqueProfileKey,
             CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException(message);
+    }
+
+    private sealed class CancelingMembershipVerifier(string message)
+        : IMembershipSignatureVerifier
+    {
+        public bool Verify(
+            ReadOnlySpan<byte> signerId,
+            ReadOnlySpan<byte> publicKey,
+            MembershipSignatureDomain domain,
+            ReadOnlySpan<byte> signingBytes,
+            ReadOnlySpan<byte> signature) =>
+            throw new OperationCanceledException(message);
+    }
+
+    private sealed class CancelingMembershipTrustRepository(string message)
+        : IMembershipTrustRepository
+    {
+        public Task<MembershipTrustCommitResult> CommitMembershipTrustAsync(
+            MembershipTrustRecord record,
+            ulong? expectedHeadRevision,
+            CancellationToken cancellationToken = default) =>
+            throw new OperationCanceledException(message);
+
+        public Task<MembershipTrustReadSnapshot> ReadMembershipTrustAsync(
+            string opaqueProfileKey,
+            MembershipTrustDomain domain,
+            CancellationToken cancellationToken = default) =>
+            throw new OperationCanceledException(message);
+
+        public Task<MembershipTrustClockCommitResult> CommitMembershipTrustClockAsync(
+            MembershipTrustClockRecord record,
+            ulong? expectedRevision,
+            CancellationToken cancellationToken = default) =>
+            throw new OperationCanceledException(message);
+
+        public Task<MembershipTrustClockReadSnapshot> ReadMembershipTrustClockAsync(
+            string opaqueProfileKey,
+            CancellationToken cancellationToken = default) =>
+            throw new OperationCanceledException(message);
     }
 
     private sealed class RejectingMembershipVerifier : IMembershipSignatureVerifier
