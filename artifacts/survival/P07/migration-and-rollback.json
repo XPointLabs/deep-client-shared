@@ -11,6 +11,8 @@
     "revoked_delegation_hashes"
   ],
   "trustRecordSchema": 2,
+  "trustTimestampCanonicalForm": "UTC whole seconds",
+  "preCanonicalDormantRecordPolicy": "fail-closed-and-rebootstrap",
   "preV2DormantRecordPolicy": "fail-closed-and-rebootstrap",
   "revocationSetOverflowPolicy": "persist-terminal-corrupt-marker-and-require-approved-rebootstrap",
   "profileScope": "installation-not-account",

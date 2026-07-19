@@ -14,27 +14,27 @@
     "a798739168effbe2bfd3d250e9999855533f5e78",
     "d20289800bbea96da526af614b38926fef149983",
     "0b2715dfa6ee1bbe4292953a9108c112e12f79bc",
-    "f7cd105f7d9dee0c0747d30dc446e98b3c48abd0"
+    "f7cd105f7d9dee0c0747d30dc446e98b3c48abd0",
+    "19269b901b85620de15fbe0d4edcce69a99ed29e"
   ],
-  "previousEvidenceCarrierCommit": "84b01ee39804d06c09a74b36edfcb5bbb082f926",
-  "sourceCommit": "9e2ceb1ddf6353a84a3c62334b5a12ab58198a0d",
-  "evidenceContentCommit": "b8258864dd262569783d41f1d96174b94ea22f6d",
+  "previousEvidenceCarrierCommit": "c27e130ddfa2d7ba68ac2a6025b6f924c4a1882a",
+  "sourceCommit": "5cd1d8dfd8e1f7dd33793e937c840ba315daac27",
   "tests": {
     "full": {
-      "command": "dotnet test .\\Deep.Client.Shared.slnx --configuration Release --no-restore --logger \"trx;LogFileName=p07-corrective4-full.trx\" --results-directory .\\artifacts\\survival\\P07\\trx",
+      "command": "dotnet test .\\Deep.Client.Shared.slnx --configuration Release --no-restore --logger \"trx;LogFileName=p07-corrective5-full.trx\" --results-directory .\\artifacts\\survival\\P07\\trx",
       "exitCode": 0,
-      "passed": 377,
+      "passed": 382,
       "failed": 0,
       "skipped": 0,
-      "localUncommittedTrxSha256": "5bcf2841d187e2e94d4dee5391904628703bf54ad08fde6be816a2684ebb2d9f"
+      "localUncommittedTrxSha256": "98d79ab993a6d2c9da5a1a8f4ed3e03d7a094f2eff8a2ed8975f63579166de97"
     },
     "focused": {
-      "command": "dotnet test .\\tests\\Deep.Client.Shared.Tests\\Deep.Client.Shared.Tests.csproj --configuration Release --no-restore --filter \"FullyQualifiedName~MembershipTrust\" --logger \"trx;LogFileName=p07-corrective4-focused.trx\" --results-directory .\\artifacts\\survival\\P07\\trx",
+      "command": "dotnet test .\\tests\\Deep.Client.Shared.Tests\\Deep.Client.Shared.Tests.csproj --configuration Release --no-restore --filter \"FullyQualifiedName~MembershipTrust\" --logger \"trx;LogFileName=p07-corrective5-focused.trx\" --results-directory .\\artifacts\\survival\\P07\\trx",
       "exitCode": 0,
-      "passed": 67,
+      "passed": 72,
       "failed": 0,
       "skipped": 0,
-      "localUncommittedTrxSha256": "23f468e45755f38d2856dfb58de76c79d51c47d4bd28b8046df14ed2727c1fea"
+      "localUncommittedTrxSha256": "ba73b56fc7c5a125fe963c811d7b61416007ed43da83e7a6c285f23c47715984"
     },
     "privacyGate": {
       "command": "& .\\eng\\scripts\\Invoke-P07TrustGate.ps1",
@@ -44,12 +44,12 @@
       "skipped": 0
     },
     "schemaAndFlags": {
-      "command": "dotnet test .\\tests\\Deep.Client.Shared.Tests\\Deep.Client.Shared.Tests.csproj --configuration Release --no-restore --filter \"FullyQualifiedName~FeatureFlagsTests|FullyQualifiedName~LogicalSchemaThreeToFour\" --logger \"trx;LogFileName=p07-corrective4-schema-flags.trx\" --results-directory .\\artifacts\\survival\\P07\\trx",
+      "command": "dotnet test .\\tests\\Deep.Client.Shared.Tests\\Deep.Client.Shared.Tests.csproj --configuration Release --no-restore --filter \"FullyQualifiedName~FeatureFlagsTests|FullyQualifiedName~LogicalSchemaThreeToFour\" --logger \"trx;LogFileName=p07-corrective5-schema-flags.trx\" --results-directory .\\artifacts\\survival\\P07\\trx",
       "exitCode": 0,
       "passed": 6,
       "failed": 0,
       "skipped": 0,
-      "localUncommittedTrxSha256": "d8478da2e1182abd731d94b0068790a2fa903d3cfc93d903ad0dda17dee660a6"
+      "localUncommittedTrxSha256": "7796086883d001cda9ef2dbd2c11b5aa78931246fdc38560423b2f527dcd94d2"
     }
   },
   "verificationCommands": [
@@ -57,6 +57,13 @@
     { "command": "dotnet restore .\\Deep.Client.Shared.slnx --locked-mode", "exitCode": 0, "result": "two-projects-up-to-date" },
     { "command": "& .\\eng\\scripts\\Invoke-P07DependencyGate.ps1", "exitCode": 0, "result": "PASS-after-restore" }
   ],
+  "correctiveFive": {
+    "authorityApplyRevalidatesPersistedChain": true,
+    "authorityReplayUsesCurrentOperationTime": true,
+    "evaluationUsesFinalRevisionAndDigestFence": true,
+    "timestampsCanonicalizedToUtcWholeSeconds": true,
+    "reservedSelfHostedNamespaceDisjoint": true
+  },
   "changedFilesFromBase": [
     "NuGet.Config",
     "artifacts/survival/P07/compatibility-impact.json",

@@ -9,6 +9,7 @@
   "physicalUserVersionChanged": false,
   "physicalSchemaAdditive": true,
   "membershipTrustRecordSchema": 2,
+  "trustTimestampCanonicalForm": "UTC whole seconds; pre-existing dormant non-canonical rows fail closed",
   "preV2DormantTrustRows": "fail-closed-rebootstrap-required",
   "revocationOverflow": "terminal-fail-closed-rebootstrap-required",
   "existingTrustRowsUseExplicitAnchorDefaultUntilRewritten": true,
