@@ -26,9 +26,9 @@
     "6e5a6df9c3f9c6a6a63635bbbfc34468a0582f37",
     "959d020924ba151eb85495d659cec6cbc90f59a4"
   ],
-  "previousEvidenceCarrierCommit": "d7fb6be1e09fda0e05bd8f0a7090603ee16fee5c",
+  "previousEvidenceCarrierCommit": "3596a1c1a11f89ebc1be55eb09daf20a5756fed7",
   "sourceCommit": "13e39cf9ff4b0cf3b1c60084aa5af977db68f280",
-  "evidenceContentCommit": "77aec5ab9f18d625ad79ba7c832bcd9d1e9fe170",
+  "evidenceContentCommit": "9d64ac9eb7de82af5e47e404aea78100f448ac0b",
   "independentReview": {
     "verdict": "GO",
     "reviewerTaskPath": "/root/dependency_audit_retry",
