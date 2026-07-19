@@ -1,0 +1,63 @@
+{
+  "schema": "deep-survival-work-package/v1",
+  "sprint": "P11A",
+  "owner": "Mr. X",
+  "repository": "deep-client-shared",
+  "branch": "survival/w03-p11a-outbox",
+  "base_commit": "13e39cf9ff4b0cf3b1c60084aa5af977db68f280",
+  "source_commit": "c54869eb22f18facd395eabb1941342e3b217c70",
+  "status": "contract/storage-go-runtime-unwired",
+  "tests": {
+    "focused": {
+      "passed": 30,
+      "failed": 0,
+      "trx_sha256": "10d235765f3c9af7fffdff6fa731e613ea6941bd3324ab99f505bdd9dbf711a2"
+    },
+    "full_debug": {
+      "passed": 476,
+      "failed": 0,
+      "trx_sha256": "73266b552d89a9b3a2ce0b1704ed72d0685f8ae52bf1bbccc75a3de4bb57014f"
+    },
+    "full_release": {
+      "passed": 476,
+      "failed": 0,
+      "trx_sha256": "2037c48a48ad5e4910241da511eed01c0907fa6ea777d5d863bf1af94366bdad"
+    },
+    "focused_coverage": {
+      "passed": 21,
+      "failed": 0,
+      "trx_sha256": "cf8939e50131699485b4a9277113e810111f1834cec407a54a356ecd9a3a926a",
+      "cobertura_sha256": "47f6f3077f05306c06a92260870a1ff000b5fb795afa8c084a1611f1d3f6b42a"
+    }
+  },
+  "builds": {
+    "debug": {
+      "warnings": 0,
+      "errors": 0
+    },
+    "release": {
+      "warnings": 0,
+      "errors": 0
+    }
+  },
+  "scope_exclusions": [
+    "runtime wiring",
+    "network adapters",
+    "bridge selection",
+    "mailbox receipt verification",
+    "RoutedSessionTransport changes",
+    "UI",
+    "billing",
+    "Docker",
+    "credentials",
+    "live network",
+    "GitHub push"
+  ],
+  "residual_blockers": [
+    "independent architecture review",
+    "independent security review",
+    "recipient acknowledgement verifier",
+    "runtime composition",
+    "physical-device and Windows E2E in later waves"
+  ]
+}
