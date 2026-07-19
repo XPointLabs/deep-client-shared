@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Reflection;
 using Deep.Client.Shared.Persistence;
 using Microsoft.Data.Sqlite;
@@ -32,6 +33,19 @@ public sealed class TransportOutboxIteration6RedTests
             pair => pair.Value?.ToString()?.Contains(
                 EncryptionKeyCanary,
                 StringComparison.Ordinal) == true);
+    }
+
+    [Fact]
+    public void SqliteOptions_PrivateKeyIsHiddenFromDebuggerExpansion()
+    {
+        var field = typeof(SqliteSessionStoreOptions).GetField(
+            "encryptionKey",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+
+        Assert.NotNull(field);
+        var debuggerBrowsable = field.GetCustomAttribute<DebuggerBrowsableAttribute>();
+        Assert.NotNull(debuggerBrowsable);
+        Assert.Equal(DebuggerBrowsableState.Never, debuggerBrowsable.State);
     }
 
     [Fact]
