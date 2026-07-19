@@ -1,0 +1,54 @@
+{
+  "schema": "deep.survival.work-package-report.v1",
+  "workPackage": "P11A",
+  "humanOwner": "Mr. X",
+  "repository": "deep-client-shared",
+  "baseSourceCommit": "13e39cf9ff4b0cf3b1c60084aa5af977db68f280",
+  "sourceCommit": "343f770800ad6247a5a0ae63a418b229c9388cde",
+  "status": "accepted-dormant-storage-contract-go-runtime-blocked",
+  "featureFlag": "disabled",
+  "reviews": [
+    {
+      "taskPath": "/root/p11_final_arch_v7",
+      "role": "independent architecture",
+      "verdict": "GO",
+      "p0": 0,
+      "p1": 0,
+      "p2": 0,
+      "p3": 3
+    },
+    {
+      "taskPath": "/root/p18a_c1_security_review",
+      "role": "independent security/privacy",
+      "verdict": "GO",
+      "p0": 0,
+      "p1": 0,
+      "p2": 0,
+      "p3": 3
+    }
+  ],
+  "verification": {
+    "lockedOfflineRestore": "PASS",
+    "focusedDebug": "101/101",
+    "focusedRelease": "101/101",
+    "fullDebug": "556/556",
+    "fullRelease": "556/556",
+    "debugBuild": "0 warnings, 0 errors",
+    "releaseBuild": "0 warnings, 0 errors",
+    "format": "PASS",
+    "diffCheck": "PASS"
+  },
+  "sanitizedEvidenceSha256": {
+    "p11a-final-focused-release.sanitized.json": "2038e962f8ee5300982c74c1db23b125e2100ebe155044f17770a7fed7c37e18",
+    "p11a-final-full-debug.sanitized.json": "3f9446587120b0965d1df332c1fc6b01bfc5936252582ed924c7b7cd0e1f035a",
+    "p11a-final-full-release.sanitized.json": "e1a5f0777f98d3d4cc438fe820ed1d31a5e9cfaa58dcece7a69cf46d21d2c419"
+  },
+  "claims": {
+    "runtimeRegistered": false,
+    "networkE2EComplete": false,
+    "mobileE2EComplete": false,
+    "windowsE2EComplete": false,
+    "productionReady": false,
+    "githubPush": false
+  }
+}

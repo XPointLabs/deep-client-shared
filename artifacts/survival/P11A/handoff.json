@@ -1,0 +1,22 @@
+{
+  "schema": "deep.p11a.handoff.v1",
+  "sourceCommit": "343f770800ad6247a5a0ae63a418b229c9388cde",
+  "evidenceContentCommit": "PENDING",
+  "independentReviewRequired": false,
+  "status": "accepted-dormant-storage-contract-go-runtime-blocked",
+  "next": [
+    "P11B managed transport racing after P07B and server fixtures",
+    "P12A disabled nearby power-policy shell"
+  ],
+  "blockers": [
+    "recipient-device acknowledgement verifier not implemented",
+    "runtime composition and transport adapters absent",
+    "no physical Android or Windows messaging E2E",
+    "no typed post-purge WAL/forensic maintenance status"
+  ],
+  "claims": {
+    "logicalPurge": true,
+    "physicalMediaErasureProven": false,
+    "productionReady": false
+  }
+}
