@@ -513,6 +513,7 @@ public sealed class MembershipTrustRepositoryContractTests
         {
             using var store = new SqliteSessionStore(path);
             MembershipTrustRecord? previous = null;
+            var rejected = false;
             for (var revision = 1; revision <= 34; revision++)
             {
                 var record = MembershipTrustRecord.Create(
@@ -535,21 +536,25 @@ public sealed class MembershipTrustRepositoryContractTests
                     signingAuthorityEnvelope: Enumerable.Repeat(
                         checked((byte)(revision % 241 + 1)),
                         MembershipTrustRecord.MaximumEnvelopeLength).ToArray());
-                Assert.Equal(
-                    MembershipTrustCommitResult.Applied,
-                    await store.CommitMembershipTrustAsync(
-                        record,
-                        previous?.Revision));
+                var result = await store.CommitMembershipTrustAsync(
+                    record,
+                    previous?.Revision);
+                if (result == MembershipTrustCommitResult.Corrupt)
+                {
+                    rejected = true;
+                    break;
+                }
+                Assert.Equal(MembershipTrustCommitResult.Applied, result);
                 previous = record;
             }
+            Assert.True(rejected, "The cumulative byte budget was not enforced before commit.");
 
             var read = await store.ReadMembershipTrustAsync(
                 "install:test",
                 MembershipTrustDomain.Membership);
 
-            Assert.Equal(MembershipTrustReadResult.Corrupt, read.Result);
-            Assert.Null(read.Head);
-            Assert.Null(read.Predecessor);
+            Assert.Equal(MembershipTrustReadResult.Found, read.Result);
+            Assert.Equal(previous!.Revision, read.Head!.Revision);
         }
         finally
         {
