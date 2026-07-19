@@ -950,6 +950,69 @@ public sealed class MembershipTrustRepositoryContractTests
     }
 
     [Theory]
+    [InlineData("version")]
+    [InlineData("digest")]
+    public async Task InMemoryCorruptClock_BlocksReplayRollbackAndSuccessor(
+        string corruption)
+    {
+        var path = Path.Combine(
+            Path.GetTempPath(),
+            $"deep-p07-corrupt-clock-{corruption}-{Guid.NewGuid():N}.json");
+        try
+        {
+            var first = MembershipTrustClockRecord.Create(
+                "install:test",
+                1,
+                DateTimeOffset.FromUnixTimeSeconds(1000));
+            var store = new InMemorySessionStore(path);
+            Assert.Equal(
+                MembershipTrustClockCommitResult.Applied,
+                await store.CommitMembershipTrustClockAsync(first, null));
+
+            var root = System.Text.Json.Nodes.JsonNode.Parse(
+                await File.ReadAllTextAsync(path))!;
+            var clock = root["membershipTrustClocks"]!.AsArray().Single()!;
+            if (corruption == "version")
+            {
+                clock["version"] = 999;
+            }
+            else
+            {
+                clock["digest"] = Convert.ToBase64String(new byte[32]);
+            }
+            await File.WriteAllTextAsync(path, root.ToJsonString());
+
+            var restarted = new InMemorySessionStore(path);
+            Assert.Equal(
+                MembershipTrustClockReadResult.Corrupt,
+                (await restarted.ReadMembershipTrustClockAsync("install:test")).Result);
+            Assert.Equal(
+                MembershipTrustClockCommitResult.Corrupt,
+                await restarted.CommitMembershipTrustClockAsync(first, null));
+            Assert.Equal(
+                MembershipTrustClockCommitResult.Corrupt,
+                await restarted.CommitMembershipTrustClockAsync(
+                    MembershipTrustClockRecord.Create(
+                        "install:test",
+                        2,
+                        DateTimeOffset.FromUnixTimeSeconds(900)),
+                    1));
+            Assert.Equal(
+                MembershipTrustClockCommitResult.Corrupt,
+                await restarted.CommitMembershipTrustClockAsync(
+                    MembershipTrustClockRecord.Create(
+                        "install:test",
+                        2,
+                        DateTimeOffset.FromUnixTimeSeconds(2000)),
+                    1));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Theory]
     [InlineData("orphan")]
     [InlineData("missing-middle")]
     [InlineData("history-undercount")]
