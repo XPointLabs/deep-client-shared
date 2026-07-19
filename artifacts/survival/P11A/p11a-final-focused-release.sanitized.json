@@ -16,407 +16,508 @@
     "tests":  [
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxContractRedTests.OpaqueIdentifiersAndTransitionReasonsFailClosed",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxContractRedTests.OpaqueIdentifiersDoNotRenderTheirValue",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxContractRedTests.PreparedItemRequiresExplicitRecipientAckBeforeDelivered",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxCorrectiveRedTests.AttemptsCollectionCannotBeMutatedThroughRuntimeArray",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxCorrectiveRedTests.AttemptsReaderUsesBoundedSentinelInsteadOfCount",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxCorrectiveRedTests.CompatibilitySurfacesRemainSourceAndBinaryStable",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxCorrectiveRedTests.DeliveredAcknowledgementOutsideItemLifetimeIsCorrupt(beforeCreated: False)",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxCorrectiveRedTests.DeliveredAcknowledgementOutsideItemLifetimeIsCorrupt(beforeCreated: True)",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxCorrectiveRedTests.EmptyV8OutboxMigratesToV9WithoutRecoveryTables",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxCorrectiveRedTests.FailedV8QuarantineRollsBackAndLeavesVersionAndRowsUntouched",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxCorrectiveRedTests.FileBackedInMemoryStoreRejectsMalformedSnapshotBeforeAdmission",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxCorrectiveRedTests.FileBackedRetryMetadataMismatchIsRejectedBeforeAdmission",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxCorrectiveRedTests.FileBackedStoreCanRestartItsOwnLargeNonOutboxSnapshot",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxCorrectiveRedTests.ForeignScopeReadIsMissingAndApplyIsConflict",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxCorrectiveRedTests.IllegalPersistedReasonAndRevisionAreCorruptAndNeverMutated",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxCorrectiveRedTests.LatestTransitionIdentitySurvivesRestartWhenLogicalMaximumIsUnchanged",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxCorrectiveRedTests.NonEmptyV8OutboxIsQuarantinedDuringTransactionalV9Migration",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxCorrectiveRedTests.PersistedAllZeroAndWrongProviderTypesReturnCorrupt",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxCorrectiveRedTests.PersistedAttemptOccurredAtExpiryIsCorrupt",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxCorrectiveRedTests.PersistedLogicalStateBelowExactAttemptMaximumIsCorrupt",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxCorrectiveRedTests.ReadApplyAndTransitionIdentityRequireAccountScope",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxCorrectiveRedTests.RetryMetadataMustEqualPersistedNotBeforeAcrossRestart",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxCorrectiveRedTests.RetryNotBeforeAndFullAcknowledgementBindingAreExact",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxCorrectiveRedTests.SameLogicalIdIsIndependentAcrossAccountScopes",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxCorrectiveRedTests.SqliteGraphReadIsExplicitlyTransactionBound",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxCorrectiveRedTests.SQLiteTransitionMutatesOnlyAffectedAttemptAndMetadata",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxCorrectiveRedTests.SubMillisecondInputsAreCanonicalAndExactRetryIsIdempotent",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxCorrectiveRedTests.TerminalAndPreparedLatestIdentityFieldsMustBeRawNull(corruption: \"attempted-last-attempt\")",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxCorrectiveRedTests.TerminalAndPreparedLatestIdentityFieldsMustBeRawNull(corruption: \"delivered-last-attempt\")",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxCorrectiveRedTests.TerminalAndPreparedLatestIdentityFieldsMustBeRawNull(corruption: \"durable-last-retry\")",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxCorrectiveRedTests.TerminalAndPreparedLatestIdentityFieldsMustBeRawNull(corruption: \"prepared-last-attempt\")",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxCorrectiveRedTests.TerminalAndPreparedLatestIdentityFieldsMustBeRawNull(corruption: \"prepared-last-retry\")",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxCorrectiveRedTests.TwoSqliteInstancesRaceTheSameRevisionWithSingleWinner",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxIteration4RedTests.ExpiryBoundaryIsHalfOpenForScheduleRetryAcknowledgementAndDelivery",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxIteration4RedTests.PurgeRejectsRecoveryDeleteTriggerBeforeAnyMutation(afterDeleteCopy: False)",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxIteration4RedTests.PurgeRejectsRecoveryDeleteTriggerBeforeAnyMutation(afterDeleteCopy: True)",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxIteration4RedTests.QueueItemAdmissionIsPerScopeAndExistingRowsRemainReconcilable(sqlite: False)",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxIteration4RedTests.QueueItemAdmissionIsPerScopeAndExistingRowsRemainReconcilable(sqlite: True)",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxIteration4RedTests.QueueLogicalByteAdmissionIsPerScope(sqlite: False)",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxIteration4RedTests.QueueLogicalByteAdmissionIsPerScope(sqlite: True)",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxIteration4RedTests.RecoveryOrphanFailsClosedAndPreservesActiveAndRecoveryRows(accountPurge: False)",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxIteration4RedTests.RecoveryOrphanFailsClosedAndPreservesActiveAndRecoveryRows(accountPurge: True)",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxIteration4RedTests.ScopePurgeCommitsLogicalDeletionWhenTruncateCheckpointIsBusy",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxIteration4RedTests.ScopePurgeDeclaresSecureDeleteAndBoundedTruncateCheckpoint",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxIteration4RedTests.V8MigrationRejectsTriggerBeforeRenameAndKeepsRowsAndVersion",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxIteration4RedTests.V9OpenRejectsRecoveryTriggerAndPreservesQuarantine",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxIteration4RedTests.V9OpenRejectsUnexpectedIndexesAndHiddenColumns(corruption: \"extra-expression\")",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxIteration4RedTests.V9OpenRejectsUnexpectedIndexesAndHiddenColumns(corruption: \"extra-nonunique\")",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxIteration4RedTests.V9OpenRejectsUnexpectedIndexesAndHiddenColumns(corruption: \"extra-partial\")",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxIteration4RedTests.V9OpenRejectsUnexpectedIndexesAndHiddenColumns(corruption: \"extra-unique\")",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxIteration4RedTests.V9OpenRejectsUnexpectedIndexesAndHiddenColumns(corruption: \"hidden-generated\")",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxIteration4RedTests.V9OpenRejectsUpdateTriggerOnActiveOutboxTable",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxIteration5RedTests.AccountPurgeStillRemovesAllActiveItemsAttemptsAndOrphans",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxIteration5RedTests.ActiveAttemptTriggerFailsScopePurgeBeforeAnyMutation",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxIteration5RedTests.ScopePurgeRemovesActiveOrphanAttemptsAndPreservesUnrelatedScope",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxIteration5RedTests.SqliteOptionsDiagnosticsRedactEncryptionKeyAtEveryNestedSurface",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxIteration6RedTests.SqliteOptions_PrivateKeyIsHiddenFromDebuggerExpansion",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxIteration6RedTests.SqliteOptions_PrivateKeyStillOpensAndReopensEncryptedDatabase",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxIteration6RedTests.SqliteOptions_PublicStructuredSurfaceCannotRevealEncryptionKey",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxMigrationPrivacyRedTests.AccountPurgeRemovesAllQuarantinedV8Rows",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxMigrationPrivacyRedTests.EmptyV8MigrationFailsClosedOnAnyRecoveryNameConflict(recoveryName: \"transport_outbox_attempts_v8_recovery\", objectType: \"index\")",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxMigrationPrivacyRedTests.EmptyV8MigrationFailsClosedOnAnyRecoveryNameConflict(recoveryName: \"transport_outbox_attempts_v8_recovery\", objectType: \"table\")",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxMigrationPrivacyRedTests.EmptyV8MigrationFailsClosedOnAnyRecoveryNameConflict(recoveryName: \"transport_outbox_attempts_v8_recovery\", objectType: \"trigger\")",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxMigrationPrivacyRedTests.EmptyV8MigrationFailsClosedOnAnyRecoveryNameConflict(recoveryName: \"transport_outbox_attempts_v8_recovery\", objectType: \"view\")",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxMigrationPrivacyRedTests.EmptyV8MigrationFailsClosedOnAnyRecoveryNameConflict(recoveryName: \"transport_outbox_items_v8_recovery\", objectType: \"index\")",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxMigrationPrivacyRedTests.EmptyV8MigrationFailsClosedOnAnyRecoveryNameConflict(recoveryName: \"transport_outbox_items_v8_recovery\", objectType: \"table\")",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxMigrationPrivacyRedTests.EmptyV8MigrationFailsClosedOnAnyRecoveryNameConflict(recoveryName: \"transport_outbox_items_v8_recovery\", objectType: \"trigger\")",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxMigrationPrivacyRedTests.EmptyV8MigrationFailsClosedOnAnyRecoveryNameConflict(recoveryName: \"transport_outbox_items_v8_recovery\", objectType: \"view\")",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxMigrationPrivacyRedTests.PrivacyPurgeFailsClosedOnHostileRecoveryObjectWithoutDeletingActiveRows(accountPurge: False)",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxMigrationPrivacyRedTests.PrivacyPurgeFailsClosedOnHostileRecoveryObjectWithoutDeletingActiveRows(accountPurge: True)",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxMigrationPrivacyRedTests.ScopePurgeRemovesOnlyMatchingQuarantinedV8RowsAcrossRestart",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxMigrationPrivacyRedTests.V8MigrationAcceptsAbsentOptionalPhysicalIndexes",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxMigrationPrivacyRedTests.V8MigrationRejectsWrongOwnedIndexBeforeDropAndRollsBack",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxMigrationPrivacyRedTests.V8PresenceProbeUsesBoundedExistsInsteadOfCount",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxMigrationPrivacyRedTests.V9SchemaAttestationRejectsHostileIndexAndForeignKeyLayouts(corruption: \"foreign-key-update-cascade\")",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxMigrationPrivacyRedTests.V9SchemaAttestationRejectsHostileIndexAndForeignKeyLayouts(corruption: \"independent-foreign-keys\")",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxMigrationPrivacyRedTests.V9SchemaAttestationRejectsHostileIndexAndForeignKeyLayouts(corruption: \"missing-expiry-index\")",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxMigrationPrivacyRedTests.V9SchemaAttestationRejectsHostileIndexAndForeignKeyLayouts(corruption: \"missing-ready-index\")",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxMigrationPrivacyRedTests.V9SchemaAttestationRejectsHostileIndexAndForeignKeyLayouts(corruption: \"partial-ready-index\")",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxMigrationPrivacyRedTests.V9SchemaAttestationRejectsHostileIndexAndForeignKeyLayouts(corruption: \"ready-index-on-wrong-table\")",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxMigrationPrivacyRedTests.V9SchemaAttestationRejectsHostileIndexAndForeignKeyLayouts(corruption: \"unique-ready-index\")",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxMigrationPrivacyRedTests.V9SchemaAttestationRejectsHostileIndexAndForeignKeyLayouts(corruption: \"wrong-expiry-order\")",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxMigrationPrivacyRedTests.V9SchemaAttestationRejectsHostileIndexAndForeignKeyLayouts(corruption: \"wrong-ready-order\")",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxRepositoryContractTests.AttemptCountIsStrictlyBounded(sqlite: False)",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxRepositoryContractTests.AttemptCountIsStrictlyBounded(sqlite: True)",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxRepositoryContractTests.CancellationBeforeAndFailureAfterDurablePointAreExplicit",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxRepositoryContractTests.DivergentReuseAndRegressionFailClosed(sqlite: False)",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxRepositoryContractTests.DivergentReuseAndRegressionFailClosed(sqlite: True)",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxRepositoryContractTests.ExpiryAndRetryListingAreBoundedAndTerminal(sqlite: False)",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxRepositoryContractTests.ExpiryAndRetryListingAreBoundedAndTerminal(sqlite: True)",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxRepositoryContractTests.RestartAtEveryTransitionPreservesMonotonicState(sqlite: False)",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxRepositoryContractTests.RestartAtEveryTransitionPreservesMonotonicState(sqlite: True)",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxRepositoryContractTests.ReturnedBuffersAreDefensiveCopies(sqlite: False)",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxRepositoryContractTests.ReturnedBuffersAreDefensiveCopies(sqlite: True)",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxRepositoryContractTests.ScopePurgeAndAccountPurgeRemoveOutboxWithoutCrossScopeLeak(sqlite: False)",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxRepositoryContractTests.ScopePurgeAndAccountPurgeRemoveOutboxWithoutCrossScopeLeak(sqlite: True)",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxRepositoryContractTests.SimultaneousAttemptSuccessAdvancesOneLogicalDurableState(sqlite: False)",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxRepositoryContractTests.SimultaneousAttemptSuccessAdvancesOneLogicalDurableState(sqlite: True)",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxRepositoryContractTests.SqliteMigratesPopulatedV7WithoutTouchingExistingRowsAndRejectsNewerSchema",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxRepositoryContractTests.SqliteRejectsOversizedAttemptEvidenceBeforeReadingIt",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   },
                   {
                       "testName":  "Deep.Client.Shared.Tests.Persistence.TransportOutboxRepositoryContractTests.SqliteRejectsOversizedPersistedBlobBeforeIdempotencyDecision",
-                      "outcome":  "Passed"
+                      "outcome":  "Passed",
+                      "occurrence":  1
                   }
               ]
 }

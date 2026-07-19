@@ -13,12 +13,30 @@ $ns.AddNamespace('t', 'http://microsoft.com/schemas/VisualStudio/TeamTest/2010')
 $counters = $document.SelectSingleNode('//t:ResultSummary/t:Counters', $ns)
 if ($null -eq $counters) { throw 'TRX counters are missing.' }
 
-$tests = @(
+$sortedTests = @(
     $document.SelectNodes('//t:UnitTestResult', $ns) |
         ForEach-Object {
             [ordered]@{ testName = [string] $_.testName; outcome = [string] $_.outcome }
         } |
         Sort-Object -Property @{ Expression = { $_.testName } }, @{ Expression = { $_.outcome } }
+)
+$occurrences = @{}
+$tests = @(
+    foreach ($test in $sortedTests) {
+        $key = $test.testName + [char] 0x1f + $test.outcome
+        $previous = if ($occurrences.ContainsKey($key)) {
+            [int] $occurrences[$key]
+        } else {
+            0
+        }
+        $occurrence = 1 + $previous
+        $occurrences[$key] = $occurrence
+        [ordered]@{
+            testName = $test.testName
+            outcome = $test.outcome
+            occurrence = $occurrence
+        }
+    }
 )
 
 $evidence = [ordered]@{

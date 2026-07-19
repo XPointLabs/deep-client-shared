@@ -40,9 +40,9 @@
     "diffCheck": "PASS"
   },
   "sanitizedEvidenceSha256": {
-    "p11a-final-focused-release.sanitized.json": "2038e962f8ee5300982c74c1db23b125e2100ebe155044f17770a7fed7c37e18",
-    "p11a-final-full-debug.sanitized.json": "3f9446587120b0965d1df332c1fc6b01bfc5936252582ed924c7b7cd0e1f035a",
-    "p11a-final-full-release.sanitized.json": "e1a5f0777f98d3d4cc438fe820ed1d31a5e9cfaa58dcece7a69cf46d21d2c419"
+    "p11a-final-focused-release.sanitized.json": "1433d726e511af3bdc4ade733e1a680c95d0bb8855d5f012a0223837144deea8",
+    "p11a-final-full-debug.sanitized.json": "2ede0a483a013ba3699bcb438f9e15f03addd5d93770f8793a3274194930f18a",
+    "p11a-final-full-release.sanitized.json": "c2378f219c3c84bfcb88ba606811c6121abcce9eece93a3242f9f64e728fad38"
   },
   "claims": {
     "runtimeRegistered": false,
