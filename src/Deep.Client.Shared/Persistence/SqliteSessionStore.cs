@@ -5148,6 +5148,7 @@ public sealed partial class SqliteSessionStore :
 [DebuggerDisplay("{ToString(),nq}")]
 public sealed class SqliteSessionStoreOptions
 {
+    [DebuggerBrowsable(DebuggerBrowsableState.Never)]
     private readonly string? encryptionKey;
 
     public SqliteSessionStoreOptions(string statePath, string? encryptionKey = null)
