@@ -15,6 +15,8 @@
   "preCanonicalDormantRecordPolicy": "fail-closed-and-rebootstrap",
   "deepHistoryCorruptionPolicy": "fail-closed; never select an older head",
   "historyValidationBudgetPerProfileDomain": 4096,
+  "historyBlobByteBudgetPerProfileDomain": 8388608,
+  "sqliteHeadAdditiveColumn": "history_bytes with bounded restart backfill",
   "historyBudgetOverflowPolicy": "fail-closed-and-require-separately-reviewed-checkpoint-or-rebootstrap",
   "preV2DormantRecordPolicy": "fail-closed-and-rebootstrap",
   "revocationSetOverflowPolicy": "persist-terminal-corrupt-marker-and-require-approved-rebootstrap",

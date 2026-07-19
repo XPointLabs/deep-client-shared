@@ -1,8 +1,7 @@
 {
   "schema": "deep.p07.handoff.v1",
-  "sourceCommit": "e6319e980eaf9cb1b8059ab8a3f91119482297b4",
-  "previousEvidenceCarrierCommit": "74c36c503acae8c3ca65d0c5be7caa358c406a67",
-  "evidenceContentCommit": "4a4e1eedad26a65b545cc511af2e00ba899f63ff",
+  "sourceCommit": "0709e11d257358f6786cffe62ee7cd5994c8e626",
+  "previousEvidenceCarrierCommit": "7b1b2934444f670b7e9acfda21b61664dc0635d0",
   "independentReviewRequired": true,
   "next": ["repeat independent exact-source-and-evidence review", "P07B source policy", "P14 self-host UX"],
   "blockers": [
@@ -10,7 +9,7 @@
     "no live signed bootstrap/checkpoint source",
     "P06 and P07B source composition absent",
     "release SQLCipher/integrity guard not proven",
-    "production authenticated history checkpoint/compaction policy absent; dormant validation fails closed at 4096 records per profile/domain",
+    "production authenticated history checkpoint/compaction policy absent; dormant validation rejects writes beyond 4096 records or 8 MiB of trust BLOBs per profile/domain",
     "stale, trusted-clock, and emergency legacy policy not approved",
     "runtime and MAUI composition intentionally absent"
   ],
