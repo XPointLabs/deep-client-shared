@@ -1344,85 +1344,25 @@ public sealed class SqliteSessionStore :
             using var connection = OpenConnection();
             using var transaction = connection.BeginTransaction();
 
-            ulong? currentHead;
-            byte[]? currentHeadDigest;
-            long currentHistoryBytes;
-            await using (var head = connection.CreateCommand())
-            {
-                head.Transaction = transaction;
-                head.CommandText = """
-                    SELECT revision, length(payload_digest), payload_digest, history_bytes
-                    FROM membership_trust_heads
-                    WHERE profile_key = $profile AND domain = $domain;
-                    """;
-                head.Parameters.AddWithValue("$profile", record.OpaqueProfileKey);
-                head.Parameters.AddWithValue("$domain", (int)record.Domain);
-                await using var reader = await head.ExecuteReaderAsync(
-                    cancellationToken).ConfigureAwait(false);
-                if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-                {
-                    var signedRevision = reader.GetInt64(0);
-                    currentHeadDigest = ReadFixedProjectedBlob(
-                        reader,
-                        lengthOrdinal: 1,
-                        blobOrdinal: 2,
-                        MembershipLimits.HashLength);
-                    currentHistoryBytes = reader.GetInt64(3);
-                    if (signedRevision <= 0 ||
-                        currentHistoryBytes < 0 ||
-                        currentHistoryBytes >
-                            MembershipTrustRepositoryValidation
-                                .MaximumMembershipTrustHistoryBytes)
-                    {
-                        transaction.Rollback();
-                        return MembershipTrustCommitResult.Corrupt;
-                    }
-                    currentHead = checked((ulong)signedRevision);
-                }
-                else
-                {
-                    currentHead = null;
-                    currentHeadDigest = null;
-                    currentHistoryBytes = 0;
-                }
-            }
-
-            if (currentHead.HasValue)
-            {
-                var currentHeadRecord = await ReadMembershipTrustRecordAsync(
-                    connection,
-                    transaction,
-                    record.OpaqueProfileKey,
-                    record.Domain,
-                    currentHead.Value,
-                    cancellationToken).ConfigureAwait(false);
-                if (currentHeadRecord is null ||
-                    currentHeadDigest is null ||
-                    !currentHeadDigest.AsSpan().SequenceEqual(
-                        currentHeadRecord.PayloadDigest) ||
-                    currentHistoryBytes <
-                        MembershipTrustRepositoryValidation.HistoryBlobBytes(
-                            currentHeadRecord))
-                {
-                    transaction.Rollback();
-                    return MembershipTrustCommitResult.Corrupt;
-                }
-            }
-
-            var existing = await ReadMembershipTrustRecordAsync(
+            var history = await ValidateMembershipTrustHistoryAsync(
                 connection,
                 transaction,
                 record.OpaqueProfileKey,
                 record.Domain,
                 record.Revision,
                 cancellationToken).ConfigureAwait(false);
+            if (history.Snapshot.Result == MembershipTrustReadResult.Corrupt)
+            {
+                transaction.Rollback();
+                return MembershipTrustCommitResult.Corrupt;
+            }
+
+            var currentHead = history.Snapshot.Head?.Revision;
+            var currentHistoryBytes = history.HistoryBytes;
+            var existing = history.SelectedRecord;
             if (existing is not null)
             {
                 transaction.Rollback();
-                if (currentHead != record.Revision)
-                {
-                    return MembershipTrustCommitResult.Corrupt;
-                }
                 return MembershipTrustRepositoryValidation.Same(existing, record)
                     ? MembershipTrustCommitResult.Idempotent
                     : MembershipTrustCommitResult.Conflict;
@@ -1430,6 +1370,13 @@ public sealed class SqliteSessionStore :
 
             if (currentHead != expectedHeadRevision ||
                 record.Revision != (currentHead.HasValue ? currentHead.Value + 1 : 1))
+            {
+                transaction.Rollback();
+                return MembershipTrustCommitResult.Conflict;
+            }
+            if (!MembershipTrustRepositoryValidation.HasValidLinkage(
+                    record,
+                    history.Snapshot.Head))
             {
                 transaction.Rollback();
                 return MembershipTrustCommitResult.Conflict;
@@ -1534,175 +1481,14 @@ public sealed class SqliteSessionStore :
         {
             using var connection = OpenConnection();
             using var transaction = connection.BeginTransaction();
-
-            ulong? headRevision;
-            byte[]? headDigest;
-            long headHistoryBytes;
-            await using (var head = connection.CreateCommand())
-            {
-                head.Transaction = transaction;
-                head.CommandText = """
-                    SELECT revision, length(payload_digest), payload_digest, history_bytes
-                    FROM membership_trust_heads
-                    WHERE profile_key = $profile AND domain = $domain;
-                    """;
-                head.Parameters.AddWithValue("$profile", opaqueProfileKey);
-                head.Parameters.AddWithValue("$domain", (int)domain);
-                await using var reader = await head.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-                if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-                {
-                    await using var records = connection.CreateCommand();
-                    records.Transaction = transaction;
-                    records.CommandText = """
-                        SELECT 1 FROM membership_trust_records
-                        WHERE profile_key = $profile AND domain = $domain
-                        LIMIT 1;
-                        """;
-                    records.Parameters.AddWithValue("$profile", opaqueProfileKey);
-                    records.Parameters.AddWithValue("$domain", (int)domain);
-                    var exists = await records.ExecuteScalarAsync(
-                        cancellationToken).ConfigureAwait(false);
-                    return exists is null or DBNull
-                        ? MembershipTrustRepositoryValidation.Missing()
-                        : MembershipTrustRepositoryValidation.Corrupt();
-                }
-                var signedRevision = reader.GetInt64(0);
-                headDigest = ReadFixedProjectedBlob(
-                    reader,
-                    lengthOrdinal: 1,
-                    blobOrdinal: 2,
-                    MembershipLimits.HashLength);
-                headHistoryBytes = reader.GetInt64(3);
-                if (signedRevision <= 0 ||
-                    headHistoryBytes < 0 ||
-                    headHistoryBytes >
-                        MembershipTrustRepositoryValidation
-                            .MaximumMembershipTrustHistoryBytes)
-                {
-                    return MembershipTrustRepositoryValidation.Corrupt();
-                }
-                headRevision = checked((ulong)signedRevision);
-            }
-
-            if (headRevision.Value >
-                MembershipTrustRepositoryValidation.MaximumMembershipTrustHistoryRecords)
-            {
-                return MembershipTrustRepositoryValidation.Corrupt();
-            }
-
-            await using (var orphan = connection.CreateCommand())
-            {
-                orphan.Transaction = transaction;
-                orphan.CommandText = """
-                    SELECT 1
-                    FROM membership_trust_records
-                    WHERE profile_key = $profile AND domain = $domain
-                      AND revision > $head
-                    LIMIT 1;
-                    """;
-                orphan.Parameters.AddWithValue("$profile", opaqueProfileKey);
-                orphan.Parameters.AddWithValue("$domain", (int)domain);
-                orphan.Parameters.AddWithValue(
-                    "$head",
-                    checked((long)headRevision.Value));
-                var exists = await orphan.ExecuteScalarAsync(
-                    cancellationToken).ConfigureAwait(false);
-                if (exists is not null and not DBNull)
-                {
-                    return MembershipTrustRepositoryValidation.Corrupt();
-                }
-            }
-
-            MembershipTrustRecord? current = null;
-            MembershipTrustRecord? predecessor = null;
-            MembershipTrustRecord? previous = null;
-            var recordsRead = 0UL;
-            var historyBytes = 0L;
-            await using (var command = connection.CreateCommand())
-            {
-                command.Transaction = transaction;
-                command.CommandText = """
-                    SELECT revision, version, artifact_kind, sequence, previous_sequence,
-                           state, observed_at, valid_from, valid_until,
-                           length(previous_hash), length(envelope), length(payload_digest),
-                           length(canonical_hash), length(profile_binding_hash),
-                           length(signing_authority), length(revoked_delegation_hashes),
-                           previous_hash, envelope, payload_digest, canonical_hash,
-                           profile_binding_hash, signing_authority, revoked_delegation_hashes
-                    FROM membership_trust_records
-                    WHERE profile_key = $profile AND domain = $domain
-                    ORDER BY revision
-                    LIMIT $limit;
-                    """;
-                command.Parameters.AddWithValue("$profile", opaqueProfileKey);
-                command.Parameters.AddWithValue("$domain", (int)domain);
-                command.Parameters.AddWithValue(
-                    "$limit",
-                    MembershipTrustRepositoryValidation.MaximumMembershipTrustHistoryRecords + 1);
-                await using var reader = await command.ExecuteReaderAsync(
-                    cancellationToken).ConfigureAwait(false);
-                while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-                {
-                    var signedRevision = reader.GetInt64(0);
-                    var sequence = reader.GetInt64(3);
-                    var previousSequence = reader.GetInt64(4);
-                    if (signedRevision <= 0 || sequence <= 0 || previousSequence < 0)
-                    {
-                        return MembershipTrustRepositoryValidation.Corrupt();
-                    }
-                    var blobLengths = ReadMembershipTrustBlobLengths(
-                        reader,
-                        firstLengthOrdinal: 9,
-                        ref historyBytes);
-                    var record = new MembershipTrustRecord
-                    {
-                        Version = reader.GetInt32(1),
-                        OpaqueProfileKey = opaqueProfileKey,
-                        Domain = domain,
-                        ArtifactKind = (MembershipTrustArtifactKind)reader.GetInt32(2),
-                        Revision = checked((ulong)signedRevision),
-                        Sequence = checked((ulong)sequence),
-                        PreviousSequence = checked((ulong)previousSequence),
-                        PreviousCanonicalHash = ReadProjectedBlob(reader, 16, blobLengths[0]),
-                        CanonicalEnvelope = ReadProjectedBlob(reader, 17, blobLengths[1]),
-                        PayloadDigest = ReadProjectedBlob(reader, 18, blobLengths[2]),
-                        CanonicalHash = ReadProjectedBlob(reader, 19, blobLengths[3]),
-                        ProfileBindingHash = ReadProjectedBlob(reader, 20, blobLengths[4]),
-                        SigningAuthorityEnvelope = ReadProjectedBlob(reader, 21, blobLengths[5]),
-                        RevokedDelegationHashes = ReadProjectedBlob(reader, 22, blobLengths[6]),
-                        State = (MembershipTrustState)reader.GetInt32(5),
-                        ObservedAt = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(6)),
-                        ValidFrom = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(7)),
-                        ValidUntil = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(8))
-                    };
-                    recordsRead++;
-                    if (record.Revision != recordsRead ||
-                        !MembershipTrustRepositoryValidation.IsValid(record) ||
-                        !MembershipTrustRepositoryValidation.HasValidLinkage(
-                            record,
-                            previous))
-                    {
-                        return MembershipTrustRepositoryValidation.Corrupt();
-                    }
-                    if (record.Revision == headRevision.Value - 1)
-                    {
-                        predecessor = record;
-                    }
-                    previous = record;
-                    current = record;
-                }
-            }
-
-            if (current is null ||
-                recordsRead != headRevision.Value ||
-                historyBytes != headHistoryBytes ||
-                headDigest is null ||
-                !headDigest.AsSpan().SequenceEqual(current.PayloadDigest))
-            {
-                return MembershipTrustRepositoryValidation.Corrupt();
-            }
-
-            return new MembershipTrustReadSnapshot(MembershipTrustReadResult.Found, current, predecessor);
+            var history = await ValidateMembershipTrustHistoryAsync(
+                connection,
+                transaction,
+                opaqueProfileKey,
+                domain,
+                selectedRevision: null,
+                cancellationToken).ConfigureAwait(false);
+            return history.Snapshot;
         }
         catch (Exception exception) when (
             exception is ArgumentOutOfRangeException or InvalidCastException or InvalidOperationException or
@@ -1714,6 +1500,215 @@ public sealed class SqliteSessionStore :
         {
             _databaseGate.Release();
         }
+    }
+
+    private readonly record struct MembershipTrustHistoryValidation(
+        MembershipTrustReadSnapshot Snapshot,
+        MembershipTrustRecord? SelectedRecord,
+        long HistoryBytes);
+
+    private static async Task<MembershipTrustHistoryValidation>
+        ValidateMembershipTrustHistoryAsync(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            string opaqueProfileKey,
+            MembershipTrustDomain domain,
+            ulong? selectedRevision,
+            CancellationToken cancellationToken)
+    {
+        ulong headRevision;
+        byte[] headDigest;
+        long headHistoryBytes;
+        await using (var head = connection.CreateCommand())
+        {
+            head.Transaction = transaction;
+            head.CommandText = """
+                SELECT revision, length(payload_digest), payload_digest, history_bytes
+                FROM membership_trust_heads
+                WHERE profile_key = $profile AND domain = $domain;
+                """;
+            head.Parameters.AddWithValue("$profile", opaqueProfileKey);
+            head.Parameters.AddWithValue("$domain", (int)domain);
+            await using var reader = await head.ExecuteReaderAsync(
+                cancellationToken).ConfigureAwait(false);
+            if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                await using var records = connection.CreateCommand();
+                records.Transaction = transaction;
+                records.CommandText = """
+                    SELECT 1 FROM membership_trust_records
+                    WHERE profile_key = $profile AND domain = $domain
+                    LIMIT 1;
+                    """;
+                records.Parameters.AddWithValue("$profile", opaqueProfileKey);
+                records.Parameters.AddWithValue("$domain", (int)domain);
+                var exists = await records.ExecuteScalarAsync(
+                    cancellationToken).ConfigureAwait(false);
+                var snapshot = exists is null or DBNull
+                    ? MembershipTrustRepositoryValidation.Missing()
+                    : MembershipTrustRepositoryValidation.Corrupt();
+                return new MembershipTrustHistoryValidation(snapshot, null, 0);
+            }
+            var signedRevision = reader.GetInt64(0);
+            headDigest = ReadFixedProjectedBlob(
+                reader,
+                lengthOrdinal: 1,
+                blobOrdinal: 2,
+                MembershipLimits.HashLength);
+            headHistoryBytes = reader.GetInt64(3);
+            if (signedRevision <= 0 ||
+                headHistoryBytes < 0 ||
+                headHistoryBytes >
+                    MembershipTrustRepositoryValidation.MaximumMembershipTrustHistoryBytes)
+            {
+                return new MembershipTrustHistoryValidation(
+                    MembershipTrustRepositoryValidation.Corrupt(),
+                    null,
+                    0);
+            }
+            headRevision = checked((ulong)signedRevision);
+        }
+
+        if (headRevision >
+            MembershipTrustRepositoryValidation.MaximumMembershipTrustHistoryRecords)
+        {
+            return new MembershipTrustHistoryValidation(
+                MembershipTrustRepositoryValidation.Corrupt(),
+                null,
+                0);
+        }
+
+        await using (var orphan = connection.CreateCommand())
+        {
+            orphan.Transaction = transaction;
+            orphan.CommandText = """
+                SELECT 1
+                FROM membership_trust_records
+                WHERE profile_key = $profile AND domain = $domain
+                  AND revision > $head
+                LIMIT 1;
+                """;
+            orphan.Parameters.AddWithValue("$profile", opaqueProfileKey);
+            orphan.Parameters.AddWithValue("$domain", (int)domain);
+            orphan.Parameters.AddWithValue("$head", checked((long)headRevision));
+            var exists = await orphan.ExecuteScalarAsync(
+                cancellationToken).ConfigureAwait(false);
+            if (exists is not null and not DBNull)
+            {
+                return new MembershipTrustHistoryValidation(
+                    MembershipTrustRepositoryValidation.Corrupt(),
+                    null,
+                    0);
+            }
+        }
+
+        MembershipTrustRecord? current = null;
+        MembershipTrustRecord? predecessor = null;
+        MembershipTrustRecord? previous = null;
+        MembershipTrustRecord? selected = null;
+        var recordsRead = 0UL;
+        var historyBytes = 0L;
+        await using (var command = connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText = """
+                SELECT revision, version, artifact_kind, sequence, previous_sequence,
+                       state, observed_at, valid_from, valid_until,
+                       length(previous_hash), length(envelope), length(payload_digest),
+                       length(canonical_hash), length(profile_binding_hash),
+                       length(signing_authority), length(revoked_delegation_hashes),
+                       previous_hash, envelope, payload_digest, canonical_hash,
+                       profile_binding_hash, signing_authority, revoked_delegation_hashes
+                FROM membership_trust_records
+                WHERE profile_key = $profile AND domain = $domain
+                ORDER BY revision
+                LIMIT $limit;
+                """;
+            command.Parameters.AddWithValue("$profile", opaqueProfileKey);
+            command.Parameters.AddWithValue("$domain", (int)domain);
+            command.Parameters.AddWithValue(
+                "$limit",
+                MembershipTrustRepositoryValidation.MaximumMembershipTrustHistoryRecords + 1);
+            await using var reader = await command.ExecuteReaderAsync(
+                cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                var signedRevision = reader.GetInt64(0);
+                var sequence = reader.GetInt64(3);
+                var previousSequence = reader.GetInt64(4);
+                if (signedRevision <= 0 || sequence <= 0 || previousSequence < 0)
+                {
+                    return new MembershipTrustHistoryValidation(
+                        MembershipTrustRepositoryValidation.Corrupt(),
+                        null,
+                        0);
+                }
+                var blobLengths = ReadMembershipTrustBlobLengths(
+                    reader,
+                    firstLengthOrdinal: 9,
+                    ref historyBytes);
+                var record = new MembershipTrustRecord
+                {
+                    Version = reader.GetInt32(1),
+                    OpaqueProfileKey = opaqueProfileKey,
+                    Domain = domain,
+                    ArtifactKind = (MembershipTrustArtifactKind)reader.GetInt32(2),
+                    Revision = checked((ulong)signedRevision),
+                    Sequence = checked((ulong)sequence),
+                    PreviousSequence = checked((ulong)previousSequence),
+                    PreviousCanonicalHash = ReadProjectedBlob(reader, 16, blobLengths[0]),
+                    CanonicalEnvelope = ReadProjectedBlob(reader, 17, blobLengths[1]),
+                    PayloadDigest = ReadProjectedBlob(reader, 18, blobLengths[2]),
+                    CanonicalHash = ReadProjectedBlob(reader, 19, blobLengths[3]),
+                    ProfileBindingHash = ReadProjectedBlob(reader, 20, blobLengths[4]),
+                    SigningAuthorityEnvelope = ReadProjectedBlob(reader, 21, blobLengths[5]),
+                    RevokedDelegationHashes = ReadProjectedBlob(reader, 22, blobLengths[6]),
+                    State = (MembershipTrustState)reader.GetInt32(5),
+                    ObservedAt = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(6)),
+                    ValidFrom = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(7)),
+                    ValidUntil = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(8))
+                };
+                recordsRead++;
+                if (record.Revision != recordsRead ||
+                    !MembershipTrustRepositoryValidation.IsValid(record) ||
+                    !MembershipTrustRepositoryValidation.HasValidLinkage(record, previous))
+                {
+                    return new MembershipTrustHistoryValidation(
+                        MembershipTrustRepositoryValidation.Corrupt(),
+                        null,
+                        0);
+                }
+                if (record.Revision == headRevision - 1)
+                {
+                    predecessor = record;
+                }
+                if (record.Revision == selectedRevision)
+                {
+                    selected = record;
+                }
+                previous = record;
+                current = record;
+            }
+        }
+
+        if (current is null ||
+            recordsRead != headRevision ||
+            historyBytes != headHistoryBytes ||
+            !headDigest.AsSpan().SequenceEqual(current.PayloadDigest))
+        {
+            return new MembershipTrustHistoryValidation(
+                MembershipTrustRepositoryValidation.Corrupt(),
+                null,
+                0);
+        }
+
+        return new MembershipTrustHistoryValidation(
+            new MembershipTrustReadSnapshot(
+                MembershipTrustReadResult.Found,
+                current,
+                predecessor),
+            selected,
+            historyBytes);
     }
 
     public async Task<MembershipTrustClockCommitResult> CommitMembershipTrustClockAsync(
@@ -2714,76 +2709,6 @@ public sealed class SqliteSessionStore :
             throw new InvalidDataException("Membership trust blob length changed while reading.");
         }
         return value;
-    }
-
-    private static async Task<MembershipTrustRecord?> ReadMembershipTrustRecordAsync(
-        SqliteConnection connection,
-        SqliteTransaction? transaction,
-        string opaqueProfileKey,
-        MembershipTrustDomain domain,
-        ulong revision,
-        CancellationToken cancellationToken)
-    {
-        await using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = """
-            SELECT version, artifact_kind, sequence, previous_sequence,
-                   state, observed_at, valid_from, valid_until,
-                   length(previous_hash), length(envelope), length(payload_digest),
-                   length(canonical_hash), length(profile_binding_hash),
-                   length(signing_authority), length(revoked_delegation_hashes),
-                   previous_hash, envelope, payload_digest, canonical_hash,
-                   profile_binding_hash, signing_authority, revoked_delegation_hashes
-            FROM membership_trust_records
-            WHERE profile_key = $profile AND domain = $domain AND revision = $revision;
-            """;
-        command.Parameters.AddWithValue("$profile", opaqueProfileKey);
-        command.Parameters.AddWithValue("$domain", (int)domain);
-        command.Parameters.AddWithValue("$revision", checked((long)revision));
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-        if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-        {
-            return null;
-        }
-
-        var sequence = reader.GetInt64(2);
-        var previousSequence = reader.GetInt64(3);
-        if (sequence <= 0 || previousSequence < 0)
-        {
-            throw new InvalidDataException("Membership trust record counters are invalid.");
-        }
-
-        var recordBytes = 0L;
-        var blobLengths = ReadMembershipTrustBlobLengths(
-            reader,
-            firstLengthOrdinal: 8,
-            ref recordBytes);
-        var record = new MembershipTrustRecord
-        {
-            Version = reader.GetInt32(0),
-            OpaqueProfileKey = opaqueProfileKey,
-            Domain = domain,
-            ArtifactKind = (MembershipTrustArtifactKind)reader.GetInt32(1),
-            Revision = revision,
-            Sequence = checked((ulong)sequence),
-            PreviousSequence = checked((ulong)previousSequence),
-            PreviousCanonicalHash = ReadProjectedBlob(reader, 15, blobLengths[0]),
-            CanonicalEnvelope = ReadProjectedBlob(reader, 16, blobLengths[1]),
-            PayloadDigest = ReadProjectedBlob(reader, 17, blobLengths[2]),
-            CanonicalHash = ReadProjectedBlob(reader, 18, blobLengths[3]),
-            ProfileBindingHash = ReadProjectedBlob(reader, 19, blobLengths[4]),
-            SigningAuthorityEnvelope = ReadProjectedBlob(reader, 20, blobLengths[5]),
-            RevokedDelegationHashes = ReadProjectedBlob(reader, 21, blobLengths[6]),
-            State = (MembershipTrustState)reader.GetInt32(4),
-            ObservedAt = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(5)),
-            ValidFrom = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(6)),
-            ValidUntil = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(7))
-        };
-        if (!MembershipTrustRepositoryValidation.IsValid(record))
-        {
-            throw new InvalidDataException("Membership trust record is invalid.");
-        }
-        return record;
     }
 
     private void InitializeSchema()

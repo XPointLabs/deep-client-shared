@@ -1031,28 +1031,22 @@ public sealed class InMemorySessionStore :
         lock (durableStateGate)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (!membershipTrustRecords.TryGetValue(key, out var records))
+            var history = ValidateMembershipTrustHistory(
+                key,
+                record.Revision);
+            if (history.Snapshot.Result == MembershipTrustReadResult.Corrupt)
             {
-                records = [];
-                membershipTrustRecords[key] = records;
+                return Task.FromResult(MembershipTrustCommitResult.Corrupt);
             }
 
-            if (records.TryGetValue(record.Revision, out var existing))
+            if (history.SelectedRecord is { } existing)
             {
                 return Task.FromResult(
                     MembershipTrustRepositoryValidation.Same(existing, record)
                         ? MembershipTrustCommitResult.Idempotent
                         : MembershipTrustCommitResult.Conflict);
             }
-            var historyBytes = records.Values.Aggregate(
-                0L,
-                static (total, value) =>
-                {
-                    var bytes = MembershipTrustRepositoryValidation.HistoryBlobBytes(value);
-                    return total > long.MaxValue - bytes
-                        ? long.MaxValue
-                        : total + bytes;
-                });
+            var historyBytes = history.HistoryBytes;
             var recordBytes =
                 MembershipTrustRepositoryValidation.HistoryBlobBytes(record);
             if (historyBytes >
@@ -1062,6 +1056,9 @@ public sealed class InMemorySessionStore :
                 return Task.FromResult(MembershipTrustCommitResult.Corrupt);
             }
 
+            var records = membershipTrustRecords.TryGetValue(key, out var existingRecords)
+                ? existingRecords
+                : [];
             var hasHead = membershipTrustHeads.TryGetValue(key, out var headRevision);
             if (hasHead != expectedHeadRevision.HasValue ||
                 (hasHead && headRevision != expectedHeadRevision!.Value) ||
@@ -1069,7 +1066,17 @@ public sealed class InMemorySessionStore :
             {
                 return Task.FromResult(MembershipTrustCommitResult.Conflict);
             }
+            if (!MembershipTrustRepositoryValidation.HasValidLinkage(
+                    record,
+                    history.Snapshot.Head))
+            {
+                return Task.FromResult(MembershipTrustCommitResult.Conflict);
+            }
 
+            if (!hasHead)
+            {
+                membershipTrustRecords[key] = records;
+            }
             records.Add(storedRecord.Revision, storedRecord);
             membershipTrustHeads[key] = storedRecord.Revision;
             try
@@ -1115,66 +1122,97 @@ public sealed class InMemorySessionStore :
         {
             cancellationToken.ThrowIfCancellationRequested();
             var key = new MembershipTrustKey(opaqueProfileKey, domain);
-            var hasRecords = membershipTrustRecords.TryGetValue(key, out var records);
-            var hasHead = membershipTrustHeads.TryGetValue(key, out var headRevision);
-            if (!hasRecords && !hasHead)
+            var history = ValidateMembershipTrustHistory(key, selectedRevision: null);
+            if (history.Snapshot.Result != MembershipTrustReadResult.Found)
             {
-                return Task.FromResult(MembershipTrustRepositoryValidation.Missing());
+                return Task.FromResult(history.Snapshot);
             }
-            if (!hasRecords || !hasHead || records is null || headRevision == 0 ||
-                headRevision >
-                    MembershipTrustRepositoryValidation.MaximumMembershipTrustHistoryRecords ||
-                headRevision != checked((ulong)records.Count))
-            {
-                return Task.FromResult(MembershipTrustRepositoryValidation.Corrupt());
-            }
-
-            MembershipTrustRecord? head = null;
-            MembershipTrustRecord? predecessor = null;
-            MembershipTrustRecord? previous = null;
-            var historyBytes = 0L;
-            for (var revision = 1UL; revision <= headRevision; revision++)
-            {
-                if (!records.TryGetValue(revision, out var record) ||
-                    !MembershipTrustRepositoryValidation.IsValid(record) ||
-                    !MembershipTrustRepositoryValidation.HasValidLinkage(
-                        record,
-                        previous))
-                {
-                    return Task.FromResult(MembershipTrustRepositoryValidation.Corrupt());
-                }
-                var recordBytes =
-                    MembershipTrustRepositoryValidation.HistoryBlobBytes(record);
-                if (historyBytes >
-                    MembershipTrustRepositoryValidation.MaximumMembershipTrustHistoryBytes -
-                    recordBytes)
-                {
-                    return Task.FromResult(MembershipTrustRepositoryValidation.Corrupt());
-                }
-                historyBytes += recordBytes;
-                if (revision == headRevision - 1)
-                {
-                    predecessor = record;
-                }
-                if (revision == headRevision)
-                {
-                    head = record;
-                    break;
-                }
-                previous = record;
-            }
-            if (head is null)
-            {
-                return Task.FromResult(MembershipTrustRepositoryValidation.Corrupt());
-            }
-
             return Task.FromResult(new MembershipTrustReadSnapshot(
                 MembershipTrustReadResult.Found,
-                MembershipTrustRepositoryValidation.Clone(head),
-                predecessor is null
+                MembershipTrustRepositoryValidation.Clone(history.Snapshot.Head!),
+                history.Snapshot.Predecessor is null
                     ? null
-                    : MembershipTrustRepositoryValidation.Clone(predecessor)));
+                    : MembershipTrustRepositoryValidation.Clone(
+                        history.Snapshot.Predecessor)));
         }
+    }
+
+    private readonly record struct MembershipTrustHistoryValidation(
+        MembershipTrustReadSnapshot Snapshot,
+        MembershipTrustRecord? SelectedRecord,
+        long HistoryBytes);
+
+    private MembershipTrustHistoryValidation ValidateMembershipTrustHistory(
+        MembershipTrustKey key,
+        ulong? selectedRevision)
+    {
+        var hasRecords = membershipTrustRecords.TryGetValue(key, out var records);
+        var hasHead = membershipTrustHeads.TryGetValue(key, out var headRevision);
+        if (!hasRecords && !hasHead)
+        {
+            return new MembershipTrustHistoryValidation(
+                MembershipTrustRepositoryValidation.Missing(),
+                null,
+                0);
+        }
+        if (!hasRecords || !hasHead || records is null || headRevision == 0 ||
+            headRevision >
+                MembershipTrustRepositoryValidation.MaximumMembershipTrustHistoryRecords ||
+            headRevision != checked((ulong)records.Count))
+        {
+            return new MembershipTrustHistoryValidation(
+                MembershipTrustRepositoryValidation.Corrupt(),
+                null,
+                0);
+        }
+
+        MembershipTrustRecord? head = null;
+        MembershipTrustRecord? predecessor = null;
+        MembershipTrustRecord? previous = null;
+        MembershipTrustRecord? selected = null;
+        var historyBytes = 0L;
+        for (var revision = 1UL; revision <= headRevision; revision++)
+        {
+            if (!records.TryGetValue(revision, out var record) ||
+                !MembershipTrustRepositoryValidation.IsValid(record) ||
+                !MembershipTrustRepositoryValidation.HasValidLinkage(record, previous))
+            {
+                return new MembershipTrustHistoryValidation(
+                    MembershipTrustRepositoryValidation.Corrupt(),
+                    null,
+                    0);
+            }
+            var recordBytes =
+                MembershipTrustRepositoryValidation.HistoryBlobBytes(record);
+            if (historyBytes >
+                MembershipTrustRepositoryValidation.MaximumMembershipTrustHistoryBytes -
+                recordBytes)
+            {
+                return new MembershipTrustHistoryValidation(
+                    MembershipTrustRepositoryValidation.Corrupt(),
+                    null,
+                    0);
+            }
+            historyBytes += recordBytes;
+            if (revision == headRevision - 1)
+            {
+                predecessor = record;
+            }
+            if (revision == selectedRevision)
+            {
+                selected = record;
+            }
+            previous = record;
+            head = record;
+        }
+
+        return new MembershipTrustHistoryValidation(
+            new MembershipTrustReadSnapshot(
+                MembershipTrustReadResult.Found,
+                head,
+                predecessor),
+            selected,
+            historyBytes);
     }
 
     public Task<MembershipTrustClockCommitResult> CommitMembershipTrustClockAsync(
