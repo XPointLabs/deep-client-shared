@@ -4,7 +4,14 @@
   "preservesAccountMessageGroupState": true,
   "trustProfilesSurviveAccountSignOut": true,
   "observedTimeHighWaterSurvivesAccountSignOut": true,
-  "sqliteAdditions": ["artifact_kind", "membership_trust_clock"],
+  "sqliteAdditions": [
+    "artifact_kind",
+    "membership_trust_clock",
+    "signing_authority",
+    "revoked_delegation_hashes"
+  ],
+  "trustRecordSchema": 2,
+  "preV2DormantRecordPolicy": "fail-closed-and-rebootstrap",
   "profileScope": "installation-not-account",
   "rollback": "keep tables and both flags false; do not select an older LKG",
   "silentLegacyFallback": false

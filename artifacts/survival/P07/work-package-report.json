@@ -12,15 +12,89 @@
   "correctiveRedCommit": "ef485c5e8d92d548ed5a50876cf0f4ed526a0a07",
   "correctiveRedCommits": [
     "a798739168effbe2bfd3d250e9999855533f5e78",
-    "d20289800bbea96da526af614b38926fef149983"
+    "d20289800bbea96da526af614b38926fef149983",
+    "0b2715dfa6ee1bbe4292953a9108c112e12f79bc"
   ],
-  "previousEvidenceCarrierCommit": "37c3501d61462a1403da944096ab2c113bcc46d8",
-  "sourceCommit": "f8acbc605c35ec084e8f7f6fe923eb16102688a2",
-  "evidenceContentCommit": "c121411b2d14fccf88bae9920d1040856180af90",
+  "previousEvidenceCarrierCommit": "e7824a90ec4f5b2eb4b719c76cdf6e96040da66f",
+  "sourceCommit": "e665972e655160c7359b18d8dfeb432efec524a6",
   "tests": {
-    "full": { "passed": 363, "failed": 0, "skipped": 0 },
-    "focused": { "passed": 53, "failed": 0, "skipped": 0 },
-    "privacyGate": { "passed": 3, "failed": 0, "skipped": 0 }
+    "full": {
+      "command": "dotnet test .\\Deep.Client.Shared.slnx --configuration Release --no-restore --logger \"trx;LogFileName=p07-corrective3-full.trx\" --results-directory .\\artifacts\\survival\\P07\\trx",
+      "exitCode": 0,
+      "passed": 376,
+      "failed": 0,
+      "skipped": 0,
+      "localUncommittedTrxSha256": "a655627db8a0fb77d34f2ff0831483bd13aad8ba2b27591f047d40034f83a2de"
+    },
+    "focused": {
+      "command": "dotnet test .\\tests\\Deep.Client.Shared.Tests\\Deep.Client.Shared.Tests.csproj --configuration Release --no-restore --filter \"FullyQualifiedName~MembershipTrust\" --logger \"trx;LogFileName=p07-corrective3-focused.trx\" --results-directory .\\artifacts\\survival\\P07\\trx",
+      "exitCode": 0,
+      "passed": 66,
+      "failed": 0,
+      "skipped": 0,
+      "localUncommittedTrxSha256": "6dcbdd70e96aaa3ce7abcbfd9552e1ae4a2ae838f756e1498eab6eab69325b95"
+    },
+    "privacyGate": {
+      "command": "& .\\eng\\scripts\\Invoke-P07TrustGate.ps1",
+      "exitCode": 0,
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0
+    },
+    "schemaAndFlags": {
+      "command": "dotnet test .\\tests\\Deep.Client.Shared.Tests\\Deep.Client.Shared.Tests.csproj --configuration Release --no-restore --filter \"FullyQualifiedName~FeatureFlagsTests|FullyQualifiedName~LogicalSchemaThreeToFour\" --logger \"trx;LogFileName=p07-corrective3-schema-flags.trx\" --results-directory .\\artifacts\\survival\\P07\\trx",
+      "exitCode": 0,
+      "passed": 6,
+      "failed": 0,
+      "skipped": 0,
+      "localUncommittedTrxSha256": "a73095adf4f7a809257c7a3f13a44901815c723d2604c883fc9d61f28b3497bf"
+    }
+  },
+  "verificationCommands": [
+    { "command": "& .\\eng\\scripts\\Invoke-P07DependencyGate.ps1", "exitCode": 0, "result": "PASS-before-restore" },
+    { "command": "dotnet restore .\\Deep.Client.Shared.slnx --locked-mode", "exitCode": 0, "result": "two-projects-up-to-date" },
+    { "command": "& .\\eng\\scripts\\Invoke-P07DependencyGate.ps1", "exitCode": 0, "result": "PASS-after-restore" }
+  ],
+  "changedFilesFromBase": [
+    "NuGet.Config",
+    "artifacts/survival/P07/compatibility-impact.json",
+    "artifacts/survival/P07/dependency-pins.json",
+    "artifacts/survival/P07/handoff.json",
+    "artifacts/survival/P07/migration-and-rollback.json",
+    "artifacts/survival/P07/security-impact.json",
+    "artifacts/survival/P07/test-results.md",
+    "artifacts/survival/P07/work-package-report.json",
+    "docs/ARCHITECTURE.md",
+    "docs/P07_MEMBERSHIP_TRUST.md",
+    "docs/SESSION_PORTING.md",
+    "eng/scripts/Invoke-P07DependencyGate.ps1",
+    "eng/scripts/Invoke-P07TrustGate.ps1",
+    "src/Deep.Client.Shared/Deep.Client.Shared.csproj",
+    "src/Deep.Client.Shared/Domain/MembershipTrust.cs",
+    "src/Deep.Client.Shared/Features/ClientFeatureFlags.cs",
+    "src/Deep.Client.Shared/Persistence/InMemorySessionStore.cs",
+    "src/Deep.Client.Shared/Persistence/MembershipTrustRepository.cs",
+    "src/Deep.Client.Shared/Persistence/RepositoryContracts.cs",
+    "src/Deep.Client.Shared/Persistence/SchemaMigration.cs",
+    "src/Deep.Client.Shared/Persistence/SqliteSessionStore.cs",
+    "src/Deep.Client.Shared/Services/MembershipTrustService.cs",
+    "src/Deep.Client.Shared/packages.lock.json",
+    "tests/Deep.Client.Shared.Tests/Deep.Client.Shared.Tests.csproj",
+    "tests/Deep.Client.Shared.Tests/Features/FeatureFlagsTests.cs",
+    "tests/Deep.Client.Shared.Tests/Fixtures/p04-membership-contract-v1.json",
+    "tests/Deep.Client.Shared.Tests/Persistence/MembershipTrustRepositoryContractTests.cs",
+    "tests/Deep.Client.Shared.Tests/Persistence/MembershipTrustSqliteRecoveryTests.cs",
+    "tests/Deep.Client.Shared.Tests/Services/MembershipTrustPrivacyTests.cs",
+    "tests/Deep.Client.Shared.Tests/Services/MembershipTrustServiceTests.cs",
+    "tests/Deep.Client.Shared.Tests/packages.lock.json"
+  ],
+  "lockScopeApproval": {
+    "humanOwner": "Mr. X",
+    "approvedPaths": [
+      "src/Deep.Client.Shared/packages.lock.json",
+      "tests/Deep.Client.Shared.Tests/packages.lock.json"
+    ],
+    "reason": "mandatory offline locked restore evidence"
   },
   "dormant": true,
   "runtimeRegistered": false,
