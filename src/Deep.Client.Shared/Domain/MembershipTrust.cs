@@ -106,7 +106,7 @@ public sealed record MembershipTrustStatus(
 
 public sealed record MembershipTrustRecord
 {
-    public const int SchemaVersion = 1;
+    public const int SchemaVersion = 2;
     public const int MaximumProfileKeyLength = 128;
     public const int MaximumEnvelopeLength = 128 * 1024;
 
@@ -134,6 +134,10 @@ public sealed record MembershipTrustRecord
 
     public required byte[] ProfileBindingHash { get; init; }
 
+    public byte[] SigningAuthorityEnvelope { get; init; } = [];
+
+    public byte[] RevokedDelegationHashes { get; init; } = [];
+
     public required MembershipTrustState State { get; init; }
 
     public required DateTimeOffset ObservedAt { get; init; }
@@ -158,7 +162,9 @@ public sealed record MembershipTrustRecord
         DateTimeOffset? validFrom = null,
         byte[]? canonicalHash = null,
         byte[]? profileBindingHash = null,
-        MembershipTrustArtifactKind? artifactKind = null)
+        MembershipTrustArtifactKind? artifactKind = null,
+        byte[]? signingAuthorityEnvelope = null,
+        byte[]? revokedDelegationHashes = null)
     {
         ArgumentNullException.ThrowIfNull(previousCanonicalHash);
         ArgumentNullException.ThrowIfNull(canonicalEnvelope);
@@ -183,6 +189,8 @@ public sealed record MembershipTrustRecord
             CanonicalHash = (canonicalHash ?? SHA256.HashData(canonicalEnvelope)).ToArray(),
             ProfileBindingHash = (profileBindingHash ??
                 SHA256.HashData(Encoding.UTF8.GetBytes(opaqueProfileKey))).ToArray(),
+            SigningAuthorityEnvelope = (signingAuthorityEnvelope ?? []).ToArray(),
+            RevokedDelegationHashes = (revokedDelegationHashes ?? []).ToArray(),
             State = state,
             ObservedAt = observedAt,
             ValidFrom = validFrom ?? DateTimeOffset.UnixEpoch,
@@ -218,6 +226,12 @@ public sealed record MembershipTrustRecord
             record.CanonicalHash.Length != MembershipLimits.HashLength ||
             record.ProfileBindingHash is null ||
             record.ProfileBindingHash.Length != MembershipLimits.HashLength ||
+            record.SigningAuthorityEnvelope is null ||
+            record.SigningAuthorityEnvelope.Length > MaximumEnvelopeLength ||
+            record.RevokedDelegationHashes is null ||
+            record.RevokedDelegationHashes.Length >
+                MembershipLimits.MaximumRevokedDelegationHashes * MembershipLimits.HashLength ||
+            record.RevokedDelegationHashes.Length % MembershipLimits.HashLength != 0 ||
             !Enum.IsDefined(record.State) ||
             record.ObservedAt < DateTimeOffset.UnixEpoch ||
             record.ValidFrom > record.ValidUntil)
@@ -245,6 +259,10 @@ public sealed record MembershipTrustRecord
         Append(hash, record.CanonicalEnvelope ?? []);
         AppendFixed(hash, record.CanonicalHash);
         AppendFixed(hash, record.ProfileBindingHash);
+        AppendUInt32(hash, checked((uint)(record.SigningAuthorityEnvelope?.Length ?? 0)));
+        Append(hash, record.SigningAuthorityEnvelope ?? []);
+        AppendUInt32(hash, checked((uint)(record.RevokedDelegationHashes?.Length ?? 0)));
+        Append(hash, record.RevokedDelegationHashes ?? []);
         AppendInt32(hash, (int)record.State);
         AppendInt64(hash, record.ObservedAt.ToUnixTimeSeconds());
         AppendInt64(hash, record.ValidFrom.ToUnixTimeSeconds());

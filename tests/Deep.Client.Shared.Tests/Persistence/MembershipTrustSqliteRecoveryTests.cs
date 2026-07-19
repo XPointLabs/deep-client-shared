@@ -278,14 +278,27 @@ public sealed class MembershipTrustSqliteRecoveryTests
                     WHERE profile_key = 'install:test' AND domain = 3 AND revision = 1;
                     """,
                 "valid-from-null" => """
-                    UPDATE membership_trust_records
-                    SET valid_from = NULL
-                    WHERE profile_key = 'install:test' AND domain = 3 AND revision = 1;
+                    ALTER TABLE membership_trust_records RENAME TO membership_trust_records_old;
+                    CREATE TABLE membership_trust_records AS
+                    SELECT profile_key, domain, revision, version, artifact_kind, sequence,
+                           previous_sequence, previous_hash, envelope, payload_digest,
+                           canonical_hash, profile_binding_hash, signing_authority,
+                           revoked_delegation_hashes, state, observed_at,
+                           CASE WHEN revision = 1 THEN NULL ELSE valid_from END AS valid_from,
+                           valid_until
+                    FROM membership_trust_records_old;
+                    DROP TABLE membership_trust_records_old;
                     """,
                 "valid-until-null" => """
-                    UPDATE membership_trust_records
-                    SET valid_until = NULL
-                    WHERE profile_key = 'install:test' AND domain = 3 AND revision = 1;
+                    ALTER TABLE membership_trust_records RENAME TO membership_trust_records_old;
+                    CREATE TABLE membership_trust_records AS
+                    SELECT profile_key, domain, revision, version, artifact_kind, sequence,
+                           previous_sequence, previous_hash, envelope, payload_digest,
+                           canonical_hash, profile_binding_hash, signing_authority,
+                           revoked_delegation_hashes, state, observed_at, valid_from,
+                           CASE WHEN revision = 1 THEN NULL ELSE valid_until END AS valid_until
+                    FROM membership_trust_records_old;
+                    DROP TABLE membership_trust_records_old;
                     """,
                 "clock-observed-out-of-range" => """
                     UPDATE membership_trust_clock
@@ -293,9 +306,11 @@ public sealed class MembershipTrustSqliteRecoveryTests
                     WHERE profile_key = 'install:test';
                     """,
                 "clock-observed-null" => """
-                    UPDATE membership_trust_clock
-                    SET observed_at = NULL
-                    WHERE profile_key = 'install:test';
+                    ALTER TABLE membership_trust_clock RENAME TO membership_trust_clock_old;
+                    CREATE TABLE membership_trust_clock AS
+                    SELECT profile_key, version, revision, NULL AS observed_at, digest
+                    FROM membership_trust_clock_old;
+                    DROP TABLE membership_trust_clock_old;
                     """,
                 _ => throw new ArgumentOutOfRangeException(nameof(corruption))
             };

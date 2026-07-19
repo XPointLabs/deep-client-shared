@@ -287,6 +287,24 @@ public sealed class MembershipTrustService(
                     Sequence = current.Head.Sequence,
                     CanonicalHash = current.Head.CanonicalHash.ToArray()
                 };
+            var revokedDelegationHashes = DecodeRevokedDelegationHashes(
+                current.Head.RevokedDelegationHashes);
+            if (artifactKind == MembershipTrustArtifactKind.Revocation)
+            {
+                var revocation = (SignerRevocation)decoded.Value;
+                var target = decoded.Sequence == current.Head.Sequence
+                    ? current.Predecessor
+                    : current.Head;
+                if (target is null ||
+                    target.ArtifactKind != MembershipTrustArtifactKind.Delegation ||
+                    !revocation.DelegationHash.Span.SequenceEqual(target.CanonicalHash))
+                {
+                    return MembershipTrustStatus.For(MembershipTrustState.ProtocolUnsupported);
+                }
+                revokedDelegationHashes = AddRevokedDelegationHash(
+                    revokedDelegationHashes,
+                    revocation.DelegationHash);
+            }
             var verifiedHash = VerifyAuthorityCandidate(decoded, genesis, lkg, now);
             if (decoded.Sequence == current.Head.Sequence)
             {
@@ -299,7 +317,10 @@ public sealed class MembershipTrustService(
                     (decoded.ValidFrom, decoded.ValidUntil),
                     now,
                     artifactKind,
-                    cancellationToken).ConfigureAwait(false);
+                    signingAuthorityEnvelope: [],
+                    revokedDelegationHashes: FlattenRevokedDelegationHashes(
+                        revokedDelegationHashes),
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
             }
 
             return await CommitAuthorityAsync(
@@ -312,6 +333,7 @@ public sealed class MembershipTrustService(
                 decoded.ValidUntil,
                 decoded.State,
                 artifactKind,
+                FlattenRevokedDelegationHashes(revokedDelegationHashes),
                 now,
                 cancellationToken).ConfigureAwait(false);
         }
@@ -351,10 +373,11 @@ public sealed class MembershipTrustService(
         }
 
         byte[] profileBinding;
+        NetworkGenesis genesis;
         try
         {
             ValidateOptions();
-            _ = DecodePinnedGenesis(profile);
+            genesis = DecodePinnedGenesis(profile);
             var canonicalDelegation = Bounded(profile.SignedDelegation);
             RequireExact(
                 canonicalDelegation,
@@ -408,6 +431,28 @@ public sealed class MembershipTrustService(
                 return MembershipTrustStatus.For(MembershipTrustState.ProtocolUnsupported);
             }
             snapshots.Add(snapshot);
+        }
+
+        MembershipTrustStatus? revalidated;
+        try
+        {
+            revalidated = await RevalidateContentHeadsAsync(
+                profile,
+                genesis,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (MembershipContractException exception)
+        {
+            return FromContractError(exception.Error);
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException or InvalidDataException or OverflowException)
+        {
+            return MembershipTrustStatus.For(MembershipTrustState.Corrupt);
+        }
+        if (revalidated is not null)
+        {
+            return revalidated;
         }
 
         var blocking = snapshots.Select(static snapshot => snapshot.Head!.State)
@@ -587,7 +632,8 @@ public sealed class MembershipTrustService(
                 Genesis = genesis,
                 ActiveDelegation = delegation,
                 AuthorityLastKnownGood = ToLastKnownGood(authority.Head),
-                RevokedDelegationHashes = [],
+                RevokedDelegationHashes = DecodeRevokedDelegationHashes(
+                    authority.Head.RevokedDelegationHashes),
                 LastKnownGood = lkg,
                 VerificationTimeUnixSeconds = Seconds(operationNow),
                 AllowedClockSkewSeconds = AllowedSkewSeconds(),
@@ -615,7 +661,9 @@ public sealed class MembershipTrustService(
                     domain == MembershipTrustDomain.Bridge
                         ? MembershipTrustArtifactKind.Bridge
                         : MembershipTrustArtifactKind.Membership,
-                    cancellationToken).ConfigureAwait(false);
+                    authority.Head.CanonicalEnvelope,
+                    revokedDelegationHashes: [],
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
             }
 
             var validity = ContentValidity(candidate);
@@ -632,7 +680,8 @@ public sealed class MembershipTrustService(
                 Unix(validity.ValidUntil),
                 Unix(validity.ValidFrom),
                 verifiedHash.ToArray(),
-                current.Head.ProfileBindingHash);
+                current.Head.ProfileBindingHash,
+                signingAuthorityEnvelope: authority.Head.CanonicalEnvelope);
             var result = await repository.CommitMembershipTrustAsync(
                 record,
                 current.Head.Revision,
@@ -665,7 +714,9 @@ public sealed class MembershipTrustService(
                         domain == MembershipTrustDomain.Bridge
                             ? MembershipTrustArtifactKind.Bridge
                             : MembershipTrustArtifactKind.Membership,
-                        cancellationToken).ConfigureAwait(false);
+                        authority.Head.CanonicalEnvelope,
+                        revokedDelegationHashes: [],
+                        cancellationToken: cancellationToken).ConfigureAwait(false);
                 }
             }
             return MembershipTrustStatus.For(MembershipTrustState.Corrupt);
@@ -696,6 +747,8 @@ public sealed class MembershipTrustService(
         (ulong ValidFrom, ulong ValidUntil) validity,
         DateTimeOffset operationNow,
         MembershipTrustArtifactKind artifactKind,
+        byte[] signingAuthorityEnvelope,
+        byte[] revokedDelegationHashes,
         CancellationToken cancellationToken)
     {
         var fork = MembershipTrustRecord.Create(
@@ -712,7 +765,9 @@ public sealed class MembershipTrustService(
             Unix(validity.ValidFrom),
             candidateHash,
             current.ProfileBindingHash,
-            artifactKind);
+            artifactKind,
+            signingAuthorityEnvelope,
+            revokedDelegationHashes);
         var result = await repository.CommitMembershipTrustAsync(
             fork,
             current.Revision,
@@ -733,7 +788,88 @@ public sealed class MembershipTrustService(
             profile,
             operationNow,
             cancellationToken).ConfigureAwait(false);
-        return initialized.State == MembershipTrustState.Healthy ? null : initialized;
+        if (initialized.State == MembershipTrustState.Healthy)
+        {
+            return null;
+        }
+        if ((initialized.State is MembershipTrustState.ProtocolUnsupported or
+                MembershipTrustState.Revoked) &&
+            await CanRefreshSupersededContentAsync(
+                profile,
+                initialized.State,
+                cancellationToken).ConfigureAwait(false))
+        {
+            return null;
+        }
+        return initialized;
+    }
+
+    private async Task<bool> CanRefreshSupersededContentAsync(
+        MembershipTrustProfile profile,
+        MembershipTrustState initializedState,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var profileBinding = ComputeProfileBinding(profile);
+            var authority = await repository.ReadMembershipTrustAsync(
+                profile.OpaqueProfileKey,
+                MembershipTrustDomain.Authority,
+                cancellationToken).ConfigureAwait(false);
+            if (authority.Result != MembershipTrustReadResult.Found ||
+                authority.Head is null ||
+                authority.Head.State != MembershipTrustState.Healthy ||
+                authority.Head.ArtifactKind != MembershipTrustArtifactKind.Delegation ||
+                !authority.Head.ProfileBindingHash.AsSpan().SequenceEqual(profileBinding))
+            {
+                return false;
+            }
+
+            var revoked = DecodeRevokedDelegationHashes(
+                authority.Head.RevokedDelegationHashes);
+            var foundExpectedReason = false;
+            foreach (var domain in new[]
+                     {
+                         MembershipTrustDomain.Bridge,
+                         MembershipTrustDomain.Membership
+                     })
+            {
+                var snapshot = await repository.ReadMembershipTrustAsync(
+                    profile.OpaqueProfileKey,
+                    domain,
+                    cancellationToken).ConfigureAwait(false);
+                if (snapshot.Result != MembershipTrustReadResult.Found ||
+                    snapshot.Head is null ||
+                    snapshot.Head.State != MembershipTrustState.Healthy ||
+                    !snapshot.Head.ProfileBindingHash.AsSpan().SequenceEqual(profileBinding))
+                {
+                    return false;
+                }
+                if (snapshot.Head.ArtifactKind == MembershipTrustArtifactKind.Anchor)
+                {
+                    continue;
+                }
+                var signingDelegation = MembershipContractCodec.DecodeSignedDelegation(
+                    snapshot.Head.SigningAuthorityEnvelope);
+                RequireExact(
+                    snapshot.Head.SigningAuthorityEnvelope,
+                    MembershipContractCodec.EncodeSignedDelegation(signingDelegation));
+                var signingHash = MembershipContractHash.Sha256(
+                    MembershipContractCodec.GetDelegationSigningBytes(signingDelegation));
+                var isRevoked = revoked.Any(value => value.Span.SequenceEqual(signingHash));
+                var isSuperseded = !authority.Head.CanonicalHash.AsSpan().SequenceEqual(signingHash);
+                foundExpectedReason |= initializedState == MembershipTrustState.Revoked
+                    ? isRevoked
+                    : isSuperseded && !isRevoked;
+            }
+            return foundExpectedReason;
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException or InvalidDataException or
+                MembershipContractException or OverflowException)
+        {
+            return false;
+        }
     }
 
     private async Task<MembershipTrustStatus> EnsureAnchorAsync(
@@ -809,6 +945,7 @@ public sealed class MembershipTrustService(
         ulong validUntil,
         MembershipTrustState state,
         MembershipTrustArtifactKind artifactKind,
+        byte[] revokedDelegationHashes,
         DateTimeOffset operationNow,
         CancellationToken cancellationToken)
     {
@@ -826,7 +963,9 @@ public sealed class MembershipTrustService(
             Unix(validFrom),
             canonicalHash,
             current.ProfileBindingHash,
-            artifactKind);
+            artifactKind,
+            signingAuthorityEnvelope: [],
+            revokedDelegationHashes: revokedDelegationHashes);
         var result = await repository.CommitMembershipTrustAsync(
             record,
             current.Revision,
@@ -860,7 +999,9 @@ public sealed class MembershipTrustService(
                     (validFrom, validUntil),
                     operationNow,
                     artifactKind,
-                    cancellationToken).ConfigureAwait(false);
+                    signingAuthorityEnvelope: [],
+                    revokedDelegationHashes: revokedDelegationHashes,
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
             }
         }
         return MembershipTrustStatus.For(MembershipTrustState.Corrupt);
@@ -931,6 +1072,11 @@ public sealed class MembershipTrustService(
             {
                 return MembershipTrustStatus.For(MembershipTrustState.ProtocolUnsupported);
             }
+            if (snapshot.Head.RevokedDelegationHashes.Length != 0 ||
+                snapshot.Head.SigningAuthorityEnvelope.Length != 0)
+            {
+                return MembershipTrustStatus.For(MembershipTrustState.Corrupt);
+            }
             VerifyPersistedAuthorityRecord(snapshot.Head, genesis, genesis.GenesisSequence, genesisHash);
             return null;
         }
@@ -949,6 +1095,39 @@ public sealed class MembershipTrustService(
             genesis,
             snapshot.Head.PreviousSequence,
             snapshot.Head.PreviousCanonicalHash);
+        if (snapshot.Head.SigningAuthorityEnvelope.Length != 0)
+        {
+            return MembershipTrustStatus.For(MembershipTrustState.Corrupt);
+        }
+        if (snapshot.Head.State != MembershipTrustState.ForkDetected)
+        {
+            var predecessorRevoked = DecodeRevokedDelegationHashes(
+                snapshot.Predecessor.RevokedDelegationHashes);
+            if (snapshot.Head.ArtifactKind == MembershipTrustArtifactKind.Delegation)
+            {
+                if (!snapshot.Head.RevokedDelegationHashes.AsSpan().SequenceEqual(
+                        snapshot.Predecessor.RevokedDelegationHashes))
+                {
+                    return MembershipTrustStatus.For(MembershipTrustState.Corrupt);
+                }
+            }
+            else
+            {
+                var revocation = MembershipContractCodec.DecodeSignedRevocation(
+                    snapshot.Head.CanonicalEnvelope);
+                if (snapshot.Predecessor.ArtifactKind != MembershipTrustArtifactKind.Delegation ||
+                    !revocation.DelegationHash.Span.SequenceEqual(
+                        snapshot.Predecessor.CanonicalHash) ||
+                    !snapshot.Head.RevokedDelegationHashes.AsSpan().SequenceEqual(
+                        FlattenRevokedDelegationHashes(
+                            AddRevokedDelegationHash(
+                                predecessorRevoked,
+                                revocation.DelegationHash))))
+                {
+                    return MembershipTrustStatus.For(MembershipTrustState.Corrupt);
+                }
+            }
+        }
         return null;
     }
 
@@ -1006,6 +1185,10 @@ public sealed class MembershipTrustService(
         RequireExact(
             authority.Head.CanonicalEnvelope,
             MembershipContractCodec.EncodeSignedDelegation(delegation));
+        var activeDelegationHash = authority.Head.CanonicalHash;
+        var revokedDelegationHashes = DecodeRevokedDelegationHashes(
+            authority.Head.RevokedDelegationHashes);
+        MembershipTrustStatus? superseded = null;
 
         foreach (var (domain, anchor, kind) in new[]
                  {
@@ -1042,36 +1225,64 @@ public sealed class MembershipTrustService(
                     snapshot.Predecessor,
                     domain,
                     genesis,
-                    delegation,
-                    authority.Head);
+                    revokedDelegationHashes: []);
             }
-            VerifyPersistedContentRecord(
+            var signingAuthorityHash = VerifyPersistedContentRecord(
                 snapshot.Head,
                 domain,
                 genesis,
-                delegation,
-                authority.Head);
+                revokedDelegationHashes);
+            if (!signingAuthorityHash.AsSpan().SequenceEqual(activeDelegationHash))
+            {
+                superseded = MembershipTrustStatus.For(
+                    MembershipTrustState.ProtocolUnsupported);
+            }
         }
-        return null;
+        return superseded;
     }
 
-    private void VerifyPersistedContentRecord(
+    private byte[] VerifyPersistedContentRecord(
         MembershipTrustRecord record,
         MembershipTrustDomain domain,
         NetworkGenesis genesis,
-        SignerDelegation delegation,
-        MembershipTrustRecord authority)
+        IReadOnlyList<ReadOnlyMemory<byte>> revokedDelegationHashes)
     {
+        if (record.SigningAuthorityEnvelope.Length == 0)
+        {
+            throw new InvalidDataException("Persisted content authority is missing.");
+        }
+        var delegation = MembershipContractCodec.DecodeSignedDelegation(
+            record.SigningAuthorityEnvelope);
+        RequireExact(
+            record.SigningAuthorityEnvelope,
+            MembershipContractCodec.EncodeSignedDelegation(delegation));
+        var authorityHash = MembershipContractVerifier.VerifyDelegation(
+            delegation,
+            genesis,
+            new MembershipLastKnownGood
+            {
+                NetworkId = genesis.NetworkId.ToArray(),
+                PolicyVersion = genesis.PolicyVersion,
+                Sequence = checked(delegation.Sequence - 1),
+                CanonicalHash = delegation.PreviousHash.ToArray()
+            },
+            Seconds(VerificationInstant(record)),
+            AllowedSkewSeconds(),
+            options.ClientProtocol,
+            verifier!).CanonicalHash.ToArray();
         var candidate = DecodeContent(domain, record.CanonicalEnvelope);
         var context = new MembershipVerificationContext
         {
             Genesis = genesis,
             ActiveDelegation = delegation,
-            AuthorityLastKnownGood = ToLastKnownGood(
-                authority,
-                genesis.NetworkId,
-                genesis.PolicyVersion),
-            RevokedDelegationHashes = [],
+            AuthorityLastKnownGood = new MembershipLastKnownGood
+            {
+                NetworkId = genesis.NetworkId.ToArray(),
+                PolicyVersion = genesis.PolicyVersion,
+                Sequence = delegation.Sequence,
+                CanonicalHash = authorityHash
+            },
+            RevokedDelegationHashes = revokedDelegationHashes,
             LastKnownGood = new MembershipLastKnownGood
             {
                 NetworkId = genesis.NetworkId.ToArray(),
@@ -1092,6 +1303,7 @@ public sealed class MembershipTrustService(
         {
             throw new InvalidDataException("Persisted content record failed revalidation.");
         }
+        return authorityHash;
     }
 
     private static DateTimeOffset VerificationInstant(MembershipTrustRecord record)
@@ -1196,6 +1408,72 @@ public sealed class MembershipTrustService(
                     verifier!).CanonicalHash.ToArray(),
             _ => throw new ArgumentOutOfRangeException(nameof(candidate))
         };
+
+    private static IReadOnlyList<ReadOnlyMemory<byte>> DecodeRevokedDelegationHashes(
+        byte[] flattened)
+    {
+        ArgumentNullException.ThrowIfNull(flattened);
+        if (flattened.Length % MembershipLimits.HashLength != 0 ||
+            flattened.Length >
+                MembershipLimits.MaximumRevokedDelegationHashes * MembershipLimits.HashLength)
+        {
+            throw new InvalidDataException("Revoked delegation set is invalid.");
+        }
+        var values = new List<ReadOnlyMemory<byte>>(
+            flattened.Length / MembershipLimits.HashLength);
+        for (var offset = 0; offset < flattened.Length; offset += MembershipLimits.HashLength)
+        {
+            var value = flattened.AsSpan(offset, MembershipLimits.HashLength).ToArray();
+            if (values.Any(existing => existing.Span.SequenceEqual(value)))
+            {
+                throw new InvalidDataException("Revoked delegation set is invalid.");
+            }
+            values.Add(value);
+        }
+        return values;
+    }
+
+    private static IReadOnlyList<ReadOnlyMemory<byte>> AddRevokedDelegationHash(
+        IReadOnlyList<ReadOnlyMemory<byte>> current,
+        ReadOnlyMemory<byte> candidate)
+    {
+        if (candidate.Length != MembershipLimits.HashLength)
+        {
+            throw new InvalidDataException("Revoked delegation hash is invalid.");
+        }
+        if (current.Any(value => value.Span.SequenceEqual(candidate.Span)))
+        {
+            return current;
+        }
+        if (current.Count >= MembershipLimits.MaximumRevokedDelegationHashes)
+        {
+            throw new InvalidDataException("Revoked delegation set is full.");
+        }
+        return current
+            .Select(value => (ReadOnlyMemory<byte>)value.ToArray())
+            .Append(candidate.ToArray())
+            .ToArray();
+    }
+
+    private static byte[] FlattenRevokedDelegationHashes(
+        IReadOnlyList<ReadOnlyMemory<byte>> values)
+    {
+        if (values.Count > MembershipLimits.MaximumRevokedDelegationHashes)
+        {
+            throw new InvalidDataException("Revoked delegation set is invalid.");
+        }
+        var flattened = new byte[checked(values.Count * MembershipLimits.HashLength)];
+        for (var index = 0; index < values.Count; index++)
+        {
+            if (values[index].Length != MembershipLimits.HashLength)
+            {
+                throw new InvalidDataException("Revoked delegation hash is invalid.");
+            }
+            values[index].Span.CopyTo(
+                flattened.AsSpan(index * MembershipLimits.HashLength));
+        }
+        return flattened;
+    }
 
     private static SignedMembershipCommitment DecodeMembership(byte[] bytes)
     {

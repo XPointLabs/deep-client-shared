@@ -23,6 +23,7 @@ public sealed class SqliteSessionStore :
     private readonly string _connectionString;
     private readonly string? _encryptionKey;
     private readonly SemaphoreSlim _databaseGate = new(1, 1);
+    private readonly Action<MembershipTrustCommitFaultPoint>? _membershipTrustFaultInjector;
 
     private sealed record OneToOneOpenMetadata(
         string? ActiveAccountPayload,
@@ -46,6 +47,13 @@ public sealed class SqliteSessionStore :
     }
 
     public SqliteSessionStore(SqliteSessionStoreOptions options)
+        : this(options, null)
+    {
+    }
+
+    internal SqliteSessionStore(
+        SqliteSessionStoreOptions options,
+        Action<MembershipTrustCommitFaultPoint>? faultInjector)
     {
         var statePath = options.StatePath;
         if (string.IsNullOrWhiteSpace(statePath))
@@ -60,6 +68,7 @@ public sealed class SqliteSessionStore :
         }
 
         _encryptionKey = string.IsNullOrWhiteSpace(options.EncryptionKey) ? null : options.EncryptionKey;
+        _membershipTrustFaultInjector = faultInjector;
         _connectionString = ConnectionStringFor(
             statePath,
             _encryptionKey,
@@ -1375,10 +1384,12 @@ public sealed class SqliteSessionStore :
                     INSERT INTO membership_trust_records
                         (profile_key, domain, revision, version, artifact_kind, sequence, previous_sequence,
                          previous_hash, envelope, payload_digest, canonical_hash, profile_binding_hash,
+                         signing_authority, revoked_delegation_hashes,
                          state, observed_at, valid_from, valid_until)
                     VALUES
                         ($profile, $domain, $revision, $version, $artifactKind, $sequence, $previousSequence,
                          $previousHash, $envelope, $digest, $canonicalHash, $profileBindingHash,
+                         $signingAuthority, $revokedDelegationHashes,
                          $state, $observedAt, $validFrom, $validUntil);
                     """;
                 AddMembershipTrustRecordParameters(insert, record);
@@ -1420,8 +1431,20 @@ public sealed class SqliteSessionStore :
                 return MembershipTrustCommitResult.Conflict;
             }
 
+            _membershipTrustFaultInjector?.Invoke(
+                MembershipTrustCommitFaultPoint.BeforeDurableCommit);
+            cancellationToken.ThrowIfCancellationRequested();
             transaction.Commit();
+            _membershipTrustFaultInjector?.Invoke(
+                MembershipTrustCommitFaultPoint.AfterDurableCommit);
+            cancellationToken.ThrowIfCancellationRequested();
             return MembershipTrustCommitResult.Applied;
+        }
+        catch (Exception exception) when (
+            exception is ArgumentOutOfRangeException or InvalidCastException or InvalidOperationException or
+                InvalidDataException or OverflowException)
+        {
+            return MembershipTrustCommitResult.Corrupt;
         }
         finally
         {
@@ -1536,7 +1559,8 @@ public sealed class SqliteSessionStore :
             return new MembershipTrustReadSnapshot(MembershipTrustReadResult.Found, current, predecessor);
         }
         catch (Exception exception) when (
-            exception is InvalidDataException or JsonException or OverflowException)
+            exception is ArgumentOutOfRangeException or InvalidCastException or InvalidOperationException or
+                InvalidDataException or JsonException or OverflowException)
         {
             return MembershipTrustRepositoryValidation.Corrupt();
         }
@@ -1636,6 +1660,12 @@ public sealed class SqliteSessionStore :
             transaction.Commit();
             return MembershipTrustClockCommitResult.Applied;
         }
+        catch (Exception exception) when (
+            exception is ArgumentOutOfRangeException or InvalidCastException or InvalidOperationException or
+                InvalidDataException or OverflowException)
+        {
+            return MembershipTrustClockCommitResult.Corrupt;
+        }
         finally
         {
             _databaseGate.Release();
@@ -1681,7 +1711,8 @@ public sealed class SqliteSessionStore :
             return new MembershipTrustClockReadSnapshot(MembershipTrustClockReadResult.Found, record);
         }
         catch (Exception exception) when (
-            exception is InvalidDataException or OverflowException)
+            exception is ArgumentOutOfRangeException or InvalidCastException or InvalidOperationException or
+                InvalidDataException or OverflowException)
         {
             return new MembershipTrustClockReadSnapshot(MembershipTrustClockReadResult.Corrupt, null);
         }
@@ -2454,6 +2485,8 @@ public sealed class SqliteSessionStore :
         command.Parameters.AddWithValue("$digest", record.PayloadDigest);
         command.Parameters.AddWithValue("$canonicalHash", record.CanonicalHash);
         command.Parameters.AddWithValue("$profileBindingHash", record.ProfileBindingHash);
+        command.Parameters.AddWithValue("$signingAuthority", record.SigningAuthorityEnvelope);
+        command.Parameters.AddWithValue("$revokedDelegationHashes", record.RevokedDelegationHashes);
         command.Parameters.AddWithValue("$state", (int)record.State);
         command.Parameters.AddWithValue("$observedAt", record.ObservedAt.ToUnixTimeSeconds());
         command.Parameters.AddWithValue("$validFrom", record.ValidFrom.ToUnixTimeSeconds());
@@ -2472,7 +2505,8 @@ public sealed class SqliteSessionStore :
         command.Transaction = transaction;
         command.CommandText = """
             SELECT version, artifact_kind, sequence, previous_sequence, previous_hash, envelope,
-                   payload_digest, canonical_hash, profile_binding_hash, state, observed_at, valid_from, valid_until
+                   payload_digest, canonical_hash, profile_binding_hash, signing_authority,
+                   revoked_delegation_hashes, state, observed_at, valid_from, valid_until
             FROM membership_trust_records
             WHERE profile_key = $profile AND domain = $domain AND revision = $revision;
             """;
@@ -2506,10 +2540,12 @@ public sealed class SqliteSessionStore :
             PayloadDigest = reader.GetFieldValue<byte[]>(6),
             CanonicalHash = reader.GetFieldValue<byte[]>(7),
             ProfileBindingHash = reader.GetFieldValue<byte[]>(8),
-            State = (MembershipTrustState)reader.GetInt32(9),
-            ObservedAt = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(10)),
-            ValidFrom = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(11)),
-            ValidUntil = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(12))
+            SigningAuthorityEnvelope = reader.GetFieldValue<byte[]>(9),
+            RevokedDelegationHashes = reader.GetFieldValue<byte[]>(10),
+            State = (MembershipTrustState)reader.GetInt32(11),
+            ObservedAt = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(12)),
+            ValidFrom = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(13)),
+            ValidUntil = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(14))
         };
     }
 
@@ -2644,7 +2680,7 @@ public sealed class SqliteSessionStore :
                     profile_key TEXT NOT NULL,
                     domain INTEGER NOT NULL,
                     revision INTEGER NOT NULL,
-                    version INTEGER NOT NULL DEFAULT 1,
+                    version INTEGER NOT NULL DEFAULT 2,
                     artifact_kind INTEGER NOT NULL DEFAULT 1,
                     sequence INTEGER NOT NULL,
                     previous_sequence INTEGER NOT NULL,
@@ -2653,6 +2689,8 @@ public sealed class SqliteSessionStore :
                     payload_digest BLOB NOT NULL,
                     canonical_hash BLOB NOT NULL,
                     profile_binding_hash BLOB NOT NULL,
+                    signing_authority BLOB NOT NULL DEFAULT X'',
+                    revoked_delegation_hashes BLOB NOT NULL DEFAULT X'',
                     state INTEGER NOT NULL,
                     observed_at INTEGER NOT NULL,
                     valid_from INTEGER NOT NULL DEFAULT 0,
@@ -2718,7 +2756,7 @@ public sealed class SqliteSessionStore :
                 profile_key TEXT NOT NULL,
                 domain INTEGER NOT NULL,
                 revision INTEGER NOT NULL,
-                version INTEGER NOT NULL DEFAULT 1,
+                version INTEGER NOT NULL DEFAULT 2,
                 artifact_kind INTEGER NOT NULL DEFAULT 1,
                 sequence INTEGER NOT NULL,
                 previous_sequence INTEGER NOT NULL,
@@ -2727,6 +2765,8 @@ public sealed class SqliteSessionStore :
                 payload_digest BLOB NOT NULL,
                 canonical_hash BLOB NOT NULL,
                 profile_binding_hash BLOB NOT NULL,
+                signing_authority BLOB NOT NULL DEFAULT X'',
+                revoked_delegation_hashes BLOB NOT NULL DEFAULT X'',
                 state INTEGER NOT NULL,
                 observed_at INTEGER NOT NULL,
                 valid_from INTEGER NOT NULL DEFAULT 0,
@@ -2754,15 +2794,15 @@ public sealed class SqliteSessionStore :
                 ON membership_trust_records(profile_key, domain, revision);
             """;
         command.ExecuteNonQuery();
-        EnsureMembershipTrustArtifactColumn(connection, transaction);
+        EnsureMembershipTrustColumns(connection, transaction);
         transaction.Commit();
     }
 
-    private static void EnsureMembershipTrustArtifactColumn(
+    private static void EnsureMembershipTrustColumns(
         SqliteConnection connection,
         SqliteTransaction transaction)
     {
-        var hasColumn = false;
+        var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         using (var inspect = connection.CreateCommand())
         {
             inspect.Transaction = transaction;
@@ -2770,15 +2810,30 @@ public sealed class SqliteSessionStore :
             using var reader = inspect.ExecuteReader();
             while (reader.Read())
             {
-                hasColumn |= string.Equals(reader.GetString(1), "artifact_kind", StringComparison.OrdinalIgnoreCase);
+                columns.Add(reader.GetString(1));
             }
         }
-        if (!hasColumn)
+        var additions = new List<string>();
+        if (!columns.Contains("artifact_kind"))
+        {
+            additions.Add(
+                "ALTER TABLE membership_trust_records ADD COLUMN artifact_kind INTEGER NOT NULL DEFAULT 1;");
+        }
+        if (!columns.Contains("signing_authority"))
+        {
+            additions.Add(
+                "ALTER TABLE membership_trust_records ADD COLUMN signing_authority BLOB NOT NULL DEFAULT X'';");
+        }
+        if (!columns.Contains("revoked_delegation_hashes"))
+        {
+            additions.Add(
+                "ALTER TABLE membership_trust_records ADD COLUMN revoked_delegation_hashes BLOB NOT NULL DEFAULT X'';");
+        }
+        foreach (var statement in additions)
         {
             using var alter = connection.CreateCommand();
             alter.Transaction = transaction;
-            alter.CommandText =
-                "ALTER TABLE membership_trust_records ADD COLUMN artifact_kind INTEGER NOT NULL DEFAULT 1;";
+            alter.CommandText = statement;
             alter.ExecuteNonQuery();
         }
     }

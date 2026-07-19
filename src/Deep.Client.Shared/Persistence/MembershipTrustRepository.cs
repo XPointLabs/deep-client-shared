@@ -79,8 +79,25 @@ internal static class MembershipTrustRepositoryValidation
         left.PayloadDigest.AsSpan().SequenceEqual(right.PayloadDigest) &&
         left.CanonicalHash.AsSpan().SequenceEqual(right.CanonicalHash) &&
         left.ProfileBindingHash.AsSpan().SequenceEqual(right.ProfileBindingHash) &&
+        left.SigningAuthorityEnvelope.AsSpan().SequenceEqual(right.SigningAuthorityEnvelope) &&
+        left.RevokedDelegationHashes.AsSpan().SequenceEqual(right.RevokedDelegationHashes) &&
         left.State == right.State &&
         left.ObservedAt == right.ObservedAt &&
         left.ValidFrom == right.ValidFrom &&
         left.ValidUntil == right.ValidUntil;
+
+    public static MembershipTrustRecord Clone(MembershipTrustRecord record) =>
+        record with
+        {
+            PreviousCanonicalHash = record.PreviousCanonicalHash.ToArray(),
+            CanonicalEnvelope = record.CanonicalEnvelope.ToArray(),
+            PayloadDigest = record.PayloadDigest.ToArray(),
+            CanonicalHash = record.CanonicalHash.ToArray(),
+            ProfileBindingHash = record.ProfileBindingHash.ToArray(),
+            SigningAuthorityEnvelope = record.SigningAuthorityEnvelope.ToArray(),
+            RevokedDelegationHashes = record.RevokedDelegationHashes.ToArray()
+        };
+
+    public static MembershipTrustClockRecord Clone(MembershipTrustClockRecord record) =>
+        record with { Digest = record.Digest.ToArray() };
 }

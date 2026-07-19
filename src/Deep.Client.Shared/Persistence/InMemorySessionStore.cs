@@ -34,6 +34,7 @@ public sealed class InMemorySessionStore :
     private readonly object durableStateGate = new();
     private readonly object accountDataPurgeGate = new();
     private readonly string? statePath;
+    private readonly Action<MembershipTrustCommitFaultPoint>? membershipTrustFaultInjector;
     private long nextInboxSequence;
     private long nextIncomingMessageNotificationSequence;
     private int schemaVersion;
@@ -41,8 +42,16 @@ public sealed class InMemorySessionStore :
     private const int ReplayPruneBatchSize = 256;
 
     public InMemorySessionStore(string? statePath = null)
+        : this(statePath, null)
+    {
+    }
+
+    internal InMemorySessionStore(
+        string? statePath,
+        Action<MembershipTrustCommitFaultPoint>? faultInjector)
     {
         this.statePath = string.IsNullOrWhiteSpace(statePath) ? null : statePath;
+        membershipTrustFaultInjector = faultInjector;
         LoadState();
     }
 
@@ -1010,6 +1019,7 @@ public sealed class InMemorySessionStore :
         CancellationToken cancellationToken = default)
     {
         MembershipTrustRecord.Validate(record);
+        var storedRecord = MembershipTrustRepositoryValidation.Clone(record);
         cancellationToken.ThrowIfCancellationRequested();
         var key = new MembershipTrustKey(record.OpaqueProfileKey, record.Domain);
 
@@ -1038,10 +1048,13 @@ public sealed class InMemorySessionStore :
                 return Task.FromResult(MembershipTrustCommitResult.Conflict);
             }
 
-            records.Add(record.Revision, record);
-            membershipTrustHeads[key] = record.Revision;
+            records.Add(storedRecord.Revision, storedRecord);
+            membershipTrustHeads[key] = storedRecord.Revision;
             try
             {
+                membershipTrustFaultInjector?.Invoke(
+                    MembershipTrustCommitFaultPoint.BeforeDurableCommit);
+                cancellationToken.ThrowIfCancellationRequested();
                 PersistState();
             }
             catch
@@ -1062,6 +1075,9 @@ public sealed class InMemorySessionStore :
                 throw;
             }
 
+            membershipTrustFaultInjector?.Invoke(
+                MembershipTrustCommitFaultPoint.AfterDurableCommit);
+            cancellationToken.ThrowIfCancellationRequested();
             return Task.FromResult(MembershipTrustCommitResult.Applied);
         }
     }
@@ -1105,8 +1121,10 @@ public sealed class InMemorySessionStore :
 
             return Task.FromResult(new MembershipTrustReadSnapshot(
                 MembershipTrustReadResult.Found,
-                head,
-                predecessor));
+                MembershipTrustRepositoryValidation.Clone(head),
+                predecessor is null
+                    ? null
+                    : MembershipTrustRepositoryValidation.Clone(predecessor)));
         }
     }
 
@@ -1116,6 +1134,7 @@ public sealed class InMemorySessionStore :
         CancellationToken cancellationToken = default)
     {
         MembershipTrustClockRecord.Validate(record);
+        var storedRecord = MembershipTrustRepositoryValidation.Clone(record);
         cancellationToken.ThrowIfCancellationRequested();
         lock (durableStateGate)
         {
@@ -1137,7 +1156,7 @@ public sealed class InMemorySessionStore :
                 return Task.FromResult(MembershipTrustClockCommitResult.Rollback);
             }
 
-            membershipTrustClocks[record.OpaqueProfileKey] = record;
+            membershipTrustClocks[storedRecord.OpaqueProfileKey] = storedRecord;
             try
             {
                 PersistState();
@@ -1177,7 +1196,7 @@ public sealed class InMemorySessionStore :
                 MembershipTrustClockRecord.Validate(record);
                 return Task.FromResult(new MembershipTrustClockReadSnapshot(
                     MembershipTrustClockReadResult.Found,
-                    record));
+                    MembershipTrustRepositoryValidation.Clone(record)));
             }
             catch (InvalidDataException)
             {

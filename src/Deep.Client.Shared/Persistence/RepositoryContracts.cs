@@ -540,6 +540,12 @@ public enum MembershipTrustClockCommitResult
     Corrupt
 }
 
+internal enum MembershipTrustCommitFaultPoint
+{
+    BeforeDurableCommit = 1,
+    AfterDurableCommit = 2
+}
+
 public enum MembershipTrustClockReadResult
 {
     Missing,

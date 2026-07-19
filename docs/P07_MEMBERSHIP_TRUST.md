@@ -14,10 +14,13 @@ Three installation-scoped tracks are stored independently:
 
 Each track has immutable revisions plus a CAS head. The record digest binds the
 profile, domain, typed artifact kind, revision, sequences, predecessor and
-canonical hashes, envelope, state, and timestamps. SQLite commits record and head in one
-transaction. A corrupt current profile/domain blocks without selecting an older
-record; corruption in an unrelated opaque profile cannot deny service to the
-current profile.
+canonical hashes, envelope, signing-authority context, bounded revoked
+delegation set, state, and timestamps. Corrective record schema v2 intentionally
+fails closed on pre-v2 dormant records rather than interpreting an incomplete
+verification context. SQLite commits record and head in one transaction. A
+corrupt current profile/domain blocks without selecting an older record;
+corruption in an unrelated opaque profile cannot deny service to the current
+profile.
 
 Profiles bind exact genesis, initial delegation, and initial domain anchors.
 Substitution after first use fails closed. Root-signed delegation rotation can
@@ -28,6 +31,20 @@ same-sequence and concurrent mixed-type equivocation. Restart revalidates
 persisted authority and signed content against canonical bytes and their signed
 predecessor context; immutable anchors are explicitly typed and checked against
 the profile pins.
+
+Every accepted signed content revision preserves the exact canonical delegation
+that verified it. Rotation therefore leaves the old content cryptographically
+diagnosable but no longer reports it as `Healthy`; a successor signed by the
+current delegation may advance the same content LKG. Revocation must target the
+active delegation hash. Each authority revision carries a bounded, de-duplicated
+set of revoked delegation hashes so restart and later rotation cannot forget a
+revocation.
+
+In-memory repository inputs and read snapshots are defensive copies, matching
+SQLite value semantics. Deterministic test-only fault points prove cancellation
+before durable commit rolls back, while cancellation after commit is explicitly
+an uncertain caller result whose applied state is resolved by a read/restart.
+Malformed, null, or out-of-range SQLite trust timestamps return `Corrupt`.
 
 An installation-scoped, CAS-persisted observed-time high-water mark blocks
 rollback across operations and restarts. Every public trust operation samples
