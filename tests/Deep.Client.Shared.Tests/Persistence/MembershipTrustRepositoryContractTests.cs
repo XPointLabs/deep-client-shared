@@ -51,6 +51,35 @@ public sealed class MembershipTrustRepositoryContractTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task HistoricalReplayAndDivergence_HaveParity(bool sqlite)
+    {
+        using var scope = StoreScope.Create(sqlite);
+        var first = Record(revision: 1, sequence: 6, fill: 0x11);
+        var second = Record(
+            revision: 2,
+            sequence: 7,
+            fill: 0x22,
+            previousCanonicalHash: first.CanonicalHash);
+        Assert.Equal(
+            MembershipTrustCommitResult.Applied,
+            await scope.Store.CommitMembershipTrustAsync(first, null));
+        Assert.Equal(
+            MembershipTrustCommitResult.Applied,
+            await scope.Store.CommitMembershipTrustAsync(second, 1));
+
+        Assert.Equal(
+            MembershipTrustCommitResult.Idempotent,
+            await scope.Store.CommitMembershipTrustAsync(first, null));
+        Assert.Equal(
+            MembershipTrustCommitResult.Conflict,
+            await scope.Store.CommitMembershipTrustAsync(
+                Record(revision: 1, sequence: 6, fill: 0x33),
+                null));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task ConcurrentDifferentSuccessors_OnlyOneWins(bool sqlite)
     {
         using var scope = StoreScope.Create(sqlite);
@@ -876,6 +905,105 @@ public sealed class MembershipTrustRepositoryContractTests
             Assert.True(await reader.ReadAsync());
             Assert.Equal(1L, reader.GetInt64(0));
             Assert.Equal(1048576L, reader.GetInt64(1));
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            foreach (var candidate in new[] { path, path + "-wal", path + "-shm" })
+            {
+                File.Delete(candidate);
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData("orphan")]
+    [InlineData("missing-middle")]
+    [InlineData("history-undercount")]
+    public async Task SqliteCommit_ValidatesCanonicalHistoryBeforeSuccess(
+        string corruption)
+    {
+        var path = Path.Combine(
+            Path.GetTempPath(),
+            $"deep-p07-commit-history-{corruption}-{Guid.NewGuid():N}.db");
+        try
+        {
+            using var store = new SqliteSessionStore(path);
+            var first = Record(1, 6, 0x10);
+            var second = Record(
+                2,
+                7,
+                0x20,
+                previousCanonicalHash: first.CanonicalHash);
+            var third = Record(
+                3,
+                8,
+                0x30,
+                previousCanonicalHash: second.CanonicalHash);
+            Assert.Equal(
+                MembershipTrustCommitResult.Applied,
+                await store.CommitMembershipTrustAsync(first, null));
+            if (corruption == "missing-middle")
+            {
+                Assert.Equal(
+                    MembershipTrustCommitResult.Applied,
+                    await store.CommitMembershipTrustAsync(second, 1));
+                Assert.Equal(
+                    MembershipTrustCommitResult.Applied,
+                    await store.CommitMembershipTrustAsync(third, 2));
+            }
+
+            await using (var connection = new SqliteConnection(
+                             $"Data Source={path};Pooling=False"))
+            {
+                await connection.OpenAsync();
+                await using var command = connection.CreateCommand();
+                command.CommandText = corruption switch
+                {
+                    "orphan" => """
+                        INSERT INTO membership_trust_records
+                            (profile_key, domain, revision, version, artifact_kind, sequence,
+                             previous_sequence, previous_hash, envelope, payload_digest,
+                             canonical_hash, profile_binding_hash, signing_authority,
+                             revoked_delegation_hashes, state, observed_at, valid_from, valid_until)
+                        SELECT profile_key, domain, 3, version, artifact_kind, 8, 7,
+                               canonical_hash, envelope, payload_digest, canonical_hash,
+                               profile_binding_hash, signing_authority,
+                               revoked_delegation_hashes, state, observed_at, valid_from, valid_until
+                        FROM membership_trust_records
+                        WHERE profile_key = 'install:test' AND domain = 3 AND revision = 1;
+                        """,
+                    "missing-middle" => """
+                        DELETE FROM membership_trust_records
+                        WHERE profile_key = 'install:test' AND domain = 3 AND revision = 2;
+                        """,
+                    "history-undercount" => """
+                        UPDATE membership_trust_heads
+                        SET history_bytes = 1
+                        WHERE profile_key = 'install:test' AND domain = 3;
+                        """,
+                    _ => throw new InvalidOperationException()
+                };
+                await command.ExecuteNonQueryAsync();
+            }
+
+            var candidate = corruption == "missing-middle" ? third : second;
+            var expected = corruption == "missing-middle" ? (ulong?)2 : 1;
+            Assert.Equal(
+                MembershipTrustCommitResult.Corrupt,
+                await store.CommitMembershipTrustAsync(candidate, expected));
+            await using var verify = new SqliteConnection(
+                $"Data Source={path};Pooling=False");
+            await verify.OpenAsync();
+            await using var query = verify.CreateCommand();
+            query.CommandText = """
+                SELECT revision
+                FROM membership_trust_heads
+                WHERE profile_key = 'install:test' AND domain = 3;
+                """;
+            Assert.Equal(
+                corruption == "missing-middle" ? 3L : 1L,
+                Convert.ToInt64(await query.ExecuteScalarAsync()));
         }
         finally
         {
