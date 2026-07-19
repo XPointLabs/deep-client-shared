@@ -372,7 +372,7 @@ public sealed class MembershipTrustRepositoryContractTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task SignedHeadLinkageMismatch_IsCorruptEvenWithValidRecordDigest(bool sqlite)
+    public async Task SignedHeadLinkageMismatch_IsRejectedEvenWithValidRecordDigest(bool sqlite)
     {
         using var scope = StoreScope.Create(sqlite);
         var first = Record(1, 6, 0x10);
@@ -388,10 +388,12 @@ public sealed class MembershipTrustRepositoryContractTests
             state: MembershipTrustState.Healthy,
             observedAt: DateTimeOffset.FromUnixTimeSeconds(1010),
             validUntil: DateTimeOffset.FromUnixTimeSeconds(1200));
-        _ = await scope.Store.CommitMembershipTrustAsync(second, 1);
+        Assert.Equal(
+            MembershipTrustCommitResult.Conflict,
+            await scope.Store.CommitMembershipTrustAsync(second, 1));
 
         Assert.Equal(
-            MembershipTrustReadResult.Corrupt,
+            MembershipTrustReadResult.Found,
             (await scope.Store.ReadMembershipTrustAsync(
                 "install:test",
                 MembershipTrustDomain.Membership)).Result);
