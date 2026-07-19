@@ -492,6 +492,7 @@ internal static class TransportOutboxStateMachine
             TransportOutboxState.Attempted or TransportOutboxState.Accepted =>
                 latestAttempt is not null
                 && item.LastTransitionRetryNotBefore is not null
+                && item.NotBefore == item.LastTransitionRetryNotBefore
                 && (int)latestAttempt.State == (int)item.LastTransitionState - 1
                 && latestAttempt.Source == item.Source
                 && latestAttempt.Reason == item.Reason

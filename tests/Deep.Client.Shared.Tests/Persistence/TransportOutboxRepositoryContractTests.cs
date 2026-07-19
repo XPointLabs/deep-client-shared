@@ -408,7 +408,7 @@ public sealed class TransportOutboxRepositoryContractTests
                     """;
                 using var reader = command.ExecuteReader();
                 Assert.True(reader.Read());
-                Assert.Equal(8, reader.GetInt32(0));
+                Assert.Equal(9, reader.GetInt32(0));
                 Assert.Equal("\"preserved\"", reader.GetString(1));
                 Assert.Equal(1, reader.GetInt32(2));
             }
@@ -417,7 +417,7 @@ public sealed class TransportOutboxRepositoryContractTests
             {
                 connection.Open();
                 using var command = connection.CreateCommand();
-                command.CommandText = "PRAGMA user_version=9;";
+                command.CommandText = "PRAGMA user_version=10;";
                 command.ExecuteNonQuery();
             }
             Assert.Throws<InvalidOperationException>(() => new SqliteSessionStore(path));

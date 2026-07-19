@@ -343,6 +343,32 @@ public sealed class TransportOutboxCorrectiveRedTests
                 typeof(bool).MakeByRefType(), typeof(bool).MakeByRefType(),
                 typeof(bool).MakeByRefType()
             ]));
+
+        var flags = new ClientFeatureFlags(
+            true, false, true, false, true, false, true, false, true, false, true);
+        var (
+            groups,
+            communities,
+            calls,
+            share,
+            attachmentEncryption,
+            backgroundSync,
+            push,
+            transportRequired,
+            stubAllowed,
+            membershipTrust,
+            rollbackAllowed) = flags;
+        Assert.True(groups);
+        Assert.False(communities);
+        Assert.True(calls);
+        Assert.False(share);
+        Assert.True(attachmentEncryption);
+        Assert.False(backgroundSync);
+        Assert.True(push);
+        Assert.False(transportRequired);
+        Assert.True(stubAllowed);
+        Assert.False(membershipTrust);
+        Assert.True(rollbackAllowed);
     }
 
     [Fact]
@@ -422,7 +448,8 @@ public sealed class TransportOutboxCorrectiveRedTests
                     Now.AddMinutes(2)));
             var root = JsonNode.Parse(File.ReadAllText(path))!.AsObject();
             root["transportOutboxItems"]![0]!["notBefore"] =
-                Now.AddMinutes(3).ToString("O");
+                DateTimeOffset.FromUnixTimeMilliseconds(
+                    Now.AddMinutes(3).ToUnixTimeMilliseconds()).ToString("O");
             File.WriteAllText(path, root.ToJsonString(new JsonSerializerOptions
             {
                 WriteIndented = true
@@ -572,41 +599,42 @@ public sealed class TransportOutboxCorrectiveRedTests
     }
 
     [Fact]
-    public async Task PersistedLogicalMaximumAndTerminalTimelineCorruptionFailClosed()
+    public async Task PersistedLogicalStateBelowExactAttemptMaximumIsCorrupt()
     {
-        var path = TempPath("state-timeline-corruption");
+        var path = TempPath("state-maximum-corruption");
         try
         {
-            var item = Prepared(0x54, 0x87);
-            var attempt = Attempt(0x88);
-            using (var store = new SqliteSessionStore(path))
-            {
-                await store.PrepareTransportOutboxAsync(item);
-                await store.ApplyTransportOutboxTransitionAsync(
-                    TransportOutboxTransition.Attempted(
-                        item.AccountScope, item.LogicalId, 1, attempt,
-                        OutboxTransitionSource.Adapter,
-                        OutboxTransitionReason.DispatchStarted,
-                        Now.AddMinutes(1), Now.AddMinutes(2)));
-                await store.ApplyTransportOutboxTransitionAsync(
-                    TransportOutboxTransition.Accepted(
-                        item.AccountScope, item.LogicalId, 2, attempt,
-                        OutboxTransitionSource.Adapter,
-                        OutboxTransitionReason.AdapterAccepted,
-                        Now.AddMinutes(2), Now.AddMinutes(3), Bytes(16, 0x89)));
-                await store.ApplyTransportOutboxTransitionAsync(
-                    TransportOutboxTransition.Durable(
-                        item.AccountScope, item.LogicalId, 3, attempt,
-                        OutboxTransitionSource.Adapter,
-                        OutboxTransitionReason.AdapterConfirmedDurable,
-                        Now.AddMinutes(3), Bytes(16, 0x8A)));
-            }
+            var item = await CreateDurableItemAsync(path, 0x54, 0x87, 0x88);
             using (var connection = Open(path))
             {
                 using var command = connection.CreateCommand();
                 command.CommandText = """
                     UPDATE transport_outbox_items SET state = 2
                     WHERE account_scope = $scope AND logical_id = $logicalId;
+                    """;
+                command.Parameters.AddWithValue("$scope", item.AccountScope.ToArray());
+                command.Parameters.AddWithValue("$logicalId", item.LogicalId.ToArray());
+                command.ExecuteNonQuery();
+            }
+            await AssertSqliteItemCorruptAsync(path, item);
+        }
+        finally
+        {
+            DeleteSqliteFiles(path);
+        }
+    }
+
+    [Fact]
+    public async Task PersistedAttemptOccurredAtExpiryIsCorrupt()
+    {
+        var path = TempPath("attempt-expiry-corruption");
+        try
+        {
+            var item = await CreateDurableItemAsync(path, 0x55, 0x8B, 0x8C);
+            using (var connection = Open(path))
+            {
+                using var command = connection.CreateCommand();
+                command.CommandText = """
                     UPDATE transport_outbox_attempts SET occurred_at = $expiresAt
                     WHERE account_scope = $scope AND logical_id = $logicalId;
                     """;
@@ -617,13 +645,121 @@ public sealed class TransportOutboxCorrectiveRedTests
                     item.ExpiresAt.ToUnixTimeMilliseconds());
                 command.ExecuteNonQuery();
             }
+            await AssertSqliteItemCorruptAsync(path, item);
+        }
+        finally
+        {
+            DeleteSqliteFiles(path);
+        }
+    }
 
-            using var restarted = new SqliteSessionStore(path);
-            Assert.Equal(
-                TransportOutboxReadResult.Corrupt,
-                (await restarted.ReadTransportOutboxAsync(
-                    item.AccountScope,
-                    item.LogicalId)).Result);
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task DeliveredAcknowledgementOutsideItemLifetimeIsCorrupt(bool beforeCreated)
+    {
+        var path = TempPath(beforeCreated ? "ack-before-created" : "ack-after-expiry");
+        try
+        {
+            var item = await CreateDeliveredItemAsync(path, 0x56, 0x8D, 0x8E);
+            var corruptAcknowledgedAt = beforeCreated
+                ? item.CreatedAt.AddMilliseconds(-1)
+                : item.ExpiresAt.AddMilliseconds(1);
+            using (var connection = Open(path))
+            {
+                using var command = connection.CreateCommand();
+                command.CommandText = """
+                    UPDATE transport_outbox_items
+                    SET acknowledged_at = $acknowledgedAt,
+                        transitioned_at = $transitionedAt
+                    WHERE account_scope = $scope AND logical_id = $logicalId;
+                    """;
+                command.Parameters.AddWithValue(
+                    "$acknowledgedAt",
+                    corruptAcknowledgedAt.ToUnixTimeMilliseconds());
+                command.Parameters.AddWithValue(
+                    "$transitionedAt",
+                    item.ExpiresAt.AddMinutes(1).ToUnixTimeMilliseconds());
+                command.Parameters.AddWithValue("$scope", item.AccountScope.ToArray());
+                command.Parameters.AddWithValue("$logicalId", item.LogicalId.ToArray());
+                command.ExecuteNonQuery();
+            }
+            await AssertSqliteItemCorruptAsync(path, item);
+        }
+        finally
+        {
+            DeleteSqliteFiles(path);
+        }
+    }
+
+    [Theory]
+    [InlineData("prepared-last-attempt")]
+    [InlineData("prepared-last-retry")]
+    [InlineData("attempted-last-attempt")]
+    [InlineData("durable-last-retry")]
+    [InlineData("delivered-last-attempt")]
+    public async Task TerminalAndPreparedLatestIdentityFieldsMustBeRawNull(string corruption)
+    {
+        var path = TempPath(corruption);
+        try
+        {
+            TransportOutboxPreparedItem item;
+            if (corruption.StartsWith("prepared", StringComparison.Ordinal))
+            {
+                item = Prepared(0x57, 0x8F);
+                using var store = new SqliteSessionStore(path);
+                await store.PrepareTransportOutboxAsync(item);
+            }
+            else if (corruption.StartsWith("attempted", StringComparison.Ordinal))
+            {
+                item = Prepared(0x5A, 0x94);
+                using var store = new SqliteSessionStore(path);
+                await store.PrepareTransportOutboxAsync(item);
+                await store.ApplyTransportOutboxTransitionAsync(
+                    TransportOutboxTransition.Attempted(
+                        item.AccountScope,
+                        item.LogicalId,
+                        1,
+                        Attempt(0x95),
+                        OutboxTransitionSource.Adapter,
+                        OutboxTransitionReason.DispatchStarted,
+                        Now.AddMinutes(1),
+                        Now.AddMinutes(2)));
+            }
+            else if (corruption.StartsWith("durable", StringComparison.Ordinal))
+            {
+                item = await CreateDurableItemAsync(path, 0x58, 0x90, 0x91);
+            }
+            else
+            {
+                item = await CreateDeliveredItemAsync(path, 0x59, 0x92, 0x93);
+            }
+
+            using (var connection = Open(path))
+            {
+                using var command = connection.CreateCommand();
+                command.CommandText = corruption.EndsWith("attempt", StringComparison.Ordinal)
+                    ? """
+                        UPDATE transport_outbox_items
+                        SET last_attempt_id = zeroblob(16)
+                        WHERE account_scope = $scope AND logical_id = $logicalId;
+                        """
+                    : """
+                        UPDATE transport_outbox_items
+                        SET last_retry_not_before = $retry
+                        WHERE account_scope = $scope AND logical_id = $logicalId;
+                        """;
+                command.Parameters.AddWithValue("$scope", item.AccountScope.ToArray());
+                command.Parameters.AddWithValue("$logicalId", item.LogicalId.ToArray());
+                if (!corruption.EndsWith("attempt", StringComparison.Ordinal))
+                {
+                    command.Parameters.AddWithValue(
+                        "$retry",
+                        item.CreatedAt.AddMinutes(1).ToUnixTimeMilliseconds());
+                }
+                command.ExecuteNonQuery();
+            }
+            await AssertSqliteItemCorruptAsync(path, item);
         }
         finally
         {
@@ -683,12 +819,12 @@ public sealed class TransportOutboxCorrectiveRedTests
     }
 
     [Fact]
-    public void FileBackedInMemoryStoreRejectsOversizedSnapshotBeforeAdmission()
+    public void FileBackedInMemoryStoreRejectsMalformedSnapshotBeforeAdmission()
     {
         var path = TempPath("memory-json");
         try
         {
-            File.WriteAllText(path, new string(' ', 9 * 1024 * 1024), Encoding.UTF8);
+            File.WriteAllText(path, "not-json", Encoding.UTF8);
 
             Assert.Throws<TransportOutboxCorruptException>(
                 () => new InMemorySessionStore(path));
@@ -792,6 +928,73 @@ public sealed class TransportOutboxCorrectiveRedTests
             Now,
             Now.AddHours(1),
             Now);
+
+    private static async Task<TransportOutboxPreparedItem> CreateDurableItemAsync(
+        string path,
+        byte scope,
+        byte logical,
+        byte attemptValue)
+    {
+        var item = Prepared(scope, logical);
+        var attempt = Attempt(attemptValue);
+        using var store = new SqliteSessionStore(path);
+        await store.PrepareTransportOutboxAsync(item);
+        await store.ApplyTransportOutboxTransitionAsync(
+            TransportOutboxTransition.Attempted(
+                item.AccountScope, item.LogicalId, 1, attempt,
+                OutboxTransitionSource.Adapter,
+                OutboxTransitionReason.DispatchStarted,
+                Now.AddMinutes(1), Now.AddMinutes(2)));
+        await store.ApplyTransportOutboxTransitionAsync(
+            TransportOutboxTransition.Accepted(
+                item.AccountScope, item.LogicalId, 2, attempt,
+                OutboxTransitionSource.Adapter,
+                OutboxTransitionReason.AdapterAccepted,
+                Now.AddMinutes(2), Now.AddMinutes(3), Bytes(16, 0xC1)));
+        await store.ApplyTransportOutboxTransitionAsync(
+            TransportOutboxTransition.Durable(
+                item.AccountScope, item.LogicalId, 3, attempt,
+                OutboxTransitionSource.Adapter,
+                OutboxTransitionReason.AdapterConfirmedDurable,
+                Now.AddMinutes(3), Bytes(16, 0xC2)));
+        return item;
+    }
+
+    private static async Task<TransportOutboxPreparedItem> CreateDeliveredItemAsync(
+        string path,
+        byte scope,
+        byte logical,
+        byte attemptValue)
+    {
+        var item = await CreateDurableItemAsync(path, scope, logical, attemptValue);
+        using var store = new SqliteSessionStore(path);
+        var acknowledgement = RecipientDeviceAcknowledgement.Create(
+            item.LogicalId,
+            item.DedupMaterial,
+            Bytes(16, 0xC3),
+            Now.AddMinutes(4));
+        await store.ApplyTransportOutboxTransitionAsync(
+            TransportOutboxTransition.Delivered(
+                item.AccountScope,
+                item.LogicalId,
+                4,
+                acknowledgement,
+                OutboxTransitionReason.RecipientAcknowledged,
+                Now.AddMinutes(4)));
+        return item;
+    }
+
+    private static async Task AssertSqliteItemCorruptAsync(
+        string path,
+        TransportOutboxPreparedItem item)
+    {
+        using var restarted = new SqliteSessionStore(path);
+        Assert.Equal(
+            TransportOutboxReadResult.Corrupt,
+            (await restarted.ReadTransportOutboxAsync(
+                item.AccountScope,
+                item.LogicalId)).Result);
+    }
 
     private static OutboxAttemptId Attempt(byte value) =>
         OutboxAttemptId.FromBytes(Bytes(16, value));

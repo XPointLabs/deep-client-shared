@@ -334,11 +334,6 @@ public sealed partial class InMemorySessionStore
     private void RestoreTransportOutboxSnapshots(
         IReadOnlyList<TransportOutboxPersistenceSnapshot> snapshots)
     {
-        if (snapshots.Count > 4096)
-        {
-            throw new TransportOutboxCorruptException();
-        }
-
         var restored = new Dictionary<string, TransportOutboxStoredItem>(StringComparer.Ordinal);
         foreach (var snapshot in snapshots)
         {

@@ -42,6 +42,33 @@ public sealed record ClientFeatureFlags(
     {
     }
 
+    public void Deconstruct(
+        out bool groupsV2Enabled,
+        out bool communitiesEnabled,
+        out bool callsEnabled,
+        out bool shareExtensionEnabled,
+        out bool attachmentEncryptionEnabled,
+        out bool backgroundSyncEnabled,
+        out bool pushNotificationsEnabled,
+        out bool transportRequired,
+        out bool stubTransportAllowed,
+        out bool membershipTrustEnabled,
+        out bool legacyEmbeddedBootstrapRollbackAllowed)
+    {
+        groupsV2Enabled = GroupsV2Enabled;
+        communitiesEnabled = CommunitiesEnabled;
+        callsEnabled = CallsEnabled;
+        shareExtensionEnabled = ShareExtensionEnabled;
+        attachmentEncryptionEnabled = AttachmentEncryptionEnabled;
+        backgroundSyncEnabled = BackgroundSyncEnabled;
+        pushNotificationsEnabled = PushNotificationsEnabled;
+        transportRequired = TransportRequired;
+        stubTransportAllowed = StubTransportAllowed;
+        membershipTrustEnabled = MembershipTrustEnabled;
+        legacyEmbeddedBootstrapRollbackAllowed =
+            LegacyEmbeddedBootstrapRollbackAllowed;
+    }
+
     public static ClientFeatureFlags Defaults { get; } = new();
 
     public static ClientFeatureFlags ReleaseDefaults { get; } = new(

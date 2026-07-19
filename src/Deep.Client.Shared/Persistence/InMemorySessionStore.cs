@@ -1895,12 +1895,6 @@ public sealed partial class InMemorySessionStore :
             return;
         }
 
-        const long maximumSnapshotBytes = 8L * 1024 * 1024;
-        if (new FileInfo(statePath).Length > maximumSnapshotBytes)
-        {
-            throw new TransportOutboxCorruptException();
-        }
-
         SessionStoreSnapshot? snapshot;
         try
         {
