@@ -422,6 +422,14 @@ public sealed class MembershipTrustRepositoryContractTests
             "MaximumMembershipTrustHistoryBytes",
             source,
             StringComparison.Ordinal);
+        Assert.Contains(
+            "length(payload_digest)",
+            implementation,
+            StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(
+            "GetBytes(ordinal, 0, null",
+            source,
+            StringComparison.Ordinal);
     }
 
     [Theory]
@@ -652,6 +660,134 @@ public sealed class MembershipTrustRepositoryContractTests
                 WHERE profile_key = 'install:test' AND domain = 3;
                 """;
             Assert.True(Convert.ToInt64(await query.ExecuteScalarAsync()) > 0);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            foreach (var candidate in new[] { path, path + "-wal", path + "-shm" })
+            {
+                File.Delete(candidate);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task SqliteCommit_OversizedExistingCandidateCannotAdvanceHead()
+    {
+        var path = Path.Combine(
+            Path.GetTempPath(),
+            $"deep-p07-oversized-candidate-{Guid.NewGuid():N}.db");
+        try
+        {
+            using var store = new SqliteSessionStore(path);
+            var first = Record(1, 6, 0x10);
+            var second = Record(
+                2,
+                7,
+                0x20,
+                previousCanonicalHash: first.CanonicalHash);
+            Assert.Equal(
+                MembershipTrustCommitResult.Applied,
+                await store.CommitMembershipTrustAsync(first, null));
+            await using (var connection = new SqliteConnection(
+                             $"Data Source={path};Pooling=False"))
+            {
+                await connection.OpenAsync();
+                await using var command = connection.CreateCommand();
+                command.CommandText = """
+                    INSERT INTO membership_trust_records
+                        (profile_key, domain, revision, version, artifact_kind, sequence,
+                         previous_sequence, previous_hash, envelope, payload_digest,
+                         canonical_hash, profile_binding_hash, signing_authority,
+                         revoked_delegation_hashes, state, observed_at, valid_from, valid_until)
+                    SELECT profile_key, domain, 2, version, artifact_kind, 7, 6,
+                           canonical_hash, zeroblob(1048576), payload_digest,
+                           canonical_hash, profile_binding_hash, signing_authority,
+                           revoked_delegation_hashes, state, observed_at, valid_from, valid_until
+                    FROM membership_trust_records
+                    WHERE profile_key = 'install:test' AND domain = 3 AND revision = 1;
+                    """;
+                await command.ExecuteNonQueryAsync();
+            }
+
+            Assert.Equal(
+                MembershipTrustCommitResult.Corrupt,
+                await store.CommitMembershipTrustAsync(second, 1));
+            await using var verify = new SqliteConnection(
+                $"Data Source={path};Pooling=False");
+            await verify.OpenAsync();
+            await using var query = verify.CreateCommand();
+            query.CommandText = """
+                SELECT revision FROM membership_trust_heads
+                WHERE profile_key = 'install:test' AND domain = 3;
+                """;
+            Assert.Equal(1L, Convert.ToInt64(await query.ExecuteScalarAsync()));
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            foreach (var candidate in new[] { path, path + "-wal", path + "-shm" })
+            {
+                File.Delete(candidate);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task SqliteOversizedHeadDigest_BlocksReadIdempotencyAndSuccessor()
+    {
+        var path = Path.Combine(
+            Path.GetTempPath(),
+            $"deep-p07-oversized-head-digest-{Guid.NewGuid():N}.db");
+        try
+        {
+            using var store = new SqliteSessionStore(path);
+            var first = Record(1, 6, 0x10);
+            var second = Record(
+                2,
+                7,
+                0x20,
+                previousCanonicalHash: first.CanonicalHash);
+            Assert.Equal(
+                MembershipTrustCommitResult.Applied,
+                await store.CommitMembershipTrustAsync(first, null));
+            await using (var connection = new SqliteConnection(
+                             $"Data Source={path};Pooling=False"))
+            {
+                await connection.OpenAsync();
+                await using var command = connection.CreateCommand();
+                command.CommandText = """
+                    UPDATE membership_trust_heads
+                    SET payload_digest = zeroblob(1048576)
+                    WHERE profile_key = 'install:test' AND domain = 3;
+                    """;
+                await command.ExecuteNonQueryAsync();
+            }
+
+            Assert.Equal(
+                MembershipTrustReadResult.Corrupt,
+                (await store.ReadMembershipTrustAsync(
+                    "install:test",
+                    MembershipTrustDomain.Membership)).Result);
+            Assert.Equal(
+                MembershipTrustCommitResult.Corrupt,
+                await store.CommitMembershipTrustAsync(first, null));
+            Assert.Equal(
+                MembershipTrustCommitResult.Corrupt,
+                await store.CommitMembershipTrustAsync(second, 1));
+            await using var verify = new SqliteConnection(
+                $"Data Source={path};Pooling=False");
+            await verify.OpenAsync();
+            await using var query = verify.CreateCommand();
+            query.CommandText = """
+                SELECT revision, length(payload_digest)
+                FROM membership_trust_heads
+                WHERE profile_key = 'install:test' AND domain = 3;
+                """;
+            await using var reader = await query.ExecuteReaderAsync();
+            Assert.True(await reader.ReadAsync());
+            Assert.Equal(1L, reader.GetInt64(0));
+            Assert.Equal(1048576L, reader.GetInt64(1));
         }
         finally
         {
