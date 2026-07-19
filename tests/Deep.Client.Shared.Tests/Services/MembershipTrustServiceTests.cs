@@ -560,6 +560,17 @@ public sealed class MembershipTrustServiceTests
             Sequence = template.Statement.Sequence + 1,
             PreviousHash = previousContent.CanonicalHash.ToArray()
         };
+        var stillSignedByOldAuthority = ResignMembership(
+            successor,
+            template.Signatures,
+            MembershipSignatureDomain.Membership,
+            verifier);
+        Assert.NotEqual(
+            MembershipTrustState.Healthy,
+            (await service.ApplyMembershipAsync(
+                profile,
+                MembershipContractCodec.EncodeSignedMembership(
+                    stillSignedByOldAuthority))).State);
         var signedByRotated = ResignMembership(
             successor,
             template.Signatures,
@@ -658,6 +669,17 @@ public sealed class MembershipTrustServiceTests
             Sequence = template.Statement.Sequence + 1,
             PreviousHash = previousContent.CanonicalHash.ToArray()
         };
+        var stillSignedByRevokedAuthority = ResignMembership(
+            successor,
+            template.Signatures,
+            MembershipSignatureDomain.Membership,
+            verifier);
+        Assert.NotEqual(
+            MembershipTrustState.Healthy,
+            (await service.ApplyMembershipAsync(
+                profile,
+                MembershipContractCodec.EncodeSignedMembership(
+                    stillSignedByRevokedAuthority))).State);
         var signedByRotated = ResignMembership(
             successor,
             template.Signatures,

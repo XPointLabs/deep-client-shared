@@ -40,6 +40,18 @@ active delegation hash. Each authority revision carries a bounded, de-duplicated
 set of revoked delegation hashes so restart and later rotation cannot forget a
 revocation.
 
+The corrective refresh path never treats replay as recovery. When stored
+content was signed by a superseded or revoked delegation, only an exact
+sequence successor is considered, and it must verify under the current active
+delegation before any accepted/idempotent result is possible. Exact replay
+preserves the existing `ProtocolUnsupported` or `Revoked` state.
+
+If a valid revocation would exceed the 64-hash P04 bound, the 65th revocation
+is first verified and then committed as a durable terminal `Corrupt` authority
+revision. The prior 64 hashes remain intact. Evaluation, restart, replay, and
+ordinary delegation rotation remain blocked; recovery requires a separately
+approved explicit rebootstrap flow that is intentionally absent from P07.
+
 In-memory repository inputs and read snapshots are defensive copies, matching
 SQLite value semantics. Deterministic test-only fault points prove cancellation
 before durable commit rolls back, while cancellation after commit is explicitly
