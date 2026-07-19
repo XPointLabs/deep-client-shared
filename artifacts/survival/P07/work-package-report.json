@@ -21,6 +21,7 @@
   ],
   "previousEvidenceCarrierCommit": "74c36c503acae8c3ca65d0c5be7caa358c406a67",
   "sourceCommit": "e6319e980eaf9cb1b8059ab8a3f91119482297b4",
+  "evidenceContentCommit": "b9508a253430c7497634fb12f9669d0fe978f593",
   "tests": {
     "full": {
       "command": "dotnet test .\\Deep.Client.Shared.slnx --configuration Release --no-restore --logger \"trx;LogFileName=p07-corrective7-full.trx\" --results-directory .\\artifacts\\survival\\P07\\trx",

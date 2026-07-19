@@ -2,6 +2,7 @@
   "schema": "deep.p07.handoff.v1",
   "sourceCommit": "e6319e980eaf9cb1b8059ab8a3f91119482297b4",
   "previousEvidenceCarrierCommit": "74c36c503acae8c3ca65d0c5be7caa358c406a67",
+  "evidenceContentCommit": "b9508a253430c7497634fb12f9669d0fe978f593",
   "independentReviewRequired": true,
   "next": ["repeat independent exact-source-and-evidence review", "P07B source policy", "P14 self-host UX"],
   "blockers": [
