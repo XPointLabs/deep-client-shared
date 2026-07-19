@@ -43,8 +43,15 @@ public sealed class MembershipTrustSqliteRecoveryTests
         await using var database = await TestDatabase.CreateAsync();
         using (var store = database.Open())
         {
-            _ = await store.CommitMembershipTrustAsync(Record(1, 6, 0x10), null);
-            _ = await store.CommitMembershipTrustAsync(Record(2, 7, 0x20), 1);
+            var first = Record(1, 6, 0x10);
+            Assert.Equal(
+                MembershipTrustCommitResult.Applied,
+                await store.CommitMembershipTrustAsync(first, null));
+            Assert.Equal(
+                MembershipTrustCommitResult.Applied,
+                await store.CommitMembershipTrustAsync(
+                    Record(2, 7, 0x20, previousCanonicalHash: first.CanonicalHash),
+                    1));
         }
 
         await database.MutateAsync(corruption);
@@ -177,14 +184,16 @@ public sealed class MembershipTrustSqliteRecoveryTests
         ulong revision,
         ulong sequence,
         byte fill,
-        string profile = "install:test") =>
+        string profile = "install:test",
+        byte[]? previousCanonicalHash = null) =>
         MembershipTrustRecord.Create(
             profile,
             MembershipTrustDomain.Membership,
             revision,
             sequence,
             sequence - 1,
-            Enumerable.Repeat((byte)(fill - 1), 32).ToArray(),
+            previousCanonicalHash ??
+                Enumerable.Repeat((byte)(fill - 1), 32).ToArray(),
             Enumerable.Repeat(fill, 96).ToArray(),
             MembershipTrustState.Healthy,
             DateTimeOffset.FromUnixTimeSeconds(1010),
