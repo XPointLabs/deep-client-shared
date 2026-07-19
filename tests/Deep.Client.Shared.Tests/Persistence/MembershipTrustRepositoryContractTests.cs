@@ -406,10 +406,202 @@ public sealed class MembershipTrustRepositoryContractTests
             "ReadMembershipTrustRecordAsync(",
             implementation,
             StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "COUNT(*)",
+            implementation,
+            StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(
+            "new List<MembershipTrustRecord>",
+            implementation,
+            StringComparison.Ordinal);
         Assert.Contains(
             "MaximumMembershipTrustHistoryRecords",
             source,
             StringComparison.Ordinal);
+        Assert.Contains(
+            "MaximumMembershipTrustHistoryBytes",
+            source,
+            StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task OversizedCorruptHistory_FailsClosedWithoutSelectingOlderState(
+        bool deleteHead)
+    {
+        var path = Path.Combine(
+            Path.GetTempPath(),
+            $"deep-p07-oversized-corrupt-{Guid.NewGuid():N}.db");
+        try
+        {
+            using var store = new SqliteSessionStore(path);
+            var first = Record(1, 6, 0x10);
+            Assert.Equal(
+                MembershipTrustCommitResult.Applied,
+                await store.CommitMembershipTrustAsync(first, null));
+
+            await using (var connection = new SqliteConnection(
+                             $"Data Source={path};Pooling=False"))
+            {
+                await connection.OpenAsync();
+                await using var transaction = connection.BeginTransaction();
+                await using var command = connection.CreateCommand();
+                command.Transaction = transaction;
+                command.CommandText = """
+                    WITH RECURSIVE sequence(value) AS (
+                        SELECT 2
+                        UNION ALL
+                        SELECT value + 1 FROM sequence WHERE value <= 5002
+                    )
+                    INSERT INTO membership_trust_records
+                        (profile_key, domain, revision, version, artifact_kind, sequence,
+                         previous_sequence, previous_hash, envelope, payload_digest,
+                         canonical_hash, profile_binding_hash, signing_authority,
+                         revoked_delegation_hashes, state, observed_at, valid_from, valid_until)
+                    SELECT record.profile_key, record.domain, sequence.value, record.version,
+                           record.artifact_kind, sequence.value + 5, sequence.value + 4,
+                           record.previous_hash, record.envelope, record.payload_digest,
+                           record.canonical_hash, record.profile_binding_hash,
+                           record.signing_authority, record.revoked_delegation_hashes,
+                           record.state, record.observed_at, record.valid_from, record.valid_until
+                    FROM membership_trust_records AS record
+                    CROSS JOIN sequence
+                    WHERE record.profile_key = 'install:test'
+                      AND record.domain = 3
+                      AND record.revision = 1;
+                    """;
+                await command.ExecuteNonQueryAsync();
+                if (deleteHead)
+                {
+                    await using var delete = connection.CreateCommand();
+                    delete.Transaction = transaction;
+                    delete.CommandText = """
+                        DELETE FROM membership_trust_heads
+                        WHERE profile_key = 'install:test' AND domain = 3;
+                        """;
+                    await delete.ExecuteNonQueryAsync();
+                }
+                transaction.Commit();
+            }
+
+            var read = await store.ReadMembershipTrustAsync(
+                "install:test",
+                MembershipTrustDomain.Membership);
+
+            Assert.Equal(MembershipTrustReadResult.Corrupt, read.Result);
+            Assert.Null(read.Head);
+            Assert.Null(read.Predecessor);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            foreach (var candidate in new[] { path, path + "-wal", path + "-shm" })
+            {
+                File.Delete(candidate);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task SqliteHistory_CumulativeValidBytesBeyondBudgetFailClosed()
+    {
+        var path = Path.Combine(
+            Path.GetTempPath(),
+            $"deep-p07-history-byte-budget-{Guid.NewGuid():N}.db");
+        try
+        {
+            using var store = new SqliteSessionStore(path);
+            MembershipTrustRecord? previous = null;
+            for (var revision = 1; revision <= 34; revision++)
+            {
+                var record = MembershipTrustRecord.Create(
+                    "install:test",
+                    MembershipTrustDomain.Membership,
+                    checked((ulong)revision),
+                    checked((ulong)(revision + 5)),
+                    checked((ulong)(revision + 4)),
+                    previous?.CanonicalHash ??
+                        Enumerable.Repeat((byte)0x10, 32).ToArray(),
+                    Enumerable.Repeat(
+                        checked((byte)(revision % 251 + 1)),
+                        MembershipTrustRecord.MaximumEnvelopeLength).ToArray(),
+                    MembershipTrustState.Healthy,
+                    DateTimeOffset.FromUnixTimeSeconds(2_000),
+                    DateTimeOffset.FromUnixTimeSeconds(3_000),
+                    DateTimeOffset.FromUnixTimeSeconds(1_000),
+                    profileBindingHash: Enumerable.Repeat((byte)0x30, 32).ToArray(),
+                    artifactKind: MembershipTrustArtifactKind.Membership,
+                    signingAuthorityEnvelope: Enumerable.Repeat(
+                        checked((byte)(revision % 241 + 1)),
+                        MembershipTrustRecord.MaximumEnvelopeLength).ToArray());
+                Assert.Equal(
+                    MembershipTrustCommitResult.Applied,
+                    await store.CommitMembershipTrustAsync(
+                        record,
+                        previous?.Revision));
+                previous = record;
+            }
+
+            var read = await store.ReadMembershipTrustAsync(
+                "install:test",
+                MembershipTrustDomain.Membership);
+
+            Assert.Equal(MembershipTrustReadResult.Corrupt, read.Result);
+            Assert.Null(read.Head);
+            Assert.Null(read.Predecessor);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            foreach (var candidate in new[] { path, path + "-wal", path + "-shm" })
+            {
+                File.Delete(candidate);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task SqliteHistory_OversizedBlobFailsClosed()
+    {
+        var path = Path.Combine(
+            Path.GetTempPath(),
+            $"deep-p07-history-blob-budget-{Guid.NewGuid():N}.db");
+        try
+        {
+            using var store = new SqliteSessionStore(path);
+            Assert.Equal(
+                MembershipTrustCommitResult.Applied,
+                await store.CommitMembershipTrustAsync(Record(1, 6, 0x10), null));
+            await using (var connection = new SqliteConnection(
+                             $"Data Source={path};Pooling=False"))
+            {
+                await connection.OpenAsync();
+                await using var command = connection.CreateCommand();
+                command.CommandText = """
+                    UPDATE membership_trust_records
+                    SET envelope = zeroblob(1048576)
+                    WHERE profile_key = 'install:test' AND domain = 3 AND revision = 1;
+                    """;
+                await command.ExecuteNonQueryAsync();
+            }
+
+            var read = await store.ReadMembershipTrustAsync(
+                "install:test",
+                MembershipTrustDomain.Membership);
+
+            Assert.Equal(MembershipTrustReadResult.Corrupt, read.Result);
+            Assert.Null(read.Head);
+            Assert.Null(read.Predecessor);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            foreach (var candidate in new[] { path, path + "-wal", path + "-shm" })
+            {
+                File.Delete(candidate);
+            }
+        }
     }
 
     [Theory]
