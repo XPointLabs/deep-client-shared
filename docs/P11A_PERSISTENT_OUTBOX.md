@@ -98,6 +98,24 @@ empty v9 tables are created in the same transaction. Recovery-table name
 conflicts or incompatible v8 layouts fail closed and leave version and rows
 unchanged. Databases newer than v9 fail closed.
 
+Migration attests the exact legacy table, foreign-key, and optional-index
+layouts before any rename or drop. A same-name index owned by another table or
+with a different key order is hostile state, not an index to replace. Row
+presence uses a bounded `EXISTS` probe. At v9 open, both required indexes are
+attested as non-unique, non-partial indexes owned by the item table with their
+exact ordered keys. The attempts foreign key must be one two-column composite
+constraint in account-scope/logical-ID order with `NO ACTION` update,
+`CASCADE` delete, and `NONE` match semantics.
+
+Quarantine does not exempt legacy ciphertext from the privacy lifecycle.
+Scope purge first validates the recovery objects, deletes legacy attempts by
+joining their logical IDs through the scoped recovery item rows, deletes those
+items, and then deletes active rows in one transaction. Full account purge uses
+the existing secure-delete transaction and removes every recovery attempt and
+item before the active account tables. Missing recovery tables are normal;
+partial, view-backed, or schema-incompatible recovery objects fail closed
+before any active or recovery row is deleted.
+
 The feature remains dormant and `PersistentTransportOutboxEnabled` is false in
 both default profiles; no runtime composition reads this repository. During the
 declared rollback window, an older binary may open only a copied pre-migration

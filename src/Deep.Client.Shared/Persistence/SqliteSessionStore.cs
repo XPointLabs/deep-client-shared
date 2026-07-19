@@ -2583,6 +2583,16 @@ public sealed partial class SqliteSessionStore :
             }
 
             using var transaction = connection.BeginTransaction();
+            if (ValidateTransportOutboxRecoveryTablesIfPresent(connection, transaction))
+            {
+                await using var recovery = connection.CreateCommand();
+                recovery.Transaction = transaction;
+                recovery.CommandText = """
+                    DELETE FROM transport_outbox_attempts_v8_recovery;
+                    DELETE FROM transport_outbox_items_v8_recovery;
+                    """;
+                await recovery.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
             foreach (var table in new[]
                      {
                          "transport_outbox_attempts", "transport_outbox_items", "group_state_outbox", "inbox_items", "inbox_cursors", "incoming_message_notifications", "messages", "groups", "conversations", "contacts", "replay_claims", "settings"
@@ -3009,10 +3019,26 @@ public sealed partial class SqliteSessionStore :
         ValidateTransportOutboxForeignKeys(
             connection,
             transaction: null,
+            "transport_outbox_attempts",
+            "transport_outbox_items",
             [
-                "account_scope:account_scope",
-                "logical_id:logical_id"
+                (0, "account_scope", "account_scope"),
+                (1, "logical_id", "logical_id")
             ]);
+        ValidateTransportOutboxIndex(
+            connection,
+            transaction: null,
+            "idx_transport_outbox_ready",
+            "transport_outbox_items",
+            ["account_scope", "state", "not_before", "expires_at", "created_at"],
+            optional: false);
+        ValidateTransportOutboxIndex(
+            connection,
+            transaction: null,
+            "idx_transport_outbox_expiry",
+            "transport_outbox_items",
+            ["account_scope", "expires_at", "state"],
+            optional: false);
     }
 
     private static void MigrateTransportOutboxV8ToV9(
@@ -3054,16 +3080,33 @@ public sealed partial class SqliteSessionStore :
         ValidateTransportOutboxForeignKeys(
             connection,
             transaction,
-            ["logical_id:logical_id"]);
+            "transport_outbox_attempts",
+            "transport_outbox_items",
+            [(0, "logical_id", "logical_id")]);
+        ValidateTransportOutboxIndex(
+            connection,
+            transaction,
+            "idx_transport_outbox_ready",
+            "transport_outbox_items",
+            ["account_scope", "state", "not_before", "expires_at", "created_at"],
+            optional: true);
+        ValidateTransportOutboxIndex(
+            connection,
+            transaction,
+            "idx_transport_outbox_expiry",
+            "transport_outbox_items",
+            ["account_scope", "expires_at", "state"],
+            optional: true);
+        EnsureTransportOutboxRecoveryNamesUnused(connection, transaction);
 
-        var hasRows = CountTransportOutboxRows(
+        var hasRows = TransportOutboxHasRows(
                 connection,
                 transaction,
-                "transport_outbox_items") != 0
-            || CountTransportOutboxRows(
+                "transport_outbox_items")
+            || TransportOutboxHasRows(
                 connection,
                 transaction,
-                "transport_outbox_attempts") != 0;
+                "transport_outbox_attempts");
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = hasRows
@@ -3082,17 +3125,119 @@ public sealed partial class SqliteSessionStore :
         command.ExecuteNonQuery();
     }
 
-    private static long CountTransportOutboxRows(
+    private static bool TransportOutboxHasRows(
         SqliteConnection connection,
         SqliteTransaction transaction,
         string tableName)
     {
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
-        command.CommandText = $"SELECT COUNT(*) FROM \"{tableName}\";";
-        return Convert.ToInt64(
+        command.CommandText =
+            $"SELECT EXISTS(SELECT 1 FROM \"{tableName}\" LIMIT 1);";
+        return Convert.ToInt32(
             command.ExecuteScalar(),
-            CultureInfo.InvariantCulture);
+            CultureInfo.InvariantCulture) == 1;
+    }
+
+    private static void EnsureTransportOutboxRecoveryNamesUnused(
+        SqliteConnection connection,
+        SqliteTransaction transaction)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT COUNT(*) FROM sqlite_master
+            WHERE name IN (
+                'transport_outbox_items_v8_recovery',
+                'transport_outbox_attempts_v8_recovery');
+            """;
+        if (Convert.ToInt32(
+                command.ExecuteScalar(),
+                CultureInfo.InvariantCulture) != 0)
+        {
+            throw new InvalidDataException(
+                "Transport outbox v8 recovery object names are already in use.");
+        }
+    }
+
+    private static bool ValidateTransportOutboxRecoveryTablesIfPresent(
+        SqliteConnection connection,
+        SqliteTransaction transaction)
+    {
+        using (var objects = connection.CreateCommand())
+        {
+            objects.Transaction = transaction;
+            objects.CommandText = """
+                SELECT name, type FROM sqlite_master
+                WHERE name IN (
+                    'transport_outbox_items_v8_recovery',
+                    'transport_outbox_attempts_v8_recovery')
+                ORDER BY name;
+                """;
+            using var reader = objects.ExecuteReader();
+            var found = new Dictionary<string, string>(StringComparer.Ordinal);
+            while (reader.Read())
+            {
+                found.Add(reader.GetString(0), reader.GetString(1));
+            }
+            if (found.Count == 0)
+            {
+                return false;
+            }
+            if (found.Count != 2
+                || !found.TryGetValue(
+                    "transport_outbox_items_v8_recovery",
+                    out var itemsType)
+                || !string.Equals(itemsType, "table", StringComparison.Ordinal)
+                || !found.TryGetValue(
+                    "transport_outbox_attempts_v8_recovery",
+                    out var attemptsType)
+                || !string.Equals(attemptsType, "table", StringComparison.Ordinal))
+            {
+                throw new InvalidDataException(
+                    "Transport outbox v8 recovery objects are incompatible.");
+            }
+        }
+
+        ValidateTransportOutboxColumns(
+            connection,
+            transaction,
+            "transport_outbox_items_v8_recovery",
+            [
+                ("account_scope", "BLOB", 1, 0),
+                ("logical_id", "BLOB", 1, 1),
+                ("dedup_material", "BLOB", 1, 0),
+                ("ciphertext_bundle", "BLOB", 1, 0),
+                ("created_at", "INTEGER", 1, 0),
+                ("expires_at", "INTEGER", 1, 0),
+                ("not_before", "INTEGER", 1, 0),
+                ("state", "INTEGER", 1, 0),
+                ("revision", "INTEGER", 1, 0),
+                ("transition_source", "INTEGER", 1, 0),
+                ("transition_reason", "INTEGER", 1, 0),
+                ("transitioned_at", "INTEGER", 1, 0),
+                ("acknowledgement_evidence", "BLOB", 0, 0)
+            ]);
+        ValidateTransportOutboxColumns(
+            connection,
+            transaction,
+            "transport_outbox_attempts_v8_recovery",
+            [
+                ("logical_id", "BLOB", 1, 1),
+                ("attempt_id", "BLOB", 1, 2),
+                ("state", "INTEGER", 1, 0),
+                ("transition_source", "INTEGER", 1, 0),
+                ("transition_reason", "INTEGER", 1, 0),
+                ("occurred_at", "INTEGER", 1, 0),
+                ("evidence", "BLOB", 1, 0)
+            ]);
+        ValidateTransportOutboxForeignKeys(
+            connection,
+            transaction,
+            "transport_outbox_attempts_v8_recovery",
+            "transport_outbox_items_v8_recovery",
+            [(0, "logical_id", "logical_id")]);
+        return true;
     }
 
     private static bool TransportOutboxTableExists(
@@ -3113,33 +3258,141 @@ public sealed partial class SqliteSessionStore :
     private static void ValidateTransportOutboxForeignKeys(
         SqliteConnection connection,
         SqliteTransaction? transaction,
-        IReadOnlyCollection<string> expectedMappings)
+        string attemptsTable,
+        string expectedTable,
+        IReadOnlyList<(int Sequence, string From, string To)> expectedMappings)
     {
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
-        command.CommandText = """
-            SELECT "table", "from", "to", "on_delete"
-            FROM pragma_foreign_key_list('transport_outbox_attempts');
+        command.CommandText = $"""
+            SELECT id, seq, "table", "from", "to",
+                   "on_update", "on_delete", "match"
+            FROM pragma_foreign_key_list('{attemptsTable}')
+            ORDER BY id, seq;
             """;
         using var reader = command.ExecuteReader();
-        var mappings = new HashSet<string>(StringComparer.Ordinal);
+        var index = 0;
+        int? compositeId = null;
         while (reader.Read())
         {
+            if (index >= expectedMappings.Count)
+            {
+                throw new InvalidDataException(
+                    "Transport outbox foreign-key schema has extra rows.");
+            }
+            compositeId ??= reader.GetInt32(0);
+            var expected = expectedMappings[index++];
             if (!string.Equals(
-                    reader.GetString(0),
-                    "transport_outbox_items",
+                    reader.GetString(2),
+                    expectedTable,
                     StringComparison.Ordinal)
-                || !string.Equals(reader.GetString(3), "CASCADE", StringComparison.Ordinal))
+                || reader.GetInt32(0) != compositeId
+                || reader.GetInt32(1) != expected.Sequence
+                || !string.Equals(reader.GetString(3), expected.From, StringComparison.Ordinal)
+                || !string.Equals(reader.GetString(4), expected.To, StringComparison.Ordinal)
+                || !string.Equals(reader.GetString(5), "NO ACTION", StringComparison.Ordinal)
+                || !string.Equals(reader.GetString(6), "CASCADE", StringComparison.Ordinal)
+                || !string.Equals(reader.GetString(7), "NONE", StringComparison.Ordinal))
             {
                 throw new InvalidDataException(
                     "Transport outbox foreign-key schema is incompatible.");
             }
-            mappings.Add($"{reader.GetString(1)}:{reader.GetString(2)}");
         }
-        if (!mappings.SetEquals(expectedMappings))
+        if (index != expectedMappings.Count)
         {
             throw new InvalidDataException(
-                "Transport outbox foreign-key schema is incompatible.");
+                "Transport outbox foreign-key schema is missing rows.");
+        }
+    }
+
+    private static void ValidateTransportOutboxIndex(
+        SqliteConnection connection,
+        SqliteTransaction? transaction,
+        string indexName,
+        string expectedTable,
+        IReadOnlyList<string> expectedColumns,
+        bool optional)
+    {
+        using (var owner = connection.CreateCommand())
+        {
+            owner.Transaction = transaction;
+            owner.CommandText = """
+                SELECT type, tbl_name
+                FROM sqlite_master
+                WHERE name = $name;
+                """;
+            owner.Parameters.AddWithValue("$name", indexName);
+            using var reader = owner.ExecuteReader();
+            if (!reader.Read())
+            {
+                if (optional)
+                {
+                    return;
+                }
+                throw new InvalidDataException(
+                    $"Transport outbox index {indexName} is missing.");
+            }
+            if (!string.Equals(reader.GetString(0), "index", StringComparison.Ordinal)
+                || !string.Equals(reader.GetString(1), expectedTable, StringComparison.Ordinal)
+                || reader.Read())
+            {
+                throw new InvalidDataException(
+                    $"Transport outbox index {indexName} has an invalid owner.");
+            }
+        }
+
+        using (var properties = connection.CreateCommand())
+        {
+            properties.Transaction = transaction;
+            properties.CommandText = $"""
+                SELECT "unique", origin, partial
+                FROM pragma_index_list('{expectedTable}')
+                WHERE name = $name;
+                """;
+            properties.Parameters.AddWithValue("$name", indexName);
+            using var reader = properties.ExecuteReader();
+            if (!reader.Read()
+                || reader.GetInt32(0) != 0
+                || !string.Equals(reader.GetString(1), "c", StringComparison.Ordinal)
+                || reader.GetInt32(2) != 0
+                || reader.Read())
+            {
+                throw new InvalidDataException(
+                    $"Transport outbox index {indexName} properties are incompatible.");
+            }
+        }
+
+        using var columns = connection.CreateCommand();
+        columns.Transaction = transaction;
+        columns.CommandText = $"""
+            SELECT seqno, name, "desc", coll
+            FROM pragma_index_xinfo('{indexName}')
+            WHERE "key" = 1
+            ORDER BY seqno;
+            """;
+        using var columnReader = columns.ExecuteReader();
+        var columnIndex = 0;
+        while (columnReader.Read())
+        {
+            if (columnIndex >= expectedColumns.Count
+                || columnReader.GetInt32(0) != columnIndex
+                || columnReader.IsDBNull(1)
+                || !string.Equals(
+                    columnReader.GetString(1),
+                    expectedColumns[columnIndex],
+                    StringComparison.Ordinal)
+                || columnReader.GetInt32(2) != 0
+                || !string.Equals(columnReader.GetString(3), "BINARY", StringComparison.Ordinal))
+            {
+                throw new InvalidDataException(
+                    $"Transport outbox index {indexName} key columns are incompatible.");
+            }
+            columnIndex++;
+        }
+        if (columnIndex != expectedColumns.Count)
+        {
+            throw new InvalidDataException(
+                $"Transport outbox index {indexName} is missing key columns.");
         }
     }
 

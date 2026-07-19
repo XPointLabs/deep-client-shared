@@ -273,6 +273,22 @@ public sealed partial class SqliteSessionStore
         return WithReplayConnectionAsync(connection =>
         {
             using var transaction = connection.BeginTransaction(deferred: false);
+            if (ValidateTransportOutboxRecoveryTablesIfPresent(connection, transaction))
+            {
+                using var recovery = connection.CreateCommand();
+                recovery.Transaction = transaction;
+                recovery.CommandText = """
+                    DELETE FROM transport_outbox_attempts_v8_recovery
+                    WHERE logical_id IN (
+                        SELECT logical_id
+                        FROM transport_outbox_items_v8_recovery
+                        WHERE account_scope = $scope);
+                    DELETE FROM transport_outbox_items_v8_recovery
+                    WHERE account_scope = $scope;
+                    """;
+                recovery.Parameters.AddWithValue("$scope", accountScope.ToArray());
+                recovery.ExecuteNonQuery();
+            }
             using var command = connection.CreateCommand();
             command.Transaction = transaction;
             command.CommandText =

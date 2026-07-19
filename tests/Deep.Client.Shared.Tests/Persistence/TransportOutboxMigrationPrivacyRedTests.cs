@@ -24,6 +24,8 @@ public sealed class TransportOutboxMigrationPrivacyRedTests
             Assert.Equal((0L, 0L, 1L, 1L), ReadRecoveryCounts(path));
             using var restarted = new SqliteSessionStore(path);
             Assert.Equal((0L, 0L, 1L, 1L), ReadRecoveryCounts(path));
+            await restarted.PurgeAccountDataAsync();
+            Assert.Equal((0L, 0L, 0L, 0L), ReadRecoveryCounts(path));
         }
         finally
         {
@@ -54,9 +56,14 @@ public sealed class TransportOutboxMigrationPrivacyRedTests
 
     [Theory]
     [InlineData("missing-ready-index")]
+    [InlineData("missing-expiry-index")]
     [InlineData("wrong-ready-order")]
+    [InlineData("wrong-expiry-order")]
+    [InlineData("unique-ready-index")]
+    [InlineData("partial-ready-index")]
     [InlineData("ready-index-on-wrong-table")]
     [InlineData("independent-foreign-keys")]
+    [InlineData("foreign-key-update-cascade")]
     public void V9SchemaAttestationRejectsHostileIndexAndForeignKeyLayouts(string corruption)
     {
         var path = TempPath(corruption);
@@ -72,11 +79,31 @@ public sealed class TransportOutboxMigrationPrivacyRedTests
                 {
                     "missing-ready-index" =>
                         "DROP INDEX idx_transport_outbox_ready;",
+                    "missing-expiry-index" =>
+                        "DROP INDEX idx_transport_outbox_expiry;",
                     "wrong-ready-order" => """
                         DROP INDEX idx_transport_outbox_ready;
                         CREATE INDEX idx_transport_outbox_ready
                             ON transport_outbox_items(
                                 account_scope, not_before, state, expires_at, created_at);
+                        """,
+                    "wrong-expiry-order" => """
+                        DROP INDEX idx_transport_outbox_expiry;
+                        CREATE INDEX idx_transport_outbox_expiry
+                            ON transport_outbox_items(account_scope, state, expires_at);
+                        """,
+                    "unique-ready-index" => """
+                        DROP INDEX idx_transport_outbox_ready;
+                        CREATE UNIQUE INDEX idx_transport_outbox_ready
+                            ON transport_outbox_items(
+                                account_scope, state, not_before, expires_at, created_at);
+                        """,
+                    "partial-ready-index" => """
+                        DROP INDEX idx_transport_outbox_ready;
+                        CREATE INDEX idx_transport_outbox_ready
+                            ON transport_outbox_items(
+                                account_scope, state, not_before, expires_at, created_at)
+                            WHERE state > 0;
                         """,
                     "ready-index-on-wrong-table" => """
                         DROP INDEX idx_transport_outbox_ready;
@@ -112,12 +139,82 @@ public sealed class TransportOutboxMigrationPrivacyRedTests
                         );
                         PRAGMA foreign_keys=ON;
                         """,
+                    "foreign-key-update-cascade" => """
+                        PRAGMA foreign_keys=OFF;
+                        DROP TABLE transport_outbox_attempts;
+                        CREATE TABLE transport_outbox_attempts (
+                            account_scope BLOB NOT NULL,
+                            logical_id BLOB NOT NULL,
+                            attempt_id BLOB NOT NULL,
+                            state INTEGER NOT NULL,
+                            transition_source INTEGER NOT NULL,
+                            transition_reason INTEGER NOT NULL,
+                            occurred_at INTEGER NOT NULL,
+                            evidence BLOB NOT NULL,
+                            PRIMARY KEY(account_scope, logical_id, attempt_id),
+                            FOREIGN KEY(account_scope, logical_id)
+                                REFERENCES transport_outbox_items(account_scope, logical_id)
+                                ON UPDATE CASCADE ON DELETE CASCADE
+                        );
+                        PRAGMA foreign_keys=ON;
+                        """,
                     _ => throw new ArgumentOutOfRangeException(nameof(corruption))
                 };
                 command.ExecuteNonQuery();
             }
 
             Assert.ThrowsAny<Exception>(() => new SqliteSessionStore(path));
+        }
+        finally
+        {
+            DeleteSqliteFiles(path);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PrivacyPurgeFailsClosedOnHostileRecoveryObjectWithoutDeletingActiveRows(
+        bool accountPurge)
+    {
+        var path = TempPath(accountPurge ? "hostile-account-purge" : "hostile-scope-purge");
+        try
+        {
+            var item = TransportOutboxPreparedItem.Create(
+                Scope(0xD1),
+                OutboxLogicalId.FromBytes(Bytes(16, 0xD2)),
+                OutboxDedupMaterial.FromBytes(Bytes(32, 0xD3)),
+                Bytes(64, 0xD4),
+                Now,
+                Now.AddHours(1),
+                Now);
+            using var store = new SqliteSessionStore(path);
+            await store.PrepareTransportOutboxAsync(item);
+            using (var connection = Open(path))
+            {
+                using var command = connection.CreateCommand();
+                command.CommandText = """
+                    CREATE VIEW transport_outbox_items_v8_recovery
+                    AS SELECT 1 AS hostile;
+                    """;
+                command.ExecuteNonQuery();
+            }
+
+            if (accountPurge)
+            {
+                await Assert.ThrowsAnyAsync<Exception>(
+                    () => store.PurgeAccountDataAsync());
+            }
+            else
+            {
+                await Assert.ThrowsAnyAsync<Exception>(
+                    () => store.PurgeTransportOutboxScopeAsync(item.AccountScope));
+            }
+
+            using var verify = Open(path);
+            Assert.Equal(
+                1L,
+                ScalarInt64(verify, "SELECT COUNT(*) FROM transport_outbox_items;"));
         }
         finally
         {
