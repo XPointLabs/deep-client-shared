@@ -2,16 +2,16 @@
 
 - Locked local restore: exit 0, two projects.
 - Dependency gate: PASS.
-- Full Release: 453 passed, 0 failed, 0 skipped.
-- Focused `MembershipTrust`: 143 passed, 0 failed, 0 skipped.
+- Full Release: 455 passed, 0 failed, 0 skipped.
+- Focused `MembershipTrust`: 145 passed, 0 failed, 0 skipped.
 - Privacy/source gate: 3 passed, 0 failed, 0 skipped.
 - Schema/flags: 6 passed, 0 failed, 0 skipped.
-- Full TRX SHA-256: `d70ceb57aa3d52fd42335c8f4ab66f93c0ceb33320fbe2fc448d90acde2f0e2a`.
-- Focused TRX SHA-256: `7f48daa99d3b0e9ff5c063c3166e01c8bd2be5a6da0e72fcd8c0fc1b85eebba9`.
-- Schema/flags TRX SHA-256: `b32a796c08b09836946d1126778d6ba2c68333686e56bc8869c02ac94a4ccbf3`.
+- Full TRX SHA-256: `d70617739cf1b0f7e02e3e951dd12d78038c32f182cb48a377d4466759faf717`.
+- Focused TRX SHA-256: `7002e8fb8a8ea92464e7b184d580f241fa413ff010477a70b0b5085b2d4718a2`.
+- Schema/flags TRX SHA-256: `82846b283ba5a10e56f3df2c96e5e2bbe3e8bf29144c88c36e145587cbf42493`.
 
 The commands above were run from exact source commit
-`ff32845d3939e671a43a0d2d4cb73abfb0479847`. The dependency gate also
+`13e39cf9ff4b0cf3b1c60084aa5af977db68f280`. The dependency gate also
 verified the P04 source/review/final ancestry and all three exact global-cache
 package archives without depending on sibling repository HEAD or cleanliness.
 
@@ -31,10 +31,10 @@ Exact commands and exit codes:
 | `& .\eng\scripts\Invoke-P07DependencyGate.ps1` (before restore) | 0 |
 | `dotnet restore .\Deep.Client.Shared.slnx --locked-mode` | 0 |
 | `& .\eng\scripts\Invoke-P07DependencyGate.ps1` (after restore) | 0 |
-| `dotnet test .\tests\Deep.Client.Shared.Tests\Deep.Client.Shared.Tests.csproj --configuration Release --no-restore --filter "FullyQualifiedName~MembershipTrust" --logger "trx;LogFileName=p07-corrective11-focused.trx" --results-directory .\artifacts\survival\P07\trx` | 0 |
-| `dotnet test .\Deep.Client.Shared.slnx --configuration Release --no-restore --logger "trx;LogFileName=p07-corrective11-full.trx" --results-directory .\artifacts\survival\P07\trx` | 0 |
+| `dotnet test .\tests\Deep.Client.Shared.Tests\Deep.Client.Shared.Tests.csproj --configuration Release --no-restore --filter "FullyQualifiedName~MembershipTrust" --logger "trx;LogFileName=p07-corrective12-focused.trx" --results-directory .\artifacts\survival\P07\trx` | 0 |
+| `dotnet test .\Deep.Client.Shared.slnx --configuration Release --no-restore --logger "trx;LogFileName=p07-corrective12-full.trx" --results-directory .\artifacts\survival\P07\trx` | 0 |
 | `& .\eng\scripts\Invoke-P07TrustGate.ps1` | 0 |
-| `dotnet test .\tests\Deep.Client.Shared.Tests\Deep.Client.Shared.Tests.csproj --configuration Release --no-restore --filter "FullyQualifiedName~FeatureFlagsTests\|FullyQualifiedName~LogicalSchemaThreeToFour" --logger "trx;LogFileName=p07-corrective11-schema-flags.trx" --results-directory .\artifacts\survival\P07\trx` | 0 |
+| `dotnet test .\tests\Deep.Client.Shared.Tests\Deep.Client.Shared.Tests.csproj --configuration Release --no-restore --filter "FullyQualifiedName~FeatureFlagsTests\|FullyQualifiedName~LogicalSchemaThreeToFour" --logger "trx;LogFileName=p07-corrective12-schema-flags.trx" --results-directory .\artifacts\survival\P07\trx` | 0 |
 
 The Windows checkout initially materialized one pre-existing push fixture with
 CRLF because global `core.autocrlf=true`. Its worktree SHA-256 was

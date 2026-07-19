@@ -53,6 +53,7 @@
   "selfHostedNamespaceSeparated": true,
   "forkFailClosed": true,
   "clockRollbackFailClosed": true,
+  "inMemoryClockCommitValidatesPersistedStateBeforeOutcome": true,
   "legacyAutomaticFallback": false,
   "externalCryptoReviewComplete": false,
   "productionAuthorization": false
