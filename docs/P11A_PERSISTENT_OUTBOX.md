@@ -83,7 +83,8 @@ silently weaken the persistence safety boundary.
 Opaque identifiers deliberately redact `ToString()`. Exceptions and transition
 diagnostics use state, source and reason code only. They do not contain bundle
 bytes, account identifiers, logical IDs, attempt IDs, dedup material, recipient
-identity, or plaintext.
+identity, or plaintext. SQLite store options also redact the encryption key from
+their string and debugger representation and exclude it from JSON diagnostics.
 
 ## Mobile write and WAL budget
 
@@ -139,9 +140,12 @@ open, and purge so a trigger cannot suppress, redirect, copy, or mutate a
 delete.
 
 Quarantine does not exempt legacy ciphertext from the privacy lifecycle.
-Scope purge first validates the recovery objects, deletes legacy attempts by
-joining their logical IDs through the scoped recovery item rows, deletes those
-items, and then deletes active rows in one transaction. Full account purge uses
+Scope purge first validates the active and recovery objects, explicitly deletes
+active attempts before active items, then deletes legacy attempts by joining
+their logical IDs through the scoped recovery item rows and deletes those items
+in one transaction. The explicit active-attempt delete removes scoped orphan
+evidence that a database writer could otherwise leave behind with foreign keys
+disabled. Full account purge uses
 the existing secure-delete transaction and removes every recovery attempt and
 item before the active account tables. Missing recovery tables are normal;
 partial, view-backed, or schema-incompatible recovery objects fail closed

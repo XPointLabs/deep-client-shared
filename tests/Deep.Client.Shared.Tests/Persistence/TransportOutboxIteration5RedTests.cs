@@ -114,6 +114,48 @@ public sealed class TransportOutboxIteration5RedTests
     }
 
     [Fact]
+    public async Task AccountPurgeStillRemovesAllActiveItemsAttemptsAndOrphans()
+    {
+        var path = TempPath("account-purge-active-orphan");
+        try
+        {
+            var first = Prepared(0xD1, 0xF1);
+            var second = Prepared(0xD2, 0xF2);
+            using var store = new SqliteSessionStore(path);
+            await PrepareAttemptedAsync(store, first, 0xA1);
+            await PrepareAttemptedAsync(store, second, 0xA2);
+            InsertActiveOrphan(path, first.AccountScope, 0xF3, 0xA3);
+
+            await store.PurgeAccountDataAsync();
+
+            using (var verify = Open(path))
+            {
+                Assert.Equal(
+                    0L,
+                    Scalar(verify, "SELECT COUNT(*) FROM transport_outbox_items;"));
+                Assert.Equal(
+                    0L,
+                    Scalar(verify, "SELECT COUNT(*) FROM transport_outbox_attempts;"));
+            }
+            using var restarted = new SqliteSessionStore(path);
+            Assert.Equal(
+                TransportOutboxReadResult.Missing,
+                (await restarted.ReadTransportOutboxAsync(
+                    first.AccountScope,
+                    first.LogicalId)).Result);
+            Assert.Equal(
+                TransportOutboxReadResult.Missing,
+                (await restarted.ReadTransportOutboxAsync(
+                    second.AccountScope,
+                    second.LogicalId)).Result);
+        }
+        finally
+        {
+            DeleteSqliteFiles(path);
+        }
+    }
+
+    [Fact]
     public void SqliteOptionsDiagnosticsRedactEncryptionKeyAtEveryNestedSurface()
     {
         var options = new SqliteSessionStoreOptions(
@@ -206,6 +248,15 @@ public sealed class TransportOutboxIteration5RedTests
         command.CommandText = $"SELECT COUNT(*) FROM {table} WHERE account_scope = $scope;";
         command.Parameters.AddWithValue("$scope", scope.ToArray());
         return Convert.ToInt64(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    private static long Scalar(SqliteConnection connection, string sql)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        return Convert.ToInt64(
+            command.ExecuteScalar(),
+            System.Globalization.CultureInfo.InvariantCulture);
     }
 
     private static TransportOutboxPreparedItem Prepared(byte scope, byte logical) =>

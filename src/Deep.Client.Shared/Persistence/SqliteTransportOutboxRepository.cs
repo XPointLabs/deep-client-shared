@@ -284,7 +284,21 @@ public sealed partial class SqliteSessionStore
             EnableSqliteSecureDelete(connection);
             using var transaction = connection.BeginTransaction(deferred: false);
             ValidateTransportOutboxSchema(connection, transaction);
-            if (ValidateTransportOutboxRecoveryTablesIfPresent(connection, transaction))
+            var hasRecoveryTables =
+                ValidateTransportOutboxRecoveryTablesIfPresent(connection, transaction);
+            using (var active = connection.CreateCommand())
+            {
+                active.Transaction = transaction;
+                active.CommandText = """
+                    DELETE FROM transport_outbox_attempts
+                    WHERE account_scope = $scope;
+                    DELETE FROM transport_outbox_items
+                    WHERE account_scope = $scope;
+                    """;
+                active.Parameters.AddWithValue("$scope", accountScope.ToArray());
+                active.ExecuteNonQuery();
+            }
+            if (hasRecoveryTables)
             {
                 using var recovery = connection.CreateCommand();
                 recovery.Transaction = transaction;
@@ -300,12 +314,6 @@ public sealed partial class SqliteSessionStore
                 recovery.Parameters.AddWithValue("$scope", accountScope.ToArray());
                 recovery.ExecuteNonQuery();
             }
-            using var command = connection.CreateCommand();
-            command.Transaction = transaction;
-            command.CommandText =
-                "DELETE FROM transport_outbox_items WHERE account_scope = $scope;";
-            command.Parameters.AddWithValue("$scope", accountScope.ToArray());
-            command.ExecuteNonQuery();
             cancellationToken.ThrowIfCancellationRequested();
             transaction.Commit();
             RunPostScopePurgeMaintenanceBestEffort(connection);

@@ -1,5 +1,7 @@
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Globalization;
 using Deep.Client.Shared.Domain;
 using Deep.Client.Shared.Services;
@@ -5143,4 +5145,23 @@ public sealed partial class SqliteSessionStore :
 
 }
 
-public sealed record SqliteSessionStoreOptions(string StatePath, string? EncryptionKey = null);
+[DebuggerDisplay("{ToString(),nq}")]
+public sealed class SqliteSessionStoreOptions
+{
+    public SqliteSessionStoreOptions(string statePath, string? encryptionKey = null)
+    {
+        StatePath = statePath;
+        EncryptionKey = encryptionKey;
+    }
+
+    public string StatePath { get; }
+
+    [DebuggerBrowsable(DebuggerBrowsableState.Never)]
+    [JsonIgnore]
+    public string? EncryptionKey { get; }
+
+    public override string ToString() =>
+        $"{nameof(SqliteSessionStoreOptions)} {{ " +
+        $"StatePath = {(string.IsNullOrWhiteSpace(StatePath) ? "[missing]" : "[configured]")}, " +
+        $"EncryptionKey = {(string.IsNullOrWhiteSpace(EncryptionKey) ? "[not-configured]" : "[redacted]")} }}";
+}
