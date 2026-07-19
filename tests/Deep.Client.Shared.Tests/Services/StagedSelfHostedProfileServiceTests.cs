@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text;
 using Deep.Client.Shared.Persistence;
 using Deep.Client.Shared.Services;
+using Microsoft.Data.Sqlite;
 
 namespace Deep.Client.Shared.Tests.Services;
 
@@ -224,7 +225,7 @@ public sealed class StagedSelfHostedProfileServiceTests
             scope,
             StagedSelfHostedProfileLimits.SchemaVersion,
             Bytes(8, 0x74));
-        var key = Assert.Single(settings.Keys);
+        var key = Assert.Single(settings.Keys.Distinct(StringComparer.Ordinal));
         await inner.SetAsync(key, "synthetic-corrupt-value");
         settings.Reset();
 
@@ -261,7 +262,7 @@ public sealed class StagedSelfHostedProfileServiceTests
             scope,
             StagedSelfHostedProfileLimits.SchemaVersion,
             Bytes(1, 0x76));
-        var key = Assert.Single(settings.Keys);
+        var key = Assert.Single(settings.Keys.Distinct(StringComparer.Ordinal));
 
         await inner.SetAsync(key, new
         {
@@ -394,6 +395,46 @@ public sealed class StagedSelfHostedProfileServiceTests
     }
 
     [Fact]
+    public async Task SqlCipherSettingsProtectSyntheticBytesAndPurgeSurvivesRestart()
+    {
+        var statePath = Path.Combine(
+            Path.GetTempPath(),
+            $"deep-staged-profile-{Guid.NewGuid():N}.db");
+        var encryptionKey = Convert.ToHexString(Bytes(32, 0x91));
+        var scope = Scope(0x27);
+        var candidateBytes = Bytes(512, 0x92);
+        try
+        {
+            using (var store = new SqliteSessionStore(
+                       new SqliteSessionStoreOptions(statePath, encryptionKey)))
+            {
+                var service = new StagedSelfHostedProfileService(store);
+                var saved = await service.SaveAsync(
+                    scope,
+                    StagedSelfHostedProfileLimits.SchemaVersion,
+                    candidateBytes);
+                Assert.Equal(StagedSelfHostedProfileSaveResult.Saved, saved.Result);
+                SqliteConnection.ClearAllPools();
+                Assert.False(ContainsSequence(File.ReadAllBytes(statePath), candidateBytes));
+
+                await store.PurgeAccountDataAsync();
+            }
+
+            using (var restarted = new SqliteSessionStore(
+                       new SqliteSessionStoreOptions(statePath, encryptionKey)))
+            {
+                var listed = await new StagedSelfHostedProfileService(restarted).ListAsync(scope);
+                Assert.Equal(StagedSelfHostedProfileListResult.Success, listed.Result);
+                Assert.Empty(listed.Candidates);
+            }
+        }
+        finally
+        {
+            DeleteSqliteFiles(statePath);
+        }
+    }
+
+    [Fact]
     public async Task PublicDebugStringAndExceptionSurfacesAreRedacted()
     {
         var service = new StagedSelfHostedProfileService(new InMemorySessionStore());
@@ -470,6 +511,21 @@ public sealed class StagedSelfHostedProfileServiceTests
 
     private static byte[] Bytes(int length, byte value) =>
         Enumerable.Repeat(value, length).ToArray();
+
+    private static bool ContainsSequence(byte[] source, byte[] candidate) =>
+        source.AsSpan().IndexOf(candidate) >= 0;
+
+    private static void DeleteSqliteFiles(string statePath)
+    {
+        SqliteConnection.ClearAllPools();
+        foreach (var path in new[] { statePath, statePath + "-wal", statePath + "-shm" })
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+    }
 
     private static string FindRepositoryRoot()
     {
