@@ -15,27 +15,27 @@
     "d20289800bbea96da526af614b38926fef149983",
     "0b2715dfa6ee1bbe4292953a9108c112e12f79bc",
     "f7cd105f7d9dee0c0747d30dc446e98b3c48abd0",
-    "19269b901b85620de15fbe0d4edcce69a99ed29e"
+    "19269b901b85620de15fbe0d4edcce69a99ed29e",
+    "85e26016f5d667e92b30d2ea6d95fc90236e4794"
   ],
-  "previousEvidenceCarrierCommit": "c27e130ddfa2d7ba68ac2a6025b6f924c4a1882a",
-  "sourceCommit": "5cd1d8dfd8e1f7dd33793e937c840ba315daac27",
-  "evidenceContentCommit": "6153deb1ff2b86b85c8da7310bcceefdc94a75ba",
+  "previousEvidenceCarrierCommit": "bef4e75792f1f3d2713a04a91cb6147124fbf5a1",
+  "sourceCommit": "4cd90d1f952a64dc000d7f1997f648eea11c26bd",
   "tests": {
     "full": {
-      "command": "dotnet test .\\Deep.Client.Shared.slnx --configuration Release --no-restore --logger \"trx;LogFileName=p07-corrective5-full.trx\" --results-directory .\\artifacts\\survival\\P07\\trx",
+      "command": "dotnet test .\\Deep.Client.Shared.slnx --configuration Release --no-restore --logger \"trx;LogFileName=p07-corrective6-full.trx\" --results-directory .\\artifacts\\survival\\P07\\trx",
       "exitCode": 0,
-      "passed": 382,
+      "passed": 414,
       "failed": 0,
       "skipped": 0,
-      "localUncommittedTrxSha256": "98d79ab993a6d2c9da5a1a8f4ed3e03d7a094f2eff8a2ed8975f63579166de97"
+      "localUncommittedTrxSha256": "2fd7144d65f9bd66cfbead6106facbe151a6b1de102857adaf19dfaccc551098"
     },
     "focused": {
-      "command": "dotnet test .\\tests\\Deep.Client.Shared.Tests\\Deep.Client.Shared.Tests.csproj --configuration Release --no-restore --filter \"FullyQualifiedName~MembershipTrust\" --logger \"trx;LogFileName=p07-corrective5-focused.trx\" --results-directory .\\artifacts\\survival\\P07\\trx",
+      "command": "dotnet test .\\tests\\Deep.Client.Shared.Tests\\Deep.Client.Shared.Tests.csproj --configuration Release --no-restore --filter \"FullyQualifiedName~MembershipTrust\" --logger \"trx;LogFileName=p07-corrective6-focused.trx\" --results-directory .\\artifacts\\survival\\P07\\trx",
       "exitCode": 0,
-      "passed": 72,
+      "passed": 104,
       "failed": 0,
       "skipped": 0,
-      "localUncommittedTrxSha256": "ba73b56fc7c5a125fe963c811d7b61416007ed43da83e7a6c285f23c47715984"
+      "localUncommittedTrxSha256": "6970692a359b2381039c01bb0cb5e18663b9d69cfd62d8188c9d6fb40759453e"
     },
     "privacyGate": {
       "command": "& .\\eng\\scripts\\Invoke-P07TrustGate.ps1",
@@ -45,12 +45,12 @@
       "skipped": 0
     },
     "schemaAndFlags": {
-      "command": "dotnet test .\\tests\\Deep.Client.Shared.Tests\\Deep.Client.Shared.Tests.csproj --configuration Release --no-restore --filter \"FullyQualifiedName~FeatureFlagsTests|FullyQualifiedName~LogicalSchemaThreeToFour\" --logger \"trx;LogFileName=p07-corrective5-schema-flags.trx\" --results-directory .\\artifacts\\survival\\P07\\trx",
+      "command": "dotnet test .\\tests\\Deep.Client.Shared.Tests\\Deep.Client.Shared.Tests.csproj --configuration Release --no-restore --filter \"FullyQualifiedName~FeatureFlagsTests|FullyQualifiedName~LogicalSchemaThreeToFour\" --logger \"trx;LogFileName=p07-corrective6-schema-flags.trx\" --results-directory .\\artifacts\\survival\\P07\\trx",
       "exitCode": 0,
       "passed": 6,
       "failed": 0,
       "skipped": 0,
-      "localUncommittedTrxSha256": "7796086883d001cda9ef2dbd2c11b5aa78931246fdc38560423b2f527dcd94d2"
+      "localUncommittedTrxSha256": "4faf3d0f36419572acb9990ec32473c90356a4295d2fe1ea0ac6463a46625d25"
     }
   },
   "verificationCommands": [
@@ -64,6 +64,14 @@
     "evaluationUsesFinalRevisionAndDigestFence": true,
     "timestampsCanonicalizedToUtcWholeSeconds": true,
     "reservedSelfHostedNamespaceDisjoint": true
+  },
+  "correctiveSix": {
+    "bootstrapEquivocationUsesVerifiedForkReducer": true,
+    "contentApplyAuthorityAndContentFence": true,
+    "completeImmutableHistoryValidation": true,
+    "publicInputsDeepSnapshotted": true,
+    "dependencyExceptionsBoundedAndCancellationPreserved": true,
+    "operationTimeCanonicalizedOnce": true
   },
   "changedFilesFromBase": [
     "NuGet.Config",

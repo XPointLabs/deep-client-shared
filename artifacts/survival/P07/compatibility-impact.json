@@ -10,6 +10,7 @@
   "physicalSchemaAdditive": true,
   "membershipTrustRecordSchema": 2,
   "trustTimestampCanonicalForm": "UTC whole seconds; pre-existing dormant non-canonical rows fail closed",
+  "historyReadPolicy": "validate every immutable revision through the advertised head; dormant-only linear read cost",
   "preV2DormantTrustRows": "fail-closed-rebootstrap-required",
   "revocationOverflow": "terminal-fail-closed-rebootstrap-required",
   "existingTrustRowsUseExplicitAnchorDefaultUntilRewritten": true,

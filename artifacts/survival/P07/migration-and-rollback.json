@@ -13,6 +13,7 @@
   "trustRecordSchema": 2,
   "trustTimestampCanonicalForm": "UTC whole seconds",
   "preCanonicalDormantRecordPolicy": "fail-closed-and-rebootstrap",
+  "deepHistoryCorruptionPolicy": "fail-closed; never select an older head",
   "preV2DormantRecordPolicy": "fail-closed-and-rebootstrap",
   "revocationSetOverflowPolicy": "persist-terminal-corrupt-marker-and-require-approved-rebootstrap",
   "profileScope": "installation-not-account",
