@@ -2,7 +2,6 @@
   "schema": "deep.p07.handoff.v1",
   "sourceCommit": "e6319e980eaf9cb1b8059ab8a3f91119482297b4",
   "previousEvidenceCarrierCommit": "74c36c503acae8c3ca65d0c5be7caa358c406a67",
-  "evidenceContentCommit": "b9508a253430c7497634fb12f9669d0fe978f593",
   "independentReviewRequired": true,
   "next": ["repeat independent exact-source-and-evidence review", "P07B source policy", "P14 self-host UX"],
   "blockers": [
@@ -19,5 +18,9 @@
     "mobileE2EComplete": false,
     "windowsE2EComplete": false,
     "networkRestrictionResilienceProven": false
-  }
+  },
+  "residualCoverageP3": [
+    "no dedicated SQLite restart variant for the revision-one bootstrap fork test",
+    "no dedicated barriers for rotation after content CAS before authority fence or competing content-head change before content fence"
+  ]
 }

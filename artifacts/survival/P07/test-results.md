@@ -18,6 +18,12 @@ package archives without depending on sibling repository HEAD or cleanliness.
 TRX files were not committed because they contain machine-local paths. No
 external, device, Docker, or network E2E lane was run or claimed.
 
+Residual P3 coverage gaps: the revision-one bootstrap fork restart assertion is
+dedicated to the in-memory store rather than SQLite, and the inspected
+post-commit fences do not yet have separate deterministic barriers for rotation
+after content CAS but before the authority fence or for a competing content-head
+change before the content fence. These are not claimed as completed coverage.
+
 Exact commands and exit codes:
 
 | Command | Exit |

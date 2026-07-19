@@ -21,7 +21,6 @@
   ],
   "previousEvidenceCarrierCommit": "74c36c503acae8c3ca65d0c5be7caa358c406a67",
   "sourceCommit": "e6319e980eaf9cb1b8059ab8a3f91119482297b4",
-  "evidenceContentCommit": "b9508a253430c7497634fb12f9669d0fe978f593",
   "tests": {
     "full": {
       "command": "dotnet test .\\Deep.Client.Shared.slnx --configuration Release --no-restore --logger \"trx;LogFileName=p07-corrective7-full.trx\" --results-directory .\\artifacts\\survival\\P07\\trx",
@@ -83,6 +82,10 @@
     "historyBudgetOverflowFailsClosed": true,
     "productionCheckpointStillRequired": true
   },
+  "residualCoverageP3": [
+    "bootstrap revision-one fork has durable in-memory restart coverage but no dedicated SQLite restart variant",
+    "content authority fencing is inspected for post-CAS rotation and competing pre-fence content changes, but those two interleavings lack dedicated barrier tests"
+  ],
   "changedFilesFromBase": [
     "NuGet.Config",
     "artifacts/survival/P07/compatibility-impact.json",
