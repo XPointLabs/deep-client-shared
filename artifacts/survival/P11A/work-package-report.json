@@ -5,6 +5,7 @@
   "repository": "deep-client-shared",
   "baseSourceCommit": "13e39cf9ff4b0cf3b1c60084aa5af977db68f280",
   "sourceCommit": "343f770800ad6247a5a0ae63a418b229c9388cde",
+  "evidenceContentCommit": "6f931492fd54a00ec4e112b98c5db97d1260ad0d",
   "status": "accepted-dormant-storage-contract-go-runtime-blocked",
   "featureFlag": "disabled",
   "reviews": [

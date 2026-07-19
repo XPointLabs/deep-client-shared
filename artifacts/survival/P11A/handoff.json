@@ -1,7 +1,7 @@
 {
   "schema": "deep.p11a.handoff.v1",
   "sourceCommit": "343f770800ad6247a5a0ae63a418b229c9388cde",
-  "evidenceContentCommit": "PENDING",
+  "evidenceContentCommit": "6f931492fd54a00ec4e112b98c5db97d1260ad0d",
   "independentReviewRequired": false,
   "status": "accepted-dormant-storage-contract-go-runtime-blocked",
   "next": [
