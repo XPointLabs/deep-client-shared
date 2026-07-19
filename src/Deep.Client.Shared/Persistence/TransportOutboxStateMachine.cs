@@ -35,7 +35,11 @@ internal sealed class TransportOutboxStoredItem
     public required OutboxTransitionReason Reason { get; set; }
     public required DateTimeOffset TransitionedAt { get; set; }
     public required List<TransportOutboxStoredAttempt> Attempts { get; init; }
+    public required TransportOutboxState LastTransitionState { get; set; }
+    public byte[]? LastTransitionAttemptId { get; set; }
+    public DateTimeOffset? LastTransitionRetryNotBefore { get; set; }
     public byte[]? AcknowledgementEvidence { get; set; }
+    public DateTimeOffset? AcknowledgedAt { get; set; }
 
     public TransportOutboxStoredItem Clone() => new()
     {
@@ -52,7 +56,11 @@ internal sealed class TransportOutboxStoredItem
         Reason = Reason,
         TransitionedAt = TransitionedAt,
         Attempts = Attempts.Select(static attempt => attempt.Clone()).ToList(),
-        AcknowledgementEvidence = AcknowledgementEvidence?.ToArray()
+        LastTransitionState = LastTransitionState,
+        LastTransitionAttemptId = LastTransitionAttemptId?.ToArray(),
+        LastTransitionRetryNotBefore = LastTransitionRetryNotBefore,
+        AcknowledgementEvidence = AcknowledgementEvidence?.ToArray(),
+        AcknowledgedAt = AcknowledgedAt
     };
 }
 
@@ -75,7 +83,8 @@ internal static class TransportOutboxStateMachine
             Source = OutboxTransitionSource.LocalQueue,
             Reason = OutboxTransitionReason.Prepared,
             TransitionedAt = item.CreatedAt,
-            Attempts = []
+            Attempts = [],
+            LastTransitionState = TransportOutboxState.Prepared
         };
         Validate(stored);
         return stored;
@@ -105,6 +114,10 @@ internal static class TransportOutboxStateMachine
         ArgumentNullException.ThrowIfNull(transition);
         Validate(item);
         if (!item.LogicalId.AsSpan().SequenceEqual(transition.LogicalId.Value))
+        {
+            return TransportOutboxCommitResult.Conflict;
+        }
+        if (!item.AccountScope.AsSpan().SequenceEqual(transition.AccountScope.Value))
         {
             return TransportOutboxCommitResult.Conflict;
         }
@@ -148,6 +161,9 @@ internal static class TransportOutboxStateMachine
             item.Source = transition.Source;
             item.Reason = transition.Reason;
             item.TransitionedAt = transition.OccurredAt;
+            item.LastTransitionState = transition.TargetState;
+            item.LastTransitionAttemptId = transition.AttemptId?.ToArray();
+            item.LastTransitionRetryNotBefore = transition.RetryNotBefore;
             Validate(item);
         }
 
@@ -189,10 +205,22 @@ internal static class TransportOutboxStateMachine
             || item.LogicalId.Length != TransportOutboxLimits.LogicalIdBytes
             || item.DedupMaterial.Length != TransportOutboxLimits.DedupMaterialBytes
             || item.CiphertextBundle.Length is <= 0 or > TransportOutboxLimits.MaxCiphertextBundleBytes
+            || IsAllZero(item.AccountScope)
+            || IsAllZero(item.LogicalId)
+            || IsAllZero(item.DedupMaterial)
             || item.Revision is 0 or > long.MaxValue
             || !Enum.IsDefined(item.State)
             || !Enum.IsDefined(item.Source)
-            || !Enum.IsDefined(item.Reason))
+            || !Enum.IsDefined(item.Reason)
+            || !Enum.IsDefined(item.LastTransitionState)
+            || !TransportOutboxTime.IsCanonical(item.CreatedAt)
+            || !TransportOutboxTime.IsCanonical(item.ExpiresAt)
+            || !TransportOutboxTime.IsCanonical(item.NotBefore)
+            || !TransportOutboxTime.IsCanonical(item.TransitionedAt)
+            || item.LastTransitionRetryNotBefore is { } lastRetry
+                && !TransportOutboxTime.IsCanonical(lastRetry)
+            || item.AcknowledgedAt is { } acknowledgedAt
+                && !TransportOutboxTime.IsCanonical(acknowledgedAt))
         {
             throw new TransportOutboxCorruptException();
         }
@@ -218,6 +246,7 @@ internal static class TransportOutboxStateMachine
         foreach (var attempt in item.Attempts)
         {
             if (attempt.AttemptId.Length != TransportOutboxLimits.AttemptIdBytes
+                || IsAllZero(attempt.AttemptId)
                 || !attemptIds.Add(Convert.ToHexString(attempt.AttemptId))
                 || !Enum.IsDefined(attempt.State)
                 || !Enum.IsDefined(attempt.Source)
@@ -225,6 +254,8 @@ internal static class TransportOutboxStateMachine
                 || !Enum.IsDefined(attempt.Reason)
                 || attempt.OccurredAt < item.CreatedAt
                 || attempt.OccurredAt > item.TransitionedAt
+                || attempt.OccurredAt >= item.ExpiresAt
+                || !TransportOutboxTime.IsCanonical(attempt.OccurredAt)
                 || attempt.Evidence.Length > TransportOutboxLimits.MaxEvidenceBytes
                 || attempt.State != TransportOutboxAttemptState.Attempted && attempt.Evidence.Length == 0
                 || attempt.State == TransportOutboxAttemptState.Attempted && attempt.Evidence.Length != 0)
@@ -242,11 +273,29 @@ internal static class TransportOutboxStateMachine
             || item.State == TransportOutboxState.Delivered
                 && (item.AcknowledgementEvidence is not { Length: > 0 }
                     || item.AcknowledgementEvidence.Length > TransportOutboxLimits.MaxEvidenceBytes
-                    || maximumAttemptState != TransportOutboxAttemptState.Durable)
-            || item.State != TransportOutboxState.Delivered && item.AcknowledgementEvidence is not null)
+                    || maximumAttemptState != TransportOutboxAttemptState.Durable
+                    || item.AcknowledgedAt is null)
+            || item.State != TransportOutboxState.Delivered
+                && (item.AcknowledgementEvidence is not null || item.AcknowledgedAt is not null))
         {
             throw new TransportOutboxCorruptException();
         }
+
+        if (item.State is TransportOutboxState.Attempted
+                or TransportOutboxState.Accepted
+                or TransportOutboxState.Durable
+            && (int)item.State != (int)maximumAttemptState + 1
+            || item.State is not (TransportOutboxState.Delivered or TransportOutboxState.Expired)
+                && item.TransitionedAt >= item.ExpiresAt
+            || item.LastTransitionRetryNotBefore is { } retry
+                && (retry < item.TransitionedAt || retry > item.ExpiresAt)
+            || item.AcknowledgedAt is { } ack
+                && (ack < item.CreatedAt || ack > item.ExpiresAt))
+        {
+            throw new TransportOutboxCorruptException();
+        }
+
+        ValidateTransitionHistory(item);
     }
 
     private static TransportOutboxCommitResult ApplyAttempt(
@@ -319,6 +368,7 @@ internal static class TransportOutboxStateMachine
 
         item.State = TransportOutboxState.Delivered;
         item.AcknowledgementEvidence = acknowledgement.GetEvidenceCopy();
+        item.AcknowledgedAt = acknowledgement.AcknowledgedAt;
         return TransportOutboxCommitResult.Applied;
     }
 
@@ -340,8 +390,10 @@ internal static class TransportOutboxStateMachine
     {
         if (transition.ExpectedRevision == ulong.MaxValue
             || item.Revision != transition.ExpectedRevision + 1
-            || item.State != transition.TargetState
-                && transition.TargetState is TransportOutboxState.Delivered or TransportOutboxState.Expired
+            || !item.AccountScope.AsSpan().SequenceEqual(transition.AccountScope.Value)
+            || item.LastTransitionState != transition.TargetState
+            || !NullableBlobEquals(item.LastTransitionAttemptId, transition.AttemptId?.ToArray())
+            || item.LastTransitionRetryNotBefore != transition.RetryNotBefore
             || item.Source != transition.Source
             || item.Reason != transition.Reason
             || item.TransitionedAt != transition.OccurredAt)
@@ -353,6 +405,9 @@ internal static class TransportOutboxStateMachine
         {
             return transition.Acknowledgement is { } acknowledgement
                 && item.AcknowledgementEvidence is { } stored
+                && item.AcknowledgedAt == acknowledgement.AcknowledgedAt
+                && item.LogicalId.AsSpan().SequenceEqual(acknowledgement.LogicalId.Value)
+                && item.DedupMaterial.AsSpan().SequenceEqual(acknowledgement.DedupMaterial.Value)
                 && stored.AsSpan().SequenceEqual(acknowledgement.Evidence);
         }
         if (transition.TargetState == TransportOutboxState.Expired)
@@ -372,5 +427,103 @@ internal static class TransportOutboxStateMachine
             && attempt.Reason == transition.Reason
             && attempt.OccurredAt == transition.OccurredAt
             && attempt.Evidence.AsSpan().SequenceEqual(transition.Evidence);
+    }
+
+    private static bool IsAllZero(ReadOnlySpan<byte> value) =>
+        value.IndexOfAnyExcept((byte)0) < 0;
+
+    private static bool NullableBlobEquals(byte[]? stored, byte[]? candidate) =>
+        stored is null
+            ? candidate is null
+            : candidate is { } value && stored.AsSpan().SequenceEqual(value);
+
+    private static void ValidateTransitionHistory(TransportOutboxStoredItem item)
+    {
+        ulong expectedRevision = 1;
+        foreach (var attempt in item.Attempts)
+        {
+            expectedRevision = checked(expectedRevision + (ulong)attempt.State);
+            var legalReason = attempt.State switch
+            {
+                TransportOutboxAttemptState.Attempted =>
+                    attempt.Reason is OutboxTransitionReason.DispatchStarted
+                        or OutboxTransitionReason.RetryScheduled
+                        or OutboxTransitionReason.CrashReconciled,
+                TransportOutboxAttemptState.Accepted =>
+                    attempt.Reason is OutboxTransitionReason.AdapterAccepted
+                        or OutboxTransitionReason.CrashReconciled,
+                TransportOutboxAttemptState.Durable =>
+                    attempt.Reason is OutboxTransitionReason.AdapterConfirmedDurable
+                        or OutboxTransitionReason.CrashReconciled,
+                _ => false
+            };
+            if (!legalReason
+                || attempt.Source == OutboxTransitionSource.Recovery
+                    && attempt.Reason != OutboxTransitionReason.CrashReconciled
+                || attempt.Source == OutboxTransitionSource.Adapter
+                    && attempt.Reason == OutboxTransitionReason.CrashReconciled)
+            {
+                throw new TransportOutboxCorruptException();
+            }
+        }
+        if (item.State is TransportOutboxState.Delivered or TransportOutboxState.Expired)
+        {
+            expectedRevision++;
+        }
+        if (item.Revision != expectedRevision)
+        {
+            throw new TransportOutboxCorruptException();
+        }
+
+        var latestAttempt = item.LastTransitionAttemptId is null
+            ? null
+            : item.Attempts.SingleOrDefault(attempt =>
+                attempt.AttemptId.AsSpan().SequenceEqual(item.LastTransitionAttemptId));
+        var latestIsLegal = item.LastTransitionState switch
+        {
+            TransportOutboxState.Prepared =>
+                item.Revision == 1
+                && item.LastTransitionAttemptId is null
+                && item.LastTransitionRetryNotBefore is null
+                && latestAttempt is null
+                && item.Source == OutboxTransitionSource.LocalQueue
+                && item.Reason == OutboxTransitionReason.Prepared
+                && item.TransitionedAt == item.CreatedAt,
+            TransportOutboxState.Attempted or TransportOutboxState.Accepted =>
+                latestAttempt is not null
+                && item.LastTransitionRetryNotBefore is not null
+                && (int)latestAttempt.State == (int)item.LastTransitionState - 1
+                && latestAttempt.Source == item.Source
+                && latestAttempt.Reason == item.Reason
+                && latestAttempt.OccurredAt == item.TransitionedAt,
+            TransportOutboxState.Durable =>
+                latestAttempt is not null
+                && item.LastTransitionRetryNotBefore is null
+                && latestAttempt.State == TransportOutboxAttemptState.Durable
+                && latestAttempt.Source == item.Source
+                && latestAttempt.Reason == item.Reason
+                && latestAttempt.OccurredAt == item.TransitionedAt,
+            TransportOutboxState.Delivered =>
+                item.LastTransitionAttemptId is null
+                && item.LastTransitionRetryNotBefore is null
+                && latestAttempt is null
+                && item.State == TransportOutboxState.Delivered
+                && item.Source == OutboxTransitionSource.RecipientDevice
+                && item.Reason == OutboxTransitionReason.RecipientAcknowledged
+                && item.AcknowledgedAt <= item.TransitionedAt,
+            TransportOutboxState.Expired =>
+                item.LastTransitionAttemptId is null
+                && item.LastTransitionRetryNotBefore is null
+                && latestAttempt is null
+                && item.State == TransportOutboxState.Expired
+                && item.Source == OutboxTransitionSource.ExpiryScheduler
+                && item.Reason == OutboxTransitionReason.LifetimeElapsed
+                && item.TransitionedAt >= item.ExpiresAt,
+            _ => false
+        };
+        if (!latestIsLegal)
+        {
+            throw new TransportOutboxCorruptException();
+        }
     }
 }

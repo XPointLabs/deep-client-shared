@@ -14,6 +14,34 @@ public sealed record ClientFeatureFlags(
     bool LegacyEmbeddedBootstrapRollbackAllowed = false,
     bool PersistentTransportOutboxEnabled = false)
 {
+    public ClientFeatureFlags(
+        bool groupsV2Enabled,
+        bool communitiesEnabled,
+        bool callsEnabled,
+        bool shareExtensionEnabled,
+        bool attachmentEncryptionEnabled,
+        bool backgroundSyncEnabled,
+        bool pushNotificationsEnabled,
+        bool transportRequired,
+        bool stubTransportAllowed,
+        bool membershipTrustEnabled,
+        bool legacyEmbeddedBootstrapRollbackAllowed)
+        : this(
+            groupsV2Enabled,
+            communitiesEnabled,
+            callsEnabled,
+            shareExtensionEnabled,
+            attachmentEncryptionEnabled,
+            backgroundSyncEnabled,
+            pushNotificationsEnabled,
+            transportRequired,
+            stubTransportAllowed,
+            membershipTrustEnabled,
+            legacyEmbeddedBootstrapRollbackAllowed,
+            PersistentTransportOutboxEnabled: false)
+    {
+    }
+
     public static ClientFeatureFlags Defaults { get; } = new();
 
     public static ClientFeatureFlags ReleaseDefaults { get; } = new(

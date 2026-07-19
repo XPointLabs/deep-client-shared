@@ -8,6 +8,7 @@ namespace Deep.Client.Shared.Persistence;
 
 public sealed partial class InMemorySessionStore :
     ILocalSessionStore,
+    ITransportOutboxRepository,
     IOneToOneConversationOpenRepository,
     IMessageSyncRepository,
     IMembershipTrustRepository
@@ -1894,7 +1895,23 @@ public sealed partial class InMemorySessionStore :
             return;
         }
 
-        var snapshot = JsonSerializer.Deserialize<SessionStoreSnapshot>(File.ReadAllText(statePath), SerializerOptions);
+        const long maximumSnapshotBytes = 8L * 1024 * 1024;
+        if (new FileInfo(statePath).Length > maximumSnapshotBytes)
+        {
+            throw new TransportOutboxCorruptException();
+        }
+
+        SessionStoreSnapshot? snapshot;
+        try
+        {
+            snapshot = JsonSerializer.Deserialize<SessionStoreSnapshot>(
+                File.ReadAllText(statePath),
+                SerializerOptions);
+        }
+        catch (JsonException)
+        {
+            throw new TransportOutboxCorruptException();
+        }
         if (snapshot is null)
         {
             return;

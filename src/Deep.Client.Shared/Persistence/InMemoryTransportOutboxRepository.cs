@@ -22,7 +22,7 @@ public sealed partial class InMemorySessionStore
         ArgumentNullException.ThrowIfNull(item);
         cancellationToken.ThrowIfCancellationRequested();
         var candidate = TransportOutboxStateMachine.Prepared(item);
-        var key = OutboxKey(candidate.LogicalId);
+        var key = OutboxKey(candidate.AccountScope, candidate.LogicalId);
         lock (durableStateGate)
         {
             if (transportOutbox.TryGetValue(key, out var existing))
@@ -59,14 +59,18 @@ public sealed partial class InMemorySessionStore
     }
 
     public Task<TransportOutboxReadSnapshot> ReadTransportOutboxAsync(
+        OutboxAccountScope accountScope,
         OutboxLogicalId logicalId,
         CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(accountScope);
         ArgumentNullException.ThrowIfNull(logicalId);
         cancellationToken.ThrowIfCancellationRequested();
         lock (durableStateGate)
         {
-            if (!transportOutbox.TryGetValue(OutboxKey(logicalId.Value), out var item))
+            if (!transportOutbox.TryGetValue(
+                    OutboxKey(accountScope.Value, logicalId.Value),
+                    out var item))
             {
                 return Task.FromResult(
                     new TransportOutboxReadSnapshot(TransportOutboxReadResult.Missing, null));
@@ -88,14 +92,20 @@ public sealed partial class InMemorySessionStore
     }
 
     public Task<TransportOutboxCommitResult> ApplyTransportOutboxTransitionAsync(
+        OutboxAccountScope accountScope,
         TransportOutboxTransition transition,
         CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(accountScope);
         ArgumentNullException.ThrowIfNull(transition);
+        if (!accountScope.Value.SequenceEqual(transition.AccountScope.Value))
+        {
+            return Task.FromResult(TransportOutboxCommitResult.Conflict);
+        }
         cancellationToken.ThrowIfCancellationRequested();
         lock (durableStateGate)
         {
-            var key = OutboxKey(transition.LogicalId.Value);
+            var key = OutboxKey(accountScope.Value, transition.LogicalId.Value);
             if (!transportOutbox.TryGetValue(key, out var existing))
             {
                 return Task.FromResult(TransportOutboxCommitResult.Conflict);
@@ -203,6 +213,7 @@ public sealed partial class InMemorySessionStore
                     var result = TransportOutboxStateMachine.Apply(
                         candidate,
                         TransportOutboxTransition.Expired(
+                            OutboxAccountScope.FromBytes(existing.AccountScope),
                             OutboxLogicalId.FromBytes(existing.LogicalId),
                             existing.Revision,
                             now));
@@ -313,20 +324,35 @@ public sealed partial class InMemorySessionStore
                     attempt.Reason,
                     attempt.OccurredAt,
                     attempt.Evidence)).ToArray(),
-                item.AcknowledgementEvidence))
+                item.LastTransitionState,
+                item.LastTransitionAttemptId,
+                item.LastTransitionRetryNotBefore,
+                item.AcknowledgementEvidence,
+                item.AcknowledgedAt))
             .ToArray();
 
     private void RestoreTransportOutboxSnapshots(
         IReadOnlyList<TransportOutboxPersistenceSnapshot> snapshots)
     {
+        if (snapshots.Count > 4096)
+        {
+            throw new TransportOutboxCorruptException();
+        }
+
+        var restored = new Dictionary<string, TransportOutboxStoredItem>(StringComparer.Ordinal);
         foreach (var snapshot in snapshots)
         {
+            if (snapshot.Attempts is null
+                || snapshot.Attempts.Count > TransportOutboxLimits.MaxAttemptsPerItem)
+            {
+                throw new TransportOutboxCorruptException();
+            }
             var item = new TransportOutboxStoredItem
             {
-                AccountScope = snapshot.AccountScope,
-                LogicalId = snapshot.LogicalId,
-                DedupMaterial = snapshot.DedupMaterial,
-                CiphertextBundle = snapshot.CiphertextBundle,
+                AccountScope = snapshot.AccountScope?.ToArray() ?? [],
+                LogicalId = snapshot.LogicalId?.ToArray() ?? [],
+                DedupMaterial = snapshot.DedupMaterial?.ToArray() ?? [],
+                CiphertextBundle = snapshot.CiphertextBundle?.ToArray() ?? [],
                 CreatedAt = snapshot.CreatedAt,
                 ExpiresAt = snapshot.ExpiresAt,
                 NotBefore = snapshot.NotBefore,
@@ -337,16 +363,28 @@ public sealed partial class InMemorySessionStore
                 TransitionedAt = snapshot.TransitionedAt,
                 Attempts = snapshot.Attempts.Select(static attempt => new TransportOutboxStoredAttempt
                 {
-                    AttemptId = attempt.AttemptId,
+                    AttemptId = attempt.AttemptId?.ToArray() ?? [],
                     State = attempt.State,
                     Source = attempt.Source,
                     Reason = attempt.Reason,
                     OccurredAt = attempt.OccurredAt,
-                    Evidence = attempt.Evidence
+                    Evidence = attempt.Evidence?.ToArray() ?? []
                 }).ToList(),
-                AcknowledgementEvidence = snapshot.AcknowledgementEvidence
+                LastTransitionState = snapshot.LastTransitionState,
+                LastTransitionAttemptId = snapshot.LastTransitionAttemptId?.ToArray(),
+                LastTransitionRetryNotBefore = snapshot.LastTransitionRetryNotBefore,
+                AcknowledgementEvidence = snapshot.AcknowledgementEvidence?.ToArray(),
+                AcknowledgedAt = snapshot.AcknowledgedAt
             };
-            transportOutbox[OutboxKey(item.LogicalId)] = item;
+            TransportOutboxStateMachine.Validate(item);
+            if (!restored.TryAdd(OutboxKey(item.AccountScope, item.LogicalId), item))
+            {
+                throw new TransportOutboxCorruptException();
+            }
+        }
+        foreach (var item in restored)
+        {
+            transportOutbox.Add(item.Key, item.Value);
         }
     }
 
@@ -363,8 +401,10 @@ public sealed partial class InMemorySessionStore
         }
     }
 
-    private static string OutboxKey(ReadOnlySpan<byte> logicalId) =>
-        Convert.ToHexString(logicalId);
+    private static string OutboxKey(
+        ReadOnlySpan<byte> accountScope,
+        ReadOnlySpan<byte> logicalId) =>
+        $"{Convert.ToHexString(accountScope)}:{Convert.ToHexString(logicalId)}";
 
     private sealed record TransportOutboxPersistenceSnapshot(
         byte[] AccountScope,
@@ -380,7 +420,11 @@ public sealed partial class InMemorySessionStore
         OutboxTransitionReason Reason,
         DateTimeOffset TransitionedAt,
         IReadOnlyList<TransportOutboxAttemptPersistenceSnapshot> Attempts,
-        byte[]? AcknowledgementEvidence);
+        TransportOutboxState LastTransitionState,
+        byte[]? LastTransitionAttemptId,
+        DateTimeOffset? LastTransitionRetryNotBefore,
+        byte[]? AcknowledgementEvidence,
+        DateTimeOffset? AcknowledgedAt);
 
     private sealed record TransportOutboxAttemptPersistenceSnapshot(
         byte[] AttemptId,

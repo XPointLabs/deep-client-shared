@@ -15,6 +15,17 @@ public static class TransportOutboxLimits
     public static readonly TimeSpan MaxLifetime = TimeSpan.FromDays(365);
 }
 
+internal static class TransportOutboxTime
+{
+    public static DateTimeOffset Canonical(DateTimeOffset value) =>
+        DateTimeOffset.FromUnixTimeMilliseconds(value.ToUnixTimeMilliseconds());
+
+    public static DateTimeOffset? Canonical(DateTimeOffset? value) =>
+        value is null ? null : Canonical(value.Value);
+
+    public static bool IsCanonical(DateTimeOffset value) => value == Canonical(value);
+}
+
 public abstract class OutboxOpaqueValue : IEquatable<OutboxOpaqueValue>
 {
     private readonly byte[] value;
@@ -222,6 +233,9 @@ public sealed class TransportOutboxPreparedItem
             throw new ArgumentOutOfRangeException(nameof(ciphertextBundle));
         }
 
+        createdAt = TransportOutboxTime.Canonical(createdAt);
+        expiresAt = TransportOutboxTime.Canonical(expiresAt);
+        notBefore = TransportOutboxTime.Canonical(notBefore);
         ValidateTimeline(createdAt, expiresAt, notBefore);
         return new(
             accountScope,
@@ -284,6 +298,7 @@ public sealed class RecipientDeviceAcknowledgement
         ArgumentNullException.ThrowIfNull(logicalId);
         ArgumentNullException.ThrowIfNull(dedupMaterial);
         ValidateEvidence(evidence);
+        acknowledgedAt = TransportOutboxTime.Canonical(acknowledgedAt);
         ValidateOccurredAt(acknowledgedAt);
         return new(logicalId, dedupMaterial, evidence.ToArray(), acknowledgedAt);
     }
@@ -310,6 +325,7 @@ public sealed class TransportOutboxTransition
     private readonly byte[] evidence;
 
     private TransportOutboxTransition(
+        OutboxAccountScope accountScope,
         OutboxLogicalId logicalId,
         ulong expectedRevision,
         TransportOutboxState targetState,
@@ -321,6 +337,7 @@ public sealed class TransportOutboxTransition
         byte[] evidence,
         RecipientDeviceAcknowledgement? acknowledgement)
     {
+        AccountScope = OutboxAccountScope.FromBytes(accountScope.Value);
         LogicalId = OutboxLogicalId.FromBytes(logicalId.Value);
         ExpectedRevision = expectedRevision;
         TargetState = targetState;
@@ -338,6 +355,8 @@ public sealed class TransportOutboxTransition
                 acknowledgement.Evidence,
                 acknowledgement.AcknowledgedAt);
     }
+
+    public OutboxAccountScope AccountScope { get; }
 
     public OutboxLogicalId LogicalId { get; }
 
@@ -362,6 +381,7 @@ public sealed class TransportOutboxTransition
     internal ReadOnlySpan<byte> Evidence => evidence;
 
     public static TransportOutboxTransition Attempted(
+        OutboxAccountScope accountScope,
         OutboxLogicalId logicalId,
         ulong expectedRevision,
         OutboxAttemptId attemptId,
@@ -370,6 +390,7 @@ public sealed class TransportOutboxTransition
         DateTimeOffset occurredAt,
         DateTimeOffset retryNotBefore) =>
         CreateAttempt(
+            accountScope,
             logicalId,
             expectedRevision,
             TransportOutboxState.Attempted,
@@ -381,6 +402,7 @@ public sealed class TransportOutboxTransition
             []);
 
     public static TransportOutboxTransition Accepted(
+        OutboxAccountScope accountScope,
         OutboxLogicalId logicalId,
         ulong expectedRevision,
         OutboxAttemptId attemptId,
@@ -390,6 +412,7 @@ public sealed class TransportOutboxTransition
         DateTimeOffset retryNotBefore,
         ReadOnlySpan<byte> evidence) =>
         CreateAttempt(
+            accountScope,
             logicalId,
             expectedRevision,
             TransportOutboxState.Accepted,
@@ -401,6 +424,7 @@ public sealed class TransportOutboxTransition
             evidence);
 
     public static TransportOutboxTransition Durable(
+        OutboxAccountScope accountScope,
         OutboxLogicalId logicalId,
         ulong expectedRevision,
         OutboxAttemptId attemptId,
@@ -409,6 +433,7 @@ public sealed class TransportOutboxTransition
         DateTimeOffset occurredAt,
         ReadOnlySpan<byte> evidence) =>
         CreateAttempt(
+            accountScope,
             logicalId,
             expectedRevision,
             TransportOutboxState.Durable,
@@ -420,6 +445,7 @@ public sealed class TransportOutboxTransition
             evidence);
 
     public static TransportOutboxTransition Delivered(
+        OutboxAccountScope accountScope,
         OutboxLogicalId logicalId,
         ulong expectedRevision,
         RecipientDeviceAcknowledgement acknowledgement,
@@ -427,13 +453,15 @@ public sealed class TransportOutboxTransition
         DateTimeOffset occurredAt)
     {
         ArgumentNullException.ThrowIfNull(acknowledgement);
-        ValidateCommon(logicalId, expectedRevision, OutboxTransitionSource.RecipientDevice, reason, occurredAt);
+        occurredAt = TransportOutboxTime.Canonical(occurredAt);
+        ValidateCommon(accountScope, logicalId, expectedRevision, OutboxTransitionSource.RecipientDevice, reason, occurredAt);
         if (reason != OutboxTransitionReason.RecipientAcknowledged)
         {
             throw new ArgumentException("Delivered requires the recipient acknowledgement reason.", nameof(reason));
         }
 
         return new(
+            accountScope,
             logicalId,
             expectedRevision,
             TransportOutboxState.Delivered,
@@ -447,17 +475,21 @@ public sealed class TransportOutboxTransition
     }
 
     public static TransportOutboxTransition Expired(
+        OutboxAccountScope accountScope,
         OutboxLogicalId logicalId,
         ulong expectedRevision,
         DateTimeOffset occurredAt)
     {
+        occurredAt = TransportOutboxTime.Canonical(occurredAt);
         ValidateCommon(
+            accountScope,
             logicalId,
             expectedRevision,
             OutboxTransitionSource.ExpiryScheduler,
             OutboxTransitionReason.LifetimeElapsed,
             occurredAt);
         return new(
+            accountScope,
             logicalId,
             expectedRevision,
             TransportOutboxState.Expired,
@@ -471,6 +503,7 @@ public sealed class TransportOutboxTransition
     }
 
     private static TransportOutboxTransition CreateAttempt(
+        OutboxAccountScope accountScope,
         OutboxLogicalId logicalId,
         ulong expectedRevision,
         TransportOutboxState targetState,
@@ -482,7 +515,7 @@ public sealed class TransportOutboxTransition
         ReadOnlySpan<byte> evidence)
     {
         ArgumentNullException.ThrowIfNull(attemptId);
-        ValidateCommon(logicalId, expectedRevision, source, reason, occurredAt);
+        ValidateCommon(accountScope, logicalId, expectedRevision, source, reason, occurredAt);
         if (source is not (OutboxTransitionSource.Adapter or OutboxTransitionSource.Recovery))
         {
             throw new ArgumentException("Attempt transitions require an adapter or recovery source.", nameof(source));
@@ -519,12 +552,15 @@ public sealed class TransportOutboxTransition
             throw new ArgumentException("Attempt-start evidence must be empty.", nameof(evidence));
         }
 
+        occurredAt = TransportOutboxTime.Canonical(occurredAt);
+        retryNotBefore = TransportOutboxTime.Canonical(retryNotBefore);
         if (retryNotBefore is not null && retryNotBefore < occurredAt)
         {
             throw new ArgumentOutOfRangeException(nameof(retryNotBefore));
         }
 
         return new(
+            accountScope,
             logicalId,
             expectedRevision,
             targetState,
@@ -538,12 +574,14 @@ public sealed class TransportOutboxTransition
     }
 
     private static void ValidateCommon(
+        OutboxAccountScope accountScope,
         OutboxLogicalId logicalId,
         ulong expectedRevision,
         OutboxTransitionSource source,
         OutboxTransitionReason reason,
         DateTimeOffset occurredAt)
     {
+        ArgumentNullException.ThrowIfNull(accountScope);
         ArgumentNullException.ThrowIfNull(logicalId);
         if (expectedRevision == 0)
         {
@@ -555,7 +593,8 @@ public sealed class TransportOutboxTransition
             throw new ArgumentOutOfRangeException(nameof(source));
         }
 
-        RecipientDeviceAcknowledgement.ValidateOccurredAt(occurredAt);
+        RecipientDeviceAcknowledgement.ValidateOccurredAt(
+            TransportOutboxTime.Canonical(occurredAt));
     }
 }
 
@@ -622,7 +661,7 @@ public sealed class TransportOutboxItemSnapshot
         Source = source;
         Reason = reason;
         TransitionedAt = transitionedAt;
-        this.attempts = attempts
+        this.attempts = Array.AsReadOnly(attempts
             .Select(static attempt => new TransportOutboxAttemptSnapshot(
                 attempt.AttemptId,
                 attempt.State,
@@ -630,7 +669,7 @@ public sealed class TransportOutboxItemSnapshot
                 attempt.Reason,
                 attempt.OccurredAt,
                 attempt.Evidence.ToArray()))
-            .ToArray();
+            .ToArray());
         this.acknowledgementEvidence = acknowledgementEvidence?.ToArray();
     }
 
@@ -663,10 +702,12 @@ public interface ITransportOutboxRepository
         CancellationToken cancellationToken = default);
 
     Task<TransportOutboxReadSnapshot> ReadTransportOutboxAsync(
+        OutboxAccountScope accountScope,
         OutboxLogicalId logicalId,
         CancellationToken cancellationToken = default);
 
     Task<TransportOutboxCommitResult> ApplyTransportOutboxTransitionAsync(
+        OutboxAccountScope accountScope,
         TransportOutboxTransition transition,
         CancellationToken cancellationToken = default);
 
@@ -685,6 +726,22 @@ public interface ITransportOutboxRepository
     Task PurgeTransportOutboxScopeAsync(
         OutboxAccountScope accountScope,
         CancellationToken cancellationToken = default);
+}
+
+public static class TransportOutboxRepositoryExtensions
+{
+    public static Task<TransportOutboxCommitResult> ApplyTransportOutboxTransitionAsync(
+        this ITransportOutboxRepository repository,
+        TransportOutboxTransition transition,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(repository);
+        ArgumentNullException.ThrowIfNull(transition);
+        return repository.ApplyTransportOutboxTransitionAsync(
+            transition.AccountScope,
+            transition,
+            cancellationToken);
+    }
 }
 
 internal enum TransportOutboxCommitFaultPoint

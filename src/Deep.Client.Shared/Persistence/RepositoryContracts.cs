@@ -599,6 +599,5 @@ public interface ILocalSessionStore :
     IConversationListSummaryRepository,
     IConversationListOpenRepository,
     IGroupConversationOpenRepository,
-    ITransportOutboxRepository,
     ISettingsRepository,
     ISchemaStore;

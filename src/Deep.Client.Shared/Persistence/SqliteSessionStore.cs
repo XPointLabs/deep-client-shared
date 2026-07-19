@@ -10,6 +10,7 @@ namespace Deep.Client.Shared.Persistence;
 
 public sealed partial class SqliteSessionStore :
     ILocalSessionStore,
+    ITransportOutboxRepository,
     IOneToOneConversationOpenRepository,
     IMessageSyncRepository,
     IMembershipTrustRepository,
@@ -2880,7 +2881,7 @@ public sealed partial class SqliteSessionStore :
 
                 CREATE TABLE IF NOT EXISTS transport_outbox_items (
                     account_scope BLOB NOT NULL,
-                    logical_id BLOB NOT NULL PRIMARY KEY,
+                    logical_id BLOB NOT NULL,
                     dedup_material BLOB NOT NULL,
                     ciphertext_bundle BLOB NOT NULL,
                     created_at INTEGER NOT NULL,
@@ -2891,10 +2892,16 @@ public sealed partial class SqliteSessionStore :
                     transition_source INTEGER NOT NULL,
                     transition_reason INTEGER NOT NULL,
                     transitioned_at INTEGER NOT NULL,
-                    acknowledgement_evidence BLOB NULL
+                    last_transition_state INTEGER NOT NULL,
+                    last_attempt_id BLOB NULL,
+                    last_retry_not_before INTEGER NULL,
+                    acknowledgement_evidence BLOB NULL,
+                    acknowledged_at INTEGER NULL,
+                    PRIMARY KEY(account_scope, logical_id)
                 );
 
                 CREATE TABLE IF NOT EXISTS transport_outbox_attempts (
+                    account_scope BLOB NOT NULL,
                     logical_id BLOB NOT NULL,
                     attempt_id BLOB NOT NULL,
                     state INTEGER NOT NULL,
@@ -2902,8 +2909,9 @@ public sealed partial class SqliteSessionStore :
                     transition_reason INTEGER NOT NULL,
                     occurred_at INTEGER NOT NULL,
                     evidence BLOB NOT NULL,
-                    PRIMARY KEY(logical_id, attempt_id),
-                    FOREIGN KEY(logical_id) REFERENCES transport_outbox_items(logical_id) ON DELETE CASCADE
+                    PRIMARY KEY(account_scope, logical_id, attempt_id),
+                    FOREIGN KEY(account_scope, logical_id)
+                        REFERENCES transport_outbox_items(account_scope, logical_id) ON DELETE CASCADE
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_messages_conversation_created
@@ -2953,7 +2961,7 @@ public sealed partial class SqliteSessionStore :
         command.CommandText = """
             CREATE TABLE IF NOT EXISTS transport_outbox_items (
                 account_scope BLOB NOT NULL,
-                logical_id BLOB NOT NULL PRIMARY KEY,
+                logical_id BLOB NOT NULL,
                 dedup_material BLOB NOT NULL,
                 ciphertext_bundle BLOB NOT NULL,
                 created_at INTEGER NOT NULL,
@@ -2964,10 +2972,16 @@ public sealed partial class SqliteSessionStore :
                 transition_source INTEGER NOT NULL,
                 transition_reason INTEGER NOT NULL,
                 transitioned_at INTEGER NOT NULL,
-                acknowledgement_evidence BLOB NULL
+                last_transition_state INTEGER NOT NULL,
+                last_attempt_id BLOB NULL,
+                last_retry_not_before INTEGER NULL,
+                acknowledgement_evidence BLOB NULL,
+                acknowledged_at INTEGER NULL,
+                PRIMARY KEY(account_scope, logical_id)
             );
 
             CREATE TABLE IF NOT EXISTS transport_outbox_attempts (
+                account_scope BLOB NOT NULL,
                 logical_id BLOB NOT NULL,
                 attempt_id BLOB NOT NULL,
                 state INTEGER NOT NULL,
@@ -2975,8 +2989,9 @@ public sealed partial class SqliteSessionStore :
                 transition_reason INTEGER NOT NULL,
                 occurred_at INTEGER NOT NULL,
                 evidence BLOB NOT NULL,
-                PRIMARY KEY(logical_id, attempt_id),
-                FOREIGN KEY(logical_id) REFERENCES transport_outbox_items(logical_id) ON DELETE CASCADE
+                PRIMARY KEY(account_scope, logical_id, attempt_id),
+                FOREIGN KEY(account_scope, logical_id)
+                    REFERENCES transport_outbox_items(account_scope, logical_id) ON DELETE CASCADE
             );
 
             CREATE INDEX IF NOT EXISTS idx_transport_outbox_ready

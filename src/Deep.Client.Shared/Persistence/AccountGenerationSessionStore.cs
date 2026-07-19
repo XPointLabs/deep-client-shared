@@ -273,56 +273,6 @@ internal class AccountGenerationSessionStore : ILocalSessionStore, IDisposable
 
     public Task PurgeAccountDataAsync(CancellationToken token = default) => Inner.PurgeAccountDataAsync(token);
 
-    public Task<TransportOutboxCommitResult> PrepareTransportOutboxAsync(
-        TransportOutboxPreparedItem item,
-        CancellationToken token = default) =>
-        MutateAsync(innerToken => Inner.PrepareTransportOutboxAsync(item, innerToken), token);
-
-    public Task<TransportOutboxReadSnapshot> ReadTransportOutboxAsync(
-        OutboxLogicalId logicalId,
-        CancellationToken token = default) =>
-        MutateAsync(innerToken => Inner.ReadTransportOutboxAsync(logicalId, innerToken), token);
-
-    public Task<TransportOutboxCommitResult> ApplyTransportOutboxTransitionAsync(
-        TransportOutboxTransition transition,
-        CancellationToken token = default) =>
-        MutateAsync(
-            innerToken => Inner.ApplyTransportOutboxTransitionAsync(transition, innerToken),
-            token);
-
-    public Task<IReadOnlyList<TransportOutboxItemSnapshot>> ListReadyTransportOutboxAsync(
-        OutboxAccountScope accountScope,
-        DateTimeOffset now,
-        int limit,
-        CancellationToken token = default) =>
-        MutateAsync(
-            innerToken => Inner.ListReadyTransportOutboxAsync(
-                accountScope,
-                now,
-                limit,
-                innerToken),
-            token);
-
-    public Task<int> ExpireDueTransportOutboxAsync(
-        OutboxAccountScope accountScope,
-        DateTimeOffset now,
-        int limit,
-        CancellationToken token = default) =>
-        MutateAsync(
-            innerToken => Inner.ExpireDueTransportOutboxAsync(
-                accountScope,
-                now,
-                limit,
-                innerToken),
-            token);
-
-    public Task PurgeTransportOutboxScopeAsync(
-        OutboxAccountScope accountScope,
-        CancellationToken token = default) =>
-        MutateAsync(
-            innerToken => Inner.PurgeTransportOutboxScopeAsync(accountScope, innerToken),
-            token);
-
     public Task<int> GetSchemaVersionAsync(CancellationToken token = default) => Inner.GetSchemaVersionAsync(token);
 
     public Task SetSchemaVersionAsync(int version, CancellationToken token = default) =>

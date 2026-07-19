@@ -22,6 +22,7 @@ public sealed class TransportOutboxRepositoryContractTests
 
         var attempt = Attempt(0x61);
         var attempted = TransportOutboxTransition.Attempted(
+            prepared.AccountScope,
             prepared.LogicalId,
             1,
             attempt,
@@ -38,6 +39,7 @@ public sealed class TransportOutboxRepositoryContractTests
             await scope.Store.ApplyTransportOutboxTransitionAsync(attempted));
 
         var accepted = TransportOutboxTransition.Accepted(
+            prepared.AccountScope,
             prepared.LogicalId,
             2,
             attempt,
@@ -52,6 +54,7 @@ public sealed class TransportOutboxRepositoryContractTests
         await AssertRestartedStateAsync(scope, TransportOutboxState.Accepted, 3);
 
         var durable = TransportOutboxTransition.Durable(
+            prepared.AccountScope,
             prepared.LogicalId,
             3,
             attempt,
@@ -70,6 +73,7 @@ public sealed class TransportOutboxRepositoryContractTests
             Bytes(48, 0x64),
             Now.AddMinutes(6));
         var delivered = TransportOutboxTransition.Delivered(
+            prepared.AccountScope,
             prepared.LogicalId,
             4,
             acknowledgement,
@@ -88,6 +92,7 @@ public sealed class TransportOutboxRepositoryContractTests
             TransportOutboxCommitResult.Conflict,
             await scope.Store.ApplyTransportOutboxTransitionAsync(
                 TransportOutboxTransition.Expired(
+                    prepared.AccountScope,
                     prepared.LogicalId,
                     5,
                     prepared.ExpiresAt.AddMinutes(1))));
@@ -119,25 +124,31 @@ public sealed class TransportOutboxRepositoryContractTests
         var first = Attempt(0x71);
         var second = Attempt(0x72);
         await scope.Store.ApplyTransportOutboxTransitionAsync(TransportOutboxTransition.Attempted(
+            item.AccountScope,
             item.LogicalId, 1, first, OutboxTransitionSource.Adapter,
             OutboxTransitionReason.DispatchStarted, Now.AddMinutes(1), Now.AddMinutes(2)));
         await scope.Store.ApplyTransportOutboxTransitionAsync(TransportOutboxTransition.Attempted(
+            item.AccountScope,
             item.LogicalId, 2, second, OutboxTransitionSource.Adapter,
             OutboxTransitionReason.DispatchStarted, Now.AddMinutes(2), Now.AddMinutes(3)));
         await scope.Store.ApplyTransportOutboxTransitionAsync(TransportOutboxTransition.Accepted(
+            item.AccountScope,
             item.LogicalId, 3, first, OutboxTransitionSource.Adapter,
             OutboxTransitionReason.AdapterAccepted, Now.AddMinutes(3), Now.AddMinutes(4),
             Bytes(16, 0x73)));
         await scope.Store.ApplyTransportOutboxTransitionAsync(TransportOutboxTransition.Accepted(
+            item.AccountScope,
             item.LogicalId, 4, second, OutboxTransitionSource.Adapter,
             OutboxTransitionReason.AdapterAccepted, Now.AddMinutes(4), Now.AddMinutes(5),
             Bytes(16, 0x74)));
 
         var firstSuccess = TransportOutboxTransition.Durable(
+            item.AccountScope,
             item.LogicalId, 5, first, OutboxTransitionSource.Adapter,
             OutboxTransitionReason.AdapterConfirmedDurable, Now.AddMinutes(6),
             Bytes(16, 0x75));
         var secondSuccess = TransportOutboxTransition.Durable(
+            item.AccountScope,
             item.LogicalId, 5, second, OutboxTransitionSource.Adapter,
             OutboxTransitionReason.AdapterConfirmedDurable, Now.AddMinutes(6),
             Bytes(16, 0x76));
@@ -152,7 +163,7 @@ public sealed class TransportOutboxRepositoryContractTests
 
         Assert.Single(results, result => result == TransportOutboxCommitResult.Applied);
         Assert.Single(results, result => result == TransportOutboxCommitResult.Conflict);
-        var read = await scope.Store.ReadTransportOutboxAsync(item.LogicalId);
+        var read = await scope.Store.ReadTransportOutboxAsync(item.AccountScope, item.LogicalId);
         Assert.Equal(TransportOutboxState.Durable, read.Item?.State);
         Assert.Equal((ulong)6, read.Item?.Revision);
         Assert.Equal(2, read.Item?.Attempts.Count);
@@ -184,18 +195,21 @@ public sealed class TransportOutboxRepositoryContractTests
 
         var attempt = Attempt(0x81);
         await scope.Store.ApplyTransportOutboxTransitionAsync(TransportOutboxTransition.Attempted(
+            item.AccountScope,
             item.LogicalId, 1, attempt, OutboxTransitionSource.Adapter,
             OutboxTransitionReason.DispatchStarted, Now.AddMinutes(1), Now.AddMinutes(2)));
         Assert.Equal(
             TransportOutboxCommitResult.Conflict,
             await scope.Store.ApplyTransportOutboxTransitionAsync(
                 TransportOutboxTransition.Attempted(
+                    item.AccountScope,
                     item.LogicalId, 2, attempt, OutboxTransitionSource.Adapter,
                     OutboxTransitionReason.RetryScheduled, Now.AddMinutes(2), Now.AddMinutes(3))));
         Assert.Equal(
             TransportOutboxCommitResult.Conflict,
             await scope.Store.ApplyTransportOutboxTransitionAsync(
                 TransportOutboxTransition.Durable(
+                    item.AccountScope,
                     item.LogicalId, 2, attempt, OutboxTransitionSource.Adapter,
                     OutboxTransitionReason.AdapterConfirmedDurable, Now.AddMinutes(3),
                     Bytes(16, 0x82))));
@@ -228,7 +242,9 @@ public sealed class TransportOutboxRepositoryContractTests
             ready.AccountScope,
             Now,
             1));
-        var expiredRead = await scope.Store.ReadTransportOutboxAsync(expired.LogicalId);
+        var expiredRead = await scope.Store.ReadTransportOutboxAsync(
+            expired.AccountScope,
+            expired.LogicalId);
         Assert.Equal(TransportOutboxState.Expired, expiredRead.Item?.State);
         var remaining = await scope.Store.ListReadyTransportOutboxAsync(
             ready.AccountScope,
@@ -257,15 +273,21 @@ public sealed class TransportOutboxRepositoryContractTests
         await scope.Store.PurgeTransportOutboxScopeAsync(first.AccountScope);
         Assert.Equal(
             TransportOutboxReadResult.Missing,
-            (await scope.Store.ReadTransportOutboxAsync(first.LogicalId)).Result);
+            (await scope.Store.ReadTransportOutboxAsync(
+                first.AccountScope,
+                first.LogicalId)).Result);
         Assert.Equal(
             TransportOutboxReadResult.Found,
-            (await scope.Store.ReadTransportOutboxAsync(second.LogicalId)).Result);
+            (await scope.Store.ReadTransportOutboxAsync(
+                second.AccountScope,
+                second.LogicalId)).Result);
 
         await ((IAccountDataPurger)scope.Store).PurgeAccountDataAsync();
         Assert.Equal(
             TransportOutboxReadResult.Missing,
-            (await scope.Store.ReadTransportOutboxAsync(second.LogicalId)).Result);
+            (await scope.Store.ReadTransportOutboxAsync(
+                second.AccountScope,
+                second.LogicalId)).Result);
     }
 
     [Theory]
@@ -286,11 +308,15 @@ public sealed class TransportOutboxRepositoryContractTests
         source[0] = 0;
         await scope.Store.PrepareTransportOutboxAsync(item);
 
-        var first = (await scope.Store.ReadTransportOutboxAsync(item.LogicalId)).Item!;
+        var first = (await scope.Store.ReadTransportOutboxAsync(
+            item.AccountScope,
+            item.LogicalId)).Item!;
         var copy = first.GetCiphertextBundleCopy();
         Assert.Equal(0x91, copy[0]);
         copy[0] = 0;
-        var second = (await scope.Store.ReadTransportOutboxAsync(item.LogicalId)).Item!;
+        var second = (await scope.Store.ReadTransportOutboxAsync(
+            item.AccountScope,
+            item.LogicalId)).Item!;
         Assert.Equal(0x91, second.GetCiphertextBundleCopy()[0]);
     }
 
@@ -316,7 +342,9 @@ public sealed class TransportOutboxRepositoryContractTests
                     beforeCancellation.Token));
             Assert.Equal(
                 TransportOutboxReadResult.Missing,
-                (await before.Store.ReadTransportOutboxAsync(item.LogicalId)).Result);
+                (await before.Store.ReadTransportOutboxAsync(
+                    item.AccountScope,
+                    item.LogicalId)).Result);
 
             using var after = StoreScope.Create(
                 sqlite,
@@ -332,7 +360,9 @@ public sealed class TransportOutboxRepositoryContractTests
                 () => after.Store.PrepareTransportOutboxAsync(committed));
             Assert.Equal(
                 TransportOutboxReadResult.Found,
-                (await after.Store.ReadTransportOutboxAsync(committed.LogicalId)).Result);
+                (await after.Store.ReadTransportOutboxAsync(
+                    committed.AccountScope,
+                    committed.LogicalId)).Result);
             Assert.Equal(
                 TransportOutboxCommitResult.Idempotent,
                 await after.Store.PrepareTransportOutboxAsync(committed));
@@ -428,7 +458,9 @@ public sealed class TransportOutboxRepositoryContractTests
             using var restarted = new SqliteSessionStore(path);
             Assert.Equal(
                 TransportOutboxReadResult.Corrupt,
-                (await restarted.ReadTransportOutboxAsync(item.LogicalId)).Result);
+                (await restarted.ReadTransportOutboxAsync(
+                    item.AccountScope,
+                    item.LogicalId)).Result);
             Assert.Equal(
                 TransportOutboxCommitResult.Corrupt,
                 await restarted.PrepareTransportOutboxAsync(item));
@@ -454,6 +486,7 @@ public sealed class TransportOutboxRepositoryContractTests
                 TransportOutboxCommitResult.Applied,
                 await scope.Store.ApplyTransportOutboxTransitionAsync(
                     TransportOutboxTransition.Attempted(
+                        item.AccountScope,
                         item.LogicalId,
                         revision,
                         Attempt(checked((byte)(0xb0 + index))),
@@ -468,6 +501,7 @@ public sealed class TransportOutboxRepositoryContractTests
             TransportOutboxCommitResult.Conflict,
             await scope.Store.ApplyTransportOutboxTransitionAsync(
                 TransportOutboxTransition.Attempted(
+                    item.AccountScope,
                     item.LogicalId,
                     revision,
                     Attempt(0xcf),
@@ -490,6 +524,7 @@ public sealed class TransportOutboxRepositoryContractTests
                 await store.PrepareTransportOutboxAsync(item);
                 await store.ApplyTransportOutboxTransitionAsync(
                     TransportOutboxTransition.Attempted(
+                        item.AccountScope,
                         item.LogicalId,
                         1,
                         attempt,
@@ -499,6 +534,7 @@ public sealed class TransportOutboxRepositoryContractTests
                         Now.AddMinutes(2)));
                 await store.ApplyTransportOutboxTransitionAsync(
                     TransportOutboxTransition.Accepted(
+                        item.AccountScope,
                         item.LogicalId,
                         2,
                         attempt,
@@ -528,7 +564,9 @@ public sealed class TransportOutboxRepositoryContractTests
             using var restarted = new SqliteSessionStore(path);
             Assert.Equal(
                 TransportOutboxReadResult.Corrupt,
-                (await restarted.ReadTransportOutboxAsync(item.LogicalId)).Result);
+                (await restarted.ReadTransportOutboxAsync(
+                    item.AccountScope,
+                    item.LogicalId)).Result);
         }
         finally
         {
@@ -542,7 +580,7 @@ public sealed class TransportOutboxRepositoryContractTests
         ulong revision)
     {
         scope.Restart();
-        var read = await scope.Store.ReadTransportOutboxAsync(Logical());
+        var read = await scope.Store.ReadTransportOutboxAsync(Scope(0x11), Logical());
         Assert.Equal(TransportOutboxReadResult.Found, read.Result);
         Assert.Equal(state, read.Item?.State);
         Assert.Equal(revision, read.Item?.Revision);
@@ -610,7 +648,7 @@ public sealed class TransportOutboxRepositoryContractTests
         }
 
         public string Path { get; }
-        public ILocalSessionStore Store { get; private set; }
+        public ITransportOutboxRepository Store { get; private set; }
 
         public static StoreScope Create(
             bool sqlite,
@@ -636,7 +674,7 @@ public sealed class TransportOutboxRepositoryContractTests
             }
         }
 
-        private ILocalSessionStore Open()
+        private ITransportOutboxRepository Open()
         {
             if (sqlite)
             {

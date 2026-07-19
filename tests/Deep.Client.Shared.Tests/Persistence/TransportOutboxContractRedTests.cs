@@ -24,13 +24,16 @@ public sealed class TransportOutboxContractRedTests
             TransportOutboxCommitResult.Applied,
             await repository.PrepareTransportOutboxAsync(prepared));
 
-        var read = await repository.ReadTransportOutboxAsync(prepared.LogicalId);
+        var read = await repository.ReadTransportOutboxAsync(
+            prepared.AccountScope,
+            prepared.LogicalId);
         Assert.Equal(TransportOutboxReadResult.Found, read.Result);
         Assert.Equal(TransportOutboxState.Prepared, read.Item?.State);
 
         await Assert.ThrowsAsync<ArgumentNullException>(
             () => repository.ApplyTransportOutboxTransitionAsync(
                 TransportOutboxTransition.Delivered(
+                    prepared.AccountScope,
                     prepared.LogicalId,
                     expectedRevision: 1,
                     acknowledgement: null!,
@@ -54,6 +57,7 @@ public sealed class TransportOutboxContractRedTests
             () => OutboxLogicalId.FromBytes(new byte[TransportOutboxLimits.LogicalIdBytes]));
         Assert.Throws<ArgumentException>(
             () => TransportOutboxTransition.Durable(
+                OutboxAccountScope.FromBytes(Bytes(32, 0x50)),
                 OutboxLogicalId.FromBytes(Bytes(16, 0x51)),
                 1,
                 OutboxAttemptId.FromBytes(Bytes(16, 0x52)),
