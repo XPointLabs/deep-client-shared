@@ -1019,6 +1019,11 @@ public sealed class InMemorySessionStore :
         CancellationToken cancellationToken = default)
     {
         MembershipTrustRecord.Validate(record);
+        if (record.Revision >
+            MembershipTrustRepositoryValidation.MaximumMembershipTrustHistoryRecords)
+        {
+            return Task.FromResult(MembershipTrustCommitResult.Corrupt);
+        }
         var storedRecord = MembershipTrustRepositoryValidation.Clone(record);
         cancellationToken.ThrowIfCancellationRequested();
         var key = new MembershipTrustKey(record.OpaqueProfileKey, record.Domain);
@@ -1100,6 +1105,8 @@ public sealed class InMemorySessionStore :
                 return Task.FromResult(MembershipTrustRepositoryValidation.Missing());
             }
             if (!hasRecords || !hasHead || records is null || headRevision == 0 ||
+                headRevision >
+                    MembershipTrustRepositoryValidation.MaximumMembershipTrustHistoryRecords ||
                 headRevision != checked((ulong)records.Count))
             {
                 return Task.FromResult(MembershipTrustRepositoryValidation.Corrupt());

@@ -19,7 +19,8 @@ public sealed class MembershipTrustService(
             () => InitializeCoreAsync(
                 SnapshotProfile(profile),
                 CanonicalOperationTime(clock.UtcNow),
-                cancellationToken));
+                cancellationToken),
+            cancellationToken);
 
     private async Task<MembershipTrustStatus> InitializeCoreAsync(
         MembershipTrustProfile profile,
@@ -176,7 +177,8 @@ public sealed class MembershipTrustService(
                 MembershipTrustDomain.Membership,
                 Bounded(canonicalSignedEnvelope),
                 CanonicalOperationTime(clock.UtcNow),
-                cancellationToken));
+                cancellationToken),
+            cancellationToken);
 
     public Task<MembershipTrustStatus> ApplyBridgeAsync(
         MembershipTrustProfile profile,
@@ -188,7 +190,8 @@ public sealed class MembershipTrustService(
                 MembershipTrustDomain.Bridge,
                 Bounded(canonicalSignedEnvelope),
                 CanonicalOperationTime(clock.UtcNow),
-                cancellationToken));
+                cancellationToken),
+            cancellationToken);
 
     public Task<MembershipTrustStatus> ApplyDelegationAsync(
         MembershipTrustProfile profile,
@@ -200,7 +203,8 @@ public sealed class MembershipTrustService(
                 Bounded(canonicalSignedEnvelope),
                 MembershipTrustArtifactKind.Delegation,
                 CanonicalOperationTime(clock.UtcNow),
-                cancellationToken));
+                cancellationToken),
+            cancellationToken);
 
     public Task<MembershipTrustStatus> ApplyRevocationAsync(
         MembershipTrustProfile profile,
@@ -212,7 +216,8 @@ public sealed class MembershipTrustService(
                 Bounded(canonicalSignedEnvelope),
                 MembershipTrustArtifactKind.Revocation,
                 CanonicalOperationTime(clock.UtcNow),
-                cancellationToken));
+                cancellationToken),
+            cancellationToken);
 
     private async Task<MembershipTrustStatus> ApplyAuthorityAsync(
         MembershipTrustProfile profile,
@@ -378,7 +383,8 @@ public sealed class MembershipTrustService(
                 SnapshotProfile(profile),
                 CanonicalOperationTime(clock.UtcNow),
                 observeClock: true,
-                cancellationToken));
+                cancellationToken),
+            cancellationToken);
 
     private async Task<MembershipTrustStatus> EvaluateCoreAsync(
         MembershipTrustProfile profile,
@@ -580,7 +586,8 @@ public sealed class MembershipTrustService(
             () => ImportSelfHostedGenesisCoreAsync(
                 SnapshotImport(import),
                 CanonicalOperationTime(clock.UtcNow),
-                cancellationToken));
+                cancellationToken),
+            cancellationToken);
 
     private async Task<MembershipTrustStatus> ImportSelfHostedGenesisCoreAsync(
         SelfHostedGenesisImport import,
@@ -1780,15 +1787,17 @@ public sealed class MembershipTrustService(
         DateTimeOffset.FromUnixTimeSeconds(value.ToUnixTimeSeconds());
 
     private static async Task<MembershipTrustStatus> ExecutePublicAsync(
-        Func<Task<MembershipTrustStatus>> operation)
+        Func<Task<MembershipTrustStatus>> operation,
+        CancellationToken cancellationToken)
     {
         try
         {
             return await operation().ConfigureAwait(false);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (
+            cancellationToken.IsCancellationRequested)
         {
-            throw;
+            throw new OperationCanceledException(cancellationToken);
         }
         catch (Exception)
         {

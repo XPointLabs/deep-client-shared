@@ -415,6 +415,43 @@ public sealed class MembershipTrustRepositoryContractTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task BoundedHistory_RepeatedReadsRemainCancelableAndEquivalent(
+        bool sqlite)
+    {
+        const int historyLength = 128;
+        using var scope = DeepHistoryStoreScope.Create(sqlite);
+        MembershipTrustRecord? previous = null;
+        for (var revision = 1; revision <= historyLength; revision++)
+        {
+            var record = Record(
+                checked((ulong)revision),
+                checked((ulong)(revision + 5)),
+                checked((byte)(revision % 251 + 1)),
+                previousCanonicalHash: previous?.CanonicalHash);
+            Assert.Equal(
+                MembershipTrustCommitResult.Applied,
+                await scope.Store.CommitMembershipTrustAsync(
+                    record,
+                    previous?.Revision));
+            previous = record;
+        }
+
+        using var budget = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        for (var attempt = 0; attempt < 8; attempt++)
+        {
+            var read = await scope.Store.ReadMembershipTrustAsync(
+                "install:test",
+                MembershipTrustDomain.Membership,
+                budget.Token);
+            Assert.Equal(MembershipTrustReadResult.Found, read.Result);
+            Assert.Equal(checked((ulong)historyLength), read.Head!.Revision);
+            Assert.Equal(checked((ulong)(historyLength - 1)), read.Predecessor!.Revision);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task ObservedClockHighWater_IsCasPersistedAndRejectsRollback(bool sqlite)
     {
         using var scope = StoreScope.Create(sqlite);

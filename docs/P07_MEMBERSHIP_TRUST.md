@@ -87,10 +87,14 @@ returned; a concurrent rotation is reevaluated fail closed.
 
 Repository reads validate every immutable revision from revision one through
 the advertised head, including its payload digest and predecessor linkage.
-This deliberately favors dormant-slice corruption detection over read cost.
-A future production composition may replace the complete scan only with a
-separately reviewed authenticated-history/checkpoint design that preserves the
-same deletion and deep-corruption decisions.
+SQLite performs that validation from one ordered, cancellable snapshot query,
+not one query per revision. Both stores enforce a fail-closed 4096-record
+per-domain validation budget, preventing attacker-controlled unbounded CPU,
+database-gate, latency, and battery work. Reaching the dormant budget blocks
+the profile rather than silently selecting an older LKG. Production activation
+requires a separately reviewed authenticated checkpoint/compaction design that
+preserves the same deletion and deep-corruption decisions without this dormant
+limit.
 
 In-memory repository inputs and read snapshots are defensive copies, matching
 SQLite value semantics. Deterministic test-only fault points prove cancellation

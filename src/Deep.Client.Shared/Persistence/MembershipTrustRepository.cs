@@ -4,6 +4,8 @@ namespace Deep.Client.Shared.Persistence;
 
 internal static class MembershipTrustRepositoryValidation
 {
+    public const int MaximumMembershipTrustHistoryRecords = 4096;
+
     public static void ValidateKey(string opaqueProfileKey, MembershipTrustDomain domain)
     {
         ValidateProfileKey(opaqueProfileKey);
