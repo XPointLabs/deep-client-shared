@@ -235,6 +235,57 @@ public sealed class AtomicBoundedSettingsRepositoryTests
         Assert.False(memory.SpanRequested);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ProviderMemoryFailureIsSanitized(bool sqlite)
+    {
+        using var scope = StoreScope.Create(sqlite);
+        var repository = (IAtomicBoundedSettingsRepository)scope.Store;
+        using var memory = new ThrowingMemoryManager(32);
+
+        var result = await repository.CreateAtomicBoundedSettingAsync(
+            Key("provider-memory"),
+            memory.Memory,
+            MaximumValueBytes);
+
+        Assert.Equal(AtomicBoundedSettingMutationResult.DependencyFailure, result);
+        Assert.True(memory.SpanRequested);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task FaultHooksRunOutsideStoreAndDatabaseLocks(bool sqlite)
+    {
+        using var scope = StoreScope.Create(sqlite);
+        var repository = (IAtomicBoundedSettingsRepository)scope.Store;
+        var key = Key("reentrant-hook");
+        var observed = new List<AtomicBoundedSettingReadResult>();
+        scope.SetFaultInjector(_ =>
+        {
+            observed.Add(repository.ReadAtomicBoundedSettingAsync(
+                    key,
+                    MaximumValueBytes)
+                .GetAwaiter()
+                .GetResult()
+                .Result);
+        });
+
+        var result = await repository.CreateAtomicBoundedSettingAsync(
+            key,
+            JsonBytes(0x51),
+            MaximumValueBytes);
+
+        Assert.Equal(AtomicBoundedSettingMutationResult.Applied, result);
+        Assert.Equal(
+            [
+                AtomicBoundedSettingReadResult.Missing,
+                AtomicBoundedSettingReadResult.Found
+            ],
+            observed);
+    }
+
     [Fact]
     public async Task RevisionsAndOutcomesDoNotExposeOrCorrelateStoredMaterial()
     {
@@ -267,9 +318,9 @@ public sealed class AtomicBoundedSettingsRepositoryTests
         Assert.DoesNotContain(key, rendered, StringComparison.Ordinal);
         Assert.DoesNotContain("synthetic-private-value", rendered, StringComparison.Ordinal);
         Assert.Equal(first.Revision!.GetHashCode(), second.Revision!.GetHashCode());
-        Assert.Empty(
-            typeof(AtomicBoundedSettingRevision).GetMethods()
-                .Where(method => method.IsPublic && method.Name is "ToArray" or "GetBytes"));
+        Assert.DoesNotContain(
+            typeof(AtomicBoundedSettingRevision).GetMethods(),
+            method => method.IsPublic && method.Name is "ToArray" or "GetBytes");
     }
 
     private static string Key(string suffix) =>

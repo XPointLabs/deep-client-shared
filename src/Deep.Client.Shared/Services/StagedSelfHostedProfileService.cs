@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using Deep.Client.Shared.Persistence;
 
 namespace Deep.Client.Shared.Services;
@@ -17,6 +18,8 @@ public static class StagedSelfHostedProfileLimits
     public const int MaxCandidateBytes = 64 * 1024;
     public const int MaxAccountCandidateBytes = 512 * 1024;
     public const int MaxDisplayHintUtf8Bytes = 64;
+    public const int MaxDisplayHintCharacters = 256;
+    internal const int MaximumCasAttempts = 16;
 }
 
 public abstract class StagedSelfHostedProfileOpaqueValue :
@@ -45,8 +48,6 @@ public abstract class StagedSelfHostedProfileOpaqueValue :
 
     internal ReadOnlySpan<byte> Value => value;
 
-    internal byte[] CopyValue() => value.ToArray();
-
     public bool Equals(StagedSelfHostedProfileOpaqueValue? other) =>
         other is not null
         && other.GetType() == GetType()
@@ -55,13 +56,7 @@ public abstract class StagedSelfHostedProfileOpaqueValue :
     public override bool Equals(object? obj) =>
         Equals(obj as StagedSelfHostedProfileOpaqueValue);
 
-    public override int GetHashCode()
-    {
-        var hash = new HashCode();
-        hash.Add(GetType());
-        hash.AddBytes(value);
-        return hash.ToHashCode();
-    }
+    public override int GetHashCode() => GetType().GetHashCode();
 
     public override string ToString() => $"[opaque-{redactedName}]";
 }
@@ -80,8 +75,6 @@ public sealed class SelfHostedProfileStagingAccountScope :
 
     public static SelfHostedProfileStagingAccountScope FromBytes(ReadOnlySpan<byte> value) =>
         new(value);
-
-    public byte[] ToArray() => CopyValue();
 }
 
 [DebuggerDisplay("{ToString(),nq}")]
@@ -107,13 +100,11 @@ public sealed class StagedSelfHostedProfileCandidate :
     internal StagedSelfHostedProfileCandidate(
         StagedSelfHostedProfileCandidateId id,
         int schemaVersion,
-        int candidateByteLength,
-        string? displayHint)
+        int candidateByteLength)
     {
         Id = StagedSelfHostedProfileCandidateId.FromBytes(id.Value);
         SchemaVersion = schemaVersion;
         CandidateByteLength = candidateByteLength;
-        DisplayHint = displayHint;
     }
 
     public StagedSelfHostedProfileCandidateId Id { get; }
@@ -122,20 +113,16 @@ public sealed class StagedSelfHostedProfileCandidate :
 
     public int CandidateByteLength { get; }
 
-    public string? DisplayHint { get; }
-
     public bool Equals(StagedSelfHostedProfileCandidate? other) =>
         other is not null
         && Id.Equals(other.Id)
         && SchemaVersion == other.SchemaVersion
-        && CandidateByteLength == other.CandidateByteLength
-        && string.Equals(DisplayHint, other.DisplayHint, StringComparison.Ordinal);
+        && CandidateByteLength == other.CandidateByteLength;
 
     public override bool Equals(object? obj) =>
         Equals(obj as StagedSelfHostedProfileCandidate);
 
-    public override int GetHashCode() =>
-        HashCode.Combine(Id, SchemaVersion, CandidateByteLength, DisplayHint);
+    public override int GetHashCode() => typeof(StagedSelfHostedProfileCandidate).GetHashCode();
 
     public override string ToString() => "[staged-unverified-self-hosted-profile-candidate]";
 }
@@ -146,34 +133,41 @@ public enum StagedSelfHostedProfileSaveResult
     Idempotent,
     InvalidCandidate,
     CapacityExceeded,
-    Corrupt
+    Corrupt,
+    DependencyFailure,
+    OutcomeUnknown
 }
 
 public enum StagedSelfHostedProfileListResult
 {
     Success,
-    Corrupt
+    Corrupt,
+    DependencyFailure
 }
 
 public enum StagedSelfHostedProfileReadResult
 {
     Missing,
     Found,
-    Corrupt
+    Corrupt,
+    DependencyFailure
 }
 
 public enum StagedSelfHostedProfileExportResult
 {
     Missing,
     Exported,
-    Corrupt
+    Corrupt,
+    DependencyFailure
 }
 
 public enum StagedSelfHostedProfileDeleteResult
 {
     Missing,
     Deleted,
-    Corrupt
+    Corrupt,
+    DependencyFailure,
+    OutcomeUnknown
 }
 
 [DebuggerDisplay("{ToString(),nq}")]
@@ -237,10 +231,10 @@ public sealed class StagedSelfHostedProfileExportOutcome
 
     internal StagedSelfHostedProfileExportOutcome(
         StagedSelfHostedProfileExportResult result,
-        byte[]? candidateBytes = null)
+        ReadOnlySpan<byte> candidateBytes = default)
     {
         Result = result;
-        this.candidateBytes = candidateBytes?.ToArray() ?? [];
+        this.candidateBytes = candidateBytes.ToArray();
     }
 
     public StagedSelfHostedProfileExportResult Result { get; }
@@ -258,17 +252,46 @@ public sealed class StagedSelfHostedProfilePersistenceException : IOException
     }
 }
 
+internal interface IStagedSelfHostedProfileProviders
+{
+    byte[] CreateCandidateId();
+
+    byte[] ComputeFingerprint(ReadOnlySpan<byte> value);
+}
+
+internal sealed class SystemStagedSelfHostedProfileProviders :
+    IStagedSelfHostedProfileProviders
+{
+    public byte[] CreateCandidateId() =>
+        RandomNumberGenerator.GetBytes(StagedSelfHostedProfileLimits.CandidateIdBytes);
+
+    public byte[] ComputeFingerprint(ReadOnlySpan<byte> value) =>
+        SHA256.HashData(value);
+}
+
+/// <summary>
+/// Stores bounded opaque profile candidates as staged and unverified local data.
+/// This boundary is non-activating: it does not parse, verify, select, or connect a profile.
+/// </summary>
 public sealed class StagedSelfHostedProfileService
 {
     private const string SettingsPrefix = "account.self-hosted-staging.v1.";
     private static ReadOnlySpan<byte> SettingsScopeDomain =>
         "deep.staged-self-hosted-profile.settings-scope/v1"u8;
-    private readonly ISettingsRepository settings;
-    private readonly SemaphoreSlim mutationGate = new(1, 1);
+    private readonly IAtomicBoundedSettingsRepository settings;
+    private readonly IStagedSelfHostedProfileProviders providers;
 
-    public StagedSelfHostedProfileService(ISettingsRepository settings)
+    public StagedSelfHostedProfileService(IAtomicBoundedSettingsRepository settings)
+        : this(settings, new SystemStagedSelfHostedProfileProviders())
+    {
+    }
+
+    internal StagedSelfHostedProfileService(
+        IAtomicBoundedSettingsRepository settings,
+        IStagedSelfHostedProfileProviders providers)
     {
         this.settings = settings ?? throw new ArgumentNullException(nameof(settings));
+        this.providers = providers ?? throw new ArgumentNullException(nameof(providers));
     }
 
     public async Task<StagedSelfHostedProfileSaveOutcome> SaveAsync(
@@ -280,28 +303,68 @@ public sealed class StagedSelfHostedProfileService
     {
         ArgumentNullException.ThrowIfNull(accountScope);
         cancellationToken.ThrowIfCancellationRequested();
-
-        var candidateBytes = canonicalEnvelopeCandidate.ToArray();
         if (schemaVersion != StagedSelfHostedProfileLimits.SchemaVersion
-            || candidateBytes.Length is 0
+            || canonicalEnvelopeCandidate.Length is 0
                 or > StagedSelfHostedProfileLimits.MaxCandidateBytes
+            || displayHint?.Length > StagedSelfHostedProfileLimits.MaxDisplayHintCharacters
             || !TryNormalizeDisplayHint(displayHint, out var normalizedHint))
         {
             return new(StagedSelfHostedProfileSaveResult.InvalidCandidate);
         }
 
-        var fingerprint = SHA256.HashData(candidateBytes);
-        await mutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        byte[] candidateBytes;
+        byte[] fingerprint;
+        byte[] candidateId;
+        string key;
         try
         {
-            var loaded = await LoadCatalogAsync(accountScope, cancellationToken).ConfigureAwait(false);
+            candidateBytes = canonicalEnvelopeCandidate.ToArray();
+            fingerprint = providers.ComputeFingerprint(candidateBytes);
+            candidateId = providers.CreateCandidateId();
+            key = SettingsKey(accountScope);
+            if (fingerprint.Length != StagedSelfHostedProfileLimits.FingerprintBytes
+                || candidateId.Length != StagedSelfHostedProfileLimits.CandidateIdBytes
+                || candidateId.AsSpan().IndexOfAnyExcept((byte)0) < 0
+                || key.Length != SettingsPrefix.Length
+                    + StagedSelfHostedProfileLimits.FingerprintBytes * 2)
+            {
+                return new(StagedSelfHostedProfileSaveResult.DependencyFailure);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch
+        {
+            return new(StagedSelfHostedProfileSaveResult.DependencyFailure);
+        }
+
+        var observedExistingCatalog = false;
+        for (var attempt = 0;
+             attempt < StagedSelfHostedProfileLimits.MaximumCasAttempts;
+             attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var loaded = await LoadCatalogAsync(key, cancellationToken).ConfigureAwait(false);
+            if (loaded.Result == CatalogLoadResult.DependencyFailure)
+            {
+                return new(StagedSelfHostedProfileSaveResult.DependencyFailure);
+            }
             if (loaded.Result == CatalogLoadResult.Corrupt)
             {
                 return new(StagedSelfHostedProfileSaveResult.Corrupt);
             }
+            if (loaded.Revision is not null)
+            {
+                observedExistingCatalog = true;
+            }
+            else if (observedExistingCatalog)
+            {
+                return new(StagedSelfHostedProfileSaveResult.OutcomeUnknown);
+            }
 
-            var catalog = loaded.Catalog;
-            var duplicate = catalog.Items.SingleOrDefault(item =>
+            var duplicate = loaded.Catalog.Items.SingleOrDefault(item =>
                 CryptographicOperations.FixedTimeEquals(item.Fingerprint, fingerprint)
                 && item.CandidateBytes.AsSpan().SequenceEqual(candidateBytes));
             if (duplicate is not null)
@@ -310,31 +373,73 @@ public sealed class StagedSelfHostedProfileService
                     StagedSelfHostedProfileSaveResult.Idempotent,
                     ToCandidate(duplicate));
             }
-
-            if (catalog.Items.Count >= StagedSelfHostedProfileLimits.MaxCandidatesPerAccount
-                || catalog.Items.Sum(static item => item.CandidateBytes.Length)
+            if (loaded.Catalog.Items.Count
+                    >= StagedSelfHostedProfileLimits.MaxCandidatesPerAccount
+                || loaded.Catalog.Items.Sum(static item => item.CandidateBytes.Length)
                     + candidateBytes.Length
                     > StagedSelfHostedProfileLimits.MaxAccountCandidateBytes)
             {
                 return new(StagedSelfHostedProfileSaveResult.CapacityExceeded);
             }
+            if (loaded.Catalog.Items.Any(item => item.Id.AsSpan().SequenceEqual(candidateId)))
+            {
+                try
+                {
+                    candidateId = providers.CreateCandidateId();
+                }
+                catch
+                {
+                    return new(StagedSelfHostedProfileSaveResult.DependencyFailure);
+                }
+                if (candidateId.Length != StagedSelfHostedProfileLimits.CandidateIdBytes
+                    || candidateId.AsSpan().IndexOfAnyExcept((byte)0) < 0)
+                {
+                    return new(StagedSelfHostedProfileSaveResult.DependencyFailure);
+                }
+                continue;
+            }
 
             var item = new CatalogItem
             {
-                Id = CreateCandidateId(catalog.Items),
-                Fingerprint = fingerprint,
-                CandidateBytes = candidateBytes,
+                Id = candidateId.ToArray(),
+                Fingerprint = fingerprint.ToArray(),
+                CandidateBytes = candidateBytes.ToArray(),
                 DisplayHint = normalizedHint
             };
-            catalog.Items.Add(item);
-            SortItems(catalog.Items);
-            await PersistCatalogAsync(accountScope, catalog, cancellationToken).ConfigureAwait(false);
-            return new(StagedSelfHostedProfileSaveResult.Saved, ToCandidate(item));
+            loaded.Catalog.Items.Add(item);
+            SortItems(loaded.Catalog.Items);
+            if (!TrySerializeCatalog(loaded.Catalog, out var serialized))
+            {
+                return new(StagedSelfHostedProfileSaveResult.Corrupt);
+            }
+
+            var mutation = await MutateSaveCatalogAsync(
+                key,
+                loaded.Revision,
+                serialized,
+                cancellationToken).ConfigureAwait(false);
+            switch (mutation)
+            {
+                case AtomicBoundedSettingMutationResult.Applied:
+                    return new(StagedSelfHostedProfileSaveResult.Saved, ToCandidate(item));
+                case AtomicBoundedSettingMutationResult.Conflict:
+                    continue;
+                case AtomicBoundedSettingMutationResult.Missing:
+                    observedExistingCatalog = true;
+                    continue;
+                case AtomicBoundedSettingMutationResult.DependencyFailure:
+                    return new(StagedSelfHostedProfileSaveResult.DependencyFailure);
+                case AtomicBoundedSettingMutationResult.TooLarge:
+                    return new(StagedSelfHostedProfileSaveResult.Corrupt);
+                case AtomicBoundedSettingMutationResult.OutcomeUnknown:
+                    return await ReconcileSaveAsync(
+                        key,
+                        item,
+                        cancellationToken).ConfigureAwait(false);
+            }
         }
-        finally
-        {
-            mutationGate.Release();
-        }
+
+        return new(StagedSelfHostedProfileSaveResult.OutcomeUnknown);
     }
 
     public async Task<StagedSelfHostedProfileListOutcome> ListAsync(
@@ -343,26 +448,23 @@ public sealed class StagedSelfHostedProfileService
     {
         ArgumentNullException.ThrowIfNull(accountScope);
         cancellationToken.ThrowIfCancellationRequested();
-        await mutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
+        if (!TrySettingsKey(accountScope, out var key))
         {
-            var loaded = await LoadCatalogAsync(accountScope, cancellationToken).ConfigureAwait(false);
-            if (loaded.Result == CatalogLoadResult.Corrupt)
-            {
-                return new(StagedSelfHostedProfileListResult.Corrupt);
-            }
+            return new(StagedSelfHostedProfileListResult.DependencyFailure);
+        }
+        var loaded = await LoadCatalogAsync(key, cancellationToken).ConfigureAwait(false);
+        if (loaded.Result == CatalogLoadResult.DependencyFailure)
+        {
+            return new(StagedSelfHostedProfileListResult.DependencyFailure);
+        }
+        if (loaded.Result == CatalogLoadResult.Corrupt)
+        {
+            return new(StagedSelfHostedProfileListResult.Corrupt);
+        }
 
-            var candidates = loaded.Catalog.Items
-                .Select(ToCandidate)
-                .ToArray();
-            return new(
-                StagedSelfHostedProfileListResult.Success,
-                Array.AsReadOnly(candidates));
-        }
-        finally
-        {
-            mutationGate.Release();
-        }
+        return new(
+            StagedSelfHostedProfileListResult.Success,
+            Array.AsReadOnly(loaded.Catalog.Items.Select(ToCandidate).ToArray()));
     }
 
     public async Task<StagedSelfHostedProfileReadOutcome> ReadAsync(
@@ -373,24 +475,23 @@ public sealed class StagedSelfHostedProfileService
         ArgumentNullException.ThrowIfNull(accountScope);
         ArgumentNullException.ThrowIfNull(candidateId);
         cancellationToken.ThrowIfCancellationRequested();
-        await mutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
+        if (!TrySettingsKey(accountScope, out var key))
         {
-            var loaded = await LoadCatalogAsync(accountScope, cancellationToken).ConfigureAwait(false);
-            if (loaded.Result == CatalogLoadResult.Corrupt)
-            {
-                return new(StagedSelfHostedProfileReadResult.Corrupt);
-            }
-
-            var item = FindById(loaded.Catalog.Items, candidateId);
-            return item is null
-                ? new(StagedSelfHostedProfileReadResult.Missing)
-                : new(StagedSelfHostedProfileReadResult.Found, ToCandidate(item));
+            return new(StagedSelfHostedProfileReadResult.DependencyFailure);
         }
-        finally
+        var loaded = await LoadCatalogAsync(key, cancellationToken).ConfigureAwait(false);
+        if (loaded.Result == CatalogLoadResult.DependencyFailure)
         {
-            mutationGate.Release();
+            return new(StagedSelfHostedProfileReadResult.DependencyFailure);
         }
+        if (loaded.Result == CatalogLoadResult.Corrupt)
+        {
+            return new(StagedSelfHostedProfileReadResult.Corrupt);
+        }
+        var item = FindById(loaded.Catalog.Items, candidateId);
+        return item is null
+            ? new(StagedSelfHostedProfileReadResult.Missing)
+            : new(StagedSelfHostedProfileReadResult.Found, ToCandidate(item));
     }
 
     public async Task<StagedSelfHostedProfileExportOutcome> ExportAsync(
@@ -401,26 +502,23 @@ public sealed class StagedSelfHostedProfileService
         ArgumentNullException.ThrowIfNull(accountScope);
         ArgumentNullException.ThrowIfNull(candidateId);
         cancellationToken.ThrowIfCancellationRequested();
-        await mutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
+        if (!TrySettingsKey(accountScope, out var key))
         {
-            var loaded = await LoadCatalogAsync(accountScope, cancellationToken).ConfigureAwait(false);
-            if (loaded.Result == CatalogLoadResult.Corrupt)
-            {
-                return new(StagedSelfHostedProfileExportResult.Corrupt);
-            }
-
-            var item = FindById(loaded.Catalog.Items, candidateId);
-            return item is null
-                ? new(StagedSelfHostedProfileExportResult.Missing)
-                : new(
-                    StagedSelfHostedProfileExportResult.Exported,
-                    item.CandidateBytes);
+            return new(StagedSelfHostedProfileExportResult.DependencyFailure);
         }
-        finally
+        var loaded = await LoadCatalogAsync(key, cancellationToken).ConfigureAwait(false);
+        if (loaded.Result == CatalogLoadResult.DependencyFailure)
         {
-            mutationGate.Release();
+            return new(StagedSelfHostedProfileExportResult.DependencyFailure);
         }
+        if (loaded.Result == CatalogLoadResult.Corrupt)
+        {
+            return new(StagedSelfHostedProfileExportResult.Corrupt);
+        }
+        var item = FindById(loaded.Catalog.Items, candidateId);
+        return item is null
+            ? new(StagedSelfHostedProfileExportResult.Missing)
+            : new(StagedSelfHostedProfileExportResult.Exported, item.CandidateBytes);
     }
 
     public async Task<StagedSelfHostedProfileDeleteResult> DeleteAsync(
@@ -431,15 +529,28 @@ public sealed class StagedSelfHostedProfileService
         ArgumentNullException.ThrowIfNull(accountScope);
         ArgumentNullException.ThrowIfNull(candidateId);
         cancellationToken.ThrowIfCancellationRequested();
-        await mutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
+        if (!TrySettingsKey(accountScope, out var key))
         {
-            var loaded = await LoadCatalogAsync(accountScope, cancellationToken).ConfigureAwait(false);
+            return StagedSelfHostedProfileDeleteResult.DependencyFailure;
+        }
+
+        for (var attempt = 0;
+             attempt < StagedSelfHostedProfileLimits.MaximumCasAttempts;
+             attempt++)
+        {
+            var loaded = await LoadCatalogAsync(key, cancellationToken).ConfigureAwait(false);
+            if (loaded.Result == CatalogLoadResult.DependencyFailure)
+            {
+                return StagedSelfHostedProfileDeleteResult.DependencyFailure;
+            }
             if (loaded.Result == CatalogLoadResult.Corrupt)
             {
                 return StagedSelfHostedProfileDeleteResult.Corrupt;
             }
-
+            if (loaded.Revision is null)
+            {
+                return StagedSelfHostedProfileDeleteResult.Missing;
+            }
             var item = FindById(loaded.Catalog.Items, candidateId);
             if (item is null)
             {
@@ -447,76 +558,230 @@ public sealed class StagedSelfHostedProfileService
             }
 
             loaded.Catalog.Items.Remove(item);
-            await PersistCatalogAsync(
-                accountScope,
-                loaded.Catalog,
-                cancellationToken).ConfigureAwait(false);
-            return StagedSelfHostedProfileDeleteResult.Deleted;
+            AtomicBoundedSettingMutationResult mutation;
+            if (loaded.Catalog.Items.Count == 0)
+            {
+                mutation = await DeleteCatalogAsync(
+                    key,
+                    loaded.Revision,
+                    cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                if (!TrySerializeCatalog(loaded.Catalog, out var serialized))
+                {
+                    return StagedSelfHostedProfileDeleteResult.Corrupt;
+                }
+                mutation = await ReplaceCatalogAsync(
+                    key,
+                    loaded.Revision,
+                    serialized,
+                    cancellationToken).ConfigureAwait(false);
+            }
+
+            switch (mutation)
+            {
+                case AtomicBoundedSettingMutationResult.Applied:
+                    return StagedSelfHostedProfileDeleteResult.Deleted;
+                case AtomicBoundedSettingMutationResult.Conflict:
+                    continue;
+                case AtomicBoundedSettingMutationResult.Missing:
+                    return StagedSelfHostedProfileDeleteResult.Deleted;
+                case AtomicBoundedSettingMutationResult.DependencyFailure:
+                    return StagedSelfHostedProfileDeleteResult.DependencyFailure;
+                case AtomicBoundedSettingMutationResult.TooLarge:
+                    return StagedSelfHostedProfileDeleteResult.Corrupt;
+                case AtomicBoundedSettingMutationResult.OutcomeUnknown:
+                    return await ReconcileDeleteAsync(
+                        key,
+                        candidateId,
+                        cancellationToken).ConfigureAwait(false);
+            }
         }
-        finally
+
+        return StagedSelfHostedProfileDeleteResult.OutcomeUnknown;
+    }
+
+    private async Task<AtomicBoundedSettingMutationResult> MutateSaveCatalogAsync(
+        string key,
+        AtomicBoundedSettingRevision? revision,
+        ReadOnlyMemory<byte> serialized,
+        CancellationToken cancellationToken)
+    {
+        try
         {
-            mutationGate.Release();
+            return revision is null
+                ? await settings.CreateAtomicBoundedSettingAsync(
+                    key,
+                    serialized,
+                    AtomicBoundedSettingsLimits.MaximumValueUtf8Bytes,
+                    cancellationToken).ConfigureAwait(false)
+                : await settings.ReplaceAtomicBoundedSettingAsync(
+                    key,
+                    revision,
+                    serialized,
+                    AtomicBoundedSettingsLimits.MaximumValueUtf8Bytes,
+                    cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch
+        {
+            return AtomicBoundedSettingMutationResult.DependencyFailure;
         }
     }
 
-    private async Task<CatalogLoadOutcome> LoadCatalogAsync(
-        SelfHostedProfileStagingAccountScope accountScope,
+    private async Task<AtomicBoundedSettingMutationResult> ReplaceCatalogAsync(
+        string key,
+        AtomicBoundedSettingRevision revision,
+        ReadOnlyMemory<byte> serialized,
         CancellationToken cancellationToken)
     {
-        Catalog? catalog;
         try
         {
-            catalog = await settings.GetAsync<Catalog>(
-                SettingsKey(accountScope),
+            return await settings.ReplaceAtomicBoundedSettingAsync(
+                key,
+                revision,
+                serialized,
+                AtomicBoundedSettingsLimits.MaximumValueUtf8Bytes,
                 cancellationToken).ConfigureAwait(false);
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException)
         {
             throw;
+        }
+        catch
+        {
+            return AtomicBoundedSettingMutationResult.DependencyFailure;
+        }
+    }
+
+    private async Task<AtomicBoundedSettingMutationResult> DeleteCatalogAsync(
+        string key,
+        AtomicBoundedSettingRevision revision,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await settings.DeleteAtomicBoundedSettingAsync(
+                key,
+                revision,
+                AtomicBoundedSettingsLimits.MaximumValueUtf8Bytes,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch
+        {
+            return AtomicBoundedSettingMutationResult.DependencyFailure;
+        }
+    }
+
+    private async Task<StagedSelfHostedProfileSaveOutcome> ReconcileSaveAsync(
+        string key,
+        CatalogItem expected,
+        CancellationToken cancellationToken)
+    {
+        var loaded = await LoadCatalogAsync(key, cancellationToken).ConfigureAwait(false);
+        if (loaded.Result == CatalogLoadResult.DependencyFailure)
+        {
+            return new(StagedSelfHostedProfileSaveResult.OutcomeUnknown);
+        }
+        if (loaded.Result == CatalogLoadResult.Corrupt)
+        {
+            return new(StagedSelfHostedProfileSaveResult.Corrupt);
+        }
+        var applied = loaded.Catalog.Items.SingleOrDefault(item =>
+            item.Id.AsSpan().SequenceEqual(expected.Id)
+            && item.CandidateBytes.AsSpan().SequenceEqual(expected.CandidateBytes));
+        return applied is null
+            ? new(StagedSelfHostedProfileSaveResult.OutcomeUnknown)
+            : new(StagedSelfHostedProfileSaveResult.Saved, ToCandidate(applied));
+    }
+
+    private async Task<StagedSelfHostedProfileDeleteResult> ReconcileDeleteAsync(
+        string key,
+        StagedSelfHostedProfileCandidateId candidateId,
+        CancellationToken cancellationToken)
+    {
+        var loaded = await LoadCatalogAsync(key, cancellationToken).ConfigureAwait(false);
+        if (loaded.Result == CatalogLoadResult.DependencyFailure)
+        {
+            return StagedSelfHostedProfileDeleteResult.OutcomeUnknown;
+        }
+        if (loaded.Result == CatalogLoadResult.Corrupt)
+        {
+            return StagedSelfHostedProfileDeleteResult.Corrupt;
+        }
+        return FindById(loaded.Catalog.Items, candidateId) is null
+            ? StagedSelfHostedProfileDeleteResult.Deleted
+            : StagedSelfHostedProfileDeleteResult.OutcomeUnknown;
+    }
+
+    private async Task<CatalogLoadOutcome> LoadCatalogAsync(
+        string key,
+        CancellationToken cancellationToken)
+    {
+        AtomicBoundedSettingReadOutcome read;
+        try
+        {
+            read = await settings.ReadAtomicBoundedSettingAsync(
+                key,
+                AtomicBoundedSettingsLimits.MaximumValueUtf8Bytes,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch
+        {
+            return CatalogLoadOutcome.DependencyFailure();
+        }
+
+        if (read.Result == AtomicBoundedSettingReadResult.Missing)
+        {
+            return CatalogLoadOutcome.Valid(new Catalog(), revision: null);
+        }
+        if (read.Result == AtomicBoundedSettingReadResult.DependencyFailure)
+        {
+            return CatalogLoadOutcome.DependencyFailure();
+        }
+        if (read.Result == AtomicBoundedSettingReadResult.Oversized
+            || read.Revision is null)
+        {
+            return CatalogLoadOutcome.Corrupt();
+        }
+
+        try
+        {
+            var catalog = JsonSerializer.Deserialize<Catalog>(read.GetValueCopy());
+            return catalog is not null && ValidateCatalog(catalog)
+                ? CatalogLoadOutcome.Valid(catalog, read.Revision)
+                : CatalogLoadOutcome.Corrupt();
         }
         catch
         {
             return CatalogLoadOutcome.Corrupt();
         }
-
-        if (catalog is null)
-        {
-            return CatalogLoadOutcome.Valid(new Catalog());
-        }
-
-        return ValidateCatalog(catalog)
-            ? CatalogLoadOutcome.Valid(catalog)
-            : CatalogLoadOutcome.Corrupt();
     }
 
-    private async Task PersistCatalogAsync(
-        SelfHostedProfileStagingAccountScope accountScope,
-        Catalog catalog,
-        CancellationToken cancellationToken)
+    private static bool TrySerializeCatalog(Catalog catalog, out byte[] serialized)
     {
+        serialized = [];
         try
         {
-            if (catalog.Items.Count == 0)
-            {
-                await settings.DeleteAsync(
-                    SettingsKey(accountScope),
-                    cancellationToken).ConfigureAwait(false);
-            }
-            else
-            {
-                await settings.SetAsync(
-                    SettingsKey(accountScope),
-                    catalog,
-                    cancellationToken).ConfigureAwait(false);
-            }
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
+            serialized = JsonSerializer.SerializeToUtf8Bytes(catalog);
+            return serialized.Length <= AtomicBoundedSettingsLimits.MaximumValueUtf8Bytes;
         }
         catch
         {
-            throw new StagedSelfHostedProfilePersistenceException();
+            serialized = [];
+            return false;
         }
     }
 
@@ -543,6 +808,8 @@ public sealed class StagedSelfHostedProfileService
                 || item.CandidateBytes is null
                 || item.CandidateBytes.Length is 0
                     or > StagedSelfHostedProfileLimits.MaxCandidateBytes
+                || item.DisplayHint?.Length
+                    > StagedSelfHostedProfileLimits.MaxDisplayHintCharacters
                 || !TryNormalizeDisplayHint(item.DisplayHint, out var normalizedHint)
                 || !string.Equals(item.DisplayHint, normalizedHint, StringComparison.Ordinal)
                 || !CryptographicOperations.FixedTimeEquals(
@@ -572,7 +839,8 @@ public sealed class StagedSelfHostedProfileService
         {
             return true;
         }
-        if (string.IsNullOrWhiteSpace(value))
+        if (value.Length > StagedSelfHostedProfileLimits.MaxDisplayHintCharacters
+            || string.IsNullOrWhiteSpace(value))
         {
             return false;
         }
@@ -581,7 +849,7 @@ public sealed class StagedSelfHostedProfileService
         {
             normalized = value.Normalize(NormalizationForm.FormC);
         }
-        catch (ArgumentException)
+        catch
         {
             return false;
         }
@@ -595,7 +863,6 @@ public sealed class StagedSelfHostedProfileService
                 normalized = null;
                 return false;
             }
-
             var category = Rune.GetUnicodeCategory(rune);
             if (category is UnicodeCategory.Control
                 or UnicodeCategory.Format
@@ -608,30 +875,48 @@ public sealed class StagedSelfHostedProfileService
             remaining = remaining[consumed..];
         }
 
-        if (Encoding.UTF8.GetByteCount(normalized)
-            > StagedSelfHostedProfileLimits.MaxDisplayHintUtf8Bytes)
+        try
+        {
+            if (Encoding.UTF8.GetByteCount(normalized)
+                > StagedSelfHostedProfileLimits.MaxDisplayHintUtf8Bytes)
+            {
+                normalized = null;
+                return false;
+            }
+        }
+        catch
         {
             normalized = null;
             return false;
         }
-
         return true;
     }
 
-    private static byte[] CreateCandidateId(IReadOnlyList<CatalogItem> items)
+    private string SettingsKey(SelfHostedProfileStagingAccountScope accountScope)
     {
-        for (var attempt = 0; attempt < 8; attempt++)
-        {
-            var value = RandomNumberGenerator.GetBytes(
-                StagedSelfHostedProfileLimits.CandidateIdBytes);
-            if (value.AsSpan().IndexOfAnyExcept((byte)0) >= 0
-                && items.All(item => !item.Id.AsSpan().SequenceEqual(value)))
-            {
-                return value;
-            }
-        }
+        var material = new byte[SettingsScopeDomain.Length + accountScope.Value.Length];
+        SettingsScopeDomain.CopyTo(material);
+        accountScope.Value.CopyTo(material.AsSpan(SettingsScopeDomain.Length));
+        return SettingsPrefix
+            + Convert.ToHexStringLower(providers.ComputeFingerprint(material));
+    }
 
-        throw new StagedSelfHostedProfilePersistenceException();
+    private bool TrySettingsKey(
+        SelfHostedProfileStagingAccountScope accountScope,
+        out string key)
+    {
+        key = string.Empty;
+        try
+        {
+            key = SettingsKey(accountScope);
+            return key.Length == SettingsPrefix.Length
+                + StagedSelfHostedProfileLimits.FingerprintBytes * 2;
+        }
+        catch
+        {
+            key = string.Empty;
+            return false;
+        }
     }
 
     private static CatalogItem? FindById(
@@ -644,45 +929,47 @@ public sealed class StagedSelfHostedProfileService
         new(
             StagedSelfHostedProfileCandidateId.FromBytes(item.Id),
             StagedSelfHostedProfileLimits.SchemaVersion,
-            item.CandidateBytes.Length,
-            item.DisplayHint);
+            item.CandidateBytes.Length);
 
     private static void SortItems(List<CatalogItem> items) =>
         items.Sort(static (left, right) =>
             left.Id.AsSpan().SequenceCompareTo(right.Id));
 
-    private static string SettingsKey(
-        SelfHostedProfileStagingAccountScope accountScope)
-    {
-        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        hash.AppendData(SettingsScopeDomain);
-        hash.AppendData(accountScope.Value);
-        return SettingsPrefix + Convert.ToHexStringLower(hash.GetHashAndReset());
-    }
-
     private enum CatalogLoadResult
     {
         Valid,
-        Corrupt
+        Corrupt,
+        DependencyFailure
     }
 
     private sealed class CatalogLoadOutcome
     {
-        private CatalogLoadOutcome(CatalogLoadResult result, Catalog catalog)
+        private CatalogLoadOutcome(
+            CatalogLoadResult result,
+            Catalog catalog,
+            AtomicBoundedSettingRevision? revision)
         {
             Result = result;
             Catalog = catalog;
+            Revision = revision;
         }
 
         public CatalogLoadResult Result { get; }
 
         public Catalog Catalog { get; }
 
-        public static CatalogLoadOutcome Valid(Catalog catalog) =>
-            new(CatalogLoadResult.Valid, catalog);
+        public AtomicBoundedSettingRevision? Revision { get; }
+
+        public static CatalogLoadOutcome Valid(
+            Catalog catalog,
+            AtomicBoundedSettingRevision? revision) =>
+            new(CatalogLoadResult.Valid, catalog, revision);
 
         public static CatalogLoadOutcome Corrupt() =>
-            new(CatalogLoadResult.Corrupt, new Catalog());
+            new(CatalogLoadResult.Corrupt, new Catalog(), null);
+
+        public static CatalogLoadOutcome DependencyFailure() =>
+            new(CatalogLoadResult.DependencyFailure, new Catalog(), null);
     }
 
     private sealed class Catalog

@@ -11,6 +11,10 @@ This library follows the Session clients at a domain boundary level:
 `Domain` contains immutable records for conversations, contacts, groups, messages, attachments, and settings.
 
 `Persistence` defines repository abstractions for local storage and schema migrations. `SqliteSessionStore` is the production path (with SQLCipher-compatible key hook), while `InMemorySessionStore` remains test/dev only.
+The dormant P14A boundary uses the existing settings table through the atomic,
+bounded, account-generation capability documented in
+[`P14A_ATOMIC_STAGING.md`](P14A_ATOMIC_STAGING.md); it remains staged,
+unverified, non-activating, and absent from runtime composition.
 
 `Services` contains account registration/login, conversation creation, message send/receive through an `ISessionMessageTransport` (`HttpSessionTransport` in production, stub in tests), group-state/group-message sync through `IGroupSyncTransport`, sync plan creation, read-receipt/state-sync helpers, notification planning, and realtime call signaling/state handling (`RealtimeCallService`).
 

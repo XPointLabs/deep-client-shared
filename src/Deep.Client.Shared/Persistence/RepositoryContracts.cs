@@ -600,4 +600,5 @@ public interface ILocalSessionStore :
     IConversationListOpenRepository,
     IGroupConversationOpenRepository,
     ISettingsRepository,
+    IAtomicBoundedSettingsRepository,
     ISchemaStore;

@@ -195,6 +195,24 @@ public sealed class StagedSelfHostedProfileCorrectiveTests
     }
 
     [Fact]
+    public async Task RepositoryMutationExceptionTextIsSanitized()
+    {
+        var service = new StagedSelfHostedProfileService(
+            new ThrowingMutationRepository("synthetic-repository-provider-secret"));
+
+        var outcome = await service.SaveAsync(
+            Scope(0xA7),
+            StagedSelfHostedProfileLimits.SchemaVersion,
+            Bytes(64, 0x74));
+
+        Assert.Equal(StagedSelfHostedProfileSaveResult.DependencyFailure, outcome.Result);
+        Assert.DoesNotContain(
+            "synthetic-repository-provider-secret",
+            outcome.ToString(),
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task PublicAndJsonSurfacesCannotRecoverScopeHandleHintOrBytes()
     {
         var scopeBytes = Bytes(StagedSelfHostedProfileLimits.AccountScopeBytes, 0xB1);
@@ -280,6 +298,39 @@ public sealed class StagedSelfHostedProfileCorrectiveTests
     }
 
     private sealed class SyntheticProviderException(string message) : Exception(message);
+
+    private sealed class ThrowingMutationRepository(string message) :
+        IAtomicBoundedSettingsRepository
+    {
+        public Task<AtomicBoundedSettingReadOutcome> ReadAtomicBoundedSettingAsync(
+            string key,
+            int maximumValueUtf8Bytes,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(new AtomicBoundedSettingReadOutcome(
+                AtomicBoundedSettingReadResult.Missing));
+
+        public Task<AtomicBoundedSettingMutationResult> CreateAtomicBoundedSettingAsync(
+            string key,
+            ReadOnlyMemory<byte> utf8Json,
+            int maximumValueUtf8Bytes,
+            CancellationToken cancellationToken = default) =>
+            throw new SyntheticProviderException(message);
+
+        public Task<AtomicBoundedSettingMutationResult> ReplaceAtomicBoundedSettingAsync(
+            string key,
+            AtomicBoundedSettingRevision expectedRevision,
+            ReadOnlyMemory<byte> utf8Json,
+            int maximumValueUtf8Bytes,
+            CancellationToken cancellationToken = default) =>
+            throw new SyntheticProviderException(message);
+
+        public Task<AtomicBoundedSettingMutationResult> DeleteAtomicBoundedSettingAsync(
+            string key,
+            AtomicBoundedSettingRevision expectedRevision,
+            int maximumValueUtf8Bytes,
+            CancellationToken cancellationToken = default) =>
+            throw new SyntheticProviderException(message);
+    }
 
     private sealed class ThrowingStagingProviders(string message) :
         IStagedSelfHostedProfileProviders

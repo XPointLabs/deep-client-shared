@@ -271,6 +271,58 @@ internal class AccountGenerationSessionStore : ILocalSessionStore, IDisposable
     public Task DeleteAsync(string key, CancellationToken token = default) =>
         MutateAsync(innerToken => Inner.DeleteAsync(key, innerToken), token);
 
+    public Task<AtomicBoundedSettingReadOutcome> ReadAtomicBoundedSettingAsync(
+        string key,
+        int maximumValueUtf8Bytes,
+        CancellationToken token = default) =>
+        MutateAsync(
+            innerToken => Inner.ReadAtomicBoundedSettingAsync(
+                key,
+                maximumValueUtf8Bytes,
+                innerToken),
+            token);
+
+    public Task<AtomicBoundedSettingMutationResult> CreateAtomicBoundedSettingAsync(
+        string key,
+        ReadOnlyMemory<byte> utf8Json,
+        int maximumValueUtf8Bytes,
+        CancellationToken token = default) =>
+        MutateAsync(
+            innerToken => Inner.CreateAtomicBoundedSettingAsync(
+                key,
+                utf8Json,
+                maximumValueUtf8Bytes,
+                innerToken),
+            token);
+
+    public Task<AtomicBoundedSettingMutationResult> ReplaceAtomicBoundedSettingAsync(
+        string key,
+        AtomicBoundedSettingRevision expectedRevision,
+        ReadOnlyMemory<byte> utf8Json,
+        int maximumValueUtf8Bytes,
+        CancellationToken token = default) =>
+        MutateAsync(
+            innerToken => Inner.ReplaceAtomicBoundedSettingAsync(
+                key,
+                expectedRevision,
+                utf8Json,
+                maximumValueUtf8Bytes,
+                innerToken),
+            token);
+
+    public Task<AtomicBoundedSettingMutationResult> DeleteAtomicBoundedSettingAsync(
+        string key,
+        AtomicBoundedSettingRevision expectedRevision,
+        int maximumValueUtf8Bytes,
+        CancellationToken token = default) =>
+        MutateAsync(
+            innerToken => Inner.DeleteAtomicBoundedSettingAsync(
+                key,
+                expectedRevision,
+                maximumValueUtf8Bytes,
+                innerToken),
+            token);
+
     public Task PurgeAccountDataAsync(CancellationToken token = default) => Inner.PurgeAccountDataAsync(token);
 
     public Task<int> GetSchemaVersionAsync(CancellationToken token = default) => Inner.GetSchemaVersionAsync(token);
