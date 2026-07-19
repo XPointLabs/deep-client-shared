@@ -190,6 +190,166 @@ public sealed class AtomicBoundedSettingsRepositoryTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task UnsolicitedCancellationIsTypedButCallerCancellationPropagates(
+        bool sqlite)
+    {
+        using var scope = StoreScope.Create(sqlite);
+        var repository = (IAtomicBoundedSettingsRepository)scope.Store;
+        using var memory = new OperationCanceledMemoryManager(
+            32,
+            "synthetic-memory-cancellation-secret");
+
+        var memoryFailure = await repository.CreateAtomicBoundedSettingAsync(
+            Key("unsolicited-memory-cancellation"),
+            memory.Memory,
+            MaximumValueBytes);
+        Assert.Equal(
+            AtomicBoundedSettingMutationResult.DependencyFailure,
+            memoryFailure);
+
+        scope.SetFaultInjector(point =>
+        {
+            if (point == AtomicBoundedSettingsFaultPoint.BeforeCommit)
+            {
+                throw new OperationCanceledException(
+                    "synthetic-before-commit-cancellation-secret");
+            }
+        });
+        var beforeCommit = await repository.CreateAtomicBoundedSettingAsync(
+            Key("unsolicited-before-commit-cancellation"),
+            JsonBytes(0x23),
+            MaximumValueBytes);
+        Assert.Equal(
+            AtomicBoundedSettingMutationResult.DependencyFailure,
+            beforeCommit);
+
+        scope.SetFaultInjector(point =>
+        {
+            if (point == AtomicBoundedSettingsFaultPoint.AfterCommit)
+            {
+                throw new OperationCanceledException(
+                    "synthetic-after-commit-cancellation-secret");
+            }
+        });
+        var afterCommit = await repository.CreateAtomicBoundedSettingAsync(
+            Key("unsolicited-after-commit-cancellation"),
+            JsonBytes(0x24),
+            MaximumValueBytes);
+        Assert.Equal(
+            AtomicBoundedSettingMutationResult.OutcomeUnknown,
+            afterCommit);
+
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            repository.CreateAtomicBoundedSettingAsync(
+                Key("genuine-caller-cancellation"),
+                JsonBytes(0x25),
+                MaximumValueBytes,
+                cancellation.Token));
+    }
+
+    [Fact]
+    public async Task InMemoryPostMutationFaultRestoresCreateReplaceDeleteAndDiskState()
+    {
+        var path = Path.Combine(
+            Path.GetTempPath(),
+            $"deep-bounded-settings-rollback-{Guid.NewGuid():N}.json");
+        try
+        {
+            var store = new InMemorySessionStore(path);
+            var repository = (IAtomicBoundedSettingsRepository)store;
+            var createKey = Key("rollback-create");
+            var replaceKey = Key("rollback-replace");
+            var deleteKey = Key("rollback-delete");
+            var original = JsonBytes(0x31);
+            var replacement = JsonBytes(0x32);
+            Assert.Equal(
+                AtomicBoundedSettingMutationResult.Applied,
+                await repository.CreateAtomicBoundedSettingAsync(
+                    replaceKey,
+                    original,
+                    MaximumValueBytes));
+            Assert.Equal(
+                AtomicBoundedSettingMutationResult.Applied,
+                await repository.CreateAtomicBoundedSettingAsync(
+                    deleteKey,
+                    original,
+                    MaximumValueBytes));
+            var replaceBefore = await repository.ReadAtomicBoundedSettingAsync(
+                replaceKey,
+                MaximumValueBytes);
+            var deleteBefore = await repository.ReadAtomicBoundedSettingAsync(
+                deleteKey,
+                MaximumValueBytes);
+
+            store.SetAtomicBoundedSettingsFaultInjectorForTests(point =>
+            {
+                if (point == AtomicBoundedSettingsFaultPoint.AfterMutationBeforePersistence)
+                {
+                    throw new SyntheticProviderException(
+                        "synthetic-post-mutation-secret");
+                }
+            });
+
+            Assert.Equal(
+                AtomicBoundedSettingMutationResult.DependencyFailure,
+                await repository.CreateAtomicBoundedSettingAsync(
+                    createKey,
+                    replacement,
+                    MaximumValueBytes));
+            Assert.Equal(
+                AtomicBoundedSettingMutationResult.DependencyFailure,
+                await repository.ReplaceAtomicBoundedSettingAsync(
+                    replaceKey,
+                    replaceBefore.Revision!,
+                    replacement,
+                    MaximumValueBytes));
+            Assert.Equal(
+                AtomicBoundedSettingMutationResult.DependencyFailure,
+                await repository.DeleteAtomicBoundedSettingAsync(
+                    deleteKey,
+                    deleteBefore.Revision!,
+                    MaximumValueBytes));
+            store.SetAtomicBoundedSettingsFaultInjectorForTests(null);
+
+            await AssertExactRollbackStateAsync(
+                repository,
+                createKey,
+                replaceKey,
+                deleteKey,
+                original,
+                replaceBefore.Revision!,
+                deleteBefore.Revision!);
+
+            var reopened = new InMemorySessionStore(path);
+            await AssertExactRollbackStateAsync(
+                reopened,
+                createKey,
+                replaceKey,
+                deleteKey,
+                original,
+                replaceBefore.Revision!,
+                deleteBefore.Revision!);
+        }
+        finally
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+            foreach (var temporary in Directory.EnumerateFiles(
+                         Path.GetDirectoryName(path)!,
+                         Path.GetFileName(path) + ".*.tmp"))
+            {
+                File.Delete(temporary);
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task OversizedStoredValueIsRejectedBeforeEnvelopeDeserialization(bool sqlite)
     {
         using var scope = StoreScope.Create(sqlite);
@@ -208,6 +368,28 @@ public sealed class AtomicBoundedSettingsRepositoryTests
         Assert.Empty(read.GetValueCopy());
         Assert.Equal(AtomicBoundedSettingMutationResult.TooLarge, delete);
         Assert.NotNull(await generic.GetAsync<string>(key));
+
+        if (scope.Store is SqliteSessionStore sqliteStore)
+        {
+            Assert.Equal(
+                0,
+                sqliteStore.AtomicBoundedSettingsPayloadSelectCountForTests);
+            var validKey = Key("payload-select-instrumentation");
+            Assert.Equal(
+                AtomicBoundedSettingMutationResult.Applied,
+                await repository.CreateAtomicBoundedSettingAsync(
+                    validKey,
+                    JsonBytes(0x33),
+                    MaximumValueBytes));
+            Assert.Equal(
+                AtomicBoundedSettingReadResult.Found,
+                (await repository.ReadAtomicBoundedSettingAsync(
+                    validKey,
+                    MaximumValueBytes)).Result);
+            Assert.Equal(
+                1,
+                sqliteStore.AtomicBoundedSettingsPayloadSelectCountForTests);
+        }
     }
 
     [Theory]
@@ -281,6 +463,7 @@ public sealed class AtomicBoundedSettingsRepositoryTests
         Assert.Equal(
             [
                 AtomicBoundedSettingReadResult.Missing,
+                AtomicBoundedSettingReadResult.Missing,
                 AtomicBoundedSettingReadResult.Found
             ],
             observed);
@@ -332,6 +515,32 @@ public sealed class AtomicBoundedSettingsRepositoryTests
     private static byte[] Bytes(int length, byte value) =>
         Enumerable.Repeat(value, length).ToArray();
 
+    private static async Task AssertExactRollbackStateAsync(
+        IAtomicBoundedSettingsRepository repository,
+        string createKey,
+        string replaceKey,
+        string deleteKey,
+        byte[] original,
+        AtomicBoundedSettingRevision replaceRevision,
+        AtomicBoundedSettingRevision deleteRevision)
+    {
+        Assert.Equal(
+            AtomicBoundedSettingReadResult.Missing,
+            (await repository.ReadAtomicBoundedSettingAsync(
+                createKey,
+                MaximumValueBytes)).Result);
+        var replace = await repository.ReadAtomicBoundedSettingAsync(
+            replaceKey,
+            MaximumValueBytes);
+        var delete = await repository.ReadAtomicBoundedSettingAsync(
+            deleteKey,
+            MaximumValueBytes);
+        Assert.Equal(original, replace.GetValueCopy());
+        Assert.Equal(original, delete.GetValueCopy());
+        Assert.Equal(replaceRevision, replace.Revision);
+        Assert.Equal(deleteRevision, delete.Revision);
+    }
+
     private sealed class SyntheticProviderException(string message) : Exception(message);
 
     private sealed class ThrowingMemoryManager(int length) : MemoryManager<byte>
@@ -346,6 +555,27 @@ public sealed class AtomicBoundedSettingsRepositoryTests
 
         public override MemoryHandle Pin(int elementIndex = 0) =>
             throw new InvalidOperationException("The oversized memory was pinned.");
+
+        public override void Unpin()
+        {
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+        }
+
+        public override Memory<byte> Memory => CreateMemory(length);
+    }
+
+    private sealed class OperationCanceledMemoryManager(
+        int length,
+        string message) : MemoryManager<byte>
+    {
+        public override Span<byte> GetSpan() =>
+            throw new OperationCanceledException(message);
+
+        public override MemoryHandle Pin(int elementIndex = 0) =>
+            throw new OperationCanceledException(message);
 
         public override void Unpin()
         {

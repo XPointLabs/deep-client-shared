@@ -213,6 +213,125 @@ public sealed class StagedSelfHostedProfileCorrectiveTests
     }
 
     [Fact]
+    public async Task UnsolicitedCancellationIsTypedButCallerCancellationPropagates()
+    {
+        var providerService = new StagedSelfHostedProfileService(
+            new InMemorySessionStore(),
+            new OperationCanceledStagingProviders(
+                "synthetic-provider-cancellation-secret"));
+        var providerOutcome = await providerService.SaveAsync(
+            Scope(0xA8),
+            StagedSelfHostedProfileLimits.SchemaVersion,
+            Bytes(64, 0x75));
+        Assert.Equal(
+            StagedSelfHostedProfileSaveResult.DependencyFailure,
+            providerOutcome.Result);
+
+        var readService = new StagedSelfHostedProfileService(
+            new OperationCanceledRepository(
+                failReads: true,
+                "synthetic-repository-read-cancellation-secret"));
+        var readOutcome = await readService.ListAsync(Scope(0xA9));
+        Assert.Equal(
+            StagedSelfHostedProfileListResult.DependencyFailure,
+            readOutcome.Result);
+
+        var mutationService = new StagedSelfHostedProfileService(
+            new OperationCanceledRepository(
+                failReads: false,
+                "synthetic-repository-mutation-cancellation-secret"));
+        var mutationOutcome = await mutationService.SaveAsync(
+            Scope(0xAA),
+            StagedSelfHostedProfileLimits.SchemaVersion,
+            Bytes(64, 0x76));
+        Assert.Equal(
+            StagedSelfHostedProfileSaveResult.OutcomeUnknown,
+            mutationOutcome.Result);
+
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            providerService.SaveAsync(
+                Scope(0xAB),
+                StagedSelfHostedProfileLimits.SchemaVersion,
+                Bytes(64, 0x77),
+                cancellationToken: cancellation.Token));
+    }
+
+    [Fact]
+    public async Task IndependentSqliteStoresRetrySameRevisionWithoutLostSaveOrDelete()
+    {
+        var path = Path.Combine(
+            Path.GetTempPath(),
+            $"deep-staged-profile-cas-{Guid.NewGuid():N}.db");
+        try
+        {
+            using var firstStore = new SqliteSessionStore(path);
+            using var secondStore = new SqliteSessionStore(path);
+            var scope = Scope(0xAC);
+            var seedService = new StagedSelfHostedProfileService(firstStore);
+            Assert.Equal(
+                StagedSelfHostedProfileSaveResult.Saved,
+                (await seedService.SaveAsync(
+                    scope,
+                    StagedSelfHostedProfileLimits.SchemaVersion,
+                    Bytes(64, 0x78))).Result);
+
+            var added = new List<StagedSelfHostedProfileCandidate>();
+            for (var iteration = 0; iteration < 4; iteration++)
+            {
+                var readBarrier = new CoordinatedAtomicReadBarrier(2);
+                var first = new StagedSelfHostedProfileService(
+                    new CoordinatedReadRepository(firstStore, readBarrier));
+                var second = new StagedSelfHostedProfileService(
+                    new CoordinatedReadRepository(secondStore, readBarrier));
+                var outcomes = await Task.WhenAll(
+                    first.SaveAsync(
+                        scope,
+                        StagedSelfHostedProfileLimits.SchemaVersion,
+                        Bytes(64, checked((byte)(0x80 + iteration * 2)))),
+                    second.SaveAsync(
+                        scope,
+                        StagedSelfHostedProfileLimits.SchemaVersion,
+                        Bytes(64, checked((byte)(0x81 + iteration * 2)))));
+                Assert.All(
+                    outcomes,
+                    outcome => Assert.Equal(
+                        StagedSelfHostedProfileSaveResult.Saved,
+                        outcome.Result));
+                added.AddRange(outcomes.Select(outcome => outcome.Candidate!));
+            }
+
+            Assert.Equal(
+                9,
+                (await seedService.ListAsync(scope)).Candidates.Count);
+
+            for (var iteration = 0; iteration < added.Count; iteration += 2)
+            {
+                var readBarrier = new CoordinatedAtomicReadBarrier(2);
+                var first = new StagedSelfHostedProfileService(
+                    new CoordinatedReadRepository(firstStore, readBarrier));
+                var second = new StagedSelfHostedProfileService(
+                    new CoordinatedReadRepository(secondStore, readBarrier));
+                var outcomes = await Task.WhenAll(
+                    first.DeleteAsync(scope, added[iteration].Id),
+                    second.DeleteAsync(scope, added[iteration + 1].Id));
+                Assert.All(
+                    outcomes,
+                    outcome => Assert.Equal(
+                        StagedSelfHostedProfileDeleteResult.Deleted,
+                        outcome));
+            }
+
+            Assert.Single((await seedService.ListAsync(scope)).Candidates);
+        }
+        finally
+        {
+            DeleteSqliteFiles(path);
+        }
+    }
+
+    [Fact]
     public async Task PublicAndJsonSurfacesCannotRecoverScopeHandleHintOrBytes()
     {
         var scopeBytes = Bytes(StagedSelfHostedProfileLimits.AccountScopeBytes, 0xB1);
@@ -341,6 +460,127 @@ public sealed class StagedSelfHostedProfileCorrectiveTests
             throw new SyntheticProviderException(message);
     }
 
+    private sealed class OperationCanceledStagingProviders(string message) :
+        IStagedSelfHostedProfileProviders
+    {
+        public byte[] CreateCandidateId() =>
+            throw new OperationCanceledException(message);
+
+        public byte[] ComputeFingerprint(ReadOnlySpan<byte> value) =>
+            throw new OperationCanceledException(message);
+    }
+
+    private sealed class OperationCanceledRepository(
+        bool failReads,
+        string message) : IAtomicBoundedSettingsRepository
+    {
+        public Task<AtomicBoundedSettingReadOutcome> ReadAtomicBoundedSettingAsync(
+            string key,
+            int maximumValueUtf8Bytes,
+            CancellationToken cancellationToken = default) =>
+            failReads
+                ? throw new OperationCanceledException(message)
+                : Task.FromResult(new AtomicBoundedSettingReadOutcome(
+                    AtomicBoundedSettingReadResult.Missing));
+
+        public Task<AtomicBoundedSettingMutationResult> CreateAtomicBoundedSettingAsync(
+            string key,
+            ReadOnlyMemory<byte> utf8Json,
+            int maximumValueUtf8Bytes,
+            CancellationToken cancellationToken = default) =>
+            throw new OperationCanceledException(message);
+
+        public Task<AtomicBoundedSettingMutationResult> ReplaceAtomicBoundedSettingAsync(
+            string key,
+            AtomicBoundedSettingRevision expectedRevision,
+            ReadOnlyMemory<byte> utf8Json,
+            int maximumValueUtf8Bytes,
+            CancellationToken cancellationToken = default) =>
+            throw new OperationCanceledException(message);
+
+        public Task<AtomicBoundedSettingMutationResult> DeleteAtomicBoundedSettingAsync(
+            string key,
+            AtomicBoundedSettingRevision expectedRevision,
+            int maximumValueUtf8Bytes,
+            CancellationToken cancellationToken = default) =>
+            throw new OperationCanceledException(message);
+    }
+
+    private sealed class CoordinatedAtomicReadBarrier(int participants)
+    {
+        private readonly TaskCompletionSource release =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int arrivals;
+
+        public async Task ArriveOnceAsync(CancellationToken cancellationToken)
+        {
+            if (Interlocked.Increment(ref arrivals) == participants)
+            {
+                release.TrySetResult();
+            }
+
+            await release.Task.WaitAsync(cancellationToken);
+        }
+    }
+
+    private sealed class CoordinatedReadRepository(
+        IAtomicBoundedSettingsRepository inner,
+        CoordinatedAtomicReadBarrier barrier) : IAtomicBoundedSettingsRepository
+    {
+        private int firstRead = 1;
+
+        public async Task<AtomicBoundedSettingReadOutcome> ReadAtomicBoundedSettingAsync(
+            string key,
+            int maximumValueUtf8Bytes,
+            CancellationToken cancellationToken = default)
+        {
+            var result = await inner.ReadAtomicBoundedSettingAsync(
+                key,
+                maximumValueUtf8Bytes,
+                cancellationToken);
+            if (Interlocked.Exchange(ref firstRead, 0) == 1)
+            {
+                await barrier.ArriveOnceAsync(cancellationToken);
+            }
+            return result;
+        }
+
+        public Task<AtomicBoundedSettingMutationResult> CreateAtomicBoundedSettingAsync(
+            string key,
+            ReadOnlyMemory<byte> utf8Json,
+            int maximumValueUtf8Bytes,
+            CancellationToken cancellationToken = default) =>
+            inner.CreateAtomicBoundedSettingAsync(
+                key,
+                utf8Json,
+                maximumValueUtf8Bytes,
+                cancellationToken);
+
+        public Task<AtomicBoundedSettingMutationResult> ReplaceAtomicBoundedSettingAsync(
+            string key,
+            AtomicBoundedSettingRevision expectedRevision,
+            ReadOnlyMemory<byte> utf8Json,
+            int maximumValueUtf8Bytes,
+            CancellationToken cancellationToken = default) =>
+            inner.ReplaceAtomicBoundedSettingAsync(
+                key,
+                expectedRevision,
+                utf8Json,
+                maximumValueUtf8Bytes,
+                cancellationToken);
+
+        public Task<AtomicBoundedSettingMutationResult> DeleteAtomicBoundedSettingAsync(
+            string key,
+            AtomicBoundedSettingRevision expectedRevision,
+            int maximumValueUtf8Bytes,
+            CancellationToken cancellationToken = default) =>
+            inner.DeleteAtomicBoundedSettingAsync(
+                key,
+                expectedRevision,
+                maximumValueUtf8Bytes,
+                cancellationToken);
+    }
+
     private sealed class ThrowingMemoryManager(int length) : MemoryManager<byte>
     {
         public bool SpanRequested { get; private set; }
@@ -363,5 +603,17 @@ public sealed class StagedSelfHostedProfileCorrectiveTests
         }
 
         public override Memory<byte> Memory => CreateMemory(length);
+    }
+
+    private static void DeleteSqliteFiles(string statePath)
+    {
+        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+        foreach (var path in new[] { statePath, statePath + "-wal", statePath + "-shm" })
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
     }
 }
