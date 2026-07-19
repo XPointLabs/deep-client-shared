@@ -6,7 +6,7 @@ using Deep.Client.Shared.Services;
 
 namespace Deep.Client.Shared.Persistence;
 
-public sealed class InMemorySessionStore :
+public sealed partial class InMemorySessionStore :
     ILocalSessionStore,
     IOneToOneConversationOpenRepository,
     IMessageSyncRepository,
@@ -42,7 +42,7 @@ public sealed class InMemorySessionStore :
     private const int ReplayPruneBatchSize = 256;
 
     public InMemorySessionStore(string? statePath = null)
-        : this(statePath, null)
+        : this(statePath, (Action<MembershipTrustCommitFaultPoint>?)null)
     {
     }
 
@@ -1851,7 +1851,8 @@ public sealed class InMemorySessionStore :
                     schemaVersion,
                     MembershipTrustRecords: MembershipTrustRecordSnapshots(),
                     MembershipTrustHeads: MembershipTrustHeadSnapshots(),
-                    MembershipTrustClocks: MembershipTrustClockSnapshots()));
+                    MembershipTrustClocks: MembershipTrustClockSnapshots(),
+                    TransportOutboxItems: []));
 
                 conversations.Clear();
                 contacts.Clear();
@@ -1863,6 +1864,7 @@ public sealed class InMemorySessionStore :
                 inboxItems.Clear();
                 groupStateOutbox.Clear();
                 incomingMessageNotifications.Clear();
+                transportOutbox.Clear();
                 nextInboxSequence = 0;
                 nextIncomingMessageNotificationSequence = 0;
             }
@@ -1993,6 +1995,8 @@ public sealed class InMemorySessionStore :
         {
             membershipTrustClocks[item.OpaqueProfileKey] = item;
         }
+
+        RestoreTransportOutboxSnapshots(snapshot.TransportOutboxItems ?? []);
     }
 
     private void PersistState()
@@ -2043,7 +2047,8 @@ public sealed class InMemorySessionStore :
                 nextIncomingMessageNotificationSequence,
                 MembershipTrustRecordSnapshots(),
                 MembershipTrustHeadSnapshots(),
-                MembershipTrustClockSnapshots()));
+                MembershipTrustClockSnapshots(),
+                TransportOutboxSnapshots()));
         }
     }
 
@@ -2115,7 +2120,8 @@ public sealed class InMemorySessionStore :
         long NextIncomingMessageNotificationSequence = 0,
         IReadOnlyList<MembershipTrustRecordSnapshot>? MembershipTrustRecords = null,
         IReadOnlyList<MembershipTrustHeadSnapshot>? MembershipTrustHeads = null,
-        IReadOnlyList<MembershipTrustClockRecord>? MembershipTrustClocks = null);
+        IReadOnlyList<MembershipTrustClockRecord>? MembershipTrustClocks = null,
+        IReadOnlyList<TransportOutboxPersistenceSnapshot>? TransportOutboxItems = null);
 
     private sealed record IncomingMessageNotificationSnapshot(string MessageId, long Sequence);
 

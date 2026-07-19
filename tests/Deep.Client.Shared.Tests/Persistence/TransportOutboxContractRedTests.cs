@@ -28,7 +28,7 @@ public sealed class TransportOutboxContractRedTests
         Assert.Equal(TransportOutboxReadResult.Found, read.Result);
         Assert.Equal(TransportOutboxState.Prepared, read.Item?.State);
 
-        await Assert.ThrowsAsync<ArgumentException>(
+        await Assert.ThrowsAsync<ArgumentNullException>(
             () => repository.ApplyTransportOutboxTransitionAsync(
                 TransportOutboxTransition.Delivered(
                     prepared.LogicalId,

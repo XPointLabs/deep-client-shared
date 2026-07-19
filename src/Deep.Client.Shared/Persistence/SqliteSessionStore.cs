@@ -8,7 +8,7 @@ using Microsoft.Data.Sqlite;
 
 namespace Deep.Client.Shared.Persistence;
 
-public sealed class SqliteSessionStore :
+public sealed partial class SqliteSessionStore :
     ILocalSessionStore,
     IOneToOneConversationOpenRepository,
     IMessageSyncRepository,
@@ -16,7 +16,7 @@ public sealed class SqliteSessionStore :
     IDisposable
 {
     private static ReadOnlySpan<byte> SqliteHeader => "SQLite format 3\0"u8;
-    private const int PhysicalSchemaVersion = 7;
+    private const int PhysicalSchemaVersion = 8;
     private const int ReplayPruneBatchSize = 256;
     private const string ReadCursorSettingPrefix = "sync.read-cursor.";
     private const string MessagePayloadProjection = "json_set(payload_json, '$.deliveryState', delivery_state, '$.readAt', read_at)";
@@ -48,7 +48,7 @@ public sealed class SqliteSessionStore :
     }
 
     public SqliteSessionStore(SqliteSessionStoreOptions options)
-        : this(options, null)
+        : this(options, (Action<MembershipTrustCommitFaultPoint>?)null)
     {
     }
 
@@ -2584,7 +2584,7 @@ public sealed class SqliteSessionStore :
             using var transaction = connection.BeginTransaction();
             foreach (var table in new[]
                      {
-                         "group_state_outbox", "inbox_items", "inbox_cursors", "incoming_message_notifications", "messages", "groups", "conversations", "contacts", "replay_claims", "settings"
+                         "transport_outbox_attempts", "transport_outbox_items", "group_state_outbox", "inbox_items", "inbox_cursors", "incoming_message_notifications", "messages", "groups", "conversations", "contacts", "replay_claims", "settings"
                      })
             {
                 await using var command = connection.CreateCommand();
@@ -2722,6 +2722,7 @@ public sealed class SqliteSessionStore :
             if (currentVersion == PhysicalSchemaVersion)
             {
                 EnsureMembershipTrustSchema(connection);
+                EnsureTransportOutboxSchema(connection);
                 return;
             }
             if (currentVersion > PhysicalSchemaVersion)
@@ -2877,6 +2878,34 @@ public sealed class SqliteSessionStore :
                     digest BLOB NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS transport_outbox_items (
+                    account_scope BLOB NOT NULL,
+                    logical_id BLOB NOT NULL PRIMARY KEY,
+                    dedup_material BLOB NOT NULL,
+                    ciphertext_bundle BLOB NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    expires_at INTEGER NOT NULL,
+                    not_before INTEGER NOT NULL,
+                    state INTEGER NOT NULL,
+                    revision INTEGER NOT NULL,
+                    transition_source INTEGER NOT NULL,
+                    transition_reason INTEGER NOT NULL,
+                    transitioned_at INTEGER NOT NULL,
+                    acknowledgement_evidence BLOB NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS transport_outbox_attempts (
+                    logical_id BLOB NOT NULL,
+                    attempt_id BLOB NOT NULL,
+                    state INTEGER NOT NULL,
+                    transition_source INTEGER NOT NULL,
+                    transition_reason INTEGER NOT NULL,
+                    occurred_at INTEGER NOT NULL,
+                    evidence BLOB NOT NULL,
+                    PRIMARY KEY(logical_id, attempt_id),
+                    FOREIGN KEY(logical_id) REFERENCES transport_outbox_items(logical_id) ON DELETE CASCADE
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_messages_conversation_created
                     ON messages(conversation_id, created_at);
 
@@ -2897,6 +2926,12 @@ public sealed class SqliteSessionStore :
 
                 CREATE INDEX IF NOT EXISTS idx_membership_trust_records_head
                     ON membership_trust_records(profile_key, domain, revision);
+
+                CREATE INDEX IF NOT EXISTS idx_transport_outbox_ready
+                    ON transport_outbox_items(account_scope, state, not_before, expires_at, created_at);
+
+                CREATE INDEX IF NOT EXISTS idx_transport_outbox_expiry
+                    ON transport_outbox_items(account_scope, expires_at, state);
                 """;
         command.ExecuteNonQuery();
         EnsureMessageHotColumns(connection, transaction);
@@ -2907,6 +2942,50 @@ public sealed class SqliteSessionStore :
         markVersionCommand.Transaction = transaction;
         markVersionCommand.CommandText = $"PRAGMA user_version={PhysicalSchemaVersion};";
         markVersionCommand.ExecuteNonQuery();
+        transaction.Commit();
+    }
+
+    private static void EnsureTransportOutboxSchema(SqliteConnection connection)
+    {
+        using var transaction = connection.BeginTransaction();
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            CREATE TABLE IF NOT EXISTS transport_outbox_items (
+                account_scope BLOB NOT NULL,
+                logical_id BLOB NOT NULL PRIMARY KEY,
+                dedup_material BLOB NOT NULL,
+                ciphertext_bundle BLOB NOT NULL,
+                created_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                not_before INTEGER NOT NULL,
+                state INTEGER NOT NULL,
+                revision INTEGER NOT NULL,
+                transition_source INTEGER NOT NULL,
+                transition_reason INTEGER NOT NULL,
+                transitioned_at INTEGER NOT NULL,
+                acknowledgement_evidence BLOB NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS transport_outbox_attempts (
+                logical_id BLOB NOT NULL,
+                attempt_id BLOB NOT NULL,
+                state INTEGER NOT NULL,
+                transition_source INTEGER NOT NULL,
+                transition_reason INTEGER NOT NULL,
+                occurred_at INTEGER NOT NULL,
+                evidence BLOB NOT NULL,
+                PRIMARY KEY(logical_id, attempt_id),
+                FOREIGN KEY(logical_id) REFERENCES transport_outbox_items(logical_id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_transport_outbox_ready
+                ON transport_outbox_items(account_scope, state, not_before, expires_at, created_at);
+
+            CREATE INDEX IF NOT EXISTS idx_transport_outbox_expiry
+                ON transport_outbox_items(account_scope, expires_at, state);
+            """;
+        command.ExecuteNonQuery();
         transaction.Commit();
     }
 
