@@ -120,6 +120,10 @@ internal static class TransportOutboxStateMachine
         {
             return TransportOutboxCommitResult.Conflict;
         }
+        if (item.Revision >= long.MaxValue)
+        {
+            return TransportOutboxCommitResult.Conflict;
+        }
 
         if (transition.OccurredAt < item.TransitionedAt)
         {
@@ -185,7 +189,7 @@ internal static class TransportOutboxStateMachine
             || item.LogicalId.Length != TransportOutboxLimits.LogicalIdBytes
             || item.DedupMaterial.Length != TransportOutboxLimits.DedupMaterialBytes
             || item.CiphertextBundle.Length is <= 0 or > TransportOutboxLimits.MaxCiphertextBundleBytes
-            || item.Revision == 0
+            || item.Revision is 0 or > long.MaxValue
             || !Enum.IsDefined(item.State)
             || !Enum.IsDefined(item.Source)
             || !Enum.IsDefined(item.Reason))

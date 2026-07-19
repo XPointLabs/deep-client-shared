@@ -26,6 +26,10 @@ public abstract class OutboxOpaqueValue : IEquatable<OutboxOpaqueValue>
         {
             throw new ArgumentException("Opaque outbox value has an invalid length.", nameof(value));
         }
+        if (value.IndexOfAnyExcept((byte)0) < 0)
+        {
+            throw new ArgumentException("Opaque outbox value must not be all zero.", nameof(value));
+        }
 
         this.value = value.ToArray();
         this.redactedName = redactedName;
@@ -482,6 +486,28 @@ public sealed class TransportOutboxTransition
         if (source is not (OutboxTransitionSource.Adapter or OutboxTransitionSource.Recovery))
         {
             throw new ArgumentException("Attempt transitions require an adapter or recovery source.", nameof(source));
+        }
+        var reasonIsLegal = targetState switch
+        {
+            TransportOutboxState.Attempted =>
+                reason is OutboxTransitionReason.DispatchStarted
+                    or OutboxTransitionReason.RetryScheduled
+                    or OutboxTransitionReason.CrashReconciled,
+            TransportOutboxState.Accepted =>
+                reason is OutboxTransitionReason.AdapterAccepted
+                    or OutboxTransitionReason.CrashReconciled,
+            TransportOutboxState.Durable =>
+                reason is OutboxTransitionReason.AdapterConfirmedDurable
+                    or OutboxTransitionReason.CrashReconciled,
+            _ => false
+        };
+        if (!reasonIsLegal
+            || source == OutboxTransitionSource.Recovery
+                && reason != OutboxTransitionReason.CrashReconciled
+            || source == OutboxTransitionSource.Adapter
+                && reason == OutboxTransitionReason.CrashReconciled)
+        {
+            throw new ArgumentException("Attempt transition reason does not match its state and source.", nameof(reason));
         }
 
         if (targetState is TransportOutboxState.Accepted or TransportOutboxState.Durable)

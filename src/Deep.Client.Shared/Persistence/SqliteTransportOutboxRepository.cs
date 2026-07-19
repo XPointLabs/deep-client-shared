@@ -4,7 +4,7 @@ namespace Deep.Client.Shared.Persistence;
 
 public sealed partial class SqliteSessionStore
 {
-    private Action<TransportOutboxCommitFaultPoint>? _transportOutboxFaultInjector;
+    private readonly Action<TransportOutboxCommitFaultPoint>? _transportOutboxFaultInjector;
 
     internal SqliteSessionStore(
         SqliteSessionStoreOptions options,
@@ -23,7 +23,7 @@ public sealed partial class SqliteSessionStore
         var candidate = TransportOutboxStateMachine.Prepared(item);
         return WithReplayConnectionAsync(connection =>
         {
-            using var transaction = connection.BeginTransaction();
+            using var transaction = connection.BeginTransaction(deferred: false);
             TransportOutboxStoredItem? existing;
             try
             {
@@ -90,7 +90,7 @@ public sealed partial class SqliteSessionStore
         ArgumentNullException.ThrowIfNull(transition);
         return WithReplayConnectionAsync(connection =>
         {
-            using var transaction = connection.BeginTransaction();
+            using var transaction = connection.BeginTransaction(deferred: false);
             TransportOutboxStoredItem? existing;
             TransportOutboxStoredItem candidate;
             TransportOutboxCommitResult result;
@@ -170,7 +170,7 @@ public sealed partial class SqliteSessionStore
         ValidateSqliteOutboxList(accountScope, now, limit);
         return WithReplayConnectionAsync(connection =>
         {
-            using var transaction = connection.BeginTransaction();
+            using var transaction = connection.BeginTransaction(deferred: false);
             var logicalIds = QueryOutboxLogicalIds(
                 connection,
                 transaction,
@@ -228,7 +228,7 @@ public sealed partial class SqliteSessionStore
         ArgumentNullException.ThrowIfNull(accountScope);
         return WithReplayConnectionAsync(connection =>
         {
-            using var transaction = connection.BeginTransaction();
+            using var transaction = connection.BeginTransaction(deferred: false);
             using var command = connection.CreateCommand();
             command.Transaction = transaction;
             command.CommandText =

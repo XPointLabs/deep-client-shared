@@ -47,6 +47,22 @@ public sealed class TransportOutboxContractRedTests
         Assert.DoesNotContain("55", logicalId.ToString(), StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void OpaqueIdentifiersAndTransitionReasonsFailClosed()
+    {
+        Assert.Throws<ArgumentException>(
+            () => OutboxLogicalId.FromBytes(new byte[TransportOutboxLimits.LogicalIdBytes]));
+        Assert.Throws<ArgumentException>(
+            () => TransportOutboxTransition.Durable(
+                OutboxLogicalId.FromBytes(Bytes(16, 0x51)),
+                1,
+                OutboxAttemptId.FromBytes(Bytes(16, 0x52)),
+                OutboxTransitionSource.Adapter,
+                OutboxTransitionReason.DispatchStarted,
+                Now.AddMinutes(1),
+                Bytes(16, 0x53)));
+    }
+
     private static byte[] Bytes(int length, byte value) =>
         Enumerable.Repeat(value, length).ToArray();
 }

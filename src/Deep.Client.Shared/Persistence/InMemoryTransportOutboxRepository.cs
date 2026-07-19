@@ -4,7 +4,7 @@ public sealed partial class InMemorySessionStore
 {
     private readonly Dictionary<string, TransportOutboxStoredItem> transportOutbox =
         new(StringComparer.Ordinal);
-    private Action<TransportOutboxCommitFaultPoint>? transportOutboxFaultInjector;
+    private readonly Action<TransportOutboxCommitFaultPoint>? transportOutboxFaultInjector;
 
     internal InMemorySessionStore(
         string? statePath,
