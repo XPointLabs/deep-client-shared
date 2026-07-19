@@ -40,6 +40,12 @@ public sealed partial class InMemorySessionStore
                 }
             }
 
+            var admission = ValidateInMemoryOutboxAdmission(candidate);
+            if (admission is not null)
+            {
+                return Task.FromResult(admission.Value);
+            }
+
             transportOutboxFaultInjector?.Invoke(TransportOutboxCommitFaultPoint.BeforeDurableCommit);
             cancellationToken.ThrowIfCancellationRequested();
             transportOutbox[key] = candidate;
@@ -400,6 +406,47 @@ public sealed partial class InMemorySessionStore
         ReadOnlySpan<byte> accountScope,
         ReadOnlySpan<byte> logicalId) =>
         $"{Convert.ToHexString(accountScope)}:{Convert.ToHexString(logicalId)}";
+
+    private TransportOutboxCommitResult? ValidateInMemoryOutboxAdmission(
+        TransportOutboxStoredItem candidate)
+    {
+        var count = 0;
+        long logicalBytes = 0;
+        foreach (var item in transportOutbox.Values)
+        {
+            if (!item.AccountScope.AsSpan().SequenceEqual(candidate.AccountScope))
+            {
+                continue;
+            }
+
+            try
+            {
+                TransportOutboxStateMachine.Validate(item);
+            }
+            catch (TransportOutboxCorruptException)
+            {
+                return TransportOutboxCommitResult.Corrupt;
+            }
+
+            count++;
+            if (count >= TransportOutboxLimits.MaxItemsPerScope)
+            {
+                return TransportOutboxCommitResult.CapacityExceeded;
+            }
+            logicalBytes += item.CiphertextBundle.Length;
+            if (logicalBytes >
+                TransportOutboxLimits.MaxLogicalCiphertextBytesPerScope -
+                candidate.CiphertextBundle.Length)
+            {
+                return TransportOutboxCommitResult.CapacityExceeded;
+            }
+        }
+
+        return candidate.CiphertextBundle.Length >
+            TransportOutboxLimits.MaxLogicalCiphertextBytesPerScope - logicalBytes
+                ? TransportOutboxCommitResult.CapacityExceeded
+                : null;
+    }
 
     private sealed record TransportOutboxPersistenceSnapshot(
         byte[] AccountScope,

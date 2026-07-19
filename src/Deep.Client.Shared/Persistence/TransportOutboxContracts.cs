@@ -12,6 +12,8 @@ public static class TransportOutboxLimits
     public const int MaxEvidenceBytes = 4096;
     public const int MaxAttemptsPerItem = 16;
     public const int MaxListCount = 256;
+    public const int MaxItemsPerScope = 200;
+    public const long MaxLogicalCiphertextBytesPerScope = 8L * 1024 * 1024;
     public static readonly TimeSpan MaxLifetime = TimeSpan.FromDays(365);
 }
 
@@ -151,7 +153,8 @@ public enum TransportOutboxCommitResult
     Applied,
     Idempotent,
     Conflict,
-    Corrupt
+    Corrupt,
+    CapacityExceeded
 }
 
 public enum TransportOutboxReadResult
@@ -256,7 +259,7 @@ public sealed class TransportOutboxPreparedItem
             || expiresAt <= createdAt
             || expiresAt - createdAt > TransportOutboxLimits.MaxLifetime
             || notBefore < createdAt
-            || notBefore > expiresAt)
+            || notBefore >= expiresAt)
         {
             throw new ArgumentOutOfRangeException(nameof(expiresAt), "Outbox timeline is invalid.");
         }

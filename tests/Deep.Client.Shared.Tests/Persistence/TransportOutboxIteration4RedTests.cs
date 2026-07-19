@@ -5,8 +5,8 @@ namespace Deep.Client.Shared.Tests.Persistence;
 
 public sealed class TransportOutboxIteration4RedTests
 {
-    private const int ExpectedMaxItemsPerScope = 1024;
-    private const int ExpectedMaxLogicalBytesPerScope = 32 * 1024 * 1024;
+    private const int ExpectedMaxItemsPerScope = 200;
+    private const int ExpectedMaxLogicalBytesPerScope = 8 * 1024 * 1024;
     private static readonly TransportOutboxCommitResult CapacityExceeded =
         (TransportOutboxCommitResult)4;
     private static readonly DateTimeOffset Now =
@@ -70,6 +70,46 @@ public sealed class TransportOutboxIteration4RedTests
             }
 
             Assert.ThrowsAny<Exception>(() => new SqliteSessionStore(path));
+        }
+        finally
+        {
+            DeleteSqliteFiles(path);
+        }
+    }
+
+    [Fact]
+    public void V9OpenRejectsRecoveryTriggerAndPreservesQuarantine()
+    {
+        var path = TempPath("v9-recovery-trigger");
+        try
+        {
+            CreateExactV8Fixture(path, populated: true);
+            using (var migrated = new SqliteSessionStore(path))
+            {
+            }
+            using (var connection = Open(path))
+            {
+                Execute(connection, """
+                    CREATE TRIGGER hostile_recovery_update
+                    AFTER UPDATE ON transport_outbox_items_v8_recovery
+                    BEGIN
+                        DELETE FROM transport_outbox_attempts_v8_recovery;
+                    END;
+                    """);
+            }
+
+            Assert.ThrowsAny<Exception>(() => new SqliteSessionStore(path));
+
+            using var verify = Open(path);
+            Assert.Equal(9L, Scalar(verify, "PRAGMA user_version;"));
+            Assert.Equal(
+                1L,
+                Scalar(verify, "SELECT COUNT(*) FROM transport_outbox_items_v8_recovery;"));
+            Assert.Equal(
+                1L,
+                Scalar(
+                    verify,
+                    "SELECT COUNT(*) FROM transport_outbox_attempts_v8_recovery;"));
         }
         finally
         {
@@ -233,7 +273,7 @@ public sealed class TransportOutboxIteration4RedTests
     }
 
     [Fact]
-    public void ScopePurgeDeclaresSecureDeleteAndPassiveCheckpoint()
+    public void ScopePurgeDeclaresSecureDeleteAndBoundedTruncateCheckpoint()
     {
         var source = File.ReadAllText(Path.Combine(
             RepositoryRoot(),
@@ -252,6 +292,83 @@ public sealed class TransportOutboxIteration4RedTests
 
         Assert.Contains("EnableSqliteSecureDelete", implementation, StringComparison.Ordinal);
         Assert.Contains("RunPostScopePurgeMaintenanceBestEffort", implementation, StringComparison.Ordinal);
+        Assert.Contains("busy_timeout=0", implementation, StringComparison.Ordinal);
+        Assert.Contains("wal_checkpoint(TRUNCATE)", implementation, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ScopePurgeCommitsLogicalDeletionWhenTruncateCheckpointIsBusy()
+    {
+        var path = TempPath("busy-checkpoint");
+        try
+        {
+            CreateExactV8Fixture(path, populated: true);
+            using var store = new SqliteSessionStore(path);
+            var item = Prepared(Scope(0xB1), Logical(0xD2), ciphertextBytes: 4096);
+            var unrelated = Prepared(Scope(0xD3), Logical(0xD4), ciphertextBytes: 4096);
+            Assert.Equal(
+                TransportOutboxCommitResult.Applied,
+                await store.PrepareTransportOutboxAsync(item));
+            Assert.Equal(
+                TransportOutboxCommitResult.Applied,
+                await store.PrepareTransportOutboxAsync(unrelated));
+
+            using var readerConnection = Open(path);
+            Execute(readerConnection, "BEGIN;");
+            Assert.Equal(
+                2L,
+                Scalar(
+                    readerConnection,
+                    "SELECT COUNT(*) FROM transport_outbox_items;"));
+            Assert.Equal(
+                1L,
+                Scalar(
+                    readerConnection,
+                    "SELECT COUNT(*) FROM transport_outbox_items_v8_recovery;"));
+
+            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+            await store.PurgeTransportOutboxScopeAsync(item.AccountScope);
+            stopwatch.Stop();
+
+            Assert.True(
+                stopwatch.Elapsed < TimeSpan.FromSeconds(2),
+                $"Busy checkpoint blocked purge for {stopwatch.Elapsed}.");
+            Assert.Equal(
+                TransportOutboxReadResult.Missing,
+                (await store.ReadTransportOutboxAsync(
+                    item.AccountScope,
+                    item.LogicalId)).Result);
+            Assert.Equal(
+                TransportOutboxReadResult.Found,
+                (await store.ReadTransportOutboxAsync(
+                    unrelated.AccountScope,
+                    unrelated.LogicalId)).Result);
+
+            Execute(readerConnection, "COMMIT;");
+            await store.PurgeTransportOutboxScopeAsync(item.AccountScope);
+            using (var verify = Open(path))
+            {
+                Assert.Equal(
+                    0L,
+                    Scalar(
+                        verify,
+                        "SELECT COUNT(*) FROM transport_outbox_items_v8_recovery;"));
+                Assert.Equal(
+                    0L,
+                    Scalar(
+                        verify,
+                        "SELECT COUNT(*) FROM transport_outbox_attempts_v8_recovery;"));
+                Assert.Equal(
+                    1L,
+                    Scalar(verify, "SELECT COUNT(*) FROM transport_outbox_items;"));
+            }
+            Assert.False(
+                File.Exists(path + "-wal") && new FileInfo(path + "-wal").Length > 0);
+        }
+        finally
+        {
+            DeleteSqliteFiles(path);
+        }
     }
 
     [Fact]

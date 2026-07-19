@@ -2576,13 +2576,10 @@ public sealed partial class SqliteSessionStore :
         await WithReplayConnectionAsync(async connection =>
         {
             cancellationToken.ThrowIfCancellationRequested();
-            await using (var secureDelete = connection.CreateCommand())
-            {
-                secureDelete.CommandText = "PRAGMA secure_delete=ON;";
-                await secureDelete.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-            }
+            EnableSqliteSecureDelete(connection);
 
             using var transaction = connection.BeginTransaction();
+            ValidateTransportOutboxSchema(connection, transaction);
             if (ValidateTransportOutboxRecoveryTablesIfPresent(connection, transaction))
             {
                 await using var recovery = connection.CreateCommand();
@@ -2736,7 +2733,12 @@ public sealed partial class SqliteSessionStore :
             if (currentVersion == PhysicalSchemaVersion)
             {
                 EnsureMembershipTrustSchema(connection);
-                ValidateTransportOutboxSchema(connection);
+                using var validationTransaction = connection.BeginTransaction();
+                ValidateTransportOutboxSchema(connection, validationTransaction);
+                ValidateTransportOutboxRecoveryTablesIfPresent(
+                    connection,
+                    validationTransaction);
+                validationTransaction.Commit();
                 return;
             }
             if (currentVersion > PhysicalSchemaVersion)
@@ -2756,7 +2758,7 @@ public sealed partial class SqliteSessionStore :
             && (TransportOutboxTableExists(connection, "transport_outbox_items")
                 || TransportOutboxTableExists(connection, "transport_outbox_attempts")))
         {
-            ValidateTransportOutboxSchema(connection);
+            ValidateTransportOutboxSchema(connection, transaction: null);
         }
 
         using var transaction = connection.BeginTransaction();
@@ -2977,11 +2979,13 @@ public sealed partial class SqliteSessionStore :
         transaction.Commit();
     }
 
-    private static void ValidateTransportOutboxSchema(SqliteConnection connection)
+    private static void ValidateTransportOutboxSchema(
+        SqliteConnection connection,
+        SqliteTransaction? transaction)
     {
         ValidateTransportOutboxColumns(
             connection,
-            transaction: null,
+            transaction,
             "transport_outbox_items",
             [
                 ("account_scope", "BLOB", 1, 1),
@@ -3004,7 +3008,7 @@ public sealed partial class SqliteSessionStore :
             ]);
         ValidateTransportOutboxColumns(
             connection,
-            transaction: null,
+            transaction,
             "transport_outbox_attempts",
             [
                 ("account_scope", "BLOB", 1, 1),
@@ -3018,23 +3022,39 @@ public sealed partial class SqliteSessionStore :
             ]);
         ValidateTransportOutboxForeignKeys(
             connection,
-            transaction: null,
+            transaction,
             "transport_outbox_attempts",
             "transport_outbox_items",
             [
                 (0, "account_scope", "account_scope"),
                 (1, "logical_id", "logical_id")
             ]);
+        ValidateTransportOutboxTriggersAbsent(
+            connection,
+            transaction,
+            ["transport_outbox_items", "transport_outbox_attempts"]);
+        ValidateTransportOutboxIndexSet(
+            connection,
+            transaction,
+            "transport_outbox_items",
+            ["account_scope", "logical_id"],
+            ["idx_transport_outbox_ready", "idx_transport_outbox_expiry"]);
+        ValidateTransportOutboxIndexSet(
+            connection,
+            transaction,
+            "transport_outbox_attempts",
+            ["account_scope", "logical_id", "attempt_id"],
+            []);
         ValidateTransportOutboxIndex(
             connection,
-            transaction: null,
+            transaction,
             "idx_transport_outbox_ready",
             "transport_outbox_items",
             ["account_scope", "state", "not_before", "expires_at", "created_at"],
             optional: false);
         ValidateTransportOutboxIndex(
             connection,
-            transaction: null,
+            transaction,
             "idx_transport_outbox_expiry",
             "transport_outbox_items",
             ["account_scope", "expires_at", "state"],
@@ -3083,6 +3103,22 @@ public sealed partial class SqliteSessionStore :
             "transport_outbox_attempts",
             "transport_outbox_items",
             [(0, "logical_id", "logical_id")]);
+        ValidateTransportOutboxTriggersAbsent(
+            connection,
+            transaction,
+            ["transport_outbox_items", "transport_outbox_attempts"]);
+        ValidateTransportOutboxIndexSet(
+            connection,
+            transaction,
+            "transport_outbox_items",
+            ["logical_id"],
+            ["idx_transport_outbox_ready", "idx_transport_outbox_expiry"]);
+        ValidateTransportOutboxIndexSet(
+            connection,
+            transaction,
+            "transport_outbox_attempts",
+            ["logical_id", "attempt_id"],
+            []);
         ValidateTransportOutboxIndex(
             connection,
             transaction,
@@ -3237,7 +3273,46 @@ public sealed partial class SqliteSessionStore :
             "transport_outbox_attempts_v8_recovery",
             "transport_outbox_items_v8_recovery",
             [(0, "logical_id", "logical_id")]);
+        ValidateTransportOutboxTriggersAbsent(
+            connection,
+            transaction,
+            [
+                "transport_outbox_items_v8_recovery",
+                "transport_outbox_attempts_v8_recovery"
+            ]);
+        ValidateTransportOutboxIndexSet(
+            connection,
+            transaction,
+            "transport_outbox_items_v8_recovery",
+            ["logical_id"],
+            []);
+        ValidateTransportOutboxIndexSet(
+            connection,
+            transaction,
+            "transport_outbox_attempts_v8_recovery",
+            ["logical_id", "attempt_id"],
+            []);
+        ValidateTransportOutboxRecoveryRowIntegrity(connection, transaction);
         return true;
+    }
+
+    private static void ValidateTransportOutboxRecoveryRowIntegrity(
+        SqliteConnection connection,
+        SqliteTransaction transaction)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT 1
+            FROM pragma_foreign_key_check('transport_outbox_attempts_v8_recovery')
+            LIMIT 1;
+            """;
+        using var reader = command.ExecuteReader();
+        if (reader.Read())
+        {
+            throw new InvalidDataException(
+                "Transport outbox v8 recovery rows violate their foreign key.");
+        }
     }
 
     private static bool TransportOutboxTableExists(
@@ -3396,6 +3471,124 @@ public sealed partial class SqliteSessionStore :
         }
     }
 
+    private static void ValidateTransportOutboxIndexSet(
+        SqliteConnection connection,
+        SqliteTransaction? transaction,
+        string tableName,
+        IReadOnlyList<string> expectedPrimaryKeyColumns,
+        IReadOnlyCollection<string> allowedCustomIndexes)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = $"""
+            SELECT name, "unique", origin, partial
+            FROM pragma_index_list('{tableName}');
+            """;
+        using var reader = command.ExecuteReader();
+        var primaryKeyCount = 0;
+        string? primaryKeyIndexName = null;
+        var customIndexes = new HashSet<string>(StringComparer.Ordinal);
+        while (reader.Read())
+        {
+            var name = reader.GetString(0);
+            var unique = reader.GetInt32(1);
+            var origin = reader.GetString(2);
+            var partial = reader.GetInt32(3);
+            if (string.Equals(origin, "pk", StringComparison.Ordinal))
+            {
+                primaryKeyCount++;
+                if (unique != 1 || partial != 0)
+                {
+                    throw new InvalidDataException(
+                        $"Transport outbox table {tableName} has an invalid primary-key index.");
+                }
+                primaryKeyIndexName = name;
+                continue;
+            }
+
+            if (!string.Equals(origin, "c", StringComparison.Ordinal)
+                || unique != 0
+                || partial != 0
+                || !allowedCustomIndexes.Contains(name)
+                || !customIndexes.Add(name))
+            {
+                throw new InvalidDataException(
+                    $"Transport outbox table {tableName} has an unexpected index.");
+            }
+        }
+        if (primaryKeyCount != 1)
+        {
+            throw new InvalidDataException(
+                $"Transport outbox table {tableName} has an incompatible primary-key index.");
+        }
+        reader.Close();
+        ValidateTransportOutboxIndexKeyColumns(
+            connection,
+            transaction,
+            primaryKeyIndexName!,
+            expectedPrimaryKeyColumns);
+    }
+
+    private static void ValidateTransportOutboxTriggersAbsent(
+        SqliteConnection connection,
+        SqliteTransaction? transaction,
+        IReadOnlyList<string> tableNames)
+    {
+        foreach (var tableName in tableNames)
+        {
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = """
+                SELECT 1 FROM sqlite_master
+                WHERE type = 'trigger' AND tbl_name = $table
+                LIMIT 1;
+                """;
+            command.Parameters.AddWithValue("$table", tableName);
+            if (command.ExecuteScalar() is not null)
+            {
+                throw new InvalidDataException(
+                    $"Transport outbox table {tableName} must not have triggers.");
+            }
+        }
+    }
+
+    private static void ValidateTransportOutboxIndexKeyColumns(
+        SqliteConnection connection,
+        SqliteTransaction? transaction,
+        string indexName,
+        IReadOnlyList<string> expectedColumns)
+    {
+        using var columns = connection.CreateCommand();
+        columns.Transaction = transaction;
+        columns.CommandText = $"""
+            SELECT seqno, name, "desc", coll
+            FROM pragma_index_xinfo('{indexName}')
+            WHERE "key" = 1
+            ORDER BY seqno;
+            """;
+        using var reader = columns.ExecuteReader();
+        var index = 0;
+        while (reader.Read())
+        {
+            if (index >= expectedColumns.Count
+                || reader.GetInt32(0) != index
+                || reader.IsDBNull(1)
+                || !string.Equals(reader.GetString(1), expectedColumns[index], StringComparison.Ordinal)
+                || reader.GetInt32(2) != 0
+                || !string.Equals(reader.GetString(3), "BINARY", StringComparison.Ordinal))
+            {
+                throw new InvalidDataException(
+                    $"Transport outbox index {indexName} key columns are incompatible.");
+            }
+            index++;
+        }
+        if (index != expectedColumns.Count)
+        {
+            throw new InvalidDataException(
+                $"Transport outbox index {indexName} is missing key columns.");
+        }
+    }
+
     private static void ValidateTransportOutboxColumns(
         SqliteConnection connection,
         SqliteTransaction? transaction,
@@ -3404,7 +3597,7 @@ public sealed partial class SqliteSessionStore :
     {
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
-        command.CommandText = $"PRAGMA table_info(\"{tableName}\");";
+        command.CommandText = $"PRAGMA table_xinfo(\"{tableName}\");";
         using var reader = command.ExecuteReader();
         var index = 0;
         while (reader.Read())
@@ -3418,7 +3611,9 @@ public sealed partial class SqliteSessionStore :
             if (!string.Equals(reader.GetString(1), column.Name, StringComparison.Ordinal)
                 || !string.Equals(reader.GetString(2), column.Type, StringComparison.OrdinalIgnoreCase)
                 || reader.GetInt32(3) != column.NotNull
-                || reader.GetInt32(5) != column.PrimaryKey)
+                || !reader.IsDBNull(4)
+                || reader.GetInt32(5) != column.PrimaryKey
+                || reader.GetInt32(6) != 0)
             {
                 throw new InvalidDataException(
                     $"Transport outbox table {tableName} is incompatible.");
@@ -3428,6 +3623,18 @@ public sealed partial class SqliteSessionStore :
         {
             throw new InvalidDataException(
                 $"Transport outbox table {tableName} is missing columns.");
+        }
+    }
+
+    private static void EnableSqliteSecureDelete(SqliteConnection connection)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = "PRAGMA secure_delete=ON;";
+        if (Convert.ToInt32(
+                command.ExecuteScalar(),
+                CultureInfo.InvariantCulture) != 1)
+        {
+            throw new InvalidOperationException("SQLite secure_delete could not be enabled.");
         }
     }
 

@@ -53,6 +53,15 @@ public sealed partial class SqliteSessionStore
                 }
             }
 
+            var admission = ValidateSqliteOutboxAdmission(
+                connection,
+                transaction,
+                candidate);
+            if (admission is not null)
+            {
+                return Task.FromResult(admission.Value);
+            }
+
             _transportOutboxFaultInjector?.Invoke(TransportOutboxCommitFaultPoint.BeforeDurableCommit);
             cancellationToken.ThrowIfCancellationRequested();
             InsertTransportOutboxItem(connection, transaction, candidate);
@@ -272,7 +281,9 @@ public sealed partial class SqliteSessionStore
         ArgumentNullException.ThrowIfNull(accountScope);
         return WithReplayConnectionAsync(connection =>
         {
+            EnableSqliteSecureDelete(connection);
             using var transaction = connection.BeginTransaction(deferred: false);
+            ValidateTransportOutboxSchema(connection, transaction);
             if (ValidateTransportOutboxRecoveryTablesIfPresent(connection, transaction))
             {
                 using var recovery = connection.CreateCommand();
@@ -297,8 +308,50 @@ public sealed partial class SqliteSessionStore
             command.ExecuteNonQuery();
             cancellationToken.ThrowIfCancellationRequested();
             transaction.Commit();
+            RunPostScopePurgeMaintenanceBestEffort(connection);
             return Task.FromResult(0);
         }, cancellationToken);
+    }
+
+    private static void RunPostScopePurgeMaintenanceBestEffort(SqliteConnection connection)
+    {
+        // Zero busy timeout bounds lock waiting. Logical deletion is already committed,
+        // so a busy or unavailable truncate checkpoint is safe to retry later.
+        try
+        {
+            using (var noWait = connection.CreateCommand())
+            {
+                noWait.CommandText = "PRAGMA busy_timeout=0;";
+                noWait.ExecuteNonQuery();
+            }
+
+            using var checkpoint = connection.CreateCommand();
+            checkpoint.CommandText = "PRAGMA wal_checkpoint(TRUNCATE);";
+            using var result = checkpoint.ExecuteReader();
+            if (result.Read())
+            {
+                _ = result.GetInt32(0); // Busy is expected when another reader owns a snapshot.
+                _ = result.GetInt32(1);
+                _ = result.GetInt32(2);
+            }
+        }
+        catch
+        {
+            // Post-commit maintenance must not make callers infer that deletion rolled back.
+        }
+        finally
+        {
+            try
+            {
+                using var restoreTimeout = connection.CreateCommand();
+                restoreTimeout.CommandText = "PRAGMA busy_timeout=5000;";
+                restoreTimeout.ExecuteNonQuery();
+            }
+            catch
+            {
+                // The operation is complete and this short-lived connection can be discarded.
+            }
+        }
     }
 
     private static TransportOutboxStoredItem? ReadTransportOutboxItem(
@@ -756,6 +809,69 @@ public sealed partial class SqliteSessionStore
         {
             throw new TransportOutboxCorruptException();
         }
+    }
+
+    private static TransportOutboxCommitResult? ValidateSqliteOutboxAdmission(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        TransportOutboxStoredItem candidate)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT typeof(ciphertext_bundle), length(ciphertext_bundle)
+            FROM transport_outbox_items
+            WHERE account_scope = $scope
+            LIMIT $limit;
+            """;
+        command.Parameters.AddWithValue("$scope", candidate.AccountScope);
+        command.Parameters.AddWithValue(
+            "$limit",
+            TransportOutboxLimits.MaxItemsPerScope + 1);
+        using var reader = command.ExecuteReader();
+        var count = 0;
+        long logicalBytes = 0;
+        while (reader.Read())
+        {
+            count++;
+            if (count >= TransportOutboxLimits.MaxItemsPerScope)
+            {
+                return TransportOutboxCommitResult.CapacityExceeded;
+            }
+
+            long length;
+            try
+            {
+                if (!string.Equals(reader.GetString(0), "blob", StringComparison.Ordinal))
+                {
+                    return TransportOutboxCommitResult.Corrupt;
+                }
+                length = reader.GetInt64(1);
+            }
+            catch (Exception exception) when (exception is InvalidCastException
+                                              or FormatException
+                                              or OverflowException)
+            {
+                return TransportOutboxCommitResult.Corrupt;
+            }
+            if (length is <= 0 or > TransportOutboxLimits.MaxCiphertextBundleBytes)
+            {
+                return TransportOutboxCommitResult.Corrupt;
+            }
+
+            logicalBytes += length;
+            if (logicalBytes >
+                TransportOutboxLimits.MaxLogicalCiphertextBytesPerScope -
+                candidate.CiphertextBundle.Length)
+            {
+                return TransportOutboxCommitResult.CapacityExceeded;
+            }
+        }
+
+        return candidate.CiphertextBundle.Length >
+            TransportOutboxLimits.MaxLogicalCiphertextBytesPerScope - logicalBytes
+                ? TransportOutboxCommitResult.CapacityExceeded
+                : null;
     }
 
     private static long ReadOutboxInteger64(SqliteDataReader reader, int ordinal)

@@ -22,10 +22,13 @@ The monotonic logical states are:
 `Prepared -> Attempted -> Accepted -> Durable -> Delivered`
 
 `Expired` is terminal and may replace any non-terminal state only when the
-stored expiry has elapsed. `Accepted` means only that an adapter accepted an
-attempt. It is never interpreted as durable. `Delivered` requires a bounded,
-typed recipient-device acknowledgement whose logical ID and dedup digest match
-the stored item.
+stored expiry has elapsed. All non-expired timestamps use the canonical
+half-open lifetime `[CreatedAt, ExpiresAt)`: prepared not-before, retry
+not-before, acknowledgement time, and a delivered transition must be strictly
+earlier than expiry. An expired transition is legal only at or after expiry.
+`Accepted` means only that an adapter accepted an attempt. It is never
+interpreted as durable. `Delivered` requires a bounded, typed recipient-device
+acknowledgement whose logical ID and dedup digest match the stored item.
 
 Each mutation stores a bounded source and reason code, retry/not-before time,
 revision, and attempt-local evidence. The repository uses revision compare-and-
@@ -57,6 +60,25 @@ All opaque identifiers, ciphertext, evidence, acknowledgement and diagnostic
 reason fields have explicit byte or character limits. SQLite reads project
 lengths and reject oversized or malformed rows before materializing BLOB or
 TEXT values. Returned objects and byte buffers are defensive copies.
+
+New-item admission also has per-account-scope engineering limits:
+
+- at most 200 concurrent logical items;
+- at most 8 MiB of immutable ciphertext-bundle bytes.
+
+The byte budget deliberately counts only the logical item's immutable
+ciphertext bundle. Attempt evidence and acknowledgements remain governed by
+their per-value and per-item bounds. The limits are enforced atomically with
+the insert: SQLite uses an immediate transaction and a bounded metadata-only
+scan, while the in-memory implementation evaluates the same rule under its
+existing lock. Same-ID reconciliation happens first. Rows already at or above
+a limit remain readable, reconcilable, transitionable, and purgeable, but a
+new logical item is rejected with the typed `CapacityExceeded` result.
+
+These are storage-safety limits, not subscription, billing, entitlement, or
+token-accounting policy. Changing either value requires an explicit decision
+record covering migration and storage impact; commercial tiers must not
+silently weaken the persistence safety boundary.
 
 Opaque identifiers deliberately redact `ToString()`. Exceptions and transition
 diagnostics use state, source and reason code only. They do not contain bundle
@@ -107,6 +129,15 @@ exact ordered keys. The attempts foreign key must be one two-column composite
 constraint in account-scope/logical-ID order with `NO ACTION` update,
 `CASCADE` delete, and `NONE` match semantics.
 
+Schema attestation uses `table_xinfo`, rejects hidden or generated columns, and
+enumerates the complete index set. Only the exact primary-key autoindexes and,
+for the active item table, the two named ordered indexes are accepted.
+Additional unique, non-unique, partial, expression, collation-altered, or
+descending indexes fail closed. Active, v8, and quarantine outbox tables must
+have no triggers of any timing or operation; this is checked before migration,
+open, and purge so a trigger cannot suppress, redirect, copy, or mutate a
+delete.
+
 Quarantine does not exempt legacy ciphertext from the privacy lifecycle.
 Scope purge first validates the recovery objects, deletes legacy attempts by
 joining their logical IDs through the scoped recovery item rows, deletes those
@@ -114,7 +145,26 @@ items, and then deletes active rows in one transaction. Full account purge uses
 the existing secure-delete transaction and removes every recovery attempt and
 item before the active account tables. Missing recovery tables are normal;
 partial, view-backed, or schema-incompatible recovery objects fail closed
-before any active or recovery row is deleted.
+before any active or recovery row is deleted. Recovery purge additionally
+runs a bounded foreign-key integrity probe before the first delete. An orphaned
+attempt therefore preserves all active and recovery rows for forensic
+inspection, and the probe does not materialize ciphertext.
+
+Scope purge enables SQLite `secure_delete` before its transaction and attempts
+a best-effort `TRUNCATE` WAL checkpoint after commit with zero lock-wait
+timeout. The checkpoint result is consumed: when another reader or writer
+holds the WAL, maintenance is deferred and does not reverse or misreport the
+already committed logical purge. A later purge or normal store maintenance can
+retry truncation. These measures reduce ordinary page and WAL residue; they do
+not promise physical erasure from flash translation layers, backups,
+snapshots, or a WAL held by another reader. SQLCipher protects residual pages
+while the database key remains secret. Robust account erasure ultimately
+depends on database-key destruction and the surrounding database/backup
+lifecycle, not on an unverifiable claim that storage media has overwritten
+every prior copy. The current `Task` completion contract reports logical purge
+only; it does not claim that post-commit WAL maintenance completed. A typed
+maintenance-status surface is an explicit P3 before any product UI may claim
+immediate forensic erasure.
 
 The feature remains dormant and `PersistentTransportOutboxEnabled` is false in
 both default profiles; no runtime composition reads this repository. During the

@@ -288,9 +288,11 @@ internal static class TransportOutboxStateMachine
             || item.State is not (TransportOutboxState.Delivered or TransportOutboxState.Expired)
                 && item.TransitionedAt >= item.ExpiresAt
             || item.LastTransitionRetryNotBefore is { } retry
-                && (retry < item.TransitionedAt || retry > item.ExpiresAt)
+                && (retry < item.TransitionedAt || retry >= item.ExpiresAt)
             || item.AcknowledgedAt is { } ack
-                && (ack < item.CreatedAt || ack > item.ExpiresAt))
+                && (ack < item.CreatedAt || ack >= item.ExpiresAt)
+            || item.State == TransportOutboxState.Delivered
+                && item.TransitionedAt >= item.ExpiresAt)
         {
             throw new TransportOutboxCorruptException();
         }
@@ -306,7 +308,7 @@ internal static class TransportOutboxStateMachine
         if (transition.AttemptId is null
             || transition.OccurredAt >= item.ExpiresAt
             || transition.RetryNotBefore is { } retry
-                && (retry < transition.OccurredAt || retry > item.ExpiresAt))
+                && (retry < transition.OccurredAt || retry >= item.ExpiresAt))
         {
             return TransportOutboxCommitResult.Conflict;
         }
@@ -357,11 +359,12 @@ internal static class TransportOutboxStateMachine
         var acknowledgement = transition.Acknowledgement;
         if (item.State != TransportOutboxState.Durable
             || acknowledgement is null
+            || transition.OccurredAt >= item.ExpiresAt
             || !acknowledgement.LogicalId.Value.SequenceEqual(item.LogicalId)
             || !acknowledgement.DedupMaterial.Value.SequenceEqual(item.DedupMaterial)
             || acknowledgement.AcknowledgedAt > transition.OccurredAt
             || acknowledgement.AcknowledgedAt < item.CreatedAt
-            || acknowledgement.AcknowledgedAt > item.ExpiresAt)
+            || acknowledgement.AcknowledgedAt >= item.ExpiresAt)
         {
             return TransportOutboxCommitResult.Conflict;
         }
