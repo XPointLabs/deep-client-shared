@@ -19,27 +19,30 @@
     "85e26016f5d667e92b30d2ea6d95fc90236e4794",
     "56f4f0c4f949ce9ead9d88972ad9fb26fbff96cb",
     "5660f07b67ef053d392c85a0eacf1b56252f81d4",
-    "52c3b0e52921ff12065a001a11e9caac0c43874b"
+    "52c3b0e52921ff12065a001a11e9caac0c43874b",
+    "dfce76c52a1586222759bc00d095354e8ce90dd4",
+    "65812b29228f91b2d2da4154e91c43dedec98fc0",
+    "1459d949cb0990929254fc5d0b98151f3f26570e",
+    "6e5a6df9c3f9c6a6a63635bbbfc34468a0582f37"
   ],
-  "previousEvidenceCarrierCommit": "7b1b2934444f670b7e9acfda21b61664dc0635d0",
-  "sourceCommit": "0709e11d257358f6786cffe62ee7cd5994c8e626",
-  "evidenceContentCommit": "1d5ab92fe0fe8e0084f34a1ee6b5b5adb19161f9",
+  "previousEvidenceCarrierCommit": "0840bfcddc92a4f4d7c0ae2ce2735da7ae89aa61",
+  "sourceCommit": "ff32845d3939e671a43a0d2d4cb73abfb0479847",
   "tests": {
     "full": {
-      "command": "dotnet test .\\Deep.Client.Shared.slnx --configuration Release --no-restore --logger \"trx;LogFileName=p07-corrective8-full.trx\" --results-directory .\\artifacts\\survival\\P07\\trx",
+      "command": "dotnet test .\\Deep.Client.Shared.slnx --configuration Release --no-restore --logger \"trx;LogFileName=p07-corrective11-full.trx\" --results-directory .\\artifacts\\survival\\P07\\trx",
       "exitCode": 0,
-      "passed": 443,
+      "passed": 453,
       "failed": 0,
       "skipped": 0,
-      "localUncommittedTrxSha256": "2ed7c11d491032154f54d5b6078116b26168e561b8f4684c280f2fa47315316b"
+      "localUncommittedTrxSha256": "d70ceb57aa3d52fd42335c8f4ab66f93c0ceb33320fbe2fc448d90acde2f0e2a"
     },
     "focused": {
-      "command": "dotnet test .\\tests\\Deep.Client.Shared.Tests\\Deep.Client.Shared.Tests.csproj --configuration Release --no-restore --filter \"FullyQualifiedName~MembershipTrust\" --logger \"trx;LogFileName=p07-corrective8-focused.trx\" --results-directory .\\artifacts\\survival\\P07\\trx",
+      "command": "dotnet test .\\tests\\Deep.Client.Shared.Tests\\Deep.Client.Shared.Tests.csproj --configuration Release --no-restore --filter \"FullyQualifiedName~MembershipTrust\" --logger \"trx;LogFileName=p07-corrective11-focused.trx\" --results-directory .\\artifacts\\survival\\P07\\trx",
       "exitCode": 0,
-      "passed": 133,
+      "passed": 143,
       "failed": 0,
       "skipped": 0,
-      "localUncommittedTrxSha256": "0d8704175e5aeb05f19e1483ad590df9cbcaeb4023dfd1262fab28736875f0ae"
+      "localUncommittedTrxSha256": "7f48daa99d3b0e9ff5c063c3166e01c8bd2be5a6da0e72fcd8c0fc1b85eebba9"
     },
     "privacyGate": {
       "command": "& .\\eng\\scripts\\Invoke-P07TrustGate.ps1",
@@ -49,12 +52,12 @@
       "skipped": 0
     },
     "schemaAndFlags": {
-      "command": "dotnet test .\\tests\\Deep.Client.Shared.Tests\\Deep.Client.Shared.Tests.csproj --configuration Release --no-restore --filter \"FullyQualifiedName~FeatureFlagsTests|FullyQualifiedName~LogicalSchemaThreeToFour\" --logger \"trx;LogFileName=p07-corrective8-schema-flags.trx\" --results-directory .\\artifacts\\survival\\P07\\trx",
+      "command": "dotnet test .\\tests\\Deep.Client.Shared.Tests\\Deep.Client.Shared.Tests.csproj --configuration Release --no-restore --filter \"FullyQualifiedName~FeatureFlagsTests|FullyQualifiedName~LogicalSchemaThreeToFour\" --logger \"trx;LogFileName=p07-corrective11-schema-flags.trx\" --results-directory .\\artifacts\\survival\\P07\\trx",
       "exitCode": 0,
       "passed": 6,
       "failed": 0,
       "skipped": 0,
-      "localUncommittedTrxSha256": "f1ccdceb4701738f472aa97677e34d04f2816a1319551030dba52bbf6cad9f15"
+      "localUncommittedTrxSha256": "b32a796c08b09836946d1126778d6ba2c68333686e56bc8869c02ac94a4ccbf3"
     }
   },
   "verificationCommands": [
@@ -93,6 +96,24 @@
     "overBudgetCommitRejectedBeforeHeadAdvance": true,
     "sqliteHistoryBytesStoredTransactionally": true,
     "legacyHeadHistoryBytesBackfilledWithBoundedQuery": true
+  },
+  "correctiveNine": {
+    "allTrustRecordBlobLengthsProjectedBeforeMaterialization": true,
+    "headDigestLengthProjectedBeforeMaterialization": true,
+    "commitCandidateBlobsBoundedBeforeMaterialization": true,
+    "oversizedCandidateAndHeadDigestFailClosed": true
+  },
+  "correctiveTen": {
+    "trustClockDigestLengthProjectedBeforeMaterialization": true,
+    "oversizedClockDigestBlocksReadReplayAndSuccessor": true
+  },
+  "correctiveEleven": {
+    "commitUsesSameFullBoundedCanonicalHistoryValidatorAsRead": true,
+    "exactCumulativeHistoryBytesValidatedBeforeCommitSuccess": true,
+    "orphanAndMissingMiddleBlockReplayAndSuccessor": true,
+    "historicalReplayParityPreserved": true,
+    "successorLinkageValidatedBeforePersistence": true,
+    "sqliteAndInMemoryCommitValidationParity": true
   },
   "residualCoverageP3": [
     "bootstrap revision-one fork has durable in-memory restart coverage but no dedicated SQLite restart variant",

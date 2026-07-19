@@ -14,6 +14,7 @@
   "trustTimestampCanonicalForm": "UTC whole seconds",
   "preCanonicalDormantRecordPolicy": "fail-closed-and-rebootstrap",
   "deepHistoryCorruptionPolicy": "fail-closed; never select an older head",
+  "commitOnCorruptHistoryPolicy": "fail-closed before idempotency, conflict, or head advance",
   "historyValidationBudgetPerProfileDomain": 4096,
   "historyBlobByteBudgetPerProfileDomain": 8388608,
   "sqliteHeadAdditiveColumn": "history_bytes with bounded restart backfill",
