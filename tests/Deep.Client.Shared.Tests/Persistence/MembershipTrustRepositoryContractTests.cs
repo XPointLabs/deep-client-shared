@@ -229,6 +229,56 @@ public sealed class MembershipTrustRepositoryContractTests
         Assert.Equal(expectedClockDigest, secondClockRead.Record!.Digest);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SubsecondAndOffsetTimes_AreCanonicalAndIdempotent(bool sqlite)
+    {
+        using var scope = StoreScope.Create(sqlite);
+        var precise = new DateTimeOffset(
+            2026, 7, 19, 4, 5, 6, 789, TimeSpan.FromHours(5));
+        var record = MembershipTrustRecord.Create(
+            "install:test",
+            MembershipTrustDomain.Membership,
+            revision: 1,
+            sequence: 6,
+            previousSequence: 5,
+            previousCanonicalHash: Enumerable.Repeat((byte)0x10, 32).ToArray(),
+            canonicalEnvelope: Enumerable.Repeat((byte)0x20, 96).ToArray(),
+            state: MembershipTrustState.Healthy,
+            observedAt: precise,
+            validFrom: precise.AddMinutes(-1),
+            validUntil: precise.AddMinutes(1));
+        Assert.Equal(TimeSpan.Zero, record.ObservedAt.Offset);
+        Assert.Equal(0, record.ObservedAt.Millisecond);
+        Assert.Equal(
+            MembershipTrustCommitResult.Applied,
+            await scope.Store.CommitMembershipTrustAsync(record, null));
+        Assert.Equal(
+            MembershipTrustCommitResult.Idempotent,
+            await scope.Store.CommitMembershipTrustAsync(record, null));
+        var read = await scope.Store.ReadMembershipTrustAsync(
+            "install:test",
+            MembershipTrustDomain.Membership);
+        Assert.Equal(record.ObservedAt, read.Head!.ObservedAt);
+        Assert.Equal(record.ValidFrom, read.Head.ValidFrom);
+        Assert.Equal(record.ValidUntil, read.Head.ValidUntil);
+
+        var clock = MembershipTrustClockRecord.Create("install:test", 1, precise);
+        Assert.Equal(TimeSpan.Zero, clock.ObservedAt.Offset);
+        Assert.Equal(0, clock.ObservedAt.Millisecond);
+        Assert.Equal(
+            MembershipTrustClockCommitResult.Applied,
+            await scope.Store.CommitMembershipTrustClockAsync(clock, null));
+        Assert.Equal(
+            MembershipTrustClockCommitResult.Idempotent,
+            await scope.Store.CommitMembershipTrustClockAsync(clock, null));
+        Assert.Equal(
+            clock.ObservedAt,
+            (await scope.Store.ReadMembershipTrustClockAsync(
+                "install:test")).Record!.ObservedAt);
+    }
+
     [Fact]
     public async Task InMemoryRestart_PreservesHeadAndPredecessor()
     {

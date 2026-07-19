@@ -803,6 +803,115 @@ public sealed class MembershipTrustServiceTests
     }
 
     [Fact]
+    public async Task AuthorityReplayAndSuccessor_RevalidatePersistedChainBeforeReturning()
+    {
+        var verifier = new FixtureMembershipVerifier();
+        var clock = new MutableClock(FixtureNow);
+        var store = new InMemorySessionStore();
+        var profile = FixtureProfile();
+        var service = new MembershipTrustService(store, verifier, clock, EnabledOptions());
+        _ = await service.InitializeAsync(profile);
+        var initial = (await store.ReadMembershipTrustAsync(
+            profile.OpaqueProfileKey,
+            MembershipTrustDomain.Authority)).Head!;
+        var rotation = CreateDelegation(
+            profile,
+            verifier,
+            sequence: 3,
+            previousHash: initial.CanonicalHash,
+            keyOffset: 141,
+            validUntil: 1300);
+        Assert.Equal(
+            MembershipTrustState.Healthy,
+            (await service.ApplyDelegationAsync(profile, rotation)).State);
+
+        var rejecting = new MembershipTrustService(
+            store,
+            new RejectingMembershipVerifier(),
+            clock,
+            EnabledOptions());
+        Assert.Equal(
+            MembershipTrustState.ProtocolUnsupported,
+            (await rejecting.ApplyDelegationAsync(profile, rotation)).State);
+
+        var current = (await store.ReadMembershipTrustAsync(
+            profile.OpaqueProfileKey,
+            MembershipTrustDomain.Authority)).Head!;
+        var successor = CreateDelegation(
+            profile,
+            verifier,
+            sequence: 4,
+            previousHash: current.CanonicalHash,
+            keyOffset: 143,
+            validFrom: 1400,
+            validUntil: 2200);
+        Assert.Equal(
+            MembershipTrustState.ProtocolUnsupported,
+            (await rejecting.ApplyDelegationAsync(profile, successor)).State);
+
+        clock.UtcNow = DateTimeOffset.FromUnixTimeSeconds(1500);
+        Assert.Equal(
+            MembershipTrustState.Expired,
+            (await service.ApplyDelegationAsync(profile, rotation)).State);
+        Assert.Equal(
+            MembershipTrustState.Healthy,
+            (await service.ApplyDelegationAsync(profile, successor)).State);
+    }
+
+    [Fact]
+    public async Task Evaluate_RevisionFenceRejectsConcurrentAuthorityChange()
+    {
+        var verifier = new FixtureMembershipVerifier();
+        var inner = new InMemorySessionStore();
+        var profile = FixtureProfile();
+        var writer = Service(inner, verifier);
+        _ = await writer.InitializeAsync(profile);
+        _ = await writer.ApplyBridgeAsync(
+            profile,
+            Vector("deep-extension/membership/v1/signed-bridge"));
+        _ = await writer.ApplyMembershipAsync(
+            profile,
+            Vector("deep-extension/membership/v1/signed-membership"));
+
+        var interleaved = new InterleavingMembershipTrustRepository(
+            inner,
+            async () =>
+            {
+                Assert.Equal(
+                    MembershipTrustState.Revoked,
+                    (await writer.ApplyRevocationAsync(
+                        profile,
+                        Vector("deep-extension/membership/v1/signed-revocation"))).State);
+            });
+        var evaluator = Service(interleaved, verifier);
+
+        Assert.NotEqual(
+            MembershipTrustState.Healthy,
+            (await evaluator.EvaluateAsync(profile)).State);
+        Assert.Equal(
+            MembershipTrustState.Revoked,
+            (await writer.EvaluateAsync(profile)).State);
+    }
+
+    [Fact]
+    public async Task OrdinaryProfile_CannotOccupyReservedSelfHostedNamespace()
+    {
+        var store = new InMemorySessionStore();
+        var profile = FixtureProfile() with
+        {
+            OpaqueProfileKey = "install:self-hosted:collision"
+        };
+        var status = await Service(store).InitializeAsync(profile);
+
+        Assert.NotEqual(MembershipTrustState.Healthy, status.State);
+        Assert.Equal(
+            MembershipTrustReadResult.Missing,
+            (await store.ReadMembershipTrustAsync(
+                profile.OpaqueProfileKey,
+                MembershipTrustDomain.Authority)).Result);
+    }
+
+    [Fact]
     public async Task RestartCryptographicallyRevalidatesPersistedAuthorityAndContent()
     {
         var verifier = new FixtureMembershipVerifier();
@@ -1080,6 +1189,47 @@ public sealed class MembershipTrustServiceTests
             signingBytes.CopyTo(framed.AsSpan(signerId.Length + publicKey.Length));
             return SHA256.HashData(framed);
         }
+    }
+
+    private sealed class InterleavingMembershipTrustRepository(
+        IMembershipTrustRepository inner,
+        Func<Task> mutation) : IMembershipTrustRepository
+    {
+        private int authorityReads;
+
+        public Task<MembershipTrustCommitResult> CommitMembershipTrustAsync(
+            MembershipTrustRecord record,
+            ulong? expectedHeadRevision,
+            CancellationToken cancellationToken = default) =>
+            inner.CommitMembershipTrustAsync(record, expectedHeadRevision, cancellationToken);
+
+        public async Task<MembershipTrustReadSnapshot> ReadMembershipTrustAsync(
+            string opaqueProfileKey,
+            MembershipTrustDomain domain,
+            CancellationToken cancellationToken = default)
+        {
+            var snapshot = await inner.ReadMembershipTrustAsync(
+                opaqueProfileKey,
+                domain,
+                cancellationToken);
+            if (domain == MembershipTrustDomain.Authority &&
+                Interlocked.Increment(ref authorityReads) == 1)
+            {
+                await mutation();
+            }
+            return snapshot;
+        }
+
+        public Task<MembershipTrustClockCommitResult> CommitMembershipTrustClockAsync(
+            MembershipTrustClockRecord record,
+            ulong? expectedRevision,
+            CancellationToken cancellationToken = default) =>
+            inner.CommitMembershipTrustClockAsync(record, expectedRevision, cancellationToken);
+
+        public Task<MembershipTrustClockReadSnapshot> ReadMembershipTrustClockAsync(
+            string opaqueProfileKey,
+            CancellationToken cancellationToken = default) =>
+            inner.ReadMembershipTrustClockAsync(opaqueProfileKey, cancellationToken);
     }
 
     private sealed class RejectingMembershipVerifier : IMembershipSignatureVerifier
