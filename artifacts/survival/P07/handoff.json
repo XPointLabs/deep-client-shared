@@ -1,10 +1,20 @@
 {
   "schema": "deep.p07.handoff.v1",
   "sourceCommit": "13e39cf9ff4b0cf3b1c60084aa5af977db68f280",
-  "previousEvidenceCarrierCommit": "c3db73f4819ff47614cfea3610dbfe6bbcacedf9",
+  "previousEvidenceCarrierCommit": "d7fb6be1e09fda0e05bd8f0a7090603ee16fee5c",
   "evidenceContentCommit": "dd2be0afc69fcd7588b1f20a18a20ce80b94f7cc",
-  "independentReviewRequired": true,
-  "next": ["repeat independent exact-source-and-evidence review", "P07B source policy", "P14 self-host UX"],
+  "independentReviewRequired": false,
+  "independentReview": {
+    "verdict": "GO",
+    "reviewedSourceCommit": "13e39cf9ff4b0cf3b1c60084aa5af977db68f280",
+    "reviewedEvidenceContentCommit": "dd2be0afc69fcd7588b1f20a18a20ce80b94f7cc",
+    "reviewedEvidenceCarrierCommit": "d7fb6be1e09fda0e05bd8f0a7090603ee16fee5c",
+    "p0": 0,
+    "p1": 0,
+    "p2": 0,
+    "p3": 2
+  },
+  "next": ["P07B source policy", "P14 self-host UX"],
   "blockers": [
     "no approved production P04 signature profile or external cryptographic review",
     "no live signed bootstrap/checkpoint source",

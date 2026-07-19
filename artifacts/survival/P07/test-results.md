@@ -43,3 +43,23 @@ Mr. X authorized exact working-tree-only LF normalization from the unchanged
 Git blob; the resulting SHA-256 is
 `4bca6bffffa751d124a322a51af878476522faa9ded8a56bd2c89f93ac1e576a`.
 The blob remained `76005cbb4fdbcdd8cd0b9eef8482af2386067741` and the fixture has no Git diff.
+
+## Independent exact-source and evidence review
+
+The independent read-only review of source
+`13e39cf9ff4b0cf3b1c60084aa5af977db68f280`, evidence content
+`dd2be0afc69fcd7588b1f20a18a20ce80b94f7cc` and evidence carrier
+`d7fb6be1e09fda0e05bd8f0a7090603ee16fee5c` returned
+`GO — P0/P1/P2/P3 = 0/0/0/2`.
+
+The source-to-carrier diff contains only five P07 evidence files. Reviewed
+source, tests, lock/configuration and runtime files are unchanged. The reviewer
+repeated the locked cache-only restore, dependency gate, 145 focused Release
+tests, 6 schema/flag Release tests, 455 full Debug tests, 455 full Release tests,
+both zero-warning builds, format verification and diff check. The recorded TRX
+hashes above were independently matched.
+
+Acceptance is limited to the dormant local trust contract. Production
+activation, live signed sources, external cryptographic approval, mobile and
+Windows E2E remain incomplete. The two documented P3 coverage residuals remain
+open and are not represented as completed tests.
