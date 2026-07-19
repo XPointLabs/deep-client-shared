@@ -1100,21 +1100,36 @@ public sealed class InMemorySessionStore :
                 return Task.FromResult(MembershipTrustRepositoryValidation.Missing());
             }
             if (!hasRecords || !hasHead || records is null || headRevision == 0 ||
-                records.Keys.Any(revision => revision > headRevision) ||
-                !records.TryGetValue(headRevision, out var head) ||
-                !MembershipTrustRepositoryValidation.IsValid(head))
+                headRevision != checked((ulong)records.Count))
             {
                 return Task.FromResult(MembershipTrustRepositoryValidation.Corrupt());
             }
 
+            MembershipTrustRecord? head = null;
             MembershipTrustRecord? predecessor = null;
-            if (headRevision > 1 &&
-                (!records.TryGetValue(headRevision - 1, out predecessor) ||
-                 !MembershipTrustRepositoryValidation.IsValid(predecessor)))
+            MembershipTrustRecord? previous = null;
+            for (var revision = 1UL; revision <= headRevision; revision++)
             {
-                return Task.FromResult(MembershipTrustRepositoryValidation.Corrupt());
+                if (!records.TryGetValue(revision, out var record) ||
+                    !MembershipTrustRepositoryValidation.IsValid(record) ||
+                    !MembershipTrustRepositoryValidation.HasValidLinkage(
+                        record,
+                        previous))
+                {
+                    return Task.FromResult(MembershipTrustRepositoryValidation.Corrupt());
+                }
+                if (revision == headRevision - 1)
+                {
+                    predecessor = record;
+                }
+                if (revision == headRevision)
+                {
+                    head = record;
+                    break;
+                }
+                previous = record;
             }
-            if (!MembershipTrustRepositoryValidation.HasValidLinkage(head, predecessor))
+            if (head is null)
             {
                 return Task.FromResult(MembershipTrustRepositoryValidation.Corrupt());
             }

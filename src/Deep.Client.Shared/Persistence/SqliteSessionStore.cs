@@ -1522,36 +1522,39 @@ public sealed class SqliteSessionStore :
                 headDigest = reader.GetFieldValue<byte[]>(1);
             }
 
-            var current = await ReadMembershipTrustRecordAsync(
-                connection,
-                transaction: null,
-                opaqueProfileKey,
-                domain,
-                headRevision.Value,
-                cancellationToken).ConfigureAwait(false);
-            if (!MembershipTrustRepositoryValidation.IsValid(current) ||
-                headDigest is null ||
-                !headDigest.AsSpan().SequenceEqual(current!.PayloadDigest))
-            {
-                return MembershipTrustRepositoryValidation.Corrupt();
-            }
-
+            MembershipTrustRecord? current = null;
             MembershipTrustRecord? predecessor = null;
-            if (headRevision > 1)
+            MembershipTrustRecord? previous = null;
+            for (var revision = 1UL; revision <= headRevision.Value; revision++)
             {
-                predecessor = await ReadMembershipTrustRecordAsync(
+                var record = await ReadMembershipTrustRecordAsync(
                     connection,
                     transaction: null,
                     opaqueProfileKey,
                     domain,
-                    headRevision.Value - 1,
+                    revision,
                     cancellationToken).ConfigureAwait(false);
-                if (!MembershipTrustRepositoryValidation.IsValid(predecessor))
+                if (!MembershipTrustRepositoryValidation.IsValid(record) ||
+                    !MembershipTrustRepositoryValidation.HasValidLinkage(
+                        record!,
+                        previous))
                 {
                     return MembershipTrustRepositoryValidation.Corrupt();
                 }
+                if (revision == headRevision.Value - 1)
+                {
+                    predecessor = record;
+                }
+                if (revision == headRevision.Value)
+                {
+                    current = record;
+                    break;
+                }
+                previous = record;
             }
-            if (!MembershipTrustRepositoryValidation.HasValidLinkage(current!, predecessor))
+            if (current is null ||
+                headDigest is null ||
+                !headDigest.AsSpan().SequenceEqual(current.PayloadDigest))
             {
                 return MembershipTrustRepositoryValidation.Corrupt();
             }

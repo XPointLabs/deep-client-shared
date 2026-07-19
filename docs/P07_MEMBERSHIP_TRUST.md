@@ -70,6 +70,28 @@ Ordinary profiles use `install:*` excluding the reserved
 `install:self-hosted:*` subtree; only the explicit self-host import boundary may
 write that namespace.
 
+Every public operation takes a deep snapshot of profile, anchor, envelope, pin,
+and self-host import bytes before its first verification or persistence await.
+Dependency failures are translated to coarse trust statuses; cancellation still
+propagates, while verifier or repository exception text never crosses the public
+privacy boundary. Operation time is sampled once and canonicalized to the
+protocol's UTC whole-second unit.
+
+Authority equivocation at the bootstrap revision follows the same verified fork
+reducer as later revisions. A different same-sequence candidate becomes durable
+`ForkDetected` evidence only after successful cryptographic verification.
+Content exact replay requires the stored signing authority to equal the active
+authority. A newly committed content successor is fenced against the exact
+authority revision and digest used for verification before `Healthy` is
+returned; a concurrent rotation is reevaluated fail closed.
+
+Repository reads validate every immutable revision from revision one through
+the advertised head, including its payload digest and predecessor linkage.
+This deliberately favors dormant-slice corruption detection over read cost.
+A future production composition may replace the complete scan only with a
+separately reviewed authenticated-history/checkpoint design that preserves the
+same deletion and deep-corruption decisions.
+
 In-memory repository inputs and read snapshots are defensive copies, matching
 SQLite value semantics. Deterministic test-only fault points prove cancellation
 before durable commit rolls back, while cancellation after commit is explicitly
