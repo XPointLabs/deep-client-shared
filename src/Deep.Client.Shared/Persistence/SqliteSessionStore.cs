@@ -1344,28 +1344,14 @@ public sealed class SqliteSessionStore :
             using var connection = OpenConnection();
             using var transaction = connection.BeginTransaction();
 
-            var existing = await ReadMembershipTrustRecordAsync(
-                connection,
-                transaction,
-                record.OpaqueProfileKey,
-                record.Domain,
-                record.Revision,
-                cancellationToken).ConfigureAwait(false);
-            if (existing is not null)
-            {
-                transaction.Rollback();
-                return MembershipTrustRepositoryValidation.Same(existing, record)
-                    ? MembershipTrustCommitResult.Idempotent
-                    : MembershipTrustCommitResult.Conflict;
-            }
-
             ulong? currentHead;
+            byte[]? currentHeadDigest;
             long currentHistoryBytes;
             await using (var head = connection.CreateCommand())
             {
                 head.Transaction = transaction;
                 head.CommandText = """
-                    SELECT revision, history_bytes
+                    SELECT revision, length(payload_digest), payload_digest, history_bytes
                     FROM membership_trust_heads
                     WHERE profile_key = $profile AND domain = $domain;
                     """;
@@ -1376,7 +1362,12 @@ public sealed class SqliteSessionStore :
                 if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
                 {
                     var signedRevision = reader.GetInt64(0);
-                    currentHistoryBytes = reader.GetInt64(1);
+                    currentHeadDigest = ReadFixedProjectedBlob(
+                        reader,
+                        lengthOrdinal: 1,
+                        blobOrdinal: 2,
+                        MembershipLimits.HashLength);
+                    currentHistoryBytes = reader.GetInt64(3);
                     if (signedRevision <= 0 ||
                         currentHistoryBytes < 0 ||
                         currentHistoryBytes >
@@ -1391,8 +1382,50 @@ public sealed class SqliteSessionStore :
                 else
                 {
                     currentHead = null;
+                    currentHeadDigest = null;
                     currentHistoryBytes = 0;
                 }
+            }
+
+            if (currentHead.HasValue)
+            {
+                var currentHeadRecord = await ReadMembershipTrustRecordAsync(
+                    connection,
+                    transaction,
+                    record.OpaqueProfileKey,
+                    record.Domain,
+                    currentHead.Value,
+                    cancellationToken).ConfigureAwait(false);
+                if (currentHeadRecord is null ||
+                    currentHeadDigest is null ||
+                    !currentHeadDigest.AsSpan().SequenceEqual(
+                        currentHeadRecord.PayloadDigest) ||
+                    currentHistoryBytes <
+                        MembershipTrustRepositoryValidation.HistoryBlobBytes(
+                            currentHeadRecord))
+                {
+                    transaction.Rollback();
+                    return MembershipTrustCommitResult.Corrupt;
+                }
+            }
+
+            var existing = await ReadMembershipTrustRecordAsync(
+                connection,
+                transaction,
+                record.OpaqueProfileKey,
+                record.Domain,
+                record.Revision,
+                cancellationToken).ConfigureAwait(false);
+            if (existing is not null)
+            {
+                transaction.Rollback();
+                if (currentHead != record.Revision)
+                {
+                    return MembershipTrustCommitResult.Corrupt;
+                }
+                return MembershipTrustRepositoryValidation.Same(existing, record)
+                    ? MembershipTrustCommitResult.Idempotent
+                    : MembershipTrustCommitResult.Conflict;
             }
 
             if (currentHead != expectedHeadRevision ||
@@ -1509,7 +1542,7 @@ public sealed class SqliteSessionStore :
             {
                 head.Transaction = transaction;
                 head.CommandText = """
-                    SELECT revision, payload_digest, history_bytes
+                    SELECT revision, length(payload_digest), payload_digest, history_bytes
                     FROM membership_trust_heads
                     WHERE profile_key = $profile AND domain = $domain;
                     """;
@@ -1534,7 +1567,12 @@ public sealed class SqliteSessionStore :
                         : MembershipTrustRepositoryValidation.Corrupt();
                 }
                 var signedRevision = reader.GetInt64(0);
-                headHistoryBytes = reader.GetInt64(2);
+                headDigest = ReadFixedProjectedBlob(
+                    reader,
+                    lengthOrdinal: 1,
+                    blobOrdinal: 2,
+                    MembershipLimits.HashLength);
+                headHistoryBytes = reader.GetInt64(3);
                 if (signedRevision <= 0 ||
                     headHistoryBytes < 0 ||
                     headHistoryBytes >
@@ -1544,7 +1582,6 @@ public sealed class SqliteSessionStore :
                     return MembershipTrustRepositoryValidation.Corrupt();
                 }
                 headRevision = checked((ulong)signedRevision);
-                headDigest = reader.GetFieldValue<byte[]>(1);
             }
 
             if (headRevision.Value >
@@ -1586,9 +1623,12 @@ public sealed class SqliteSessionStore :
                 command.Transaction = transaction;
                 command.CommandText = """
                     SELECT revision, version, artifact_kind, sequence, previous_sequence,
+                           state, observed_at, valid_from, valid_until,
+                           length(previous_hash), length(envelope), length(payload_digest),
+                           length(canonical_hash), length(profile_binding_hash),
+                           length(signing_authority), length(revoked_delegation_hashes),
                            previous_hash, envelope, payload_digest, canonical_hash,
-                           profile_binding_hash, signing_authority, revoked_delegation_hashes,
-                           state, observed_at, valid_from, valid_until
+                           profile_binding_hash, signing_authority, revoked_delegation_hashes
                     FROM membership_trust_records
                     WHERE profile_key = $profile AND domain = $domain
                     ORDER BY revision
@@ -1610,6 +1650,10 @@ public sealed class SqliteSessionStore :
                     {
                         return MembershipTrustRepositoryValidation.Corrupt();
                     }
+                    var blobLengths = ReadMembershipTrustBlobLengths(
+                        reader,
+                        firstLengthOrdinal: 9,
+                        ref historyBytes);
                     var record = new MembershipTrustRecord
                     {
                         Version = reader.GetInt32(1),
@@ -1619,34 +1663,17 @@ public sealed class SqliteSessionStore :
                         Revision = checked((ulong)signedRevision),
                         Sequence = checked((ulong)sequence),
                         PreviousSequence = checked((ulong)previousSequence),
-                        PreviousCanonicalHash = ReadBoundedHistoryBlob(
-                            reader, 5, MembershipLimits.HashLength, ref historyBytes),
-                        CanonicalEnvelope = ReadBoundedHistoryBlob(
-                            reader,
-                            6,
-                            MembershipTrustRecord.MaximumEnvelopeLength,
-                            ref historyBytes),
-                        PayloadDigest = ReadBoundedHistoryBlob(
-                            reader, 7, MembershipLimits.HashLength, ref historyBytes),
-                        CanonicalHash = ReadBoundedHistoryBlob(
-                            reader, 8, MembershipLimits.HashLength, ref historyBytes),
-                        ProfileBindingHash = ReadBoundedHistoryBlob(
-                            reader, 9, MembershipLimits.HashLength, ref historyBytes),
-                        SigningAuthorityEnvelope = ReadBoundedHistoryBlob(
-                            reader,
-                            10,
-                            MembershipTrustRecord.MaximumEnvelopeLength,
-                            ref historyBytes),
-                        RevokedDelegationHashes = ReadBoundedHistoryBlob(
-                            reader,
-                            11,
-                            MembershipLimits.MaximumRevokedDelegationHashes *
-                                MembershipLimits.HashLength,
-                            ref historyBytes),
-                        State = (MembershipTrustState)reader.GetInt32(12),
-                        ObservedAt = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(13)),
-                        ValidFrom = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(14)),
-                        ValidUntil = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(15))
+                        PreviousCanonicalHash = ReadProjectedBlob(reader, 16, blobLengths[0]),
+                        CanonicalEnvelope = ReadProjectedBlob(reader, 17, blobLengths[1]),
+                        PayloadDigest = ReadProjectedBlob(reader, 18, blobLengths[2]),
+                        CanonicalHash = ReadProjectedBlob(reader, 19, blobLengths[3]),
+                        ProfileBindingHash = ReadProjectedBlob(reader, 20, blobLengths[4]),
+                        SigningAuthorityEnvelope = ReadProjectedBlob(reader, 21, blobLengths[5]),
+                        RevokedDelegationHashes = ReadProjectedBlob(reader, 22, blobLengths[6]),
+                        State = (MembershipTrustState)reader.GetInt32(5),
+                        ObservedAt = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(6)),
+                        ValidFrom = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(7)),
+                        ValidUntil = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(8))
                     };
                     recordsRead++;
                     if (record.Revision != recordsRead ||
@@ -2612,28 +2639,72 @@ public sealed class SqliteSessionStore :
         command.Parameters.AddWithValue("$validUntil", record.ValidUntil.ToUnixTimeSeconds());
     }
 
-    private static byte[] ReadBoundedHistoryBlob(
+    private static byte[] ReadFixedProjectedBlob(
         SqliteDataReader reader,
-        int ordinal,
-        int maximumBytes,
+        int lengthOrdinal,
+        int blobOrdinal,
+        int expectedBytes)
+    {
+        var length = reader.GetInt64(lengthOrdinal);
+        if (length != expectedBytes)
+        {
+            throw new InvalidDataException("Membership trust blob length is invalid.");
+        }
+
+        return ReadProjectedBlob(reader, blobOrdinal, checked((int)length));
+    }
+
+    private static int[] ReadMembershipTrustBlobLengths(
+        SqliteDataReader reader,
+        int firstLengthOrdinal,
         ref long historyBytes)
     {
-        var length = reader.GetBytes(ordinal, 0, null, 0, 0);
-        if (length < 0 ||
-            length > maximumBytes ||
-            historyBytes >
-                MembershipTrustRepositoryValidation.MaximumMembershipTrustHistoryBytes -
-                length)
+        var minimums = new[] { 32, 1, 32, 32, 32, 0, 0 };
+        var maximums = new[]
+        {
+            MembershipLimits.HashLength,
+            MembershipTrustRecord.MaximumEnvelopeLength,
+            MembershipLimits.HashLength,
+            MembershipLimits.HashLength,
+            MembershipLimits.HashLength,
+            MembershipTrustRecord.MaximumEnvelopeLength,
+            MembershipLimits.MaximumRevokedDelegationHashes *
+                MembershipLimits.HashLength
+        };
+        var lengths = new int[maximums.Length];
+        long rowBytes = 0;
+        for (var index = 0; index < maximums.Length; index++)
+        {
+            var length = reader.GetInt64(firstLengthOrdinal + index);
+            if (length < minimums[index] || length > maximums[index] ||
+                index == 6 && length % MembershipLimits.HashLength != 0)
+            {
+                throw new InvalidDataException("Membership trust blob length is invalid.");
+            }
+            rowBytes = checked(rowBytes + length);
+            lengths[index] = checked((int)length);
+        }
+
+        if (historyBytes >
+            MembershipTrustRepositoryValidation.MaximumMembershipTrustHistoryBytes -
+            rowBytes)
         {
             throw new InvalidDataException("Membership trust history exceeds its budget.");
         }
-        var value = new byte[checked((int)length)];
-        var read = reader.GetBytes(ordinal, 0, value, 0, value.Length);
-        if (read != length)
+        historyBytes += rowBytes;
+        return lengths;
+    }
+
+    private static byte[] ReadProjectedBlob(
+        SqliteDataReader reader,
+        int blobOrdinal,
+        int projectedLength)
+    {
+        var value = reader.GetFieldValue<byte[]>(blobOrdinal);
+        if (value.Length != projectedLength)
         {
-            throw new InvalidDataException("Membership trust history is truncated.");
+            throw new InvalidDataException("Membership trust blob length changed while reading.");
         }
-        historyBytes += length;
         return value;
     }
 
@@ -2648,9 +2719,13 @@ public sealed class SqliteSessionStore :
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = """
-            SELECT version, artifact_kind, sequence, previous_sequence, previous_hash, envelope,
-                   payload_digest, canonical_hash, profile_binding_hash, signing_authority,
-                   revoked_delegation_hashes, state, observed_at, valid_from, valid_until
+            SELECT version, artifact_kind, sequence, previous_sequence,
+                   state, observed_at, valid_from, valid_until,
+                   length(previous_hash), length(envelope), length(payload_digest),
+                   length(canonical_hash), length(profile_binding_hash),
+                   length(signing_authority), length(revoked_delegation_hashes),
+                   previous_hash, envelope, payload_digest, canonical_hash,
+                   profile_binding_hash, signing_authority, revoked_delegation_hashes
             FROM membership_trust_records
             WHERE profile_key = $profile AND domain = $domain AND revision = $revision;
             """;
@@ -2667,10 +2742,15 @@ public sealed class SqliteSessionStore :
         var previousSequence = reader.GetInt64(3);
         if (sequence <= 0 || previousSequence < 0)
         {
-            return null;
+            throw new InvalidDataException("Membership trust record counters are invalid.");
         }
 
-        return new MembershipTrustRecord
+        var recordBytes = 0L;
+        var blobLengths = ReadMembershipTrustBlobLengths(
+            reader,
+            firstLengthOrdinal: 8,
+            ref recordBytes);
+        var record = new MembershipTrustRecord
         {
             Version = reader.GetInt32(0),
             OpaqueProfileKey = opaqueProfileKey,
@@ -2679,18 +2759,23 @@ public sealed class SqliteSessionStore :
             Revision = revision,
             Sequence = checked((ulong)sequence),
             PreviousSequence = checked((ulong)previousSequence),
-            PreviousCanonicalHash = reader.GetFieldValue<byte[]>(4),
-            CanonicalEnvelope = reader.GetFieldValue<byte[]>(5),
-            PayloadDigest = reader.GetFieldValue<byte[]>(6),
-            CanonicalHash = reader.GetFieldValue<byte[]>(7),
-            ProfileBindingHash = reader.GetFieldValue<byte[]>(8),
-            SigningAuthorityEnvelope = reader.GetFieldValue<byte[]>(9),
-            RevokedDelegationHashes = reader.GetFieldValue<byte[]>(10),
-            State = (MembershipTrustState)reader.GetInt32(11),
-            ObservedAt = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(12)),
-            ValidFrom = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(13)),
-            ValidUntil = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(14))
+            PreviousCanonicalHash = ReadProjectedBlob(reader, 15, blobLengths[0]),
+            CanonicalEnvelope = ReadProjectedBlob(reader, 16, blobLengths[1]),
+            PayloadDigest = ReadProjectedBlob(reader, 17, blobLengths[2]),
+            CanonicalHash = ReadProjectedBlob(reader, 18, blobLengths[3]),
+            ProfileBindingHash = ReadProjectedBlob(reader, 19, blobLengths[4]),
+            SigningAuthorityEnvelope = ReadProjectedBlob(reader, 20, blobLengths[5]),
+            RevokedDelegationHashes = ReadProjectedBlob(reader, 21, blobLengths[6]),
+            State = (MembershipTrustState)reader.GetInt32(4),
+            ObservedAt = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(5)),
+            ValidFrom = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(6)),
+            ValidUntil = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(7))
         };
+        if (!MembershipTrustRepositoryValidation.IsValid(record))
+        {
+            throw new InvalidDataException("Membership trust record is invalid.");
+        }
+        return record;
     }
 
     private void InitializeSchema()
