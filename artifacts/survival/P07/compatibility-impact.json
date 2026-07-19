@@ -10,6 +10,7 @@
   "physicalSchemaAdditive": true,
   "membershipTrustRecordSchema": 2,
   "preV2DormantTrustRows": "fail-closed-rebootstrap-required",
+  "revocationOverflow": "terminal-fail-closed-rebootstrap-required",
   "existingTrustRowsUseExplicitAnchorDefaultUntilRewritten": true,
   "p07bImpact": "Consume canonical candidate bytes only after a separately reviewed source policy.",
   "mauiImpact": "Self-host import UX remains P14/P14B and is not registered."

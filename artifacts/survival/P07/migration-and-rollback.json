@@ -12,6 +12,7 @@
   ],
   "trustRecordSchema": 2,
   "preV2DormantRecordPolicy": "fail-closed-and-rebootstrap",
+  "revocationSetOverflowPolicy": "persist-terminal-corrupt-marker-and-require-approved-rebootstrap",
   "profileScope": "installation-not-account",
   "rollback": "keep tables and both flags false; do not select an older LKG",
   "silentLegacyFallback": false

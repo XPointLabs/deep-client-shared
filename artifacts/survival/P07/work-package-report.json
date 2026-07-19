@@ -13,27 +13,27 @@
   "correctiveRedCommits": [
     "a798739168effbe2bfd3d250e9999855533f5e78",
     "d20289800bbea96da526af614b38926fef149983",
-    "0b2715dfa6ee1bbe4292953a9108c112e12f79bc"
+    "0b2715dfa6ee1bbe4292953a9108c112e12f79bc",
+    "f7cd105f7d9dee0c0747d30dc446e98b3c48abd0"
   ],
-  "previousEvidenceCarrierCommit": "e7824a90ec4f5b2eb4b719c76cdf6e96040da66f",
-  "sourceCommit": "e665972e655160c7359b18d8dfeb432efec524a6",
-  "evidenceContentCommit": "7f4d248c2d9c7b750003ff65b31887f97e706e13",
+  "previousEvidenceCarrierCommit": "84b01ee39804d06c09a74b36edfcb5bbb082f926",
+  "sourceCommit": "9e2ceb1ddf6353a84a3c62334b5a12ab58198a0d",
   "tests": {
     "full": {
-      "command": "dotnet test .\\Deep.Client.Shared.slnx --configuration Release --no-restore --logger \"trx;LogFileName=p07-corrective3-full.trx\" --results-directory .\\artifacts\\survival\\P07\\trx",
+      "command": "dotnet test .\\Deep.Client.Shared.slnx --configuration Release --no-restore --logger \"trx;LogFileName=p07-corrective4-full.trx\" --results-directory .\\artifacts\\survival\\P07\\trx",
       "exitCode": 0,
-      "passed": 376,
+      "passed": 377,
       "failed": 0,
       "skipped": 0,
-      "localUncommittedTrxSha256": "a655627db8a0fb77d34f2ff0831483bd13aad8ba2b27591f047d40034f83a2de"
+      "localUncommittedTrxSha256": "5bcf2841d187e2e94d4dee5391904628703bf54ad08fde6be816a2684ebb2d9f"
     },
     "focused": {
-      "command": "dotnet test .\\tests\\Deep.Client.Shared.Tests\\Deep.Client.Shared.Tests.csproj --configuration Release --no-restore --filter \"FullyQualifiedName~MembershipTrust\" --logger \"trx;LogFileName=p07-corrective3-focused.trx\" --results-directory .\\artifacts\\survival\\P07\\trx",
+      "command": "dotnet test .\\tests\\Deep.Client.Shared.Tests\\Deep.Client.Shared.Tests.csproj --configuration Release --no-restore --filter \"FullyQualifiedName~MembershipTrust\" --logger \"trx;LogFileName=p07-corrective4-focused.trx\" --results-directory .\\artifacts\\survival\\P07\\trx",
       "exitCode": 0,
-      "passed": 66,
+      "passed": 67,
       "failed": 0,
       "skipped": 0,
-      "localUncommittedTrxSha256": "6dcbdd70e96aaa3ce7abcbfd9552e1ae4a2ae838f756e1498eab6eab69325b95"
+      "localUncommittedTrxSha256": "23f468e45755f38d2856dfb58de76c79d51c47d4bd28b8046df14ed2727c1fea"
     },
     "privacyGate": {
       "command": "& .\\eng\\scripts\\Invoke-P07TrustGate.ps1",
@@ -43,12 +43,12 @@
       "skipped": 0
     },
     "schemaAndFlags": {
-      "command": "dotnet test .\\tests\\Deep.Client.Shared.Tests\\Deep.Client.Shared.Tests.csproj --configuration Release --no-restore --filter \"FullyQualifiedName~FeatureFlagsTests|FullyQualifiedName~LogicalSchemaThreeToFour\" --logger \"trx;LogFileName=p07-corrective3-schema-flags.trx\" --results-directory .\\artifacts\\survival\\P07\\trx",
+      "command": "dotnet test .\\tests\\Deep.Client.Shared.Tests\\Deep.Client.Shared.Tests.csproj --configuration Release --no-restore --filter \"FullyQualifiedName~FeatureFlagsTests|FullyQualifiedName~LogicalSchemaThreeToFour\" --logger \"trx;LogFileName=p07-corrective4-schema-flags.trx\" --results-directory .\\artifacts\\survival\\P07\\trx",
       "exitCode": 0,
       "passed": 6,
       "failed": 0,
       "skipped": 0,
-      "localUncommittedTrxSha256": "a73095adf4f7a809257c7a3f13a44901815c723d2604c883fc9d61f28b3497bf"
+      "localUncommittedTrxSha256": "d8478da2e1182abd731d94b0068790a2fa903d3cfc93d903ad0dda17dee660a6"
     }
   },
   "verificationCommands": [
