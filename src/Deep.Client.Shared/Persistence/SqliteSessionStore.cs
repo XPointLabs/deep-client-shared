@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Globalization;
 using Deep.Client.Shared.Domain;
 using Deep.Client.Shared.Services;
+using Deep.Protocol.DeepExtension.Membership;
 using Microsoft.Data.Sqlite;
 
 namespace Deep.Client.Shared.Persistence;
@@ -1359,20 +1360,39 @@ public sealed class SqliteSessionStore :
             }
 
             ulong? currentHead;
+            long currentHistoryBytes;
             await using (var head = connection.CreateCommand())
             {
                 head.Transaction = transaction;
                 head.CommandText = """
-                    SELECT revision
+                    SELECT revision, history_bytes
                     FROM membership_trust_heads
                     WHERE profile_key = $profile AND domain = $domain;
                     """;
                 head.Parameters.AddWithValue("$profile", record.OpaqueProfileKey);
                 head.Parameters.AddWithValue("$domain", (int)record.Domain);
-                var raw = await head.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
-                currentHead = raw is null or DBNull
-                    ? null
-                    : checked((ulong)Convert.ToInt64(raw, CultureInfo.InvariantCulture));
+                await using var reader = await head.ExecuteReaderAsync(
+                    cancellationToken).ConfigureAwait(false);
+                if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    var signedRevision = reader.GetInt64(0);
+                    currentHistoryBytes = reader.GetInt64(1);
+                    if (signedRevision <= 0 ||
+                        currentHistoryBytes < 0 ||
+                        currentHistoryBytes >
+                            MembershipTrustRepositoryValidation
+                                .MaximumMembershipTrustHistoryBytes)
+                    {
+                        transaction.Rollback();
+                        return MembershipTrustCommitResult.Corrupt;
+                    }
+                    currentHead = checked((ulong)signedRevision);
+                }
+                else
+                {
+                    currentHead = null;
+                    currentHistoryBytes = 0;
+                }
             }
 
             if (currentHead != expectedHeadRevision ||
@@ -1381,6 +1401,16 @@ public sealed class SqliteSessionStore :
                 transaction.Rollback();
                 return MembershipTrustCommitResult.Conflict;
             }
+            var recordBytes =
+                MembershipTrustRepositoryValidation.HistoryBlobBytes(record);
+            if (currentHistoryBytes >
+                MembershipTrustRepositoryValidation.MaximumMembershipTrustHistoryBytes -
+                recordBytes)
+            {
+                transaction.Rollback();
+                return MembershipTrustCommitResult.Corrupt;
+            }
+            var nextHistoryBytes = currentHistoryBytes + recordBytes;
 
             await using (var insert = connection.CreateCommand())
             {
@@ -1409,7 +1439,8 @@ public sealed class SqliteSessionStore :
                 {
                     update.CommandText = """
                         UPDATE membership_trust_heads
-                        SET revision = $revision, payload_digest = $digest
+                        SET revision = $revision, payload_digest = $digest,
+                            history_bytes = $historyBytes
                         WHERE profile_key = $profile AND domain = $domain AND revision = $expected;
                         """;
                     update.Parameters.AddWithValue("$expected", checked((long)currentHead.Value));
@@ -1418,8 +1449,8 @@ public sealed class SqliteSessionStore :
                 {
                     update.CommandText = """
                         INSERT INTO membership_trust_heads
-                            (profile_key, domain, revision, payload_digest)
-                        VALUES ($profile, $domain, $revision, $digest)
+                            (profile_key, domain, revision, payload_digest, history_bytes)
+                        VALUES ($profile, $domain, $revision, $digest, $historyBytes)
                         ON CONFLICT(profile_key, domain) DO NOTHING;
                         """;
                 }
@@ -1427,6 +1458,7 @@ public sealed class SqliteSessionStore :
                 update.Parameters.AddWithValue("$domain", (int)record.Domain);
                 update.Parameters.AddWithValue("$revision", checked((long)record.Revision));
                 update.Parameters.AddWithValue("$digest", record.PayloadDigest);
+                update.Parameters.AddWithValue("$historyBytes", nextHistoryBytes);
                 updated = await update.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             }
 
@@ -1470,35 +1502,14 @@ public sealed class SqliteSessionStore :
             using var connection = OpenConnection();
             using var transaction = connection.BeginTransaction();
 
-            await using (var orphan = connection.CreateCommand())
-            {
-                orphan.Transaction = transaction;
-                orphan.CommandText = """
-                    SELECT COUNT(*)
-                    FROM membership_trust_records AS record
-                    LEFT JOIN membership_trust_heads AS head
-                      ON head.profile_key = record.profile_key AND head.domain = record.domain
-                    WHERE record.profile_key = $profile AND record.domain = $domain
-                      AND (head.revision IS NULL OR record.revision > head.revision);
-                    """;
-                orphan.Parameters.AddWithValue("$profile", opaqueProfileKey);
-                orphan.Parameters.AddWithValue("$domain", (int)domain);
-                var count = Convert.ToInt64(
-                    await orphan.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
-                    CultureInfo.InvariantCulture);
-                if (count != 0)
-                {
-                    return MembershipTrustRepositoryValidation.Corrupt();
-                }
-            }
-
             ulong? headRevision;
             byte[]? headDigest;
+            long headHistoryBytes;
             await using (var head = connection.CreateCommand())
             {
                 head.Transaction = transaction;
                 head.CommandText = """
-                    SELECT revision, payload_digest
+                    SELECT revision, payload_digest, history_bytes
                     FROM membership_trust_heads
                     WHERE profile_key = $profile AND domain = $domain;
                     """;
@@ -1510,20 +1521,25 @@ public sealed class SqliteSessionStore :
                     await using var records = connection.CreateCommand();
                     records.Transaction = transaction;
                     records.CommandText = """
-                        SELECT COUNT(*) FROM membership_trust_records
-                        WHERE profile_key = $profile AND domain = $domain;
+                        SELECT 1 FROM membership_trust_records
+                        WHERE profile_key = $profile AND domain = $domain
+                        LIMIT 1;
                         """;
                     records.Parameters.AddWithValue("$profile", opaqueProfileKey);
                     records.Parameters.AddWithValue("$domain", (int)domain);
-                    var count = Convert.ToInt64(
-                        await records.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
-                        CultureInfo.InvariantCulture);
-                    return count == 0
+                    var exists = await records.ExecuteScalarAsync(
+                        cancellationToken).ConfigureAwait(false);
+                    return exists is null or DBNull
                         ? MembershipTrustRepositoryValidation.Missing()
                         : MembershipTrustRepositoryValidation.Corrupt();
                 }
                 var signedRevision = reader.GetInt64(0);
-                if (signedRevision <= 0)
+                headHistoryBytes = reader.GetInt64(2);
+                if (signedRevision <= 0 ||
+                    headHistoryBytes < 0 ||
+                    headHistoryBytes >
+                        MembershipTrustRepositoryValidation
+                            .MaximumMembershipTrustHistoryBytes)
                 {
                     return MembershipTrustRepositoryValidation.Corrupt();
                 }
@@ -1537,8 +1553,34 @@ public sealed class SqliteSessionStore :
                 return MembershipTrustRepositoryValidation.Corrupt();
             }
 
-            var history = new List<MembershipTrustRecord>(
-                checked((int)headRevision.Value));
+            await using (var orphan = connection.CreateCommand())
+            {
+                orphan.Transaction = transaction;
+                orphan.CommandText = """
+                    SELECT 1
+                    FROM membership_trust_records
+                    WHERE profile_key = $profile AND domain = $domain
+                      AND revision > $head
+                    LIMIT 1;
+                    """;
+                orphan.Parameters.AddWithValue("$profile", opaqueProfileKey);
+                orphan.Parameters.AddWithValue("$domain", (int)domain);
+                orphan.Parameters.AddWithValue(
+                    "$head",
+                    checked((long)headRevision.Value));
+                var exists = await orphan.ExecuteScalarAsync(
+                    cancellationToken).ConfigureAwait(false);
+                if (exists is not null and not DBNull)
+                {
+                    return MembershipTrustRepositoryValidation.Corrupt();
+                }
+            }
+
+            MembershipTrustRecord? current = null;
+            MembershipTrustRecord? predecessor = null;
+            MembershipTrustRecord? previous = null;
+            var recordsRead = 0UL;
+            var historyBytes = 0L;
             await using (var command = connection.CreateCommand())
             {
                 command.Transaction = transaction;
@@ -1568,7 +1610,7 @@ public sealed class SqliteSessionStore :
                     {
                         return MembershipTrustRepositoryValidation.Corrupt();
                     }
-                    history.Add(new MembershipTrustRecord
+                    var record = new MembershipTrustRecord
                     {
                         Version = reader.GetInt32(1),
                         OpaqueProfileKey = opaqueProfileKey,
@@ -1577,41 +1619,56 @@ public sealed class SqliteSessionStore :
                         Revision = checked((ulong)signedRevision),
                         Sequence = checked((ulong)sequence),
                         PreviousSequence = checked((ulong)previousSequence),
-                        PreviousCanonicalHash = reader.GetFieldValue<byte[]>(5),
-                        CanonicalEnvelope = reader.GetFieldValue<byte[]>(6),
-                        PayloadDigest = reader.GetFieldValue<byte[]>(7),
-                        CanonicalHash = reader.GetFieldValue<byte[]>(8),
-                        ProfileBindingHash = reader.GetFieldValue<byte[]>(9),
-                        SigningAuthorityEnvelope = reader.GetFieldValue<byte[]>(10),
-                        RevokedDelegationHashes = reader.GetFieldValue<byte[]>(11),
+                        PreviousCanonicalHash = ReadBoundedHistoryBlob(
+                            reader, 5, MembershipLimits.HashLength, ref historyBytes),
+                        CanonicalEnvelope = ReadBoundedHistoryBlob(
+                            reader,
+                            6,
+                            MembershipTrustRecord.MaximumEnvelopeLength,
+                            ref historyBytes),
+                        PayloadDigest = ReadBoundedHistoryBlob(
+                            reader, 7, MembershipLimits.HashLength, ref historyBytes),
+                        CanonicalHash = ReadBoundedHistoryBlob(
+                            reader, 8, MembershipLimits.HashLength, ref historyBytes),
+                        ProfileBindingHash = ReadBoundedHistoryBlob(
+                            reader, 9, MembershipLimits.HashLength, ref historyBytes),
+                        SigningAuthorityEnvelope = ReadBoundedHistoryBlob(
+                            reader,
+                            10,
+                            MembershipTrustRecord.MaximumEnvelopeLength,
+                            ref historyBytes),
+                        RevokedDelegationHashes = ReadBoundedHistoryBlob(
+                            reader,
+                            11,
+                            MembershipLimits.MaximumRevokedDelegationHashes *
+                                MembershipLimits.HashLength,
+                            ref historyBytes),
                         State = (MembershipTrustState)reader.GetInt32(12),
                         ObservedAt = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(13)),
                         ValidFrom = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(14)),
                         ValidUntil = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(15))
-                    });
+                    };
+                    recordsRead++;
+                    if (record.Revision != recordsRead ||
+                        !MembershipTrustRepositoryValidation.IsValid(record) ||
+                        !MembershipTrustRepositoryValidation.HasValidLinkage(
+                            record,
+                            previous))
+                    {
+                        return MembershipTrustRepositoryValidation.Corrupt();
+                    }
+                    if (record.Revision == headRevision.Value - 1)
+                    {
+                        predecessor = record;
+                    }
+                    previous = record;
+                    current = record;
                 }
             }
 
-            if (history.Count != checked((int)headRevision.Value))
-            {
-                return MembershipTrustRepositoryValidation.Corrupt();
-            }
-            MembershipTrustRecord? previous = null;
-            foreach (var record in history)
-            {
-                if (record.Revision != (previous?.Revision + 1 ?? 1) ||
-                    !MembershipTrustRepositoryValidation.IsValid(record) ||
-                    !MembershipTrustRepositoryValidation.HasValidLinkage(
-                        record,
-                        previous))
-                {
-                    return MembershipTrustRepositoryValidation.Corrupt();
-                }
-                previous = record;
-            }
-            var current = history[^1];
-            var predecessor = history.Count > 1 ? history[^2] : null;
-            if (current.Revision != headRevision.Value ||
+            if (current is null ||
+                recordsRead != headRevision.Value ||
+                historyBytes != headHistoryBytes ||
                 headDigest is null ||
                 !headDigest.AsSpan().SequenceEqual(current.PayloadDigest))
             {
@@ -2555,6 +2612,31 @@ public sealed class SqliteSessionStore :
         command.Parameters.AddWithValue("$validUntil", record.ValidUntil.ToUnixTimeSeconds());
     }
 
+    private static byte[] ReadBoundedHistoryBlob(
+        SqliteDataReader reader,
+        int ordinal,
+        int maximumBytes,
+        ref long historyBytes)
+    {
+        var length = reader.GetBytes(ordinal, 0, null, 0, 0);
+        if (length < 0 ||
+            length > maximumBytes ||
+            historyBytes >
+                MembershipTrustRepositoryValidation.MaximumMembershipTrustHistoryBytes -
+                length)
+        {
+            throw new InvalidDataException("Membership trust history exceeds its budget.");
+        }
+        var value = new byte[checked((int)length)];
+        var read = reader.GetBytes(ordinal, 0, value, 0, value.Length);
+        if (read != length)
+        {
+            throw new InvalidDataException("Membership trust history is truncated.");
+        }
+        historyBytes += length;
+        return value;
+    }
+
     private static async Task<MembershipTrustRecord?> ReadMembershipTrustRecordAsync(
         SqliteConnection connection,
         SqliteTransaction? transaction,
@@ -2765,6 +2847,7 @@ public sealed class SqliteSessionStore :
                     domain INTEGER NOT NULL,
                     revision INTEGER NOT NULL,
                     payload_digest BLOB NOT NULL,
+                    history_bytes INTEGER NOT NULL DEFAULT 0,
                     PRIMARY KEY(profile_key, domain)
                 );
 
@@ -2800,6 +2883,7 @@ public sealed class SqliteSessionStore :
         command.ExecuteNonQuery();
         EnsureMessageHotColumns(connection, transaction);
         EnsureMessageHotIndexes(connection, transaction);
+        EnsureMembershipTrustColumns(connection, transaction);
 
         using var markVersionCommand = connection.CreateCommand();
         markVersionCommand.Transaction = transaction;
@@ -2841,6 +2925,7 @@ public sealed class SqliteSessionStore :
                 domain INTEGER NOT NULL,
                 revision INTEGER NOT NULL,
                 payload_digest BLOB NOT NULL,
+                history_bytes INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY(profile_key, domain)
             );
 
@@ -2897,6 +2982,54 @@ public sealed class SqliteSessionStore :
             alter.Transaction = transaction;
             alter.CommandText = statement;
             alter.ExecuteNonQuery();
+        }
+
+        var headColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        using (var inspect = connection.CreateCommand())
+        {
+            inspect.Transaction = transaction;
+            inspect.CommandText = "PRAGMA table_info(membership_trust_heads);";
+            using var reader = inspect.ExecuteReader();
+            while (reader.Read())
+            {
+                headColumns.Add(reader.GetString(1));
+            }
+        }
+        if (!headColumns.Contains("history_bytes"))
+        {
+            using (var alter = connection.CreateCommand())
+            {
+                alter.Transaction = transaction;
+                alter.CommandText = """
+                    ALTER TABLE membership_trust_heads
+                    ADD COLUMN history_bytes INTEGER NOT NULL DEFAULT 0;
+                    """;
+                alter.ExecuteNonQuery();
+            }
+            using var backfill = connection.CreateCommand();
+            backfill.Transaction = transaction;
+            backfill.CommandText = """
+                UPDATE membership_trust_heads
+                SET history_bytes = COALESCE((
+                    SELECT SUM(row_bytes)
+                    FROM (
+                        SELECT length(previous_hash) + length(envelope) +
+                               length(payload_digest) + length(canonical_hash) +
+                               length(profile_binding_hash) + length(signing_authority) +
+                               length(revoked_delegation_hashes) AS row_bytes
+                        FROM membership_trust_records
+                        WHERE profile_key = membership_trust_heads.profile_key
+                          AND domain = membership_trust_heads.domain
+                          AND revision <= membership_trust_heads.revision
+                        ORDER BY revision
+                        LIMIT $historyLimit
+                    )
+                ), 0);
+                """;
+            backfill.Parameters.AddWithValue(
+                "$historyLimit",
+                MembershipTrustRepositoryValidation.MaximumMembershipTrustHistoryRecords + 1);
+            backfill.ExecuteNonQuery();
         }
     }
 

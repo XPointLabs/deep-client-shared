@@ -5,6 +5,7 @@ namespace Deep.Client.Shared.Persistence;
 internal static class MembershipTrustRepositoryValidation
 {
     public const int MaximumMembershipTrustHistoryRecords = 4096;
+    public const long MaximumMembershipTrustHistoryBytes = 8L * 1024 * 1024;
 
     public static void ValidateKey(string opaqueProfileKey, MembershipTrustDomain domain)
     {
@@ -102,4 +103,23 @@ internal static class MembershipTrustRepositoryValidation
 
     public static MembershipTrustClockRecord Clone(MembershipTrustClockRecord record) =>
         record with { Digest = record.Digest.ToArray() };
+
+    public static long HistoryBlobBytes(MembershipTrustRecord record)
+    {
+        try
+        {
+            return checked(
+                (record.PreviousCanonicalHash?.LongLength ?? long.MaxValue) +
+                (record.CanonicalEnvelope?.LongLength ?? long.MaxValue) +
+                (record.PayloadDigest?.LongLength ?? long.MaxValue) +
+                (record.CanonicalHash?.LongLength ?? long.MaxValue) +
+                (record.ProfileBindingHash?.LongLength ?? long.MaxValue) +
+                (record.SigningAuthorityEnvelope?.LongLength ?? long.MaxValue) +
+                (record.RevokedDelegationHashes?.LongLength ?? long.MaxValue));
+        }
+        catch (OverflowException)
+        {
+            return long.MaxValue;
+        }
+    }
 }

@@ -609,6 +609,60 @@ public sealed class MembershipTrustRepositoryContractTests
         }
     }
 
+    [Fact]
+    public async Task SqliteLegacyHead_AddsAndBackfillsHistoryByteBudget()
+    {
+        var path = Path.Combine(
+            Path.GetTempPath(),
+            $"deep-p07-history-byte-migration-{Guid.NewGuid():N}.db");
+        try
+        {
+            await using (var store = new AsyncDisposableSqliteStore(path))
+            {
+                Assert.Equal(
+                    MembershipTrustCommitResult.Applied,
+                    await store.Value.CommitMembershipTrustAsync(
+                        Record(1, 6, 0x10),
+                        null));
+            }
+            await using (var connection = new SqliteConnection(
+                             $"Data Source={path};Pooling=False"))
+            {
+                await connection.OpenAsync();
+                await using var command = connection.CreateCommand();
+                command.CommandText = """
+                    ALTER TABLE membership_trust_heads DROP COLUMN history_bytes;
+                    """;
+                await command.ExecuteNonQueryAsync();
+            }
+
+            using var restarted = new SqliteSessionStore(path);
+            var read = await restarted.ReadMembershipTrustAsync(
+                "install:test",
+                MembershipTrustDomain.Membership);
+
+            Assert.Equal(MembershipTrustReadResult.Found, read.Result);
+            await using var verify = new SqliteConnection(
+                $"Data Source={path};Pooling=False");
+            await verify.OpenAsync();
+            await using var query = verify.CreateCommand();
+            query.CommandText = """
+                SELECT history_bytes
+                FROM membership_trust_heads
+                WHERE profile_key = 'install:test' AND domain = 3;
+                """;
+            Assert.True(Convert.ToInt64(await query.ExecuteScalarAsync()) > 0);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            foreach (var candidate in new[] { path, path + "-wal", path + "-shm" })
+            {
+                File.Delete(candidate);
+            }
+        }
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -890,5 +944,17 @@ public sealed class MembershipTrustRepositoryContractTests
             current = current.Parent;
         }
         throw new DirectoryNotFoundException("Repository root was not found.");
+    }
+
+    private sealed class AsyncDisposableSqliteStore(string path) : IAsyncDisposable
+    {
+        public SqliteSessionStore Value { get; } = new(path);
+
+        public ValueTask DisposeAsync()
+        {
+            Value.Dispose();
+            SqliteConnection.ClearAllPools();
+            return ValueTask.CompletedTask;
+        }
     }
 }

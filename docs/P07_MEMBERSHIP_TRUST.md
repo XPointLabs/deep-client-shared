@@ -88,13 +88,18 @@ returned; a concurrent rotation is reevaluated fail closed.
 Repository reads validate every immutable revision from revision one through
 the advertised head, including its payload digest and predecessor linkage.
 SQLite performs that validation from one ordered, cancellable snapshot query,
-not one query per revision. Both stores enforce a fail-closed 4096-record
-per-domain validation budget, preventing attacker-controlled unbounded CPU,
-database-gate, latency, and battery work. Reaching the dormant budget blocks
-the profile rather than silently selecting an older LKG. Production activation
+not one query per revision. Rows are validated as a stream after their BLOB
+lengths are checked, retaining only the predecessor and head. Missing-head and
+orphan checks use indexed `SELECT 1 ... LIMIT 1`, never history-wide counts.
+Both stores enforce fail-closed per-domain budgets of 4096 records and 8 MiB of
+persisted trust BLOBs, preventing attacker-controlled unbounded allocation,
+CPU, database-gate, latency, and battery work. The SQLite head stores the
+transactionally updated cumulative byte count and rejects an over-budget commit
+before it makes the profile unreadable. Reaching either dormant budget blocks
+the write rather than silently selecting an older LKG. Production activation
 requires a separately reviewed authenticated checkpoint/compaction design that
-preserves the same deletion and deep-corruption decisions without this dormant
-limit.
+preserves the same deletion and deep-corruption decisions without these dormant
+limits.
 
 In-memory repository inputs and read snapshots are defensive copies, matching
 SQLite value semantics. Deterministic test-only fault points prove cancellation

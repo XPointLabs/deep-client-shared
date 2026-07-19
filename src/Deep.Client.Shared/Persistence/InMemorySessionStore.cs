@@ -1044,6 +1044,23 @@ public sealed class InMemorySessionStore :
                         ? MembershipTrustCommitResult.Idempotent
                         : MembershipTrustCommitResult.Conflict);
             }
+            var historyBytes = records.Values.Aggregate(
+                0L,
+                static (total, value) =>
+                {
+                    var bytes = MembershipTrustRepositoryValidation.HistoryBlobBytes(value);
+                    return total > long.MaxValue - bytes
+                        ? long.MaxValue
+                        : total + bytes;
+                });
+            var recordBytes =
+                MembershipTrustRepositoryValidation.HistoryBlobBytes(record);
+            if (historyBytes >
+                    MembershipTrustRepositoryValidation.MaximumMembershipTrustHistoryBytes -
+                    recordBytes)
+            {
+                return Task.FromResult(MembershipTrustCommitResult.Corrupt);
+            }
 
             var hasHead = membershipTrustHeads.TryGetValue(key, out var headRevision);
             if (hasHead != expectedHeadRevision.HasValue ||
@@ -1115,6 +1132,7 @@ public sealed class InMemorySessionStore :
             MembershipTrustRecord? head = null;
             MembershipTrustRecord? predecessor = null;
             MembershipTrustRecord? previous = null;
+            var historyBytes = 0L;
             for (var revision = 1UL; revision <= headRevision; revision++)
             {
                 if (!records.TryGetValue(revision, out var record) ||
@@ -1125,6 +1143,15 @@ public sealed class InMemorySessionStore :
                 {
                     return Task.FromResult(MembershipTrustRepositoryValidation.Corrupt());
                 }
+                var recordBytes =
+                    MembershipTrustRepositoryValidation.HistoryBlobBytes(record);
+                if (historyBytes >
+                    MembershipTrustRepositoryValidation.MaximumMembershipTrustHistoryBytes -
+                    recordBytes)
+                {
+                    return Task.FromResult(MembershipTrustRepositoryValidation.Corrupt());
+                }
+                historyBytes += recordBytes;
                 if (revision == headRevision - 1)
                 {
                     predecessor = record;
