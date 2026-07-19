@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text;
+using System.Text.Json;
 using Deep.Client.Shared.Persistence;
 using Deep.Client.Shared.Services;
 using Microsoft.Data.Sqlite;
@@ -11,10 +12,12 @@ public sealed class StagedSelfHostedProfileServiceTests
     [Fact]
     public async Task AccountsAreIsolatedAndSettingsKeysContainOnlyDerivedOpaqueScope()
     {
-        var settings = new RecordingSettingsRepository(new InMemorySessionStore());
+        var settings = new RecordingAtomicBoundedSettingsRepository(new InMemorySessionStore());
         var service = new StagedSelfHostedProfileService(settings);
-        var firstScope = Scope(0xA1);
-        var secondScope = Scope(0xB2);
+        var firstScopeBytes = Bytes(StagedSelfHostedProfileLimits.AccountScopeBytes, 0xA1);
+        var secondScopeBytes = Bytes(StagedSelfHostedProfileLimits.AccountScopeBytes, 0xB2);
+        var firstScope = SelfHostedProfileStagingAccountScope.FromBytes(firstScopeBytes);
+        var secondScope = SelfHostedProfileStagingAccountScope.FromBytes(secondScopeBytes);
 
         var first = await service.SaveAsync(
             firstScope,
@@ -34,11 +37,11 @@ public sealed class StagedSelfHostedProfileServiceTests
         {
             Assert.StartsWith("account.self-hosted-staging.v1.", key, StringComparison.Ordinal);
             Assert.DoesNotContain(
-                Convert.ToHexString(firstScope.ToArray()),
+                Convert.ToHexString(firstScopeBytes),
                 key,
                 StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain(
-                Convert.ToHexString(secondScope.ToArray()),
+                Convert.ToHexString(secondScopeBytes),
                 key,
                 StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("label", key, StringComparison.OrdinalIgnoreCase);
@@ -60,7 +63,7 @@ public sealed class StagedSelfHostedProfileServiceTests
         source.AsSpan().Fill(0xEE);
 
         Assert.Equal(StagedSelfHostedProfileSaveResult.Saved, saved.Result);
-        Assert.Equal("Café", saved.Candidate?.DisplayHint);
+        Assert.Null(typeof(StagedSelfHostedProfileCandidate).GetProperty("DisplayHint"));
         var listed = await service.ListAsync(Scope(0x11));
         var read = await service.ReadAsync(Scope(0x11), saved.Candidate!.Id);
         var exported = await service.ExportAsync(Scope(0x11), saved.Candidate.Id);
@@ -218,7 +221,7 @@ public sealed class StagedSelfHostedProfileServiceTests
     public async Task CorruptCatalogReturnsTypedBoundedResultsAndIsNotOverwritten()
     {
         var inner = new InMemorySessionStore();
-        var settings = new RecordingSettingsRepository(inner);
+        var settings = new RecordingAtomicBoundedSettingsRepository(inner);
         var service = new StagedSelfHostedProfileService(settings);
         var scope = Scope(0x20);
         var initial = await service.SaveAsync(
@@ -226,7 +229,17 @@ public sealed class StagedSelfHostedProfileServiceTests
             StagedSelfHostedProfileLimits.SchemaVersion,
             Bytes(8, 0x74));
         var key = Assert.Single(settings.Keys.Distinct(StringComparer.Ordinal));
-        await inner.SetAsync(key, "synthetic-corrupt-value");
+        var persisted = await settings.ReadAtomicBoundedSettingAsync(
+            key,
+            AtomicBoundedSettingsLimits.MaximumValueUtf8Bytes);
+        var corruptBytes = JsonSerializer.SerializeToUtf8Bytes("synthetic-corrupt-value");
+        Assert.Equal(
+            AtomicBoundedSettingMutationResult.Applied,
+            await settings.ReplaceAtomicBoundedSettingAsync(
+                key,
+                persisted.Revision!,
+                corruptBytes,
+                AtomicBoundedSettingsLimits.MaximumValueUtf8Bytes));
         settings.Reset();
 
         var listed = await service.ListAsync(scope);
@@ -248,14 +261,18 @@ public sealed class StagedSelfHostedProfileServiceTests
         Assert.Equal(StagedSelfHostedProfileDeleteResult.Corrupt, deleted);
         Assert.Empty(settings.SetKeys);
         Assert.Empty(settings.DeleteKeys);
-        Assert.Equal("synthetic-corrupt-value", await inner.GetAsync<string>(key));
+        Assert.Equal(
+            corruptBytes,
+            (await settings.ReadAtomicBoundedSettingAsync(
+                key,
+                AtomicBoundedSettingsLimits.MaximumValueUtf8Bytes)).GetValueCopy());
     }
 
     [Fact]
     public async Task UnknownPersistedSchemaAndOversizedPersistedValuesAreCorrupt()
     {
         var inner = new InMemorySessionStore();
-        var settings = new RecordingSettingsRepository(inner);
+        var settings = new RecordingAtomicBoundedSettingsRepository(inner);
         var service = new StagedSelfHostedProfileService(settings);
         var scope = Scope(0x21);
         await service.SaveAsync(
@@ -264,31 +281,49 @@ public sealed class StagedSelfHostedProfileServiceTests
             Bytes(1, 0x76));
         var key = Assert.Single(settings.Keys.Distinct(StringComparer.Ordinal));
 
-        await inner.SetAsync(key, new
-        {
-            Version = StagedSelfHostedProfileLimits.SchemaVersion + 1,
-            Items = Array.Empty<object>()
-        });
+        var persisted = await settings.ReadAtomicBoundedSettingAsync(
+            key,
+            AtomicBoundedSettingsLimits.MaximumValueUtf8Bytes);
+        Assert.Equal(
+            AtomicBoundedSettingMutationResult.Applied,
+            await settings.ReplaceAtomicBoundedSettingAsync(
+                key,
+                persisted.Revision!,
+                JsonSerializer.SerializeToUtf8Bytes(new
+                {
+                    Version = StagedSelfHostedProfileLimits.SchemaVersion + 1,
+                    Items = Array.Empty<object>()
+                }),
+                AtomicBoundedSettingsLimits.MaximumValueUtf8Bytes));
         Assert.Equal(
             StagedSelfHostedProfileListResult.Corrupt,
             (await service.ListAsync(scope)).Result);
 
-        await inner.SetAsync(key, new
-        {
-            Version = StagedSelfHostedProfileLimits.SchemaVersion,
-            Items = new[]
-            {
-                new
+        persisted = await settings.ReadAtomicBoundedSettingAsync(
+            key,
+            AtomicBoundedSettingsLimits.MaximumValueUtf8Bytes);
+        Assert.Equal(
+            AtomicBoundedSettingMutationResult.Applied,
+            await settings.ReplaceAtomicBoundedSettingAsync(
+                key,
+                persisted.Revision!,
+                JsonSerializer.SerializeToUtf8Bytes(new
                 {
-                    Id = Bytes(16, 0x77),
-                    Fingerprint = Bytes(32, 0x78),
-                    CandidateBytes = Bytes(
-                        StagedSelfHostedProfileLimits.MaxCandidateBytes + 1,
-                        0x79),
-                    DisplayHint = (string?)null
-                }
-            }
-        });
+                    Version = StagedSelfHostedProfileLimits.SchemaVersion,
+                    Items = new[]
+                    {
+                        new
+                        {
+                            Id = Bytes(16, 0x77),
+                            Fingerprint = Bytes(32, 0x78),
+                            CandidateBytes = Bytes(
+                                StagedSelfHostedProfileLimits.MaxCandidateBytes + 1,
+                                0x79),
+                            DisplayHint = (string?)null
+                        }
+                    }
+                }),
+                AtomicBoundedSettingsLimits.MaximumValueUtf8Bytes));
         Assert.Equal(
             StagedSelfHostedProfileListResult.Corrupt,
             (await service.ListAsync(scope)).Result);
@@ -330,23 +365,28 @@ public sealed class StagedSelfHostedProfileServiceTests
     [Fact]
     public async Task FailedPersistenceMutationLeavesPreviousCatalogReadable()
     {
-        var repository = new FaultingSettingsRepository(new InMemorySessionStore());
+        var repository = new InMemorySessionStore();
         var service = new StagedSelfHostedProfileService(repository);
         var scope = Scope(0x23);
         var first = await service.SaveAsync(
             scope,
             StagedSelfHostedProfileLimits.SchemaVersion,
             Bytes(16, 0x81));
-        repository.FailNextSet("synthetic-sensitive-fault-text");
+        repository.SetAtomicBoundedSettingsFaultInjectorForTests(point =>
+        {
+            if (point == AtomicBoundedSettingsFaultPoint.BeforeCommit)
+            {
+                throw new IOException("synthetic-sensitive-fault-text");
+            }
+        });
+        var failed = await service.SaveAsync(
+            scope,
+            StagedSelfHostedProfileLimits.SchemaVersion,
+            Bytes(16, 0x82));
 
-        var exception = await Assert.ThrowsAsync<StagedSelfHostedProfilePersistenceException>(
-            () => service.SaveAsync(
-                scope,
-                StagedSelfHostedProfileLimits.SchemaVersion,
-                Bytes(16, 0x82)));
-
-        Assert.Equal("Staged self-hosted profile persistence failed.", exception.Message);
-        Assert.DoesNotContain("synthetic-sensitive-fault-text", exception.ToString(), StringComparison.Ordinal);
+        Assert.Equal(StagedSelfHostedProfileSaveResult.DependencyFailure, failed.Result);
+        Assert.DoesNotContain("synthetic-sensitive-fault-text", failed.ToString(), StringComparison.Ordinal);
+        repository.SetAtomicBoundedSettingsFaultInjectorForTests(null);
         var listed = await service.ListAsync(scope);
         Assert.Equal(StagedSelfHostedProfileListResult.Success, listed.Result);
         Assert.Equal(first.Candidate, Assert.Single(listed.Candidates));
@@ -438,7 +478,8 @@ public sealed class StagedSelfHostedProfileServiceTests
     public async Task PublicDebugStringAndExceptionSurfacesAreRedacted()
     {
         var service = new StagedSelfHostedProfileService(new InMemorySessionStore());
-        var scope = Scope(0x26);
+        var scopeBytes = Bytes(StagedSelfHostedProfileLimits.AccountScopeBytes, 0x26);
+        var scope = SelfHostedProfileStagingAccountScope.FromBytes(scopeBytes);
         const string hint = "Synthetic private hint";
         var bytes = Encoding.UTF8.GetBytes("synthetic-candidate-marker");
         var saved = await service.SaveAsync(
@@ -463,7 +504,7 @@ public sealed class StagedSelfHostedProfileServiceTests
             var rendered = value.ToString() ?? string.Empty;
             Assert.DoesNotContain(hint, rendered, StringComparison.Ordinal);
             Assert.DoesNotContain("synthetic-candidate-marker", rendered, StringComparison.Ordinal);
-            Assert.DoesNotContain(Convert.ToHexString(scope.ToArray()), rendered, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain(Convert.ToHexString(scopeBytes), rendered, StringComparison.OrdinalIgnoreCase);
             var debuggerDisplay = value.GetType()
                 .GetCustomAttributes(typeof(DebuggerDisplayAttribute), inherit: false)
                 .Cast<DebuggerDisplayAttribute>()
@@ -540,8 +581,9 @@ public sealed class StagedSelfHostedProfileServiceTests
             ?? throw new InvalidOperationException("Repository root was not found.");
     }
 
-    private sealed class RecordingSettingsRepository(ISettingsRepository inner)
-        : ISettingsRepository
+    private sealed class RecordingAtomicBoundedSettingsRepository(
+        IAtomicBoundedSettingsRepository inner)
+        : IAtomicBoundedSettingsRepository
     {
         private readonly List<string> keys = [];
         private readonly List<string> setKeys = [];
@@ -551,31 +593,63 @@ public sealed class StagedSelfHostedProfileServiceTests
         public IReadOnlyList<string> SetKeys => setKeys;
         public IReadOnlyList<string> DeleteKeys => deleteKeys;
 
-        public async Task SetAsync<T>(
+        public async Task<AtomicBoundedSettingMutationResult> CreateAtomicBoundedSettingAsync(
             string key,
-            T value,
+            ReadOnlyMemory<byte> utf8Json,
+            int maximumValueUtf8Bytes,
             CancellationToken cancellationToken = default)
         {
             keys.Add(key);
             setKeys.Add(key);
-            await inner.SetAsync(key, value, cancellationToken);
+            return await inner.CreateAtomicBoundedSettingAsync(
+                key,
+                utf8Json,
+                maximumValueUtf8Bytes,
+                cancellationToken);
         }
 
-        public async Task<T?> GetAsync<T>(
+        public async Task<AtomicBoundedSettingReadOutcome> ReadAtomicBoundedSettingAsync(
             string key,
+            int maximumValueUtf8Bytes,
             CancellationToken cancellationToken = default)
         {
             keys.Add(key);
-            return await inner.GetAsync<T>(key, cancellationToken);
+            return await inner.ReadAtomicBoundedSettingAsync(
+                key,
+                maximumValueUtf8Bytes,
+                cancellationToken);
         }
 
-        public async Task DeleteAsync(
+        public async Task<AtomicBoundedSettingMutationResult> ReplaceAtomicBoundedSettingAsync(
             string key,
+            AtomicBoundedSettingRevision expectedRevision,
+            ReadOnlyMemory<byte> utf8Json,
+            int maximumValueUtf8Bytes,
+            CancellationToken cancellationToken = default)
+        {
+            keys.Add(key);
+            setKeys.Add(key);
+            return await inner.ReplaceAtomicBoundedSettingAsync(
+                key,
+                expectedRevision,
+                utf8Json,
+                maximumValueUtf8Bytes,
+                cancellationToken);
+        }
+
+        public async Task<AtomicBoundedSettingMutationResult> DeleteAtomicBoundedSettingAsync(
+            string key,
+            AtomicBoundedSettingRevision expectedRevision,
+            int maximumValueUtf8Bytes,
             CancellationToken cancellationToken = default)
         {
             keys.Add(key);
             deleteKeys.Add(key);
-            await inner.DeleteAsync(key, cancellationToken);
+            return await inner.DeleteAtomicBoundedSettingAsync(
+                key,
+                expectedRevision,
+                maximumValueUtf8Bytes,
+                cancellationToken);
         }
 
         public void Reset()
@@ -584,37 +658,5 @@ public sealed class StagedSelfHostedProfileServiceTests
             setKeys.Clear();
             deleteKeys.Clear();
         }
-    }
-
-    private sealed class FaultingSettingsRepository(ISettingsRepository inner)
-        : ISettingsRepository
-    {
-        private string? nextSetFailure;
-
-        public void FailNextSet(string message) => nextSetFailure = message;
-
-        public Task SetAsync<T>(
-            string key,
-            T value,
-            CancellationToken cancellationToken = default)
-        {
-            if (nextSetFailure is { } message)
-            {
-                nextSetFailure = null;
-                throw new IOException(message);
-            }
-
-            return inner.SetAsync(key, value, cancellationToken);
-        }
-
-        public Task<T?> GetAsync<T>(
-            string key,
-            CancellationToken cancellationToken = default) =>
-            inner.GetAsync<T>(key, cancellationToken);
-
-        public Task DeleteAsync(
-            string key,
-            CancellationToken cancellationToken = default) =>
-            inner.DeleteAsync(key, cancellationToken);
     }
 }
