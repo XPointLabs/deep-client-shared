@@ -80,18 +80,49 @@ public sealed class MembershipTrustRepositoryContractTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task InvalidSuccessorLinkage_IsRejectedAndHeadPreserved(bool sqlite)
+    {
+        using var scope = StoreScope.Create(sqlite);
+        var first = Record(revision: 1, sequence: 6, fill: 0x11);
+        var unlinked = Record(revision: 2, sequence: 7, fill: 0x22);
+        Assert.Equal(
+            MembershipTrustCommitResult.Applied,
+            await scope.Store.CommitMembershipTrustAsync(first, null));
+
+        Assert.Equal(
+            MembershipTrustCommitResult.Conflict,
+            await scope.Store.CommitMembershipTrustAsync(unlinked, 1));
+        var read = await scope.Store.ReadMembershipTrustAsync(
+            "install:test",
+            MembershipTrustDomain.Membership);
+        Assert.Equal(MembershipTrustReadResult.Found, read.Result);
+        Assert.Equal(1UL, read.Head!.Revision);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task ConcurrentDifferentSuccessors_OnlyOneWins(bool sqlite)
     {
         using var scope = StoreScope.Create(sqlite);
         var store = scope.Store;
+        var predecessor = Record(revision: 1, sequence: 6, fill: 0x10);
         Assert.Equal(
             MembershipTrustCommitResult.Applied,
             await store.CommitMembershipTrustAsync(
-                Record(revision: 1, sequence: 6, fill: 0x10),
+                predecessor,
                 expectedHeadRevision: null));
 
-        var first = Record(revision: 2, sequence: 7, fill: 0x20);
-        var second = Record(revision: 2, sequence: 7, fill: 0x30);
+        var first = Record(
+            revision: 2,
+            sequence: 7,
+            fill: 0x20,
+            previousCanonicalHash: predecessor.CanonicalHash);
+        var second = Record(
+            revision: 2,
+            sequence: 7,
+            fill: 0x30,
+            previousCanonicalHash: predecessor.CanonicalHash);
         var results = await Task.WhenAll(
             store.CommitMembershipTrustAsync(first, 1),
             store.CommitMembershipTrustAsync(second, 1));
