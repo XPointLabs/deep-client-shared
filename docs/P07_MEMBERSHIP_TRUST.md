@@ -52,6 +52,24 @@ revision. The prior 64 hashes remain intact. Evaluation, restart, replay, and
 ordinary delegation rotation remain blocked; recovery requires a separately
 approved explicit rebootstrap flow that is intentionally absent from P07.
 
+Authority apply operations revalidate the persisted head and predecessor before
+both exact replay and successor processing. Exact replay also evaluates the
+current operation time, so an expired delegation cannot return a stale
+`Healthy`/idempotent result. A root-signed successor may still advance a
+historically valid but currently expired predecessor.
+
+`Evaluate` uses a final revision-and-digest fence across authority, bridge, and
+membership heads. If any head changes while the cross-domain decision is being
+formed, the operation fails closed instead of returning a mixed-snapshot
+`Healthy` result.
+
+All persisted trust timestamps are canonical UTC whole seconds at construction
+and validation boundaries. This matches the signed protocol time unit and gives
+SQLite and in-memory stores identical digest, replay, and clock-CAS semantics.
+Ordinary profiles use `install:*` excluding the reserved
+`install:self-hosted:*` subtree; only the explicit self-host import boundary may
+write that namespace.
+
 In-memory repository inputs and read snapshots are defensive copies, matching
 SQLite value semantics. Deterministic test-only fault points prove cancellation
 before durable commit rolls back, while cancellation after commit is explicitly

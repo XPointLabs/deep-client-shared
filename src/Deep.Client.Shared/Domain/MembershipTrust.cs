@@ -192,9 +192,9 @@ public sealed record MembershipTrustRecord
             SigningAuthorityEnvelope = (signingAuthorityEnvelope ?? []).ToArray(),
             RevokedDelegationHashes = (revokedDelegationHashes ?? []).ToArray(),
             State = state,
-            ObservedAt = observedAt,
-            ValidFrom = validFrom ?? DateTimeOffset.UnixEpoch,
-            ValidUntil = validUntil
+            ObservedAt = CanonicalTime(observedAt),
+            ValidFrom = CanonicalTime(validFrom ?? DateTimeOffset.UnixEpoch),
+            ValidUntil = CanonicalTime(validUntil)
         };
         record = record with { PayloadDigest = ComputePayloadDigest(record) };
         Validate(record);
@@ -234,6 +234,9 @@ public sealed record MembershipTrustRecord
             record.RevokedDelegationHashes.Length % MembershipLimits.HashLength != 0 ||
             !Enum.IsDefined(record.State) ||
             record.ObservedAt < DateTimeOffset.UnixEpoch ||
+            !record.ObservedAt.EqualsExact(CanonicalTime(record.ObservedAt)) ||
+            !record.ValidFrom.EqualsExact(CanonicalTime(record.ValidFrom)) ||
+            !record.ValidUntil.EqualsExact(CanonicalTime(record.ValidUntil)) ||
             record.ValidFrom > record.ValidUntil)
         {
             throw new InvalidDataException("Membership trust state is invalid.");
@@ -306,6 +309,9 @@ public sealed record MembershipTrustRecord
 
     private static void Append(IncrementalHash hash, ReadOnlySpan<byte> value) =>
         hash.AppendData(value);
+
+    private static DateTimeOffset CanonicalTime(DateTimeOffset value) =>
+        DateTimeOffset.FromUnixTimeSeconds(value.ToUnixTimeSeconds());
 }
 
 public sealed record MembershipTrustClockRecord
@@ -332,7 +338,7 @@ public sealed record MembershipTrustClockRecord
             Version = SchemaVersion,
             OpaqueProfileKey = opaqueProfileKey,
             Revision = revision,
-            ObservedAt = observedAt,
+            ObservedAt = CanonicalTime(observedAt),
             Digest = []
         };
         record = record with { Digest = ComputeDigest(record) };
@@ -349,6 +355,7 @@ public sealed record MembershipTrustClockRecord
             record.Revision == 0 ||
             record.Revision > long.MaxValue ||
             record.ObservedAt < DateTimeOffset.UnixEpoch ||
+            !record.ObservedAt.EqualsExact(CanonicalTime(record.ObservedAt)) ||
             record.Digest is null ||
             record.Digest.Length != MembershipLimits.HashLength ||
             !ComputeDigest(record).AsSpan().SequenceEqual(record.Digest))
@@ -373,4 +380,7 @@ public sealed record MembershipTrustClockRecord
         hash.AppendData(bytes);
         return hash.GetHashAndReset();
     }
+
+    private static DateTimeOffset CanonicalTime(DateTimeOffset value) =>
+        DateTimeOffset.FromUnixTimeSeconds(value.ToUnixTimeSeconds());
 }

@@ -225,12 +225,8 @@ public sealed class MembershipTrustService(
         try
         {
             ValidateOptions();
-            var genesis = DecodePinnedGenesis(profile);
-            var pinned = Bounded(profile.SignedDelegation);
-            RequireExact(
-                pinned,
-                MembershipContractCodec.EncodeSignedDelegation(
-                    MembershipContractCodec.DecodeSignedDelegation(pinned)));
+            var pins = ValidateBootstrapPins(profile);
+            var genesis = pins.Genesis;
             var profileBinding = ComputeProfileBinding(profile);
             var clockStatus = await ObserveClockAsync(
                 profile.OpaqueProfileKey,
@@ -253,6 +249,15 @@ public sealed class MembershipTrustService(
             {
                 return MembershipTrustStatus.For(MembershipTrustState.Corrupt);
             }
+            var persistedStatus = RevalidateAuthority(
+                current,
+                pins.Genesis,
+                pins.GenesisHash,
+                pins.CanonicalDelegation);
+            if (persistedStatus is not null)
+            {
+                return persistedStatus;
+            }
 
             var decoded = DecodeAuthorityCandidate(bytes, artifactKind);
             if (decoded.Sequence < current.Head.Sequence)
@@ -263,9 +268,7 @@ public sealed class MembershipTrustService(
                 current.Head.ArtifactKind == artifactKind &&
                 current.Head.CanonicalEnvelope.AsSpan().SequenceEqual(bytes))
             {
-                return MembershipTrustStatus.For(
-                    current.Head.State,
-                    MembershipTrustEvent.StateUnchanged);
+                return EvaluateAuthorityReplay(current.Head, now);
             }
             if (decoded.Sequence == current.Head.Sequence && current.Head.Revision == 1)
             {
@@ -494,7 +497,72 @@ public sealed class MembershipTrustService(
             return MembershipTrustStatus.For(MembershipTrustState.Expired);
         }
 
+        if (!await HeadsMatchAsync(
+                profile.OpaqueProfileKey,
+                snapshots,
+                cancellationToken).ConfigureAwait(false))
+        {
+            return MembershipTrustStatus.For(MembershipTrustState.Corrupt);
+        }
         return MembershipTrustStatus.For(MembershipTrustState.Healthy);
+    }
+
+    private async Task<bool> HeadsMatchAsync(
+        string opaqueProfileKey,
+        IReadOnlyList<MembershipTrustReadSnapshot> expected,
+        CancellationToken cancellationToken)
+    {
+        var domains = new[]
+        {
+            MembershipTrustDomain.Authority,
+            MembershipTrustDomain.Bridge,
+            MembershipTrustDomain.Membership
+        };
+        if (expected.Count != domains.Length)
+        {
+            return false;
+        }
+        for (var index = 0; index < domains.Length; index++)
+        {
+            var current = await repository.ReadMembershipTrustAsync(
+                opaqueProfileKey,
+                domains[index],
+                cancellationToken).ConfigureAwait(false);
+            var expectedHead = expected[index].Head;
+            if (current.Result != MembershipTrustReadResult.Found ||
+                current.Head is null ||
+                expectedHead is null ||
+                current.Head.Revision != expectedHead.Revision ||
+                !current.Head.PayloadDigest.AsSpan().SequenceEqual(
+                    expectedHead.PayloadDigest))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private MembershipTrustStatus EvaluateAuthorityReplay(
+        MembershipTrustRecord current,
+        DateTimeOffset now)
+    {
+        if (current.State != MembershipTrustState.Healthy)
+        {
+            return MembershipTrustStatus.For(
+                current.State,
+                MembershipTrustEvent.StateUnchanged);
+        }
+        if (now + options.AllowedClockSkew < current.ValidFrom)
+        {
+            return MembershipTrustStatus.For(MembershipTrustState.NotYetValid);
+        }
+        if (now > current.ValidUntil + options.AllowedClockSkew)
+        {
+            return MembershipTrustStatus.For(MembershipTrustState.Expired);
+        }
+        return MembershipTrustStatus.For(
+            MembershipTrustState.Healthy,
+            MembershipTrustEvent.StateUnchanged);
     }
 
     public async Task<MembershipTrustStatus> ImportSelfHostedGenesisAsync(
@@ -513,7 +581,7 @@ public sealed class MembershipTrustService(
 
         try
         {
-            ValidateProfileKey(import.OpaqueProfileKey);
+            ValidateProfileKey(import.OpaqueProfileKey, allowSelfHosted: true);
             if (!import.OpaqueProfileKey.StartsWith("install:self-hosted:", StringComparison.Ordinal))
             {
                 throw new InvalidDataException("Self-hosted profiles require an independent namespace.");
@@ -521,7 +589,8 @@ public sealed class MembershipTrustService(
             var clockStatus = await ObserveClockAsync(
                 import.OpaqueProfileKey,
                 now,
-                cancellationToken).ConfigureAwait(false);
+                cancellationToken,
+                allowSelfHosted: true).ConfigureAwait(false);
             if (clockStatus is not null)
             {
                 return clockStatus;
@@ -1597,11 +1666,15 @@ public sealed class MembershipTrustService(
         _ = AllowedSkewSeconds();
     }
 
-    private static void ValidateProfileKey(string opaqueProfileKey)
+    private static void ValidateProfileKey(
+        string opaqueProfileKey,
+        bool allowSelfHosted = false)
     {
         if (string.IsNullOrWhiteSpace(opaqueProfileKey) ||
             opaqueProfileKey.Length > MembershipTrustRecord.MaximumProfileKeyLength ||
-            !opaqueProfileKey.StartsWith("install:", StringComparison.Ordinal))
+            !opaqueProfileKey.StartsWith("install:", StringComparison.Ordinal) ||
+            !allowSelfHosted &&
+            opaqueProfileKey.StartsWith("install:self-hosted:", StringComparison.Ordinal))
         {
             throw new InvalidDataException("Membership profile is invalid.");
         }
@@ -1711,9 +1784,10 @@ public sealed class MembershipTrustService(
     private async Task<MembershipTrustStatus?> ObserveClockAsync(
         string opaqueProfileKey,
         DateTimeOffset now,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool allowSelfHosted = false)
     {
-        ValidateProfileKey(opaqueProfileKey);
+        ValidateProfileKey(opaqueProfileKey, allowSelfHosted);
         if (now < DateTimeOffset.UnixEpoch)
         {
             throw new InvalidDataException("Membership clock is invalid.");
