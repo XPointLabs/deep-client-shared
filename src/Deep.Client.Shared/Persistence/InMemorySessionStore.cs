@@ -1226,6 +1226,17 @@ public sealed class InMemorySessionStore :
         lock (durableStateGate)
         {
             var hasCurrent = membershipTrustClocks.TryGetValue(record.OpaqueProfileKey, out var current);
+            if (hasCurrent)
+            {
+                try
+                {
+                    MembershipTrustClockRecord.Validate(current!);
+                }
+                catch (InvalidDataException)
+                {
+                    return Task.FromResult(MembershipTrustClockCommitResult.Corrupt);
+                }
+            }
             if (hasCurrent != expectedRevision.HasValue ||
                 (hasCurrent && current!.Revision != expectedRevision!.Value) ||
                 record.Revision != (hasCurrent ? current!.Revision + 1 : 1))
