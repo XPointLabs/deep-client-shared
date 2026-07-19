@@ -331,9 +331,9 @@ public sealed class StagedSelfHostedProfileService
                 return new(StagedSelfHostedProfileSaveResult.DependencyFailure);
             }
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            throw;
+            throw SanitizedCancellation(cancellationToken);
         }
         catch
         {
@@ -386,6 +386,11 @@ public sealed class StagedSelfHostedProfileService
                 try
                 {
                     candidateId = providers.CreateCandidateId();
+                }
+                catch (OperationCanceledException) when (
+                    cancellationToken.IsCancellationRequested)
+                {
+                    throw SanitizedCancellation(cancellationToken);
                 }
                 catch
                 {
@@ -448,7 +453,7 @@ public sealed class StagedSelfHostedProfileService
     {
         ArgumentNullException.ThrowIfNull(accountScope);
         cancellationToken.ThrowIfCancellationRequested();
-        if (!TrySettingsKey(accountScope, out var key))
+        if (!TrySettingsKey(accountScope, cancellationToken, out var key))
         {
             return new(StagedSelfHostedProfileListResult.DependencyFailure);
         }
@@ -475,7 +480,7 @@ public sealed class StagedSelfHostedProfileService
         ArgumentNullException.ThrowIfNull(accountScope);
         ArgumentNullException.ThrowIfNull(candidateId);
         cancellationToken.ThrowIfCancellationRequested();
-        if (!TrySettingsKey(accountScope, out var key))
+        if (!TrySettingsKey(accountScope, cancellationToken, out var key))
         {
             return new(StagedSelfHostedProfileReadResult.DependencyFailure);
         }
@@ -502,7 +507,7 @@ public sealed class StagedSelfHostedProfileService
         ArgumentNullException.ThrowIfNull(accountScope);
         ArgumentNullException.ThrowIfNull(candidateId);
         cancellationToken.ThrowIfCancellationRequested();
-        if (!TrySettingsKey(accountScope, out var key))
+        if (!TrySettingsKey(accountScope, cancellationToken, out var key))
         {
             return new(StagedSelfHostedProfileExportResult.DependencyFailure);
         }
@@ -529,7 +534,7 @@ public sealed class StagedSelfHostedProfileService
         ArgumentNullException.ThrowIfNull(accountScope);
         ArgumentNullException.ThrowIfNull(candidateId);
         cancellationToken.ThrowIfCancellationRequested();
-        if (!TrySettingsKey(accountScope, out var key))
+        if (!TrySettingsKey(accountScope, cancellationToken, out var key))
         {
             return StagedSelfHostedProfileDeleteResult.DependencyFailure;
         }
@@ -623,9 +628,17 @@ public sealed class StagedSelfHostedProfileService
                     AtomicBoundedSettingsLimits.MaximumValueUtf8Bytes,
                     cancellationToken).ConfigureAwait(false);
         }
-        catch (OperationCanceledException)
+        catch (AccountGenerationMutationCanceledException)
         {
             throw;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw SanitizedCancellation(cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            return AtomicBoundedSettingMutationResult.OutcomeUnknown;
         }
         catch
         {
@@ -648,9 +661,17 @@ public sealed class StagedSelfHostedProfileService
                 AtomicBoundedSettingsLimits.MaximumValueUtf8Bytes,
                 cancellationToken).ConfigureAwait(false);
         }
-        catch (OperationCanceledException)
+        catch (AccountGenerationMutationCanceledException)
         {
             throw;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw SanitizedCancellation(cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            return AtomicBoundedSettingMutationResult.OutcomeUnknown;
         }
         catch
         {
@@ -671,9 +692,17 @@ public sealed class StagedSelfHostedProfileService
                 AtomicBoundedSettingsLimits.MaximumValueUtf8Bytes,
                 cancellationToken).ConfigureAwait(false);
         }
-        catch (OperationCanceledException)
+        catch (AccountGenerationMutationCanceledException)
         {
             throw;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw SanitizedCancellation(cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            return AtomicBoundedSettingMutationResult.OutcomeUnknown;
         }
         catch
         {
@@ -734,9 +763,13 @@ public sealed class StagedSelfHostedProfileService
                 AtomicBoundedSettingsLimits.MaximumValueUtf8Bytes,
                 cancellationToken).ConfigureAwait(false);
         }
-        catch (OperationCanceledException)
+        catch (AccountGenerationMutationCanceledException)
         {
             throw;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw SanitizedCancellation(cancellationToken);
         }
         catch
         {
@@ -903,6 +936,7 @@ public sealed class StagedSelfHostedProfileService
 
     private bool TrySettingsKey(
         SelfHostedProfileStagingAccountScope accountScope,
+        CancellationToken cancellationToken,
         out string key)
     {
         key = string.Empty;
@@ -911,6 +945,10 @@ public sealed class StagedSelfHostedProfileService
             key = SettingsKey(accountScope);
             return key.Length == SettingsPrefix.Length
                 + StagedSelfHostedProfileLimits.FingerprintBytes * 2;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw SanitizedCancellation(cancellationToken);
         }
         catch
         {
@@ -924,6 +962,12 @@ public sealed class StagedSelfHostedProfileService
         StagedSelfHostedProfileCandidateId candidateId) =>
         items.SingleOrDefault(item =>
             CryptographicOperations.FixedTimeEquals(item.Id, candidateId.Value));
+
+    private static OperationCanceledException SanitizedCancellation(
+        CancellationToken cancellationToken) =>
+        new(
+            "Staged self-hosted profile operation was canceled.",
+            cancellationToken);
 
     private static StagedSelfHostedProfileCandidate ToCandidate(CatalogItem item) =>
         new(

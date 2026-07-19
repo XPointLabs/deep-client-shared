@@ -6,6 +6,10 @@ namespace Deep.Client.Shared.Persistence;
 public sealed partial class SqliteSessionStore
 {
     private Action<AtomicBoundedSettingsFaultPoint>? atomicBoundedSettingsFaultInjector;
+    private int atomicBoundedSettingsPayloadSelectCount;
+
+    internal int AtomicBoundedSettingsPayloadSelectCountForTests =>
+        Volatile.Read(ref atomicBoundedSettingsPayloadSelectCount);
 
     public async Task<AtomicBoundedSettingReadOutcome> ReadAtomicBoundedSettingAsync(
         string key,
@@ -30,9 +34,11 @@ public sealed partial class SqliteSessionStore
                     cancellationToken),
                 cancellationToken).ConfigureAwait(false);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            throw;
+            throw new OperationCanceledException(
+                "Atomic bounded settings operation was canceled.",
+                cancellationToken);
         }
         catch
         {
@@ -115,9 +121,11 @@ public sealed partial class SqliteSessionStore
                     utf8Json,
                     maximumValueUtf8Bytes);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            throw;
+            throw new OperationCanceledException(
+                "Atomic bounded settings operation was canceled.",
+                cancellationToken);
         }
         catch
         {
@@ -143,9 +151,11 @@ public sealed partial class SqliteSessionStore
                 AtomicBoundedSettingsFaultPoint.BeforeCommit);
             cancellationToken.ThrowIfCancellationRequested();
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            throw;
+            throw new OperationCanceledException(
+                "Atomic bounded settings operation was canceled.",
+                cancellationToken);
         }
         catch
         {
@@ -251,13 +261,21 @@ public sealed partial class SqliteSessionStore
                     : AtomicBoundedSettingMutationResult.Conflict;
             }, cancellationToken).ConfigureAwait(false);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             if (committed)
             {
                 return AtomicBoundedSettingMutationResult.OutcomeUnknown;
             }
-            throw;
+            throw new OperationCanceledException(
+                "Atomic bounded settings operation was canceled.",
+                cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            return committed
+                ? AtomicBoundedSettingMutationResult.OutcomeUnknown
+                : AtomicBoundedSettingMutationResult.DependencyFailure;
         }
         catch
         {
@@ -284,7 +302,7 @@ public sealed partial class SqliteSessionStore
         return result;
     }
 
-    private static async Task<AtomicBoundedSettingReadOutcome>
+    private async Task<AtomicBoundedSettingReadOutcome>
         ReadAtomicBoundedSettingOnConnectionAsync(
             SqliteConnection connection,
             string key,
@@ -311,7 +329,7 @@ public sealed partial class SqliteSessionStore
             stored.Envelope.Value);
     }
 
-    private static async Task<SqliteStoredAtomicEnvelope> ReadStoredEnvelopeOnConnectionAsync(
+    private async Task<SqliteStoredAtomicEnvelope> ReadStoredEnvelopeOnConnectionAsync(
         SqliteConnection connection,
         SqliteTransaction transaction,
         string key,
@@ -356,6 +374,7 @@ public sealed partial class SqliteSessionStore
                 """;
             valueCommand.Parameters.AddWithValue("$key", key);
             await valueCommand.PrepareAsync(cancellationToken).ConfigureAwait(false);
+            Interlocked.Increment(ref atomicBoundedSettingsPayloadSelectCount);
             storedEnvelope = (string?)await valueCommand
                 .ExecuteScalarAsync(cancellationToken)
                 .ConfigureAwait(false)

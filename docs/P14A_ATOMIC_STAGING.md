@@ -30,6 +30,14 @@ in-memory store applies the same outcomes under its durable-state lock and
 rolls back a failed pre-commit persistence write. Neither implementation calls
 the test fault hook while a store or database lock is held.
 
+The SQLite tests instrument execution of the payload-selection statement and
+prove that an oversized row returns from the length projection without issuing
+that statement. The in-memory tests inject a failure after the live dictionary
+has changed but before persistence concludes, then prove create, replace, and
+delete restore both the exact live revision/value and the file-backed state
+observed by a reopened store. The injected callback is evaluated outside the
+store lock and only its captured fault is raised at the rollback point.
+
 ## Account lifecycle and concurrency
 
 `AccountGenerationSessionStore` holds one generation-barrier lease across each
@@ -42,6 +50,19 @@ The staging service uses bounded optimistic CAS retries instead of an
 instance-local lock. Two service instances therefore reconcile conflicts
 without losing already committed candidates. Outcome-unknown saves and deletes
 are read back before a public result is selected.
+
+The concurrency proof uses two independent SQLite store instances over one
+database and a deterministic read barrier that makes both services observe the
+same revision before their save or delete. One mutation wins, the other retries
+the CAS, and neither committed candidate nor unrelated deletion is lost.
+
+Cancellation is rethrown only when the caller token or the account-generation
+lease token is actually canceled. Those paths construct a fixed cancellation
+exception without preserving provider text or an inner exception. An
+unsolicited cancellation-shaped failure from candidate memory, cryptographic
+providers, repositories, or concrete stores is treated as a dependency
+failure before a commit attempt and as outcome-unknown once a commit may have
+occurred.
 
 ## Bounds and privacy
 

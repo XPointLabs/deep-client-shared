@@ -126,6 +126,7 @@ public interface IAtomicBoundedSettingsRepository
 internal enum AtomicBoundedSettingsFaultPoint
 {
     BeforeCommit,
+    AfterMutationBeforePersistence,
     AfterCommit
 }
 

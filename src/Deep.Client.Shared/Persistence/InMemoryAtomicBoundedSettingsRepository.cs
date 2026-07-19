@@ -33,9 +33,11 @@ public sealed partial class InMemorySessionStore
                 return Task.FromResult(ReadStoredEnvelope(stored, maximumValueUtf8Bytes));
             }
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            throw;
+            throw new OperationCanceledException(
+                "Atomic bounded settings operation was canceled.",
+                cancellationToken);
         }
         catch
         {
@@ -119,9 +121,11 @@ public sealed partial class InMemorySessionStore
                     utf8Json,
                     maximumValueUtf8Bytes);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            throw;
+            throw new OperationCanceledException(
+                "Atomic bounded settings operation was canceled.",
+                cancellationToken);
         }
         catch
         {
@@ -134,6 +138,7 @@ public sealed partial class InMemorySessionStore
 
         byte[]? input = null;
         string? replacement = null;
+        Exception? afterMutationFault = null;
         try
         {
             if (!delete)
@@ -145,11 +150,25 @@ public sealed partial class InMemorySessionStore
 
             atomicBoundedSettingsFaultInjector?.Invoke(
                 AtomicBoundedSettingsFaultPoint.BeforeCommit);
+            // The callback is evaluated before the store lock. Any captured fault is
+            // injected only after the live dictionary mutation, so rollback is real
+            // without executing test code under the lock.
+            try
+            {
+                atomicBoundedSettingsFaultInjector?.Invoke(
+                    AtomicBoundedSettingsFaultPoint.AfterMutationBeforePersistence);
+            }
+            catch (Exception exception)
+            {
+                afterMutationFault = exception;
+            }
             cancellationToken.ThrowIfCancellationRequested();
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            throw;
+            throw new OperationCanceledException(
+                "Atomic bounded settings operation was canceled.",
+                cancellationToken);
         }
         catch
         {
@@ -208,8 +227,27 @@ public sealed partial class InMemorySessionStore
                     {
                         settings[key] = replacement!;
                     }
+                    if (afterMutationFault is not null)
+                    {
+                        throw afterMutationFault;
+                    }
                     PersistState();
                     result = AtomicBoundedSettingMutationResult.Applied;
+                }
+                catch (OperationCanceledException) when (
+                    cancellationToken.IsCancellationRequested)
+                {
+                    if (exists)
+                    {
+                        settings[key] = previous!;
+                    }
+                    else
+                    {
+                        settings.TryRemove(key, out _);
+                    }
+                    throw new OperationCanceledException(
+                        "Atomic bounded settings operation was canceled.",
+                        cancellationToken);
                 }
                 catch
                 {
@@ -225,9 +263,11 @@ public sealed partial class InMemorySessionStore
                 }
             }
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            throw;
+            throw new OperationCanceledException(
+                "Atomic bounded settings operation was canceled.",
+                cancellationToken);
         }
         catch
         {

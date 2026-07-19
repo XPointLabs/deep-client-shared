@@ -239,6 +239,24 @@ public sealed class AtomicBoundedSettingsRepositoryTests
             AtomicBoundedSettingMutationResult.OutcomeUnknown,
             afterCommit);
 
+        using var canceledDuringProvider = new CancellationTokenSource();
+        using var cancelingMemory = new CancelingOperationCanceledMemoryManager(
+            32,
+            canceledDuringProvider,
+            "synthetic-associated-memory-cancellation-secret");
+        var sanitized = await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            repository.CreateAtomicBoundedSettingAsync(
+                Key("associated-provider-cancellation"),
+                cancelingMemory.Memory,
+                MaximumValueBytes,
+                canceledDuringProvider.Token));
+        Assert.True(sanitized.CancellationToken.IsCancellationRequested);
+        Assert.Null(sanitized.InnerException);
+        Assert.DoesNotContain(
+            "synthetic-associated-memory-cancellation-secret",
+            sanitized.ToString(),
+            StringComparison.Ordinal);
+
         using var cancellation = new CancellationTokenSource();
         cancellation.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
@@ -461,11 +479,16 @@ public sealed class AtomicBoundedSettingsRepositoryTests
 
         Assert.Equal(AtomicBoundedSettingMutationResult.Applied, result);
         Assert.Equal(
-            [
-                AtomicBoundedSettingReadResult.Missing,
-                AtomicBoundedSettingReadResult.Missing,
-                AtomicBoundedSettingReadResult.Found
-            ],
+            sqlite
+                ? [
+                    AtomicBoundedSettingReadResult.Missing,
+                    AtomicBoundedSettingReadResult.Found
+                ]
+                : [
+                    AtomicBoundedSettingReadResult.Missing,
+                    AtomicBoundedSettingReadResult.Missing,
+                    AtomicBoundedSettingReadResult.Found
+                ],
             observed);
     }
 
@@ -573,6 +596,31 @@ public sealed class AtomicBoundedSettingsRepositoryTests
     {
         public override Span<byte> GetSpan() =>
             throw new OperationCanceledException(message);
+
+        public override MemoryHandle Pin(int elementIndex = 0) =>
+            throw new OperationCanceledException(message);
+
+        public override void Unpin()
+        {
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+        }
+
+        public override Memory<byte> Memory => CreateMemory(length);
+    }
+
+    private sealed class CancelingOperationCanceledMemoryManager(
+        int length,
+        CancellationTokenSource cancellation,
+        string message) : MemoryManager<byte>
+    {
+        public override Span<byte> GetSpan()
+        {
+            cancellation.Cancel();
+            throw new OperationCanceledException(message);
+        }
 
         public override MemoryHandle Pin(int elementIndex = 0) =>
             throw new OperationCanceledException(message);

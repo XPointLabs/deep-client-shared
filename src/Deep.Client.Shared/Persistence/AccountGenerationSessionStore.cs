@@ -4,6 +4,18 @@ using System.Runtime.CompilerServices;
 
 namespace Deep.Client.Shared.Persistence;
 
+internal sealed class AccountGenerationMutationCanceledException :
+    OperationCanceledException
+{
+    public AccountGenerationMutationCanceledException(
+        CancellationToken cancellationToken)
+        : base(
+            "Account-generation operation was canceled.",
+            cancellationToken)
+    {
+    }
+}
+
 internal class AccountGenerationSessionStore : ILocalSessionStore, IDisposable
 {
     protected readonly ILocalSessionStore Inner;
@@ -275,7 +287,7 @@ internal class AccountGenerationSessionStore : ILocalSessionStore, IDisposable
         string key,
         int maximumValueUtf8Bytes,
         CancellationToken token = default) =>
-        MutateAsync(
+        MutateAtomicBoundedAsync(
             innerToken => Inner.ReadAtomicBoundedSettingAsync(
                 key,
                 maximumValueUtf8Bytes,
@@ -287,7 +299,7 @@ internal class AccountGenerationSessionStore : ILocalSessionStore, IDisposable
         ReadOnlyMemory<byte> utf8Json,
         int maximumValueUtf8Bytes,
         CancellationToken token = default) =>
-        MutateAsync(
+        MutateAtomicBoundedAsync(
             innerToken => Inner.CreateAtomicBoundedSettingAsync(
                 key,
                 utf8Json,
@@ -301,7 +313,7 @@ internal class AccountGenerationSessionStore : ILocalSessionStore, IDisposable
         ReadOnlyMemory<byte> utf8Json,
         int maximumValueUtf8Bytes,
         CancellationToken token = default) =>
-        MutateAsync(
+        MutateAtomicBoundedAsync(
             innerToken => Inner.ReplaceAtomicBoundedSettingAsync(
                 key,
                 expectedRevision,
@@ -315,7 +327,7 @@ internal class AccountGenerationSessionStore : ILocalSessionStore, IDisposable
         AtomicBoundedSettingRevision expectedRevision,
         int maximumValueUtf8Bytes,
         CancellationToken token = default) =>
-        MutateAsync(
+        MutateAtomicBoundedAsync(
             innerToken => Inner.DeleteAtomicBoundedSettingAsync(
                 key,
                 expectedRevision,
@@ -352,6 +364,23 @@ internal class AccountGenerationSessionStore : ILocalSessionStore, IDisposable
     {
         using var lease = Barrier.Enter(token);
         return await mutation(lease.CancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<T> MutateAtomicBoundedAsync<T>(
+        Func<CancellationToken, Task<T>> mutation,
+        CancellationToken token)
+    {
+        using var lease = Barrier.Enter(token);
+        try
+        {
+            return await mutation(lease.CancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (
+            lease.CancellationToken.IsCancellationRequested)
+        {
+            throw new AccountGenerationMutationCanceledException(
+                lease.CancellationToken);
+        }
     }
 
     protected async IAsyncEnumerable<T> EnumerateAsync<T>(

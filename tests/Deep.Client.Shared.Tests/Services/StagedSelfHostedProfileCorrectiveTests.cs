@@ -89,6 +89,8 @@ public sealed class StagedSelfHostedProfileCorrectiveTests
             {
                 entered.Set();
                 release.Wait(TimeSpan.FromSeconds(10));
+                throw new OperationCanceledException(
+                    "synthetic-generation-cancellation-secret");
             }
         });
         using var runtime = new ClientRuntime(
@@ -111,7 +113,12 @@ public sealed class StagedSelfHostedProfileCorrectiveTests
         Assert.False(signOut.IsCompleted);
 
         release.Set();
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => save);
+        var canceled = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => save);
+        Assert.Null(canceled.InnerException);
+        Assert.DoesNotContain(
+            "synthetic-generation-cancellation-secret",
+            canceled.ToString(),
+            StringComparison.Ordinal);
         await signOut.WaitAsync(TimeSpan.FromSeconds(10));
         rawStore.SetAtomicBoundedSettingsFaultInjectorForTests(null);
 
@@ -248,13 +255,32 @@ public sealed class StagedSelfHostedProfileCorrectiveTests
             StagedSelfHostedProfileSaveResult.OutcomeUnknown,
             mutationOutcome.Result);
 
+        using var canceledDuringProvider = new CancellationTokenSource();
+        var cancelingProviderService = new StagedSelfHostedProfileService(
+            new InMemorySessionStore(),
+            new CancelingOperationCanceledStagingProviders(
+                canceledDuringProvider,
+                "synthetic-associated-provider-cancellation-secret"));
+        var sanitized = await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            cancelingProviderService.SaveAsync(
+                Scope(0xAB),
+                StagedSelfHostedProfileLimits.SchemaVersion,
+                Bytes(64, 0x77),
+                cancellationToken: canceledDuringProvider.Token));
+        Assert.True(sanitized.CancellationToken.IsCancellationRequested);
+        Assert.Null(sanitized.InnerException);
+        Assert.DoesNotContain(
+            "synthetic-associated-provider-cancellation-secret",
+            sanitized.ToString(),
+            StringComparison.Ordinal);
+
         using var cancellation = new CancellationTokenSource();
         cancellation.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
             providerService.SaveAsync(
-                Scope(0xAB),
+                Scope(0xAD),
                 StagedSelfHostedProfileLimits.SchemaVersion,
-                Bytes(64, 0x77),
+                Bytes(64, 0x79),
                 cancellationToken: cancellation.Token));
     }
 
@@ -468,6 +494,20 @@ public sealed class StagedSelfHostedProfileCorrectiveTests
 
         public byte[] ComputeFingerprint(ReadOnlySpan<byte> value) =>
             throw new OperationCanceledException(message);
+    }
+
+    private sealed class CancelingOperationCanceledStagingProviders(
+        CancellationTokenSource cancellation,
+        string message) : IStagedSelfHostedProfileProviders
+    {
+        public byte[] CreateCandidateId() =>
+            throw new InvalidOperationException("Candidate ID generation was unexpected.");
+
+        public byte[] ComputeFingerprint(ReadOnlySpan<byte> value)
+        {
+            cancellation.Cancel();
+            throw new OperationCanceledException(message);
+        }
     }
 
     private sealed class OperationCanceledRepository(
