@@ -1,5 +1,8 @@
+using System.Collections;
+using System.Reflection;
 using Deep.Client.Shared.Domain;
 using Deep.Client.Shared.Persistence;
+using Microsoft.Data.Sqlite;
 
 namespace Deep.Client.Shared.Tests.Persistence;
 
@@ -335,6 +338,50 @@ public sealed class MembershipTrustRepositoryContractTests
     }
 
     [Theory]
+    [InlineData(false, "deleted-record")]
+    [InlineData(false, "digest")]
+    [InlineData(false, "linkage")]
+    [InlineData(true, "deleted-record")]
+    [InlineData(true, "digest")]
+    [InlineData(true, "linkage")]
+    public async Task DeepHistoryCorruption_BeyondImmediatePredecessor_IsCorrupt(
+        bool sqlite,
+        string corruption)
+    {
+        using var scope = DeepHistoryStoreScope.Create(sqlite);
+        var first = Record(1, 6, 0x10);
+        var second = Record(
+            2,
+            7,
+            0x20,
+            previousCanonicalHash: first.CanonicalHash);
+        var third = Record(
+            3,
+            8,
+            0x30,
+            previousCanonicalHash: second.CanonicalHash);
+
+        Assert.Equal(
+            MembershipTrustCommitResult.Applied,
+            await scope.Store.CommitMembershipTrustAsync(first, null));
+        Assert.Equal(
+            MembershipTrustCommitResult.Applied,
+            await scope.Store.CommitMembershipTrustAsync(second, 1));
+        Assert.Equal(
+            MembershipTrustCommitResult.Applied,
+            await scope.Store.CommitMembershipTrustAsync(third, 2));
+
+        await scope.CorruptDeepHistoryAsync(corruption, first, second);
+
+        var read = await scope.Store.ReadMembershipTrustAsync(
+            "install:test",
+            MembershipTrustDomain.Membership);
+        Assert.Equal(MembershipTrustReadResult.Corrupt, read.Result);
+        Assert.Null(read.Head);
+        Assert.Null(read.Predecessor);
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task ObservedClockHighWater_IsCasPersistedAndRejectsRollback(bool sqlite)
@@ -436,6 +483,130 @@ public sealed class MembershipTrustRepositoryContractTests
         {
             store.Dispose();
             foreach (var candidate in new[] { path, path + "-wal", path + "-shm" })
+            {
+                File.Delete(candidate);
+            }
+        }
+    }
+
+    private sealed class DeepHistoryStoreScope(
+        IMembershipTrustRepository store,
+        string? sqlitePath) : IDisposable
+    {
+        public IMembershipTrustRepository Store { get; } = store;
+
+        public static DeepHistoryStoreScope Create(bool sqlite)
+        {
+            if (!sqlite)
+            {
+                return new DeepHistoryStoreScope(new InMemorySessionStore(), null);
+            }
+
+            var path = Path.Combine(
+                Path.GetTempPath(),
+                $"deep-p07-deep-history-{Guid.NewGuid():N}.db");
+            return new DeepHistoryStoreScope(new SqliteSessionStore(path), path);
+        }
+
+        public async Task CorruptDeepHistoryAsync(
+            string corruption,
+            MembershipTrustRecord first,
+            MembershipTrustRecord second)
+        {
+            var invalidDigest = first.PayloadDigest.ToArray();
+            invalidDigest[0] ^= 0xff;
+            var brokenLink = second with
+            {
+                PreviousCanonicalHash = Enumerable.Repeat((byte)0xee, 32).ToArray(),
+                PayloadDigest = []
+            };
+            brokenLink = brokenLink with
+            {
+                PayloadDigest = MembershipTrustRecord.ComputePayloadDigest(brokenLink)
+            };
+
+            if (sqlitePath is not null)
+            {
+                await using var connection = new SqliteConnection(
+                    $"Data Source={sqlitePath};Pooling=False");
+                await connection.OpenAsync();
+                await using var command = connection.CreateCommand();
+                command.CommandText = corruption switch
+                {
+                    "deleted-record" => """
+                        DELETE FROM membership_trust_records
+                        WHERE profile_key = 'install:test' AND domain = 3 AND revision = 1;
+                        """,
+                    "digest" => """
+                        UPDATE membership_trust_records
+                        SET payload_digest = $digest
+                        WHERE profile_key = 'install:test' AND domain = 3 AND revision = 1;
+                        """,
+                    "linkage" => """
+                        UPDATE membership_trust_records
+                        SET previous_hash = $previousHash, payload_digest = $digest
+                        WHERE profile_key = 'install:test' AND domain = 3 AND revision = 2;
+                        """,
+                    _ => throw new ArgumentOutOfRangeException(nameof(corruption))
+                };
+                if (corruption == "digest")
+                {
+                    command.Parameters.AddWithValue("$digest", invalidDigest);
+                }
+                else if (corruption == "linkage")
+                {
+                    command.Parameters.AddWithValue(
+                        "$previousHash",
+                        brokenLink.PreviousCanonicalHash);
+                    command.Parameters.AddWithValue("$digest", brokenLink.PayloadDigest);
+                }
+                await command.ExecuteNonQueryAsync();
+                return;
+            }
+
+            var field = typeof(InMemorySessionStore).GetField(
+                "membershipTrustRecords",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.NotNull(field);
+            var dictionary = Assert.IsAssignableFrom<IDictionary>(field.GetValue(Store));
+            var entries = dictionary.GetEnumerator();
+            Assert.True(entries.MoveNext());
+            var entry = entries.Entry;
+            Assert.False(entries.MoveNext());
+            var records = Assert.IsAssignableFrom<IDictionary>(entry.Value);
+            switch (corruption)
+            {
+                case "deleted-record":
+                    records.Remove(1UL);
+                    break;
+                case "digest":
+                    records[1UL] = first with { PayloadDigest = invalidDigest };
+                    break;
+                case "linkage":
+                    records[2UL] = brokenLink;
+                    break;
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(corruption));
+            }
+        }
+
+        public void Dispose()
+        {
+            if (Store is IDisposable disposable)
+            {
+                disposable.Dispose();
+            }
+            if (sqlitePath is null)
+            {
+                return;
+            }
+            SqliteConnection.ClearAllPools();
+            foreach (var candidate in new[]
+                     {
+                         sqlitePath,
+                         sqlitePath + "-wal",
+                         sqlitePath + "-shm"
+                     })
             {
                 File.Delete(candidate);
             }

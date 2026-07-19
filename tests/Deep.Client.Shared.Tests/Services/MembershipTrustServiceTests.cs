@@ -413,6 +413,59 @@ public sealed class MembershipTrustServiceTests
     }
 
     [Fact]
+    public async Task BootstrapSequenceAlternative_ValidPersistsForkButInvalidDoesNot()
+    {
+        var verifier = new FixtureMembershipVerifier();
+        var profile = FixtureProfile();
+        var genesisHash = MembershipContractHash.Sha256(profile.CanonicalGenesis);
+        var validAlternative = CreateDelegation(
+            profile,
+            verifier,
+            sequence: 2,
+            previousHash: genesisHash,
+            keyOffset: 151);
+
+        var validStore = new InMemorySessionStore();
+        var validService = Service(validStore, verifier);
+        Assert.Equal(
+            MembershipTrustState.Healthy,
+            (await validService.InitializeAsync(profile)).State);
+        Assert.Equal(
+            MembershipTrustState.ForkDetected,
+            (await validService.ApplyDelegationAsync(
+                profile,
+                validAlternative)).State);
+        Assert.Equal(
+            MembershipTrustState.ForkDetected,
+            (await Service(validStore, verifier).InitializeAsync(profile)).State);
+
+        var invalid = MembershipContractCodec.DecodeSignedDelegation(validAlternative);
+        var invalidSignature = invalid.Signatures[0].Signature.ToArray();
+        invalidSignature[0] ^= 0xff;
+        invalid = invalid with
+        {
+            Signatures =
+            [
+                invalid.Signatures[0] with { Signature = invalidSignature },
+                .. invalid.Signatures.Skip(1)
+            ]
+        };
+        var invalidStore = new InMemorySessionStore();
+        var invalidService = Service(invalidStore, verifier);
+        _ = await invalidService.InitializeAsync(profile);
+        Assert.Equal(
+            MembershipTrustState.ProtocolUnsupported,
+            (await invalidService.ApplyDelegationAsync(
+                profile,
+                MembershipContractCodec.EncodeSignedDelegation(invalid))).State);
+        var unchanged = await invalidStore.ReadMembershipTrustAsync(
+            profile.OpaqueProfileKey,
+            MembershipTrustDomain.Authority);
+        Assert.Equal(MembershipTrustState.Healthy, unchanged.Head!.State);
+        Assert.Equal(1UL, unchanged.Head.Revision);
+    }
+
+    [Fact]
     public async Task AuthorityDelegationRevocationEquivocation_PersistsForkAcrossRestart()
     {
         var verifier = new FixtureMembershipVerifier();
@@ -894,6 +947,261 @@ public sealed class MembershipTrustServiceTests
     }
 
     [Fact]
+    public async Task ApplyContent_ExactReplayRejectsAuthorityRotationAfterReadiness()
+    {
+        var verifier = new FixtureMembershipVerifier();
+        var inner = new InMemorySessionStore();
+        var profile = FixtureProfile();
+        var writer = Service(inner, verifier);
+        _ = await writer.InitializeAsync(profile);
+        var membership = Vector("deep-extension/membership/v1/signed-membership");
+        _ = await writer.ApplyMembershipAsync(profile, membership);
+        var authority = (await inner.ReadMembershipTrustAsync(
+            profile.OpaqueProfileKey,
+            MembershipTrustDomain.Authority)).Head!;
+        var rotation = CreateDelegation(
+            profile,
+            verifier,
+            sequence: 3,
+            previousHash: authority.CanonicalHash,
+            keyOffset: 153);
+        var interleaved = new AuthorityReadInterleavingRepository(
+            inner,
+            mutateOnAuthorityRead: 6,
+            async () =>
+            {
+                Assert.Equal(
+                    MembershipTrustState.Healthy,
+                    (await writer.ApplyDelegationAsync(profile, rotation)).State);
+            });
+        var reader = Service(interleaved, verifier);
+
+        var replay = await reader.ApplyMembershipAsync(profile, membership);
+
+        Assert.Equal(1, interleaved.MutationCount);
+        Assert.NotEqual(MembershipTrustState.Healthy, replay.State);
+    }
+
+    [Fact]
+    public async Task ApplyContent_NewCommitRejectsAuthorityRotationAfterVerificationBeforeCas()
+    {
+        var verifier = new FixtureMembershipVerifier();
+        var inner = new InMemorySessionStore();
+        var profile = FixtureProfile();
+        var writer = Service(inner, verifier);
+        _ = await writer.InitializeAsync(profile);
+        _ = await writer.ApplyMembershipAsync(
+            profile,
+            Vector("deep-extension/membership/v1/signed-membership"));
+        var authority = (await inner.ReadMembershipTrustAsync(
+            profile.OpaqueProfileKey,
+            MembershipTrustDomain.Authority)).Head!;
+        var rotation = CreateDelegation(
+            profile,
+            verifier,
+            sequence: 3,
+            previousHash: authority.CanonicalHash,
+            keyOffset: 155);
+        var current = (await inner.ReadMembershipTrustAsync(
+            profile.OpaqueProfileKey,
+            MembershipTrustDomain.Membership)).Head!;
+        var template = MembershipContractCodec.DecodeSignedMembership(
+            Vector("deep-extension/membership/v1/signed-membership"));
+        var successor = ResignMembership(
+            template.Statement with
+            {
+                Sequence = template.Statement.Sequence + 1,
+                PreviousHash = current.CanonicalHash.ToArray()
+            },
+            template.Signatures,
+            MembershipSignatureDomain.Membership,
+            verifier);
+        var interleaved = new ContentCommitInterleavingRepository(
+            inner,
+            async () =>
+            {
+                Assert.Equal(
+                    MembershipTrustState.Healthy,
+                    (await writer.ApplyDelegationAsync(profile, rotation)).State);
+            });
+        var service = Service(interleaved, verifier);
+
+        var result = await service.ApplyMembershipAsync(
+            profile,
+            MembershipContractCodec.EncodeSignedMembership(successor));
+
+        Assert.Equal(1, interleaved.MutationCount);
+        Assert.NotEqual(MembershipTrustState.Healthy, result.State);
+    }
+
+    [Fact]
+    public async Task Initialize_SnapshotsProfileEnvelopeAndAnchorsBeforeVerification()
+    {
+        var signer = new FixtureMembershipVerifier();
+        var verifier = new OneShotBlockingVerifier(signer);
+        var store = new InMemorySessionStore();
+        var profile = FixtureProfile() with { OpaqueProfileKey = "install:mutation-profile" };
+        var originalDelegation = profile.SignedDelegation.ToArray();
+        var originalMembershipAnchor = profile.MembershipAnchor!.CanonicalHash.ToArray();
+        var alternative = CreateDelegation(
+            profile,
+            signer,
+            sequence: 2,
+            previousHash: MembershipContractHash.Sha256(profile.CanonicalGenesis),
+            keyOffset: 157);
+        Assert.Equal(originalDelegation.Length, alternative.Length);
+        var service = new MembershipTrustService(
+            store,
+            verifier,
+            new FrozenClock(FixtureNow),
+            EnabledOptions());
+
+        var initialization = Task.Run(() => service.InitializeAsync(profile));
+        verifier.WaitUntilBlocked();
+        try
+        {
+            alternative.CopyTo(profile.SignedDelegation, 0);
+            profile.MembershipAnchor.CanonicalHash[0] ^= 0xff;
+        }
+        finally
+        {
+            verifier.Release();
+        }
+        _ = await initialization;
+
+        var authority = await store.ReadMembershipTrustAsync(
+            profile.OpaqueProfileKey,
+            MembershipTrustDomain.Authority);
+        var membership = await store.ReadMembershipTrustAsync(
+            profile.OpaqueProfileKey,
+            MembershipTrustDomain.Membership);
+        Assert.Equal(originalDelegation, authority.Head!.CanonicalEnvelope);
+        Assert.Equal(originalMembershipAnchor, membership.Head!.CanonicalEnvelope);
+    }
+
+    [Fact]
+    public async Task SelfHostedImport_SnapshotsSignatureEnvelopeBeforeVerification()
+    {
+        var signer = new FixtureMembershipVerifier();
+        var baselineStore = new InMemorySessionStore();
+        var baselineImport = SelfHostedImport("install:self-hosted:baseline", signer);
+        Assert.Equal(
+            MembershipTrustState.MissingBootstrap,
+            (await Service(baselineStore, signer).ImportSelfHostedGenesisAsync(
+                baselineImport)).State);
+        var expectedBinding = (await baselineStore.ReadMembershipTrustAsync(
+            baselineImport.OpaqueProfileKey,
+            MembershipTrustDomain.Authority)).Head!.ProfileBindingHash;
+
+        var verifier = new OneShotBlockingVerifier(signer);
+        var store = new InMemorySessionStore();
+        var import = SelfHostedImport("install:self-hosted:mutation", signer);
+        var service = new MembershipTrustService(
+            store,
+            verifier,
+            new FrozenClock(FixtureNow),
+            EnabledOptions());
+
+        var importing = Task.Run(() => service.ImportSelfHostedGenesisAsync(import));
+        verifier.WaitUntilBlocked();
+        try
+        {
+            import.CanonicalSignatures[^1] ^= 0xff;
+        }
+        finally
+        {
+            verifier.Release();
+        }
+        _ = await importing;
+
+        var persisted = await store.ReadMembershipTrustAsync(
+            import.OpaqueProfileKey,
+            MembershipTrustDomain.Authority);
+        Assert.Equal(expectedBinding, persisted.Head!.ProfileBindingHash);
+    }
+
+    [Theory]
+    [InlineData("initialize")]
+    [InlineData("evaluate")]
+    [InlineData("membership")]
+    [InlineData("bridge")]
+    [InlineData("delegation")]
+    [InlineData("revocation")]
+    [InlineData("self-hosted")]
+    public async Task PublicOperations_BoundUnexpectedVerifierFailures(string operation)
+    {
+        var signer = new FixtureMembershipVerifier();
+        var store = new InMemorySessionStore();
+        var profile = FixtureProfile();
+        var healthy = Service(store, signer);
+        _ = await healthy.InitializeAsync(profile);
+        _ = await healthy.ApplyMembershipAsync(
+            profile,
+            Vector("deep-extension/membership/v1/signed-membership"));
+        _ = await healthy.ApplyBridgeAsync(
+            profile,
+            Vector("deep-extension/membership/v1/signed-bridge"));
+        var service = new MembershipTrustService(
+            store,
+            new ThrowingMembershipVerifier("signer-sensitive-marker"),
+            new FrozenClock(FixtureNow),
+            EnabledOptions());
+
+        await AssertFailureIsBoundedAsync(() =>
+            InvokePublicOperationAsync(service, profile, operation, signer));
+    }
+
+    [Theory]
+    [InlineData("initialize")]
+    [InlineData("evaluate")]
+    [InlineData("membership")]
+    [InlineData("bridge")]
+    [InlineData("delegation")]
+    [InlineData("revocation")]
+    [InlineData("self-hosted")]
+    public async Task PublicOperations_BoundUnexpectedRepositoryFailures(string operation)
+    {
+        var signer = new FixtureMembershipVerifier();
+        var profile = FixtureProfile() with
+        {
+            OpaqueProfileKey = "install:profile-sensitive-marker"
+        };
+        var service = new MembershipTrustService(
+            new ThrowingMembershipTrustRepository("profile-sensitive-marker"),
+            signer,
+            new FrozenClock(FixtureNow),
+            EnabledOptions());
+
+        await AssertFailureIsBoundedAsync(() =>
+            InvokePublicOperationAsync(service, profile, operation, signer));
+    }
+
+    [Theory]
+    [InlineData("initialize")]
+    [InlineData("evaluate")]
+    [InlineData("membership")]
+    [InlineData("bridge")]
+    [InlineData("delegation")]
+    [InlineData("revocation")]
+    [InlineData("self-hosted")]
+    public async Task PublicOperations_StillPropagateCancellation(string operation)
+    {
+        var signer = new FixtureMembershipVerifier();
+        var profile = FixtureProfile();
+        var service = Service(new InMemorySessionStore(), signer);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            InvokePublicOperationAsync(
+                service,
+                profile,
+                operation,
+                signer,
+                cancellation.Token));
+    }
+
+    [Fact]
     public async Task OrdinaryProfile_CannotOccupyReservedSelfHostedNamespace()
     {
         var store = new InMemorySessionStore();
@@ -992,6 +1300,62 @@ public sealed class MembershipTrustServiceTests
             ClockRollbackTolerance = TimeSpan.FromSeconds(30)
         };
 
+    private static async Task AssertFailureIsBoundedAsync(
+        Func<Task<MembershipTrustStatus>> operation)
+    {
+        try
+        {
+            var result = await operation();
+            Assert.NotEqual(MembershipTrustState.Healthy, result.State);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch
+        {
+            Assert.Fail("Public trust operation exposed an unbounded implementation failure.");
+        }
+    }
+
+    private static Task<MembershipTrustStatus> InvokePublicOperationAsync(
+        MembershipTrustService service,
+        MembershipTrustProfile profile,
+        string operation,
+        FixtureMembershipVerifier signer,
+        CancellationToken cancellationToken = default) =>
+        operation switch
+        {
+            "initialize" => service.InitializeAsync(profile, cancellationToken),
+            "evaluate" => service.EvaluateAsync(profile, cancellationToken),
+            "membership" => service.ApplyMembershipAsync(
+                profile,
+                Vector("deep-extension/membership/v1/signed-membership"),
+                cancellationToken),
+            "bridge" => service.ApplyBridgeAsync(
+                profile,
+                Vector("deep-extension/membership/v1/signed-bridge"),
+                cancellationToken),
+            "delegation" => service.ApplyDelegationAsync(
+                profile,
+                CreateDelegation(
+                    profile,
+                    signer,
+                    sequence: 3,
+                    previousHash: MembershipContractHash.Sha256(
+                        profile.SignedDelegation),
+                    keyOffset: 159),
+                cancellationToken),
+            "revocation" => service.ApplyRevocationAsync(
+                profile,
+                Vector("deep-extension/membership/v1/signed-revocation"),
+                cancellationToken),
+            "self-hosted" => service.ImportSelfHostedGenesisAsync(
+                SelfHostedImport("install:self-hosted:operation", signer),
+                cancellationToken),
+            _ => throw new ArgumentOutOfRangeException(nameof(operation))
+        };
+
     private static MembershipTrustProfile FixtureProfile()
     {
         var genesis = Vector("deep-extension/membership/v1/network-genesis");
@@ -1011,6 +1375,30 @@ public sealed class MembershipTrustServiceTests
             MembershipAnchor: new MembershipTrustAnchor(
                 membership.Statement.Sequence - 1,
                 membership.Statement.PreviousHash.ToArray()));
+    }
+
+    private static SelfHostedGenesisImport SelfHostedImport(
+        string profileKey,
+        FixtureMembershipVerifier verifier)
+    {
+        var genesisBytes = Vector("deep-extension/membership/v1/network-genesis");
+        var genesis = MembershipContractCodec.DecodeGenesis(genesisBytes);
+        var signatures = genesis.OfflineRoots.Take(3).Select(root => new MembershipSignature
+        {
+            SignerId = root.SignerId.ToArray(),
+            Domain = MembershipSignatureDomain.Genesis,
+            Signature = verifier.Sign(
+                root.SignerId.Span,
+                root.PublicKey.Span,
+                MembershipSignatureDomain.Genesis,
+                genesisBytes)
+        }).ToArray();
+        return new SelfHostedGenesisImport(
+            profileKey,
+            genesisBytes,
+            genesis.NetworkId.ToArray(),
+            MembershipContractHash.Sha256(genesisBytes),
+            EncodeGenesisSignatures(signatures));
     }
 
     private static SignedMembershipCommitment ResignMembership(
@@ -1230,6 +1618,172 @@ public sealed class MembershipTrustServiceTests
             string opaqueProfileKey,
             CancellationToken cancellationToken = default) =>
             inner.ReadMembershipTrustClockAsync(opaqueProfileKey, cancellationToken);
+    }
+
+    private sealed class AuthorityReadInterleavingRepository(
+        IMembershipTrustRepository inner,
+        int mutateOnAuthorityRead,
+        Func<Task> mutation) : IMembershipTrustRepository
+    {
+        private int authorityReads;
+
+        public int MutationCount { get; private set; }
+
+        public Task<MembershipTrustCommitResult> CommitMembershipTrustAsync(
+            MembershipTrustRecord record,
+            ulong? expectedHeadRevision,
+            CancellationToken cancellationToken = default) =>
+            inner.CommitMembershipTrustAsync(record, expectedHeadRevision, cancellationToken);
+
+        public async Task<MembershipTrustReadSnapshot> ReadMembershipTrustAsync(
+            string opaqueProfileKey,
+            MembershipTrustDomain domain,
+            CancellationToken cancellationToken = default)
+        {
+            if (domain == MembershipTrustDomain.Authority &&
+                Interlocked.Increment(ref authorityReads) == mutateOnAuthorityRead)
+            {
+                await mutation();
+                MutationCount++;
+            }
+            return await inner.ReadMembershipTrustAsync(
+                opaqueProfileKey,
+                domain,
+                cancellationToken);
+        }
+
+        public Task<MembershipTrustClockCommitResult> CommitMembershipTrustClockAsync(
+            MembershipTrustClockRecord record,
+            ulong? expectedRevision,
+            CancellationToken cancellationToken = default) =>
+            inner.CommitMembershipTrustClockAsync(record, expectedRevision, cancellationToken);
+
+        public Task<MembershipTrustClockReadSnapshot> ReadMembershipTrustClockAsync(
+            string opaqueProfileKey,
+            CancellationToken cancellationToken = default) =>
+            inner.ReadMembershipTrustClockAsync(opaqueProfileKey, cancellationToken);
+    }
+
+    private sealed class ContentCommitInterleavingRepository(
+        IMembershipTrustRepository inner,
+        Func<Task> mutation) : IMembershipTrustRepository
+    {
+        private int triggered;
+
+        public int MutationCount { get; private set; }
+
+        public async Task<MembershipTrustCommitResult> CommitMembershipTrustAsync(
+            MembershipTrustRecord record,
+            ulong? expectedHeadRevision,
+            CancellationToken cancellationToken = default)
+        {
+            if (record.Domain == MembershipTrustDomain.Membership &&
+                record.Revision > 1 &&
+                Interlocked.Exchange(ref triggered, 1) == 0)
+            {
+                await mutation();
+                MutationCount++;
+            }
+            return await inner.CommitMembershipTrustAsync(
+                record,
+                expectedHeadRevision,
+                cancellationToken);
+        }
+
+        public Task<MembershipTrustReadSnapshot> ReadMembershipTrustAsync(
+            string opaqueProfileKey,
+            MembershipTrustDomain domain,
+            CancellationToken cancellationToken = default) =>
+            inner.ReadMembershipTrustAsync(opaqueProfileKey, domain, cancellationToken);
+
+        public Task<MembershipTrustClockCommitResult> CommitMembershipTrustClockAsync(
+            MembershipTrustClockRecord record,
+            ulong? expectedRevision,
+            CancellationToken cancellationToken = default) =>
+            inner.CommitMembershipTrustClockAsync(record, expectedRevision, cancellationToken);
+
+        public Task<MembershipTrustClockReadSnapshot> ReadMembershipTrustClockAsync(
+            string opaqueProfileKey,
+            CancellationToken cancellationToken = default) =>
+            inner.ReadMembershipTrustClockAsync(opaqueProfileKey, cancellationToken);
+    }
+
+    private sealed class OneShotBlockingVerifier(
+        IMembershipSignatureVerifier inner) : IMembershipSignatureVerifier, IDisposable
+    {
+        private readonly ManualResetEventSlim entered = new(false);
+        private readonly ManualResetEventSlim release = new(false);
+        private int blocked;
+
+        public bool Verify(
+            ReadOnlySpan<byte> signerId,
+            ReadOnlySpan<byte> publicKey,
+            MembershipSignatureDomain domain,
+            ReadOnlySpan<byte> signingBytes,
+            ReadOnlySpan<byte> signature)
+        {
+            if (Interlocked.Exchange(ref blocked, 1) == 0)
+            {
+                entered.Set();
+                release.Wait();
+            }
+            return inner.Verify(signerId, publicKey, domain, signingBytes, signature);
+        }
+
+        public void WaitUntilBlocked()
+        {
+            Assert.True(
+                entered.Wait(TimeSpan.FromSeconds(10)),
+                "Verifier barrier was not reached.");
+        }
+
+        public void Release() => release.Set();
+
+        public void Dispose()
+        {
+            release.Set();
+            entered.Dispose();
+            release.Dispose();
+        }
+    }
+
+    private sealed class ThrowingMembershipVerifier(string message)
+        : IMembershipSignatureVerifier
+    {
+        public bool Verify(
+            ReadOnlySpan<byte> signerId,
+            ReadOnlySpan<byte> publicKey,
+            MembershipSignatureDomain domain,
+            ReadOnlySpan<byte> signingBytes,
+            ReadOnlySpan<byte> signature) =>
+            throw new InvalidOperationException(message);
+    }
+
+    private sealed class ThrowingMembershipTrustRepository(string message)
+        : IMembershipTrustRepository
+    {
+        public Task<MembershipTrustCommitResult> CommitMembershipTrustAsync(
+            MembershipTrustRecord record,
+            ulong? expectedHeadRevision,
+            CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException(message);
+
+        public Task<MembershipTrustReadSnapshot> ReadMembershipTrustAsync(
+            string opaqueProfileKey,
+            MembershipTrustDomain domain,
+            CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException(message);
+
+        public Task<MembershipTrustClockCommitResult> CommitMembershipTrustClockAsync(
+            MembershipTrustClockRecord record,
+            ulong? expectedRevision,
+            CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException(message);
+
+        public Task<MembershipTrustClockReadSnapshot> ReadMembershipTrustClockAsync(
+            string opaqueProfileKey,
+            CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException(message);
     }
 
     private sealed class RejectingMembershipVerifier : IMembershipSignatureVerifier
