@@ -4,6 +4,7 @@ using Deep.Client.Shared.Domain;
 using Deep.Client.Shared.Persistence;
 using Deep.Client.Shared.Services;
 using Deep.Protocol.DeepExtension.Membership;
+using Microsoft.Data.Sqlite;
 
 namespace Deep.Client.Shared.Tests.Services;
 
@@ -538,6 +539,16 @@ public sealed class MembershipTrustServiceTests
         Assert.Equal(
             MembershipTrustState.ProtocolUnsupported,
             (await Service(store, verifier).InitializeAsync(profile)).State);
+        Assert.Equal(
+            MembershipTrustState.ProtocolUnsupported,
+            (await service.ApplyMembershipAsync(
+                profile,
+                Vector("deep-extension/membership/v1/signed-membership"))).State);
+        Assert.Equal(
+            MembershipTrustState.ProtocolUnsupported,
+            (await Service(store, verifier).ApplyMembershipAsync(
+                profile,
+                Vector("deep-extension/membership/v1/signed-membership"))).State);
 
         var previousContent = (await store.ReadMembershipTrustAsync(
             profile.OpaqueProfileKey,
@@ -626,6 +637,16 @@ public sealed class MembershipTrustServiceTests
         Assert.Equal(
             MembershipTrustState.Revoked,
             (await Service(store, verifier).InitializeAsync(profile)).State);
+        Assert.Equal(
+            MembershipTrustState.Revoked,
+            (await service.ApplyMembershipAsync(
+                profile,
+                Vector("deep-extension/membership/v1/signed-membership"))).State);
+        Assert.Equal(
+            MembershipTrustState.Revoked,
+            (await Service(store, verifier).ApplyMembershipAsync(
+                profile,
+                Vector("deep-extension/membership/v1/signed-membership"))).State);
 
         var previousContent = (await store.ReadMembershipTrustAsync(
             profile.OpaqueProfileKey,
@@ -651,6 +672,112 @@ public sealed class MembershipTrustServiceTests
         Assert.Equal(
             MembershipTrustState.Healthy,
             (await Service(store, verifier).InitializeAsync(profile)).State);
+    }
+
+    [Fact]
+    public async Task SixtyFifthRevocation_PersistsTerminalMarkerAcrossSqliteRestart()
+    {
+        var verifier = new FixtureMembershipVerifier();
+        var profile = FixtureProfile();
+        var path = Path.Combine(Path.GetTempPath(), $"deep-p07-revocation-overflow-{Guid.NewGuid():N}.db");
+        try
+        {
+            using (var store = new SqliteSessionStore(path))
+            {
+                var service = Service(store, verifier);
+                _ = await service.InitializeAsync(profile);
+                for (var index = 0;
+                     index < MembershipLimits.MaximumRevokedDelegationHashes;
+                     index++)
+                {
+                    var active = (await store.ReadMembershipTrustAsync(
+                        profile.OpaqueProfileKey,
+                        MembershipTrustDomain.Authority)).Head!;
+                    Assert.Equal(
+                        MembershipTrustState.Revoked,
+                        (await service.ApplyRevocationAsync(
+                            profile,
+                            CreateRevocation(
+                                profile,
+                                verifier,
+                                active.Sequence + 1,
+                                active.CanonicalHash,
+                                active.CanonicalHash))).State);
+                    var revoked = (await store.ReadMembershipTrustAsync(
+                        profile.OpaqueProfileKey,
+                        MembershipTrustDomain.Authority)).Head!;
+                    Assert.Equal(
+                        MembershipTrustState.Healthy,
+                        (await service.ApplyDelegationAsync(
+                            profile,
+                            CreateDelegation(
+                                profile,
+                                verifier,
+                                revoked.Sequence + 1,
+                                revoked.CanonicalHash,
+                                keyOffset: 40 + index))).State);
+                }
+
+                var full = (await store.ReadMembershipTrustAsync(
+                    profile.OpaqueProfileKey,
+                    MembershipTrustDomain.Authority)).Head!;
+                Assert.Equal(
+                    MembershipLimits.MaximumRevokedDelegationHashes *
+                        MembershipLimits.HashLength,
+                    full.RevokedDelegationHashes.Length);
+                var overflow = CreateRevocation(
+                    profile,
+                    verifier,
+                    full.Sequence + 1,
+                    full.CanonicalHash,
+                    full.CanonicalHash);
+                Assert.Equal(
+                    MembershipTrustState.Corrupt,
+                    (await service.ApplyRevocationAsync(profile, overflow)).State);
+
+                var terminal = (await store.ReadMembershipTrustAsync(
+                    profile.OpaqueProfileKey,
+                    MembershipTrustDomain.Authority)).Head!;
+                Assert.Equal(MembershipTrustState.Corrupt, terminal.State);
+                Assert.Equal(full.RevokedDelegationHashes, terminal.RevokedDelegationHashes);
+                Assert.Equal(
+                    MembershipTrustState.Corrupt,
+                    (await service.EvaluateAsync(profile)).State);
+            }
+
+            using (var restartedStore = new SqliteSessionStore(path))
+            {
+                var restarted = Service(restartedStore, verifier);
+                Assert.Equal(
+                    MembershipTrustState.Corrupt,
+                    (await restarted.InitializeAsync(profile)).State);
+                Assert.Equal(
+                    MembershipTrustState.Corrupt,
+                    (await restarted.EvaluateAsync(profile)).State);
+
+                var terminal = (await restartedStore.ReadMembershipTrustAsync(
+                    profile.OpaqueProfileKey,
+                    MembershipTrustDomain.Authority)).Head!;
+                Assert.Equal(
+                    MembershipTrustState.Corrupt,
+                    (await restarted.ApplyDelegationAsync(
+                        profile,
+                        CreateDelegation(
+                            profile,
+                            verifier,
+                            terminal.Sequence + 1,
+                            terminal.CanonicalHash,
+                            keyOffset: 120))).State);
+            }
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            foreach (var candidate in new[] { path, path + "-wal", path + "-shm" })
+            {
+                File.Delete(candidate);
+            }
+        }
     }
 
     [Fact]
