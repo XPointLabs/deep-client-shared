@@ -11,6 +11,16 @@
     "p3": 2
   },
   "scope": "accepted-dormant-contract-go-runtime-blocked",
+  "reviewer": {
+    "kind": "independent-internal-codex-subagent",
+    "taskPath": "/root/dependency_audit_retry",
+    "role": "read-only architecture and security reviewer",
+    "implementedP07": false,
+    "reviewedWorkingTree": "C:\\W\\deep-survival\\wave02\\deep-client-shared-p07",
+    "attestationRecordedBy": "/root",
+    "cryptographicallySigned": false,
+    "externalReview": false
+  },
   "sourceToCarrierDiff": "five artifacts/survival/P07 evidence files only; source, tests, locks, configuration and runtime files unchanged",
   "verification": {
     "dependencyGateBeforeRestore": "PASS",
@@ -30,6 +40,11 @@
     "focusedTrxSha256": "7002e8fb8a8ea92464e7b184d580f241fa413ff010477a70b0b5085b2d4718a2",
     "fullTrxSha256": "d70617739cf1b0f7e02e3e951dd12d78038c32f182cb48a377d4466759faf717",
     "schemaAndFlagsTrxSha256": "82846b283ba5a10e56f3df2c96e5e2bbe3e8bf29144c88c36e145587cbf42493"
+  },
+  "committedSanitizedEvidence": {
+    "p07-corrective12-focused.sanitized.json": "e99125276ecb580d48f74e8f37635f27bc8fb50bea801ef74af15b5d27eaf486",
+    "p07-corrective12-full.sanitized.json": "9062912937bf907bdab14201d85ed38f221c4fb33ad0d0e615e9e09448e4549f",
+    "p07-corrective12-schema-flags.sanitized.json": "180bd6f6371f9c33f5c28462921055b30d2a5de16fcea9463dd66b8bfab37a48"
   },
   "residualCoverageP3": [
     "no dedicated SQLite restart variant for the revision-one bootstrap fork test",
