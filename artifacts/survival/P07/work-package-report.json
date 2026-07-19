@@ -28,7 +28,7 @@
   ],
   "previousEvidenceCarrierCommit": "d7fb6be1e09fda0e05bd8f0a7090603ee16fee5c",
   "sourceCommit": "13e39cf9ff4b0cf3b1c60084aa5af977db68f280",
-  "evidenceContentCommit": "dd2be0afc69fcd7588b1f20a18a20ce80b94f7cc",
+  "evidenceContentCommit": "77aec5ab9f18d625ad79ba7c832bcd9d1e9fe170",
   "independentReview": {
     "verdict": "GO",
     "reviewedSourceCommit": "13e39cf9ff4b0cf3b1c60084aa5af977db68f280",
