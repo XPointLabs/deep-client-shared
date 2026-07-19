@@ -1733,7 +1733,7 @@ public sealed class SqliteSessionStore :
             {
                 read.Transaction = transaction;
                 read.CommandText = """
-                    SELECT version, revision, observed_at, digest
+                    SELECT version, revision, observed_at, length(digest), digest
                     FROM membership_trust_clock
                     WHERE profile_key = $profile;
                     """;
@@ -1752,7 +1752,11 @@ public sealed class SqliteSessionStore :
                         OpaqueProfileKey = record.OpaqueProfileKey,
                         Revision = checked((ulong)revision),
                         ObservedAt = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(2)),
-                        Digest = reader.GetFieldValue<byte[]>(3)
+                        Digest = ReadFixedProjectedBlob(
+                            reader,
+                            lengthOrdinal: 3,
+                            blobOrdinal: 4,
+                            MembershipLimits.HashLength)
                     };
                     try
                     {
@@ -1830,7 +1834,7 @@ public sealed class SqliteSessionStore :
             using var connection = OpenConnection();
             await using var command = connection.CreateCommand();
             command.CommandText = """
-                SELECT version, revision, observed_at, digest
+                SELECT version, revision, observed_at, length(digest), digest
                 FROM membership_trust_clock
                 WHERE profile_key = $profile;
                 """;
@@ -1851,7 +1855,11 @@ public sealed class SqliteSessionStore :
                 OpaqueProfileKey = opaqueProfileKey,
                 Revision = checked((ulong)revision),
                 ObservedAt = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(2)),
-                Digest = reader.GetFieldValue<byte[]>(3)
+                Digest = ReadFixedProjectedBlob(
+                    reader,
+                    lengthOrdinal: 3,
+                    blobOrdinal: 4,
+                    MembershipLimits.HashLength)
             };
             MembershipTrustClockRecord.Validate(record);
             return new MembershipTrustClockReadSnapshot(MembershipTrustClockReadResult.Found, record);
