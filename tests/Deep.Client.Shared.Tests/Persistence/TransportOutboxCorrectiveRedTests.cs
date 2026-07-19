@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Deep.Client.Shared.Features;
 using Deep.Client.Shared.Persistence;
 using Microsoft.Data.Sqlite;
@@ -332,6 +333,302 @@ public sealed class TransportOutboxCorrectiveRedTests
             typeof(bool), typeof(bool), typeof(bool), typeof(bool), typeof(bool),
             typeof(bool)
         ]));
+        Assert.NotNull(typeof(ClientFeatureFlags).GetMethod(
+            "Deconstruct",
+            [
+                typeof(bool).MakeByRefType(), typeof(bool).MakeByRefType(),
+                typeof(bool).MakeByRefType(), typeof(bool).MakeByRefType(),
+                typeof(bool).MakeByRefType(), typeof(bool).MakeByRefType(),
+                typeof(bool).MakeByRefType(), typeof(bool).MakeByRefType(),
+                typeof(bool).MakeByRefType(), typeof(bool).MakeByRefType(),
+                typeof(bool).MakeByRefType()
+            ]));
+    }
+
+    [Fact]
+    public async Task RetryMetadataMustEqualPersistedNotBeforeAcrossRestart()
+    {
+        var path = TempPath("retry-metadata");
+        try
+        {
+            var item = Prepared(0x52, 0x83);
+            var transition = TransportOutboxTransition.Attempted(
+                item.AccountScope,
+                item.LogicalId,
+                1,
+                Attempt(0x84),
+                OutboxTransitionSource.Adapter,
+                OutboxTransitionReason.DispatchStarted,
+                Now.AddMinutes(1),
+                Now.AddMinutes(2));
+            using (var store = new SqliteSessionStore(path))
+            {
+                await store.PrepareTransportOutboxAsync(item);
+                await store.ApplyTransportOutboxTransitionAsync(transition);
+            }
+            using (var connection = Open(path))
+            {
+                using var command = connection.CreateCommand();
+                command.CommandText = """
+                    UPDATE transport_outbox_items
+                    SET not_before = $divergent
+                    WHERE account_scope = $scope AND logical_id = $logicalId;
+                    """;
+                command.Parameters.AddWithValue(
+                    "$divergent",
+                    Now.AddMinutes(3).ToUnixTimeMilliseconds());
+                command.Parameters.AddWithValue("$scope", item.AccountScope.ToArray());
+                command.Parameters.AddWithValue("$logicalId", item.LogicalId.ToArray());
+                command.ExecuteNonQuery();
+            }
+
+            using var restarted = new SqliteSessionStore(path);
+            Assert.Equal(
+                TransportOutboxReadResult.Corrupt,
+                (await restarted.ReadTransportOutboxAsync(
+                    item.AccountScope,
+                    item.LogicalId)).Result);
+            Assert.Equal(
+                TransportOutboxCommitResult.Corrupt,
+                await restarted.PrepareTransportOutboxAsync(item));
+            Assert.Equal(
+                TransportOutboxCommitResult.Corrupt,
+                await restarted.ApplyTransportOutboxTransitionAsync(transition));
+        }
+        finally
+        {
+            DeleteSqliteFiles(path);
+        }
+    }
+
+    [Fact]
+    public async Task FileBackedRetryMetadataMismatchIsRejectedBeforeAdmission()
+    {
+        var path = TempPath("memory-retry-metadata");
+        try
+        {
+            var item = Prepared(0x53, 0x85);
+            var store = new InMemorySessionStore(path);
+            await store.PrepareTransportOutboxAsync(item);
+            await store.ApplyTransportOutboxTransitionAsync(
+                TransportOutboxTransition.Attempted(
+                    item.AccountScope,
+                    item.LogicalId,
+                    1,
+                    Attempt(0x86),
+                    OutboxTransitionSource.Adapter,
+                    OutboxTransitionReason.DispatchStarted,
+                    Now.AddMinutes(1),
+                    Now.AddMinutes(2)));
+            var root = JsonNode.Parse(File.ReadAllText(path))!.AsObject();
+            root["transportOutboxItems"]![0]!["notBefore"] =
+                Now.AddMinutes(3).ToString("O");
+            File.WriteAllText(path, root.ToJsonString(new JsonSerializerOptions
+            {
+                WriteIndented = true
+            }));
+
+            Assert.Throws<TransportOutboxCorruptException>(
+                () => new InMemorySessionStore(path));
+        }
+        finally
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task FileBackedStoreCanRestartItsOwnLargeNonOutboxSnapshot()
+    {
+        var path = TempPath("memory-self-rejection");
+        try
+        {
+            var payload = new string('x', 9 * 1024 * 1024);
+            var store = new InMemorySessionStore(path);
+            await store.SetAsync("compat.large-other-domain", payload);
+
+            var restarted = new InMemorySessionStore(path);
+            Assert.Equal(
+                payload.Length,
+                (await restarted.GetAsync<string>("compat.large-other-domain"))?.Length);
+        }
+        finally
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task NonEmptyV8OutboxIsQuarantinedDuringTransactionalV9Migration()
+    {
+        var path = TempPath("v8-quarantine");
+        try
+        {
+            CreateExactV8Fixture(path, withOutboxRow: true);
+
+            using (var store = new SqliteSessionStore(path))
+            {
+                Assert.Equal(
+                    "preserved",
+                    await store.GetAsync<string>("legacy.marker"));
+            }
+            using var connection = Open(path);
+            using var command = connection.CreateCommand();
+            command.CommandText = """
+                SELECT
+                    (SELECT user_version FROM pragma_user_version),
+                    (SELECT COUNT(*) FROM transport_outbox_items),
+                    (SELECT COUNT(*) FROM transport_outbox_items_v8_recovery),
+                    (SELECT COUNT(*) FROM sqlite_master
+                        WHERE type='table'
+                          AND name='transport_outbox_attempts_v8_recovery'),
+                    (SELECT payload_json FROM settings WHERE key='legacy.marker');
+                """;
+            using var reader = command.ExecuteReader();
+            Assert.True(reader.Read());
+            Assert.Equal(9, reader.GetInt32(0));
+            Assert.Equal(0, reader.GetInt32(1));
+            Assert.Equal(1, reader.GetInt32(2));
+            Assert.Equal(1, reader.GetInt32(3));
+            Assert.Equal("\"preserved\"", reader.GetString(4));
+        }
+        finally
+        {
+            DeleteSqliteFiles(path);
+        }
+    }
+
+    [Fact]
+    public void EmptyV8OutboxMigratesToV9WithoutRecoveryTables()
+    {
+        var path = TempPath("v8-empty");
+        try
+        {
+            CreateExactV8Fixture(path, withOutboxRow: false);
+
+            using var store = new SqliteSessionStore(path);
+            using var connection = Open(path);
+            using var command = connection.CreateCommand();
+            command.CommandText = """
+                SELECT
+                    (SELECT user_version FROM pragma_user_version),
+                    (SELECT COUNT(*) FROM pragma_table_info('transport_outbox_items')
+                        WHERE name='acknowledged_at'),
+                    (SELECT COUNT(*) FROM sqlite_master
+                        WHERE type='table'
+                          AND name='transport_outbox_items_v8_recovery');
+                """;
+            using var reader = command.ExecuteReader();
+            Assert.True(reader.Read());
+            Assert.Equal(9, reader.GetInt32(0));
+            Assert.Equal(1, reader.GetInt32(1));
+            Assert.Equal(0, reader.GetInt32(2));
+        }
+        finally
+        {
+            DeleteSqliteFiles(path);
+        }
+    }
+
+    [Fact]
+    public void FailedV8QuarantineRollsBackAndLeavesVersionAndRowsUntouched()
+    {
+        var path = TempPath("v8-rollback");
+        try
+        {
+            CreateExactV8Fixture(path, withOutboxRow: true);
+            using (var connection = Open(path))
+            {
+                using var command = connection.CreateCommand();
+                command.CommandText =
+                    "CREATE TABLE transport_outbox_items_v8_recovery(marker INTEGER);";
+                command.ExecuteNonQuery();
+            }
+
+            Assert.ThrowsAny<Exception>(() => new SqliteSessionStore(path));
+
+            using var verify = Open(path);
+            using var read = verify.CreateCommand();
+            read.CommandText = """
+                SELECT
+                    (SELECT user_version FROM pragma_user_version),
+                    (SELECT COUNT(*) FROM transport_outbox_items);
+                """;
+            using var reader = read.ExecuteReader();
+            Assert.True(reader.Read());
+            Assert.Equal(8, reader.GetInt32(0));
+            Assert.Equal(1, reader.GetInt32(1));
+        }
+        finally
+        {
+            DeleteSqliteFiles(path);
+        }
+    }
+
+    [Fact]
+    public async Task PersistedLogicalMaximumAndTerminalTimelineCorruptionFailClosed()
+    {
+        var path = TempPath("state-timeline-corruption");
+        try
+        {
+            var item = Prepared(0x54, 0x87);
+            var attempt = Attempt(0x88);
+            using (var store = new SqliteSessionStore(path))
+            {
+                await store.PrepareTransportOutboxAsync(item);
+                await store.ApplyTransportOutboxTransitionAsync(
+                    TransportOutboxTransition.Attempted(
+                        item.AccountScope, item.LogicalId, 1, attempt,
+                        OutboxTransitionSource.Adapter,
+                        OutboxTransitionReason.DispatchStarted,
+                        Now.AddMinutes(1), Now.AddMinutes(2)));
+                await store.ApplyTransportOutboxTransitionAsync(
+                    TransportOutboxTransition.Accepted(
+                        item.AccountScope, item.LogicalId, 2, attempt,
+                        OutboxTransitionSource.Adapter,
+                        OutboxTransitionReason.AdapterAccepted,
+                        Now.AddMinutes(2), Now.AddMinutes(3), Bytes(16, 0x89)));
+                await store.ApplyTransportOutboxTransitionAsync(
+                    TransportOutboxTransition.Durable(
+                        item.AccountScope, item.LogicalId, 3, attempt,
+                        OutboxTransitionSource.Adapter,
+                        OutboxTransitionReason.AdapterConfirmedDurable,
+                        Now.AddMinutes(3), Bytes(16, 0x8A)));
+            }
+            using (var connection = Open(path))
+            {
+                using var command = connection.CreateCommand();
+                command.CommandText = """
+                    UPDATE transport_outbox_items SET state = 2
+                    WHERE account_scope = $scope AND logical_id = $logicalId;
+                    UPDATE transport_outbox_attempts SET occurred_at = $expiresAt
+                    WHERE account_scope = $scope AND logical_id = $logicalId;
+                    """;
+                command.Parameters.AddWithValue("$scope", item.AccountScope.ToArray());
+                command.Parameters.AddWithValue("$logicalId", item.LogicalId.ToArray());
+                command.Parameters.AddWithValue(
+                    "$expiresAt",
+                    item.ExpiresAt.ToUnixTimeMilliseconds());
+                command.ExecuteNonQuery();
+            }
+
+            using var restarted = new SqliteSessionStore(path);
+            Assert.Equal(
+                TransportOutboxReadResult.Corrupt,
+                (await restarted.ReadTransportOutboxAsync(
+                    item.AccountScope,
+                    item.LogicalId)).Result);
+        }
+        finally
+        {
+            DeleteSqliteFiles(path);
+        }
     }
 
     [Fact]
@@ -510,6 +807,83 @@ public sealed class TransportOutboxCorrectiveRedTests
         var connection = new SqliteConnection($"Data Source={path};Pooling=False");
         connection.Open();
         return connection;
+    }
+
+    private static void CreateExactV8Fixture(string path, bool withOutboxRow)
+    {
+        using var connection = Open(path);
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            CREATE TABLE settings (
+                key TEXT PRIMARY KEY,
+                payload_json TEXT NOT NULL
+            );
+            INSERT INTO settings(key, payload_json)
+            VALUES ('legacy.marker', '"preserved"');
+
+            CREATE TABLE transport_outbox_items (
+                account_scope BLOB NOT NULL,
+                logical_id BLOB NOT NULL PRIMARY KEY,
+                dedup_material BLOB NOT NULL,
+                ciphertext_bundle BLOB NOT NULL,
+                created_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                not_before INTEGER NOT NULL,
+                state INTEGER NOT NULL,
+                revision INTEGER NOT NULL,
+                transition_source INTEGER NOT NULL,
+                transition_reason INTEGER NOT NULL,
+                transitioned_at INTEGER NOT NULL,
+                acknowledgement_evidence BLOB NULL
+            );
+
+            CREATE TABLE transport_outbox_attempts (
+                logical_id BLOB NOT NULL,
+                attempt_id BLOB NOT NULL,
+                state INTEGER NOT NULL,
+                transition_source INTEGER NOT NULL,
+                transition_reason INTEGER NOT NULL,
+                occurred_at INTEGER NOT NULL,
+                evidence BLOB NOT NULL,
+                PRIMARY KEY(logical_id, attempt_id),
+                FOREIGN KEY(logical_id)
+                    REFERENCES transport_outbox_items(logical_id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX idx_transport_outbox_ready
+                ON transport_outbox_items(
+                    account_scope, state, not_before, expires_at, created_at);
+            CREATE INDEX idx_transport_outbox_expiry
+                ON transport_outbox_items(account_scope, expires_at, state);
+            PRAGMA user_version=8;
+            """;
+        command.ExecuteNonQuery();
+        if (!withOutboxRow)
+        {
+            return;
+        }
+
+        using var insert = connection.CreateCommand();
+        insert.CommandText = """
+            INSERT INTO transport_outbox_items (
+                account_scope, logical_id, dedup_material, ciphertext_bundle,
+                created_at, expires_at, not_before, state, revision,
+                transition_source, transition_reason, transitioned_at,
+                acknowledgement_evidence)
+            VALUES (
+                $scope, $logicalId, $dedup, $ciphertext,
+                $createdAt, $expiresAt, $notBefore, 1, 1, 1, 1, $createdAt, NULL);
+            """;
+        insert.Parameters.AddWithValue("$scope", Bytes(32, 0xB1));
+        insert.Parameters.AddWithValue("$logicalId", Bytes(16, 0xB2));
+        insert.Parameters.AddWithValue("$dedup", Bytes(32, 0xB3));
+        insert.Parameters.AddWithValue("$ciphertext", Bytes(64, 0xB4));
+        insert.Parameters.AddWithValue("$createdAt", Now.ToUnixTimeMilliseconds());
+        insert.Parameters.AddWithValue(
+            "$expiresAt",
+            Now.AddHours(1).ToUnixTimeMilliseconds());
+        insert.Parameters.AddWithValue("$notBefore", Now.ToUnixTimeMilliseconds());
+        insert.ExecuteNonQuery();
     }
 
     private static void DeleteSqliteFiles(string path)
