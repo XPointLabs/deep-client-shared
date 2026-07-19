@@ -430,6 +430,28 @@ public sealed class MembershipTrustRepositoryContractTests
             "GetBytes(ordinal, 0, null",
             source,
             StringComparison.Ordinal);
+
+        var clockCommitStart = source.IndexOf(
+            "public async Task<MembershipTrustClockCommitResult> CommitMembershipTrustClockAsync(",
+            StringComparison.Ordinal);
+        var clockReadStart = source.IndexOf(
+            "public async Task<MembershipTrustClockReadSnapshot> ReadMembershipTrustClockAsync(",
+            clockCommitStart,
+            StringComparison.Ordinal);
+        var clockReadEnd = source.IndexOf(
+            "public async Task<MessageReplayClaimResult>",
+            clockReadStart,
+            StringComparison.Ordinal);
+        Assert.True(
+            clockCommitStart >= 0 &&
+            clockReadStart > clockCommitStart &&
+            clockReadEnd > clockReadStart);
+        var clockCommit = source[clockCommitStart..clockReadStart];
+        var clockRead = source[clockReadStart..clockReadEnd];
+        Assert.Contains("length(digest)", clockCommit, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("ReadFixedProjectedBlob(", clockCommit, StringComparison.Ordinal);
+        Assert.Contains("length(digest)", clockRead, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("ReadFixedProjectedBlob(", clockRead, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -783,6 +805,72 @@ public sealed class MembershipTrustRepositoryContractTests
                 SELECT revision, length(payload_digest)
                 FROM membership_trust_heads
                 WHERE profile_key = 'install:test' AND domain = 3;
+                """;
+            await using var reader = await query.ExecuteReaderAsync();
+            Assert.True(await reader.ReadAsync());
+            Assert.Equal(1L, reader.GetInt64(0));
+            Assert.Equal(1048576L, reader.GetInt64(1));
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            foreach (var candidate in new[] { path, path + "-wal", path + "-shm" })
+            {
+                File.Delete(candidate);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task SqliteOversizedClockDigest_BlocksReadReplayAndSuccessor()
+    {
+        var path = Path.Combine(
+            Path.GetTempPath(),
+            $"deep-p07-oversized-clock-digest-{Guid.NewGuid():N}.db");
+        try
+        {
+            using var store = new SqliteSessionStore(path);
+            var first = MembershipTrustClockRecord.Create(
+                "install:test",
+                1,
+                DateTimeOffset.FromUnixTimeSeconds(1000));
+            var second = MembershipTrustClockRecord.Create(
+                "install:test",
+                2,
+                DateTimeOffset.FromUnixTimeSeconds(2000));
+            Assert.Equal(
+                MembershipTrustClockCommitResult.Applied,
+                await store.CommitMembershipTrustClockAsync(first, null));
+            await using (var connection = new SqliteConnection(
+                             $"Data Source={path};Pooling=False"))
+            {
+                await connection.OpenAsync();
+                await using var command = connection.CreateCommand();
+                command.CommandText = """
+                    UPDATE membership_trust_clock
+                    SET digest = zeroblob(1048576)
+                    WHERE profile_key = 'install:test';
+                    """;
+                await command.ExecuteNonQueryAsync();
+            }
+
+            Assert.Equal(
+                MembershipTrustClockReadResult.Corrupt,
+                (await store.ReadMembershipTrustClockAsync("install:test")).Result);
+            Assert.Equal(
+                MembershipTrustClockCommitResult.Corrupt,
+                await store.CommitMembershipTrustClockAsync(first, null));
+            Assert.Equal(
+                MembershipTrustClockCommitResult.Corrupt,
+                await store.CommitMembershipTrustClockAsync(second, 1));
+            await using var verify = new SqliteConnection(
+                $"Data Source={path};Pooling=False");
+            await verify.OpenAsync();
+            await using var query = verify.CreateCommand();
+            query.CommandText = """
+                SELECT revision, length(digest)
+                FROM membership_trust_clock
+                WHERE profile_key = 'install:test';
                 """;
             await using var reader = await query.ExecuteReaderAsync();
             Assert.True(await reader.ReadAsync());
