@@ -37,6 +37,8 @@ public sealed class FeatureFlagsTests
         Assert.False(ClientFeatureFlags.Defaults.LegacyEmbeddedBootstrapRollbackAllowed);
         Assert.False(ClientFeatureFlags.ReleaseDefaults.MembershipTrustEnabled);
         Assert.False(ClientFeatureFlags.ReleaseDefaults.LegacyEmbeddedBootstrapRollbackAllowed);
+        Assert.False(ClientFeatureFlags.Defaults.PersistentTransportOutboxEnabled);
+        Assert.False(ClientFeatureFlags.ReleaseDefaults.PersistentTransportOutboxEnabled);
     }
 
     [Fact]
@@ -47,5 +49,6 @@ public sealed class FeatureFlagsTests
 
         Assert.False(flags.MembershipTrustEnabled);
         Assert.False(flags.LegacyEmbeddedBootstrapRollbackAllowed);
+        Assert.False(flags.PersistentTransportOutboxEnabled);
     }
 }

@@ -11,7 +11,8 @@ public sealed record ClientFeatureFlags(
     bool TransportRequired = false,
     bool StubTransportAllowed = true,
     bool MembershipTrustEnabled = false,
-    bool LegacyEmbeddedBootstrapRollbackAllowed = false)
+    bool LegacyEmbeddedBootstrapRollbackAllowed = false,
+    bool PersistentTransportOutboxEnabled = false)
 {
     public static ClientFeatureFlags Defaults { get; } = new();
 
@@ -26,7 +27,8 @@ public sealed record ClientFeatureFlags(
         TransportRequired: true,
         StubTransportAllowed: false,
         MembershipTrustEnabled: false,
-        LegacyEmbeddedBootstrapRollbackAllowed: false);
+        LegacyEmbeddedBootstrapRollbackAllowed: false,
+        PersistentTransportOutboxEnabled: false);
 }
 
 public sealed class FeatureDisabledException(string featureName)

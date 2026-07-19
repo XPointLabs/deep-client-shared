@@ -60,9 +60,9 @@ P11A moves the physical SQLite schema from v7 to v8 by adding only
 indexes. Existing v7 tables and rows are not rewritten or deleted. Databases
 newer than v8 fail closed.
 
-The feature remains dormant and disabled at runtime. During the declared
-rollback window, a v7 binary may open a copied pre-migration database; the
+The feature remains dormant and `PersistentTransportOutboxEnabled` is false in
+both default profiles; no runtime composition reads this repository. During the
+declared rollback window, a v7 binary may open a copied pre-migration database; the
 authoritative v8 file must not be opened by an older writer. Operational
 rollback therefore restores the pre-migration file backup, never edits
 `user_version` and never drops P11A tables in place.
-
