@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Security.Cryptography;
+using Deep.Client.Shared.Persistence;
 using Deep.Protocol.DeepExtension.Membership;
 using Deep.Protocol.DeepExtension.SelfHostedProfiles;
 
@@ -117,93 +118,83 @@ public sealed class DormantSelfHostedProfileVerificationService
         ArgumentNullException.ThrowIfNull(parameters);
         ThrowIfCanceled(cancellationToken);
 
-        StagedSelfHostedProfileExportOutcome exported;
+        ProfileCarrierVerificationOptions options;
         try
         {
-            exported = await staging.ExportAsync(
-                accountScope,
-                candidateId,
-                cancellationToken).ConfigureAwait(false);
+            options = new ProfileCarrierVerificationOptions(
+                parameters.VerificationTimeUnixSeconds,
+                parameters.AllowedClockSkewSeconds,
+                parameters.Protocol);
         }
         catch (OutOfMemoryException)
         {
             throw;
+        }
+        catch (ProfileCarrierException)
+        {
+            return Outcome(DormantSelfHostedProfileVerificationStatus.InvalidRequest);
+        }
+        catch (Exception)
+        {
+            return Outcome(DormantSelfHostedProfileVerificationStatus.DependencyFailure);
+        }
+
+        try
+        {
+            await verificationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw SanitizedCancellation(cancellationToken);
         }
-        catch (Exception)
-        {
-            return Outcome(DormantSelfHostedProfileVerificationStatus.DependencyFailure);
-        }
-
-        ThrowIfCanceled(cancellationToken);
-        switch (exported.Result)
-        {
-            case StagedSelfHostedProfileExportResult.Missing:
-                return Outcome(DormantSelfHostedProfileVerificationStatus.Missing);
-            case StagedSelfHostedProfileExportResult.Corrupt:
-                return Outcome(DormantSelfHostedProfileVerificationStatus.CorruptStaging);
-            case StagedSelfHostedProfileExportResult.DependencyFailure:
-                return Outcome(DormantSelfHostedProfileVerificationStatus.DependencyFailure);
-            case StagedSelfHostedProfileExportResult.Exported:
-                break;
-            default:
-                return Outcome(DormantSelfHostedProfileVerificationStatus.DependencyFailure);
-        }
-
-        byte[] candidateBytes;
         try
         {
-            candidateBytes = exported.GetCandidateBytesCopy();
-        }
-        catch (OutOfMemoryException)
-        {
-            throw;
-        }
-        catch (Exception)
-        {
-            return Outcome(DormantSelfHostedProfileVerificationStatus.DependencyFailure);
-        }
-
-        try
-        {
-            if (candidateBytes.Length > ProfileCarrierLimits.MaximumFilePayloadBytes)
-                return Outcome(DormantSelfHostedProfileVerificationStatus.BoundsExceeded);
-
-            ProfileCarrierVerificationOptions options;
+            StagedSelfHostedProfileExportOutcome exported;
             try
             {
-                options = new ProfileCarrierVerificationOptions(
-                    parameters.VerificationTimeUnixSeconds,
-                    parameters.AllowedClockSkewSeconds,
-                    parameters.Protocol);
+                exported = await staging.ExportAsync(
+                    accountScope,
+                    candidateId,
+                    cancellationToken).ConfigureAwait(false);
             }
             catch (OutOfMemoryException)
             {
                 throw;
             }
-            catch (ProfileCarrierException)
+            catch (AccountGenerationMutationCanceledException)
             {
-                return Outcome(DormantSelfHostedProfileVerificationStatus.InvalidRequest);
+                throw SanitizedBarrierCancellation();
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw SanitizedCancellation(cancellationToken);
             }
             catch (Exception)
             {
                 return Outcome(DormantSelfHostedProfileVerificationStatus.DependencyFailure);
             }
 
-            try
+            ThrowIfCanceled(cancellationToken);
+            switch (exported.Result)
             {
-                await verificationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                throw SanitizedCancellation(cancellationToken);
+                case StagedSelfHostedProfileExportResult.Missing:
+                    return Outcome(DormantSelfHostedProfileVerificationStatus.Missing);
+                case StagedSelfHostedProfileExportResult.Corrupt:
+                    return Outcome(DormantSelfHostedProfileVerificationStatus.CorruptStaging);
+                case StagedSelfHostedProfileExportResult.DependencyFailure:
+                    return Outcome(DormantSelfHostedProfileVerificationStatus.DependencyFailure);
+                case StagedSelfHostedProfileExportResult.Exported:
+                    break;
+                default:
+                    return Outcome(DormantSelfHostedProfileVerificationStatus.DependencyFailure);
             }
 
+            var candidateBytes = exported.TakeCandidateBytesForVerification();
             try
             {
+                if (candidateBytes.Length > ProfileCarrierLimits.MaximumFilePayloadBytes)
+                    return Outcome(DormantSelfHostedProfileVerificationStatus.BoundsExceeded);
+
                 ThrowIfCanceled(cancellationToken);
                 var guardedVerifier = new GuardedMembershipVerifier(verifier, cancellationToken);
                 try
@@ -251,12 +242,12 @@ public sealed class DormantSelfHostedProfileVerificationService
             }
             finally
             {
-                verificationGate.Release();
+                CryptographicOperations.ZeroMemory(candidateBytes);
             }
         }
         finally
         {
-            CryptographicOperations.ZeroMemory(candidateBytes);
+            verificationGate.Release();
         }
     }
 
@@ -306,6 +297,8 @@ public sealed class DormantSelfHostedProfileVerificationService
 
     private static OperationCanceledException SanitizedCancellation(
         CancellationToken cancellationToken) => new(cancellationToken);
+
+    private static OperationCanceledException SanitizedBarrierCancellation() => new();
 
     private sealed class GuardedMembershipVerifier(
         IMembershipSignatureVerifier inner,

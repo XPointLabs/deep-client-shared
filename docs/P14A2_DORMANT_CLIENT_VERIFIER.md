@@ -8,6 +8,13 @@ through the exact accepted `Deep.Protocol.ProfileCarrier` package. Verification
 time, clock skew and protocol are explicit inputs. No clock or production
 verifier policy is selected here.
 
+Admission is bounded before export, so one service instance owns at most one
+exported snapshot at a time. The export outcome transfers its sole owned byte
+buffer to the verifier and no longer retains a second copy; the transferred
+buffer is zeroed on every success, rejection, cancellation, and exception path.
+Account-generation barrier cancellation is returned as a fixed sanitized
+`OperationCanceledException` without retaining the barrier exception.
+
 Null account scope, candidate ID, or parameter objects follow the existing staging
 API contract and throw `ArgumentNullException`; valid objects with unsupported
 verification values return the fixed `InvalidRequest` status.

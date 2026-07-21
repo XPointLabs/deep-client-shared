@@ -227,7 +227,7 @@ public sealed class StagedSelfHostedProfileReadOutcome
 [DebuggerDisplay("{ToString(),nq}")]
 public sealed class StagedSelfHostedProfileExportOutcome
 {
-    private readonly byte[] candidateBytes;
+    private byte[] candidateBytes;
 
     internal StagedSelfHostedProfileExportOutcome(
         StagedSelfHostedProfileExportResult result,
@@ -240,6 +240,9 @@ public sealed class StagedSelfHostedProfileExportOutcome
     public StagedSelfHostedProfileExportResult Result { get; }
 
     public byte[] GetCandidateBytesCopy() => candidateBytes.ToArray();
+
+    internal byte[] TakeCandidateBytesForVerification() =>
+        Interlocked.Exchange(ref candidateBytes, Array.Empty<byte>());
 
     public override string ToString() => "[staged-self-hosted-profile-export-outcome]";
 }
