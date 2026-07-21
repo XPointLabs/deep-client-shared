@@ -110,6 +110,13 @@ public sealed class P14A2PackageAndStaticGateTests
     [Fact]
     public void SourceLockPinsOfflineWinArm64RuntimeClosure()
     {
+        var projectText = File.ReadAllText(Path.Combine(
+            RepositoryRoot(), "src", "Deep.Client.Shared", "Deep.Client.Shared.csproj"));
+        Assert.Contains(
+            "<RuntimeIdentifiers>win-arm64</RuntimeIdentifiers>",
+            projectText,
+            StringComparison.Ordinal);
+
         using var document = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(
             RepositoryRoot(), "src", "Deep.Client.Shared", "packages.lock.json")));
         var runtime = document.RootElement.GetProperty("dependencies")
