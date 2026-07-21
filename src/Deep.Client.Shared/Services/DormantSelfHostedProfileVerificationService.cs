@@ -174,80 +174,89 @@ public sealed class DormantSelfHostedProfileVerificationService
                 return Outcome(DormantSelfHostedProfileVerificationStatus.DependencyFailure);
             }
 
-            ThrowIfCanceled(cancellationToken);
             switch (exported.Result)
             {
                 case StagedSelfHostedProfileExportResult.Missing:
+                    ThrowIfCanceled(cancellationToken);
                     return Outcome(DormantSelfHostedProfileVerificationStatus.Missing);
                 case StagedSelfHostedProfileExportResult.Corrupt:
+                    ThrowIfCanceled(cancellationToken);
                     return Outcome(DormantSelfHostedProfileVerificationStatus.CorruptStaging);
                 case StagedSelfHostedProfileExportResult.DependencyFailure:
+                    ThrowIfCanceled(cancellationToken);
                     return Outcome(DormantSelfHostedProfileVerificationStatus.DependencyFailure);
                 case StagedSelfHostedProfileExportResult.Exported:
-                    break;
+                    return ConsumeExportedSnapshot(exported, options, cancellationToken);
                 default:
-                    return Outcome(DormantSelfHostedProfileVerificationStatus.DependencyFailure);
-            }
-
-            var candidateBytes = exported.TakeCandidateBytesForVerification();
-            try
-            {
-                if (candidateBytes.Length > ProfileCarrierLimits.MaximumFilePayloadBytes)
-                    return Outcome(DormantSelfHostedProfileVerificationStatus.BoundsExceeded);
-
-                ThrowIfCanceled(cancellationToken);
-                var guardedVerifier = new GuardedMembershipVerifier(verifier, cancellationToken);
-                try
-                {
-                    var result = ProfileCarrierVerifier.VerifyExact(
-                        candidateBytes,
-                        options,
-                        guardedVerifier);
-                    ThrowIfCanceled(cancellationToken);
-                    if (guardedVerifier.DependencyFailed)
-                        return Outcome(DormantSelfHostedProfileVerificationStatus.DependencyFailure);
-                    if (!TryCreateMetadata(result, out var metadata))
-                        return Outcome(DormantSelfHostedProfileVerificationStatus.DependencyFailure);
-                    return new(DormantSelfHostedProfileVerificationStatus.Verified, metadata);
-                }
-                catch (OutOfMemoryException)
-                {
-                    throw;
-                }
-                catch (ProfileCarrierException exception)
-                {
-                    ThrowIfCanceled(cancellationToken);
-                    if (guardedVerifier.DependencyFailed)
-                        return Outcome(DormantSelfHostedProfileVerificationStatus.DependencyFailure);
-                    return Outcome(exception.Error switch
-                    {
-                        ProfileCarrierError.BoundsExceeded =>
-                            DormantSelfHostedProfileVerificationStatus.BoundsExceeded,
-                        ProfileCarrierError.VerificationRejected =>
-                            DormantSelfHostedProfileVerificationStatus.TrustRejected,
-                        ProfileCarrierError.InvalidFraming or ProfileCarrierError.InvalidInput =>
-                            DormantSelfHostedProfileVerificationStatus.Malformed,
-                        _ => DormantSelfHostedProfileVerificationStatus.DependencyFailure
-                    });
-                }
-                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-                {
-                    throw SanitizedCancellation(cancellationToken);
-                }
-                catch (Exception)
-                {
                     ThrowIfCanceled(cancellationToken);
                     return Outcome(DormantSelfHostedProfileVerificationStatus.DependencyFailure);
-                }
-            }
-            finally
-            {
-                CryptographicOperations.ZeroMemory(candidateBytes);
             }
         }
         finally
         {
             verificationGate.Release();
+        }
+    }
+
+    private DormantSelfHostedProfileVerificationOutcome ConsumeExportedSnapshot(
+        StagedSelfHostedProfileExportOutcome exported,
+        ProfileCarrierVerificationOptions options,
+        CancellationToken cancellationToken)
+    {
+        var candidateBytes = exported.TakeCandidateBytesForVerification();
+        try
+        {
+            ThrowIfCanceled(cancellationToken);
+            if (candidateBytes.Length > ProfileCarrierLimits.MaximumFilePayloadBytes)
+                return Outcome(DormantSelfHostedProfileVerificationStatus.BoundsExceeded);
+
+            var guardedVerifier = new GuardedMembershipVerifier(verifier, cancellationToken);
+            try
+            {
+                var result = ProfileCarrierVerifier.VerifyExact(
+                    candidateBytes,
+                    options,
+                    guardedVerifier);
+                ThrowIfCanceled(cancellationToken);
+                if (guardedVerifier.DependencyFailed)
+                    return Outcome(DormantSelfHostedProfileVerificationStatus.DependencyFailure);
+                if (!TryCreateMetadata(result, out var metadata))
+                    return Outcome(DormantSelfHostedProfileVerificationStatus.DependencyFailure);
+                return new(DormantSelfHostedProfileVerificationStatus.Verified, metadata);
+            }
+            catch (OutOfMemoryException)
+            {
+                throw;
+            }
+            catch (ProfileCarrierException exception)
+            {
+                ThrowIfCanceled(cancellationToken);
+                if (guardedVerifier.DependencyFailed)
+                    return Outcome(DormantSelfHostedProfileVerificationStatus.DependencyFailure);
+                return Outcome(exception.Error switch
+                {
+                    ProfileCarrierError.BoundsExceeded =>
+                        DormantSelfHostedProfileVerificationStatus.BoundsExceeded,
+                    ProfileCarrierError.VerificationRejected =>
+                        DormantSelfHostedProfileVerificationStatus.TrustRejected,
+                    ProfileCarrierError.InvalidFraming or ProfileCarrierError.InvalidInput =>
+                        DormantSelfHostedProfileVerificationStatus.Malformed,
+                    _ => DormantSelfHostedProfileVerificationStatus.DependencyFailure
+                });
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw SanitizedCancellation(cancellationToken);
+            }
+            catch (Exception)
+            {
+                ThrowIfCanceled(cancellationToken);
+                return Outcome(DormantSelfHostedProfileVerificationStatus.DependencyFailure);
+            }
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(candidateBytes);
         }
     }
 
