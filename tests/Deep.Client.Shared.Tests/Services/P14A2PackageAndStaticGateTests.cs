@@ -108,6 +108,27 @@ public sealed class P14A2PackageAndStaticGateTests
     }
 
     [Fact]
+    public void SourceLockPinsOfflineWinArm64RuntimeClosure()
+    {
+        using var document = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(
+            RepositoryRoot(), "src", "Deep.Client.Shared", "packages.lock.json")));
+        var runtime = document.RootElement.GetProperty("dependencies")
+            .GetProperty("net10.0/win-arm64");
+
+        AssertRuntimePackage(
+            runtime,
+            "libsodium",
+            "1.0.22",
+            "KPD9SloJFclrsjnhABu7dzWrcyYkwPbvx5l1gRSPAX/0n+OBtSiVCKtGFv4n+ecWUHU0tCG9LSSwoZZx673zBQ==");
+        AssertRuntimePackage(
+            runtime,
+            "SQLitePCLRaw.lib.e_sqlcipher",
+            "2.1.11",
+            "Cg6UPeDbH8jyaOs1vqXYIgeewH0wYrBnmbC5Ml3GYBo+GKzNmyxrWSO52JV68bfB7Addt/PZLMekJV1RH2ftWQ==");
+        Assert.Equal(2, runtime.EnumerateObject().Count());
+    }
+
+    [Fact]
     public void CarrierPinNegativeControlsRejectAlteredVersionShaAndProjectReference()
     {
         var root = RepositoryRoot();
@@ -178,6 +199,18 @@ public sealed class P14A2PackageAndStaticGateTests
         {
             throw new InvalidDataException("Carrier pin validation failed.");
         }
+    }
+
+    private static void AssertRuntimePackage(
+        JsonElement runtime,
+        string id,
+        string version,
+        string contentHash)
+    {
+        var package = runtime.GetProperty(id);
+        Assert.Equal("Transitive", package.GetProperty("type").GetString());
+        Assert.Equal(version, package.GetProperty("resolved").GetString());
+        Assert.Equal(contentHash, package.GetProperty("contentHash").GetString());
     }
 
     internal static string RepositoryRoot()
