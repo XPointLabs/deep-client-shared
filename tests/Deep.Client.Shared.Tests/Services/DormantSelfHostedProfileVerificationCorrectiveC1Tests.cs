@@ -33,6 +33,10 @@ public sealed class DormantSelfHostedProfileVerificationCorrectiveC1Tests
         Assert.NotNull(field);
         Assert.NotNull(transfer);
         var originallyOwned = Assert.IsType<byte[]>(field.GetValue(outcome));
+        var defensiveCopy = outcome.GetCandidateBytesCopy();
+        Assert.NotSame(originallyOwned, defensiveCopy);
+        defensiveCopy[0] ^= 0xff;
+        Assert.Equal(payload[0], originallyOwned[0]);
         var taken = Assert.IsType<byte[]>(transfer.Invoke(outcome, null));
 
         Assert.Same(originallyOwned, taken);
@@ -117,7 +121,7 @@ public sealed class DormantSelfHostedProfileVerificationCorrectiveC1Tests
 
         Assert.Equal(1, repository.Reads);
         Assert.Equal(1, repository.MaximumActiveReads);
-        Assert.Equal(31, verifications.Count(task => !task.IsCompleted));
+        Assert.Equal(32, verifications.Count(task => !task.IsCompleted));
 
         releaseVerifier.Set();
         var outcomes = await Task.WhenAll(verifications).WaitAsync(TestTimeout);
@@ -166,6 +170,33 @@ public sealed class DormantSelfHostedProfileVerificationCorrectiveC1Tests
                 scope,
                 saved.Candidate.Id,
                 P14A2TestSupport.Parameters())).Status);
+    }
+
+    [Fact]
+    public async Task InvalidValueParametersAreRejectedBeforeGateAndExport()
+    {
+        var inner = new InMemorySessionStore();
+        var seed = new StagedSelfHostedProfileService(inner);
+        var scope = P14A2TestSupport.Scope(0xa4);
+        var saved = await seed.SaveAsync(
+            scope,
+            StagedSelfHostedProfileLimits.SchemaVersion,
+            P14A2TestSupport.Fixture("accepted-eff4523-default.dpf"));
+        var repository = new ConcurrentReadProbeRepository(inner);
+        var service = new DormantSelfHostedProfileVerificationService(
+            new StagedSelfHostedProfileService(repository),
+            new P14A2DeterministicVerifier());
+
+        var outcome = await service.VerifyAsync(
+            scope,
+            saved.Candidate!.Id,
+            new DormantSelfHostedProfileVerificationParameters(
+                P14A2TestSupport.VerificationTime,
+                P14A2TestSupport.ClockSkew,
+                protocol: 0));
+
+        Assert.Equal(DormantSelfHostedProfileVerificationStatus.InvalidRequest, outcome.Status);
+        Assert.Equal(0, repository.Reads);
     }
 
     [Fact]
