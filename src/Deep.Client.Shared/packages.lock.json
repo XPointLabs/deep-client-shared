@@ -13,6 +13,15 @@
           "Sodium.Core": "1.4.1"
         }
       },
+      "Deep.Protocol.ProfileCarrier": {
+        "type": "Direct",
+        "requested": "[0.1.0-p14.faa598f, 0.1.0-p14.faa598f]",
+        "resolved": "0.1.0-p14.faa598f",
+        "contentHash": "XV6HBDrOAQKVp9jQDirlxIO1QrdWIFhMuF5ij8HGavGPCMhIvOTHwTwn/bDuSTsMfmQ0BJDDC+RH+VE8BtqR5Q==",
+        "dependencies": {
+          "Deep.Protocol": "[0.3.0-p04.b887fa0]"
+        }
+      },
       "Microsoft.Data.Sqlite.Core": {
         "type": "Direct",
         "requested": "[10.0.9, )",

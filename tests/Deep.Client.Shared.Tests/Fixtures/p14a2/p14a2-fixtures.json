@@ -1,0 +1,20 @@
+{
+  "schema": "deep-client-p14a2-frozen-fixtures.v1",
+  "acceptedP14C2SourceCommit": "cd9d20a8ec8346d171d4cd070dde170aa5f471d7",
+  "acceptedP14C2SourceTree": "e27c1d7c2517bd9d1bcdfbacda8c68c57a2ced59",
+  "acceptedP14C2EvidenceCarrier": "2a21902ff5a613242180fdd75233991da896f879",
+  "originalVectorSourceCommit": "eff452368fa4cb1324c5b3c8ee06e2f10e96b835",
+  "fingerprint": "sha256:f297fde558e06fb88b83ab638e7bd85113a5d0cf617e3d4fe20d8e77a9b18fe2",
+  "minimumProtocol": 1,
+  "maximumProtocol": 3,
+  "verificationTimeUnixSeconds": 1100,
+  "allowedClockSkewSeconds": 30,
+  "protocol": 2,
+  "vectors": [
+    { "file": "accepted-eff4523-default.dpf", "bytes": 1359, "sha256": "cc8df0559b033ad7c70aa5d19134c06c58fb2dd6cfc10449525e1fb919679dbe", "componentCount": 4, "bridgeCount": 1 },
+    { "file": "accepted-eff4523-two-bridges.dpf", "bytes": 1726, "sha256": "05549533056af9a7f6d1cfb779e336fec3ac40395bcd9512ca953d1fe7795385", "componentCount": 5, "bridgeCount": 2 },
+    { "file": "accepted-eff4523-qr-1524.dpf", "bytes": 1524, "sha256": "0a1708d4fdf65ad0e72904867857973191ecb291bed379c6d728a5a56e0c497f", "componentCount": 4, "bridgeCount": 1 },
+    { "file": "accepted-eff4523-qr-1525.dpf", "bytes": 1525, "sha256": "854f4f73f304bc1cbf95be7a48231b7a1549079ea456a7eb2b06e763d8f70894", "componentCount": 4, "bridgeCount": 1 },
+    { "file": "accepted-eff4523-max-49152.dpf", "bytes": 49152, "sha256": "554f63afd6da4ecdde2c66732c9e4daf28391f796d26e949eb41ca3e95c74441", "componentCount": 16, "bridgeCount": 13 }
+  ]
+}

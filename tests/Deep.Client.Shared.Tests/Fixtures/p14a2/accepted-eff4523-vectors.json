@@ -1,0 +1,40 @@
+{
+  "sourceCommit": "eff452368fa4cb1324c5b3c8ee06e2f10e96b835",
+  "vectors": [
+    {
+      "file": "accepted-eff4523-default.dpf",
+      "bytes": 1359,
+      "sha256": "cc8df0559b033ad7c70aa5d19134c06c58fb2dd6cfc10449525e1fb919679dbe",
+      "ComponentCount": 4,
+      "qrCharacters": 1828
+    },
+    {
+      "file": "accepted-eff4523-two-bridges.dpf",
+      "bytes": 1726,
+      "sha256": "05549533056af9a7f6d1cfb779e336fec3ac40395bcd9512ca953d1fe7795385",
+      "ComponentCount": 5,
+      "qrCharacters": null
+    },
+    {
+      "file": "accepted-eff4523-qr-1524.dpf",
+      "bytes": 1524,
+      "sha256": "0a1708d4fdf65ad0e72904867857973191ecb291bed379c6d728a5a56e0c497f",
+      "ComponentCount": 4,
+      "qrCharacters": 2048
+    },
+    {
+      "file": "accepted-eff4523-qr-1525.dpf",
+      "bytes": 1525,
+      "sha256": "854f4f73f304bc1cbf95be7a48231b7a1549079ea456a7eb2b06e763d8f70894",
+      "ComponentCount": 4,
+      "qrCharacters": null
+    },
+    {
+      "file": "accepted-eff4523-max-49152.dpf",
+      "bytes": 49152,
+      "sha256": "554f63afd6da4ecdde2c66732c9e4daf28391f796d26e949eb41ca3e95c74441",
+      "ComponentCount": 16,
+      "qrCharacters": null
+    }
+  ]
+}

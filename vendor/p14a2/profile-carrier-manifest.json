@@ -1,0 +1,16 @@
+{
+  "schema": "deep-client-p14a2-profile-carrier-package.v1",
+  "id": "Deep.Protocol.ProfileCarrier",
+  "version": "0.1.0-p14.faa598f",
+  "file": "packages/Deep.Protocol.ProfileCarrier.0.1.0-p14.faa598f.nupkg",
+  "bytes": 24597,
+  "sha256": "5b895ced820d678e6957482989f74621322a7bb0661ede13dcb3184e4f3e960e",
+  "nugetContentHash": "XV6HBDrOAQKVp9jQDirlxIO1QrdWIFhMuF5ij8HGavGPCMhIvOTHwTwn/bDuSTsMfmQ0BJDDC+RH+VE8BtqR5Q==",
+  "normalizedIdentity": "ab402ce9420ecb5f3f80a6fb9fd48b807a4bda96565c28f88f3c35ac860719ba",
+  "sourceCommit": "faa598ff32913470cf85d6f2c8a8921cbf2aa287",
+  "dependency": {
+    "id": "Deep.Protocol",
+    "version": "[0.3.0-p04.b887fa0]"
+  },
+  "status": "REVIEW-PENDING / PRODUCTION-VERIFIER-NO-GO / ACTIVATION-NO-GO"
+}

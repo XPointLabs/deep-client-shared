@@ -1,0 +1,243 @@
+{
+  "schema": "deep-client-p14a2-offline-closure.v1",
+  "acceptedP14C2SourceCommit": "cd9d20a8ec8346d171d4cd070dde170aa5f471d7",
+  "acceptedP14C2SourceTree": "e27c1d7c2517bd9d1bcdfbacda8c68c57a2ced59",
+  "acceptedP14C2EvidenceCarrier": "2a21902ff5a613242180fdd75233991da896f879",
+  "contractVersion": "Deep.Protocol/P04-canonical-v1",
+  "p04SourceCommit": "b887fa088f486390be182cac4cbcb59b60ce8931",
+  "productionCryptoStatus": "blocked-no-approved-production-signature-profile-or-verifier",
+  "packages": [
+    {
+      "id": "coverlet.collector",
+      "version": "6.0.4",
+      "file": "packages/coverlet.collector.6.0.4.nupkg",
+      "bytes": 2243960,
+      "sha256": "89e89497b1b9a55290e15eabc6111ed1e85ea74feed51043dc4008eb70104c8d",
+      "role": "test-infrastructure-only"
+    },
+    {
+      "id": "Deep.Protocol",
+      "version": "0.3.0-p04.b887fa0",
+      "file": "packages/Deep.Protocol.0.3.0-p04.b887fa0.nupkg",
+      "bytes": 91148,
+      "sha256": "8ef4e70ad0b6c1cc0087f25c0313d6ab6a5387d16246679e4c10a3c00898a442",
+      "role": "p04-authority"
+    },
+    {
+      "id": "Deep.Protocol.Abstractions",
+      "version": "0.3.0-p04.b887fa0",
+      "file": "packages/Deep.Protocol.Abstractions.0.3.0-p04.b887fa0.nupkg",
+      "bytes": 25670,
+      "sha256": "fc1212a6765f5778188fcb3866ef923023c2253c3ead299a542271f4cc4f844f",
+      "role": "p04-authority"
+    },
+    {
+      "id": "Deep.Protocol.Protobuf",
+      "version": "0.3.0-p04.b887fa0",
+      "file": "packages/Deep.Protocol.Protobuf.0.3.0-p04.b887fa0.nupkg",
+      "bytes": 51180,
+      "sha256": "755a027c58be670151456cc0bca4764731f7c493932d9eedd00c02e704baf818",
+      "role": "p04-authority"
+    },
+    {
+      "id": "Deep.Protocol.ProfileCarrier",
+      "version": "0.1.0-p14.faa598f",
+      "file": "packages/Deep.Protocol.ProfileCarrier.0.1.0-p14.faa598f.nupkg",
+      "bytes": 24597,
+      "sha256": "5b895ced820d678e6957482989f74621322a7bb0661ede13dcb3184e4f3e960e",
+      "role": "p14-shared-carrier"
+    },
+    {
+      "id": "Google.Protobuf",
+      "version": "3.32.1",
+      "file": "packages/Google.Protobuf.3.32.1.nupkg",
+      "bytes": 1410495,
+      "sha256": "02a4a40ad4b81aae6652a4b163eb5622d1b3b3519cca348b3cb79ac71d9b2cab",
+      "role": "p04-managed-transitive"
+    },
+    {
+      "id": "libsodium",
+      "version": "1.0.22",
+      "file": "packages/libsodium.1.0.22.nupkg",
+      "bytes": 7404253,
+      "sha256": "f66eac31ea413c1d5d068b46ade11d3295c86ec9d6cd29ff158ba58ef51db51a",
+      "role": "p04-native-crypto-transitive-production-blocked"
+    },
+    {
+      "id": "Microsoft.CodeCoverage",
+      "version": "17.14.1",
+      "file": "packages/Microsoft.CodeCoverage.17.14.1.nupkg",
+      "bytes": 9755080,
+      "sha256": "7fc432b46f06bd1a0fe3baced8a1269c32f1229c9eb1aab6e931630dd5b8d06b",
+      "role": "test-infrastructure-only"
+    },
+    {
+      "id": "Microsoft.Data.Sqlite.Core",
+      "version": "10.0.9",
+      "file": "packages/microsoft.data.sqlite.core.10.0.9.nupkg",
+      "bytes": 208183,
+      "sha256": "a9e7188b866fde4d6b306eba0793541afd067d467027f0ae14e671fcc700a589",
+      "role": "client-storage"
+    },
+    {
+      "id": "Microsoft.AspNetCore.App.Runtime.win-arm64",
+      "version": "10.0.9",
+      "file": "packages/Microsoft.AspNetCore.App.Runtime.win-arm64.10.0.9.nupkg",
+      "bytes": 12385929,
+      "sha256": "91746678d8bc9c7e3d93d7101dce5acb81e88c9a9b58badeae3a69121c1c0bdf",
+      "role": "win-arm64-sdk-runtime-pack"
+    },
+    {
+      "id": "Microsoft.NET.Test.Sdk",
+      "version": "17.14.1",
+      "file": "packages/Microsoft.NET.Test.Sdk.17.14.1.nupkg",
+      "bytes": 39629,
+      "sha256": "9995330c5bc5a7bc759caadc9d17748616cdbb983c11062df122a74607614ff0",
+      "role": "test-infrastructure-only"
+    },
+    {
+      "id": "Microsoft.NETCore.App.Runtime.win-arm64",
+      "version": "10.0.9",
+      "file": "packages/Microsoft.NETCore.App.Runtime.win-arm64.10.0.9.nupkg",
+      "bytes": 39715299,
+      "sha256": "1a9dd847442f01db24fa6bf7c7db4b9a9fac579879a2c90b9b87e47e8b261fa8",
+      "role": "win-arm64-sdk-runtime-pack"
+    },
+    {
+      "id": "Microsoft.TestPlatform.ObjectModel",
+      "version": "17.14.1",
+      "file": "packages/Microsoft.TestPlatform.ObjectModel.17.14.1.nupkg",
+      "bytes": 1657190,
+      "sha256": "40c7fa3bec34213fb5e8caf3a3bc27f8ddb47f72f5fe60e1b3faa3984a35ad8b",
+      "role": "test-infrastructure-only"
+    },
+    {
+      "id": "Microsoft.TestPlatform.TestHost",
+      "version": "17.14.1",
+      "file": "packages/Microsoft.TestPlatform.TestHost.17.14.1.nupkg",
+      "bytes": 3167820,
+      "sha256": "d5cc4759cbc7443ee8ad0dc41043cfc55184913a71a26d7fce82020bd4889c9b",
+      "role": "test-infrastructure-only"
+    },
+    {
+      "id": "Microsoft.WindowsDesktop.App.Runtime.win-arm64",
+      "version": "10.0.9",
+      "file": "packages/Microsoft.WindowsDesktop.App.Runtime.win-arm64.10.0.9.nupkg",
+      "bytes": 35316023,
+      "sha256": "c4e0dd00f1fa63be5c0a2e000ae44334286b5ddfba320c2f52369953396801cc",
+      "role": "win-arm64-sdk-runtime-pack"
+    },
+    {
+      "id": "Newtonsoft.Json",
+      "version": "13.0.3",
+      "file": "packages/Newtonsoft.Json.13.0.3.nupkg",
+      "bytes": 2441966,
+      "sha256": "872fc189e638ab1056555b03aaa38f68bcb54286e221aa646eb1129babf63c77",
+      "role": "test-infrastructure-only"
+    },
+    {
+      "id": "Sodium.Core",
+      "version": "1.4.1",
+      "file": "packages/Sodium.Core.1.4.1.nupkg",
+      "bytes": 168024,
+      "sha256": "de0b567d19bd1c0b9974ee5d98fc4da87045924b94ffa1b4378bb14e623a65b7",
+      "role": "p04-crypto-transitive-production-blocked"
+    },
+    {
+      "id": "SQLitePCLRaw.bundle_e_sqlcipher",
+      "version": "2.1.11",
+      "file": "packages/sqlitepclraw.bundle_e_sqlcipher.2.1.11.nupkg",
+      "bytes": 36767,
+      "sha256": "c07bdeb307cf183d6def43dc1cebc1f68e1d7af12219125f9c0fdfd060bdc078",
+      "role": "client-storage"
+    },
+    {
+      "id": "SQLitePCLRaw.core",
+      "version": "2.1.11",
+      "file": "packages/sqlitepclraw.core.2.1.11.nupkg",
+      "bytes": 36180,
+      "sha256": "b3f7f112862535ff5cd82e0766e78cccf081be98958835654a983b7a90741976",
+      "role": "client-storage"
+    },
+    {
+      "id": "SQLitePCLRaw.lib.e_sqlcipher",
+      "version": "2.1.11",
+      "file": "packages/sqlitepclraw.lib.e_sqlcipher.2.1.11.nupkg",
+      "bytes": 21094009,
+      "sha256": "461ef5dd142784b44b22662f853dd5de7a2d28e9c98e0165f26733d81a355696",
+      "role": "client-storage"
+    },
+    {
+      "id": "SQLitePCLRaw.provider.e_sqlcipher",
+      "version": "2.1.11",
+      "file": "packages/sqlitepclraw.provider.e_sqlcipher.2.1.11.nupkg",
+      "bytes": 61200,
+      "sha256": "3e952a8e1775ec718dd9e2a9a1dd8e67c12bf06e0eb654e15d6bb8b769c4d856",
+      "role": "client-storage"
+    },
+    {
+      "id": "xunit",
+      "version": "2.9.3",
+      "file": "packages/xunit.2.9.3.nupkg",
+      "bytes": 31659,
+      "sha256": "04fae949b8e5201ecfa07fa8702baca8c0eb3198114194b3793789cc72bf23d7",
+      "role": "test-infrastructure-only"
+    },
+    {
+      "id": "xunit.abstractions",
+      "version": "2.0.3",
+      "file": "packages/xunit.abstractions.2.0.3.nupkg",
+      "bytes": 75155,
+      "sha256": "d03d72fc2df8880448f7a81bddb00e1bcb5c18f323c7e7cc69b4cfa727469403",
+      "role": "test-infrastructure-only"
+    },
+    {
+      "id": "xunit.analyzers",
+      "version": "1.18.0",
+      "file": "packages/xunit.analyzers.1.18.0.nupkg",
+      "bytes": 269902,
+      "sha256": "0ce81a98b9df8bd51ae480e6dc9566f4c68e15b4926e6ab997c8f634f3b7a9dd",
+      "role": "test-infrastructure-only"
+    },
+    {
+      "id": "xunit.assert",
+      "version": "2.9.3",
+      "file": "packages/xunit.assert.2.9.3.nupkg",
+      "bytes": 246078,
+      "sha256": "bc760e75ef1b775d293a6afb89301836d3e5a87cec265e31dedd430ee61d0c20",
+      "role": "test-infrastructure-only"
+    },
+    {
+      "id": "xunit.core",
+      "version": "2.9.3",
+      "file": "packages/xunit.core.2.9.3.nupkg",
+      "bytes": 33553,
+      "sha256": "aa4550f09c3f2d95a6c62ae43cec22af2edbbd99f722e691ceefeca761fc6a7c",
+      "role": "test-infrastructure-only"
+    },
+    {
+      "id": "xunit.extensibility.core",
+      "version": "2.9.3",
+      "file": "packages/xunit.extensibility.core.2.9.3.nupkg",
+      "bytes": 298787,
+      "sha256": "99ca555fe9b447b1747aff426819db6a2f60b6ee0655caa28c4b91a9ef3d0f48",
+      "role": "test-infrastructure-only"
+    },
+    {
+      "id": "xunit.extensibility.execution",
+      "version": "2.9.3",
+      "file": "packages/xunit.extensibility.execution.2.9.3.nupkg",
+      "bytes": 379849,
+      "sha256": "dabc4cb360ede1c01c98e14cc0fe587774693f40679a22fc71794acac5d8d23c",
+      "role": "test-infrastructure-only"
+    },
+    {
+      "id": "xunit.runner.visualstudio",
+      "version": "3.1.4",
+      "file": "packages/xunit.runner.visualstudio.3.1.4.nupkg",
+      "bytes": 1325258,
+      "sha256": "5b54674b105a5f2cbd5e6e0e67956a1b67e082d94eaa7fddbc803110e6eff2d4",
+      "role": "test-infrastructure-only"
+    }
+  ]
+}

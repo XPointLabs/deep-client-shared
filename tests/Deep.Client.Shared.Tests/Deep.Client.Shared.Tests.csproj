@@ -28,6 +28,8 @@
           CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\p04-membership-contract-v1.json"
           CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\p14a2\**\*"
+          CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>
