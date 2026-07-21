@@ -7,6 +7,7 @@ using Deep.Client.Shared.Persistence;
 using Deep.Client.Shared.Services;
 using Deep.Client.Shared.State;
 using Deep.Protocol.DeepExtension.Membership;
+using Deep.Protocol.DeepExtension.SelfHostedProfiles;
 
 namespace Deep.Client.Shared.Tests.Services;
 
@@ -47,6 +48,47 @@ public sealed class DormantSelfHostedProfileVerificationCorrectiveC1Tests
         CryptographicOperations.ZeroMemory(taken);
         Assert.All(taken, value => Assert.Equal(0, value));
         Assert.Empty(Assert.IsType<byte[]>(field.GetValue(outcome)));
+    }
+
+    [Fact]
+    public void PostExportCancellationConsumesAndZerosOwnedSnapshot()
+    {
+        var payload = P14A2TestSupport.Fixture("accepted-eff4523-max-49152.dpf");
+        var outcome = new StagedSelfHostedProfileExportOutcome(
+            StagedSelfHostedProfileExportResult.Exported,
+            payload);
+        var field = typeof(StagedSelfHostedProfileExportOutcome).GetField(
+            "candidateBytes",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        var consume = typeof(DormantSelfHostedProfileVerificationService).GetMethod(
+            "ConsumeExportedSnapshot",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        var service = new DormantSelfHostedProfileVerificationService(
+            new StagedSelfHostedProfileService(new InMemorySessionStore()),
+            new P14A2DeterministicVerifier());
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        Assert.NotNull(field);
+        Assert.NotNull(consume);
+        var owned = Assert.IsType<byte[]>(field.GetValue(outcome));
+        var invocation = Assert.Throws<TargetInvocationException>(() => consume.Invoke(
+            service,
+            new object[]
+            {
+                outcome,
+                new ProfileCarrierVerificationOptions(
+                    P14A2TestSupport.VerificationTime,
+                    P14A2TestSupport.ClockSkew,
+                    P14A2TestSupport.Protocol),
+                cancellation.Token
+            }));
+        var exception = Assert.IsType<OperationCanceledException>(invocation.InnerException);
+
+        Assert.Null(exception.InnerException);
+        Assert.DoesNotContain("candidate", exception.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(outcome.GetCandidateBytesCopy());
+        Assert.All(owned, value => Assert.Equal(0, value));
     }
 
     [Fact]
