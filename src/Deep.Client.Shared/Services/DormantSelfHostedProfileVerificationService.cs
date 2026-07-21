@@ -161,6 +161,11 @@ public sealed class DormantSelfHostedProfileVerificationService
             {
                 throw;
             }
+            catch (AccountGenerationMutationCanceledException) when (
+                cancellationToken.IsCancellationRequested)
+            {
+                throw SanitizedCancellation(cancellationToken);
+            }
             catch (AccountGenerationMutationCanceledException)
             {
                 throw SanitizedBarrierCancellation();
