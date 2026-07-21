@@ -62,9 +62,11 @@ public sealed class P14A2PackageAndStaticGateTests
             .Order(StringComparer.OrdinalIgnoreCase).ToArray();
 
         Assert.Equal(29, packages.Length);
-        Assert.Equal(files, manifestFiles, ignoreCase: true);
-        Assert.Equal(files, content.EnumerateObject().Select(value => value.Name)
-            .Order(StringComparer.OrdinalIgnoreCase).ToArray(), ignoreCase: true);
+        Assert.True(files.SequenceEqual(manifestFiles, StringComparer.OrdinalIgnoreCase));
+        Assert.True(files.SequenceEqual(
+            content.EnumerateObject().Select(value => value.Name)
+                .Order(StringComparer.OrdinalIgnoreCase),
+            StringComparer.OrdinalIgnoreCase));
         foreach (var package in packages)
         {
             var file = Path.GetFileName(package.GetProperty("file").GetString()!);
@@ -78,6 +80,64 @@ public sealed class P14A2PackageAndStaticGateTests
         }
         Assert.Equal("cd9d20a8ec8346d171d4cd070dde170aa5f471d7",
             closureDocument.RootElement.GetProperty("acceptedP14C2SourceCommit").GetString());
+    }
+
+    [Fact]
+    public void CarrierLocksPinExactVersionAndNuGetContentHash()
+    {
+        var root = RepositoryRoot();
+        foreach (var relativePath in new[]
+                 {
+                     Path.Combine("src", "Deep.Client.Shared", "packages.lock.json"),
+                     Path.Combine("tests", "Deep.Client.Shared.Tests", "packages.lock.json")
+                 })
+        {
+            using var document = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(root, relativePath)));
+            var carrier = document.RootElement.GetProperty("dependencies").GetProperty("net10.0")
+                .GetProperty("Deep.Protocol.ProfileCarrier");
+            Assert.Equal("0.1.0-p14.faa598f", carrier.GetProperty("resolved").GetString());
+            Assert.Equal(
+                "XV6HBDrOAQKVp9jQDirlxIO1QrdWIFhMuF5ij8HGavGPCMhIvOTHwTwn/bDuSTsMfmQ0BJDDC+RH+VE8BtqR5Q==",
+                carrier.GetProperty("contentHash").GetString());
+            if (carrier.GetProperty("type").GetString() == "Direct")
+            {
+                Assert.Equal("[0.1.0-p14.faa598f, 0.1.0-p14.faa598f]",
+                    carrier.GetProperty("requested").GetString());
+            }
+        }
+    }
+
+    [Fact]
+    public void CarrierPinNegativeControlsRejectAlteredVersionShaAndProjectReference()
+    {
+        var root = RepositoryRoot();
+        var manifestText = File.ReadAllText(Path.Combine(
+            root, "vendor", "p14a2", "profile-carrier-manifest.json"));
+        var projectText = File.ReadAllText(Path.Combine(
+            root, "src", "Deep.Client.Shared", "Deep.Client.Shared.csproj"));
+
+        AssertCarrierPin(manifestText, projectText);
+        Assert.Throws<InvalidDataException>(() => AssertCarrierPin(
+            manifestText.Replace("0.1.0-p14.faa598f", "0.1.0-p14.invalid", StringComparison.Ordinal),
+            projectText));
+        Assert.Throws<InvalidDataException>(() => AssertCarrierPin(
+            manifestText.Replace(
+                "5b895ced820d678e6957482989f74621322a7bb0661ede13dcb3184e4f3e960e",
+                new string('0', 64), StringComparison.Ordinal),
+            projectText));
+        Assert.Throws<InvalidDataException>(() => AssertCarrierPin(
+            manifestText,
+            projectText + "<ProjectReference Include=\"synthetic\" />"));
+    }
+
+    [Fact]
+    public void OfflineGateIsClientNamedAndContainsNoXNodePath()
+    {
+        var root = RepositoryRoot();
+        foreach (var path in Directory.GetFiles(Path.Combine(root, "eng", "scripts"), "*P14A2*"))
+            Assert.DoesNotContain("xnode", File.ReadAllText(path), StringComparison.OrdinalIgnoreCase);
+        foreach (var path in Directory.GetFiles(Path.Combine(root, "vendor", "p14a2"), "*.json"))
+            Assert.DoesNotContain("xnode", File.ReadAllText(path), StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -103,6 +163,22 @@ public sealed class P14A2PackageAndStaticGateTests
 
     private static string Sha256(string path) =>
         Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))).ToLowerInvariant();
+
+    private static void AssertCarrierPin(string manifestText, string projectText)
+    {
+        using var document = JsonDocument.Parse(manifestText);
+        var manifest = document.RootElement;
+        if (manifest.GetProperty("version").GetString() != "0.1.0-p14.faa598f"
+            || manifest.GetProperty("sha256").GetString()
+                != "5b895ced820d678e6957482989f74621322a7bb0661ede13dcb3184e4f3e960e"
+            || !projectText.Contains(
+                "Deep.Protocol.ProfileCarrier\" Version=\"[0.1.0-p14.faa598f]",
+                StringComparison.Ordinal)
+            || projectText.Contains("ProjectReference", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException("Carrier pin validation failed.");
+        }
+    }
 
     internal static string RepositoryRoot()
     {
