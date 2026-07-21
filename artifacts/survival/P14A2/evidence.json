@@ -1,13 +1,13 @@
 {
   "schema": "deep-client-p14a2-sanitized-evidence.v1",
   "validation": {
-    "state": "RED",
-    "evidenceRedCommit": null,
+    "state": "GREEN",
+    "evidenceRedCommit": "b32443571853c623c582988d468814e968b609ea",
     "hashClosure": {
       "algorithm": "SHA-256",
       "manifest": "SHA256SUMS",
       "contentHash": "CONTENT_SHA256",
-      "state": "INTENTIONALLY-MISSING",
+      "state": "VALID",
       "selfReferentialCommitHashEmbedded": false
     }
   },
