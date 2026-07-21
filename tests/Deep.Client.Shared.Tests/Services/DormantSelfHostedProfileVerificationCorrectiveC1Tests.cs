@@ -124,6 +124,7 @@ public sealed class DormantSelfHostedProfileVerificationCorrectiveC1Tests
         var exception = await Assert.ThrowsAsync<OperationCanceledException>(
             () => verification.WaitAsync(TestTimeout));
         Assert.Null(exception.InnerException);
+        Assert.False(exception.CancellationToken.CanBeCanceled);
         Assert.DoesNotContain(BarrierSentinel, exception.ToString(), StringComparison.Ordinal);
         Assert.DoesNotContain(
             "Account-generation operation was canceled",
@@ -131,6 +132,50 @@ public sealed class DormantSelfHostedProfileVerificationCorrectiveC1Tests
             StringComparison.Ordinal);
         await signOut.WaitAsync(TestTimeout);
         Assert.Empty((await new StagedSelfHostedProfileService(inner).ListAsync(scope)).Candidates);
+    }
+
+    [Fact]
+    public async Task WrappedExportCallerCancellationPreservesExactCallerToken()
+    {
+        var inner = new InMemorySessionStore();
+        var blockingStore = BlockingAtomicReadStoreProxy.Create(inner, out var controller);
+        using var runtime = new ClientRuntime(
+            blockingStore,
+            ClientFeatureFlags.Defaults,
+            new FrozenClock(Now),
+            new StubSessionBackend());
+        await runtime.Accounts.RegisterAsync("Synthetic P14A2 caller-cancel account");
+        var staging = new StagedSelfHostedProfileService(
+            (IAtomicBoundedSettingsRepository)runtime.Store);
+        var scope = P14A2TestSupport.Scope(0xa5);
+        var saved = await staging.SaveAsync(
+            scope,
+            StagedSelfHostedProfileLimits.SchemaVersion,
+            P14A2TestSupport.Fixture("accepted-eff4523-default.dpf"));
+        var service = new DormantSelfHostedProfileVerificationService(
+            staging,
+            new P14A2DeterministicVerifier());
+        using var cancellation = new CancellationTokenSource();
+        controller.BlockNextAtomicRead();
+
+        var verification = service.VerifyAsync(
+            scope,
+            saved.Candidate!.Id,
+            P14A2TestSupport.Parameters(),
+            cancellation.Token);
+        await controller.ReadStarted.WaitAsync(TestTimeout);
+        cancellation.Cancel();
+
+        var exception = await Assert.ThrowsAsync<OperationCanceledException>(
+            () => verification.WaitAsync(TestTimeout));
+        Assert.Equal(cancellation.Token, exception.CancellationToken);
+        Assert.True(exception.CancellationToken.IsCancellationRequested);
+        Assert.Null(exception.InnerException);
+        Assert.DoesNotContain(BarrierSentinel, exception.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "Account-generation operation was canceled",
+            exception.ToString(),
+            StringComparison.Ordinal);
     }
 
     [Fact]
