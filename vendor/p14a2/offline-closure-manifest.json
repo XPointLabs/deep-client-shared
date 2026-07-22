@@ -3,6 +3,12 @@
   "acceptedP14C2SourceCommit": "cd9d20a8ec8346d171d4cd070dde170aa5f471d7",
   "acceptedP14C2SourceTree": "e27c1d7c2517bd9d1bcdfbacda8c68c57a2ced59",
   "acceptedP14C2EvidenceCarrier": "2a21902ff5a613242180fdd75233991da896f879",
+  "acceptedP14E2SourceCommit": "69a712a894b024a09859096025c2bb8fe68a642e",
+  "acceptedP14E2SourceTree": "d83bbdd001b723738357689bbb2150a51357cb3b",
+  "acceptedP14E2EvidenceCommit": "071b5b300bcba3796d621720fb8f21cfdd5eb882",
+  "acceptedP14E2EvidenceTree": "ecbfc7747452709fb82aaf85fa912ba13b61d4ad",
+  "acceptedP14E2PackageSha256": "fb0feca6bc1734b3a0ac26910421ccdddb24a6a03c1f83972a9b5685e6785498",
+  "acceptedP14E2NormalizedIdentity": "baadb33d07dfeb139f0d3ffdfd5bbd41587c02963f8434208fb7718a73733e0f",
   "contractVersion": "Deep.Protocol/P04-canonical-v1",
   "p04SourceCommit": "b887fa088f486390be182cac4cbcb59b60ce8931",
   "productionCryptoStatus": "blocked-no-approved-production-signature-profile-or-verifier",
@@ -41,10 +47,10 @@
     },
     {
       "id": "Deep.Protocol.ProfileCarrier",
-      "version": "0.1.0-p14.faa598f",
-      "file": "packages/Deep.Protocol.ProfileCarrier.0.1.0-p14.faa598f.nupkg",
-      "bytes": 24597,
-      "sha256": "5b895ced820d678e6957482989f74621322a7bb0661ede13dcb3184e4f3e960e",
+      "version": "0.2.0-p14.69a712a",
+      "file": "packages/Deep.Protocol.ProfileCarrier.0.2.0-p14.69a712a.nupkg",
+      "bytes": 29399,
+      "sha256": "fb0feca6bc1734b3a0ac26910421ccdddb24a6a03c1f83972a9b5685e6785498",
       "role": "p14-shared-carrier"
     },
     {

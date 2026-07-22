@@ -1,16 +1,31 @@
 {
-  "schema": "deep-client-p14a2-profile-carrier-package.v1",
+  "schema": "deep-client-p14a2b1-profile-carrier-package.v1",
   "id": "Deep.Protocol.ProfileCarrier",
-  "version": "0.1.0-p14.faa598f",
-  "file": "packages/Deep.Protocol.ProfileCarrier.0.1.0-p14.faa598f.nupkg",
-  "bytes": 24597,
-  "sha256": "5b895ced820d678e6957482989f74621322a7bb0661ede13dcb3184e4f3e960e",
-  "nugetContentHash": "XV6HBDrOAQKVp9jQDirlxIO1QrdWIFhMuF5ij8HGavGPCMhIvOTHwTwn/bDuSTsMfmQ0BJDDC+RH+VE8BtqR5Q==",
-  "normalizedIdentity": "ab402ce9420ecb5f3f80a6fb9fd48b807a4bda96565c28f88f3c35ac860719ba",
-  "sourceCommit": "faa598ff32913470cf85d6f2c8a8921cbf2aa287",
-  "dependency": {
-    "id": "Deep.Protocol",
-    "version": "[0.3.0-p04.b887fa0]"
-  },
-  "status": "REVIEW-PENDING / PRODUCTION-VERIFIER-NO-GO / ACTIVATION-NO-GO"
+  "version": "0.2.0-p14.69a712a",
+  "file": "packages/Deep.Protocol.ProfileCarrier.0.2.0-p14.69a712a.nupkg",
+  "bytes": 29399,
+  "sha256": "fb0feca6bc1734b3a0ac26910421ccdddb24a6a03c1f83972a9b5685e6785498",
+  "nugetContentHash": "x9LZb8nAUE/XQWQS2ZGBGLbPt2FivGRVc9y1xvlsr02CKHaU6scklrBsOebxj/NiTG66QgFCK7Gd7qFEoRe5zw==",
+  "normalizedIdentity": "baadb33d07dfeb139f0d3ffdfd5bbd41587c02963f8434208fb7718a73733e0f",
+  "sourceCommit": "69a712a894b024a09859096025c2bb8fe68a642e",
+  "sourceTree": "d83bbdd001b723738357689bbb2150a51357cb3b",
+  "evidenceCommit": "071b5b300bcba3796d621720fb8f21cfdd5eb882",
+  "evidenceTree": "ecbfc7747452709fb82aaf85fa912ba13b61d4ad",
+  "dependencies": [
+    {
+      "id": "Deep.Protocol",
+      "version": "[0.3.0-p04.b887fa0]"
+    },
+    {
+      "id": "Sodium.Core",
+      "version": "[1.4.1]"
+    },
+    {
+      "id": "libsodium",
+      "version": "[1.0.22]"
+    }
+  ],
+  "dllSha256": "20489ac15239af11207a0daa670545b975c03eaebb78297adf956af45daa7034",
+  "pdbSha256": "80f2210e6c61050e2a4edbbf1fa4181ca0d7285d124073fa0d9aa9a77307542a",
+  "status": "P14A2B1-SOURCE-REVIEW-PENDING / STAGED-BYTES-ONLY / CLIENT-RUNTIME-REGISTRATION-NO-GO / PROFILE-ACTIVATION-NO-GO"
 }

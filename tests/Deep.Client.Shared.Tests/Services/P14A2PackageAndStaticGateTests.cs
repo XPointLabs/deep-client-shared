@@ -7,6 +7,27 @@ namespace Deep.Client.Shared.Tests.Services;
 
 public sealed class P14A2PackageAndStaticGateTests
 {
+    private const string CarrierVersion = "0.2.0-p14.69a712a";
+    private const string CarrierSource = "69a712a894b024a09859096025c2bb8fe68a642e";
+    private const string CarrierSourceTree = "d83bbdd001b723738357689bbb2150a51357cb3b";
+    private const string CarrierEvidence = "071b5b300bcba3796d621720fb8f21cfdd5eb882";
+    private const string CarrierEvidenceTree = "ecbfc7747452709fb82aaf85fa912ba13b61d4ad";
+    private const string CarrierSha256 =
+        "fb0feca6bc1734b3a0ac26910421ccdddb24a6a03c1f83972a9b5685e6785498";
+    private const string CarrierContentHash =
+        "x9LZb8nAUE/XQWQS2ZGBGLbPt2FivGRVc9y1xvlsr02CKHaU6scklrBsOebxj/NiTG66QgFCK7Gd7qFEoRe5zw==";
+    private const string CarrierNormalizedIdentity =
+        "baadb33d07dfeb139f0d3ffdfd5bbd41587c02963f8434208fb7718a73733e0f";
+    private const string CarrierDllSha256 =
+        "20489ac15239af11207a0daa670545b975c03eaebb78297adf956af45daa7034";
+    private const string CarrierPdbSha256 =
+        "80f2210e6c61050e2a4edbbf1fa4181ca0d7285d124073fa0d9aa9a77307542a";
+    private const string CarrierFile =
+        "packages/Deep.Protocol.ProfileCarrier.0.2.0-p14.69a712a.nupkg";
+    private const string CarrierStatus =
+        "P14A2B1-SOURCE-REVIEW-PENDING / STAGED-BYTES-ONLY / " +
+        "CLIENT-RUNTIME-REGISTRATION-NO-GO / PROFILE-ACTIVATION-NO-GO";
+
     [Fact]
     public void ExactCarrierPackageAndAcceptedProducerArePinned()
     {
@@ -15,15 +36,37 @@ public sealed class P14A2PackageAndStaticGateTests
         using var manifest = JsonDocument.Parse(File.ReadAllBytes(
             Path.Combine(vendor, "profile-carrier-manifest.json")));
         var value = manifest.RootElement;
-        Assert.Equal("deep-client-p14a2-profile-carrier-package.v1",
+        Assert.Equal("deep-client-p14a2b1-profile-carrier-package.v1",
             value.GetProperty("schema").GetString());
-        Assert.Equal("0.1.0-p14.faa598f", value.GetProperty("version").GetString());
-        Assert.Equal("faa598ff32913470cf85d6f2c8a8921cbf2aa287",
+        Assert.Equal(CarrierVersion, value.GetProperty("version").GetString());
+        Assert.Equal(CarrierSource,
             value.GetProperty("sourceCommit").GetString());
-        Assert.Equal("5b895ced820d678e6957482989f74621322a7bb0661ede13dcb3184e4f3e960e",
-            value.GetProperty("sha256").GetString());
+        Assert.Equal(CarrierSourceTree, value.GetProperty("sourceTree").GetString());
+        Assert.Equal(CarrierEvidence, value.GetProperty("evidenceCommit").GetString());
+        Assert.Equal(CarrierEvidenceTree, value.GetProperty("evidenceTree").GetString());
+        Assert.Equal(CarrierSha256, value.GetProperty("sha256").GetString());
+        Assert.Equal(
+            CarrierNormalizedIdentity,
+            value.GetProperty("normalizedIdentity").GetString());
+        Assert.Equal(CarrierDllSha256, value.GetProperty("dllSha256").GetString());
+        Assert.Equal(CarrierPdbSha256, value.GetProperty("pdbSha256").GetString());
+        Assert.Equal(CarrierStatus, value.GetProperty("status").GetString());
+        Assert.Equal(
+            new[]
+            {
+                ("Deep.Protocol", "[0.3.0-p04.b887fa0]"),
+                ("Sodium.Core", "[1.4.1]"),
+                ("libsodium", "[1.0.22]")
+            },
+            value.GetProperty("dependencies")
+                .EnumerateArray()
+                .Select(dependency => (
+                    dependency.GetProperty("id").GetString()!,
+                    dependency.GetProperty("version").GetString()!))
+                .OrderBy(dependency => dependency.Item1, StringComparer.Ordinal)
+                .ToArray());
         var package = Path.Combine(vendor, value.GetProperty("file").GetString()!);
-        Assert.Equal(24_597, new FileInfo(package).Length);
+        Assert.Equal(29_399, new FileInfo(package).Length);
         Assert.Equal(value.GetProperty("sha256").GetString(), Sha256(package));
 
         using var archive = ZipFile.OpenRead(package);
@@ -33,14 +76,30 @@ public sealed class P14A2PackageAndStaticGateTests
         var xml = XDocument.Load(stream);
         XNamespace ns = xml.Root!.Name.Namespace;
         var metadata = xml.Root.Element(ns + "metadata")!;
-        Assert.Equal("faa598ff32913470cf85d6f2c8a8921cbf2aa287",
+        Assert.Equal(CarrierSource,
             metadata.Element(ns + "repository")!.Attribute("commit")!.Value);
-        var dependency = Assert.Single(metadata.Descendants(ns + "dependency"));
-        Assert.Equal("Deep.Protocol", dependency.Attribute("id")!.Value);
-        Assert.Equal("[0.3.0-p04.b887fa0]", dependency.Attribute("version")!.Value);
+        var dependencies = metadata.Descendants(ns + "dependency")
+            .Select(dependency => (
+                Id: dependency.Attribute("id")!.Value,
+                Version: dependency.Attribute("version")!.Value))
+            .OrderBy(dependency => dependency.Id, StringComparer.Ordinal)
+            .ToArray();
+        Assert.Equal(
+            new[]
+            {
+                ("Deep.Protocol", "[0.3.0-p04.b887fa0]"),
+                ("Sodium.Core", "[1.4.1]"),
+                ("libsodium", "[1.0.22]")
+            },
+            dependencies);
+
+        Assert.Equal(CarrierDllSha256, Sha256(ArchiveEntry(archive,
+            "lib/net10.0/Deep.Protocol.ProfileCarrier.dll")));
+        Assert.Equal(CarrierPdbSha256, Sha256(ArchiveEntry(archive,
+            "lib/net10.0/Deep.Protocol.ProfileCarrier.pdb")));
 
         var project = File.ReadAllText(Path.Combine(root, "src", "Deep.Client.Shared", "Deep.Client.Shared.csproj"));
-        Assert.Contains("Deep.Protocol.ProfileCarrier\" Version=\"[0.1.0-p14.faa598f]", project);
+        Assert.Contains($"Deep.Protocol.ProfileCarrier\" Version=\"[{CarrierVersion}]", project);
         Assert.DoesNotContain("ProjectReference", project, StringComparison.OrdinalIgnoreCase);
     }
 
@@ -80,6 +139,18 @@ public sealed class P14A2PackageAndStaticGateTests
         }
         Assert.Equal("cd9d20a8ec8346d171d4cd070dde170aa5f471d7",
             closureDocument.RootElement.GetProperty("acceptedP14C2SourceCommit").GetString());
+        Assert.Equal(CarrierSource,
+            closureDocument.RootElement.GetProperty("acceptedP14E2SourceCommit").GetString());
+        Assert.Equal(CarrierSourceTree,
+            closureDocument.RootElement.GetProperty("acceptedP14E2SourceTree").GetString());
+        Assert.Equal(CarrierEvidence,
+            closureDocument.RootElement.GetProperty("acceptedP14E2EvidenceCommit").GetString());
+        Assert.Equal(CarrierEvidenceTree,
+            closureDocument.RootElement.GetProperty("acceptedP14E2EvidenceTree").GetString());
+        Assert.Equal(CarrierSha256,
+            closureDocument.RootElement.GetProperty("acceptedP14E2PackageSha256").GetString());
+        Assert.Equal(CarrierNormalizedIdentity,
+            closureDocument.RootElement.GetProperty("acceptedP14E2NormalizedIdentity").GetString());
     }
 
     [Fact]
@@ -95,13 +166,17 @@ public sealed class P14A2PackageAndStaticGateTests
             using var document = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(root, relativePath)));
             var carrier = document.RootElement.GetProperty("dependencies").GetProperty("net10.0")
                 .GetProperty("Deep.Protocol.ProfileCarrier");
-            Assert.Equal("0.1.0-p14.faa598f", carrier.GetProperty("resolved").GetString());
-            Assert.Equal(
-                "XV6HBDrOAQKVp9jQDirlxIO1QrdWIFhMuF5ij8HGavGPCMhIvOTHwTwn/bDuSTsMfmQ0BJDDC+RH+VE8BtqR5Q==",
-                carrier.GetProperty("contentHash").GetString());
+            Assert.Equal(CarrierVersion, carrier.GetProperty("resolved").GetString());
+            Assert.Equal(CarrierContentHash, carrier.GetProperty("contentHash").GetString());
+            var dependencies = carrier.GetProperty("dependencies");
+            Assert.Equal(3, dependencies.EnumerateObject().Count());
+            Assert.Equal("[0.3.0-p04.b887fa0]",
+                dependencies.GetProperty("Deep.Protocol").GetString());
+            Assert.Equal("[1.4.1]", dependencies.GetProperty("Sodium.Core").GetString());
+            Assert.Equal("[1.0.22]", dependencies.GetProperty("libsodium").GetString());
             if (carrier.GetProperty("type").GetString() == "Direct")
             {
-                Assert.Equal("[0.1.0-p14.faa598f, 0.1.0-p14.faa598f]",
+                Assert.Equal($"[{CarrierVersion}, {CarrierVersion}]",
                     carrier.GetProperty("requested").GetString());
             }
         }
@@ -146,16 +221,44 @@ public sealed class P14A2PackageAndStaticGateTests
 
         AssertCarrierPin(manifestText, projectText);
         Assert.Throws<InvalidDataException>(() => AssertCarrierPin(
-            manifestText.Replace("0.1.0-p14.faa598f", "0.1.0-p14.invalid", StringComparison.Ordinal),
+            manifestText.Replace(CarrierVersion, "0.2.0-p14.invalid", StringComparison.Ordinal),
             projectText));
         Assert.Throws<InvalidDataException>(() => AssertCarrierPin(
             manifestText.Replace(
-                "5b895ced820d678e6957482989f74621322a7bb0661ede13dcb3184e4f3e960e",
+                CarrierSha256,
                 new string('0', 64), StringComparison.Ordinal),
             projectText));
         Assert.Throws<InvalidDataException>(() => AssertCarrierPin(
             manifestText,
             projectText + "<ProjectReference Include=\"synthetic\" />"));
+        foreach (var drifted in new[]
+                 {
+                     manifestText.Replace(CarrierFile, "packages/drift.nupkg",
+                         StringComparison.Ordinal),
+                     manifestText.Replace(CarrierContentHash, new string('A', 88),
+                         StringComparison.Ordinal),
+                     manifestText.Replace(CarrierNormalizedIdentity, new string('0', 64),
+                         StringComparison.Ordinal),
+                     manifestText.Replace(CarrierSource, new string('0', 40),
+                         StringComparison.Ordinal),
+                     manifestText.Replace(CarrierEvidence, new string('1', 40),
+                         StringComparison.Ordinal),
+                     manifestText.Replace(CarrierDllSha256, new string('2', 64),
+                         StringComparison.Ordinal),
+                     manifestText.Replace(CarrierPdbSha256, new string('3', 64),
+                         StringComparison.Ordinal),
+                     manifestText.Replace("[1.0.22]", "[1.0.0,2.0.0)",
+                         StringComparison.Ordinal),
+                     manifestText.Replace(
+                         "\"id\": \"libsodium\"",
+                         "\"id\": \"unexpected\"",
+                         StringComparison.Ordinal),
+                     manifestText.Replace(CarrierStatus, "PRODUCTION-READY",
+                         StringComparison.Ordinal)
+                 })
+        {
+            Assert.Throws<InvalidDataException>(() => AssertCarrierPin(drifted, projectText));
+        }
     }
 
     [Fact]
@@ -196,17 +299,54 @@ public sealed class P14A2PackageAndStaticGateTests
     {
         using var document = JsonDocument.Parse(manifestText);
         var manifest = document.RootElement;
-        if (manifest.GetProperty("version").GetString() != "0.1.0-p14.faa598f"
-            || manifest.GetProperty("sha256").GetString()
-                != "5b895ced820d678e6957482989f74621322a7bb0661ede13dcb3184e4f3e960e"
+        var dependencies = manifest.GetProperty("dependencies")
+            .EnumerateArray()
+            .Select(dependency => (
+                Id: dependency.GetProperty("id").GetString()!,
+                Version: dependency.GetProperty("version").GetString()!))
+            .OrderBy(dependency => dependency.Id, StringComparer.Ordinal)
+            .ToArray();
+        var expectedDependencies = new[]
+        {
+            (Id: "Deep.Protocol", Version: "[0.3.0-p04.b887fa0]"),
+            (Id: "Sodium.Core", Version: "[1.4.1]"),
+            (Id: "libsodium", Version: "[1.0.22]")
+        };
+        if (manifest.GetProperty("version").GetString() != CarrierVersion
+            || manifest.GetProperty("file").GetString() != CarrierFile
+            || manifest.GetProperty("bytes").GetInt64() != 29_399
+            || manifest.GetProperty("sha256").GetString() != CarrierSha256
+            || manifest.GetProperty("nugetContentHash").GetString() != CarrierContentHash
+            || manifest.GetProperty("normalizedIdentity").GetString()
+                != CarrierNormalizedIdentity
+            || manifest.GetProperty("sourceCommit").GetString() != CarrierSource
+            || manifest.GetProperty("sourceTree").GetString() != CarrierSourceTree
+            || manifest.GetProperty("evidenceCommit").GetString() != CarrierEvidence
+            || manifest.GetProperty("evidenceTree").GetString() != CarrierEvidenceTree
+            || manifest.GetProperty("dllSha256").GetString() != CarrierDllSha256
+            || manifest.GetProperty("pdbSha256").GetString() != CarrierPdbSha256
+            || manifest.GetProperty("status").GetString() != CarrierStatus
+            || !dependencies.SequenceEqual(expectedDependencies)
             || !projectText.Contains(
-                "Deep.Protocol.ProfileCarrier\" Version=\"[0.1.0-p14.faa598f]",
+                $"Deep.Protocol.ProfileCarrier\" Version=\"[{CarrierVersion}]",
                 StringComparison.Ordinal)
             || projectText.Contains("ProjectReference", StringComparison.OrdinalIgnoreCase))
         {
             throw new InvalidDataException("Carrier pin validation failed.");
         }
     }
+
+    private static byte[] ArchiveEntry(ZipArchive archive, string name)
+    {
+        var entry = Assert.Single(archive.Entries, value => value.FullName == name);
+        using var stream = entry.Open();
+        using var memory = new MemoryStream((int)entry.Length);
+        stream.CopyTo(memory);
+        return memory.ToArray();
+    }
+
+    private static string Sha256(byte[] bytes) =>
+        Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
 
     private static void AssertRuntimePackage(
         JsonElement runtime,

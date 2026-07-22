@@ -15,11 +15,13 @@
       },
       "Deep.Protocol.ProfileCarrier": {
         "type": "Direct",
-        "requested": "[0.1.0-p14.faa598f, 0.1.0-p14.faa598f]",
-        "resolved": "0.1.0-p14.faa598f",
-        "contentHash": "XV6HBDrOAQKVp9jQDirlxIO1QrdWIFhMuF5ij8HGavGPCMhIvOTHwTwn/bDuSTsMfmQ0BJDDC+RH+VE8BtqR5Q==",
+        "requested": "[0.2.0-p14.69a712a, 0.2.0-p14.69a712a]",
+        "resolved": "0.2.0-p14.69a712a",
+        "contentHash": "x9LZb8nAUE/XQWQS2ZGBGLbPt2FivGRVc9y1xvlsr02CKHaU6scklrBsOebxj/NiTG66QgFCK7Gd7qFEoRe5zw==",
         "dependencies": {
-          "Deep.Protocol": "[0.3.0-p04.b887fa0]"
+          "Deep.Protocol": "[0.3.0-p04.b887fa0]",
+          "Sodium.Core": "[1.4.1]",
+          "libsodium": "[1.0.22]"
         }
       },
       "Microsoft.Data.Sqlite.Core": {
