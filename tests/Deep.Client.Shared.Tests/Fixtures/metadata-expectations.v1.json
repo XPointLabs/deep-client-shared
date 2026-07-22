@@ -8,8 +8,8 @@
       "observer": "storage-exit",
       "domain": "dpe1-envelope",
       "beta_blocking": true,
-      "status": "unresolved",
-      "evidence": "MetadataPrivacyCharacterizationTests.Dpe1Header_ContainsClearSenderAndRecipientIdentifiers",
+      "status": "mitigated",
+      "evidence": "OpaqueMetadataTransportTests.Deposit_RequestContainsOnlyOpaqueCapabilityAndAttemptLocalCorrelation; production P03A crypto producer and independent review remain unavailable",
       "required_producer_contract": "P03 must replace the storage-visible sender capability with an unlinkable, authenticated deposit authorization."
     },
     {
@@ -17,8 +17,8 @@
       "observer": "storage-exit",
       "domain": "dpe1-envelope",
       "beta_blocking": true,
-      "status": "unresolved",
-      "evidence": "MetadataPrivacyCharacterizationTests.Dpe1Header_ContainsClearSenderAndRecipientIdentifiers",
+      "status": "mitigated",
+      "evidence": "OpaqueMetadataTransportTests.Deposit_RequestContainsOnlyOpaqueCapabilityAndAttemptLocalCorrelation; production P03A crypto producer and independent review remain unavailable",
       "required_producer_contract": "P03 must provide recipient-private addressing whose storage-visible value is not a raw Session ID."
     },
     {
@@ -26,8 +26,8 @@
       "observer": "storage",
       "domain": "storage-rpc",
       "beta_blocking": true,
-      "status": "unresolved",
-      "evidence": "MetadataPrivacyCharacterizationTests.StorageStore_ExposesTargetPairAndStableIdempotencyMaterial; SessionTransportTests.RoutedSessionStorageMessageTransport_SendAndReceive_UsesRouterRpcAndTracksRoute",
+      "status": "mitigated",
+      "evidence": "OpaqueMetadataTransportTests.Deposit_RequestContainsOnlyOpaqueCapabilityAndAttemptLocalCorrelation; OpaqueMetadataTransportTests.Retrieve_RequestUsesRotatingOpaqueHandleWithoutAccountAuthenticationMaterial; SessionTransportTests.RoutedOpaqueStorage_DepositAndRetrieveHideRawIdentityAndRotateAttemptMaterial",
       "required_producer_contract": "P03 must define an opaque deposit capability and a distinct opaque retrieval capability."
     },
     {
@@ -35,8 +35,8 @@
       "observer": "storage",
       "domain": "storage-rpc",
       "beta_blocking": true,
-      "status": "unresolved",
-      "evidence": "MetadataPrivacyCharacterizationTests.StorageStore_ExposesTargetPairAndStableIdempotencyMaterial; SessionTransportTests.RoutedSessionStorageMessageTransport_SendAndReceive_UsesRouterRpcAndTracksRoute",
+      "status": "mitigated",
+      "evidence": "OpaqueMetadataTransportTests.Deposit_RequestContainsOnlyOpaqueCapabilityAndAttemptLocalCorrelation; SessionTransportTests.RoutedOpaqueStorage_DepositAndRetrieveHideRawIdentityAndRotateAttemptMaterial",
       "required_producer_contract": "P03 must prevent a storage observer from using a stable client-generated identifier across independent transport attempts."
     },
     {
@@ -44,8 +44,8 @@
       "observer": "ingress+storage",
       "domain": "capability-contract",
       "beta_blocking": true,
-      "status": "unresolved",
-      "evidence": "No opaque deposit capability exists in the current producer contract.",
+      "status": "mitigated",
+      "evidence": "IOpaqueMailboxCapabilityProvider consumes canonical MCP1/DPB1 contracts; no reviewed production producer is registered.",
       "required_producer_contract": "P03 must expose a versioned opaque deposit capability with expiry, replay bounds and authenticated failure semantics."
     },
     {
@@ -53,8 +53,8 @@
       "observer": "storage+client",
       "domain": "capability-contract",
       "beta_blocking": true,
-      "status": "unresolved",
-      "evidence": "Current retrieval authenticates with the raw account public key.",
+      "status": "mitigated",
+      "evidence": "OpaqueMetadataTransportTests.Retrieve_RequestUsesRotatingOpaqueHandleWithoutAccountAuthenticationMaterial; no reviewed production producer is registered.",
       "required_producer_contract": "P03 must expose a versioned opaque retrieval capability separated from deposit authorization."
     },
     {

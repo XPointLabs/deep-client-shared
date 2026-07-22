@@ -61,3 +61,14 @@ process exit `1`. Positive controls prove current unresolved exit `1` and exact 
 - `eng/scripts/MetadataPrivacyGateHarness.psm1`
 - `eng/scripts/Test-MetadataPrivacyGateHarness.ps1`
 - `artifacts/survival/P01/observer-collusion-matrix.md`
+
+## P03 runtime iteration (2026-07-22)
+
+- RED commit `2d762ca86be5814c3658f122402c239103b90830`: focused opaque transport tests
+  executed with 0 passed / 2 failed, both on captured raw Session identity material.
+- GREEN focused opaque direct/routed, E2EE dedup, feature, and release fail-closed tests: 14 passed,
+  0 failed, 0 skipped.
+- Full `dotnet test Deep.Client.Shared.slnx --no-restore`: 647 passed, 0 failed, 0 skipped.
+- Strict metadata gate: expected exit 1, exact total 8, 0 resolved / 8 red (six mitigated pending
+  production producer/review and two untouched push findings).
+- Metadata gate harness: exit 0; 17 self-test scenarios and 15 rejected mutation classes.

@@ -149,19 +149,29 @@ public sealed record SessionStorageMessageTransportOptions(
     int Namespace = 0,
     int TtlMilliseconds = 14 * 24 * 60 * 60 * 1000,
     string StorePath = "/storage/store",
-    string RetrievePath = "/storage/retrieve");
+    string RetrievePath = "/storage/retrieve",
+    SessionStorageMetadataMode MetadataMode = SessionStorageMetadataMode.OpaqueP03);
 
-public sealed class SessionStorageMessageTransport : ISessionMessageTransport, IAuthenticatedInboxTransport
+public sealed class SessionStorageMessageTransport :
+    ISessionMessageTransport,
+    IAuthenticatedInboxTransport,
+    IMetadataPrivateSessionTransport
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     private readonly HttpClient _httpClient;
     private readonly SessionStorageMessageTransportOptions _options;
+    private readonly OpaqueSessionStorageDependencies? _opaque;
+    private readonly OpaqueInboxDecodeCache _opaqueDecodeCache = new();
 
-    public SessionStorageMessageTransport(HttpClient httpClient, SessionStorageMessageTransportOptions options)
+    public SessionStorageMessageTransport(
+        HttpClient httpClient,
+        SessionStorageMessageTransportOptions options,
+        OpaqueSessionStorageDependencies? opaque = null)
     {
         _httpClient = httpClient;
         _options = options;
+        _opaque = opaque;
 
         if (string.IsNullOrWhiteSpace(_options.BaseUrl))
         {
@@ -174,10 +184,38 @@ public sealed class SessionStorageMessageTransport : ISessionMessageTransport, I
                 ? _options.BaseUrl
                 : _options.BaseUrl + "/", UriKind.Absolute);
         }
+
+        if (_options.MetadataMode == SessionStorageMetadataMode.OpaqueP03)
+        {
+            _opaque?.Validate();
+            if (_opaque is null)
+            {
+                throw new InvalidOperationException(
+                    "Opaque P03 storage requires explicit capability, crypto and replay dependencies.");
+            }
+        }
     }
+
+    public bool UsesOpaqueMetadata => _options.MetadataMode == SessionStorageMetadataMode.OpaqueP03;
 
     public async Task SendAsync(OutboundMessageEnvelope envelope, CancellationToken cancellationToken = default)
     {
+        if (UsesOpaqueMetadata)
+        {
+            var opaque = OpaqueSessionStorageCodec.EncodeDeposit(envelope, _options.TtlMilliseconds, _opaque!);
+            using var opaqueResponse = await PostJsonAsync(_options.StorePath, new
+            {
+                deposit_capability = opaque.Capability,
+                placement_key = opaque.PlacementKey,
+                @namespace = _options.Namespace,
+                attempt_id = opaque.AttemptId,
+                idempotency_key = opaque.IdempotencyKey,
+                data = opaque.Data
+            }, cancellationToken).ConfigureAwait(false);
+            opaqueResponse.EnsureSuccessStatusCode();
+            return;
+        }
+
         var payload = new StoredMessagePayload(
             (envelope.Id ?? MessageId.NewId()).Value,
             envelope.Sender.Value,
@@ -248,6 +286,35 @@ public sealed class SessionStorageMessageTransport : ISessionMessageTransport, I
             throw new ArgumentOutOfRangeException(nameof(limit));
         }
 
+        if (UsesOpaqueMetadata)
+        {
+            var opaque = OpaqueSessionStorageCodec.EncodeRetrieve(identity, _opaque!);
+            using var response = await PostJsonAsync(_options.RetrievePath, new
+            {
+                retrieve_capability = opaque.Capability,
+                placement_key = opaque.PlacementKey,
+                @namespace = _options.Namespace,
+                attempt_id = opaque.AttemptId,
+                last_hash = cursor
+            }, cancellationToken).ConfigureAwait(false);
+            response.EnsureSuccessStatusCode();
+            var payload = await response.Content.ReadFromJsonAsync<StorageRetrieveResponse>(JsonOptions, cancellationToken)
+                .ConfigureAwait(false) ?? new StorageRetrieveResponse([]);
+            var entries = payload.Messages
+                .Take(limit)
+                .Where(static item =>
+                    !string.IsNullOrWhiteSpace(item.Hash)
+                    && item.Hash.Length <= DurableInboxLimits.MaxServerHashChars)
+                .Select(static item => DurableInboxWireEntry.CreateBounded(
+                    item.Hash,
+                    item.Timestamp,
+                    item.Data ?? string.Empty))
+                .ToArray();
+            return new AuthenticatedInboxBatch(
+                entries,
+                entries.Length == 0 ? cursor : entries[^1].ServerHash);
+        }
+
         var recipient = identity.SessionId;
         var timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         var signatureMaterial = StorageSignatureCanonicalizer.CreateRetrieve(_options.Namespace, timestamp);
@@ -297,6 +364,16 @@ public sealed class SessionStorageMessageTransport : ISessionMessageTransport, I
         SessionId recipient,
         out InboundMessageEnvelope envelope)
     {
+        if (UsesOpaqueMetadata)
+        {
+            return _opaqueDecodeCache.TryDecode(
+                entry,
+                recipient,
+                _options.TtlMilliseconds,
+                _opaque!,
+                out envelope);
+        }
+
         envelope = default!;
 
         try

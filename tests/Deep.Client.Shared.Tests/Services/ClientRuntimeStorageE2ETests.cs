@@ -178,7 +178,9 @@ public sealed class ClientRuntimeStorageE2ETests
             new SystemClock(),
             new SessionStorageMessageTransport(
                 new HttpClient(),
-                new SessionStorageMessageTransportOptions(storageUrl)),
+                new SessionStorageMessageTransportOptions(
+                    storageUrl,
+                    MetadataMode: SessionStorageMetadataMode.LegacyCompatibility)),
             new SessionStorageGroupSyncTransport(
                 new HttpClient(),
                 new SessionStorageGroupSyncTransportOptions(storageUrl)));

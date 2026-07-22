@@ -142,7 +142,10 @@ public sealed class SessionTransportTests
 
         var transport = new SessionStorageMessageTransport(
             client,
-            new SessionStorageMessageTransportOptions("http://storage.local", TtlMilliseconds: 60_000));
+            new SessionStorageMessageTransportOptions(
+                "http://storage.local",
+                TtlMilliseconds: 60_000,
+                MetadataMode: SessionStorageMetadataMode.LegacyCompatibility));
 
         await transport.SendAsync(new OutboundMessageEnvelope(sender, recipient, "hello-storage", [], DateTimeOffset.Parse("2026-06-10T00:00:00Z"), null));
         var received = await transport.ReceiveAuthenticatedAsync(recipientIdentity);
@@ -203,7 +206,9 @@ public sealed class SessionTransportTests
         };
         var transport = new SessionStorageMessageTransport(
             client,
-            new SessionStorageMessageTransportOptions("http://storage.local"));
+            new SessionStorageMessageTransportOptions(
+                "http://storage.local",
+                MetadataMode: SessionStorageMetadataMode.LegacyCompatibility));
 
         await transport.SendAsync(new OutboundMessageEnvelope(
             sender,
@@ -318,7 +323,9 @@ public sealed class SessionTransportTests
                 TrustedRouterIds: TestOnionRoute.RouterIds));
         var transport = new RoutedSessionStorageMessageTransport(
             router,
-            new RoutedSessionStorageTransportOptions(TtlMilliseconds: 60_000));
+            new RoutedSessionStorageTransportOptions(
+                TtlMilliseconds: 60_000,
+                MetadataMode: SessionStorageMetadataMode.LegacyCompatibility));
 
         await transport.SendAsync(new OutboundMessageEnvelope(sender, recipient, "hello-routed", [], DateTimeOffset.Parse("2026-06-10T00:00:00Z"), null));
         var received = await transport.ReceiveAuthenticatedAsync(recipientIdentity);
@@ -338,6 +345,100 @@ public sealed class SessionTransportTests
             Convert.FromBase64String(storageRequest.GetProperty("data").GetString()!));
         Assert.Equal(sender.Value, managedPayload.RootElement.GetProperty("sender").GetString());
         Assert.Equal(recipient.Value, managedPayload.RootElement.GetProperty("recipient").GetString());
+    }
+
+    [Fact]
+    public async Task RoutedOpaqueStorage_DepositAndRetrieveHideRawIdentityAndRotateAttemptMaterial()
+    {
+        using var sender = new SessionIdentityProvider(
+            "amber anchor april arrow atom aurora autumn badge bamboo beacon berry blade");
+        using var recipient = new SessionIdentityProvider(
+            "cactus canyon cedar circle cloud comet coral crystal dawn delta dune ember");
+        var finalRequests = new List<JsonElement>();
+        var outerRequests = new List<string>();
+        var onionRoute = new TestOnionRoute();
+        using var client = new HttpClient(new FakeHandler((request, cancellationToken) =>
+        {
+            var json = request.Content!.ReadAsStringAsync(cancellationToken).GetAwaiter().GetResult();
+            outerRequests.Add(json);
+            using var document = JsonDocument.Parse(json);
+            var root = document.RootElement;
+            var method = root.GetProperty("method").GetString();
+            if (method == "storage_route")
+            {
+                return onionRoute.RouterJson(root, new
+                {
+                    routeNonce = root.GetProperty("payload").GetProperty("routeNonce").GetString(),
+                    route = onionRoute.RouteDocument()
+                });
+            }
+
+            var final = onionRoute.OpenStorageLayer(root.GetProperty("payload"));
+            finalRequests.Add(final.Body.Clone());
+            var storage = final.StoragePath == "/storage/store"
+                ? (object)new { hash = "opaque-routed-hash" }
+                : new { messages = Array.Empty<object>() };
+            return onionRoute.RouterJson(root, new
+            {
+                onionResponse = onionRoute.EncryptResponse(final.ResponsePublicKey, new
+                {
+                    storageStatusCode = 200,
+                    storage,
+                    storageError = (string?)null
+                })
+            });
+        }));
+        var router = new XNodeRpcClient(
+            client,
+            new XNodeRpcClientOptions(
+                [new PinnedRouterEndpoint("http://router-one.local", TestOnionRoute.RouterIds[0])],
+                TrustedRouterIds: TestOnionRoute.RouterIds));
+        var transport = new RoutedSessionStorageMessageTransport(
+            router,
+            new RoutedSessionStorageTransportOptions(),
+            OpaqueMetadataTransportTests.TestOpaqueDependencies.Create());
+        var wire = new OutboundMessageEnvelope(
+            sender.SessionId,
+            recipient.SessionId,
+            E2eeClientTransport.WireBodyPrefix + Convert.ToBase64String("DPE1routed-opaque"u8),
+            [],
+            DateTimeOffset.UtcNow,
+            null,
+            new MessageId("routed-opaque-logical"));
+
+        await transport.SendAsync(wire);
+        await transport.SendAsync(wire);
+        await transport.RetrieveAuthenticatedAsync(recipient, null, 10);
+        await transport.RetrieveAuthenticatedAsync(recipient, null, 10);
+
+        Assert.Equal(4, finalRequests.Count);
+        Assert.All(outerRequests, request =>
+        {
+            Assert.DoesNotContain(sender.SessionId.Value, request, StringComparison.Ordinal);
+            Assert.DoesNotContain(recipient.SessionId.Value, request, StringComparison.Ordinal);
+        });
+        Assert.All(finalRequests, request =>
+        {
+            Assert.False(request.TryGetProperty("pubkey", out _));
+            Assert.False(request.TryGetProperty("pubkey_ed25519", out _));
+            Assert.False(request.TryGetProperty("signature", out _));
+            Assert.True(request.TryGetProperty("attempt_id", out _));
+        });
+        Assert.All(finalRequests.Take(2), request =>
+        {
+            Assert.Equal("DPB1", Encoding.ASCII.GetString(
+                Convert.FromBase64String(request.GetProperty("data").GetString()!)[..4]));
+            Assert.Equal("MCP1", Encoding.ASCII.GetString(
+                Convert.FromBase64String(request.GetProperty("deposit_capability").GetString()!)[..4]));
+        });
+        Assert.All(finalRequests.Skip(2), request =>
+            Assert.Equal("MCP1", Encoding.ASCII.GetString(
+                Convert.FromBase64String(request.GetProperty("retrieve_capability").GetString()!)[..4])));
+        Assert.Equal(4, finalRequests.Select(static request =>
+            request.GetProperty("attempt_id").GetString()).Distinct(StringComparer.Ordinal).Count());
+        Assert.NotEqual(
+            finalRequests[2].GetProperty("retrieve_capability").GetString(),
+            finalRequests[3].GetProperty("retrieve_capability").GetString());
     }
 
     private sealed class FakeHandler : HttpMessageHandler

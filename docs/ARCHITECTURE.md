@@ -46,6 +46,23 @@ Storage routes are parsed as request-local immutable results before `CurrentRout
 
 Dynamic membership authorization currently comes from XNode's exact `NodeDb` registered catalog plus the pinned seed response. A relay contact self-signature establishes contact integrity and key possession, never registry authority. A future quorum-backed catalog checkpoint may replace this authorization source; route trust v1 intentionally does not add a Merkle or on-chain checkpoint.
 
+## P03 opaque personal mailbox slice
+
+Personal Session storage defaults to `SessionStorageMetadataMode.OpaqueP03`. Direct and routed
+transports encode the existing DPE1 content envelope inside the authenticated P03A `DPB1`
+compatibility envelope, present canonical P03B `MCP1` deposit/retrieve capabilities, and use a new
+transport-attempt identifier for every storage request. Routed discovery uses the opaque placement
+key rather than the raw Session ID. Repeated logical sends retain their end-to-end message ID only
+inside authenticated encrypted content, so receiver deduplication remains unchanged while storage
+correlation is attempt-local.
+
+`OpaqueSessionStorageDependencies` is an explicit trust boundary. The shared assembly does not
+ship a capability derivation, production P03A crypto adapter, or durable capability/replay
+implementation. Release defaults therefore require `IMetadataPrivateSessionTransport` and fail
+closed until a reviewed producer supplies those dependencies. A local Debug/survival lane may opt
+into `SessionStorageMetadataMode.LegacyCompatibility` explicitly; it is never marked metadata
+private and `ClientFeatureFlags.ReleaseDefaults` rejects it.
+
 ## E3 MVP Notes
 
 - Current signaling transport is in-memory and intended for deterministic runtime/tests until secure network signaling is wired.

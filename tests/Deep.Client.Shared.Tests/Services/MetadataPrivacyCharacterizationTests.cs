@@ -70,7 +70,10 @@ public sealed partial class MetadataPrivacyCharacterizationTests
         };
         var transport = new SessionStorageMessageTransport(
             client,
-            new SessionStorageMessageTransportOptions("http://storage.test", Namespace: 0));
+            new SessionStorageMessageTransportOptions(
+                "http://storage.test",
+                Namespace: 0,
+                MetadataMode: SessionStorageMetadataMode.LegacyCompatibility));
         var message = new OutboundMessageEnvelope(
             senderIdentity.SessionId,
             recipientIdentity.SessionId,

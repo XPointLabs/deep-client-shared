@@ -31,14 +31,23 @@ public sealed class ClientRuntime : IDisposable
         AvatarProfiles = avatarProfiles ?? new DisabledAvatarProfileTransport();
         Accounts = new SessionAccountService(store, store, clock, messageTransport as IRecoveryProfileLookup);
 
-        if (requireE2eeTransport || featureFlags.TransportRequired)
+        var transportRequired = requireE2eeTransport || featureFlags.TransportRequired;
+        if (transportRequired && messageTransport is not IAuthenticatedInboxTransport)
         {
-            if (messageTransport is not IAuthenticatedInboxTransport)
-            {
-                throw new InvalidOperationException(
-                    "TransportRequired is enabled, but the configured transport is not authenticated E2EE.");
-            }
+            throw new InvalidOperationException(
+                "TransportRequired is enabled, but the configured transport is not authenticated E2EE.");
+        }
 
+        if (featureFlags.MetadataPrivateTransportRequired &&
+            (messageTransport is not IMetadataPrivateSessionTransport metadataTransport ||
+             !metadataTransport.UsesOpaqueMetadata))
+        {
+            throw new InvalidOperationException(
+                "MetadataPrivateTransportRequired is enabled, but the configured transport is not opaque P03.");
+        }
+
+        if (transportRequired)
+        {
             var encryptedTransport = new E2eeClientTransport(
                 messageTransport,
                 Accounts.GetRecoveryPhraseAsync,
@@ -132,6 +141,14 @@ public sealed class ClientRuntime : IDisposable
         {
             throw new InvalidOperationException(
                 "TransportRequired is enabled, but the configured transport is not authenticated E2EE.");
+        }
+
+        if (resolvedFeatureFlags.MetadataPrivateTransportRequired &&
+            (backend is not IMetadataPrivateSessionTransport metadataTransport ||
+             !metadataTransport.UsesOpaqueMetadata))
+        {
+            throw new InvalidOperationException(
+                "MetadataPrivateTransportRequired is enabled, but the configured transport is not opaque P03.");
         }
 
         var store = new SqliteSessionStore(new SqliteSessionStoreOptions(statePath, sqlCipherKey));

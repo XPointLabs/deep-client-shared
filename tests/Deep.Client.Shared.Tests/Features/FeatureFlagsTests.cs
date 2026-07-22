@@ -10,6 +10,7 @@ public sealed class FeatureFlagsTests
         Assert.True(ClientFeatureFlags.ReleaseDefaults.TransportRequired);
         Assert.False(ClientFeatureFlags.ReleaseDefaults.StubTransportAllowed);
         Assert.True(ClientFeatureFlags.ReleaseDefaults.CallsEnabled);
+        Assert.True(ClientFeatureFlags.ReleaseDefaults.MetadataPrivateTransportRequired);
     }
 
     [Fact]
@@ -17,6 +18,7 @@ public sealed class FeatureFlagsTests
     {
         Assert.False(ClientFeatureFlags.Defaults.TransportRequired);
         Assert.True(ClientFeatureFlags.Defaults.StubTransportAllowed);
+        Assert.False(ClientFeatureFlags.Defaults.MetadataPrivateTransportRequired);
     }
 
     [Fact]

@@ -963,8 +963,12 @@ public sealed class PersistenceTests
         }
     }
 
-    private sealed class AuthenticatedTestTransport : ISessionMessageTransport, IAuthenticatedInboxTransport
+    private sealed class AuthenticatedTestTransport :
+        ISessionMessageTransport,
+        IAuthenticatedInboxTransport,
+        IMetadataPrivateSessionTransport
     {
+        public bool UsesOpaqueMetadata => true;
         public Task SendAsync(OutboundMessageEnvelope envelope, CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 

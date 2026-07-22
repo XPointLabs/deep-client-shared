@@ -12,7 +12,8 @@ public sealed record ClientFeatureFlags(
     bool StubTransportAllowed = true,
     bool MembershipTrustEnabled = false,
     bool LegacyEmbeddedBootstrapRollbackAllowed = false,
-    bool PersistentTransportOutboxEnabled = false)
+    bool PersistentTransportOutboxEnabled = false,
+    bool MetadataPrivateTransportRequired = false)
 {
     public ClientFeatureFlags(
         bool groupsV2Enabled,
@@ -38,7 +39,8 @@ public sealed record ClientFeatureFlags(
             stubTransportAllowed,
             membershipTrustEnabled,
             legacyEmbeddedBootstrapRollbackAllowed,
-            PersistentTransportOutboxEnabled: false)
+            PersistentTransportOutboxEnabled: false,
+            MetadataPrivateTransportRequired: false)
     {
     }
 
@@ -83,7 +85,8 @@ public sealed record ClientFeatureFlags(
         StubTransportAllowed: false,
         MembershipTrustEnabled: false,
         LegacyEmbeddedBootstrapRollbackAllowed: false,
-        PersistentTransportOutboxEnabled: false);
+        PersistentTransportOutboxEnabled: false,
+        MetadataPrivateTransportRequired: true);
 }
 
 public sealed class FeatureDisabledException(string featureName)

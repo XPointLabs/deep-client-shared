@@ -16,7 +16,7 @@ It intentionally ports shared behavior and boundaries rather than UI line-by-lin
 - Local persistence abstractions with production `SqliteSessionStore` (SQLCipher-compatible key hook) plus in-memory implementation for tests.
 - Notification planning abstractions.
 - Platform service boundaries for push, media codec, permissions, background tasks, share extension equivalents, and calls.
-- Session-compatible storage transport (`SessionStorageMessageTransport`) for local real message exchange via `/storage/store` and `/storage/retrieve`.
+- P03 opaque personal storage transport (`SessionStorageMessageTransport`) using explicit reviewed-provider boundaries for canonical DPB1/MCP1 deposit and retrieval. The raw Session-compatible wire shape remains available only through explicit `SessionStorageMetadataMode.LegacyCompatibility` for Debug/survival lanes; release defaults reject it.
 - Session-compatible group sync transport (`SessionStorageGroupSyncTransport`) for local real group-state and group-message exchange via `/storage/store` and `/storage/retrieve`.
 - Encrypted attachment file transport (`HttpAttachmentFileTransport`) for local real upload/download via `/file`.
 - HTTP call signaling transport (`HttpCallSignalingTransport`) for real call offer/answer/bye exchange via `/api/calls`.
