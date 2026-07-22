@@ -18,6 +18,14 @@ unverified, non-activating, and absent from runtime composition.
 
 `Services` contains account registration/login, conversation creation, message send/receive through an `ISessionMessageTransport` (`HttpSessionTransport` in production, stub in tests), group-state/group-message sync through `IGroupSyncTransport`, sync plan creation, read-receipt/state-sync helpers, notification planning, and realtime call signaling/state handling (`RealtimeCallService`).
 
+The P11 transport outbox has an opt-in runtime boundary in
+`TransportOutboxDispatcher`. It accepts only already-opaque ciphertext bundles,
+records every attempt before adapter I/O, distinguishes adapter acceptance from
+durability, and runs only bounded caller-owned passes. It is not wired above
+E2EE in `MessageService`, because that layer contains plaintext. Default and
+release profiles remain disabled until a reviewed P03 producer and production
+adapter provide opaque bundles and durable receipts.
+
 Account restore uses recovery phrase input only. Session ID derivation is deterministic and crypto-backed (`PBKDF2-HMAC-SHA512` seed material -> Ed25519 keypair public key -> `05` Session ID), while raw Session ID login is intentionally blocked.
 During restore, runtime attempts a network profile display-name lookup (`IRecoveryProfileLookup`) with timeout before falling back to manual display-name input.
 

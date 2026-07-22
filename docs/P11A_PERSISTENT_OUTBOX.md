@@ -2,8 +2,33 @@
 
 Owner: Mr. X
 
-Status: dormant contract and local storage only. No runtime composition or
-network adapter consumes this API in P11A.
+Status: persistent contract plus an explicitly activated, bounded runtime
+dispatcher. No production network adapter or P03 opaque-bundle producer is
+shipped by this slice, so both default profiles keep the feature disabled.
+
+## Runtime dispatcher boundary
+
+`TransportOutboxDispatcher` consumes only a caller-prepared opaque ciphertext
+bundle through `ITransportOutboxAdapter`. It is intentionally below the message
+domain boundary: `MessageService` sees plaintext before `E2eeClientTransport`,
+so wiring the repository there would persist plaintext and is forbidden.
+
+`ClientRuntime` creates the dispatcher only when
+`PersistentTransportOutboxEnabled` is true, the local store implements
+`ITransportOutboxRepository`, and an adapter is supplied explicitly. Any
+partial configuration fails closed. The dispatcher performs one bounded,
+caller-owned pass and never creates a polling loop, timer, or background
+wakeup. The platform lifecycle remains responsible for deciding when to run a
+pass.
+
+An attempt is committed before adapter I/O. Adapter exceptions become only a
+typed retry count so endpoint or identifier text cannot escape through this
+boundary. `Accepted` is persisted as retryable and is never promoted to
+`Durable` without separate bounded durable evidence. Cancellation propagates;
+the precommitted attempt remains retryable. Commit-outcome-unknown errors are
+reconciled by scoped point read before more I/O. Bundles that expire while an
+adapter is running are marked expired instead of receiving a late success
+claim.
 
 ## State and identity model
 
@@ -170,9 +195,10 @@ only; it does not claim that post-commit WAL maintenance completed. A typed
 maintenance-status surface is an explicit P3 before any product UI may claim
 immediate forensic erasure.
 
-The feature remains dormant and `PersistentTransportOutboxEnabled` is false in
-both default profiles; no runtime composition reads this repository. During the
-declared rollback window, an older binary may open only a copied pre-migration
-database. The authoritative v9 file must not be opened by an older writer.
+The feature remains disabled in both default profiles. Runtime composition is
+available only with an explicit opaque-bundle adapter; the current direct and
+routed storage transports do not implement that producer/receipt contract yet.
+During the declared rollback window, an older binary may open only a copied
+pre-migration database. The authoritative v9 file must not be opened by an older writer.
 Operational rollback therefore restores the pre-migration file backup, never
 edits `user_version` and never drops or renames P11A tables in place.

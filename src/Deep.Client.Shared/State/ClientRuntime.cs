@@ -17,7 +17,8 @@ public sealed class ClientRuntime : IDisposable
         ISessionMessageTransport messageTransport,
         IGroupSyncTransport? groupSyncTransport = null,
         IAvatarProfileTransport? avatarProfiles = null,
-        bool requireE2eeTransport = false)
+        bool requireE2eeTransport = false,
+        ITransportOutboxAdapter? transportOutboxAdapter = null)
     {
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(featureFlags);
@@ -30,6 +31,30 @@ public sealed class ClientRuntime : IDisposable
         Clock = clock;
         AvatarProfiles = avatarProfiles ?? new DisabledAvatarProfileTransport();
         Accounts = new SessionAccountService(store, store, clock, messageTransport as IRecoveryProfileLookup);
+
+        if (featureFlags.PersistentTransportOutboxEnabled)
+        {
+            if (store is not ITransportOutboxRepository outboxRepository)
+            {
+                throw new InvalidOperationException(
+                    "PersistentTransportOutboxEnabled is enabled, but the configured store has no transport outbox repository.");
+            }
+            if (transportOutboxAdapter is null)
+            {
+                throw new InvalidOperationException(
+                    "PersistentTransportOutboxEnabled is enabled, but no transport outbox adapter is configured.");
+            }
+
+            TransportOutbox = new TransportOutboxDispatcher(
+                outboxRepository,
+                transportOutboxAdapter,
+                clock);
+        }
+        else if (transportOutboxAdapter is not null)
+        {
+            throw new InvalidOperationException(
+                "A transport outbox adapter was configured while PersistentTransportOutboxEnabled is disabled.");
+        }
 
         var transportRequired = requireE2eeTransport || featureFlags.TransportRequired;
         if (transportRequired && messageTransport is not IAuthenticatedInboxTransport)
@@ -85,6 +110,8 @@ public sealed class ClientRuntime : IDisposable
 
     public IAvatarProfileTransport AvatarProfiles { get; }
 
+    public TransportOutboxDispatcher? TransportOutbox { get; }
+
     public SessionAccountService Accounts { get; }
 
     public ConversationService Conversations { get; }
@@ -106,14 +133,16 @@ public sealed class ClientRuntime : IDisposable
         IClock? clock = null,
         StubSessionBackend? backend = null,
         IGroupSyncTransport? groupSyncTransport = null,
-        IAvatarProfileTransport? avatarProfiles = null) =>
+        IAvatarProfileTransport? avatarProfiles = null,
+        ITransportOutboxAdapter? transportOutboxAdapter = null) =>
         new(
             new InMemorySessionStore(),
             featureFlags ?? ClientFeatureFlags.Defaults,
             clock ?? new SystemClock(),
             backend ?? new StubSessionBackend(),
             groupSyncTransport,
-            avatarProfiles);
+            avatarProfiles,
+            transportOutboxAdapter: transportOutboxAdapter);
 
     public static ClientRuntime CreatePersistent(
         string statePath,
@@ -125,7 +154,8 @@ public sealed class ClientRuntime : IDisposable
         string? legacyInMemoryStatePath = null,
         string? sqlCipherKey = null,
         Func<ILocalSessionStore, ILocalSessionStore>? storeDecorator = null,
-        bool requireE2eeTransport = false)
+        bool requireE2eeTransport = false,
+        ITransportOutboxAdapter? transportOutboxAdapter = null)
     {
         var resolvedFeatureFlags = featureFlags ?? ClientFeatureFlags.Defaults;
         if (backend is null)
@@ -172,7 +202,8 @@ public sealed class ClientRuntime : IDisposable
             backend,
             groupSyncTransport,
             avatarProfiles,
-            requireE2eeTransport);
+            requireE2eeTransport,
+            transportOutboxAdapter);
     }
 
     public static ClientRuntime CreatePersistentForTests(
@@ -184,7 +215,8 @@ public sealed class ClientRuntime : IDisposable
         IAvatarProfileTransport? avatarProfiles = null,
         string? legacyInMemoryStatePath = null,
         string? sqlCipherKey = null,
-        Func<ILocalSessionStore, ILocalSessionStore>? storeDecorator = null) =>
+        Func<ILocalSessionStore, ILocalSessionStore>? storeDecorator = null,
+        ITransportOutboxAdapter? transportOutboxAdapter = null) =>
         CreatePersistent(
             statePath,
             featureFlags ?? ClientFeatureFlags.Defaults,
@@ -195,7 +227,8 @@ public sealed class ClientRuntime : IDisposable
             legacyInMemoryStatePath,
             sqlCipherKey,
             storeDecorator,
-            requireE2eeTransport: false);
+            requireE2eeTransport: false,
+            transportOutboxAdapter);
 
     public void Dispose()
     {
