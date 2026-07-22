@@ -203,8 +203,12 @@ public sealed class XNodeRpcClientTrustTests
 
         var snapshots = await Task.WhenAll(targets.Select(target => client.RefreshRouteAsync(target)));
 
-        Assert.Equal(targets, snapshots.Select(static snapshot => snapshot!.TargetKey));
-        Assert.Contains(client.CurrentRoute!.TargetKey, targets);
+        Assert.All(snapshots, snapshot =>
+        {
+            Assert.DoesNotContain(snapshot!.TargetKey, targets);
+            Assert.Matches("^[0-9a-f]{64}$", snapshot.TargetKey);
+        });
+        Assert.DoesNotContain(client.CurrentRoute!.TargetKey, targets);
         Assert.All(snapshots, snapshot => Assert.Equal(3, snapshot!.Nodes.Count));
     }
 

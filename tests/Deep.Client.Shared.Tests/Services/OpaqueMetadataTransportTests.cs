@@ -261,7 +261,7 @@ public sealed class OpaqueMetadataTransportTests
             new(new TestCapabilities(), new TestCompatibilityCrypto(), new TestReplayGuard());
     }
 
-    private sealed class TestCapabilities : IOpaqueMailboxCapabilityProvider
+    internal sealed class TestCapabilities : IOpaqueMailboxCapabilityProvider
     {
         private long counter;
 
@@ -318,7 +318,7 @@ public sealed class OpaqueMetadataTransportTests
             SHA256.HashData(Encoding.UTF8.GetBytes($"deep-test/{domain}/{value}"));
     }
 
-    private sealed class TestCompatibilityCrypto : ICompatibilityEnvelopeCrypto
+    internal sealed class TestCompatibilityCrypto : ICompatibilityEnvelopeCrypto
     {
         private const int SenderLength = 33;
         private const int TagLength = 16;
@@ -374,7 +374,7 @@ public sealed class OpaqueMetadataTransportTests
             SHA256.HashData([.. nonceContext, .. Encoding.UTF8.GetBytes(domain)])[..12];
     }
 
-    private sealed class TestReplayGuard : ICompatibilityEnvelopeReplayGuard
+    internal sealed class TestReplayGuard : ICompatibilityEnvelopeReplayGuard
     {
         private readonly HashSet<string> seen = new(StringComparer.Ordinal);
 

@@ -441,6 +441,49 @@ public sealed class SessionTransportTests
             finalRequests[3].GetProperty("retrieve_capability").GetString());
     }
 
+    [Fact]
+    public async Task RoutedStorage_ServerErrorIsSanitizedBeforeCrossingClientBoundary()
+    {
+        const string secret = "storage-secret-account-and-token";
+        var onionRoute = new TestOnionRoute();
+        using var client = new HttpClient(new FakeHandler((request, cancellationToken) =>
+        {
+            using var document = JsonDocument.Parse(
+                request.Content!.ReadAsStringAsync(cancellationToken).GetAwaiter().GetResult());
+            var root = document.RootElement;
+            if (root.GetProperty("method").GetString() == "storage_route")
+            {
+                return onionRoute.RouterJson(root, new
+                {
+                    routeNonce = root.GetProperty("payload").GetProperty("routeNonce").GetString(),
+                    route = onionRoute.RouteDocument()
+                });
+            }
+
+            var final = onionRoute.OpenStorageLayer(root.GetProperty("payload"));
+            return onionRoute.RouterJson(root, new
+            {
+                onionResponse = onionRoute.EncryptResponse(final.ResponsePublicKey, new
+                {
+                    storageStatusCode = 403,
+                    storage = (object?)null,
+                    storageError = secret
+                })
+            });
+        }));
+        var router = new XNodeRpcClient(
+            client,
+            new XNodeRpcClientOptions(
+                [new PinnedRouterEndpoint("http://router-one.local", TestOnionRoute.RouterIds[0])],
+                TrustedRouterIds: TestOnionRoute.RouterIds));
+
+        var exception = await Assert.ThrowsAsync<HttpRequestException>(() =>
+            router.PostStorageAsync("storage_store", new { data = "opaque" }, "opaque-target"));
+
+        Assert.DoesNotContain(secret, exception.ToString(), StringComparison.Ordinal);
+        Assert.Contains("403", exception.Message, StringComparison.Ordinal);
+    }
+
     private sealed class FakeHandler : HttpMessageHandler
     {
         private readonly Func<HttpRequestMessage, CancellationToken, HttpResponseMessage> _handler;
