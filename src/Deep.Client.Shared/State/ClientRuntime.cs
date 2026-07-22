@@ -39,8 +39,7 @@ public sealed class ClientRuntime : IDisposable
         }
 
         if (featureFlags.MetadataPrivateTransportRequired &&
-            (messageTransport is not IMetadataPrivateSessionTransport metadataTransport ||
-             !metadataTransport.UsesOpaqueMetadata))
+            !IsTrustedOpaqueTransport(messageTransport))
         {
             throw new InvalidOperationException(
                 "MetadataPrivateTransportRequired is enabled, but the configured transport is not opaque P03.");
@@ -144,8 +143,7 @@ public sealed class ClientRuntime : IDisposable
         }
 
         if (resolvedFeatureFlags.MetadataPrivateTransportRequired &&
-            (backend is not IMetadataPrivateSessionTransport metadataTransport ||
-             !metadataTransport.UsesOpaqueMetadata))
+            !IsTrustedOpaqueTransport(backend))
         {
             throw new InvalidOperationException(
                 "MetadataPrivateTransportRequired is enabled, but the configured transport is not opaque P03.");
@@ -214,4 +212,12 @@ public sealed class ClientRuntime : IDisposable
             disposableStore.Dispose();
         }
     }
+
+    private static bool IsTrustedOpaqueTransport(ISessionMessageTransport transport) =>
+        transport switch
+        {
+            SessionStorageMessageTransport direct => direct.UsesOpaqueMetadata,
+            RoutedSessionStorageMessageTransport routed => routed.UsesOpaqueMetadata,
+            _ => false
+        };
 }

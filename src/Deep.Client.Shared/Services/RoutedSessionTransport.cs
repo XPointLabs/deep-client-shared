@@ -29,7 +29,7 @@ public sealed record TransportRouteNode(
 
 public sealed record TransportRouteSnapshot(
     string Mode,
-    string TargetKey,
+    string TargetKeyDigest,
     DateTimeOffset UpdatedAt,
     IReadOnlyList<TransportRouteNode> Nodes);
 
@@ -53,7 +53,7 @@ public sealed class DirectStorageRouteProvider : ITransportRouteProvider
         ? null
         : new TransportRouteSnapshot(
             "direct-storage",
-            _storageUrl,
+            RedactTargetKey(_storageUrl),
             DateTimeOffset.UtcNow,
             [
                 new TransportRouteNode(0, "direct-storage", _storageUrl, true, ["storage"])
@@ -63,6 +63,9 @@ public sealed class DirectStorageRouteProvider : ITransportRouteProvider
     {
         return Task.FromResult(CurrentRoute);
     }
+
+    private static string RedactTargetKey(string targetKey) =>
+        Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(targetKey)));
 }
 
 public sealed record PinnedRouterEndpoint(string BaseUrl, string ExpectedRouterId);
@@ -213,10 +216,7 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
             && statusElement.TryGetInt32(out var statusCode)
             && statusCode is < 200 or > 299)
         {
-            var error = decrypted.TryGetProperty("storageError", out var errorElement)
-                ? errorElement.GetString()
-                : $"storage-rpc-failed:{statusCode}";
-            throw new HttpRequestException(error);
+            throw new HttpRequestException($"Storage RPC failed with status {statusCode}.");
         }
 
         if (decrypted.TryGetProperty("storage", out var storage))
@@ -429,8 +429,11 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
                 .ThenBy(static node => node.RouterId, StringComparer.Ordinal))
             .Select((node, index) => node with { Index = index })
             .ToArray();
-        return new TransportRouteSnapshot(mode, targetKey, now, orderedNodes);
+        return new TransportRouteSnapshot(mode, RedactTargetKey(targetKey), now, orderedNodes);
     }
+
+    private static string RedactTargetKey(string targetKey) =>
+        Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(targetKey)));
 
     private static string NewRouteNonce() =>
         Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant();
@@ -711,8 +714,7 @@ public sealed record RoutedSessionStorageTransportOptions(
 
 public sealed class RoutedSessionStorageMessageTransport :
     ISessionMessageTransport,
-    IAuthenticatedInboxTransport,
-    IMetadataPrivateSessionTransport
+    IAuthenticatedInboxTransport
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -729,6 +731,12 @@ public sealed class RoutedSessionStorageMessageTransport :
         _router = router;
         _options = options;
         _opaque = opaque;
+        if (_options.MetadataMode is not (
+                SessionStorageMetadataMode.OpaqueP03 or
+                SessionStorageMetadataMode.LegacyCompatibility))
+        {
+            throw new ArgumentOutOfRangeException(nameof(options), "The storage metadata mode is undefined.");
+        }
         if (_options.MetadataMode == SessionStorageMetadataMode.OpaqueP03)
         {
             _opaque?.Validate();
@@ -826,7 +834,7 @@ public sealed class RoutedSessionStorageMessageTransport :
 
         if (UsesOpaqueMetadata)
         {
-            var opaque = OpaqueSessionStorageCodec.EncodeRetrieve(identity, _opaque!);
+            var opaque = OpaqueSessionStorageCodec.EncodeRetrieve(identity, _options.TtlMilliseconds, _opaque!);
             var storage = await _router.PostStorageAsync("storage_retrieve", new
             {
                 retrieve_capability = opaque.Capability,

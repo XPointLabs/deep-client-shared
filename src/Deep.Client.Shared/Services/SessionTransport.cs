@@ -154,8 +154,7 @@ public sealed record SessionStorageMessageTransportOptions(
 
 public sealed class SessionStorageMessageTransport :
     ISessionMessageTransport,
-    IAuthenticatedInboxTransport,
-    IMetadataPrivateSessionTransport
+    IAuthenticatedInboxTransport
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -172,6 +171,13 @@ public sealed class SessionStorageMessageTransport :
         _httpClient = httpClient;
         _options = options;
         _opaque = opaque;
+
+        if (_options.MetadataMode is not (
+                SessionStorageMetadataMode.OpaqueP03 or
+                SessionStorageMetadataMode.LegacyCompatibility))
+        {
+            throw new ArgumentOutOfRangeException(nameof(options), "The storage metadata mode is undefined.");
+        }
 
         if (string.IsNullOrWhiteSpace(_options.BaseUrl))
         {
@@ -288,7 +294,7 @@ public sealed class SessionStorageMessageTransport :
 
         if (UsesOpaqueMetadata)
         {
-            var opaque = OpaqueSessionStorageCodec.EncodeRetrieve(identity, _opaque!);
+            var opaque = OpaqueSessionStorageCodec.EncodeRetrieve(identity, _options.TtlMilliseconds, _opaque!);
             using var response = await PostJsonAsync(_options.RetrievePath, new
             {
                 retrieve_capability = opaque.Capability,

@@ -48,7 +48,9 @@ public sealed class OpaqueMetadataSecurityCorrectiveTests
     }
 
     [Theory]
+    [InlineData(true, true)]
     [InlineData(true, false)]
+    [InlineData(false, false)]
     [InlineData(false, true)]
     public async Task CapabilityValidityWindow_IsEnforcedForDepositAndRetrieve(
         bool deposit,
@@ -238,10 +240,8 @@ public sealed class OpaqueMetadataSecurityCorrectiveTests
 
     private sealed class ForgedMetadataTransport :
         ISessionMessageTransport,
-        IAuthenticatedInboxTransport,
-        IMetadataPrivateSessionTransport
+        IAuthenticatedInboxTransport
     {
-        public bool UsesOpaqueMetadata => true;
         public int InboxNamespace => 0;
 
         public Task SendAsync(OutboundMessageEnvelope envelope, CancellationToken cancellationToken = default) =>

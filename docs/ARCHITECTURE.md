@@ -58,10 +58,18 @@ correlation is attempt-local.
 
 `OpaqueSessionStorageDependencies` is an explicit trust boundary. The shared assembly does not
 ship a capability derivation, production P03A crypto adapter, or durable capability/replay
-implementation. Release defaults therefore require `IMetadataPrivateSessionTransport` and fail
-closed until a reviewed producer supplies those dependencies. A local Debug/survival lane may opt
+implementation. Release defaults therefore accept opaque metadata proof only from the two sealed
+shared transport implementations in `OpaqueP03` mode; an arbitrary transport cannot forge a
+marker interface. Production remains fail-closed until a reviewed producer supplies those
+dependencies. A local Debug/survival lane may opt
 into `SessionStorageMetadataMode.LegacyCompatibility` explicitly; it is never marked metadata
 private and `ClientFeatureFlags.ReleaseDefaults` rejects it.
+
+Route diagnostics expose only `TransportRouteSnapshot.TargetKeyDigest`, a lowercase SHA-256
+digest; the raw Session ID, placement key, or other route target is never retained in
+`CurrentRoute`. Capability providers are checked for strict domain, lifecycle, attempt binding,
+current validity window, bounded key material, and obvious raw Session-ID addressing before
+storage I/O. Provider, crypto, and server error text never crosses the client boundary.
 
 ## E3 MVP Notes
 

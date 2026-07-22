@@ -396,7 +396,7 @@ public sealed class PersistenceTests
     {
         var runtime = new ClientRuntime(
             new InMemorySessionStore(),
-            ClientFeatureFlags.ReleaseDefaults,
+            ClientFeatureFlags.ReleaseDefaults with { MetadataPrivateTransportRequired = false },
             new SystemClock(),
             new AuthenticatedTestTransport());
 
@@ -965,10 +965,8 @@ public sealed class PersistenceTests
 
     private sealed class AuthenticatedTestTransport :
         ISessionMessageTransport,
-        IAuthenticatedInboxTransport,
-        IMetadataPrivateSessionTransport
+        IAuthenticatedInboxTransport
     {
-        public bool UsesOpaqueMetadata => true;
         public Task SendAsync(OutboundMessageEnvelope envelope, CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 

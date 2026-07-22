@@ -205,10 +205,10 @@ public sealed class XNodeRpcClientTrustTests
 
         Assert.All(snapshots, snapshot =>
         {
-            Assert.DoesNotContain(snapshot!.TargetKey, targets);
-            Assert.Matches("^[0-9a-f]{64}$", snapshot.TargetKey);
+            Assert.DoesNotContain(snapshot!.TargetKeyDigest, targets);
+            Assert.Matches("^[0-9a-f]{64}$", snapshot.TargetKeyDigest);
         });
-        Assert.DoesNotContain(client.CurrentRoute!.TargetKey, targets);
+        Assert.DoesNotContain(client.CurrentRoute!.TargetKeyDigest, targets);
         Assert.All(snapshots, snapshot => Assert.Equal(3, snapshot!.Nodes.Count));
     }
 
