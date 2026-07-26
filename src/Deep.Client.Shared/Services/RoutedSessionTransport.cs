@@ -79,10 +79,71 @@ public sealed record XNodeRpcClientOptions(
     int MaxResponseBytes = 8_388_608,
     bool RequireMembershipRouteSelection = false);
 
+public enum TransportRouteEvidenceOperation
+{
+    Store = 1,
+    Retrieve = 2
+}
+
+public enum TransportRouteEvidenceEvent
+{
+    Selected = 1,
+    PreDispatchFailure = 2,
+    OutcomeUnknown = 3,
+    Completed = 4
+}
+
+/// <summary>
+/// Privacy-bounded route evidence for deterministic chaos correlation. Router
+/// identities are one-way SHA-256 digests; target, endpoint, account, mailbox,
+/// payload, request, response, and exception data are intentionally absent.
+/// </summary>
+public sealed class TransportRouteEvidence
+{
+    internal TransportRouteEvidence(
+        TransportRouteEvidenceOperation operation,
+        TransportRouteEvidenceEvent @event,
+        int attempt,
+        IEnumerable<string> routerIdDigests)
+    {
+        Operation = operation;
+        Event = @event;
+        Attempt = attempt;
+        RouterIdDigests = Array.AsReadOnly(routerIdDigests.ToArray());
+    }
+
+    public TransportRouteEvidenceOperation Operation { get; }
+
+    public TransportRouteEvidenceEvent Event { get; }
+
+    public int Attempt { get; }
+
+    public IReadOnlyList<string> RouterIdDigests { get; }
+}
+
+public interface ITransportRouteEvidenceObserver
+{
+    void Observe(TransportRouteEvidence evidence);
+}
+
 public sealed class StorageDispatchOutcomeUnknownException : IOException
 {
     public StorageDispatchOutcomeUnknownException()
         : base("The storage store dispatch outcome is unknown; do not retry this logical request.")
+    {
+    }
+}
+
+/// <summary>
+/// Internal transport contract for a proven zero-byte dispatch failure. An
+/// HttpMessageHandler may throw this only when it can prove that no request
+/// bytes reached the selected first-hop router. XNodeRpcClient deliberately
+/// never infers this state from HttpRequestException, timeout, or cancellation.
+/// </summary>
+internal sealed class StorageRoutePreDispatchException : IOException
+{
+    internal StorageRoutePreDispatchException()
+        : base("The routed storage request failed before any bytes were dispatched.")
     {
     }
 }
@@ -104,18 +165,21 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
     private readonly TimeSpan _responseFreshness;
     private readonly int _maxResponseBytes;
     private readonly IMembershipRouteCatalogProvider? _membershipRouteCatalogProvider;
+    private readonly ITransportRouteEvidenceObserver _routeEvidenceObserver;
     private TransportRouteSnapshot? _currentRoute;
 
     public XNodeRpcClient(
         HttpClient httpClient,
         XNodeRpcClientOptions options,
         TimeProvider? timeProvider = null,
-        IMembershipRouteCatalogProvider? membershipRouteCatalogProvider = null)
+        IMembershipRouteCatalogProvider? membershipRouteCatalogProvider = null,
+        ITransportRouteEvidenceObserver? routeEvidenceObserver = null)
     {
         _httpClient = httpClient;
         _options = options;
         _timeProvider = timeProvider ?? TimeProvider.System;
         _membershipRouteCatalogProvider = membershipRouteCatalogProvider;
+        _routeEvidenceObserver = routeEvidenceObserver ?? NoOpTransportRouteEvidenceObserver.Instance;
         _responseFreshness = options.ResponseFreshness == default
             ? DefaultResponseFreshness
             : options.ResponseFreshness;
@@ -280,6 +344,11 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
             }
 
             var onion = OnionRouting.BuildStorageRequest(routeSnapshot.Nodes, storagePath, body);
+            ObserveRouteEvidence(
+                method,
+                TransportRouteEvidenceEvent.Selected,
+                attempt + 1,
+                routeSnapshot.Nodes);
             JsonElement onionResult;
             try
             {
@@ -293,9 +362,38 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
             {
                 throw;
             }
+            catch (StorageRoutePreDispatchException) when (attempt == 0)
+            {
+                ObserveRouteEvidence(
+                    method,
+                    TransportRouteEvidenceEvent.PreDispatchFailure,
+                    attempt + 1,
+                    routeSnapshot.Nodes);
+                excludedRouterIds.Add(router.ExpectedRouterId);
+                foreach (var node in routeSnapshot.Nodes)
+                {
+                    excludedRouterIds.Add(node.RouterId);
+                }
+                continue;
+            }
+            catch (StorageRoutePreDispatchException)
+            {
+                ObserveRouteEvidence(
+                    method,
+                    TransportRouteEvidenceEvent.PreDispatchFailure,
+                    attempt + 1,
+                    routeSnapshot.Nodes);
+                throw new HttpRequestException(
+                    "The bounded routed storage request failed before dispatch.");
+            }
             catch (Exception exception) when (
                 method == "storage_store" && IsAmbiguousTransportFailure(exception))
             {
+                ObserveRouteEvidence(
+                    method,
+                    TransportRouteEvidenceEvent.OutcomeUnknown,
+                    attempt + 1,
+                    routeSnapshot.Nodes);
                 throw new StorageDispatchOutcomeUnknownException();
             }
             catch (Exception exception) when (
@@ -314,7 +412,13 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
 
             try
             {
-                return DecryptStorageResponse(onionResult, onion.ResponsePrivateKey);
+                var result = DecryptStorageResponse(onionResult, onion.ResponsePrivateKey);
+                ObserveRouteEvidence(
+                    method,
+                    TransportRouteEvidenceEvent.Completed,
+                    attempt + 1,
+                    routeSnapshot.Nodes);
+                return result;
             }
             finally
             {
@@ -359,6 +463,11 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
                 excludedRouterIds);
             var routeSnapshot = ToRouteSnapshot(targetKey, selected);
             Volatile.Write(ref _currentRoute, routeSnapshot);
+            ObserveRouteEvidence(
+                method,
+                TransportRouteEvidenceEvent.Selected,
+                attempt + 1,
+                routeSnapshot.Nodes);
             var firstHop = ConfigureRouter(new PinnedRouterEndpoint(
                 routeSnapshot.Nodes[0].RpcEndpoint,
                 routeSnapshot.Nodes[0].RouterId));
@@ -378,9 +487,37 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
                 {
                     throw;
                 }
+                catch (StorageRoutePreDispatchException) when (attempt == 0)
+                {
+                    ObserveRouteEvidence(
+                        method,
+                        TransportRouteEvidenceEvent.PreDispatchFailure,
+                        attempt + 1,
+                        routeSnapshot.Nodes);
+                    firstFailure = new HttpRequestException(
+                        "The first membership route failed before dispatch.");
+                    foreach (var node in routeSnapshot.Nodes)
+                        excludedRouterIds.Add(node.RouterId);
+                    continue;
+                }
+                catch (StorageRoutePreDispatchException)
+                {
+                    ObserveRouteEvidence(
+                        method,
+                        TransportRouteEvidenceEvent.PreDispatchFailure,
+                        attempt + 1,
+                        routeSnapshot.Nodes);
+                    throw new HttpRequestException(
+                        "The bounded membership route request failed before dispatch.");
+                }
                 catch (Exception exception) when (
                     method == "storage_store" && IsAmbiguousTransportFailure(exception))
                 {
+                    ObserveRouteEvidence(
+                        method,
+                        TransportRouteEvidenceEvent.OutcomeUnknown,
+                        attempt + 1,
+                        routeSnapshot.Nodes);
                     throw new StorageDispatchOutcomeUnknownException();
                 }
                 catch (Exception exception) when (
@@ -394,7 +531,13 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
                     continue;
                 }
 
-                return DecryptStorageResponse(onionResult, onion.ResponsePrivateKey);
+                var result = DecryptStorageResponse(onionResult, onion.ResponsePrivateKey);
+                ObserveRouteEvidence(
+                    method,
+                    TransportRouteEvidenceEvent.Completed,
+                    attempt + 1,
+                    routeSnapshot.Nodes);
+                return result;
             }
             finally
             {
@@ -962,6 +1105,36 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
                 : throw new RouterResponseValidationException($"Router storage route has an invalid {name}.");
     }
 
+    private void ObserveRouteEvidence(
+        string method,
+        TransportRouteEvidenceEvent @event,
+        int attempt,
+        IReadOnlyList<TransportRouteNode> nodes)
+    {
+        var operation = method switch
+        {
+            "storage_store" => TransportRouteEvidenceOperation.Store,
+            "storage_retrieve" => TransportRouteEvidenceOperation.Retrieve,
+            _ => throw new ArgumentOutOfRangeException(nameof(method))
+        };
+        var digests = nodes
+            .Select(static node => RedactRouterId(node.RouterId))
+            .ToArray();
+        try
+        {
+            _routeEvidenceObserver.Observe(
+                new TransportRouteEvidence(operation, @event, attempt, digests));
+        }
+        catch
+        {
+            // Diagnostic observers must never alter routing or delivery semantics.
+        }
+    }
+
+    private static string RedactRouterId(string routerId) =>
+        Convert.ToHexStringLower(SHA256.HashData(
+            Encoding.UTF8.GetBytes(routerId.Trim().ToLowerInvariant())));
+
     private sealed record RouterRpcRequest(string Id, string Method, JsonElement Payload, string Nonce);
 
     private sealed record RouterRpcResponse(string Id, bool Success, JsonElement? Result, string? Error)
@@ -1018,6 +1191,15 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
     private sealed record ConfiguredRouter(Uri BaseUri, string ExpectedRouterId);
 
     private sealed record RouterRpcResult(ConfiguredRouter Router, JsonElement Result);
+
+    private sealed class NoOpTransportRouteEvidenceObserver : ITransportRouteEvidenceObserver
+    {
+        public static NoOpTransportRouteEvidenceObserver Instance { get; } = new();
+
+        public void Observe(TransportRouteEvidence evidence)
+        {
+        }
+    }
 }
 
 public sealed record RoutedSessionStorageTransportOptions(

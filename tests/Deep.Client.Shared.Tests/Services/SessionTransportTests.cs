@@ -6,6 +6,8 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Deep.Client.Shared.Domain;
 using Deep.Client.Shared.Services;
+using Deep.Protocol.DeepExtension.Membership;
+using Deep.Protocol.DeepExtension.MembershipRoutes;
 using Sodium;
 
 namespace Deep.Client.Shared.Tests.Services;
@@ -833,6 +835,142 @@ public sealed class SessionTransportTests
         Assert.Equal(rpcError, exception.Message);
     }
 
+    [Fact]
+    public async Task MembershipStore_ProvenPreDispatchFailureExcludesSelectedRouteAndStoresExactlyOnce()
+    {
+        const string targetKey = "private-mailbox-target-for-chaos-correlation";
+        var onionRoute = new TestOnionRoute();
+        var catalog = onionRoute.MembershipCatalog();
+        var observer = new RecordingRouteEvidenceObserver();
+        var onionAttempts = 0;
+        var committedBodies = new List<JsonElement>();
+        var failedRouterIndex = -1;
+        using var client = new HttpClient(new FakeHandler((request, cancellationToken) =>
+        {
+            onionAttempts++;
+            var selected = observer.Events.Last(static evidence =>
+                evidence.Event == TransportRouteEvidenceEvent.Selected);
+            var routeIndices = TestOnionRoute.RouteIndices(selected.RouterIdDigests);
+            if (onionAttempts == 1)
+            {
+                failedRouterIndex = routeIndices[0];
+                throw new StorageRoutePreDispatchException();
+            }
+
+            using var document = JsonDocument.Parse(
+                request.Content!.ReadAsStringAsync(cancellationToken).GetAwaiter().GetResult());
+            var root = document.RootElement;
+            var final = onionRoute.OpenStorageLayer(root.GetProperty("payload"), routeIndices);
+            committedBodies.Add(final.Body.Clone());
+            return onionRoute.RouterJson(root, new
+            {
+                onionResponse = onionRoute.EncryptResponse(final.ResponsePublicKey, new
+                {
+                    storageStatusCode = 200,
+                    storage = new { hash = "membership-stored-once" }
+                })
+            }, routeIndices[0]);
+        }));
+        var routerIds = catalog.Members.Select(static member =>
+            Convert.ToHexStringLower(member.Descriptor.RouterId.Span)).ToArray();
+        var router = new XNodeRpcClient(
+            client,
+            new XNodeRpcClientOptions(
+                [new PinnedRouterEndpoint("http://bootstrap.invalid/", routerIds[0])],
+                TrustedRouterIds: routerIds,
+                RequireMembershipRouteSelection: true),
+            membershipRouteCatalogProvider: new StaticMembershipCatalogProvider(catalog),
+            routeEvidenceObserver: observer);
+
+        var result = await router.PostStorageAsync(
+            "storage_store",
+            new { idempotency_key = new string('7', 64), data = "ciphertext" },
+            targetKey);
+
+        Assert.Equal("membership-stored-once", result.GetProperty("hash").GetString());
+        Assert.Equal(2, onionAttempts);
+        var body = Assert.Single(committedBodies);
+        Assert.Equal(new string('7', 64), body.GetProperty("idempotency_key").GetString());
+        var selectedRoutes = observer.Events
+            .Where(static evidence => evidence.Event == TransportRouteEvidenceEvent.Selected)
+            .ToArray();
+        Assert.Equal(2, selectedRoutes.Length);
+        Assert.Contains(
+            TestOnionRoute.RouterDigest(failedRouterIndex),
+            selectedRoutes[0].RouterIdDigests);
+        Assert.Empty(selectedRoutes[0].RouterIdDigests.Intersect(
+            selectedRoutes[1].RouterIdDigests,
+            StringComparer.Ordinal));
+        Assert.Contains(observer.Events, static evidence =>
+            evidence.Event == TransportRouteEvidenceEvent.PreDispatchFailure &&
+            evidence.Attempt == 1);
+        Assert.Contains(observer.Events, static evidence =>
+            evidence.Event == TransportRouteEvidenceEvent.Completed &&
+            evidence.Attempt == 2);
+        Assert.DoesNotContain(
+            targetKey,
+            JsonSerializer.Serialize(observer.Events),
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task MembershipRetrieve_TransportFailureRetainsDisjointFallbackBehavior()
+    {
+        var onionRoute = new TestOnionRoute();
+        var catalog = onionRoute.MembershipCatalog();
+        var observer = new RecordingRouteEvidenceObserver();
+        var onionAttempts = 0;
+        using var client = new HttpClient(new FakeHandler((request, cancellationToken) =>
+        {
+            onionAttempts++;
+            if (onionAttempts == 1)
+            {
+                throw new HttpRequestException("first retrieve route unavailable");
+            }
+
+            var selected = observer.Events.Last(static evidence =>
+                evidence.Event == TransportRouteEvidenceEvent.Selected);
+            var routeIndices = TestOnionRoute.RouteIndices(selected.RouterIdDigests);
+            using var document = JsonDocument.Parse(
+                request.Content!.ReadAsStringAsync(cancellationToken).GetAwaiter().GetResult());
+            var root = document.RootElement;
+            var final = onionRoute.OpenStorageLayer(root.GetProperty("payload"), routeIndices);
+            return onionRoute.RouterJson(root, new
+            {
+                onionResponse = onionRoute.EncryptResponse(final.ResponsePublicKey, new
+                {
+                    storageStatusCode = 200,
+                    storage = new { messages = Array.Empty<object>() }
+                })
+            }, routeIndices[0]);
+        }));
+        var routerIds = catalog.Members.Select(static member =>
+            Convert.ToHexStringLower(member.Descriptor.RouterId.Span)).ToArray();
+        var router = new XNodeRpcClient(
+            client,
+            new XNodeRpcClientOptions(
+                [new PinnedRouterEndpoint("http://bootstrap.invalid/", routerIds[0])],
+                TrustedRouterIds: routerIds,
+                RequireMembershipRouteSelection: true),
+            membershipRouteCatalogProvider: new StaticMembershipCatalogProvider(catalog),
+            routeEvidenceObserver: observer);
+
+        var result = await router.PostStorageAsync(
+            "storage_retrieve",
+            new { last_hash = (string?)null },
+            "opaque-retrieve-target");
+
+        Assert.Empty(result.GetProperty("messages").EnumerateArray());
+        Assert.Equal(2, onionAttempts);
+        var selectedRoutes = observer.Events
+            .Where(static evidence => evidence.Event == TransportRouteEvidenceEvent.Selected)
+            .ToArray();
+        Assert.Equal(2, selectedRoutes.Length);
+        Assert.Empty(selectedRoutes[0].RouterIdDigests.Intersect(
+            selectedRoutes[1].RouterIdDigests,
+            StringComparer.Ordinal));
+    }
+
     private static PinnedRouterEndpoint[] OrderedPinnedEndpoints(
         string targetKey,
         int firstRouterIndex,
@@ -872,6 +1010,24 @@ public sealed class SessionTransportTests
                 return Convert.ToHexString(distance);
             }, StringComparer.Ordinal))
             .ToArray();
+    }
+
+    private sealed class StaticMembershipCatalogProvider(MembershipRouteCatalogSnapshot catalog)
+        : IMembershipRouteCatalogProvider
+    {
+        public Task<MembershipRouteCatalogSnapshot> GetCatalogAsync(
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(catalog);
+        }
+    }
+
+    private sealed class RecordingRouteEvidenceObserver : ITransportRouteEvidenceObserver
+    {
+        public List<TransportRouteEvidence> Events { get; } = [];
+
+        public void Observe(TransportRouteEvidence evidence) => Events.Add(evidence);
     }
 
     private sealed class FakeHandler : HttpMessageHandler
@@ -925,6 +1081,58 @@ public sealed class SessionTransportTests
             PublicKeyBox.GenerateKeyPair(),
             PublicKeyBox.GenerateKeyPair()
         ];
+
+        public MembershipRouteCatalogSnapshot MembershipCatalog()
+        {
+            var members = Enumerable.Range(0, RouterIds.Length)
+                .Select(index => new MembershipRouteCatalogMember(
+                    new MembershipRouteDescriptor
+                    {
+                        RouterId = Convert.FromHexString(RouterIds[index]),
+                        Ed25519PublicKey = SigningKeys[index].PublicKey.ToArray(),
+                        X25519PublicKey = _keys[index].PublicKey.ToArray(),
+                        RpcEndpoint = $"http://10.0.0.{index + 1}:8080",
+                        Roles = MembershipRouteRole.Ingress |
+                                MembershipRouteRole.Core |
+                                MembershipRouteRole.Storage,
+                        Capabilities = MembershipRouteCapability.SessionRpc |
+                                       MembershipRouteCapability.OnionV1 |
+                                       MembershipRouteCapability.Storage,
+                        Epoch = 10,
+                        ValidFromUnixSeconds = 1_700_000_000,
+                        ValidUntilUnixSeconds = 1_900_000_000
+                    },
+                    new MembershipRouteInclusionProof
+                    {
+                        LeafIndex = checked((uint)index),
+                        MemberCount = checked((uint)RouterIds.Length),
+                        SiblingHashes = []
+                    }))
+                .ToArray();
+            return new MembershipRouteCatalogSnapshot(
+                10,
+                DateTimeOffset.FromUnixTimeSeconds(1_900_000_000),
+                members,
+                SHA256.HashData("membership-route-test"u8))
+            {
+                EndpointPolicy = MembershipRouteEndpointPolicy.DevLocalHttp
+            };
+        }
+
+        public static int[] RouteIndices(IReadOnlyList<string> routerIdDigests) =>
+            routerIdDigests.Select(digest =>
+                Array.FindIndex(
+                    RouterIds,
+                    routerId => string.Equals(
+                        RouterDigest(routerId),
+                        digest,
+                        StringComparison.Ordinal))).ToArray();
+
+        public static string RouterDigest(int routerIndex) => RouterDigest(RouterIds[routerIndex]);
+
+        private static string RouterDigest(string routerId) =>
+            Convert.ToHexStringLower(SHA256.HashData(
+                Encoding.UTF8.GetBytes(routerId.Trim().ToLowerInvariant())));
 
         public object[] RouteDocument(params int[] routeIndices)
         {

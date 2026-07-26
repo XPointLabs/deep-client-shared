@@ -63,9 +63,28 @@ public sealed class MembershipRouteSelectionTests
     }
 
     [Fact]
+    public void Selector_FailsClosedWhenFewerThanThreeViableMembersRemain()
+    {
+        var catalog = Catalog();
+        var excluded = catalog.Members
+            .Take(4)
+            .Select(Id)
+            .ToHashSet(StringComparer.Ordinal);
+
+        var exception = Assert.Throws<MembershipRouteCatalogException>(() =>
+            MembershipRouteSelector.Select(
+                catalog,
+                Enumerable.Repeat((byte)4, 32).ToArray(),
+                excluded));
+
+        Assert.Contains("No exact", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task MembershipStore_DispatchesDirectlyWithoutRouteOrExclusionDisclosure()
     {
         var requests = new List<string>();
+        var evidence = new RecordingRouteEvidenceObserver();
         using var client = new HttpClient(new ThrowingHandler(async (request, cancellationToken) =>
         {
             requests.Add(await request.Content!.ReadAsStringAsync(cancellationToken));
@@ -79,7 +98,8 @@ public sealed class MembershipRouteSelectionTests
                 [new PinnedRouterEndpoint("http://bootstrap.invalid/", routerIds[0])],
                 TrustedRouterIds: routerIds,
                 RequireMembershipRouteSelection: true),
-            membershipRouteCatalogProvider: new StaticCatalogProvider(catalog));
+            membershipRouteCatalogProvider: new StaticCatalogProvider(catalog),
+            routeEvidenceObserver: evidence);
 
         await Assert.ThrowsAsync<StorageDispatchOutcomeUnknownException>(
             () => router.PostStorageAsync(
@@ -92,6 +112,16 @@ public sealed class MembershipRouteSelectionTests
         Assert.DoesNotContain("storage_route", request, StringComparison.Ordinal);
         Assert.DoesNotContain("excludedRouterIds", request, StringComparison.Ordinal);
         Assert.DoesNotContain("mailbox-target-that-must-not-leak", request, StringComparison.Ordinal);
+        Assert.Equal(
+            [
+                TransportRouteEvidenceEvent.Selected,
+                TransportRouteEvidenceEvent.OutcomeUnknown
+            ],
+            evidence.Events.Select(static item => item.Event));
+        Assert.DoesNotContain(
+            "mailbox-target-that-must-not-leak",
+            JsonSerializer.Serialize(evidence.Events),
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -810,6 +840,13 @@ public sealed class MembershipRouteSelectionTests
             cancellationToken.ThrowIfCancellationRequested();
             return Task.FromResult(catalog);
         }
+    }
+
+    private sealed class RecordingRouteEvidenceObserver : ITransportRouteEvidenceObserver
+    {
+        public List<TransportRouteEvidence> Events { get; } = [];
+
+        public void Observe(TransportRouteEvidence evidence) => Events.Add(evidence);
     }
 
     private sealed class ThrowingHandler(

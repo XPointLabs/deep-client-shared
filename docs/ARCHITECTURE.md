@@ -117,7 +117,14 @@ expired, rollback or fork candidate fails closed and never falls back to cache.
 `XNodeRpcClient` can then select ingress/core/storage hops locally. Retrieve fallback keeps the
 first route only in local memory and uses a disjoint second set from at least six members. No
 mailbox target, route request or prior route IDs are disclosed to an ingress. Store dispatch still
-has outcome-unknown/no-redispatch semantics.
+has outcome-unknown/no-redispatch semantics for every timeout, cancellation, ordinary HTTP
+failure, or signed downstream transport failure. A store may select one disjoint fallback only
+when the injected HTTP transport raises the internal zero-byte pre-dispatch contract; the transport
+must prove that no request bytes reached the selected first hop, and `XNodeRpcClient` never infers
+that fact from an `HttpClient` exception. The failed three-node route is excluded locally before
+the fallback is selected. Optional route evidence reports only operation/event/attempt plus
+SHA-256 router-ID digests; it contains no endpoint, target, account, mailbox, payload, response, or
+exception data, and the default observer is a no-op.
 
 Platform composition remains disabled until the external production signer/indexer publishes a
 real artifact and MAUI supplies its pinned trust profile, verifier and durable cache path.
