@@ -1,5 +1,6 @@
 ﻿using System.Net;
 using System.Net.Http;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -477,11 +478,247 @@ public sealed class SessionTransportTests
                 [new PinnedRouterEndpoint("http://router-one.local", TestOnionRoute.RouterIds[0])],
                 TrustedRouterIds: TestOnionRoute.RouterIds));
 
-        var exception = await Assert.ThrowsAsync<HttpRequestException>(() =>
+        var exception = await Assert.ThrowsAnyAsync<HttpRequestException>(() =>
             router.PostStorageAsync("storage_store", new { data = "opaque" }, "opaque-target"));
 
         Assert.DoesNotContain(secret, exception.ToString(), StringComparison.Ordinal);
         Assert.Contains("403", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RoutedStorage_RetriesOnceOnStrictlyDisjointRouteAndPreservesDedupMaterial()
+    {
+        const string targetKey = "six-node-disjoint-target";
+        var onionRoute = new TestOnionRoute();
+        var endpoints = OrderedPinnedEndpoints(targetKey, firstRouterIndex: 0, fallbackRouterIndex: 3);
+        var routeRequests = new List<JsonElement>();
+        var storageBodies = new List<JsonElement>();
+        var onionAttempts = 0;
+        using var client = new HttpClient(new FakeHandler((request, cancellationToken) =>
+        {
+            using var document = JsonDocument.Parse(
+                request.Content!.ReadAsStringAsync(cancellationToken).GetAwaiter().GetResult());
+            var root = document.RootElement;
+            var method = root.GetProperty("method").GetString();
+            var responderIndex = request.RequestUri!.Host.StartsWith("router-4", StringComparison.Ordinal) ? 3 : 0;
+            var routeIndices = responderIndex == 0
+                ? ClientRouteOrder(targetKey, 0, 1, 2)
+                : ClientRouteOrder(targetKey, 3, 4, 5);
+            if (method == "storage_route")
+            {
+                routeRequests.Add(root.GetProperty("payload").Clone());
+                return onionRoute.RouterJson(root, new
+                {
+                    routeNonce = root.GetProperty("payload").GetProperty("routeNonce").GetString(),
+                    route = onionRoute.RouteDocument(routeIndices)
+                }, responderIndex);
+            }
+
+            onionAttempts++;
+            var final = onionRoute.OpenStorageLayer(root.GetProperty("payload"), routeIndices);
+            storageBodies.Add(final.Body.Clone());
+            if (responderIndex == 0)
+            {
+                return onionRoute.RouterFailureJson(root, "onion-peer-transport-failed");
+            }
+
+            return onionRoute.RouterJson(root, new
+            {
+                onionResponse = onionRoute.EncryptResponse(final.ResponsePublicKey, new
+                {
+                    storageStatusCode = 200,
+                    storage = new { hash = "stored-once" },
+                    storageError = (string?)null
+                })
+            }, responderIndex);
+        }));
+        var router = new XNodeRpcClient(
+            client,
+            new XNodeRpcClientOptions(endpoints, TrustedRouterIds: TestOnionRoute.RouterIds));
+
+        var result = await router.PostStorageAsync(
+            "storage_store",
+            new { idempotency_key = new string('a', 64), data = "ciphertext" },
+            targetKey);
+
+        Assert.Equal("stored-once", result.GetProperty("hash").GetString());
+        Assert.Equal(2, onionAttempts);
+        Assert.Equal(2, routeRequests.Count);
+        Assert.Equal(2, routeRequests.Select(static payload =>
+            payload.GetProperty("attemptId").GetString()).Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(2, routeRequests.Select(static payload =>
+            payload.GetProperty("routeNonce").GetString()).Distinct(StringComparer.Ordinal).Count());
+        Assert.Empty(routeRequests[0].GetProperty("excludedRouterIds").EnumerateArray());
+        Assert.Equal(
+            TestOnionRoute.RouterIds.Take(3).Order(StringComparer.Ordinal),
+            routeRequests[1].GetProperty("excludedRouterIds").EnumerateArray()
+                .Select(static value => value.GetString()!)
+                .Order(StringComparer.Ordinal));
+        Assert.Equal(2, storageBodies.Count);
+        Assert.All(storageBodies, body =>
+            Assert.Equal(new string('a', 64), body.GetProperty("idempotency_key").GetString()));
+        Assert.Equal(ClientRouteOrder(targetKey, 3, 4, 5).Select(index => TestOnionRoute.RouterIds[index]),
+            router.CurrentRoute!.Nodes.Select(static node => node.RouterId));
+    }
+
+    [Fact]
+    public async Task RoutedStorage_FailsClosedWhenFallbackRouteIgnoresExclusions()
+    {
+        const string targetKey = "fallback-exclusion-validation-target";
+        var onionRoute = new TestOnionRoute();
+        var calls = 0;
+        using var client = new HttpClient(new FakeHandler((request, cancellationToken) =>
+        {
+            calls++;
+            using var document = JsonDocument.Parse(
+                request.Content!.ReadAsStringAsync(cancellationToken).GetAwaiter().GetResult());
+            var root = document.RootElement;
+            var method = root.GetProperty("method").GetString();
+            var responderIndex = request.RequestUri!.Host.StartsWith("router-4", StringComparison.Ordinal) ? 3 : 0;
+            if (method == "storage_route")
+            {
+                var route = responderIndex == 0
+                    ? onionRoute.RouteDocument(ClientRouteOrder(targetKey, 0, 1, 2))
+                    : onionRoute.RouteDocument(3, 4, 0);
+                return onionRoute.RouterJson(root, new
+                {
+                    routeNonce = root.GetProperty("payload").GetProperty("routeNonce").GetString(),
+                    route
+                }, responderIndex);
+            }
+
+            return onionRoute.RouterFailureJson(root, "onion-peer-transport-failed");
+        }));
+        var router = new XNodeRpcClient(
+            client,
+            new XNodeRpcClientOptions(
+                OrderedPinnedEndpoints(targetKey, firstRouterIndex: 0, fallbackRouterIndex: 3),
+                TrustedRouterIds: TestOnionRoute.RouterIds));
+
+        var exception = await Assert.ThrowsAnyAsync<HttpRequestException>(() => router.PostStorageAsync(
+            "storage_store",
+            new { idempotency_key = new string('d', 64), data = "ciphertext" },
+            targetKey));
+
+        Assert.Contains("exclusions", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(3, calls);
+    }
+
+    [Fact]
+    public async Task RoutedStorage_DoesNotRetryPinnedResponseIdentityFailure()
+    {
+        const string targetKey = "no-security-downgrade-target";
+        var onionRoute = new TestOnionRoute();
+        var calls = 0;
+        using var client = new HttpClient(new FakeHandler((request, cancellationToken) =>
+        {
+            calls++;
+            using var document = JsonDocument.Parse(
+                request.Content!.ReadAsStringAsync(cancellationToken).GetAwaiter().GetResult());
+            var root = document.RootElement;
+            return onionRoute.RouterJson(root, new
+            {
+                routeNonce = root.GetProperty("payload").GetProperty("routeNonce").GetString(),
+                route = onionRoute.RouteDocument()
+            }, responderIndex: 1);
+        }));
+        var router = new XNodeRpcClient(
+            client,
+            new XNodeRpcClientOptions(
+                OrderedPinnedEndpoints(targetKey, firstRouterIndex: 0, fallbackRouterIndex: 3),
+                TrustedRouterIds: TestOnionRoute.RouterIds));
+
+        var exception = await Assert.ThrowsAnyAsync<HttpRequestException>(() => router.PostStorageAsync(
+            "storage_store",
+            new { idempotency_key = new string('b', 64), data = "ciphertext" },
+            targetKey));
+
+        Assert.Equal(1, calls);
+        Assert.Contains("pinned request", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("unauthorized-onion-next-router")]
+    [InlineData("onion-decrypt-failed:tamper")]
+    [InlineData("replay-detected")]
+    [InlineData("unsupported-onion-layer")]
+    [InlineData("storage-rpc-failed:403")]
+    public async Task RoutedStorage_DoesNotRetrySignedNonTransportFailures(string rpcError)
+    {
+        const string targetKey = "signed-failure-no-retry-target";
+        var onionRoute = new TestOnionRoute();
+        var calls = 0;
+        using var client = new HttpClient(new FakeHandler((request, cancellationToken) =>
+        {
+            calls++;
+            using var document = JsonDocument.Parse(
+                request.Content!.ReadAsStringAsync(cancellationToken).GetAwaiter().GetResult());
+            var root = document.RootElement;
+            if (root.GetProperty("method").GetString() == "storage_route")
+            {
+                return onionRoute.RouterJson(root, new
+                {
+                    routeNonce = root.GetProperty("payload").GetProperty("routeNonce").GetString(),
+                    route = onionRoute.RouteDocument(ClientRouteOrder(targetKey, 0, 1, 2))
+                });
+            }
+
+            return onionRoute.RouterFailureJson(root, rpcError);
+        }));
+        var router = new XNodeRpcClient(
+            client,
+            new XNodeRpcClientOptions(
+                OrderedPinnedEndpoints(targetKey, firstRouterIndex: 0, fallbackRouterIndex: 3),
+                TrustedRouterIds: TestOnionRoute.RouterIds));
+
+        var exception = await Assert.ThrowsAnyAsync<HttpRequestException>(() => router.PostStorageAsync(
+            "storage_store",
+            new { idempotency_key = new string('c', 64), data = "ciphertext" },
+            targetKey));
+
+        Assert.Equal(2, calls);
+        Assert.Equal(rpcError, exception.Message);
+    }
+
+    private static PinnedRouterEndpoint[] OrderedPinnedEndpoints(
+        string targetKey,
+        int firstRouterIndex,
+        int fallbackRouterIndex)
+    {
+        var start = SHA256.HashData(Encoding.UTF8.GetBytes(targetKey.Trim().ToLowerInvariant()))[0] % 6;
+        var remaining = Enumerable.Range(0, 6)
+            .Where(index => index != firstRouterIndex && index != fallbackRouterIndex)
+            .ToArray();
+        var routerIndices = new int[6];
+        routerIndices[start] = firstRouterIndex;
+        routerIndices[(start + 1) % 6] = fallbackRouterIndex;
+        var remainingOffset = 0;
+        for (var offset = 2; offset < 6; offset++)
+        {
+            routerIndices[(start + offset) % 6] = remaining[remainingOffset++];
+        }
+
+        return routerIndices.Select(index => new PinnedRouterEndpoint(
+            $"http://router-{index + 1}.local",
+            TestOnionRoute.RouterIds[index])).ToArray();
+    }
+
+    private static int[] ClientRouteOrder(string targetKey, int first, params int[] remaining)
+    {
+        var targetDigest = SHA256.HashData(Encoding.UTF8.GetBytes(targetKey.Trim().ToLowerInvariant()));
+        return new[] { first }
+            .Concat(remaining.OrderBy(index =>
+            {
+                var routerBytes = Convert.FromHexString(TestOnionRoute.RouterIds[index]);
+                var distance = new byte[32];
+                for (var offset = 0; offset < distance.Length; offset++)
+                {
+                    distance[offset] = (byte)(routerBytes[offset] ^ targetDigest[offset]);
+                }
+
+                return Convert.ToHexString(distance);
+            }, StringComparer.Ordinal))
+            .ToArray();
     }
 
     private sealed class FakeHandler : HttpMessageHandler
@@ -516,7 +753,10 @@ public sealed class SessionTransportTests
         [
             PublicKeyAuth.GenerateKeyPair(Seed(0xa1)),
             PublicKeyAuth.GenerateKeyPair(Seed(0xb2)),
-            PublicKeyAuth.GenerateKeyPair(Seed(0xc3))
+            PublicKeyAuth.GenerateKeyPair(Seed(0xc3)),
+            PublicKeyAuth.GenerateKeyPair(Seed(0xd4)),
+            PublicKeyAuth.GenerateKeyPair(Seed(0xe5)),
+            PublicKeyAuth.GenerateKeyPair(Seed(0xf6))
         ];
 
         public static readonly string[] RouterIds = SigningKeys
@@ -527,49 +767,71 @@ public sealed class SessionTransportTests
         [
             PublicKeyBox.GenerateKeyPair(),
             PublicKeyBox.GenerateKeyPair(),
+            PublicKeyBox.GenerateKeyPair(),
+            PublicKeyBox.GenerateKeyPair(),
+            PublicKeyBox.GenerateKeyPair(),
             PublicKeyBox.GenerateKeyPair()
         ];
 
-        public object[] RouteDocument() =>
-        [
-            RouteNode(0, 20443),
-            RouteNode(1, 20444),
-            RouteNode(2, 20445)
-        ];
+        public object[] RouteDocument(params int[] routeIndices)
+        {
+            routeIndices = routeIndices.Length == 0 ? [0, 1, 2] : routeIndices;
+            return routeIndices.Select((nodeIndex, routeIndex) =>
+                RouteNode(nodeIndex, routeIndex, 20443 + nodeIndex)).ToArray();
+        }
 
-        public HttpResponseMessage RouterJson<T>(JsonElement request, T result)
+        public HttpResponseMessage RouterJson<T>(JsonElement request, T result, int responderIndex = 0) =>
+            SignedRouterJson(request, success: true, result, error: null, responderIndex);
+
+        public HttpResponseMessage RouterFailureJson(
+            JsonElement request,
+            string error,
+            int responderIndex = 0) =>
+            SignedRouterJson<object?>(request, success: false, result: null, error, responderIndex);
+
+        private static HttpResponseMessage SignedRouterJson<T>(
+            JsonElement request,
+            bool success,
+            T result,
+            string? error,
+            int responderIndex)
         {
             var id = request.GetProperty("id").GetString()!;
             var method = request.GetProperty("method").GetString()!;
             var nonce = request.GetProperty("nonce").GetString()!;
             var payload = request.GetProperty("payload");
-            var resultElement = JsonSerializer.SerializeToElement(result, JsonOptions);
+            var resultElement = success
+                ? JsonSerializer.SerializeToElement(result, JsonOptions)
+                : default;
             var issuedAtUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             var requestPayloadSha256 = RpcCanonicalJson.Sha256Hex(payload);
-            var outcomeSha256 = RpcCanonicalJson.Sha256Hex(resultElement);
+            var outcome = success
+                ? resultElement
+                : JsonSerializer.SerializeToElement(error, JsonOptions);
+            var outcomeSha256 = RpcCanonicalJson.Sha256Hex(outcome);
             var signingPayload = JsonSerializer.SerializeToElement(new
             {
                 version = "xpoint-rpc-response-v1",
-                responderRouterId = RouterIds[0],
+                responderRouterId = RouterIds[responderIndex],
                 requestId = id,
                 method,
                 nonce,
                 requestPayloadSha256,
                 issuedAtUnixMs,
-                success = true,
+                success,
                 outcomeSha256
             }, JsonOptions);
             var signature = PublicKeyAuth.SignDetached(
                 RpcCanonicalJson.Serialize(signingPayload),
-                SigningKeys[0].PrivateKey);
+                SigningKeys[responderIndex].PrivateKey);
             return Json(new
             {
                 id,
-                success = true,
-                result = resultElement,
-                error = (string?)null,
+                success,
+                result = success ? resultElement : (JsonElement?)null,
+                error,
                 version = "xpoint-rpc-response-v1",
-                responderRouterId = RouterIds[0],
+                responderRouterId = RouterIds[responderIndex],
                 method,
                 nonce,
                 requestPayloadSha256,
@@ -580,17 +842,19 @@ public sealed class SessionTransportTests
             });
         }
 
-        public FinalStorageLayer OpenStorageLayer(JsonElement payload)
+        public FinalStorageLayer OpenStorageLayer(JsonElement payload, params int[] routeIndices)
         {
+            routeIndices = routeIndices.Length == 0 ? [0, 1, 2] : routeIndices;
             var onion = payload.Deserialize<TestOnionRequest>(JsonOptions)!;
             var envelope = onion.Envelope;
-            for (var index = 0; index < _keys.Length; index++)
+            for (var routeIndex = 0; routeIndex < routeIndices.Length; routeIndex++)
             {
-                var layer = DecryptLayer(envelope, _keys[index].PrivateKey);
-                if (index < _keys.Length - 1)
+                var nodeIndex = routeIndices[routeIndex];
+                var layer = DecryptLayer(envelope, _keys[nodeIndex].PrivateKey);
+                if (routeIndex < routeIndices.Length - 1)
                 {
                     Assert.Equal("relay", layer.Type);
-                    Assert.Equal(RouterIds[index + 1], layer.NextRouterId);
+                    Assert.Equal(RouterIds[routeIndices[routeIndex + 1]], layer.NextRouterId);
                     envelope = layer.Inner!;
                     continue;
                 }
@@ -619,20 +883,20 @@ public sealed class SessionTransportTests
                 Convert.ToBase64String(ciphertext));
         }
 
-        private object RouteNode(int index, int port)
+        private object RouteNode(int nodeIndex, int routeIndex, int port)
         {
             var signedAt = DateTimeOffset.UtcNow.AddMinutes(-1);
             var expiresAt = signedAt.AddDays(30);
             var capabilities = new[] { "session-rpc", "onion-v1" };
             var publicHost = "192.168.1.44";
             var publicIp = "192.168.1.44";
-            var x25519PublicKey = Convert.ToHexString(_keys[index].PublicKey).ToLowerInvariant();
-            var rpcEndpoint = $"http://xnode-{index + 1}:8080";
+            var x25519PublicKey = Convert.ToHexString(_keys[nodeIndex].PublicKey).ToLowerInvariant();
+            var rpcEndpoint = $"http://xnode-{nodeIndex + 1}:8080";
             var routerVersion = "1.0.0";
             var payload = new
             {
                 version = "deep-relay-contact-v1",
-                routerId = RouterIds[index],
+                routerId = RouterIds[nodeIndex],
                 publicHost,
                 publicIp,
                 publicPort = port,
@@ -646,11 +910,11 @@ public sealed class SessionTransportTests
             };
             var signature = PublicKeyAuth.SignDetached(
                 JsonSerializer.SerializeToUtf8Bytes(payload, JsonOptions),
-                SigningKeys[index].PrivateKey);
+                SigningKeys[nodeIndex].PrivateKey);
             return new
             {
-                index,
-                routerId = RouterIds[index],
+                index = routeIndex,
+                routerId = RouterIds[nodeIndex],
                 publicHost,
                 publicIp,
                 publicPort = port,

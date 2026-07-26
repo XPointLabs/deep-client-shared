@@ -149,22 +149,31 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
         string targetKey,
         CancellationToken cancellationToken = default)
     {
-        var routeNonce = NewRouteNonce();
-        var routeResult = await PostRouterRpcWithEndpointAsync(
-            "storage_route",
-            new { routeNonce },
-            targetKey,
-            cancellationToken).ConfigureAwait(false);
-        var route = ParseRoute(
-            "onion-storage",
-            targetKey,
-            routeNonce,
-            routeResult.Router.ExpectedRouterId,
-            routeResult.Result,
-            _timeProvider.GetUtcNow(),
-            _trustedRouterIds);
-        Volatile.Write(ref _currentRoute, route);
-        return route;
+        try
+        {
+            var routeNonce = NewRouteNonce();
+            var routeResult = await PostRouterRpcWithEndpointAsync(
+                "storage_route",
+                new { routeNonce },
+                targetKey,
+                cancellationToken).ConfigureAwait(false);
+            var route = ParseRoute(
+                "onion-storage",
+                targetKey,
+                routeNonce,
+                routeResult.Router.ExpectedRouterId,
+                routeResult.Result,
+                _timeProvider.GetUtcNow(),
+                _trustedRouterIds);
+            Volatile.Write(ref _currentRoute, route);
+            return route;
+        }
+        catch (RouterResponseValidationException exception)
+        {
+            // Preserve the public failure contract while retaining an internal
+            // non-retryable classification for the storage continuity path.
+            throw new HttpRequestException(exception.Message, exception);
+        }
     }
 
     public async Task<JsonElement> PostStorageAsync(
@@ -180,52 +189,110 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
             _ => throw new ArgumentOutOfRangeException(nameof(method), method, "Unsupported routed storage method.")
         };
 
-        var routeNonce = NewRouteNonce();
-        var routeResult = await PostRouterRpcWithEndpointAsync(
-            "storage_route",
-            new { routeNonce },
-            targetKey,
-            cancellationToken).ConfigureAwait(false);
-        var routeSnapshot = ParseRoute(
-            "onion-storage",
-            targetKey,
-            routeNonce,
-            routeResult.Router.ExpectedRouterId,
-            routeResult.Result,
-            _timeProvider.GetUtcNow(),
-            _trustedRouterIds);
-        var route = routeSnapshot.Nodes;
-        Volatile.Write(ref _currentRoute, routeSnapshot);
-
-        var onion = OnionRouting.BuildStorageRequest(route, storagePath, body);
-        var onionResult = await PostRouterRpcAsync(
-            routeResult.Router,
-            "onion_request",
-            ToJsonElement(onion.Request),
-            cancellationToken).ConfigureAwait(false);
-
-        if (!onionResult.TryGetProperty("onionResponse", out var onionResponseElement))
+        var excludedRouterIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        Exception? firstFailure = null;
+        for (var attempt = 0; attempt < 2; attempt++)
         {
-            throw new HttpRequestException("Deep onion route did not return an encrypted storage response.");
+            cancellationToken.ThrowIfCancellationRequested();
+            var router = OrderedRouters(targetKey)
+                .FirstOrDefault(candidate => !excludedRouterIds.Contains(candidate.ExpectedRouterId))
+                ?? throw new HttpRequestException("No disjoint pinned XNode remains for the bounded fallback.", firstFailure);
+            TransportRouteSnapshot? routeSnapshot = null;
+            try
+            {
+                var routeNonce = NewRouteNonce();
+                var attemptId = NewRouteNonce();
+                var routeResult = await PostRouterRpcAsync(
+                    router,
+                    "storage_route",
+                    ToJsonElement(new
+                    {
+                        routeNonce,
+                        attemptId,
+                        excludedRouterIds = excludedRouterIds.Order(StringComparer.Ordinal).ToArray()
+                    }),
+                    cancellationToken).ConfigureAwait(false);
+                routeSnapshot = ParseRoute(
+                    "onion-storage",
+                    targetKey,
+                    routeNonce,
+                    router.ExpectedRouterId,
+                    routeResult,
+                    _timeProvider.GetUtcNow(),
+                    _trustedRouterIds);
+                ValidateRouteExclusions(routeSnapshot, excludedRouterIds);
+                Volatile.Write(ref _currentRoute, routeSnapshot);
+
+                var onion = OnionRouting.BuildStorageRequest(routeSnapshot.Nodes, storagePath, body);
+                var onionResult = await PostRouterRpcAsync(
+                    router,
+                    "onion_request",
+                    ToJsonElement(onion.Request),
+                    cancellationToken).ConfigureAwait(false);
+
+                if (!onionResult.TryGetProperty("onionResponse", out var onionResponseElement))
+                {
+                    throw new RouterResponseValidationException(
+                        "Deep onion route did not return an encrypted storage response.");
+                }
+
+                OnionResponseEnvelope onionResponse;
+                try
+                {
+                    onionResponse = onionResponseElement.Deserialize<OnionResponseEnvelope>(JsonOptions)
+                        ?? throw new JsonException("Missing onion response body.");
+                }
+                catch (JsonException exception)
+                {
+                    throw new RouterResponseValidationException(
+                        "Deep onion route returned an invalid encrypted response.",
+                        exception);
+                }
+
+                var decrypted = OnionRouting.DecryptResponse(onionResponse, onion.ResponsePrivateKey);
+                if (decrypted.TryGetProperty("storageStatusCode", out var statusElement)
+                    && statusElement.TryGetInt32(out var statusCode)
+                    && statusCode is < 200 or > 299)
+                {
+                    throw new RouterResponseValidationException($"Storage RPC failed with status {statusCode}.");
+                }
+
+                return decrypted.TryGetProperty("storage", out var storage)
+                    ? storage.Clone()
+                    : JsonSerializer.SerializeToElement(new { });
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception exception) when (attempt == 0 && IsRetryablePreDurableFailure(exception))
+            {
+                firstFailure = exception;
+                excludedRouterIds.Add(router.ExpectedRouterId);
+                if (routeSnapshot is not null)
+                {
+                    foreach (var node in routeSnapshot.Nodes)
+                    {
+                        excludedRouterIds.Add(node.RouterId);
+                    }
+                }
+            }
         }
 
-        var onionResponse = onionResponseElement.Deserialize<OnionResponseEnvelope>(JsonOptions)
-            ?? throw new HttpRequestException("Deep onion route returned an invalid encrypted response.");
-        var decrypted = OnionRouting.DecryptResponse(onionResponse, onion.ResponsePrivateKey);
-        if (decrypted.TryGetProperty("storageStatusCode", out var statusElement)
-            && statusElement.TryGetInt32(out var statusCode)
-            && statusCode is < 200 or > 299)
-        {
-            throw new HttpRequestException($"Storage RPC failed with status {statusCode}.");
-        }
-
-        if (decrypted.TryGetProperty("storage", out var storage))
-        {
-            return storage.Clone();
-        }
-
-        return JsonSerializer.SerializeToElement(new { });
+        throw new HttpRequestException("The bounded disjoint XNode fallback failed.", firstFailure);
     }
+
+    private static bool IsRetryablePreDurableFailure(Exception exception) => exception switch
+    {
+        RouterRpcFailureException rpc => string.Equals(
+            rpc.RpcError,
+            "onion-peer-transport-failed",
+            StringComparison.Ordinal),
+        RouterResponseValidationException => false,
+        TaskCanceledException => true,
+        HttpRequestException => true,
+        _ => false
+    };
 
     private async Task<JsonElement> PostRouterRpcAsync(
         string method,
@@ -259,7 +326,7 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
             {
                 throw;
             }
-            catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or JsonException)
+            catch (Exception ex) when (IsRetryablePreDurableFailure(ex))
             {
                 lastError = ex;
             }
@@ -285,18 +352,26 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
             .ConfigureAwait(false);
         var rpcBytes = await ReadBoundedAsync(response.Content, _maxResponseBytes, cancellationToken)
             .ConfigureAwait(false);
-        var rpc = JsonSerializer.Deserialize<RouterRpcResponse>(rpcBytes, JsonOptions);
+        RouterRpcResponse? rpc;
+        try
+        {
+            rpc = JsonSerializer.Deserialize<RouterRpcResponse>(rpcBytes, JsonOptions);
+        }
+        catch (JsonException exception)
+        {
+            throw new RouterResponseValidationException("Router RPC response is malformed.", exception);
+        }
 
         if (rpc is null)
         {
-            throw new HttpRequestException($"router-rpc-empty-response:{(int)response.StatusCode}");
+            throw new RouterResponseValidationException($"router-rpc-empty-response:{(int)response.StatusCode}");
         }
 
         VerifyRpcResponse(router, request, rpc, _timeProvider.GetUtcNow());
 
         if (!response.IsSuccessStatusCode || !rpc.Success || rpc.Result is null)
         {
-            throw new HttpRequestException(rpc?.Error ?? $"router-rpc-failed:{(int)response.StatusCode}");
+            throw new RouterRpcFailureException(rpc.Error ?? $"router-rpc-failed:{(int)response.StatusCode}");
         }
 
         return rpc.Result.Value.Clone();
@@ -327,18 +402,18 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
             || responseNonce.ValueKind != JsonValueKind.String
             || !string.Equals(responseNonce.GetString(), expectedRouteNonce, StringComparison.Ordinal))
         {
-            throw new HttpRequestException("Router storage route nonce does not match the request.");
+            throw new RouterResponseValidationException("Router storage route nonce does not match the request.");
         }
 
         if (!result.TryGetProperty("route", out var routeElement) ||
             routeElement.ValueKind != JsonValueKind.Array)
         {
-            throw new HttpRequestException("Router storage route is missing.");
+            throw new RouterResponseValidationException("Router storage route is missing.");
         }
 
         if (routeElement.GetArrayLength() != RequiredRouteHops)
         {
-            throw new HttpRequestException($"Router storage route must contain exactly {RequiredRouteHops} hops.");
+            throw new RouterResponseValidationException($"Router storage route must contain exactly {RequiredRouteHops} hops.");
         }
 
         var nodes = new List<TransportRouteNode>();
@@ -352,7 +427,7 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
                 || !indexElement.TryGetInt32(out var index)
                 || index != expectedIndex)
             {
-                throw new HttpRequestException("Router storage route indices must be exactly 0, 1, 2.");
+                throw new RouterResponseValidationException("Router storage route indices must be exactly 0, 1, 2.");
             }
 
             var routerId = GetRequiredString(node, "routerId");
@@ -403,14 +478,14 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
                 || !TryNormalizeRpcEndpoint(rpcEndpoint, out var normalizedRpcEndpoint)
                 || !RelayContactSignatureVerifier.Verify(routeNode, now))
             {
-                throw new HttpRequestException($"Router returned an invalid signed relay contact for {routerId}.");
+                throw new RouterResponseValidationException($"Router returned an invalid signed relay contact for {routerId}.");
             }
 
             if (!routerIds.Add(routerId)
                 || !onionKeys.Add(x25519PublicKey)
                 || !rpcEndpoints.Add(normalizedRpcEndpoint))
             {
-                throw new HttpRequestException("Router storage route contains duplicate relay identities or endpoints.");
+                throw new RouterResponseValidationException("Router storage route contains duplicate relay identities or endpoints.");
             }
 
             nodes.Add(routeNode);
@@ -418,7 +493,7 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
 
         if (!string.Equals(nodes[0].RouterId, expectedResponderRouterId, StringComparison.OrdinalIgnoreCase))
         {
-            throw new HttpRequestException("Router storage route first hop does not match the pinned responder.");
+            throw new RouterResponseValidationException("Router storage route first hop does not match the pinned responder.");
         }
 
         var orderedNodes = nodes
@@ -430,6 +505,17 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
             .Select((node, index) => node with { Index = index })
             .ToArray();
         return new TransportRouteSnapshot(mode, RedactTargetKey(targetKey), now, orderedNodes);
+    }
+
+    private static void ValidateRouteExclusions(
+        TransportRouteSnapshot route,
+        IReadOnlySet<string> excludedRouterIds)
+    {
+        if (route.Nodes.Any(node => excludedRouterIds.Contains(node.RouterId)))
+        {
+            throw new RouterResponseValidationException(
+                "Router storage route did not honor the requested relay exclusions.");
+        }
     }
 
     private static string RedactTargetKey(string targetKey) =>
@@ -459,7 +545,7 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
         if (content.Headers.ContentLength is > 0 and var declaredLength
             && declaredLength > maximumBytes)
         {
-            throw new HttpRequestException("Router RPC response exceeds the configured byte limit.");
+            throw new RouterResponseValidationException("Router RPC response exceeds the configured byte limit.");
         }
 
         await using var input = await content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
@@ -478,7 +564,7 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
 
             if (output.Length + read > maximumBytes)
             {
-                throw new HttpRequestException("Router RPC response exceeds the configured byte limit.");
+                throw new RouterResponseValidationException("Router RPC response exceeds the configured byte limit.");
             }
 
             output.Write(buffer, 0, read);
@@ -500,7 +586,7 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
             || response.IssuedAtUnixMs is null
             || string.IsNullOrWhiteSpace(response.Signature))
         {
-            throw new HttpRequestException("Router RPC response is unsigned or does not match its pinned request.");
+            throw new RouterResponseValidationException("Router RPC response is unsigned or does not match its pinned request.");
         }
 
         DateTimeOffset issuedAt;
@@ -510,12 +596,12 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
         }
         catch (ArgumentOutOfRangeException exception)
         {
-            throw new HttpRequestException("Router RPC response has an invalid issuance time.", exception);
+            throw new RouterResponseValidationException("Router RPC response has an invalid issuance time.", exception);
         }
 
         if ((now - issuedAt).Duration() > _responseFreshness)
         {
-            throw new HttpRequestException("Router RPC response is stale.");
+            throw new RouterResponseValidationException("Router RPC response is stale.");
         }
 
         var requestDigest = RpcCanonicalJson.Sha256Hex(request.Payload);
@@ -523,7 +609,7 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
         if (!FixedTimeHexEquals(response.RequestPayloadSha256, requestDigest, 32)
             || !FixedTimeHexEquals(response.OutcomeSha256, outcomeDigest, 32))
         {
-            throw new HttpRequestException("Router RPC response digest validation failed.");
+            throw new RouterResponseValidationException("Router RPC response digest validation failed.");
         }
 
         try
@@ -543,12 +629,12 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
                     RpcCanonicalJson.Serialize(signingPayload),
                     DecodeHex(router.ExpectedRouterId, 32)))
             {
-                throw new HttpRequestException("Router RPC response signature validation failed.");
+                throw new RouterResponseValidationException("Router RPC response signature validation failed.");
             }
         }
         catch (Exception exception) when (exception is ArgumentException or FormatException)
         {
-            throw new HttpRequestException("Router RPC response signature is malformed.", exception);
+            throw new RouterResponseValidationException("Router RPC response signature is malformed.", exception);
         }
     }
 
@@ -656,7 +742,7 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
     {
         return GetString(element, name) is { Length: > 0 } value
             ? value
-            : throw new HttpRequestException($"Router storage route is missing {name}.");
+            : throw new RouterResponseValidationException($"Router storage route is missing {name}.");
     }
 
     private static DateTimeOffset GetRequiredDateTimeOffset(JsonElement element, string name)
@@ -665,7 +751,7 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
             && property.ValueKind == JsonValueKind.String
             && property.TryGetDateTimeOffset(out var value)
                 ? value
-                : throw new HttpRequestException($"Router storage route has an invalid {name}.");
+                : throw new RouterResponseValidationException($"Router storage route has an invalid {name}.");
     }
 
     private sealed record RouterRpcRequest(string Id, string Method, JsonElement Payload, string Nonce);
@@ -701,6 +787,25 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
         long IssuedAtUnixMs,
         bool Success,
         string OutcomeSha256);
+
+    private sealed class RouterResponseValidationException : HttpRequestException
+    {
+        public RouterResponseValidationException(string message, Exception? innerException = null)
+            : base(message, innerException)
+        {
+        }
+    }
+
+    private sealed class RouterRpcFailureException : HttpRequestException
+    {
+        public RouterRpcFailureException(string rpcError)
+            : base(rpcError)
+        {
+            RpcError = rpcError;
+        }
+
+        public string RpcError { get; }
+    }
 
     private sealed record ConfiguredRouter(Uri BaseUri, string ExpectedRouterId);
 
