@@ -1,5 +1,6 @@
 ﻿using System.Net;
 using System.Text;
+using System.Text.Json;
 using Deep.Client.Shared.Domain;
 using Deep.Client.Shared.Services;
 
@@ -119,6 +120,39 @@ public sealed class AttachmentFileTransportTests
             new Uri(remoteUri));
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => transport.DownloadAsync(metadata));
+    }
+
+    [Theory]
+    [InlineData("../x")]
+    [InlineData("..\\x")]
+    [InlineData("%2e%2e%2f")]
+    [InlineData("%252e%252e%252f")]
+    [InlineData("/")]
+    [InlineData("\\")]
+    [InlineData(".")]
+    [InlineData("..")]
+    public async Task HttpAttachmentFileTransport_RejectsUnsafeResponseFileId(
+        string fileId)
+    {
+        using var client = new HttpClient(new FakeHandler((_, _) =>
+            new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    JsonSerializer.Serialize(new { id = fileId }),
+                    Encoding.UTF8,
+                    "application/json")
+            }));
+        var transport = new HttpAttachmentFileTransport(
+            client,
+            new HttpAttachmentFileTransportOptions("https://file.local"));
+        await using var content = new MemoryStream([1, 2, 3]);
+
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => transport.UploadAsync(
+                new AttachmentFileUpload(
+                    "unsafe.bin",
+                    "application/octet-stream",
+                    content)));
     }
 
     [Fact]

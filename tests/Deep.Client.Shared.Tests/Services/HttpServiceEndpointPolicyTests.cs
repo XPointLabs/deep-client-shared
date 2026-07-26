@@ -6,6 +6,7 @@ using Deep.Client.Shared.Services;
 
 namespace Deep.Client.Shared.Tests.Services;
 
+[Collection("HTTP default proxy isolation")]
 public sealed class HttpServiceEndpointPolicyTests
 {
     [Fact]
@@ -160,6 +161,44 @@ public sealed class HttpServiceEndpointPolicyTests
                 RetrievePath: path)));
     }
 
+    [Theory]
+    [InlineData("../x")]
+    [InlineData("..\\x")]
+    [InlineData("%2e%2e%2f")]
+    [InlineData("%252e%252e%252f")]
+    [InlineData("/")]
+    [InlineData("\\")]
+    [InlineData(".")]
+    [InlineData("..")]
+    public async Task SessionAndCall_RejectUnsafePlaceholderValuesBeforeNetwork(
+        string value)
+    {
+        var networkRequests = 0;
+        using var sessionClient = new HttpClient(new CaptureHandler(_ =>
+        {
+            Interlocked.Increment(ref networkRequests);
+            return SuccessResponse();
+        }));
+        using var callClient = new HttpClient(new CaptureHandler(_ =>
+        {
+            Interlocked.Increment(ref networkRequests);
+            return SuccessResponse();
+        }));
+        var session = new HttpSessionTransport(
+            sessionClient,
+            new HttpSessionTransportOptions("https://session.example/"));
+        var calls = new HttpCallSignalingTransport(
+            callClient,
+            new HttpCallSignalingTransportOptions("https://calls.example/"));
+        var unsafeSessionId = new Deep.Client.Shared.Domain.SessionId(value);
+
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => session.ReceiveAsync(unsafeSessionId));
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => calls.ReceiveAsync(unsafeSessionId));
+        Assert.Equal(0, networkRequests);
+    }
+
     [Fact]
     public void PublicFactorySurface_DoesNotExposeMutableClientsOrHandlers()
     {
@@ -242,6 +281,67 @@ public sealed class HttpServiceEndpointPolicyTests
             "\r\nCookie:",
             secondRequest,
             StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task PhysicalFactory_IgnoresSystemProxyAndConnectsConfiguredAuthority()
+    {
+        using var backend = new TcpListener(IPAddress.Loopback, 0);
+        using var hostileProxy = new TcpListener(IPAddress.Loopback, 0);
+        backend.Start();
+        hostileProxy.Start();
+        var backendPort = ((IPEndPoint)backend.LocalEndpoint).Port;
+        var proxyPort = ((IPEndPoint)hostileProxy.LocalEndpoint).Port;
+        DnsEndPoint? connectedAuthority = null;
+        var backendRequest = ServeSuccessOnceAsync(backend);
+        var originalProxy = HttpClient.DefaultProxy;
+        try
+        {
+            HttpClient.DefaultProxy = new WebProxy(
+                $"http://127.0.0.1:{proxyPort}/");
+            var factory = new HttpServiceTransportFactory(
+                    HttpServiceEndpointPolicy.PhysicalE2eDevelopment)
+                .BindNetwork(new HttpServiceNetworkHooks(
+                    async (context, cancellationToken) =>
+                    {
+                        connectedAuthority = context.DnsEndPoint;
+                        var socket = new Socket(
+                            AddressFamily.InterNetwork,
+                            SocketType.Stream,
+                            ProtocolType.Tcp);
+                        try
+                        {
+                            await socket.ConnectAsync(
+                                IPAddress.Loopback,
+                                backendPort,
+                                cancellationToken);
+                            return new NetworkStream(socket, ownsSocket: true);
+                        }
+                        catch
+                        {
+                            socket.Dispose();
+                            throw;
+                        }
+                    }));
+            using var transport = factory.CreatePush(
+                new HttpPushSubscriptionTransportOptions(
+                    $"http://192.168.1.44:{backendPort}/"));
+
+            await transport.SubscribeAsync(CreatePushRequest());
+            var request = await backendRequest;
+            await Task.Delay(100);
+
+            Assert.Equal("192.168.1.44", connectedAuthority?.Host);
+            Assert.Equal(backendPort, connectedAuthority?.Port);
+            Assert.Contains("\"token\":\"token\"", request, StringComparison.Ordinal);
+            Assert.False(
+                hostileProxy.Pending(),
+                "System proxy received a physical HTTP request.");
+        }
+        finally
+        {
+            HttpClient.DefaultProxy = originalProxy;
+        }
     }
 
     [Fact]
@@ -346,6 +446,17 @@ public sealed class HttpServiceEndpointPolicyTests
         return secondRequest;
     }
 
+    private static async Task<string> ServeSuccessOnceAsync(TcpListener listener)
+    {
+        using var client = await listener.AcceptTcpClientAsync();
+        await using var stream = client.GetStream();
+        var request = await ReadRequestAsync(stream);
+        var response = Encoding.ASCII.GetBytes(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 16\r\nConnection: close\r\n\r\n{\"success\":true}");
+        await stream.WriteAsync(response);
+        return request;
+    }
+
     private static async Task<string> ReadRequestAsync(NetworkStream stream)
     {
         var buffer = new byte[4096];
@@ -407,3 +518,6 @@ public sealed class HttpServiceEndpointPolicyTests
             Task.FromResult(respond(request));
     }
 }
+
+[CollectionDefinition("HTTP default proxy isolation", DisableParallelization = true)]
+public sealed class HttpDefaultProxyIsolationCollection;

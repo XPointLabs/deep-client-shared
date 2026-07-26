@@ -255,7 +255,7 @@ internal sealed class HttpServiceOrigin
         string value,
         string description)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(value);
+        RequirePlaceholderValue(value, description);
         var escaped = Uri.EscapeDataString(value);
         var path = template.Replace(
             $"{{{placeholder}}}",
@@ -279,6 +279,44 @@ internal sealed class HttpServiceOrigin
         }
 
         return resource;
+    }
+
+    private static void RequirePlaceholderValue(
+        string value,
+        string description)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(value);
+        if (!string.Equals(value, value.Trim(), StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                $"{description} placeholder must be canonical.",
+                nameof(value));
+        }
+
+        var candidate = value;
+        for (var decodePass = 0; decodePass < 3; decodePass++)
+        {
+            if (candidate is "." or ".." ||
+                candidate.Contains('/') ||
+                candidate.Contains('\\') ||
+                candidate.Contains('%') ||
+                candidate.Contains('?') ||
+                candidate.Contains('#') ||
+                candidate.Any(char.IsControl))
+            {
+                throw new ArgumentException(
+                    $"{description} placeholder contains traversal or URI syntax.",
+                    nameof(value));
+            }
+
+            var decoded = Uri.UnescapeDataString(candidate);
+            if (string.Equals(decoded, candidate, StringComparison.Ordinal))
+            {
+                break;
+            }
+
+            candidate = decoded;
+        }
     }
 
     internal Uri RequireExactResource(
@@ -466,6 +504,7 @@ public sealed class HttpServiceTransportFactory
         // These invariants are deliberately assigned after caller customization.
         handler.AllowAutoRedirect = false;
         handler.UseCookies = false;
+        handler.UseProxy = false;
 
         var client = new HttpClient(handler, disposeHandler: true)
         {
