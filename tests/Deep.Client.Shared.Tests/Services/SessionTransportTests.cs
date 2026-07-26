@@ -486,7 +486,7 @@ public sealed class SessionTransportTests
     }
 
     [Fact]
-    public async Task RoutedStorage_RetriesOnceOnStrictlyDisjointRouteAndPreservesDedupMaterial()
+    public async Task RoutedStorage_RetrievePostDispatchTransportFailureRetriesOnceOnStrictlyDisjointRoute()
     {
         const string targetKey = "six-node-disjoint-target";
         var onionRoute = new TestOnionRoute();
@@ -537,7 +537,7 @@ public sealed class SessionTransportTests
             new XNodeRpcClientOptions(endpoints, TrustedRouterIds: TestOnionRoute.RouterIds));
 
         var result = await router.PostStorageAsync(
-            "storage_store",
+            "storage_retrieve",
             new { idempotency_key = new string('a', 64), data = "ciphertext" },
             targetKey);
 
@@ -559,6 +559,159 @@ public sealed class SessionTransportTests
             Assert.Equal(new string('a', 64), body.GetProperty("idempotency_key").GetString()));
         Assert.Equal(ClientRouteOrder(targetKey, 3, 4, 5).Select(index => TestOnionRoute.RouterIds[index]),
             router.CurrentRoute!.Nodes.Select(static node => node.RouterId));
+    }
+
+    [Fact]
+    public async Task RoutedStorage_StoreRouteAcquisitionFailureUsesFallbackBeforeSingleDispatch()
+    {
+        const string targetKey = "store-route-acquisition-fallback-target";
+        var onionRoute = new TestOnionRoute();
+        var routeRequests = new List<JsonElement>();
+        var storageBodies = new List<JsonElement>();
+        var onionAttempts = 0;
+        using var client = new HttpClient(new FakeHandler((request, cancellationToken) =>
+        {
+            using var document = JsonDocument.Parse(
+                request.Content!.ReadAsStringAsync(cancellationToken).GetAwaiter().GetResult());
+            var root = document.RootElement;
+            var method = root.GetProperty("method").GetString();
+            var responderIndex = request.RequestUri!.Host.StartsWith("router-4", StringComparison.Ordinal) ? 3 : 0;
+            if (method == "storage_route")
+            {
+                routeRequests.Add(root.GetProperty("payload").Clone());
+                if (responderIndex == 0)
+                {
+                    throw new HttpRequestException("first route unavailable");
+                }
+
+                return onionRoute.RouterJson(root, new
+                {
+                    routeNonce = root.GetProperty("payload").GetProperty("routeNonce").GetString(),
+                    route = onionRoute.RouteDocument(ClientRouteOrder(targetKey, 3, 4, 5))
+                }, responderIndex);
+            }
+
+            onionAttempts++;
+            var final = onionRoute.OpenStorageLayer(
+                root.GetProperty("payload"),
+                ClientRouteOrder(targetKey, 3, 4, 5));
+            storageBodies.Add(final.Body.Clone());
+            return onionRoute.RouterJson(root, new
+            {
+                onionResponse = onionRoute.EncryptResponse(final.ResponsePublicKey, new
+                {
+                    storageStatusCode = 200,
+                    storage = new { hash = "stored-once" }
+                })
+            }, responderIndex);
+        }));
+        var router = new XNodeRpcClient(
+            client,
+            new XNodeRpcClientOptions(
+                OrderedPinnedEndpoints(targetKey, firstRouterIndex: 0, fallbackRouterIndex: 3),
+                TrustedRouterIds: TestOnionRoute.RouterIds));
+
+        var result = await router.PostStorageAsync(
+            "storage_store",
+            new { idempotency_key = new string('e', 64), data = "ciphertext" },
+            targetKey);
+
+        Assert.Equal("stored-once", result.GetProperty("hash").GetString());
+        Assert.Equal(2, routeRequests.Count);
+        Assert.Equal(1, onionAttempts);
+        Assert.Single(storageBodies);
+        Assert.Equal(
+            new string('e', 64),
+            storageBodies[0].GetProperty("idempotency_key").GetString());
+        Assert.Equal(2, routeRequests.Select(static payload =>
+            payload.GetProperty("attemptId").GetString()).Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(2, routeRequests.Select(static payload =>
+            payload.GetProperty("routeNonce").GetString()).Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(
+            [TestOnionRoute.RouterIds[0]],
+            routeRequests[1].GetProperty("excludedRouterIds").EnumerateArray()
+                .Select(static value => value.GetString()!));
+    }
+
+    [Fact]
+    public async Task RoutedStorage_StoreCommittedButResponseTransportFailsDoesNotRedispatch()
+    {
+        const string secret = "committed-store-secret-response";
+        const string targetKey = "store-commit-response-lost-target";
+        var onionRoute = new TestOnionRoute();
+        var committedBodies = new List<JsonElement>();
+        using var client = new HttpClient(new FakeHandler((request, cancellationToken) =>
+        {
+            using var document = JsonDocument.Parse(
+                request.Content!.ReadAsStringAsync(cancellationToken).GetAwaiter().GetResult());
+            var root = document.RootElement;
+            if (root.GetProperty("method").GetString() == "storage_route")
+            {
+                return onionRoute.RouterJson(root, new
+                {
+                    routeNonce = root.GetProperty("payload").GetProperty("routeNonce").GetString(),
+                    route = onionRoute.RouteDocument(ClientRouteOrder(targetKey, 0, 1, 2))
+                });
+            }
+
+            var final = onionRoute.OpenStorageLayer(
+                root.GetProperty("payload"),
+                ClientRouteOrder(targetKey, 0, 1, 2));
+            committedBodies.Add(final.Body.Clone());
+            throw new HttpRequestException(secret);
+        }));
+        var router = new XNodeRpcClient(
+            client,
+            new XNodeRpcClientOptions(
+                OrderedPinnedEndpoints(targetKey, firstRouterIndex: 0, fallbackRouterIndex: 3),
+                TrustedRouterIds: TestOnionRoute.RouterIds));
+
+        var exception = await Assert.ThrowsAsync<StorageDispatchOutcomeUnknownException>(() =>
+            router.PostStorageAsync(
+                "storage_store",
+                new { idempotency_key = new string('f', 64), data = "ciphertext" },
+                targetKey));
+
+        Assert.Single(committedBodies);
+        Assert.DoesNotContain(secret, exception.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RoutedStorage_StoreSignedPeerTransportFailureDoesNotRedispatch()
+    {
+        const string targetKey = "store-signed-peer-failure-target";
+        var onionRoute = new TestOnionRoute();
+        var onionAttempts = 0;
+        using var client = new HttpClient(new FakeHandler((request, cancellationToken) =>
+        {
+            using var document = JsonDocument.Parse(
+                request.Content!.ReadAsStringAsync(cancellationToken).GetAwaiter().GetResult());
+            var root = document.RootElement;
+            if (root.GetProperty("method").GetString() == "storage_route")
+            {
+                return onionRoute.RouterJson(root, new
+                {
+                    routeNonce = root.GetProperty("payload").GetProperty("routeNonce").GetString(),
+                    route = onionRoute.RouteDocument(ClientRouteOrder(targetKey, 0, 1, 2))
+                });
+            }
+
+            onionAttempts++;
+            return onionRoute.RouterFailureJson(root, "onion-peer-transport-failed");
+        }));
+        var router = new XNodeRpcClient(
+            client,
+            new XNodeRpcClientOptions(
+                OrderedPinnedEndpoints(targetKey, firstRouterIndex: 0, fallbackRouterIndex: 3),
+                TrustedRouterIds: TestOnionRoute.RouterIds));
+
+        await Assert.ThrowsAsync<StorageDispatchOutcomeUnknownException>(() =>
+            router.PostStorageAsync(
+                "storage_store",
+                new { idempotency_key = new string('9', 64), data = "ciphertext" },
+                targetKey));
+
+        Assert.Equal(1, onionAttempts);
     }
 
     [Fact]
@@ -596,7 +749,7 @@ public sealed class SessionTransportTests
                 TrustedRouterIds: TestOnionRoute.RouterIds));
 
         var exception = await Assert.ThrowsAnyAsync<HttpRequestException>(() => router.PostStorageAsync(
-            "storage_store",
+            "storage_retrieve",
             new { idempotency_key = new string('d', 64), data = "ciphertext" },
             targetKey));
 

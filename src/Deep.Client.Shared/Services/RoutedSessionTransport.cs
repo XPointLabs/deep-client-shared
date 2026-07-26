@@ -77,6 +77,14 @@ public sealed record XNodeRpcClientOptions(
     IReadOnlyList<string>? TrustedRouterIds = null,
     int MaxResponseBytes = 8_388_608);
 
+public sealed class StorageDispatchOutcomeUnknownException : IOException
+{
+    public StorageDispatchOutcomeUnknownException()
+        : base("The storage store dispatch outcome is unknown; do not retry this logical request.")
+    {
+    }
+}
+
 public sealed class XNodeRpcClient : ITransportRouteProvider
 {
     private const string ResponseVersion = "xpoint-rpc-response-v1";
@@ -197,7 +205,7 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
             var router = OrderedRouters(targetKey)
                 .FirstOrDefault(candidate => !excludedRouterIds.Contains(candidate.ExpectedRouterId))
                 ?? throw new HttpRequestException("No disjoint pinned XNode remains for the bounded fallback.", firstFailure);
-            TransportRouteSnapshot? routeSnapshot = null;
+            TransportRouteSnapshot routeSnapshot;
             try
             {
                 var routeNonce = NewRouteNonce();
@@ -222,67 +230,87 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
                     _trustedRouterIds);
                 ValidateRouteExclusions(routeSnapshot, excludedRouterIds);
                 Volatile.Write(ref _currentRoute, routeSnapshot);
-
-                var onion = OnionRouting.BuildStorageRequest(routeSnapshot.Nodes, storagePath, body);
-                var onionResult = await PostRouterRpcAsync(
-                    router,
-                    "onion_request",
-                    ToJsonElement(onion.Request),
-                    cancellationToken).ConfigureAwait(false);
-
-                if (!onionResult.TryGetProperty("onionResponse", out var onionResponseElement))
-                {
-                    throw new RouterResponseValidationException(
-                        "Deep onion route did not return an encrypted storage response.");
-                }
-
-                OnionResponseEnvelope onionResponse;
-                try
-                {
-                    onionResponse = onionResponseElement.Deserialize<OnionResponseEnvelope>(JsonOptions)
-                        ?? throw new JsonException("Missing onion response body.");
-                }
-                catch (JsonException exception)
-                {
-                    throw new RouterResponseValidationException(
-                        "Deep onion route returned an invalid encrypted response.",
-                        exception);
-                }
-
-                var decrypted = OnionRouting.DecryptResponse(onionResponse, onion.ResponsePrivateKey);
-                if (decrypted.TryGetProperty("storageStatusCode", out var statusElement)
-                    && statusElement.TryGetInt32(out var statusCode)
-                    && statusCode is < 200 or > 299)
-                {
-                    throw new RouterResponseValidationException($"Storage RPC failed with status {statusCode}.");
-                }
-
-                return decrypted.TryGetProperty("storage", out var storage)
-                    ? storage.Clone()
-                    : JsonSerializer.SerializeToElement(new { });
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
                 throw;
             }
-            catch (Exception exception) when (attempt == 0 && IsRetryablePreDurableFailure(exception))
+            catch (Exception exception) when (attempt == 0 && IsAmbiguousTransportFailure(exception))
             {
                 firstFailure = exception;
                 excludedRouterIds.Add(router.ExpectedRouterId);
-                if (routeSnapshot is not null)
-                {
-                    foreach (var node in routeSnapshot.Nodes)
-                    {
-                        excludedRouterIds.Add(node.RouterId);
-                    }
-                }
+                continue;
             }
+
+            var onion = OnionRouting.BuildStorageRequest(routeSnapshot.Nodes, storagePath, body);
+            JsonElement onionResult;
+            try
+            {
+                onionResult = await PostRouterRpcAsync(
+                    router,
+                    "onion_request",
+                    ToJsonElement(onion.Request),
+                    cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception exception) when (
+                method == "storage_store" && IsAmbiguousTransportFailure(exception))
+            {
+                throw new StorageDispatchOutcomeUnknownException();
+            }
+            catch (Exception exception) when (
+                attempt == 0
+                && method == "storage_retrieve"
+                && IsAmbiguousTransportFailure(exception))
+            {
+                firstFailure = exception;
+                excludedRouterIds.Add(router.ExpectedRouterId);
+                foreach (var node in routeSnapshot.Nodes)
+                {
+                    excludedRouterIds.Add(node.RouterId);
+                }
+                continue;
+            }
+
+            if (!onionResult.TryGetProperty("onionResponse", out var onionResponseElement))
+            {
+                throw new RouterResponseValidationException(
+                    "Deep onion route did not return an encrypted storage response.");
+            }
+
+            OnionResponseEnvelope onionResponse;
+            try
+            {
+                onionResponse = onionResponseElement.Deserialize<OnionResponseEnvelope>(JsonOptions)
+                    ?? throw new JsonException("Missing onion response body.");
+            }
+            catch (JsonException exception)
+            {
+                throw new RouterResponseValidationException(
+                    "Deep onion route returned an invalid encrypted response.",
+                    exception);
+            }
+
+            var decrypted = OnionRouting.DecryptResponse(onionResponse, onion.ResponsePrivateKey);
+            if (decrypted.TryGetProperty("storageStatusCode", out var statusElement)
+                && statusElement.TryGetInt32(out var statusCode)
+                && statusCode is < 200 or > 299)
+            {
+                throw new RouterResponseValidationException($"Storage RPC failed with status {statusCode}.");
+            }
+
+            return decrypted.TryGetProperty("storage", out var storage)
+                ? storage.Clone()
+                : JsonSerializer.SerializeToElement(new { });
         }
 
         throw new HttpRequestException("The bounded disjoint XNode fallback failed.", firstFailure);
     }
 
-    private static bool IsRetryablePreDurableFailure(Exception exception) => exception switch
+    private static bool IsAmbiguousTransportFailure(Exception exception) => exception switch
     {
         RouterRpcFailureException rpc => string.Equals(
             rpc.RpcError,
@@ -326,7 +354,7 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
             {
                 throw;
             }
-            catch (Exception ex) when (IsRetryablePreDurableFailure(ex))
+            catch (Exception ex) when (IsAmbiguousTransportFailure(ex))
             {
                 lastError = ex;
             }

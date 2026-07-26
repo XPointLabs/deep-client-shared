@@ -53,13 +53,18 @@ Routed storage bootstrap uses `PinnedRouterEndpoint` values containing both the 
 Storage routes are parsed as request-local immutable results before `CurrentRoute` is updated as a diagnostic snapshot. A valid route has exactly three nodes at indices 0, 1, and 2; unique RouterIds, X25519 keys, and peer RPC endpoints; a first RouterId matching the pinned responder; reachable contacts; required `onion-v1` and `session-rpc` capabilities; and fresh valid contact self-signatures. The returned target must exactly match the requested target.
 
 The survival development profile pins six endpoints but never lowers the
-three-hop validation rule. A storage operation has at most two attempts. Only a
-connection/timeout failure or the signed exact `onion-peer-transport-failed`
-result may trigger the second attempt; signature, responder identity, freshness,
-digest, contact, replay/tamper, protocol, and storage-status failures terminate
+three-hop validation rule. Route acquisition has at most two attempts and may
+use a different pinned responder after a connection/timeout failure. Once an
+onion request is dispatched, `storage_retrieve` may use one disjoint fallback
+after a connection/timeout failure or the signed exact
+`onion-peer-transport-failed` result. `storage_store` never retries after onion
+dispatch begins: any such ambiguous failure throws the sanitized typed
+`StorageDispatchOutcomeUnknownException`, because a downstream commit response
+may have been lost. Signature, responder identity, freshness, digest, contact,
+replay/tamper, protocol, semantic, and storage-status failures always terminate
 immediately. If a first route was acquired, all three of its RouterIds are sent
-as exclusions and the fallback must be a disjoint signed three-hop route. The
-encrypted storage body and idempotency material stay unchanged while the RPC
+as exclusions and a retrieve fallback must be a disjoint signed three-hop
+route. The storage body and deduplication material stay unchanged while the RPC
 request id, route nonce, and route-attempt id rotate. This is bounded continuity
 inside a fixed trust set, not dynamic discovery or proof of production anonymity.
 
