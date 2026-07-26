@@ -10,7 +10,7 @@ namespace Deep.Client.Shared.Tests.Services;
 public sealed class HttpServiceEndpointPolicyTests
 {
     [Fact]
-    public void PhysicalFactory_ConstructsEverySurvivalHttpTransportForCanonicalLanOrigins()
+    public void PhysicalFactory_ConstructsAllSevenTransportsWithPlatformNeutralDefaultPaths()
     {
         var factory = new HttpServiceTransportFactory(
             HttpServiceEndpointPolicy.PhysicalE2eDevelopment);
@@ -73,6 +73,8 @@ public sealed class HttpServiceEndpointPolicyTests
 
     [Theory]
     [InlineData("https://attacker.example/{0}")]
+    [InlineData("https:{0}")]
+    [InlineData("file:{0}")]
     [InlineData("//attacker.example/{0}")]
     [InlineData("/safe/../{0}")]
     [InlineData("/safe/%2e%2e/{0}")]

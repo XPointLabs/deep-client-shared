@@ -179,10 +179,10 @@ internal sealed class HttpServiceOrigin
             value.StartsWith("//", StringComparison.Ordinal) ||
             value.EndsWith("/", StringComparison.Ordinal) ||
             value.Contains('\\') ||
+            value.Contains(':') ||
             value.Contains('?') ||
             value.Contains('#') ||
-            value.Contains('%') ||
-            Uri.TryCreate(value, UriKind.Absolute, out _))
+            value.Contains('%'))
         {
             throw new ArgumentException(
                 $"{description} must be a canonical rooted relative path.",
