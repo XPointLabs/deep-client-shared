@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using Deep.Client.Shared.Persistence;
 
@@ -104,6 +103,34 @@ public interface IBoundedTransportOutboxAdapter : ITransportOutboxAdapter
     TimeSpan MaximumDispatchDuration { get; }
 }
 
+/// <summary>
+/// Platform-owned supervisor for a transport adapter running outside the client
+/// process. Implementations must reserve from a bounded worker pool without
+/// invoking adapter code, and each acquired execution must be independently
+/// killable. An in-process task, thread, or cancellation token does not satisfy
+/// this contract.
+/// </summary>
+public interface IExternalTransportOutboxExecutor
+{
+    TimeSpan MaximumDispatchDuration { get; }
+
+    bool TryAcquire(out IExternalTransportOutboxExecution? execution);
+}
+
+/// <summary>
+/// One exclusive external worker reservation. Dispatch must return only after
+/// a receipt, a confirmed worker termination, or caller cancellation followed
+/// by confirmed worker termination. It must never leave adapter work running
+/// after this lease is disposed.
+/// </summary>
+public interface IExternalTransportOutboxExecution : IAsyncDisposable
+{
+    Task<TransportOutboxAdapterReceipt> DispatchAsync(
+        TransportOutboxDispatchRequest request,
+        TimeSpan hardTimeout,
+        CancellationToken cancellationToken = default);
+}
+
 public sealed record TransportOutboxDispatchBatchResult(
     int ExpiredCount,
     int DurableCount,
@@ -126,32 +153,23 @@ public sealed class TransportOutboxDispatcher
 {
     public static readonly TimeSpan DefaultRetryDelay = TimeSpan.FromSeconds(30);
     public static readonly TimeSpan DefaultAttemptTimeout = TimeSpan.FromSeconds(15);
-    public const int DefaultMaxOutstandingOrphans = 4;
 
     private readonly ITransportOutboxRepository repository;
-    private readonly IBoundedTransportOutboxAdapter adapter;
+    private readonly IExternalTransportOutboxExecutor executor;
     private readonly IClock clock;
     private readonly TimeSpan retryDelay;
     private readonly TimeSpan attemptTimeout;
-    private readonly int maxOutstandingOrphans;
     private readonly SemaphoreSlim dispatchGate = new(1, 1);
-    private readonly ConcurrentDictionary<string, OrphanDispatch> orphanDispatches =
-        new(StringComparer.Ordinal);
 
     public TransportOutboxDispatcher(
         ITransportOutboxRepository repository,
-        ITransportOutboxAdapter adapter,
+        IExternalTransportOutboxExecutor executor,
         IClock clock,
         TimeSpan? retryDelay = null,
-        TimeSpan? attemptTimeout = null,
-        int maxOutstandingOrphans = DefaultMaxOutstandingOrphans)
+        TimeSpan? attemptTimeout = null)
     {
         this.repository = repository ?? throw new ArgumentNullException(nameof(repository));
-        ArgumentNullException.ThrowIfNull(adapter);
-        this.adapter = adapter as IBoundedTransportOutboxAdapter
-            ?? throw new ArgumentException(
-                "The transport outbox adapter must declare a bounded maximum dispatch duration.",
-                nameof(adapter));
+        this.executor = executor ?? throw new ArgumentNullException(nameof(executor));
         this.clock = clock ?? throw new ArgumentNullException(nameof(clock));
         this.retryDelay = retryDelay ?? DefaultRetryDelay;
         this.attemptTimeout = attemptTimeout ?? DefaultAttemptTimeout;
@@ -163,18 +181,13 @@ public sealed class TransportOutboxDispatcher
         {
             throw new ArgumentOutOfRangeException(nameof(attemptTimeout));
         }
-        if (this.adapter.MaximumDispatchDuration <= TimeSpan.Zero
-            || this.adapter.MaximumDispatchDuration > TimeSpan.FromMinutes(5))
+        if (this.executor.MaximumDispatchDuration <= TimeSpan.Zero
+            || this.executor.MaximumDispatchDuration > TimeSpan.FromMinutes(5))
         {
             throw new ArgumentOutOfRangeException(
-                nameof(adapter),
-                "The adapter maximum dispatch duration must be positive and no more than five minutes.");
+                nameof(executor),
+                "The external executor maximum dispatch duration must be positive and no more than five minutes.");
         }
-        if (maxOutstandingOrphans is <= 0 or > 32)
-        {
-            throw new ArgumentOutOfRangeException(nameof(maxOutstandingOrphans));
-        }
-        this.maxOutstandingOrphans = maxOutstandingOrphans;
     }
 
     public Task<TransportOutboxCommitResult> PrepareAsync(
@@ -231,11 +244,6 @@ public sealed class TransportOutboxDispatcher
             foreach (var item in ready)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                if (orphanDispatches.Count >= maxOutstandingOrphans)
-                {
-                    capacityDeferred++;
-                    continue;
-                }
                 var itemNow = clock.UtcNow;
                 if (itemNow >= item.ExpiresAt)
                 {
@@ -260,6 +268,18 @@ public sealed class TransportOutboxDispatcher
                     continue;
                 }
 
+                if (!executor.TryAcquire(out var execution))
+                {
+                    capacityDeferred++;
+                    continue;
+                }
+                if (execution is null)
+                {
+                    throw new InvalidOperationException(
+                        "The external outbox executor reported a reservation without an execution lease.");
+                }
+
+                await using var ownedExecution = execution;
                 var attemptId = CreateAttemptId();
                 var retryNotBefore = RetryNotBefore(itemNow, item.ExpiresAt);
                 var attempted = TransportOutboxTransition.Attempted(
@@ -308,41 +328,21 @@ public sealed class TransportOutboxDispatcher
                 }
 
                 TransportOutboxAdapterReceipt? receipt = null;
-                Task<TransportOutboxAdapterReceipt>? dispatchTask = null;
-                CancellationTokenSource? attemptCancellation = new();
                 var remainingTtl = item.ExpiresAt - dispatchAt;
                 var dispatchWindow = Min(
                     remainingTtl,
                     attemptTimeout,
-                    adapter.MaximumDispatchDuration);
+                    executor.MaximumDispatchDuration);
                 try
                 {
-                    dispatchTask = adapter.DispatchAsync(request, attemptCancellation.Token);
+                    var dispatchTask = execution.DispatchAsync(
+                        request,
+                        dispatchWindow,
+                        cancellationToken);
                     if (dispatchTask is null)
                     {
-                        throw new InvalidOperationException("The outbox adapter returned no dispatch task.");
-                    }
-
-                    var timeoutTask = Task.Delay(dispatchWindow);
-                    var callerCancellationTask = Task.Delay(
-                        Timeout.InfiniteTimeSpan,
-                        cancellationToken);
-                    var completed = await Task.WhenAny(
-                        dispatchTask,
-                        timeoutTask,
-                        callerCancellationTask).ConfigureAwait(false);
-                    if (completed != dispatchTask)
-                    {
-                        attemptCancellation.Cancel();
-                        TrackOrphan(item, attemptId, dispatchTask, attemptCancellation);
-                        attemptCancellation = null;
-                        if (completed == callerCancellationTask)
-                        {
-                            cancellationToken.ThrowIfCancellationRequested();
-                        }
-
-                        outcomeUnknown++;
-                        continue;
+                        throw new InvalidOperationException(
+                            "The external outbox execution returned no dispatch task.");
                     }
 
                     receipt = await dispatchTask.ConfigureAwait(false);
@@ -353,14 +353,11 @@ public sealed class TransportOutboxDispatcher
                 }
                 catch
                 {
-                    // The typed count is intentionally the only diagnostic here: adapter exception
-                    // text may contain endpoints or identifiers and must not cross this boundary.
+                    // The external executor has confirmed worker termination before surfacing
+                    // failure. Adapter exception text may contain endpoints or identifiers and
+                    // must not cross this boundary.
                     outcomeUnknown++;
                     continue;
-                }
-                finally
-                {
-                    attemptCancellation?.Dispose();
                 }
 
                 if (receipt is null)
@@ -403,54 +400,6 @@ public sealed class TransportOutboxDispatcher
         finally
         {
             dispatchGate.Release();
-        }
-    }
-
-    private void TrackOrphan(
-        TransportOutboxItemSnapshot item,
-        OutboxAttemptId attemptId,
-        Task<TransportOutboxAdapterReceipt> dispatchTask,
-        CancellationTokenSource cancellation)
-    {
-        var key = OrphanKey(item.AccountScope, item.LogicalId);
-        var orphan = new OrphanDispatch(dispatchTask, cancellation);
-        if (!orphanDispatches.TryAdd(key, orphan))
-        {
-            cancellation.Dispose();
-            throw new InvalidOperationException("A transport outbox dispatch is already in flight.");
-        }
-
-        _ = ObserveLateReceiptAsync(key, orphan, item, attemptId);
-    }
-
-    private async Task ObserveLateReceiptAsync(
-        string key,
-        OrphanDispatch orphan,
-        TransportOutboxItemSnapshot item,
-        OutboxAttemptId attemptId)
-    {
-        try
-        {
-            var receipt = await orphan.DispatchTask.ConfigureAwait(false);
-            if (receipt is not null)
-            {
-                await ApplyReceiptAsync(
-                    item,
-                    attemptId,
-                    receipt,
-                    CancellationToken.None).ConfigureAwait(false);
-            }
-        }
-        catch
-        {
-            // Dispatch and persistence diagnostics may contain identifiers. The persisted
-            // Attempted state remains quarantined and is the only safe recovery signal.
-        }
-        finally
-        {
-            orphanDispatches.TryRemove(
-                new KeyValuePair<string, OrphanDispatch>(key, orphan));
-            orphan.Cancellation.Dispose();
         }
     }
 
@@ -613,11 +562,6 @@ public sealed class TransportOutboxDispatcher
             ? first <= third ? first : third
             : second <= third ? second : third;
 
-    private static string OrphanKey(
-        OutboxAccountScope accountScope,
-        OutboxLogicalId logicalId) =>
-        Convert.ToHexString(accountScope.Value) + Convert.ToHexString(logicalId.Value);
-
     private static OutboxAttemptId CreateAttemptId()
     {
         Span<byte> bytes = stackalloc byte[TransportOutboxLimits.AttemptIdBytes];
@@ -636,8 +580,4 @@ public sealed class TransportOutboxDispatcher
         Durable,
         Conflict
     }
-
-    private sealed record OrphanDispatch(
-        Task<TransportOutboxAdapterReceipt> DispatchTask,
-        CancellationTokenSource Cancellation);
 }

@@ -9,19 +9,31 @@ shipped by this slice, so both default profiles keep the feature disabled.
 ## Runtime dispatcher boundary
 
 `TransportOutboxDispatcher` consumes only a caller-prepared opaque ciphertext
-bundle through `ITransportOutboxAdapter`. It is intentionally below the message
-domain boundary: `MessageService` sees plaintext before `E2eeClientTransport`,
-so wiring the repository there would persist plaintext and is forbidden.
+bundle through an `IExternalTransportOutboxExecutor`. It is intentionally below
+the message domain boundary: `MessageService` sees plaintext before
+`E2eeClientTransport`, so wiring the repository there would persist plaintext
+and is forbidden.
 
 `ClientRuntime` creates the dispatcher only when
 `PersistentTransportOutboxEnabled` is true, the local store implements
-`ITransportOutboxRepository`, and an adapter implementing
-`IBoundedTransportOutboxAdapter` is supplied explicitly. The adapter must
-declare a positive maximum dispatch duration of no more than five minutes.
-Any partial or unbounded configuration fails closed. The dispatcher performs
-one bounded, caller-owned pass and never creates a polling loop, recurring
-timer, or background wakeup. The platform lifecycle remains responsible for
-deciding when to run a pass.
+`ITransportOutboxRepository`, and an external executor is supplied explicitly.
+The executor must supervise adapter code in a separate, independently killable
+process (or an equivalently killable OS boundary), reserve from a bounded
+worker pool without invoking adapter code, and declare a positive maximum
+dispatch duration of no more than five minutes. An in-process `Task`, dedicated
+thread, `Task.Run`, cancellation token, or `IBoundedTransportOutboxAdapter`
+declaration is insufficient: none can terminate a synchronously blocked or
+native adapter call. No platform implementation of this external executor is
+shipped yet, so production activation remains NO-GO and both default profiles
+remain disabled.
+
+The dispatcher performs one caller-owned pass and never creates a polling loop,
+recurring timer, detached task, or background wakeup. The platform lifecycle
+remains responsible for deciding when to run a pass. Executor capacity is
+reserved before the attempt transition and before adapter I/O. A failed
+reservation therefore reports `CapacityDeferredCount`, leaves the item
+`Prepared`/`Accepted`, and permits later ready items to be considered without
+silently quarantining a message that was never sent.
 
 Ready-list admission includes only `Prepared` and explicitly `Accepted` items
 and excludes items whose bounded attempt budget is exhausted before ordering
@@ -30,31 +42,29 @@ may have happened, so it is quarantined from automatic redispatch across
 process restart until expiry. This uses the existing v9 state model and requires
 no schema migration.
 
-Each adapter call is raced against the smallest of the dispatcher timeout, the
-adapter's declared bound, and the item lifetime remaining immediately before
-I/O. Timeout or caller cancellation requests adapter cancellation but never
-awaits a non-cooperative task. The caller therefore returns bounded even if the
-adapter ignores cancellation. At most four such orphan tasks are retained by
-default; capacity is reported without starting more I/O, while another ready
-item can progress whenever capacity remains. A logical item is already
-persistently quarantined before I/O and is also keyed in the live orphan set,
-so it cannot be redispatched while its orphan is alive.
+Each external execution receives the smallest of the dispatcher timeout, the
+executor's declared bound, and the item lifetime remaining immediately before
+I/O as a hard deadline. The executor contract requires the returned task to
+finish only after a receipt or confirmed termination of the isolated worker.
+Caller cancellation likewise requires confirmed worker termination before the
+execution completes. This removes the former in-process orphan-task pool: a
+bounded number of permanently blocked tasks could still consume every slot,
+and invoking an async adapter could block synchronously before returning a task.
+The dispatcher does not pretend either failure can be made killable in-process.
 
 An attempt is committed before adapter I/O. Adapter exceptions, missing
 receipts, and timeouts become only a typed outcome-unknown count so endpoint or
-identifier text cannot escape through this boundary. A detached task is always
-observed. A valid late receipt is reconciled through the existing compare-and-
-swap transitions to `Accepted` and, when separate evidence exists, `Durable`;
-a late fault leaves the attempt quarantined. `Accepted` remains retryable and
-is never promoted to `Durable` without bounded durable evidence.
+identifier text cannot escape through this boundary. After dispatch starts,
+any failure remains outcome-unknown and is persistently quarantined; the
+dispatcher never redispatches it automatically. `Accepted` remains retryable
+and is never promoted to `Durable` without bounded durable evidence.
 Commit-outcome-unknown errors are reconciled by scoped point read before more
 I/O. Bundles that expire while an adapter is running are marked expired instead
 of receiving a late success claim.
 
-No current production adapter supplies a durable receipt-status query or is
-declared production-ready. Consequently both default profiles keep
-`PersistentTransportOutboxEnabled` disabled. A future restart reconciliation
-that releases an outcome-unknown attempt before TTL requires an authenticated,
+No current production adapter supplies the external killable executor or a
+durable receipt-status query. A future restart reconciliation that releases an
+outcome-unknown attempt before TTL requires an authenticated,
 deduplication-bound adapter receipt query; without that capability the runtime
 must retain the persisted quarantine and must not infer failure from process
 restart.
@@ -225,8 +235,9 @@ maintenance-status surface is an explicit P3 before any product UI may claim
 immediate forensic erasure.
 
 The feature remains disabled in both default profiles. Runtime composition is
-available only with an explicit opaque-bundle adapter; the current direct and
-routed storage transports do not implement that producer/receipt contract yet.
+available only with an explicit external killable executor; the current direct
+and routed storage transports do not implement that process boundary or the
+opaque producer/receipt contract yet.
 During the declared rollback window, an older binary may open only a copied
 pre-migration database. The authoritative v9 file must not be opened by an older writer.
 Operational rollback therefore restores the pre-migration file backup, never

@@ -18,7 +18,7 @@ public sealed class ClientRuntime : IDisposable
         IGroupSyncTransport? groupSyncTransport = null,
         IAvatarProfileTransport? avatarProfiles = null,
         bool requireE2eeTransport = false,
-        ITransportOutboxAdapter? transportOutboxAdapter = null)
+        IExternalTransportOutboxExecutor? transportOutboxExecutor = null)
     {
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(featureFlags);
@@ -39,26 +39,21 @@ public sealed class ClientRuntime : IDisposable
                 throw new InvalidOperationException(
                     "PersistentTransportOutboxEnabled is enabled, but the configured store has no transport outbox repository.");
             }
-            if (transportOutboxAdapter is null)
+            if (transportOutboxExecutor is null)
             {
                 throw new InvalidOperationException(
-                    "PersistentTransportOutboxEnabled is enabled, but no transport outbox adapter is configured.");
-            }
-            if (transportOutboxAdapter is not IBoundedTransportOutboxAdapter)
-            {
-                throw new InvalidOperationException(
-                    "PersistentTransportOutboxEnabled is enabled, but the transport outbox adapter does not declare bounded completion.");
+                    "PersistentTransportOutboxEnabled is enabled, but no external killable transport outbox executor is configured.");
             }
 
             TransportOutbox = new TransportOutboxDispatcher(
                 outboxRepository,
-                transportOutboxAdapter,
+                transportOutboxExecutor,
                 clock);
         }
-        else if (transportOutboxAdapter is not null)
+        else if (transportOutboxExecutor is not null)
         {
             throw new InvalidOperationException(
-                "A transport outbox adapter was configured while PersistentTransportOutboxEnabled is disabled.");
+                "A transport outbox executor was configured while PersistentTransportOutboxEnabled is disabled.");
         }
 
         var transportRequired = requireE2eeTransport || featureFlags.TransportRequired;
@@ -139,7 +134,7 @@ public sealed class ClientRuntime : IDisposable
         StubSessionBackend? backend = null,
         IGroupSyncTransport? groupSyncTransport = null,
         IAvatarProfileTransport? avatarProfiles = null,
-        ITransportOutboxAdapter? transportOutboxAdapter = null) =>
+        IExternalTransportOutboxExecutor? transportOutboxExecutor = null) =>
         new(
             new InMemorySessionStore(),
             featureFlags ?? ClientFeatureFlags.Defaults,
@@ -147,7 +142,7 @@ public sealed class ClientRuntime : IDisposable
             backend ?? new StubSessionBackend(),
             groupSyncTransport,
             avatarProfiles,
-            transportOutboxAdapter: transportOutboxAdapter);
+            transportOutboxExecutor: transportOutboxExecutor);
 
     public static ClientRuntime CreatePersistent(
         string statePath,
@@ -160,7 +155,7 @@ public sealed class ClientRuntime : IDisposable
         string? sqlCipherKey = null,
         Func<ILocalSessionStore, ILocalSessionStore>? storeDecorator = null,
         bool requireE2eeTransport = false,
-        ITransportOutboxAdapter? transportOutboxAdapter = null)
+        IExternalTransportOutboxExecutor? transportOutboxExecutor = null)
     {
         var resolvedFeatureFlags = featureFlags ?? ClientFeatureFlags.Defaults;
         if (backend is null)
@@ -208,7 +203,7 @@ public sealed class ClientRuntime : IDisposable
             groupSyncTransport,
             avatarProfiles,
             requireE2eeTransport,
-            transportOutboxAdapter);
+            transportOutboxExecutor);
     }
 
     public static ClientRuntime CreatePersistentForTests(
@@ -221,7 +216,7 @@ public sealed class ClientRuntime : IDisposable
         string? legacyInMemoryStatePath = null,
         string? sqlCipherKey = null,
         Func<ILocalSessionStore, ILocalSessionStore>? storeDecorator = null,
-        ITransportOutboxAdapter? transportOutboxAdapter = null) =>
+        IExternalTransportOutboxExecutor? transportOutboxExecutor = null) =>
         CreatePersistent(
             statePath,
             featureFlags ?? ClientFeatureFlags.Defaults,
@@ -233,7 +228,7 @@ public sealed class ClientRuntime : IDisposable
             sqlCipherKey,
             storeDecorator,
             requireE2eeTransport: false,
-            transportOutboxAdapter);
+            transportOutboxExecutor);
 
     public void Dispose()
     {
