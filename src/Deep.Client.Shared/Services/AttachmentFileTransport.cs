@@ -51,7 +51,7 @@ public sealed record HttpAttachmentFileTransportOptions(
     string UploadPath = "/file",
     string DownloadPathFormat = "/file/{fileId}");
 
-public sealed class HttpAttachmentFileTransport : IAttachmentFileTransport
+public sealed class HttpAttachmentFileTransport : IAttachmentFileTransport, IDisposable
 {
     private const int KeySizeBytes = 32;
     private const int NonceSizeBytes = 12;
@@ -70,18 +70,17 @@ public sealed class HttpAttachmentFileTransport : IAttachmentFileTransport
     private static readonly byte[] ChunkedPayloadMagic = Encoding.ASCII.GetBytes("DEEPATT2");
 
     private readonly HttpClient httpClient;
-    private readonly HttpAttachmentFileTransportOptions options;
-    private readonly Uri fileServiceOrigin;
-    private readonly HttpServiceEndpointPolicy endpointPolicy;
+    private readonly HttpServiceOrigin serviceOrigin;
+    private readonly string uploadPath;
+    private readonly string downloadPathFormat;
 
-    public HttpAttachmentFileTransport(
+    internal HttpAttachmentFileTransport(
         HttpClient httpClient,
         HttpAttachmentFileTransportOptions options,
         HttpServiceEndpointPolicy? endpointPolicy = null)
     {
-        this.httpClient = httpClient;
-        this.options = options;
-        this.endpointPolicy = endpointPolicy ?? HttpServiceEndpointPolicy.Production;
+        this.httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
+        ArgumentNullException.ThrowIfNull(options);
 
         if (string.IsNullOrWhiteSpace(options.BaseUrl))
         {
@@ -90,13 +89,17 @@ public sealed class HttpAttachmentFileTransport : IAttachmentFileTransport
 
         try
         {
-            fileServiceOrigin = this.endpointPolicy.RequireOrigin(
+            serviceOrigin = (endpointPolicy ?? HttpServiceEndpointPolicy.Production)
+                .RequireServiceOrigin(
                 options.BaseUrl,
                 "Attachment file transport base URL");
-            this.endpointPolicy.RequireCompatibleBaseAddress(
-                this.httpClient,
-                fileServiceOrigin,
-                "Attachment file transport");
+            uploadPath = serviceOrigin.RequirePath(
+                options.UploadPath,
+                "Attachment upload path");
+            downloadPathFormat = serviceOrigin.RequireTemplate(
+                options.DownloadPathFormat,
+                "Attachment download path template",
+                "fileId");
         }
         catch (ArgumentException exception)
         {
@@ -108,6 +111,8 @@ public sealed class HttpAttachmentFileTransport : IAttachmentFileTransport
     }
 
     public bool IsEnabled => true;
+
+    public void Dispose() => httpClient.Dispose();
 
     public async Task<AttachmentMetadata> UploadAsync(
         AttachmentFileUpload upload,
@@ -138,7 +143,9 @@ public sealed class HttpAttachmentFileTransport : IAttachmentFileTransport
             content.Headers.ContentType = new("application/octet-stream");
             content.Headers.ContentLength = encryptedInput.Length;
 
-            using var request = new HttpRequestMessage(HttpMethod.Post, options.UploadPath)
+            using var request = new HttpRequestMessage(
+                HttpMethod.Post,
+                serviceOrigin.Build(uploadPath, "Attachment upload path"))
             {
                 Content = content,
                 Version = HttpVersion.Version11,
@@ -164,7 +171,7 @@ public sealed class HttpAttachmentFileTransport : IAttachmentFileTransport
                 Path.GetFileName(upload.FileName),
                 upload.ContentType,
                 encrypted.PlainLength,
-                new Uri(httpClient.BaseAddress!, PathFor(payload.Id)),
+                PathFor(payload.Id),
                 Convert.ToBase64String(key),
                 encrypted.DigestBase64,
                 upload.Width,
@@ -198,7 +205,8 @@ public sealed class HttpAttachmentFileTransport : IAttachmentFileTransport
             throw new InvalidOperationException("Attachment metadata does not include a remote URI.");
         }
 
-        ValidateRemoteUri(metadata.RemoteUri);
+        var expectedRemoteUri = PathFor(metadata.AttachmentId);
+        ValidateRemoteUri(metadata.RemoteUri, expectedRemoteUri);
 
         ArgumentNullException.ThrowIfNull(destination);
         if (!destination.CanWrite)
@@ -244,16 +252,20 @@ public sealed class HttpAttachmentFileTransport : IAttachmentFileTransport
         return new AttachmentFileDownloadInfo(metadata.FileName, metadata.ContentType);
     }
 
-    private string PathFor(string fileId) =>
-        options.DownloadPathFormat.Replace("{fileId}", Uri.EscapeDataString(fileId), StringComparison.Ordinal);
+    private Uri PathFor(string fileId) =>
+        serviceOrigin.Format(
+            downloadPathFormat,
+            "fileId",
+            fileId,
+            "Attachment download resource");
 
-    private void ValidateRemoteUri(Uri remoteUri)
+    private void ValidateRemoteUri(Uri remoteUri, Uri expectedRemoteUri)
     {
         try
         {
-            endpointPolicy.RequireSameOriginResource(
+            serviceOrigin.RequireExactResource(
                 remoteUri,
-                fileServiceOrigin,
+                expectedRemoteUri,
                 "Remote attachment URI");
         }
         catch (ArgumentException exception)

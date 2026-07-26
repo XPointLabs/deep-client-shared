@@ -96,6 +96,8 @@ public sealed class AttachmentFileTransportTests
     [InlineData("http://file.local/file/file-abc")]
     [InlineData("https://user:password@file.local/file/file-abc")]
     [InlineData("https://file.local:22/file/file-abc")]
+    [InlineData("https://file.local/admin/file-abc")]
+    [InlineData("https://file.local/file/%66ile-abc")]
     public async Task HttpAttachmentFileTransport_RejectsUnsafeInboundRemoteUri(string remoteUri)
     {
         using var client = new HttpClient(new FakeHandler((_, _) =>

@@ -44,22 +44,25 @@ public sealed record HttpAvatarProfileTransportOptions(
     int MaxMetadataBytes = 65_536,
     TimeSpan RequestFreshness = default);
 
-public sealed class HttpAvatarProfileTransport : IAvatarProfileTransport
+public sealed class HttpAvatarProfileTransport : IAvatarProfileTransport, IDisposable
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private readonly HttpClient httpClient;
     private readonly HttpAvatarProfileTransportOptions options;
     private readonly TimeProvider timeProvider;
     private readonly TimeSpan requestFreshness;
+    private readonly HttpServiceOrigin serviceOrigin;
+    private readonly string avatarPathFormat;
+    private readonly string avatarInfoPathFormat;
 
-    public HttpAvatarProfileTransport(
+    internal HttpAvatarProfileTransport(
         HttpClient httpClient,
         HttpAvatarProfileTransportOptions options,
         TimeProvider? timeProvider = null,
         HttpServiceEndpointPolicy? endpointPolicy = null)
     {
-        this.httpClient = httpClient;
-        this.options = options;
+        this.httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
+        this.options = options ?? throw new ArgumentNullException(nameof(options));
         this.timeProvider = timeProvider ?? TimeProvider.System;
         requestFreshness = options.RequestFreshness == default
             ? TimeSpan.FromMinutes(5)
@@ -72,13 +75,16 @@ public sealed class HttpAvatarProfileTransport : IAvatarProfileTransport
 
         try
         {
-            var baseUri = (endpointPolicy ?? HttpServiceEndpointPolicy.Production)
-                .RequireOrigin(this.options.BaseUrl, "Avatar transport base URL");
-            (endpointPolicy ?? HttpServiceEndpointPolicy.Production)
-                .RequireCompatibleBaseAddress(
-                    this.httpClient,
-                    baseUri,
-                    "Avatar transport");
+            serviceOrigin = (endpointPolicy ?? HttpServiceEndpointPolicy.Production)
+                .RequireServiceOrigin(this.options.BaseUrl, "Avatar transport base URL");
+            avatarPathFormat = serviceOrigin.RequireTemplate(
+                options.AvatarPathFormat,
+                "Avatar resource path template",
+                "sessionId");
+            avatarInfoPathFormat = serviceOrigin.RequireTemplate(
+                options.AvatarInfoPathFormat,
+                "Avatar metadata path template",
+                "sessionId");
         }
         catch (ArgumentException exception)
         {
@@ -99,6 +105,8 @@ public sealed class HttpAvatarProfileTransport : IAvatarProfileTransport
 
     public bool IsEnabled => true;
 
+    public void Dispose() => httpClient.Dispose();
+
     public async Task<AvatarProfileMetadata> UploadAsync(
         SessionIdentityProvider identity,
         Stream content,
@@ -110,7 +118,8 @@ public sealed class HttpAvatarProfileTransport : IAvatarProfileTransport
         ArgumentException.ThrowIfNullOrWhiteSpace(contentType);
 
         var sessionId = identity.SessionId;
-        var path = PathFor(options.AvatarPathFormat, sessionId);
+        var resource = PathFor(avatarPathFormat, sessionId);
+        var path = resource.AbsolutePath;
         var bytes = await ReadBoundedAsync(content, options.MaxAvatarBytes, cancellationToken).ConfigureAwait(false);
         if (bytes.Length == 0)
         {
@@ -130,7 +139,7 @@ public sealed class HttpAvatarProfileTransport : IAvatarProfileTransport
             digest);
         var signature = identity.SignDetached(signingPayload);
 
-        using var request = new HttpRequestMessage(HttpMethod.Put, path);
+        using var request = new HttpRequestMessage(HttpMethod.Put, resource);
         using var requestContent = new ByteArrayContent(bytes);
         requestContent.Headers.ContentType = MediaTypeHeaderValue.Parse(contentType);
         request.Content = requestContent;
@@ -169,7 +178,7 @@ public sealed class HttpAvatarProfileTransport : IAvatarProfileTransport
         CancellationToken cancellationToken = default)
     {
         using var response = await httpClient.GetAsync(
-            PathFor(options.AvatarInfoPathFormat, sessionId),
+            PathFor(avatarInfoPathFormat, sessionId),
             HttpCompletionOption.ResponseHeadersRead,
             cancellationToken)
             .ConfigureAwait(false);
@@ -191,7 +200,7 @@ public sealed class HttpAvatarProfileTransport : IAvatarProfileTransport
         CancellationToken cancellationToken = default)
     {
         using var response = await httpClient.GetAsync(
-            PathFor(options.AvatarPathFormat, sessionId),
+            PathFor(avatarPathFormat, sessionId),
             HttpCompletionOption.ResponseHeadersRead,
             cancellationToken)
             .ConfigureAwait(false);
@@ -254,8 +263,12 @@ public sealed class HttpAvatarProfileTransport : IAvatarProfileTransport
         }
     }
 
-    private static string PathFor(string pathFormat, SessionId sessionId) =>
-        pathFormat.Replace("{sessionId}", Uri.EscapeDataString(sessionId.Value), StringComparison.Ordinal);
+    private Uri PathFor(string pathFormat, SessionId sessionId) =>
+        serviceOrigin.Format(
+            pathFormat,
+            "sessionId",
+            sessionId.Value,
+            "Avatar resource");
 
     private sealed record AvatarProfileMetadataDto(
         string SessionId,

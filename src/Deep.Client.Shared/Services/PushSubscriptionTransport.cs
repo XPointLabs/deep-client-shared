@@ -120,18 +120,19 @@ public sealed class DisabledPushSubscriptionTransport : IPushSubscriptionTranspo
     public Task UnsubscribeAsync(PushUnsubscribeRequest request, CancellationToken cancellationToken = default) => Task.CompletedTask;
 }
 
-public sealed class HttpPushSubscriptionTransport : IPushSubscriptionTransport
+public sealed class HttpPushSubscriptionTransport : IPushSubscriptionTransport, IDisposable
 {
     private readonly HttpClient httpClient;
-    private readonly HttpPushSubscriptionTransportOptions options;
+    private readonly Uri subscribeUri;
+    private readonly Uri unsubscribeUri;
 
-    public HttpPushSubscriptionTransport(
+    internal HttpPushSubscriptionTransport(
         HttpClient httpClient,
         HttpPushSubscriptionTransportOptions options,
         HttpServiceEndpointPolicy? endpointPolicy = null)
     {
-        this.httpClient = httpClient;
-        this.options = options;
+        this.httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
+        ArgumentNullException.ThrowIfNull(options);
 
         if (string.IsNullOrWhiteSpace(options.BaseUrl))
         {
@@ -139,14 +140,17 @@ public sealed class HttpPushSubscriptionTransport : IPushSubscriptionTransport
         }
 
         var policy = endpointPolicy ?? HttpServiceEndpointPolicy.Production;
-        Uri baseUri;
         try
         {
-            baseUri = policy.RequireOrigin(options.BaseUrl, "Push transport base URL");
-            policy.RequireCompatibleBaseAddress(
-                this.httpClient,
-                baseUri,
-                "Push transport");
+            var origin = policy.RequireServiceOrigin(
+                options.BaseUrl,
+                "Push transport base URL");
+            subscribeUri = origin.Build(
+                origin.RequirePath(options.SubscribePath, "Push subscribe path"),
+                "Push subscribe path");
+            unsubscribeUri = origin.Build(
+                origin.RequirePath(options.UnsubscribePath, "Push unsubscribe path"),
+                "Push unsubscribe path");
         }
         catch (ArgumentException exception)
         {
@@ -159,15 +163,17 @@ public sealed class HttpPushSubscriptionTransport : IPushSubscriptionTransport
 
     public bool IsEnabled => true;
 
+    public void Dispose() => httpClient.Dispose();
+
     public Task SubscribeAsync(PushSubscriptionRequest request, CancellationToken cancellationToken = default) =>
-        SendAsync(options.SubscribePath, request, cancellationToken);
+        SendAsync(subscribeUri, request, cancellationToken);
 
     public Task UnsubscribeAsync(PushUnsubscribeRequest request, CancellationToken cancellationToken = default) =>
-        SendAsync(options.UnsubscribePath, request, cancellationToken);
+        SendAsync(unsubscribeUri, request, cancellationToken);
 
-    private async Task SendAsync<TRequest>(string path, TRequest request, CancellationToken cancellationToken)
+    private async Task SendAsync<TRequest>(Uri resource, TRequest request, CancellationToken cancellationToken)
     {
-        using var response = await httpClient.PostAsJsonAsync(path, request, cancellationToken).ConfigureAwait(false);
+        using var response = await httpClient.PostAsJsonAsync(resource, request, cancellationToken).ConfigureAwait(false);
         if (response.IsSuccessStatusCode)
         {
             var successPayload = await response.Content.ReadFromJsonAsync<PushOperationResponse>(cancellationToken).ConfigureAwait(false);

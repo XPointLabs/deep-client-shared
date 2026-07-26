@@ -50,18 +50,25 @@ public sealed record HttpSessionTransportOptions(
     string InboxPathFormat = "/api/messages/inbox/{recipient}",
     string ProfilePathFormat = "/api/profiles/{sessionId}");
 
-public sealed class HttpSessionTransport : ISessionMessageTransport, IRecoveryProfileLookup
+public sealed class HttpSessionTransport :
+    ISessionMessageTransport,
+    IRecoveryProfileLookup,
+    IDisposable
 {
     private readonly HttpClient _httpClient;
     private readonly HttpSessionTransportOptions _options;
+    private readonly HttpServiceOrigin _serviceOrigin;
+    private readonly Uri _sendUri;
+    private readonly string _inboxPathFormat;
+    private readonly string _profilePathFormat;
 
-    public HttpSessionTransport(
+    internal HttpSessionTransport(
         HttpClient httpClient,
         HttpSessionTransportOptions options,
         HttpServiceEndpointPolicy? endpointPolicy = null)
     {
-        _httpClient = httpClient;
-        _options = options;
+        _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
+        _options = options ?? throw new ArgumentNullException(nameof(options));
 
         if (string.IsNullOrWhiteSpace(_options.BaseUrl))
         {
@@ -70,9 +77,19 @@ public sealed class HttpSessionTransport : ISessionMessageTransport, IRecoveryPr
 
         try
         {
-            var policy = endpointPolicy ?? HttpServiceEndpointPolicy.Production;
-            var baseUri = policy.RequireOrigin(_options.BaseUrl, "Transport base URL");
-            policy.RequireCompatibleBaseAddress(_httpClient, baseUri, "Session transport");
+            _serviceOrigin = (endpointPolicy ?? HttpServiceEndpointPolicy.Production)
+                .RequireServiceOrigin(_options.BaseUrl, "Transport base URL");
+            _sendUri = _serviceOrigin.Build(
+                _serviceOrigin.RequirePath(_options.SendPath, "Session send path"),
+                "Session send path");
+            _inboxPathFormat = _serviceOrigin.RequireTemplate(
+                _options.InboxPathFormat,
+                "Session inbox path template",
+                "recipient");
+            _profilePathFormat = _serviceOrigin.RequireTemplate(
+                _options.ProfilePathFormat,
+                "Session profile path template",
+                "sessionId");
         }
         catch (ArgumentException exception)
         {
@@ -85,7 +102,7 @@ public sealed class HttpSessionTransport : ISessionMessageTransport, IRecoveryPr
 
     public async Task SendAsync(OutboundMessageEnvelope envelope, CancellationToken cancellationToken = default)
     {
-        var response = await _httpClient.PostAsJsonAsync(_options.SendPath, new
+        using var response = await _httpClient.PostAsJsonAsync(_sendUri, new
         {
             id = envelope.Id?.Value,
             sender = envelope.Sender.Value,
@@ -101,10 +118,16 @@ public sealed class HttpSessionTransport : ISessionMessageTransport, IRecoveryPr
         response.EnsureSuccessStatusCode();
     }
 
+    public void Dispose() => _httpClient.Dispose();
+
     public async Task<IReadOnlyList<InboundMessageEnvelope>> ReceiveAsync(SessionId recipient, CancellationToken cancellationToken = default)
     {
-        var path = _options.InboxPathFormat.Replace("{recipient}", Uri.EscapeDataString(recipient.Value), StringComparison.Ordinal);
-        var payload = await _httpClient.GetFromJsonAsync<List<InboundMessageEnvelopeDto>>(path, cancellationToken).ConfigureAwait(false)
+        var resource = _serviceOrigin.Format(
+            _inboxPathFormat,
+            "recipient",
+            recipient.Value,
+            "Session inbox resource");
+        var payload = await _httpClient.GetFromJsonAsync<List<InboundMessageEnvelopeDto>>(resource, cancellationToken).ConfigureAwait(false)
             ?? [];
 
         return payload.Select(static item => new InboundMessageEnvelope(
@@ -122,11 +145,15 @@ public sealed class HttpSessionTransport : ISessionMessageTransport, IRecoveryPr
 
     public async Task<string?> TryGetDisplayNameAsync(SessionId sessionId, CancellationToken cancellationToken = default)
     {
-        var path = _options.ProfilePathFormat.Replace("{sessionId}", Uri.EscapeDataString(sessionId.Value), StringComparison.Ordinal);
+        var resource = _serviceOrigin.Format(
+            _profilePathFormat,
+            "sessionId",
+            sessionId.Value,
+            "Session profile resource");
 
         try
         {
-            var payload = await _httpClient.GetFromJsonAsync<ProfileLookupDto>(path, cancellationToken).ConfigureAwait(false);
+            var payload = await _httpClient.GetFromJsonAsync<ProfileLookupDto>(resource, cancellationToken).ConfigureAwait(false);
             return string.IsNullOrWhiteSpace(payload?.DisplayName) ? null : payload.DisplayName.Trim();
         }
         catch (HttpRequestException)
@@ -164,7 +191,8 @@ public sealed record SessionStorageMessageTransportOptions(
 
 public sealed class SessionStorageMessageTransport :
     ISessionMessageTransport,
-    IAuthenticatedInboxTransport
+    IAuthenticatedInboxTransport,
+    IDisposable
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -172,15 +200,17 @@ public sealed class SessionStorageMessageTransport :
     private readonly SessionStorageMessageTransportOptions _options;
     private readonly OpaqueSessionStorageDependencies? _opaque;
     private readonly OpaqueInboxDecodeCache _opaqueDecodeCache = new();
+    private readonly Uri _storeUri;
+    private readonly Uri _retrieveUri;
 
-    public SessionStorageMessageTransport(
+    internal SessionStorageMessageTransport(
         HttpClient httpClient,
         SessionStorageMessageTransportOptions options,
         OpaqueSessionStorageDependencies? opaque = null,
         HttpServiceEndpointPolicy? endpointPolicy = null)
     {
-        _httpClient = httpClient;
-        _options = options;
+        _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
+        _options = options ?? throw new ArgumentNullException(nameof(options));
         _opaque = opaque;
 
         if (_options.MetadataMode is not (
@@ -197,9 +227,14 @@ public sealed class SessionStorageMessageTransport :
 
         try
         {
-            var policy = endpointPolicy ?? HttpServiceEndpointPolicy.Production;
-            var baseUri = policy.RequireOrigin(_options.BaseUrl, "Storage base URL");
-            policy.RequireCompatibleBaseAddress(_httpClient, baseUri, "Storage transport");
+            var origin = (endpointPolicy ?? HttpServiceEndpointPolicy.Production)
+                .RequireServiceOrigin(_options.BaseUrl, "Storage base URL");
+            _storeUri = origin.Build(
+                origin.RequirePath(_options.StorePath, "Storage deposit path"),
+                "Storage deposit path");
+            _retrieveUri = origin.Build(
+                origin.RequirePath(_options.RetrievePath, "Storage retrieve path"),
+                "Storage retrieve path");
         }
         catch (ArgumentException exception)
         {
@@ -222,12 +257,14 @@ public sealed class SessionStorageMessageTransport :
 
     public bool UsesOpaqueMetadata => _options.MetadataMode == SessionStorageMetadataMode.OpaqueP03;
 
+    public void Dispose() => _httpClient.Dispose();
+
     public async Task SendAsync(OutboundMessageEnvelope envelope, CancellationToken cancellationToken = default)
     {
         if (UsesOpaqueMetadata)
         {
             var opaque = OpaqueSessionStorageCodec.EncodeDeposit(envelope, _options.TtlMilliseconds, _opaque!);
-            using var opaqueResponse = await PostJsonAsync(_options.StorePath, new
+            using var opaqueResponse = await PostJsonAsync(_storeUri, new
             {
                 deposit_capability = opaque.Capability,
                 placement_key = opaque.PlacementKey,
@@ -256,7 +293,7 @@ public sealed class SessionStorageMessageTransport :
         var timestamp = envelope.CreatedAt.ToUnixTimeMilliseconds();
         var idempotencyKey = BuildIdempotencyKey(envelope, payloadJson);
 
-        using var response = await PostJsonAsync(_options.StorePath, new
+        using var response = await PostJsonAsync(_storeUri, new
         {
             pubkey = envelope.Recipient.Value,
             @namespace = _options.Namespace,
@@ -313,7 +350,7 @@ public sealed class SessionStorageMessageTransport :
         if (UsesOpaqueMetadata)
         {
             var opaque = OpaqueSessionStorageCodec.EncodeRetrieve(identity, _options.TtlMilliseconds, _opaque!);
-            using var response = await PostJsonAsync(_options.RetrievePath, new
+            using var response = await PostJsonAsync(_retrieveUri, new
             {
                 retrieve_capability = opaque.Capability,
                 placement_key = opaque.PlacementKey,
@@ -347,7 +384,7 @@ public sealed class SessionStorageMessageTransport :
 
         try
         {
-            using var response = await PostJsonAsync(_options.RetrievePath, new
+            using var response = await PostJsonAsync(_retrieveUri, new
             {
                 pubkey = recipient.Value,
                 pubkey_ed25519 = Convert.ToHexString(ed25519PublicKey).ToLowerInvariant(),
@@ -447,13 +484,13 @@ public sealed class SessionStorageMessageTransport :
     }
 
     private async Task<HttpResponseMessage> PostJsonAsync<TPayload>(
-        string path,
+        Uri resource,
         TPayload payload,
         CancellationToken cancellationToken)
     {
         var json = JsonSerializer.Serialize(payload, JsonOptions);
         using var content = new StringContent(json, Encoding.UTF8, "application/json");
-        return await _httpClient.PostAsync(path, content, cancellationToken).ConfigureAwait(false);
+        return await _httpClient.PostAsync(resource, content, cancellationToken).ConfigureAwait(false);
     }
 
     private sealed record StoredMessagePayload(

@@ -94,6 +94,12 @@ public interface ICallIceConfigurationProvider
     Task<CallIceConfiguration> GetAsync(SessionId recipient, CancellationToken cancellationToken = default);
 }
 
+public interface ICallRecoveryPhraseProvider
+{
+    Task<string?> GetRecoveryPhraseAsync(
+        CancellationToken cancellationToken = default);
+}
+
 public sealed record HttpCallSignalingTransportOptions(
     string BaseUrl,
     string SignalPath = "/api/calls/signal",
@@ -102,7 +108,10 @@ public sealed record HttpCallSignalingTransportOptions(
     TimeSpan SignalFreshness = default,
     int MaxResponseBytes = 1_048_576);
 
-public sealed class HttpCallSignalingTransport : ICallSignalingTransport, ICallIceConfigurationProvider
+public sealed class HttpCallSignalingTransport :
+    ICallSignalingTransport,
+    ICallIceConfigurationProvider,
+    IDisposable
 {
     private readonly HttpClient _httpClient;
     private readonly HttpCallSignalingTransportOptions _options;
@@ -110,16 +119,20 @@ public sealed class HttpCallSignalingTransport : ICallSignalingTransport, ICallI
     private readonly TimeProvider _timeProvider;
     private readonly TimeSpan _signalFreshness;
     private readonly ConcurrentDictionary<string, long> _replayCache = new(StringComparer.Ordinal);
+    private readonly HttpServiceOrigin _serviceOrigin;
+    private readonly Uri _signalUri;
+    private readonly string _inboxPathFormat;
+    private readonly string _iceServersPathFormat;
 
-    public HttpCallSignalingTransport(
+    internal HttpCallSignalingTransport(
         HttpClient httpClient,
         HttpCallSignalingTransportOptions options,
         Func<CancellationToken, Task<string?>>? recoveryPhraseProvider = null,
         TimeProvider? timeProvider = null,
         HttpServiceEndpointPolicy? endpointPolicy = null)
     {
-        _httpClient = httpClient;
-        _options = options;
+        _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
+        _options = options ?? throw new ArgumentNullException(nameof(options));
         _recoveryPhraseProvider = recoveryPhraseProvider;
         _timeProvider = timeProvider ?? TimeProvider.System;
         _signalFreshness = options.SignalFreshness == default
@@ -133,14 +146,21 @@ public sealed class HttpCallSignalingTransport : ICallSignalingTransport, ICallI
 
         try
         {
-            var policy = endpointPolicy ?? HttpServiceEndpointPolicy.Production;
-            var baseUri = policy.RequireOrigin(
+            _serviceOrigin = (endpointPolicy ?? HttpServiceEndpointPolicy.Production)
+                .RequireServiceOrigin(
                 _options.BaseUrl,
                 "Call signaling base URL");
-            policy.RequireCompatibleBaseAddress(
-                _httpClient,
-                baseUri,
-                "Call signaling transport");
+            _signalUri = _serviceOrigin.Build(
+                _serviceOrigin.RequirePath(_options.SignalPath, "Call signal path"),
+                "Call signal path");
+            _inboxPathFormat = _serviceOrigin.RequireTemplate(
+                _options.InboxPathFormat,
+                "Call inbox path template",
+                "recipient");
+            _iceServersPathFormat = _serviceOrigin.RequireTemplate(
+                _options.IceServersPathFormat,
+                "Call ICE path template",
+                "recipient");
         }
         catch (ArgumentException exception)
         {
@@ -163,19 +183,25 @@ public sealed class HttpCallSignalingTransport : ICallSignalingTransport, ICallI
         var outgoing = _recoveryPhraseProvider is null
             ? envelope
             : await EncryptAndSignAsync(envelope, cancellationToken).ConfigureAwait(false);
-        using var request = CreateRequest(HttpMethod.Post, _options.SignalPath);
+        using var request = CreateRequest(HttpMethod.Post, _signalUri);
         request.Content = JsonContent.Create(outgoing);
         using var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
     }
 
+    public void Dispose() => _httpClient.Dispose();
+
     public async Task<IReadOnlyList<CallSignalEnvelope>> ReceiveAsync(SessionId recipient, CancellationToken cancellationToken = default)
     {
-        var path = _options.InboxPathFormat.Replace("{recipient}", Uri.EscapeDataString(recipient.Value), StringComparison.Ordinal);
+        var resource = _serviceOrigin.Format(
+            _inboxPathFormat,
+            "recipient",
+            recipient.Value,
+            "Call inbox resource");
         if (_recoveryPhraseProvider is null)
         {
             using var unauthenticatedResponse = await _httpClient.GetAsync(
-                path,
+                resource,
                 HttpCompletionOption.ResponseHeadersRead,
                 cancellationToken).ConfigureAwait(false);
             unauthenticatedResponse.EnsureSuccessStatusCode();
@@ -196,7 +222,7 @@ public sealed class HttpCallSignalingTransport : ICallSignalingTransport, ICallI
         }
 
         var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-        using var request = CreateRequest(HttpMethod.Get, path);
+        using var request = CreateRequest(HttpMethod.Get, resource);
         request.Headers.TryAddWithoutValidation("X-Deep-Ed25519", recipientIdentity.Ed25519PublicKeyHex);
         request.Headers.TryAddWithoutValidation("X-Deep-Timestamp", timestamp.ToString(System.Globalization.CultureInfo.InvariantCulture));
         request.Headers.TryAddWithoutValidation(
@@ -244,11 +270,12 @@ public sealed class HttpCallSignalingTransport : ICallSignalingTransport, ICallI
         }
 
         var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-        var path = _options.IceServersPathFormat.Replace(
-            "{recipient}",
-            Uri.EscapeDataString(recipient.Value),
-            StringComparison.Ordinal);
-        using var request = CreateRequest(HttpMethod.Get, path);
+        var resource = _serviceOrigin.Format(
+            _iceServersPathFormat,
+            "recipient",
+            recipient.Value,
+            "Call ICE resource");
+        using var request = CreateRequest(HttpMethod.Get, resource);
         request.Headers.TryAddWithoutValidation("X-Deep-Ed25519", identity.Ed25519PublicKeyHex);
         request.Headers.TryAddWithoutValidation("X-Deep-Timestamp", timestamp.ToString(System.Globalization.CultureInfo.InvariantCulture));
         request.Headers.TryAddWithoutValidation(
@@ -264,7 +291,8 @@ public sealed class HttpCallSignalingTransport : ICallSignalingTransport, ICallI
                ?? throw new InvalidOperationException("The call service returned an empty ICE configuration.");
     }
 
-    private static HttpRequestMessage CreateRequest(HttpMethod method, string path) => new(method, path);
+    private static HttpRequestMessage CreateRequest(HttpMethod method, Uri resource) =>
+        new(method, resource);
 
     private async Task<CallSignalEnvelope> EncryptAndSignAsync(
         CallSignalEnvelope envelope,

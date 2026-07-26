@@ -92,7 +92,7 @@ public sealed record SessionStorageGroupSyncTransportOptions(
     string StorePath = "/storage/store",
     string RetrievePath = "/storage/retrieve");
 
-public sealed class SessionStorageGroupSyncTransport : IGroupSyncTransport
+public sealed class SessionStorageGroupSyncTransport : IGroupSyncTransport, IDisposable
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -100,14 +100,16 @@ public sealed class SessionStorageGroupSyncTransport : IGroupSyncTransport
     private readonly SessionStorageGroupSyncTransportOptions options;
     private readonly ConcurrentDictionary<string, string> stateLastHashes = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string> messageLastHashes = new(StringComparer.Ordinal);
+    private readonly Uri storeUri;
+    private readonly Uri retrieveUri;
 
-    public SessionStorageGroupSyncTransport(
+    internal SessionStorageGroupSyncTransport(
         HttpClient httpClient,
         SessionStorageGroupSyncTransportOptions options,
         HttpServiceEndpointPolicy? endpointPolicy = null)
     {
-        this.httpClient = httpClient;
-        this.options = options;
+        this.httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
+        this.options = options ?? throw new ArgumentNullException(nameof(options));
 
         if (string.IsNullOrWhiteSpace(options.BaseUrl))
         {
@@ -116,9 +118,14 @@ public sealed class SessionStorageGroupSyncTransport : IGroupSyncTransport
 
         try
         {
-            var policy = endpointPolicy ?? HttpServiceEndpointPolicy.Production;
-            var baseUri = policy.RequireOrigin(options.BaseUrl, "Storage base URL");
-            policy.RequireCompatibleBaseAddress(httpClient, baseUri, "Group sync transport");
+            var origin = (endpointPolicy ?? HttpServiceEndpointPolicy.Production)
+                .RequireServiceOrigin(options.BaseUrl, "Storage base URL");
+            storeUri = origin.Build(
+                origin.RequirePath(options.StorePath, "Group storage deposit path"),
+                "Group storage deposit path");
+            retrieveUri = origin.Build(
+                origin.RequirePath(options.RetrievePath, "Group storage retrieve path"),
+                "Group storage retrieve path");
         }
         catch (ArgumentException exception)
         {
@@ -151,7 +158,7 @@ public sealed class SessionStorageGroupSyncTransport : IGroupSyncTransport
 
         foreach (var member in targetMembers)
         {
-            using var response = await PostJsonAsync(options.StorePath, new
+            using var response = await PostJsonAsync(storeUri, new
             {
                 pubkey = member.Value,
                 @namespace = options.GroupStateNamespace,
@@ -209,7 +216,7 @@ public sealed class SessionStorageGroupSyncTransport : IGroupSyncTransport
         var payloadJson = JsonSerializer.Serialize(payload, JsonOptions);
         var timestamp = envelope.CreatedAt.ToUnixTimeMilliseconds();
 
-        using var response = await PostJsonAsync(options.StorePath, new
+        using var response = await PostJsonAsync(storeUri, new
         {
             pubkey = envelope.GroupId.Value,
             @namespace = options.GroupMessagesNamespace,
@@ -256,13 +263,13 @@ public sealed class SessionStorageGroupSyncTransport : IGroupSyncTransport
         CancellationToken cancellationToken)
     {
         using var response = CanRetrieveWithoutSignature(@namespace)
-            ? await PostJsonAsync(options.RetrievePath, new
+            ? await PostJsonAsync(retrieveUri, new
             {
                 pubkey,
                 @namespace,
                 last_hash = lastHash
             }, cancellationToken).ConfigureAwait(false)
-            : await PostJsonAsync(options.RetrievePath, new
+            : await PostJsonAsync(retrieveUri, new
             {
                 pubkey,
                 @namespace,
@@ -280,14 +287,16 @@ public sealed class SessionStorageGroupSyncTransport : IGroupSyncTransport
         @namespace == -10 || (@namespace < 0 && (-@namespace % 20) == 1);
 
     private async Task<HttpResponseMessage> PostJsonAsync<TPayload>(
-        string path,
+        Uri resource,
         TPayload payload,
         CancellationToken cancellationToken)
     {
         var json = JsonSerializer.Serialize(payload, JsonOptions);
         using var content = new StringContent(json, Encoding.UTF8, "application/json");
-        return await httpClient.PostAsync(path, content, cancellationToken).ConfigureAwait(false);
+        return await httpClient.PostAsync(resource, content, cancellationToken).ConfigureAwait(false);
     }
+
+    public void Dispose() => httpClient.Dispose();
 
     private async Task PublishGroupMessageWakeupsAsync(
         OutboundGroupMessageEnvelope envelope,
@@ -313,7 +322,7 @@ public sealed class SessionStorageGroupSyncTransport : IGroupSyncTransport
 
         foreach (var recipient in recipients)
         {
-            using var response = await PostJsonAsync(options.StorePath, new
+            using var response = await PostJsonAsync(storeUri, new
             {
                 pubkey = recipient.Value,
                 @namespace = options.GroupStateNamespace,
