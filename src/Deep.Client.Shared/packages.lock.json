@@ -13,6 +13,12 @@
           "Sodium.Core": "1.4.1"
         }
       },
+      "Deep.Protocol.MembershipRoutes": {
+        "type": "Direct",
+        "requested": "[0.1.0-p15.local, 0.1.0-p15.local]",
+        "resolved": "0.1.0-p15.local",
+        "contentHash": "ejxZx+b4Um6rd8NrUdUhPKdPYSxYPmkOVa6G/RsAjnHuwEfce7IZXTt5tu5LbSAmM5QfM2gH0vNt35wDwvLKiQ=="
+      },
       "Deep.Protocol.ProfileCarrier": {
         "type": "Direct",
         "requested": "[0.2.0-p14.69a712a, 0.2.0-p14.69a712a]",

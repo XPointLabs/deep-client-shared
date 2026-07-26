@@ -46,9 +46,10 @@ Use `deep-protocol` for protocol and crypto semantics. Do not recreate protocol 
 - `StubSessionBackend` exists for deterministic unit/UI tests only.
 - SQLite persistence is the production local-store shape; upstream client database schemas are not copied directly.
 - Some crypto-sensitive behavior is represented behind protocol/transport abstractions until production adapters are available.
-- P07 membership trust is a dormant local contract/storage slice. It survives
-  account sign-out as installation state, but has no production verifier,
-  runtime registration, fetch source, or platform UX.
+- P07 membership LKG is now consumed by a portable verified route-catalog provider. MRL1 members
+  are selected locally as exact ingress/core/storage routes and disjoint retrieve fallback never
+  sends prior route IDs. Production platform registration remains disabled until an external
+  signer/indexer publishes a real artifact and the app receives reviewed genesis/delegation pins.
 - Group and call behavior currently covers launch-critical scaffolding/state, not every upstream management or media edge.
 
 ## Non-Negotiable Runtime Parity

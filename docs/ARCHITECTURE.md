@@ -100,16 +100,26 @@ storage I/O. Provider, crypto, and server error text never crosses the client bo
 - Current signaling transport is in-memory and intended for deterministic runtime/tests until secure network signaling is wired.
 - SDP/ICE payload objects are compatibility-level placeholders; native platform WebRTC media engines are a parity follow-up.
 - Parity target is to connect secure signaling + native media stack + observability export without changing shared call state semantics.
-# Dormant membership trust slice (P07)
+# Membership trust and local route selection
 
 `MembershipTrustService` is a portable, fixture-driven trust reducer for the
-pinned P04 canonical contract. It is deliberately absent from `ClientRuntime`
-and every platform composition. Installation-scoped profiles keep independent
+pinned P04 canonical contract. Installation-scoped profiles keep independent
 authority, bridge, and membership LKG chains in SQLite or the in-memory store.
 Immutable records and CAS heads bind all persisted metadata with a
 domain-separated SHA-256 corruption digest.
 
-The digest detects accidental corruption only. This slice does not claim local
-tamper resistance, approved production cryptography, live bootstrap, transport
-availability, or production readiness. Both membership and legacy rollback
-feature flags remain disabled.
+`VerifiedMembershipRouteCatalogProvider` adds the activation boundary: it fetches an opaque
+artifact only from migration bootstrap anchors, quorum-verifies the signed membership successor,
+requires a complete sorted MRL1 catalog with one proof per member, and writes the verified artifact
+to a bounded LKG cache. A directory outage may use that still-valid cache; a malformed, unsigned,
+expired, rollback or fork candidate fails closed and never falls back to cache.
+
+`XNodeRpcClient` can then select ingress/core/storage hops locally. Retrieve fallback keeps the
+first route only in local memory and uses a disjoint second set from at least six members. No
+mailbox target, route request or prior route IDs are disclosed to an ingress. Store dispatch still
+has outcome-unknown/no-redispatch semantics.
+
+Platform composition remains disabled until the external production signer/indexer publishes a
+real artifact and MAUI supplies its pinned trust profile, verifier and durable cache path.
+`RequireMembershipRouteSelection` is the release fail-closed switch; the legacy ingress-selected
+route remains a migration-only compatibility path while that blocker is open.

@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Deep.Client.Shared.Domain;
 using Deep.Client.Shared.Persistence;
+using Deep.Protocol.DeepExtension.MembershipRoutes;
 using Sodium;
 
 namespace Deep.Client.Shared.Services;
@@ -75,7 +76,8 @@ public sealed record XNodeRpcClientOptions(
     string RpcPath = "/api/session/rpc",
     TimeSpan ResponseFreshness = default,
     IReadOnlyList<string>? TrustedRouterIds = null,
-    int MaxResponseBytes = 8_388_608);
+    int MaxResponseBytes = 8_388_608,
+    bool RequireMembershipRouteSelection = false);
 
 public sealed class StorageDispatchOutcomeUnknownException : IOException
 {
@@ -101,16 +103,19 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
     private readonly TimeProvider _timeProvider;
     private readonly TimeSpan _responseFreshness;
     private readonly int _maxResponseBytes;
+    private readonly IMembershipRouteCatalogProvider? _membershipRouteCatalogProvider;
     private TransportRouteSnapshot? _currentRoute;
 
     public XNodeRpcClient(
         HttpClient httpClient,
         XNodeRpcClientOptions options,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        IMembershipRouteCatalogProvider? membershipRouteCatalogProvider = null)
     {
         _httpClient = httpClient;
         _options = options;
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _membershipRouteCatalogProvider = membershipRouteCatalogProvider;
         _responseFreshness = options.ResponseFreshness == default
             ? DefaultResponseFreshness
             : options.ResponseFreshness;
@@ -149,6 +154,12 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
                 nameof(options),
                 "Router response byte limit must be between 1 KiB and 64 MiB.");
         }
+        if (options.RequireMembershipRouteSelection && membershipRouteCatalogProvider is null)
+        {
+            throw new ArgumentException(
+                "Membership route selection is required but no verified catalog provider is configured.",
+                nameof(membershipRouteCatalogProvider));
+        }
     }
 
     public TransportRouteSnapshot? CurrentRoute => Volatile.Read(ref _currentRoute);
@@ -157,6 +168,18 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
         string targetKey,
         CancellationToken cancellationToken = default)
     {
+        if (_membershipRouteCatalogProvider is not null)
+        {
+            var catalog = await _membershipRouteCatalogProvider.GetCatalogAsync(cancellationToken)
+                .ConfigureAwait(false);
+            var selected = MembershipRouteSelector.Select(
+                catalog,
+                RandomNumberGenerator.GetBytes(32));
+            var route = ToRouteSnapshot(targetKey, catalog, selected);
+            Volatile.Write(ref _currentRoute, route);
+            return route;
+        }
+
         try
         {
             var routeNonce = NewRouteNonce();
@@ -190,6 +213,20 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
         string targetKey,
         CancellationToken cancellationToken = default)
     {
+        if (_membershipRouteCatalogProvider is not null)
+        {
+            return await PostMembershipStorageAsync(
+                method,
+                body,
+                targetKey,
+                cancellationToken).ConfigureAwait(false);
+        }
+        if (_options.RequireMembershipRouteSelection)
+        {
+            throw new MembershipRouteCatalogException(
+                "Verified membership routing is required and no catalog is available.");
+        }
+
         var storagePath = method switch
         {
             "storage_store" => "/storage/store",
@@ -275,39 +312,183 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
                 continue;
             }
 
-            if (!onionResult.TryGetProperty("onionResponse", out var onionResponseElement))
-            {
-                throw new RouterResponseValidationException(
-                    "Deep onion route did not return an encrypted storage response.");
-            }
-
-            OnionResponseEnvelope onionResponse;
             try
             {
-                onionResponse = onionResponseElement.Deserialize<OnionResponseEnvelope>(JsonOptions)
-                    ?? throw new JsonException("Missing onion response body.");
+                return DecryptStorageResponse(onionResult, onion.ResponsePrivateKey);
             }
-            catch (JsonException exception)
+            finally
             {
-                throw new RouterResponseValidationException(
-                    "Deep onion route returned an invalid encrypted response.",
-                    exception);
+                CryptographicOperations.ZeroMemory(onion.ResponsePrivateKey);
             }
-
-            var decrypted = OnionRouting.DecryptResponse(onionResponse, onion.ResponsePrivateKey);
-            if (decrypted.TryGetProperty("storageStatusCode", out var statusElement)
-                && statusElement.TryGetInt32(out var statusCode)
-                && statusCode is < 200 or > 299)
-            {
-                throw new RouterResponseValidationException($"Storage RPC failed with status {statusCode}.");
-            }
-
-            return decrypted.TryGetProperty("storage", out var storage)
-                ? storage.Clone()
-                : JsonSerializer.SerializeToElement(new { });
         }
 
         throw new HttpRequestException("The bounded disjoint XNode fallback failed.", firstFailure);
+    }
+
+    private async Task<JsonElement> PostMembershipStorageAsync(
+        string method,
+        object body,
+        string targetKey,
+        CancellationToken cancellationToken)
+    {
+        var storagePath = method switch
+        {
+            "storage_store" => "/storage/store",
+            "storage_retrieve" => "/storage/retrieve",
+            _ => throw new ArgumentOutOfRangeException(
+                nameof(method),
+                method,
+                "Unsupported routed storage method.")
+        };
+        var catalog = await _membershipRouteCatalogProvider!.GetCatalogAsync(cancellationToken)
+            .ConfigureAwait(false);
+        if (catalog.Members.Count < MembershipRouteSelector.RequiredDisjointMembers)
+        {
+            throw new MembershipRouteCatalogException(
+                "At least six quorum-verified route members are required.");
+        }
+
+        var excludedRouterIds = new HashSet<string>(StringComparer.Ordinal);
+        Exception? firstFailure = null;
+        for (var attempt = 0; attempt < 2; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var selected = MembershipRouteSelector.Select(
+                catalog,
+                RandomNumberGenerator.GetBytes(32),
+                excludedRouterIds);
+            var routeSnapshot = ToRouteSnapshot(targetKey, catalog, selected);
+            Volatile.Write(ref _currentRoute, routeSnapshot);
+            var firstHop = ConfigureRouter(new PinnedRouterEndpoint(
+                routeSnapshot.Nodes[0].RpcEndpoint,
+                routeSnapshot.Nodes[0].RouterId));
+            var onion = OnionRouting.BuildStorageRequest(routeSnapshot.Nodes, storagePath, body);
+            try
+            {
+                JsonElement onionResult;
+                try
+                {
+                    onionResult = await PostRouterRpcAsync(
+                        firstHop,
+                        "onion_request",
+                        ToJsonElement(onion.Request),
+                        cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception exception) when (
+                    method == "storage_store" && IsAmbiguousTransportFailure(exception))
+                {
+                    throw new StorageDispatchOutcomeUnknownException();
+                }
+                catch (Exception exception) when (
+                    attempt == 0 &&
+                    method == "storage_retrieve" &&
+                    IsAmbiguousTransportFailure(exception))
+                {
+                    firstFailure = exception;
+                    foreach (var node in routeSnapshot.Nodes)
+                        excludedRouterIds.Add(node.RouterId);
+                    continue;
+                }
+
+                return DecryptStorageResponse(onionResult, onion.ResponsePrivateKey);
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(onion.ResponsePrivateKey);
+            }
+        }
+
+        throw new HttpRequestException(
+            "The local disjoint membership route fallback failed.",
+            firstFailure);
+    }
+
+    private static TransportRouteSnapshot ToRouteSnapshot(
+        string targetKey,
+        MembershipRouteCatalogSnapshot catalog,
+        IReadOnlyList<MembershipRouteCatalogMember> selected)
+    {
+        var nodes = selected.Select((member, index) =>
+        {
+            var descriptor = member.Descriptor;
+            var endpoint = new Uri(descriptor.RpcEndpoint, UriKind.Absolute);
+            return new TransportRouteNode(
+                index,
+                Convert.ToHexStringLower(descriptor.RouterId.Span),
+                endpoint.Authority,
+                IsReachable: true,
+                ToCapabilityNames(descriptor.Capabilities),
+                Convert.ToHexStringLower(descriptor.X25519PublicKey.Span),
+                descriptor.RpcEndpoint,
+                endpoint.Host,
+                "",
+                endpoint.Port,
+                DateTimeOffset.FromUnixTimeSeconds(checked((long)descriptor.ValidFromUnixSeconds)),
+                DateTimeOffset.FromUnixTimeSeconds(checked((long)descriptor.ValidUntilUnixSeconds)),
+                "membership-route-v1",
+                "membership-merkle-quorum-v1",
+                Convert.ToHexStringLower(catalog.CanonicalMembershipHash));
+        }).ToArray();
+        return new TransportRouteSnapshot(
+            "membership-onion-storage",
+            RedactTargetKey(targetKey),
+            DateTimeOffset.UtcNow,
+            nodes);
+    }
+
+    private static IReadOnlyList<string> ToCapabilityNames(
+        MembershipRouteCapability capabilities)
+    {
+        var names = new List<string>(4);
+        if (capabilities.HasFlag(MembershipRouteCapability.SessionRpc))
+            names.Add("session-rpc");
+        if (capabilities.HasFlag(MembershipRouteCapability.OnionV1))
+            names.Add("onion-v1");
+        if (capabilities.HasFlag(MembershipRouteCapability.Storage))
+            names.Add("storage");
+        if (capabilities.HasFlag(MembershipRouteCapability.BridgeFetch))
+            names.Add("bridge-fetch");
+        return names;
+    }
+
+    private static JsonElement DecryptStorageResponse(
+        JsonElement onionResult,
+        byte[] responsePrivateKey)
+    {
+        if (!onionResult.TryGetProperty("onionResponse", out var onionResponseElement))
+        {
+            throw new RouterResponseValidationException(
+                "Deep onion route did not return an encrypted storage response.");
+        }
+
+        OnionResponseEnvelope onionResponse;
+        try
+        {
+            onionResponse = onionResponseElement.Deserialize<OnionResponseEnvelope>(JsonOptions)
+                ?? throw new JsonException("Missing onion response body.");
+        }
+        catch (JsonException exception)
+        {
+            throw new RouterResponseValidationException(
+                "Deep onion route returned an invalid encrypted response.",
+                exception);
+        }
+
+        var decrypted = OnionRouting.DecryptResponse(onionResponse, responsePrivateKey);
+        if (decrypted.TryGetProperty("storageStatusCode", out var statusElement)
+            && statusElement.TryGetInt32(out var statusCode)
+            && statusCode is < 200 or > 299)
+        {
+            throw new RouterResponseValidationException($"Storage RPC failed with status {statusCode}.");
+        }
+
+        return decrypted.TryGetProperty("storage", out var storage)
+            ? storage.Clone()
+            : JsonSerializer.SerializeToElement(new { });
     }
 
     private static bool IsAmbiguousTransportFailure(Exception exception) => exception switch

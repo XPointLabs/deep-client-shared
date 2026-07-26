@@ -1,0 +1,10 @@
+{
+  "packageId": "Deep.Protocol.MembershipRoutes",
+  "packageVersion": "0.1.0-p15.local",
+  "sourceRepository": "../deep-protocol",
+  "sourceCommit": "f224a96d3208c8f85989375b56d322191e71f4e5",
+  "publication": "local-only-not-published",
+  "packageFile": "packages/Deep.Protocol.MembershipRoutes.0.1.0-p15.local.nupkg",
+  "packageBytes": 12064,
+  "packageSha256": "fe7b5e638c1ab5e7505f45bb7d5804048d2a4ad273c88dd75d7d46ae80db641a"
+}
