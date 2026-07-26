@@ -15,29 +15,49 @@ so wiring the repository there would persist plaintext and is forbidden.
 
 `ClientRuntime` creates the dispatcher only when
 `PersistentTransportOutboxEnabled` is true, the local store implements
-`ITransportOutboxRepository`, and an adapter is supplied explicitly. Any
-partial configuration fails closed. The dispatcher performs one bounded,
-caller-owned pass and never creates a polling loop, recurring timer, or
-background wakeup. The platform lifecycle remains responsible for deciding
-when to run a pass.
+`ITransportOutboxRepository`, and an adapter implementing
+`IBoundedTransportOutboxAdapter` is supplied explicitly. The adapter must
+declare a positive maximum dispatch duration of no more than five minutes.
+Any partial or unbounded configuration fails closed. The dispatcher performs
+one bounded, caller-owned pass and never creates a polling loop, recurring
+timer, or background wakeup. The platform lifecycle remains responsible for
+deciding when to run a pass.
 
-Ready-list admission excludes items whose bounded attempt budget is exhausted
-before ordering and `LIMIT`, so an old exhausted item cannot starve later work.
-Each adapter call has a bounded cooperative timeout using a linked cancellation
-token, capped by the item lifetime remaining immediately before I/O. The
-dispatcher awaits cancellation completion and disposes the timeout source before
-moving on; adapters must honor cancellation. The clock is refreshed per item and
-immediately before adapter I/O, preventing a stale batch timestamp from
-dispatching an already expired bundle.
+Ready-list admission includes only `Prepared` and explicitly `Accepted` items
+and excludes items whose bounded attempt budget is exhausted before ordering
+and `LIMIT`. A persisted `Attempted` item is outcome-unknown: adapter dispatch
+may have happened, so it is quarantined from automatic redispatch across
+process restart until expiry. This uses the existing v9 state model and requires
+no schema migration.
 
-An attempt is committed before adapter I/O. Adapter exceptions become only a
-typed retry count so endpoint or identifier text cannot escape through this
-boundary. `Accepted` is persisted as retryable and is never promoted to
-`Durable` without separate bounded durable evidence. Cancellation propagates;
-the precommitted attempt remains retryable. Commit-outcome-unknown errors are
-reconciled by scoped point read before more I/O. Bundles that expire while an
-adapter is running are marked expired instead of receiving a late success
-claim.
+Each adapter call is raced against the smallest of the dispatcher timeout, the
+adapter's declared bound, and the item lifetime remaining immediately before
+I/O. Timeout or caller cancellation requests adapter cancellation but never
+awaits a non-cooperative task. The caller therefore returns bounded even if the
+adapter ignores cancellation. At most four such orphan tasks are retained by
+default; capacity is reported without starting more I/O, while another ready
+item can progress whenever capacity remains. A logical item is already
+persistently quarantined before I/O and is also keyed in the live orphan set,
+so it cannot be redispatched while its orphan is alive.
+
+An attempt is committed before adapter I/O. Adapter exceptions, missing
+receipts, and timeouts become only a typed outcome-unknown count so endpoint or
+identifier text cannot escape through this boundary. A detached task is always
+observed. A valid late receipt is reconciled through the existing compare-and-
+swap transitions to `Accepted` and, when separate evidence exists, `Durable`;
+a late fault leaves the attempt quarantined. `Accepted` remains retryable and
+is never promoted to `Durable` without bounded durable evidence.
+Commit-outcome-unknown errors are reconciled by scoped point read before more
+I/O. Bundles that expire while an adapter is running are marked expired instead
+of receiving a late success claim.
+
+No current production adapter supplies a durable receipt-status query or is
+declared production-ready. Consequently both default profiles keep
+`PersistentTransportOutboxEnabled` disabled. A future restart reconciliation
+that releases an outcome-unknown attempt before TTL requires an authenticated,
+deduplication-bound adapter receipt query; without that capability the runtime
+must retain the persisted quarantine and must not infer failure from process
+restart.
 
 ## State and identity model
 

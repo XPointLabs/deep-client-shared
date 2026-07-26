@@ -38,6 +38,19 @@ public sealed class TransportOutboxDispatcherTests
     }
 
     [Fact]
+    public void RuntimeRejectsEnabledAdapterWithoutBoundedCompletionContract()
+    {
+        var exception = Assert.Throws<InvalidOperationException>(() => new ClientRuntime(
+            new InMemorySessionStore(),
+            ClientFeatureFlags.Defaults with { PersistentTransportOutboxEnabled = true },
+            new FrozenClock(Now),
+            new StubSessionBackend(),
+            transportOutboxAdapter: new UnboundedAdapter()));
+
+        Assert.Contains("does not declare bounded completion", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task DurableReceiptPersistsExactOpaqueBundleAndDoesNotRedispatch()
     {
         var store = new InMemorySessionStore();
@@ -66,7 +79,7 @@ public sealed class TransportOutboxDispatcherTests
     }
 
     [Fact]
-    public async Task AdapterFailureIsRedactedAndRetriedWithNewAttemptAfterBackoff()
+    public async Task AdapterFailureIsRedactedAndPersistentlyQuarantined()
     {
         var store = new InMemorySessionStore();
         var clock = new FrozenClock(Now);
@@ -82,23 +95,20 @@ public sealed class TransportOutboxDispatcherTests
         var deferred = await runtime.TransportOutbox.DispatchReadyAsync(item.AccountScope);
         var afterFailure = await store.ReadTransportOutboxAsync(item.AccountScope, item.LogicalId);
 
-        Assert.Equal(1, failed.RetryScheduledCount);
+        Assert.Equal(1, failed.OutcomeUnknownCount);
         Assert.Equal(0, deferred.AttemptedCount);
         Assert.Equal(TransportOutboxState.Attempted, afterFailure.Item?.State);
         Assert.Single(afterFailure.Item!.Attempts);
 
         adapter.Failure = null;
         clock.Advance(TransportOutboxDispatcher.DefaultRetryDelay);
-        var retried = await runtime.TransportOutbox.DispatchReadyAsync(item.AccountScope);
-        var durable = await store.ReadTransportOutboxAsync(item.AccountScope, item.LogicalId);
+        var quarantined = await runtime.TransportOutbox.DispatchReadyAsync(item.AccountScope);
+        var persisted = await store.ReadTransportOutboxAsync(item.AccountScope, item.LogicalId);
 
-        Assert.Equal(1, retried.DurableCount);
-        Assert.Equal(2, adapter.Calls);
-        Assert.Equal(TransportOutboxState.Durable, durable.Item?.State);
-        Assert.Equal(2, durable.Item?.Attempts.Count);
-        Assert.NotEqual(
-            durable.Item!.Attempts[0].AttemptId.ToArray(),
-            durable.Item.Attempts[1].AttemptId.ToArray());
+        Assert.Equal(0, quarantined.AttemptedCount);
+        Assert.Equal(1, adapter.Calls);
+        Assert.Equal(TransportOutboxState.Attempted, persisted.Item?.State);
+        Assert.Single(persisted.Item!.Attempts);
     }
 
     [Fact]
@@ -147,7 +157,7 @@ public sealed class TransportOutboxDispatcherTests
     }
 
     [Fact]
-    public async Task CooperativeAttemptTimeoutStopsAdapterAndNextPassCanRetry()
+    public async Task CooperativeAttemptTimeoutStopsAdapterAndQuarantinesAttempt()
     {
         var store = new InMemorySessionStore();
         var clock = new FrozenClock(Now);
@@ -165,7 +175,7 @@ public sealed class TransportOutboxDispatcherTests
         var timedOut = await dispatcher.DispatchReadyAsync(item.AccountScope);
         stopwatch.Stop();
 
-        Assert.Equal(1, timedOut.RetryScheduledCount);
+        Assert.Equal(1, timedOut.OutcomeUnknownCount);
         Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(2));
         await adapter.CancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(1));
         Assert.Equal(1, adapter.CompletedCalls);
@@ -173,10 +183,10 @@ public sealed class TransportOutboxDispatcherTests
         var retried = await dispatcher.DispatchReadyAsync(item.AccountScope);
         var persisted = await dispatcher.ReadAsync(item.AccountScope, item.LogicalId);
 
-        Assert.Equal(1, retried.DurableCount);
-        Assert.Equal(2, adapter.Calls);
-        Assert.Equal(2, adapter.CompletedCalls);
-        Assert.Equal(TransportOutboxState.Durable, persisted.Item?.State);
+        Assert.Equal(0, retried.AttemptedCount);
+        Assert.Equal(1, adapter.Calls);
+        Assert.Equal(1, adapter.CompletedCalls);
+        Assert.Equal(TransportOutboxState.Attempted, persisted.Item?.State);
     }
 
     [Fact]
@@ -205,9 +215,81 @@ public sealed class TransportOutboxDispatcherTests
         var result = await dispatcher.DispatchReadyAsync(item.AccountScope);
         stopwatch.Stop();
 
-        Assert.Equal(1, result.RetryScheduledCount);
+        Assert.Equal(1, result.OutcomeUnknownCount);
         Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(1));
         await adapter.CancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(1));
+    }
+
+    [Fact]
+    public async Task NeverCompletingAdapterReturnsBoundedDoesNotRedispatchAndAllowsNextItem()
+    {
+        var store = new InMemorySessionStore();
+        var adapter = new NeverThenSuccessAdapter();
+        var dispatcher = new TransportOutboxDispatcher(
+            store,
+            adapter,
+            new FrozenClock(Now),
+            attemptTimeout: TimeSpan.FromMilliseconds(50),
+            maxOutstandingOrphans: 2);
+        var first = Prepared(logical: 0x21);
+        var second = Prepared(logical: 0x22);
+        await dispatcher.PrepareAsync(first);
+        await dispatcher.PrepareAsync(second);
+
+        var stopwatch = Stopwatch.StartNew();
+        var result = await dispatcher.DispatchReadyAsync(first.AccountScope, limit: 2)
+            .WaitAsync(TimeSpan.FromSeconds(2));
+        stopwatch.Stop();
+
+        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(1));
+        Assert.Equal(1, result.OutcomeUnknownCount);
+        Assert.Equal(1, result.DurableCount);
+        Assert.Equal(2, adapter.Calls);
+        Assert.Equal(
+            TransportOutboxState.Attempted,
+            (await dispatcher.ReadAsync(first.AccountScope, first.LogicalId)).Item?.State);
+        Assert.Equal(
+            TransportOutboxState.Durable,
+            (await dispatcher.ReadAsync(second.AccountScope, second.LogicalId)).Item?.State);
+
+        var later = await dispatcher.DispatchReadyAsync(first.AccountScope);
+        Assert.Equal(0, later.AttemptedCount);
+        Assert.Equal(2, adapter.Calls);
+    }
+
+    [Fact]
+    public async Task LateDurableReceiptReconcilesQuarantinedAttempt()
+    {
+        var store = new InMemorySessionStore();
+        var adapter = new LateReceiptAdapter();
+        var dispatcher = new TransportOutboxDispatcher(
+            store,
+            adapter,
+            new FrozenClock(Now),
+            attemptTimeout: TimeSpan.FromMilliseconds(50));
+        var item = Prepared();
+        await dispatcher.PrepareAsync(item);
+
+        var timedOut = await dispatcher.DispatchReadyAsync(item.AccountScope)
+            .WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal(1, timedOut.OutcomeUnknownCount);
+
+        adapter.CompleteDurable();
+        TransportOutboxReadSnapshot persisted;
+        var deadline = Stopwatch.StartNew();
+        do
+        {
+            persisted = await dispatcher.ReadAsync(item.AccountScope, item.LogicalId);
+            if (persisted.Item?.State == TransportOutboxState.Durable)
+            {
+                break;
+            }
+            await Task.Delay(10);
+        }
+        while (deadline.Elapsed < TimeSpan.FromSeconds(1));
+
+        Assert.Equal(TransportOutboxState.Durable, persisted.Item?.State);
+        Assert.Equal(1, adapter.Calls);
     }
 
     [Fact]
@@ -373,8 +455,10 @@ public sealed class TransportOutboxDispatcherTests
         }
     }
 
-    private sealed class RecordingAdapter : ITransportOutboxAdapter
+    private sealed class RecordingAdapter : IBoundedTransportOutboxAdapter
     {
+        public TimeSpan MaximumDispatchDuration => TimeSpan.FromSeconds(1);
+
         public int Calls { get; private set; }
 
         public byte[]? LastBundle { get; private set; }
@@ -408,8 +492,10 @@ public sealed class TransportOutboxDispatcherTests
         }
     }
 
-    private sealed class TimeoutThenSuccessAdapter : ITransportOutboxAdapter
+    private sealed class TimeoutThenSuccessAdapter : IBoundedTransportOutboxAdapter
     {
+        public TimeSpan MaximumDispatchDuration => TimeSpan.FromSeconds(1);
+
         private int calls;
         private int completedCalls;
 
@@ -451,8 +537,10 @@ public sealed class TransportOutboxDispatcherTests
         }
     }
 
-    private sealed class AlwaysWaitingAdapter : ITransportOutboxAdapter
+    private sealed class AlwaysWaitingAdapter : IBoundedTransportOutboxAdapter
     {
+        public TimeSpan MaximumDispatchDuration => TimeSpan.FromSeconds(1);
+
         public TaskCompletionSource Started { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -477,6 +565,54 @@ public sealed class TransportOutboxDispatcherTests
                 }
             }
         }
+    }
+
+    private sealed class UnboundedAdapter : ITransportOutboxAdapter
+    {
+        public Task<TransportOutboxAdapterReceipt> DispatchAsync(
+            TransportOutboxDispatchRequest request,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(TransportOutboxAdapterReceipt.Durable([0x71], [0x72]));
+    }
+
+    private sealed class NeverThenSuccessAdapter : IBoundedTransportOutboxAdapter
+    {
+        private int calls;
+        private readonly TaskCompletionSource<TransportOutboxAdapterReceipt> never =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TimeSpan MaximumDispatchDuration => TimeSpan.FromSeconds(1);
+
+        public int Calls => Volatile.Read(ref calls);
+
+        public Task<TransportOutboxAdapterReceipt> DispatchAsync(
+            TransportOutboxDispatchRequest request,
+            CancellationToken cancellationToken = default) =>
+            Interlocked.Increment(ref calls) == 1
+                ? never.Task
+                : Task.FromResult(TransportOutboxAdapterReceipt.Durable([0x81], [0x82]));
+    }
+
+    private sealed class LateReceiptAdapter : IBoundedTransportOutboxAdapter
+    {
+        private readonly TaskCompletionSource<TransportOutboxAdapterReceipt> receipt =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int calls;
+
+        public TimeSpan MaximumDispatchDuration => TimeSpan.FromSeconds(1);
+
+        public int Calls => Volatile.Read(ref calls);
+
+        public Task<TransportOutboxAdapterReceipt> DispatchAsync(
+            TransportOutboxDispatchRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            Interlocked.Increment(ref calls);
+            return receipt.Task;
+        }
+
+        public void CompleteDurable() =>
+            receipt.TrySetResult(TransportOutboxAdapterReceipt.Durable([0x91], [0x92]));
     }
 
     private sealed class ElapsedClock : IClock

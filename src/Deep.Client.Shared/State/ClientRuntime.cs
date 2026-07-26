@@ -44,6 +44,11 @@ public sealed class ClientRuntime : IDisposable
                 throw new InvalidOperationException(
                     "PersistentTransportOutboxEnabled is enabled, but no transport outbox adapter is configured.");
             }
+            if (transportOutboxAdapter is not IBoundedTransportOutboxAdapter)
+            {
+                throw new InvalidOperationException(
+                    "PersistentTransportOutboxEnabled is enabled, but the transport outbox adapter does not declare bounded completion.");
+            }
 
             TransportOutbox = new TransportOutboxDispatcher(
                 outboxRepository,

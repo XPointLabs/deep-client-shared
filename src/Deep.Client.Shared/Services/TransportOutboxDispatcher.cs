@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using Deep.Client.Shared.Persistence;
 
@@ -98,16 +99,23 @@ public interface ITransportOutboxAdapter
         CancellationToken cancellationToken = default);
 }
 
+public interface IBoundedTransportOutboxAdapter : ITransportOutboxAdapter
+{
+    TimeSpan MaximumDispatchDuration { get; }
+}
+
 public sealed record TransportOutboxDispatchBatchResult(
     int ExpiredCount,
     int DurableCount,
     int AcceptedCount,
     int RetryScheduledCount,
     int ConflictCount,
-    int ExhaustedCount)
+    int ExhaustedCount,
+    int OutcomeUnknownCount = 0,
+    int CapacityDeferredCount = 0)
 {
     public int AttemptedCount =>
-        DurableCount + AcceptedCount + RetryScheduledCount + ConflictCount;
+        DurableCount + AcceptedCount + RetryScheduledCount + OutcomeUnknownCount + ConflictCount;
 }
 
 /// <summary>
@@ -118,23 +126,32 @@ public sealed class TransportOutboxDispatcher
 {
     public static readonly TimeSpan DefaultRetryDelay = TimeSpan.FromSeconds(30);
     public static readonly TimeSpan DefaultAttemptTimeout = TimeSpan.FromSeconds(15);
+    public const int DefaultMaxOutstandingOrphans = 4;
 
     private readonly ITransportOutboxRepository repository;
-    private readonly ITransportOutboxAdapter adapter;
+    private readonly IBoundedTransportOutboxAdapter adapter;
     private readonly IClock clock;
     private readonly TimeSpan retryDelay;
     private readonly TimeSpan attemptTimeout;
+    private readonly int maxOutstandingOrphans;
     private readonly SemaphoreSlim dispatchGate = new(1, 1);
+    private readonly ConcurrentDictionary<string, OrphanDispatch> orphanDispatches =
+        new(StringComparer.Ordinal);
 
     public TransportOutboxDispatcher(
         ITransportOutboxRepository repository,
         ITransportOutboxAdapter adapter,
         IClock clock,
         TimeSpan? retryDelay = null,
-        TimeSpan? attemptTimeout = null)
+        TimeSpan? attemptTimeout = null,
+        int maxOutstandingOrphans = DefaultMaxOutstandingOrphans)
     {
         this.repository = repository ?? throw new ArgumentNullException(nameof(repository));
-        this.adapter = adapter ?? throw new ArgumentNullException(nameof(adapter));
+        ArgumentNullException.ThrowIfNull(adapter);
+        this.adapter = adapter as IBoundedTransportOutboxAdapter
+            ?? throw new ArgumentException(
+                "The transport outbox adapter must declare a bounded maximum dispatch duration.",
+                nameof(adapter));
         this.clock = clock ?? throw new ArgumentNullException(nameof(clock));
         this.retryDelay = retryDelay ?? DefaultRetryDelay;
         this.attemptTimeout = attemptTimeout ?? DefaultAttemptTimeout;
@@ -146,6 +163,18 @@ public sealed class TransportOutboxDispatcher
         {
             throw new ArgumentOutOfRangeException(nameof(attemptTimeout));
         }
+        if (this.adapter.MaximumDispatchDuration <= TimeSpan.Zero
+            || this.adapter.MaximumDispatchDuration > TimeSpan.FromMinutes(5))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(adapter),
+                "The adapter maximum dispatch duration must be positive and no more than five minutes.");
+        }
+        if (maxOutstandingOrphans is <= 0 or > 32)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maxOutstandingOrphans));
+        }
+        this.maxOutstandingOrphans = maxOutstandingOrphans;
     }
 
     public Task<TransportOutboxCommitResult> PrepareAsync(
@@ -194,13 +223,19 @@ public sealed class TransportOutboxDispatcher
 
             var durable = 0;
             var accepted = 0;
-            var retryScheduled = 0;
+            var outcomeUnknown = 0;
             var conflicts = 0;
             var exhausted = 0;
+            var capacityDeferred = 0;
 
             foreach (var item in ready)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                if (orphanDispatches.Count >= maxOutstandingOrphans)
+                {
+                    capacityDeferred++;
+                    continue;
+                }
                 var itemNow = clock.UtcNow;
                 if (itemNow >= item.ExpiresAt)
                 {
@@ -272,138 +307,225 @@ public sealed class TransportOutboxDispatcher
                     continue;
                 }
 
-                TransportOutboxAdapterReceipt receipt;
-                using var attemptCancellation =
-                    CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                TransportOutboxAdapterReceipt? receipt = null;
+                Task<TransportOutboxAdapterReceipt>? dispatchTask = null;
+                CancellationTokenSource? attemptCancellation = new();
                 var remainingTtl = item.ExpiresAt - dispatchAt;
-                attemptCancellation.CancelAfter(
-                    remainingTtl <= attemptTimeout ? remainingTtl : attemptTimeout);
+                var dispatchWindow = Min(
+                    remainingTtl,
+                    attemptTimeout,
+                    adapter.MaximumDispatchDuration);
                 try
                 {
-                    receipt = await adapter.DispatchAsync(
-                        request,
-                        attemptCancellation.Token).ConfigureAwait(false);
-                    cancellationToken.ThrowIfCancellationRequested();
-                    if (attemptCancellation.IsCancellationRequested)
+                    dispatchTask = adapter.DispatchAsync(request, attemptCancellation.Token);
+                    if (dispatchTask is null)
                     {
-                        retryScheduled++;
+                        throw new InvalidOperationException("The outbox adapter returned no dispatch task.");
+                    }
+
+                    var timeoutTask = Task.Delay(dispatchWindow);
+                    var callerCancellationTask = Task.Delay(
+                        Timeout.InfiniteTimeSpan,
+                        cancellationToken);
+                    var completed = await Task.WhenAny(
+                        dispatchTask,
+                        timeoutTask,
+                        callerCancellationTask).ConfigureAwait(false);
+                    if (completed != dispatchTask)
+                    {
+                        attemptCancellation.Cancel();
+                        TrackOrphan(item, attemptId, dispatchTask, attemptCancellation);
+                        attemptCancellation = null;
+                        if (completed == callerCancellationTask)
+                        {
+                            cancellationToken.ThrowIfCancellationRequested();
+                        }
+
+                        outcomeUnknown++;
                         continue;
                     }
-                    if (receipt is null)
-                    {
-                        throw new InvalidOperationException("The outbox adapter returned no receipt.");
-                    }
+
+                    receipt = await dispatchTask.ConfigureAwait(false);
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
                     throw;
                 }
-                catch (OperationCanceledException) when (attemptCancellation.IsCancellationRequested)
-                {
-                    retryScheduled++;
-                    continue;
-                }
                 catch
                 {
                     // The typed count is intentionally the only diagnostic here: adapter exception
                     // text may contain endpoints or identifiers and must not cross this boundary.
-                    retryScheduled++;
+                    outcomeUnknown++;
                     continue;
                 }
-
-                var receiptAt = clock.UtcNow;
-                if (receiptAt >= item.ExpiresAt)
+                finally
                 {
-                    if (await ApplyOrReconcileExpiryAsync(
-                            item,
-                            expectedRevision: item.Revision + 1,
-                            receiptAt,
-                            cancellationToken).ConfigureAwait(false))
-                    {
-                        expired++;
-                    }
-                    else
-                    {
-                        conflicts++;
-                    }
+                    attemptCancellation?.Dispose();
+                }
+
+                if (receipt is null)
+                {
+                    outcomeUnknown++;
                     continue;
                 }
 
-                var acceptedTransition = TransportOutboxTransition.Accepted(
-                    item.AccountScope,
-                    item.LogicalId,
-                    item.Revision + 1,
-                    attemptId,
-                    OutboxTransitionSource.Adapter,
-                    OutboxTransitionReason.AdapterAccepted,
-                    receiptAt,
-                    RetryNotBefore(receiptAt, item.ExpiresAt),
-                    receipt.GetAcceptedEvidenceCopy());
-                if (!await ApplyOrReconcileAttemptAsync(
+                switch (await ApplyReceiptAsync(
                         item,
-                        acceptedTransition,
-                        TransportOutboxAttemptState.Accepted,
+                        attemptId,
+                        receipt,
                         cancellationToken).ConfigureAwait(false))
                 {
-                    conflicts++;
-                    continue;
-                }
-
-                if (receipt.Disposition == TransportOutboxAdapterDisposition.Accepted)
-                {
-                    accepted++;
-                    continue;
-                }
-
-                var durableEvidence = receipt.GetDurableEvidenceCopy()
-                    ?? throw new InvalidOperationException("A durable receipt has no durable evidence.");
-                var durableAt = clock.UtcNow;
-                if (durableAt >= item.ExpiresAt)
-                {
-                    if (await ApplyOrReconcileExpiryAsync(
-                            item,
-                            expectedRevision: item.Revision + 2,
-                            durableAt,
-                            cancellationToken).ConfigureAwait(false))
-                    {
+                    case ReceiptApplyResult.Expired:
                         expired++;
-                    }
-                    else
-                    {
+                        break;
+                    case ReceiptApplyResult.Accepted:
+                        accepted++;
+                        break;
+                    case ReceiptApplyResult.Durable:
+                        durable++;
+                        break;
+                    case ReceiptApplyResult.Conflict:
                         conflicts++;
-                    }
-                    continue;
-                }
-
-                var durableTransition = TransportOutboxTransition.Durable(
-                    item.AccountScope,
-                    item.LogicalId,
-                    item.Revision + 2,
-                    attemptId,
-                    OutboxTransitionSource.Adapter,
-                    OutboxTransitionReason.AdapterConfirmedDurable,
-                    durableAt,
-                    durableEvidence);
-                if (await ApplyOrReconcileAttemptAsync(
-                        item,
-                        durableTransition,
-                        TransportOutboxAttemptState.Durable,
-                        cancellationToken).ConfigureAwait(false))
-                {
-                    durable++;
-                }
-                else
-                {
-                    conflicts++;
+                        break;
                 }
             }
 
-            return new(expired, durable, accepted, retryScheduled, conflicts, exhausted);
+            return new(
+                expired,
+                durable,
+                accepted,
+                RetryScheduledCount: 0,
+                conflicts,
+                exhausted,
+                outcomeUnknown,
+                capacityDeferred);
         }
         finally
         {
             dispatchGate.Release();
         }
+    }
+
+    private void TrackOrphan(
+        TransportOutboxItemSnapshot item,
+        OutboxAttemptId attemptId,
+        Task<TransportOutboxAdapterReceipt> dispatchTask,
+        CancellationTokenSource cancellation)
+    {
+        var key = OrphanKey(item.AccountScope, item.LogicalId);
+        var orphan = new OrphanDispatch(dispatchTask, cancellation);
+        if (!orphanDispatches.TryAdd(key, orphan))
+        {
+            cancellation.Dispose();
+            throw new InvalidOperationException("A transport outbox dispatch is already in flight.");
+        }
+
+        _ = ObserveLateReceiptAsync(key, orphan, item, attemptId);
+    }
+
+    private async Task ObserveLateReceiptAsync(
+        string key,
+        OrphanDispatch orphan,
+        TransportOutboxItemSnapshot item,
+        OutboxAttemptId attemptId)
+    {
+        try
+        {
+            var receipt = await orphan.DispatchTask.ConfigureAwait(false);
+            if (receipt is not null)
+            {
+                await ApplyReceiptAsync(
+                    item,
+                    attemptId,
+                    receipt,
+                    CancellationToken.None).ConfigureAwait(false);
+            }
+        }
+        catch
+        {
+            // Dispatch and persistence diagnostics may contain identifiers. The persisted
+            // Attempted state remains quarantined and is the only safe recovery signal.
+        }
+        finally
+        {
+            orphanDispatches.TryRemove(
+                new KeyValuePair<string, OrphanDispatch>(key, orphan));
+            orphan.Cancellation.Dispose();
+        }
+    }
+
+    private async Task<ReceiptApplyResult> ApplyReceiptAsync(
+        TransportOutboxItemSnapshot item,
+        OutboxAttemptId attemptId,
+        TransportOutboxAdapterReceipt receipt,
+        CancellationToken cancellationToken)
+    {
+        var receiptAt = clock.UtcNow;
+        if (receiptAt >= item.ExpiresAt)
+        {
+            return await ApplyOrReconcileExpiryAsync(
+                    item,
+                    expectedRevision: item.Revision + 1,
+                    receiptAt,
+                    cancellationToken).ConfigureAwait(false)
+                ? ReceiptApplyResult.Expired
+                : ReceiptApplyResult.Conflict;
+        }
+
+        var acceptedTransition = TransportOutboxTransition.Accepted(
+            item.AccountScope,
+            item.LogicalId,
+            item.Revision + 1,
+            attemptId,
+            OutboxTransitionSource.Adapter,
+            OutboxTransitionReason.AdapterAccepted,
+            receiptAt,
+            RetryNotBefore(receiptAt, item.ExpiresAt),
+            receipt.GetAcceptedEvidenceCopy());
+        if (!await ApplyOrReconcileAttemptAsync(
+                item,
+                acceptedTransition,
+                TransportOutboxAttemptState.Accepted,
+                cancellationToken).ConfigureAwait(false))
+        {
+            return ReceiptApplyResult.Conflict;
+        }
+
+        if (receipt.Disposition == TransportOutboxAdapterDisposition.Accepted)
+        {
+            return ReceiptApplyResult.Accepted;
+        }
+
+        var durableEvidence = receipt.GetDurableEvidenceCopy()
+            ?? throw new InvalidOperationException("A durable receipt has no durable evidence.");
+        var durableAt = clock.UtcNow;
+        if (durableAt >= item.ExpiresAt)
+        {
+            return await ApplyOrReconcileExpiryAsync(
+                    item,
+                    expectedRevision: item.Revision + 2,
+                    durableAt,
+                    cancellationToken).ConfigureAwait(false)
+                ? ReceiptApplyResult.Expired
+                : ReceiptApplyResult.Conflict;
+        }
+
+        var durableTransition = TransportOutboxTransition.Durable(
+            item.AccountScope,
+            item.LogicalId,
+            item.Revision + 2,
+            attemptId,
+            OutboxTransitionSource.Adapter,
+            OutboxTransitionReason.AdapterConfirmedDurable,
+            durableAt,
+            durableEvidence);
+        return await ApplyOrReconcileAttemptAsync(
+                item,
+                durableTransition,
+                TransportOutboxAttemptState.Durable,
+                cancellationToken).ConfigureAwait(false)
+            ? ReceiptApplyResult.Durable
+            : ReceiptApplyResult.Conflict;
     }
 
     private async Task<bool> ApplyOrReconcileAttemptAsync(
@@ -486,6 +608,16 @@ public sealed class TransportOutboxDispatcher
         return candidate <= latest ? candidate : now <= latest ? latest : now;
     }
 
+    private static TimeSpan Min(TimeSpan first, TimeSpan second, TimeSpan third) =>
+        first <= second
+            ? first <= third ? first : third
+            : second <= third ? second : third;
+
+    private static string OrphanKey(
+        OutboxAccountScope accountScope,
+        OutboxLogicalId logicalId) =>
+        Convert.ToHexString(accountScope.Value) + Convert.ToHexString(logicalId.Value);
+
     private static OutboxAttemptId CreateAttemptId()
     {
         Span<byte> bytes = stackalloc byte[TransportOutboxLimits.AttemptIdBytes];
@@ -496,4 +628,16 @@ public sealed class TransportOutboxDispatcher
         while (bytes.IndexOfAnyExcept((byte)0) < 0);
         return OutboxAttemptId.FromBytes(bytes);
     }
+
+    private enum ReceiptApplyResult
+    {
+        Expired,
+        Accepted,
+        Durable,
+        Conflict
+    }
+
+    private sealed record OrphanDispatch(
+        Task<TransportOutboxAdapterReceipt> DispatchTask,
+        CancellationTokenSource Cancellation);
 }

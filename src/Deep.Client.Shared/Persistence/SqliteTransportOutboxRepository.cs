@@ -177,7 +177,7 @@ public sealed partial class SqliteSessionStore
                 SELECT length(logical_id), logical_id
                 FROM transport_outbox_items
                 WHERE account_scope = $scope
-                  AND state IN (1, 2, 3)
+                  AND state IN (1, 3)
                   AND not_before <= $now
                   AND expires_at > $now
                   AND NOT EXISTS (

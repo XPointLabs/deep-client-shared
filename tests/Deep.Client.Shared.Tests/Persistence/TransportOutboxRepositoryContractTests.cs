@@ -262,6 +262,66 @@ public sealed class TransportOutboxRepositoryContractTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task AttemptedOutcomeUnknownIsQuarantinedAcrossRestartWhileAcceptedIsReady(bool sqlite)
+    {
+        using var scope = StoreScope.Create(sqlite);
+        var attemptedItem = Prepared(logical: 0x24);
+        var acceptedItem = Prepared(logical: 0x25);
+        await scope.Store.PrepareTransportOutboxAsync(attemptedItem);
+        await scope.Store.PrepareTransportOutboxAsync(acceptedItem);
+
+        var attemptedId = Attempt(0x64);
+        var acceptedId = Attempt(0x65);
+        await scope.Store.ApplyTransportOutboxTransitionAsync(
+            TransportOutboxTransition.Attempted(
+                attemptedItem.AccountScope,
+                attemptedItem.LogicalId,
+                1,
+                attemptedId,
+                OutboxTransitionSource.Adapter,
+                OutboxTransitionReason.DispatchStarted,
+                Now.AddMinutes(1),
+                Now.AddMinutes(2)));
+        await scope.Store.ApplyTransportOutboxTransitionAsync(
+            TransportOutboxTransition.Attempted(
+                acceptedItem.AccountScope,
+                acceptedItem.LogicalId,
+                1,
+                acceptedId,
+                OutboxTransitionSource.Adapter,
+                OutboxTransitionReason.DispatchStarted,
+                Now.AddMinutes(1),
+                Now.AddMinutes(2)));
+        await scope.Store.ApplyTransportOutboxTransitionAsync(
+            TransportOutboxTransition.Accepted(
+                acceptedItem.AccountScope,
+                acceptedItem.LogicalId,
+                2,
+                acceptedId,
+                OutboxTransitionSource.Adapter,
+                OutboxTransitionReason.AdapterAccepted,
+                Now.AddMinutes(2),
+                Now.AddMinutes(3),
+                Bytes(16, 0x66)));
+
+        scope.Restart();
+        var listed = await scope.Store.ListReadyTransportOutboxAsync(
+            attemptedItem.AccountScope,
+            Now.AddMinutes(4),
+            TransportOutboxLimits.MaxListCount);
+        var quarantined = await scope.Store.ReadTransportOutboxAsync(
+            attemptedItem.AccountScope,
+            attemptedItem.LogicalId);
+
+        Assert.Single(listed);
+        Assert.Equal(acceptedItem.LogicalId, listed[0].LogicalId);
+        Assert.Equal(TransportOutboxState.Accepted, listed[0].State);
+        Assert.Equal(TransportOutboxState.Attempted, quarantined.Item?.State);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task ScopePurgeAndAccountPurgeRemoveOutboxWithoutCrossScopeLeak(bool sqlite)
     {
         using var scope = StoreScope.Create(sqlite);
