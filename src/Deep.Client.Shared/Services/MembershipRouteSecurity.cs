@@ -171,12 +171,13 @@ internal interface ICanonicalDevLocalMembershipRouteArtifactSource
 
 public sealed record DevLocalMembershipTrustBootstrapOptions(
     string? ExpectedArtifactSha256,
-    string ExpectedOpaqueProfileKey = "install:deep-survival-dev-v1");
+    string ExpectedOpaqueProfileKey = "install:deep-survival-dev-v2");
 
 public static class DevLocalMembershipTrustBootstrap
 {
     public const string Version = "deep-membership-trust-bootstrap-v1";
     public const string Scope = "DEV-LOCAL-ONLY";
+    public const string OpaqueProfileKeyBase = "install:deep-survival-dev-v2";
 
     private static readonly string[] ExactProperties =
     [
@@ -205,16 +206,17 @@ public static class DevLocalMembershipTrustBootstrap
         var actualPin = SHA256.HashData(exactArtifact);
         if (!CryptographicOperations.FixedTimeEquals(actualPin, expectedPin))
             throw new MembershipRouteCatalogException("Membership artifact SHA-256 pin does not match.");
-        if (string.IsNullOrWhiteSpace(options.ExpectedOpaqueProfileKey) ||
-            options.ExpectedOpaqueProfileKey.Length > MembershipTrustRecord.MaximumProfileKeyLength ||
-            !options.ExpectedOpaqueProfileKey.StartsWith("install:", StringComparison.Ordinal) ||
-            options.ExpectedOpaqueProfileKey.StartsWith(
-                "install:self-hosted:",
+        if (!string.Equals(
+                options.ExpectedOpaqueProfileKey,
+                OpaqueProfileKeyBase,
                 StringComparison.Ordinal))
         {
             throw new MembershipRouteCatalogException(
                 "Expected development membership profile key is invalid.");
         }
+        var derivedOpaqueProfileKey = DeriveOpaqueProfileKey(
+            options.ExpectedOpaqueProfileKey,
+            options.ExpectedArtifactSha256!);
 
         try
         {
@@ -308,7 +310,7 @@ public static class DevLocalMembershipTrustBootstrap
                 "membership");
 
             return new MembershipTrustProfile(
-                options.ExpectedOpaqueProfileKey,
+                derivedOpaqueProfileKey,
                 genesisBytes,
                 expectedNetworkId,
                 expectedGenesisHash,
@@ -404,6 +406,24 @@ public static class DevLocalMembershipTrustBootstrap
                 "An exact lowercase membership artifact SHA-256 pin is required.");
         }
         return Convert.FromHexString(value);
+    }
+
+    private static string DeriveOpaqueProfileKey(
+        string profileKeyBase,
+        string expectedArtifactSha256)
+    {
+        var derived = $"{profileKeyBase}:{expectedArtifactSha256}";
+        if (derived.Length != profileKeyBase.Length + 1 + MembershipLimits.HashLength * 2 ||
+            derived.Length > MembershipTrustRecord.MaximumProfileKeyLength ||
+            !derived.StartsWith($"{OpaqueProfileKeyBase}:", StringComparison.Ordinal) ||
+            expectedArtifactSha256.Any(character =>
+                character is not (>= '0' and <= '9') and
+                not (>= 'a' and <= 'f')))
+        {
+            throw new MembershipRouteCatalogException(
+                "Derived development membership profile key is invalid.");
+        }
+        return derived;
     }
 
     private static string RequireString(JsonElement value, string propertyName)

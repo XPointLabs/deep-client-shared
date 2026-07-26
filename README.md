@@ -31,6 +31,11 @@ It intentionally ports shared behavior and boundaries rather than UI line-by-lin
   `/api/network/membership-route-catalog` path. The embedded bootstrap is accepted
   only after the whole-artifact pin matches and is converted into a
   `MembershipTrustProfile`; it is never a TOFU or production trust-root source.
+  Its exact `install:deep-survival-dev-v2` artifact base is not used directly as
+  a repository key. The verified profile key is
+  `install:deep-survival-dev-v2:<lowercase-64-hex-artifact-sha256>`, isolating the
+  authority and membership LKG for every regenerated fixture without clearing or
+  migrating account, session, conversation, or other local state.
   MAUI activation must require both handoff values
   `DEEP_DEV_LOCAL_MEMBERSHIP_TRUST_URL` and
   `DEEP_DEV_LOCAL_MEMBERSHIP_TRUST_SHA256`, use

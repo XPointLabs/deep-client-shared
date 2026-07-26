@@ -193,6 +193,93 @@ public sealed class MembershipRouteSelectionTests
                 {
                     ExpectedArtifactSha256 = new string('0', 64)
                 }));
+        Assert.Throws<MembershipRouteCatalogException>(() =>
+            DevLocalMembershipTrustBootstrap.CreateProfile(
+                fixture.Artifact,
+                fixture.Bootstrap with
+                {
+                    ExpectedArtifactSha256 =
+                        fixture.Bootstrap.ExpectedArtifactSha256!.ToUpperInvariant()
+                }));
+    }
+
+    [Fact]
+    public void DevBootstrap_DerivesExactArtifactScopedProfileKey()
+    {
+        var fixture = SignedArtifact();
+        var profile = DevLocalMembershipTrustBootstrap.CreateProfile(
+            fixture.Artifact,
+            fixture.Bootstrap);
+
+        Assert.Equal(
+            $"{DevLocalMembershipTrustBootstrap.OpaqueProfileKeyBase}:{fixture.Bootstrap.ExpectedArtifactSha256}",
+            profile.OpaqueProfileKey);
+        Assert.Equal(
+            DevLocalMembershipTrustBootstrap.OpaqueProfileKeyBase.Length + 65,
+            profile.OpaqueProfileKey.Length);
+        Assert.True(
+            profile.OpaqueProfileKey.Length <= MembershipTrustRecord.MaximumProfileKeyLength);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("install:deep-survival-dev-v1")]
+    [InlineData("install:deep-survival-dev-v2:")]
+    [InlineData("install:self-hosted:deep-survival-dev-v2")]
+    public void DevBootstrap_RejectsMalformedOrUnpinnedProfileBase(string profileBase)
+    {
+        var fixture = SignedArtifact();
+
+        Assert.Throws<MembershipRouteCatalogException>(() =>
+            DevLocalMembershipTrustBootstrap.CreateProfile(
+                fixture.Artifact,
+                fixture.Bootstrap with { ExpectedOpaqueProfileKey = profileBase }));
+    }
+
+    [Fact]
+    public async Task DevBootstrap_DifferentArtifactPinsIsolatePersistedAuthority()
+    {
+        var first = SignedArtifact(static index => $"http://10.0.0.{index}/");
+        var second = SignedArtifact(static index => $"http://10.0.1.{index}/");
+        var firstProfile = DevLocalMembershipTrustBootstrap.CreateProfile(
+            first.Artifact,
+            first.Bootstrap);
+        var secondProfile = DevLocalMembershipTrustBootstrap.CreateProfile(
+            second.Artifact,
+            second.Bootstrap);
+        var store = new InMemorySessionStore();
+
+        var firstProvider = new VerifiedMembershipRouteCatalogProvider(
+            TrustService(store),
+            store,
+            first.Bootstrap,
+            DevLocalHttpSource(new SwitchingArtifactHandler(first.Artifact)),
+            new InMemoryMembershipRouteArtifactCache(),
+            new FrozenTimeProvider(TrustNow),
+            MembershipRouteEndpointPolicy.DevLocalHttp);
+        var secondProvider = new VerifiedMembershipRouteCatalogProvider(
+            TrustService(store),
+            store,
+            second.Bootstrap,
+            DevLocalHttpSource(new SwitchingArtifactHandler(second.Artifact)),
+            new InMemoryMembershipRouteArtifactCache(),
+            new FrozenTimeProvider(TrustNow),
+            MembershipRouteEndpointPolicy.DevLocalHttp);
+
+        _ = await firstProvider.GetCatalogAsync();
+        _ = await secondProvider.GetCatalogAsync();
+        var firstAuthority = await store.ReadMembershipTrustAsync(
+            firstProfile.OpaqueProfileKey,
+            MembershipTrustDomain.Authority);
+        var secondAuthority = await store.ReadMembershipTrustAsync(
+            secondProfile.OpaqueProfileKey,
+            MembershipTrustDomain.Authority);
+
+        Assert.NotEqual(firstProfile.OpaqueProfileKey, secondProfile.OpaqueProfileKey);
+        Assert.Equal(MembershipTrustReadResult.Found, firstAuthority.Result);
+        Assert.Equal(MembershipTrustReadResult.Found, secondAuthority.Result);
+        Assert.Equal(firstProfile.OpaqueProfileKey, firstAuthority.Head!.OpaqueProfileKey);
+        Assert.Equal(secondProfile.OpaqueProfileKey, secondAuthority.Head!.OpaqueProfileKey);
     }
 
     [Fact]
@@ -231,7 +318,7 @@ public sealed class MembershipRouteSelectionTests
     }
 
     [Theory]
-    [InlineData("version", "deep-membership-trust-bootstrap-v2")]
+    [InlineData("version", "deep-membership-trust-bootstrap-v3")]
     [InlineData("scope", "PRODUCTION")]
     [InlineData("opaqueProfileKey", "install:other-profile")]
     public void DevBootstrap_RejectsUnpinnedFraming(
@@ -612,7 +699,7 @@ public sealed class MembershipRouteSelectionTests
         };
         var proofs = MembershipRouteDescriptorCodec.BuildProofs(descriptors);
         var profile = new MembershipTrustProfile(
-            "install:membership-route-test",
+            DevLocalMembershipTrustBootstrap.OpaqueProfileKeyBase,
             genesisBytes,
             genesis.NetworkId.ToArray(),
             MembershipContractHash.Sha256(genesisBytes),
@@ -659,7 +746,7 @@ public sealed class MembershipRouteSelectionTests
 
     private static DevLocalMembershipTrustBootstrapOptions BootstrapFor(
         byte[] artifact,
-        string profileKey = "install:membership-route-test") =>
+        string profileKey = DevLocalMembershipTrustBootstrap.OpaqueProfileKeyBase) =>
         new(Convert.ToHexStringLower(SHA256.HashData(artifact)), profileKey);
 
     private static VerifiedMembershipRouteCatalogProvider ProductionProvider(
