@@ -879,6 +879,7 @@ public sealed class SessionTransportTests
                 [new PinnedRouterEndpoint("http://bootstrap.invalid/", routerIds[0])],
                 TrustedRouterIds: routerIds,
                 RequireMembershipRouteSelection: true),
+            timeProvider: null,
             membershipRouteCatalogProvider: new StaticMembershipCatalogProvider(catalog),
             routeEvidenceObserver: observer);
 
@@ -907,6 +908,11 @@ public sealed class SessionTransportTests
         Assert.Contains(observer.Events, static evidence =>
             evidence.Event == TransportRouteEvidenceEvent.Completed &&
             evidence.Attempt == 2);
+        Assert.Equal(4, observer.Events.Count);
+        var correlationId = Assert.Single(observer.Events
+            .Select(static evidence => evidence.CorrelationId)
+            .Distinct(StringComparer.Ordinal));
+        Assert.Matches("^[0-9a-f]{32}$", correlationId);
         Assert.DoesNotContain(
             targetKey,
             JsonSerializer.Serialize(observer.Events),
@@ -952,6 +958,7 @@ public sealed class SessionTransportTests
                 [new PinnedRouterEndpoint("http://bootstrap.invalid/", routerIds[0])],
                 TrustedRouterIds: routerIds,
                 RequireMembershipRouteSelection: true),
+            timeProvider: null,
             membershipRouteCatalogProvider: new StaticMembershipCatalogProvider(catalog),
             routeEvidenceObserver: observer);
 

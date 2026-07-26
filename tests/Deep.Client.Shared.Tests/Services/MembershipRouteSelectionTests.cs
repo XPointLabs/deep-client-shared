@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text.Json;
@@ -13,6 +14,29 @@ namespace Deep.Client.Shared.Tests.Services;
 public sealed class MembershipRouteSelectionTests
 {
     private static readonly DateTimeOffset TrustNow = DateTimeOffset.FromUnixTimeSeconds(1010);
+
+    [Fact]
+    public void XNodeRpcClient_RetainsBinaryCompatibleFourArgumentConstructor()
+    {
+        var constructor = typeof(XNodeRpcClient).GetConstructor(
+            [
+                typeof(HttpClient),
+                typeof(XNodeRpcClientOptions),
+                typeof(TimeProvider),
+                typeof(IMembershipRouteCatalogProvider)
+            ]);
+
+        Assert.NotNull(constructor);
+        Assert.Equal(4, constructor.GetParameters().Length);
+        Assert.NotNull(typeof(XNodeRpcClient).GetConstructor(
+            [
+                typeof(HttpClient),
+                typeof(XNodeRpcClientOptions),
+                typeof(TimeProvider),
+                typeof(IMembershipRouteCatalogProvider),
+                typeof(ITransportRouteEvidenceObserver)
+            ]));
+    }
 
     [Fact]
     public void Selector_ProducesExactDisjointThreeHopRoutesFromSixMembers()
@@ -98,6 +122,7 @@ public sealed class MembershipRouteSelectionTests
                 [new PinnedRouterEndpoint("http://bootstrap.invalid/", routerIds[0])],
                 TrustedRouterIds: routerIds,
                 RequireMembershipRouteSelection: true),
+            timeProvider: null,
             membershipRouteCatalogProvider: new StaticCatalogProvider(catalog),
             routeEvidenceObserver: evidence);
 
@@ -122,6 +147,93 @@ public sealed class MembershipRouteSelectionTests
             "mailbox-target-that-must-not-leak",
             JsonSerializer.Serialize(evidence.Events),
             StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RouteEvidence_ConcurrentCallsHaveIndependentImmutableCorrelations()
+    {
+        const int callCount = 8;
+        var dispatchCount = 0;
+        var evidence = new ConcurrentRouteEvidenceObserver();
+        using var client = new HttpClient(new ThrowingHandler((request, cancellationToken) =>
+        {
+            Interlocked.Increment(ref dispatchCount);
+            return Task.FromException<HttpResponseMessage>(
+                new HttpRequestException("response lost"));
+        }));
+        var catalog = Catalog();
+        var routerIds = catalog.Members.Select(Id).ToArray();
+        var router = new XNodeRpcClient(
+            client,
+            new XNodeRpcClientOptions(
+                [new PinnedRouterEndpoint("http://bootstrap.invalid/", routerIds[0])],
+                TrustedRouterIds: routerIds,
+                RequireMembershipRouteSelection: true),
+            timeProvider: null,
+            membershipRouteCatalogProvider: new StaticCatalogProvider(catalog),
+            routeEvidenceObserver: evidence);
+
+        await Task.WhenAll(Enumerable.Range(0, callCount).Select(async _ =>
+            await Assert.ThrowsAsync<StorageDispatchOutcomeUnknownException>(() =>
+                router.PostStorageAsync(
+                    "storage_store",
+                    new { placement_key = "opaque" },
+                    "same-private-target"))));
+
+        Assert.Equal(callCount, dispatchCount);
+        var snapshots = evidence.Events.ToArray();
+        Assert.Equal(callCount * 2, snapshots.Length);
+        var correlations = snapshots.GroupBy(static item => item.CorrelationId).ToArray();
+        Assert.Equal(callCount, correlations.Length);
+        Assert.All(correlations, group =>
+        {
+            Assert.Matches("^[0-9a-f]{32}$", group.Key);
+            Assert.Equal(2, group.Count());
+            Assert.Equal(
+                [
+                    TransportRouteEvidenceEvent.Selected,
+                    TransportRouteEvidenceEvent.OutcomeUnknown
+                ],
+                group.Select(static item => item.Event));
+            Assert.All(group, static item => Assert.Equal(1, item.Attempt));
+        });
+        var firstRouters = Assert.IsAssignableFrom<IList<string>>(snapshots[0].RouterIdDigests);
+        Assert.Throws<NotSupportedException>(() => firstRouters[0] = new string('0', 64));
+        Assert.DoesNotContain(
+            "same-private-target",
+            JsonSerializer.Serialize(snapshots),
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RouteEvidence_ThrowingObserverCannotAlterTransportSemantics()
+    {
+        var dispatchCount = 0;
+        using var client = new HttpClient(new ThrowingHandler((request, cancellationToken) =>
+        {
+            Interlocked.Increment(ref dispatchCount);
+            return Task.FromException<HttpResponseMessage>(
+                new HttpRequestException("response lost"));
+        }));
+        var catalog = Catalog();
+        var routerIds = catalog.Members.Select(Id).ToArray();
+        var router = new XNodeRpcClient(
+            client,
+            new XNodeRpcClientOptions(
+                [new PinnedRouterEndpoint("http://bootstrap.invalid/", routerIds[0])],
+                TrustedRouterIds: routerIds,
+                RequireMembershipRouteSelection: true),
+            timeProvider: null,
+            membershipRouteCatalogProvider: new StaticCatalogProvider(catalog),
+            routeEvidenceObserver: new ThrowingRouteEvidenceObserver());
+
+        await Assert.ThrowsAsync<StorageDispatchOutcomeUnknownException>(() =>
+            router.PostStorageAsync(
+                "storage_store",
+                new { placement_key = "opaque" },
+                "private-target"));
+
+        Assert.Equal(1, dispatchCount);
     }
 
     [Fact]
@@ -847,6 +959,19 @@ public sealed class MembershipRouteSelectionTests
         public List<TransportRouteEvidence> Events { get; } = [];
 
         public void Observe(TransportRouteEvidence evidence) => Events.Add(evidence);
+    }
+
+    private sealed class ConcurrentRouteEvidenceObserver : ITransportRouteEvidenceObserver
+    {
+        public ConcurrentQueue<TransportRouteEvidence> Events { get; } = new();
+
+        public void Observe(TransportRouteEvidence evidence) => Events.Enqueue(evidence);
+    }
+
+    private sealed class ThrowingRouteEvidenceObserver : ITransportRouteEvidenceObserver
+    {
+        public void Observe(TransportRouteEvidence evidence) =>
+            throw new InvalidOperationException("observer failure");
     }
 
     private sealed class ThrowingHandler(

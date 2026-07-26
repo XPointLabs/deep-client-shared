@@ -104,11 +104,13 @@ public sealed class TransportRouteEvidence
         TransportRouteEvidenceOperation operation,
         TransportRouteEvidenceEvent @event,
         int attempt,
+        string correlationId,
         IEnumerable<string> routerIdDigests)
     {
         Operation = operation;
         Event = @event;
         Attempt = attempt;
+        CorrelationId = correlationId;
         RouterIdDigests = Array.AsReadOnly(routerIdDigests.ToArray());
     }
 
@@ -118,9 +120,20 @@ public sealed class TransportRouteEvidence
 
     public int Attempt { get; }
 
+    /// <summary>
+    /// Random 128-bit, lowercase hexadecimal identifier scoped to one logical
+    /// PostStorageAsync call. It is not derived from request or identity data.
+    /// </summary>
+    public string CorrelationId { get; }
+
     public IReadOnlyList<string> RouterIdDigests { get; }
 }
 
+/// <summary>
+/// Receives immutable privacy-bounded snapshots. Observe may be invoked
+/// concurrently; implementations must be thread-safe, non-blocking, and return
+/// promptly. Observer exceptions are ignored and never affect transport state.
+/// </summary>
 public interface ITransportRouteEvidenceObserver
 {
     void Observe(TransportRouteEvidence evidence);
@@ -172,8 +185,22 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
         HttpClient httpClient,
         XNodeRpcClientOptions options,
         TimeProvider? timeProvider = null,
-        IMembershipRouteCatalogProvider? membershipRouteCatalogProvider = null,
-        ITransportRouteEvidenceObserver? routeEvidenceObserver = null)
+        IMembershipRouteCatalogProvider? membershipRouteCatalogProvider = null)
+        : this(
+            httpClient,
+            options,
+            timeProvider,
+            membershipRouteCatalogProvider,
+            routeEvidenceObserver: null)
+    {
+    }
+
+    public XNodeRpcClient(
+        HttpClient httpClient,
+        XNodeRpcClientOptions options,
+        TimeProvider? timeProvider,
+        IMembershipRouteCatalogProvider? membershipRouteCatalogProvider,
+        ITransportRouteEvidenceObserver? routeEvidenceObserver)
     {
         _httpClient = httpClient;
         _options = options;
@@ -277,12 +304,14 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
         string targetKey,
         CancellationToken cancellationToken = default)
     {
+        var evidenceCorrelationId = NewEvidenceCorrelationId();
         if (_membershipRouteCatalogProvider is not null)
         {
             return await PostMembershipStorageAsync(
                 method,
                 body,
                 targetKey,
+                evidenceCorrelationId,
                 cancellationToken).ConfigureAwait(false);
         }
         if (_options.RequireMembershipRouteSelection)
@@ -348,6 +377,7 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
                 method,
                 TransportRouteEvidenceEvent.Selected,
                 attempt + 1,
+                evidenceCorrelationId,
                 routeSnapshot.Nodes);
             JsonElement onionResult;
             try
@@ -368,6 +398,7 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
                     method,
                     TransportRouteEvidenceEvent.PreDispatchFailure,
                     attempt + 1,
+                    evidenceCorrelationId,
                     routeSnapshot.Nodes);
                 excludedRouterIds.Add(router.ExpectedRouterId);
                 foreach (var node in routeSnapshot.Nodes)
@@ -382,6 +413,7 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
                     method,
                     TransportRouteEvidenceEvent.PreDispatchFailure,
                     attempt + 1,
+                    evidenceCorrelationId,
                     routeSnapshot.Nodes);
                 throw new HttpRequestException(
                     "The bounded routed storage request failed before dispatch.");
@@ -393,6 +425,7 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
                     method,
                     TransportRouteEvidenceEvent.OutcomeUnknown,
                     attempt + 1,
+                    evidenceCorrelationId,
                     routeSnapshot.Nodes);
                 throw new StorageDispatchOutcomeUnknownException();
             }
@@ -417,6 +450,7 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
                     method,
                     TransportRouteEvidenceEvent.Completed,
                     attempt + 1,
+                    evidenceCorrelationId,
                     routeSnapshot.Nodes);
                 return result;
             }
@@ -433,6 +467,7 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
         string method,
         object body,
         string targetKey,
+        string evidenceCorrelationId,
         CancellationToken cancellationToken)
     {
         var storagePath = method switch
@@ -467,6 +502,7 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
                 method,
                 TransportRouteEvidenceEvent.Selected,
                 attempt + 1,
+                evidenceCorrelationId,
                 routeSnapshot.Nodes);
             var firstHop = ConfigureRouter(new PinnedRouterEndpoint(
                 routeSnapshot.Nodes[0].RpcEndpoint,
@@ -493,6 +529,7 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
                         method,
                         TransportRouteEvidenceEvent.PreDispatchFailure,
                         attempt + 1,
+                        evidenceCorrelationId,
                         routeSnapshot.Nodes);
                     firstFailure = new HttpRequestException(
                         "The first membership route failed before dispatch.");
@@ -506,6 +543,7 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
                         method,
                         TransportRouteEvidenceEvent.PreDispatchFailure,
                         attempt + 1,
+                        evidenceCorrelationId,
                         routeSnapshot.Nodes);
                     throw new HttpRequestException(
                         "The bounded membership route request failed before dispatch.");
@@ -517,6 +555,7 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
                         method,
                         TransportRouteEvidenceEvent.OutcomeUnknown,
                         attempt + 1,
+                        evidenceCorrelationId,
                         routeSnapshot.Nodes);
                     throw new StorageDispatchOutcomeUnknownException();
                 }
@@ -536,6 +575,7 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
                     method,
                     TransportRouteEvidenceEvent.Completed,
                     attempt + 1,
+                    evidenceCorrelationId,
                     routeSnapshot.Nodes);
                 return result;
             }
@@ -1109,6 +1149,7 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
         string method,
         TransportRouteEvidenceEvent @event,
         int attempt,
+        string correlationId,
         IReadOnlyList<TransportRouteNode> nodes)
     {
         var operation = method switch
@@ -1123,7 +1164,7 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
         try
         {
             _routeEvidenceObserver.Observe(
-                new TransportRouteEvidence(operation, @event, attempt, digests));
+                new TransportRouteEvidence(operation, @event, attempt, correlationId, digests));
         }
         catch
         {
@@ -1134,6 +1175,9 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
     private static string RedactRouterId(string routerId) =>
         Convert.ToHexStringLower(SHA256.HashData(
             Encoding.UTF8.GetBytes(routerId.Trim().ToLowerInvariant())));
+
+    private static string NewEvidenceCorrelationId() =>
+        Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(16));
 
     private sealed record RouterRpcRequest(string Id, string Method, JsonElement Payload, string Nonce);
 

@@ -123,8 +123,12 @@ when the injected HTTP transport raises the internal zero-byte pre-dispatch cont
 must prove that no request bytes reached the selected first hop, and `XNodeRpcClient` never infers
 that fact from an `HttpClient` exception. The failed three-node route is excluded locally before
 the fallback is selected. Optional route evidence reports only operation/event/attempt plus
-SHA-256 router-ID digests; it contains no endpoint, target, account, mailbox, payload, response, or
-exception data, and the default observer is a no-op.
+an independent random 128-bit per-call correlation ID and SHA-256 router-ID digests; it contains
+no endpoint, target, account, mailbox, payload, response, exception data, or identifier derived
+from them. One correlation ID spans every attempt/event for a logical `PostStorageAsync` call and
+concurrent calls receive independent IDs. Evidence snapshots are immutable. The default observer
+is a no-op; injected observers must be thread-safe, non-blocking, and prompt because calls may be
+concurrent, while observer failures are ignored and cannot affect routing or delivery semantics.
 
 Platform composition remains disabled until the external production signer/indexer publishes a
 real artifact and MAUI supplies its pinned trust profile, verifier and durable cache path.
