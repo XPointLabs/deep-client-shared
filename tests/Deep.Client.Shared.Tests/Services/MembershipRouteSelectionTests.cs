@@ -1,6 +1,7 @@
 using System.Net;
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Deep.Client.Shared.Domain;
 using Deep.Client.Shared.Persistence;
 using Deep.Client.Shared.Services;
@@ -128,10 +129,11 @@ public sealed class MembershipRouteSelectionTests
         var provider = new VerifiedMembershipRouteCatalogProvider(
             trust,
             store,
-            fixture.Profile,
+            fixture.Bootstrap,
             source,
             cache,
-            new FrozenTimeProvider(TrustNow));
+            new FrozenTimeProvider(TrustNow),
+            MembershipRouteEndpointPolicy.DevLocalHttp);
 
         var fresh = await provider.GetCatalogAsync();
         source.Unavailable = true;
@@ -160,13 +162,217 @@ public sealed class MembershipRouteSelectionTests
                     ClockRollbackTolerance = TimeSpan.FromSeconds(30)
                 }),
             store,
-            fixture.Profile,
+            fixture.Bootstrap,
             providerSource,
             new InMemoryMembershipRouteArtifactCache(),
-            new FrozenTimeProvider(TrustNow));
+            new FrozenTimeProvider(TrustNow),
+            MembershipRouteEndpointPolicy.DevLocalHttp);
 
         _ = await provider.GetCatalogAsync();
         providerSource.Artifact = "{ \"version\": \"unsigned\" }"u8.ToArray();
+
+        await Assert.ThrowsAsync<MembershipRouteCatalogException>(
+            () => provider.GetCatalogAsync());
+    }
+
+    [Fact]
+    public void DevBootstrap_RequiresExactWholeArtifactPin()
+    {
+        var fixture = SignedArtifact();
+
+        Assert.Throws<MembershipRouteCatalogException>(() =>
+            DevLocalMembershipTrustBootstrap.CreateProfile(
+                fixture.Artifact,
+                new DevLocalMembershipTrustBootstrapOptions(null)));
+        Assert.Throws<MembershipRouteCatalogException>(() =>
+            DevLocalMembershipTrustBootstrap.CreateProfile(
+                fixture.Artifact,
+                fixture.Bootstrap with
+                {
+                    ExpectedArtifactSha256 = new string('0', 64)
+                }));
+    }
+
+    [Fact]
+    public void DevBootstrap_RejectsExtraOrPrivateFields()
+    {
+        var fixture = SignedArtifact();
+        var root = JsonNode.Parse(fixture.Artifact)!.AsObject();
+        root["trustBootstrap"]!.AsObject()["privateKey"] = "must-not-be-accepted";
+        var mutated = JsonSerializer.SerializeToUtf8Bytes(
+            root,
+            new JsonSerializerOptions(JsonSerializerDefaults.Web));
+
+        Assert.Throws<MembershipRouteCatalogException>(() =>
+            DevLocalMembershipTrustBootstrap.CreateProfile(
+                mutated,
+                BootstrapFor(mutated)));
+    }
+
+    [Theory]
+    [InlineData("expectedNetworkId")]
+    [InlineData("signedDelegation")]
+    public void DevBootstrap_RejectsNonCanonicalBase64(string propertyName)
+    {
+        var fixture = SignedArtifact();
+        var root = JsonNode.Parse(fixture.Artifact)!.AsObject();
+        var trust = root["trustBootstrap"]!.AsObject();
+        trust[propertyName] = trust[propertyName]!.GetValue<string>() + "\n";
+        var mutated = JsonSerializer.SerializeToUtf8Bytes(
+            root,
+            new JsonSerializerOptions(JsonSerializerDefaults.Web));
+
+        Assert.Throws<MembershipRouteCatalogException>(() =>
+            DevLocalMembershipTrustBootstrap.CreateProfile(
+                mutated,
+                BootstrapFor(mutated)));
+    }
+
+    [Theory]
+    [InlineData("version", "deep-membership-trust-bootstrap-v2")]
+    [InlineData("scope", "PRODUCTION")]
+    [InlineData("opaqueProfileKey", "install:other-profile")]
+    public void DevBootstrap_RejectsUnpinnedFraming(
+        string propertyName,
+        string value)
+    {
+        var fixture = SignedArtifact();
+        var root = JsonNode.Parse(fixture.Artifact)!.AsObject();
+        root["trustBootstrap"]!.AsObject()[propertyName] = value;
+        var mutated = JsonSerializer.SerializeToUtf8Bytes(
+            root,
+            new JsonSerializerOptions(JsonSerializerDefaults.Web));
+
+        Assert.Throws<MembershipRouteCatalogException>(() =>
+            DevLocalMembershipTrustBootstrap.CreateProfile(
+                mutated,
+                BootstrapFor(mutated)));
+    }
+
+    [Fact]
+    public void DevBootstrap_RejectsMalformedUtf8()
+    {
+        var malformed = new byte[] { (byte)'{', (byte)'"', 0xff, (byte)'"', (byte)'}' };
+
+        Assert.Throws<MembershipRouteCatalogException>(() =>
+            DevLocalMembershipTrustBootstrap.CreateProfile(
+                malformed,
+                BootstrapFor(malformed)));
+    }
+
+    [Theory]
+    [InlineData("http://203.0.113.10/api/network/membership-route-catalog")]
+    [InlineData("http://example.invalid/api/network/membership-route-catalog")]
+    [InlineData("http://[::1]/api/network/membership-route-catalog")]
+    public void DevHttpCatalog_RejectsRemoteOrNonIpv4Urls(string value)
+    {
+        Assert.Throws<ArgumentException>(() =>
+            HttpMembershipRouteArtifactSource.FromCatalogUrls(
+                new HttpClient(),
+                [new Uri(value)],
+                MembershipRouteEndpointPolicy.DevLocalHttp));
+    }
+
+    [Theory]
+    [InlineData("http://127.0.0.1/api/network/membership-route-catalog")]
+    [InlineData("http://10.20.30.40/api/network/membership-route-catalog")]
+    [InlineData("http://172.31.255.254/api/network/membership-route-catalog")]
+    [InlineData("http://192.168.50.7/api/network/membership-route-catalog")]
+    [InlineData("http://169.254.10.20/api/network/membership-route-catalog")]
+    public void DevHttpCatalog_AcceptsExplicitLocalIpv4Ranges(string value)
+    {
+        Assert.NotNull(HttpMembershipRouteArtifactSource.FromCatalogUrls(
+            new HttpClient(),
+            [new Uri(value)],
+            MembershipRouteEndpointPolicy.DevLocalHttp));
+    }
+
+    [Theory]
+    [InlineData("https://user:password@registry.example/api/network/membership-route-catalog")]
+    [InlineData("https://registry.example/api/network/membership-route-catalog?mirror=1")]
+    [InlineData("https://registry.example/api/network/membership-route-catalog#fragment")]
+    public void CatalogUrls_RejectCredentialsQueryAndFragment(string value)
+    {
+        Assert.Throws<ArgumentException>(() =>
+            HttpMembershipRouteArtifactSource.FromCatalogUrls(
+                new HttpClient(),
+                [new Uri(value)]));
+    }
+
+    [Fact]
+    public async Task DevHttpCatalog_RequiresExplicitPolicyAndExactPath()
+    {
+        var requests = new List<Uri>();
+        using var client = new HttpClient(new ThrowingHandler((request, _) =>
+        {
+            requests.Add(request.RequestUri!);
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent("{}"u8.ToArray())
+            });
+        }));
+        var url = new Uri("http://192.168.50.7/api/network/membership-route-catalog");
+
+        Assert.Throws<ArgumentException>(() =>
+            HttpMembershipRouteArtifactSource.FromCatalogUrls(client, [url]));
+        Assert.Throws<ArgumentException>(() =>
+            HttpMembershipRouteArtifactSource.FromCatalogUrls(
+                client,
+                [new Uri("http://192.168.50.7/not-the-catalog")],
+                MembershipRouteEndpointPolicy.DevLocalHttp));
+        Assert.NotNull(HttpMembershipRouteArtifactSource.FromCatalogUrls(
+            client,
+            [new Uri("https://registry.example/api/network/membership-route-catalog")]));
+
+        var source = HttpMembershipRouteArtifactSource.FromCatalogUrls(
+            client,
+            [url],
+            MembershipRouteEndpointPolicy.DevLocalHttp);
+        _ = await source.FetchAsync();
+
+        Assert.Equal(url, Assert.Single(requests));
+    }
+
+    [Fact]
+    public async Task VerifiedProvider_AcceptsHttpsProductionCatalogAndAllSixQuorumMembers()
+    {
+        var fixture = SignedArtifact(static index => $"https://node-{index}.example/");
+        var store = new InMemorySessionStore();
+        var provider = Provider(
+            fixture,
+            store,
+            MembershipRouteEndpointPolicy.Production);
+
+        var catalog = await provider.GetCatalogAsync();
+        var first = MembershipRouteSelector.Select(
+            catalog,
+            Enumerable.Repeat((byte)11, 32).ToArray());
+        var excluded = first.Select(Id).ToHashSet(StringComparer.Ordinal);
+        var second = MembershipRouteSelector.Select(
+            catalog,
+            Enumerable.Repeat((byte)12, 32).ToArray(),
+            excluded);
+
+        Assert.Equal(6, catalog.Members.Count);
+        Assert.Equal(3, first.Count);
+        Assert.Equal(3, second.Count);
+        Assert.Empty(first.Select(Id).Intersect(second.Select(Id), StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public async Task VerifiedProvider_RejectsEquivalentDefaultPortOrigins()
+    {
+        var fixture = SignedArtifact(index => index switch
+        {
+            1 => "https://duplicate.example/",
+            2 => "https://duplicate.example:443",
+            _ => $"https://node-{index}.example/"
+        });
+        var store = new InMemorySessionStore();
+        var provider = Provider(
+            fixture,
+            store,
+            MembershipRouteEndpointPolicy.Production);
 
         await Assert.ThrowsAsync<MembershipRouteCatalogException>(
             () => provider.GetCatalogAsync());
@@ -219,7 +425,7 @@ public sealed class MembershipRouteSelectionTests
                     RouterId = Bytes(index),
                     Ed25519PublicKey = Bytes(index),
                     X25519PublicKey = Bytes(index + 64),
-                    RpcEndpoint = $"http://node-{index}.invalid/",
+                    RpcEndpoint = $"http://10.0.0.{index}/",
                     Roles = MembershipRouteRole.Ingress |
                             MembershipRouteRole.Core |
                             MembershipRouteRole.Storage,
@@ -241,17 +447,23 @@ public sealed class MembershipRouteSelectionTests
             10,
             DateTimeOffset.FromUnixTimeSeconds(1_900_000_000),
             members,
-            SHA256.HashData("membership"u8));
+            SHA256.HashData("membership"u8))
+        {
+            EndpointPolicy = MembershipRouteEndpointPolicy.DevLocalHttp
+        };
     }
 
-    private static (byte[] Artifact, MembershipTrustProfile Profile) SignedArtifact()
+    private static (
+        byte[] Artifact,
+        MembershipTrustProfile Profile,
+        DevLocalMembershipTrustBootstrapOptions Bootstrap) SignedArtifact(
+            Func<int, string>? endpoint = null)
     {
+        endpoint ??= static index => $"http://10.0.0.{index}/";
         var membershipTemplate = MembershipContractCodec.DecodeSignedMembership(
             MembershipTrustServiceTests.Vector("deep-extension/membership/v1/signed-membership"));
         var delegation = MembershipContractCodec.DecodeSignedDelegation(
             MembershipTrustServiceTests.Vector("deep-extension/membership/v1/signed-delegation"));
-        var bridge = MembershipContractCodec.DecodeSignedBridge(
-            MembershipTrustServiceTests.Vector("deep-extension/membership/v1/signed-bridge"));
         var genesisBytes = MembershipTrustServiceTests.Vector(
             "deep-extension/membership/v1/network-genesis");
         var genesis = MembershipContractCodec.DecodeGenesis(genesisBytes);
@@ -260,19 +472,22 @@ public sealed class MembershipRouteSelectionTests
             RouterId = Bytes(index),
             Ed25519PublicKey = Bytes(index),
             X25519PublicKey = Bytes(index + 64),
-            RpcEndpoint = $"http://node-{index}.invalid/",
+            RpcEndpoint = endpoint(index),
             Roles = MembershipRouteRole.Ingress |
                     MembershipRouteRole.Core |
                     MembershipRouteRole.Storage,
             Capabilities = MembershipRouteCapability.SessionRpc |
                            MembershipRouteCapability.OnionV1 |
                            MembershipRouteCapability.Storage,
-            Epoch = membershipTemplate.Statement.Sequence,
+            Epoch = delegation.Sequence + 1,
             ValidFromUnixSeconds = membershipTemplate.Statement.ValidFromUnixSeconds,
             ValidUntilUnixSeconds = membershipTemplate.Statement.ValidUntilUnixSeconds
         }).ToArray();
         var statement = membershipTemplate.Statement with
         {
+            Sequence = delegation.Sequence + 1,
+            PreviousHash = MembershipContractHash.Sha256(
+                MembershipContractCodec.GetDelegationSigningBytes(delegation)),
             MemberCount = checked((uint)descriptors.Length),
             MerkleRoot = MembershipRouteDescriptorCodec.ComputeRoot(descriptors)
         };
@@ -293,9 +508,38 @@ public sealed class MembershipRouteSelectionTests
             }).ToArray()
         };
         var proofs = MembershipRouteDescriptorCodec.BuildProofs(descriptors);
+        var profile = new MembershipTrustProfile(
+            "install:membership-route-test",
+            genesisBytes,
+            genesis.NetworkId.ToArray(),
+            MembershipContractHash.Sha256(genesisBytes),
+            MembershipTrustServiceTests.Vector("deep-extension/membership/v1/signed-delegation"),
+            new MembershipTrustAnchor(delegation.Sequence, statement.PreviousHash.ToArray()),
+            new MembershipTrustAnchor(delegation.Sequence, statement.PreviousHash.ToArray()));
         var artifact = JsonSerializer.SerializeToUtf8Bytes(new
         {
             version = "deep-membership-route-catalog-v1",
+            trustBootstrap = new
+            {
+                version = DevLocalMembershipTrustBootstrap.Version,
+                scope = DevLocalMembershipTrustBootstrap.Scope,
+                opaqueProfileKey = profile.OpaqueProfileKey,
+                canonicalGenesis = Convert.ToBase64String(profile.CanonicalGenesis),
+                expectedNetworkId = Convert.ToBase64String(profile.ExpectedNetworkId),
+                expectedCanonicalGenesisSha256 =
+                    Convert.ToBase64String(profile.ExpectedCanonicalGenesisSha256),
+                signedDelegation = Convert.ToBase64String(profile.SignedDelegation),
+                bridgeAnchor = new
+                {
+                    sequence = profile.BridgeAnchor!.Sequence,
+                    canonicalHash = Convert.ToBase64String(profile.BridgeAnchor.CanonicalHash)
+                },
+                membershipAnchor = new
+                {
+                    sequence = profile.MembershipAnchor!.Sequence,
+                    canonicalHash = Convert.ToBase64String(profile.MembershipAnchor.CanonicalHash)
+                }
+            },
             signedMembership = Convert.ToBase64String(
                 MembershipContractCodec.EncodeSignedMembership(signed)),
             members = descriptors.Select((descriptor, index) => new
@@ -307,20 +551,38 @@ public sealed class MembershipRouteSelectionTests
                     static value => Convert.ToBase64String(value.Span)).ToArray()
             }).ToArray()
         }, new JsonSerializerOptions(JsonSerializerDefaults.Web));
-        var profile = new MembershipTrustProfile(
-            "install:membership-route-test",
-            genesisBytes,
-            genesis.NetworkId.ToArray(),
-            MembershipContractHash.Sha256(genesisBytes),
-            MembershipTrustServiceTests.Vector("deep-extension/membership/v1/signed-delegation"),
-            new MembershipTrustAnchor(
-                bridge.Statement.Sequence - 1,
-                bridge.Statement.PreviousHash.ToArray()),
-            new MembershipTrustAnchor(
-                statement.Sequence - 1,
-                statement.PreviousHash.ToArray()));
-        return (artifact, profile);
+        return (artifact, profile, BootstrapFor(artifact, profile.OpaqueProfileKey));
     }
+
+    private static DevLocalMembershipTrustBootstrapOptions BootstrapFor(
+        byte[] artifact,
+        string profileKey = "install:membership-route-test") =>
+        new(Convert.ToHexStringLower(SHA256.HashData(artifact)), profileKey);
+
+    private static VerifiedMembershipRouteCatalogProvider Provider(
+        (
+            byte[] Artifact,
+            MembershipTrustProfile Profile,
+            DevLocalMembershipTrustBootstrapOptions Bootstrap) fixture,
+        InMemorySessionStore store,
+        MembershipRouteEndpointPolicy endpointPolicy) =>
+        new(
+            new MembershipTrustService(
+                store,
+                new MembershipTrustServiceTests.FixtureMembershipVerifier(),
+                new FrozenClock(TrustNow),
+                MembershipTrustOptions.DormantDefaults with
+                {
+                    Enabled = true,
+                    AllowedClockSkew = TimeSpan.FromSeconds(30),
+                    ClockRollbackTolerance = TimeSpan.FromSeconds(30)
+                }),
+            store,
+            fixture.Bootstrap,
+            new SwitchingArtifactSource(fixture.Artifact),
+            new InMemoryMembershipRouteArtifactCache(),
+            new FrozenTimeProvider(TrustNow),
+            endpointPolicy);
 
     private static string Id(MembershipRouteCatalogMember member) =>
         Convert.ToHexStringLower(member.Descriptor.RouterId.Span);

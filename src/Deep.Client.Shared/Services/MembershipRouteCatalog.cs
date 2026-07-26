@@ -17,7 +17,11 @@ public sealed record MembershipRouteCatalogSnapshot(
     ulong Sequence,
     DateTimeOffset ValidUntil,
     IReadOnlyList<MembershipRouteCatalogMember> Members,
-    byte[] CanonicalMembershipHash);
+    byte[] CanonicalMembershipHash)
+{
+    public MembershipRouteEndpointPolicy EndpointPolicy { get; init; } =
+        MembershipRouteEndpointPolicy.Production;
+}
 
 public interface IMembershipRouteCatalogProvider
 {
@@ -45,36 +49,67 @@ public sealed class MembershipRouteDirectoryUnavailableException(string message,
 public sealed class HttpMembershipRouteArtifactSource : IMembershipRouteArtifactSource
 {
     public const int MaximumArtifactBytes = 2 * 1024 * 1024;
+    public const string DefaultArtifactPath = "/api/network/membership-route-catalog";
 
     private readonly HttpClient _httpClient;
-    private readonly Uri[] _bootstrapEndpoints;
-    private readonly string _artifactPath;
+    private readonly Uri[] _catalogEndpoints;
 
     public HttpMembershipRouteArtifactSource(
         HttpClient httpClient,
         IEnumerable<Uri> bootstrapEndpoints,
-        string artifactPath = "/api/network/membership-route-catalog")
+        string artifactPath = DefaultArtifactPath,
+        MembershipRouteEndpointPolicy? endpointPolicy = null)
     {
         _httpClient = httpClient;
-        _bootstrapEndpoints = bootstrapEndpoints?.Select(RequireBootstrapEndpoint).Distinct().ToArray()
+        if (!string.Equals(artifactPath, DefaultArtifactPath, StringComparison.Ordinal))
+            throw new ArgumentException(
+                $"Artifact path must be exactly {DefaultArtifactPath}.",
+                nameof(artifactPath));
+        var policy = endpointPolicy ?? MembershipRouteEndpointPolicy.Production;
+        _catalogEndpoints = bootstrapEndpoints?
+            .Select(policy.RequireCatalogOrigin)
+            .DistinctBy(static endpoint => endpoint.AbsoluteUri, StringComparer.Ordinal)
+            .Select(endpoint => new Uri(endpoint, DefaultArtifactPath.TrimStart('/')))
+            .ToArray()
             ?? throw new ArgumentNullException(nameof(bootstrapEndpoints));
-        if (_bootstrapEndpoints.Length == 0)
+        if (_catalogEndpoints.Length == 0)
             throw new ArgumentException("At least one bootstrap fetch endpoint is required.", nameof(bootstrapEndpoints));
-        if (string.IsNullOrWhiteSpace(artifactPath) || !artifactPath.StartsWith('/'))
-            throw new ArgumentException("Artifact path must be absolute.", nameof(artifactPath));
-        _artifactPath = artifactPath;
+    }
+
+    private HttpMembershipRouteArtifactSource(
+        HttpClient httpClient,
+        Uri[] catalogEndpoints)
+    {
+        _httpClient = httpClient;
+        _catalogEndpoints = catalogEndpoints;
+    }
+
+    public static HttpMembershipRouteArtifactSource FromCatalogUrls(
+        HttpClient httpClient,
+        IEnumerable<Uri> catalogUrls,
+        MembershipRouteEndpointPolicy? endpointPolicy = null)
+    {
+        var policy = endpointPolicy ?? MembershipRouteEndpointPolicy.Production;
+        var endpoints = catalogUrls?
+            .Select(policy.RequireCatalogUri)
+            .DistinctBy(static endpoint => endpoint.AbsoluteUri, StringComparer.Ordinal)
+            .ToArray()
+            ?? throw new ArgumentNullException(nameof(catalogUrls));
+        if (endpoints.Length == 0)
+            throw new ArgumentException("At least one membership catalog URL is required.", nameof(catalogUrls));
+        return new HttpMembershipRouteArtifactSource(httpClient, endpoints);
     }
 
     public async Task<byte[]> FetchAsync(CancellationToken cancellationToken = default)
     {
         Exception? lastFailure = null;
-        foreach (var bootstrap in _bootstrapEndpoints)
+        foreach (var endpoint in _catalogEndpoints)
         {
             cancellationToken.ThrowIfCancellationRequested();
             try
             {
                 using var response = await _httpClient.GetAsync(
-                    new Uri(bootstrap, _artifactPath.TrimStart('/')),
+                    endpoint,
                     HttpCompletionOption.ResponseHeadersRead,
                     cancellationToken).ConfigureAwait(false);
                 if (response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.ServiceUnavailable)
@@ -102,18 +137,6 @@ public sealed class HttpMembershipRouteArtifactSource : IMembershipRouteArtifact
         throw new MembershipRouteDirectoryUnavailableException(
             "All membership bootstrap fetch endpoints are unavailable.",
             lastFailure);
-    }
-
-    private static Uri RequireBootstrapEndpoint(Uri endpoint)
-    {
-        ArgumentNullException.ThrowIfNull(endpoint);
-        if (!endpoint.IsAbsoluteUri ||
-            endpoint.Scheme is not ("http" or "https") ||
-            !string.IsNullOrEmpty(endpoint.UserInfo) ||
-            !string.IsNullOrEmpty(endpoint.Query) ||
-            !string.IsNullOrEmpty(endpoint.Fragment))
-            throw new ArgumentException("Bootstrap endpoint must be an absolute HTTP(S) URI.");
-        return endpoint;
     }
 
     private static async Task<byte[]> ReadBoundedAsync(
@@ -203,23 +226,61 @@ public sealed class InMemoryMembershipRouteArtifactCache : IMembershipRouteArtif
     }
 }
 
-public sealed class VerifiedMembershipRouteCatalogProvider(
-    MembershipTrustService trustService,
-    IMembershipTrustRepository trustRepository,
-    MembershipTrustProfile trustProfile,
-    IMembershipRouteArtifactSource source,
-    IMembershipRouteArtifactCache cache,
-    TimeProvider? timeProvider = null) : IMembershipRouteCatalogProvider
+public sealed class VerifiedMembershipRouteCatalogProvider : IMembershipRouteCatalogProvider
 {
-    private const string ArtifactVersion = "deep-membership-route-catalog-v1";
+    public const string ArtifactVersion = "deep-membership-route-catalog-v1";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         PropertyNameCaseInsensitive = false,
         MaxDepth = 32
     };
 
-    private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
+    private readonly TimeProvider _timeProvider;
     private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly MembershipTrustService _trustService;
+    private readonly IMembershipTrustRepository _trustRepository;
+    private readonly MembershipTrustProfile? _trustProfile;
+    private readonly IMembershipRouteArtifactSource _source;
+    private readonly IMembershipRouteArtifactCache _cache;
+    private readonly DevLocalMembershipTrustBootstrapOptions? _devLocalBootstrap;
+    private readonly MembershipRouteEndpointPolicy _endpointPolicy;
+
+    public VerifiedMembershipRouteCatalogProvider(
+        MembershipTrustService trustService,
+        IMembershipTrustRepository trustRepository,
+        MembershipTrustProfile trustProfile,
+        IMembershipRouteArtifactSource source,
+        IMembershipRouteArtifactCache cache,
+        TimeProvider? timeProvider = null,
+        MembershipRouteEndpointPolicy? endpointPolicy = null)
+    {
+        _trustService = trustService;
+        _trustRepository = trustRepository;
+        _trustProfile = trustProfile ?? throw new ArgumentNullException(nameof(trustProfile));
+        _source = source ?? throw new ArgumentNullException(nameof(source));
+        _cache = cache ?? throw new ArgumentNullException(nameof(cache));
+        _timeProvider = timeProvider ?? TimeProvider.System;
+        _endpointPolicy = endpointPolicy ?? MembershipRouteEndpointPolicy.Production;
+    }
+
+    public VerifiedMembershipRouteCatalogProvider(
+        MembershipTrustService trustService,
+        IMembershipTrustRepository trustRepository,
+        DevLocalMembershipTrustBootstrapOptions devLocalBootstrap,
+        IMembershipRouteArtifactSource source,
+        IMembershipRouteArtifactCache cache,
+        TimeProvider? timeProvider = null,
+        MembershipRouteEndpointPolicy? endpointPolicy = null)
+    {
+        _trustService = trustService;
+        _trustRepository = trustRepository;
+        _devLocalBootstrap = devLocalBootstrap ??
+            throw new ArgumentNullException(nameof(devLocalBootstrap));
+        _source = source ?? throw new ArgumentNullException(nameof(source));
+        _cache = cache ?? throw new ArgumentNullException(nameof(cache));
+        _timeProvider = timeProvider ?? TimeProvider.System;
+        _endpointPolicy = endpointPolicy ?? MembershipRouteEndpointPolicy.Production;
+    }
 
     public async Task<MembershipRouteCatalogSnapshot> GetCatalogAsync(
         CancellationToken cancellationToken = default)
@@ -230,11 +291,11 @@ public sealed class VerifiedMembershipRouteCatalogProvider(
             byte[] artifact;
             try
             {
-                artifact = await source.FetchAsync(cancellationToken).ConfigureAwait(false);
+                artifact = await _source.FetchAsync(cancellationToken).ConfigureAwait(false);
             }
             catch (MembershipRouteDirectoryUnavailableException exception)
             {
-                artifact = await cache.ReadAsync(cancellationToken).ConfigureAwait(false)
+                artifact = await _cache.ReadAsync(cancellationToken).ConfigureAwait(false)
                     ?? throw new MembershipRouteDirectoryUnavailableException(
                         "Membership directory is unavailable and no LKG catalog is cached.",
                         exception);
@@ -242,7 +303,7 @@ public sealed class VerifiedMembershipRouteCatalogProvider(
             }
 
             var verified = await VerifyAsync(artifact, cancellationToken).ConfigureAwait(false);
-            await cache.WriteAsync(artifact, cancellationToken).ConfigureAwait(false);
+            await _cache.WriteAsync(artifact, cancellationToken).ConfigureAwait(false);
             return verified;
         }
         finally
@@ -257,9 +318,34 @@ public sealed class VerifiedMembershipRouteCatalogProvider(
     {
         if (encoded.Length is <= 0 or > HttpMembershipRouteArtifactSource.MaximumArtifactBytes)
             throw new MembershipRouteCatalogException("Membership artifact is outside its byte limit.");
+        var trustProfile = _devLocalBootstrap is null
+            ? _trustProfile!
+            : DevLocalMembershipTrustBootstrap.CreateProfile(encoded, _devLocalBootstrap);
         MembershipRouteArtifactDocument artifact;
         try
         {
+            using var document = JsonDocument.Parse(encoded, new JsonDocumentOptions
+            {
+                AllowTrailingCommas = false,
+                CommentHandling = JsonCommentHandling.Disallow,
+                MaxDepth = 32
+            });
+            DevLocalMembershipTrustBootstrap.RequireExactProperties(
+                document.RootElement,
+                _devLocalBootstrap is null
+                    ? ["version", "signedMembership", "members"]
+                    : ["version", "trustBootstrap", "signedMembership", "members"],
+                "Membership artifact");
+            var rawMembers = document.RootElement.GetProperty("members");
+            if (rawMembers.ValueKind != JsonValueKind.Array)
+                throw new MembershipRouteCatalogException("Membership route members must be an array.");
+            foreach (var rawMember in rawMembers.EnumerateArray())
+            {
+                DevLocalMembershipTrustBootstrap.RequireExactProperties(
+                    rawMember,
+                    ["leaf", "leafIndex", "memberCount", "siblingHashes"],
+                    "Membership route member");
+            }
             artifact = JsonSerializer.Deserialize<MembershipRouteArtifactDocument>(encoded, JsonOptions)
                 ?? throw new JsonException("Membership artifact is empty.");
         }
@@ -287,17 +373,17 @@ public sealed class VerifiedMembershipRouteCatalogProvider(
             throw new MembershipRouteCatalogException("Signed membership envelope is invalid.", exception);
         }
 
-        var initialized = await trustService.InitializeAsync(trustProfile, cancellationToken).ConfigureAwait(false);
+        var initialized = await _trustService.InitializeAsync(trustProfile, cancellationToken).ConfigureAwait(false);
         if (!initialized.Usable)
             throw new MembershipRouteCatalogException($"Membership trust initialization failed: {initialized.State}.");
-        var applied = await trustService.ApplyMembershipAsync(
+        var applied = await _trustService.ApplyMembershipAsync(
             trustProfile,
             signedEnvelope,
             cancellationToken).ConfigureAwait(false);
         if (!applied.Usable)
             throw new MembershipRouteCatalogException($"Membership trust rejected the catalog: {applied.State}.");
 
-        var persisted = await trustRepository.ReadMembershipTrustAsync(
+        var persisted = await _trustRepository.ReadMembershipTrustAsync(
             trustProfile.OpaqueProfileKey,
             MembershipTrustDomain.Membership,
             cancellationToken).ConfigureAwait(false);
@@ -322,7 +408,7 @@ public sealed class VerifiedMembershipRouteCatalogProvider(
 
         var members = new MembershipRouteCatalogMember[artifact.Members.Count];
         var routerIds = new HashSet<string>(StringComparer.Ordinal);
-        var endpoints = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var endpoints = new HashSet<string>(StringComparer.Ordinal);
         var proofIndices = new HashSet<uint>();
         string? previousRouterId = null;
         for (var index = 0; index < artifact.Members.Count; index++)
@@ -355,6 +441,7 @@ public sealed class VerifiedMembershipRouteCatalogProvider(
             }
 
             var routerId = Convert.ToHexStringLower(descriptor.RouterId.Span);
+            var endpoint = _endpointPolicy.RequireMembershipOrigin(descriptor.RpcEndpoint);
             if (descriptor.Epoch != signed.Statement.Sequence ||
                 descriptor.ValidFromUnixSeconds < signed.Statement.ValidFromUnixSeconds ||
                 descriptor.ValidUntilUnixSeconds > signed.Statement.ValidUntilUnixSeconds ||
@@ -372,7 +459,7 @@ public sealed class VerifiedMembershipRouteCatalogProvider(
                 previousRouterId is not null &&
                 string.CompareOrdinal(previousRouterId, routerId) >= 0 ||
                 !routerIds.Add(routerId) ||
-                !endpoints.Add(descriptor.RpcEndpoint) ||
+                !endpoints.Add(endpoint) ||
                 !proofIndices.Add(proof.LeafIndex) ||
                 proof.LeafIndex != index ||
                 proof.MemberCount != signed.Statement.MemberCount ||
@@ -389,17 +476,17 @@ public sealed class VerifiedMembershipRouteCatalogProvider(
             signed.Statement.Sequence,
             DateTimeOffset.FromUnixTimeSeconds(checked((long)signed.Statement.ValidUntilUnixSeconds)),
             members,
-            canonicalHash);
+            canonicalHash)
+        {
+            EndpointPolicy = _endpointPolicy
+        };
     }
 
     private static byte[] DecodeBase64(string? value, int maximumBytes)
     {
         if (string.IsNullOrWhiteSpace(value) || value.Length > ((maximumBytes + 2) / 3) * 4 + 4)
             throw new FormatException("Base64 value is outside its bound.");
-        var decoded = Convert.FromBase64String(value);
-        if (decoded.Length is <= 0 || decoded.Length > maximumBytes)
-            throw new FormatException("Decoded value is outside its bound.");
-        return decoded;
+        return DevLocalMembershipTrustBootstrap.DecodeCanonicalBase64(value, maximumBytes);
     }
 
     private sealed record MembershipRouteArtifactDocument(
@@ -429,6 +516,15 @@ public static class MembershipRouteSelector
             throw new ArgumentException("Route-selection entropy must be at least 128 bits.", nameof(entropy));
         var entropyBytes = entropy.ToArray();
         var excluded = excludedRouterIds ?? new HashSet<string>(StringComparer.Ordinal);
+        var endpointOrigins = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var member in catalog.Members)
+        {
+            var origin = catalog.EndpointPolicy.RequireMembershipOrigin(
+                member.Descriptor.RpcEndpoint);
+            if (!endpointOrigins.Add(origin))
+                throw new MembershipRouteCatalogException(
+                    "Membership route catalog contains equivalent endpoint origins.");
+        }
         var ranked = catalog.Members
             .Where(member => !excluded.Contains(
                 Convert.ToHexStringLower(member.Descriptor.RouterId.Span)))

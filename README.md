@@ -22,6 +22,22 @@ It intentionally ports shared behavior and boundaries rather than UI line-by-lin
 - HTTP call signaling transport (`HttpCallSignalingTransport`) for real call offer/answer/bye exchange via `/api/calls`.
 - HTTP transport integration (`HttpSessionTransport`) for custom production message APIs, plus `StubSessionBackend` for isolated tests.
 - Opt-in P11 persistent outbox dispatcher for already-opaque ciphertext bundles. Activation requires the feature flag, an outbox-capable store, and an explicit `IExternalTransportOutboxExecutor` backed by an independently killable bounded worker process; an in-process task/thread adapter is rejected as insufficient. Outcome-unknown attempts are persistently quarantined from redispatch. No default profile enables it and no platform executor is currently shipped.
+- Verified membership routing with production-secure HTTPS endpoint defaults. The
+  `DEV-LOCAL-ONLY` bootstrap path is additive and dormant: a caller must supply the
+  exact catalog URL, explicitly select `MembershipRouteEndpointPolicy.DevLocalHttp`,
+  and provide the lowercase SHA-256 of the exact artifact bytes through
+  `DevLocalMembershipTrustBootstrapOptions`. Development HTTP is accepted only for
+  loopback, RFC1918, or IPv4 link-local addresses at the exact
+  `/api/network/membership-route-catalog` path. The embedded bootstrap is accepted
+  only after the whole-artifact pin matches and is converted into a
+  `MembershipTrustProfile`; it is never a TOFU or production trust-root source.
+  MAUI activation must require both handoff values
+  `DEEP_DEV_LOCAL_MEMBERSHIP_TRUST_URL` and
+  `DEEP_DEV_LOCAL_MEMBERSHIP_TRUST_SHA256`, use
+  `HttpMembershipRouteArtifactSource.FromCatalogUrls`, and construct
+  `VerifiedMembershipRouteCatalogProvider` with the dev-bootstrap overload and the
+  same explicit development endpoint policy. Missing either value must leave
+  membership routing disabled/fail closed.
 
 Persistent runtime includes:
 
