@@ -46,13 +46,19 @@ public sealed class MembershipRouteCatalogException(string message, Exception? i
 public sealed class MembershipRouteDirectoryUnavailableException(string message, Exception? inner = null)
     : IOException(message, inner);
 
-public sealed class HttpMembershipRouteArtifactSource : IMembershipRouteArtifactSource
+public sealed class HttpMembershipRouteArtifactSource :
+    IMembershipRouteArtifactSource,
+    ICanonicalDevLocalMembershipRouteArtifactSource
 {
     public const int MaximumArtifactBytes = 2 * 1024 * 1024;
     public const string DefaultArtifactPath = "/api/network/membership-route-catalog";
 
     private readonly HttpClient _httpClient;
     private readonly Uri[] _catalogEndpoints;
+    private readonly bool _isCanonicalDevLocalHttpSource;
+
+    bool ICanonicalDevLocalMembershipRouteArtifactSource.IsCanonicalDevLocalHttpSource =>
+        _isCanonicalDevLocalHttpSource;
 
     public HttpMembershipRouteArtifactSource(
         HttpClient httpClient,
@@ -66,22 +72,28 @@ public sealed class HttpMembershipRouteArtifactSource : IMembershipRouteArtifact
                 $"Artifact path must be exactly {DefaultArtifactPath}.",
                 nameof(artifactPath));
         var policy = endpointPolicy ?? MembershipRouteEndpointPolicy.Production;
-        _catalogEndpoints = bootstrapEndpoints?
+        var suppliedEndpoints = bootstrapEndpoints?.ToArray()
+            ?? throw new ArgumentNullException(nameof(bootstrapEndpoints));
+        _isCanonicalDevLocalHttpSource =
+            suppliedEndpoints.Length == 1 &&
+            suppliedEndpoints.All(policy.IsCanonicalDevLocalCatalogOrigin);
+        _catalogEndpoints = suppliedEndpoints
             .Select(policy.RequireCatalogOrigin)
             .DistinctBy(static endpoint => endpoint.AbsoluteUri, StringComparer.Ordinal)
             .Select(endpoint => new Uri(endpoint, DefaultArtifactPath.TrimStart('/')))
-            .ToArray()
-            ?? throw new ArgumentNullException(nameof(bootstrapEndpoints));
+            .ToArray();
         if (_catalogEndpoints.Length == 0)
             throw new ArgumentException("At least one bootstrap fetch endpoint is required.", nameof(bootstrapEndpoints));
     }
 
     private HttpMembershipRouteArtifactSource(
         HttpClient httpClient,
-        Uri[] catalogEndpoints)
+        Uri[] catalogEndpoints,
+        bool isCanonicalDevLocalHttpSource)
     {
         _httpClient = httpClient;
         _catalogEndpoints = catalogEndpoints;
+        _isCanonicalDevLocalHttpSource = isCanonicalDevLocalHttpSource;
     }
 
     public static HttpMembershipRouteArtifactSource FromCatalogUrls(
@@ -90,14 +102,21 @@ public sealed class HttpMembershipRouteArtifactSource : IMembershipRouteArtifact
         MembershipRouteEndpointPolicy? endpointPolicy = null)
     {
         var policy = endpointPolicy ?? MembershipRouteEndpointPolicy.Production;
-        var endpoints = catalogUrls?
+        var suppliedUrls = catalogUrls?.ToArray()
+            ?? throw new ArgumentNullException(nameof(catalogUrls));
+        var isCanonicalDevLocalHttpSource =
+            suppliedUrls.Length == 1 &&
+            suppliedUrls.All(policy.IsCanonicalDevLocalCatalogUri);
+        var endpoints = suppliedUrls
             .Select(policy.RequireCatalogUri)
             .DistinctBy(static endpoint => endpoint.AbsoluteUri, StringComparer.Ordinal)
-            .ToArray()
-            ?? throw new ArgumentNullException(nameof(catalogUrls));
+            .ToArray();
         if (endpoints.Length == 0)
             throw new ArgumentException("At least one membership catalog URL is required.", nameof(catalogUrls));
-        return new HttpMembershipRouteArtifactSource(httpClient, endpoints);
+        return new HttpMembershipRouteArtifactSource(
+            httpClient,
+            endpoints,
+            isCanonicalDevLocalHttpSource);
     }
 
     public async Task<byte[]> FetchAsync(CancellationToken cancellationToken = default)
@@ -112,6 +131,16 @@ public sealed class HttpMembershipRouteArtifactSource : IMembershipRouteArtifact
                     endpoint,
                     HttpCompletionOption.ResponseHeadersRead,
                     cancellationToken).ConfigureAwait(false);
+                if (_isCanonicalDevLocalHttpSource &&
+                    response.RequestMessage?.RequestUri is { } responseUri &&
+                    !string.Equals(
+                        responseUri.AbsoluteUri,
+                        endpoint.AbsoluteUri,
+                        StringComparison.Ordinal))
+                {
+                    throw new MembershipRouteCatalogException(
+                        "Development membership catalog redirects are prohibited.");
+                }
                 if (response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.ServiceUnavailable)
                 {
                     lastFailure = new HttpRequestException(
@@ -279,7 +308,22 @@ public sealed class VerifiedMembershipRouteCatalogProvider : IMembershipRouteCat
         _source = source ?? throw new ArgumentNullException(nameof(source));
         _cache = cache ?? throw new ArgumentNullException(nameof(cache));
         _timeProvider = timeProvider ?? TimeProvider.System;
-        _endpointPolicy = endpointPolicy ?? MembershipRouteEndpointPolicy.Production;
+        if (endpointPolicy is null || !endpointPolicy.IsExplicitDevLocal)
+        {
+            throw new ArgumentException(
+                "Development membership trust bootstrap requires the explicit development-local HTTP endpoint policy.",
+                nameof(endpointPolicy));
+        }
+        if (source is not ICanonicalDevLocalMembershipRouteArtifactSource
+            {
+                IsCanonicalDevLocalHttpSource: true
+            })
+        {
+            throw new ArgumentException(
+                "Development membership trust bootstrap requires a canonical local-IPv4 HTTP catalog source.",
+                nameof(source));
+        }
+        _endpointPolicy = endpointPolicy;
     }
 
     public async Task<MembershipRouteCatalogSnapshot> GetCatalogAsync(

@@ -17,6 +17,57 @@ public sealed record MembershipRouteEndpointPolicy
         AllowDevLocalHttp = true
     };
 
+    internal bool IsExplicitDevLocal =>
+        ReferenceEquals(this, DevLocalHttp);
+
+    internal bool IsCanonicalDevLocalCatalogOrigin(Uri value)
+    {
+        try
+        {
+            if (!IsExplicitDevLocal ||
+                value.Scheme != Uri.UriSchemeHttp ||
+                value.AbsolutePath != "/" ||
+                value.Port <= 0 ||
+                !IsLocalIpv4(value.Host))
+            {
+                return false;
+            }
+            var canonical = RequireOrigin(value, "Membership catalog origin");
+            return string.Equals(
+                value.OriginalString,
+                canonical.AbsoluteUri,
+                StringComparison.Ordinal);
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+    }
+
+    internal bool IsCanonicalDevLocalCatalogUri(Uri value)
+    {
+        try
+        {
+            if (!IsExplicitDevLocal ||
+                value.Scheme != Uri.UriSchemeHttp ||
+                value.AbsolutePath != HttpMembershipRouteArtifactSource.DefaultArtifactPath ||
+                value.Port <= 0 ||
+                !IsLocalIpv4(value.Host))
+            {
+                return false;
+            }
+            var canonical = RequireCatalogUri(value);
+            return string.Equals(
+                value.OriginalString,
+                canonical.AbsoluteUri,
+                StringComparison.Ordinal);
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+    }
+
     internal Uri RequireCatalogOrigin(Uri value)
     {
         var canonical = RequireOrigin(value, "Membership catalog origin");
@@ -72,6 +123,7 @@ public sealed record MembershipRouteEndpointPolicy
             !string.IsNullOrEmpty(value.UserInfo) ||
             !string.IsNullOrEmpty(value.Query) ||
             !string.IsNullOrEmpty(value.Fragment) ||
+            value.Port <= 0 ||
             requireRootPath && value.AbsolutePath != "/")
         {
             throw new ArgumentException(
@@ -110,6 +162,11 @@ public sealed record MembershipRouteEndpointPolicy
                bytes[0] == 172 && bytes[1] is >= 16 and <= 31 ||
                bytes[0] == 192 && bytes[1] == 168;
     }
+}
+
+internal interface ICanonicalDevLocalMembershipRouteArtifactSource
+{
+    bool IsCanonicalDevLocalHttpSource { get; }
 }
 
 public sealed record DevLocalMembershipTrustBootstrapOptions(

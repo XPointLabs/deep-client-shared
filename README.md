@@ -37,7 +37,10 @@ It intentionally ports shared behavior and boundaries rather than UI line-by-lin
   `HttpMembershipRouteArtifactSource.FromCatalogUrls`, and construct
   `VerifiedMembershipRouteCatalogProvider` with the dev-bootstrap overload and the
   same explicit development endpoint policy. Missing either value must leave
-  membership routing disabled/fail closed.
+  membership routing disabled/fail closed. That overload accepts exactly one
+  canonical literal-local-IPv4 HTTP catalog source; default/lookalike policies,
+  HTTPS (including local HTTPS), hostnames, public or noncanonical addresses,
+  multiple sources, and redirects away from the exact URL are rejected.
 
 Persistent runtime includes:
 

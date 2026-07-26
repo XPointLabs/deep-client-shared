@@ -124,7 +124,8 @@ public sealed class MembershipRouteSelectionTests
                 AllowedClockSkew = TimeSpan.FromSeconds(30),
                 ClockRollbackTolerance = TimeSpan.FromSeconds(30)
             });
-        var source = new SwitchingArtifactSource(fixture.Artifact);
+        var sourceState = new SwitchingArtifactHandler(fixture.Artifact);
+        var source = DevLocalHttpSource(sourceState);
         var cache = new InMemoryMembershipRouteArtifactCache();
         var provider = new VerifiedMembershipRouteCatalogProvider(
             trust,
@@ -136,7 +137,7 @@ public sealed class MembershipRouteSelectionTests
             MembershipRouteEndpointPolicy.DevLocalHttp);
 
         var fresh = await provider.GetCatalogAsync();
-        source.Unavailable = true;
+        sourceState.Unavailable = true;
         var cached = await provider.GetCatalogAsync();
 
         Assert.Equal(6, fresh.Members.Count);
@@ -149,7 +150,8 @@ public sealed class MembershipRouteSelectionTests
         var fixture = SignedArtifact();
         var store = new InMemorySessionStore();
         var verifier = new MembershipTrustServiceTests.FixtureMembershipVerifier();
-        var providerSource = new SwitchingArtifactSource(fixture.Artifact);
+        var sourceState = new SwitchingArtifactHandler(fixture.Artifact);
+        var providerSource = DevLocalHttpSource(sourceState);
         var provider = new VerifiedMembershipRouteCatalogProvider(
             new MembershipTrustService(
                 store,
@@ -169,7 +171,7 @@ public sealed class MembershipRouteSelectionTests
             MembershipRouteEndpointPolicy.DevLocalHttp);
 
         _ = await provider.GetCatalogAsync();
-        providerSource.Artifact = "{ \"version\": \"unsigned\" }"u8.ToArray();
+        sourceState.Artifact = "{ \"version\": \"unsigned\" }"u8.ToArray();
 
         await Assert.ThrowsAsync<MembershipRouteCatalogException>(
             () => provider.GetCatalogAsync());
@@ -263,6 +265,8 @@ public sealed class MembershipRouteSelectionTests
     [Theory]
     [InlineData("http://203.0.113.10/api/network/membership-route-catalog")]
     [InlineData("http://example.invalid/api/network/membership-route-catalog")]
+    [InlineData("http://localhost/api/network/membership-route-catalog")]
+    [InlineData("http://0.0.0.0/api/network/membership-route-catalog")]
     [InlineData("http://[::1]/api/network/membership-route-catalog")]
     public void DevHttpCatalog_RejectsRemoteOrNonIpv4Urls(string value)
     {
@@ -334,11 +338,110 @@ public sealed class MembershipRouteSelectionTests
     }
 
     [Fact]
+    public void DevBootstrapProvider_RequiresExplicitDevLocalPolicy()
+    {
+        var fixture = SignedArtifact();
+        var store = new InMemorySessionStore();
+        var source = DevLocalHttpSource(new SwitchingArtifactHandler(fixture.Artifact));
+
+        Assert.Throws<ArgumentException>(() => new VerifiedMembershipRouteCatalogProvider(
+            TrustService(store),
+            store,
+            fixture.Bootstrap,
+            source,
+            new InMemoryMembershipRouteArtifactCache()));
+        Assert.Throws<ArgumentException>(() => new VerifiedMembershipRouteCatalogProvider(
+            TrustService(store),
+            store,
+            fixture.Bootstrap,
+            source,
+            new InMemoryMembershipRouteArtifactCache(),
+            endpointPolicy: MembershipRouteEndpointPolicy.Production));
+        Assert.Throws<ArgumentException>(() => new VerifiedMembershipRouteCatalogProvider(
+            TrustService(store),
+            store,
+            fixture.Bootstrap,
+            source,
+            new InMemoryMembershipRouteArtifactCache(),
+            endpointPolicy: new MembershipRouteEndpointPolicy
+            {
+                AllowDevLocalHttp = true
+            }));
+    }
+
+    [Theory]
+    [InlineData("https://127.0.0.1/api/network/membership-route-catalog")]
+    [InlineData("https://registry.example/api/network/membership-route-catalog")]
+    [InlineData("http://127.0.0.1:80/api/network/membership-route-catalog")]
+    [InlineData("http://127.1/api/network/membership-route-catalog")]
+    public void DevBootstrapProvider_RejectsHttpsOrNoncanonicalCatalogSources(string value)
+    {
+        var fixture = SignedArtifact();
+        var store = new InMemorySessionStore();
+        var source = HttpMembershipRouteArtifactSource.FromCatalogUrls(
+            new HttpClient(),
+            [new Uri(value)],
+            MembershipRouteEndpointPolicy.DevLocalHttp);
+
+        Assert.Throws<ArgumentException>(() => new VerifiedMembershipRouteCatalogProvider(
+            TrustService(store),
+            store,
+            fixture.Bootstrap,
+            source,
+            new InMemoryMembershipRouteArtifactCache(),
+            endpointPolicy: MembershipRouteEndpointPolicy.DevLocalHttp));
+    }
+
+    [Fact]
+    public void DevBootstrapProvider_RejectsArbitraryArtifactSource()
+    {
+        var fixture = SignedArtifact();
+        var store = new InMemorySessionStore();
+
+        Assert.Throws<ArgumentException>(() => new VerifiedMembershipRouteCatalogProvider(
+            TrustService(store),
+            store,
+            fixture.Bootstrap,
+            new SwitchingArtifactSource(fixture.Artifact),
+            new InMemoryMembershipRouteArtifactCache(),
+            endpointPolicy: MembershipRouteEndpointPolicy.DevLocalHttp));
+    }
+
+    [Fact]
+    public async Task DevBootstrapProvider_RejectsRedirectAwayFromExactLocalCatalogUrl()
+    {
+        var fixture = SignedArtifact();
+        var store = new InMemorySessionStore();
+        using var client = new HttpClient(new ThrowingHandler((_, _) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(fixture.Artifact),
+                RequestMessage = new HttpRequestMessage(
+                    HttpMethod.Get,
+                    "https://public.example/api/network/membership-route-catalog")
+            })));
+        var source = HttpMembershipRouteArtifactSource.FromCatalogUrls(
+            client,
+            [new Uri("http://127.0.0.1/api/network/membership-route-catalog")],
+            MembershipRouteEndpointPolicy.DevLocalHttp);
+        var provider = new VerifiedMembershipRouteCatalogProvider(
+            TrustService(store),
+            store,
+            fixture.Bootstrap,
+            source,
+            new InMemoryMembershipRouteArtifactCache(),
+            endpointPolicy: MembershipRouteEndpointPolicy.DevLocalHttp);
+
+        await Assert.ThrowsAsync<MembershipRouteDirectoryUnavailableException>(
+            () => provider.GetCatalogAsync());
+    }
+
+    [Fact]
     public async Task VerifiedProvider_AcceptsHttpsProductionCatalogAndAllSixQuorumMembers()
     {
         var fixture = SignedArtifact(static index => $"https://node-{index}.example/");
         var store = new InMemorySessionStore();
-        var provider = Provider(
+        var provider = ProductionProvider(
             fixture,
             store,
             MembershipRouteEndpointPolicy.Production);
@@ -369,7 +472,7 @@ public sealed class MembershipRouteSelectionTests
             _ => $"https://node-{index}.example/"
         });
         var store = new InMemorySessionStore();
-        var provider = Provider(
+        var provider = ProductionProvider(
             fixture,
             store,
             MembershipRouteEndpointPolicy.Production);
@@ -559,7 +662,7 @@ public sealed class MembershipRouteSelectionTests
         string profileKey = "install:membership-route-test") =>
         new(Convert.ToHexStringLower(SHA256.HashData(artifact)), profileKey);
 
-    private static VerifiedMembershipRouteCatalogProvider Provider(
+    private static VerifiedMembershipRouteCatalogProvider ProductionProvider(
         (
             byte[] Artifact,
             MembershipTrustProfile Profile,
@@ -567,22 +670,41 @@ public sealed class MembershipRouteSelectionTests
         InMemorySessionStore store,
         MembershipRouteEndpointPolicy endpointPolicy) =>
         new(
-            new MembershipTrustService(
-                store,
-                new MembershipTrustServiceTests.FixtureMembershipVerifier(),
-                new FrozenClock(TrustNow),
-                MembershipTrustOptions.DormantDefaults with
-                {
-                    Enabled = true,
-                    AllowedClockSkew = TimeSpan.FromSeconds(30),
-                    ClockRollbackTolerance = TimeSpan.FromSeconds(30)
-                }),
+            TrustService(store),
             store,
-            fixture.Bootstrap,
-            new SwitchingArtifactSource(fixture.Artifact),
+            fixture.Profile,
+            new SwitchingArtifactSource(RemoveTrustBootstrap(fixture.Artifact)),
             new InMemoryMembershipRouteArtifactCache(),
             new FrozenTimeProvider(TrustNow),
             endpointPolicy);
+
+    private static MembershipTrustService TrustService(InMemorySessionStore store) =>
+        new(
+            store,
+            new MembershipTrustServiceTests.FixtureMembershipVerifier(),
+            new FrozenClock(TrustNow),
+            MembershipTrustOptions.DormantDefaults with
+            {
+                Enabled = true,
+                AllowedClockSkew = TimeSpan.FromSeconds(30),
+                ClockRollbackTolerance = TimeSpan.FromSeconds(30)
+            });
+
+    private static HttpMembershipRouteArtifactSource DevLocalHttpSource(
+        SwitchingArtifactHandler handler) =>
+        HttpMembershipRouteArtifactSource.FromCatalogUrls(
+            new HttpClient(handler),
+            [new Uri("http://127.0.0.1/api/network/membership-route-catalog")],
+            MembershipRouteEndpointPolicy.DevLocalHttp);
+
+    private static byte[] RemoveTrustBootstrap(byte[] artifact)
+    {
+        var root = JsonNode.Parse(artifact)!.AsObject();
+        Assert.True(root.Remove("trustBootstrap"));
+        return JsonSerializer.SerializeToUtf8Bytes(
+            root,
+            new JsonSerializerOptions(JsonSerializerDefaults.Web));
+    }
 
     private static string Id(MembershipRouteCatalogMember member) =>
         Convert.ToHexStringLower(member.Descriptor.RouterId.Span);
@@ -623,6 +745,26 @@ public sealed class MembershipRouteSelectionTests
             if (Unavailable)
                 throw new MembershipRouteDirectoryUnavailableException("fixture outage");
             return Task.FromResult(Artifact.ToArray());
+        }
+    }
+
+    private sealed class SwitchingArtifactHandler(byte[] artifact) : HttpMessageHandler
+    {
+        public byte[] Artifact { get; set; } = artifact;
+        public bool Unavailable { get; set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (Unavailable)
+                throw new HttpRequestException("fixture outage");
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(Artifact.ToArray()),
+                RequestMessage = request
+            });
         }
     }
 
