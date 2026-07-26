@@ -55,7 +55,8 @@ public sealed class HttpAvatarProfileTransport : IAvatarProfileTransport
     public HttpAvatarProfileTransport(
         HttpClient httpClient,
         HttpAvatarProfileTransportOptions options,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        HttpServiceEndpointPolicy? endpointPolicy = null)
     {
         this.httpClient = httpClient;
         this.options = options;
@@ -69,11 +70,22 @@ public sealed class HttpAvatarProfileTransport : IAvatarProfileTransport
             throw new ArgumentException("Avatar transport base URL is required.", nameof(options));
         }
 
-        if (this.httpClient.BaseAddress is null)
+        try
         {
-            this.httpClient.BaseAddress = new Uri(this.options.BaseUrl.EndsWith('/')
-                ? this.options.BaseUrl
-                : this.options.BaseUrl + "/", UriKind.Absolute);
+            var baseUri = (endpointPolicy ?? HttpServiceEndpointPolicy.Production)
+                .RequireOrigin(this.options.BaseUrl, "Avatar transport base URL");
+            (endpointPolicy ?? HttpServiceEndpointPolicy.Production)
+                .RequireCompatibleBaseAddress(
+                    this.httpClient,
+                    baseUri,
+                    "Avatar transport");
+        }
+        catch (ArgumentException exception)
+        {
+            throw new ArgumentException(
+                "Avatar transport base URL violates the configured endpoint policy.",
+                nameof(options),
+                exception);
         }
 
         if (options.MaxAvatarBytes is < 1 or > 16_000_000

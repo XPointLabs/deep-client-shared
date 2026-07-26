@@ -115,7 +115,8 @@ public sealed class HttpCallSignalingTransport : ICallSignalingTransport, ICallI
         HttpClient httpClient,
         HttpCallSignalingTransportOptions options,
         Func<CancellationToken, Task<string?>>? recoveryPhraseProvider = null,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        HttpServiceEndpointPolicy? endpointPolicy = null)
     {
         _httpClient = httpClient;
         _options = options;
@@ -130,11 +131,23 @@ public sealed class HttpCallSignalingTransport : ICallSignalingTransport, ICallI
             throw new ArgumentException("Call signaling base URL is required.", nameof(options));
         }
 
-        if (_httpClient.BaseAddress is null)
+        try
         {
-            _httpClient.BaseAddress = new Uri(_options.BaseUrl.EndsWith('/')
-                ? _options.BaseUrl
-                : _options.BaseUrl + "/", UriKind.Absolute);
+            var policy = endpointPolicy ?? HttpServiceEndpointPolicy.Production;
+            var baseUri = policy.RequireOrigin(
+                _options.BaseUrl,
+                "Call signaling base URL");
+            policy.RequireCompatibleBaseAddress(
+                _httpClient,
+                baseUri,
+                "Call signaling transport");
+        }
+        catch (ArgumentException exception)
+        {
+            throw new ArgumentException(
+                "Call signaling base URL violates the configured endpoint policy.",
+                nameof(options),
+                exception);
         }
 
         if (_signalFreshness <= TimeSpan.Zero

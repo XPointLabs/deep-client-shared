@@ -32,7 +32,7 @@ public sealed class OpaqueMetadataTransportTests
         });
         var transport = new SessionStorageMessageTransport(
             client,
-            new SessionStorageMessageTransportOptions("http://storage.test"),
+            new SessionStorageMessageTransportOptions("https://storage.test"),
             TestOpaqueDependencies.Create());
         var envelope = new OutboundMessageEnvelope(
             sender.SessionId,
@@ -83,7 +83,7 @@ public sealed class OpaqueMetadataTransportTests
         });
         var transport = new SessionStorageMessageTransport(
             client,
-            new SessionStorageMessageTransportOptions("http://storage.test"),
+            new SessionStorageMessageTransportOptions("https://storage.test"),
             TestOpaqueDependencies.Create());
 
         await transport.RetrieveAuthenticatedAsync(recipient, null, 10);
@@ -142,7 +142,7 @@ public sealed class OpaqueMetadataTransportTests
         });
         var raw = new SessionStorageMessageTransport(
             client,
-            new SessionStorageMessageTransportOptions("http://storage.test"),
+            new SessionStorageMessageTransportOptions("https://storage.test"),
             TestOpaqueDependencies.Create());
         using var aliceIdentity = new SessionIdentityProvider(AlicePhrase);
         using var bobIdentity = new SessionIdentityProvider(BobPhrase);
@@ -169,7 +169,7 @@ public sealed class OpaqueMetadataTransportTests
         await alice.SendAsync(logical);
         var diagnosticRaw = new SessionStorageMessageTransport(
             client,
-            new SessionStorageMessageTransportOptions("http://storage.test"),
+            new SessionStorageMessageTransportOptions("https://storage.test"),
             TestOpaqueDependencies.Create());
         var diagnosticBatch = await diagnosticRaw.RetrieveAuthenticatedAsync(bobIdentity, null, 10);
         Assert.Equal(2, diagnosticBatch.Entries.Count);
@@ -196,7 +196,7 @@ public sealed class OpaqueMetadataTransportTests
         var exception = Assert.Throws<InvalidOperationException>(() =>
             new SessionStorageMessageTransport(
                 client,
-                new SessionStorageMessageTransportOptions("http://storage.test")));
+                new SessionStorageMessageTransportOptions("https://storage.test")));
 
         Assert.Contains("explicit capability, crypto and replay", exception.Message, StringComparison.Ordinal);
     }
@@ -208,7 +208,7 @@ public sealed class OpaqueMetadataTransportTests
         var transport = new SessionStorageMessageTransport(
             client,
             new SessionStorageMessageTransportOptions(
-                "http://storage.test",
+                "https://storage.test",
                 MetadataMode: SessionStorageMetadataMode.LegacyCompatibility));
 
         Assert.False(transport.UsesOpaqueMetadata);
@@ -221,7 +221,7 @@ public sealed class OpaqueMetadataTransportTests
         var transport = new SessionStorageMessageTransport(
             client,
             new SessionStorageMessageTransportOptions(
-                "http://storage.test",
+                "https://storage.test",
                 MetadataMode: SessionStorageMetadataMode.LegacyCompatibility));
 
         var exception = Assert.Throws<InvalidOperationException>(() => new ClientRuntime(
@@ -237,7 +237,7 @@ public sealed class OpaqueMetadataTransportTests
         Func<HttpRequestMessage, Task<HttpResponseMessage>> handler) =>
         new(new CaptureHandler(handler))
         {
-            BaseAddress = new Uri("http://storage.test/")
+            BaseAddress = new Uri("https://storage.test/")
         };
 
     private static HttpResponseMessage Json<T>(T payload) =>

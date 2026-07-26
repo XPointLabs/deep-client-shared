@@ -55,10 +55,10 @@ public sealed class SessionTransportTests
             return new HttpResponseMessage(HttpStatusCode.NotFound);
         }))
         {
-            BaseAddress = new Uri("http://transport.local/")
+            BaseAddress = new Uri("https://transport.local/")
         };
 
-        var transport = new HttpSessionTransport(client, new HttpSessionTransportOptions("http://transport.local"));
+        var transport = new HttpSessionTransport(client, new HttpSessionTransportOptions("https://transport.local"));
 
         await transport.SendAsync(new OutboundMessageEnvelope(sender, recipient, "hello-http", [], DateTimeOffset.UtcNow, null));
         var received = await transport.ReceiveAsync(recipient);
@@ -138,13 +138,13 @@ public sealed class SessionTransportTests
             return new HttpResponseMessage(HttpStatusCode.NotFound);
         }))
         {
-            BaseAddress = new Uri("http://storage.local/")
+            BaseAddress = new Uri("https://storage.local/")
         };
 
         var transport = new SessionStorageMessageTransport(
             client,
             new SessionStorageMessageTransportOptions(
-                "http://storage.local",
+                "https://storage.local",
                 TtlMilliseconds: 60_000,
                 MetadataMode: SessionStorageMetadataMode.LegacyCompatibility));
 
@@ -203,12 +203,12 @@ public sealed class SessionTransportTests
             return new HttpResponseMessage(HttpStatusCode.NotFound);
         }))
         {
-            BaseAddress = new Uri("http://storage.local/")
+            BaseAddress = new Uri("https://storage.local/")
         };
         var transport = new SessionStorageMessageTransport(
             client,
             new SessionStorageMessageTransportOptions(
-                "http://storage.local",
+                "https://storage.local",
                 MetadataMode: SessionStorageMetadataMode.LegacyCompatibility));
 
         await transport.SendAsync(new OutboundMessageEnvelope(

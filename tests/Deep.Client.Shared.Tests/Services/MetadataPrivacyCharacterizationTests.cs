@@ -66,12 +66,12 @@ public sealed partial class MetadataPrivacyCharacterizationTests
             return Json(new { hash = "synthetic-storage-hash" });
         }))
         {
-            BaseAddress = new Uri("http://storage.test/")
+            BaseAddress = new Uri("https://storage.test/")
         };
         var transport = new SessionStorageMessageTransport(
             client,
             new SessionStorageMessageTransportOptions(
-                "http://storage.test",
+                "https://storage.test",
                 Namespace: 0,
                 MetadataMode: SessionStorageMetadataMode.LegacyCompatibility));
         var message = new OutboundMessageEnvelope(

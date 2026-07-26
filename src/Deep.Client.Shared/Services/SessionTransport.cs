@@ -55,7 +55,10 @@ public sealed class HttpSessionTransport : ISessionMessageTransport, IRecoveryPr
     private readonly HttpClient _httpClient;
     private readonly HttpSessionTransportOptions _options;
 
-    public HttpSessionTransport(HttpClient httpClient, HttpSessionTransportOptions options)
+    public HttpSessionTransport(
+        HttpClient httpClient,
+        HttpSessionTransportOptions options,
+        HttpServiceEndpointPolicy? endpointPolicy = null)
     {
         _httpClient = httpClient;
         _options = options;
@@ -65,11 +68,18 @@ public sealed class HttpSessionTransport : ISessionMessageTransport, IRecoveryPr
             throw new ArgumentException("Transport base URL is required.", nameof(options));
         }
 
-        if (_httpClient.BaseAddress is null)
+        try
         {
-            _httpClient.BaseAddress = new Uri(_options.BaseUrl.EndsWith('/')
-                ? _options.BaseUrl
-                : _options.BaseUrl + "/", UriKind.Absolute);
+            var policy = endpointPolicy ?? HttpServiceEndpointPolicy.Production;
+            var baseUri = policy.RequireOrigin(_options.BaseUrl, "Transport base URL");
+            policy.RequireCompatibleBaseAddress(_httpClient, baseUri, "Session transport");
+        }
+        catch (ArgumentException exception)
+        {
+            throw new ArgumentException(
+                "Transport base URL violates the configured endpoint policy.",
+                nameof(options),
+                exception);
         }
     }
 
@@ -166,7 +176,8 @@ public sealed class SessionStorageMessageTransport :
     public SessionStorageMessageTransport(
         HttpClient httpClient,
         SessionStorageMessageTransportOptions options,
-        OpaqueSessionStorageDependencies? opaque = null)
+        OpaqueSessionStorageDependencies? opaque = null,
+        HttpServiceEndpointPolicy? endpointPolicy = null)
     {
         _httpClient = httpClient;
         _options = options;
@@ -184,11 +195,18 @@ public sealed class SessionStorageMessageTransport :
             throw new ArgumentException("Storage base URL is required.", nameof(options));
         }
 
-        if (_httpClient.BaseAddress is null)
+        try
         {
-            _httpClient.BaseAddress = new Uri(_options.BaseUrl.EndsWith('/')
-                ? _options.BaseUrl
-                : _options.BaseUrl + "/", UriKind.Absolute);
+            var policy = endpointPolicy ?? HttpServiceEndpointPolicy.Production;
+            var baseUri = policy.RequireOrigin(_options.BaseUrl, "Storage base URL");
+            policy.RequireCompatibleBaseAddress(_httpClient, baseUri, "Storage transport");
+        }
+        catch (ArgumentException exception)
+        {
+            throw new ArgumentException(
+                "Storage base URL violates the configured endpoint policy.",
+                nameof(options),
+                exception);
         }
 
         if (_options.MetadataMode == SessionStorageMetadataMode.OpaqueP03)

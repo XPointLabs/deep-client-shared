@@ -72,28 +72,38 @@ public sealed class HttpAttachmentFileTransport : IAttachmentFileTransport
     private readonly HttpClient httpClient;
     private readonly HttpAttachmentFileTransportOptions options;
     private readonly Uri fileServiceOrigin;
+    private readonly HttpServiceEndpointPolicy endpointPolicy;
 
-    public HttpAttachmentFileTransport(HttpClient httpClient, HttpAttachmentFileTransportOptions options)
+    public HttpAttachmentFileTransport(
+        HttpClient httpClient,
+        HttpAttachmentFileTransportOptions options,
+        HttpServiceEndpointPolicy? endpointPolicy = null)
     {
         this.httpClient = httpClient;
         this.options = options;
+        this.endpointPolicy = endpointPolicy ?? HttpServiceEndpointPolicy.Production;
 
         if (string.IsNullOrWhiteSpace(options.BaseUrl))
         {
             throw new ArgumentException("Attachment file transport base URL is required.", nameof(options));
         }
 
-        if (this.httpClient.BaseAddress is null)
+        try
         {
-            this.httpClient.BaseAddress = new Uri(options.BaseUrl.EndsWith('/')
-                ? options.BaseUrl
-                : options.BaseUrl + "/", UriKind.Absolute);
+            fileServiceOrigin = this.endpointPolicy.RequireOrigin(
+                options.BaseUrl,
+                "Attachment file transport base URL");
+            this.endpointPolicy.RequireCompatibleBaseAddress(
+                this.httpClient,
+                fileServiceOrigin,
+                "Attachment file transport");
         }
-
-        fileServiceOrigin = this.httpClient.BaseAddress!;
-        if (!IsHttpUri(fileServiceOrigin) || fileServiceOrigin.UserInfo.Length > 0)
+        catch (ArgumentException exception)
         {
-            throw new ArgumentException("Attachment file transport base URL must be HTTP(S) without userinfo.", nameof(options));
+            throw new ArgumentException(
+                "Attachment file transport base URL violates the configured endpoint policy.",
+                nameof(options),
+                exception);
         }
     }
 
@@ -239,25 +249,18 @@ public sealed class HttpAttachmentFileTransport : IAttachmentFileTransport
 
     private void ValidateRemoteUri(Uri remoteUri)
     {
-        if (!remoteUri.IsAbsoluteUri || !IsHttpUri(remoteUri))
+        try
         {
-            throw new InvalidOperationException("Remote attachment URI must be an absolute HTTP(S) URI.");
+            endpointPolicy.RequireSameOriginResource(
+                remoteUri,
+                fileServiceOrigin,
+                "Remote attachment URI");
         }
-
-        if (remoteUri.UserInfo.Length > 0)
+        catch (ArgumentException exception)
         {
-            throw new InvalidOperationException("Remote attachment URI must not contain userinfo.");
-        }
-
-        if (!IsSameOrigin(remoteUri, fileServiceOrigin))
-        {
-            throw new InvalidOperationException("Remote attachment URI must be same-origin with the configured file service.");
-        }
-
-        if (remoteUri.Scheme != Uri.UriSchemeHttps &&
-            !(remoteUri.Scheme == Uri.UriSchemeHttp && remoteUri.IsLoopback))
-        {
-            throw new InvalidOperationException("Remote attachment URI must use HTTPS, except for loopback test endpoints.");
+            throw new InvalidOperationException(
+                "Remote attachment URI violates the configured endpoint policy.",
+                exception);
         }
 
         if (!remoteUri.IsLoopback && DangerousPorts.Contains(remoteUri.Port))
@@ -265,14 +268,6 @@ public sealed class HttpAttachmentFileTransport : IAttachmentFileTransport
             throw new InvalidOperationException("Remote attachment URI uses a blocked port.");
         }
     }
-
-    private static bool IsSameOrigin(Uri left, Uri right) =>
-        string.Equals(left.Scheme, right.Scheme, StringComparison.OrdinalIgnoreCase) &&
-        string.Equals(left.IdnHost, right.IdnHost, StringComparison.OrdinalIgnoreCase) &&
-        left.Port == right.Port;
-
-    private static bool IsHttpUri(Uri uri) =>
-        uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps;
 
     private static async Task<AttachmentEncryptionResult> EncryptChunkedToAsync(
         Stream plainInput,

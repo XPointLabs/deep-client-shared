@@ -125,7 +125,10 @@ public sealed class HttpPushSubscriptionTransport : IPushSubscriptionTransport
     private readonly HttpClient httpClient;
     private readonly HttpPushSubscriptionTransportOptions options;
 
-    public HttpPushSubscriptionTransport(HttpClient httpClient, HttpPushSubscriptionTransportOptions options)
+    public HttpPushSubscriptionTransport(
+        HttpClient httpClient,
+        HttpPushSubscriptionTransportOptions options,
+        HttpServiceEndpointPolicy? endpointPolicy = null)
     {
         this.httpClient = httpClient;
         this.options = options;
@@ -135,19 +138,22 @@ public sealed class HttpPushSubscriptionTransport : IPushSubscriptionTransport
             throw new ArgumentException("Push transport base URL is required.", nameof(options));
         }
 
-        if (!Uri.TryCreate(options.BaseUrl, UriKind.Absolute, out var baseUri) || !IsSecurePushEndpoint(baseUri) ||
-            (this.httpClient.BaseAddress is not null && !IsSecurePushEndpoint(this.httpClient.BaseAddress)))
+        var policy = endpointPolicy ?? HttpServiceEndpointPolicy.Production;
+        Uri baseUri;
+        try
+        {
+            baseUri = policy.RequireOrigin(options.BaseUrl, "Push transport base URL");
+            policy.RequireCompatibleBaseAddress(
+                this.httpClient,
+                baseUri,
+                "Push transport");
+        }
+        catch (ArgumentException exception)
         {
             throw new ArgumentException(
                 "Push transport must use HTTPS unless the endpoint is an explicit loopback test endpoint.",
-                nameof(options));
-        }
-
-        if (this.httpClient.BaseAddress is null)
-        {
-            this.httpClient.BaseAddress = new Uri(baseUri.AbsoluteUri.EndsWith('/')
-                ? baseUri.AbsoluteUri
-                : baseUri.AbsoluteUri + "/", UriKind.Absolute);
+                nameof(options),
+                exception);
         }
     }
 
@@ -193,9 +199,6 @@ public sealed class HttpPushSubscriptionTransport : IPushSubscriptionTransport
         [property: JsonPropertyName("message")] string? Message,
             [property: JsonPropertyName("error")] int? Error);
 
-    private static bool IsSecurePushEndpoint(Uri endpoint) =>
-        endpoint.Scheme == Uri.UriSchemeHttps ||
-        (endpoint.Scheme == Uri.UriSchemeHttp && endpoint.IsLoopback);
 }
 
 public sealed class PushRegistrationCoordinator : IPushRegistrationCoordinator, IPushUnsubscribeRetryCoordinator

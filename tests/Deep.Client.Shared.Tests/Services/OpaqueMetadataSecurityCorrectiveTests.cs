@@ -32,7 +32,7 @@ public sealed class OpaqueMetadataSecurityCorrectiveTests
 
         Assert.Throws<ArgumentOutOfRangeException>(() => new SessionStorageMessageTransport(
             client,
-            new SessionStorageMessageTransportOptions("http://storage.test", MetadataMode: mode)));
+            new SessionStorageMessageTransportOptions("https://storage.test", MetadataMode: mode)));
     }
 
     [Fact]
@@ -144,7 +144,7 @@ public sealed class OpaqueMetadataSecurityCorrectiveTests
         IOpaqueMailboxCapabilityProvider provider) =>
         new(
             client,
-            new SessionStorageMessageTransportOptions("http://storage.test"),
+            new SessionStorageMessageTransportOptions("https://storage.test"),
             new OpaqueSessionStorageDependencies(
                 provider,
                 new OpaqueMetadataTransportTests.TestCompatibilityCrypto(),
@@ -179,7 +179,7 @@ public sealed class OpaqueMetadataSecurityCorrectiveTests
         Client(request => Task.FromResult(handler(request)));
 
     private static HttpClient Client(Func<HttpRequestMessage, Task<HttpResponseMessage>> handler) =>
-        new(new Handler(handler)) { BaseAddress = new Uri("http://storage.test/") };
+        new(new Handler(handler)) { BaseAddress = new Uri("https://storage.test/") };
 
     private static HttpResponseMessage Json<T>(T value) =>
         new(HttpStatusCode.OK)

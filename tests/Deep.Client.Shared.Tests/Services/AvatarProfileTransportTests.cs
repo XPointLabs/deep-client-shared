@@ -89,12 +89,12 @@ public sealed class AvatarProfileTransportTests
             return new HttpResponseMessage(HttpStatusCode.NotFound);
         }))
         {
-            BaseAddress = new Uri("http://file.local/")
+            BaseAddress = new Uri("https://file.local/")
         };
 
         var transport = new HttpAvatarProfileTransport(
             client,
-            new HttpAvatarProfileTransportOptions("http://file.local"),
+            new HttpAvatarProfileTransportOptions("https://file.local"),
             new FixedTimeProvider(DateTimeOffset.FromUnixTimeMilliseconds(1_780_000_000_000)));
 
         await using var uploadStream = new MemoryStream(avatarBytes);
@@ -129,11 +129,11 @@ public sealed class AvatarProfileTransportTests
             Content = new UnknownLengthContent(new byte[1_025])
         }))
         {
-            BaseAddress = new Uri("http://file.local/")
+            BaseAddress = new Uri("https://file.local/")
         };
         var transport = new HttpAvatarProfileTransport(
             client,
-            new HttpAvatarProfileTransportOptions("http://file.local", MaxAvatarBytes: 1_024));
+            new HttpAvatarProfileTransportOptions("https://file.local", MaxAvatarBytes: 1_024));
 
         await Assert.ThrowsAsync<HttpRequestException>(() => transport.TryDownloadAsync(sessionId));
     }

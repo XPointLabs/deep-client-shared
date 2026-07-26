@@ -101,7 +101,10 @@ public sealed class SessionStorageGroupSyncTransport : IGroupSyncTransport
     private readonly ConcurrentDictionary<string, string> stateLastHashes = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string> messageLastHashes = new(StringComparer.Ordinal);
 
-    public SessionStorageGroupSyncTransport(HttpClient httpClient, SessionStorageGroupSyncTransportOptions options)
+    public SessionStorageGroupSyncTransport(
+        HttpClient httpClient,
+        SessionStorageGroupSyncTransportOptions options,
+        HttpServiceEndpointPolicy? endpointPolicy = null)
     {
         this.httpClient = httpClient;
         this.options = options;
@@ -111,11 +114,18 @@ public sealed class SessionStorageGroupSyncTransport : IGroupSyncTransport
             throw new ArgumentException("Storage base URL is required.", nameof(options));
         }
 
-        if (httpClient.BaseAddress is null)
+        try
         {
-            httpClient.BaseAddress = new Uri(options.BaseUrl.EndsWith('/')
-                ? options.BaseUrl
-                : options.BaseUrl + "/", UriKind.Absolute);
+            var policy = endpointPolicy ?? HttpServiceEndpointPolicy.Production;
+            var baseUri = policy.RequireOrigin(options.BaseUrl, "Storage base URL");
+            policy.RequireCompatibleBaseAddress(httpClient, baseUri, "Group sync transport");
+        }
+        catch (ArgumentException exception)
+        {
+            throw new ArgumentException(
+                "Storage base URL violates the configured endpoint policy.",
+                nameof(options),
+                exception);
         }
     }
 
