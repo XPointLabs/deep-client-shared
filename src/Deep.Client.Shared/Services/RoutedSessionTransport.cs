@@ -175,7 +175,7 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
             var selected = MembershipRouteSelector.Select(
                 catalog,
                 RandomNumberGenerator.GetBytes(32));
-            var route = ToRouteSnapshot(targetKey, catalog, selected);
+            var route = ToRouteSnapshot(targetKey, selected);
             Volatile.Write(ref _currentRoute, route);
             return route;
         }
@@ -357,7 +357,7 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
                 catalog,
                 RandomNumberGenerator.GetBytes(32),
                 excludedRouterIds);
-            var routeSnapshot = ToRouteSnapshot(targetKey, catalog, selected);
+            var routeSnapshot = ToRouteSnapshot(targetKey, selected);
             Volatile.Write(ref _currentRoute, routeSnapshot);
             var firstHop = ConfigureRouter(new PinnedRouterEndpoint(
                 routeSnapshot.Nodes[0].RpcEndpoint,
@@ -409,7 +409,6 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
 
     private static TransportRouteSnapshot ToRouteSnapshot(
         string targetKey,
-        MembershipRouteCatalogSnapshot catalog,
         IReadOnlyList<MembershipRouteCatalogMember> selected)
     {
         var nodes = selected.Select((member, index) =>
@@ -427,11 +426,11 @@ public sealed class XNodeRpcClient : ITransportRouteProvider
                 endpoint.Host,
                 "",
                 endpoint.Port,
-                DateTimeOffset.FromUnixTimeSeconds(checked((long)descriptor.ValidFromUnixSeconds)),
+                default,
                 DateTimeOffset.FromUnixTimeSeconds(checked((long)descriptor.ValidUntilUnixSeconds)),
                 "membership-route-v1",
-                "membership-merkle-quorum-v1",
-                Convert.ToHexStringLower(catalog.CanonicalMembershipHash));
+                "",
+                "");
         }).ToArray();
         return new TransportRouteSnapshot(
             "membership-onion-storage",
