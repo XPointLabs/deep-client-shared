@@ -511,6 +511,52 @@ public sealed class TransportOutboxRepositoryContractTests
                     Now.AddMinutes(10))));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ExhaustedItemCannotStarveReadyItemBeforeLimit(bool sqlite)
+    {
+        using var scope = StoreScope.Create(sqlite);
+        var exhausted = Prepared(
+            logical: 0x71,
+            created: Now,
+            notBefore: Now.AddMinutes(1));
+        var ready = Prepared(
+            logical: 0x72,
+            created: Now.AddSeconds(1),
+            notBefore: Now.AddMinutes(1));
+        await scope.Store.PrepareTransportOutboxAsync(exhausted);
+        await scope.Store.PrepareTransportOutboxAsync(ready);
+
+        ulong revision = 1;
+        for (var index = 0; index < TransportOutboxLimits.MaxAttemptsPerItem; index++)
+        {
+            Assert.Equal(
+                TransportOutboxCommitResult.Applied,
+                await scope.Store.ApplyTransportOutboxTransitionAsync(
+                    TransportOutboxTransition.Attempted(
+                        exhausted.AccountScope,
+                        exhausted.LogicalId,
+                        revision++,
+                        Attempt(checked((byte)(0x80 + index))),
+                        OutboxTransitionSource.Adapter,
+                        index == 0
+                            ? OutboxTransitionReason.DispatchStarted
+                            : OutboxTransitionReason.RetryScheduled,
+                        Now.AddSeconds(index + 1),
+                        Now.AddMinutes(1))));
+        }
+
+        var listed = await scope.Store.ListReadyTransportOutboxAsync(
+            exhausted.AccountScope,
+            Now.AddMinutes(2),
+            limit: 1);
+
+        Assert.Single(listed);
+        Assert.Equal(ready.LogicalId, listed[0].LogicalId);
+        Assert.Empty(listed[0].Attempts);
+    }
+
     [Fact]
     public async Task SqliteRejectsOversizedAttemptEvidenceBeforeReadingIt()
     {

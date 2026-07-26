@@ -17,9 +17,18 @@ so wiring the repository there would persist plaintext and is forbidden.
 `PersistentTransportOutboxEnabled` is true, the local store implements
 `ITransportOutboxRepository`, and an adapter is supplied explicitly. Any
 partial configuration fails closed. The dispatcher performs one bounded,
-caller-owned pass and never creates a polling loop, timer, or background
-wakeup. The platform lifecycle remains responsible for deciding when to run a
-pass.
+caller-owned pass and never creates a polling loop, recurring timer, or
+background wakeup. The platform lifecycle remains responsible for deciding
+when to run a pass.
+
+Ready-list admission excludes items whose bounded attempt budget is exhausted
+before ordering and `LIMIT`, so an old exhausted item cannot starve later work.
+Each adapter call has a bounded cooperative timeout using a linked cancellation
+token, capped by the item lifetime remaining immediately before I/O. The
+dispatcher awaits cancellation completion and disposes the timeout source before
+moving on; adapters must honor cancellation. The clock is refreshed per item and
+immediately before adapter I/O, preventing a stale batch timestamp from
+dispatching an already expired bundle.
 
 An attempt is committed before adapter I/O. Adapter exceptions become only a
 typed retry count so endpoint or identifier text cannot escape through this

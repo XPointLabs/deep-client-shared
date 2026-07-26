@@ -180,12 +180,20 @@ public sealed partial class SqliteSessionStore
                   AND state IN (1, 2, 3)
                   AND not_before <= $now
                   AND expires_at > $now
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM transport_outbox_attempts AS attempt
+                      WHERE attempt.account_scope = transport_outbox_items.account_scope
+                        AND attempt.logical_id = transport_outbox_items.logical_id
+                      LIMIT 1 OFFSET $maxAttemptOffset
+                  )
                 ORDER BY not_before, created_at, logical_id
                 LIMIT $limit;
                 """,
                 accountScope,
                 now,
-                limit);
+                limit,
+                bindMaxAttemptOffset: true);
             var items = new List<TransportOutboxItemSnapshot>(logicalIds.Count);
             foreach (var logicalId in logicalIds)
             {
@@ -721,7 +729,8 @@ public sealed partial class SqliteSessionStore
         string sql,
         OutboxAccountScope accountScope,
         DateTimeOffset now,
-        int limit)
+        int limit,
+        bool bindMaxAttemptOffset = false)
     {
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
@@ -729,6 +738,12 @@ public sealed partial class SqliteSessionStore
         command.Parameters.AddWithValue("$scope", accountScope.ToArray());
         command.Parameters.AddWithValue("$now", now.ToUnixTimeMilliseconds());
         command.Parameters.AddWithValue("$limit", limit);
+        if (bindMaxAttemptOffset)
+        {
+            command.Parameters.AddWithValue(
+                "$maxAttemptOffset",
+                TransportOutboxLimits.MaxAttemptsPerItem - 1);
+        }
         using var reader = command.ExecuteReader();
         var result = new List<byte[]>(limit);
         while (reader.Read())

@@ -170,7 +170,8 @@ public sealed partial class InMemorySessionStore
                             or TransportOutboxState.Attempted
                             or TransportOutboxState.Accepted
                         && item.NotBefore <= now
-                        && item.ExpiresAt > now)
+                        && item.ExpiresAt > now
+                        && item.Attempts.Count < TransportOutboxLimits.MaxAttemptsPerItem)
                     .OrderBy(static item => item.NotBefore)
                     .ThenBy(static item => item.CreatedAt)
                     .ThenBy(static item => Convert.ToHexString(item.LogicalId), StringComparer.Ordinal)

@@ -117,26 +117,34 @@ public sealed record TransportOutboxDispatchBatchResult(
 public sealed class TransportOutboxDispatcher
 {
     public static readonly TimeSpan DefaultRetryDelay = TimeSpan.FromSeconds(30);
+    public static readonly TimeSpan DefaultAttemptTimeout = TimeSpan.FromSeconds(15);
 
     private readonly ITransportOutboxRepository repository;
     private readonly ITransportOutboxAdapter adapter;
     private readonly IClock clock;
     private readonly TimeSpan retryDelay;
+    private readonly TimeSpan attemptTimeout;
     private readonly SemaphoreSlim dispatchGate = new(1, 1);
 
     public TransportOutboxDispatcher(
         ITransportOutboxRepository repository,
         ITransportOutboxAdapter adapter,
         IClock clock,
-        TimeSpan? retryDelay = null)
+        TimeSpan? retryDelay = null,
+        TimeSpan? attemptTimeout = null)
     {
         this.repository = repository ?? throw new ArgumentNullException(nameof(repository));
         this.adapter = adapter ?? throw new ArgumentNullException(nameof(adapter));
         this.clock = clock ?? throw new ArgumentNullException(nameof(clock));
         this.retryDelay = retryDelay ?? DefaultRetryDelay;
+        this.attemptTimeout = attemptTimeout ?? DefaultAttemptTimeout;
         if (this.retryDelay < TimeSpan.Zero || this.retryDelay > TimeSpan.FromDays(1))
         {
             throw new ArgumentOutOfRangeException(nameof(retryDelay));
+        }
+        if (this.attemptTimeout <= TimeSpan.Zero || this.attemptTimeout > TimeSpan.FromMinutes(5))
+        {
+            throw new ArgumentOutOfRangeException(nameof(attemptTimeout));
         }
     }
 
@@ -172,15 +180,15 @@ public sealed class TransportOutboxDispatcher
         await dispatchGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            var now = clock.UtcNow;
+            var batchNow = clock.UtcNow;
             var expired = await repository.ExpireDueTransportOutboxAsync(
                 accountScope,
-                now,
+                batchNow,
                 limit,
                 cancellationToken).ConfigureAwait(false);
             var ready = await repository.ListReadyTransportOutboxAsync(
                 accountScope,
-                now,
+                batchNow,
                 limit,
                 cancellationToken).ConfigureAwait(false);
 
@@ -193,6 +201,24 @@ public sealed class TransportOutboxDispatcher
             foreach (var item in ready)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                var itemNow = clock.UtcNow;
+                if (itemNow >= item.ExpiresAt)
+                {
+                    if (await ApplyOrReconcileExpiryAsync(
+                            item,
+                            item.Revision,
+                            itemNow,
+                            cancellationToken).ConfigureAwait(false))
+                    {
+                        expired++;
+                    }
+                    else
+                    {
+                        conflicts++;
+                    }
+                    continue;
+                }
+
                 if (item.Attempts.Count >= TransportOutboxLimits.MaxAttemptsPerItem)
                 {
                     exhausted++;
@@ -200,7 +226,7 @@ public sealed class TransportOutboxDispatcher
                 }
 
                 var attemptId = CreateAttemptId();
-                var retryNotBefore = RetryNotBefore(now, item.ExpiresAt);
+                var retryNotBefore = RetryNotBefore(itemNow, item.ExpiresAt);
                 var attempted = TransportOutboxTransition.Attempted(
                     item.AccountScope,
                     item.LogicalId,
@@ -210,7 +236,7 @@ public sealed class TransportOutboxDispatcher
                     item.State == TransportOutboxState.Prepared
                         ? OutboxTransitionReason.DispatchStarted
                         : OutboxTransitionReason.RetryScheduled,
-                    now,
+                    itemNow,
                     retryNotBefore);
                 if (!await ApplyOrReconcileAttemptAsync(
                         item,
@@ -222,17 +248,47 @@ public sealed class TransportOutboxDispatcher
                     continue;
                 }
 
+                var request = new TransportOutboxDispatchRequest(
+                    item.LogicalId,
+                    attemptId,
+                    item.DedupMaterial,
+                    item.GetCiphertextBundleCopy(),
+                    item.ExpiresAt);
+                var dispatchAt = clock.UtcNow;
+                if (dispatchAt >= item.ExpiresAt)
+                {
+                    if (await ApplyOrReconcileExpiryAsync(
+                            item,
+                            item.Revision + 1,
+                            dispatchAt,
+                            cancellationToken).ConfigureAwait(false))
+                    {
+                        expired++;
+                    }
+                    else
+                    {
+                        conflicts++;
+                    }
+                    continue;
+                }
+
                 TransportOutboxAdapterReceipt receipt;
+                using var attemptCancellation =
+                    CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                var remainingTtl = item.ExpiresAt - dispatchAt;
+                attemptCancellation.CancelAfter(
+                    remainingTtl <= attemptTimeout ? remainingTtl : attemptTimeout);
                 try
                 {
                     receipt = await adapter.DispatchAsync(
-                        new TransportOutboxDispatchRequest(
-                            item.LogicalId,
-                            attemptId,
-                            item.DedupMaterial,
-                            item.GetCiphertextBundleCopy(),
-                            item.ExpiresAt),
-                        cancellationToken).ConfigureAwait(false);
+                        request,
+                        attemptCancellation.Token).ConfigureAwait(false);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (attemptCancellation.IsCancellationRequested)
+                    {
+                        retryScheduled++;
+                        continue;
+                    }
                     if (receipt is null)
                     {
                         throw new InvalidOperationException("The outbox adapter returned no receipt.");
@@ -241,6 +297,11 @@ public sealed class TransportOutboxDispatcher
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
                     throw;
+                }
+                catch (OperationCanceledException) when (attemptCancellation.IsCancellationRequested)
+                {
+                    retryScheduled++;
+                    continue;
                 }
                 catch
                 {
@@ -253,7 +314,7 @@ public sealed class TransportOutboxDispatcher
                 var receiptAt = clock.UtcNow;
                 if (receiptAt >= item.ExpiresAt)
                 {
-                    if (await ExpireAfterAttemptAsync(
+                    if (await ApplyOrReconcileExpiryAsync(
                             item,
                             expectedRevision: item.Revision + 1,
                             receiptAt,
@@ -299,7 +360,7 @@ public sealed class TransportOutboxDispatcher
                 var durableAt = clock.UtcNow;
                 if (durableAt >= item.ExpiresAt)
                 {
-                    if (await ExpireAfterAttemptAsync(
+                    if (await ApplyOrReconcileExpiryAsync(
                             item,
                             expectedRevision: item.Revision + 2,
                             durableAt,
@@ -357,6 +418,10 @@ public sealed class TransportOutboxDispatcher
                 original.AccountScope,
                 transition,
                 cancellationToken).ConfigureAwait(false);
+            if (result == TransportOutboxCommitResult.Corrupt)
+            {
+                throw new TransportOutboxCorruptException();
+            }
             return result is TransportOutboxCommitResult.Applied or TransportOutboxCommitResult.Idempotent;
         }
         catch (TransportOutboxCommitOutcomeUnknownException)
@@ -376,7 +441,7 @@ public sealed class TransportOutboxDispatcher
         }
     }
 
-    private async Task<bool> ExpireAfterAttemptAsync(
+    private async Task<bool> ApplyOrReconcileExpiryAsync(
         TransportOutboxItemSnapshot original,
         ulong expectedRevision,
         DateTimeOffset occurredAt,
@@ -393,6 +458,10 @@ public sealed class TransportOutboxDispatcher
                 original.AccountScope,
                 transition,
                 cancellationToken).ConfigureAwait(false);
+            if (result == TransportOutboxCommitResult.Corrupt)
+            {
+                throw new TransportOutboxCorruptException();
+            }
             return result is TransportOutboxCommitResult.Applied or TransportOutboxCommitResult.Idempotent;
         }
         catch (TransportOutboxCommitOutcomeUnknownException)
