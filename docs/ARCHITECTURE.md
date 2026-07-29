@@ -203,30 +203,37 @@ Length, overflow, and canonical-envelope decoder failures are normalized to
 
 `E2eeClientTransport` retains the existing `ISessionMessageTransport` send path
 unchanged. A transport may additionally implement
-`IIdentityAuthenticatedRawTransport`; only then does E2EE keep the leased
-`SessionIdentityProvider` alive through complete all-copy local preflight and
-authenticated dispatch. The raw transport receives the provider solely to call
-operations such as `SignDetached`; it never receives or exports private key
-material. E2EE always selects `SendAuthenticatedAsync` for that contract and
-does not fall back to its inherited legacy `SendAsync` method.
+`IMailboxIdentityAuthenticatedRawTransport`; only then does E2EE use the
+mailbox operation contract. It receives an `IMailboxOperationSigner`, not a
+`SessionIdentityProvider`: the facade exposes only the public identity and
+exact domain-separated MCP2 presentation signing, never generic signing or
+private-key access. It is invalidated before the operation's identity lease is
+released, including on exceptions and cancellation.
 
-`IMailboxBoundIdentityAuthenticatedRawTransport` is a dormant marker for the
-future MEO1 mailbox producer. It imposes the mailbox ciphertext bound of
+The mailbox contract requires a successful
+`PrepareMailboxAuthenticatedSendAsync` result for every fan-out target before
+any `SendPreparedMailboxAuthenticatedAsync` dispatch. There is no optional
+prepare path. Its opaque prepared handles are created by the transport and
+may be dispatched only through that transport. This dormant producer contract
+imposes the mailbox ciphertext bound of
 81,768 bytes (`MailboxClientLimits.MaximumCiphertextLength`) on the decoded
 DPE1 bytes after encryption, while ordinary DPE1 transports retain the
 existing 512-KiB envelope limit. Every direct/group fan-out copy is built and
-preflighted before the first authenticated dispatch, preventing a later target
+prepared before the first authenticated dispatch, preventing a later target
 failure from producing a partial remote fan-out.
 
 `OpaqueMailboxWireEntry`, `OpaqueMailboxContinuation`, and
 `OpaqueMailboxInboxPage` are contracts only; no runtime activates them yet.
-They expose only a cursor, canonical bounded MEO1 bytes, envelope digest, and
-continuation authority—never sender, recipient, Session ID, or server hash.
-The retrieval seam is deliberately one-item: a nonzero continuation cursor
-requires a nonempty bounded token, and zero cursor requires an empty token.
-This reserves the ordered one-item MAK1 acknowledgement shape without adding
-mailbox persistence, credential issuance, HTTP ingress, or acknowledgement
-behavior in this slice.
+An entry can be created only by strictly decoding and re-encoding MEO1 under
+the operation's verified decode policy; its external digest is bound in
+constant time to header bytes 96–127. They expose only a cursor, canonical
+MEO1 bytes, digest, and continuation authority—never sender, recipient,
+Session ID, or server hash. The retrieval seam is deliberately one-item: an
+entry cursor must advance the requested cursor, a nonterminal continuation
+must equal that entry cursor, and an empty page must be terminal. This reserves
+the ordered one-item MAK1 acknowledgement shape without adding mailbox
+persistence, credential issuance, HTTP ingress, or acknowledgement behavior
+in this slice.
 
 ## E3 MVP Notes
 
