@@ -135,6 +135,10 @@ continuation tokens. A traversal row is reclaimable only at cursor zero with
 an empty token, no inbox rows, and no expiry-quarantine evidence. If no such
 row exists, admission of another scope rolls back rather than evicting live
 replay authority.
+In-memory acknowledgement commits clone and validate the complete installation
+state plus expiry quarantine before publication, matching SQLite's global
+transaction. A conflicting acknowledgement for an absent scope therefore
+cannot allocate an empty scope or bypass these bounds.
 The legacy CMS1/CMS2 blob table is
 migration-only and is never rewritten by the hot path. The coordinator journal
 uses a separate installation/issuer-derived opaque scope, so a reused
@@ -175,8 +179,10 @@ migration backups are bounded to 1024 encrypted artifacts and 64 MiB; compact
 corruption evidence is one additional fixed-size aggregate row (32-byte
 digest, at most 256 prefix bytes, and at most 64 reason characters). Schema v5
 never copies an unparseable legacy blob into
-quarantine. It streams the blob through SHA-256 with a 64-KiB work buffer and
-retains one aggregate record containing count, total source bytes, a chained
+quarantine. Both legacy-state and legacy-quarantine reads select SQLite
+`rowid` and require Microsoft.Data.Sqlite's incremental `SqliteBlob` stream;
+they stream through SHA-256 with a 64-KiB work buffer and
+retain one aggregate record containing count, total source bytes, a chained
 digest, reason, and at most a 256-byte first prefix. Thus an oversized corrupt
 blob or more than 1024 corrupt rows can be removed atomically and cannot brick
 every subsequent startup. The first recovering startup still reports a

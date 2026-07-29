@@ -880,6 +880,91 @@ public sealed class ClientMailboxAdapterTests
         }
     }
 
+    [Fact]
+    public async Task P10B8_InMemorySequentialFinalRetrieveAckConflict_DoesNotBypassScopeBound()
+    {
+        var repository = new InMemoryClientMailboxStateRepository();
+        var count = ClientMailboxStateLimits.MaximumInstallationScopes + 1;
+        for (var index = 0; index < count; index++)
+        {
+            var scope = UniqueScope(index + 38000);
+            var page = Page(1, 0, hasMore: false, token: []);
+            await repository.CommitRetrievePageAsync(
+                scope,
+                new ClientMailboxTraversal(0, []),
+                page);
+            Assert.Equal(
+                ClientMailboxAckState.Conflict,
+                await repository.CommitAcknowledgementsAsync(
+                    scope,
+                    [Envelope(1).ToAcknowledgement()]));
+        }
+
+        Assert.Equal(0, InstallationTraversalCount(repository));
+        var restarted = repository.RestartInstallationForTests();
+        Assert.Equal(0, InstallationTraversalCount(restarted));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task P10B8_FinalRetrieveAckLifecycle_HasBackendParity(
+        bool sqlite)
+    {
+        var path = TempDatabase();
+        IClientMailboxStateRepository repository = CreateRepository(sqlite, path);
+        try
+        {
+            var scope = UniqueScope(39000);
+            var page = Page(1, 1, hasMore: false, token: []);
+            await repository.CommitRetrievePageAsync(
+                scope,
+                new ClientMailboxTraversal(0, []),
+                page);
+            Assert.Equal(
+                ClientMailboxAckState.Pending,
+                await repository.CommitAcknowledgementsAsync(
+                    scope,
+                    [page.Items[0].ToAcknowledgement()]));
+            Assert.Equal(1, InstallationTraversalCount(repository));
+            repository = RestartInstallation(repository, sqlite, path);
+            Assert.Equal(1, InstallationTraversalCount(repository));
+        }
+        finally
+        {
+            (repository as IDisposable)?.Dispose();
+            DeleteSqliteFiles(path);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task P10B8_AbsentAckConflict_DoesNotAllocateTraversalScope(
+        bool sqlite)
+    {
+        var path = TempDatabase();
+        IClientMailboxStateRepository repository = CreateRepository(sqlite, path);
+        try
+        {
+            var scope = UniqueScope(40000);
+            Assert.Equal(
+                ClientMailboxAckState.Conflict,
+                await repository.CommitAcknowledgementsAsync(
+                    scope,
+                    [Envelope(1).ToAcknowledgement()]));
+            Assert.Equal(0, InstallationTraversalCount(repository));
+
+            repository = RestartInstallation(repository, sqlite, path);
+            Assert.Equal(0, InstallationTraversalCount(repository));
+        }
+        finally
+        {
+            (repository as IDisposable)?.Dispose();
+            DeleteSqliteFiles(path);
+        }
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -1501,11 +1586,12 @@ public sealed class ClientMailboxAdapterTests
     }
 
     [Fact]
-    public void P10B7_CorruptOversizedLegacyBlob_StreamsToBoundedEvidenceAndProgresses()
+    public void P10B8_CorruptOversizedLegacyBlob_UsesIncrementalBoundedStreamAndProgresses()
     {
         var path = TempDatabase();
         var scope = UniqueScope(32000);
         const long oversizedBytes = 64L * 1024 * 1024 + 1;
+        ClientMailboxCorruptStreamObservation? observation = null;
         try
         {
             using (var seed = CreateSqlite(path))
@@ -1515,14 +1601,69 @@ public sealed class ClientMailboxAdapterTests
 
             Assert.Throws<InvalidDataException>(() =>
             {
-                using var quarantined = CreateSqlite(path);
+                using var quarantined =
+                    new SqliteClientMailboxStateRepository(
+                        Options(path),
+                        migrationFault: null,
+                        commitFault: null,
+                        corruptStreamObservation: value =>
+                            observation = value);
             });
+            Assert.NotNull(observation);
+            Assert.Equal(
+                "Microsoft.Data.Sqlite.SqliteBlob",
+                observation.StreamType);
+            Assert.Equal(oversizedBytes, observation.SourceBytes);
+            Assert.InRange(
+                observation.ManagedAllocatedBytes,
+                0,
+                8L * 1024 * 1024);
 
             using var recovered = CreateSqlite(path);
             Assert.Equal(0, recovered.LegacyStateCountForTests());
             Assert.Equal(1, recovered.QuarantineCountForTests());
             Assert.InRange(
                 recovered.CorruptEvidenceStoredBytesForTests(),
+                32,
+                ClientMailboxStateLimits.MaximumCorruptEvidencePrefixBytes + 128);
+        }
+        finally
+        {
+            DeleteSqliteFiles(path);
+        }
+    }
+
+    [Fact]
+    public void P10B8_LegacyQuarantineBlob_UsesIncrementalBoundedStream()
+    {
+        var path = TempDatabase();
+        var scope = UniqueScope(32500);
+        const long legacyBytes = 16L * 1024 * 1024 + 1;
+        ClientMailboxCorruptStreamObservation? observation = null;
+        try
+        {
+            using (var seed = CreateSqlite(path))
+            {
+                seed.InsertLegacyQuarantineBlobForTests(scope, legacyBytes);
+            }
+
+            using var compacted = new SqliteClientMailboxStateRepository(
+                Options(path),
+                migrationFault: null,
+                commitFault: null,
+                corruptStreamObservation: value => observation = value);
+            Assert.NotNull(observation);
+            Assert.Equal(
+                "Microsoft.Data.Sqlite.SqliteBlob",
+                observation.StreamType);
+            Assert.Equal(legacyBytes, observation.SourceBytes);
+            Assert.InRange(
+                observation.ManagedAllocatedBytes,
+                0,
+                8L * 1024 * 1024);
+            Assert.Equal(1, compacted.QuarantineCountForTests());
+            Assert.InRange(
+                compacted.CorruptEvidenceStoredBytesForTests(),
                 32,
                 ClientMailboxStateLimits.MaximumCorruptEvidencePrefixBytes + 128);
         }

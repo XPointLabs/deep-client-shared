@@ -132,11 +132,34 @@ public sealed class InMemoryClientMailboxStateRepository :
     public Task<ClientMailboxAckState> CommitAcknowledgementsAsync(
         ClientMailboxScope scope,
         IReadOnlyList<MailboxAcknowledgement> acknowledgements,
-        CancellationToken cancellationToken = default) =>
-        Mutate(
-            scope,
-            state => ClientMailboxStateMachine.CommitAck(state, acknowledgements),
-            cancellationToken);
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ArgumentNullException.ThrowIfNull(scope);
+        ArgumentNullException.ThrowIfNull(acknowledgements);
+        lock (gate)
+        {
+            var candidateStates = CloneStates();
+            var candidateQuarantine = CloneExpiredQuarantine();
+            var key = Key(scope);
+            var existed = candidateStates.TryGetValue(key, out var candidate);
+            candidate ??= new ClientMailboxStoredState();
+            var result = ClientMailboxStateMachine.CommitAck(
+                candidate, acknowledgements);
+            if (existed)
+            {
+                candidateStates[key] = candidate;
+            }
+
+            RemoveRetiredScopes(candidateStates, candidateQuarantine);
+            ValidateInstallationInbox(candidateStates);
+            commitFault?.Invoke(ClientMailboxCommitFaultPoint.BeforeCommit);
+            Replace(states, candidateStates);
+            Replace(expiredQuarantine, candidateQuarantine);
+            commitFault?.Invoke(ClientMailboxCommitFaultPoint.AfterCommit);
+            return Task.FromResult(result);
+        }
+    }
 
     public Task<ClientMailboxCoordinatorRecordResult> RecordCoordinatorStatementAsync(
         ClientMailboxJournalScope scope,
@@ -363,25 +386,6 @@ public sealed class InMemoryClientMailboxStateRepository :
         lock (gate)
         {
             return Task.FromResult(read(Get(scope).Clone()));
-        }
-    }
-
-    private Task<TResult> Mutate<TResult>(
-        ClientMailboxScope scope,
-        Func<ClientMailboxStoredState, TResult> mutation,
-        CancellationToken cancellationToken)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        ArgumentNullException.ThrowIfNull(scope);
-        lock (gate)
-        {
-            var candidate = Get(scope).Clone();
-            var result = mutation(candidate);
-            _ = ClientMailboxStateCodec.Encode(candidate);
-            commitFault?.Invoke(ClientMailboxCommitFaultPoint.BeforeCommit);
-            states[Key(scope)] = candidate;
-            commitFault?.Invoke(ClientMailboxCommitFaultPoint.AfterCommit);
-            return Task.FromResult(result);
         }
     }
 

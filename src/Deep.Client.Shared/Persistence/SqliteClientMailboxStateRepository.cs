@@ -10,6 +10,11 @@ internal enum ClientMailboxMigrationFaultPoint
     AfterCorruptEvidenceBeforeLegacyDelete
 }
 
+internal sealed record ClientMailboxCorruptStreamObservation(
+    string StreamType,
+    long SourceBytes,
+    long ManagedAllocatedBytes);
+
 /// <summary>
 /// SQLCipher-backed state containing only domain-separated scope hashes,
 /// encrypted envelopes, cursor/token state, and receipt commitments.
@@ -22,6 +27,8 @@ public sealed class SqliteClientMailboxStateRepository :
     private readonly string connectionString;
     private readonly Action<ClientMailboxMigrationFaultPoint>? migrationFault;
     private readonly Action<ClientMailboxCommitFaultPoint>? commitFault;
+    private readonly Action<ClientMailboxCorruptStreamObservation>?
+        corruptStreamObservation;
     private readonly SemaphoreSlim gate = new(1, 1);
 
     static SqliteClientMailboxStateRepository()
@@ -37,7 +44,9 @@ public sealed class SqliteClientMailboxStateRepository :
     internal SqliteClientMailboxStateRepository(
         SqliteSessionStoreOptions options,
         Action<ClientMailboxMigrationFaultPoint>? migrationFault,
-        Action<ClientMailboxCommitFaultPoint>? commitFault = null)
+        Action<ClientMailboxCommitFaultPoint>? commitFault = null,
+        Action<ClientMailboxCorruptStreamObservation>?
+            corruptStreamObservation = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         var encryptionKey = options.GetEncryptionKeyForStore();
@@ -64,6 +73,7 @@ public sealed class SqliteClientMailboxStateRepository :
         }.ToString();
         this.migrationFault = migrationFault;
         this.commitFault = commitFault;
+        this.corruptStreamObservation = corruptStreamObservation;
         Initialize();
     }
 
@@ -218,6 +228,35 @@ public sealed class SqliteClientMailboxStateRepository :
             """;
         command.Parameters.Add("$scope", SqliteType.Blob).Value = scope.ToArray();
         command.Parameters.AddWithValue("$bytes", bytes);
+        command.ExecuteNonQuery();
+    }
+
+    internal void InsertLegacyQuarantineBlobForTests(
+        ClientMailboxScope scope,
+        long bytes)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        if (bytes <= 0 || bytes > int.MaxValue)
+        {
+            throw new ArgumentOutOfRangeException(nameof(bytes));
+        }
+
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO client_mailbox_quarantine(
+                scope, state_blob, reason, quarantined_at)
+            VALUES($scope, zeroblob($bytes), 'legacy-corrupt-state', $at)
+            ON CONFLICT(scope) DO UPDATE SET
+                state_blob = excluded.state_blob,
+                reason = excluded.reason,
+                quarantined_at = excluded.quarantined_at;
+            """;
+        command.Parameters.Add("$scope", SqliteType.Blob).Value = scope.ToArray();
+        command.Parameters.AddWithValue("$bytes", bytes);
+        command.Parameters.AddWithValue(
+            "$at",
+            DateTimeOffset.UtcNow.ToUnixTimeSeconds());
         command.ExecuteNonQuery();
     }
 
@@ -1948,8 +1987,9 @@ public sealed class SqliteClientMailboxStateRepository :
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText =
-            "SELECT state_blob FROM client_mailbox_state WHERE scope = $scope;";
+            "SELECT rowid, state_blob FROM client_mailbox_state WHERE scope = $scope;";
         command.Parameters.Add("$scope", SqliteType.Blob).Value = scope;
+        var allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
         using var reader = command.ExecuteReader();
         if (!reader.Read())
         {
@@ -1957,7 +1997,10 @@ public sealed class SqliteClientMailboxStateRepository :
                 "Legacy mailbox state disappeared during migration.");
         }
 
-        using var stream = reader.GetStream(0);
+        _ = reader.GetInt64(0);
+        using var stream = reader.GetStream(1);
+        RequireIncrementalBlobStream(stream);
+        var streamType = stream.GetType().FullName ?? stream.GetType().Name;
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         var prefix = new byte[ClientMailboxStateLimits.MaximumCorruptEvidencePrefixBytes];
         var buffer = new byte[64 * 1024];
@@ -1983,8 +2026,15 @@ public sealed class SqliteClientMailboxStateRepository :
                 "Legacy mailbox state changed during bounded streaming recovery.");
         }
 
+        var managedAllocated =
+            GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
         stream.Dispose();
         reader.Dispose();
+        corruptStreamObservation?.Invoke(
+            new ClientMailboxCorruptStreamObservation(
+                streamType,
+                total,
+                managedAllocated));
         CompactCorruptEvidence(
             connection,
             transaction,
@@ -2083,7 +2133,7 @@ public sealed class SqliteClientMailboxStateRepository :
         command.ExecuteNonQuery();
     }
 
-    private static void CompactExistingCorruptQuarantine(
+    private void CompactExistingCorruptQuarantine(
         SqliteConnection connection,
         SqliteTransaction transaction)
     {
@@ -2110,10 +2160,11 @@ public sealed class SqliteClientMailboxStateRepository :
             using var select = connection.CreateCommand();
             select.Transaction = transaction;
             select.CommandText = """
-                SELECT state_blob FROM client_mailbox_quarantine
+                SELECT rowid, state_blob FROM client_mailbox_quarantine
                 WHERE scope = $scope;
                 """;
             select.Parameters.Add("$scope", SqliteType.Blob).Value = row.Scope;
+            var allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
             using var reader = select.ExecuteReader();
             if (!reader.Read())
             {
@@ -2121,7 +2172,10 @@ public sealed class SqliteClientMailboxStateRepository :
                     "Legacy corrupt evidence disappeared during compaction.");
             }
 
-            using var stream = reader.GetStream(0);
+            _ = reader.GetInt64(0);
+            using var stream = reader.GetStream(1);
+            RequireIncrementalBlobStream(stream);
+            var streamType = stream.GetType().FullName ?? stream.GetType().Name;
             using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
             var prefix =
                 new byte[ClientMailboxStateLimits.MaximumCorruptEvidencePrefixBytes];
@@ -2148,8 +2202,15 @@ public sealed class SqliteClientMailboxStateRepository :
                     "Legacy corrupt evidence changed during compaction.");
             }
 
+            var managedAllocated =
+                GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
             stream.Dispose();
             reader.Dispose();
+            corruptStreamObservation?.Invoke(
+                new ClientMailboxCorruptStreamObservation(
+                    streamType,
+                    total,
+                    managedAllocated));
             CompactCorruptEvidence(
                 connection,
                 transaction,
@@ -2164,6 +2225,18 @@ public sealed class SqliteClientMailboxStateRepository :
         delete.Transaction = transaction;
         delete.CommandText = "DELETE FROM client_mailbox_quarantine;";
         delete.ExecuteNonQuery();
+    }
+
+    private static void RequireIncrementalBlobStream(Stream stream)
+    {
+        if (!string.Equals(
+                stream.GetType().FullName,
+                "Microsoft.Data.Sqlite.SqliteBlob",
+                StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                "Corrupt mailbox evidence must use incremental SQLite BLOB I/O.");
+        }
     }
 
     private SqliteConnection Open()
