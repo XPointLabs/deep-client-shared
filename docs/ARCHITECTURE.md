@@ -95,6 +95,29 @@ digest; the raw Session ID, placement key, or other route target is never retain
 current validity window, bounded key material, and obvious raw Session-ID addressing before
 storage I/O. Provider, crypto, and server error text never crosses the client boundary.
 
+## P09C staged client mailbox adapter
+
+`ClientMailboxAdapter` is a portable, binary-only Store/Retrieve/Acknowledge
+boundary for the pinned mailbox contract. It emits MST1/MRT1/MAK1 and accepts
+only canonical MRR2/MQR3, MRP1, and MQR3-backed MAR1 responses. Durable
+transitions require two distinct pinned placement replicas, exact membership
+and placement commitments, exact operation/generation/expiry bindings, and
+valid replica plus coordinator signatures. Accepted and durable are persistent
+outbox states; this adapter never creates a delivered transition.
+
+Activation is fail-closed and disabled by default through
+`ClientMailboxAdapterEnabled`. Explicit issuer context, a pinned two-replica
+placement, and a configured binary ingress are all required. Legacy mirror
+overlap additionally requires both activation and decode-policy permission plus
+a bounded expiry; the strict path does not downgrade to MQR2 or JSON.
+
+Receive cursor, deduplication, and ordered acknowledgement state share one
+bounded binary state machine across the in-memory and SQLite repositories.
+SQLite stores opaque scope hashes, cursors, and envelope digests only. The
+`CMS2` state codec lazily reads the prior `CMS1` layout and rewrites it on the
+next mutation, preserving pending acknowledgements across restart without
+persisting raw account or mailbox identities.
+
 ## E3 MVP Notes
 
 - Current signaling transport is in-memory and intended for deterministic runtime/tests until secure network signaling is wired.

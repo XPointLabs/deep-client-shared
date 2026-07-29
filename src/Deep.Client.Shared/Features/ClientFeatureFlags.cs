@@ -13,7 +13,8 @@ public sealed record ClientFeatureFlags(
     bool MembershipTrustEnabled = false,
     bool LegacyEmbeddedBootstrapRollbackAllowed = false,
     bool PersistentTransportOutboxEnabled = false,
-    bool MetadataPrivateTransportRequired = false)
+    bool MetadataPrivateTransportRequired = false,
+    bool ClientMailboxAdapterEnabled = false)
 {
     public ClientFeatureFlags(
         bool groupsV2Enabled,
@@ -40,7 +41,8 @@ public sealed record ClientFeatureFlags(
             membershipTrustEnabled,
             legacyEmbeddedBootstrapRollbackAllowed,
             PersistentTransportOutboxEnabled: false,
-            MetadataPrivateTransportRequired: false)
+            MetadataPrivateTransportRequired: false,
+            ClientMailboxAdapterEnabled: false)
     {
     }
 
@@ -86,7 +88,8 @@ public sealed record ClientFeatureFlags(
         MembershipTrustEnabled: false,
         LegacyEmbeddedBootstrapRollbackAllowed: false,
         PersistentTransportOutboxEnabled: false,
-        MetadataPrivateTransportRequired: true);
+        MetadataPrivateTransportRequired: true,
+        ClientMailboxAdapterEnabled: false);
 }
 
 public sealed class FeatureDisabledException(string featureName)

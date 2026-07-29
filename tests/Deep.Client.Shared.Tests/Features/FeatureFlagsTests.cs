@@ -41,6 +41,8 @@ public sealed class FeatureFlagsTests
         Assert.False(ClientFeatureFlags.ReleaseDefaults.LegacyEmbeddedBootstrapRollbackAllowed);
         Assert.False(ClientFeatureFlags.Defaults.PersistentTransportOutboxEnabled);
         Assert.False(ClientFeatureFlags.ReleaseDefaults.PersistentTransportOutboxEnabled);
+        Assert.False(ClientFeatureFlags.Defaults.ClientMailboxAdapterEnabled);
+        Assert.False(ClientFeatureFlags.ReleaseDefaults.ClientMailboxAdapterEnabled);
     }
 
     [Fact]

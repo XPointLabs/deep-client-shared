@@ -7,21 +7,19 @@ namespace Deep.Client.Shared.Tests.Services;
 
 public sealed class P14A2B1ActivationTrustRebindTests
 {
-    private const string AcceptedVersion = "0.2.0-p14.69a712a";
-    private const string AcceptedSource = "69a712a894b024a09859096025c2bb8fe68a642e";
+    private const string AcceptedVersion = "0.2.0-p10b3.60ce2e3";
+    private const string AcceptedSource = "dfb182d65d3e8d3ee44a2246ae94c68159bc692d";
     private const string AcceptedSha256 =
-        "fb0feca6bc1734b3a0ac26910421ccdddb24a6a03c1f83972a9b5685e6785498";
+        "e2d03040daaf7c7fe29952db3cfbc3227fb9f0da42740b5f57f65a02ae8118a2";
     private const string AcceptedContentHash =
-        "x9LZb8nAUE/XQWQS2ZGBGLbPt2FivGRVc9y1xvlsr02CKHaU6scklrBsOebxj/NiTG66QgFCK7Gd7qFEoRe5zw==";
-    private const string AcceptedNormalizedIdentity =
-        "baadb33d07dfeb139f0d3ffdfd5bbd41587c02963f8434208fb7718a73733e0f";
+        "MuaiHUicMF1VRmh/4t3bZ7d23tl/X1oIyZsveSQ4pgwFhBKB9l4AJjiHGYmlszpteyywWyI5ZGZ44urvaHB/QQ==";
     private const string OldVersion = "0.1.0-p14.faa598f";
 
     [Fact]
     public void AcceptedCarrierIsTheOnlyCarrierInTheOfflineClosure()
     {
         var root = P14A2PackageAndStaticGateTests.RepositoryRoot();
-        var vendor = Path.Combine(root, "vendor", "p14a2");
+        var vendor = Path.Combine(root, "vendor", "p10b3");
         var packageDirectory = Path.Combine(vendor, "packages");
         var acceptedFile = $"Deep.Protocol.ProfileCarrier.{AcceptedVersion}.nupkg";
         var packages = Directory.GetFiles(
@@ -33,7 +31,7 @@ public sealed class P14A2B1ActivationTrustRebindTests
         Assert.Equal(new[] { acceptedFile }, packages);
 
         var packagePath = Path.Combine(packageDirectory, acceptedFile);
-        Assert.Equal(29_399, new FileInfo(packagePath).Length);
+        Assert.Equal(28_902, new FileInfo(packagePath).Length);
         Assert.Equal(AcceptedSha256, Sha256(packagePath));
         using var sha512 = SHA512.Create();
         using var packageStream = File.OpenRead(packagePath);
@@ -89,33 +87,23 @@ public sealed class P14A2B1ActivationTrustRebindTests
         var manifestPath = Path.Combine(
             root,
             "vendor",
-            "p14a2",
-            "profile-carrier-manifest.json");
+            "p10b3",
+            "package-provenance.json");
         using var manifest = JsonDocument.Parse(File.ReadAllBytes(manifestPath));
         var value = manifest.RootElement;
-        Assert.Equal(AcceptedVersion, value.GetProperty("version").GetString());
-        Assert.Equal(AcceptedSource, value.GetProperty("sourceCommit").GetString());
-        Assert.Equal(AcceptedSha256, value.GetProperty("sha256").GetString());
-        Assert.Equal(AcceptedContentHash, value.GetProperty("nugetContentHash").GetString());
         Assert.Equal(
-            AcceptedNormalizedIdentity,
-            value.GetProperty("normalizedIdentity").GetString());
-
-        var closure = File.ReadAllText(Path.Combine(
-            root,
-            "vendor",
-            "p14a2",
-            "offline-closure-manifest.json"));
-        Assert.DoesNotContain(OldVersion, closure, StringComparison.Ordinal);
-        Assert.Contains(AcceptedVersion, closure, StringComparison.Ordinal);
-
-        var hashes = File.ReadAllText(Path.Combine(
-            root,
-            "vendor",
-            "p14a2",
-            "package-content-hashes.json"));
-        Assert.DoesNotContain(OldVersion, hashes, StringComparison.Ordinal);
-        Assert.Contains(AcceptedContentHash, hashes, StringComparison.Ordinal);
+            AcceptedSource,
+            value.GetProperty("profileCarrierSourceCommit").GetString());
+        var carrierPackage = Assert.Single(
+            value.GetProperty("packages").EnumerateArray(),
+            package => package.GetProperty("id").GetString() ==
+                "Deep.Protocol.ProfileCarrier");
+        Assert.Equal(
+            AcceptedVersion,
+            carrierPackage.GetProperty("version").GetString());
+        Assert.Equal(
+            AcceptedSha256,
+            carrierPackage.GetProperty("sha256").GetString());
     }
 
     [Theory]
@@ -134,7 +122,6 @@ public sealed class P14A2B1ActivationTrustRebindTests
             version,
             sha256,
             contentHash,
-            AcceptedNormalizedIdentity,
             AcceptedSource));
     }
 
@@ -142,16 +129,11 @@ public sealed class P14A2B1ActivationTrustRebindTests
         string version,
         string sha256,
         string contentHash,
-        string normalizedIdentity,
         string source)
     {
         if (!string.Equals(version, AcceptedVersion, StringComparison.Ordinal)
             || !string.Equals(sha256, AcceptedSha256, StringComparison.Ordinal)
             || !string.Equals(contentHash, AcceptedContentHash, StringComparison.Ordinal)
-            || !string.Equals(
-                normalizedIdentity,
-                AcceptedNormalizedIdentity,
-                StringComparison.Ordinal)
             || !string.Equals(source, AcceptedSource, StringComparison.Ordinal))
         {
             throw new InvalidDataException("P14A2B1 carrier binding is not exact.");

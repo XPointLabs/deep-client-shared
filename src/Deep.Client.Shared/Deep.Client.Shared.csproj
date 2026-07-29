@@ -9,9 +9,9 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Deep.Protocol" Version="[0.3.0-p04.b887fa0]" />
-    <PackageReference Include="Deep.Protocol.MembershipRoutes" Version="[0.1.0-p15.local]" />
-    <PackageReference Include="Deep.Protocol.ProfileCarrier" Version="[0.2.0-p14.69a712a]" />
+    <PackageReference Include="Deep.Protocol" Version="[0.3.0-p10b3.60ce2e3]" />
+    <PackageReference Include="Deep.Protocol.MembershipRoutes" Version="[0.3.0-p10b3.60ce2e3]" />
+    <PackageReference Include="Deep.Protocol.ProfileCarrier" Version="[0.2.0-p10b3.60ce2e3]" />
     <PackageReference Include="Microsoft.Data.Sqlite.Core" Version="10.0.9" />
     <PackageReference Include="Sodium.Core" Version="1.4.1" />
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlcipher" Version="2.1.11" />

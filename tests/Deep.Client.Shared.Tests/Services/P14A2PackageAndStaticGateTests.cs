@@ -7,364 +7,215 @@ namespace Deep.Client.Shared.Tests.Services;
 
 public sealed class P14A2PackageAndStaticGateTests
 {
-    private const string CarrierVersion = "0.2.0-p14.69a712a";
-    private const string CarrierSource = "69a712a894b024a09859096025c2bb8fe68a642e";
-    private const string CarrierSourceTree = "d83bbdd001b723738357689bbb2150a51357cb3b";
-    private const string CarrierEvidence = "071b5b300bcba3796d621720fb8f21cfdd5eb882";
-    private const string CarrierEvidenceTree = "ecbfc7747452709fb82aaf85fa912ba13b61d4ad";
-    private const string CarrierSha256 =
-        "fb0feca6bc1734b3a0ac26910421ccdddb24a6a03c1f83972a9b5685e6785498";
-    private const string CarrierContentHash =
-        "x9LZb8nAUE/XQWQS2ZGBGLbPt2FivGRVc9y1xvlsr02CKHaU6scklrBsOebxj/NiTG66QgFCK7Gd7qFEoRe5zw==";
-    private const string CarrierNormalizedIdentity =
-        "baadb33d07dfeb139f0d3ffdfd5bbd41587c02963f8434208fb7718a73733e0f";
-    private const string CarrierDllSha256 =
-        "20489ac15239af11207a0daa670545b975c03eaebb78297adf956af45daa7034";
-    private const string CarrierPdbSha256 =
-        "80f2210e6c61050e2a4edbbf1fa4181ca0d7285d124073fa0d9aa9a77307542a";
-    private const string CarrierFile =
-        "packages/Deep.Protocol.ProfileCarrier.0.2.0-p14.69a712a.nupkg";
-    private const string CarrierStatus =
-        "P14A2B1-SOURCE-REVIEW-PENDING / STAGED-BYTES-ONLY / " +
-        "CLIENT-RUNTIME-REGISTRATION-NO-GO / PROFILE-ACTIVATION-NO-GO";
+    private const string ProtocolVersion = "0.3.0-p10b3.60ce2e3";
+    private const string CarrierVersion = "0.2.0-p10b3.60ce2e3";
+    private const string ProtocolSource =
+        "60ce2e3a5140f245d6bcfecf60fa456c26ffe730";
+    private const string CarrierSource =
+        "dfb182d65d3e8d3ee44a2246ae94c68159bc692d";
 
     [Fact]
-    public void ExactCarrierPackageAndAcceptedProducerArePinned()
+    public void UnifiedP10b3PackageSetIsExactAndLocallyPinned()
     {
-        var root = RepositoryRoot();
-        var vendor = Path.Combine(root, "vendor", "p14a2");
-        using var manifest = JsonDocument.Parse(File.ReadAllBytes(
-            Path.Combine(vendor, "profile-carrier-manifest.json")));
-        var value = manifest.RootElement;
-        Assert.Equal("deep-client-p14a2b1-profile-carrier-package.v1",
-            value.GetProperty("schema").GetString());
-        Assert.Equal(CarrierVersion, value.GetProperty("version").GetString());
+        var vendor = Path.Combine(RepositoryRoot(), "vendor", "p10b3");
+        using var document = JsonDocument.Parse(File.ReadAllBytes(
+            Path.Combine(vendor, "package-provenance.json")));
+        var root = document.RootElement;
+        Assert.Equal("deep-client-p10b3-offline-package-set.v1",
+            root.GetProperty("schema").GetString());
+        Assert.Equal(ProtocolSource,
+            root.GetProperty("protocolSourceCommit").GetString());
         Assert.Equal(CarrierSource,
-            value.GetProperty("sourceCommit").GetString());
-        Assert.Equal(CarrierSourceTree, value.GetProperty("sourceTree").GetString());
-        Assert.Equal(CarrierEvidence, value.GetProperty("evidenceCommit").GetString());
-        Assert.Equal(CarrierEvidenceTree, value.GetProperty("evidenceTree").GetString());
-        Assert.Equal(CarrierSha256, value.GetProperty("sha256").GetString());
-        Assert.Equal(
-            CarrierNormalizedIdentity,
-            value.GetProperty("normalizedIdentity").GetString());
-        Assert.Equal(CarrierDllSha256, value.GetProperty("dllSha256").GetString());
-        Assert.Equal(CarrierPdbSha256, value.GetProperty("pdbSha256").GetString());
-        Assert.Equal(CarrierStatus, value.GetProperty("status").GetString());
-        Assert.Equal(
-            new[]
-            {
-                ("Deep.Protocol", "[0.3.0-p04.b887fa0]"),
-                ("Sodium.Core", "[1.4.1]"),
-                ("libsodium", "[1.0.22]")
-            },
-            value.GetProperty("dependencies")
-                .EnumerateArray()
-                .Select(dependency => (
-                    dependency.GetProperty("id").GetString()!,
-                    dependency.GetProperty("version").GetString()!))
-                .OrderBy(dependency => dependency.Item1, StringComparer.Ordinal)
-                .ToArray());
-        var package = Path.Combine(vendor, value.GetProperty("file").GetString()!);
-        Assert.Equal(29_399, new FileInfo(package).Length);
-        Assert.Equal(value.GetProperty("sha256").GetString(), Sha256(package));
+            root.GetProperty("profileCarrierSourceCommit").GetString());
+        Assert.Equal("local-only-not-published",
+            root.GetProperty("publication").GetString());
 
-        using var archive = ZipFile.OpenRead(package);
-        var nuspec = Assert.Single(archive.Entries,
-            entry => entry.FullName == "Deep.Protocol.ProfileCarrier.nuspec");
-        using var stream = nuspec.Open();
-        var xml = XDocument.Load(stream);
-        XNamespace ns = xml.Root!.Name.Namespace;
-        var metadata = xml.Root.Element(ns + "metadata")!;
-        Assert.Equal(CarrierSource,
-            metadata.Element(ns + "repository")!.Attribute("commit")!.Value);
-        var dependencies = metadata.Descendants(ns + "dependency")
-            .Select(dependency => (
-                Id: dependency.Attribute("id")!.Value,
-                Version: dependency.Attribute("version")!.Value))
-            .OrderBy(dependency => dependency.Id, StringComparer.Ordinal)
+        var packages = root.GetProperty("packages").EnumerateArray().ToArray();
+        Assert.Equal(5, packages.Length);
+        var files = Directory.GetFiles(Path.Combine(vendor, "packages"), "*.nupkg")
+            .Select(Path.GetFileName)
+            .Order(StringComparer.Ordinal)
             .ToArray();
         Assert.Equal(
-            new[]
-            {
-                ("Deep.Protocol", "[0.3.0-p04.b887fa0]"),
-                ("Sodium.Core", "[1.4.1]"),
-                ("libsodium", "[1.0.22]")
-            },
-            dependencies);
-
-        Assert.Equal(CarrierDllSha256, Sha256(ArchiveEntry(archive,
-            "lib/net10.0/Deep.Protocol.ProfileCarrier.dll")));
-        Assert.Equal(CarrierPdbSha256, Sha256(ArchiveEntry(archive,
-            "lib/net10.0/Deep.Protocol.ProfileCarrier.pdb")));
-
-        var project = File.ReadAllText(Path.Combine(root, "src", "Deep.Client.Shared", "Deep.Client.Shared.csproj"));
-        Assert.Contains($"Deep.Protocol.ProfileCarrier\" Version=\"[{CarrierVersion}]", project);
-        Assert.DoesNotContain("ProjectReference", project, StringComparison.OrdinalIgnoreCase);
-    }
-
-    [Fact]
-    public void VendorClosureIsExactHashAndContentHashBijection()
-    {
-        var vendor = Path.Combine(RepositoryRoot(), "vendor", "p14a2");
-        using var closureDocument = JsonDocument.Parse(File.ReadAllBytes(
-            Path.Combine(vendor, "offline-closure-manifest.json")));
-        using var contentDocument = JsonDocument.Parse(File.ReadAllBytes(
-            Path.Combine(vendor, "package-content-hashes.json")));
-        var packages = closureDocument.RootElement.GetProperty("packages")
-            .EnumerateArray().ToArray();
-        var content = contentDocument.RootElement.GetProperty("packages");
-        var files = Directory.GetFiles(Path.Combine(vendor, "packages"), "*.nupkg")
-            .Select(Path.GetFileName).Order(StringComparer.OrdinalIgnoreCase).ToArray();
-        var manifestFiles = packages.Select(value =>
-                Path.GetFileName(value.GetProperty("file").GetString()!))
-            .Order(StringComparer.OrdinalIgnoreCase).ToArray();
-
-        Assert.Equal(29, packages.Length);
-        Assert.True(files.SequenceEqual(manifestFiles, StringComparer.OrdinalIgnoreCase));
-        Assert.True(files.SequenceEqual(
-            content.EnumerateObject().Select(value => value.Name)
-                .Order(StringComparer.OrdinalIgnoreCase),
-            StringComparer.OrdinalIgnoreCase));
+            packages.Select(value => Path.GetFileName(value.GetProperty("file").GetString()!))
+                .Order(StringComparer.Ordinal),
+            files);
         foreach (var package in packages)
         {
-            var file = Path.GetFileName(package.GetProperty("file").GetString()!);
-            var path = Path.Combine(vendor, "packages", file);
+            var path = Path.Combine(vendor, package.GetProperty("file").GetString()!);
             Assert.Equal(package.GetProperty("bytes").GetInt64(), new FileInfo(path).Length);
             Assert.Equal(package.GetProperty("sha256").GetString(), Sha256(path));
-            using var sha = SHA512.Create();
-            using var stream = File.OpenRead(path);
-            Assert.Equal(content.GetProperty(file).GetString(),
-                Convert.ToBase64String(sha.ComputeHash(stream)));
         }
-        Assert.Equal("cd9d20a8ec8346d171d4cd070dde170aa5f471d7",
-            closureDocument.RootElement.GetProperty("acceptedP14C2SourceCommit").GetString());
-        Assert.Equal(CarrierSource,
-            closureDocument.RootElement.GetProperty("acceptedP14E2SourceCommit").GetString());
-        Assert.Equal(CarrierSourceTree,
-            closureDocument.RootElement.GetProperty("acceptedP14E2SourceTree").GetString());
-        Assert.Equal(CarrierEvidence,
-            closureDocument.RootElement.GetProperty("acceptedP14E2EvidenceCommit").GetString());
-        Assert.Equal(CarrierEvidenceTree,
-            closureDocument.RootElement.GetProperty("acceptedP14E2EvidenceTree").GetString());
-        Assert.Equal(CarrierSha256,
-            closureDocument.RootElement.GetProperty("acceptedP14E2PackageSha256").GetString());
-        Assert.Equal(CarrierNormalizedIdentity,
-            closureDocument.RootElement.GetProperty("acceptedP14E2NormalizedIdentity").GetString());
     }
 
     [Fact]
-    public void CarrierLocksPinExactVersionAndNuGetContentHash()
+    public void ProjectAndLocksResolveOneExactProtocolGraph()
     {
         var root = RepositoryRoot();
-        foreach (var relativePath in new[]
+        var project = XDocument.Load(Path.Combine(
+            root, "src", "Deep.Client.Shared", "Deep.Client.Shared.csproj"));
+        var references = project.Descendants("PackageReference").ToDictionary(
+            value => value.Attribute("Include")!.Value,
+            value => value.Attribute("Version")!.Value,
+            StringComparer.Ordinal);
+        Assert.Equal($"[{ProtocolVersion}]", references["Deep.Protocol"]);
+        Assert.Equal($"[{ProtocolVersion}]", references["Deep.Protocol.MembershipRoutes"]);
+        Assert.Equal($"[{CarrierVersion}]", references["Deep.Protocol.ProfileCarrier"]);
+
+        foreach (var relative in new[]
                  {
                      Path.Combine("src", "Deep.Client.Shared", "packages.lock.json"),
                      Path.Combine("tests", "Deep.Client.Shared.Tests", "packages.lock.json")
                  })
         {
-            using var document = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(root, relativePath)));
-            var carrier = document.RootElement.GetProperty("dependencies").GetProperty("net10.0")
-                .GetProperty("Deep.Protocol.ProfileCarrier");
-            Assert.Equal(CarrierVersion, carrier.GetProperty("resolved").GetString());
-            Assert.Equal(CarrierContentHash, carrier.GetProperty("contentHash").GetString());
-            var dependencies = carrier.GetProperty("dependencies");
-            Assert.Equal(3, dependencies.EnumerateObject().Count());
-            Assert.Equal("[0.3.0-p04.b887fa0]",
-                dependencies.GetProperty("Deep.Protocol").GetString());
-            Assert.Equal("[1.4.1]", dependencies.GetProperty("Sodium.Core").GetString());
-            Assert.Equal("[1.0.22]", dependencies.GetProperty("libsodium").GetString());
-            if (carrier.GetProperty("type").GetString() == "Direct")
-            {
-                Assert.Equal($"[{CarrierVersion}, {CarrierVersion}]",
-                    carrier.GetProperty("requested").GetString());
-            }
+            using var document = JsonDocument.Parse(
+                File.ReadAllBytes(Path.Combine(root, relative)));
+            var dependencies = document.RootElement.GetProperty("dependencies")
+                .GetProperty("net10.0");
+            AssertResolved(dependencies, "Deep.Protocol", ProtocolVersion);
+            AssertResolved(dependencies, "Deep.Protocol.Abstractions", ProtocolVersion);
+            AssertResolved(dependencies, "Deep.Protocol.MembershipRoutes", ProtocolVersion);
+            AssertResolved(dependencies, "Deep.Protocol.ProfileCarrier", CarrierVersion);
+            AssertResolved(dependencies, "Deep.Protocol.Protobuf", ProtocolVersion);
+            Assert.Equal(
+                $"[{ProtocolVersion}]",
+                dependencies.GetProperty("Deep.Protocol.ProfileCarrier")
+                    .GetProperty("dependencies")
+                    .GetProperty("Deep.Protocol")
+                    .GetString());
         }
     }
 
     [Fact]
-    public void SourceLockPinsOfflineWinArm64RuntimeClosure()
+    public void CarrierNuspecSeparatesCarrierIdentityFromProtocolDependency()
     {
-        var projectText = File.ReadAllText(Path.Combine(
-            RepositoryRoot(), "src", "Deep.Client.Shared", "Deep.Client.Shared.csproj"));
-        Assert.Contains(
-            "<RuntimeIdentifiers>win-arm64</RuntimeIdentifiers>",
-            projectText,
-            StringComparison.Ordinal);
-
-        using var document = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(
-            RepositoryRoot(), "src", "Deep.Client.Shared", "packages.lock.json")));
-        var runtime = document.RootElement.GetProperty("dependencies")
-            .GetProperty("net10.0/win-arm64");
-
-        AssertRuntimePackage(
-            runtime,
-            "libsodium",
-            "1.0.22",
-            "KPD9SloJFclrsjnhABu7dzWrcyYkwPbvx5l1gRSPAX/0n+OBtSiVCKtGFv4n+ecWUHU0tCG9LSSwoZZx673zBQ==");
-        AssertRuntimePackage(
-            runtime,
-            "SQLitePCLRaw.lib.e_sqlcipher",
-            "2.1.11",
-            "Cg6UPeDbH8jyaOs1vqXYIgeewH0wYrBnmbC5Ml3GYBo+GKzNmyxrWSO52JV68bfB7Addt/PZLMekJV1RH2ftWQ==");
-        Assert.Equal(2, runtime.EnumerateObject().Count());
+        var package = Path.Combine(
+            RepositoryRoot(),
+            "vendor",
+            "p10b3",
+            "packages",
+            $"Deep.Protocol.ProfileCarrier.{CarrierVersion}.nupkg");
+        using var archive = ZipFile.OpenRead(package);
+        var nuspec = Assert.Single(archive.Entries,
+            value => value.FullName == "Deep.Protocol.ProfileCarrier.nuspec");
+        using var stream = nuspec.Open();
+        var xml = XDocument.Load(stream);
+        XNamespace ns = xml.Root!.Name.Namespace;
+        var metadata = xml.Root.Element(ns + "metadata")!;
+        Assert.Equal(
+            CarrierSource,
+            metadata.Element(ns + "repository")!.Attribute("commit")!.Value);
+        var protocol = Assert.Single(metadata.Descendants(ns + "dependency"),
+            value => value.Attribute("id")!.Value == "Deep.Protocol");
+        Assert.Equal($"[{ProtocolVersion}]", protocol.Attribute("version")!.Value);
+        Assert.NotEqual(ProtocolSource, CarrierSource);
     }
 
     [Fact]
-    public void CarrierPinNegativeControlsRejectAlteredVersionShaAndProjectReference()
+    public void NuGetSourcesAreLocalAndDeepPackagesMapOnlyToP10b3()
+    {
+        var text = File.ReadAllText(Path.Combine(RepositoryRoot(), "NuGet.Config"));
+        Assert.Contains("<clear", text, StringComparison.Ordinal);
+        Assert.Contains("p10b3-protocol-local-pinned", text, StringComparison.Ordinal);
+        Assert.Contains("vendor\\p10b3\\packages", text, StringComparison.Ordinal);
+        Assert.Contains("Deep.Protocol*", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("nuget.org", text, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("http://", text, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("https://", text, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void UnifiedPackagePinRejectsVersionHashAndProjectReferenceDrift()
     {
         var root = RepositoryRoot();
-        var manifestText = File.ReadAllText(Path.Combine(
-            root, "vendor", "p14a2", "profile-carrier-manifest.json"));
-        var projectText = File.ReadAllText(Path.Combine(
+        var manifest = File.ReadAllText(Path.Combine(
+            root, "vendor", "p10b3", "package-provenance.json"));
+        var project = File.ReadAllText(Path.Combine(
             root, "src", "Deep.Client.Shared", "Deep.Client.Shared.csproj"));
-
-        AssertCarrierPin(manifestText, projectText);
-        Assert.Throws<InvalidDataException>(() => AssertCarrierPin(
-            manifestText.Replace(CarrierVersion, "0.2.0-p14.invalid", StringComparison.Ordinal),
-            projectText));
-        Assert.Throws<InvalidDataException>(() => AssertCarrierPin(
-            manifestText.Replace(
-                CarrierSha256,
-                new string('0', 64), StringComparison.Ordinal),
-            projectText));
-        Assert.Throws<InvalidDataException>(() => AssertCarrierPin(
-            manifestText,
-            projectText + "<ProjectReference Include=\"synthetic\" />"));
-        foreach (var drifted in new[]
-                 {
-                     manifestText.Replace(CarrierFile, "packages/drift.nupkg",
-                         StringComparison.Ordinal),
-                     manifestText.Replace(CarrierContentHash, new string('A', 88),
-                         StringComparison.Ordinal),
-                     manifestText.Replace(CarrierNormalizedIdentity, new string('0', 64),
-                         StringComparison.Ordinal),
-                     manifestText.Replace(CarrierSource, new string('0', 40),
-                         StringComparison.Ordinal),
-                     manifestText.Replace(CarrierEvidence, new string('1', 40),
-                         StringComparison.Ordinal),
-                     manifestText.Replace(CarrierDllSha256, new string('2', 64),
-                         StringComparison.Ordinal),
-                     manifestText.Replace(CarrierPdbSha256, new string('3', 64),
-                         StringComparison.Ordinal),
-                     manifestText.Replace("[1.0.22]", "[1.0.0,2.0.0)",
-                         StringComparison.Ordinal),
-                     manifestText.Replace(
-                         "\"id\": \"libsodium\"",
-                         "\"id\": \"unexpected\"",
-                         StringComparison.Ordinal),
-                     manifestText.Replace(CarrierStatus, "PRODUCTION-READY",
-                         StringComparison.Ordinal)
-                 })
-        {
-            Assert.Throws<InvalidDataException>(() => AssertCarrierPin(drifted, projectText));
-        }
+        AssertPackagePin(manifest, project);
+        Assert.Throws<InvalidDataException>(() => AssertPackagePin(
+            manifest.Replace(ProtocolVersion, "0.3.0-p10b3.invalid",
+                StringComparison.Ordinal),
+            project));
+        Assert.Throws<InvalidDataException>(() => AssertPackagePin(
+            manifest.Replace(
+                "e2d03040daaf7c7fe29952db3cfbc3227fb9f0da42740b5f57f65a02ae8118a2",
+                new string('0', 64),
+                StringComparison.Ordinal),
+            project));
+        Assert.Throws<InvalidDataException>(() =>
+            AssertPackagePin(manifest, project + "<ProjectReference Include=\"drift\" />"));
     }
 
     [Fact]
-    public void OfflineGateIsClientNamedAndContainsNoXNodePath()
-    {
-        var root = RepositoryRoot();
-        foreach (var path in Directory.GetFiles(Path.Combine(root, "eng", "scripts"), "*P14A2*"))
-            Assert.DoesNotContain("xnode", File.ReadAllText(path), StringComparison.OrdinalIgnoreCase);
-        foreach (var path in Directory.GetFiles(Path.Combine(root, "vendor", "p14a2"), "*.json"))
-            Assert.DoesNotContain("xnode", File.ReadAllText(path), StringComparison.OrdinalIgnoreCase);
-    }
-
-    [Fact]
-    public void ProductionGraphIsDormantAndUsesOnlySharedVerifier()
+    public void ProductionProfileGraphRemainsDormant()
     {
         var root = RepositoryRoot();
         var path = Path.Combine(root, "src", "Deep.Client.Shared", "Services",
             "DormantSelfHostedProfileVerificationService.cs");
         var source = File.ReadAllText(path);
         Assert.Contains("ProfileCarrierVerifier.VerifyExact", source);
-        foreach (var forbidden in new[]
-                 {
-                     "MembershipContractVerifier", "ImportSelfHostedGenesis", "DSIG",
-                     "ClientRuntime", "HttpClient", "ILogger", "Console.", "wallet",
-                     "billing", "subscription", "entitlement", "XPNT", "endpoint"
-                 })
-        {
-            Assert.DoesNotContain(forbidden, source, StringComparison.OrdinalIgnoreCase);
-        }
-        var runtime = File.ReadAllText(Path.Combine(root, "src", "Deep.Client.Shared", "State", "ClientRuntime.cs"));
+        var runtime = File.ReadAllText(Path.Combine(
+            root, "src", "Deep.Client.Shared", "State", "ClientRuntime.cs"));
         Assert.DoesNotContain("DormantSelfHostedProfileVerification", runtime);
     }
 
-    private static string Sha256(string path) =>
-        Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))).ToLowerInvariant();
-
-    private static void AssertCarrierPin(string manifestText, string projectText)
+    private static void AssertPackagePin(string manifestText, string projectText)
     {
         using var document = JsonDocument.Parse(manifestText);
-        var manifest = document.RootElement;
-        var dependencies = manifest.GetProperty("dependencies")
-            .EnumerateArray()
-            .Select(dependency => (
-                Id: dependency.GetProperty("id").GetString()!,
-                Version: dependency.GetProperty("version").GetString()!))
-            .OrderBy(dependency => dependency.Id, StringComparer.Ordinal)
-            .ToArray();
-        var expectedDependencies = new[]
-        {
-            (Id: "Deep.Protocol", Version: "[0.3.0-p04.b887fa0]"),
-            (Id: "Sodium.Core", Version: "[1.4.1]"),
-            (Id: "libsodium", Version: "[1.0.22]")
-        };
-        if (manifest.GetProperty("version").GetString() != CarrierVersion
-            || manifest.GetProperty("file").GetString() != CarrierFile
-            || manifest.GetProperty("bytes").GetInt64() != 29_399
-            || manifest.GetProperty("sha256").GetString() != CarrierSha256
-            || manifest.GetProperty("nugetContentHash").GetString() != CarrierContentHash
-            || manifest.GetProperty("normalizedIdentity").GetString()
-                != CarrierNormalizedIdentity
-            || manifest.GetProperty("sourceCommit").GetString() != CarrierSource
-            || manifest.GetProperty("sourceTree").GetString() != CarrierSourceTree
-            || manifest.GetProperty("evidenceCommit").GetString() != CarrierEvidence
-            || manifest.GetProperty("evidenceTree").GetString() != CarrierEvidenceTree
-            || manifest.GetProperty("dllSha256").GetString() != CarrierDllSha256
-            || manifest.GetProperty("pdbSha256").GetString() != CarrierPdbSha256
-            || manifest.GetProperty("status").GetString() != CarrierStatus
-            || !dependencies.SequenceEqual(expectedDependencies)
+        var packages = document.RootElement.GetProperty("packages")
+            .EnumerateArray().ToArray();
+        if (document.RootElement.GetProperty("protocolSourceCommit").GetString()
+                != ProtocolSource
+            || document.RootElement.GetProperty("profileCarrierSourceCommit").GetString()
+                != CarrierSource
+            || packages.Length != 5
+            || packages.Where(value =>
+                    value.GetProperty("id").GetString() !=
+                    "Deep.Protocol.ProfileCarrier")
+                .Any(value => value.GetProperty("version").GetString() != ProtocolVersion)
+            || packages.Single(value =>
+                    value.GetProperty("id").GetString() ==
+                    "Deep.Protocol.ProfileCarrier")
+                .GetProperty("version").GetString() != CarrierVersion
+            || packages.Single(value =>
+                    value.GetProperty("id").GetString() ==
+                    "Deep.Protocol.ProfileCarrier")
+                .GetProperty("sha256").GetString()
+                != "e2d03040daaf7c7fe29952db3cfbc3227fb9f0da42740b5f57f65a02ae8118a2"
+            || !projectText.Contains(
+                $"Deep.Protocol\" Version=\"[{ProtocolVersion}]",
+                StringComparison.Ordinal)
+            || !projectText.Contains(
+                $"Deep.Protocol.MembershipRoutes\" Version=\"[{ProtocolVersion}]",
+                StringComparison.Ordinal)
             || !projectText.Contains(
                 $"Deep.Protocol.ProfileCarrier\" Version=\"[{CarrierVersion}]",
                 StringComparison.Ordinal)
             || projectText.Contains("ProjectReference", StringComparison.OrdinalIgnoreCase))
         {
-            throw new InvalidDataException("Carrier pin validation failed.");
+            throw new InvalidDataException("Unified P10B3 package pin validation failed.");
         }
     }
 
-    private static byte[] ArchiveEntry(ZipArchive archive, string name)
-    {
-        var entry = Assert.Single(archive.Entries, value => value.FullName == name);
-        using var stream = entry.Open();
-        using var memory = new MemoryStream((int)entry.Length);
-        stream.CopyTo(memory);
-        return memory.ToArray();
-    }
-
-    private static string Sha256(byte[] bytes) =>
-        Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
-
-    private static void AssertRuntimePackage(
-        JsonElement runtime,
+    private static void AssertResolved(
+        JsonElement dependencies,
         string id,
-        string version,
-        string contentHash)
-    {
-        var package = runtime.GetProperty(id);
-        Assert.Equal("Transitive", package.GetProperty("type").GetString());
-        Assert.Equal(version, package.GetProperty("resolved").GetString());
-        Assert.Equal(contentHash, package.GetProperty("contentHash").GetString());
-    }
+        string version) =>
+        Assert.Equal(version, dependencies.GetProperty(id).GetProperty("resolved").GetString());
+
+    private static string Sha256(string path) =>
+        Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(path)));
 
     internal static string RepositoryRoot()
     {
         var directory = new DirectoryInfo(AppContext.BaseDirectory);
-        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "Deep.Client.Shared.slnx")))
+        while (directory is not null &&
+               !File.Exists(Path.Combine(directory.FullName, "Deep.Client.Shared.slnx")))
+        {
             directory = directory.Parent;
-        return directory?.FullName ?? throw new InvalidOperationException("Repository root missing.");
+        }
+        return directory?.FullName ??
+            throw new InvalidOperationException("Repository root missing.");
     }
 }

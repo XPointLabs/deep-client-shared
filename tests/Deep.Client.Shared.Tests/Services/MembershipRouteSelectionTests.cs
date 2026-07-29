@@ -717,20 +717,24 @@ public sealed class MembershipRouteSelectionTests
         var package = Path.Combine(
             root,
             "vendor",
-            "p15",
+            "p10b3",
             "packages",
-            "Deep.Protocol.MembershipRoutes.0.1.0-p15.local.nupkg");
+            "Deep.Protocol.MembershipRoutes.0.3.0-p10b3.60ce2e3.nupkg");
         using var manifest = JsonDocument.Parse(File.ReadAllBytes(
-            Path.Combine(root, "vendor", "p15", "package-manifest.json")));
-        var expectedHash = manifest.RootElement.GetProperty("packageSha256").GetString();
+            Path.Combine(root, "vendor", "p10b3", "package-provenance.json")));
+        var packageEntry = Assert.Single(
+            manifest.RootElement.GetProperty("packages").EnumerateArray(),
+            entry => entry.GetProperty("id").GetString() ==
+                "Deep.Protocol.MembershipRoutes");
+        var expectedHash = packageEntry.GetProperty("sha256").GetString();
 
-        Assert.Equal(12_064, new FileInfo(package).Length);
+        Assert.Equal(12_871, new FileInfo(package).Length);
         Assert.Equal(
             expectedHash,
             Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(package))));
         Assert.Equal(
-            "f224a96d3208c8f85989375b56d322191e71f4e5",
-            manifest.RootElement.GetProperty("sourceCommit").GetString());
+            "60ce2e3a5140f245d6bcfecf60fa456c26ffe730",
+            manifest.RootElement.GetProperty("protocolSourceCommit").GetString());
 
         foreach (var relative in new[]
                  {
@@ -741,9 +745,11 @@ public sealed class MembershipRouteSelectionTests
             using var locked = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(root, relative)));
             var dependency = locked.RootElement.GetProperty("dependencies").GetProperty("net10.0")
                 .GetProperty("Deep.Protocol.MembershipRoutes");
-            Assert.Equal("0.1.0-p15.local", dependency.GetProperty("resolved").GetString());
             Assert.Equal(
-                "ejxZx+b4Um6rd8NrUdUhPKdPYSxYPmkOVa6G/RsAjnHuwEfce7IZXTt5tu5LbSAmM5QfM2gH0vNt35wDwvLKiQ==",
+                "0.3.0-p10b3.60ce2e3",
+                dependency.GetProperty("resolved").GetString());
+            Assert.Equal(
+                "xcgfNWfuju4D8D2q5am0ds0y86Z2PbMO6hA0rGQSWImeTMGNO9DO8mizZ9SSVIXIffn++zdwa+SDyY/+FYQrnA==",
                 dependency.GetProperty("contentHash").GetString());
         }
     }

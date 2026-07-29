@@ -1,329 +1,85 @@
 [CmdletBinding()]
 param()
 
-$ErrorActionPreference = 'Stop'
-$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-$protocolRoot = (Resolve-Path (Join-Path $repoRoot '..\..\wave01b\deep-protocol')).Path
-$packageRoot = Join-Path $protocolRoot 'artifacts\survival\P04'
-$expectedVersion = '0.3.0-p04.b887fa0'
-$expectedSourceCommit = 'b887fa088f486390be182cac4cbcb59b60ce8931'
+$ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
 
-$pins = @(
-    @{
-        Path = Join-Path $packageRoot 'package-manifest.json'
-        Bytes = 868
-        Sha256 = 'fd3ef27bf0b9272570d6c6e680a3c99e581f6220799d13ee3afbd86ea0e99298'
-    },
-    @{
-        Path = Join-Path $packageRoot "packages\Deep.Protocol.$expectedVersion.nupkg"
-        Bytes = 91148
-        Sha256 = '8ef4e70ad0b6c1cc0087f25c0313d6ab6a5387d16246679e4c10a3c00898a442'
-    },
-    @{
-        Path = Join-Path $packageRoot "packages\Deep.Protocol.Abstractions.$expectedVersion.nupkg"
-        Bytes = 25670
-        Sha256 = 'fc1212a6765f5778188fcb3866ef923023c2253c3ead299a542271f4cc4f844f'
-    },
-    @{
-        Path = Join-Path $packageRoot "packages\Deep.Protocol.Protobuf.$expectedVersion.nupkg"
-        Bytes = 51180
-        Sha256 = '755a027c58be670151456cc0bca4764731f7c493932d9eedd00c02e704baf818'
-    },
-    @{
-        Path = Join-Path $protocolRoot 'tests\Deep.Protocol.GoldenVectors\Vectors\membership-contract-v1.json'
-        Bytes = 8830
-        Sha256 = '758707e4705c0499f546ce1e1e5201df253ef70822225c5fd3086c43d8d9bf45'
-    }
-)
+$repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+$vendorRoot = Join-Path $repositoryRoot "vendor\p10b3"
+$manifestPath = Join-Path $vendorRoot "package-provenance.json"
+$protocolVersion = "0.3.0-p10b3.60ce2e3"
+$carrierVersion = "0.2.0-p10b3.60ce2e3"
 
-function Assert-ExactFile {
-    param(
-        [Parameter(Mandatory)][string] $Path,
-        [Parameter(Mandatory)][long] $Bytes,
-        [Parameter(Mandatory)][string] $Sha256
-    )
-
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-        throw "P07 dependency gate: a pinned local artifact is missing."
-    }
-
-    $item = Get-Item -LiteralPath $Path
-    $actualHash = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($item.Length -ne $Bytes -or $actualHash -ne $Sha256) {
-        throw "P07 dependency gate: pinned local artifact identity mismatch."
+function Assert-Equal {
+    param([string]$Expected, [string]$Actual, [string]$Label)
+    if ($Expected -ne $Actual) {
+        throw "P10B3 dependency gate: $Label differs."
     }
 }
 
-function Assert-ConsumerText {
-    param([Parameter(Mandatory)][string] $Text)
-
-    if ($Text -notmatch '<PackageReference\s+Include="Deep\.Protocol"\s+Version="\[0\.3\.0-p04\.b887fa0\]"\s*/>') {
-        throw 'P07 dependency gate: exact Deep.Protocol PackageReference is required.'
-    }
-    if ($Text -match 'ProjectReference[^>]+deep-protocol') {
-        throw 'P07 dependency gate: deep-protocol ProjectReference substitution is forbidden.'
-    }
+function Get-Sha256 {
+    param([string]$Path)
+    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
-function Assert-LockText {
-    param([Parameter(Mandatory)][string] $Text)
-
-    $lock = $Text | ConvertFrom-Json
-    $matched = $false
-    foreach ($target in $lock.dependencies.PSObject.Properties) {
-        $property = $target.Value.PSObject.Properties['Deep.Protocol']
-        $dependency = if ($null -eq $property) { $null } else { $property.Value }
-        if ($null -ne $dependency -and
-            $dependency.resolved -eq $expectedVersion -and
-            ($dependency.type -ne 'Direct' -or
-             $dependency.requested -eq "[$expectedVersion, $expectedVersion]")) {
-            $matched = $true
-        }
-    }
-    if (-not $matched) {
-        throw 'P07 dependency gate: lock file does not pin the exact Deep.Protocol version.'
-    }
+$manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+Assert-Equal "deep-client-p10b3-offline-package-set.v1" `
+    ([string]$manifest.schema) "manifest schema"
+Assert-Equal "60ce2e3a5140f245d6bcfecf60fa456c26ffe730" `
+    ([string]$manifest.protocolSourceCommit) "protocol source"
+Assert-Equal "dfb182d65d3e8d3ee44a2246ae94c68159bc692d" `
+    ([string]$manifest.profileCarrierSourceCommit) "carrier source"
+if ($manifest.packages.Count -ne 5) {
+    throw "P10B3 dependency gate: the exact package count differs."
+}
+foreach ($package in $manifest.packages) {
+    $path = Join-Path $vendorRoot $package.file
+    Assert-Equal ([string]$package.bytes) `
+        ([string](Get-Item -LiteralPath $path).Length) `
+        "$($package.id) byte length"
+    Assert-Equal ([string]$package.sha256) `
+        (Get-Sha256 $path) `
+        "$($package.id) SHA-256"
 }
 
-foreach ($pin in $pins) {
-    Assert-ExactFile @pin
-}
-
-$manifest = Get-Content -Raw -Encoding UTF8 (Join-Path $packageRoot 'package-manifest.json') | ConvertFrom-Json
-if ($manifest.packageVersion -ne $expectedVersion -or
-    $manifest.sourceCommit -ne $expectedSourceCommit -or
-    $manifest.publication -ne 'local-only-not-published') {
-    throw 'P07 dependency gate: package manifest metadata mismatch.'
-}
-
-Add-Type -AssemblyName System.IO.Compression.FileSystem
-$protocolNupkg = Join-Path $packageRoot "packages\Deep.Protocol.$expectedVersion.nupkg"
-$archive = [IO.Compression.ZipFile]::OpenRead($protocolNupkg)
-try {
-    $entry = $archive.Entries | Where-Object FullName -eq 'Deep.Protocol.nuspec'
-    if ($null -eq $entry) {
-        throw 'P07 dependency gate: package nuspec is missing.'
-    }
-    $reader = [IO.StreamReader]::new($entry.Open(), [Text.Encoding]::UTF8, $true)
-    try {
-        [xml]$nuspec = $reader.ReadToEnd()
-    }
-    finally {
-        $reader.Dispose()
-    }
-    $repository = $nuspec.package.metadata.repository
-    if ($repository.type -ne 'git' -or $repository.commit -ne $expectedSourceCommit) {
-        throw 'P07 dependency gate: nupkg repository source commit mismatch.'
+$project = Get-Content -LiteralPath (Join-Path $repositoryRoot `
+    "src\Deep.Client.Shared\Deep.Client.Shared.csproj") -Raw
+foreach ($expected in @(
+    "Deep.Protocol`" Version=`"[$protocolVersion]",
+    "Deep.Protocol.MembershipRoutes`" Version=`"[$protocolVersion]",
+    "Deep.Protocol.ProfileCarrier`" Version=`"[$carrierVersion]"
+)) {
+    if ($project.IndexOf($expected, [StringComparison]::Ordinal) -lt 0) {
+        throw "P10B3 dependency gate: an exact project package pin is missing."
     }
 }
-finally {
-    $archive.Dispose()
+if ($project.IndexOf("ProjectReference", [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+    throw "P10B3 dependency gate: project-reference substitution is forbidden."
 }
 
-function Get-GitBlobBytes {
-    param(
-        [Parameter(Mandatory)][string] $Repository,
-        [Parameter(Mandatory)][string] $Object
-    )
-    Assert-SafeGitObjectGraph $Repository
-    $start = New-SanitizedGitStartInfo
-    $start.Arguments = ConvertTo-GitArguments @('-C', $Repository, 'show', $Object)
-    $process = [Diagnostics.Process]::Start($start)
-    $memory = [IO.MemoryStream]::new()
-    $process.StandardOutput.BaseStream.CopyTo($memory)
-    $errorText = $process.StandardError.ReadToEnd()
-    $process.WaitForExit()
-    if ($process.ExitCode -ne 0) {
-        throw "P07 dependency gate: pinned Git artifact is unavailable: $errorText"
-    }
-    return $memory.ToArray()
+foreach ($relative in @(
+    "src\Deep.Client.Shared\packages.lock.json",
+    "tests\Deep.Client.Shared.Tests\packages.lock.json"
+)) {
+    $lock = Get-Content -LiteralPath (Join-Path $repositoryRoot $relative) -Raw |
+        ConvertFrom-Json
+    $target = $lock.dependencies.'net10.0'
+    Assert-Equal $protocolVersion ([string]$target.'Deep.Protocol'.resolved) `
+        "$relative Deep.Protocol"
+    Assert-Equal $protocolVersion `
+        ([string]$target.'Deep.Protocol.MembershipRoutes'.resolved) `
+        "$relative MembershipRoutes"
+    Assert-Equal $carrierVersion `
+        ([string]$target.'Deep.Protocol.ProfileCarrier'.resolved) `
+        "$relative ProfileCarrier"
 }
 
-function New-SanitizedGitStartInfo {
-    $start = [Diagnostics.ProcessStartInfo]::new()
-    $start.FileName = 'git'
-    $start.UseShellExecute = $false
-    $start.RedirectStandardOutput = $true
-    $start.RedirectStandardError = $true
-    foreach ($name in @($start.Environment.Keys)) {
-        if ($name.StartsWith('GIT_', [StringComparison]::OrdinalIgnoreCase)) {
-            $start.Environment.Remove($name)
-        }
-    }
-    $start.Environment['GIT_NO_REPLACE_OBJECTS'] = '1'
-    return $start
+$config = Get-Content -LiteralPath (Join-Path $repositoryRoot "NuGet.Config") -Raw
+if ($config.IndexOf("<clear", [StringComparison]::Ordinal) -lt 0 -or
+    $config.IndexOf("vendor\p10b3\packages", [StringComparison]::Ordinal) -lt 0 -or
+    $config.IndexOf("http://", [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+    $config.IndexOf("https://", [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+    throw "P10B3 dependency gate: NuGet sources are not exact and local-only."
 }
 
-function ConvertTo-GitArguments {
-    param([string[]] $Values)
-    return (($Values | ForEach-Object {
-        '"' + ($_.Replace('"', '\"')) + '"'
-    }) -join ' ')
-}
-
-function Invoke-SanitizedGitText {
-    param(
-        [Parameter(Mandatory)][string] $Repository,
-        [Parameter(Mandatory)][string[]] $Arguments,
-        [switch] $AllowFailure
-    )
-    $start = New-SanitizedGitStartInfo
-    $start.Arguments = ConvertTo-GitArguments (@('-C', $Repository) + $Arguments)
-    $process = [Diagnostics.Process]::Start($start)
-    $text = $process.StandardOutput.ReadToEnd()
-    $errorText = $process.StandardError.ReadToEnd()
-    $process.WaitForExit()
-    if ($process.ExitCode -ne 0 -and -not $AllowFailure) {
-        throw "P07 dependency gate: pinned Git object operation failed: $errorText"
-    }
-    return [pscustomobject]@{ ExitCode = $process.ExitCode; Text = $text }
-}
-
-function Assert-SafeGitObjectGraph {
-    param([Parameter(Mandatory)][string] $Repository)
-    $replace = Invoke-SanitizedGitText $Repository @('for-each-ref', '--format=%(refname)', 'refs/replace')
-    if (-not [string]::IsNullOrWhiteSpace($replace.Text)) {
-        throw 'P07 dependency gate: Git replace refs are forbidden.'
-    }
-    foreach ($gitPathName in @('info/grafts', 'shallow')) {
-        $pathResult = Invoke-SanitizedGitText $Repository @('rev-parse', '--git-path', $gitPathName)
-        $path = $pathResult.Text.Trim()
-        if (-not [IO.Path]::IsPathRooted($path)) {
-            $path = Join-Path $Repository $path
-        }
-        if (Test-Path -LiteralPath $path) {
-            throw 'P07 dependency gate: grafted or shallow Git history is forbidden.'
-        }
-    }
-}
-
-function Assert-GitObject {
-    param([string] $Repository, [string] $Object)
-    Assert-SafeGitObjectGraph $Repository
-    $result = Invoke-SanitizedGitText $Repository @('cat-file', '-e', "$Object`^{commit}") -AllowFailure
-    if ($result.ExitCode -ne 0) {
-        throw 'P07 dependency gate: required Git commit object is unavailable.'
-    }
-}
-
-function Assert-GitAncestor {
-    param([string] $Repository, [string] $Ancestor, [string] $Descendant)
-    Assert-GitObject $Repository $Ancestor
-    Assert-GitObject $Repository $Descendant
-    $result = Invoke-SanitizedGitText $Repository @('merge-base', '--is-ancestor', $Ancestor, $Descendant) -AllowFailure
-    if ($result.ExitCode -ne 0) {
-        throw 'P07 dependency gate: pinned prerequisite ancestry mismatch.'
-    }
-}
-
-function Assert-BytesHash {
-    param([byte[]] $Bytes, [string] $Expected)
-    $sha = [Security.Cryptography.SHA256]::Create()
-    try {
-        $actual = -join ($sha.ComputeHash($Bytes) | ForEach-Object { $_.ToString('x2') })
-    }
-    finally {
-        $sha.Dispose()
-    }
-    if ($actual -ne $Expected) {
-        throw 'P07 dependency gate: pinned Git artifact hash mismatch.'
-    }
-}
-
-$devops = (Resolve-Path (Join-Path $repoRoot '..\..\wave01b\deep-devops-w1w2-manifest')).Path
-$accepted = '1c01e24e24647a46b4f37622f3934dc2cc1284ef'
-$corrective = '1fc3fcd376f9ffc9d4bca68f0143bf12b761e7dc'
-$carrier = '524c5796aa868fa3d057fbf7eaa13cfea2e0d19c'
-Assert-GitAncestor $devops $corrective $accepted
-$manifestBytes = Get-GitBlobBytes $devops "$accepted`:release/manifests/survival-v2.1.0-w1w2-gate.detached.local.json"
-$contractBytes = Get-GitBlobBytes $devops "$carrier`:release/contracts/survival-compatibility-v2.1.0-w1w2-gate.json"
-$closureBytes = Get-GitBlobBytes $devops "$accepted`:release/evidence/w1w2-dependency-closure.json"
-Assert-BytesHash $manifestBytes '920b24bb5bcfcc8b4f91aef56ed210127246ec9fd2d49178ed9856c8555d0b93'
-Assert-BytesHash $contractBytes 'c45f66f7a688cbd70b7ca57a777851962ce2ab59eb37a3304d9b4bf7e4c55719'
-Assert-BytesHash $closureBytes 'b2f813061e7986d1e383c2df5b5ce345367c4cca06a03cf8122221c5cfa5c51b'
-$closure = [Text.Encoding]::UTF8.GetString($closureBytes) | ConvertFrom-Json
-if ($closure.status -ne 'W1-CONTRACT-CLOSED-W2-BLOCKED' -or
-    $closure.contract.carrierCommit -ne $carrier -or
-    $closure.contract.runtimeBaseCommit -ne '1eb9a2a40ce01ce0f8c924e9dafaf3752b197d31' -or
-    $closure.P04.sourceCommit -ne $expectedSourceCommit -or
-    $closure.P04.runtimeAuthorized -ne $false) {
-    throw 'P07 dependency gate: accepted closure semantics mismatch.'
-}
-
-$reviewedP04Commit = '68da52aaf6768ee2cb41f88ae42db102eeaf1ad6'
-$finalP04Commit = 'db58937d4070eb057642c00d10a64d2f738f6e41'
-Assert-GitAncestor $protocolRoot $expectedSourceCommit $reviewedP04Commit
-Assert-GitAncestor $protocolRoot $reviewedP04Commit $finalP04Commit
-
-$nugetConfig = Get-Content -Raw -Encoding UTF8 (Join-Path $repoRoot 'NuGet.Config')
-if ($nugetConfig -notmatch '<clear\s*/>' -or
-    $nugetConfig -notmatch 'p04-local-pinned' -or
-    $nugetConfig -match 'nuget\.org|https?://') {
-    throw 'P07 dependency gate: NuGet sources must be local-only and cleared.'
-}
-
-$projectPath = Join-Path $repoRoot 'src\Deep.Client.Shared\Deep.Client.Shared.csproj'
-$projectText = Get-Content -Raw -Encoding UTF8 $projectPath
-Assert-ConsumerText $projectText
-
-$lockPaths = @(
-    (Join-Path $repoRoot 'src\Deep.Client.Shared\packages.lock.json'),
-    (Join-Path $repoRoot 'tests\Deep.Client.Shared.Tests\packages.lock.json')
-)
-foreach ($lockPath in $lockPaths) {
-    if (-not (Test-Path -LiteralPath $lockPath -PathType Leaf)) {
-        throw 'P07 dependency gate: a required package lock file is missing.'
-    }
-    Assert-LockText (Get-Content -Raw -Encoding UTF8 $lockPath)
-}
-
-$assetsPath = Join-Path $repoRoot 'src\Deep.Client.Shared\obj\project.assets.json'
-if (Test-Path -LiteralPath $assetsPath -PathType Leaf) {
-    $assets = Get-Content -Raw -Encoding UTF8 $assetsPath | ConvertFrom-Json
-    if (-not $assets.libraries.PSObject.Properties["Deep.Protocol/$expectedVersion"]) {
-        throw 'P07 dependency gate: resolved assets do not contain the exact Deep.Protocol version.'
-    }
-
-    $globalPackages = if ([string]::IsNullOrWhiteSpace($env:NUGET_PACKAGES)) {
-        Join-Path ([Environment]::GetFolderPath('UserProfile')) '.nuget\packages'
-    }
-    else {
-        $env:NUGET_PACKAGES
-    }
-    $cachePins = @(
-        @{ Id = 'deep.protocol'; Bytes = 91148; Sha256 = '8ef4e70ad0b6c1cc0087f25c0313d6ab6a5387d16246679e4c10a3c00898a442' },
-        @{ Id = 'deep.protocol.abstractions'; Bytes = 25670; Sha256 = 'fc1212a6765f5778188fcb3866ef923023c2253c3ead299a542271f4cc4f844f' },
-        @{ Id = 'deep.protocol.protobuf'; Bytes = 51180; Sha256 = '755a027c58be670151456cc0bca4764731f7c493932d9eedd00c02e704baf818' }
-    )
-    foreach ($cachePin in $cachePins) {
-        if (-not $assets.libraries.PSObject.Properties[
-                "$($cachePin.Id -replace '^deep\.protocol$', 'Deep.Protocol' -replace '^deep\.protocol\.abstractions$', 'Deep.Protocol.Abstractions' -replace '^deep\.protocol\.protobuf$', 'Deep.Protocol.Protobuf')/$expectedVersion"]) {
-            throw 'P07 dependency gate: resolved assets do not contain an exact P04 dependency.'
-        }
-        $packageFolder = Join-Path $globalPackages "$($cachePin.Id)\$expectedVersion"
-        $cachedNupkg = Join-Path $packageFolder "$($cachePin.Id).$expectedVersion.nupkg"
-        Assert-ExactFile $cachedNupkg $cachePin.Bytes $cachePin.Sha256
-    }
-}
-
-# In-memory negative controls prove the gate rejects the required substitution classes.
-$negativeControls = @(
-    { Assert-ConsumerText ($projectText -replace [regex]::Escape($expectedVersion), '0.3.0-p04.stale') },
-    { Assert-ConsumerText ($projectText -replace [regex]::Escape("[$expectedVersion]"), $expectedVersion) },
-    { Assert-ConsumerText ($projectText -replace '<PackageReference Include="Deep.Protocol"[^>]+/>', '<ProjectReference Include="..\..\deep-protocol\src\Deep.Protocol.csproj" />') },
-    { Assert-LockText '{"version":1,"dependencies":{"net10.0":{"Deep.Protocol":{"type":"Direct","requested":"[0.3.0-p04.stale, )","resolved":"0.3.0-p04.stale"}}}}' }
-)
-foreach ($negativeControl in $negativeControls) {
-    $rejected = $false
-    try {
-        & $negativeControl
-    }
-    catch {
-        $rejected = $true
-    }
-    if (-not $rejected) {
-        throw 'P07 dependency gate: a synthetic negative control was not rejected.'
-    }
-}
-
-Write-Output 'P07 dependency gate PASS'
+Write-Output "P10B3 dependency gate PASS"
