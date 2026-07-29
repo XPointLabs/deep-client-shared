@@ -1,6 +1,7 @@
 ﻿using Deep.Protocol.DeepExtension.MailboxCapabilities;
 using Microsoft.Data.Sqlite;
 using System.Security.Cryptography;
+using System.Text;
 
 namespace Deep.Client.Shared.Persistence;
 
@@ -21,6 +22,58 @@ public sealed class SqliteClientMailboxStateRepository :
         "client_mailbox_expired_quarantine",
         "client_mailbox_coordinator_journal"
     ];
+    private static readonly IReadOnlyDictionary<string, string> CurrentTableDefinitions =
+        new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["client_mailbox_meta"] = """
+                CREATE TABLE client_mailbox_meta (
+                    id INTEGER PRIMARY KEY CHECK(id = 1),
+                    schema_version INTEGER NOT NULL
+                )
+                """,
+            ["client_mailbox_traversal"] = """
+                CREATE TABLE client_mailbox_traversal (
+                    scope BLOB PRIMARY KEY NOT NULL CHECK(length(scope) = 32),
+                    after_cursor BLOB NOT NULL CHECK(length(after_cursor) = 8),
+                    continuation_token BLOB NOT NULL
+                )
+                """,
+            ["client_mailbox_inbox"] = """
+                CREATE TABLE client_mailbox_inbox (
+                    scope BLOB NOT NULL CHECK(length(scope) = 32),
+                    cursor BLOB NOT NULL CHECK(length(cursor) = 8),
+                    digest BLOB NOT NULL CHECK(length(digest) = 32),
+                    expires_at BLOB NOT NULL CHECK(length(expires_at) = 8),
+                    canonical_envelope BLOB NOT NULL,
+                    acknowledged INTEGER NOT NULL CHECK(acknowledged IN (0, 1)),
+                    PRIMARY KEY(scope, cursor),
+                    UNIQUE(scope, digest)
+                )
+                """,
+            ["client_mailbox_expired_quarantine"] = """
+                CREATE TABLE client_mailbox_expired_quarantine (
+                    scope BLOB NOT NULL CHECK(length(scope) = 32),
+                    cursor BLOB NOT NULL CHECK(length(cursor) = 8),
+                    digest BLOB NOT NULL CHECK(length(digest) = 32),
+                    expires_at BLOB NOT NULL CHECK(length(expires_at) = 8),
+                    canonical_envelope BLOB NOT NULL,
+                    quarantined_at INTEGER NOT NULL,
+                    reason TEXT NOT NULL,
+                    PRIMARY KEY(scope, cursor, digest)
+                )
+                """,
+            ["client_mailbox_coordinator_journal"] = """
+                CREATE TABLE client_mailbox_coordinator_journal (
+                    installation_scope BLOB NOT NULL
+                        CHECK(length(installation_scope) = 32),
+                    statement_key BLOB NOT NULL CHECK(length(statement_key) = 32),
+                    statement_digest BLOB NOT NULL
+                        CHECK(length(statement_digest) = 32),
+                    expires_at BLOB NOT NULL CHECK(length(expires_at) = 8),
+                    PRIMARY KEY(installation_scope, statement_key)
+                )
+                """
+        };
     private static readonly IReadOnlyDictionary<string, string[]> CurrentIndexes =
         new Dictionary<string, string[]>(StringComparer.Ordinal)
         {
@@ -32,6 +85,32 @@ public sealed class SqliteClientMailboxStateRepository :
                 ["quarantined_at", "expires_at", "scope"],
             ["ix_client_mailbox_journal_scope_expiry"] =
                 ["installation_scope", "expires_at"]
+        };
+    private static readonly IReadOnlyDictionary<string, string> CurrentIndexDefinitions =
+        new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["ix_client_mailbox_inbox_scope_expiry"] = """
+                CREATE INDEX ix_client_mailbox_inbox_scope_expiry
+                    ON client_mailbox_inbox(scope, expires_at)
+                """,
+            ["ix_client_mailbox_inbox_expiry_scope"] = """
+                CREATE INDEX ix_client_mailbox_inbox_expiry_scope
+                    ON client_mailbox_inbox(expires_at, scope)
+                """,
+            ["ix_client_mailbox_inbox_scope_ack_cursor"] = """
+                CREATE INDEX ix_client_mailbox_inbox_scope_ack_cursor
+                    ON client_mailbox_inbox(scope, acknowledged, cursor)
+                """,
+            ["ix_client_mailbox_quarantine_age"] = """
+                CREATE INDEX ix_client_mailbox_quarantine_age
+                    ON client_mailbox_expired_quarantine(
+                        quarantined_at, expires_at, scope)
+                """,
+            ["ix_client_mailbox_journal_scope_expiry"] = """
+                CREATE INDEX ix_client_mailbox_journal_scope_expiry
+                    ON client_mailbox_coordinator_journal(
+                        installation_scope, expires_at)
+                """
         };
     private readonly string connectionString;
     private readonly Action<ClientMailboxCommitFaultPoint>? commitFault;
@@ -462,6 +541,11 @@ public sealed class SqliteClientMailboxStateRepository :
                     ("statement_digest", "BLOB", true, 0),
                     ("expires_at", "BLOB", true, 0)
                 ]) ||
+            !HasExactSchemaDefinitions(
+                connection,
+                transaction,
+                "table",
+                CurrentTableDefinitions) ||
             !HasExactIndexes(connection, transaction))
         {
             throw ResetRequired();
@@ -507,14 +591,25 @@ public sealed class SqliteClientMailboxStateRepository :
         using var indexes = connection.CreateCommand();
         indexes.Transaction = transaction;
         indexes.CommandText = """
-            SELECT name FROM sqlite_master
+            SELECT name, sql FROM sqlite_master
             WHERE type = 'index' AND name LIKE 'ix_client_mailbox_%';
             """;
         using var reader = indexes.ExecuteReader();
         var names = new HashSet<string>(StringComparer.Ordinal);
         while (reader.Read())
         {
-            names.Add(reader.GetString(0));
+            var name = reader.GetString(0);
+            if (!CurrentIndexDefinitions.TryGetValue(name, out var expectedSql) ||
+                reader.IsDBNull(1) ||
+                !string.Equals(
+                    NormalizeSchemaSql(reader.GetString(1)),
+                    NormalizeSchemaSql(expectedSql),
+                    StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            names.Add(name);
         }
         reader.Dispose();
 
@@ -549,6 +644,56 @@ public sealed class SqliteClientMailboxStateRepository :
         }
 
         return true;
+    }
+
+    private static bool HasExactSchemaDefinitions(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string type,
+        IReadOnlyDictionary<string, string> expected)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT name, sql FROM sqlite_master
+            WHERE type = $type AND name LIKE 'client_mailbox_%';
+            """;
+        command.Parameters.AddWithValue("$type", type);
+        using var reader = command.ExecuteReader();
+        var found = new HashSet<string>(StringComparer.Ordinal);
+        while (reader.Read())
+        {
+            var name = reader.GetString(0);
+            if (!expected.TryGetValue(name, out var expectedSql) ||
+                reader.IsDBNull(1) ||
+                !string.Equals(
+                    NormalizeSchemaSql(reader.GetString(1)),
+                    NormalizeSchemaSql(expectedSql),
+                    StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            found.Add(name);
+        }
+
+        return found.SetEquals(expected.Keys);
+    }
+
+    private static string NormalizeSchemaSql(string value)
+    {
+        var normalized = new StringBuilder(value.Length);
+        foreach (var character in value)
+        {
+            if (!char.IsWhiteSpace(character) && character != ';')
+            {
+                normalized.Append(char.ToUpperInvariant(character));
+            }
+        }
+
+        return normalized
+            .ToString()
+            .Replace("IFNOTEXISTS", string.Empty, StringComparison.Ordinal);
     }
 
     private static InvalidDataException ResetRequired() =>

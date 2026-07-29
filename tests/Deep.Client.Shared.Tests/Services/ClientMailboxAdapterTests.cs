@@ -1529,6 +1529,80 @@ public sealed class ClientMailboxAdapterTests
     }
 
     [Fact]
+    public void Sqlite_SpoofedCurrentVersionConstraintsRequireExplicitWipeReset()
+    {
+        var path = TempDatabase();
+        try
+        {
+            using (var connection = new SqliteConnection(
+                       new SqliteConnectionStringBuilder
+                       {
+                           DataSource = path,
+                           Password = DatabaseKey,
+                           Pooling = false
+                       }.ToString()))
+            {
+                connection.Open();
+                using var command = connection.CreateCommand();
+                command.CommandText = """
+                    CREATE TABLE client_mailbox_meta (
+                        id INTEGER PRIMARY KEY CHECK(id = 1),
+                        schema_version INTEGER NOT NULL);
+                    INSERT INTO client_mailbox_meta(id, schema_version) VALUES(1, 6);
+                    CREATE TABLE client_mailbox_traversal (
+                        scope BLOB PRIMARY KEY NOT NULL,
+                        after_cursor BLOB NOT NULL,
+                        continuation_token BLOB NOT NULL);
+                    CREATE TABLE client_mailbox_inbox (
+                        scope BLOB NOT NULL,
+                        cursor BLOB NOT NULL,
+                        digest BLOB NOT NULL,
+                        expires_at BLOB NOT NULL,
+                        canonical_envelope BLOB NOT NULL,
+                        acknowledged INTEGER NOT NULL,
+                        PRIMARY KEY(scope, cursor));
+                    CREATE TABLE client_mailbox_expired_quarantine (
+                        scope BLOB NOT NULL,
+                        cursor BLOB NOT NULL,
+                        digest BLOB NOT NULL,
+                        expires_at BLOB NOT NULL,
+                        canonical_envelope BLOB NOT NULL,
+                        quarantined_at INTEGER NOT NULL,
+                        reason TEXT NOT NULL,
+                        PRIMARY KEY(scope, cursor, digest));
+                    CREATE TABLE client_mailbox_coordinator_journal (
+                        installation_scope BLOB NOT NULL,
+                        statement_key BLOB NOT NULL,
+                        statement_digest BLOB NOT NULL,
+                        expires_at BLOB NOT NULL,
+                        PRIMARY KEY(installation_scope, statement_key));
+                    CREATE INDEX ix_client_mailbox_inbox_scope_expiry
+                        ON client_mailbox_inbox(scope, expires_at);
+                    CREATE INDEX ix_client_mailbox_inbox_expiry_scope
+                        ON client_mailbox_inbox(expires_at, scope);
+                    CREATE INDEX ix_client_mailbox_inbox_scope_ack_cursor
+                        ON client_mailbox_inbox(scope, acknowledged, cursor);
+                    CREATE INDEX ix_client_mailbox_quarantine_age
+                        ON client_mailbox_expired_quarantine(
+                            quarantined_at, expires_at, scope);
+                    CREATE INDEX ix_client_mailbox_journal_scope_expiry
+                        ON client_mailbox_coordinator_journal(
+                            installation_scope, expires_at);
+                    """;
+                command.ExecuteNonQuery();
+            }
+
+            var exception = Assert.Throws<InvalidDataException>(() =>
+                new SqliteClientMailboxStateRepository(Options(path)));
+            Assert.Contains("Wipe/reset", exception.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DeleteSqliteFiles(path);
+        }
+    }
+
+    [Fact]
     public async Task Sqlite_FreshCurrentMailboxStateSurvivesRestart()
     {
         var path = TempDatabase();
