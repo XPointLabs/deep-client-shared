@@ -392,6 +392,37 @@ public sealed class PersistenceTests
     }
 
     [Fact]
+    public async Task ClientRuntime_CreatePersistent_InitializesFreshCurrentSchema()
+    {
+        var statePath = Path.Combine(Path.GetTempPath(), $"deep-client-runtime-{Guid.NewGuid():N}.db");
+        try
+        {
+            using var runtime = ClientRuntime.CreatePersistentForTests(statePath);
+
+            Assert.Null(await runtime.Accounts.GetActiveAccountAsync());
+            Assert.Equal(LocalSchemaMigrations.LatestVersion, await runtime.Store.GetSchemaVersionAsync());
+        }
+        finally
+        {
+            DeleteSqliteFiles(statePath);
+        }
+    }
+
+    [Fact]
+    public void ClientRuntime_PersistentFactories_DoNotAcceptLegacySnapshotPath()
+    {
+        var persistentFactories = typeof(ClientRuntime).GetMethods()
+            .Where(method => method.Name is nameof(ClientRuntime.CreatePersistent) or nameof(ClientRuntime.CreatePersistentForTests));
+
+        Assert.All(
+            persistentFactories,
+            method => Assert.DoesNotContain(
+                method.GetParameters(),
+                parameter => string.Equals(parameter.Name, "legacyInMemoryStatePath", StringComparison.Ordinal)));
+        Assert.Null(typeof(ClientRuntime).Assembly.GetType("Deep.Client.Shared.Persistence.LocalStateMigration"));
+    }
+
+    [Fact]
     public void ClientRuntime_ReleaseFlagsWrapAuthenticatedTransportWithE2ee()
     {
         var runtime = new ClientRuntime(
@@ -429,61 +460,6 @@ public sealed class PersistenceTests
         finally
         {
             DeleteSqliteFiles(statePath);
-        }
-    }
-
-    [Fact]
-    public async Task ClientRuntime_CreatePersistent_MigratesLegacyInMemorySnapshotWithoutDataLoss()
-    {
-        var legacyPath = Path.Combine(Path.GetTempPath(), $"deep-client-legacy-{Guid.NewGuid():N}.json");
-        var sqlitePath = Path.Combine(Path.GetTempPath(), $"deep-client-runtime-{Guid.NewGuid():N}.db");
-
-        try
-        {
-            var legacyStore = new InMemorySessionStore(legacyPath);
-            var sender = SessionId.CreateNew();
-            var recipient = SessionId.CreateNew();
-            var conversationId = ConversationId.ForOneToOne(recipient);
-            var now = DateTimeOffset.Parse("2026-05-28T00:00:00Z");
-            var messageId = MessageId.NewId();
-
-            await legacyStore.UpsertAsync(new Conversation(
-                conversationId,
-                ConversationKind.OneToOne,
-                "Legacy",
-                ConversationSettings.Default(ConversationKind.OneToOne),
-                now,
-                now));
-            await legacyStore.AppendAsync(new Message(messageId, conversationId, sender, recipient, "legacy-message", MessageDirection.Outgoing, MessageDeliveryState.Sent, now, []));
-            await legacyStore.SetSchemaVersionAsync(2);
-            await legacyStore.SetSchemaValueAsync("schema.2", "attachment-pointer-metadata");
-
-            var runtime = ClientRuntime.CreatePersistentForTests(sqlitePath, legacyInMemoryStatePath: legacyPath);
-            var recoveredConversation = await ((IConversationRepository)runtime.Store).GetAsync(conversationId);
-            var recoveredMessage = await ((IMessageRepository)runtime.Store).GetAsync(messageId);
-            var schemaVersion = await runtime.Store.GetSchemaVersionAsync();
-
-            Assert.NotNull(recoveredConversation);
-            Assert.Equal("Legacy", recoveredConversation!.DisplayName);
-            Assert.NotNull(recoveredMessage);
-            Assert.Equal("legacy-message", recoveredMessage!.Body);
-            Assert.True(schemaVersion >= LocalSchemaMigrations.LatestVersion);
-            Assert.False(File.Exists(legacyPath));
-            Assert.False(File.Exists(legacyPath + ".migrated.bak"));
-        }
-        finally
-        {
-            if (File.Exists(legacyPath))
-            {
-                File.Delete(legacyPath);
-            }
-
-            if (File.Exists(legacyPath + ".migrated.bak"))
-            {
-                File.Delete(legacyPath + ".migrated.bak");
-            }
-
-            DeleteSqliteFiles(sqlitePath);
         }
     }
 

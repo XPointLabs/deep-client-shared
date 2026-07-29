@@ -67,9 +67,9 @@ Use `deep-protocol` for protocol and crypto semantics. Do not recreate protocol 
 
 ## Persistence Migration Rules
 
-- Add a migration test before changing schema or local-state migration.
-- Never delete legacy state until the new store has been written and verified.
-- Preserve a backup path for one-way migrations.
+- Add a migration test before changing schema or an explicitly approved local-state migration.
+- For an explicitly approved migration, never delete source state until the new store has been written and verified.
+- Legacy JSON/in-memory snapshots are not an approved local-state migration path.
 - Corruption handling should quarantine bad state where possible and expose diagnostics.
 
 ## Evidence Checklist

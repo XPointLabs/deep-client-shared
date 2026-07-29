@@ -151,7 +151,6 @@ public sealed class ClientRuntime : IDisposable
         ISessionMessageTransport? backend = null,
         IGroupSyncTransport? groupSyncTransport = null,
         IAvatarProfileTransport? avatarProfiles = null,
-        string? legacyInMemoryStatePath = null,
         string? sqlCipherKey = null,
         Func<ILocalSessionStore, ILocalSessionStore>? storeDecorator = null,
         bool requireE2eeTransport = false,
@@ -180,14 +179,6 @@ public sealed class ClientRuntime : IDisposable
         }
 
         var store = new SqliteSessionStore(new SqliteSessionStoreOptions(statePath, sqlCipherKey));
-        if (!string.IsNullOrWhiteSpace(legacyInMemoryStatePath))
-        {
-            LocalStateMigration
-                .MigrateLegacyInMemorySnapshotAsync(legacyInMemoryStatePath, store)
-                .GetAwaiter()
-                .GetResult();
-        }
-
         new LocalSchemaMigrator(LocalSchemaMigrations.Default)
             .MigrateAsync(store)
             .GetAwaiter()
@@ -213,7 +204,6 @@ public sealed class ClientRuntime : IDisposable
         StubSessionBackend? backend = null,
         IGroupSyncTransport? groupSyncTransport = null,
         IAvatarProfileTransport? avatarProfiles = null,
-        string? legacyInMemoryStatePath = null,
         string? sqlCipherKey = null,
         Func<ILocalSessionStore, ILocalSessionStore>? storeDecorator = null,
         IExternalTransportOutboxExecutor? transportOutboxExecutor = null) =>
@@ -224,7 +214,6 @@ public sealed class ClientRuntime : IDisposable
             backend ?? new StubSessionBackend(),
             groupSyncTransport,
             avatarProfiles,
-            legacyInMemoryStatePath,
             sqlCipherKey,
             storeDecorator,
             requireE2eeTransport: false,

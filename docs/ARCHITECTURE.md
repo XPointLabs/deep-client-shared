@@ -41,7 +41,7 @@ E4 adds group admin/member-state lifecycle behavior into `ConversationService`: 
 - Local group sync publishes group state to member inbox storage and group messages to the group storage stream; `SessionStorageGroupSyncTransport` uses compat-service public namespaces for unsigned local e2e until the secure signed namespace layer is wired.
 - Attachments are metadata/pointer records: local plaintext handling and encrypted upload/download belong behind platform/service implementations.
 - Sync plans preserve the key Session ordering rule: group keys are requested last after group info and members.
-- Local data migration path supports importing legacy in-memory JSON snapshots into SQLite on first production startup.
+- Persistent startup opens only the configured SQLite state and applies the current local schema migrations.
 - E3 call quality strategy computes rolling quality metrics and records explicit degradation diagnostics, then applies reconnect attempts before terminal failure.
 - E4 onboarding/recovery edge-cases are validated by runtime tests (restore flow, malformed Session ID guard, persistence across restart), and acceptance evidence is tracked in `docs/e4-acceptance-checklist.md`.
 - Full upstream Session account-linking restore semantics (network/profile fetch stage handling) remain a parity follow-up beyond current local deterministic restore flow.

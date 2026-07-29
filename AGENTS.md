@@ -43,6 +43,7 @@ Not owned here:
   current schema, reject older/incompatible state with an explicit wipe/reset
   requirement, and do not add dual-read or automatic migration unless Mr. X
   explicitly requests it.
+- Legacy JSON/in-memory snapshots are not a supported runtime import format.
 - Feature flags must fail closed for release: if a release feature needs real infrastructure, missing configuration should be visible.
 - Do not log recovery phrases, private keys, Session IDs paired with sensitive payloads, attachment contents, or push tokens.
 
