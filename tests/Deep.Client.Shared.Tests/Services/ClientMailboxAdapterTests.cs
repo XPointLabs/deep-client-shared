@@ -481,6 +481,76 @@ public sealed class ClientMailboxAdapterTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task ExpiredReconciliation_IsAtomicAndNeverFabricatesAck(
+        bool sqlite)
+    {
+        foreach (var faultPoint in new[]
+                 {
+                     ClientMailboxCommitFaultPoint.BeforeCommit,
+                     ClientMailboxCommitFaultPoint.AfterCommit
+                 })
+        {
+            var path = TempDatabase();
+            var scope = Scope(0x51);
+            IClientMailboxStateRepository seed = CreateRepository(sqlite, path);
+            try
+            {
+                var page = Page(1, 1, false, []);
+                await seed.CommitRetrievePageAsync(
+                    scope,
+                    new ClientMailboxTraversal(0, []),
+                    page);
+                var storedState = sqlite
+                    ? null
+                    : CurrentStoredState(page.Items[0], acknowledged: false);
+                (seed as IDisposable)?.Dispose();
+
+                var fired = false;
+                var repository = CreateFaultingRepository(
+                    sqlite,
+                    path,
+                    point =>
+                    {
+                        if (!fired && point == faultPoint)
+                        {
+                            fired = true;
+                            throw new IOException("expiry-crash");
+                        }
+                    });
+                if (!sqlite)
+                {
+                    Assert.IsType<InMemoryClientMailboxStateRepository>(repository)
+                        .SeedCurrentStatesForTests([(scope, storedState!)]);
+                }
+
+                await Assert.ThrowsAsync<IOException>(() =>
+                    repository.ReconcileExpiredAsync(scope, 1120));
+                var inbox = await repository.ReadDurableInboxAsync(scope);
+                var quarantineCount = ExpiredQuarantineCount(repository, scope);
+                if (faultPoint == ClientMailboxCommitFaultPoint.BeforeCommit)
+                {
+                    Assert.Single(inbox);
+                    Assert.Equal(0, quarantineCount);
+                }
+                else
+                {
+                    Assert.Empty(inbox);
+                    Assert.Equal(1, quarantineCount);
+                }
+
+                (repository as IDisposable)?.Dispose();
+            }
+            finally
+            {
+                (seed as IDisposable)?.Dispose();
+                DeleteSqliteFiles(path);
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task ConcurrentExpiryReconciliation_QuarantinesExactlyOnce(
         bool sqlite)
     {
@@ -1370,6 +1440,80 @@ public sealed class ClientMailboxAdapterTests
                     CREATE TABLE client_mailbox_state (
                         scope BLOB PRIMARY KEY,
                         state_blob BLOB NOT NULL);
+                    """;
+                command.ExecuteNonQuery();
+            }
+
+            var exception = Assert.Throws<InvalidDataException>(() =>
+                new SqliteClientMailboxStateRepository(Options(path)));
+            Assert.Contains("Wipe/reset", exception.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DeleteSqliteFiles(path);
+        }
+    }
+
+    [Fact]
+    public void Sqlite_PartialCurrentVersionSchemaRequiresExplicitWipeReset()
+    {
+        var path = TempDatabase();
+        try
+        {
+            using (var connection = new SqliteConnection(
+                       new SqliteConnectionStringBuilder
+                       {
+                           DataSource = path,
+                           Password = DatabaseKey,
+                           Pooling = false
+                       }.ToString()))
+            {
+                connection.Open();
+                using var command = connection.CreateCommand();
+                command.CommandText = """
+                    CREATE TABLE client_mailbox_meta (
+                        id INTEGER PRIMARY KEY CHECK(id = 1),
+                        schema_version INTEGER NOT NULL);
+                    INSERT INTO client_mailbox_meta(id, schema_version) VALUES(1, 6);
+                    """;
+                command.ExecuteNonQuery();
+            }
+
+            var exception = Assert.Throws<InvalidDataException>(() =>
+                new SqliteClientMailboxStateRepository(Options(path)));
+            Assert.Contains("Wipe/reset", exception.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DeleteSqliteFiles(path);
+        }
+    }
+
+    [Fact]
+    public void Sqlite_SpoofedCurrentVersionShapeRequiresExplicitWipeReset()
+    {
+        var path = TempDatabase();
+        try
+        {
+            using (var connection = new SqliteConnection(
+                       new SqliteConnectionStringBuilder
+                       {
+                           DataSource = path,
+                           Password = DatabaseKey,
+                           Pooling = false
+                       }.ToString()))
+            {
+                connection.Open();
+                using var command = connection.CreateCommand();
+                command.CommandText = """
+                    CREATE TABLE client_mailbox_meta (
+                        id INTEGER PRIMARY KEY CHECK(id = 1),
+                        schema_version INTEGER NOT NULL);
+                    INSERT INTO client_mailbox_meta(id, schema_version) VALUES(1, 6);
+                    CREATE TABLE client_mailbox_traversal (scope BLOB);
+                    CREATE TABLE client_mailbox_inbox (scope BLOB);
+                    CREATE TABLE client_mailbox_expired_quarantine (scope BLOB);
+                    CREATE TABLE client_mailbox_coordinator_journal (installation_scope BLOB);
                     """;
                 command.ExecuteNonQuery();
             }

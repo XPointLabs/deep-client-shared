@@ -13,6 +13,26 @@ public sealed class SqliteClientMailboxStateRepository :
     IDisposable
 {
     private const int SchemaVersion = 6;
+    private static readonly string[] CurrentTables =
+    [
+        "client_mailbox_meta",
+        "client_mailbox_traversal",
+        "client_mailbox_inbox",
+        "client_mailbox_expired_quarantine",
+        "client_mailbox_coordinator_journal"
+    ];
+    private static readonly IReadOnlyDictionary<string, string[]> CurrentIndexes =
+        new Dictionary<string, string[]>(StringComparer.Ordinal)
+        {
+            ["ix_client_mailbox_inbox_scope_expiry"] = ["scope", "expires_at"],
+            ["ix_client_mailbox_inbox_expiry_scope"] = ["expires_at", "scope"],
+            ["ix_client_mailbox_inbox_scope_ack_cursor"] =
+                ["scope", "acknowledged", "cursor"],
+            ["ix_client_mailbox_quarantine_age"] =
+                ["quarantined_at", "expires_at", "scope"],
+            ["ix_client_mailbox_journal_scope_expiry"] =
+                ["installation_scope", "expires_at"]
+        };
     private readonly string connectionString;
     private readonly Action<ClientMailboxCommitFaultPoint>? commitFault;
     private readonly SemaphoreSlim gate = new(1, 1);
@@ -382,24 +402,153 @@ public sealed class SqliteClientMailboxStateRepository :
             return;
         }
 
+        if (!names.SetEquals(CurrentTables))
+        {
+            throw ResetRequired();
+        }
+
         using var version = connection.CreateCommand();
         version.Transaction = transaction;
         version.CommandText =
             "SELECT schema_version FROM client_mailbox_meta WHERE id = 1;";
         var rawVersion = version.ExecuteScalar();
         if (rawVersion is null || Convert.ToInt32(rawVersion) != SchemaVersion ||
-            names.Overlaps([
-                "client_mailbox_state",
-                "client_mailbox_migration_backup",
-                "client_mailbox_migration_cutover",
-                "client_mailbox_quarantine",
-                "client_mailbox_corrupt_aggregate",
-                "client_mailbox_legacy_journal_guard",
-                "client_mailbox_legacy_journal_guard_v2"
-            ]))
+            !HasExactColumns(
+                connection,
+                transaction,
+                "client_mailbox_meta",
+                [("id", "INTEGER", false, 1), ("schema_version", "INTEGER", true, 0)]) ||
+            !HasExactColumns(
+                connection,
+                transaction,
+                "client_mailbox_traversal",
+                [
+                    ("scope", "BLOB", true, 1),
+                    ("after_cursor", "BLOB", true, 0),
+                    ("continuation_token", "BLOB", true, 0)
+                ]) ||
+            !HasExactColumns(
+                connection,
+                transaction,
+                "client_mailbox_inbox",
+                [
+                    ("scope", "BLOB", true, 1),
+                    ("cursor", "BLOB", true, 2),
+                    ("digest", "BLOB", true, 0),
+                    ("expires_at", "BLOB", true, 0),
+                    ("canonical_envelope", "BLOB", true, 0),
+                    ("acknowledged", "INTEGER", true, 0)
+                ]) ||
+            !HasExactColumns(
+                connection,
+                transaction,
+                "client_mailbox_expired_quarantine",
+                [
+                    ("scope", "BLOB", true, 1),
+                    ("cursor", "BLOB", true, 2),
+                    ("digest", "BLOB", true, 3),
+                    ("expires_at", "BLOB", true, 0),
+                    ("canonical_envelope", "BLOB", true, 0),
+                    ("quarantined_at", "INTEGER", true, 0),
+                    ("reason", "TEXT", true, 0)
+                ]) ||
+            !HasExactColumns(
+                connection,
+                transaction,
+                "client_mailbox_coordinator_journal",
+                [
+                    ("installation_scope", "BLOB", true, 1),
+                    ("statement_key", "BLOB", true, 2),
+                    ("statement_digest", "BLOB", true, 0),
+                    ("expires_at", "BLOB", true, 0)
+                ]) ||
+            !HasExactIndexes(connection, transaction))
         {
             throw ResetRequired();
         }
+    }
+
+    private static bool HasExactColumns(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string table,
+        IReadOnlyList<(string Name, string Type, bool NotNull, int PrimaryKeyOrder)>
+            expected)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = $"PRAGMA table_info(\"{table}\");";
+        using var reader = command.ExecuteReader();
+        var offset = 0;
+        while (reader.Read())
+        {
+            if (offset >= expected.Count)
+            {
+                return false;
+            }
+
+            var column = expected[offset++];
+            if (!string.Equals(reader.GetString(1), column.Name, StringComparison.Ordinal) ||
+                !string.Equals(reader.GetString(2), column.Type, StringComparison.Ordinal) ||
+                reader.GetBoolean(3) != column.NotNull ||
+                reader.GetInt32(5) != column.PrimaryKeyOrder)
+            {
+                return false;
+            }
+        }
+
+        return offset == expected.Count;
+    }
+
+    private static bool HasExactIndexes(
+        SqliteConnection connection,
+        SqliteTransaction transaction)
+    {
+        using var indexes = connection.CreateCommand();
+        indexes.Transaction = transaction;
+        indexes.CommandText = """
+            SELECT name FROM sqlite_master
+            WHERE type = 'index' AND name LIKE 'ix_client_mailbox_%';
+            """;
+        using var reader = indexes.ExecuteReader();
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        while (reader.Read())
+        {
+            names.Add(reader.GetString(0));
+        }
+        reader.Dispose();
+
+        if (!names.SetEquals(CurrentIndexes.Keys))
+        {
+            return false;
+        }
+
+        foreach (var (name, expectedColumns) in CurrentIndexes)
+        {
+            using var columns = connection.CreateCommand();
+            columns.Transaction = transaction;
+            columns.CommandText = $"PRAGMA index_info(\"{name}\");";
+            using var columnReader = columns.ExecuteReader();
+            var offset = 0;
+            while (columnReader.Read())
+            {
+                if (offset >= expectedColumns.Length ||
+                    !string.Equals(
+                        columnReader.GetString(2),
+                        expectedColumns[offset++],
+                        StringComparison.Ordinal))
+                {
+                    return false;
+                }
+            }
+
+            if (offset != expectedColumns.Length)
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static InvalidDataException ResetRequired() =>
