@@ -14,6 +14,7 @@ public static class ClientMailboxStateLimits
     public const int MaximumInstallationInboxEntries = 1000;
     public const int MaximumInstallationInboxBytes = 32 * 1024 * 1024;
     public const int MaximumInstallationScopes = 1024;
+    public const int MaximumInstallationTraversalTokenBytes = 128 * 1024;
     public const int MaximumInstallationExpiredQuarantineEntries = 1000;
     public const int MaximumInstallationExpiredQuarantineBytes = 32 * 1024 * 1024;
     public const ulong MaximumActiveInboxAgeSeconds = 7 * 24 * 60 * 60;
@@ -22,6 +23,9 @@ public static class ClientMailboxStateLimits
     public const int MaximumMigrationArtifacts = MaximumInstallationScopes;
     public const int MaximumMigrationArtifactBytes = 64 * 1024 * 1024;
     public const long MigrationArtifactRetentionSeconds = 30L * 24 * 60 * 60;
+    public const int MaximumCorruptEvidencePrefixBytes = 256;
+    public const int MaximumLegacyStateBlobBytes =
+        MaximumInboxBytes + (512 * 1024);
 }
 
 public sealed class ClientMailboxScope : IEquatable<ClientMailboxScope>

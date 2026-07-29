@@ -99,7 +99,8 @@ public sealed class InMemoryClientMailboxStateRepository :
                 candidate,
                 expectedTraversal,
                 page);
-            EnforceInstallationInboxCapacity(candidateStates);
+            EnforceInstallationInboxCapacity(
+                candidateStates, candidateQuarantine);
             commitFault?.Invoke(ClientMailboxCommitFaultPoint.BeforeCommit);
             Replace(states, candidateStates);
             Replace(expiredQuarantine, candidateQuarantine);
@@ -173,6 +174,40 @@ public sealed class InMemoryClientMailboxStateRepository :
         lock (gate)
         {
             states[Key(scope)] = ClientMailboxStateCodec.Decode(encoded);
+        }
+    }
+
+    internal void SeedNormalizedStatesForTests(
+        IReadOnlyList<(ClientMailboxScope Scope, byte[] Encoded)> snapshots)
+    {
+        lock (gate)
+        {
+            var candidate = CloneStates();
+            foreach (var snapshot in snapshots)
+            {
+                candidate[Key(snapshot.Scope)] =
+                    ClientMailboxStateCodec.Decode(snapshot.Encoded);
+            }
+
+            ValidateInstallationInbox(candidate);
+            Replace(states, candidate);
+        }
+    }
+
+    internal int InstallationTraversalCountForTests()
+    {
+        lock (gate)
+        {
+            return states.Count;
+        }
+    }
+
+    internal long InstallationTraversalTokenBytesForTests()
+    {
+        lock (gate)
+        {
+            return states.Values.Sum(static state =>
+                (long)state.ContinuationToken.Length);
         }
     }
 
@@ -528,7 +563,9 @@ public sealed class InMemoryClientMailboxStateRepository :
     }
 
     private static void EnforceInstallationInboxCapacity(
-        Dictionary<string, ClientMailboxStoredState> candidateStates)
+        Dictionary<string, ClientMailboxStoredState> candidateStates,
+        Dictionary<string, List<ClientMailboxExpiredQuarantineEntry>>
+            candidateQuarantine)
     {
         while (InstallationInboxCount(candidateStates) >
                    ClientMailboxStateLimits.MaximumInstallationInboxEntries ||
@@ -558,8 +595,8 @@ public sealed class InMemoryClientMailboxStateRepository :
             oldest.State.Entries.Remove(oldest.Entry);
         }
 
+        RemoveRetiredScopes(candidateStates, candidateQuarantine);
         ValidateInstallationInbox(candidateStates);
-        RemoveRetiredScopes(candidateStates, null);
     }
 
     private static void EnforceExpiredQuarantineCapacity(
@@ -621,7 +658,11 @@ public sealed class InMemoryClientMailboxStateRepository :
             InstallationInboxBytes(candidateStates) >
                 ClientMailboxStateLimits.MaximumInstallationInboxBytes ||
             candidateStates.Count >
-                ClientMailboxStateLimits.MaximumInstallationScopes)
+                ClientMailboxStateLimits.MaximumInstallationScopes ||
+            candidateStates.Values.Sum(static state =>
+                (long)state.ContinuationToken.Length) >
+                ClientMailboxStateLimits
+                    .MaximumInstallationTraversalTokenBytes)
         {
             throw new InvalidDataException(
                 "Installation-global mailbox inbox bounds are invalid.");
@@ -646,11 +687,17 @@ public sealed class InMemoryClientMailboxStateRepository :
         foreach (var key in candidateStates
                      .Where(static pair =>
                          pair.Value.AfterCursor == 0 &&
+                         pair.Value.ContinuationToken.Length == 0 &&
                          pair.Value.Entries.Count == 0)
                      .Select(static pair => pair.Key)
                      .ToArray())
         {
-            candidateStates.Remove(key);
+            if (candidateQuarantine is null ||
+                !candidateQuarantine.TryGetValue(key, out var evidence) ||
+                evidence.Count == 0)
+            {
+                candidateStates.Remove(key);
+            }
         }
 
         if (candidateQuarantine is null)

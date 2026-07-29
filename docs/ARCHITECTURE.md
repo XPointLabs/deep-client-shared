@@ -130,6 +130,11 @@ construction is unavailable. Runtime writes use normalized, indexed traversal,
 inbox, expiry-quarantine, and coordinator-journal rows in atomic SQLCipher WAL
 immediate-writer transactions with `synchronous=FULL`; this serializes
 installation-global capacity checks across concurrent repository instances.
+Traversal metadata is installation-bounded to 1024 live scopes and 128 KiB of
+continuation tokens. A traversal row is reclaimable only at cursor zero with
+an empty token, no inbox rows, and no expiry-quarantine evidence. If no such
+row exists, admission of another scope rolls back rather than evicting live
+replay authority.
 The legacy CMS1/CMS2 blob table is
 migration-only and is never rewritten by the hot path. The coordinator journal
 uses a separate installation/issuer-derived opaque scope, so a reused
@@ -158,18 +163,31 @@ backs up the old bytes and resets to a safe cursor-zero replay instead of
 retaining a lossy cursor/dedup state. CMS2 migration backs up the original blob
 before the atomic normalized cutover and is interruption-safe and idempotent.
 Because a CMS2 mailbox-scoped coordinator journal cannot recover its original
-issuer scope, its statements move to a separate opaque composite-key legacy
-guard. The installation journal consults that guard until each statement
-expires, preserving fail-closed equivocation detection without retaining raw
-membership or coordinator identifiers in the normalized schema.
-An installation accepts at most 1024 migrated mailbox scopes. Migration
-backups plus corruption quarantine are jointly bounded to 1024 encrypted
-artifacts and 64 MiB. A backup is collected only after the normalized
+issuer scope, its statements move to a global statement-key legacy guard.
+Identical statements repeated by many mailbox scopes occupy one row. Different
+digests under the same statement key atomically set a persistent conflict bit;
+all later uses of that key fail closed as equivocation, including after
+restart. The installation journal consults the guard until its maximum
+authenticated expiry without retaining raw membership or coordinator
+identifiers in the normalized schema.
+An installation accepts at most 1024 migrated mailbox scopes. Recoverable
+migration backups are bounded to 1024 encrypted artifacts and 64 MiB; compact
+corruption evidence is one additional fixed-size aggregate row (32-byte
+digest, at most 256 prefix bytes, and at most 64 reason characters). Schema v5
+never copies an unparseable legacy blob into
+quarantine. It streams the blob through SHA-256 with a 64-KiB work buffer and
+retains one aggregate record containing count, total source bytes, a chained
+digest, reason, and at most a 256-byte first prefix. Thus an oversized corrupt
+blob or more than 1024 corrupt rows can be removed atomically and cannot brick
+every subsequent startup. The first recovering startup still reports a
+fail-closed error after committing evidence; the next startup progresses from
+cursor zero.
+A backup is collected only after the normalized
 cutover has an atomic schema-v4 verification marker, the legacy row is gone,
 and the 30-day recovery retention has elapsed. Schema-v3 completed migrations
 backfill this marker from their committed backup-without-legacy invariant
 before any GC. A corrupt sole recovery artifact is also retained for at least
-30 days. If young recovery artifacts exceed either bound, startup rolls the
+30 days. If young recoverable backups exceed either bound, startup rolls the
 migration transaction back and leaves all legacy rows intact instead of
 deleting evidence.
 Length, overflow, and canonical-envelope decoder failures are normalized to
