@@ -11,7 +11,17 @@ public static class ClientMailboxStateLimits
     public const int MaximumInboxBytes = 8 * 1024 * 1024;
     public const int MaximumExpiredQuarantineEntries = 200;
     public const int MaximumExpiredQuarantineBytes = 8 * 1024 * 1024;
+    public const int MaximumInstallationInboxEntries = 1000;
+    public const int MaximumInstallationInboxBytes = 32 * 1024 * 1024;
+    public const int MaximumInstallationScopes = 1024;
+    public const int MaximumInstallationExpiredQuarantineEntries = 1000;
+    public const int MaximumInstallationExpiredQuarantineBytes = 32 * 1024 * 1024;
+    public const ulong MaximumActiveInboxAgeSeconds = 7 * 24 * 60 * 60;
+    public const ulong ExpiredQuarantineRetentionSeconds = 30 * 24 * 60 * 60;
     public const int MaximumCoordinatorStatements = 1024;
+    public const int MaximumMigrationArtifacts = MaximumInstallationScopes;
+    public const int MaximumMigrationArtifactBytes = 64 * 1024 * 1024;
+    public const long MigrationArtifactRetentionSeconds = 30L * 24 * 60 * 60;
 }
 
 public sealed class ClientMailboxScope : IEquatable<ClientMailboxScope>
@@ -255,6 +265,18 @@ internal sealed class ClientMailboxStoredEntry
         ExpiresAtUnixSeconds = ExpiresAtUnixSeconds,
         CanonicalEnvelope = CanonicalEnvelope.ToArray(),
         Acknowledged = Acknowledged
+    };
+}
+
+internal sealed class ClientMailboxExpiredQuarantineEntry
+{
+    public required ClientMailboxStoredEntry Entry { get; init; }
+    public required ulong QuarantinedAtUnixSeconds { get; init; }
+
+    public ClientMailboxExpiredQuarantineEntry Clone() => new()
+    {
+        Entry = Entry.Clone(),
+        QuarantinedAtUnixSeconds = QuarantinedAtUnixSeconds
     };
 }
 
@@ -625,7 +647,12 @@ internal static class ClientMailboxStateMachine
         {
             var envelope = DecodePersistedEnvelope(entry);
             if (envelope.ExpiresAtUnixSeconds != entry.ExpiresAtUnixSeconds ||
-                !FixedEquals(envelope.DeduplicationDigest.Span, entry.Digest))
+                !FixedEquals(envelope.DeduplicationDigest.Span, entry.Digest) ||
+                envelope.ExpiresAtUnixSeconds <
+                    envelope.CreatedAtUnixSeconds ||
+                envelope.ExpiresAtUnixSeconds -
+                    envelope.CreatedAtUnixSeconds >
+                    ClientMailboxStateLimits.MaximumActiveInboxAgeSeconds)
             {
                 throw new InvalidDataException(
                     "Durable mailbox inbox envelope binding is invalid.");
@@ -744,7 +771,9 @@ internal static class ClientMailboxStateMachine
             statementDigest.IndexOfAnyExcept((byte)0) < 0 ||
             epoch == 0 ||
             coordinatorSequence == 0 ||
-            expiresAtUnixSeconds <= nowUnixSeconds)
+            expiresAtUnixSeconds <= nowUnixSeconds ||
+            expiresAtUnixSeconds - nowUnixSeconds >
+                ClientMailboxStateLimits.MaximumActiveInboxAgeSeconds)
         {
             throw new ArgumentException(
                 "Coordinator statement journal input is invalid.");

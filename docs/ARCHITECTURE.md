@@ -128,18 +128,31 @@ SQLCipher path. Scope keys are domain-separated hashes derived internally from
 issuer context plus blinded mailbox ID; arbitrary production `FromBytes`
 construction is unavailable. Runtime writes use normalized, indexed traversal,
 inbox, expiry-quarantine, and coordinator-journal rows in atomic SQLCipher WAL
-transactions with `synchronous=FULL`; the legacy CMS1/CMS2 blob table is
+immediate-writer transactions with `synchronous=FULL`; this serializes
+installation-global capacity checks across concurrent repository instances.
+The legacy CMS1/CMS2 blob table is
 migration-only and is never rewritten by the hot path. The coordinator journal
 uses a separate installation/issuer-derived opaque scope, so a reused
 membership/epoch/coordinator/sequence with a different statement is rejected
-across mailbox IDs, epochs, and restarts.
+across mailbox IDs, epochs, issuer-context rotations, and restarts. Its 1024
+statement capacity is installation-global rather than per issuer scope; exact
+statements remain protected until their authenticated expiry, after which
+expired rows are collected deterministically.
 
 Before reads, retrieval, or acknowledgement, expired inbox rows are reconciled
-deterministically. Unacknowledged rows move atomically to a bounded encrypted
+deterministically across every mailbox/epoch scope in the installation.
+Unacknowledged rows move atomically to a bounded encrypted
 quarantine and are never converted to acknowledgements or delivered state;
 acknowledged expired rows are removed. Quarantine count and ciphertext bytes
-are bounded with deterministic oldest-first pruning. Tombstone expiry is
-checked against the persisted retrieved envelope.
+retain both per-scope and installation-global bounds; entries age out after 30
+days with deterministic oldest-first pruning. Active inboxes retain their
+per-scope 200-entry/8-MiB limits and additionally share a
+1000-entry/32-MiB installation bound plus the canonical seven-day maximum
+authenticated
+lifetime. Capacity pressure first removes acknowledged rows from retired
+scopes, then other acknowledged rows. If only live unacknowledged ciphertext
+remains, the transaction fails closed instead of dropping or fabricating
+state. Tombstone expiry is checked against the persisted retrieved envelope.
 CMS1 could advance a cursor without retaining ciphertext, so migration first
 backs up the old bytes and resets to a safe cursor-zero replay instead of
 retaining a lossy cursor/dedup state. CMS2 migration backs up the original blob
@@ -149,6 +162,16 @@ issuer scope, its statements move to a separate opaque composite-key legacy
 guard. The installation journal consults that guard until each statement
 expires, preserving fail-closed equivocation detection without retaining raw
 membership or coordinator identifiers in the normalized schema.
+An installation accepts at most 1024 migrated mailbox scopes. Migration
+backups plus corruption quarantine are jointly bounded to 1024 encrypted
+artifacts and 64 MiB. A backup is collected only after the normalized
+cutover has an atomic schema-v4 verification marker, the legacy row is gone,
+and the 30-day recovery retention has elapsed. Schema-v3 completed migrations
+backfill this marker from their committed backup-without-legacy invariant
+before any GC. A corrupt sole recovery artifact is also retained for at least
+30 days. If young recovery artifacts exceed either bound, startup rolls the
+migration transaction back and leaves all legacy rows intact instead of
+deleting evidence.
 Length, overflow, and canonical-envelope decoder failures are normalized to
 `InvalidDataException`; corrupt legacy rows are quarantined fail-closed.
 

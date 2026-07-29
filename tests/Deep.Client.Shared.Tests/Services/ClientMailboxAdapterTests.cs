@@ -585,6 +585,489 @@ public sealed class ClientMailboxAdapterTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task InstallationInboxBound_PrunesAcknowledgedRetiredScopeFirst(
+        bool sqlite)
+    {
+        var path = TempDatabase();
+        var scopes = Enumerable.Range(
+                0,
+                ClientMailboxStateLimits.MaximumInstallationInboxEntries)
+            .Select(UniqueScope)
+            .ToArray();
+        var repository = CreateRepository(sqlite, path);
+        try
+        {
+            SeedStates(
+                repository,
+                scopes.Select((scope, index) => (
+                    scope,
+                    EncodedStoredState(
+                        acknowledged: index is 0 or 1,
+                        continuation: index == 1))).ToArray());
+            Assert.Equal(
+                ClientMailboxStateLimits.MaximumInstallationInboxEntries,
+                InstallationInboxCount(repository));
+
+            var newScope = UniqueScope(scopes.Length + 1);
+            await repository.CommitRetrievePageAsync(
+                newScope,
+                new ClientMailboxTraversal(0, []),
+                Page(1, 1, false, []));
+
+            Assert.Equal(
+                ClientMailboxStateLimits.MaximumInstallationInboxEntries,
+                InstallationInboxCount(repository));
+            Assert.Equal(0, InboxEntryCount(repository, scopes[0]));
+            Assert.Equal(1, InboxEntryCount(repository, scopes[1]));
+            Assert.Equal(1, InboxEntryCount(repository, newScope));
+        }
+        finally
+        {
+            (repository as IDisposable)?.Dispose();
+            DeleteSqliteFiles(path);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task InstallationInboxBound_FailsClosedWhenAllRowsAreUnacknowledged(
+        bool sqlite)
+    {
+        var path = TempDatabase();
+        var scopes = Enumerable.Range(
+                0,
+                ClientMailboxStateLimits.MaximumInstallationInboxEntries)
+            .Select(index => UniqueScope(index + 2000))
+            .ToArray();
+        var repository = CreateRepository(sqlite, path);
+        try
+        {
+            var encoded = EncodedStoredState(
+                acknowledged: false,
+                continuation: false);
+            SeedStates(
+                repository,
+                scopes.Select(scope => (scope, encoded)).ToArray());
+            var rejectedScope = UniqueScope(4000);
+            await Assert.ThrowsAsync<InvalidDataException>(() =>
+                repository.CommitRetrievePageAsync(
+                    rejectedScope,
+                    new ClientMailboxTraversal(0, []),
+                    Page(1, 1, false, [])));
+
+            Assert.Equal(
+                ClientMailboxStateLimits.MaximumInstallationInboxEntries,
+                InstallationInboxCount(repository));
+            Assert.Equal(0, InboxEntryCount(repository, rejectedScope));
+        }
+        finally
+        {
+            (repository as IDisposable)?.Dispose();
+            DeleteSqliteFiles(path);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task InstallationInboxByteBound_FailsClosedBelowCountBound(
+        bool sqlite)
+    {
+        const int ciphertextBytes = 48 * 1024;
+        var path = TempDatabase();
+        var item = EnvelopeWithCiphertext(1, ciphertextBytes);
+        var encoded = EncodedStoredState(item, acknowledged: false);
+        var canonicalBytes =
+            MailboxClientCodec.EncodeEncryptedEnvelope(item.Envelope).Length;
+        var seedCount = ClientMailboxStateLimits.MaximumInstallationInboxBytes /
+            canonicalBytes;
+        Assert.InRange(
+            seedCount,
+            1,
+            ClientMailboxStateLimits.MaximumInstallationInboxEntries - 1);
+        var scopes = Enumerable.Range(0, seedCount)
+            .Select(index => UniqueScope(index + 4100))
+            .ToArray();
+        var repository = CreateRepository(sqlite, path);
+        try
+        {
+            SeedStates(
+                repository,
+                scopes.Select(scope => (scope, encoded)).ToArray());
+            var rejectedScope = UniqueScope(4999);
+            var page = PageFromItem(item);
+            await Assert.ThrowsAsync<InvalidDataException>(() =>
+                repository.CommitRetrievePageAsync(
+                    rejectedScope,
+                    new ClientMailboxTraversal(0, []),
+                    page));
+
+            Assert.Equal(seedCount, InstallationInboxCount(repository));
+            Assert.Equal(0, InboxEntryCount(repository, rejectedScope));
+        }
+        finally
+        {
+            (repository as IDisposable)?.Dispose();
+            DeleteSqliteFiles(path);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task InstallationSweep_ReconcilesAbandonedScopesAcrossRestartAndRace(
+        bool sqlite)
+    {
+        var path = TempDatabase();
+        var scopes = Enumerable.Range(0, 32)
+            .Select(index => UniqueScope(index + 5000))
+            .ToArray();
+        IClientMailboxStateRepository repository = CreateRepository(sqlite, path);
+        try
+        {
+            var encoded = EncodedStoredState(
+                acknowledged: false,
+                continuation: false);
+            SeedStates(
+                repository,
+                scopes.Select(scope => (scope, encoded)).ToArray());
+            repository = RestartInstallation(repository, sqlite, path);
+            var unrelated = UniqueScope(6000);
+            IClientMailboxStateRepository concurrent = sqlite
+                ? CreateSqlite(path)
+                : repository;
+            ClientMailboxExpiryReconciliationResult[] results;
+            try
+            {
+                results = await Task.WhenAll(
+                    repository.ReconcileExpiredAsync(unrelated, 1120),
+                    concurrent.ReconcileExpiredAsync(unrelated, 1120));
+            }
+            finally
+            {
+                if (!ReferenceEquals(concurrent, repository))
+                {
+                    (concurrent as IDisposable)?.Dispose();
+                }
+            }
+
+            Assert.Equal(
+                scopes.Length,
+                results.Sum(static result =>
+                    result.QuarantinedUnacknowledged));
+            Assert.Equal(0, InstallationInboxCount(repository));
+            Assert.Equal(
+                scopes.Length,
+                InstallationExpiredQuarantineCount(repository));
+            Assert.All(scopes, scope =>
+                Assert.Equal(0, InboxEntryCount(repository, scope)));
+        }
+        finally
+        {
+            (repository as IDisposable)?.Dispose();
+            DeleteSqliteFiles(path);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task InstallationQuarantineBound_PrunesDeterministicOldestScope(
+        bool sqlite)
+    {
+        var path = TempDatabase();
+        var scopes = Enumerable.Range(
+                0,
+                ClientMailboxStateLimits
+                    .MaximumInstallationExpiredQuarantineEntries)
+            .Select(index => UniqueScope(index + 7000))
+            .OrderBy(static scope => Convert.ToHexString(scope.ToArray()),
+                StringComparer.Ordinal)
+            .ToArray();
+        var repository = CreateRepository(sqlite, path);
+        try
+        {
+            var encoded = EncodedStoredState(
+                acknowledged: false,
+                continuation: false);
+            SeedStates(
+                repository,
+                scopes.Select(scope => (scope, encoded)).ToArray());
+            await repository.ReconcileExpiredAsync(UniqueScope(8001), 1120);
+            Assert.Equal(
+                ClientMailboxStateLimits
+                    .MaximumInstallationExpiredQuarantineEntries,
+                InstallationExpiredQuarantineCount(repository));
+
+            var newestScope = UniqueScope(9001);
+            await repository.CommitRetrievePageAsync(
+                newestScope,
+                new ClientMailboxTraversal(0, []),
+                Page(1, 1, false, []));
+            await repository.ReconcileExpiredAsync(newestScope, 1121);
+
+            Assert.Equal(
+                ClientMailboxStateLimits
+                    .MaximumInstallationExpiredQuarantineEntries,
+                InstallationExpiredQuarantineCount(repository));
+            Assert.Equal(0, ExpiredQuarantineCount(repository, scopes[0]));
+            Assert.Equal(1, ExpiredQuarantineCount(repository, newestScope));
+        }
+        finally
+        {
+            (repository as IDisposable)?.Dispose();
+            DeleteSqliteFiles(path);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task InstallationQuarantine_AgesOutAcrossAllScopes(
+        bool sqlite)
+    {
+        var path = TempDatabase();
+        var scope = UniqueScope(9100);
+        var repository = CreateRepository(sqlite, path);
+        try
+        {
+            SeedStates(
+                repository,
+                [(scope, EncodedStoredState(
+                    acknowledged: false,
+                    continuation: false))]);
+            await repository.ReconcileExpiredAsync(scope, 1120);
+            Assert.Equal(1, InstallationExpiredQuarantineCount(repository));
+
+            await repository.ReconcileExpiredAsync(
+                UniqueScope(9101),
+                1120 +
+                ClientMailboxStateLimits.ExpiredQuarantineRetentionSeconds +
+                1);
+            Assert.Equal(0, InstallationExpiredQuarantineCount(repository));
+        }
+        finally
+        {
+            (repository as IDisposable)?.Dispose();
+            DeleteSqliteFiles(path);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task InstallationQuarantineByteBound_PrunesOldestBelowCountBound(
+        bool sqlite)
+    {
+        const int ciphertextBytes = 48 * 1024;
+        var path = TempDatabase();
+        var item = EnvelopeWithCiphertext(1, ciphertextBytes);
+        var encoded = EncodedStoredState(item, acknowledged: false);
+        var canonicalBytes =
+            MailboxClientCodec.EncodeEncryptedEnvelope(item.Envelope).Length;
+        var seedCount =
+            ClientMailboxStateLimits.MaximumInstallationExpiredQuarantineBytes /
+            canonicalBytes;
+        Assert.InRange(
+            seedCount,
+            1,
+            ClientMailboxStateLimits
+                .MaximumInstallationExpiredQuarantineEntries - 1);
+        var scopes = Enumerable.Range(0, seedCount)
+            .Select(index => UniqueScope(index + 9200))
+            .OrderBy(static scope => Convert.ToHexString(scope.ToArray()),
+                StringComparer.Ordinal)
+            .ToArray();
+        var repository = CreateRepository(sqlite, path);
+        try
+        {
+            SeedStates(
+                repository,
+                scopes.Select(scope => (scope, encoded)).ToArray());
+            await repository.ReconcileExpiredAsync(UniqueScope(9300), 1120);
+            var newestScope = UniqueScope(20000);
+            await repository.CommitRetrievePageAsync(
+                newestScope,
+                new ClientMailboxTraversal(0, []),
+                PageFromItem(item));
+            await repository.ReconcileExpiredAsync(newestScope, 1121);
+
+            Assert.Equal(
+                seedCount,
+                InstallationExpiredQuarantineCount(repository));
+            Assert.Equal(0, ExpiredQuarantineCount(repository, scopes[0]));
+            Assert.Equal(1, ExpiredQuarantineCount(repository, newestScope));
+        }
+        finally
+        {
+            (repository as IDisposable)?.Dispose();
+            DeleteSqliteFiles(path);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task CoordinatorJournal_IsGlobalAcrossIssuerRotationAndCapacity(
+        bool sqlite)
+    {
+        var path = TempDatabase();
+        IClientMailboxStateRepository repository = CreateRepository(sqlite, path);
+        try
+        {
+            var firstScope = ClientMailboxJournalScope.Derive(Range(0x61, 32));
+            var rotatedScope = ClientMailboxJournalScope.Derive(Range(0x62, 32));
+            Assert.Equal(
+                ClientMailboxCoordinatorRecordResult.Applied,
+                await Record(
+                    repository,
+                    firstScope,
+                    Range(0x80, 32),
+                    Range(0x01, 32)));
+            repository = RestartInstallation(repository, sqlite, path);
+            Assert.Equal(
+                ClientMailboxCoordinatorRecordResult.Equivocation,
+                await Record(
+                    repository,
+                    rotatedScope,
+                    Range(0x80, 32),
+                    Range(0x02, 32)));
+
+            SeedCoordinatorJournal(
+                repository,
+                ClientMailboxStateLimits.MaximumCoordinatorStatements,
+                expiresAtUnixSeconds: 1120);
+            Assert.Equal(
+                ClientMailboxCoordinatorRecordResult.CapacityExceeded,
+                await Record(
+                    repository,
+                    rotatedScope,
+                    Range(0x90, 32),
+                    Range(0x03, 32)));
+            Assert.Equal(
+                ClientMailboxStateLimits.MaximumCoordinatorStatements,
+                CoordinatorJournalCount(repository));
+
+            Assert.Equal(
+                ClientMailboxCoordinatorRecordResult.Applied,
+                await repository.RecordCoordinatorStatementAsync(
+                    rotatedScope,
+                    Range(0x91, 32),
+                    epoch: 7,
+                    coordinatorId: Range(0x31, 32),
+                    coordinatorSequence: 10,
+                    statementDigest: Range(0x04, 32),
+                    expiresAtUnixSeconds: 1200,
+                    nowUnixSeconds: 1120));
+            Assert.Equal(1, CoordinatorJournalCount(repository));
+        }
+        finally
+        {
+            (repository as IDisposable)?.Dispose();
+            DeleteSqliteFiles(path);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task InstallationAgeBounds_RejectFarFutureJournalRetention(
+        bool sqlite)
+    {
+        var path = TempDatabase();
+        var repository = CreateRepository(sqlite, path);
+        try
+        {
+            await Assert.ThrowsAsync<ArgumentException>(() =>
+                repository.RecordCoordinatorStatementAsync(
+                    ClientMailboxJournalScope.Derive(Range(0x63, 32)),
+                    Range(0x80, 32),
+                    epoch: 7,
+                    coordinatorId: Range(0x30, 32),
+                    coordinatorSequence: 9,
+                    statementDigest: Range(0x01, 32),
+                    expiresAtUnixSeconds:
+                        1050 +
+                        ClientMailboxStateLimits.MaximumActiveInboxAgeSeconds +
+                        1,
+                    nowUnixSeconds: 1050));
+            Assert.Equal(0, CoordinatorJournalCount(repository));
+        }
+        finally
+        {
+            (repository as IDisposable)?.Dispose();
+            DeleteSqliteFiles(path);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task CoordinatorJournalCapacity_IsAtomicAcrossConcurrentIssuers(
+        bool sqlite)
+    {
+        var path = TempDatabase();
+        var repository = CreateRepository(sqlite, path);
+        try
+        {
+            SeedCoordinatorJournal(
+                repository,
+                ClientMailboxStateLimits.MaximumCoordinatorStatements - 1,
+                expiresAtUnixSeconds: 1200);
+            IClientMailboxStateRepository concurrent = sqlite
+                ? CreateSqlite(path)
+                : repository;
+            ClientMailboxCoordinatorRecordResult[] results;
+            try
+            {
+                results = await Task.WhenAll(
+                    repository.RecordCoordinatorStatementAsync(
+                        ClientMailboxJournalScope.Derive(Range(0x64, 32)),
+                        Range(0x81, 32),
+                        epoch: 7,
+                        coordinatorId: Range(0x32, 32),
+                        coordinatorSequence: 1100,
+                        statementDigest: Range(0x05, 32),
+                        expiresAtUnixSeconds: 1200,
+                        nowUnixSeconds: 1050),
+                    concurrent.RecordCoordinatorStatementAsync(
+                        ClientMailboxJournalScope.Derive(Range(0x65, 32)),
+                        Range(0x82, 32),
+                        epoch: 7,
+                        coordinatorId: Range(0x33, 32),
+                        coordinatorSequence: 1101,
+                        statementDigest: Range(0x06, 32),
+                        expiresAtUnixSeconds: 1200,
+                        nowUnixSeconds: 1050));
+            }
+            finally
+            {
+                if (!ReferenceEquals(concurrent, repository))
+                {
+                    (concurrent as IDisposable)?.Dispose();
+                }
+            }
+
+            Assert.Single(results, static result =>
+                result == ClientMailboxCoordinatorRecordResult.Applied);
+            Assert.Single(results, static result =>
+                result ==
+                ClientMailboxCoordinatorRecordResult.CapacityExceeded);
+            Assert.Equal(
+                ClientMailboxStateLimits.MaximumCoordinatorStatements,
+                CoordinatorJournalCount(repository));
+        }
+        finally
+        {
+            (repository as IDisposable)?.Dispose();
+            DeleteSqliteFiles(path);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task RemoteAckThenCrash_ExpiresToQuarantineWithoutDeliveredState(
         bool sqlite)
     {
@@ -715,12 +1198,134 @@ public sealed class ClientMailboxAdapterTests
                         journalScope,
                         Range(0x80, 32),
                         Range(0x02, 32)));
+                Assert.Equal(
+                    ClientMailboxCoordinatorRecordResult.Applied,
+                    await migrated.RecordCoordinatorStatementAsync(
+                        journalScope,
+                        Range(0x80, 32),
+                        epoch: 7,
+                        coordinatorId: Range(0x30, 32),
+                        coordinatorSequence: 9,
+                        statementDigest: Range(0x02, 32),
+                        expiresAtUnixSeconds: 1200,
+                        nowUnixSeconds: 1120));
+                Assert.Equal(1, migrated.CoordinatorJournalCountForTests());
             }
 
             using var reopened = CreateSqlite(path);
             Assert.Equal(1, reopened.BackupCountForTests());
             Assert.Equal(0, reopened.LegacyStateCountForTests());
             Assert.Equal(1, reopened.NormalizedInboxCountForTests(scope));
+        }
+        finally
+        {
+            DeleteSqliteFiles(path);
+        }
+    }
+
+    [Fact]
+    public void Cms2Migration_MoreThan128ScopesProgressesAndAgesVerifiedBackups()
+    {
+        var path = TempDatabase();
+        var emptyCms2 = ClientMailboxStateCodec.Encode(
+            new ClientMailboxStoredState());
+        var snapshots = Enumerable.Range(
+                0,
+                ClientMailboxStateLimits.MaximumInstallationInboxEntries)
+            .Select(index => (
+                UniqueScope(index + 10000),
+                emptyCms2))
+            .ToArray();
+        try
+        {
+            using (var seed = CreateSqlite(path))
+            {
+                seed.InsertRawStatesForTests(snapshots);
+            }
+
+            using (var migrated = CreateSqlite(path))
+            {
+                Assert.Equal(snapshots.Length, migrated.BackupCountForTests());
+                Assert.Equal(0, migrated.LegacyStateCountForTests());
+                migrated.AgeMigrationArtifactsForTests(
+                    DateTimeOffset.UtcNow.ToUnixTimeSeconds() -
+                    ClientMailboxStateLimits.MigrationArtifactRetentionSeconds -
+                    1);
+            }
+
+            using var collected = CreateSqlite(path);
+            Assert.Equal(0, collected.BackupCountForTests());
+            Assert.Equal(0, collected.LegacyStateCountForTests());
+        }
+        finally
+        {
+            DeleteSqliteFiles(path);
+        }
+    }
+
+    [Fact]
+    public void SchemaV3Upgrade_BackfillsVerifiedCutoverBeforeBackupGc()
+    {
+        var path = TempDatabase();
+        var scope = UniqueScope(10500);
+        var cms2 = ClientMailboxStateCodec.Encode(
+            new ClientMailboxStoredState());
+        try
+        {
+            using (var seed = CreateSqlite(path))
+            {
+                seed.InsertRawStateForTests(scope, cms2);
+            }
+
+            using (var migrated = CreateSqlite(path))
+            {
+                Assert.Equal(1, migrated.BackupCountForTests());
+                Assert.Equal(1, migrated.MigrationCutoverCountForTests());
+                migrated.SimulateVersionThreeWithoutCutoverMarkerForTests();
+            }
+
+            using (var upgraded = CreateSqlite(path))
+            {
+                Assert.Equal(1, upgraded.BackupCountForTests());
+                Assert.Equal(1, upgraded.MigrationCutoverCountForTests());
+                upgraded.AgeMigrationArtifactsForTests(
+                    DateTimeOffset.UtcNow.ToUnixTimeSeconds() -
+                    ClientMailboxStateLimits.MigrationArtifactRetentionSeconds -
+                    1);
+            }
+
+            using var collected = CreateSqlite(path);
+            Assert.Equal(0, collected.BackupCountForTests());
+            Assert.Equal(0, collected.MigrationCutoverCountForTests());
+        }
+        finally
+        {
+            DeleteSqliteFiles(path);
+        }
+    }
+
+    [Fact]
+    public void Cms2Migration_OverScopeBoundRollsBackAndRetainsEveryLegacyArtifact()
+    {
+        var path = TempDatabase();
+        var emptyCms2 = ClientMailboxStateCodec.Encode(
+            new ClientMailboxStoredState());
+        var count = ClientMailboxStateLimits.MaximumInstallationScopes + 1;
+        var snapshots = Enumerable.Range(0, count)
+            .Select(index => (
+                UniqueScope(index + 11000),
+                emptyCms2))
+            .ToArray();
+        try
+        {
+            using var seed = CreateSqlite(path);
+            seed.InsertRawStatesForTests(snapshots);
+            Assert.Throws<InvalidDataException>(() =>
+            {
+                using var rejected = CreateSqlite(path);
+            });
+            Assert.Equal(count, seed.LegacyStateCountForTests());
+            Assert.Equal(0, seed.BackupCountForTests());
         }
         finally
         {
@@ -749,6 +1354,27 @@ public sealed class ClientMailboxAdapterTests
         corruptEnvelope[32 + 64] ^= 0xff;
         Assert.Throws<InvalidDataException>(() =>
             ClientMailboxStateCodec.Decode(corruptEnvelope));
+    }
+
+    [Fact]
+    public void CanonicalInbox_RejectsEnvelopeBeyondMaximumActiveAge()
+    {
+        var expiresAt = 1000 +
+            ClientMailboxStateLimits.MaximumActiveInboxAgeSeconds +
+            1;
+        var envelope = new MailboxEncryptedEnvelope
+        {
+            Epoch = 7,
+            MailboxId = new BlindedMailboxId(Range(0x90, 32)),
+            PlacementId = new BlindedPlacementId(Range(0xb0, 32)),
+            OperationId = Range(0x70, 16),
+            DeduplicationDigest = Range(0xe0, 32),
+            CreatedAtUnixSeconds = 1000,
+            ExpiresAtUnixSeconds = expiresAt,
+            Ciphertext = Range(0x01, 64)
+        };
+        Assert.Throws<MailboxClientException>(() =>
+            MailboxClientCodec.EncodeEncryptedEnvelope(envelope));
     }
 
     [Fact]
@@ -830,11 +1456,23 @@ public sealed class ClientMailboxAdapterTests
                 using var corrupt =
                     new SqliteClientMailboxStateRepository(options);
             });
-            using var recovered = new SqliteClientMailboxStateRepository(options);
-            Assert.Equal(1, recovered.QuarantineCountForTests());
-            Assert.Equal(
-                0UL,
-                (await recovered.ReadTraversalAsync(scope)).AfterCursor);
+            using (var recovered =
+                   new SqliteClientMailboxStateRepository(options))
+            {
+                Assert.Equal(1, recovered.QuarantineCountForTests());
+                Assert.Equal(
+                    0UL,
+                    (await recovered.ReadTraversalAsync(scope)).AfterCursor);
+                recovered.AgeMigrationArtifactsForTests(
+                    DateTimeOffset.UtcNow.ToUnixTimeSeconds() -
+                    ClientMailboxStateLimits
+                        .MigrationArtifactRetentionSeconds -
+                    1);
+            }
+
+            using var collected =
+                new SqliteClientMailboxStateRepository(options);
+            Assert.Equal(0, collected.QuarantineCountForTests());
         }
         finally
         {
@@ -916,6 +1554,111 @@ public sealed class ClientMailboxAdapterTests
             _ => throw new InvalidOperationException("Unknown test repository.")
         };
 
+    private static int InstallationInboxCount(
+        IClientMailboxStateRepository repository) =>
+        repository switch
+        {
+            InMemoryClientMailboxStateRepository memory =>
+                memory.InstallationInboxCountForTests(),
+            SqliteClientMailboxStateRepository sqlite =>
+                sqlite.InstallationInboxCountForTests(),
+            _ => throw new InvalidOperationException("Unknown test repository.")
+        };
+
+    private static int InboxEntryCount(
+        IClientMailboxStateRepository repository,
+        ClientMailboxScope scope) =>
+        repository switch
+        {
+            InMemoryClientMailboxStateRepository memory =>
+                memory.InboxEntryCountForTests(scope),
+            SqliteClientMailboxStateRepository sqlite =>
+                sqlite.NormalizedInboxCountForTests(scope),
+            _ => throw new InvalidOperationException("Unknown test repository.")
+        };
+
+    private static int InstallationExpiredQuarantineCount(
+        IClientMailboxStateRepository repository) =>
+        repository switch
+        {
+            InMemoryClientMailboxStateRepository memory =>
+                memory.InstallationExpiredQuarantineCountForTests(),
+            SqliteClientMailboxStateRepository sqlite =>
+                sqlite.InstallationExpiredQuarantineCountForTests(),
+            _ => throw new InvalidOperationException("Unknown test repository.")
+        };
+
+    private static int CoordinatorJournalCount(
+        IClientMailboxStateRepository repository) =>
+        repository switch
+        {
+            InMemoryClientMailboxStateRepository memory =>
+                memory.CoordinatorJournalCountForTests(),
+            SqliteClientMailboxStateRepository sqlite =>
+                sqlite.CoordinatorJournalCountForTests(),
+            _ => throw new InvalidOperationException("Unknown test repository.")
+        };
+
+    private static void SeedCoordinatorJournal(
+        IClientMailboxStateRepository repository,
+        int count,
+        ulong expiresAtUnixSeconds)
+    {
+        switch (repository)
+        {
+            case InMemoryClientMailboxStateRepository memory:
+                memory.SeedCoordinatorJournalForTests(
+                    count,
+                    expiresAtUnixSeconds);
+                break;
+            case SqliteClientMailboxStateRepository sqlite:
+                sqlite.SeedCoordinatorJournalForTests(
+                    count,
+                    expiresAtUnixSeconds);
+                break;
+            default:
+                throw new InvalidOperationException("Unknown test repository.");
+        }
+    }
+
+    private static void SeedStates(
+        IClientMailboxStateRepository repository,
+        IReadOnlyList<(ClientMailboxScope Scope, byte[] Encoded)> snapshots)
+    {
+        switch (repository)
+        {
+            case InMemoryClientMailboxStateRepository memory:
+                foreach (var snapshot in snapshots)
+                {
+                    memory.ImportStateForTests(
+                        snapshot.Scope,
+                        snapshot.Encoded);
+                }
+
+                break;
+            case SqliteClientMailboxStateRepository sqlite:
+                sqlite.SeedNormalizedStatesForTests(snapshots);
+                break;
+            default:
+                throw new InvalidOperationException("Unknown test repository.");
+        }
+    }
+
+    private static IClientMailboxStateRepository RestartInstallation(
+        IClientMailboxStateRepository repository,
+        bool sqlite,
+        string path)
+    {
+        if (sqlite)
+        {
+            (repository as IDisposable)?.Dispose();
+            return CreateSqlite(path);
+        }
+
+        return Assert.IsType<InMemoryClientMailboxStateRepository>(repository)
+            .RestartInstallationForTests();
+    }
+
     private static SqliteSessionStoreOptions Options(string path) =>
         new(path, DatabaseKey);
 
@@ -991,6 +1734,89 @@ public sealed class ClientMailboxAdapterTests
             Filled(seed, 32),
             new BlindedMailboxId(Filled(seed + 1, 32)),
             epoch: 7);
+
+    private static ClientMailboxScope UniqueScope(int seed) =>
+        ClientMailboxScope.Derive(
+            SHA256.HashData([
+                .. "test-unique-issuer"u8,
+                .. UInt64Bytes(checked((ulong)seed + 1))
+            ]),
+            new BlindedMailboxId(SHA256.HashData([
+                .. "test-unique-mailbox"u8,
+                .. UInt64Bytes(checked((ulong)seed + 1))
+            ])),
+            epoch: checked((ulong)seed + 1));
+
+    private static byte[] EncodedStoredState(
+        bool acknowledged,
+        bool continuation)
+    {
+        var item = Envelope(1);
+        var state = new ClientMailboxStoredState
+        {
+            AfterCursor = continuation ? 1UL : 0UL,
+            ContinuationToken = continuation ? Range(0x44, 32) : []
+        };
+        state.Entries.Add(new ClientMailboxStoredEntry
+        {
+            Cursor = item.Cursor,
+            Digest = item.Envelope.DeduplicationDigest.ToArray(),
+            ExpiresAtUnixSeconds = item.Envelope.ExpiresAtUnixSeconds,
+            CanonicalEnvelope = MailboxClientCodec.EncodeEncryptedEnvelope(
+                item.Envelope),
+            Acknowledged = acknowledged
+        });
+        return ClientMailboxStateCodec.Encode(state);
+    }
+
+    private static byte[] EncodedStoredState(
+        MailboxRetrievedEnvelope item,
+        bool acknowledged)
+    {
+        var state = new ClientMailboxStoredState();
+        state.Entries.Add(new ClientMailboxStoredEntry
+        {
+            Cursor = item.Cursor,
+            Digest = item.Envelope.DeduplicationDigest.ToArray(),
+            ExpiresAtUnixSeconds = item.Envelope.ExpiresAtUnixSeconds,
+            CanonicalEnvelope = MailboxClientCodec.EncodeEncryptedEnvelope(
+                item.Envelope),
+            Acknowledged = acknowledged
+        });
+        return ClientMailboxStateCodec.Encode(state);
+    }
+
+    private static MailboxRetrievedEnvelope EnvelopeWithCiphertext(
+        ulong cursor,
+        int ciphertextBytes) => new()
+        {
+            Cursor = cursor,
+            Envelope = new MailboxEncryptedEnvelope
+            {
+                Epoch = 7,
+                MailboxId = new BlindedMailboxId(Range(0x90, 32)),
+                PlacementId = new BlindedPlacementId(Range(0xb0, 32)),
+                OperationId = SHA256.HashData(UInt64Bytes(cursor))[..16],
+                DeduplicationDigest = SHA256.HashData([
+                    .. "large-envelope"u8,
+                    .. UInt64Bytes(cursor)
+                ]),
+                CreatedAtUnixSeconds = 1000,
+                ExpiresAtUnixSeconds = 1120,
+                Ciphertext = Filled(0x5a, ciphertextBytes)
+            }
+        };
+
+    private static MailboxRetrievePage PageFromItem(
+        MailboxRetrievedEnvelope item) => new()
+        {
+            Epoch = 7,
+            OperationId = Range(0x50, 16),
+            NextCursor = item.Cursor,
+            HasMore = false,
+            ContinuationToken = ReadOnlyMemory<byte>.Empty,
+            Items = [item]
+        };
 
     private static byte[] Range(int start, int length) =>
         Enumerable.Range(start, length)
