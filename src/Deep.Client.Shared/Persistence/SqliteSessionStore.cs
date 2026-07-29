@@ -1,5 +1,7 @@
 using System.Diagnostics;
+using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
+using System.Text;
 using System.Text.Json;
 using System.Globalization;
 using Deep.Client.Shared.Domain;
@@ -17,15 +19,20 @@ public sealed partial class SqliteSessionStore :
     IMembershipTrustRepository,
     IDisposable
 {
-    private const int PhysicalSchemaVersion = 9;
+    private const int PhysicalSchemaVersion = 10;
+    private const int DeepApplicationId = 0x44454550;
+    private const int MaximumSchemaDefinitionLength = 16 * 1024;
     private const int ReplayPruneBatchSize = 256;
     private const string ReadCursorSettingPrefix = "sync.read-cursor.";
     private const string MessagePayloadProjection = "json_set(payload_json, '$.deliveryState', delivery_state, '$.readAt', read_at)";
     private static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerDefaults.Web);
+    private static readonly ConcurrentDictionary<string, object> InitializationGates =
+        new(StringComparer.OrdinalIgnoreCase);
+    [DebuggerBrowsable(DebuggerBrowsableState.Never)]
     private readonly string _connectionString;
-    private readonly string? _encryptionKey;
     private readonly SemaphoreSlim _databaseGate = new(1, 1);
     private readonly Action<MembershipTrustCommitFaultPoint>? _membershipTrustFaultInjector;
+    private int _disposed;
 
     private sealed record OneToOneOpenMetadata(
         string? ActiveAccountPayload,
@@ -62,31 +69,76 @@ public sealed partial class SqliteSessionStore :
         {
             throw new ArgumentException("State path is required.", nameof(statePath));
         }
-        var stateExisted = File.Exists(statePath);
+        statePath = Path.GetFullPath(statePath);
 
         var directory = Path.GetDirectoryName(statePath);
-        if (!string.IsNullOrWhiteSpace(directory))
-        {
-            Directory.CreateDirectory(directory);
-        }
-
         var encryptionKey = options.GetEncryptionKeyForStore();
-        _encryptionKey = string.IsNullOrWhiteSpace(encryptionKey) ? null : encryptionKey;
+        encryptionKey = string.IsNullOrWhiteSpace(encryptionKey) ? null : encryptionKey;
         _membershipTrustFaultInjector = faultInjector;
         _connectionString = ConnectionStringFor(
             statePath,
-            _encryptionKey,
-            pooling: false);
+            encryptionKey,
+            SqliteOpenMode.ReadWrite,
+            pooling: true);
 
-        try
+        var initializationGate = InitializationGates.GetOrAdd(statePath, static _ => new object());
+        lock (initializationGate)
         {
-            InitializeSchema();
-        }
-        catch (SqliteException exception) when (_encryptionKey is not null && stateExisted)
-        {
-            throw new InvalidOperationException(
-                "Existing local state database cannot be opened with the configured SQLCipher key. Wipe local data before retrying.",
-                exception);
+            var mainExists = File.Exists(statePath);
+            var walExists = File.Exists(statePath + "-wal");
+            var shmExists = File.Exists(statePath + "-shm");
+            var isFresh = !mainExists && !walExists && !shmExists;
+
+            if (!isFresh && !mainExists)
+            {
+                throw ResetRequired(
+                    LocalStateResetRequiredReason.InvalidCurrentSchema,
+                    "Local state is incomplete. Reset local data before retrying.");
+            }
+            if (mainExists && new FileInfo(statePath).Length == 0)
+            {
+                throw ResetRequired(
+                    LocalStateResetRequiredReason.InvalidCurrentSchema,
+                    "Local state is empty or damaged. Reset local data before retrying.");
+            }
+
+            if (!string.IsNullOrWhiteSpace(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            try
+            {
+                InitializeSchema(
+                    statePath,
+                    encryptionKey,
+                    isFresh,
+                    immutableExisting: !isFresh && !walExists && !shmExists);
+            }
+            catch (LocalStateResetRequiredException)
+            {
+                throw;
+            }
+            catch (InvalidDataException exception)
+            {
+                throw ResetRequired(
+                    LocalStateResetRequiredReason.InvalidCurrentSchema,
+                    "Local state does not match the current schema. Reset local data before retrying.",
+                    exception);
+            }
+            catch (SqliteException exception) when (!MustPropagateWithoutReset(exception))
+            {
+                var reason = PrimarySqliteErrorCode(exception) == 26
+                    ? LocalStateResetRequiredReason.UnreadableOrWrongKey
+                    : LocalStateResetRequiredReason.InvalidCurrentSchema;
+                var message = reason == LocalStateResetRequiredReason.UnreadableOrWrongKey
+                    ? "Local state is unreadable or cannot be opened with the configured key. Reset local data before retrying."
+                    : "Local state is corrupt or incompatible. Reset local data before retrying.";
+                throw ResetRequired(reason, message, exception);
+            }
+
+            using var poolIdentity = new SqliteConnection(_connectionString);
+            SqliteConnection.ClearPool(poolIdentity);
         }
     }
 
@@ -1148,41 +1200,6 @@ public sealed partial class SqliteSessionStore :
     {
         const string sql = "DELETE FROM settings WHERE key = $key;";
         return ExecuteNonQueryAsync(sql, cancellationToken, ("$key", key));
-    }
-
-    public async Task<int> GetSchemaVersionAsync(CancellationToken cancellationToken = default)
-    {
-        const string sql = "SELECT version FROM schema_meta WHERE id = 1;";
-        var version = await ExecuteScalarAsync<long?>(sql, cancellationToken).ConfigureAwait(false);
-        return version is null ? 0 : (int)version.Value;
-    }
-
-    public Task SetSchemaVersionAsync(int version, CancellationToken cancellationToken = default)
-    {
-        const string sql = """
-            INSERT INTO schema_meta (id, version)
-            VALUES (1, $version)
-            ON CONFLICT(id) DO UPDATE SET version = excluded.version;
-            """;
-
-        return ExecuteNonQueryAsync(sql, cancellationToken, ("$version", version));
-    }
-
-    public Task SetSchemaValueAsync(string key, string value, CancellationToken cancellationToken = default)
-    {
-        const string sql = """
-            INSERT INTO schema_values (key, value)
-            VALUES ($key, $value)
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value;
-            """;
-
-        return ExecuteNonQueryAsync(sql, cancellationToken, ("$key", key), ("$value", value));
-    }
-
-    public async Task<string?> GetSchemaValueAsync(string key, CancellationToken cancellationToken = default)
-    {
-        const string sql = "SELECT value FROM schema_values WHERE key = $key;";
-        return await ExecuteScalarAsync<string?>(sql, cancellationToken, ("$key", key)).ConfigureAwait(false);
     }
 
     public async Task<MembershipTrustCommitResult> CommitMembershipTrustAsync(
@@ -2438,16 +2455,6 @@ public sealed partial class SqliteSessionStore :
 
             using var transaction = connection.BeginTransaction();
             ValidateTransportOutboxSchema(connection, transaction);
-            if (ValidateTransportOutboxRecoveryTablesIfPresent(connection, transaction))
-            {
-                await using var recovery = connection.CreateCommand();
-                recovery.Transaction = transaction;
-                recovery.CommandText = """
-                    DELETE FROM transport_outbox_attempts_v8_recovery;
-                    DELETE FROM transport_outbox_items_v8_recovery;
-                    """;
-                await recovery.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-            }
             foreach (var table in new[]
                      {
                          "transport_outbox_attempts", "transport_outbox_items", "group_state_outbox", "inbox_items", "inbox_cursors", "incoming_message_notifications", "messages", "groups", "conversations", "contacts", "replay_claims", "settings"
@@ -2577,75 +2584,57 @@ public sealed partial class SqliteSessionStore :
         return value;
     }
 
-    private void InitializeSchema()
+    private static void InitializeSchema(
+        string statePath,
+        string? encryptionKey,
+        bool isFresh,
+        bool immutableExisting)
     {
-        using var connection = OpenConnection();
-
-        int currentVersion;
-        using (var versionCommand = connection.CreateCommand())
+        if (!isFresh && !immutableExisting)
         {
-            versionCommand.CommandText = "PRAGMA user_version;";
-            currentVersion = Convert.ToInt32(
-                versionCommand.ExecuteScalar(),
-                CultureInfo.InvariantCulture);
-            if (currentVersion == PhysicalSchemaVersion)
-            {
-                EnsureMembershipTrustSchema(connection);
-                using var validationTransaction = connection.BeginTransaction();
-                ValidateTransportOutboxSchema(connection, validationTransaction);
-                ValidateTransportOutboxRecoveryTablesIfPresent(
-                    connection,
-                    validationTransaction);
-                validationTransaction.Commit();
-                return;
-            }
-            if (currentVersion > PhysicalSchemaVersion)
-            {
-                throw new InvalidOperationException(
-                    $"Local database physical schema version {currentVersion} is newer than supported version {PhysicalSchemaVersion}.");
-            }
+            ValidateExistingSchemaSnapshot(statePath, encryptionKey);
+            return;
         }
 
-        using (var journalCommand = connection.CreateCommand())
-        {
-            journalCommand.CommandText = "PRAGMA journal_mode=WAL;";
-            journalCommand.ExecuteNonQuery();
-        }
+        var preflightConnectionString = ConnectionStringFor(
+            statePath,
+            encryptionKey,
+            isFresh ? SqliteOpenMode.ReadWriteCreate : SqliteOpenMode.ReadOnly,
+            pooling: false,
+            immutable: immutableExisting);
+        using var connection = new SqliteConnection(preflightConnectionString);
+        connection.Open();
+        ConfigurePreflightConnection(connection, existing: !isFresh);
 
-        if (currentVersion != 8
-            && (TransportOutboxTableExists(connection, "transport_outbox_items")
-                || TransportOutboxTableExists(connection, "transport_outbox_attempts")))
+        if (!isFresh)
         {
-            ValidateTransportOutboxSchema(connection, transaction: null);
+            ValidateCurrentSchema(connection, transaction: null);
+            return;
         }
 
         using var transaction = connection.BeginTransaction();
-        if (currentVersion == 8)
-        {
-            MigrateTransportOutboxV8ToV9(connection, transaction);
-        }
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = """
-                CREATE TABLE IF NOT EXISTS conversations (
+                CREATE TABLE conversations (
                     id TEXT PRIMARY KEY,
                     updated_at INTEGER NOT NULL,
                     payload_json TEXT NOT NULL
                 );
 
-                CREATE TABLE IF NOT EXISTS contacts (
+                CREATE TABLE contacts (
                     id TEXT PRIMARY KEY,
                     sort_name TEXT NOT NULL,
                     payload_json TEXT NOT NULL
                 );
 
-                CREATE TABLE IF NOT EXISTS groups (
+                CREATE TABLE groups (
                     id TEXT PRIMARY KEY,
                     sort_name TEXT NOT NULL,
                     payload_json TEXT NOT NULL
                 );
 
-                CREATE TABLE IF NOT EXISTS messages (
+                CREATE TABLE messages (
                     id TEXT PRIMARY KEY,
                     conversation_id TEXT NOT NULL,
                     created_at INTEGER NOT NULL,
@@ -2660,28 +2649,18 @@ public sealed partial class SqliteSessionStore :
                     payload_json TEXT NOT NULL
                 );
 
-                CREATE TABLE IF NOT EXISTS incoming_message_notifications (
+                CREATE TABLE incoming_message_notifications (
                     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
                     message_id TEXT NOT NULL UNIQUE,
                     FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE
                 );
 
-                CREATE TABLE IF NOT EXISTS settings (
+                CREATE TABLE settings (
                     key TEXT PRIMARY KEY,
                     payload_json TEXT NOT NULL
                 );
 
-                CREATE TABLE IF NOT EXISTS schema_meta (
-                    id INTEGER PRIMARY KEY CHECK(id = 1),
-                    version INTEGER NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS schema_values (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS replay_claims (
+                CREATE TABLE replay_claims (
                     sender_session_id TEXT NOT NULL,
                     message_id TEXT NOT NULL,
                     envelope_digest TEXT NOT NULL,
@@ -2689,7 +2668,7 @@ public sealed partial class SqliteSessionStore :
                     PRIMARY KEY(sender_session_id, message_id)
                 );
 
-                CREATE TABLE IF NOT EXISTS inbox_cursors (
+                CREATE TABLE inbox_cursors (
                     account_session_id TEXT NOT NULL,
                     namespace INTEGER NOT NULL,
                     cursor TEXT NOT NULL,
@@ -2697,7 +2676,7 @@ public sealed partial class SqliteSessionStore :
                     PRIMARY KEY(account_session_id, namespace)
                 );
 
-                CREATE TABLE IF NOT EXISTS inbox_items (
+                CREATE TABLE inbox_items (
                     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
                     account_session_id TEXT NOT NULL,
                     namespace INTEGER NOT NULL,
@@ -2714,7 +2693,7 @@ public sealed partial class SqliteSessionStore :
                     UNIQUE(account_session_id, namespace, server_hash)
                 );
 
-                CREATE TABLE IF NOT EXISTS group_state_outbox (
+                CREATE TABLE group_state_outbox (
                     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
                     operation_id TEXT NOT NULL UNIQUE,
                     group_id TEXT NOT NULL,
@@ -2724,7 +2703,7 @@ public sealed partial class SqliteSessionStore :
                     recipients_json TEXT NOT NULL
                 );
 
-                CREATE TABLE IF NOT EXISTS membership_trust_records (
+                CREATE TABLE membership_trust_records (
                     profile_key TEXT NOT NULL,
                     domain INTEGER NOT NULL,
                     revision INTEGER NOT NULL,
@@ -2746,7 +2725,7 @@ public sealed partial class SqliteSessionStore :
                     PRIMARY KEY(profile_key, domain, revision)
                 );
 
-                CREATE TABLE IF NOT EXISTS membership_trust_heads (
+                CREATE TABLE membership_trust_heads (
                     profile_key TEXT NOT NULL,
                     domain INTEGER NOT NULL,
                     revision INTEGER NOT NULL,
@@ -2755,7 +2734,7 @@ public sealed partial class SqliteSessionStore :
                     PRIMARY KEY(profile_key, domain)
                 );
 
-                CREATE TABLE IF NOT EXISTS membership_trust_clock (
+                CREATE TABLE membership_trust_clock (
                     profile_key TEXT NOT NULL PRIMARY KEY,
                     version INTEGER NOT NULL,
                     revision INTEGER NOT NULL,
@@ -2763,7 +2742,7 @@ public sealed partial class SqliteSessionStore :
                     digest BLOB NOT NULL
                 );
 
-                CREATE TABLE IF NOT EXISTS transport_outbox_items (
+                CREATE TABLE transport_outbox_items (
                     account_scope BLOB NOT NULL,
                     logical_id BLOB NOT NULL,
                     dedup_material BLOB NOT NULL,
@@ -2784,7 +2763,7 @@ public sealed partial class SqliteSessionStore :
                     PRIMARY KEY(account_scope, logical_id)
                 );
 
-                CREATE TABLE IF NOT EXISTS transport_outbox_attempts (
+                CREATE TABLE transport_outbox_attempts (
                     account_scope BLOB NOT NULL,
                     logical_id BLOB NOT NULL,
                     attempt_id BLOB NOT NULL,
@@ -2798,43 +2777,777 @@ public sealed partial class SqliteSessionStore :
                         REFERENCES transport_outbox_items(account_scope, logical_id) ON DELETE CASCADE
                 );
 
-                CREATE INDEX IF NOT EXISTS idx_messages_conversation_created
+                CREATE INDEX idx_messages_conversation_created
                     ON messages(conversation_id, created_at);
 
-                CREATE INDEX IF NOT EXISTS idx_replay_claims_expires_at
+                CREATE INDEX idx_messages_conversation_created_id
+                    ON messages(conversation_id, created_at DESC, id DESC);
+
+                CREATE INDEX idx_messages_unread
+                    ON messages(conversation_id, direction, delivery_state, created_at);
+
+                CREATE INDEX idx_messages_server_hash
+                    ON messages(conversation_id, server_hash)
+                    WHERE server_hash IS NOT NULL;
+
+                CREATE INDEX idx_messages_self_echo
+                    ON messages(conversation_id, sender_session_id, recipient_session_id, direction, self_echo_key);
+
+                CREATE INDEX idx_messages_pending_outgoing
+                    ON messages(sender_session_id, direction, delivery_state, created_at, id);
+
+                CREATE INDEX idx_replay_claims_expires_at
                     ON replay_claims(expires_at);
 
-                CREATE INDEX IF NOT EXISTS idx_inbox_items_staged
+                CREATE INDEX idx_inbox_items_staged
                     ON inbox_items(account_session_id, namespace, item_kind, sequence);
 
-                CREATE INDEX IF NOT EXISTS idx_inbox_items_decoded_route
+                CREATE INDEX idx_inbox_items_decoded_route
                     ON inbox_items(account_session_id, namespace, item_kind, route_key, sequence);
 
-                CREATE INDEX IF NOT EXISTS idx_inbox_items_logical_message
+                CREATE INDEX idx_inbox_items_logical_message
                     ON inbox_items(sender_session_id, message_id, sequence);
 
-                CREATE INDEX IF NOT EXISTS idx_group_state_outbox_order
+                CREATE INDEX idx_group_state_outbox_order
                     ON group_state_outbox(group_id, revision, sequence);
 
-                CREATE INDEX IF NOT EXISTS idx_membership_trust_records_head
+                CREATE INDEX idx_membership_trust_records_head
                     ON membership_trust_records(profile_key, domain, revision);
 
-                CREATE INDEX IF NOT EXISTS idx_transport_outbox_ready
+                CREATE INDEX idx_transport_outbox_ready
                     ON transport_outbox_items(account_scope, state, not_before, expires_at, created_at);
 
-                CREATE INDEX IF NOT EXISTS idx_transport_outbox_expiry
+                CREATE INDEX idx_transport_outbox_expiry
                     ON transport_outbox_items(account_scope, expires_at, state);
                 """;
         command.ExecuteNonQuery();
-        EnsureMessageHotColumns(connection, transaction);
-        EnsureMessageHotIndexes(connection, transaction);
-        EnsureMembershipTrustColumns(connection, transaction);
 
         using var markVersionCommand = connection.CreateCommand();
         markVersionCommand.Transaction = transaction;
-        markVersionCommand.CommandText = $"PRAGMA user_version={PhysicalSchemaVersion};";
+        markVersionCommand.CommandText = $"""
+            PRAGMA application_id={DeepApplicationId};
+            PRAGMA user_version={PhysicalSchemaVersion};
+            """;
         markVersionCommand.ExecuteNonQuery();
+        ValidateCurrentSchema(connection, transaction);
         transaction.Commit();
+
+        using var journalCommand = connection.CreateCommand();
+        journalCommand.CommandText = "PRAGMA journal_mode=WAL;";
+        journalCommand.ExecuteNonQuery();
+    }
+
+    private static void ValidateExistingSchemaSnapshot(
+        string statePath,
+        string? encryptionKey)
+    {
+        var temporaryDirectory = Path.Combine(
+            Path.GetTempPath(),
+            "deep-schema-preflight-" + Guid.NewGuid().ToString("N"));
+        var snapshotPath = Path.Combine(temporaryDirectory, "local-state.db");
+        Directory.CreateDirectory(temporaryDirectory);
+        try
+        {
+            CopyStateFileForPreflight(statePath, snapshotPath);
+            foreach (var suffix in new[] { "-wal", "-shm" })
+            {
+                if (File.Exists(statePath + suffix))
+                {
+                    CopyStateFileForPreflight(statePath + suffix, snapshotPath + suffix);
+                }
+            }
+
+            var connectionString = ConnectionStringFor(
+                snapshotPath,
+                encryptionKey,
+                SqliteOpenMode.ReadOnly,
+                pooling: false);
+            using var connection = new SqliteConnection(connectionString);
+            connection.Open();
+            ConfigurePreflightConnection(connection, existing: true);
+            ValidateCurrentSchema(connection, transaction: null);
+        }
+        finally
+        {
+            foreach (var candidate in new[]
+                     {
+                         snapshotPath,
+                         snapshotPath + "-wal",
+                         snapshotPath + "-shm"
+                     })
+            {
+                if (File.Exists(candidate))
+                {
+                    File.Delete(candidate);
+                }
+            }
+            Directory.Delete(temporaryDirectory);
+        }
+    }
+
+    private static void CopyStateFileForPreflight(string source, string destination)
+    {
+        using var input = new FileStream(
+            source,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
+        using var output = new FileStream(
+            destination,
+            FileMode.CreateNew,
+            FileAccess.Write,
+            FileShare.None);
+        input.CopyTo(output);
+        output.Flush(flushToDisk: true);
+    }
+
+    private sealed record ExpectedSchemaColumn(
+        string Name,
+        string Type,
+        int NotNull,
+        string? DefaultValue,
+        int PrimaryKey,
+        int Hidden = 0);
+
+    private sealed record ExpectedSchemaIndex(
+        string Table,
+        bool Unique,
+        string Origin,
+        bool Partial,
+        IReadOnlyList<(string Name, bool Descending)> Columns,
+        string? NormalizedSql = null);
+
+    private sealed record ExpectedForeignKey(
+        int Id,
+        int Sequence,
+        string TargetTable,
+        string From,
+        string To,
+        string OnUpdate,
+        string OnDelete,
+        string Match);
+
+    private static void ValidateCurrentSchema(
+        SqliteConnection connection,
+        SqliteTransaction? transaction)
+    {
+        var version = ReadPragmaInt(connection, transaction, "user_version");
+        if (version != PhysicalSchemaVersion)
+        {
+            throw ResetRequired(
+                LocalStateResetRequiredReason.UnsupportedVersion,
+                $"Local state schema version {version} is unsupported; version {PhysicalSchemaVersion} is required. Reset local data before retrying.");
+        }
+        if (ReadPragmaInt(connection, transaction, "application_id") != DeepApplicationId)
+        {
+            throw new InvalidDataException("Local state has an invalid application identifier.");
+        }
+
+        ValidateDatabaseIntegrity(connection, transaction);
+        ValidateExactSchemaObjects(connection, transaction);
+
+        var tables = ExpectedSchemaTables();
+        foreach (var table in tables)
+        {
+            ValidateTableColumns(connection, transaction, table.Key, table.Value);
+        }
+        ValidateForeignKeys(connection, transaction, tables.Keys);
+        ValidateIndexes(connection, transaction, tables.Keys);
+        ValidateAutoincrementTables(connection, transaction);
+    }
+
+    private static int ReadPragmaInt(
+        SqliteConnection connection,
+        SqliteTransaction? transaction,
+        string pragma)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = $"PRAGMA {pragma};";
+        return Convert.ToInt32(command.ExecuteScalar(), CultureInfo.InvariantCulture);
+    }
+
+    private static void ValidateDatabaseIntegrity(
+        SqliteConnection connection,
+        SqliteTransaction? transaction)
+    {
+        using (var command = connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText = "PRAGMA integrity_check;";
+            using var reader = command.ExecuteReader();
+            if (!reader.Read()
+                || !string.Equals(reader.GetString(0), "ok", StringComparison.Ordinal)
+                || reader.Read())
+            {
+                throw new InvalidDataException("Local state failed SQLite integrity validation.");
+            }
+        }
+
+        using (var command = connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText = "PRAGMA foreign_key_check;";
+            using var reader = command.ExecuteReader();
+            if (reader.Read())
+            {
+                throw new InvalidDataException("Local state contains foreign-key violations.");
+            }
+        }
+    }
+
+    private static void ValidateExactSchemaObjects(
+        SqliteConnection connection,
+        SqliteTransaction? transaction)
+    {
+        var expected = new Dictionary<string, (string Type, string Table)>(StringComparer.Ordinal);
+        foreach (var table in ExpectedSchemaTables().Keys)
+        {
+            expected.Add(table, ("table", table));
+        }
+        foreach (var index in ExpectedSchemaIndexes())
+        {
+            if (!index.Key.StartsWith("sqlite_autoindex_", StringComparison.Ordinal))
+            {
+                expected.Add(index.Key, ("index", index.Value.Table));
+            }
+        }
+
+        using (var command = connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText = """
+                SELECT type, name, tbl_name
+                FROM sqlite_schema
+                WHERE name NOT LIKE 'sqlite_%'
+                ORDER BY type, name;
+                """;
+            using var reader = command.ExecuteReader();
+            var actual = new Dictionary<string, (string Type, string Table)>(StringComparer.Ordinal);
+            while (reader.Read())
+            {
+                actual.Add(reader.GetString(1), (reader.GetString(0), reader.GetString(2)));
+            }
+            if (actual.Count != expected.Count
+                || expected.Any(item =>
+                    !actual.TryGetValue(item.Key, out var value)
+                    || value != item.Value))
+            {
+                throw new InvalidDataException("Local state has an unexpected or missing schema object.");
+            }
+        }
+
+        var expectedInternals = ExpectedSchemaIndexes()
+            .Where(static item => item.Key.StartsWith("sqlite_autoindex_", StringComparison.Ordinal))
+            .ToDictionary(
+                static item => item.Key,
+                static item => ("index", item.Value.Table),
+                StringComparer.Ordinal);
+        expectedInternals.Add("sqlite_sequence", ("table", "sqlite_sequence"));
+
+        using var internals = connection.CreateCommand();
+        internals.Transaction = transaction;
+        internals.CommandText = """
+            SELECT type, name, tbl_name
+            FROM sqlite_schema
+            WHERE name LIKE 'sqlite_%'
+            ORDER BY type, name;
+            """;
+        using var internalReader = internals.ExecuteReader();
+        var actualInternals =
+            new Dictionary<string, (string Type, string Table)>(StringComparer.Ordinal);
+        while (internalReader.Read())
+        {
+            actualInternals.Add(
+                internalReader.GetString(1),
+                (internalReader.GetString(0), internalReader.GetString(2)));
+        }
+        if (actualInternals.Count != expectedInternals.Count
+            || expectedInternals.Any(item =>
+                !actualInternals.TryGetValue(item.Key, out var value)
+                || value != item.Value))
+        {
+            throw new InvalidDataException("Local state has unexpected SQLite internal objects.");
+        }
+    }
+
+    private static IReadOnlyDictionary<string, IReadOnlyList<ExpectedSchemaColumn>>
+        ExpectedSchemaTables() =>
+        new Dictionary<string, IReadOnlyList<ExpectedSchemaColumn>>(StringComparer.Ordinal)
+        {
+            ["conversations"] =
+            [
+                new("id", "TEXT", 0, null, 1),
+                new("updated_at", "INTEGER", 1, null, 0),
+                new("payload_json", "TEXT", 1, null, 0)
+            ],
+            ["contacts"] =
+            [
+                new("id", "TEXT", 0, null, 1),
+                new("sort_name", "TEXT", 1, null, 0),
+                new("payload_json", "TEXT", 1, null, 0)
+            ],
+            ["groups"] =
+            [
+                new("id", "TEXT", 0, null, 1),
+                new("sort_name", "TEXT", 1, null, 0),
+                new("payload_json", "TEXT", 1, null, 0)
+            ],
+            ["messages"] =
+            [
+                new("id", "TEXT", 0, null, 1),
+                new("conversation_id", "TEXT", 1, null, 0),
+                new("created_at", "INTEGER", 1, null, 0),
+                new("direction", "INTEGER", 1, null, 0),
+                new("delivery_state", "INTEGER", 1, null, 0),
+                new("read_at", "TEXT", 0, null, 0),
+                new("expires_at", "TEXT", 0, null, 0),
+                new("sender_session_id", "TEXT", 0, null, 0),
+                new("recipient_session_id", "TEXT", 0, null, 0),
+                new("server_hash", "TEXT", 0, null, 0),
+                new("self_echo_key", "TEXT", 0, null, 0),
+                new("payload_json", "TEXT", 1, null, 0)
+            ],
+            ["incoming_message_notifications"] =
+            [
+                new("sequence", "INTEGER", 0, null, 1),
+                new("message_id", "TEXT", 1, null, 0)
+            ],
+            ["settings"] =
+            [
+                new("key", "TEXT", 0, null, 1),
+                new("payload_json", "TEXT", 1, null, 0)
+            ],
+            ["replay_claims"] =
+            [
+                new("sender_session_id", "TEXT", 1, null, 1),
+                new("message_id", "TEXT", 1, null, 2),
+                new("envelope_digest", "TEXT", 1, null, 0),
+                new("expires_at", "INTEGER", 1, null, 0)
+            ],
+            ["inbox_cursors"] =
+            [
+                new("account_session_id", "TEXT", 1, null, 1),
+                new("namespace", "INTEGER", 1, null, 2),
+                new("cursor", "TEXT", 1, null, 0),
+                new("updated_at", "INTEGER", 1, null, 0)
+            ],
+            ["inbox_items"] =
+            [
+                new("sequence", "INTEGER", 0, null, 1),
+                new("account_session_id", "TEXT", 1, null, 0),
+                new("namespace", "INTEGER", 1, null, 0),
+                new("server_hash", "TEXT", 1, null, 0),
+                new("storage_timestamp", "INTEGER", 1, null, 0),
+                new("wire_payload", "TEXT", 1, null, 0),
+                new("wire_digest", "TEXT", 1, null, 0),
+                new("item_kind", "INTEGER", 0, null, 0),
+                new("route_key", "TEXT", 0, null, 0),
+                new("sender_session_id", "TEXT", 0, null, 0),
+                new("message_id", "TEXT", 0, null, 0),
+                new("envelope_digest", "TEXT", 0, null, 0),
+                new("protocol_expires_at", "INTEGER", 0, null, 0)
+            ],
+            ["group_state_outbox"] =
+            [
+                new("sequence", "INTEGER", 0, null, 1),
+                new("operation_id", "TEXT", 1, null, 0),
+                new("group_id", "TEXT", 1, null, 0),
+                new("revision", "INTEGER", 1, null, 0),
+                new("updated_at", "INTEGER", 1, null, 0),
+                new("group_payload", "TEXT", 1, null, 0),
+                new("recipients_json", "TEXT", 1, null, 0)
+            ],
+            ["membership_trust_records"] =
+            [
+                new("profile_key", "TEXT", 1, null, 1),
+                new("domain", "INTEGER", 1, null, 2),
+                new("revision", "INTEGER", 1, null, 3),
+                new("version", "INTEGER", 1, "2", 0),
+                new("artifact_kind", "INTEGER", 1, "1", 0),
+                new("sequence", "INTEGER", 1, null, 0),
+                new("previous_sequence", "INTEGER", 1, null, 0),
+                new("previous_hash", "BLOB", 1, null, 0),
+                new("envelope", "BLOB", 1, null, 0),
+                new("payload_digest", "BLOB", 1, null, 0),
+                new("canonical_hash", "BLOB", 1, null, 0),
+                new("profile_binding_hash", "BLOB", 1, null, 0),
+                new("signing_authority", "BLOB", 1, "X''", 0),
+                new("revoked_delegation_hashes", "BLOB", 1, "X''", 0),
+                new("state", "INTEGER", 1, null, 0),
+                new("observed_at", "INTEGER", 1, null, 0),
+                new("valid_from", "INTEGER", 1, "0", 0),
+                new("valid_until", "INTEGER", 1, null, 0)
+            ],
+            ["membership_trust_heads"] =
+            [
+                new("profile_key", "TEXT", 1, null, 1),
+                new("domain", "INTEGER", 1, null, 2),
+                new("revision", "INTEGER", 1, null, 0),
+                new("payload_digest", "BLOB", 1, null, 0),
+                new("history_bytes", "INTEGER", 1, "0", 0)
+            ],
+            ["membership_trust_clock"] =
+            [
+                new("profile_key", "TEXT", 1, null, 1),
+                new("version", "INTEGER", 1, null, 0),
+                new("revision", "INTEGER", 1, null, 0),
+                new("observed_at", "INTEGER", 1, null, 0),
+                new("digest", "BLOB", 1, null, 0)
+            ],
+            ["transport_outbox_items"] =
+            [
+                new("account_scope", "BLOB", 1, null, 1),
+                new("logical_id", "BLOB", 1, null, 2),
+                new("dedup_material", "BLOB", 1, null, 0),
+                new("ciphertext_bundle", "BLOB", 1, null, 0),
+                new("created_at", "INTEGER", 1, null, 0),
+                new("expires_at", "INTEGER", 1, null, 0),
+                new("not_before", "INTEGER", 1, null, 0),
+                new("state", "INTEGER", 1, null, 0),
+                new("revision", "INTEGER", 1, null, 0),
+                new("transition_source", "INTEGER", 1, null, 0),
+                new("transition_reason", "INTEGER", 1, null, 0),
+                new("transitioned_at", "INTEGER", 1, null, 0),
+                new("last_transition_state", "INTEGER", 1, null, 0),
+                new("last_attempt_id", "BLOB", 0, null, 0),
+                new("last_retry_not_before", "INTEGER", 0, null, 0),
+                new("acknowledgement_evidence", "BLOB", 0, null, 0),
+                new("acknowledged_at", "INTEGER", 0, null, 0)
+            ],
+            ["transport_outbox_attempts"] =
+            [
+                new("account_scope", "BLOB", 1, null, 1),
+                new("logical_id", "BLOB", 1, null, 2),
+                new("attempt_id", "BLOB", 1, null, 3),
+                new("state", "INTEGER", 1, null, 0),
+                new("transition_source", "INTEGER", 1, null, 0),
+                new("transition_reason", "INTEGER", 1, null, 0),
+                new("occurred_at", "INTEGER", 1, null, 0),
+                new("evidence", "BLOB", 1, null, 0)
+            ]
+        };
+
+    private static void ValidateTableColumns(
+        SqliteConnection connection,
+        SqliteTransaction? transaction,
+        string table,
+        IReadOnlyList<ExpectedSchemaColumn> expected)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = $"PRAGMA table_xinfo(\"{table}\");";
+        using var reader = command.ExecuteReader();
+        var ordinal = 0;
+        while (reader.Read())
+        {
+            if (ordinal >= expected.Count)
+            {
+                throw new InvalidDataException($"Local state table {table} has extra columns.");
+            }
+            var column = expected[ordinal];
+            var defaultValue = reader.IsDBNull(4) ? null : reader.GetString(4);
+            if (reader.GetInt32(0) != ordinal
+                || !string.Equals(reader.GetString(1), column.Name, StringComparison.Ordinal)
+                || !string.Equals(reader.GetString(2), column.Type, StringComparison.Ordinal)
+                || reader.GetInt32(3) != column.NotNull
+                || !string.Equals(defaultValue, column.DefaultValue, StringComparison.Ordinal)
+                || reader.GetInt32(5) != column.PrimaryKey
+                || reader.GetInt32(6) != column.Hidden)
+            {
+                throw new InvalidDataException($"Local state table {table} has incompatible columns.");
+            }
+            ordinal++;
+        }
+        if (ordinal != expected.Count)
+        {
+            throw new InvalidDataException($"Local state table {table} is missing columns.");
+        }
+    }
+
+    private static void ValidateForeignKeys(
+        SqliteConnection connection,
+        SqliteTransaction? transaction,
+        IEnumerable<string> tables)
+    {
+        var expected = new Dictionary<string, IReadOnlyList<ExpectedForeignKey>>(StringComparer.Ordinal)
+        {
+            ["incoming_message_notifications"] =
+            [
+                new(0, 0, "messages", "message_id", "id", "NO ACTION", "CASCADE", "NONE")
+            ],
+            ["transport_outbox_attempts"] =
+            [
+                new(0, 0, "transport_outbox_items", "account_scope", "account_scope", "NO ACTION", "CASCADE", "NONE"),
+                new(0, 1, "transport_outbox_items", "logical_id", "logical_id", "NO ACTION", "CASCADE", "NONE")
+            ]
+        };
+
+        foreach (var table in tables)
+        {
+            var rows = expected.GetValueOrDefault(table) ?? [];
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = $"""
+                SELECT id, seq, "table", "from", "to", "on_update", "on_delete", "match"
+                FROM pragma_foreign_key_list('{table}')
+                ORDER BY id, seq;
+                """;
+            using var reader = command.ExecuteReader();
+            var ordinal = 0;
+            while (reader.Read())
+            {
+                if (ordinal >= rows.Count)
+                {
+                    throw new InvalidDataException($"Local state table {table} has extra foreign keys.");
+                }
+                var row = rows[ordinal++];
+                if (reader.GetInt32(0) != row.Id
+                    || reader.GetInt32(1) != row.Sequence
+                    || !string.Equals(reader.GetString(2), row.TargetTable, StringComparison.Ordinal)
+                    || !string.Equals(reader.GetString(3), row.From, StringComparison.Ordinal)
+                    || !string.Equals(reader.GetString(4), row.To, StringComparison.Ordinal)
+                    || !string.Equals(reader.GetString(5), row.OnUpdate, StringComparison.Ordinal)
+                    || !string.Equals(reader.GetString(6), row.OnDelete, StringComparison.Ordinal)
+                    || !string.Equals(reader.GetString(7), row.Match, StringComparison.Ordinal))
+                {
+                    throw new InvalidDataException($"Local state table {table} has incompatible foreign keys.");
+                }
+            }
+            if (ordinal != rows.Count)
+            {
+                throw new InvalidDataException($"Local state table {table} is missing foreign keys.");
+            }
+        }
+    }
+
+    private static IReadOnlyDictionary<string, ExpectedSchemaIndex> ExpectedSchemaIndexes()
+    {
+        static (string Name, bool Descending) Asc(string name) => (name, false);
+        static (string Name, bool Descending) Desc(string name) => (name, true);
+        return new Dictionary<string, ExpectedSchemaIndex>(StringComparer.Ordinal)
+        {
+            ["sqlite_autoindex_conversations_1"] = new("conversations", true, "pk", false, [Asc("id")]),
+            ["sqlite_autoindex_contacts_1"] = new("contacts", true, "pk", false, [Asc("id")]),
+            ["sqlite_autoindex_groups_1"] = new("groups", true, "pk", false, [Asc("id")]),
+            ["sqlite_autoindex_messages_1"] = new("messages", true, "pk", false, [Asc("id")]),
+            ["sqlite_autoindex_incoming_message_notifications_1"] = new("incoming_message_notifications", true, "u", false, [Asc("message_id")]),
+            ["sqlite_autoindex_settings_1"] = new("settings", true, "pk", false, [Asc("key")]),
+            ["sqlite_autoindex_replay_claims_1"] = new("replay_claims", true, "pk", false, [Asc("sender_session_id"), Asc("message_id")]),
+            ["sqlite_autoindex_inbox_cursors_1"] = new("inbox_cursors", true, "pk", false, [Asc("account_session_id"), Asc("namespace")]),
+            ["sqlite_autoindex_inbox_items_1"] = new("inbox_items", true, "u", false, [Asc("account_session_id"), Asc("namespace"), Asc("server_hash")]),
+            ["sqlite_autoindex_group_state_outbox_1"] = new("group_state_outbox", true, "u", false, [Asc("operation_id")]),
+            ["sqlite_autoindex_membership_trust_records_1"] = new("membership_trust_records", true, "pk", false, [Asc("profile_key"), Asc("domain"), Asc("revision")]),
+            ["sqlite_autoindex_membership_trust_heads_1"] = new("membership_trust_heads", true, "pk", false, [Asc("profile_key"), Asc("domain")]),
+            ["sqlite_autoindex_membership_trust_clock_1"] = new("membership_trust_clock", true, "pk", false, [Asc("profile_key")]),
+            ["sqlite_autoindex_transport_outbox_items_1"] = new("transport_outbox_items", true, "pk", false, [Asc("account_scope"), Asc("logical_id")]),
+            ["sqlite_autoindex_transport_outbox_attempts_1"] = new("transport_outbox_attempts", true, "pk", false, [Asc("account_scope"), Asc("logical_id"), Asc("attempt_id")]),
+            ["idx_messages_conversation_created"] = new("messages", false, "c", false, [Asc("conversation_id"), Asc("created_at")]),
+            ["idx_messages_conversation_created_id"] = new("messages", false, "c", false, [Asc("conversation_id"), Desc("created_at"), Desc("id")]),
+            ["idx_messages_unread"] = new("messages", false, "c", false, [Asc("conversation_id"), Asc("direction"), Asc("delivery_state"), Asc("created_at")]),
+            ["idx_messages_server_hash"] = new(
+                "messages",
+                false,
+                "c",
+                true,
+                [Asc("conversation_id"), Asc("server_hash")],
+                "CREATE INDEX idx_messages_server_hash ON messages(conversation_id, server_hash) WHERE server_hash IS NOT NULL"),
+            ["idx_messages_self_echo"] = new("messages", false, "c", false, [Asc("conversation_id"), Asc("sender_session_id"), Asc("recipient_session_id"), Asc("direction"), Asc("self_echo_key")]),
+            ["idx_messages_pending_outgoing"] = new("messages", false, "c", false, [Asc("sender_session_id"), Asc("direction"), Asc("delivery_state"), Asc("created_at"), Asc("id")]),
+            ["idx_replay_claims_expires_at"] = new("replay_claims", false, "c", false, [Asc("expires_at")]),
+            ["idx_inbox_items_staged"] = new("inbox_items", false, "c", false, [Asc("account_session_id"), Asc("namespace"), Asc("item_kind"), Asc("sequence")]),
+            ["idx_inbox_items_decoded_route"] = new("inbox_items", false, "c", false, [Asc("account_session_id"), Asc("namespace"), Asc("item_kind"), Asc("route_key"), Asc("sequence")]),
+            ["idx_inbox_items_logical_message"] = new("inbox_items", false, "c", false, [Asc("sender_session_id"), Asc("message_id"), Asc("sequence")]),
+            ["idx_group_state_outbox_order"] = new("group_state_outbox", false, "c", false, [Asc("group_id"), Asc("revision"), Asc("sequence")]),
+            ["idx_membership_trust_records_head"] = new("membership_trust_records", false, "c", false, [Asc("profile_key"), Asc("domain"), Asc("revision")]),
+            ["idx_transport_outbox_ready"] = new("transport_outbox_items", false, "c", false, [Asc("account_scope"), Asc("state"), Asc("not_before"), Asc("expires_at"), Asc("created_at")]),
+            ["idx_transport_outbox_expiry"] = new("transport_outbox_items", false, "c", false, [Asc("account_scope"), Asc("expires_at"), Asc("state")])
+        };
+    }
+
+    private static void ValidateIndexes(
+        SqliteConnection connection,
+        SqliteTransaction? transaction,
+        IEnumerable<string> tables)
+    {
+        var expected = ExpectedSchemaIndexes();
+        foreach (var table in tables)
+        {
+            var expectedForTable = expected
+                .Where(item => string.Equals(item.Value.Table, table, StringComparison.Ordinal))
+                .ToDictionary(static item => item.Key, static item => item.Value, StringComparer.Ordinal);
+            var found = new HashSet<string>(StringComparer.Ordinal);
+            using (var command = connection.CreateCommand())
+            {
+                command.Transaction = transaction;
+                command.CommandText = $"PRAGMA index_list(\"{table}\");";
+                using var reader = command.ExecuteReader();
+                while (reader.Read())
+                {
+                    var name = reader.GetString(1);
+                    if (!expectedForTable.TryGetValue(name, out var index)
+                        || reader.GetInt32(2) != (index.Unique ? 1 : 0)
+                        || !string.Equals(reader.GetString(3), index.Origin, StringComparison.Ordinal)
+                        || reader.GetInt32(4) != (index.Partial ? 1 : 0)
+                        || !found.Add(name))
+                    {
+                        throw new InvalidDataException($"Local state table {table} has unexpected indexes.");
+                    }
+                }
+            }
+            if (found.Count != expectedForTable.Count)
+            {
+                throw new InvalidDataException($"Local state table {table} is missing indexes.");
+            }
+
+            foreach (var index in expectedForTable)
+            {
+                using var command = connection.CreateCommand();
+                command.Transaction = transaction;
+                command.CommandText = $"""
+                    SELECT seqno, name, "desc", coll
+                    FROM pragma_index_xinfo('{index.Key}')
+                    WHERE "key" = 1
+                    ORDER BY seqno;
+                    """;
+                using var reader = command.ExecuteReader();
+                var ordinal = 0;
+                while (reader.Read())
+                {
+                    if (ordinal >= index.Value.Columns.Count)
+                    {
+                        throw new InvalidDataException($"Local state index {index.Key} has extra columns.");
+                    }
+                    var column = index.Value.Columns[ordinal];
+                    if (reader.GetInt32(0) != ordinal
+                        || reader.IsDBNull(1)
+                        || !string.Equals(reader.GetString(1), column.Name, StringComparison.Ordinal)
+                        || reader.GetInt32(2) != (column.Descending ? 1 : 0)
+                        || !string.Equals(reader.GetString(3), "BINARY", StringComparison.Ordinal))
+                    {
+                        throw new InvalidDataException($"Local state index {index.Key} is incompatible.");
+                    }
+                    ordinal++;
+                }
+                if (ordinal != index.Value.Columns.Count)
+                {
+                    throw new InvalidDataException($"Local state index {index.Key} is missing columns.");
+                }
+                reader.Close();
+
+                if (index.Value.Partial)
+                {
+                    if (index.Value.NormalizedSql is null)
+                    {
+                        throw new InvalidOperationException(
+                            $"Expected partial index {index.Key} has no SQL attestation.");
+                    }
+                    var actualSql = NormalizeSchemaSql(
+                        ReadBoundedSchemaSql(
+                            connection,
+                            transaction,
+                            "index",
+                            index.Key,
+                            index.Value.Table));
+                    if (!string.Equals(
+                            actualSql,
+                            index.Value.NormalizedSql,
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        throw new InvalidDataException(
+                            $"Local state partial index {index.Key} has an incompatible predicate.");
+                    }
+                }
+            }
+        }
+    }
+
+    private static void ValidateAutoincrementTables(
+        SqliteConnection connection,
+        SqliteTransaction? transaction)
+    {
+        foreach (var table in new[]
+                 {
+                     "incoming_message_notifications",
+                     "inbox_items",
+                     "group_state_outbox"
+                 })
+        {
+            var normalizedSql = NormalizeSchemaSql(
+                ReadBoundedSchemaSql(
+                    connection,
+                    transaction,
+                    "table",
+                    table,
+                    table));
+            var expectedPrefix =
+                $"CREATE TABLE {table} ( sequence INTEGER PRIMARY KEY AUTOINCREMENT,";
+            if (!normalizedSql.StartsWith(
+                    expectedPrefix,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException(
+                    $"Local state table {table} does not have the required autoincrementing sequence declaration.");
+            }
+        }
+    }
+
+    private static string ReadBoundedSchemaSql(
+        SqliteConnection connection,
+        SqliteTransaction? transaction,
+        string type,
+        string name,
+        string table)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT length(sql), substr(sql, 1, $maximumLength + 1)
+            FROM sqlite_schema
+            WHERE type = $type AND name = $name AND tbl_name = $table;
+            """;
+        command.Parameters.AddWithValue("$maximumLength", MaximumSchemaDefinitionLength);
+        command.Parameters.AddWithValue("$type", type);
+        command.Parameters.AddWithValue("$name", name);
+        command.Parameters.AddWithValue("$table", table);
+        using var reader = command.ExecuteReader();
+        if (!reader.Read()
+            || reader.IsDBNull(0)
+            || reader.IsDBNull(1)
+            || reader.GetInt64(0) <= 0
+            || reader.GetInt64(0) > MaximumSchemaDefinitionLength)
+        {
+            throw new InvalidDataException(
+                $"Local state schema definition {name} is missing or exceeds its validation bound.");
+        }
+        var sql = reader.GetString(1);
+        if (reader.Read())
+        {
+            throw new InvalidDataException(
+                $"Local state schema definition {name} is ambiguous.");
+        }
+        return sql;
+    }
+
+    private static string NormalizeSchemaSql(string sql)
+    {
+        var normalized = new StringBuilder(sql.Length);
+        var pendingSpace = false;
+        foreach (var character in sql)
+        {
+            if (char.IsWhiteSpace(character))
+            {
+                pendingSpace = normalized.Length > 0;
+                continue;
+            }
+            if (pendingSpace)
+            {
+                normalized.Append(' ');
+                pendingSpace = false;
+            }
+            normalized.Append(character);
+        }
+        return normalized.ToString().TrimEnd(' ', ';');
     }
 
     private static void ValidateTransportOutboxSchema(
@@ -2917,275 +3630,6 @@ public sealed partial class SqliteSessionStore :
             "transport_outbox_items",
             ["account_scope", "expires_at", "state"],
             optional: false);
-    }
-
-    private static void MigrateTransportOutboxV8ToV9(
-        SqliteConnection connection,
-        SqliteTransaction transaction)
-    {
-        ValidateTransportOutboxColumns(
-            connection,
-            transaction,
-            "transport_outbox_items",
-            [
-                ("account_scope", "BLOB", 1, 0),
-                ("logical_id", "BLOB", 1, 1),
-                ("dedup_material", "BLOB", 1, 0),
-                ("ciphertext_bundle", "BLOB", 1, 0),
-                ("created_at", "INTEGER", 1, 0),
-                ("expires_at", "INTEGER", 1, 0),
-                ("not_before", "INTEGER", 1, 0),
-                ("state", "INTEGER", 1, 0),
-                ("revision", "INTEGER", 1, 0),
-                ("transition_source", "INTEGER", 1, 0),
-                ("transition_reason", "INTEGER", 1, 0),
-                ("transitioned_at", "INTEGER", 1, 0),
-                ("acknowledgement_evidence", "BLOB", 0, 0)
-            ]);
-        ValidateTransportOutboxColumns(
-            connection,
-            transaction,
-            "transport_outbox_attempts",
-            [
-                ("logical_id", "BLOB", 1, 1),
-                ("attempt_id", "BLOB", 1, 2),
-                ("state", "INTEGER", 1, 0),
-                ("transition_source", "INTEGER", 1, 0),
-                ("transition_reason", "INTEGER", 1, 0),
-                ("occurred_at", "INTEGER", 1, 0),
-                ("evidence", "BLOB", 1, 0)
-            ]);
-        ValidateTransportOutboxForeignKeys(
-            connection,
-            transaction,
-            "transport_outbox_attempts",
-            "transport_outbox_items",
-            [(0, "logical_id", "logical_id")]);
-        ValidateTransportOutboxTriggersAbsent(
-            connection,
-            transaction,
-            ["transport_outbox_items", "transport_outbox_attempts"]);
-        ValidateTransportOutboxIndexSet(
-            connection,
-            transaction,
-            "transport_outbox_items",
-            ["logical_id"],
-            ["idx_transport_outbox_ready", "idx_transport_outbox_expiry"]);
-        ValidateTransportOutboxIndexSet(
-            connection,
-            transaction,
-            "transport_outbox_attempts",
-            ["logical_id", "attempt_id"],
-            []);
-        ValidateTransportOutboxIndex(
-            connection,
-            transaction,
-            "idx_transport_outbox_ready",
-            "transport_outbox_items",
-            ["account_scope", "state", "not_before", "expires_at", "created_at"],
-            optional: true);
-        ValidateTransportOutboxIndex(
-            connection,
-            transaction,
-            "idx_transport_outbox_expiry",
-            "transport_outbox_items",
-            ["account_scope", "expires_at", "state"],
-            optional: true);
-        EnsureTransportOutboxRecoveryNamesUnused(connection, transaction);
-
-        var hasRows = TransportOutboxHasRows(
-                connection,
-                transaction,
-                "transport_outbox_items")
-            || TransportOutboxHasRows(
-                connection,
-                transaction,
-                "transport_outbox_attempts");
-        using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = hasRows
-            ? """
-                DROP INDEX IF EXISTS idx_transport_outbox_ready;
-                DROP INDEX IF EXISTS idx_transport_outbox_expiry;
-                ALTER TABLE transport_outbox_attempts
-                    RENAME TO transport_outbox_attempts_v8_recovery;
-                ALTER TABLE transport_outbox_items
-                    RENAME TO transport_outbox_items_v8_recovery;
-                """
-            : """
-                DROP TABLE transport_outbox_attempts;
-                DROP TABLE transport_outbox_items;
-                """;
-        command.ExecuteNonQuery();
-    }
-
-    private static bool TransportOutboxHasRows(
-        SqliteConnection connection,
-        SqliteTransaction transaction,
-        string tableName)
-    {
-        using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText =
-            $"SELECT EXISTS(SELECT 1 FROM \"{tableName}\" LIMIT 1);";
-        return Convert.ToInt32(
-            command.ExecuteScalar(),
-            CultureInfo.InvariantCulture) == 1;
-    }
-
-    private static void EnsureTransportOutboxRecoveryNamesUnused(
-        SqliteConnection connection,
-        SqliteTransaction transaction)
-    {
-        using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = """
-            SELECT COUNT(*) FROM sqlite_master
-            WHERE name IN (
-                'transport_outbox_items_v8_recovery',
-                'transport_outbox_attempts_v8_recovery');
-            """;
-        if (Convert.ToInt32(
-                command.ExecuteScalar(),
-                CultureInfo.InvariantCulture) != 0)
-        {
-            throw new InvalidDataException(
-                "Transport outbox v8 recovery object names are already in use.");
-        }
-    }
-
-    private static bool ValidateTransportOutboxRecoveryTablesIfPresent(
-        SqliteConnection connection,
-        SqliteTransaction transaction)
-    {
-        using (var objects = connection.CreateCommand())
-        {
-            objects.Transaction = transaction;
-            objects.CommandText = """
-                SELECT name, type FROM sqlite_master
-                WHERE name IN (
-                    'transport_outbox_items_v8_recovery',
-                    'transport_outbox_attempts_v8_recovery')
-                ORDER BY name;
-                """;
-            using var reader = objects.ExecuteReader();
-            var found = new Dictionary<string, string>(StringComparer.Ordinal);
-            while (reader.Read())
-            {
-                found.Add(reader.GetString(0), reader.GetString(1));
-            }
-            if (found.Count == 0)
-            {
-                return false;
-            }
-            if (found.Count != 2
-                || !found.TryGetValue(
-                    "transport_outbox_items_v8_recovery",
-                    out var itemsType)
-                || !string.Equals(itemsType, "table", StringComparison.Ordinal)
-                || !found.TryGetValue(
-                    "transport_outbox_attempts_v8_recovery",
-                    out var attemptsType)
-                || !string.Equals(attemptsType, "table", StringComparison.Ordinal))
-            {
-                throw new InvalidDataException(
-                    "Transport outbox v8 recovery objects are incompatible.");
-            }
-        }
-
-        ValidateTransportOutboxColumns(
-            connection,
-            transaction,
-            "transport_outbox_items_v8_recovery",
-            [
-                ("account_scope", "BLOB", 1, 0),
-                ("logical_id", "BLOB", 1, 1),
-                ("dedup_material", "BLOB", 1, 0),
-                ("ciphertext_bundle", "BLOB", 1, 0),
-                ("created_at", "INTEGER", 1, 0),
-                ("expires_at", "INTEGER", 1, 0),
-                ("not_before", "INTEGER", 1, 0),
-                ("state", "INTEGER", 1, 0),
-                ("revision", "INTEGER", 1, 0),
-                ("transition_source", "INTEGER", 1, 0),
-                ("transition_reason", "INTEGER", 1, 0),
-                ("transitioned_at", "INTEGER", 1, 0),
-                ("acknowledgement_evidence", "BLOB", 0, 0)
-            ]);
-        ValidateTransportOutboxColumns(
-            connection,
-            transaction,
-            "transport_outbox_attempts_v8_recovery",
-            [
-                ("logical_id", "BLOB", 1, 1),
-                ("attempt_id", "BLOB", 1, 2),
-                ("state", "INTEGER", 1, 0),
-                ("transition_source", "INTEGER", 1, 0),
-                ("transition_reason", "INTEGER", 1, 0),
-                ("occurred_at", "INTEGER", 1, 0),
-                ("evidence", "BLOB", 1, 0)
-            ]);
-        ValidateTransportOutboxForeignKeys(
-            connection,
-            transaction,
-            "transport_outbox_attempts_v8_recovery",
-            "transport_outbox_items_v8_recovery",
-            [(0, "logical_id", "logical_id")]);
-        ValidateTransportOutboxTriggersAbsent(
-            connection,
-            transaction,
-            [
-                "transport_outbox_items_v8_recovery",
-                "transport_outbox_attempts_v8_recovery"
-            ]);
-        ValidateTransportOutboxIndexSet(
-            connection,
-            transaction,
-            "transport_outbox_items_v8_recovery",
-            ["logical_id"],
-            []);
-        ValidateTransportOutboxIndexSet(
-            connection,
-            transaction,
-            "transport_outbox_attempts_v8_recovery",
-            ["logical_id", "attempt_id"],
-            []);
-        ValidateTransportOutboxRecoveryRowIntegrity(connection, transaction);
-        return true;
-    }
-
-    private static void ValidateTransportOutboxRecoveryRowIntegrity(
-        SqliteConnection connection,
-        SqliteTransaction transaction)
-    {
-        using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = """
-            SELECT 1
-            FROM pragma_foreign_key_check('transport_outbox_attempts_v8_recovery')
-            LIMIT 1;
-            """;
-        using var reader = command.ExecuteReader();
-        if (reader.Read())
-        {
-            throw new InvalidDataException(
-                "Transport outbox v8 recovery rows violate their foreign key.");
-        }
-    }
-
-    private static bool TransportOutboxTableExists(
-        SqliteConnection connection,
-        string tableName)
-    {
-        using var command = connection.CreateCommand();
-        command.CommandText = """
-            SELECT COUNT(*) FROM sqlite_master
-            WHERE type = 'table' AND name = $name;
-            """;
-        command.Parameters.AddWithValue("$name", tableName);
-        return Convert.ToInt32(
-            command.ExecuteScalar(),
-            CultureInfo.InvariantCulture) == 1;
     }
 
     private static void ValidateTransportOutboxForeignKeys(
@@ -3493,310 +3937,6 @@ public sealed partial class SqliteSessionStore :
                 CultureInfo.InvariantCulture) != 1)
         {
             throw new InvalidOperationException("SQLite secure_delete could not be enabled.");
-        }
-    }
-
-    private static void EnsureMembershipTrustSchema(SqliteConnection connection)
-    {
-        using var transaction = connection.BeginTransaction();
-        using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = """
-            CREATE TABLE IF NOT EXISTS membership_trust_records (
-                profile_key TEXT NOT NULL,
-                domain INTEGER NOT NULL,
-                revision INTEGER NOT NULL,
-                version INTEGER NOT NULL DEFAULT 2,
-                artifact_kind INTEGER NOT NULL DEFAULT 1,
-                sequence INTEGER NOT NULL,
-                previous_sequence INTEGER NOT NULL,
-                previous_hash BLOB NOT NULL,
-                envelope BLOB NOT NULL,
-                payload_digest BLOB NOT NULL,
-                canonical_hash BLOB NOT NULL,
-                profile_binding_hash BLOB NOT NULL,
-                signing_authority BLOB NOT NULL DEFAULT X'',
-                revoked_delegation_hashes BLOB NOT NULL DEFAULT X'',
-                state INTEGER NOT NULL,
-                observed_at INTEGER NOT NULL,
-                valid_from INTEGER NOT NULL DEFAULT 0,
-                valid_until INTEGER NOT NULL,
-                PRIMARY KEY(profile_key, domain, revision)
-            );
-
-            CREATE TABLE IF NOT EXISTS membership_trust_heads (
-                profile_key TEXT NOT NULL,
-                domain INTEGER NOT NULL,
-                revision INTEGER NOT NULL,
-                payload_digest BLOB NOT NULL,
-                history_bytes INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY(profile_key, domain)
-            );
-
-            CREATE TABLE IF NOT EXISTS membership_trust_clock (
-                profile_key TEXT NOT NULL PRIMARY KEY,
-                version INTEGER NOT NULL,
-                revision INTEGER NOT NULL,
-                observed_at INTEGER NOT NULL,
-                digest BLOB NOT NULL
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_membership_trust_records_head
-                ON membership_trust_records(profile_key, domain, revision);
-            """;
-        command.ExecuteNonQuery();
-        EnsureMembershipTrustColumns(connection, transaction);
-        transaction.Commit();
-    }
-
-    private static void EnsureMembershipTrustColumns(
-        SqliteConnection connection,
-        SqliteTransaction transaction)
-    {
-        var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        using (var inspect = connection.CreateCommand())
-        {
-            inspect.Transaction = transaction;
-            inspect.CommandText = "PRAGMA table_info(membership_trust_records);";
-            using var reader = inspect.ExecuteReader();
-            while (reader.Read())
-            {
-                columns.Add(reader.GetString(1));
-            }
-        }
-        var additions = new List<string>();
-        if (!columns.Contains("artifact_kind"))
-        {
-            additions.Add(
-                "ALTER TABLE membership_trust_records ADD COLUMN artifact_kind INTEGER NOT NULL DEFAULT 1;");
-        }
-        if (!columns.Contains("signing_authority"))
-        {
-            additions.Add(
-                "ALTER TABLE membership_trust_records ADD COLUMN signing_authority BLOB NOT NULL DEFAULT X'';");
-        }
-        if (!columns.Contains("revoked_delegation_hashes"))
-        {
-            additions.Add(
-                "ALTER TABLE membership_trust_records ADD COLUMN revoked_delegation_hashes BLOB NOT NULL DEFAULT X'';");
-        }
-        foreach (var statement in additions)
-        {
-            using var alter = connection.CreateCommand();
-            alter.Transaction = transaction;
-            alter.CommandText = statement;
-            alter.ExecuteNonQuery();
-        }
-
-        var headColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        using (var inspect = connection.CreateCommand())
-        {
-            inspect.Transaction = transaction;
-            inspect.CommandText = "PRAGMA table_info(membership_trust_heads);";
-            using var reader = inspect.ExecuteReader();
-            while (reader.Read())
-            {
-                headColumns.Add(reader.GetString(1));
-            }
-        }
-        if (!headColumns.Contains("history_bytes"))
-        {
-            using (var alter = connection.CreateCommand())
-            {
-                alter.Transaction = transaction;
-                alter.CommandText = """
-                    ALTER TABLE membership_trust_heads
-                    ADD COLUMN history_bytes INTEGER NOT NULL DEFAULT 0;
-                    """;
-                alter.ExecuteNonQuery();
-            }
-            using var backfill = connection.CreateCommand();
-            backfill.Transaction = transaction;
-            backfill.CommandText = """
-                UPDATE membership_trust_heads
-                SET history_bytes = COALESCE((
-                    SELECT SUM(row_bytes)
-                    FROM (
-                        SELECT length(previous_hash) + length(envelope) +
-                               length(payload_digest) + length(canonical_hash) +
-                               length(profile_binding_hash) + length(signing_authority) +
-                               length(revoked_delegation_hashes) AS row_bytes
-                        FROM membership_trust_records
-                        WHERE profile_key = membership_trust_heads.profile_key
-                          AND domain = membership_trust_heads.domain
-                          AND revision <= membership_trust_heads.revision
-                        ORDER BY revision
-                        LIMIT $historyLimit
-                    )
-                ), 0);
-                """;
-            backfill.Parameters.AddWithValue(
-                "$historyLimit",
-                MembershipTrustRepositoryValidation.MaximumMembershipTrustHistoryRecords + 1);
-            backfill.ExecuteNonQuery();
-        }
-    }
-
-    private static void EnsureMessageHotColumns(SqliteConnection connection, SqliteTransaction transaction)
-    {
-        var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        using (var command = connection.CreateCommand())
-        {
-            command.Transaction = transaction;
-            command.CommandText = "PRAGMA table_info(messages);";
-            using var reader = command.ExecuteReader();
-            while (reader.Read())
-            {
-                columns.Add(reader.GetString(1));
-            }
-        }
-
-        using (var command = connection.CreateCommand())
-        {
-            command.Transaction = transaction;
-            var statements = new List<string>();
-            if (!columns.Contains("direction"))
-            {
-                statements.Add("ALTER TABLE messages ADD COLUMN direction INTEGER;");
-            }
-
-            if (!columns.Contains("delivery_state"))
-            {
-                statements.Add("ALTER TABLE messages ADD COLUMN delivery_state INTEGER;");
-            }
-
-            if (!columns.Contains("read_at"))
-            {
-                statements.Add("ALTER TABLE messages ADD COLUMN read_at TEXT;");
-            }
-
-            if (!columns.Contains("expires_at"))
-            {
-                statements.Add("ALTER TABLE messages ADD COLUMN expires_at TEXT;");
-            }
-
-            if (!columns.Contains("sender_session_id"))
-            {
-                statements.Add("ALTER TABLE messages ADD COLUMN sender_session_id TEXT;");
-            }
-
-            if (!columns.Contains("recipient_session_id"))
-            {
-                statements.Add("ALTER TABLE messages ADD COLUMN recipient_session_id TEXT;");
-            }
-
-            if (!columns.Contains("server_hash"))
-            {
-                statements.Add("ALTER TABLE messages ADD COLUMN server_hash TEXT;");
-            }
-
-            if (!columns.Contains("self_echo_key"))
-            {
-                statements.Add("ALTER TABLE messages ADD COLUMN self_echo_key TEXT;");
-            }
-
-            if (statements.Count == 0)
-            {
-                return;
-            }
-
-            command.CommandText = string.Join(Environment.NewLine, statements);
-            command.ExecuteNonQuery();
-        }
-
-        using (var command = connection.CreateCommand())
-        {
-            command.Transaction = transaction;
-            command.CommandText = """
-                UPDATE messages
-                SET
-                    direction = COALESCE(direction, CAST(json_extract(payload_json, '$.direction') AS INTEGER)),
-                    delivery_state = COALESCE(delivery_state, CAST(json_extract(payload_json, '$.deliveryState') AS INTEGER)),
-                    read_at = COALESCE(read_at, json_extract(payload_json, '$.readAt')),
-                    expires_at = COALESCE(expires_at, json_extract(payload_json, '$.expiresAt')),
-                    sender_session_id = COALESCE(sender_session_id, json_extract(payload_json, '$.sender.value')),
-                    recipient_session_id = COALESCE(recipient_session_id, json_extract(payload_json, '$.recipient.value')),
-                    server_hash = COALESCE(server_hash, json_extract(payload_json, '$.serverHash'))
-                WHERE direction IS NULL
-                   OR delivery_state IS NULL
-                   OR (read_at IS NULL AND json_extract(payload_json, '$.readAt') IS NOT NULL)
-                   OR sender_session_id IS NULL
-                   OR (recipient_session_id IS NULL AND json_extract(payload_json, '$.recipient.value') IS NOT NULL)
-                   OR (server_hash IS NULL AND json_extract(payload_json, '$.serverHash') IS NOT NULL)
-                   OR (expires_at IS NULL AND json_extract(payload_json, '$.expiresAt') IS NOT NULL);
-                """;
-            command.ExecuteNonQuery();
-        }
-
-        BackfillSelfEchoKeys(connection, transaction);
-    }
-
-    private static void EnsureMessageHotIndexes(SqliteConnection connection, SqliteTransaction transaction)
-    {
-        using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = """
-            CREATE INDEX IF NOT EXISTS idx_messages_conversation_created_id
-                ON messages(conversation_id, created_at DESC, id DESC);
-
-            CREATE INDEX IF NOT EXISTS idx_messages_unread
-                ON messages(conversation_id, direction, delivery_state, created_at);
-
-            CREATE INDEX IF NOT EXISTS idx_messages_server_hash
-                ON messages(conversation_id, server_hash)
-                WHERE server_hash IS NOT NULL;
-
-            CREATE INDEX IF NOT EXISTS idx_messages_self_echo
-                ON messages(conversation_id, sender_session_id, recipient_session_id, direction, self_echo_key);
-
-            CREATE INDEX IF NOT EXISTS idx_messages_pending_outgoing
-                ON messages(sender_session_id, direction, delivery_state, created_at, id);
-            """;
-        command.ExecuteNonQuery();
-    }
-
-    private static void BackfillSelfEchoKeys(SqliteConnection connection, SqliteTransaction transaction)
-    {
-        var rows = new List<(string Id, Message Message)>();
-        using (var command = connection.CreateCommand())
-        {
-            command.Transaction = transaction;
-            command.CommandText = "SELECT id, payload_json FROM messages WHERE self_echo_key IS NULL;";
-            using var reader = command.ExecuteReader();
-            while (reader.Read())
-            {
-                var message = JsonSerializer.Deserialize<Message>(reader.GetString(1), SerializerOptions);
-                if (message is not null)
-                {
-                    rows.Add((reader.GetString(0), message));
-                }
-            }
-        }
-
-        using var update = connection.CreateCommand();
-        update.Transaction = transaction;
-        update.CommandText = """
-            UPDATE messages
-            SET sender_session_id = $senderSessionId,
-                recipient_session_id = $recipientSessionId,
-                server_hash = $serverHash,
-                self_echo_key = $selfEchoKey
-            WHERE id = $id;
-            """;
-        var id = update.Parameters.Add("$id", SqliteType.Text);
-        var sender = update.Parameters.Add("$senderSessionId", SqliteType.Text);
-        var recipient = update.Parameters.Add("$recipientSessionId", SqliteType.Text);
-        var serverHash = update.Parameters.Add("$serverHash", SqliteType.Text);
-        var selfEchoKey = update.Parameters.Add("$selfEchoKey", SqliteType.Text);
-        update.Prepare();
-        foreach (var row in rows)
-        {
-            id.Value = row.Id;
-            sender.Value = row.Message.Sender.Value;
-            recipient.Value = row.Message.Recipient?.Value ?? (object)DBNull.Value;
-            serverHash.Value = row.Message.ServerHash ?? (object)DBNull.Value;
-            selfEchoKey.Value = MessagePersistenceKeys.SelfEcho(row.Message);
-            update.ExecuteNonQuery();
         }
     }
 
@@ -4804,13 +4944,20 @@ public sealed partial class SqliteSessionStore :
         }, CancellationToken.None).ConfigureAwait(false);
     }
 
-    private static string ConnectionStringFor(string statePath, string? encryptionKey = null, bool pooling = true)
+    private static string ConnectionStringFor(
+        string statePath,
+        string? encryptionKey,
+        SqliteOpenMode mode,
+        bool pooling,
+        bool immutable = false)
     {
         var builder = new SqliteConnectionStringBuilder
         {
-            DataSource = statePath,
-            Mode = SqliteOpenMode.ReadWriteCreate,
-            Cache = SqliteCacheMode.Shared,
+            DataSource = immutable
+                ? new Uri(statePath).AbsoluteUri + "?immutable=1"
+                : statePath,
+            Mode = mode,
+            Cache = SqliteCacheMode.Private,
             Pooling = pooling
         };
         if (!string.IsNullOrWhiteSpace(encryptionKey))
@@ -4819,6 +4966,24 @@ public sealed partial class SqliteSessionStore :
         }
 
         return builder.ToString();
+    }
+
+    private static void ConfigurePreflightConnection(
+        SqliteConnection connection,
+        bool existing)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = existing
+            ? """
+                PRAGMA busy_timeout = 5000;
+                PRAGMA foreign_keys = ON;
+                PRAGMA query_only = ON;
+                """
+            : """
+                PRAGMA busy_timeout = 5000;
+                PRAGMA foreign_keys = ON;
+                """;
+        command.ExecuteNonQuery();
     }
 
     private static void ConfigureConnection(SqliteConnection connection)
@@ -4836,8 +5001,32 @@ public sealed partial class SqliteSessionStore :
 
     public void Dispose()
     {
-        // Connections are short-lived and disposed after each operation.
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            return;
+        }
+        using var poolIdentity = new SqliteConnection(_connectionString);
+        SqliteConnection.ClearPool(poolIdentity);
     }
+
+    private static LocalStateResetRequiredException ResetRequired(
+        LocalStateResetRequiredReason reason,
+        string message,
+        Exception? innerException = null) =>
+        new(reason, message, innerException);
+
+    private static int PrimarySqliteErrorCode(SqliteException exception) =>
+        exception.SqliteExtendedErrorCode & 0xff;
+
+    private static bool MustPropagateWithoutReset(SqliteException exception) =>
+        PrimarySqliteErrorCode(exception) is
+            5 or  // SQLITE_BUSY
+            6 or  // SQLITE_LOCKED
+            7 or  // SQLITE_NOMEM
+            8 or  // SQLITE_READONLY
+            10 or // SQLITE_IOERR
+            13 or // SQLITE_FULL
+            14;   // SQLITE_CANTOPEN
 
 }
 

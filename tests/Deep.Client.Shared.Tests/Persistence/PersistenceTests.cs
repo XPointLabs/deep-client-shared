@@ -58,6 +58,7 @@ public sealed class PersistenceTests
         try
         {
             using var store = new SqliteSessionStore(statePath);
+            await store.SetAsync("busy.lock", "held");
             var lockTask = Task.Run(async () =>
             {
                 try
@@ -67,7 +68,11 @@ public sealed class PersistenceTests
                     await using var transaction = connection.BeginTransaction();
                     await using var command = connection.CreateCommand();
                     command.Transaction = transaction;
-                    command.CommandText = "UPDATE schema_meta SET version = version WHERE id = 1;";
+                    command.CommandText = """
+                        UPDATE settings
+                        SET payload_json = payload_json
+                        WHERE key = 'busy.lock';
+                        """;
                     await command.ExecuteNonQueryAsync();
                     lockAcquired.TrySetResult();
                     await releaseLock.Task;
@@ -139,21 +144,7 @@ public sealed class PersistenceTests
     }
 
     [Fact]
-    public async Task LocalSchemaMigratorAppliesAllVersionsOnce()
-    {
-        var store = new InMemorySessionStore();
-        var migrator = new LocalSchemaMigrator(LocalSchemaMigrations.Default);
-
-        var version = await migrator.MigrateAsync(store);
-        var secondRunVersion = await migrator.MigrateAsync(store);
-
-        Assert.Equal(LocalSchemaMigrations.LatestVersion, version);
-        Assert.Equal(version, secondRunVersion);
-        Assert.Equal("sync-cursors", await store.GetSchemaValueAsync("schema.3"));
-    }
-
-    [Fact]
-    public async Task PersistentSessionStore_ReloadsConversationMessageAndSchemaState()
+    public async Task PersistentSessionStore_ReloadsConversationMessageAndSettingsState()
     {
         var statePath = Path.Combine(Path.GetTempPath(), $"deep-client-shared-{Guid.NewGuid():N}.json");
         try
@@ -182,8 +173,6 @@ public sealed class PersistenceTests
                 [new GroupMember(sender, GroupMemberRole.Admin, now)]));
             await store.AppendAsync(new Message(messageId, conversationId, sender, recipient, "hello", MessageDirection.Outgoing, MessageDeliveryState.Sent, now, []));
             await store.SetAsync("ui.theme", "ember");
-            await store.SetSchemaVersionAsync(3);
-            await store.SetSchemaValueAsync("schema.3", "sync-cursors");
 
             var recovered = new InMemorySessionStore(statePath);
             var conversation = await recovered.GetAsync(conversationId);
@@ -206,8 +195,6 @@ public sealed class PersistenceTests
             Assert.NotNull(recoveredGroup);
             Assert.Equal("Persisted Group", recoveredGroup!.Name);
             Assert.Equal("ember", await recovered.GetAsync<string>("ui.theme"));
-            Assert.Equal(3, await recovered.GetSchemaVersionAsync());
-            Assert.Equal("sync-cursors", await recovered.GetSchemaValueAsync("schema.3"));
             Assert.Single(messages);
             Assert.Equal("hello", messages[0].Body);
         }
@@ -218,7 +205,7 @@ public sealed class PersistenceTests
     }
 
     [Fact]
-    public async Task SqliteSessionStore_ReloadsConversationMessageAndSchemaState()
+    public async Task SqliteSessionStore_ReloadsConversationMessageAndSettingsState()
     {
         var statePath = Path.Combine(Path.GetTempPath(), $"deep-client-shared-{Guid.NewGuid():N}.db");
         try
@@ -239,8 +226,6 @@ public sealed class PersistenceTests
                 now));
             await store.AppendAsync(new Message(messageId, conversationId, sender, recipient, "hello-sqlite", MessageDirection.Outgoing, MessageDeliveryState.Sent, now, []));
             await store.SetAsync("ui.theme", "cinder");
-            await store.SetSchemaVersionAsync(7);
-            await store.SetSchemaValueAsync("schema.7", "sqlite-cursors");
 
             var recovered = new SqliteSessionStore(statePath);
             var conversation = await recovered.GetAsync(conversationId);
@@ -251,8 +236,6 @@ public sealed class PersistenceTests
             Assert.NotNull(recoveredMessage);
             Assert.Equal("hello-sqlite", recoveredMessage!.Body);
             Assert.Equal("cinder", await recovered.GetAsync<string>("ui.theme"));
-            Assert.Equal(7, await recovered.GetSchemaVersionAsync());
-            Assert.Equal("sqlite-cursors", await recovered.GetSchemaValueAsync("schema.7"));
         }
         finally
         {
@@ -261,18 +244,18 @@ public sealed class PersistenceTests
     }
 
     [Fact]
-    public async Task SqliteSessionStore_DoesNotInterpretSqlLikeKeyInputAsExecutableSql()
+    public async Task SqliteSessionStore_DoesNotInterpretSqlLikeSettingsKeyAsExecutableSql()
     {
-        var statePath = Path.Combine(Path.GetTempPath(), $"deep-client-shared-{Guid.NewGuid():N}.db");
+            var statePath = Path.Combine(Path.GetTempPath(), $"deep-client-shared-{Guid.NewGuid():N}.db");
         try
         {
             var store = new SqliteSessionStore(statePath);
-            const string maliciousKey = "schema.7'; DROP TABLE schema_values; --";
-            await store.SetSchemaValueAsync(maliciousKey, "safe");
-            await store.SetSchemaValueAsync("schema.safe", "still-there");
+            const string maliciousKey = "ui.theme'; DROP TABLE settings; --";
+            await store.SetAsync(maliciousKey, "safe");
+            await store.SetAsync("ui.safe", "still-there");
 
-            Assert.Equal("safe", await store.GetSchemaValueAsync(maliciousKey));
-            Assert.Equal("still-there", await store.GetSchemaValueAsync("schema.safe"));
+            Assert.Equal("safe", await store.GetAsync<string>(maliciousKey));
+            Assert.Equal("still-there", await store.GetAsync<string>("ui.safe"));
         }
         finally
         {
@@ -400,7 +383,7 @@ public sealed class PersistenceTests
             using var runtime = ClientRuntime.CreatePersistentForTests(statePath);
 
             Assert.Null(await runtime.Accounts.GetActiveAccountAsync());
-            Assert.Equal(LocalSchemaMigrations.LatestVersion, await runtime.Store.GetSchemaVersionAsync());
+            Assert.NotNull(runtime.Store);
         }
         finally
         {
@@ -781,10 +764,11 @@ public sealed class PersistenceTests
 
             var plaintextBytes = await File.ReadAllBytesAsync(sqlitePath);
 
-            var exception = Assert.Throws<InvalidOperationException>(
+            var exception = Assert.Throws<LocalStateResetRequiredException>(
                 () => new SqliteSessionStore(new SqliteSessionStoreOptions(sqlitePath, encryptionKey)));
 
-            Assert.Contains("configured SQLCipher key", exception.Message, StringComparison.Ordinal);
+            Assert.Equal(LocalStateResetRequiredReason.UnreadableOrWrongKey, exception.Reason);
+            Assert.IsType<SqliteException>(exception.InnerException);
             Assert.Equal(plaintextBytes, await File.ReadAllBytesAsync(sqlitePath));
             Assert.False(File.Exists(sqlitePath + ".encrypted-migration"));
             Assert.False(File.Exists(sqlitePath + ".plaintext-migration"));
@@ -813,10 +797,11 @@ public sealed class PersistenceTests
                 Assert.Equal("persisted", await reopened.GetAsync<string>("encryption.test"));
             }
 
-            var exception = Assert.Throws<InvalidOperationException>(
+            var exception = Assert.Throws<LocalStateResetRequiredException>(
                 () => new SqliteSessionStore(new SqliteSessionStoreOptions(sqlitePath, wrongEncryptionKey)));
 
-            Assert.Contains("configured SQLCipher key", exception.Message, StringComparison.Ordinal);
+            Assert.Equal(LocalStateResetRequiredReason.UnreadableOrWrongKey, exception.Reason);
+            Assert.IsType<SqliteException>(exception.InnerException);
         }
         finally
         {

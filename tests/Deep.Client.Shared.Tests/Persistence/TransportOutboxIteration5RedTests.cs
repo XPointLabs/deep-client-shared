@@ -14,7 +14,7 @@ public sealed class TransportOutboxIteration5RedTests
         DateTimeOffset.Parse("2026-07-19T00:00:00Z");
 
     [Fact]
-    public async Task ScopePurgeRemovesActiveOrphanAttemptsAndPreservesUnrelatedScope()
+    public async Task ExistingForeignKeyViolationRequiresResetAndPreservesRows()
     {
         var path = TempPath("active-orphan");
         try
@@ -28,18 +28,19 @@ public sealed class TransportOutboxIteration5RedTests
             }
             InsertActiveOrphan(path, target.AccountScope, 0xD3, 0xE3);
 
-            using (var store = new SqliteSessionStore(path))
-            {
-                await store.PurgeTransportOutboxScopeAsync(target.AccountScope);
-            }
+            var exception = Assert.Throws<LocalStateResetRequiredException>(
+                () => new SqliteSessionStore(path));
+            Assert.Equal(
+                LocalStateResetRequiredReason.InvalidCurrentSchema,
+                exception.Reason);
 
             using (var verify = Open(path))
             {
                 Assert.Equal(
-                    0L,
+                    1L,
                     ScopedCount(verify, "transport_outbox_items", target.AccountScope));
                 Assert.Equal(
-                    0L,
+                    2L,
                     ScopedCount(verify, "transport_outbox_attempts", target.AccountScope));
                 Assert.Equal(
                     1L,
@@ -48,18 +49,6 @@ public sealed class TransportOutboxIteration5RedTests
                     1L,
                     ScopedCount(verify, "transport_outbox_attempts", unrelated.AccountScope));
             }
-
-            using var restarted = new SqliteSessionStore(path);
-            Assert.Equal(
-                TransportOutboxReadResult.Missing,
-                (await restarted.ReadTransportOutboxAsync(
-                    target.AccountScope,
-                    target.LogicalId)).Result);
-            Assert.Equal(
-                TransportOutboxReadResult.Found,
-                (await restarted.ReadTransportOutboxAsync(
-                    unrelated.AccountScope,
-                    unrelated.LogicalId)).Result);
         }
         finally
         {

@@ -193,47 +193,6 @@ public sealed class IncomingMessageNotificationRepositoryTests
     }
 
     [Fact]
-    public async Task SqlitePhysicalMigrationDoesNotBackfillExistingMessages()
-    {
-        var statePath = NewSqlitePath();
-        try
-        {
-            using (var oldStore = new SqliteSessionStore(statePath))
-            {
-                var now = DateTimeOffset.UtcNow;
-                var account = SessionId.CreateNew();
-                var counterpart = SessionId.CreateNew();
-                var conversation = NewConversation(counterpart, now);
-                await oldStore.UpsertAsync(conversation);
-                await oldStore.AppendAsync(NewMessage(
-                    conversation.Id,
-                    counterpart,
-                    account,
-                    MessageDirection.Incoming,
-                    now));
-            }
-
-            await using (var connection = new SqliteConnection($"Data Source={statePath};Pooling=False"))
-            {
-                await connection.OpenAsync();
-                await using var command = connection.CreateCommand();
-                command.CommandText = """
-                    DROP TABLE incoming_message_notifications;
-                    PRAGMA user_version=6;
-                    """;
-                await command.ExecuteNonQueryAsync();
-            }
-
-            using var migrated = new SqliteSessionStore(statePath);
-            Assert.Empty(await migrated.ListPendingIncomingMessageNotificationIdsAsync(16));
-        }
-        finally
-        {
-            DeleteSqliteFiles(statePath);
-        }
-    }
-
-    [Fact]
     public async Task AccountPurgeClearsPendingIncomingMessageNotifications()
     {
         await ForEachStoreAsync(async store =>

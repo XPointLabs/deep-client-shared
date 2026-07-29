@@ -65,12 +65,19 @@ Use `deep-protocol` for protocol and crypto semantics. Do not recreate protocol 
   `tests/Deep.Client.Shared.Tests/Fixtures/push-signature-v2.golden.json`.
 - Release feature flags must reject stub-only launch-critical behavior.
 
-## Persistence Migration Rules
+## Local-State Baseline Rules
 
-- Add a migration test before changing schema or an explicitly approved local-state migration.
-- For an explicitly approved migration, never delete source state until the new store has been written and verified.
-- Legacy JSON/in-memory snapshots are not an approved local-state migration path.
-- Corruption handling should quarantine bad state where possible and expose diagnostics.
+- Before production launch, SQLite has one supported physical baseline:
+  application ID `DEEP`, schema version 10.
+- State is fresh only when its main database, `-wal`, and `-shm` are all absent.
+- Existing state must pass exact key, version, integrity, catalog, column,
+  foreign-key, and index attestation before runtime access.
+- Older, newer, unreadable, corrupt, or tampered state requires an explicit
+  local reset. Startup must not migrate, alter, backfill, import, repair,
+  quarantine, delete, or rewrite it.
+- Legacy JSON/in-memory snapshots are not an approved local-state import path.
+- Resource failures such as busy/locked, I/O, full, read-only, cannot-open, and
+  out-of-memory are operational errors, not reset authorization.
 
 ## Evidence Checklist
 

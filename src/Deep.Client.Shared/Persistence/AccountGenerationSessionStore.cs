@@ -337,19 +337,6 @@ internal class AccountGenerationSessionStore : ILocalSessionStore, IDisposable
 
     public Task PurgeAccountDataAsync(CancellationToken token = default) => Inner.PurgeAccountDataAsync(token);
 
-    public Task<int> GetSchemaVersionAsync(CancellationToken token = default) => Inner.GetSchemaVersionAsync(token);
-
-    public Task SetSchemaVersionAsync(int version, CancellationToken token = default) =>
-        Inner.SetSchemaVersionAsync(version, token);
-
-    public Task SetSchemaValueAsync(
-        string key,
-        string value,
-        CancellationToken token = default) => Inner.SetSchemaValueAsync(key, value, token);
-
-    public Task<string?> GetSchemaValueAsync(string key, CancellationToken token = default) =>
-        Inner.GetSchemaValueAsync(key, token);
-
     protected async Task MutateAsync(
         Func<CancellationToken, Task> mutation,
         CancellationToken token)

@@ -10,7 +10,11 @@ This library follows the Session clients at a domain boundary level:
 
 `Domain` contains immutable records for conversations, contacts, groups, messages, attachments, and settings.
 
-`Persistence` defines repository abstractions for local storage and schema migrations. `SqliteSessionStore` is the production path (with SQLCipher-compatible key hook), while `InMemorySessionStore` remains test/dev only.
+`Persistence` defines repository abstractions for local storage. `SqliteSessionStore`
+is the production path (with SQLCipher-compatible key hook), while
+`InMemorySessionStore` remains test/dev only. The production database has one
+physical baseline: application ID `DEEP` and schema version 10. There is no
+logical schema store and no local migration API.
 The dormant P14A boundary uses the existing settings table through the atomic,
 bounded, account-generation capability documented in
 [`P14A_ATOMIC_STAGING.md`](P14A_ATOMIC_STAGING.md); it remains staged,
@@ -41,7 +45,13 @@ E4 adds group admin/member-state lifecycle behavior into `ConversationService`: 
 - Local group sync publishes group state to member inbox storage and group messages to the group storage stream; `SessionStorageGroupSyncTransport` uses compat-service public namespaces for unsigned local e2e until the secure signed namespace layer is wired.
 - Attachments are metadata/pointer records: local plaintext handling and encrypted upload/download belong behind platform/service implementations.
 - Sync plans preserve the key Session ordering rule: group keys are requested last after group info and members.
-- Persistent startup opens only the configured SQLite state and applies the current local schema migrations.
+- Persistent startup treats state as fresh only when the main database, WAL,
+  and SHM files are all absent. Fresh state is created and attested as v10 in
+  one transaction. Existing state is opened only after non-pooled key preflight
+  and exact read-only attestation; runtime operations then use isolated pooled
+  connections. Unsupported, corrupt, keyed incorrectly, or schema-tampered
+  state raises `LocalStateResetRequiredException` and is never migrated,
+  repaired, quarantined, deleted, or rewritten by startup.
 - E3 call quality strategy computes rolling quality metrics and records explicit degradation diagnostics, then applies reconnect attempts before terminal failure.
 - E4 onboarding/recovery edge-cases are validated by runtime tests (restore flow, malformed Session ID guard, persistence across restart), and acceptance evidence is tracked in `docs/e4-acceptance-checklist.md`.
 - Full upstream Session account-linking restore semantics (network/profile fetch stage handling) remain a parity follow-up beyond current local deterministic restore flow.

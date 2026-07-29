@@ -160,8 +160,6 @@ public sealed class AccountDataPurgeTests
             []));
         await store.TryClaimAsync(counterpart, messageId, Digest, Now.AddDays(1));
         await store.SetAsync("account.test-setting", "old-account");
-        await store.SetSchemaVersionAsync(37);
-        await store.SetSchemaValueAsync("schema.37", "must-survive-account-purge");
 
         return new AccountState(account, counterpart, conversationId, groupId, messageId);
     }
@@ -182,8 +180,6 @@ public sealed class AccountDataPurgeTests
         Assert.Null(await ((IGroupRepository)store).GetAsync(oldState.GroupId));
         Assert.Null(await ((IMessageRepository)store).GetAsync(oldState.MessageId));
         Assert.Empty(await ToListAsync(((IMessageRepository)store).ListForConversationAsync(oldState.ConversationId)));
-        Assert.Equal(37, await store.GetSchemaVersionAsync());
-        Assert.Equal("must-survive-account-purge", await store.GetSchemaValueAsync("schema.37"));
 
         if (verifyReplayClaim)
         {

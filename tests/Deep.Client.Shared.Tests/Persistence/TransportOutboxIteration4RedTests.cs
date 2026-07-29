@@ -13,44 +13,7 @@ public sealed class TransportOutboxIteration4RedTests
         DateTimeOffset.Parse("2026-07-19T00:00:00Z");
 
     [Fact]
-    public void V8MigrationRejectsTriggerBeforeRenameAndKeepsRowsAndVersion()
-    {
-        var path = TempPath("v8-trigger");
-        try
-        {
-            CreateExactV8Fixture(path, populated: true);
-            using (var connection = Open(path))
-            {
-                Execute(connection, """
-                    CREATE TRIGGER hostile_v8_delete
-                    BEFORE DELETE ON transport_outbox_items
-                    BEGIN
-                        SELECT RAISE(IGNORE);
-                    END;
-                    """);
-            }
-
-            Assert.ThrowsAny<Exception>(() => new SqliteSessionStore(path));
-            using var verify = Open(path);
-            Assert.Equal(8L, Scalar(verify, "PRAGMA user_version;"));
-            Assert.Equal(1L, Scalar(verify, "SELECT COUNT(*) FROM transport_outbox_items;"));
-            Assert.Equal(
-                0L,
-                Scalar(
-                    verify,
-                    """
-                    SELECT COUNT(*) FROM sqlite_master
-                    WHERE type='table' AND name='transport_outbox_items_v8_recovery';
-                    """));
-        }
-        finally
-        {
-            DeleteSqliteFiles(path);
-        }
-    }
-
-    [Fact]
-    public void V9OpenRejectsUpdateTriggerOnActiveOutboxTable()
+    public void V10OpenRejectsUpdateTriggerOnActiveOutboxTable()
     {
         var path = TempPath("v9-update-trigger");
         try
@@ -77,111 +40,13 @@ public sealed class TransportOutboxIteration4RedTests
         }
     }
 
-    [Fact]
-    public void V9OpenRejectsRecoveryTriggerAndPreservesQuarantine()
-    {
-        var path = TempPath("v9-recovery-trigger");
-        try
-        {
-            CreateExactV8Fixture(path, populated: true);
-            using (var migrated = new SqliteSessionStore(path))
-            {
-            }
-            using (var connection = Open(path))
-            {
-                Execute(connection, """
-                    CREATE TRIGGER hostile_recovery_update
-                    AFTER UPDATE ON transport_outbox_items_v8_recovery
-                    BEGIN
-                        DELETE FROM transport_outbox_attempts_v8_recovery;
-                    END;
-                    """);
-            }
-
-            Assert.ThrowsAny<Exception>(() => new SqliteSessionStore(path));
-
-            using var verify = Open(path);
-            Assert.Equal(9L, Scalar(verify, "PRAGMA user_version;"));
-            Assert.Equal(
-                1L,
-                Scalar(verify, "SELECT COUNT(*) FROM transport_outbox_items_v8_recovery;"));
-            Assert.Equal(
-                1L,
-                Scalar(
-                    verify,
-                    "SELECT COUNT(*) FROM transport_outbox_attempts_v8_recovery;"));
-        }
-        finally
-        {
-            DeleteSqliteFiles(path);
-        }
-    }
-
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task PurgeRejectsRecoveryDeleteTriggerBeforeAnyMutation(bool afterDeleteCopy)
-    {
-        var path = TempPath(afterDeleteCopy ? "after-delete-copy" : "before-delete-ignore");
-        try
-        {
-            CreateExactV8Fixture(path, populated: true);
-            using var store = new SqliteSessionStore(path);
-            var active = Prepared(Scope(0xB1), Logical(0xD1), ciphertextBytes: 64);
-            Assert.Equal(
-                TransportOutboxCommitResult.Applied,
-                await store.PrepareTransportOutboxAsync(active));
-
-            using (var connection = Open(path))
-            {
-                Execute(connection, "CREATE TABLE hostile_copy(payload BLOB NOT NULL);");
-                Execute(
-                    connection,
-                    afterDeleteCopy
-                        ? """
-                            CREATE TRIGGER hostile_recovery_after_delete
-                            AFTER DELETE ON transport_outbox_items_v8_recovery
-                            BEGIN
-                                INSERT INTO hostile_copy(payload) VALUES (OLD.ciphertext_bundle);
-                            END;
-                            """
-                        : """
-                            CREATE TRIGGER hostile_recovery_before_delete
-                            BEFORE DELETE ON transport_outbox_items_v8_recovery
-                            BEGIN
-                                SELECT RAISE(IGNORE);
-                            END;
-                            """);
-            }
-
-            await Assert.ThrowsAnyAsync<Exception>(
-                () => afterDeleteCopy
-                    ? store.PurgeAccountDataAsync()
-                    : store.PurgeTransportOutboxScopeAsync(active.AccountScope));
-
-            using var verify = Open(path);
-            Assert.Equal(
-                1L,
-                Scalar(verify, "SELECT COUNT(*) FROM transport_outbox_items_v8_recovery;"));
-            Assert.Equal(
-                1L,
-                Scalar(verify, "SELECT COUNT(*) FROM transport_outbox_attempts_v8_recovery;"));
-            Assert.Equal(1L, Scalar(verify, "SELECT COUNT(*) FROM transport_outbox_items;"));
-            Assert.Equal(0L, Scalar(verify, "SELECT COUNT(*) FROM hostile_copy;"));
-        }
-        finally
-        {
-            DeleteSqliteFiles(path);
-        }
-    }
-
     [Theory]
     [InlineData("extra-unique")]
     [InlineData("extra-nonunique")]
     [InlineData("extra-expression")]
     [InlineData("extra-partial")]
     [InlineData("hidden-generated")]
-    public void V9OpenRejectsUnexpectedIndexesAndHiddenColumns(string corruption)
+    public void V10OpenRejectsUnexpectedIndexesAndHiddenColumns(string corruption)
     {
         var path = TempPath(corruption);
         try
@@ -222,56 +87,6 @@ public sealed class TransportOutboxIteration4RedTests
         }
     }
 
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task RecoveryOrphanFailsClosedAndPreservesActiveAndRecoveryRows(bool accountPurge)
-    {
-        var path = TempPath(accountPurge ? "orphan-account" : "orphan-scope");
-        try
-        {
-            CreateExactV8Fixture(path, populated: true);
-            using var store = new SqliteSessionStore(path);
-            var active = Prepared(Scope(0xB1), Logical(0xD2), ciphertextBytes: 64);
-            await store.PrepareTransportOutboxAsync(active);
-            using (var connection = Open(path))
-            {
-                Execute(connection, "PRAGMA foreign_keys=OFF;");
-                using var insert = connection.CreateCommand();
-                insert.CommandText = """
-                    INSERT INTO transport_outbox_attempts_v8_recovery (
-                        logical_id, attempt_id, state, transition_source,
-                        transition_reason, occurred_at, evidence)
-                    VALUES ($logicalId, $attemptId, 1, 2, 2, $occurredAt, X'');
-                    """;
-                insert.Parameters.AddWithValue("$logicalId", Bytes(16, 0xF1));
-                insert.Parameters.AddWithValue("$attemptId", Bytes(16, 0xF2));
-                insert.Parameters.AddWithValue(
-                    "$occurredAt",
-                    Now.AddMinutes(1).ToUnixTimeMilliseconds());
-                insert.ExecuteNonQuery();
-            }
-
-            await Assert.ThrowsAnyAsync<Exception>(
-                () => accountPurge
-                    ? store.PurgeAccountDataAsync()
-                    : store.PurgeTransportOutboxScopeAsync(active.AccountScope));
-
-            using var verify = Open(path);
-            Assert.Equal(
-                1L,
-                Scalar(verify, "SELECT COUNT(*) FROM transport_outbox_items_v8_recovery;"));
-            Assert.Equal(
-                2L,
-                Scalar(verify, "SELECT COUNT(*) FROM transport_outbox_attempts_v8_recovery;"));
-            Assert.Equal(1L, Scalar(verify, "SELECT COUNT(*) FROM transport_outbox_items;"));
-        }
-        finally
-        {
-            DeleteSqliteFiles(path);
-        }
-    }
-
     [Fact]
     public void ScopePurgeDeclaresSecureDeleteAndBoundedTruncateCheckpoint()
     {
@@ -302,7 +117,6 @@ public sealed class TransportOutboxIteration4RedTests
         var path = TempPath("busy-checkpoint");
         try
         {
-            CreateExactV8Fixture(path, populated: true);
             using var store = new SqliteSessionStore(path);
             var item = Prepared(Scope(0xB1), Logical(0xD2), ciphertextBytes: 4096);
             var unrelated = Prepared(Scope(0xD3), Logical(0xD4), ciphertextBytes: 4096);
@@ -320,12 +134,6 @@ public sealed class TransportOutboxIteration4RedTests
                 Scalar(
                     readerConnection,
                     "SELECT COUNT(*) FROM transport_outbox_items;"));
-            Assert.Equal(
-                1L,
-                Scalar(
-                    readerConnection,
-                    "SELECT COUNT(*) FROM transport_outbox_items_v8_recovery;"));
-
             var stopwatch = System.Diagnostics.Stopwatch.StartNew();
             await store.PurgeTransportOutboxScopeAsync(item.AccountScope);
             stopwatch.Stop();
@@ -348,16 +156,6 @@ public sealed class TransportOutboxIteration4RedTests
             await store.PurgeTransportOutboxScopeAsync(item.AccountScope);
             using (var verify = Open(path))
             {
-                Assert.Equal(
-                    0L,
-                    Scalar(
-                        verify,
-                        "SELECT COUNT(*) FROM transport_outbox_items_v8_recovery;"));
-                Assert.Equal(
-                    0L,
-                    Scalar(
-                        verify,
-                        "SELECT COUNT(*) FROM transport_outbox_attempts_v8_recovery;"));
                 Assert.Equal(
                     1L,
                     Scalar(verify, "SELECT COUNT(*) FROM transport_outbox_items;"));
@@ -610,87 +408,6 @@ public sealed class TransportOutboxIteration4RedTests
             Now,
             Now.AddHours(1),
             Now);
-
-    private static void CreateExactV8Fixture(string path, bool populated)
-    {
-        using var connection = Open(path);
-        Execute(connection, """
-            CREATE TABLE settings (
-                key TEXT PRIMARY KEY,
-                payload_json TEXT NOT NULL
-            );
-            CREATE TABLE transport_outbox_items (
-                account_scope BLOB NOT NULL,
-                logical_id BLOB NOT NULL PRIMARY KEY,
-                dedup_material BLOB NOT NULL,
-                ciphertext_bundle BLOB NOT NULL,
-                created_at INTEGER NOT NULL,
-                expires_at INTEGER NOT NULL,
-                not_before INTEGER NOT NULL,
-                state INTEGER NOT NULL,
-                revision INTEGER NOT NULL,
-                transition_source INTEGER NOT NULL,
-                transition_reason INTEGER NOT NULL,
-                transitioned_at INTEGER NOT NULL,
-                acknowledgement_evidence BLOB NULL
-            );
-            CREATE TABLE transport_outbox_attempts (
-                logical_id BLOB NOT NULL,
-                attempt_id BLOB NOT NULL,
-                state INTEGER NOT NULL,
-                transition_source INTEGER NOT NULL,
-                transition_reason INTEGER NOT NULL,
-                occurred_at INTEGER NOT NULL,
-                evidence BLOB NOT NULL,
-                PRIMARY KEY(logical_id, attempt_id),
-                FOREIGN KEY(logical_id)
-                    REFERENCES transport_outbox_items(logical_id) ON DELETE CASCADE
-            );
-            CREATE INDEX idx_transport_outbox_ready
-                ON transport_outbox_items(
-                    account_scope, state, not_before, expires_at, created_at);
-            CREATE INDEX idx_transport_outbox_expiry
-                ON transport_outbox_items(account_scope, expires_at, state);
-            PRAGMA user_version=8;
-            """);
-        if (!populated)
-        {
-            return;
-        }
-
-        using var item = connection.CreateCommand();
-        item.CommandText = """
-            INSERT INTO transport_outbox_items (
-                account_scope, logical_id, dedup_material, ciphertext_bundle,
-                created_at, expires_at, not_before, state, revision,
-                transition_source, transition_reason, transitioned_at,
-                acknowledgement_evidence)
-            VALUES (
-                $scope, $logicalId, $dedup, $ciphertext,
-                $createdAt, $expiresAt, $notBefore, 2, 2, 2, 2, $occurredAt, NULL);
-            """;
-        item.Parameters.AddWithValue("$scope", Scope(0xB1).ToArray());
-        item.Parameters.AddWithValue("$logicalId", Logical(0xB2).ToArray());
-        item.Parameters.AddWithValue("$dedup", Dedup(0xB3).ToArray());
-        item.Parameters.AddWithValue("$ciphertext", Bytes(64, 0xB4));
-        item.Parameters.AddWithValue("$createdAt", Now.ToUnixTimeMilliseconds());
-        item.Parameters.AddWithValue("$expiresAt", Now.AddHours(1).ToUnixTimeMilliseconds());
-        item.Parameters.AddWithValue("$notBefore", Now.ToUnixTimeMilliseconds());
-        item.Parameters.AddWithValue("$occurredAt", Now.AddMinutes(1).ToUnixTimeMilliseconds());
-        item.ExecuteNonQuery();
-
-        using var attempt = connection.CreateCommand();
-        attempt.CommandText = """
-            INSERT INTO transport_outbox_attempts (
-                logical_id, attempt_id, state, transition_source,
-                transition_reason, occurred_at, evidence)
-            VALUES ($logicalId, $attemptId, 1, 2, 2, $occurredAt, X'');
-            """;
-        attempt.Parameters.AddWithValue("$logicalId", Logical(0xB2).ToArray());
-        attempt.Parameters.AddWithValue("$attemptId", Attempt(0xB5).ToArray());
-        attempt.Parameters.AddWithValue("$occurredAt", Now.AddMinutes(1).ToUnixTimeMilliseconds());
-        attempt.ExecuteNonQuery();
-    }
 
     private static void Execute(SqliteConnection connection, string sql)
     {

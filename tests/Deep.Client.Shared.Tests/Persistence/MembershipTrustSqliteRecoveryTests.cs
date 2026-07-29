@@ -78,6 +78,14 @@ public sealed class MembershipTrustSqliteRecoveryTests
         }
         await database.MutateAsync(corruption);
 
+        if (corruption.EndsWith("-null", StringComparison.Ordinal))
+        {
+            var exception = Assert.Throws<LocalStateResetRequiredException>(
+                () => database.Open());
+            Assert.Equal(LocalStateResetRequiredReason.InvalidCurrentSchema, exception.Reason);
+            return;
+        }
+
         using var restarted = database.Open();
         var read = await restarted.ReadMembershipTrustAsync(
             "install:test",
@@ -101,6 +109,14 @@ public sealed class MembershipTrustSqliteRecoveryTests
                 null);
         }
         await database.MutateAsync(corruption);
+
+        if (corruption.EndsWith("-null", StringComparison.Ordinal))
+        {
+            var exception = Assert.Throws<LocalStateResetRequiredException>(
+                () => database.Open());
+            Assert.Equal(LocalStateResetRequiredReason.InvalidCurrentSchema, exception.Reason);
+            return;
+        }
 
         using var restarted = database.Open();
         var read = await restarted.ReadMembershipTrustClockAsync("install:test");
@@ -153,31 +169,6 @@ public sealed class MembershipTrustSqliteRecoveryTests
         {
             File.Delete(path);
         }
-    }
-
-    [Fact]
-    public async Task LogicalSchemaThreeToFour_PreservesExistingDomainRows()
-    {
-        await using var database = await TestDatabase.CreateAsync();
-        using (var store = database.Open())
-        {
-            await store.SetSchemaVersionAsync(3);
-            await store.SetSchemaValueAsync("existing.account", "preserved");
-            await store.SetSchemaValueAsync("existing.message", "preserved");
-            await store.SetSchemaValueAsync("existing.group", "preserved");
-
-            var migrator = new LocalSchemaMigrator(LocalSchemaMigrations.Default);
-            Assert.Equal(4, await migrator.MigrateAsync(store));
-            Assert.Equal("preserved", await store.GetSchemaValueAsync("existing.account"));
-            Assert.Equal("preserved", await store.GetSchemaValueAsync("existing.message"));
-            Assert.Equal("preserved", await store.GetSchemaValueAsync("existing.group"));
-        }
-
-        using var restarted = database.Open();
-        Assert.Equal(4, await restarted.GetSchemaVersionAsync());
-        Assert.Equal("preserved", await restarted.GetSchemaValueAsync("existing.account"));
-        Assert.Equal("preserved", await restarted.GetSchemaValueAsync("existing.message"));
-        Assert.Equal("preserved", await restarted.GetSchemaValueAsync("existing.group"));
     }
 
     private static MembershipTrustRecord Record(

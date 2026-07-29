@@ -95,7 +95,6 @@ public sealed class ClientRuntime : IDisposable
             new CompositeAccountGenerationLifecycle(mutationBarrier, Inbox, Messages));
         Sync = new SyncOrchestrator();
         Notifications = new NotificationPlanner();
-        Migrations = new LocalSchemaMigrator(LocalSchemaMigrations.Default);
     }
 
     public ILocalSessionStore Store { get; }
@@ -123,8 +122,6 @@ public sealed class ClientRuntime : IDisposable
     public SyncOrchestrator Sync { get; }
 
     public NotificationPlanner Notifications { get; }
-
-    public LocalSchemaMigrator Migrations { get; }
 
     public bool IsDisposed => Volatile.Read(ref disposed) != 0;
 
@@ -179,10 +176,6 @@ public sealed class ClientRuntime : IDisposable
         }
 
         var store = new SqliteSessionStore(new SqliteSessionStoreOptions(statePath, sqlCipherKey));
-        new LocalSchemaMigrator(LocalSchemaMigrations.Default)
-            .MigrateAsync(store)
-            .GetAwaiter()
-            .GetResult();
 
         var runtimeStore = storeDecorator?.Invoke(store) ?? store;
 

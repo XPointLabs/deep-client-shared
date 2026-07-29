@@ -112,7 +112,7 @@ public sealed class MessageSyncRepositoryTests
                 connection.Open();
                 using var versionCommand = connection.CreateCommand();
                 versionCommand.CommandText = "PRAGMA user_version;";
-                Assert.Equal(9L, (long)versionCommand.ExecuteScalar()!);
+                Assert.Equal(10L, (long)versionCommand.ExecuteScalar()!);
 
                 using var columnsCommand = connection.CreateCommand();
                 columnsCommand.CommandText = "PRAGMA table_info(messages);";
@@ -138,73 +138,6 @@ public sealed class MessageSyncRepositoryTests
                 Assert.Contains("idx_messages_self_echo", indexes);
                 Assert.Contains("idx_messages_pending_outgoing", indexes);
                 Assert.Contains("idx_messages_unread", indexes);
-            }
-        }
-        finally
-        {
-            DeleteSqliteFiles(statePath);
-        }
-    }
-
-    [Fact]
-    public async Task SqliteStore_UpgradesVersion4MessagesAndBackfillsSyncKeys()
-    {
-        var statePath = NewSqlitePath();
-        var account = SessionId.CreateNew();
-        var conversationId = ConversationId.ForOneToOne(account);
-        var legacyMessage = new Message(
-            MessageId.NewId(),
-            conversationId,
-            account,
-            account,
-            "legacy pending",
-            MessageDirection.Outgoing,
-            MessageDeliveryState.Failed,
-            Now,
-            [],
-            ServerHash: "legacy-server-hash");
-        try
-        {
-            using (var connection = new SqliteConnection($"Data Source={statePath};Pooling=False"))
-            {
-                connection.Open();
-                using var command = connection.CreateCommand();
-                command.CommandText = """
-                    CREATE TABLE messages (
-                        id TEXT PRIMARY KEY,
-                        conversation_id TEXT NOT NULL,
-                        created_at INTEGER NOT NULL,
-                        direction INTEGER NOT NULL,
-                        delivery_state INTEGER NOT NULL,
-                        expires_at TEXT NULL,
-                        payload_json TEXT NOT NULL);
-                    INSERT INTO messages (
-                        id, conversation_id, created_at, direction, delivery_state, expires_at, payload_json)
-                    VALUES (
-                        $id, $conversationId, $createdAt, $direction, $deliveryState, NULL, $payload);
-                    PRAGMA user_version=4;
-                    """;
-                command.Parameters.AddWithValue("$id", legacyMessage.Id.Value);
-                command.Parameters.AddWithValue("$conversationId", legacyMessage.ConversationId.Value);
-                command.Parameters.AddWithValue("$createdAt", legacyMessage.CreatedAt.ToUnixTimeMilliseconds());
-                command.Parameters.AddWithValue("$direction", (int)legacyMessage.Direction);
-                command.Parameters.AddWithValue("$deliveryState", (int)legacyMessage.DeliveryState);
-                command.Parameters.AddWithValue(
-                    "$payload",
-                    JsonSerializer.Serialize(legacyMessage, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
-                command.ExecuteNonQuery();
-            }
-
-            using (var store = new SqliteSessionStore(statePath))
-            {
-                Assert.True(await store.ContainsServerHashAsync(conversationId, legacyMessage.ServerHash!));
-                Assert.True(await store.ContainsMatchingSelfOutgoingAsync(
-                    conversationId,
-                    account,
-                    legacyMessage.CreatedAt,
-                    legacyMessage.Body,
-                    legacyMessage.Attachments));
-                Assert.Equal(legacyMessage.Id, Assert.Single(await store.ListPendingOutgoingAsync(account)).Id);
             }
         }
         finally

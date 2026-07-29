@@ -292,8 +292,6 @@ public sealed partial class SqliteSessionStore
             EnableSqliteSecureDelete(connection);
             using var transaction = connection.BeginTransaction(deferred: false);
             ValidateTransportOutboxSchema(connection, transaction);
-            var hasRecoveryTables =
-                ValidateTransportOutboxRecoveryTablesIfPresent(connection, transaction);
             using (var active = connection.CreateCommand())
             {
                 active.Transaction = transaction;
@@ -305,22 +303,6 @@ public sealed partial class SqliteSessionStore
                     """;
                 active.Parameters.AddWithValue("$scope", accountScope.ToArray());
                 active.ExecuteNonQuery();
-            }
-            if (hasRecoveryTables)
-            {
-                using var recovery = connection.CreateCommand();
-                recovery.Transaction = transaction;
-                recovery.CommandText = """
-                    DELETE FROM transport_outbox_attempts_v8_recovery
-                    WHERE logical_id IN (
-                        SELECT logical_id
-                        FROM transport_outbox_items_v8_recovery
-                        WHERE account_scope = $scope);
-                    DELETE FROM transport_outbox_items_v8_recovery
-                    WHERE account_scope = $scope;
-                    """;
-                recovery.Parameters.AddWithValue("$scope", accountScope.ToArray());
-                recovery.ExecuteNonQuery();
             }
             cancellationToken.ThrowIfCancellationRequested();
             transaction.Commit();

@@ -118,10 +118,13 @@ Self-host import accepts a bounded canonical raw signature envelope, not trusted
 P04 model objects, and is restricted to the independent
 `install:self-hosted:` profile namespace.
 
-Logical local schema migration `3 -> 4` adds installation trust metadata without
-deleting account, message, or group state. Account sign-out intentionally
-preserves trust profiles. Rollback disables P07 and leaves the tables dormant;
-it does not delete them or silently activate legacy bootstrap.
+Membership trust tables are part of the single physical v10 local-state
+baseline. They are created only with a wholly fresh database and are never
+added, altered, or backfilled on open. Any older or structurally incompatible
+database requires an explicit local reset. Account sign-out intentionally
+preserves trust profiles inside an already attested v10 database. Disabling P07
+leaves those baseline tables dormant; it does not delete them or activate
+legacy bootstrap.
 
 Remaining blockers include an approved production signature profile and
 external review, signed live bootstrap/checkpoints, P06/P07B source policy,

@@ -430,65 +430,6 @@ public sealed class TransportOutboxRepositoryContractTests
     }
 
     [Fact]
-    public async Task SqliteMigratesPopulatedV7WithoutTouchingExistingRowsAndRejectsNewerSchema()
-    {
-        var path = TempPath("migration");
-        try
-        {
-            using (var connection = new SqliteConnection($"Data Source={path}"))
-            {
-                connection.Open();
-                using var command = connection.CreateCommand();
-                command.CommandText = """
-                    CREATE TABLE settings (
-                        key TEXT PRIMARY KEY,
-                        payload_json TEXT NOT NULL
-                    );
-                    INSERT INTO settings(key, payload_json)
-                    VALUES ('legacy.marker', '"preserved"');
-                    PRAGMA user_version=7;
-                    """;
-                command.ExecuteNonQuery();
-            }
-
-            using (var store = new SqliteSessionStore(path))
-            {
-                Assert.Equal("preserved", await store.GetAsync<string>("legacy.marker"));
-            }
-            using (var connection = new SqliteConnection($"Data Source={path}"))
-            {
-                connection.Open();
-                using var command = connection.CreateCommand();
-                command.CommandText = """
-                    SELECT
-                        (SELECT user_version FROM pragma_user_version),
-                        (SELECT payload_json FROM settings WHERE key='legacy.marker'),
-                        (SELECT COUNT(*) FROM sqlite_master
-                            WHERE type='table' AND name='transport_outbox_items');
-                    """;
-                using var reader = command.ExecuteReader();
-                Assert.True(reader.Read());
-                Assert.Equal(9, reader.GetInt32(0));
-                Assert.Equal("\"preserved\"", reader.GetString(1));
-                Assert.Equal(1, reader.GetInt32(2));
-            }
-
-            using (var connection = new SqliteConnection($"Data Source={path}"))
-            {
-                connection.Open();
-                using var command = connection.CreateCommand();
-                command.CommandText = "PRAGMA user_version=10;";
-                command.ExecuteNonQuery();
-            }
-            Assert.Throws<InvalidOperationException>(() => new SqliteSessionStore(path));
-        }
-        finally
-        {
-            DeleteSqliteFiles(path);
-        }
-    }
-
-    [Fact]
     public async Task SqliteRejectsOversizedPersistedBlobBeforeIdempotencyDecision()
     {
         var path = TempPath("corrupt");

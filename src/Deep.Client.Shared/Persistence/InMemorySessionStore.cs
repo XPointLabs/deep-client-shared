@@ -23,7 +23,6 @@ public sealed partial class InMemorySessionStore :
     private readonly ConcurrentDictionary<string, Group> groups = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, Message> messages = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string> settings = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, string> schemaValues = new(StringComparer.Ordinal);
     private readonly Dictionary<ReplayClaimKey, ReplayClaim> replayClaims = [];
     private readonly Dictionary<InboxScopeKey, string> inboxCursors = [];
     private readonly Dictionary<InboxItemKey, InboxItemState> inboxItems = [];
@@ -38,7 +37,6 @@ public sealed partial class InMemorySessionStore :
     private readonly Action<MembershipTrustCommitFaultPoint>? membershipTrustFaultInjector;
     private long nextInboxSequence;
     private long nextIncomingMessageNotificationSequence;
-    private int schemaVersion;
 
     private const int ReplayPruneBatchSize = 256;
 
@@ -994,26 +992,6 @@ public sealed partial class InMemorySessionStore :
         return Task.CompletedTask;
     }
 
-    public Task<int> GetSchemaVersionAsync(CancellationToken cancellationToken = default) =>
-        Task.FromResult(schemaVersion);
-
-    public Task SetSchemaVersionAsync(int version, CancellationToken cancellationToken = default)
-    {
-        schemaVersion = version;
-        PersistState();
-        return Task.CompletedTask;
-    }
-
-    public Task SetSchemaValueAsync(string key, string value, CancellationToken cancellationToken = default)
-    {
-        schemaValues[key] = value;
-        PersistState();
-        return Task.CompletedTask;
-    }
-
-    public Task<string?> GetSchemaValueAsync(string key, CancellationToken cancellationToken = default) =>
-        Task.FromResult(schemaValues.GetValueOrDefault(key));
-
     public Task<MembershipTrustCommitResult> CommitMembershipTrustAsync(
         MembershipTrustRecord record,
         ulong? expectedHeadRevision,
@@ -1848,8 +1826,6 @@ public sealed partial class InMemorySessionStore :
                     [],
                     [],
                     [],
-                    schemaValues.OrderBy(static item => item.Key).ToArray(),
-                    schemaVersion,
                     MembershipTrustRecords: MembershipTrustRecordSnapshots(),
                     MembershipTrustHeads: MembershipTrustHeadSnapshots(),
                     MembershipTrustClocks: MembershipTrustClockSnapshots(),
@@ -1911,8 +1887,6 @@ public sealed partial class InMemorySessionStore :
             return;
         }
 
-        schemaVersion = snapshot.SchemaVersion;
-
         foreach (var conversation in snapshot.Conversations)
         {
             conversations[conversation.Id.Value] = conversation;
@@ -1936,11 +1910,6 @@ public sealed partial class InMemorySessionStore :
         foreach (var setting in snapshot.Settings)
         {
             settings[setting.Key] = setting.Value;
-        }
-
-        foreach (var schemaValue in snapshot.SchemaValues)
-        {
-            schemaValues[schemaValue.Key] = schemaValue.Value;
         }
 
         foreach (var replayClaim in snapshot.ReplayClaims ?? [])
@@ -2047,8 +2016,6 @@ public sealed partial class InMemorySessionStore :
                 groups.Values.OrderBy(item => item.Name).ToArray(),
                 messages.Values.OrderBy(item => item.CreatedAt).ToArray(),
                 settings.OrderBy(item => item.Key).ToArray(),
-                schemaValues.OrderBy(item => item.Key).ToArray(),
-                schemaVersion,
                 replayClaimSnapshots,
                 inboxCursorSnapshots,
                 inboxItemSnapshots,
@@ -2120,8 +2087,6 @@ public sealed partial class InMemorySessionStore :
         IReadOnlyList<Group> Groups,
         IReadOnlyList<Message> Messages,
         IReadOnlyList<KeyValuePair<string, string>> Settings,
-        IReadOnlyList<KeyValuePair<string, string>> SchemaValues,
-        int SchemaVersion,
         IReadOnlyList<ReplayClaimSnapshot>? ReplayClaims = null,
         IReadOnlyList<InboxCursorSnapshot>? InboxCursors = null,
         IReadOnlyList<InboxItemSnapshot>? InboxItems = null,

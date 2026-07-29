@@ -51,8 +51,8 @@ public sealed class ConversationServiceTests
         var statePath = Path.Combine(Path.GetTempPath(), $"deep-contact-{Guid.NewGuid():N}.db");
         try
         {
-            var store = new SqliteSessionStore(statePath);
-            var runtime = ClientRuntime.CreatePersistentForTests(
+            using var store = new SqliteSessionStore(statePath);
+            using var runtime = ClientRuntime.CreatePersistentForTests(
                 statePath,
                 clock: new FrozenClock(DateTimeOffset.Parse("2026-05-28T00:00:00Z")));
             var contactId = SessionId.Parse("05" + new string('2', 64));
@@ -60,7 +60,7 @@ public sealed class ConversationServiceTests
             await runtime.Conversations.GetOrCreateOneToOneAsync(contactId, "Initial", approve: true);
             await runtime.Conversations.UpdateContactDisplayNameAsync(contactId, "SQLite Name");
 
-            var reopened = new SqliteSessionStore(statePath);
+            using var reopened = new SqliteSessionStore(statePath);
             var persistedContact = await ((IContactRepository)reopened).GetAsync(contactId);
             var persistedConversation = await ((IConversationRepository)reopened).GetAsync(ConversationId.ForOneToOne(contactId));
 
@@ -70,7 +70,14 @@ public sealed class ConversationServiceTests
         }
         finally
         {
-            File.Delete(statePath);
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            foreach (var candidate in new[] { statePath, statePath + "-wal", statePath + "-shm" })
+            {
+                if (File.Exists(candidate))
+                {
+                    File.Delete(candidate);
+                }
+            }
         }
     }
 

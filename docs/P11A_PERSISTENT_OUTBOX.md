@@ -39,8 +39,8 @@ Ready-list admission includes only `Prepared` and explicitly `Accepted` items
 and excludes items whose bounded attempt budget is exhausted before ordering
 and `LIMIT`. A persisted `Attempted` item is outcome-unknown: adapter dispatch
 may have happened, so it is quarantined from automatic redispatch across
-process restart until expiry. This uses the existing v9 state model and requires
-no schema migration.
+process restart until expiry. This uses the v10 single-baseline state model and
+has no migration path.
 
 Each external execution receives the smallest of the dispatcher timeout, the
 executor's declared bound, and the item lifetime remaining immediately before
@@ -173,50 +173,25 @@ admission quota. P11B may replace that read with a bounded streaming format,
 but P11A does not add an arbitrary quota that could reject snapshots the same
 store just wrote or interfere with unrelated persisted domains.
 
-## Migration and rollback window
+## Single-baseline local state
 
-P11A moves the physical SQLite schema from v7 to v9. A v7 database creates the
-current composite-scope outbox tables while preserving unrelated rows. The
-unpublished v8 draft lacked acknowledgement time and exact latest-transition
-identity, so its rows cannot be upgraded by fabricating security metadata.
-Empty v8 outbox tables are replaced transactionally. Non-empty v8 tables are
-renamed to deterministic `transport_outbox_*_v8_recovery` quarantine tables and
-empty v9 tables are created in the same transaction. Recovery-table name
-conflicts or incompatible v8 layouts fail closed and leave version and rows
-unchanged. Databases newer than v9 fail closed.
+The outbox tables are part of physical schema v10 and are created only with a
+wholly fresh local database. There is no v7/v8/v9 upgrade, quarantine, recovery
+table, import, or rollback-in-place path. Any other version, any recovery-era
+object name, or any structural mismatch raises the explicit local-reset
+requirement without changing the database or its sidecars.
 
-Migration attests the exact legacy table, foreign-key, and optional-index
-layouts before any rename or drop. A same-name index owned by another table or
-with a different key order is hostile state, not an index to replace. Row
-presence uses a bounded `EXISTS` probe. At v9 open, both required indexes are
-attested as non-unique, non-partial indexes owned by the item table with their
-exact ordered keys. The attempts foreign key must be one two-column composite
-constraint in account-scope/logical-ID order with `NO ACTION` update,
-`CASCADE` delete, and `NONE` match semantics.
+Every existing open attests application ID and version, SQLite integrity and
+foreign keys, the exact catalog object set, ordered `table_xinfo` columns and
+defaults, the composite attempts foreign key, and every primary-key and named
+index through `index_xinfo`. Additional tables, indexes, views, triggers,
+hidden/generated columns, changed collation/order, and missing outbox objects
+all fail closed before runtime access.
 
-Schema attestation uses `table_xinfo`, rejects hidden or generated columns, and
-enumerates the complete index set. Only the exact primary-key autoindexes and,
-for the active item table, the two named ordered indexes are accepted.
-Additional unique, non-unique, partial, expression, collation-altered, or
-descending indexes fail closed. Active, v8, and quarantine outbox tables must
-have no triggers of any timing or operation; this is checked before migration,
-open, and purge so a trigger cannot suppress, redirect, copy, or mutate a
-delete.
-
-Quarantine does not exempt legacy ciphertext from the privacy lifecycle.
-Scope purge first validates the active and recovery objects, explicitly deletes
-active attempts before active items, then deletes legacy attempts by joining
-their logical IDs through the scoped recovery item rows and deletes those items
-in one transaction. The explicit active-attempt delete removes scoped orphan
-evidence that a database writer could otherwise leave behind with foreign keys
-disabled. Full account purge uses
-the existing secure-delete transaction and removes every recovery attempt and
-item before the active account tables. Missing recovery tables are normal;
-partial, view-backed, or schema-incompatible recovery objects fail closed
-before any active or recovery row is deleted. Recovery purge additionally
-runs a bounded foreign-key integrity probe before the first delete. An orphaned
-attempt therefore preserves all active and recovery rows for forensic
-inspection, and the probe does not materialize ciphertext.
+Scope purge operates only on an already attested v10 schema and explicitly
+deletes active attempts before active items. An externally tampered database,
+including orphan attempts written with foreign keys disabled, is rejected at
+the next store open rather than repaired by purge.
 
 Scope purge enables SQLite `secure_delete` before its transaction and attempts
 a best-effort `TRUNCATE` WAL checkpoint after commit with zero lock-wait
@@ -238,7 +213,7 @@ The feature remains disabled in both default profiles. Runtime composition is
 available only with an explicit external killable executor; the current direct
 and routed storage transports do not implement that process boundary or the
 opaque producer/receipt contract yet.
-During the declared rollback window, an older binary may open only a copied
-pre-migration database. The authoritative v9 file must not be opened by an older writer.
-Operational rollback therefore restores the pre-migration file backup, never
-edits `user_version` and never drops or renames P11A tables in place.
+Operational rollback never edits `user_version` and never drops or renames
+P11A tables in place. A binary that does not support the v10 baseline cannot
+open the authoritative local-state file; pre-production rollback requires an
+explicit reset.
