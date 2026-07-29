@@ -5,47 +5,47 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
-$vendorRoot = Join-Path $repositoryRoot "vendor\p10b3"
+$vendorRoot = Join-Path $repositoryRoot "vendor\p10i"
 $manifestPath = Join-Path $vendorRoot "package-provenance.json"
-$protocolVersion = "0.3.0-p10b3.60ce2e3"
-$carrierVersion = "0.2.0-p10b3.60ce2e3"
+$protocolVersion = "0.3.0-p10i.a9b7a10"
+$carrierVersion = "0.2.0-p10i.a9b7a10"
 $expectedPackages = @{
     "Deep.Protocol" = @{
         Version = $protocolVersion
-        Bytes = 149753
-        Sha256 = "588a889f362a618bd06b8277fd4afc8b6c64ec37797f4cdf291af1865f0fd779"
-        Source = "60ce2e3a5140f245d6bcfecf60fa456c26ffe730"
+        Bytes = 153855
+        Sha256 = "925106e6098fe03a9fc247c5be519a13783318bb349b3b8f3cebaa299b8d0a78"
+        Source = "a9b7a10a555758d4b2e30707a70d271f010b6c30"
     }
     "Deep.Protocol.Abstractions" = @{
         Version = $protocolVersion
-        Bytes = 24952
-        Sha256 = "af23f03aade18ee726d5a6345e2a613c91fbea0bf62d3d0431dd629062e603bd"
-        Source = "60ce2e3a5140f245d6bcfecf60fa456c26ffe730"
+        Bytes = 25666
+        Sha256 = "0daa36393ff1e048186ae90883d7e5aaef18bab345e7c1219fa770a1e17776a6"
+        Source = "a9b7a10a555758d4b2e30707a70d271f010b6c30"
     }
     "Deep.Protocol.MembershipRoutes" = @{
         Version = $protocolVersion
-        Bytes = 12871
-        Sha256 = "16f4a0dd0c33461d85ed15bf69268e4b78b70617c059aa60d3b662d922155b96"
-        Source = "60ce2e3a5140f245d6bcfecf60fa456c26ffe730"
+        Bytes = 13280
+        Sha256 = "cb7cf4b4319349fb8eea81ea700b411f6b3d81ba580aef6a44c4dd141f6dee7e"
+        Source = "a9b7a10a555758d4b2e30707a70d271f010b6c30"
     }
     "Deep.Protocol.ProfileCarrier" = @{
         Version = $carrierVersion
-        Bytes = 28902
-        Sha256 = "e2d03040daaf7c7fe29952db3cfbc3227fb9f0da42740b5f57f65a02ae8118a2"
-        Source = "dfb182d65d3e8d3ee44a2246ae94c68159bc692d"
+        Bytes = 28904
+        Sha256 = "ccae562846602d99115e2de75ddf5b9e3290d17461a8eaa6a9ac0860b231da31"
+        Source = "a9b7a10a555758d4b2e30707a70d271f010b6c30"
     }
     "Deep.Protocol.Protobuf" = @{
         Version = $protocolVersion
-        Bytes = 50213
-        Sha256 = "ec5478d4ebc03fba3a97a4e0675b0fbdac4bd43c4503ed39033e1b6e469f1250"
-        Source = "60ce2e3a5140f245d6bcfecf60fa456c26ffe730"
+        Bytes = 51186
+        Sha256 = "5583ede034a85cf514840c8db325a4cffb7cdb0ab840af8c6df7d34fb0c1bade"
+        Source = "a9b7a10a555758d4b2e30707a70d271f010b6c30"
     }
 }
 
 function Assert-Equal {
     param([string]$Expected, [string]$Actual, [string]$Label)
     if ($Expected -ne $Actual) {
-        throw "P10B3 dependency gate: $Label differs."
+        throw "P10I dependency gate: $Label differs."
     }
 }
 
@@ -55,18 +55,18 @@ function Get-Sha256 {
 }
 
 $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-Assert-Equal "deep-client-p10b3-offline-package-set.v1" `
+Assert-Equal "deep-client-p10i-offline-package-set.v1" `
     ([string]$manifest.schema) "manifest schema"
-Assert-Equal "60ce2e3a5140f245d6bcfecf60fa456c26ffe730" `
+Assert-Equal "a9b7a10a555758d4b2e30707a70d271f010b6c30" `
     ([string]$manifest.protocolSourceCommit) "protocol source"
-Assert-Equal "dfb182d65d3e8d3ee44a2246ae94c68159bc692d" `
+Assert-Equal "a9b7a10a555758d4b2e30707a70d271f010b6c30" `
     ([string]$manifest.profileCarrierSourceCommit) "carrier source"
 if ($manifest.packages.Count -ne 5) {
-    throw "P10B3 dependency gate: the exact package count differs."
+    throw "P10I dependency gate: the exact package count differs."
 }
 foreach ($package in $manifest.packages) {
     if (-not $expectedPackages.ContainsKey([string]$package.id)) {
-        throw "P10B3 dependency gate: an unexpected package id is present."
+        throw "P10I dependency gate: an unexpected package id is present."
     }
     $expected = $expectedPackages[[string]$package.id]
     $path = Join-Path $vendorRoot $package.file
@@ -93,7 +93,7 @@ foreach ($package in $manifest.packages) {
             $_.FullName -eq "$($package.id).nuspec"
         })
         if ($nuspec.Count -ne 1) {
-            throw "P10B3 dependency gate: $($package.id) nuspec identity differs."
+            throw "P10I dependency gate: $($package.id) nuspec identity differs."
         }
         $reader = [IO.StreamReader]::new($nuspec[0].Open())
         try {
@@ -116,7 +116,7 @@ foreach ($package in $manifest.packages) {
     }
 }
 if ($expectedPackages.Count -ne $manifest.packages.Count) {
-    throw "P10B3 dependency gate: package identity set differs."
+    throw "P10I dependency gate: package identity set differs."
 }
 
 $project = Get-Content -LiteralPath (Join-Path $repositoryRoot `
@@ -127,11 +127,11 @@ foreach ($expected in @(
     "Deep.Protocol.ProfileCarrier`" Version=`"[$carrierVersion]"
 )) {
     if ($project.IndexOf($expected, [StringComparison]::Ordinal) -lt 0) {
-        throw "P10B3 dependency gate: an exact project package pin is missing."
+        throw "P10I dependency gate: an exact project package pin is missing."
     }
 }
 if ($project.IndexOf("ProjectReference", [StringComparison]::OrdinalIgnoreCase) -ge 0) {
-    throw "P10B3 dependency gate: project-reference substitution is forbidden."
+    throw "P10I dependency gate: project-reference substitution is forbidden."
 }
 
 foreach ($relative in @(
@@ -153,10 +153,10 @@ foreach ($relative in @(
 
 $config = Get-Content -LiteralPath (Join-Path $repositoryRoot "NuGet.Config") -Raw
 if ($config.IndexOf("<clear", [StringComparison]::Ordinal) -lt 0 -or
-    $config.IndexOf("vendor\p10b3\packages", [StringComparison]::Ordinal) -lt 0 -or
+    $config.IndexOf("vendor\p10i\packages", [StringComparison]::Ordinal) -lt 0 -or
     $config.IndexOf("http://", [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
     $config.IndexOf("https://", [StringComparison]::OrdinalIgnoreCase) -ge 0) {
-    throw "P10B3 dependency gate: NuGet sources are not exact and local-only."
+    throw "P10I dependency gate: NuGet sources are not exact and local-only."
 }
 
-Write-Output "P10B3 dependency gate PASS"
+Write-Output "P10I dependency gate PASS"

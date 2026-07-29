@@ -7,19 +7,19 @@ namespace Deep.Client.Shared.Tests.Services;
 
 public sealed class P14A2B1ActivationTrustRebindTests
 {
-    private const string AcceptedVersion = "0.2.0-p10b3.60ce2e3";
-    private const string AcceptedSource = "dfb182d65d3e8d3ee44a2246ae94c68159bc692d";
+    private const string AcceptedVersion = "0.2.0-p10i.a9b7a10";
+    private const string AcceptedSource = "a9b7a10a555758d4b2e30707a70d271f010b6c30";
     private const string AcceptedSha256 =
-        "e2d03040daaf7c7fe29952db3cfbc3227fb9f0da42740b5f57f65a02ae8118a2";
+        "ccae562846602d99115e2de75ddf5b9e3290d17461a8eaa6a9ac0860b231da31";
     private const string AcceptedContentHash =
-        "MuaiHUicMF1VRmh/4t3bZ7d23tl/X1oIyZsveSQ4pgwFhBKB9l4AJjiHGYmlszpteyywWyI5ZGZ44urvaHB/QQ==";
+        "4uQRq3xtPKqsonKLso0Wagv2GXQJAN2TC0Sf4Gjkb/+/H0anSTjGb4YFlYXYFC0bPIyYqV1zzoBghdVzh1+IjQ==";
     private const string OldVersion = "0.1.0-p14.faa598f";
 
     [Fact]
     public void AcceptedCarrierIsTheOnlyCarrierInTheOfflineClosure()
     {
         var root = P14A2PackageAndStaticGateTests.RepositoryRoot();
-        var vendor = Path.Combine(root, "vendor", "p10b3");
+        var vendor = Path.Combine(root, "vendor", "p10i");
         var packageDirectory = Path.Combine(vendor, "packages");
         var acceptedFile = $"Deep.Protocol.ProfileCarrier.{AcceptedVersion}.nupkg";
         var packages = Directory.GetFiles(
@@ -31,7 +31,7 @@ public sealed class P14A2B1ActivationTrustRebindTests
         Assert.Equal(new[] { acceptedFile }, packages);
 
         var packagePath = Path.Combine(packageDirectory, acceptedFile);
-        Assert.Equal(28_902, new FileInfo(packagePath).Length);
+        Assert.Equal(28_904, new FileInfo(packagePath).Length);
         Assert.Equal(AcceptedSha256, Sha256(packagePath));
         using var sha512 = SHA512.Create();
         using var packageStream = File.OpenRead(packagePath);
@@ -87,7 +87,7 @@ public sealed class P14A2B1ActivationTrustRebindTests
         var manifestPath = Path.Combine(
             root,
             "vendor",
-            "p10b3",
+            "p10i",
             "package-provenance.json");
         using var manifest = JsonDocument.Parse(File.ReadAllBytes(manifestPath));
         var value = manifest.RootElement;

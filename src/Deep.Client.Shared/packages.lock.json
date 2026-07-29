@@ -4,31 +4,31 @@
     "net10.0": {
       "Deep.Protocol": {
         "type": "Direct",
-        "requested": "[0.3.0-p10b3.60ce2e3, 0.3.0-p10b3.60ce2e3]",
-        "resolved": "0.3.0-p10b3.60ce2e3",
-        "contentHash": "t9K7qzSWL63+qjkH0BH9Mz+6HEui6Dq6eV8FiaFhslGe5nFQcfjlQqWq5trTSXF4td4YLUCbtcz5TCyt2GeNcw==",
+        "requested": "[0.3.0-p10i.a9b7a10, 0.3.0-p10i.a9b7a10]",
+        "resolved": "0.3.0-p10i.a9b7a10",
+        "contentHash": "Wp5hUJKUTmoJcC2NTJmbQR8SlUXhOk8Cuz2QcgCQv+R9a+Ll616yVTBXv7rDGUZSNLyNMI9ov6au2gZyXHG8ww==",
         "dependencies": {
-          "Deep.Protocol.Abstractions": "0.3.0-p10b3.60ce2e3",
-          "Deep.Protocol.Protobuf": "0.3.0-p10b3.60ce2e3",
+          "Deep.Protocol.Abstractions": "0.3.0-p10i.a9b7a10",
+          "Deep.Protocol.Protobuf": "0.3.0-p10i.a9b7a10",
           "Sodium.Core": "1.4.1"
         }
       },
       "Deep.Protocol.MembershipRoutes": {
         "type": "Direct",
-        "requested": "[0.3.0-p10b3.60ce2e3, 0.3.0-p10b3.60ce2e3]",
-        "resolved": "0.3.0-p10b3.60ce2e3",
-        "contentHash": "xcgfNWfuju4D8D2q5am0ds0y86Z2PbMO6hA0rGQSWImeTMGNO9DO8mizZ9SSVIXIffn++zdwa+SDyY/+FYQrnA==",
+        "requested": "[0.3.0-p10i.a9b7a10, 0.3.0-p10i.a9b7a10]",
+        "resolved": "0.3.0-p10i.a9b7a10",
+        "contentHash": "YEOLH2Fsps09mO6sIEpH9h9INREabUf02C0OuEeMc2RszH0PBmMNMPIEVjd91tlaIH9JGbDmTH9byVy4+Sdynw==",
         "dependencies": {
-          "Deep.Protocol": "0.3.0-p10b3.60ce2e3"
+          "Deep.Protocol": "0.3.0-p10i.a9b7a10"
         }
       },
       "Deep.Protocol.ProfileCarrier": {
         "type": "Direct",
-        "requested": "[0.2.0-p10b3.60ce2e3, 0.2.0-p10b3.60ce2e3]",
-        "resolved": "0.2.0-p10b3.60ce2e3",
-        "contentHash": "MuaiHUicMF1VRmh/4t3bZ7d23tl/X1oIyZsveSQ4pgwFhBKB9l4AJjiHGYmlszpteyywWyI5ZGZ44urvaHB/QQ==",
+        "requested": "[0.2.0-p10i.a9b7a10, 0.2.0-p10i.a9b7a10]",
+        "resolved": "0.2.0-p10i.a9b7a10",
+        "contentHash": "4uQRq3xtPKqsonKLso0Wagv2GXQJAN2TC0Sf4Gjkb/+/H0anSTjGb4YFlYXYFC0bPIyYqV1zzoBghdVzh1+IjQ==",
         "dependencies": {
-          "Deep.Protocol": "[0.3.0-p10b3.60ce2e3]",
+          "Deep.Protocol": "[0.3.0-p10i.a9b7a10]",
           "Sodium.Core": "[1.4.1]",
           "libsodium": "[1.0.22]"
         }
@@ -63,13 +63,13 @@
       },
       "Deep.Protocol.Abstractions": {
         "type": "Transitive",
-        "resolved": "0.3.0-p10b3.60ce2e3",
-        "contentHash": "hubQp7B9l9RayK3NdDYh/rY79GUgh91VDDlEKJZvlCPVQGyJKWT7aqXp3zsn9uvynWvECNMuyPVLdIfjhQ6umw=="
+        "resolved": "0.3.0-p10i.a9b7a10",
+        "contentHash": "iKhmUIWwbcqQjOQoxDdK/eSJrHRmzI/zZQhDUOyKtvC4+7+42IT5a5qSShFlEGn9QBNRUX86/s5wNVYLgGuoQw=="
       },
       "Deep.Protocol.Protobuf": {
         "type": "Transitive",
-        "resolved": "0.3.0-p10b3.60ce2e3",
-        "contentHash": "RjicT+pku9M4NNK2wVBS9KnZ+Ho2ByLEtwUMU4QJqMhNFSiSS8wOAwaHAX3Czw7F8fz6sl79u8dGiQcW7org0w==",
+        "resolved": "0.3.0-p10i.a9b7a10",
+        "contentHash": "LoXm4/fcJzRgNNZLoEsBxqYcvHQEKllL1BhCfiwojPWgD8NgFeo4ODA3E0X8P8Ehjv+RCCc3XmrKKLVbsMKjRA==",
         "dependencies": {
           "Google.Protobuf": "3.32.1"
         }
