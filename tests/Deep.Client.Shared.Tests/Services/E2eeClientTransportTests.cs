@@ -140,6 +140,26 @@ public sealed class E2eeClientTransportTests
     }
 
     [Fact]
+    public async Task OrdinarySend_81769ByteDpe1RemainsAcceptedAndDispatched()
+    {
+        using var aliceIdentity = new SessionIdentityProvider(AlicePhrase);
+        using var bobIdentity = new SessionIdentityProvider(BobPhrase);
+        var raw = new AuthenticatedRawTransport();
+        using var transport = CreateTransport(raw, () => AlicePhrase);
+        var envelope = CreateDirectWithExactDpe1Length(
+            aliceIdentity,
+            bobIdentity.SessionId,
+            MailboxClientPayloadBytes + 1);
+
+        await transport.SendAsync(envelope);
+
+        var sent = raw.SentSnapshot();
+        Assert.Equal(2, sent.Count);
+        Assert.All(sent, item =>
+            Assert.Equal(MailboxClientPayloadBytes + 1, DecodeWireLength(item.Body)));
+    }
+
+    [Fact]
     public async Task MailboxAuthenticatedGroupSend_PreparesEveryTargetBeforeAnyDispatch()
     {
         using var aliceIdentity = new SessionIdentityProvider(AlicePhrase);
