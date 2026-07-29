@@ -199,6 +199,35 @@ deleting evidence.
 Length, overflow, and canonical-envelope decoder failures are normalized to
 `InvalidDataException`; corrupt legacy rows are quarantined fail-closed.
 
+## P10E dormant identity-authenticated mailbox seam
+
+`E2eeClientTransport` retains the existing `ISessionMessageTransport` send path
+unchanged. A transport may additionally implement
+`IIdentityAuthenticatedRawTransport`; only then does E2EE keep the leased
+`SessionIdentityProvider` alive through complete all-copy local preflight and
+authenticated dispatch. The raw transport receives the provider solely to call
+operations such as `SignDetached`; it never receives or exports private key
+material. E2EE always selects `SendAuthenticatedAsync` for that contract and
+does not fall back to its inherited legacy `SendAsync` method.
+
+`IMailboxBoundIdentityAuthenticatedRawTransport` is a dormant marker for the
+future MEO1 mailbox producer. It imposes the mailbox ciphertext bound of
+81,768 bytes (`MailboxClientLimits.MaximumCiphertextLength`) on the decoded
+DPE1 bytes after encryption, while ordinary DPE1 transports retain the
+existing 512-KiB envelope limit. Every direct/group fan-out copy is built and
+preflighted before the first authenticated dispatch, preventing a later target
+failure from producing a partial remote fan-out.
+
+`OpaqueMailboxWireEntry`, `OpaqueMailboxContinuation`, and
+`OpaqueMailboxInboxPage` are contracts only; no runtime activates them yet.
+They expose only a cursor, canonical bounded MEO1 bytes, envelope digest, and
+continuation authority—never sender, recipient, Session ID, or server hash.
+The retrieval seam is deliberately one-item: a nonzero continuation cursor
+requires a nonempty bounded token, and zero cursor requires an empty token.
+This reserves the ordered one-item MAK1 acknowledgement shape without adding
+mailbox persistence, credential issuance, HTTP ingress, or acknowledgement
+behavior in this slice.
+
 ## E3 MVP Notes
 
 - Current signaling transport is in-memory and intended for deterministic runtime/tests until secure network signaling is wired.
