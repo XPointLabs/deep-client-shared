@@ -148,6 +148,9 @@ public sealed class ClientMailboxActivation
     internal ClientMailboxScope ScopeFor(BlindedMailboxId mailboxId, ulong epoch) =>
         ClientMailboxScope.Derive(issuerContext, mailboxId, epoch);
 
+    internal ClientMailboxJournalScope JournalScope =>
+        ClientMailboxJournalScope.Derive(issuerContext);
+
     public override string ToString() =>
         $"ClientMailboxActivation {{ Enabled = {Enabled}, " +
         $"IssuerContext = {(HasIssuerContext ? "[configured]" : "[missing]")}, " +
@@ -353,9 +356,6 @@ public sealed class ClientMailboxAdapter
         ArgumentNullException.ThrowIfNull(request);
         EnsureVersion(request.MixedVersion);
         EnsurePlacement(request.Envelope.PlacementId);
-        var mailboxScope = activation.ScopeFor(
-            request.Envelope.MailboxId,
-            request.Epoch);
         var encoded = MailboxClientCodec.EncodeStore(request);
         var logicalId = OutboxLogicalId.FromBytes(request.OperationId.Span);
         var dedup = OutboxDedupMaterial.FromBytes(
@@ -395,7 +395,6 @@ public sealed class ClientMailboxAdapter
                     attempt.State == TransportOutboxAttemptState.Durable)
                 .GetEvidenceCopy();
             var persistedDurable = await VerifyAndJournalDurableAsync(
-                mailboxScope,
                 evidence,
                 StoreExpectation(request),
                 cancellationToken).ConfigureAwait(false);
@@ -458,7 +457,6 @@ public sealed class ClientMailboxAdapter
         }
 
         var durable = await VerifyAndJournalDurableAsync(
-            mailboxScope,
             response.CanonicalReceipt,
             expectation,
             cancellationToken).ConfigureAwait(false);
@@ -495,26 +493,28 @@ public sealed class ClientMailboxAdapter
             durable.Disposition);
     }
 
-    public Task<ClientMailboxTraversal> ReadTraversalAsync(
+    public async Task<ClientMailboxTraversal> ReadTraversalAsync(
         BlindedMailboxId mailboxId,
         ulong epoch,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(mailboxId);
-        return state.ReadTraversalAsync(
-            activation.ScopeFor(mailboxId, epoch),
-            cancellationToken);
+        var scope = activation.ScopeFor(mailboxId, epoch);
+        await ReconcileExpiredAsync(scope, cancellationToken).ConfigureAwait(false);
+        return await state.ReadTraversalAsync(scope, cancellationToken)
+            .ConfigureAwait(false);
     }
 
-    public Task<IReadOnlyList<MailboxRetrievedEnvelope>> ReadDurableInboxAsync(
+    public async Task<IReadOnlyList<MailboxRetrievedEnvelope>> ReadDurableInboxAsync(
         BlindedMailboxId mailboxId,
         ulong epoch,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(mailboxId);
-        return state.ReadDurableInboxAsync(
-            activation.ScopeFor(mailboxId, epoch),
-            cancellationToken);
+        var scope = activation.ScopeFor(mailboxId, epoch);
+        await ReconcileExpiredAsync(scope, cancellationToken).ConfigureAwait(false);
+        return await state.ReadDurableInboxAsync(scope, cancellationToken)
+            .ConfigureAwait(false);
     }
 
     public async Task<ClientMailboxRetrieveResult> RetrieveAsync(
@@ -525,6 +525,7 @@ public sealed class ClientMailboxAdapter
         EnsureVersion(request.MixedVersion);
         EnsurePlacement(request.PlacementId);
         var scope = activation.ScopeFor(request.MailboxId, request.Epoch);
+        await ReconcileExpiredAsync(scope, cancellationToken).ConfigureAwait(false);
         var traversal = await state.ReadTraversalAsync(scope, cancellationToken)
             .ConfigureAwait(false);
         if (request.AfterCursor != traversal.AfterCursor ||
@@ -572,6 +573,7 @@ public sealed class ClientMailboxAdapter
         EnsurePlacement(request.PlacementId);
         var canonicalAck = MailboxClientCodec.EncodeAck(request);
         var scope = activation.ScopeFor(request.MailboxId, request.Epoch);
+        await ReconcileExpiredAsync(scope, cancellationToken).ConfigureAwait(false);
         var traversal = await state.ReadTraversalAsync(scope, cancellationToken)
             .ConfigureAwait(false);
         var lastAcknowledgement = request.Acknowledgements[^1];
@@ -619,7 +621,6 @@ public sealed class ClientMailboxAdapter
         {
             var acknowledgement = request.Acknowledgements[index];
             _ = await VerifyAndJournalDurableAsync(
-                scope,
                 aggregate.TombstoneQuorums[index],
                 new ClientMailboxReceiptExpectation
                 {
@@ -666,7 +667,6 @@ public sealed class ClientMailboxAdapter
 
     private async Task<VerifiedMailboxDurableQuorumV3>
         VerifyAndJournalDurableAsync(
-            ClientMailboxScope scope,
             ReadOnlyMemory<byte> encodedMqr3,
             ClientMailboxReceiptExpectation expectation,
             CancellationToken cancellationToken)
@@ -678,7 +678,7 @@ public sealed class ClientMailboxAdapter
         var nowUnixSeconds = checked(
             (ulong)timeProvider.GetUtcNow().ToUnixTimeSeconds());
         var result = await state.RecordCoordinatorStatementAsync(
-            scope,
+            activation.JournalScope,
             expectation.Route.GetMembershipCommitmentCopy(),
             expectation.Epoch,
             receipt.CoordinatorId,
@@ -701,6 +701,14 @@ public sealed class ClientMailboxAdapter
 
         return verified;
     }
+
+    private Task<ClientMailboxExpiryReconciliationResult> ReconcileExpiredAsync(
+        ClientMailboxScope scope,
+        CancellationToken cancellationToken) =>
+        state.ReconcileExpiredAsync(
+            scope,
+            checked((ulong)timeProvider.GetUtcNow().ToUnixTimeSeconds()),
+            cancellationToken);
 
     private void EnsureVersion(MailboxMixedVersionMarker marker)
     {

@@ -7,6 +7,10 @@ public sealed class InMemoryClientMailboxStateRepository :
 {
     private readonly Dictionary<string, ClientMailboxStoredState> states =
         new(StringComparer.Ordinal);
+    private readonly Dictionary<string, ClientMailboxJournalState> journals =
+        new(StringComparer.Ordinal);
+    private readonly Dictionary<string, List<ClientMailboxStoredEntry>> expiredQuarantine =
+        new(StringComparer.Ordinal);
     private readonly object gate = new();
     private readonly Action<ClientMailboxCommitFaultPoint>? commitFault;
 
@@ -29,6 +33,51 @@ public sealed class InMemoryClientMailboxStateRepository :
         ClientMailboxScope scope,
         CancellationToken cancellationToken = default) =>
         Read(scope, ClientMailboxStateMachine.DurableInbox, cancellationToken);
+
+    public Task<ClientMailboxExpiryReconciliationResult> ReconcileExpiredAsync(
+        ClientMailboxScope scope,
+        ulong nowUnixSeconds,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ArgumentNullException.ThrowIfNull(scope);
+        lock (gate)
+        {
+            var key = Key(scope);
+            var candidate = Get(scope).Clone();
+            var quarantine = expiredQuarantine.TryGetValue(key, out var current)
+                ? current.Select(static entry => entry.Clone()).ToList()
+                : [];
+            var result = ClientMailboxStateMachine.ReconcileExpired(
+                candidate,
+                nowUnixSeconds,
+                quarantine);
+            if (result.QuarantinedUnacknowledged == 0 &&
+                result.RemovedAcknowledged == 0)
+            {
+                return Task.FromResult(result);
+            }
+
+            while (quarantine.Count >
+                       ClientMailboxStateLimits.MaximumExpiredQuarantineEntries ||
+                   quarantine.Sum(static entry =>
+                       (long)entry.CanonicalEnvelope.Length) >
+                       ClientMailboxStateLimits.MaximumExpiredQuarantineBytes)
+            {
+                quarantine.Remove(quarantine
+                    .OrderBy(static entry => entry.ExpiresAtUnixSeconds)
+                    .ThenBy(static entry => entry.Cursor)
+                    .First());
+            }
+
+            _ = ClientMailboxStateCodec.Encode(candidate);
+            commitFault?.Invoke(ClientMailboxCommitFaultPoint.BeforeCommit);
+            states[key] = candidate;
+            expiredQuarantine[key] = quarantine;
+            commitFault?.Invoke(ClientMailboxCommitFaultPoint.AfterCommit);
+            return Task.FromResult(result);
+        }
+    }
 
     public Task<ClientMailboxReceiveCommitResult> CommitRetrievePageAsync(
         ClientMailboxScope scope,
@@ -73,7 +122,7 @@ public sealed class InMemoryClientMailboxStateRepository :
             cancellationToken);
 
     public Task<ClientMailboxCoordinatorRecordResult> RecordCoordinatorStatementAsync(
-        ClientMailboxScope scope,
+        ClientMailboxJournalScope scope,
         ReadOnlyMemory<byte> membershipCommitment,
         ulong epoch,
         ReadOnlyMemory<byte> coordinatorId,
@@ -82,7 +131,7 @@ public sealed class InMemoryClientMailboxStateRepository :
         ulong expiresAtUnixSeconds,
         ulong nowUnixSeconds,
         CancellationToken cancellationToken = default) =>
-        Mutate(
+        MutateJournal(
             scope,
             state => ClientMailboxStateMachine.RecordCoordinator(
                 state,
@@ -110,6 +159,41 @@ public sealed class InMemoryClientMailboxStateRepository :
         lock (gate)
         {
             states[Key(scope)] = ClientMailboxStateCodec.Decode(encoded);
+        }
+    }
+
+    internal ClientMailboxJournalState ExportJournalForTests(
+        ClientMailboxJournalScope scope)
+    {
+        lock (gate)
+        {
+            var key = Convert.ToHexString(scope.Value);
+            return journals.TryGetValue(key, out var state)
+                ? state.Clone()
+                : new ClientMailboxJournalState();
+        }
+    }
+
+    internal void ImportJournalForTests(
+        ClientMailboxJournalScope scope,
+        ClientMailboxJournalState journal)
+    {
+        ArgumentNullException.ThrowIfNull(journal);
+        lock (gate)
+        {
+            var candidate = journal.Clone();
+            ClientMailboxStateMachine.ValidateJournal(candidate);
+            journals[Convert.ToHexString(scope.Value)] = candidate;
+        }
+    }
+
+    internal int ExpiredQuarantineCountForTests(ClientMailboxScope scope)
+    {
+        lock (gate)
+        {
+            return expiredQuarantine.TryGetValue(Key(scope), out var entries)
+                ? entries.Count
+                : 0;
         }
     }
 
@@ -145,6 +229,31 @@ public sealed class InMemoryClientMailboxStateRepository :
         }
     }
 
+    private Task<TResult> MutateJournal<TResult>(
+        ClientMailboxJournalScope scope,
+        Func<ClientMailboxJournalState, TResult> mutation,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ArgumentNullException.ThrowIfNull(scope);
+        lock (gate)
+        {
+            var key = Convert.ToHexString(scope.Value);
+            if (!journals.TryGetValue(key, out var current))
+            {
+                current = new ClientMailboxJournalState();
+            }
+
+            var candidate = current.Clone();
+            var result = mutation(candidate);
+            ClientMailboxStateMachine.ValidateJournal(candidate);
+            commitFault?.Invoke(ClientMailboxCommitFaultPoint.BeforeCommit);
+            journals[key] = candidate;
+            commitFault?.Invoke(ClientMailboxCommitFaultPoint.AfterCommit);
+            return Task.FromResult(result);
+        }
+    }
+
     private ClientMailboxStoredState Get(ClientMailboxScope scope)
     {
         var key = Key(scope);
@@ -159,4 +268,5 @@ public sealed class InMemoryClientMailboxStateRepository :
 
     private static string Key(ClientMailboxScope scope) =>
         Convert.ToHexString(scope.Value);
+
 }

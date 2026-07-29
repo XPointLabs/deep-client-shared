@@ -9,6 +9,8 @@ public static class ClientMailboxStateLimits
     public const int ScopeBytes = 32;
     public const int MaximumInboxEntries = 200;
     public const int MaximumInboxBytes = 8 * 1024 * 1024;
+    public const int MaximumExpiredQuarantineEntries = 200;
+    public const int MaximumExpiredQuarantineBytes = 8 * 1024 * 1024;
     public const int MaximumCoordinatorStatements = 1024;
 }
 
@@ -78,6 +80,61 @@ public sealed class ClientMailboxScope : IEquatable<ClientMailboxScope>
     public override string ToString() => "[opaque-client-mailbox-scope]";
 }
 
+public sealed class ClientMailboxJournalScope : IEquatable<ClientMailboxJournalScope>
+{
+    private static ReadOnlySpan<byte> Domain =>
+        "deep.client.mailbox.installation-journal.v1"u8;
+    private readonly byte[] value;
+
+    private ClientMailboxJournalScope(ReadOnlySpan<byte> value)
+    {
+        if (value.Length != ClientMailboxStateLimits.ScopeBytes ||
+            value.IndexOfAnyExcept((byte)0) < 0)
+        {
+            throw new ArgumentException(
+                "Opaque mailbox journal scope is invalid.",
+                nameof(value));
+        }
+
+        this.value = value.ToArray();
+    }
+
+    internal ReadOnlySpan<byte> Value => value;
+
+    public static ClientMailboxJournalScope Derive(
+        ReadOnlySpan<byte> issuerContext)
+    {
+        if (issuerContext.Length != 32 ||
+            issuerContext.IndexOfAnyExcept((byte)0) < 0)
+        {
+            throw new ArgumentException(
+                "Mailbox issuer context must be 32 nonzero bytes.",
+                nameof(issuerContext));
+        }
+
+        return new(SHA256.HashData([.. Domain, .. issuerContext]));
+    }
+
+    public byte[] ToArray() => value.ToArray();
+
+    public bool Equals(ClientMailboxJournalScope? other) =>
+        other is not null &&
+        CryptographicOperations.FixedTimeEquals(value, other.value);
+
+    public override bool Equals(object? obj) =>
+        Equals(obj as ClientMailboxJournalScope);
+
+    public override int GetHashCode()
+    {
+        var hash = new HashCode();
+        hash.AddBytes(value);
+        return hash.ToHashCode();
+    }
+
+    public override string ToString() =>
+        "[opaque-client-mailbox-installation-journal-scope]";
+}
+
 public sealed class ClientMailboxTraversal
 {
     private readonly byte[] continuationToken;
@@ -110,6 +167,10 @@ public sealed record ClientMailboxAckExpectation(
     ReadOnlyMemory<byte> EnvelopeDigest,
     ulong ExpiresAtUnixSeconds);
 
+public sealed record ClientMailboxExpiryReconciliationResult(
+    int QuarantinedUnacknowledged,
+    int RemovedAcknowledged);
+
 public enum ClientMailboxAckState
 {
     Pending = 1,
@@ -141,6 +202,11 @@ public interface IClientMailboxStateRepository
         ClientMailboxScope scope,
         CancellationToken cancellationToken = default);
 
+    Task<ClientMailboxExpiryReconciliationResult> ReconcileExpiredAsync(
+        ClientMailboxScope scope,
+        ulong nowUnixSeconds,
+        CancellationToken cancellationToken = default);
+
     Task<ClientMailboxReceiveCommitResult> CommitRetrievePageAsync(
         ClientMailboxScope scope,
         ClientMailboxTraversal expectedTraversal,
@@ -163,7 +229,7 @@ public interface IClientMailboxStateRepository
         CancellationToken cancellationToken = default);
 
     Task<ClientMailboxCoordinatorRecordResult> RecordCoordinatorStatementAsync(
-        ClientMailboxScope scope,
+        ClientMailboxJournalScope scope,
         ReadOnlyMemory<byte> membershipCommitment,
         ulong epoch,
         ReadOnlyMemory<byte> coordinatorId,
@@ -233,6 +299,19 @@ internal sealed class ClientMailboxStoredState
     }
 }
 
+internal sealed class ClientMailboxJournalState
+{
+    public List<ClientMailboxCoordinatorStatement> CoordinatorStatements { get; } = [];
+
+    public ClientMailboxJournalState Clone()
+    {
+        var clone = new ClientMailboxJournalState();
+        clone.CoordinatorStatements.AddRange(
+            CoordinatorStatements.Select(static statement => statement.Clone()));
+        return clone;
+    }
+}
+
 internal static class ClientMailboxStateMachine
 {
     public static ClientMailboxTraversal Traversal(ClientMailboxStoredState state)
@@ -258,6 +337,7 @@ internal static class ClientMailboxStateMachine
                 "Mailbox traversal changed before durable page commit.");
         }
 
+        var committedPage = new List<MailboxRetrievedEnvelope>(page.Items.Count);
         foreach (var item in page.Items)
         {
             var canonicalEnvelope = MailboxClientCodec.EncodeEncryptedEnvelope(
@@ -279,6 +359,11 @@ internal static class ClientMailboxStateMachine
                         "Mailbox cursor/digest history conflicts with durable inbox.");
                 }
 
+                if (!byCursor.Acknowledged)
+                {
+                    committedPage.Add(item);
+                }
+
                 continue;
             }
 
@@ -296,6 +381,7 @@ internal static class ClientMailboxStateMachine
                 CanonicalEnvelope = canonicalEnvelope,
                 Acknowledged = false
             });
+            committedPage.Add(item);
         }
 
         if (page.HasMore)
@@ -313,7 +399,7 @@ internal static class ClientMailboxStateMachine
         Validate(state);
         return new ClientMailboxReceiveCommitResult(
             Traversal(state),
-            DurableInbox(state));
+            PageInbox(committedPage));
     }
 
     public static ClientMailboxAckState Check(
@@ -388,8 +474,43 @@ internal static class ClientMailboxStateMachine
         return ClientMailboxAckState.Pending;
     }
 
-    public static ClientMailboxCoordinatorRecordResult RecordCoordinator(
+    public static ClientMailboxExpiryReconciliationResult ReconcileExpired(
         ClientMailboxStoredState state,
+        ulong nowUnixSeconds,
+        ICollection<ClientMailboxStoredEntry>? quarantine = null)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+        if (nowUnixSeconds == 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(nowUnixSeconds));
+        }
+
+        var expired = state.Entries
+            .Where(entry => entry.ExpiresAtUnixSeconds <= nowUnixSeconds)
+            .ToArray();
+        var unacknowledged = expired.Where(static entry => !entry.Acknowledged)
+            .ToArray();
+        if (quarantine is not null)
+        {
+            foreach (var entry in unacknowledged)
+            {
+                quarantine.Add(entry.Clone());
+            }
+        }
+
+        foreach (var entry in expired)
+        {
+            state.Entries.Remove(entry);
+        }
+
+        Validate(state);
+        return new(
+            unacknowledged.Length,
+            expired.Length - unacknowledged.Length);
+    }
+
+    public static ClientMailboxCoordinatorRecordResult RecordCoordinator(
+        ClientMailboxJournalState state,
         ReadOnlySpan<byte> membershipCommitment,
         ulong epoch,
         ReadOnlySpan<byte> coordinatorId,
@@ -398,7 +519,7 @@ internal static class ClientMailboxStateMachine
         ulong expiresAtUnixSeconds,
         ulong nowUnixSeconds)
     {
-        Validate(state);
+        ValidateJournal(state);
         ValidateCoordinatorInput(
             membershipCommitment,
             epoch,
@@ -438,34 +559,15 @@ internal static class ClientMailboxStateMachine
             StatementDigest = statementDigest.ToArray(),
             ExpiresAtUnixSeconds = expiresAtUnixSeconds
         });
-        Validate(state);
+        ValidateJournal(state);
         return ClientMailboxCoordinatorRecordResult.Applied;
     }
 
-    public static void Validate(ClientMailboxStoredState state)
+    public static void ValidateJournal(ClientMailboxJournalState state)
     {
-        var inboxBytes = state.Entries.Sum(static entry =>
-            (long)entry.CanonicalEnvelope.Length);
-        if (state.AfterCursor == 0 != state.ContinuationToken.AsSpan().IsEmpty ||
-            state.ContinuationToken.Length >
-                MailboxClientLimits.MaximumContinuationTokenLength ||
-            state.Entries.Count > ClientMailboxStateLimits.MaximumInboxEntries ||
-            inboxBytes > ClientMailboxStateLimits.MaximumInboxBytes ||
-            state.CoordinatorStatements.Count >
+        ArgumentNullException.ThrowIfNull(state);
+        if (state.CoordinatorStatements.Count >
                 ClientMailboxStateLimits.MaximumCoordinatorStatements ||
-            state.Entries.Any(static entry =>
-                entry.Cursor == 0 ||
-                entry.ExpiresAtUnixSeconds == 0 ||
-                entry.Digest.Length != MailboxClientLimits.DigestLength ||
-                entry.Digest.AsSpan().IndexOfAnyExcept((byte)0) < 0 ||
-                entry.CanonicalEnvelope.Length is
-                    < MailboxClientLimits.EncryptedEnvelopeHeaderLength +
-                      MailboxClientLimits.MinimumCiphertextLength or
-                    > MailboxClientLimits.MaximumEncryptedEnvelopeLength) ||
-            state.Entries.Select(static entry => entry.Cursor).Distinct().Count() !=
-                state.Entries.Count ||
-            state.Entries.Select(static entry => Convert.ToHexString(entry.Digest))
-                .Distinct(StringComparer.Ordinal).Count() != state.Entries.Count ||
             state.CoordinatorStatements.Any(static statement =>
                 statement.MembershipCommitment.Length != 32 ||
                 statement.CoordinatorId.Length != 32 ||
@@ -488,16 +590,40 @@ internal static class ClientMailboxStateMachine
                 .Distinct(StringComparer.Ordinal).Count() !=
                 state.CoordinatorStatements.Count)
         {
+            throw new InvalidDataException(
+                "Persisted client mailbox coordinator journal is invalid.");
+        }
+    }
+
+    public static void Validate(ClientMailboxStoredState state)
+    {
+        var inboxBytes = state.Entries.Sum(static entry =>
+            (long)entry.CanonicalEnvelope.Length);
+        if (state.AfterCursor == 0 != state.ContinuationToken.AsSpan().IsEmpty ||
+            state.ContinuationToken.Length >
+                MailboxClientLimits.MaximumContinuationTokenLength ||
+            state.Entries.Count > ClientMailboxStateLimits.MaximumInboxEntries ||
+            inboxBytes > ClientMailboxStateLimits.MaximumInboxBytes ||
+            state.Entries.Any(static entry =>
+                entry.Cursor == 0 ||
+                entry.ExpiresAtUnixSeconds == 0 ||
+                entry.Digest.Length != MailboxClientLimits.DigestLength ||
+                entry.Digest.AsSpan().IndexOfAnyExcept((byte)0) < 0 ||
+                entry.CanonicalEnvelope.Length is
+                    < MailboxClientLimits.EncryptedEnvelopeHeaderLength +
+                      MailboxClientLimits.MinimumCiphertextLength or
+                    > MailboxClientLimits.MaximumEncryptedEnvelopeLength) ||
+            state.Entries.Select(static entry => entry.Cursor).Distinct().Count() !=
+                state.Entries.Count ||
+            state.Entries.Select(static entry => Convert.ToHexString(entry.Digest))
+                .Distinct(StringComparer.Ordinal).Count() != state.Entries.Count)
+        {
             throw new InvalidDataException("Persisted client mailbox state is invalid.");
         }
 
         foreach (var entry in state.Entries)
         {
-            var envelope = MailboxClientCodec.DecodeEncryptedEnvelope(
-                entry.CanonicalEnvelope,
-                ClientMailboxStateCodec.PersistenceDecodePolicy(
-                    entry.CanonicalEnvelope,
-                    entry.ExpiresAtUnixSeconds));
+            var envelope = DecodePersistedEnvelope(entry);
             if (envelope.ExpiresAtUnixSeconds != entry.ExpiresAtUnixSeconds ||
                 !FixedEquals(envelope.DeduplicationDigest.Span, entry.Digest))
             {
@@ -515,13 +641,57 @@ internal static class ClientMailboxStateMachine
             .Select(static entry => new MailboxRetrievedEnvelope
             {
                 Cursor = entry.Cursor,
-                Envelope = MailboxClientCodec.DecodeEncryptedEnvelope(
-                    entry.CanonicalEnvelope,
-                    ClientMailboxStateCodec.PersistenceDecodePolicy(
-                        entry.CanonicalEnvelope,
-                        entry.ExpiresAtUnixSeconds))
+                Envelope = DecodePersistedEnvelope(entry)
             })
             .ToArray();
+
+    public static IReadOnlyList<MailboxRetrievedEnvelope> PageInbox(
+        IEnumerable<MailboxRetrievedEnvelope> items)
+    {
+        ArgumentNullException.ThrowIfNull(items);
+        return items
+            .OrderBy(static item => item.Cursor)
+            .Select(static item =>
+            {
+                var canonical = MailboxClientCodec.EncodeEncryptedEnvelope(
+                    item.Envelope);
+                return new MailboxRetrievedEnvelope
+                {
+                    Cursor = item.Cursor,
+                    Envelope = MailboxClientCodec.DecodeEncryptedEnvelope(
+                        canonical,
+                        ClientMailboxStateCodec.PersistenceDecodePolicy(
+                            canonical,
+                            item.Envelope.ExpiresAtUnixSeconds))
+                };
+            })
+            .ToArray();
+    }
+
+    private static MailboxEncryptedEnvelope DecodePersistedEnvelope(
+        ClientMailboxStoredEntry entry)
+    {
+        try
+        {
+            return MailboxClientCodec.DecodeEncryptedEnvelope(
+                entry.CanonicalEnvelope,
+                ClientMailboxStateCodec.PersistenceDecodePolicy(
+                    entry.CanonicalEnvelope,
+                    entry.ExpiresAtUnixSeconds));
+        }
+        catch (InvalidDataException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (
+            exception is MailboxClientException or ArgumentException or
+            OverflowException or IndexOutOfRangeException)
+        {
+            throw new InvalidDataException(
+                "Persisted mailbox envelope is corrupt.",
+                exception);
+        }
+    }
 
     private static ClientMailboxStoredEntry?[] Matches(
         ClientMailboxStoredState state,
@@ -618,6 +788,10 @@ internal static class ClientMailboxStateCodec
     public static byte[] Encode(ClientMailboxStoredState state)
     {
         ClientMailboxStateMachine.Validate(state);
+        var legacyJournal = new ClientMailboxJournalState();
+        legacyJournal.CoordinatorStatements.AddRange(
+            state.CoordinatorStatements.Select(static statement => statement.Clone()));
+        ClientMailboxStateMachine.ValidateJournal(legacyJournal);
         var length = checked(
             HeaderBytes +
             state.ContinuationToken.Length +
@@ -677,6 +851,26 @@ internal static class ClientMailboxStateCodec
 
     public static ClientMailboxStoredState Decode(ReadOnlySpan<byte> encoded)
     {
+        try
+        {
+            return DecodeCore(encoded);
+        }
+        catch (InvalidDataException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (
+            exception is MailboxClientException or ArgumentException or
+            OverflowException or IndexOutOfRangeException)
+        {
+            throw new InvalidDataException(
+                "Client mailbox state is corrupt.",
+                exception);
+        }
+    }
+
+    private static ClientMailboxStoredState DecodeCore(ReadOnlySpan<byte> encoded)
+    {
         if (encoded.Length < HeaderBytes || !encoded[..4].SequenceEqual(V2Magic) ||
             encoded.Slice(14, 2).IndexOfAnyExcept((byte)0) >= 0 ||
             encoded.Slice(24, 8).IndexOfAnyExcept((byte)0) >= 0)
@@ -691,7 +885,8 @@ internal static class ClientMailboxStateCodec
             BinaryPrimitives.ReadUInt32BigEndian(encoded.Slice(20, 4));
         if (tokenLength > MailboxClientLimits.MaximumContinuationTokenLength ||
             entryCount > ClientMailboxStateLimits.MaximumInboxEntries ||
-            coordinatorCount > ClientMailboxStateLimits.MaximumCoordinatorStatements)
+            coordinatorCount > ClientMailboxStateLimits.MaximumCoordinatorStatements ||
+            tokenLength > encoded.Length - HeaderBytes)
         {
             throw new InvalidDataException("Client mailbox state bounds are invalid.");
         }
@@ -767,6 +962,10 @@ internal static class ClientMailboxStateCodec
         }
 
         ClientMailboxStateMachine.Validate(state);
+        var legacyJournal = new ClientMailboxJournalState();
+        legacyJournal.CoordinatorStatements.AddRange(
+            state.CoordinatorStatements.Select(static statement => statement.Clone()));
+        ClientMailboxStateMachine.ValidateJournal(legacyJournal);
         return state;
     }
 

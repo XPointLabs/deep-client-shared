@@ -1,5 +1,6 @@
 using Deep.Protocol.DeepExtension.MailboxCapabilities;
 using Microsoft.Data.Sqlite;
+using System.Security.Cryptography;
 
 namespace Deep.Client.Shared.Persistence;
 
@@ -16,7 +17,7 @@ public sealed class SqliteClientMailboxStateRepository :
     IClientMailboxStateRepository,
     IDisposable
 {
-    private const int SchemaVersion = 2;
+    private const int SchemaVersion = 3;
     private readonly string connectionString;
     private readonly Action<ClientMailboxMigrationFaultPoint>? migrationFault;
     private readonly Action<ClientMailboxCommitFaultPoint>? commitFault;
@@ -68,60 +69,74 @@ public sealed class SqliteClientMailboxStateRepository :
     public Task<ClientMailboxTraversal> ReadTraversalAsync(
         ClientMailboxScope scope,
         CancellationToken cancellationToken = default) =>
-        ReadAsync(scope, ClientMailboxStateMachine.Traversal, cancellationToken);
+        ReadNormalizedAsync(
+            scope,
+            static (connection, transaction, value, token) =>
+                ReadTraversalCoreAsync(connection, transaction, value, token),
+            cancellationToken);
 
     public Task<IReadOnlyList<MailboxRetrievedEnvelope>> ReadDurableInboxAsync(
         ClientMailboxScope scope,
         CancellationToken cancellationToken = default) =>
-        ReadAsync(
+        ReadNormalizedAsync(
             scope,
-            ClientMailboxStateMachine.DurableInbox,
+            static async (connection, transaction, value, token) =>
+                ClientMailboxStateMachine.DurableInbox(
+                    await LoadNormalizedStateAsync(
+                        connection, transaction, value, token)
+                        .ConfigureAwait(false)),
             cancellationToken);
+
+    public Task<ClientMailboxExpiryReconciliationResult> ReconcileExpiredAsync(
+        ClientMailboxScope scope,
+        ulong nowUnixSeconds,
+        CancellationToken cancellationToken = default) =>
+        ReconcileExpiredNormalizedAsync(scope, nowUnixSeconds, cancellationToken);
 
     public Task<ClientMailboxReceiveCommitResult> CommitRetrievePageAsync(
         ClientMailboxScope scope,
         ClientMailboxTraversal expectedTraversal,
         MailboxRetrievePage page,
         CancellationToken cancellationToken = default) =>
-        MutateAsync(
-            scope,
-            state => ClientMailboxStateMachine.CommitPage(
-                state,
-                expectedTraversal,
-                page),
-            cancellationToken);
+        CommitPageNormalizedAsync(
+            scope, expectedTraversal, page, cancellationToken);
 
     public Task<ClientMailboxAckState> CheckAcknowledgementsAsync(
         ClientMailboxScope scope,
         IReadOnlyList<MailboxAcknowledgement> acknowledgements,
         CancellationToken cancellationToken = default) =>
-        ReadAsync(
+        ReadNormalizedAsync(
             scope,
-            state => ClientMailboxStateMachine.Check(state, acknowledgements),
+            async (connection, transaction, value, token) =>
+                ClientMailboxStateMachine.Check(
+                    await LoadNormalizedStateAsync(
+                        connection, transaction, value, token)
+                        .ConfigureAwait(false),
+                    acknowledgements),
             cancellationToken);
 
     public Task<IReadOnlyList<ClientMailboxAckExpectation>> ReadAckExpectationsAsync(
         ClientMailboxScope scope,
         IReadOnlyList<MailboxAcknowledgement> acknowledgements,
         CancellationToken cancellationToken = default) =>
-        ReadAsync(
+        ReadNormalizedAsync(
             scope,
-            state => ClientMailboxStateMachine.AckExpectations(
-                state,
-                acknowledgements),
+            async (connection, transaction, value, token) =>
+                ClientMailboxStateMachine.AckExpectations(
+                    await LoadNormalizedStateAsync(
+                        connection, transaction, value, token)
+                        .ConfigureAwait(false),
+                    acknowledgements),
             cancellationToken);
 
     public Task<ClientMailboxAckState> CommitAcknowledgementsAsync(
         ClientMailboxScope scope,
         IReadOnlyList<MailboxAcknowledgement> acknowledgements,
         CancellationToken cancellationToken = default) =>
-        MutateAsync(
-            scope,
-            state => ClientMailboxStateMachine.CommitAck(state, acknowledgements),
-            cancellationToken);
+        CommitAckNormalizedAsync(scope, acknowledgements, cancellationToken);
 
     public Task<ClientMailboxCoordinatorRecordResult> RecordCoordinatorStatementAsync(
-        ClientMailboxScope scope,
+        ClientMailboxJournalScope scope,
         ReadOnlyMemory<byte> membershipCommitment,
         ulong epoch,
         ReadOnlyMemory<byte> coordinatorId,
@@ -130,17 +145,15 @@ public sealed class SqliteClientMailboxStateRepository :
         ulong expiresAtUnixSeconds,
         ulong nowUnixSeconds,
         CancellationToken cancellationToken = default) =>
-        MutateAsync(
+        RecordCoordinatorNormalizedAsync(
             scope,
-            state => ClientMailboxStateMachine.RecordCoordinator(
-                state,
-                membershipCommitment.Span,
-                epoch,
-                coordinatorId.Span,
-                coordinatorSequence,
-                statementDigest.Span,
-                expiresAtUnixSeconds,
-                nowUnixSeconds),
+            membershipCommitment,
+            epoch,
+            coordinatorId,
+            coordinatorSequence,
+            statementDigest,
+            expiresAtUnixSeconds,
+            nowUnixSeconds,
             cancellationToken);
 
     internal void InsertRawStateForTests(
@@ -176,6 +189,36 @@ public sealed class SqliteClientMailboxStateRepository :
         return Convert.ToInt32(command.ExecuteScalar());
     }
 
+    internal int LegacyStateCountForTests()
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT count(*) FROM client_mailbox_state;";
+        return Convert.ToInt32(command.ExecuteScalar());
+    }
+
+    internal int NormalizedInboxCountForTests(ClientMailboxScope scope)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            "SELECT count(*) FROM client_mailbox_inbox WHERE scope = $scope;";
+        command.Parameters.Add("$scope", SqliteType.Blob).Value = scope.ToArray();
+        return Convert.ToInt32(command.ExecuteScalar());
+    }
+
+    internal int ExpiredQuarantineCountForTests(ClientMailboxScope scope)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT count(*) FROM client_mailbox_expired_quarantine
+            WHERE scope = $scope;
+            """;
+        command.Parameters.Add("$scope", SqliteType.Blob).Value = scope.ToArray();
+        return Convert.ToInt32(command.ExecuteScalar());
+    }
+
     public void Dispose() => gate.Dispose();
 
     private void Initialize()
@@ -205,8 +248,61 @@ public sealed class SqliteClientMailboxStateRepository :
                     reason TEXT NOT NULL,
                     quarantined_at INTEGER NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS client_mailbox_traversal (
+                    scope BLOB PRIMARY KEY NOT NULL CHECK(length(scope) = 32),
+                    after_cursor BLOB NOT NULL CHECK(length(after_cursor) = 8),
+                    continuation_token BLOB NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS client_mailbox_inbox (
+                    scope BLOB NOT NULL CHECK(length(scope) = 32),
+                    cursor BLOB NOT NULL CHECK(length(cursor) = 8),
+                    digest BLOB NOT NULL CHECK(length(digest) = 32),
+                    expires_at BLOB NOT NULL CHECK(length(expires_at) = 8),
+                    canonical_envelope BLOB NOT NULL,
+                    acknowledged INTEGER NOT NULL CHECK(acknowledged IN (0, 1)),
+                    PRIMARY KEY(scope, cursor),
+                    UNIQUE(scope, digest)
+                );
+                CREATE INDEX IF NOT EXISTS ix_client_mailbox_inbox_scope_expiry
+                    ON client_mailbox_inbox(scope, expires_at);
+                CREATE INDEX IF NOT EXISTS ix_client_mailbox_inbox_scope_ack_cursor
+                    ON client_mailbox_inbox(scope, acknowledged, cursor);
+                CREATE TABLE IF NOT EXISTS client_mailbox_expired_quarantine (
+                    scope BLOB NOT NULL CHECK(length(scope) = 32),
+                    cursor BLOB NOT NULL CHECK(length(cursor) = 8),
+                    digest BLOB NOT NULL CHECK(length(digest) = 32),
+                    expires_at BLOB NOT NULL CHECK(length(expires_at) = 8),
+                    canonical_envelope BLOB NOT NULL,
+                    quarantined_at INTEGER NOT NULL,
+                    reason TEXT NOT NULL,
+                    PRIMARY KEY(scope, cursor, digest)
+                );
+                CREATE TABLE IF NOT EXISTS client_mailbox_coordinator_journal (
+                    installation_scope BLOB NOT NULL
+                        CHECK(length(installation_scope) = 32),
+                    statement_key BLOB NOT NULL CHECK(length(statement_key) = 32),
+                    statement_digest BLOB NOT NULL
+                        CHECK(length(statement_digest) = 32),
+                    expires_at BLOB NOT NULL CHECK(length(expires_at) = 8),
+                    PRIMARY KEY(installation_scope, statement_key)
+                );
+                CREATE INDEX IF NOT EXISTS ix_client_mailbox_journal_scope_expiry
+                    ON client_mailbox_coordinator_journal(
+                        installation_scope, expires_at);
+                CREATE TABLE IF NOT EXISTS client_mailbox_legacy_journal_guard (
+                    legacy_mailbox_scope BLOB NOT NULL
+                        CHECK(length(legacy_mailbox_scope) = 32),
+                    statement_key BLOB NOT NULL CHECK(length(statement_key) = 32),
+                    statement_digest BLOB NOT NULL
+                        CHECK(length(statement_digest) = 32),
+                    expires_at BLOB NOT NULL CHECK(length(expires_at) = 8),
+                    PRIMARY KEY(legacy_mailbox_scope, statement_key)
+                );
+                CREATE INDEX IF NOT EXISTS ix_client_mailbox_legacy_journal_key
+                    ON client_mailbox_legacy_journal_guard(
+                        statement_key, expires_at);
                 INSERT INTO client_mailbox_meta(id, schema_version)
-                VALUES(1, 2)
+                VALUES(1, 3)
                 ON CONFLICT(id) DO NOTHING;
                 """;
             command.ExecuteNonQuery();
@@ -227,7 +323,7 @@ public sealed class SqliteClientMailboxStateRepository :
             if (found < SchemaVersion)
             {
                 version.CommandText =
-                    "UPDATE client_mailbox_meta SET schema_version = 2 WHERE id = 1;";
+                    "UPDATE client_mailbox_meta SET schema_version = 3 WHERE id = 1;";
                 version.ExecuteNonQuery();
             }
         }
@@ -258,13 +354,11 @@ public sealed class SqliteClientMailboxStateRepository :
                     InsertBackup(connection, transaction, row.Scope, row.State);
                     migrationFault?.Invoke(
                         ClientMailboxMigrationFaultPoint.AfterBackupBeforeRewrite);
-                    WriteState(
-                        connection,
-                        transaction,
-                        row.Scope,
-                        ClientMailboxStateCodec.Encode(safe));
+                    InsertNormalizedSnapshot(
+                        connection, transaction, row.Scope, safe);
+                    DeleteLegacyState(connection, transaction, row.Scope);
                 }
-                catch (InvalidDataException)
+                catch (Exception exception) when (IsQuarantinable(exception))
                 {
                     Quarantine(connection, transaction, row.Scope, row.State);
                     quarantined = true;
@@ -275,9 +369,15 @@ public sealed class SqliteClientMailboxStateRepository :
 
             try
             {
-                _ = ClientMailboxStateCodec.Decode(row.State);
+                var decoded = ClientMailboxStateCodec.Decode(row.State);
+                InsertBackup(connection, transaction, row.Scope, row.State);
+                migrationFault?.Invoke(
+                    ClientMailboxMigrationFaultPoint.AfterBackupBeforeRewrite);
+                InsertNormalizedSnapshot(
+                    connection, transaction, row.Scope, decoded);
+                DeleteLegacyState(connection, transaction, row.Scope);
             }
-            catch (InvalidDataException)
+            catch (Exception exception) when (IsQuarantinable(exception))
             {
                 Quarantine(connection, transaction, row.Scope, row.State);
                 quarantined = true;
@@ -292,24 +392,21 @@ public sealed class SqliteClientMailboxStateRepository :
         }
     }
 
-    private async Task<TResult> ReadAsync<TResult>(
+    private async Task<TResult> ReadNormalizedAsync<TResult>(
         ClientMailboxScope scope,
-        Func<ClientMailboxStoredState, TResult> read,
+        Func<SqliteConnection, SqliteTransaction?, byte[], CancellationToken,
+            Task<TResult>> read,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(scope);
-        ArgumentNullException.ThrowIfNull(read);
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             await using var connection = await OpenAsync(cancellationToken)
                 .ConfigureAwait(false);
-            var state = await LoadAsync(
-                connection,
-                transaction: null,
-                scope,
-                cancellationToken).ConfigureAwait(false);
-            return read(state.Clone());
+            return await read(
+                connection, null, scope.ToArray(), cancellationToken)
+                .ConfigureAwait(false);
         }
         finally
         {
@@ -317,37 +414,163 @@ public sealed class SqliteClientMailboxStateRepository :
         }
     }
 
-    private async Task<TResult> MutateAsync<TResult>(
+    private async Task<ClientMailboxReceiveCommitResult> CommitPageNormalizedAsync(
         ClientMailboxScope scope,
-        Func<ClientMailboxStoredState, TResult> mutation,
+        ClientMailboxTraversal expected,
+        MailboxRetrievePage page,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(scope);
-        ArgumentNullException.ThrowIfNull(mutation);
+        ArgumentNullException.ThrowIfNull(expected);
+        ArgumentNullException.ThrowIfNull(page);
+        _ = MailboxClientCodec.EncodeRetrievePage(page);
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             await using var connection = await OpenAsync(cancellationToken)
                 .ConfigureAwait(false);
             await using var transaction = connection.BeginTransaction();
-            var current = await LoadAsync(
-                connection,
-                transaction,
-                scope,
-                cancellationToken).ConfigureAwait(false);
-            var candidate = current.Clone();
-            var result = mutation(candidate);
-            var encoded = ClientMailboxStateCodec.Encode(candidate);
-            await using var command = connection.CreateCommand();
-            command.Transaction = transaction;
-            command.CommandText = """
-                INSERT INTO client_mailbox_state(scope, state_blob)
-                VALUES($scope, $state)
-                ON CONFLICT(scope) DO UPDATE SET state_blob = excluded.state_blob;
-                """;
-            command.Parameters.Add("$scope", SqliteType.Blob).Value = scope.ToArray();
-            command.Parameters.Add("$state", SqliteType.Blob).Value = encoded;
-            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            var scopeBytes = scope.ToArray();
+            var traversal = await ReadTraversalCoreAsync(
+                connection, transaction, scopeBytes, cancellationToken)
+                .ConfigureAwait(false);
+            if (traversal.AfterCursor != expected.AfterCursor ||
+                !CryptographicOperations.FixedTimeEquals(
+                    traversal.ContinuationToken, expected.ContinuationToken))
+            {
+                throw new InvalidOperationException(
+                    "Mailbox traversal changed before durable page commit.");
+            }
+
+            var committedPage =
+                new List<MailboxRetrievedEnvelope>(page.Items.Count);
+            foreach (var item in page.Items)
+            {
+                var envelope = MailboxClientCodec.EncodeEncryptedEnvelope(item.Envelope);
+                var digest = item.Envelope.DeduplicationDigest.ToArray();
+                await using var inspect = connection.CreateCommand();
+                inspect.Transaction = transaction;
+                inspect.CommandText = """
+                    SELECT cursor, digest, expires_at, canonical_envelope, acknowledged
+                    FROM client_mailbox_inbox
+                    WHERE scope = $scope AND (cursor = $cursor OR digest = $digest);
+                    """;
+                inspect.Parameters.Add("$scope", SqliteType.Blob).Value = scopeBytes;
+                inspect.Parameters.Add("$cursor", SqliteType.Blob).Value = U64(item.Cursor);
+                inspect.Parameters.Add("$digest", SqliteType.Blob).Value = digest;
+                await using var reader = await inspect.ExecuteReaderAsync(cancellationToken)
+                    .ConfigureAwait(false);
+                if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    var matches =
+                        Fixed(reader.GetFieldValue<byte[]>(0), U64(item.Cursor)) &&
+                        Fixed(reader.GetFieldValue<byte[]>(1), digest) &&
+                        ReadU64(reader.GetFieldValue<byte[]>(2)) ==
+                            item.Envelope.ExpiresAtUnixSeconds &&
+                        Fixed(reader.GetFieldValue<byte[]>(3), envelope);
+                    var acknowledged = reader.GetInt32(4) == 1;
+                    if (!matches ||
+                        await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                    {
+                        throw new InvalidDataException(
+                            "Mailbox cursor/digest history conflicts with durable inbox.");
+                    }
+
+                    if (!acknowledged)
+                    {
+                        committedPage.Add(item);
+                    }
+
+                    continue;
+                }
+
+                if (expected.AfterCursor != 0 && item.Cursor <= expected.AfterCursor)
+                {
+                    throw new InvalidDataException(
+                        "Continuation page rolled back below its authorized cursor.");
+                }
+
+                await using var insert = connection.CreateCommand();
+                insert.Transaction = transaction;
+                insert.CommandText = """
+                    INSERT INTO client_mailbox_inbox(
+                        scope, cursor, digest, expires_at,
+                        canonical_envelope, acknowledged)
+                    VALUES($scope, $cursor, $digest, $expires, $envelope, 0);
+                    """;
+                insert.Parameters.Add("$scope", SqliteType.Blob).Value = scopeBytes;
+                insert.Parameters.Add("$cursor", SqliteType.Blob).Value = U64(item.Cursor);
+                insert.Parameters.Add("$digest", SqliteType.Blob).Value = digest;
+                insert.Parameters.Add("$expires", SqliteType.Blob).Value =
+                    U64(item.Envelope.ExpiresAtUnixSeconds);
+                insert.Parameters.Add("$envelope", SqliteType.Blob).Value = envelope;
+                await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                committedPage.Add(item);
+            }
+
+            var next = page.HasMore
+                ? new ClientMailboxTraversal(page.NextCursor, page.ContinuationToken.Span)
+                : new ClientMailboxTraversal(0, []);
+            await WriteTraversalAsync(
+                connection, transaction, scopeBytes, next, cancellationToken)
+                .ConfigureAwait(false);
+            await EnforceInboxCapacityAsync(
+                connection, transaction, scopeBytes, cancellationToken)
+                .ConfigureAwait(false);
+            var durable = ClientMailboxStateMachine.PageInbox(committedPage);
+            commitFault?.Invoke(ClientMailboxCommitFaultPoint.BeforeCommit);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            commitFault?.Invoke(ClientMailboxCommitFaultPoint.AfterCommit);
+            return new(next, durable);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    private async Task<ClientMailboxAckState> CommitAckNormalizedAsync(
+        ClientMailboxScope scope,
+        IReadOnlyList<MailboxAcknowledgement> acknowledgements,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        ArgumentNullException.ThrowIfNull(acknowledgements);
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await using var connection = await OpenAsync(cancellationToken)
+                .ConfigureAwait(false);
+            await using var transaction = connection.BeginTransaction();
+            var scopeBytes = scope.ToArray();
+            var state = await LoadNormalizedStateAsync(
+                connection, transaction, scopeBytes, cancellationToken)
+                .ConfigureAwait(false);
+            var result = ClientMailboxStateMachine.Check(state, acknowledgements);
+            if (result == ClientMailboxAckState.Pending)
+            {
+                foreach (var acknowledgement in acknowledgements)
+                {
+                    await using var update = connection.CreateCommand();
+                    update.Transaction = transaction;
+                    update.CommandText = """
+                        UPDATE client_mailbox_inbox SET acknowledged = 1
+                        WHERE scope = $scope AND cursor = $cursor AND digest = $digest;
+                        """;
+                    update.Parameters.Add("$scope", SqliteType.Blob).Value = scopeBytes;
+                    update.Parameters.Add("$cursor", SqliteType.Blob).Value =
+                        U64(acknowledgement.Cursor);
+                    update.Parameters.Add("$digest", SqliteType.Blob).Value =
+                        acknowledgement.EnvelopeDigest.ToArray();
+                    if (await update.ExecuteNonQueryAsync(cancellationToken)
+                            .ConfigureAwait(false) != 1)
+                    {
+                        throw new IOException(
+                            "Mailbox acknowledgement state changed concurrently.");
+                    }
+                }
+            }
+
             commitFault?.Invoke(ClientMailboxCommitFaultPoint.BeforeCommit);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             commitFault?.Invoke(ClientMailboxCommitFaultPoint.AfterCommit);
@@ -359,23 +582,558 @@ public sealed class SqliteClientMailboxStateRepository :
         }
     }
 
-    private static async Task<ClientMailboxStoredState> LoadAsync(
+    private async Task<ClientMailboxExpiryReconciliationResult>
+        ReconcileExpiredNormalizedAsync(
+            ClientMailboxScope scope,
+            ulong nowUnixSeconds,
+            CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        if (nowUnixSeconds == 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(nowUnixSeconds));
+        }
+
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await using var connection = await OpenAsync(cancellationToken)
+                .ConfigureAwait(false);
+            await using var transaction = connection.BeginTransaction();
+            var scopeBytes = scope.ToArray();
+            var expired = new List<(byte[] Cursor, byte[] Digest, byte[] Expires,
+                byte[] Envelope, bool Acknowledged)>();
+            await using (var select = connection.CreateCommand())
+            {
+                select.Transaction = transaction;
+                select.CommandText = """
+                    SELECT cursor, digest, expires_at, canonical_envelope, acknowledged
+                    FROM client_mailbox_inbox
+                    WHERE scope = $scope AND expires_at <= $now;
+                    """;
+                select.Parameters.Add("$scope", SqliteType.Blob).Value = scopeBytes;
+                select.Parameters.Add("$now", SqliteType.Blob).Value = U64(nowUnixSeconds);
+                await using var reader = await select.ExecuteReaderAsync(cancellationToken)
+                    .ConfigureAwait(false);
+                while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    expired.Add((
+                        reader.GetFieldValue<byte[]>(0),
+                        reader.GetFieldValue<byte[]>(1),
+                        reader.GetFieldValue<byte[]>(2),
+                        reader.GetFieldValue<byte[]>(3),
+                        reader.GetInt32(4) == 1));
+                }
+            }
+
+            if (expired.Count == 0)
+            {
+                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                return new(0, 0);
+            }
+
+            foreach (var item in expired.Where(static item => !item.Acknowledged))
+            {
+                await using var quarantine = connection.CreateCommand();
+                quarantine.Transaction = transaction;
+                quarantine.CommandText = """
+                    INSERT INTO client_mailbox_expired_quarantine(
+                        scope, cursor, digest, expires_at, canonical_envelope,
+                        quarantined_at, reason)
+                    VALUES($scope, $cursor, $digest, $expires, $envelope, $at,
+                        'expired-unacknowledged-no-fabricated-ack')
+                    ON CONFLICT(scope, cursor, digest) DO NOTHING;
+                    """;
+                quarantine.Parameters.Add("$scope", SqliteType.Blob).Value = scopeBytes;
+                quarantine.Parameters.Add("$cursor", SqliteType.Blob).Value = item.Cursor;
+                quarantine.Parameters.Add("$digest", SqliteType.Blob).Value = item.Digest;
+                quarantine.Parameters.Add("$expires", SqliteType.Blob).Value = item.Expires;
+                quarantine.Parameters.Add("$envelope", SqliteType.Blob).Value = item.Envelope;
+                quarantine.Parameters.AddWithValue("$at", checked((long)Math.Min(
+                    nowUnixSeconds, (ulong)long.MaxValue)));
+                await quarantine.ExecuteNonQueryAsync(cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            await EnforceExpiredQuarantineCapacityAsync(
+                connection, transaction, scopeBytes, cancellationToken)
+                .ConfigureAwait(false);
+
+            await using (var delete = connection.CreateCommand())
+            {
+                delete.Transaction = transaction;
+                delete.CommandText =
+                    "DELETE FROM client_mailbox_inbox WHERE scope = $scope AND expires_at <= $now;";
+                delete.Parameters.Add("$scope", SqliteType.Blob).Value = scopeBytes;
+                delete.Parameters.Add("$now", SqliteType.Blob).Value = U64(nowUnixSeconds);
+                await delete.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            commitFault?.Invoke(ClientMailboxCommitFaultPoint.BeforeCommit);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            commitFault?.Invoke(ClientMailboxCommitFaultPoint.AfterCommit);
+            return new(
+                expired.Count(static item => !item.Acknowledged),
+                expired.Count(static item => item.Acknowledged));
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    private async Task<ClientMailboxCoordinatorRecordResult>
+        RecordCoordinatorNormalizedAsync(
+            ClientMailboxJournalScope scope,
+            ReadOnlyMemory<byte> membershipCommitment,
+            ulong epoch,
+            ReadOnlyMemory<byte> coordinatorId,
+            ulong coordinatorSequence,
+            ReadOnlyMemory<byte> statementDigest,
+            ulong expiresAtUnixSeconds,
+            ulong nowUnixSeconds,
+            CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        var probe = new ClientMailboxJournalState();
+        _ = ClientMailboxStateMachine.RecordCoordinator(
+            probe, membershipCommitment.Span, epoch, coordinatorId.Span,
+            coordinatorSequence, statementDigest.Span, expiresAtUnixSeconds,
+            nowUnixSeconds);
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await using var connection = await OpenAsync(cancellationToken)
+                .ConfigureAwait(false);
+            await using var transaction = connection.BeginTransaction();
+            var scopeBytes = scope.ToArray();
+            var statementKey = CoordinatorStatementKey(
+                membershipCommitment.Span,
+                epoch,
+                coordinatorId.Span,
+                coordinatorSequence);
+            await using (var prune = connection.CreateCommand())
+            {
+                prune.Transaction = transaction;
+                prune.CommandText = """
+                    DELETE FROM client_mailbox_coordinator_journal
+                    WHERE installation_scope = $scope AND expires_at <= $now;
+                    DELETE FROM client_mailbox_legacy_journal_guard
+                    WHERE expires_at <= $now;
+                    """;
+                prune.Parameters.Add("$scope", SqliteType.Blob).Value = scopeBytes;
+                prune.Parameters.Add("$now", SqliteType.Blob).Value = U64(nowUnixSeconds);
+                await prune.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            await using (var legacy = connection.CreateCommand())
+            {
+                legacy.Transaction = transaction;
+                legacy.CommandText = """
+                    SELECT statement_digest
+                    FROM client_mailbox_legacy_journal_guard
+                    WHERE statement_key = $key;
+                    """;
+                legacy.Parameters.Add("$key", SqliteType.Blob).Value = statementKey;
+                await using var reader = await legacy.ExecuteReaderAsync(cancellationToken)
+                    .ConfigureAwait(false);
+                var found = false;
+                while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    found = true;
+                    if (!Fixed(
+                            reader.GetFieldValue<byte[]>(0),
+                            statementDigest.Span))
+                    {
+                        await reader.DisposeAsync().ConfigureAwait(false);
+                        await transaction.CommitAsync(cancellationToken)
+                            .ConfigureAwait(false);
+                        return ClientMailboxCoordinatorRecordResult.Equivocation;
+                    }
+                }
+
+                if (found)
+                {
+                    await reader.DisposeAsync().ConfigureAwait(false);
+                    await transaction.CommitAsync(cancellationToken)
+                        .ConfigureAwait(false);
+                    return ClientMailboxCoordinatorRecordResult.Idempotent;
+                }
+            }
+
+            await using (var find = connection.CreateCommand())
+            {
+                find.Transaction = transaction;
+                find.CommandText = """
+                    SELECT statement_digest
+                    FROM client_mailbox_coordinator_journal
+                    WHERE installation_scope = $scope
+                      AND statement_key = $key;
+                    """;
+                find.Parameters.Add("$scope", SqliteType.Blob).Value = scopeBytes;
+                find.Parameters.Add("$key", SqliteType.Blob).Value = statementKey;
+                var existing = await find.ExecuteScalarAsync(cancellationToken)
+                    .ConfigureAwait(false);
+                if (existing is byte[] digest)
+                {
+                    await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                    return Fixed(digest, statementDigest.Span)
+                        ? ClientMailboxCoordinatorRecordResult.Idempotent
+                        : ClientMailboxCoordinatorRecordResult.Equivocation;
+                }
+            }
+
+            await using (var count = connection.CreateCommand())
+            {
+                count.Transaction = transaction;
+                count.CommandText = """
+                    SELECT count(*) FROM client_mailbox_coordinator_journal
+                    WHERE installation_scope = $scope;
+                    """;
+                count.Parameters.Add("$scope", SqliteType.Blob).Value = scopeBytes;
+                if (Convert.ToInt32(await count.ExecuteScalarAsync(cancellationToken)
+                        .ConfigureAwait(false)) >=
+                    ClientMailboxStateLimits.MaximumCoordinatorStatements)
+                {
+                    await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                    return ClientMailboxCoordinatorRecordResult.CapacityExceeded;
+                }
+            }
+
+            await using var insert = connection.CreateCommand();
+            insert.Transaction = transaction;
+            insert.CommandText = """
+                INSERT INTO client_mailbox_coordinator_journal(
+                    installation_scope, statement_key, statement_digest, expires_at)
+                VALUES($scope, $key, $digest, $expires);
+                """;
+            insert.Parameters.Add("$scope", SqliteType.Blob).Value = scopeBytes;
+            insert.Parameters.Add("$key", SqliteType.Blob).Value = statementKey;
+            insert.Parameters.Add("$digest", SqliteType.Blob).Value =
+                statementDigest.ToArray();
+            insert.Parameters.Add("$expires", SqliteType.Blob).Value =
+                U64(expiresAtUnixSeconds);
+            await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            commitFault?.Invoke(ClientMailboxCommitFaultPoint.BeforeCommit);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            commitFault?.Invoke(ClientMailboxCommitFaultPoint.AfterCommit);
+            return ClientMailboxCoordinatorRecordResult.Applied;
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    private static async Task<ClientMailboxTraversal> ReadTraversalCoreAsync(
         SqliteConnection connection,
         SqliteTransaction? transaction,
-        ClientMailboxScope scope,
+        byte[] scope,
         CancellationToken cancellationToken)
     {
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
-        command.CommandText =
-            "SELECT state_blob FROM client_mailbox_state WHERE scope = $scope;";
-        command.Parameters.Add("$scope", SqliteType.Blob).Value = scope.ToArray();
-        var value = await command.ExecuteScalarAsync(cancellationToken)
+        command.CommandText = """
+            SELECT after_cursor, continuation_token
+            FROM client_mailbox_traversal WHERE scope = $scope;
+            """;
+        command.Parameters.Add("$scope", SqliteType.Blob).Value = scope;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken)
             .ConfigureAwait(false);
-        return value is byte[] encoded
-            ? ClientMailboxStateCodec.Decode(encoded)
-            : new ClientMailboxStoredState();
+        return await reader.ReadAsync(cancellationToken).ConfigureAwait(false)
+            ? new ClientMailboxTraversal(
+                ReadU64(reader.GetFieldValue<byte[]>(0)),
+                reader.GetFieldValue<byte[]>(1))
+            : new ClientMailboxTraversal(0, []);
     }
+
+    private static async Task<ClientMailboxStoredState> LoadNormalizedStateAsync(
+        SqliteConnection connection,
+        SqliteTransaction? transaction,
+        byte[] scope,
+        CancellationToken cancellationToken)
+    {
+        var traversal = await ReadTraversalCoreAsync(
+            connection, transaction, scope, cancellationToken)
+            .ConfigureAwait(false);
+        var state = new ClientMailboxStoredState
+        {
+            AfterCursor = traversal.AfterCursor,
+            ContinuationToken = traversal.GetContinuationTokenCopy()
+        };
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT cursor, digest, expires_at, canonical_envelope, acknowledged
+            FROM client_mailbox_inbox WHERE scope = $scope ORDER BY cursor;
+            """;
+        command.Parameters.Add("$scope", SqliteType.Blob).Value = scope;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken)
+            .ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            state.Entries.Add(new ClientMailboxStoredEntry
+            {
+                Cursor = ReadU64(reader.GetFieldValue<byte[]>(0)),
+                Digest = reader.GetFieldValue<byte[]>(1),
+                ExpiresAtUnixSeconds = ReadU64(reader.GetFieldValue<byte[]>(2)),
+                CanonicalEnvelope = reader.GetFieldValue<byte[]>(3),
+                Acknowledged = reader.GetInt32(4) == 1
+            });
+        }
+
+        ClientMailboxStateMachine.Validate(state);
+        return state;
+    }
+
+    private static async Task WriteTraversalAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        byte[] scope,
+        ClientMailboxTraversal traversal,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            INSERT INTO client_mailbox_traversal(
+                scope, after_cursor, continuation_token)
+            VALUES($scope, $cursor, $token)
+            ON CONFLICT(scope) DO UPDATE SET
+                after_cursor = excluded.after_cursor,
+                continuation_token = excluded.continuation_token;
+            """;
+        command.Parameters.Add("$scope", SqliteType.Blob).Value = scope;
+        command.Parameters.Add("$cursor", SqliteType.Blob).Value =
+            U64(traversal.AfterCursor);
+        command.Parameters.Add("$token", SqliteType.Blob).Value =
+            traversal.GetContinuationTokenCopy();
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task EnforceInboxCapacityAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        byte[] scope,
+        CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            await using var count = connection.CreateCommand();
+            count.Transaction = transaction;
+            count.CommandText = """
+                SELECT count(*), COALESCE(sum(length(canonical_envelope)), 0)
+                FROM client_mailbox_inbox WHERE scope = $scope;
+                """;
+            count.Parameters.Add("$scope", SqliteType.Blob).Value = scope;
+            await using var reader = await count.ExecuteReaderAsync(cancellationToken)
+                .ConfigureAwait(false);
+            _ = await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+            if (reader.GetInt64(0) <= ClientMailboxStateLimits.MaximumInboxEntries &&
+                reader.GetInt64(1) <= ClientMailboxStateLimits.MaximumInboxBytes)
+            {
+                return;
+            }
+
+            await reader.DisposeAsync().ConfigureAwait(false);
+            await using var delete = connection.CreateCommand();
+            delete.Transaction = transaction;
+            delete.CommandText = """
+                DELETE FROM client_mailbox_inbox
+                WHERE scope = $scope AND cursor = (
+                    SELECT cursor FROM client_mailbox_inbox
+                    WHERE scope = $scope AND acknowledged = 1
+                    ORDER BY cursor LIMIT 1);
+                """;
+            delete.Parameters.Add("$scope", SqliteType.Blob).Value = scope;
+            if (await delete.ExecuteNonQueryAsync(cancellationToken)
+                    .ConfigureAwait(false) == 0)
+            {
+                throw new InvalidDataException(
+                    "Unacknowledged mailbox inbox exceeded its persistent bound.");
+            }
+        }
+    }
+
+    private static async Task EnforceExpiredQuarantineCapacityAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        byte[] scope,
+        CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            await using var count = connection.CreateCommand();
+            count.Transaction = transaction;
+            count.CommandText = """
+                SELECT count(*), COALESCE(sum(length(canonical_envelope)), 0)
+                FROM client_mailbox_expired_quarantine WHERE scope = $scope;
+                """;
+            count.Parameters.Add("$scope", SqliteType.Blob).Value = scope;
+            await using var reader = await count.ExecuteReaderAsync(cancellationToken)
+                .ConfigureAwait(false);
+            _ = await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+            if (reader.GetInt64(0) <=
+                    ClientMailboxStateLimits.MaximumExpiredQuarantineEntries &&
+                reader.GetInt64(1) <=
+                    ClientMailboxStateLimits.MaximumExpiredQuarantineBytes)
+            {
+                return;
+            }
+
+            await reader.DisposeAsync().ConfigureAwait(false);
+            await using var delete = connection.CreateCommand();
+            delete.Transaction = transaction;
+            delete.CommandText = """
+                DELETE FROM client_mailbox_expired_quarantine
+                WHERE scope = $scope AND cursor = (
+                    SELECT cursor FROM client_mailbox_expired_quarantine
+                    WHERE scope = $scope
+                    ORDER BY expires_at, cursor, digest LIMIT 1)
+                  AND digest = (
+                    SELECT digest FROM client_mailbox_expired_quarantine
+                    WHERE scope = $scope
+                    ORDER BY expires_at, cursor, digest LIMIT 1);
+                """;
+            delete.Parameters.Add("$scope", SqliteType.Blob).Value = scope;
+            if (await delete.ExecuteNonQueryAsync(cancellationToken)
+                    .ConfigureAwait(false) != 1)
+            {
+                throw new IOException(
+                    "Expired mailbox quarantine pruning made no progress.");
+            }
+        }
+    }
+
+    private static void InsertNormalizedSnapshot(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        byte[] scope,
+        ClientMailboxStoredState state)
+    {
+        using (var traversal = connection.CreateCommand())
+        {
+            traversal.Transaction = transaction;
+            traversal.CommandText = """
+                INSERT INTO client_mailbox_traversal(
+                    scope, after_cursor, continuation_token)
+                VALUES($scope, $cursor, $token)
+                ON CONFLICT(scope) DO UPDATE SET
+                    after_cursor = excluded.after_cursor,
+                    continuation_token = excluded.continuation_token;
+                """;
+            traversal.Parameters.Add("$scope", SqliteType.Blob).Value = scope;
+            traversal.Parameters.Add("$cursor", SqliteType.Blob).Value =
+                U64(state.AfterCursor);
+            traversal.Parameters.Add("$token", SqliteType.Blob).Value =
+                state.ContinuationToken;
+            traversal.ExecuteNonQuery();
+        }
+
+        foreach (var entry in state.Entries)
+        {
+            using var insert = connection.CreateCommand();
+            insert.Transaction = transaction;
+            insert.CommandText = """
+                INSERT INTO client_mailbox_inbox(
+                    scope, cursor, digest, expires_at,
+                    canonical_envelope, acknowledged)
+                VALUES($scope, $cursor, $digest, $expires, $envelope, $ack)
+                ON CONFLICT(scope, cursor) DO UPDATE SET
+                    digest = excluded.digest,
+                    expires_at = excluded.expires_at,
+                    canonical_envelope = excluded.canonical_envelope,
+                    acknowledged = excluded.acknowledged;
+                """;
+            insert.Parameters.Add("$scope", SqliteType.Blob).Value = scope;
+            insert.Parameters.Add("$cursor", SqliteType.Blob).Value =
+                U64(entry.Cursor);
+            insert.Parameters.Add("$digest", SqliteType.Blob).Value = entry.Digest;
+            insert.Parameters.Add("$expires", SqliteType.Blob).Value =
+                U64(entry.ExpiresAtUnixSeconds);
+            insert.Parameters.Add("$envelope", SqliteType.Blob).Value =
+                entry.CanonicalEnvelope;
+            insert.Parameters.AddWithValue("$ack", entry.Acknowledged ? 1 : 0);
+            insert.ExecuteNonQuery();
+        }
+
+        foreach (var statement in state.CoordinatorStatements)
+        {
+            using var insert = connection.CreateCommand();
+            insert.Transaction = transaction;
+            insert.CommandText = """
+                INSERT INTO client_mailbox_legacy_journal_guard(
+                    legacy_mailbox_scope, statement_key,
+                    statement_digest, expires_at)
+                VALUES($scope, $key, $digest, $expires)
+                ON CONFLICT(legacy_mailbox_scope, statement_key) DO NOTHING;
+                """;
+            insert.Parameters.Add("$scope", SqliteType.Blob).Value = scope;
+            insert.Parameters.Add("$key", SqliteType.Blob).Value =
+                CoordinatorStatementKey(
+                    statement.MembershipCommitment,
+                    statement.Epoch,
+                    statement.CoordinatorId,
+                    statement.CoordinatorSequence);
+            insert.Parameters.Add("$digest", SqliteType.Blob).Value =
+                statement.StatementDigest;
+            insert.Parameters.Add("$expires", SqliteType.Blob).Value =
+                U64(statement.ExpiresAtUnixSeconds);
+            insert.ExecuteNonQuery();
+        }
+    }
+
+    private static void DeleteLegacyState(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        byte[] scope)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            "DELETE FROM client_mailbox_state WHERE scope = $scope;";
+        command.Parameters.Add("$scope", SqliteType.Blob).Value = scope;
+        command.ExecuteNonQuery();
+    }
+
+    private static bool IsQuarantinable(Exception exception) =>
+        exception is InvalidDataException or MailboxClientException or
+            ArgumentOutOfRangeException or IndexOutOfRangeException or
+            OverflowException;
+
+    private static byte[] U64(ulong value)
+    {
+        var bytes = new byte[8];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt64BigEndian(bytes, value);
+        return bytes;
+    }
+
+    private static byte[] CoordinatorStatementKey(
+        ReadOnlySpan<byte> membershipCommitment,
+        ulong epoch,
+        ReadOnlySpan<byte> coordinatorId,
+        ulong coordinatorSequence) =>
+        SHA256.HashData([
+            .. "deep.client.mailbox.coordinator-statement-key.v1"u8,
+            .. membershipCommitment,
+            .. U64(epoch),
+            .. coordinatorId,
+            .. U64(coordinatorSequence)
+        ]);
+
+    private static ulong ReadU64(ReadOnlySpan<byte> value)
+    {
+        if (value.Length != 8)
+        {
+            throw new InvalidDataException("Persisted UInt64 is invalid.");
+        }
+
+        return System.Buffers.Binary.BinaryPrimitives.ReadUInt64BigEndian(value);
+    }
+
+    private static bool Fixed(ReadOnlySpan<byte> left, ReadOnlySpan<byte> right) =>
+        left.Length == right.Length &&
+        CryptographicOperations.FixedTimeEquals(left, right);
 
     private static void InsertBackup(
         SqliteConnection connection,
@@ -395,21 +1153,6 @@ public sealed class SqliteClientMailboxStateRepository :
         command.Parameters.AddWithValue(
             "$at",
             DateTimeOffset.UtcNow.ToUnixTimeSeconds());
-        command.ExecuteNonQuery();
-    }
-
-    private static void WriteState(
-        SqliteConnection connection,
-        SqliteTransaction transaction,
-        byte[] scope,
-        byte[] state)
-    {
-        using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText =
-            "UPDATE client_mailbox_state SET state_blob = $state WHERE scope = $scope;";
-        command.Parameters.Add("$scope", SqliteType.Blob).Value = scope;
-        command.Parameters.Add("$state", SqliteType.Blob).Value = state;
         command.ExecuteNonQuery();
     }
 
@@ -456,7 +1199,7 @@ public sealed class SqliteClientMailboxStateRepository :
         command.CommandText = """
             PRAGMA busy_timeout=5000;
             PRAGMA journal_mode=WAL;
-            PRAGMA synchronous=NORMAL;
+            PRAGMA synchronous=FULL;
             """;
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         return connection;
@@ -476,7 +1219,7 @@ public sealed class SqliteClientMailboxStateRepository :
         command.CommandText = """
             PRAGMA busy_timeout=5000;
             PRAGMA journal_mode=WAL;
-            PRAGMA synchronous=NORMAL;
+            PRAGMA synchronous=FULL;
             """;
         command.ExecuteNonQuery();
     }

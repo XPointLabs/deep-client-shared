@@ -115,7 +115,10 @@ a bounded expiry; the strict path does not downgrade to MQR2 or JSON.
 Receive ciphertext, cursor, continuation token, deduplication, and ordered
 acknowledgement state share one bounded atomic state machine across the
 in-memory and SQLite repositories. A page is returned to its caller only after
-the encrypted envelopes and its next traversal authority commit together.
+the encrypted envelopes and its next traversal authority commit together. The
+hot commit result contains only that committed page; recovery of the complete
+unacknowledged inbox is an explicit operation, so normal polling never reloads
+the full bounded store merely to report new items.
 Crash-before-commit preserves the prior cursor/token; crash-after-commit
 replays the durable inbox. Non-final XCT1 tokens persist across restart, while
 a final empty-token MRP1 resets the next polling cycle to cursor zero.
@@ -123,12 +126,31 @@ a final empty-token MRP1 resets the next polling cycle to cursor zero.
 SQLite state is available only through the keyed `SqliteSessionStoreOptions`
 SQLCipher path. Scope keys are domain-separated hashes derived internally from
 issuer context plus blinded mailbox ID; arbitrary production `FromBytes`
-construction is unavailable. CMS2 also journals bounded coordinator statements
-by membership/epoch so sequence equivocation remains detectable after restart,
-and tombstone expiry is checked against the persisted retrieved envelope.
+construction is unavailable. Runtime writes use normalized, indexed traversal,
+inbox, expiry-quarantine, and coordinator-journal rows in atomic SQLCipher WAL
+transactions with `synchronous=FULL`; the legacy CMS1/CMS2 blob table is
+migration-only and is never rewritten by the hot path. The coordinator journal
+uses a separate installation/issuer-derived opaque scope, so a reused
+membership/epoch/coordinator/sequence with a different statement is rejected
+across mailbox IDs, epochs, and restarts.
+
+Before reads, retrieval, or acknowledgement, expired inbox rows are reconciled
+deterministically. Unacknowledged rows move atomically to a bounded encrypted
+quarantine and are never converted to acknowledgements or delivered state;
+acknowledged expired rows are removed. Quarantine count and ciphertext bytes
+are bounded with deterministic oldest-first pruning. Tombstone expiry is
+checked against the persisted retrieved envelope.
 CMS1 could advance a cursor without retaining ciphertext, so migration first
 backs up the old bytes and resets to a safe cursor-zero replay instead of
-retaining a lossy cursor/dedup state. Corrupt rows are quarantined.
+retaining a lossy cursor/dedup state. CMS2 migration backs up the original blob
+before the atomic normalized cutover and is interruption-safe and idempotent.
+Because a CMS2 mailbox-scoped coordinator journal cannot recover its original
+issuer scope, its statements move to a separate opaque composite-key legacy
+guard. The installation journal consults that guard until each statement
+expires, preserving fail-closed equivocation detection without retaining raw
+membership or coordinator identifiers in the normalized schema.
+Length, overflow, and canonical-envelope decoder failures are normalized to
+`InvalidDataException`; corrupt legacy rows are quarantined fail-closed.
 
 ## E3 MVP Notes
 
