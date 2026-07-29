@@ -1,19 +1,8 @@
-using Deep.Protocol.DeepExtension.MailboxCapabilities;
+﻿using Deep.Protocol.DeepExtension.MailboxCapabilities;
 using Microsoft.Data.Sqlite;
 using System.Security.Cryptography;
 
 namespace Deep.Client.Shared.Persistence;
-
-internal enum ClientMailboxMigrationFaultPoint
-{
-    AfterBackupBeforeRewrite,
-    AfterCorruptEvidenceBeforeLegacyDelete
-}
-
-internal sealed record ClientMailboxCorruptStreamObservation(
-    string StreamType,
-    long SourceBytes,
-    long ManagedAllocatedBytes);
 
 /// <summary>
 /// SQLCipher-backed state containing only domain-separated scope hashes,
@@ -23,12 +12,9 @@ public sealed class SqliteClientMailboxStateRepository :
     IClientMailboxStateRepository,
     IDisposable
 {
-    private const int SchemaVersion = 5;
+    private const int SchemaVersion = 6;
     private readonly string connectionString;
-    private readonly Action<ClientMailboxMigrationFaultPoint>? migrationFault;
     private readonly Action<ClientMailboxCommitFaultPoint>? commitFault;
-    private readonly Action<ClientMailboxCorruptStreamObservation>?
-        corruptStreamObservation;
     private readonly SemaphoreSlim gate = new(1, 1);
 
     static SqliteClientMailboxStateRepository()
@@ -37,16 +23,13 @@ public sealed class SqliteClientMailboxStateRepository :
     }
 
     public SqliteClientMailboxStateRepository(SqliteSessionStoreOptions options)
-        : this(options, migrationFault: null, commitFault: null)
+        : this(options, commitFault: null)
     {
     }
 
     internal SqliteClientMailboxStateRepository(
         SqliteSessionStoreOptions options,
-        Action<ClientMailboxMigrationFaultPoint>? migrationFault,
-        Action<ClientMailboxCommitFaultPoint>? commitFault = null,
-        Action<ClientMailboxCorruptStreamObservation>?
-            corruptStreamObservation = null)
+        Action<ClientMailboxCommitFaultPoint>? commitFault = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         var encryptionKey = options.GetEncryptionKeyForStore();
@@ -71,9 +54,7 @@ public sealed class SqliteClientMailboxStateRepository :
             Pooling = false,
             Password = encryptionKey
         }.ToString();
-        this.migrationFault = migrationFault;
         this.commitFault = commitFault;
-        this.corruptStreamObservation = corruptStreamObservation;
         Initialize();
     }
 
@@ -167,135 +148,6 @@ public sealed class SqliteClientMailboxStateRepository :
             nowUnixSeconds,
             cancellationToken);
 
-    internal void InsertRawStateForTests(
-        ClientMailboxScope scope,
-        ReadOnlySpan<byte> encoded)
-    {
-        ArgumentNullException.ThrowIfNull(scope);
-        using var connection = Open();
-        using var command = connection.CreateCommand();
-        command.CommandText = """
-            INSERT INTO client_mailbox_state(scope, state_blob)
-            VALUES($scope, $state)
-            ON CONFLICT(scope) DO UPDATE SET state_blob = excluded.state_blob;
-            """;
-        command.Parameters.Add("$scope", SqliteType.Blob).Value = scope.ToArray();
-        command.Parameters.Add("$state", SqliteType.Blob).Value = encoded.ToArray();
-        command.ExecuteNonQuery();
-    }
-
-    internal void InsertRawStatesForTests(
-        IReadOnlyList<(ClientMailboxScope Scope, byte[] Encoded)> snapshots)
-    {
-        using var connection = Open();
-        using var transaction = connection.BeginTransaction(deferred: false);
-        foreach (var snapshot in snapshots)
-        {
-            using var command = connection.CreateCommand();
-            command.Transaction = transaction;
-            command.CommandText = """
-                INSERT INTO client_mailbox_state(scope, state_blob)
-                VALUES($scope, $state)
-                ON CONFLICT(scope) DO UPDATE SET state_blob = excluded.state_blob;
-                """;
-            command.Parameters.Add("$scope", SqliteType.Blob).Value =
-                snapshot.Scope.ToArray();
-            command.Parameters.Add("$state", SqliteType.Blob).Value =
-                snapshot.Encoded;
-            command.ExecuteNonQuery();
-        }
-
-        transaction.Commit();
-    }
-
-    internal void InsertOversizedRawStateForTests(
-        ClientMailboxScope scope,
-        long bytes)
-    {
-        ArgumentNullException.ThrowIfNull(scope);
-        if (bytes <= ClientMailboxStateLimits.MaximumLegacyStateBlobBytes ||
-            bytes > int.MaxValue)
-        {
-            throw new ArgumentOutOfRangeException(nameof(bytes));
-        }
-
-        using var connection = Open();
-        using var command = connection.CreateCommand();
-        command.CommandText = """
-            INSERT INTO client_mailbox_state(scope, state_blob)
-            VALUES($scope, zeroblob($bytes))
-            ON CONFLICT(scope) DO UPDATE SET state_blob = excluded.state_blob;
-            """;
-        command.Parameters.Add("$scope", SqliteType.Blob).Value = scope.ToArray();
-        command.Parameters.AddWithValue("$bytes", bytes);
-        command.ExecuteNonQuery();
-    }
-
-    internal void InsertLegacyQuarantineBlobForTests(
-        ClientMailboxScope scope,
-        long bytes)
-    {
-        ArgumentNullException.ThrowIfNull(scope);
-        if (bytes <= 0 || bytes > int.MaxValue)
-        {
-            throw new ArgumentOutOfRangeException(nameof(bytes));
-        }
-
-        using var connection = Open();
-        using var command = connection.CreateCommand();
-        command.CommandText = """
-            INSERT INTO client_mailbox_quarantine(
-                scope, state_blob, reason, quarantined_at)
-            VALUES($scope, zeroblob($bytes), 'legacy-corrupt-state', $at)
-            ON CONFLICT(scope) DO UPDATE SET
-                state_blob = excluded.state_blob,
-                reason = excluded.reason,
-                quarantined_at = excluded.quarantined_at;
-            """;
-        command.Parameters.Add("$scope", SqliteType.Blob).Value = scope.ToArray();
-        command.Parameters.AddWithValue("$bytes", bytes);
-        command.Parameters.AddWithValue(
-            "$at",
-            DateTimeOffset.UtcNow.ToUnixTimeSeconds());
-        command.ExecuteNonQuery();
-    }
-
-    internal int BackupCountForTests()
-    {
-        using var connection = Open();
-        using var command = connection.CreateCommand();
-        command.CommandText = "SELECT count(*) FROM client_mailbox_migration_backup;";
-        return Convert.ToInt32(command.ExecuteScalar());
-    }
-
-    internal int QuarantineCountForTests()
-    {
-        using var connection = Open();
-        using var command = connection.CreateCommand();
-        command.CommandText = """
-            SELECT
-                COALESCE((SELECT corrupt_count
-                    FROM client_mailbox_corrupt_aggregate WHERE id = 1), 0) +
-                (SELECT count(*) FROM client_mailbox_quarantine);
-            """;
-        return Convert.ToInt32(command.ExecuteScalar());
-    }
-
-    internal long CorruptEvidenceStoredBytesForTests()
-    {
-        using var connection = Open();
-        using var command = connection.CreateCommand();
-        command.CommandText = """
-            SELECT
-                COALESCE((SELECT length(evidence_digest) + length(first_prefix) +
-                    length(last_reason)
-                    FROM client_mailbox_corrupt_aggregate WHERE id = 1), 0) +
-                COALESCE((SELECT sum(length(state_blob))
-                    FROM client_mailbox_quarantine), 0);
-            """;
-        return Convert.ToInt64(command.ExecuteScalar());
-    }
-
     internal int InstallationTraversalCountForTests()
     {
         using var connection = Open();
@@ -313,14 +165,6 @@ public sealed class SqliteClientMailboxStateRepository :
             FROM client_mailbox_traversal;
             """;
         return Convert.ToInt64(command.ExecuteScalar());
-    }
-
-    internal int LegacyStateCountForTests()
-    {
-        using var connection = Open();
-        using var command = connection.CreateCommand();
-        command.CommandText = "SELECT count(*) FROM client_mailbox_state;";
-        return Convert.ToInt32(command.ExecuteScalar());
     }
 
     internal int NormalizedInboxCountForTests(ClientMailboxScope scope)
@@ -366,26 +210,22 @@ public sealed class SqliteClientMailboxStateRepository :
     {
         using var connection = Open();
         using var command = connection.CreateCommand();
-        command.CommandText = """
-            SELECT
-                (SELECT count(*) FROM client_mailbox_coordinator_journal) +
-                (SELECT count(*) FROM client_mailbox_legacy_journal_guard_v2);
-            """;
+        command.CommandText = "SELECT count(*) FROM client_mailbox_coordinator_journal;";
         return Convert.ToInt32(command.ExecuteScalar());
     }
 
-    internal void SeedNormalizedStatesForTests(
-        IReadOnlyList<(ClientMailboxScope Scope, byte[] Encoded)> snapshots)
+    internal void SeedCurrentStatesForTests(
+        IReadOnlyList<(ClientMailboxScope Scope, ClientMailboxStoredState State)> snapshots)
     {
         using var connection = Open();
         using var transaction = connection.BeginTransaction(deferred: false);
         foreach (var snapshot in snapshots)
         {
-            InsertNormalizedSnapshot(
+            InsertCurrentSnapshot(
                 connection,
                 transaction,
                 snapshot.Scope.ToArray(),
-                ClientMailboxStateCodec.Decode(snapshot.Encoded));
+                snapshot.State);
         }
 
         transaction.Commit();
@@ -407,8 +247,6 @@ public sealed class SqliteClientMailboxStateRepository :
             clear.Transaction = transaction;
             clear.CommandText = """
                 DELETE FROM client_mailbox_coordinator_journal;
-                DELETE FROM client_mailbox_legacy_journal_guard;
-                DELETE FROM client_mailbox_legacy_journal_guard_v2;
                 """;
             clear.ExecuteNonQuery();
         }
@@ -446,46 +284,13 @@ public sealed class SqliteClientMailboxStateRepository :
         transaction.Commit();
     }
 
-    internal void AgeMigrationArtifactsForTests(long unixSeconds)
-    {
-        using var connection = Open();
-        using var command = connection.CreateCommand();
-        command.CommandText = """
-            UPDATE client_mailbox_migration_backup SET migrated_at = $at;
-            UPDATE client_mailbox_quarantine SET quarantined_at = $at;
-            UPDATE client_mailbox_corrupt_aggregate SET updated_at = $at;
-            UPDATE client_mailbox_migration_cutover SET verified_at = $at;
-            """;
-        command.Parameters.AddWithValue("$at", unixSeconds);
-        command.ExecuteNonQuery();
-    }
-
-    internal int MigrationCutoverCountForTests()
-    {
-        using var connection = Open();
-        using var command = connection.CreateCommand();
-        command.CommandText =
-            "SELECT count(*) FROM client_mailbox_migration_cutover;";
-        return Convert.ToInt32(command.ExecuteScalar());
-    }
-
-    internal void SimulateVersionThreeWithoutCutoverMarkerForTests()
-    {
-        using var connection = Open();
-        using var command = connection.CreateCommand();
-        command.CommandText = """
-            UPDATE client_mailbox_meta SET schema_version = 3 WHERE id = 1;
-            DELETE FROM client_mailbox_migration_cutover;
-            """;
-        command.ExecuteNonQuery();
-    }
-
     public void Dispose() => gate.Dispose();
 
     private void Initialize()
     {
         using var connection = Open();
         using var transaction = connection.BeginTransaction(deferred: false);
+        EnsureCurrentSchemaOrFreshDatabase(connection, transaction);
         using (var command = connection.CreateCommand())
         {
             command.Transaction = transaction;
@@ -493,36 +298,6 @@ public sealed class SqliteClientMailboxStateRepository :
                 CREATE TABLE IF NOT EXISTS client_mailbox_meta (
                     id INTEGER PRIMARY KEY CHECK(id = 1),
                     schema_version INTEGER NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS client_mailbox_state (
-                    scope BLOB PRIMARY KEY NOT NULL CHECK(length(scope) = 32),
-                    state_blob BLOB NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS client_mailbox_migration_backup (
-                    scope BLOB PRIMARY KEY NOT NULL CHECK(length(scope) = 32),
-                    state_blob BLOB NOT NULL,
-                    migrated_at INTEGER NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS client_mailbox_migration_cutover (
-                    scope BLOB PRIMARY KEY NOT NULL CHECK(length(scope) = 32),
-                    verified_at INTEGER NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS client_mailbox_quarantine (
-                    scope BLOB PRIMARY KEY NOT NULL CHECK(length(scope) = 32),
-                    state_blob BLOB NOT NULL,
-                    reason TEXT NOT NULL,
-                    quarantined_at INTEGER NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS client_mailbox_corrupt_aggregate (
-                    id INTEGER PRIMARY KEY CHECK(id = 1),
-                    corrupt_count INTEGER NOT NULL,
-                    total_bytes INTEGER NOT NULL,
-                    evidence_digest BLOB NOT NULL
-                        CHECK(length(evidence_digest) = 32),
-                    first_prefix BLOB NOT NULL
-                        CHECK(length(first_prefix) <= 256),
-                    last_reason TEXT NOT NULL CHECK(length(last_reason) <= 64),
-                    updated_at INTEGER NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS client_mailbox_traversal (
                     scope BLOB PRIMARY KEY NOT NULL CHECK(length(scope) = 32),
@@ -570,143 +345,65 @@ public sealed class SqliteClientMailboxStateRepository :
                 CREATE INDEX IF NOT EXISTS ix_client_mailbox_journal_scope_expiry
                     ON client_mailbox_coordinator_journal(
                         installation_scope, expires_at);
-                CREATE TABLE IF NOT EXISTS client_mailbox_legacy_journal_guard (
-                    legacy_mailbox_scope BLOB NOT NULL
-                        CHECK(length(legacy_mailbox_scope) = 32),
-                    statement_key BLOB NOT NULL CHECK(length(statement_key) = 32),
-                    statement_digest BLOB NOT NULL
-                        CHECK(length(statement_digest) = 32),
-                    expires_at BLOB NOT NULL CHECK(length(expires_at) = 8),
-                    PRIMARY KEY(legacy_mailbox_scope, statement_key)
-                );
-                CREATE INDEX IF NOT EXISTS ix_client_mailbox_legacy_journal_key
-                    ON client_mailbox_legacy_journal_guard(
-                        statement_key, expires_at);
-                CREATE TABLE IF NOT EXISTS client_mailbox_legacy_journal_guard_v2 (
-                    statement_key BLOB PRIMARY KEY NOT NULL
-                        CHECK(length(statement_key) = 32),
-                    statement_digest BLOB NOT NULL
-                        CHECK(length(statement_digest) = 32),
-                    expires_at BLOB NOT NULL CHECK(length(expires_at) = 8),
-                    conflict INTEGER NOT NULL CHECK(conflict IN (0, 1))
-                );
-                CREATE INDEX IF NOT EXISTS ix_client_mailbox_legacy_guard_v2_expiry
-                    ON client_mailbox_legacy_journal_guard_v2(expires_at);
                 INSERT INTO client_mailbox_meta(id, schema_version)
-                VALUES(1, 5)
+                VALUES(1, 6)
                 ON CONFLICT(id) DO NOTHING;
                 """;
             command.ExecuteNonQuery();
         }
-
-        using (var version = connection.CreateCommand())
-        {
-            version.Transaction = transaction;
-            version.CommandText =
-                "SELECT schema_version FROM client_mailbox_meta WHERE id = 1;";
-            var found = Convert.ToInt32(version.ExecuteScalar());
-            if (found is < 1 or > SchemaVersion)
-            {
-                throw new InvalidDataException(
-                    "Client mailbox state schema version is unsupported.");
-            }
-
-            if (found < SchemaVersion)
-            {
-                version.CommandText =
-                    "UPDATE client_mailbox_meta SET schema_version = 5 WHERE id = 1;";
-                version.ExecuteNonQuery();
-            }
-        }
-
-        using (var backfill = connection.CreateCommand())
-        {
-            backfill.Transaction = transaction;
-            backfill.CommandText = """
-                INSERT INTO client_mailbox_migration_cutover(scope, verified_at)
-                SELECT backup.scope, backup.migrated_at
-                FROM client_mailbox_migration_backup AS backup
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM client_mailbox_state AS legacy
-                    WHERE legacy.scope = backup.scope)
-                ON CONFLICT(scope) DO NOTHING;
-                """;
-            backfill.ExecuteNonQuery();
-        }
-
-        CompactExistingCorruptQuarantine(connection, transaction);
-        UpgradeLegacyJournalGuards(connection, transaction);
-
-        var quarantined = false;
-        byte[]? previousScope = null;
-        while (TryReadNextLegacyStateMetadata(
-                   connection,
-                   transaction,
-                   previousScope,
-                   out var scope,
-                   out var stateBytes))
-        {
-            previousScope = scope;
-            if (stateBytes < 0 ||
-                stateBytes > ClientMailboxStateLimits.MaximumLegacyStateBlobBytes)
-            {
-                CompactLegacyStateFromDatabase(
-                    connection,
-                    transaction,
-                    scope,
-                    stateBytes,
-                    "oversized-legacy-state");
-                quarantined = true;
-                continue;
-            }
-
-            var state = LoadBoundedLegacyState(
-                connection, transaction, scope, stateBytes);
-            ClientMailboxStoredState decoded;
-            try
-            {
-                decoded = ClientMailboxStateCodec.IsVersionOne(state)
-                    ? ClientMailboxStateCodec.MigrateVersionOneToSafeReplay(state)
-                    : ClientMailboxStateCodec.Decode(state);
-            }
-            catch (Exception exception) when (IsQuarantinable(exception))
-            {
-                CompactCorruptState(
-                    connection,
-                    transaction,
-                    scope,
-                    state,
-                    "invalid-canonical-state");
-                migrationFault?.Invoke(
-                    ClientMailboxMigrationFaultPoint
-                        .AfterCorruptEvidenceBeforeLegacyDelete);
-                DeleteLegacyState(connection, transaction, scope);
-                quarantined = true;
-                continue;
-            }
-
-            InsertBackup(connection, transaction, scope, state);
-            migrationFault?.Invoke(
-                ClientMailboxMigrationFaultPoint.AfterBackupBeforeRewrite);
-            InsertNormalizedSnapshot(
-                connection, transaction, scope, decoded);
-            MarkVerifiedCutover(
-                connection, transaction, scope);
-            DeleteLegacyState(connection, transaction, scope);
-        }
-
-        GarbageCollectMigrationArtifacts(
-            connection,
-            transaction,
-            DateTimeOffset.UtcNow.ToUnixTimeSeconds());
-        EnforceInstallationMigrationBounds(connection, transaction);
         transaction.Commit();
-        if (quarantined)
+    }
+
+    private static void EnsureCurrentSchemaOrFreshDatabase(
+        SqliteConnection connection,
+        SqliteTransaction transaction)
+    {
+        using var tables = connection.CreateCommand();
+        tables.Transaction = transaction;
+        tables.CommandText = """
+            SELECT name FROM sqlite_master
+            WHERE type = 'table' AND name LIKE 'client_mailbox_%';
+            """;
+        using var reader = tables.ExecuteReader();
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        while (reader.Read())
         {
-            throw new InvalidDataException(
-                "Corrupt client mailbox state was quarantined; retry starts a safe cursor-zero cycle.");
+            names.Add(reader.GetString(0));
+        }
+        reader.Dispose();
+
+        if (!names.Contains("client_mailbox_meta"))
+        {
+            if (names.Count != 0)
+            {
+                throw ResetRequired();
+            }
+
+            return;
+        }
+
+        using var version = connection.CreateCommand();
+        version.Transaction = transaction;
+        version.CommandText =
+            "SELECT schema_version FROM client_mailbox_meta WHERE id = 1;";
+        var rawVersion = version.ExecuteScalar();
+        if (rawVersion is null || Convert.ToInt32(rawVersion) != SchemaVersion ||
+            names.Overlaps([
+                "client_mailbox_state",
+                "client_mailbox_migration_backup",
+                "client_mailbox_migration_cutover",
+                "client_mailbox_quarantine",
+                "client_mailbox_corrupt_aggregate",
+                "client_mailbox_legacy_journal_guard",
+                "client_mailbox_legacy_journal_guard_v2"
+            ]))
+        {
+            throw ResetRequired();
         }
     }
+
+    private static InvalidDataException ResetRequired() =>
+        new("Client mailbox state uses a pre-current or incompatible schema. Wipe/reset the local mailbox database before continuing.");
 
     private async Task<TResult> ReadNormalizedAsync<TResult>(
         ClientMailboxScope scope,
@@ -1001,8 +698,6 @@ public sealed class SqliteClientMailboxStateRepository :
                 prune.CommandText = """
                     DELETE FROM client_mailbox_coordinator_journal
                     WHERE expires_at <= $now;
-                    DELETE FROM client_mailbox_legacy_journal_guard_v2
-                    WHERE expires_at <= $now;
                     """;
                 prune.Parameters.Add("$now", SqliteType.Blob).Value = U64(nowUnixSeconds);
                 await prune.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
@@ -1010,37 +705,6 @@ public sealed class SqliteClientMailboxStateRepository :
             await EnforceInstallationScopeCapacityAsync(
                 connection, transaction, cancellationToken)
                 .ConfigureAwait(false);
-
-            await using (var legacy = connection.CreateCommand())
-            {
-                legacy.Transaction = transaction;
-                legacy.CommandText = """
-                    SELECT statement_digest, conflict
-                    FROM client_mailbox_legacy_journal_guard_v2
-                    WHERE statement_key = $key;
-                    """;
-                legacy.Parameters.Add("$key", SqliteType.Blob).Value = statementKey;
-                await using var reader = await legacy.ExecuteReaderAsync(cancellationToken)
-                    .ConfigureAwait(false);
-                if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-                {
-                    var conflict = reader.GetInt32(1) == 1;
-                    if (conflict || !Fixed(
-                            reader.GetFieldValue<byte[]>(0),
-                            statementDigest.Span))
-                    {
-                        await reader.DisposeAsync().ConfigureAwait(false);
-                        await transaction.CommitAsync(cancellationToken)
-                            .ConfigureAwait(false);
-                        return ClientMailboxCoordinatorRecordResult.Equivocation;
-                    }
-
-                    await reader.DisposeAsync().ConfigureAwait(false);
-                    await transaction.CommitAsync(cancellationToken)
-                        .ConfigureAwait(false);
-                    return ClientMailboxCoordinatorRecordResult.Idempotent;
-                }
-            }
 
             await using (var find = connection.CreateCommand())
             {
@@ -1080,11 +744,7 @@ public sealed class SqliteClientMailboxStateRepository :
             await using (var count = connection.CreateCommand())
             {
                 count.Transaction = transaction;
-                count.CommandText = """
-                    SELECT
-                        (SELECT count(*) FROM client_mailbox_coordinator_journal) +
-                        (SELECT count(*) FROM client_mailbox_legacy_journal_guard_v2);
-                    """;
+                count.CommandText = "SELECT count(*) FROM client_mailbox_coordinator_journal;";
                 if (Convert.ToInt32(await count.ExecuteScalarAsync(cancellationToken)
                         .ConfigureAwait(false)) >=
                     ClientMailboxStateLimits.MaximumCoordinatorStatements)
@@ -1560,28 +1220,30 @@ public sealed class SqliteClientMailboxStateRepository :
         }
     }
 
-    private static void InsertNormalizedSnapshot(
+    private static byte[] U64(ulong value)
+    {
+        var bytes = new byte[8];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt64BigEndian(bytes, value);
+        return bytes;
+    }
+
+    private static void InsertCurrentSnapshot(
         SqliteConnection connection,
         SqliteTransaction transaction,
         byte[] scope,
         ClientMailboxStoredState state)
     {
+        ClientMailboxStateMachine.Validate(state);
         using (var traversal = connection.CreateCommand())
         {
             traversal.Transaction = transaction;
             traversal.CommandText = """
-                INSERT INTO client_mailbox_traversal(
-                    scope, after_cursor, continuation_token)
-                VALUES($scope, $cursor, $token)
-                ON CONFLICT(scope) DO UPDATE SET
-                    after_cursor = excluded.after_cursor,
-                    continuation_token = excluded.continuation_token;
+                INSERT INTO client_mailbox_traversal(scope, after_cursor, continuation_token)
+                VALUES($scope, $cursor, $token);
                 """;
             traversal.Parameters.Add("$scope", SqliteType.Blob).Value = scope;
-            traversal.Parameters.Add("$cursor", SqliteType.Blob).Value =
-                U64(state.AfterCursor);
-            traversal.Parameters.Add("$token", SqliteType.Blob).Value =
-                state.ContinuationToken;
+            traversal.Parameters.Add("$cursor", SqliteType.Blob).Value = U64(state.AfterCursor);
+            traversal.Parameters.Add("$token", SqliteType.Blob).Value = state.ContinuationToken;
             traversal.ExecuteNonQuery();
         }
 
@@ -1591,176 +1253,17 @@ public sealed class SqliteClientMailboxStateRepository :
             insert.Transaction = transaction;
             insert.CommandText = """
                 INSERT INTO client_mailbox_inbox(
-                    scope, cursor, digest, expires_at,
-                    canonical_envelope, acknowledged)
-                VALUES($scope, $cursor, $digest, $expires, $envelope, $ack)
-                ON CONFLICT(scope, cursor) DO UPDATE SET
-                    digest = excluded.digest,
-                    expires_at = excluded.expires_at,
-                    canonical_envelope = excluded.canonical_envelope,
-                    acknowledged = excluded.acknowledged;
+                    scope, cursor, digest, expires_at, canonical_envelope, acknowledged)
+                VALUES($scope, $cursor, $digest, $expires, $envelope, $ack);
                 """;
             insert.Parameters.Add("$scope", SqliteType.Blob).Value = scope;
-            insert.Parameters.Add("$cursor", SqliteType.Blob).Value =
-                U64(entry.Cursor);
+            insert.Parameters.Add("$cursor", SqliteType.Blob).Value = U64(entry.Cursor);
             insert.Parameters.Add("$digest", SqliteType.Blob).Value = entry.Digest;
-            insert.Parameters.Add("$expires", SqliteType.Blob).Value =
-                U64(entry.ExpiresAtUnixSeconds);
-            insert.Parameters.Add("$envelope", SqliteType.Blob).Value =
-                entry.CanonicalEnvelope;
+            insert.Parameters.Add("$expires", SqliteType.Blob).Value = U64(entry.ExpiresAtUnixSeconds);
+            insert.Parameters.Add("$envelope", SqliteType.Blob).Value = entry.CanonicalEnvelope;
             insert.Parameters.AddWithValue("$ack", entry.Acknowledged ? 1 : 0);
             insert.ExecuteNonQuery();
         }
-
-        foreach (var statement in state.CoordinatorStatements)
-        {
-            UpsertLegacyJournalGuard(
-                connection,
-                transaction,
-                CoordinatorStatementKey(
-                    statement.MembershipCommitment,
-                    statement.Epoch,
-                    statement.CoordinatorId,
-                    statement.CoordinatorSequence),
-                statement.StatementDigest,
-                U64(statement.ExpiresAtUnixSeconds));
-        }
-    }
-
-    private static void UpsertLegacyJournalGuard(
-        SqliteConnection connection,
-        SqliteTransaction transaction,
-        byte[] statementKey,
-        byte[] statementDigest,
-        byte[] expiresAt)
-    {
-        using var insert = connection.CreateCommand();
-        insert.Transaction = transaction;
-        insert.CommandText = """
-            INSERT INTO client_mailbox_legacy_journal_guard_v2(
-                statement_key, statement_digest, expires_at, conflict)
-            VALUES(
-                $key,
-                $digest,
-                CASE WHEN COALESCE((
-                    SELECT max(expires_at)
-                    FROM client_mailbox_coordinator_journal
-                    WHERE statement_key = $key), X'') > $expires
-                THEN (
-                    SELECT max(expires_at)
-                    FROM client_mailbox_coordinator_journal
-                    WHERE statement_key = $key)
-                ELSE $expires END,
-                CASE WHEN EXISTS (
-                    SELECT 1 FROM client_mailbox_coordinator_journal
-                    WHERE statement_key = $key
-                      AND statement_digest <> $digest)
-                THEN 1 ELSE 0 END)
-            ON CONFLICT(statement_key) DO UPDATE SET
-                expires_at = CASE
-                    WHEN client_mailbox_legacy_journal_guard_v2.expires_at <
-                        excluded.expires_at
-                    THEN excluded.expires_at
-                    ELSE client_mailbox_legacy_journal_guard_v2.expires_at
-                END,
-                conflict = CASE
-                    WHEN client_mailbox_legacy_journal_guard_v2.conflict = 1 OR
-                         client_mailbox_legacy_journal_guard_v2.statement_digest <>
-                            excluded.statement_digest OR
-                         EXISTS (
-                             SELECT 1 FROM client_mailbox_coordinator_journal
-                             WHERE statement_key = excluded.statement_key
-                               AND statement_digest <>
-                                   excluded.statement_digest)
-                    THEN 1
-                    ELSE 0
-                END;
-            DELETE FROM client_mailbox_coordinator_journal
-            WHERE statement_key = $key;
-            """;
-        insert.Parameters.Add("$key", SqliteType.Blob).Value = statementKey;
-        insert.Parameters.Add("$digest", SqliteType.Blob).Value = statementDigest;
-        insert.Parameters.Add("$expires", SqliteType.Blob).Value = expiresAt;
-        insert.ExecuteNonQuery();
-    }
-
-    private static void UpgradeLegacyJournalGuards(
-        SqliteConnection connection,
-        SqliteTransaction transaction)
-    {
-        var rows = new List<(byte[] Key, byte[] Digest, byte[] Expires)>();
-        using (var select = connection.CreateCommand())
-        {
-            select.Transaction = transaction;
-            select.CommandText = """
-                SELECT statement_key, statement_digest, expires_at
-                FROM client_mailbox_legacy_journal_guard
-                ORDER BY statement_key, legacy_mailbox_scope;
-                """;
-            using var reader = select.ExecuteReader();
-            while (reader.Read())
-            {
-                rows.Add((
-                    reader.GetFieldValue<byte[]>(0),
-                    reader.GetFieldValue<byte[]>(1),
-                    reader.GetFieldValue<byte[]>(2)));
-            }
-        }
-
-        foreach (var row in rows)
-        {
-            UpsertLegacyJournalGuard(
-                connection, transaction, row.Key, row.Digest, row.Expires);
-        }
-
-        using var delete = connection.CreateCommand();
-        delete.Transaction = transaction;
-        delete.CommandText = "DELETE FROM client_mailbox_legacy_journal_guard;";
-        delete.ExecuteNonQuery();
-    }
-
-    private static void DeleteLegacyState(
-        SqliteConnection connection,
-        SqliteTransaction transaction,
-        byte[] scope)
-    {
-        using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText =
-            "DELETE FROM client_mailbox_state WHERE scope = $scope;";
-        command.Parameters.Add("$scope", SqliteType.Blob).Value = scope;
-        command.ExecuteNonQuery();
-    }
-
-    private static void MarkVerifiedCutover(
-        SqliteConnection connection,
-        SqliteTransaction transaction,
-        byte[] scope)
-    {
-        using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = """
-            INSERT INTO client_mailbox_migration_cutover(scope, verified_at)
-            VALUES($scope, $at)
-            ON CONFLICT(scope) DO NOTHING;
-            """;
-        command.Parameters.Add("$scope", SqliteType.Blob).Value = scope;
-        command.Parameters.AddWithValue(
-            "$at",
-            DateTimeOffset.UtcNow.ToUnixTimeSeconds());
-        command.ExecuteNonQuery();
-    }
-
-    private static bool IsQuarantinable(Exception exception) =>
-        exception is InvalidDataException or MailboxClientException or
-            ArgumentOutOfRangeException or IndexOutOfRangeException or
-            OverflowException;
-
-    private static byte[] U64(ulong value)
-    {
-        var bytes = new byte[8];
-        System.Buffers.Binary.BinaryPrimitives.WriteUInt64BigEndian(bytes, value);
-        return bytes;
     }
 
     private static byte[] CoordinatorStatementKey(
@@ -1789,455 +1292,6 @@ public sealed class SqliteClientMailboxStateRepository :
     private static bool Fixed(ReadOnlySpan<byte> left, ReadOnlySpan<byte> right) =>
         left.Length == right.Length &&
         CryptographicOperations.FixedTimeEquals(left, right);
-
-    private static void EnforceInstallationMigrationBounds(
-        SqliteConnection connection,
-        SqliteTransaction transaction)
-    {
-        using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = """
-            SELECT
-                (SELECT count(*) FROM client_mailbox_inbox),
-                (SELECT COALESCE(sum(length(canonical_envelope)), 0)
-                    FROM client_mailbox_inbox),
-                (SELECT count(*) FROM client_mailbox_traversal),
-                (SELECT COALESCE(sum(length(continuation_token)), 0)
-                    FROM client_mailbox_traversal),
-                (SELECT count(*) FROM client_mailbox_coordinator_journal) +
-                (SELECT count(*) FROM client_mailbox_legacy_journal_guard_v2),
-                (SELECT count(*) FROM client_mailbox_migration_cutover);
-            """;
-        using var reader = command.ExecuteReader();
-        _ = reader.Read();
-        if (reader.GetInt64(0) >
-                ClientMailboxStateLimits.MaximumInstallationInboxEntries ||
-            reader.GetInt64(1) >
-                ClientMailboxStateLimits.MaximumInstallationInboxBytes ||
-            reader.GetInt64(2) >
-                ClientMailboxStateLimits.MaximumInstallationScopes ||
-            reader.GetInt64(3) >
-                ClientMailboxStateLimits
-                    .MaximumInstallationTraversalTokenBytes ||
-            reader.GetInt64(4) >
-                ClientMailboxStateLimits.MaximumCoordinatorStatements ||
-            reader.GetInt64(5) >
-                ClientMailboxStateLimits.MaximumInstallationScopes)
-        {
-            throw new InvalidDataException(
-                "Migrated installation-global mailbox bounds are exceeded; legacy recovery state was retained.");
-        }
-    }
-
-    private static void GarbageCollectMigrationArtifacts(
-        SqliteConnection connection,
-        SqliteTransaction transaction,
-        long nowUnixSeconds)
-    {
-        var cutoff = nowUnixSeconds -
-            ClientMailboxStateLimits.MigrationArtifactRetentionSeconds;
-        using (var collect = connection.CreateCommand())
-        {
-            collect.Transaction = transaction;
-            collect.CommandText = """
-                DELETE FROM client_mailbox_migration_backup
-                WHERE migrated_at <= $cutoff
-                  AND NOT EXISTS (
-                      SELECT 1 FROM client_mailbox_state
-                      WHERE client_mailbox_state.scope =
-                          client_mailbox_migration_backup.scope)
-                  AND EXISTS (
-                      SELECT 1 FROM client_mailbox_migration_cutover
-                      WHERE client_mailbox_migration_cutover.scope =
-                          client_mailbox_migration_backup.scope);
-                DELETE FROM client_mailbox_quarantine
-                WHERE quarantined_at <= $cutoff;
-                DELETE FROM client_mailbox_corrupt_aggregate
-                WHERE updated_at <= $cutoff;
-                DELETE FROM client_mailbox_migration_cutover
-                WHERE verified_at <= $cutoff
-                  AND NOT EXISTS (
-                      SELECT 1 FROM client_mailbox_migration_backup
-                      WHERE client_mailbox_migration_backup.scope =
-                          client_mailbox_migration_cutover.scope)
-                  AND NOT EXISTS (
-                      SELECT 1 FROM client_mailbox_state
-                      WHERE client_mailbox_state.scope =
-                          client_mailbox_migration_cutover.scope);
-                """;
-            collect.Parameters.AddWithValue("$cutoff", cutoff);
-            collect.ExecuteNonQuery();
-        }
-
-        using var bounds = connection.CreateCommand();
-        bounds.Transaction = transaction;
-        bounds.CommandText = """
-            SELECT
-                (SELECT count(*) FROM client_mailbox_migration_backup) +
-                (SELECT count(*) FROM client_mailbox_quarantine),
-                (SELECT COALESCE(sum(length(state_blob)), 0)
-                    FROM client_mailbox_migration_backup) +
-                (SELECT COALESCE(sum(length(state_blob)), 0)
-                    FROM client_mailbox_quarantine);
-            """;
-        using var reader = bounds.ExecuteReader();
-        _ = reader.Read();
-        if (reader.GetInt64(0) >
-                ClientMailboxStateLimits.MaximumMigrationArtifacts ||
-            reader.GetInt64(1) >
-                ClientMailboxStateLimits.MaximumMigrationArtifactBytes)
-        {
-            throw new InvalidDataException(
-                "Mailbox migration recovery artifacts exceed installation bounds before minimum retention; cutover was rolled back.");
-        }
-    }
-
-    private static void InsertBackup(
-        SqliteConnection connection,
-        SqliteTransaction transaction,
-        byte[] scope,
-        byte[] state)
-    {
-        using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = """
-            INSERT INTO client_mailbox_migration_backup(scope, state_blob, migrated_at)
-            VALUES($scope, $state, $at)
-            ON CONFLICT(scope) DO NOTHING;
-            """;
-        command.Parameters.Add("$scope", SqliteType.Blob).Value = scope;
-        command.Parameters.Add("$state", SqliteType.Blob).Value = state;
-        command.Parameters.AddWithValue(
-            "$at",
-            DateTimeOffset.UtcNow.ToUnixTimeSeconds());
-        command.ExecuteNonQuery();
-    }
-
-    private static bool TryReadNextLegacyStateMetadata(
-        SqliteConnection connection,
-        SqliteTransaction transaction,
-        byte[]? previousScope,
-        out byte[] scope,
-        out long stateBytes)
-    {
-        using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = previousScope is null
-            ? """
-                SELECT scope, length(state_blob)
-                FROM client_mailbox_state
-                ORDER BY scope LIMIT 1;
-                """
-            : """
-                SELECT scope, length(state_blob)
-                FROM client_mailbox_state
-                WHERE scope > $previous
-                ORDER BY scope LIMIT 1;
-                """;
-        if (previousScope is not null)
-        {
-            command.Parameters.Add("$previous", SqliteType.Blob).Value =
-                previousScope;
-        }
-
-        using var reader = command.ExecuteReader();
-        if (!reader.Read())
-        {
-            scope = [];
-            stateBytes = 0;
-            return false;
-        }
-
-        scope = reader.GetFieldValue<byte[]>(0);
-        stateBytes = reader.GetInt64(1);
-        return true;
-    }
-
-    private static byte[] LoadBoundedLegacyState(
-        SqliteConnection connection,
-        SqliteTransaction transaction,
-        byte[] scope,
-        long expectedBytes)
-    {
-        using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText =
-            "SELECT state_blob FROM client_mailbox_state WHERE scope = $scope;";
-        command.Parameters.Add("$scope", SqliteType.Blob).Value = scope;
-        var state = command.ExecuteScalar() as byte[] ??
-            throw new InvalidDataException(
-                "Legacy mailbox state disappeared during migration.");
-        if (state.LongLength != expectedBytes ||
-            state.Length > ClientMailboxStateLimits.MaximumLegacyStateBlobBytes)
-        {
-            throw new InvalidDataException(
-                "Legacy mailbox state changed or exceeded its bounded read.");
-        }
-
-        return state;
-    }
-
-    private void CompactLegacyStateFromDatabase(
-        SqliteConnection connection,
-        SqliteTransaction transaction,
-        byte[] scope,
-        long expectedBytes,
-        string reason)
-    {
-        using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText =
-            "SELECT rowid, state_blob FROM client_mailbox_state WHERE scope = $scope;";
-        command.Parameters.Add("$scope", SqliteType.Blob).Value = scope;
-        var allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
-        using var reader = command.ExecuteReader();
-        if (!reader.Read())
-        {
-            throw new InvalidDataException(
-                "Legacy mailbox state disappeared during migration.");
-        }
-
-        _ = reader.GetInt64(0);
-        using var stream = reader.GetStream(1);
-        RequireIncrementalBlobStream(stream);
-        var streamType = stream.GetType().FullName ?? stream.GetType().Name;
-        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        var prefix = new byte[ClientMailboxStateLimits.MaximumCorruptEvidencePrefixBytes];
-        var buffer = new byte[64 * 1024];
-        long total = 0;
-        var prefixBytes = 0;
-        int read;
-        while ((read = stream.Read(buffer, 0, buffer.Length)) != 0)
-        {
-            hash.AppendData(buffer, 0, read);
-            if (prefixBytes < prefix.Length)
-            {
-                var copy = Math.Min(read, prefix.Length - prefixBytes);
-                buffer.AsSpan(0, copy).CopyTo(prefix.AsSpan(prefixBytes));
-                prefixBytes += copy;
-            }
-
-            total = checked(total + read);
-        }
-
-        if (total != expectedBytes)
-        {
-            throw new InvalidDataException(
-                "Legacy mailbox state changed during bounded streaming recovery.");
-        }
-
-        var managedAllocated =
-            GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
-        stream.Dispose();
-        reader.Dispose();
-        corruptStreamObservation?.Invoke(
-            new ClientMailboxCorruptStreamObservation(
-                streamType,
-                total,
-                managedAllocated));
-        CompactCorruptEvidence(
-            connection,
-            transaction,
-            scope,
-            hash.GetHashAndReset(),
-            total,
-            prefix.AsSpan(0, prefixBytes),
-            reason);
-        migrationFault?.Invoke(
-            ClientMailboxMigrationFaultPoint.AfterCorruptEvidenceBeforeLegacyDelete);
-        DeleteLegacyState(connection, transaction, scope);
-    }
-
-    private static void CompactCorruptState(
-        SqliteConnection connection,
-        SqliteTransaction transaction,
-        byte[] scope,
-        byte[] state,
-        string reason) =>
-        CompactCorruptEvidence(
-            connection,
-            transaction,
-            scope,
-            SHA256.HashData(state),
-            state.LongLength,
-            state.AsSpan(
-                0,
-                Math.Min(
-                    state.Length,
-                    ClientMailboxStateLimits.MaximumCorruptEvidencePrefixBytes)),
-            reason);
-
-    private static void CompactCorruptEvidence(
-        SqliteConnection connection,
-        SqliteTransaction transaction,
-        byte[] scope,
-        byte[] blobDigest,
-        long stateBytes,
-        ReadOnlySpan<byte> prefix,
-        string reason)
-    {
-        var priorDigest = new byte[32];
-        var priorCount = 0L;
-        var priorBytes = 0L;
-        byte[]? firstPrefix = null;
-        using (var select = connection.CreateCommand())
-        {
-            select.Transaction = transaction;
-            select.CommandText = """
-                SELECT corrupt_count, total_bytes, evidence_digest, first_prefix
-                FROM client_mailbox_corrupt_aggregate WHERE id = 1;
-                """;
-            using var reader = select.ExecuteReader();
-            if (reader.Read())
-            {
-                priorCount = reader.GetInt64(0);
-                priorBytes = reader.GetInt64(1);
-                priorDigest = reader.GetFieldValue<byte[]>(2);
-                firstPrefix = reader.GetFieldValue<byte[]>(3);
-            }
-        }
-
-        var evidenceDigest = SHA256.HashData([
-            .. "deep.client.mailbox.corrupt-evidence.v1"u8,
-            .. priorDigest,
-            .. scope,
-            .. blobDigest,
-            .. U64(checked((ulong)stateBytes))
-        ]);
-        using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = """
-            INSERT INTO client_mailbox_corrupt_aggregate(
-                id, corrupt_count, total_bytes, evidence_digest,
-                first_prefix, last_reason, updated_at)
-            VALUES(1, $count, $bytes, $digest, $prefix, $reason, $at)
-            ON CONFLICT(id) DO UPDATE SET
-                corrupt_count = excluded.corrupt_count,
-                total_bytes = excluded.total_bytes,
-                evidence_digest = excluded.evidence_digest,
-                first_prefix = excluded.first_prefix,
-                last_reason = excluded.last_reason,
-                updated_at = excluded.updated_at;
-            """;
-        command.Parameters.AddWithValue("$count", checked(priorCount + 1));
-        command.Parameters.AddWithValue("$bytes", checked(priorBytes + stateBytes));
-        command.Parameters.Add("$digest", SqliteType.Blob).Value = evidenceDigest;
-        command.Parameters.Add("$prefix", SqliteType.Blob).Value =
-            firstPrefix ?? prefix.ToArray();
-        command.Parameters.AddWithValue(
-            "$reason",
-            reason.Length <= 64 ? reason : "legacy-corrupt-state");
-        command.Parameters.AddWithValue(
-            "$at",
-            DateTimeOffset.UtcNow.ToUnixTimeSeconds());
-        command.ExecuteNonQuery();
-    }
-
-    private void CompactExistingCorruptQuarantine(
-        SqliteConnection connection,
-        SqliteTransaction transaction)
-    {
-        var rows = new List<(byte[] Scope, long StateBytes, string Reason)>();
-        using (var select = connection.CreateCommand())
-        {
-            select.Transaction = transaction;
-            select.CommandText = """
-                SELECT scope, length(state_blob), reason
-                FROM client_mailbox_quarantine ORDER BY scope;
-                """;
-            using var reader = select.ExecuteReader();
-            while (reader.Read())
-            {
-                rows.Add((
-                    reader.GetFieldValue<byte[]>(0),
-                    reader.GetInt64(1),
-                    reader.GetString(2)));
-            }
-        }
-
-        foreach (var row in rows)
-        {
-            using var select = connection.CreateCommand();
-            select.Transaction = transaction;
-            select.CommandText = """
-                SELECT rowid, state_blob FROM client_mailbox_quarantine
-                WHERE scope = $scope;
-                """;
-            select.Parameters.Add("$scope", SqliteType.Blob).Value = row.Scope;
-            var allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
-            using var reader = select.ExecuteReader();
-            if (!reader.Read())
-            {
-                throw new InvalidDataException(
-                    "Legacy corrupt evidence disappeared during compaction.");
-            }
-
-            _ = reader.GetInt64(0);
-            using var stream = reader.GetStream(1);
-            RequireIncrementalBlobStream(stream);
-            var streamType = stream.GetType().FullName ?? stream.GetType().Name;
-            using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-            var prefix =
-                new byte[ClientMailboxStateLimits.MaximumCorruptEvidencePrefixBytes];
-            var buffer = new byte[64 * 1024];
-            long total = 0;
-            var prefixBytes = 0;
-            int read;
-            while ((read = stream.Read(buffer, 0, buffer.Length)) != 0)
-            {
-                hash.AppendData(buffer, 0, read);
-                if (prefixBytes < prefix.Length)
-                {
-                    var copy = Math.Min(read, prefix.Length - prefixBytes);
-                    buffer.AsSpan(0, copy).CopyTo(prefix.AsSpan(prefixBytes));
-                    prefixBytes += copy;
-                }
-
-                total = checked(total + read);
-            }
-
-            if (total != row.StateBytes)
-            {
-                throw new InvalidDataException(
-                    "Legacy corrupt evidence changed during compaction.");
-            }
-
-            var managedAllocated =
-                GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
-            stream.Dispose();
-            reader.Dispose();
-            corruptStreamObservation?.Invoke(
-                new ClientMailboxCorruptStreamObservation(
-                    streamType,
-                    total,
-                    managedAllocated));
-            CompactCorruptEvidence(
-                connection,
-                transaction,
-                row.Scope,
-                hash.GetHashAndReset(),
-                total,
-                prefix.AsSpan(0, prefixBytes),
-                row.Reason);
-        }
-
-        using var delete = connection.CreateCommand();
-        delete.Transaction = transaction;
-        delete.CommandText = "DELETE FROM client_mailbox_quarantine;";
-        delete.ExecuteNonQuery();
-    }
-
-    private static void RequireIncrementalBlobStream(Stream stream)
-    {
-        if (!string.Equals(
-                stream.GetType().FullName,
-                "Microsoft.Data.Sqlite.SqliteBlob",
-                StringComparison.Ordinal))
-        {
-            throw new InvalidDataException(
-                "Corrupt mailbox evidence must use incremental SQLite BLOB I/O.");
-        }
-    }
 
     private SqliteConnection Open()
     {

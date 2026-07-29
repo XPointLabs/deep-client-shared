@@ -124,23 +124,17 @@ public sealed class ClientMailboxActivation
         bool enabled,
         ReadOnlySpan<byte> issuerContext,
         ClientMailboxPinnedRoute? route,
-        bool ingressConfigured,
-        bool allowLegacyMirrorOverlap = false,
-        ulong legacyMirrorExpiresAtUnixSeconds = 0)
+        bool ingressConfigured)
     {
         Enabled = enabled;
         this.issuerContext = issuerContext.ToArray();
         Route = route;
         IngressConfigured = ingressConfigured;
-        AllowLegacyMirrorOverlap = allowLegacyMirrorOverlap;
-        LegacyMirrorExpiresAtUnixSeconds = legacyMirrorExpiresAtUnixSeconds;
     }
 
     public bool Enabled { get; }
     public ClientMailboxPinnedRoute? Route { get; }
     public bool IngressConfigured { get; }
-    public bool AllowLegacyMirrorOverlap { get; }
-    public ulong LegacyMirrorExpiresAtUnixSeconds { get; }
     public bool HasIssuerContext =>
         issuerContext.Length == 32 &&
         issuerContext.AsSpan().IndexOfAnyExcept((byte)0) >= 0;
@@ -712,16 +706,11 @@ public sealed class ClientMailboxAdapter
 
     private void EnsureVersion(MailboxMixedVersionMarker marker)
     {
-        if (marker == MailboxMixedVersionMarker.LegacyMirrorOverlap &&
-            (!activation.AllowLegacyMirrorOverlap ||
-             !decodePolicy.AllowLegacyMirrorOverlap ||
-             activation.LegacyMirrorExpiresAtUnixSeconds == 0 ||
-             checked((ulong)timeProvider.GetUtcNow().ToUnixTimeSeconds()) >
-                activation.LegacyMirrorExpiresAtUnixSeconds))
+        if (marker != MailboxMixedVersionMarker.StrictV1)
         {
             throw new MailboxClientException(
                 MailboxClientError.DowngradeRejected,
-                "Legacy mailbox mirror overlap was not explicitly activated.");
+                "Only the current strict mailbox wire version is accepted.");
         }
     }
 

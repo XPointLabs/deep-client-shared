@@ -108,9 +108,9 @@ outbox states; this adapter never creates a delivered transition.
 
 Activation is fail-closed and disabled by default through
 `ClientMailboxAdapterEnabled`. Explicit issuer context, a pinned two-replica
-placement, and a configured binary ingress are all required. Legacy mirror
-overlap additionally requires both activation and decode-policy permission plus
-a bounded expiry; the strict path does not downgrade to MQR2 or JSON.
+placement, and a configured binary ingress are all required. Only the current
+strict mailbox wire version is accepted; the adapter does not downgrade to
+MQR2 or JSON.
 
 Receive ciphertext, cursor, continuation token, deduplication, and ordered
 acknowledgement state share one bounded atomic state machine across the
@@ -138,9 +138,7 @@ replay authority.
 In-memory acknowledgement commits clone and validate the complete installation
 state plus expiry quarantine before publication, matching SQLite's global
 transaction. A conflicting acknowledgement for an absent scope therefore
-cannot allocate an empty scope or bypass these bounds.
-The legacy CMS1/CMS2 blob table is
-migration-only and is never rewritten by the hot path. The coordinator journal
+cannot allocate an empty scope or bypass these bounds. The coordinator journal
 uses a separate installation/issuer-derived opaque scope, so a reused
 membership/epoch/coordinator/sequence with a different statement is rejected
 across mailbox IDs, epochs, issuer-context rotations, and restarts. Its 1024
@@ -162,42 +160,11 @@ lifetime. Capacity pressure first removes acknowledged rows from retired
 scopes, then other acknowledged rows. If only live unacknowledged ciphertext
 remains, the transaction fails closed instead of dropping or fabricating
 state. Tombstone expiry is checked against the persisted retrieved envelope.
-CMS1 could advance a cursor without retaining ciphertext, so migration first
-backs up the old bytes and resets to a safe cursor-zero replay instead of
-retaining a lossy cursor/dedup state. CMS2 migration backs up the original blob
-before the atomic normalized cutover and is interruption-safe and idempotent.
-Because a CMS2 mailbox-scoped coordinator journal cannot recover its original
-issuer scope, its statements move to a global statement-key legacy guard.
-Identical statements repeated by many mailbox scopes occupy one row. Different
-digests under the same statement key atomically set a persistent conflict bit;
-all later uses of that key fail closed as equivocation, including after
-restart. The installation journal consults the guard until its maximum
-authenticated expiry without retaining raw membership or coordinator
-identifiers in the normalized schema.
-An installation accepts at most 1024 migrated mailbox scopes. Recoverable
-migration backups are bounded to 1024 encrypted artifacts and 64 MiB; compact
-corruption evidence is one additional fixed-size aggregate row (32-byte
-digest, at most 256 prefix bytes, and at most 64 reason characters). Schema v5
-never copies an unparseable legacy blob into
-quarantine. Both legacy-state and legacy-quarantine reads select SQLite
-`rowid` and require Microsoft.Data.Sqlite's incremental `SqliteBlob` stream;
-they stream through SHA-256 with a 64-KiB work buffer and
-retain one aggregate record containing count, total source bytes, a chained
-digest, reason, and at most a 256-byte first prefix. Thus an oversized corrupt
-blob or more than 1024 corrupt rows can be removed atomically and cannot brick
-every subsequent startup. The first recovering startup still reports a
-fail-closed error after committing evidence; the next startup progresses from
-cursor zero.
-A backup is collected only after the normalized
-cutover has an atomic schema-v4 verification marker, the legacy row is gone,
-and the 30-day recovery retention has elapsed. Schema-v3 completed migrations
-backfill this marker from their committed backup-without-legacy invariant
-before any GC. A corrupt sole recovery artifact is also retained for at least
-30 days. If young recoverable backups exceed either bound, startup rolls the
-migration transaction back and leaves all legacy rows intact instead of
-deleting evidence.
 Length, overflow, and canonical-envelope decoder failures are normalized to
-`InvalidDataException`; corrupt legacy rows are quarantined fail-closed.
+`InvalidDataException`. The canonical mailbox schema is version 6 and is
+created only for a fresh local database. Any earlier or incompatible mailbox
+schema fails fast with an explicit wipe/reset-required error; no mailbox state
+is dual-read, migrated, or retained for compatibility.
 
 ## P10E dormant identity-authenticated mailbox seam
 

@@ -24,7 +24,7 @@ Owned here:
 
 - `Domain`: accounts, identifiers, conversations, contacts, groups, messages, attachments.
 - `Services`: account lifecycle, message send/receive, sync, notification planning, avatar/profile, push subscription, call signaling orchestration.
-- `Persistence`: repository contracts, in-memory store, SQLite store, schema and local-state migration.
+- `Persistence`: repository contracts, in-memory store, SQLite store, and the current local-state schema.
 - `Platform`: interfaces for permissions, media, background tasks, share extension bridges, push, notification scheduling, and calls.
 - `Features`: release/debug feature flags and invariants.
 
@@ -39,7 +39,10 @@ Not owned here:
 - Domain behavior must be deterministic, testable, and free of MAUI dependencies.
 - Release runtime must not depend on `StubSessionBackend`; stubs are test/dev-only.
 - Public APIs should accept cancellation tokens and avoid hiding transport/persistence failures.
-- Persistence changes require migration tests and backward-compatibility notes.
+- Before production launch, persistence changes are clean breaks: keep only the
+  current schema, reject older/incompatible state with an explicit wipe/reset
+  requirement, and do not add dual-read or automatic migration unless Mr. X
+  explicitly requests it.
 - Feature flags must fail closed for release: if a release feature needs real infrastructure, missing configuration should be visible.
 - Do not log recovery phrases, private keys, Session IDs paired with sensitive payloads, attachment contents, or push tokens.
 
@@ -88,7 +91,8 @@ A change is complete only when:
 Stop and fix or document a blocker if:
 
 - a release path can silently use stub transport,
-- a migration can lose local account/message/group state,
+- a compatibility fallback or stale-schema path can silently weaken current
+  privacy, durability, or fail-closed behavior,
 - Session compatibility is guessed without upstream reference or tests,
 - sensitive identity/push/attachment material can leak through logs,
 - a service API becomes MAUI-specific.

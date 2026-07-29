@@ -182,46 +182,27 @@ public sealed class InMemoryClientMailboxStateRepository :
             nowUnixSeconds,
             cancellationToken);
 
-    internal byte[] ExportStateForTests(ClientMailboxScope scope)
+    internal int InstallationTraversalCountForTests()
     {
         lock (gate)
         {
-            return ClientMailboxStateCodec.Encode(Get(scope));
+            return states.Count;
         }
     }
 
-    internal void ImportStateForTests(
-        ClientMailboxScope scope,
-        ReadOnlySpan<byte> encoded)
-    {
-        lock (gate)
-        {
-            states[Key(scope)] = ClientMailboxStateCodec.Decode(encoded);
-        }
-    }
-
-    internal void SeedNormalizedStatesForTests(
-        IReadOnlyList<(ClientMailboxScope Scope, byte[] Encoded)> snapshots)
+    internal void SeedCurrentStatesForTests(
+        IReadOnlyList<(ClientMailboxScope Scope, ClientMailboxStoredState State)> snapshots)
     {
         lock (gate)
         {
             var candidate = CloneStates();
             foreach (var snapshot in snapshots)
             {
-                candidate[Key(snapshot.Scope)] =
-                    ClientMailboxStateCodec.Decode(snapshot.Encoded);
+                candidate[Key(snapshot.Scope)] = snapshot.State.Clone();
             }
 
             ValidateInstallationInbox(candidate);
             Replace(states, candidate);
-        }
-    }
-
-    internal int InstallationTraversalCountForTests()
-    {
-        lock (gate)
-        {
-            return states.Count;
         }
     }
 

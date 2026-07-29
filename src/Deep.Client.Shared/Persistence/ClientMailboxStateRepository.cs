@@ -20,12 +20,6 @@ public static class ClientMailboxStateLimits
     public const ulong MaximumActiveInboxAgeSeconds = 7 * 24 * 60 * 60;
     public const ulong ExpiredQuarantineRetentionSeconds = 30 * 24 * 60 * 60;
     public const int MaximumCoordinatorStatements = 1024;
-    public const int MaximumMigrationArtifacts = MaximumInstallationScopes;
-    public const int MaximumMigrationArtifactBytes = 64 * 1024 * 1024;
-    public const long MigrationArtifactRetentionSeconds = 30L * 24 * 60 * 60;
-    public const int MaximumCorruptEvidencePrefixBytes = 256;
-    public const int MaximumLegacyStateBlobBytes =
-        MaximumInboxBytes + (512 * 1024);
 }
 
 public sealed class ClientMailboxScope : IEquatable<ClientMailboxScope>
@@ -309,7 +303,6 @@ internal sealed class ClientMailboxStoredState
     public ulong AfterCursor { get; set; }
     public byte[] ContinuationToken { get; set; } = [];
     public List<ClientMailboxStoredEntry> Entries { get; } = [];
-    public List<ClientMailboxCoordinatorStatement> CoordinatorStatements { get; } = [];
 
     public ClientMailboxStoredState Clone()
     {
@@ -319,8 +312,6 @@ internal sealed class ClientMailboxStoredState
             ContinuationToken = ContinuationToken.ToArray()
         };
         clone.Entries.AddRange(Entries.Select(static entry => entry.Clone()));
-        clone.CoordinatorStatements.AddRange(
-            CoordinatorStatements.Select(static statement => statement.Clone()));
         return clone;
     }
 }
@@ -691,7 +682,7 @@ internal static class ClientMailboxStateMachine
                     Cursor = item.Cursor,
                     Envelope = MailboxClientCodec.DecodeEncryptedEnvelope(
                         canonical,
-                        ClientMailboxStateCodec.PersistenceDecodePolicy(
+                        ClientMailboxPersistence.DecodePolicy(
                             canonical,
                             item.Envelope.ExpiresAtUnixSeconds))
                 };
@@ -706,7 +697,7 @@ internal static class ClientMailboxStateMachine
         {
             return MailboxClientCodec.DecodeEncryptedEnvelope(
                 entry.CanonicalEnvelope,
-                ClientMailboxStateCodec.PersistenceDecodePolicy(
+                ClientMailboxPersistence.DecodePolicy(
                     entry.CanonicalEnvelope,
                     entry.ExpiresAtUnixSeconds));
         }
@@ -805,226 +796,9 @@ internal static class ClientMailboxStateMachine
         CryptographicOperations.FixedTimeEquals(left, right);
 }
 
-internal static class ClientMailboxStateCodec
+internal static class ClientMailboxPersistence
 {
-    private static ReadOnlySpan<byte> V1Magic => "CMS1"u8;
-    private static ReadOnlySpan<byte> V2Magic => "CMS2"u8;
-    private const int HeaderBytes = 32;
-    private const int V1HeaderBytes = 16;
-    private const int V1EntryBytes = 40;
-    private const int EntryHeaderBytes = 64;
-    private const int CoordinatorBytes = 120;
-
-    public static bool IsVersionOne(ReadOnlySpan<byte> encoded) =>
-        encoded.Length >= 4 && encoded[..4].SequenceEqual(V1Magic);
-
-    public static byte[] Encode(ClientMailboxStoredState state)
-    {
-        ClientMailboxStateMachine.Validate(state);
-        var legacyJournal = new ClientMailboxJournalState();
-        legacyJournal.CoordinatorStatements.AddRange(
-            state.CoordinatorStatements.Select(static statement => statement.Clone()));
-        ClientMailboxStateMachine.ValidateJournal(legacyJournal);
-        var length = checked(
-            HeaderBytes +
-            state.ContinuationToken.Length +
-            state.Entries.Sum(static entry =>
-                EntryHeaderBytes + entry.CanonicalEnvelope.Length) +
-            (state.CoordinatorStatements.Count * CoordinatorBytes));
-        var output = new byte[length];
-        V2Magic.CopyTo(output);
-        BinaryPrimitives.WriteUInt64BigEndian(output.AsSpan(4, 8), state.AfterCursor);
-        BinaryPrimitives.WriteUInt16BigEndian(
-            output.AsSpan(12, 2),
-            checked((ushort)state.ContinuationToken.Length));
-        BinaryPrimitives.WriteUInt32BigEndian(
-            output.AsSpan(16, 4),
-            checked((uint)state.Entries.Count));
-        BinaryPrimitives.WriteUInt32BigEndian(
-            output.AsSpan(20, 4),
-            checked((uint)state.CoordinatorStatements.Count));
-        var offset = HeaderBytes;
-        state.ContinuationToken.CopyTo(output, offset);
-        offset += state.ContinuationToken.Length;
-        foreach (var entry in state.Entries.OrderBy(static entry => entry.Cursor))
-        {
-            BinaryPrimitives.WriteUInt64BigEndian(output.AsSpan(offset, 8), entry.Cursor);
-            BinaryPrimitives.WriteUInt64BigEndian(
-                output.AsSpan(offset + 8, 8),
-                entry.ExpiresAtUnixSeconds);
-            output[offset + 16] = entry.Acknowledged ? (byte)1 : (byte)0;
-            entry.Digest.CopyTo(output, offset + 24);
-            BinaryPrimitives.WriteUInt32BigEndian(
-                output.AsSpan(offset + 56, 4),
-                checked((uint)entry.CanonicalEnvelope.Length));
-            offset += EntryHeaderBytes;
-            entry.CanonicalEnvelope.CopyTo(output, offset);
-            offset += entry.CanonicalEnvelope.Length;
-        }
-
-        foreach (var statement in state.CoordinatorStatements)
-        {
-            statement.MembershipCommitment.CopyTo(output, offset);
-            BinaryPrimitives.WriteUInt64BigEndian(
-                output.AsSpan(offset + 32, 8),
-                statement.Epoch);
-            statement.CoordinatorId.CopyTo(output, offset + 40);
-            BinaryPrimitives.WriteUInt64BigEndian(
-                output.AsSpan(offset + 72, 8),
-                statement.CoordinatorSequence);
-            statement.StatementDigest.CopyTo(output, offset + 80);
-            BinaryPrimitives.WriteUInt64BigEndian(
-                output.AsSpan(offset + 112, 8),
-                statement.ExpiresAtUnixSeconds);
-            offset += CoordinatorBytes;
-        }
-
-        return output;
-    }
-
-    public static ClientMailboxStoredState Decode(ReadOnlySpan<byte> encoded)
-    {
-        try
-        {
-            return DecodeCore(encoded);
-        }
-        catch (InvalidDataException)
-        {
-            throw;
-        }
-        catch (Exception exception) when (
-            exception is MailboxClientException or ArgumentException or
-            OverflowException or IndexOutOfRangeException)
-        {
-            throw new InvalidDataException(
-                "Client mailbox state is corrupt.",
-                exception);
-        }
-    }
-
-    private static ClientMailboxStoredState DecodeCore(ReadOnlySpan<byte> encoded)
-    {
-        if (encoded.Length < HeaderBytes || !encoded[..4].SequenceEqual(V2Magic) ||
-            encoded.Slice(14, 2).IndexOfAnyExcept((byte)0) >= 0 ||
-            encoded.Slice(24, 8).IndexOfAnyExcept((byte)0) >= 0)
-        {
-            throw new InvalidDataException(
-                "Client mailbox state version/header is invalid.");
-        }
-
-        var tokenLength = BinaryPrimitives.ReadUInt16BigEndian(encoded.Slice(12, 2));
-        var entryCount = BinaryPrimitives.ReadUInt32BigEndian(encoded.Slice(16, 4));
-        var coordinatorCount =
-            BinaryPrimitives.ReadUInt32BigEndian(encoded.Slice(20, 4));
-        if (tokenLength > MailboxClientLimits.MaximumContinuationTokenLength ||
-            entryCount > ClientMailboxStateLimits.MaximumInboxEntries ||
-            coordinatorCount > ClientMailboxStateLimits.MaximumCoordinatorStatements ||
-            tokenLength > encoded.Length - HeaderBytes)
-        {
-            throw new InvalidDataException("Client mailbox state bounds are invalid.");
-        }
-
-        var state = new ClientMailboxStoredState
-        {
-            AfterCursor = BinaryPrimitives.ReadUInt64BigEndian(encoded.Slice(4, 8)),
-            ContinuationToken = encoded.Slice(HeaderBytes, tokenLength).ToArray()
-        };
-        var offset = HeaderBytes + tokenLength;
-        for (var index = 0; index < entryCount; index++)
-        {
-            if (offset > encoded.Length - EntryHeaderBytes ||
-                encoded[offset + 16] > 1 ||
-                encoded.Slice(offset + 17, 7).IndexOfAnyExcept((byte)0) >= 0 ||
-                encoded.Slice(offset + 60, 4).IndexOfAnyExcept((byte)0) >= 0)
-            {
-                throw new InvalidDataException("Client mailbox inbox entry is invalid.");
-            }
-
-            var envelopeLength = BinaryPrimitives.ReadUInt32BigEndian(
-                encoded.Slice(offset + 56, 4));
-            if (envelopeLength >
-                    MailboxClientLimits.MaximumEncryptedEnvelopeLength ||
-                envelopeLength > encoded.Length - offset - EntryHeaderBytes)
-            {
-                throw new InvalidDataException(
-                    "Client mailbox inbox envelope length is invalid.");
-            }
-
-            state.Entries.Add(new ClientMailboxStoredEntry
-            {
-                Cursor = BinaryPrimitives.ReadUInt64BigEndian(
-                    encoded.Slice(offset, 8)),
-                ExpiresAtUnixSeconds = BinaryPrimitives.ReadUInt64BigEndian(
-                    encoded.Slice(offset + 8, 8)),
-                Acknowledged = encoded[offset + 16] == 1,
-                Digest = encoded.Slice(offset + 24, 32).ToArray(),
-                CanonicalEnvelope = encoded.Slice(
-                    offset + EntryHeaderBytes,
-                    checked((int)envelopeLength)).ToArray()
-            });
-            offset += EntryHeaderBytes + checked((int)envelopeLength);
-        }
-
-        for (var index = 0; index < coordinatorCount; index++)
-        {
-            if (offset > encoded.Length - CoordinatorBytes)
-            {
-                throw new InvalidDataException(
-                    "Client mailbox coordinator journal is truncated.");
-            }
-
-            state.CoordinatorStatements.Add(new ClientMailboxCoordinatorStatement
-            {
-                MembershipCommitment = encoded.Slice(offset, 32).ToArray(),
-                Epoch = BinaryPrimitives.ReadUInt64BigEndian(
-                    encoded.Slice(offset + 32, 8)),
-                CoordinatorId = encoded.Slice(offset + 40, 32).ToArray(),
-                CoordinatorSequence = BinaryPrimitives.ReadUInt64BigEndian(
-                    encoded.Slice(offset + 72, 8)),
-                StatementDigest = encoded.Slice(offset + 80, 32).ToArray(),
-                ExpiresAtUnixSeconds = BinaryPrimitives.ReadUInt64BigEndian(
-                    encoded.Slice(offset + 112, 8))
-            });
-            offset += CoordinatorBytes;
-        }
-
-        if (offset != encoded.Length)
-        {
-            throw new InvalidDataException(
-                "Client mailbox state has trailing bytes.");
-        }
-
-        ClientMailboxStateMachine.Validate(state);
-        var legacyJournal = new ClientMailboxJournalState();
-        legacyJournal.CoordinatorStatements.AddRange(
-            state.CoordinatorStatements.Select(static statement => statement.Clone()));
-        ClientMailboxStateMachine.ValidateJournal(legacyJournal);
-        return state;
-    }
-
-    public static ClientMailboxStoredState MigrateVersionOneToSafeReplay(
-        ReadOnlySpan<byte> encoded)
-    {
-        if (encoded.Length < V1HeaderBytes ||
-            !encoded[..4].SequenceEqual(V1Magic))
-        {
-            throw new InvalidDataException("CMS1 migration input is invalid.");
-        }
-
-        var count = BinaryPrimitives.ReadUInt32BigEndian(encoded.Slice(12, 4));
-        if (count > 2048 ||
-            encoded.Length != V1HeaderBytes + checked((int)count * V1EntryBytes))
-        {
-            throw new InvalidDataException("CMS1 migration input length is invalid.");
-        }
-
-        // CMS1 advanced the cursor without retaining ciphertext. Retaining either
-        // its cursor or digest set would hide messages permanently. Preserve the
-        // original bytes in the migration backup and restart a safe cursor-zero cycle.
-        return new ClientMailboxStoredState();
-    }
-
-    public static MailboxClientDecodePolicy PersistenceDecodePolicy(
+    public static MailboxClientDecodePolicy DecodePolicy(
         ReadOnlySpan<byte> canonicalEnvelope,
         ulong expiresAtUnixSeconds)
     {
@@ -1062,8 +836,7 @@ internal static class ClientMailboxStateCodec
             {
                 CurrentBucket = 1,
                 MinimumGeneration = 1
-            },
-            AllowLegacyMirrorOverlap = true
+            }
         };
     }
 }
