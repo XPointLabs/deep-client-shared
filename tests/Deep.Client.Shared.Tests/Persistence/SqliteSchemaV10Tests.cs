@@ -99,13 +99,13 @@ public sealed class SqliteSchemaV10Tests
             using var fixture = Open(path);
             Execute(fixture, $"PRAGMA user_version={version};");
             Execute(fixture, "INSERT INTO settings(key, payload_json) VALUES ('fixture', '\"preserved\"');");
-            var before = SnapshotFiles(path);
+            var before = SnapshotDurableFiles(path);
 
             var exception = Assert.Throws<LocalStateResetRequiredException>(
                 () => new SqliteSessionStore(path));
 
             Assert.Equal(LocalStateResetRequiredReason.UnsupportedVersion, exception.Reason);
-            AssertFilesEqual(before, path);
+            AssertDurableFilesEqual(before, path);
             Assert.Equal(
                 1,
                 Scalar(
@@ -212,6 +212,50 @@ public sealed class SqliteSchemaV10Tests
             Assert.Equal(
                 "still-usable",
                 await concurrent.GetAsync<string>("pool.after-wrong-key"));
+        }
+        finally
+        {
+            DeleteFiles(path);
+        }
+    }
+
+    [Fact]
+    public async Task ConstructionDuringActiveWalWriterUsesAConsistentReadSnapshot()
+    {
+        var path = TempPath("active-wal-writer");
+        try
+        {
+            using var first = new SqliteSessionStore(path);
+            await first.SetAsync("writer.marker", "committed");
+
+            using var writer = Open(path);
+            using var transaction = writer.BeginTransaction();
+            using (var command = writer.CreateCommand())
+            {
+                command.Transaction = transaction;
+                command.CommandText = """
+                    UPDATE settings
+                    SET payload_json = '"uncommitted"'
+                    WHERE key = 'writer.marker';
+                    """;
+                Assert.Equal(1, command.ExecuteNonQuery());
+            }
+
+            Assert.True(File.Exists(path + "-wal"));
+            Assert.True(File.Exists(path + "-shm"));
+            var before = SnapshotDurableFiles(path);
+
+            using var concurrent = new SqliteSessionStore(path);
+            Assert.Equal(
+                "committed",
+                await concurrent.GetAsync<string>("writer.marker"));
+            AssertDurableFilesEqual(before, path);
+            Assert.True(File.Exists(path + "-shm"));
+
+            transaction.Commit();
+            Assert.Equal(
+                "uncommitted",
+                await first.GetAsync<string>("writer.marker"));
         }
         finally
         {
@@ -478,11 +522,43 @@ public sealed class SqliteSchemaV10Tests
         return result;
     }
 
+    private static IReadOnlyDictionary<string, byte[]> SnapshotDurableFiles(string path)
+    {
+        var result = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+        foreach (var candidate in new[] { path, path + "-wal" })
+        {
+            if (File.Exists(candidate))
+            {
+                using var stream = new FileStream(
+                    candidate,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.ReadWrite | FileShare.Delete);
+                var bytes = new byte[stream.Length];
+                stream.ReadExactly(bytes);
+                result[candidate] = bytes;
+            }
+        }
+        return result;
+    }
+
     private static void AssertFilesEqual(
         IReadOnlyDictionary<string, byte[]> expected,
         string path)
     {
         var actual = SnapshotFiles(path);
+        Assert.Equal(expected.Keys.Order(), actual.Keys.Order());
+        foreach (var file in expected)
+        {
+            Assert.Equal(file.Value, actual[file.Key]);
+        }
+    }
+
+    private static void AssertDurableFilesEqual(
+        IReadOnlyDictionary<string, byte[]> expected,
+        string path)
+    {
+        var actual = SnapshotDurableFiles(path);
         Assert.Equal(expected.Keys.Order(), actual.Keys.Order());
         foreach (var file in expected)
         {

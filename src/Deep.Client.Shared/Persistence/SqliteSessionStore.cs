@@ -2592,7 +2592,7 @@ public sealed partial class SqliteSessionStore :
     {
         if (!isFresh && !immutableExisting)
         {
-            ValidateExistingSchemaSnapshot(statePath, encryptionKey);
+            ValidateExistingSchemaReadOnly(statePath, encryptionKey);
             return;
         }
 
@@ -2837,68 +2837,21 @@ public sealed partial class SqliteSessionStore :
         journalCommand.ExecuteNonQuery();
     }
 
-    private static void ValidateExistingSchemaSnapshot(
+    private static void ValidateExistingSchemaReadOnly(
         string statePath,
         string? encryptionKey)
     {
-        var temporaryDirectory = Path.Combine(
-            Path.GetTempPath(),
-            "deep-schema-preflight-" + Guid.NewGuid().ToString("N"));
-        var snapshotPath = Path.Combine(temporaryDirectory, "local-state.db");
-        Directory.CreateDirectory(temporaryDirectory);
-        try
-        {
-            CopyStateFileForPreflight(statePath, snapshotPath);
-            foreach (var suffix in new[] { "-wal", "-shm" })
-            {
-                if (File.Exists(statePath + suffix))
-                {
-                    CopyStateFileForPreflight(statePath + suffix, snapshotPath + suffix);
-                }
-            }
-
-            var connectionString = ConnectionStringFor(
-                snapshotPath,
-                encryptionKey,
-                SqliteOpenMode.ReadOnly,
-                pooling: false);
-            using var connection = new SqliteConnection(connectionString);
-            connection.Open();
-            ConfigurePreflightConnection(connection, existing: true);
-            ValidateCurrentSchema(connection, transaction: null);
-        }
-        finally
-        {
-            foreach (var candidate in new[]
-                     {
-                         snapshotPath,
-                         snapshotPath + "-wal",
-                         snapshotPath + "-shm"
-                     })
-            {
-                if (File.Exists(candidate))
-                {
-                    File.Delete(candidate);
-                }
-            }
-            Directory.Delete(temporaryDirectory);
-        }
-    }
-
-    private static void CopyStateFileForPreflight(string source, string destination)
-    {
-        using var input = new FileStream(
-            source,
-            FileMode.Open,
-            FileAccess.Read,
-            FileShare.ReadWrite | FileShare.Delete);
-        using var output = new FileStream(
-            destination,
-            FileMode.CreateNew,
-            FileAccess.Write,
-            FileShare.None);
-        input.CopyTo(output);
-        output.Flush(flushToDisk: true);
+        var connectionString = ConnectionStringFor(
+            statePath,
+            encryptionKey,
+            SqliteOpenMode.ReadOnly,
+            pooling: false);
+        using var connection = new SqliteConnection(connectionString);
+        connection.Open();
+        ConfigurePreflightConnection(connection, existing: true);
+        using var transaction = connection.BeginTransaction(deferred: true);
+        ValidateCurrentSchema(connection, transaction);
+        transaction.Commit();
     }
 
     private sealed record ExpectedSchemaColumn(
