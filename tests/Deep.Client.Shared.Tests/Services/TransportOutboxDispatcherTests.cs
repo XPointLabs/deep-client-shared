@@ -82,7 +82,7 @@ public sealed class TransportOutboxDispatcherTests
     }
 
     [Fact]
-    public async Task AdapterFailureIsRedactedAndPersistentlyQuarantined()
+    public async Task AdapterFailureIsRedactedAndRetriedAfterPersistedLease()
     {
         var store = new InMemorySessionStore();
         var clock = new FrozenClock(Now);
@@ -105,13 +105,16 @@ public sealed class TransportOutboxDispatcherTests
 
         adapter.Failure = null;
         clock.Advance(TransportOutboxDispatcher.DefaultRetryDelay);
-        var quarantined = await runtime.TransportOutbox.DispatchReadyAsync(item.AccountScope);
+        var retried = await runtime.TransportOutbox.DispatchReadyAsync(item.AccountScope);
         var persisted = await store.ReadTransportOutboxAsync(item.AccountScope, item.LogicalId);
 
-        Assert.Equal(0, quarantined.AttemptedCount);
-        Assert.Equal(1, adapter.Calls);
-        Assert.Equal(TransportOutboxState.Attempted, persisted.Item?.State);
-        Assert.Single(persisted.Item!.Attempts);
+        Assert.Equal(1, retried.DurableCount);
+        Assert.Equal(2, adapter.Calls);
+        Assert.Equal(TransportOutboxState.Durable, persisted.Item?.State);
+        Assert.Equal(2, persisted.Item!.Attempts.Count);
+        Assert.Single(
+            persisted.Item.Attempts,
+            attempt => attempt.State == TransportOutboxAttemptState.Durable);
     }
 
     [Fact]
@@ -160,7 +163,7 @@ public sealed class TransportOutboxDispatcherTests
     }
 
     [Fact]
-    public async Task CooperativeAttemptTimeoutStopsAdapterAndQuarantinesAttempt()
+    public async Task CooperativeAttemptTimeoutRetriesAfterLease()
     {
         var store = new InMemorySessionStore();
         var clock = new FrozenClock(Now);
@@ -186,10 +189,10 @@ public sealed class TransportOutboxDispatcherTests
         var retried = await dispatcher.DispatchReadyAsync(item.AccountScope);
         var persisted = await dispatcher.ReadAsync(item.AccountScope, item.LogicalId);
 
-        Assert.Equal(0, retried.AttemptedCount);
-        Assert.Equal(1, adapter.Calls);
-        Assert.Equal(1, adapter.CompletedCalls);
-        Assert.Equal(TransportOutboxState.Attempted, persisted.Item?.State);
+        Assert.Equal(1, retried.DurableCount);
+        Assert.Equal(2, adapter.Calls);
+        Assert.Equal(2, adapter.CompletedCalls);
+        Assert.Equal(TransportOutboxState.Durable, persisted.Item?.State);
     }
 
     [Fact]

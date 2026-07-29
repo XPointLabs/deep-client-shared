@@ -317,7 +317,13 @@ internal static class TransportOutboxStateMachine
             existing => existing.AttemptId.AsSpan().SequenceEqual(transition.AttemptId.Value));
         if (target == TransportOutboxAttemptState.Attempted)
         {
-            if (attempt is not null || item.Attempts.Count >= TransportOutboxLimits.MaxAttemptsPerItem)
+            if (attempt is not null ||
+                item.State is not (
+                    TransportOutboxState.Prepared or
+                    TransportOutboxState.Attempted or
+                    TransportOutboxState.Accepted) ||
+                transition.OccurredAt < item.NotBefore ||
+                item.Attempts.Count >= TransportOutboxLimits.MaxAttemptsPerItem)
             {
                 return TransportOutboxCommitResult.Conflict;
             }
@@ -333,7 +339,21 @@ internal static class TransportOutboxStateMachine
         }
         else
         {
-            if (attempt is null || (int)target != (int)attempt.State + 1)
+            var requiredLastState = target == TransportOutboxAttemptState.Accepted
+                ? TransportOutboxState.Attempted
+                : TransportOutboxState.Accepted;
+            if (attempt is null ||
+                target == TransportOutboxAttemptState.Accepted &&
+                    item.State is not (
+                        TransportOutboxState.Attempted or
+                        TransportOutboxState.Accepted) ||
+                target == TransportOutboxAttemptState.Durable &&
+                    item.State != TransportOutboxState.Accepted ||
+                item.LastTransitionState != requiredLastState ||
+                item.LastTransitionAttemptId is null ||
+                !item.LastTransitionAttemptId.AsSpan().SequenceEqual(
+                    transition.AttemptId.Value) ||
+                (int)target != (int)attempt.State + 1)
             {
                 return TransportOutboxCommitResult.Conflict;
             }

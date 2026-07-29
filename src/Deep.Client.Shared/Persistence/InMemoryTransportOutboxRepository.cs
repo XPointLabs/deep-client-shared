@@ -167,6 +167,7 @@ public sealed partial class InMemorySessionStore
                     .Where(item =>
                         item.AccountScope.AsSpan().SequenceEqual(accountScope.Value)
                         && item.State is TransportOutboxState.Prepared
+                            or TransportOutboxState.Attempted
                             or TransportOutboxState.Accepted
                         && item.NotBefore <= now
                         && item.ExpiresAt > now

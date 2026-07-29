@@ -25,7 +25,11 @@ unverified, non-activating, and absent from runtime composition.
 The P11 transport outbox has an opt-in runtime boundary in
 `TransportOutboxDispatcher`. It accepts only already-opaque ciphertext bundles,
 records every attempt before adapter I/O, distinguishes adapter acceptance from
-durability, and runs only bounded caller-owned passes. It is not wired above
+durability, and runs only bounded caller-owned passes. Prepared, outcome-unknown
+Attempted, and accepted-only items are eligible only at their persisted
+`NotBefore`; repository revision CAS and the last-transition attempt identity
+prevent overlapping or stale attempts from claiming acceptance or durability.
+Durable, delivered, and expired items cannot start another attempt. It is not wired above
 E2EE in `MessageService`, because that layer contains plaintext. Default and
 release profiles remain disabled until a reviewed P03 producer and production
 adapter provide opaque bundles and durable receipts.
@@ -112,22 +116,55 @@ digest; the raw Session ID, placement key, or other route target is never retain
 current validity window, bounded key material, and obvious raw Session-ID addressing before
 storage I/O. Provider, crypto, and server error text never crosses the client boundary.
 
-## P09C staged client mailbox adapter
+## Native authenticated client mailbox adapter
 
 `ClientMailboxAdapter` is a portable, binary-only Store/Retrieve/Acknowledge
-boundary for the pinned mailbox contract. It emits MST1/MRT1/MAK1 and accepts
-only canonical MRR2/MQR3, MRP1, and MQR3-backed MAR1 responses. Durable
+boundary for the pinned mailbox contract. Its public operations accept semantic
+inputs plus the narrow `IMailboxOperationSigner`; the adapter obtains the sole
+signed canonical MAU2 carrier from `MailboxAuthenticatedRequestFactory`.
+The frame constructor remains assembly-internal, so callers cannot inject an
+unsigned or alternate-version request. The binary ingress sends MAU2 only to
+the exact mailbox-v2 Store/Retrieve/Acknowledge routes and accepts only exact
+canonical MQR3, MRP1, and MQR3-backed MAR1 responses. Durable
 transitions require two distinct pinned placement replica IDs and two distinct
 Ed25519 keys, exact membership
 and placement commitments, exact operation/generation/expiry bindings, and
 valid replica plus coordinator signatures. Accepted and durable are persistent
 outbox states; this adapter never creates a delivered transition.
 
+Every MAU2 request is prepared in the durable transport outbox before network
+I/O. Recovery looks up the operation ID first and reuses the byte-identical
+persisted MAU2 frame, including the original replay counter, before it may ask
+the credential repository to lease a counter. A bounded per-operation
+single-flight covers read, credential lease, prepare, and dispatch inside the
+process; persisted `NotBefore` plus repository revision CAS remains the
+cross-instance authority. Every retry lease spans the operation HTTP deadline
+plus a safety margin. Store persists the exact MQR3. Retrieve persists a strict
+versioned MRSO summary containing the SHA-256 of the exact MRP1, epoch,
+operation ID, request/response/result cursors, continuation authority, and item
+count. Ack persists a domain-tagged SHA-256 commitment to exact MAR1. A
+completed Retrieve is reconstructed only from its own validated MRSO summary,
+never from mutable current traversal. A crash before outcome commit resends the
+same MAU2. A crash after the accepted transition promotes the same attempt to
+durable without allocating another counter.
+
+`HttpClientMailboxBinaryIngress` owns its `SocketsHttpHandler`, disables
+redirects before the first request byte can leave the pinned origin, disables
+cookies and automatic decompression, and requires both platform TLS validation
+and one of 1–16 configured SHA-256 SPKI pins. Cleartext is available only
+through the explicit loopback-development factory; arbitrary remote `http://`
+origins are rejected. The ingress also rejects origin changes, content
+encoding, media-type parameters, wrong status/media/frame, truncated or
+oversized bodies, and noncanonical round trips. Transport failures use a
+closed enum with an explicit retryable bit; error bodies are forbidden. The
+owned deadline covers request send plus success/error body reads, while caller
+cancellation remains distinguishable and is never remapped.
+
 Activation is fail-closed and disabled by default through
 `ClientMailboxAdapterEnabled`. Explicit issuer context, a pinned two-replica
 placement, and a configured binary ingress are all required. Only the current
-strict mailbox wire version is accepted; the adapter does not downgrade to
-MQR2 or JSON.
+native authenticated wire is accepted; the adapter has no downgrade, mirror,
+or JSON path.
 
 Receive ciphertext, cursor, continuation token, deduplication, and ordered
 acknowledgement state share one bounded atomic state machine across the
@@ -183,7 +220,7 @@ created only for a fresh local database. Any earlier or incompatible mailbox
 schema fails fast with an explicit wipe/reset-required error; no mailbox state
 is dual-read, migrated, or retained for compatibility.
 
-## P10E dormant identity-authenticated mailbox seam
+## Identity-authenticated mailbox seam
 
 `E2eeClientTransport` retains the existing `ISessionMessageTransport` send path
 unchanged. A transport may additionally implement
@@ -207,7 +244,7 @@ prepared before the first authenticated dispatch, preventing a later target
 failure from producing a partial remote fan-out.
 
 `OpaqueMailboxWireEntry`, `OpaqueMailboxContinuation`, and
-`OpaqueMailboxInboxPage` are contracts only; no runtime activates them yet.
+`OpaqueMailboxInboxPage` remain portable opaque receive contracts.
 An entry can be created only by strictly decoding and re-encoding MEO1 under
 the operation's verified decode policy; its external digest is bound in
 constant time to header bytes 96–127. They expose only a cursor, canonical
@@ -215,9 +252,8 @@ MEO1 bytes, digest, and continuation authority—never sender, recipient,
 Session ID, or server hash. The retrieval seam is deliberately one-item: an
 entry cursor must advance the requested cursor, a nonterminal continuation
 must equal that entry cursor, and an empty page must be terminal. This reserves
-the ordered one-item MAK1 acknowledgement shape without adding mailbox
-persistence, credential issuance, HTTP ingress, or acknowledgement behavior
-in this slice.
+the ordered one-item authenticated MBA2 acknowledgement shape without exposing
+mailbox identity or plaintext through the portable receive seam.
 
 ## E3 MVP Notes
 

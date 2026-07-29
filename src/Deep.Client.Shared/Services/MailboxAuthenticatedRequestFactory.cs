@@ -4,8 +4,7 @@ using Deep.Protocol.DeepExtension.MailboxCapabilities;
 
 namespace Deep.Client.Shared.Services;
 
-/// <summary>Builds the current strict MAU2 carrier. It intentionally does not synthesize MCP1,
-/// MST1, MRT1, MAK1, legacy JSON, or a mixed-version fallback.</summary>
+/// <summary>Builds the sole current signed canonical MAU2 client carrier.</summary>
 public sealed class MailboxAuthenticatedRequestFactory
 {
     private readonly IClientMailboxCredentialStateRepository state;

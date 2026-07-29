@@ -162,7 +162,7 @@ public sealed class TransportOutboxCorrectiveRedTests
     }
 
     [Fact]
-    public async Task LatestTransitionIdentitySurvivesRestartWhenLogicalMaximumIsUnchanged()
+    public async Task Durable_terminal_rejects_new_attempt_and_survives_restart()
     {
         foreach (var sqlite in new[] { false, true })
         {
@@ -185,11 +185,7 @@ public sealed class TransportOutboxCorrectiveRedTests
                     item.AccountScope, item.LogicalId, 3, first,
                     OutboxTransitionSource.Adapter,
                     OutboxTransitionReason.AdapterConfirmedDurable,
-                    Now.AddMinutes(3), Bytes(16, 0x6B)),
-                TransportOutboxTransition.Attempted(
-                    item.AccountScope, item.LogicalId, 4, second,
-                    OutboxTransitionSource.Adapter, OutboxTransitionReason.DispatchStarted,
-                    Now.AddMinutes(4), Now.AddMinutes(5))
+                    Now.AddMinutes(3), Bytes(16, 0x6B))
             };
             foreach (var transition in transitions)
             {
@@ -197,14 +193,28 @@ public sealed class TransportOutboxCorrectiveRedTests
                     TransportOutboxCommitResult.Applied,
                     await scope.Store.ApplyTransportOutboxTransitionAsync(transition));
             }
+            var rejected = TransportOutboxTransition.Attempted(
+                item.AccountScope,
+                item.LogicalId,
+                4,
+                second,
+                OutboxTransitionSource.Adapter,
+                OutboxTransitionReason.RetryScheduled,
+                Now.AddMinutes(4),
+                Now.AddMinutes(5));
+            Assert.Equal(
+                TransportOutboxCommitResult.Conflict,
+                await scope.Store.ApplyTransportOutboxTransitionAsync(rejected));
 
             scope.Restart();
             Assert.Equal(
-                TransportOutboxCommitResult.Idempotent,
-                await scope.Store.ApplyTransportOutboxTransitionAsync(transitions[^1]));
-            Assert.Equal(
                 TransportOutboxCommitResult.Conflict,
-                await scope.Store.ApplyTransportOutboxTransitionAsync(transitions[^2]));
+                await scope.Store.ApplyTransportOutboxTransitionAsync(rejected));
+            var persisted = await scope.Store.ReadTransportOutboxAsync(
+                item.AccountScope,
+                item.LogicalId);
+            Assert.Equal(TransportOutboxState.Durable, persisted.Item!.State);
+            Assert.Single(persisted.Item.Attempts);
         }
     }
 

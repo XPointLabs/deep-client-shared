@@ -101,71 +101,103 @@ public sealed class TransportOutboxRepositoryContractTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task SimultaneousAttemptSuccessAdvancesOneLogicalDurableState(bool sqlite)
+    public async Task Only_latest_leased_attempt_can_advance_to_success(bool sqlite)
     {
-        using var firstCommitEntered = new ManualResetEventSlim();
-        using var releaseFirstCommit = new ManualResetEventSlim();
-        var gateEnabled = false;
-        var gateCalls = 0;
-        using var scope = StoreScope.Create(
-            sqlite,
-            point =>
-            {
-                if (gateEnabled
-                    && point == TransportOutboxCommitFaultPoint.BeforeDurableCommit
-                    && Interlocked.Increment(ref gateCalls) == 1)
-                {
-                    firstCommitEntered.Set();
-                    releaseFirstCommit.Wait(TimeSpan.FromSeconds(5));
-                }
-            });
+        using var scope = StoreScope.Create(sqlite);
         var item = Prepared();
         await scope.Store.PrepareTransportOutboxAsync(item);
         var first = Attempt(0x71);
         var second = Attempt(0x72);
-        await scope.Store.ApplyTransportOutboxTransitionAsync(TransportOutboxTransition.Attempted(
-            item.AccountScope,
-            item.LogicalId, 1, first, OutboxTransitionSource.Adapter,
-            OutboxTransitionReason.DispatchStarted, Now.AddMinutes(1), Now.AddMinutes(2)));
-        await scope.Store.ApplyTransportOutboxTransitionAsync(TransportOutboxTransition.Attempted(
-            item.AccountScope,
-            item.LogicalId, 2, second, OutboxTransitionSource.Adapter,
-            OutboxTransitionReason.DispatchStarted, Now.AddMinutes(2), Now.AddMinutes(3)));
-        await scope.Store.ApplyTransportOutboxTransitionAsync(TransportOutboxTransition.Accepted(
-            item.AccountScope,
-            item.LogicalId, 3, first, OutboxTransitionSource.Adapter,
-            OutboxTransitionReason.AdapterAccepted, Now.AddMinutes(3), Now.AddMinutes(4),
-            Bytes(16, 0x73)));
-        await scope.Store.ApplyTransportOutboxTransitionAsync(TransportOutboxTransition.Accepted(
-            item.AccountScope,
-            item.LogicalId, 4, second, OutboxTransitionSource.Adapter,
-            OutboxTransitionReason.AdapterAccepted, Now.AddMinutes(4), Now.AddMinutes(5),
-            Bytes(16, 0x74)));
+        Assert.Equal(
+            TransportOutboxCommitResult.Applied,
+            await scope.Store.ApplyTransportOutboxTransitionAsync(
+                TransportOutboxTransition.Attempted(
+                    item.AccountScope,
+                    item.LogicalId,
+                    1,
+                    first,
+                    OutboxTransitionSource.Adapter,
+                    OutboxTransitionReason.DispatchStarted,
+                    Now.AddMinutes(1),
+                    Now.AddMinutes(2))));
+        Assert.Equal(
+            TransportOutboxCommitResult.Conflict,
+            await scope.Store.ApplyTransportOutboxTransitionAsync(
+                TransportOutboxTransition.Attempted(
+                    item.AccountScope,
+                    item.LogicalId,
+                    2,
+                    second,
+                    OutboxTransitionSource.Adapter,
+                    OutboxTransitionReason.RetryScheduled,
+                    Now.AddMinutes(2).AddMilliseconds(-1),
+                    Now.AddMinutes(3))));
+        Assert.Equal(
+            TransportOutboxCommitResult.Applied,
+            await scope.Store.ApplyTransportOutboxTransitionAsync(
+                TransportOutboxTransition.Attempted(
+                    item.AccountScope,
+                    item.LogicalId,
+                    2,
+                    second,
+                    OutboxTransitionSource.Adapter,
+                    OutboxTransitionReason.RetryScheduled,
+                    Now.AddMinutes(2),
+                    Now.AddMinutes(3))));
+        Assert.Equal(
+            TransportOutboxCommitResult.Conflict,
+            await scope.Store.ApplyTransportOutboxTransitionAsync(
+                TransportOutboxTransition.Accepted(
+                    item.AccountScope,
+                    item.LogicalId,
+                    3,
+                    first,
+                    OutboxTransitionSource.Adapter,
+                    OutboxTransitionReason.AdapterAccepted,
+                    Now.AddMinutes(3),
+                    Now.AddMinutes(4),
+                    Bytes(16, 0x73))));
+        Assert.Equal(
+            TransportOutboxCommitResult.Applied,
+            await scope.Store.ApplyTransportOutboxTransitionAsync(
+                TransportOutboxTransition.Accepted(
+                    item.AccountScope,
+                    item.LogicalId,
+                    3,
+                    second,
+                    OutboxTransitionSource.Adapter,
+                    OutboxTransitionReason.AdapterAccepted,
+                    Now.AddMinutes(3),
+                    Now.AddMinutes(4),
+                    Bytes(16, 0x74))));
+        Assert.Equal(
+            TransportOutboxCommitResult.Applied,
+            await scope.Store.ApplyTransportOutboxTransitionAsync(
+                TransportOutboxTransition.Durable(
+                    item.AccountScope,
+                    item.LogicalId,
+                    4,
+                    second,
+                    OutboxTransitionSource.Adapter,
+                    OutboxTransitionReason.AdapterConfirmedDurable,
+                    Now.AddMinutes(4),
+                    Bytes(16, 0x75))));
+        Assert.Equal(
+            TransportOutboxCommitResult.Conflict,
+            await scope.Store.ApplyTransportOutboxTransitionAsync(
+                TransportOutboxTransition.Attempted(
+                    item.AccountScope,
+                    item.LogicalId,
+                    5,
+                    Attempt(0x76),
+                    OutboxTransitionSource.Adapter,
+                    OutboxTransitionReason.RetryScheduled,
+                    Now.AddMinutes(5),
+                    Now.AddMinutes(6))));
 
-        var firstSuccess = TransportOutboxTransition.Durable(
-            item.AccountScope,
-            item.LogicalId, 5, first, OutboxTransitionSource.Adapter,
-            OutboxTransitionReason.AdapterConfirmedDurable, Now.AddMinutes(6),
-            Bytes(16, 0x75));
-        var secondSuccess = TransportOutboxTransition.Durable(
-            item.AccountScope,
-            item.LogicalId, 5, second, OutboxTransitionSource.Adapter,
-            OutboxTransitionReason.AdapterConfirmedDurable, Now.AddMinutes(6),
-            Bytes(16, 0x76));
-        gateEnabled = true;
-        var firstTask = Task.Run(
-            () => scope.Store.ApplyTransportOutboxTransitionAsync(firstSuccess));
-        Assert.True(firstCommitEntered.Wait(TimeSpan.FromSeconds(5)));
-        var secondTask = Task.Run(
-            () => scope.Store.ApplyTransportOutboxTransitionAsync(secondSuccess));
-        releaseFirstCommit.Set();
-        var results = await Task.WhenAll(firstTask, secondTask);
-
-        Assert.Single(results, result => result == TransportOutboxCommitResult.Applied);
-        Assert.Single(results, result => result == TransportOutboxCommitResult.Conflict);
         var read = await scope.Store.ReadTransportOutboxAsync(item.AccountScope, item.LogicalId);
         Assert.Equal(TransportOutboxState.Durable, read.Item?.State);
-        Assert.Equal((ulong)6, read.Item?.Revision);
+        Assert.Equal((ulong)5, read.Item?.Revision);
         Assert.Equal(2, read.Item?.Attempts.Count);
         Assert.Single(read.Item!.Attempts, attempt =>
             attempt.State == TransportOutboxAttemptState.Durable);
@@ -262,7 +294,7 @@ public sealed class TransportOutboxRepositoryContractTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task AttemptedOutcomeUnknownIsQuarantinedAcrossRestartWhileAcceptedIsReady(bool sqlite)
+    public async Task Attempted_lease_and_accepted_retry_are_ready_after_restart(bool sqlite)
     {
         using var scope = StoreScope.Create(sqlite);
         var attemptedItem = Prepared(logical: 0x24);
@@ -313,9 +345,11 @@ public sealed class TransportOutboxRepositoryContractTests
             attemptedItem.AccountScope,
             attemptedItem.LogicalId);
 
-        Assert.Single(listed);
-        Assert.Equal(acceptedItem.LogicalId, listed[0].LogicalId);
-        Assert.Equal(TransportOutboxState.Accepted, listed[0].State);
+        Assert.Equal(2, listed.Count);
+        Assert.Equal(attemptedItem.LogicalId, listed[0].LogicalId);
+        Assert.Equal(TransportOutboxState.Attempted, listed[0].State);
+        Assert.Equal(acceptedItem.LogicalId, listed[1].LogicalId);
+        Assert.Equal(TransportOutboxState.Accepted, listed[1].State);
         Assert.Equal(TransportOutboxState.Attempted, quarantined.Item?.State);
     }
 
@@ -494,7 +528,7 @@ public sealed class TransportOutboxRepositoryContractTests
                         OutboxTransitionSource.Adapter,
                         OutboxTransitionReason.DispatchStarted,
                         Now.AddSeconds(index + 1),
-                        Now.AddMinutes(10))));
+                        Now.AddSeconds(index + 2))));
             revision++;
         }
 
@@ -508,8 +542,10 @@ public sealed class TransportOutboxRepositoryContractTests
                     Attempt(0xcf),
                     OutboxTransitionSource.Adapter,
                     OutboxTransitionReason.DispatchStarted,
-                    Now.AddMinutes(1),
-                    Now.AddMinutes(10))));
+                    Now.AddSeconds(
+                        TransportOutboxLimits.MaxAttemptsPerItem + 2),
+                    Now.AddSeconds(
+                        TransportOutboxLimits.MaxAttemptsPerItem + 3))));
     }
 
     [Theory]
@@ -544,8 +580,8 @@ public sealed class TransportOutboxRepositoryContractTests
                         index == 0
                             ? OutboxTransitionReason.DispatchStarted
                             : OutboxTransitionReason.RetryScheduled,
-                        Now.AddSeconds(index + 1),
-                        Now.AddMinutes(1))));
+                        Now.AddMinutes(1).AddSeconds(index),
+                        Now.AddMinutes(1).AddSeconds(index + 1))));
         }
 
         var listed = await scope.Store.ListReadyTransportOutboxAsync(

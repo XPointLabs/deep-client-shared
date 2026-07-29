@@ -137,7 +137,7 @@ public sealed class OpaqueMailboxContinuation
 
 /// <summary>
 /// A committed opaque mailbox page. This bridge seam deliberately authorizes at most one entry per
-/// traversal so the eventual remote MAK1 acknowledgement is an ordered one-item prefix.
+/// traversal so the eventual authenticated MBA2 acknowledgement is an ordered one-item prefix.
 /// </summary>
 public sealed class OpaqueMailboxInboxPage
 {

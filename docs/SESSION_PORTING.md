@@ -51,6 +51,11 @@ Use `deep-protocol` for protocol and crypto semantics. Do not recreate protocol 
   sends prior route IDs. Production platform registration remains disabled until an external
   signer/indexer publishes a real artifact and the app receives reviewed genesis/delegation pins.
 - Group and call behavior currently covers launch-critical scaffolding/state, not every upstream management or media edge.
+- The native MAU2 adapter currently receives an explicit mailbox ID and epoch
+  for retrieve/ack orchestration. Replacing that parameter seam with the
+  reviewed self/peer/group scoped-credential resolver is required before
+  production activation; no singleton-credential compatibility fallback is
+  permitted.
 
 ## Non-Negotiable Runtime Parity
 
@@ -96,3 +101,5 @@ For every runtime port, record:
 - Complete message request/approval state.
 - Full open/community group handling.
 - Native call media integration hooks once MAUI platform layer is ready.
+- Scoped self/recipient/group mailbox credential resolver and atomic fan-out
+  leasing for the native MAU2 adapter.

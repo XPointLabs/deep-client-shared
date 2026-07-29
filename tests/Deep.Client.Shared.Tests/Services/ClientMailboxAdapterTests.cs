@@ -61,42 +61,6 @@ public sealed class ClientMailboxAdapterTests
                 .VerifyDurable(forged, fixture.Expectation()));
     }
 
-    [Fact]
-    public async Task Store_PersistsAcceptedThenDurable_IsRestartIdempotent()
-    {
-        var fixture = new ReceiptFixture();
-        var ingress = new SequenceIngress(
-            new ClientMailboxStoreIngressResult(
-                ClientMailboxIngressState.Accepted,
-                fixture.AcceptedReceipt()),
-            new ClientMailboxStoreIngressResult(
-                ClientMailboxIngressState.Durable,
-                fixture.Quorum()));
-        var outbox = new InMemorySessionStore();
-        var state = new InMemoryClientMailboxStateRepository();
-        var adapter = fixture.Adapter(ingress, outbox, state);
-        var outboxScope = OutboxAccountScope.FromBytes(Range(0x02, 32));
-
-        Assert.Equal(
-            ClientMailboxIngressState.Accepted,
-            (await adapter.StoreAsync(outboxScope, fixture.StoreRequest())).State);
-        Assert.Equal(
-            ClientMailboxIngressState.Durable,
-            (await adapter.StoreAsync(outboxScope, fixture.StoreRequest())).State);
-        var persisted = await outbox.ReadTransportOutboxAsync(
-            outboxScope,
-            OutboxLogicalId.FromBytes(fixture.OperationId));
-        Assert.Equal(TransportOutboxState.Durable, persisted.Item!.State);
-        Assert.NotEqual(TransportOutboxState.Delivered, persisted.Item.State);
-
-        var restarted = fixture.Adapter(ingress, outbox, state);
-        var idempotent = await restarted.StoreAsync(
-            outboxScope,
-            fixture.StoreRequest());
-        Assert.Equal(42UL, idempotent.Cursor);
-        Assert.Equal(2, ingress.StoreCalls);
-    }
-
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -258,125 +222,6 @@ public sealed class ClientMailboxAdapterTests
             (repository as IDisposable)?.Dispose();
             DeleteSqliteFiles(path);
         }
-    }
-
-    [Fact]
-    public async Task Adapter_RequiresPersistedContinuationAndAllowsNewCycleAfterFinal()
-    {
-        var fixture = new ReceiptFixture();
-        var first = fixture.RetrievePage(
-            operationByte: 0x70,
-            cursor: 42,
-            hasMore: true,
-            token: Range(0x44, 32));
-        var final = fixture.RetrievePage(
-            operationByte: 0x71,
-            cursor: 43,
-            hasMore: false,
-            token: []);
-        var ingress = new RetrieveSequenceIngress(first, final);
-        var adapter = fixture.Adapter(
-            ingress,
-            new InMemorySessionStore(),
-            new InMemoryClientMailboxStateRepository());
-
-        var firstResult = await adapter.RetrieveAsync(
-            fixture.RetrieveRequest(
-                0x70,
-                afterCursor: 0,
-                token: ReadOnlyMemory<byte>.Empty));
-        Assert.Equal(42UL, firstResult.AfterCursor);
-        await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            adapter.RetrieveAsync(
-                fixture.RetrieveRequest(
-                    0x71,
-                    afterCursor: 42,
-                    token: ReadOnlyMemory<byte>.Empty)));
-        Assert.Equal(1, ingress.RetrieveCalls);
-
-        var finalResult = await adapter.RetrieveAsync(
-            fixture.RetrieveRequest(
-                0x71,
-                afterCursor: 42,
-                token: firstResult.ContinuationToken));
-        Assert.Equal(0UL, finalResult.AfterCursor);
-        Assert.Empty(finalResult.ContinuationToken.ToArray());
-        Assert.Single(finalResult.NewItems);
-        var next = await adapter.ReadTraversalAsync(fixture.MailboxId, epoch: 7);
-        Assert.Equal(0UL, next.AfterCursor);
-    }
-
-    [Fact]
-    public async Task Ack_BindsPersistedEnvelopeExpiryAndIsIdempotent()
-    {
-        var fixture = new ReceiptFixture();
-        var state = new InMemoryClientMailboxStateRepository();
-        var page = fixture.RetrievePage(0x70, 42, false, []);
-        var scope = fixture.Scope;
-        await state.CommitRetrievePageAsync(
-            scope,
-            new ClientMailboxTraversal(0, []),
-            page);
-        var acknowledgement = page.Items[0].ToAcknowledgement();
-        var ack = fixture.AckRequest(acknowledgement);
-        var forgedExpiry = fixture.Mar1(
-            ack,
-            expiresAt: 1130,
-            coordinatorSequence: 84);
-        var ingress = new AckSequenceIngress(forgedExpiry, fixture.Mar1(
-            ack,
-            expiresAt: 1120,
-            coordinatorSequence: 84));
-        var adapter = fixture.Adapter(ingress, new InMemorySessionStore(), state);
-
-        await Assert.ThrowsAsync<MailboxReceiptException>(() =>
-            adapter.AcknowledgeAsync(ack));
-        Assert.Equal(
-            ClientMailboxAckState.Pending,
-            await state.CheckAcknowledgementsAsync(scope, [acknowledgement]));
-        var applied = await adapter.AcknowledgeAsync(ack);
-        Assert.False(applied.Idempotent);
-        var replay = await adapter.AcknowledgeAsync(ack);
-        Assert.True(replay.Idempotent);
-        Assert.Equal(2, ingress.AckCalls);
-    }
-
-    [Fact]
-    public async Task NonFinalAck_RequiresExactPersistedPageToken()
-    {
-        var fixture = new ReceiptFixture();
-        var state = new InMemoryClientMailboxStateRepository();
-        var token = Range(0x66, 32);
-        var page = fixture.RetrievePage(0x70, 42, true, token);
-        await state.CommitRetrievePageAsync(
-            fixture.Scope,
-            new ClientMailboxTraversal(0, []),
-            page);
-        var acknowledgement = page.Items[0].ToAcknowledgement();
-        var canonical = fixture.AckRequest(acknowledgement) with
-        {
-            IsFinalPage = false,
-            ContinuationToken = token
-        };
-        var ingress = new AckSequenceIngress(fixture.Mar1(
-            canonical,
-            expiresAt: 1120,
-            coordinatorSequence: 85));
-        var adapter = fixture.Adapter(ingress, new InMemorySessionStore(), state);
-        var wrong = canonical with
-        {
-            ContinuationToken = Range(0x67, 32)
-        };
-        await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            adapter.AcknowledgeAsync(wrong));
-        Assert.Equal(0, ingress.AckCalls);
-
-        Assert.False((await adapter.AcknowledgeAsync(canonical)).Idempotent);
-        Assert.Equal(1, ingress.AckCalls);
-        var traversal = await adapter.ReadTraversalAsync(
-            fixture.MailboxId,
-            epoch: 7);
-        Assert.Equal(token, traversal.GetContinuationTokenCopy());
     }
 
     [Theory]
@@ -1324,13 +1169,13 @@ public sealed class ClientMailboxAdapterTests
         bool sqlite)
     {
         var path = TempDatabase();
-        var fixture = new ReceiptFixture();
+        var scope = Scope(0x70);
         IClientMailboxStateRepository seed = CreateRepository(sqlite, path);
         try
         {
-            var page = fixture.RetrievePage(0x70, 42, false, []);
+            var page = Page(42, 1, false, []);
             await seed.CommitRetrievePageAsync(
-                fixture.Scope,
+                scope,
                 new ClientMailboxTraversal(0, []),
                 page);
             var storedState = sqlite
@@ -1354,30 +1199,18 @@ public sealed class ClientMailboxAdapterTests
             if (!sqlite)
             {
                 Assert.IsType<InMemoryClientMailboxStateRepository>(repository)
-                    .SeedCurrentStatesForTests([(fixture.Scope, storedState!)]);
+                    .SeedCurrentStatesForTests([(scope, storedState!)]);
             }
 
             var acknowledgement = page.Items[0].ToAcknowledgement();
-            var ingress = new AckSequenceIngress(fixture.Mar1(
-                fixture.AckRequest(acknowledgement),
-                expiresAt: 1120,
-                coordinatorSequence: 85));
-            var time = new MutableTimeProvider(1050);
-            var adapter = fixture.Adapter(
-                ingress,
-                new InMemorySessionStore(),
-                repository,
-                time);
             await Assert.ThrowsAsync<IOException>(() =>
-                adapter.AcknowledgeAsync(fixture.AckRequest(acknowledgement)));
-            Assert.Equal(1, ingress.AckCalls);
+                repository.CommitAcknowledgementsAsync(
+                    scope,
+                    [acknowledgement]));
 
-            time.SetUnixSeconds(1120);
-            Assert.Empty(await adapter.ReadDurableInboxAsync(
-                fixture.MailboxId,
-                epoch: 7));
-            Assert.Equal(1, ExpiredQuarantineCount(repository, fixture.Scope));
-            Assert.Equal(1, ingress.AckCalls);
+            await repository.ReconcileExpiredAsync(scope, 1120);
+            Assert.Empty(await repository.ReadDurableInboxAsync(scope));
+            Assert.Equal(1, ExpiredQuarantineCount(repository, scope));
             (repository as IDisposable)?.Dispose();
         }
         finally
@@ -2064,117 +1897,6 @@ public sealed class ClientMailboxAdapterTests
         public ClientMailboxPinnedRoute Route { get; }
         public BlindedMailboxId MailboxId { get; } =
             new(Range(0xc0, 32));
-        public byte[] OperationId => operationId.ToArray();
-        public ClientMailboxScope Scope =>
-            ClientMailboxScope.Derive(issuer, MailboxId, epoch: 7);
-
-        public ClientMailboxAdapter Adapter(
-            IClientMailboxBinaryIngress ingress,
-            ITransportOutboxRepository outbox,
-            IClientMailboxStateRepository state,
-            TimeProvider? timeProvider = null) =>
-            new(
-                ClientFeatureFlags.Defaults with
-                {
-                    ClientMailboxAdapterEnabled = true
-                },
-                new ClientMailboxActivation(
-                    enabled: true,
-                    issuer,
-                    Route,
-                    ingressConfigured: true),
-                ingress,
-                outbox,
-                state,
-                new PinnedClientMailboxReceiptVerifier(Crypto),
-                Policy(),
-                timeProvider ??
-                    new FixedTimeProvider(
-                        DateTimeOffset.FromUnixTimeSeconds(1050)));
-
-        public MailboxStoreRequest StoreRequest() => new()
-        {
-            Epoch = 7,
-            OperationId = operationId,
-            MixedVersion = MailboxMixedVersionMarker.StrictV1,
-            DepositCapability = Capability(deposit: true, operationId),
-            Envelope = EnvelopeModel(cursor: 42)
-        };
-
-        public MailboxRetrieveRequest RetrieveRequest(
-            byte operationByte,
-            ulong afterCursor,
-            ReadOnlyMemory<byte> token) => new()
-            {
-                Epoch = 7,
-                OperationId = Filled(operationByte, 16),
-                MixedVersion = MailboxMixedVersionMarker.StrictV1,
-                RetrieveCapability = Capability(
-                deposit: false,
-                Filled(operationByte, 16)),
-                MailboxId = MailboxId,
-                PlacementId = placementId,
-                AfterCursor = afterCursor,
-                MaximumItems = 10,
-                ContinuationToken = token
-            };
-
-        public MailboxRetrievePage RetrievePage(
-            byte operationByte,
-            ulong cursor,
-            bool hasMore,
-            byte[] token) => new()
-            {
-                Epoch = 7,
-                OperationId = Filled(operationByte, 16),
-                NextCursor = cursor,
-                HasMore = hasMore,
-                ContinuationToken = token,
-                Items =
-            [
-                new MailboxRetrievedEnvelope
-                {
-                    Cursor = cursor,
-                    Envelope = EnvelopeModel(cursor)
-                }
-            ]
-            };
-
-        public MailboxAckRequest AckRequest(
-            MailboxAcknowledgement acknowledgement) => new()
-            {
-                Epoch = 7,
-                OperationId = Range(0x75, 16),
-                MixedVersion = MailboxMixedVersionMarker.StrictV1,
-                RetrieveCapability = Capability(
-                deposit: false,
-                Range(0x75, 16)),
-                MailboxId = MailboxId,
-                PlacementId = placementId,
-                IsFinalPage = true,
-                ContinuationToken = ReadOnlyMemory<byte>.Empty,
-                Acknowledgements = [acknowledgement]
-            };
-
-        public byte[] Mar1(
-            MailboxAckRequest request,
-            ulong expiresAt,
-            ulong coordinatorSequence) =>
-            MailboxAggregateAckCodec.EncodeMqr3(
-                new MailboxAggregateAckResponse
-                {
-                    Epoch = request.Epoch,
-                    OperationId = request.OperationId,
-                    TombstoneQuorums =
-                    [
-                        Quorum(
-                            disposition: MailboxReplicaDisposition.Tombstone,
-                            envelopeDigest: request.Acknowledgements[0]
-                                .EnvelopeDigest.ToArray(),
-                            expiresAt: expiresAt,
-                            coordinatorSequence: coordinatorSequence)
-                    ]
-                });
 
         public ClientMailboxReceiptExpectation Expectation() => new()
         {
@@ -2191,26 +1913,6 @@ public sealed class ClientMailboxAdapterTests
                 },
             Cursor = 42
         };
-
-        public byte[] AcceptedReceipt()
-        {
-            var durable = Replica(
-                firstId,
-                firstSeed,
-                42,
-                MailboxReplicaDisposition.Stored,
-                envelopeDigest,
-                1120);
-            return MailboxReceiptV2Codec.EncodeReplica(
-                Crypto.SignReplicaResponse(
-                    durable with
-                    {
-                        Status = MailboxReceiptStatus.Accepted,
-                        DurableAtUnixSeconds = 0,
-                        Signature = ReadOnlyMemory<byte>.Empty
-                    },
-                    firstSeed));
-        }
 
         public byte[] Quorum(
             ulong cursor = 42,
@@ -2279,114 +1981,6 @@ public sealed class ClientMailboxAdapterTests
             return Crypto.SignReplicaResponse(unsigned, signingSeed);
         }
 
-        private MailboxEncryptedEnvelope EnvelopeModel(ulong cursor) => new()
-        {
-            Epoch = 7,
-            MailboxId = MailboxId,
-            PlacementId = placementId,
-            OperationId = operationId,
-            DeduplicationDigest = cursor == 42
-                ? envelopeDigest
-                : SHA256.HashData(UInt64Bytes(cursor)),
-            CreatedAtUnixSeconds = 1000,
-            ExpiresAtUnixSeconds = 1120,
-            Ciphertext = Range(0x01, 64)
-        };
-
-        private static MailboxCapabilityPresentation Capability(
-            bool deposit,
-            byte[] idempotency) => new()
-            {
-                DomainValue = deposit
-                ? new RotatingDepositCapability(Range(0x30, 32))
-                : new RotatingRetrieveCapability(Range(0x40, 32)),
-                Lifecycle = MailboxCapabilityLifecycle.Active,
-                MixedVersion = MailboxMixedVersionMarker.StrictV1,
-                Generation = 7,
-                NotBeforeBucket = 900,
-                ExpiresAtBucket = 1200,
-                OverlapUntilBucket = 0,
-                ReplayCounter = 1,
-                IdempotencyKey = idempotency
-            };
-    }
-
-    private sealed class SequenceIngress(
-        params ClientMailboxStoreIngressResult[] responses)
-        : IClientMailboxBinaryIngress
-    {
-        private int index;
-        public int StoreCalls { get; private set; }
-
-        public Task<ClientMailboxStoreIngressResult> StoreAsync(
-            ReadOnlyMemory<byte> canonicalMst1,
-            CancellationToken cancellationToken = default)
-        {
-            StoreCalls++;
-            return Task.FromResult(responses[index++]);
-        }
-
-        public Task<ReadOnlyMemory<byte>> RetrieveAsync(
-            ReadOnlyMemory<byte> canonicalMrt1,
-            CancellationToken cancellationToken = default) =>
-            throw new NotSupportedException();
-
-        public Task<ReadOnlyMemory<byte>> AcknowledgeAsync(
-            ReadOnlyMemory<byte> canonicalMak1,
-            CancellationToken cancellationToken = default) =>
-            throw new NotSupportedException();
-    }
-
-    private sealed class RetrieveSequenceIngress(
-        params MailboxRetrievePage[] pages)
-        : IClientMailboxBinaryIngress
-    {
-        private int index;
-        public int RetrieveCalls { get; private set; }
-
-        public Task<ClientMailboxStoreIngressResult> StoreAsync(
-            ReadOnlyMemory<byte> canonicalMst1,
-            CancellationToken cancellationToken = default) =>
-            throw new NotSupportedException();
-
-        public Task<ReadOnlyMemory<byte>> RetrieveAsync(
-            ReadOnlyMemory<byte> canonicalMrt1,
-            CancellationToken cancellationToken = default)
-        {
-            RetrieveCalls++;
-            return Task.FromResult<ReadOnlyMemory<byte>>(
-                MailboxClientCodec.EncodeRetrievePage(pages[index++]));
-        }
-
-        public Task<ReadOnlyMemory<byte>> AcknowledgeAsync(
-            ReadOnlyMemory<byte> canonicalMak1,
-            CancellationToken cancellationToken = default) =>
-            throw new NotSupportedException();
-    }
-
-    private sealed class AckSequenceIngress(params byte[][] responses)
-        : IClientMailboxBinaryIngress
-    {
-        private int index;
-        public int AckCalls { get; private set; }
-
-        public Task<ClientMailboxStoreIngressResult> StoreAsync(
-            ReadOnlyMemory<byte> canonicalMst1,
-            CancellationToken cancellationToken = default) =>
-            throw new NotSupportedException();
-
-        public Task<ReadOnlyMemory<byte>> RetrieveAsync(
-            ReadOnlyMemory<byte> canonicalMrt1,
-            CancellationToken cancellationToken = default) =>
-            throw new NotSupportedException();
-
-        public Task<ReadOnlyMemory<byte>> AcknowledgeAsync(
-            ReadOnlyMemory<byte> canonicalMak1,
-            CancellationToken cancellationToken = default)
-        {
-            AckCalls++;
-            return Task.FromResult<ReadOnlyMemory<byte>>(responses[index++]);
-        }
     }
 
     private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider

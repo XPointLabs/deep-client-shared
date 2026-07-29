@@ -1,0 +1,55 @@
+{
+  "schema": "deep-client-p10j-offline-package-set.v1",
+  "protocolSourceCommit": "2886880d4c2060cd819765c53c77a02e1c475ea8",
+  "profileCarrierSourceCommit": "2886880d4c2060cd819765c53c77a02e1c475ea8",
+  "protocolPackageProvenance": "../deep-protocol/eng/p10j-package-closure-provenance.json",
+  "publication": "local-only-not-published",
+  "networkSourcesAllowed": false,
+  "packages": [
+    {
+      "id": "Deep.Protocol",
+      "version": "0.3.0-p10j.2886880",
+      "file": "packages/Deep.Protocol.0.3.0-p10j.2886880.nupkg",
+      "bytes": 193439,
+      "sha256": "a41c79124f1c62c2889e7b2ea4695956272aa16de1700206cade8993c1b44abe",
+      "sha512": "f2792da79b55f683f13996eaf60f580ead08f2d9a492a63899d5cff616600449d98b5c657cfaba8fa23fb35c5416dd3ee3f32874c946bfd5ff454d2227fbc56f",
+      "contentHash": "8nktp5tV9oPxOZbq9g9YDq0I8tmkkqY4mdXP9hZgBEnZi1xlfPq6j6I/s1xUFt0+4/ModMlGv9X/RU0iJ/vFbw=="
+    },
+    {
+      "id": "Deep.Protocol.Abstractions",
+      "version": "0.3.0-p10j.2886880",
+      "file": "packages/Deep.Protocol.Abstractions.0.3.0-p10j.2886880.nupkg",
+      "bytes": 34415,
+      "sha256": "4508e67aba983e91c174c8ce796df654c06892680d65e14ff78bda4d553d542c",
+      "sha512": "4c849430fc3511da9d32e060e3412d77670910858345de864ef3965ea2a131d54db0db2a7d039362a37c8707c997dd5b9a6d3ccf0b11060829536ee01b93206c",
+      "contentHash": "TISUMPw1EdqdMuBg40Etd2cJEIWDRd6GTvOWXqKhMdVNsNsqfQOTYqN8hwfJl91bmm08zwsRBggpU27gG5MgbA=="
+    },
+    {
+      "id": "Deep.Protocol.MembershipRoutes",
+      "version": "0.3.0-p10j.2886880",
+      "file": "packages/Deep.Protocol.MembershipRoutes.0.3.0-p10j.2886880.nupkg",
+      "bytes": 21799,
+      "sha256": "cdb3eb8a8b2889567a25e6db437a287fb12db86d29e0819c13c9adb5fbc02327",
+      "sha512": "62a3040abf990d523deecbfd2f2d77ad2ad8c7a6b3bbdc7046119c0f85f8cdce0017179011c338bcfc6d0376c837da8e2aa34093efca959c7eb9658b553bc2f7",
+      "contentHash": "YqMECr+ZDVI97sv9Ly13rSrYx6azu9xwRhGcD4X4zc4AFxeQEcM4vPxtA3bIN9qOKqNAk+/KlZx+uWWLVTvC9w=="
+    },
+    {
+      "id": "Deep.Protocol.ProfileCarrier",
+      "version": "0.2.0-p10j.2886880",
+      "file": "packages/Deep.Protocol.ProfileCarrier.0.2.0-p10j.2886880.nupkg",
+      "bytes": 28944,
+      "sha256": "a4b13bd32d6dac2999dd997e567a3760af20b5697a5fd1045cca910cde2a1f36",
+      "sha512": "8f1ecda8da537ea92516e368658232af0ba7c07e6afdad1a8f97e03a57fbacba5a394f99ec81a867a1fea8a6c7c8b3ad5349473196117b59782184065d204adf",
+      "contentHash": "jx7NqNpTfqklFuNoZYIyrwunwH5q/a0aj5fgOlf7rLpaOU+Z7IGoZ6H+qKbHyLOtU0lHMZYRe1l4IYQGXSBK3w=="
+    },
+    {
+      "id": "Deep.Protocol.Protobuf",
+      "version": "0.3.0-p10j.2886880",
+      "file": "packages/Deep.Protocol.Protobuf.0.3.0-p10j.2886880.nupkg",
+      "bytes": 73289,
+      "sha256": "c97025f5d1b44fd7a955e7b69614ea2c6cca499656ccf7930029cc740208eab7",
+      "sha512": "8a63e142f25ed4dc67e0f7d1e37abee076ca9e80409935a7c8ca2a14bb01bc28962a097c003c8e84ad01b930a1bbc8f5e6940675a51654fed70353078305eacc",
+      "contentHash": "imPhQvJe1Nxn4PfR43q+4HbKnoBAmTWnyMoqFLsBvCiWKgl8ADyOhK0BuTChu8j15pQGdaUWVP7XA1MHgwXqzA=="
+    }
+  ]
+}
