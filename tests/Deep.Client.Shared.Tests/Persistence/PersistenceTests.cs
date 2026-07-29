@@ -760,9 +760,9 @@ public sealed class PersistenceTests
     }
 
     [Fact]
-    public async Task SqliteSessionStore_MigratesPlaintextDatabaseToSqlCipher()
+    public async Task SqliteSessionStore_RejectsExistingPlaintextDatabaseWithoutChangingIt()
     {
-        var sqlitePath = Path.Combine(Path.GetTempPath(), $"deep-client-encrypted-{Guid.NewGuid():N}.db");
+        var sqlitePath = Path.Combine(Path.GetTempPath(), $"deep-client-plaintext-rejection-{Guid.NewGuid():N}.db");
         var encryptionKey = Convert.ToHexString(Guid.NewGuid().ToByteArray()).ToLowerInvariant();
         var conversationId = ConversationId.CreateGroupV2();
         var now = DateTimeOffset.Parse("2026-05-28T00:00:00Z");
@@ -779,135 +779,57 @@ public sealed class PersistenceTests
                     now));
             }
 
-            SqliteSessionStore.EnsureEncryptedDatabase(sqlitePath, encryptionKey);
-            Assert.ThrowsAny<Exception>(() => new SqliteSessionStore(sqlitePath));
+            var plaintextBytes = await File.ReadAllBytesAsync(sqlitePath);
 
-            var encrypted = new SqliteSessionStore(new SqliteSessionStoreOptions(sqlitePath, encryptionKey));
-            var recovered = await encrypted.GetAsync(conversationId);
+            var exception = Assert.Throws<InvalidOperationException>(
+                () => new SqliteSessionStore(new SqliteSessionStoreOptions(sqlitePath, encryptionKey)));
 
-            Assert.NotNull(recovered);
-            Assert.Equal("Encrypted", recovered!.DisplayName);
+            Assert.Contains("configured SQLCipher key", exception.Message, StringComparison.Ordinal);
+            Assert.Equal(plaintextBytes, await File.ReadAllBytesAsync(sqlitePath));
+            Assert.False(File.Exists(sqlitePath + ".encrypted-migration"));
+            Assert.False(File.Exists(sqlitePath + ".plaintext-migration"));
         }
         finally
         {
             DeleteSqliteFiles(sqlitePath);
-            DeleteSqliteFiles(sqlitePath + ".encrypted-migration");
-            DeleteSqliteFiles(sqlitePath + ".plaintext-migration");
         }
     }
 
     [Fact]
-    public async Task SqliteSessionStore_RecoversInterruptedMigrationFromPlaintextBackup()
+    public async Task SqliteSessionStore_CreatesEncryptedDatabaseAndRejectsWrongKey()
     {
-        var sqlitePath = Path.Combine(Path.GetTempPath(), $"deep-client-recover-backup-{Guid.NewGuid():N}.db");
+        var sqlitePath = Path.Combine(Path.GetTempPath(), $"deep-client-encrypted-create-{Guid.NewGuid():N}.db");
         var encryptionKey = Convert.ToHexString(Guid.NewGuid().ToByteArray()).ToLowerInvariant();
-        var conversationId = ConversationId.CreateGroupV2();
-        var backupPath = sqlitePath + ".plaintext-migration";
+        var wrongEncryptionKey = Convert.ToHexString(Guid.NewGuid().ToByteArray()).ToLowerInvariant();
         try
         {
-            await CreatePlaintextConversationAsync(sqlitePath, conversationId, "Recovered backup");
-            File.Move(sqlitePath, backupPath);
+            using (var created = new SqliteSessionStore(new SqliteSessionStoreOptions(sqlitePath, encryptionKey)))
+            {
+                await created.SetAsync("encryption.test", "persisted");
+            }
 
-            SqliteSessionStore.EnsureEncryptedDatabase(sqlitePath, encryptionKey);
+            using (var reopened = new SqliteSessionStore(new SqliteSessionStoreOptions(sqlitePath, encryptionKey)))
+            {
+                Assert.Equal("persisted", await reopened.GetAsync<string>("encryption.test"));
+            }
 
-            Assert.False(File.Exists(backupPath));
-            await AssertEncryptedConversationAsync(sqlitePath, encryptionKey, conversationId, "Recovered backup");
+            var exception = Assert.Throws<InvalidOperationException>(
+                () => new SqliteSessionStore(new SqliteSessionStoreOptions(sqlitePath, wrongEncryptionKey)));
+
+            Assert.Contains("configured SQLCipher key", exception.Message, StringComparison.Ordinal);
         }
         finally
         {
             DeleteSqliteFiles(sqlitePath);
-            DeleteSqliteFiles(sqlitePath + ".encrypted-migration");
-            DeleteSqliteFiles(backupPath);
         }
     }
 
     [Fact]
-    public async Task SqliteSessionStore_RecoversInterruptedMigrationFromEncryptedTemp()
+    public void SqliteSessionStore_DoesNotExposeEncryptionMigrationApi()
     {
-        var sqlitePath = Path.Combine(Path.GetTempPath(), $"deep-client-recover-temp-{Guid.NewGuid():N}.db");
-        var encryptionKey = Convert.ToHexString(Guid.NewGuid().ToByteArray()).ToLowerInvariant();
-        var conversationId = ConversationId.CreateGroupV2();
-        var snapshotPath = sqlitePath + ".plaintext-snapshot";
-        var tempPath = sqlitePath + ".encrypted-migration";
-        var backupPath = sqlitePath + ".plaintext-migration";
-        try
-        {
-            await CreatePlaintextConversationAsync(sqlitePath, conversationId, "Recovered temp");
-            File.Copy(sqlitePath, snapshotPath);
-            SqliteSessionStore.EnsureEncryptedDatabase(sqlitePath, encryptionKey);
-            File.Move(sqlitePath, tempPath);
-            File.Move(snapshotPath, backupPath);
-
-            SqliteSessionStore.EnsureEncryptedDatabase(sqlitePath, encryptionKey);
-
-            Assert.False(File.Exists(tempPath));
-            Assert.False(File.Exists(backupPath));
-            await AssertEncryptedConversationAsync(sqlitePath, encryptionKey, conversationId, "Recovered temp");
-        }
-        finally
-        {
-            DeleteSqliteFiles(sqlitePath);
-            DeleteSqliteFiles(tempPath);
-            DeleteSqliteFiles(backupPath);
-            DeleteSqliteFiles(snapshotPath);
-        }
-    }
-
-    [Fact]
-    public async Task SqliteSessionStore_RemovesPlaintextBackupAfterCompletedMigration()
-    {
-        var sqlitePath = Path.Combine(Path.GetTempPath(), $"deep-client-clean-backup-{Guid.NewGuid():N}.db");
-        var encryptionKey = Convert.ToHexString(Guid.NewGuid().ToByteArray()).ToLowerInvariant();
-        var conversationId = ConversationId.CreateGroupV2();
-        var snapshotPath = sqlitePath + ".plaintext-snapshot";
-        var backupPath = sqlitePath + ".plaintext-migration";
-        try
-        {
-            await CreatePlaintextConversationAsync(sqlitePath, conversationId, "Clean backup");
-            File.Copy(sqlitePath, snapshotPath);
-            SqliteSessionStore.EnsureEncryptedDatabase(sqlitePath, encryptionKey);
-            File.Move(snapshotPath, backupPath);
-
-            SqliteSessionStore.EnsureEncryptedDatabase(sqlitePath, encryptionKey);
-
-            Assert.False(File.Exists(backupPath));
-            await AssertEncryptedConversationAsync(sqlitePath, encryptionKey, conversationId, "Clean backup");
-        }
-        finally
-        {
-            DeleteSqliteFiles(sqlitePath);
-            DeleteSqliteFiles(sqlitePath + ".encrypted-migration");
-            DeleteSqliteFiles(backupPath);
-            DeleteSqliteFiles(snapshotPath);
-        }
-    }
-
-    private static async Task CreatePlaintextConversationAsync(
-        string sqlitePath,
-        ConversationId conversationId,
-        string displayName)
-    {
-        var now = DateTimeOffset.Parse("2026-05-28T00:00:00Z");
-        using var store = new SqliteSessionStore(sqlitePath);
-        await store.UpsertAsync(new Conversation(
-            conversationId,
-            ConversationKind.GroupV2,
-            displayName,
-            ConversationSettings.Default(ConversationKind.GroupV2),
-            now,
-            now));
-    }
-
-    private static async Task AssertEncryptedConversationAsync(
-        string sqlitePath,
-        string encryptionKey,
-        ConversationId conversationId,
-        string expectedDisplayName)
-    {
-        using var encrypted = new SqliteSessionStore(new SqliteSessionStoreOptions(sqlitePath, encryptionKey));
-        var recovered = await encrypted.GetAsync(conversationId);
-        Assert.NotNull(recovered);
-        Assert.Equal(expectedDisplayName, recovered!.DisplayName);
+        Assert.Null(typeof(SqliteSessionStore).GetMethod(
+            "EnsureEncryptedDatabase",
+            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static));
     }
 
     private static async Task<string> ReadRawMessagePayloadAsync(string statePath, MessageId messageId)

@@ -17,7 +17,6 @@ public sealed partial class SqliteSessionStore :
     IMembershipTrustRepository,
     IDisposable
 {
-    private static ReadOnlySpan<byte> SqliteHeader => "SQLite format 3\0"u8;
     private const int PhysicalSchemaVersion = 9;
     private const int ReplayPruneBatchSize = 256;
     private const string ReadCursorSettingPrefix = "sync.read-cursor.";
@@ -63,6 +62,7 @@ public sealed partial class SqliteSessionStore :
         {
             throw new ArgumentException("State path is required.", nameof(statePath));
         }
+        var stateExisted = File.Exists(statePath);
 
         var directory = Path.GetDirectoryName(statePath);
         if (!string.IsNullOrWhiteSpace(directory))
@@ -76,161 +76,17 @@ public sealed partial class SqliteSessionStore :
         _connectionString = ConnectionStringFor(
             statePath,
             _encryptionKey,
-            pooling: _encryptionKey is not null);
+            pooling: false);
 
-        InitializeSchema();
-    }
-
-    public static void EnsureEncryptedDatabase(string statePath, string encryptionKey)
-    {
-        if (string.IsNullOrWhiteSpace(statePath))
-        {
-            throw new ArgumentException("State path is required.", nameof(statePath));
-        }
-
-        if (string.IsNullOrWhiteSpace(encryptionKey))
-        {
-            throw new ArgumentException("Encryption key is required.", nameof(encryptionKey));
-        }
-
-        var tempPath = statePath + ".encrypted-migration";
-        var backupPath = statePath + ".plaintext-migration";
-        RecoverInterruptedEncryptionMigration(statePath, tempPath, backupPath, encryptionKey);
-
-        if (!File.Exists(statePath))
-        {
-            return;
-        }
-
-        if (!HasPlaintextSqliteHeader(statePath))
-        {
-            if (!CanOpenDatabase(statePath, encryptionKey))
-            {
-                throw new InvalidOperationException("Encrypted local state database cannot be opened with the configured key.");
-            }
-
-            SecureDeleteSqliteFileSet(tempPath);
-            SecureDeleteSqliteFileSet(backupPath);
-            return;
-        }
-
-        if (!CanOpenDatabase(statePath, null))
-        {
-            throw new InvalidOperationException("Local state database cannot be opened with the configured key and is not a plaintext database.");
-        }
-
-        SecureDeleteSqliteFileSet(tempPath);
-        SecureDeleteSqliteFileSet(backupPath);
-
-        using (var source = OpenConnectionForPath(statePath, null))
-        {
-            ExecuteNonQuery(source, "PRAGMA wal_checkpoint(TRUNCATE);");
-            ExecuteNonQuery(
-                source,
-                $"""
-                ATTACH DATABASE '{EscapePragmaString(tempPath)}' AS encrypted KEY '{EscapePragmaString(encryptionKey)}';
-                SELECT sqlcipher_export('encrypted');
-                DETACH DATABASE encrypted;
-                """);
-        }
-
-        if (!CanOpenDatabase(tempPath, encryptionKey))
-        {
-            DeleteSqliteFileSet(tempPath);
-            throw new InvalidOperationException("Encrypted local state migration did not produce a readable SQLCipher database.");
-        }
-
-        CompleteEncryptionMigrationSwap(statePath, tempPath, backupPath, encryptionKey);
-    }
-
-    private static void RecoverInterruptedEncryptionMigration(
-        string statePath,
-        string tempPath,
-        string backupPath,
-        string encryptionKey)
-    {
-        if (File.Exists(statePath))
-        {
-            if (CanOpenDatabase(statePath, encryptionKey))
-            {
-                SecureDeleteSqliteFileSet(tempPath);
-                SecureDeleteSqliteFileSet(backupPath);
-                return;
-            }
-
-            if (!HasPlaintextSqliteHeader(statePath) || !CanOpenDatabase(statePath, null))
-            {
-                throw new InvalidOperationException("Local state database is neither valid plaintext nor readable with the configured encryption key.");
-            }
-
-            if (CanOpenDatabase(tempPath, encryptionKey))
-            {
-                CompleteEncryptionMigrationSwap(statePath, tempPath, backupPath, encryptionKey);
-                return;
-            }
-
-            SecureDeleteSqliteFileSet(tempPath);
-            SecureDeleteSqliteFileSet(backupPath);
-            return;
-        }
-
-        if (CanOpenDatabase(tempPath, encryptionKey))
-        {
-            SecureDeleteSqliteSidecars(statePath);
-            File.Move(tempPath, statePath);
-            SecureDeleteSqliteSidecars(tempPath);
-            if (!CanOpenDatabase(statePath, encryptionKey))
-            {
-                throw new InvalidOperationException("Interrupted local state migration could not promote the encrypted database.");
-            }
-
-            SecureDeleteSqliteFileSet(backupPath);
-            return;
-        }
-
-        SecureDeleteSqliteFileSet(tempPath);
-        if (CanOpenDatabase(backupPath, null))
-        {
-            SecureDeleteSqliteSidecars(statePath);
-            File.Move(backupPath, statePath);
-            SecureDeleteSqliteSidecars(backupPath);
-            return;
-        }
-
-        if (File.Exists(backupPath))
-        {
-            throw new InvalidOperationException("Interrupted local state migration left an unreadable plaintext backup.");
-        }
-    }
-
-    private static void CompleteEncryptionMigrationSwap(
-        string statePath,
-        string tempPath,
-        string backupPath,
-        string encryptionKey)
-    {
-        SecureDeleteSqliteFileSet(backupPath);
         try
         {
-            File.Move(statePath, backupPath);
-            SecureDeleteSqliteSidecars(statePath);
-            File.Move(tempPath, statePath);
-            SecureDeleteSqliteSidecars(tempPath);
-            if (!CanOpenDatabase(statePath, encryptionKey))
-            {
-                throw new InvalidOperationException("Encrypted local state migration produced an unreadable database after promotion.");
-            }
-
-            SecureDeleteSqliteFileSet(backupPath);
+            InitializeSchema();
         }
-        catch
+        catch (SqliteException exception) when (_encryptionKey is not null && stateExisted)
         {
-            if (!File.Exists(statePath) && File.Exists(backupPath))
-            {
-                File.Move(backupPath, statePath);
-            }
-
-            throw;
+            throw new InvalidOperationException(
+                "Existing local state database cannot be opened with the configured SQLCipher key. Wipe local data before retrying.",
+                exception);
         }
     }
 
@@ -4965,15 +4821,6 @@ public sealed partial class SqliteSessionStore :
         return builder.ToString();
     }
 
-    private static SqliteConnection OpenConnectionForPath(string statePath, string? encryptionKey)
-    {
-        var connection = new SqliteConnection(ConnectionStringFor(statePath, pooling: false));
-        connection.Open();
-        ApplyEncryptionKey(connection, encryptionKey);
-        ConfigureConnection(connection);
-        return connection;
-    }
-
     private static void ConfigureConnection(SqliteConnection connection)
     {
         using var command = connection.CreateCommand();
@@ -4987,160 +4834,9 @@ public sealed partial class SqliteSessionStore :
         command.ExecuteNonQuery();
     }
 
-    private static bool HasPlaintextSqliteHeader(string statePath)
-    {
-        Span<byte> header = stackalloc byte[16];
-        try
-        {
-            using var stream = new FileStream(
-                statePath,
-                FileMode.Open,
-                FileAccess.Read,
-                FileShare.ReadWrite | FileShare.Delete,
-                bufferSize: header.Length,
-                FileOptions.SequentialScan);
-            stream.ReadExactly(header);
-            return header.SequenceEqual(SqliteHeader);
-        }
-        catch (IOException)
-        {
-            return false;
-        }
-        catch (UnauthorizedAccessException)
-        {
-            return false;
-        }
-    }
-
-    private static void ApplyEncryptionKey(SqliteConnection connection, string? encryptionKey)
-    {
-        if (string.IsNullOrWhiteSpace(encryptionKey))
-        {
-            return;
-        }
-
-        using var pragma = connection.CreateCommand();
-        pragma.CommandText = $"PRAGMA key = '{EscapePragmaString(encryptionKey)}';";
-        pragma.ExecuteNonQuery();
-
-        using var cipherVersion = connection.CreateCommand();
-        cipherVersion.CommandText = "PRAGMA cipher_version;";
-        var version = cipherVersion.ExecuteScalar()?.ToString();
-        if (string.IsNullOrWhiteSpace(version))
-        {
-            throw new InvalidOperationException("SQLCipher support is not available for the local state database.");
-        }
-    }
-
-    private static string EscapePragmaString(string value) =>
-        value.Replace("'", "''", StringComparison.Ordinal);
-
-    private static bool CanOpenDatabase(string statePath, string? encryptionKey)
-    {
-        if (!File.Exists(statePath))
-        {
-            return false;
-        }
-
-        try
-        {
-            using var connection = OpenConnectionForPath(statePath, encryptionKey);
-            ExecuteNonQuery(connection, "SELECT count(*) FROM sqlite_master;");
-            return true;
-        }
-        catch (SqliteException)
-        {
-            return false;
-        }
-        catch (InvalidOperationException)
-        {
-            return false;
-        }
-    }
-
-    private static void ExecuteNonQuery(SqliteConnection connection, string sql)
-    {
-        using var command = connection.CreateCommand();
-        command.CommandText = sql;
-        command.ExecuteNonQuery();
-    }
-
-    private static void DeleteSqliteFileSet(string statePath)
-    {
-        if (File.Exists(statePath))
-        {
-            File.Delete(statePath);
-        }
-
-        DeleteSqliteSidecars(statePath);
-    }
-
-    private static void SecureDeleteSqliteFileSet(string statePath)
-    {
-        SecureDeleteFile(statePath);
-        SecureDeleteSqliteSidecars(statePath);
-    }
-
-    private static void SecureDeleteSqliteSidecars(string statePath)
-    {
-        SecureDeleteFile(statePath + "-wal");
-        SecureDeleteFile(statePath + "-shm");
-    }
-
-    private static void SecureDeleteFile(string path)
-    {
-        if (!File.Exists(path))
-        {
-            return;
-        }
-
-        try
-        {
-            using var stream = new FileStream(
-                path,
-                FileMode.Open,
-                FileAccess.Write,
-                FileShare.None,
-                bufferSize: 64 * 1024,
-                FileOptions.WriteThrough | FileOptions.SequentialScan);
-            var zeroBuffer = new byte[64 * 1024];
-            var remaining = stream.Length;
-            stream.Position = 0;
-            while (remaining > 0)
-            {
-                var count = (int)Math.Min(zeroBuffer.Length, remaining);
-                stream.Write(zeroBuffer, 0, count);
-                remaining -= count;
-            }
-
-            stream.Flush(flushToDisk: true);
-        }
-        catch (IOException)
-        {
-            // Deletion below is still preferable when the platform does not permit in-place overwrite.
-        }
-        catch (UnauthorizedAccessException)
-        {
-            // Preserve the original deletion error if the file cannot be removed either.
-        }
-
-        File.Delete(path);
-    }
-
-    private static void DeleteSqliteSidecars(string statePath)
-    {
-        foreach (var sidecarPath in new[] { statePath + "-wal", statePath + "-shm" })
-        {
-            if (File.Exists(sidecarPath))
-            {
-                File.Delete(sidecarPath);
-            }
-        }
-    }
-
     public void Dispose()
     {
-        // Connections are short-lived and returned to the provider pool after each operation.
+        // Connections are short-lived and disposed after each operation.
     }
 
 }
