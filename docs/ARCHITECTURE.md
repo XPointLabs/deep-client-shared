@@ -178,7 +178,7 @@ scopes, then other acknowledged rows. If only live unacknowledged ciphertext
 remains, the transaction fails closed instead of dropping or fabricating
 state. Tombstone expiry is checked against the persisted retrieved envelope.
 Length, overflow, and canonical-envelope decoder failures are normalized to
-`InvalidDataException`. The canonical mailbox schema is version 6 and is
+`InvalidDataException`. The canonical mailbox schema is version 7 and is
 created only for a fresh local database. Any earlier or incompatible mailbox
 schema fails fast with an explicit wipe/reset-required error; no mailbox state
 is dual-read, migrated, or retained for compatibility.

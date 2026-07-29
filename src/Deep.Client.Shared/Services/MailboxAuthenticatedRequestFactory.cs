@@ -25,15 +25,23 @@ public sealed class MailboxAuthenticatedRequestFactory
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(envelope);
-        var generation = await state.ReadCredentialGenerationAsync(cancellationToken).ConfigureAwait(false);
-        var now = Now(); var epoch = ActiveEpoch(generation,
-            await state.ReadActiveCredentialEpochAsync(cancellationToken).ConfigureAwait(false), now);
+        _ = MailboxClientCodec.EncodeEncryptedEnvelope(envelope);
+        var now = Now();
+        var lease = await state.LeaseCredentialAsync(
+            MailboxCredentialGrantKind.PeerDeposit,
+            now,
+            new MailboxCredentialLeaseExpectation(
+                envelope.Epoch,
+                envelope.MailboxId.Bytes.Span,
+                envelope.PlacementId.Bytes.Span),
+            cancellationToken).ConfigureAwait(false);
+        var generation = lease.Generation;
+        var epoch = ActiveEpoch(generation, lease.ActiveEpoch, now);
         if (envelope.Epoch != epoch.Epoch || !Equal(envelope.MailboxId.Bytes.Span, generation.PeerMailboxId.Span) ||
             !Equal(envelope.PlacementId.Bytes.Span, epoch.PlacementId.Span))
             throw new InvalidOperationException("Mailbox store does not match the active credential route.");
         var binding = MailboxAuthenticatedRequestTranscript.ForStore(envelope);
-        var lease = await state.AllocateReplayCounterAsync(MailboxCredentialGrantKind.PeerDeposit, now, cancellationToken).ConfigureAwait(false);
-        return Sign(signer, generation, binding, lease, revocations);
+        return Sign(signer, binding, lease, epoch, revocations);
     }
 
     public async Task<MailboxAuthenticatedRequestFrame> CreateRetrieveAsync(
@@ -41,14 +49,21 @@ public sealed class MailboxAuthenticatedRequestFactory
         ushort maximumItems, ReadOnlyMemory<byte> continuationToken,
         CancellationToken cancellationToken = default)
     {
-        var generation = await state.ReadCredentialGenerationAsync(cancellationToken).ConfigureAwait(false);
-        var now = Now(); var epoch = ActiveEpoch(generation,
-            await state.ReadActiveCredentialEpochAsync(cancellationToken).ConfigureAwait(false), now);
+        ValidateRetrieveInputs(
+            operationId.Span,
+            maximumItems,
+            continuationToken.Span);
+        var now = Now();
+        var lease = await state.LeaseCredentialAsync(
+            MailboxCredentialGrantKind.OwnRetrieve,
+            now,
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        var generation = lease.Generation;
+        var epoch = ActiveEpoch(generation, lease.ActiveEpoch, now);
         var binding = MailboxAuthenticatedRequestTranscript.ForRetrieve(epoch.Epoch, operationId.Span,
             new BlindedMailboxId(generation.OwnMailboxId.Span), new BlindedPlacementId(epoch.PlacementId.Span),
             afterCursor, maximumItems, continuationToken.Span);
-        var lease = await state.AllocateReplayCounterAsync(MailboxCredentialGrantKind.OwnRetrieve, now, cancellationToken).ConfigureAwait(false);
-        return Sign(signer, generation, binding, lease, revocations);
+        return Sign(signer, binding, lease, epoch, revocations);
     }
 
     public async Task<MailboxAuthenticatedRequestFrame> CreateAckAsync(
@@ -57,27 +72,51 @@ public sealed class MailboxAuthenticatedRequestFactory
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(acknowledgements);
-        var generation = await state.ReadCredentialGenerationAsync(cancellationToken).ConfigureAwait(false);
-        var now = Now(); var epoch = ActiveEpoch(generation,
-            await state.ReadActiveCredentialEpochAsync(cancellationToken).ConfigureAwait(false), now);
+        ValidateAckInputs(
+            operationId.Span,
+            isFinalPage,
+            continuationToken.Span,
+            acknowledgements);
+        var now = Now();
+        var lease = await state.LeaseCredentialAsync(
+            MailboxCredentialGrantKind.OwnRetrieve,
+            now,
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        var generation = lease.Generation;
+        var epoch = ActiveEpoch(generation, lease.ActiveEpoch, now);
         var binding = MailboxAuthenticatedRequestTranscript.ForAck(epoch.Epoch, operationId.Span,
             new BlindedMailboxId(generation.OwnMailboxId.Span), new BlindedPlacementId(epoch.PlacementId.Span),
             isFinalPage, continuationToken.Span, acknowledgements);
-        var lease = await state.AllocateReplayCounterAsync(MailboxCredentialGrantKind.OwnRetrieve, now, cancellationToken).ConfigureAwait(false);
-        return Sign(signer, generation, binding, lease, revocations);
+        return Sign(signer, binding, lease, epoch, revocations);
     }
 
     private static MailboxAuthenticatedRequestFrame Sign(IMailboxOperationSigner signer,
-        MailboxCredentialGeneration generation, MailboxAuthenticatedRequestBinding binding,
-        MailboxCredentialGrantLease lease, IMailboxCapabilityRevocationSource revocations)
+        MailboxAuthenticatedRequestBinding binding,
+        MailboxCredentialOperationLease lease,
+        MailboxCredentialEpoch epoch,
+        IMailboxCapabilityRevocationSource revocations)
     {
         ArgumentNullException.ThrowIfNull(signer);
+        var generation = lease.Generation;
         var key = signer.GetEd25519PublicKey();
         try
         {
             if (!Equal(key, generation.HolderPublicKey.Span))
                 throw new InvalidOperationException("Mailbox signer does not match the pinned credential holder.");
             var grant = MailboxAuthenticatedCapabilityCodec.DecodeGrant(lease.CanonicalGrant.Span);
+            var expectedDomain = lease.Kind == MailboxCredentialGrantKind.OwnRetrieve
+                ? MailboxCapabilityDomain.Retrieve
+                : MailboxCapabilityDomain.Deposit;
+            if (lease.ActiveEpoch != epoch.Epoch ||
+                grant.Epoch != lease.ActiveEpoch ||
+                grant.Generation != lease.ActiveEpoch ||
+                grant.Domain != expectedDomain ||
+                !Equal(grant.NetworkId.Span, generation.NetworkId.Span) ||
+                !Equal(grant.IssuerPublicKey.Span, generation.IssuerPublicKey.Span) ||
+                !Equal(grant.HolderPublicKey.Span, generation.HolderPublicKey.Span) ||
+                !Equal(grant.PlacementCommitment.Span, epoch.PlacementCommitment.Span) ||
+                !Equal(grant.MembershipCommitment.Span, epoch.MembershipCommitment.Span))
+                throw new InvalidOperationException("Mailbox credential lease is incoherent.");
             if (revocations.IsRevoked(new MailboxCapabilityRevocationQuery
             {
                 IssuerPublicKey = grant.IssuerPublicKey.ToArray(), Serial = grant.Serial.ToArray(),
@@ -107,6 +146,65 @@ public sealed class MailboxAuthenticatedRequestFactory
     }
 
     private ulong Now() => checked((ulong)timeProvider.GetUtcNow().ToUnixTimeSeconds());
+
+    private static void ValidateRetrieveInputs(
+        ReadOnlySpan<byte> operationId,
+        ushort maximumItems,
+        ReadOnlySpan<byte> continuationToken)
+    {
+        ValidateOperationId(operationId);
+        if (maximumItems is 0 or > MailboxClientLimits.MaximumPageItems ||
+            continuationToken.Length >
+                MailboxClientLimits.MaximumContinuationTokenLength)
+        {
+            throw new ArgumentException(
+                "Mailbox retrieve inputs are outside strict bounds.");
+        }
+    }
+
+    private static void ValidateAckInputs(
+        ReadOnlySpan<byte> operationId,
+        bool isFinalPage,
+        ReadOnlySpan<byte> continuationToken,
+        IReadOnlyList<MailboxAcknowledgement> acknowledgements)
+    {
+        ValidateOperationId(operationId);
+        if (acknowledgements.Count is 0 or > MailboxClientLimits.MaximumPageItems ||
+            continuationToken.Length >
+                MailboxClientLimits.MaximumContinuationTokenLength ||
+            isFinalPage != continuationToken.IsEmpty)
+        {
+            throw new ArgumentException(
+                "Mailbox acknowledgement inputs are outside strict bounds.");
+        }
+        ulong previousCursor = 0;
+        foreach (var acknowledgement in acknowledgements)
+        {
+            if (acknowledgement is null ||
+                acknowledgement.Cursor <= previousCursor ||
+                acknowledgement.EnvelopeDigest.Length !=
+                    MailboxClientLimits.DigestLength ||
+                acknowledgement.EnvelopeDigest.Span.IndexOfAnyExcept((byte)0) < 0)
+            {
+                throw new ArgumentException(
+                    "Mailbox acknowledgements are not canonical.",
+                    nameof(acknowledgements));
+            }
+            previousCursor = acknowledgement.Cursor;
+        }
+    }
+
+    private static void ValidateOperationId(ReadOnlySpan<byte> operationId)
+    {
+        if (operationId.Length != MailboxClientLimits.OperationIdLength ||
+            operationId.IndexOfAnyExcept((byte)0) < 0)
+        {
+            throw new ArgumentException(
+                "Mailbox operation id is invalid.",
+                nameof(operationId));
+        }
+    }
+
     private static MailboxCredentialEpoch ActiveEpoch(MailboxCredentialGeneration generation, ulong activeEpoch, ulong now) =>
         activeEpoch == generation.Current.Epoch && now >= generation.Current.NotBeforeUnixSeconds && now <= generation.Current.ExpiresAtUnixSeconds
             ? generation.Current : activeEpoch == generation.Next.Epoch && now >= generation.Next.NotBeforeUnixSeconds && now <= generation.Next.ExpiresAtUnixSeconds

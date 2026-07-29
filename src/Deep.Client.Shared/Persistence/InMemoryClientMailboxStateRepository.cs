@@ -54,22 +54,6 @@ public sealed class InMemoryClientMailboxStateRepository :
         }
     }
 
-    public Task<MailboxCredentialGeneration> ReadCredentialGenerationAsync(
-        CancellationToken cancellationToken = default)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        lock (gate)
-        {
-            return Task.FromResult(MailboxCredentialStateMachine.Read(RequireCredentials()));
-        }
-    }
-
-    public Task<ulong> ReadActiveCredentialEpochAsync(CancellationToken cancellationToken = default)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        lock (gate) return Task.FromResult(RequireCredentials().ActiveEpoch);
-    }
-
     public Task SwitchCredentialEpochAsync(ulong epoch, ulong nowUnixSeconds,
         CancellationToken cancellationToken = default)
     {
@@ -85,15 +69,21 @@ public sealed class InMemoryClientMailboxStateRepository :
         }
     }
 
-    public Task<MailboxCredentialGrantLease> AllocateReplayCounterAsync(
-        MailboxCredentialGrantKind kind, ulong nowUnixSeconds,
+    public Task<MailboxCredentialOperationLease> LeaseCredentialAsync(
+        MailboxCredentialGrantKind kind,
+        ulong nowUnixSeconds,
+        MailboxCredentialLeaseExpectation? expectation = null,
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
         lock (gate)
         {
             var candidate = RequireCredentials().Clone();
-            var lease = MailboxCredentialStateMachine.Allocate(candidate, kind, nowUnixSeconds);
+            var lease = MailboxCredentialStateMachine.Allocate(
+                candidate,
+                kind,
+                nowUnixSeconds,
+                expectation);
             commitFault?.Invoke(ClientMailboxCommitFaultPoint.BeforeCommit);
             credentials = candidate;
             commitFault?.Invoke(ClientMailboxCommitFaultPoint.AfterCommit);

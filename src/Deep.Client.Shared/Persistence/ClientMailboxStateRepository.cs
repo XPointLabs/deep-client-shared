@@ -200,6 +200,11 @@ internal enum ClientMailboxCommitFaultPoint
     AfterCommit
 }
 
+internal enum ClientMailboxSchemaPreflightPoint
+{
+    AfterCatalogSnapshot
+}
+
 public interface IClientMailboxStateRepository
 {
     Task<ClientMailboxTraversal> ReadTraversalAsync(

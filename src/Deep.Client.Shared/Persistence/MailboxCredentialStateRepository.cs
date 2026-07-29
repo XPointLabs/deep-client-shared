@@ -157,30 +157,73 @@ public sealed record MailboxCredentialImportPolicy(
     public override string ToString() => "[mailbox-credential-import-policy]";
 }
 
-public sealed class MailboxCredentialGrantLease
+public sealed class MailboxCredentialLeaseExpectation
+{
+    private readonly byte[] mailboxId;
+    private readonly byte[] placementId;
+
+    public MailboxCredentialLeaseExpectation(
+        ulong epoch,
+        ReadOnlySpan<byte> mailboxId,
+        ReadOnlySpan<byte> placementId)
+    {
+        if (epoch == 0 ||
+            mailboxId.Length != MailboxClientLimits.BlindedIdentifierLength ||
+            mailboxId.IndexOfAnyExcept((byte)0) < 0 ||
+            placementId.Length != MailboxClientLimits.BlindedIdentifierLength ||
+            placementId.IndexOfAnyExcept((byte)0) < 0)
+        {
+            throw new ArgumentException("Mailbox credential lease expectation is invalid.");
+        }
+
+        Epoch = epoch;
+        this.mailboxId = mailboxId.ToArray();
+        this.placementId = placementId.ToArray();
+    }
+
+    public ulong Epoch { get; }
+    internal ReadOnlySpan<byte> MailboxId => mailboxId;
+    internal ReadOnlySpan<byte> PlacementId => placementId;
+    public override string ToString() => "[mailbox-credential-lease-expectation]";
+}
+
+public sealed class MailboxCredentialOperationLease
 {
     private readonly byte[] canonicalGrant;
-    internal MailboxCredentialGrantLease(MailboxCredentialGrantKind kind, ulong epoch,
-        ulong replayCounter, ReadOnlySpan<byte> canonicalGrant)
+    private readonly MailboxCredentialGeneration generation;
+
+    internal MailboxCredentialOperationLease(
+        MailboxCredentialGeneration generation,
+        MailboxCredentialGrantKind kind,
+        ulong activeEpoch,
+        ulong replayCounter,
+        ReadOnlySpan<byte> canonicalGrant)
     {
-        Kind = kind; Epoch = epoch; ReplayCounter = replayCounter;
+        this.generation = generation.Clone();
+        Kind = kind;
+        ActiveEpoch = activeEpoch;
+        ReplayCounter = replayCounter;
         this.canonicalGrant = canonicalGrant.ToArray();
     }
+
+    public MailboxCredentialGeneration Generation => generation.Clone();
     public MailboxCredentialGrantKind Kind { get; }
-    public ulong Epoch { get; }
+    public ulong ActiveEpoch { get; }
     public ulong ReplayCounter { get; }
     public ReadOnlyMemory<byte> CanonicalGrant => canonicalGrant.ToArray();
+    public override string ToString() => "[mailbox-credential-operation-lease]";
 }
 
 public interface IClientMailboxCredentialStateRepository
 {
     Task ImportCredentialGenerationAsync(MailboxCredentialGeneration generation,
         MailboxCredentialImportPolicy policy, CancellationToken cancellationToken = default);
-    Task<MailboxCredentialGeneration> ReadCredentialGenerationAsync(CancellationToken cancellationToken = default);
-    Task<ulong> ReadActiveCredentialEpochAsync(CancellationToken cancellationToken = default);
     Task SwitchCredentialEpochAsync(ulong epoch, ulong nowUnixSeconds, CancellationToken cancellationToken = default);
-    Task<MailboxCredentialGrantLease> AllocateReplayCounterAsync(MailboxCredentialGrantKind kind,
-        ulong nowUnixSeconds, CancellationToken cancellationToken = default);
+    Task<MailboxCredentialOperationLease> LeaseCredentialAsync(
+        MailboxCredentialGrantKind kind,
+        ulong nowUnixSeconds,
+        MailboxCredentialLeaseExpectation? expectation = null,
+        CancellationToken cancellationToken = default);
 }
 
 internal sealed class MailboxCredentialStoredState
@@ -233,8 +276,11 @@ internal static class MailboxCredentialStateMachine
         return new MailboxCredentialStoredState { Generation = generation.Clone(), ActiveEpoch = generation.Current.Epoch };
     }
 
-    public static MailboxCredentialGrantLease Allocate(MailboxCredentialStoredState state,
-        MailboxCredentialGrantKind kind, ulong now)
+    public static MailboxCredentialOperationLease Allocate(
+        MailboxCredentialStoredState state,
+        MailboxCredentialGrantKind kind,
+        ulong now,
+        MailboxCredentialLeaseExpectation? expectation)
     {
         ArgumentNullException.ThrowIfNull(state);
         var epoch = Epoch(state.Generation, state.ActiveEpoch);
@@ -242,14 +288,28 @@ internal static class MailboxCredentialStateMachine
             throw new InvalidOperationException("Mailbox credential is not active.");
         var grant = Grant(state.Generation, kind, state.ActiveEpoch);
         var decoded = MailboxAuthenticatedCapabilityCodec.DecodeGrant(grant.Span);
-        if (decoded.ExpiresAtUnixSeconds < now)
+        if (decoded.ExpiresAtUnixSeconds < now ||
+            expectation is not null &&
+            (expectation.Epoch != state.ActiveEpoch ||
+             !Same(expectation.PlacementId, epoch.PlacementId.Span, 32) ||
+             !Same(
+                 expectation.MailboxId,
+                 kind == MailboxCredentialGrantKind.PeerDeposit
+                    ? state.Generation.PeerMailboxId.Span
+                    : state.Generation.OwnMailboxId.Span,
+                 32)))
             throw new InvalidOperationException("Mailbox credential is not active.");
         var key = Convert.ToHexString(SHA256.HashData(grant.Span));
         var counter = state.NextCounters.TryGetValue(key, out var value) ? value : 1;
         if (counter == 0 || counter == ulong.MaxValue)
             throw new InvalidOperationException("Mailbox replay counter is exhausted.");
         state.NextCounters[key] = checked(counter + 1);
-        return new MailboxCredentialGrantLease(kind, state.ActiveEpoch, counter, grant.Span);
+        return new MailboxCredentialOperationLease(
+            state.Generation,
+            kind,
+            state.ActiveEpoch,
+            counter,
+            grant.Span);
     }
 
     public static void Switch(MailboxCredentialStoredState state, ulong epoch, ulong now)

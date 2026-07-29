@@ -15,12 +15,12 @@ public sealed class MailboxCredentialStateRepositoryTests
         var fixture = new Fixture();
         var state = new InMemoryClientMailboxStateRepository();
         await state.ImportCredentialGenerationAsync(fixture.Bundle, fixture.Policy);
-        Assert.Equal(1UL, (await state.AllocateReplayCounterAsync(MailboxCredentialGrantKind.OwnRetrieve, 250)).ReplayCounter);
+        Assert.Equal(1UL, (await state.LeaseCredentialAsync(MailboxCredentialGrantKind.OwnRetrieve, 250)).ReplayCounter);
         var restarted = state.RestartInstallationForTests();
-        Assert.Equal(2UL, (await restarted.AllocateReplayCounterAsync(MailboxCredentialGrantKind.OwnRetrieve, 250)).ReplayCounter);
+        Assert.Equal(2UL, (await restarted.LeaseCredentialAsync(MailboxCredentialGrantKind.OwnRetrieve, 250)).ReplayCounter);
         await Assert.ThrowsAsync<InvalidOperationException>(() => restarted.SwitchCredentialEpochAsync(6, 199));
         await restarted.SwitchCredentialEpochAsync(6, 250);
-        Assert.Equal(1UL, (await restarted.AllocateReplayCounterAsync(MailboxCredentialGrantKind.OwnRetrieve, 250)).ReplayCounter);
+        Assert.Equal(1UL, (await restarted.LeaseCredentialAsync(MailboxCredentialGrantKind.OwnRetrieve, 250)).ReplayCounter);
     }
 
     [Fact]
@@ -56,6 +56,89 @@ public sealed class MailboxCredentialStateRepositoryTests
         revoked.Revoked = true;
         await Assert.ThrowsAsync<InvalidOperationException>(() => factory.CreateRetrieveAsync(
             fixture.Signer, Bytes(16, 92), 0, 10, Array.Empty<byte>()));
+        revoked.Revoked = false;
+        var afterRevocation = await factory.CreateRetrieveAsync(
+            fixture.Signer,
+            Bytes(16, 93),
+            0,
+            10,
+            Array.Empty<byte>());
+        Assert.Equal(
+            3UL,
+            MailboxAuthenticatedClientRequestCodec.Decode(
+                afterRevocation.GetCanonicalMau2Copy()).Presentation.ReplayCounter);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            factory.CreateRetrieveAsync(
+                new InvalidSignatureSigner(fixture.Signer.GetEd25519PublicKey()),
+                Bytes(16, 94),
+                0,
+                10,
+                Array.Empty<byte>()));
+        var afterInvalidSignature = await factory.CreateRetrieveAsync(
+            fixture.Signer,
+            Bytes(16, 95),
+            0,
+            10,
+            Array.Empty<byte>());
+        Assert.Equal(
+            5UL,
+            MailboxAuthenticatedClientRequestCodec.Decode(
+                afterInvalidSignature.GetCanonicalMau2Copy()).Presentation.ReplayCounter);
+    }
+
+    [Fact]
+    public async Task Invalid_factory_input_does_not_lease_or_burn_a_counter()
+    {
+        var fixture = new Fixture();
+        var state = new InMemoryClientMailboxStateRepository();
+        await state.ImportCredentialGenerationAsync(fixture.Bundle, fixture.Policy);
+        var factory = new MailboxAuthenticatedRequestFactory(
+            state,
+            new Revocations(),
+            new FixedTimeProvider(250));
+
+        await Assert.ThrowsAsync<MailboxClientException>(() =>
+            factory.CreateStoreAsync(
+                fixture.Signer,
+                new MailboxEncryptedEnvelope
+                {
+                    Epoch = fixture.Bundle.Current.Epoch,
+                    MailboxId = new BlindedMailboxId(
+                        fixture.Bundle.PeerMailboxId.Span),
+                    PlacementId = new BlindedPlacementId(
+                        fixture.Bundle.Current.PlacementId.Span),
+                    OperationId = new byte[16],
+                    DeduplicationDigest = Bytes(32, 98),
+                    CreatedAtUnixSeconds = 200,
+                    ExpiresAtUnixSeconds = 300,
+                    Ciphertext = Bytes(
+                        MailboxClientLimits.MinimumCiphertextLength,
+                        99)
+                }));
+        await Assert.ThrowsAsync<ArgumentException>(() => factory.CreateRetrieveAsync(
+            fixture.Signer,
+            new byte[16],
+            0,
+            0,
+            Array.Empty<byte>()));
+        await Assert.ThrowsAsync<ArgumentException>(() => factory.CreateAckAsync(
+            fixture.Signer,
+            Bytes(16, 96),
+            true,
+            Array.Empty<byte>(),
+            []));
+
+        var valid = await factory.CreateRetrieveAsync(
+            fixture.Signer,
+            Bytes(16, 97),
+            0,
+            10,
+            Array.Empty<byte>());
+        Assert.Equal(
+            1UL,
+            MailboxAuthenticatedClientRequestCodec.Decode(
+                valid.GetCanonicalMau2Copy()).Presentation.ReplayCounter);
     }
 
     [Fact]
@@ -68,10 +151,10 @@ public sealed class MailboxCredentialStateRepositoryTests
             using (var first = new SqliteClientMailboxStateRepository(new SqliteSessionStoreOptions(path, "test-key")))
             {
                 await first.ImportCredentialGenerationAsync(fixture.Bundle, fixture.Policy);
-                Assert.Equal(1UL, (await first.AllocateReplayCounterAsync(MailboxCredentialGrantKind.PeerDeposit, 250)).ReplayCounter);
+                Assert.Equal(1UL, (await first.LeaseCredentialAsync(MailboxCredentialGrantKind.PeerDeposit, 250)).ReplayCounter);
             }
             using var restarted = new SqliteClientMailboxStateRepository(new SqliteSessionStoreOptions(path, "test-key"));
-            Assert.Equal(2UL, (await restarted.AllocateReplayCounterAsync(MailboxCredentialGrantKind.PeerDeposit, 250)).ReplayCounter);
+            Assert.Equal(2UL, (await restarted.LeaseCredentialAsync(MailboxCredentialGrantKind.PeerDeposit, 250)).ReplayCounter);
         }
         finally
         {
@@ -121,8 +204,8 @@ public sealed class MailboxCredentialStateRepositoryTests
             using var second = new SqliteClientMailboxStateRepository(new SqliteSessionStoreOptions(path, "test-key"));
             await first.ImportCredentialGenerationAsync(fixture.Bundle, fixture.Policy);
             var tasks = Enumerable.Range(0, 24).Select(index => (index & 1) == 0
-                ? first.AllocateReplayCounterAsync(MailboxCredentialGrantKind.OwnRetrieve, 250)
-                : second.AllocateReplayCounterAsync(MailboxCredentialGrantKind.OwnRetrieve, 250));
+                ? first.LeaseCredentialAsync(MailboxCredentialGrantKind.OwnRetrieve, 250)
+                : second.LeaseCredentialAsync(MailboxCredentialGrantKind.OwnRetrieve, 250));
             var counters = (await Task.WhenAll(tasks)).Select(item => item.ReplayCounter).Order().ToArray();
             Assert.Equal(Enumerable.Range(1, 24).Select(static value => (ulong)value), counters);
         }
@@ -138,7 +221,7 @@ public sealed class MailboxCredentialStateRepositoryTests
             using (var state = new SqliteClientMailboxStateRepository(new SqliteSessionStoreOptions(path, "test-key")))
             {
                 await state.ImportCredentialGenerationAsync(fixture.Bundle, fixture.Policy);
-                _ = await state.AllocateReplayCounterAsync(MailboxCredentialGrantKind.OwnRetrieve, 250);
+                _ = await state.LeaseCredentialAsync(MailboxCredentialGrantKind.OwnRetrieve, 250);
             }
             var key = SHA256.HashData(fixture.Bundle.OwnRetrieve.CurrentGrant.Span);
             using (var connection = Open(path)) using (var update = connection.CreateCommand())
@@ -149,7 +232,7 @@ public sealed class MailboxCredentialStateRepositoryTests
                 update.ExecuteNonQuery();
             }
             using var exhausted = new SqliteClientMailboxStateRepository(new SqliteSessionStoreOptions(path, "test-key"));
-            await Assert.ThrowsAsync<InvalidOperationException>(() => exhausted.AllocateReplayCounterAsync(MailboxCredentialGrantKind.OwnRetrieve, 250));
+            await Assert.ThrowsAsync<InvalidOperationException>(() => exhausted.LeaseCredentialAsync(MailboxCredentialGrantKind.OwnRetrieve, 250));
         }
         finally { DeleteDatabase(path); }
 
@@ -160,9 +243,9 @@ public sealed class MailboxCredentialStateRepositoryTests
         });
         await fault.ImportCredentialGenerationAsync(fixture.Bundle, fixture.Policy);
         armed = true;
-        await Assert.ThrowsAsync<IOException>(() => fault.AllocateReplayCounterAsync(MailboxCredentialGrantKind.OwnDeposit, 250));
+        await Assert.ThrowsAsync<IOException>(() => fault.LeaseCredentialAsync(MailboxCredentialGrantKind.OwnDeposit, 250));
         var restarted = fault.RestartInstallationForTests();
-        Assert.Equal(2UL, (await restarted.AllocateReplayCounterAsync(MailboxCredentialGrantKind.OwnDeposit, 250)).ReplayCounter);
+        Assert.Equal(2UL, (await restarted.LeaseCredentialAsync(MailboxCredentialGrantKind.OwnDeposit, 250)).ReplayCounter);
     }
 
     [Fact]
@@ -184,6 +267,133 @@ public sealed class MailboxCredentialStateRepositoryTests
             fixture.Bundle.OwnRetrieve, fixture.Bundle.OwnDeposit, fixture.Bundle.PeerDeposit, fixture.Bundle.Replicas);
         await Assert.ThrowsAsync<InvalidDataException>(() => new InMemoryClientMailboxStateRepository().ImportCredentialGenerationAsync(malformed, fixture.Policy));
         Assert.Throws<ArgumentException>(() => new MailboxCredentialGrantSet(new byte[1], new byte[1]));
+    }
+
+    [Theory]
+    [InlineData("CREATE TABLE foreign_state(value INTEGER);")]
+    [InlineData("CREATE VIEW hostile_view AS SELECT schema_version FROM client_mailbox_meta;")]
+    [InlineData("CREATE TRIGGER hostile_trigger AFTER UPDATE ON client_mailbox_meta BEGIN SELECT 1; END;")]
+    public async Task Sqlite_preflight_rejects_every_unexpected_user_object_without_mutation(
+        string hostileSql)
+    {
+        var fixture = new Fixture();
+        var path = NewPath();
+        try
+        {
+            await CreateCurrentDatabaseAsync(path, fixture);
+            using (var connection = Open(path))
+            using (var command = connection.CreateCommand())
+            {
+                command.CommandText = hostileSql;
+                command.ExecuteNonQuery();
+                command.CommandText =
+                    "PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;";
+                command.ExecuteNonQuery();
+            }
+            var before = File.ReadAllBytes(path);
+            Assert.False(File.Exists(path + "-wal"));
+            Assert.False(File.Exists(path + "-shm"));
+            Assert.Throws<InvalidDataException>(() =>
+                new SqliteClientMailboxStateRepository(
+                    new SqliteSessionStoreOptions(path, "test-key")));
+            Assert.Equal(before, File.ReadAllBytes(path));
+            Assert.False(File.Exists(path + "-wal"));
+            Assert.False(File.Exists(path + "-shm"));
+        }
+        finally { DeleteDatabase(path); }
+    }
+
+    [Fact]
+    public async Task Preflight_catalog_and_detail_reads_share_one_snapshot()
+    {
+        var fixture = new Fixture();
+        var path = NewPath();
+        try
+        {
+            await CreateCurrentDatabaseAsync(path, fixture);
+            using (var connection = Open(path))
+            using (var command = connection.CreateCommand())
+            {
+                command.CommandText = "PRAGMA journal_mode = WAL;";
+                _ = command.ExecuteScalar();
+            }
+
+            var injected = false;
+            Assert.Throws<InvalidDataException>(() =>
+                new SqliteClientMailboxStateRepository(
+                    new SqliteSessionStoreOptions(path, "test-key"),
+                    commitFault: null,
+                    schemaPreflightFault: point =>
+                    {
+                        Assert.Equal(
+                            ClientMailboxSchemaPreflightPoint.AfterCatalogSnapshot,
+                            point);
+                        using var writer = Open(path);
+                        using var create = writer.CreateCommand();
+                        create.CommandText =
+                            "CREATE VIEW snapshot_race_view AS " +
+                            "SELECT schema_version FROM client_mailbox_meta;";
+                        create.ExecuteNonQuery();
+                        injected = true;
+                    }));
+            Assert.True(injected);
+        }
+        finally { DeleteDatabase(path); }
+    }
+
+    [Fact]
+    public async Task Epoch_switch_winning_race_cannot_mismatch_mau2_or_burn_next_grant()
+    {
+        var fixture = new Fixture();
+        var path = NewPath();
+        using var switchEntered = new ManualResetEventSlim();
+        using var releaseSwitch = new ManualResetEventSlim();
+        var armed = false;
+        try
+        {
+            using var switching = new SqliteClientMailboxStateRepository(
+                new SqliteSessionStoreOptions(path, "test-key"),
+                point =>
+                {
+                    if (armed && point == ClientMailboxCommitFaultPoint.BeforeCommit)
+                    {
+                        switchEntered.Set();
+                        Assert.True(releaseSwitch.Wait(TimeSpan.FromSeconds(10)));
+                    }
+                });
+            await switching.ImportCredentialGenerationAsync(
+                fixture.Bundle,
+                fixture.Policy);
+            using var leasing = new SqliteClientMailboxStateRepository(
+                new SqliteSessionStoreOptions(path, "test-key"));
+            var factory = new MailboxAuthenticatedRequestFactory(
+                leasing,
+                new Revocations(),
+                new FixedTimeProvider(250));
+            var oldEnvelope = Envelope(fixture.Bundle.Current, fixture.Bundle, 98);
+
+            armed = true;
+            var switchTask = Task.Run(async () =>
+                await switching.SwitchCredentialEpochAsync(6, 250));
+            Assert.True(switchEntered.Wait(TimeSpan.FromSeconds(10)));
+            var createTask = Task.Run(async () =>
+                await factory.CreateStoreAsync(fixture.Signer, oldEnvelope));
+            releaseSwitch.Set();
+            await switchTask;
+
+            await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+                await createTask);
+            var firstNextLease = await leasing.LeaseCredentialAsync(
+                MailboxCredentialGrantKind.PeerDeposit,
+                250);
+            Assert.Equal(6UL, firstNextLease.ActiveEpoch);
+            Assert.Equal(1UL, firstNextLease.ReplayCounter);
+        }
+        finally
+        {
+            releaseSwitch.Set();
+            DeleteDatabase(path);
+        }
     }
 
     private sealed class Fixture
@@ -233,9 +443,32 @@ public sealed class MailboxCredentialStateRepositoryTests
         public byte[] SignMailboxPresentation(MailboxAuthenticatedOperation operation, ReadOnlySpan<byte> bytes) =>
             PublicKeyAuth.SignDetached(bytes.ToArray(), PublicKeyAuth.GenerateKeyPair(seed).PrivateKey);
     }
+    private sealed class InvalidSignatureSigner(byte[] key) : IMailboxOperationSigner
+    {
+        public Deep.Client.Shared.Domain.SessionId SessionId =>
+            Deep.Client.Shared.Domain.SessionId.Parse("05" + new string('b', 64));
+        public byte[] GetEd25519PublicKey() => key.ToArray();
+        public byte[] SignMailboxPresentation(
+            MailboxAuthenticatedOperation operation,
+            ReadOnlySpan<byte> bytes) => Bytes(64, 1);
+    }
     private sealed class FixedTimeProvider(long seconds) : TimeProvider
     { public override DateTimeOffset GetUtcNow() => DateTimeOffset.FromUnixTimeSeconds(seconds); }
     private static byte[] Placement(byte[] id) => MailboxPlacementCommitment.Compute(new BlindedPlacementId(id));
+    private static MailboxEncryptedEnvelope Envelope(
+        MailboxCredentialEpoch epoch,
+        MailboxCredentialGeneration generation,
+        byte value) => new()
+        {
+            Epoch = epoch.Epoch,
+            MailboxId = new BlindedMailboxId(generation.PeerMailboxId.Span),
+            PlacementId = new BlindedPlacementId(epoch.PlacementId.Span),
+            OperationId = Bytes(16, value),
+            DeduplicationDigest = Bytes(32, (byte)(value + 1)),
+            CreatedAtUnixSeconds = 200,
+            ExpiresAtUnixSeconds = 300,
+            Ciphertext = Bytes(MailboxClientLimits.MinimumCiphertextLength, value)
+        };
     private static byte[] Bytes(int length, byte value) => Enumerable.Repeat(value, length).ToArray();
     private static string NewPath() => Path.Combine(Path.GetTempPath(), "deep-mailbox-" + Guid.NewGuid().ToString("N") + ".db");
     private static SqliteConnection Open(string path)
@@ -243,6 +476,16 @@ public sealed class MailboxCredentialStateRepositoryTests
         SQLitePCL.Batteries_V2.Init();
         var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Password = "test-key", Pooling = false }.ToString());
         connection.Open(); return connection;
+    }
+    private static async Task CreateCurrentDatabaseAsync(
+        string path,
+        Fixture fixture)
+    {
+        using var repository = new SqliteClientMailboxStateRepository(
+            new SqliteSessionStoreOptions(path, "test-key"));
+        await repository.ImportCredentialGenerationAsync(
+            fixture.Bundle,
+            fixture.Policy);
     }
     private static byte[] U64(ulong value) { var bytes = new byte[8]; System.Buffers.Binary.BinaryPrimitives.WriteUInt64BigEndian(bytes, value); return bytes; }
     private static void DeleteDatabase(string path)

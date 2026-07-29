@@ -15,16 +15,6 @@ public sealed class SqliteClientMailboxStateRepository :
     IDisposable
 {
     private const int SchemaVersion = 7;
-    private static readonly string[] CurrentTables =
-    [
-        "client_mailbox_meta",
-        "client_mailbox_traversal",
-        "client_mailbox_inbox",
-        "client_mailbox_expired_quarantine",
-        "client_mailbox_coordinator_journal",
-        "client_mailbox_credentials",
-        "client_mailbox_replay_counters"
-    ];
     private static readonly IReadOnlyDictionary<string, string> CurrentTableDefinitions =
         new Dictionary<string, string>(StringComparer.Ordinal)
         {
@@ -145,7 +135,8 @@ public sealed class SqliteClientMailboxStateRepository :
 
     internal SqliteClientMailboxStateRepository(
         SqliteSessionStoreOptions options,
-        Action<ClientMailboxCommitFaultPoint>? commitFault = null)
+        Action<ClientMailboxCommitFaultPoint>? commitFault = null,
+        Action<ClientMailboxSchemaPreflightPoint>? schemaPreflightFault = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         var encryptionKey = options.GetEncryptionKeyForStore();
@@ -171,7 +162,7 @@ public sealed class SqliteClientMailboxStateRepository :
             Password = encryptionKey
         }.ToString();
         this.commitFault = commitFault;
-        PreflightExistingSchema(options.StatePath, encryptionKey);
+        PreflightExistingSchema(options.StatePath, encryptionKey, schemaPreflightFault);
         Initialize();
     }
 
@@ -296,21 +287,6 @@ public sealed class SqliteClientMailboxStateRepository :
         finally { gate.Release(); }
     }
 
-    public async Task<MailboxCredentialGeneration> ReadCredentialGenerationAsync(
-        CancellationToken cancellationToken = default)
-    {
-        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try { using var connection = Open(); return ReadCredentials(connection, null).Generation.Clone(); }
-        finally { gate.Release(); }
-    }
-
-    public async Task<ulong> ReadActiveCredentialEpochAsync(CancellationToken cancellationToken = default)
-    {
-        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try { using var connection = Open(); return ReadCredentials(connection, null).ActiveEpoch; }
-        finally { gate.Release(); }
-    }
-
     public async Task SwitchCredentialEpochAsync(ulong epoch, ulong nowUnixSeconds,
         CancellationToken cancellationToken = default)
     {
@@ -328,8 +304,10 @@ public sealed class SqliteClientMailboxStateRepository :
         finally { gate.Release(); }
     }
 
-    public async Task<MailboxCredentialGrantLease> AllocateReplayCounterAsync(
-        MailboxCredentialGrantKind kind, ulong nowUnixSeconds,
+    public async Task<MailboxCredentialOperationLease> LeaseCredentialAsync(
+        MailboxCredentialGrantKind kind,
+        ulong nowUnixSeconds,
+        MailboxCredentialLeaseExpectation? expectation = null,
         CancellationToken cancellationToken = default)
     {
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -337,7 +315,11 @@ public sealed class SqliteClientMailboxStateRepository :
         {
             using var connection = Open(); using var transaction = connection.BeginTransaction(deferred: false);
             var state = ReadCredentials(connection, transaction);
-            var provisional = MailboxCredentialStateMachine.Allocate(state, kind, nowUnixSeconds);
+            var provisional = MailboxCredentialStateMachine.Allocate(
+                state,
+                kind,
+                nowUnixSeconds,
+                expectation);
             var key = SHA256.HashData(provisional.CanonicalGrant.Span);
             using var read = connection.CreateCommand(); read.Transaction = transaction;
             read.CommandText = "SELECT next_counter FROM client_mailbox_replay_counters WHERE grant_key = $key;";
@@ -346,7 +328,11 @@ public sealed class SqliteClientMailboxStateRepository :
             var counter = stored is null ? provisional.ReplayCounter : ReadU64(stored);
             if (counter == 0 || counter == ulong.MaxValue)
                 throw new InvalidOperationException("Mailbox replay counter is exhausted.");
-            var lease = new MailboxCredentialGrantLease(kind, provisional.Epoch, counter,
+            var lease = new MailboxCredentialOperationLease(
+                provisional.Generation,
+                kind,
+                provisional.ActiveEpoch,
+                counter,
                 provisional.CanonicalGrant.Span);
             using var upsert = connection.CreateCommand(); upsert.Transaction = transaction;
             upsert.CommandText = "INSERT INTO client_mailbox_replay_counters(grant_key, next_counter) VALUES($key, $counter) ON CONFLICT(grant_key) DO UPDATE SET next_counter = excluded.next_counter;";
@@ -575,7 +561,10 @@ public sealed class SqliteClientMailboxStateRepository :
         transaction.Commit();
     }
 
-    private static void PreflightExistingSchema(string statePath, string encryptionKey)
+    private static void PreflightExistingSchema(
+        string statePath,
+        string encryptionKey,
+        Action<ClientMailboxSchemaPreflightPoint>? schemaPreflightFault)
     {
         if (!File.Exists(statePath))
         {
@@ -596,38 +585,27 @@ public sealed class SqliteClientMailboxStateRepository :
             command.CommandText = "PRAGMA query_only = ON;";
             command.ExecuteNonQuery();
         }
-        EnsureCurrentSchemaOrFreshDatabase(connection, transaction: null);
+        using var transaction = connection.BeginTransaction(deferred: true);
+        EnsureCurrentSchemaOrFreshDatabase(
+            connection,
+            transaction,
+            schemaPreflightFault);
+        transaction.Commit();
     }
 
     private static void EnsureCurrentSchemaOrFreshDatabase(
         SqliteConnection connection,
-        SqliteTransaction? transaction)
+        SqliteTransaction? transaction,
+        Action<ClientMailboxSchemaPreflightPoint>? schemaPreflightFault = null)
     {
-        using var tables = connection.CreateCommand();
-        tables.Transaction = transaction;
-        tables.CommandText = """
-            SELECT name FROM sqlite_master
-            WHERE type = 'table' AND name LIKE 'client_mailbox_%';
-            """;
-        using var reader = tables.ExecuteReader();
-        var names = new HashSet<string>(StringComparer.Ordinal);
-        while (reader.Read())
+        var userObjects = ReadUserSchemaObjects(connection, transaction);
+        schemaPreflightFault?.Invoke(
+            ClientMailboxSchemaPreflightPoint.AfterCatalogSnapshot);
+        if (userObjects.Count == 0)
         {
-            names.Add(reader.GetString(0));
-        }
-        reader.Dispose();
-
-        if (!names.Contains("client_mailbox_meta"))
-        {
-            if (names.Count != 0)
-            {
-                throw ResetRequired();
-            }
-
             return;
         }
-
-        if (!names.SetEquals(CurrentTables))
+        if (!HasExactUserSchemaObjectSet(userObjects))
         {
             throw ResetRequired();
         }
@@ -705,15 +683,71 @@ public sealed class SqliteClientMailboxStateRepository :
                     ("grant_key", "BLOB", true, 1),
                     ("next_counter", "BLOB", true, 0)
                 ]) ||
-            !HasExactSchemaDefinitions(
-                connection,
-                transaction,
-                "table",
-                CurrentTableDefinitions) ||
             !HasExactIndexes(connection, transaction))
         {
             throw ResetRequired();
         }
+    }
+
+    private static IReadOnlyDictionary<(string Type, string Name), string>
+        ReadUserSchemaObjects(
+            SqliteConnection connection,
+            SqliteTransaction? transaction)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT type, name, sql
+            FROM sqlite_master
+            WHERE name NOT LIKE 'sqlite_%'
+            ORDER BY type, name;
+            """;
+        using var reader = command.ExecuteReader();
+        var objects = new Dictionary<(string Type, string Name), string>();
+        while (reader.Read())
+        {
+            if (reader.IsDBNull(2) ||
+                !objects.TryAdd(
+                    (reader.GetString(0), reader.GetString(1)),
+                    reader.GetString(2)))
+            {
+                throw ResetRequired();
+            }
+        }
+        return objects;
+    }
+
+    private static bool HasExactUserSchemaObjectSet(
+        IReadOnlyDictionary<(string Type, string Name), string> actual)
+    {
+        if (actual.Count != CurrentTableDefinitions.Count +
+                CurrentIndexDefinitions.Count)
+        {
+            return false;
+        }
+        foreach (var (name, sql) in CurrentTableDefinitions)
+        {
+            if (!actual.TryGetValue(("table", name), out var actualSql) ||
+                !string.Equals(
+                    NormalizeSchemaSql(actualSql),
+                    NormalizeSchemaSql(sql),
+                    StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+        foreach (var (name, sql) in CurrentIndexDefinitions)
+        {
+            if (!actual.TryGetValue(("index", name), out var actualSql) ||
+                !string.Equals(
+                    NormalizeSchemaSql(actualSql),
+                    NormalizeSchemaSql(sql),
+                    StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static bool HasExactColumns(
