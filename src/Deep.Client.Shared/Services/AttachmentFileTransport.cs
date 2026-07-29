@@ -351,24 +351,8 @@ public sealed class HttpAttachmentFileTransport : IAttachmentFileTransport, IDis
             return;
         }
 
-        using var legacyPayload = new MemoryStream();
-        legacyPayload.Write(prefix, 0, prefixBytes);
-        await CopyWithLimitAsync(encryptedInput, legacyPayload, MaxAttachmentEncryptedBytes - prefixBytes, cancellationToken).ConfigureAwait(false);
-        var plain = DecryptLegacy(legacyPayload.ToArray(), key);
-        try
-        {
-            if (expectedPlainLength > 0 && plain.LongLength != expectedPlainLength)
-            {
-                throw new CryptographicException("Attachment length verification failed.");
-            }
-
-            hash.AppendData(plain);
-            await plainOutput.WriteAsync(plain, cancellationToken).ConfigureAwait(false);
-        }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(plain);
-        }
+        throw new CryptographicException(
+            "Encrypted attachment does not use the current authenticated chunked format.");
     }
 
     private static async Task DecryptChunkedToAsync(
@@ -432,23 +416,6 @@ public sealed class HttpAttachmentFileTransport : IAttachmentFileTransport, IDis
         }
     }
 
-    private static byte[] DecryptLegacy(byte[] payload, byte[] key)
-    {
-        if (payload.Length <= NonceSizeBytes + TagSizeBytes)
-        {
-            throw new CryptographicException("Encrypted attachment payload is malformed.");
-        }
-
-        var nonce = payload[..NonceSizeBytes];
-        var tag = payload[NonceSizeBytes..(NonceSizeBytes + TagSizeBytes)];
-        var cipher = payload[(NonceSizeBytes + TagSizeBytes)..];
-        var plain = new byte[cipher.Length];
-
-        using var aes = new AesGcm(key, TagSizeBytes);
-        aes.Decrypt(nonce, cipher, tag, plain);
-        return plain;
-    }
-
     private static async Task CopyWithDigestAsync(
         Stream source,
         Stream destination,
@@ -486,50 +453,6 @@ public sealed class HttpAttachmentFileTransport : IAttachmentFileTransport, IDis
         if (expectedLength > 0 && total != expectedLength)
         {
             throw new CryptographicException("Attachment length verification failed.");
-        }
-    }
-
-    private static async Task CopyWithLimitAsync(
-        Stream source,
-        Stream destination,
-        long remainingBytes,
-        CancellationToken cancellationToken)
-    {
-        var buffer = ArrayPool<byte>.Shared.Rent(ChunkSizeBytes);
-        try
-        {
-            while (true)
-            {
-                if (remainingBytes <= 0)
-                {
-                    var probe = await source.ReadAsync(buffer.AsMemory(0, 1), cancellationToken).ConfigureAwait(false);
-                    if (probe == 0)
-                    {
-                        break;
-                    }
-
-                    throw new InvalidOperationException("Remote attachment exceeds the maximum supported size.");
-                }
-
-                var read = await source.ReadAsync(buffer.AsMemory(0, (int)Math.Min(buffer.Length, remainingBytes)), cancellationToken)
-                    .ConfigureAwait(false);
-                if (read == 0)
-                {
-                    break;
-                }
-
-                remainingBytes -= read;
-                if (remainingBytes < 0)
-                {
-                    throw new InvalidOperationException("Remote attachment exceeds the maximum supported size.");
-                }
-
-                await destination.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
-            }
-        }
-        finally
-        {
-            ArrayPool<byte>.Shared.Return(buffer, clearArray: true);
         }
     }
 

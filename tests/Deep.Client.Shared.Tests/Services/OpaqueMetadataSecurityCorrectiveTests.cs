@@ -15,11 +15,11 @@ namespace Deep.Client.Shared.Tests.Services;
 public sealed class OpaqueMetadataSecurityCorrectiveTests
 {
     private const string AlicePhrase =
-        "amber anchor april arrow atom aurora autumn badge bamboo beacon berry blade";
+        "amaze buffet cake entrance symptoms tiger lamb maze nestle python dusted faxed faxed";
     private const string BobPhrase =
-        "cactus canyon cedar circle cloud comet coral crystal dawn delta dune ember";
+        "update vague zinger boxes ornament renting glass gained island nabbing afield calamity nabbing";
     private const string CharliePhrase =
-        "fabric falcon feather field flame forest frost galaxy garden glacier glow granite";
+        "sickness rhino tilt yeti innocent network dogs boat feast ionic subtly zodiac ionic";
 
     [Theory]
     [InlineData(0)]

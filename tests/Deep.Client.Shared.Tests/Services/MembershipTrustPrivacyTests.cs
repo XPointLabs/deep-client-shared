@@ -53,7 +53,6 @@ public sealed class MembershipTrustPrivacyTests
         {
             var status = MembershipTrustStatus.For(state);
             Assert.Equal(state.ToString(), status.State.ToString());
-            Assert.False(status.LegacyRollbackEligible);
             Assert.Equal(state == MembershipTrustState.Healthy, status.Usable);
         }
     }

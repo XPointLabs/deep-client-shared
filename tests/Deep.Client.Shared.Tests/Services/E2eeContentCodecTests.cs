@@ -91,8 +91,8 @@ public sealed class E2eeContentCodecTests
     [Fact]
     public void DmcContent_RoundTripsInsideEncryptedEnvelopeWithoutLeakingMarker()
     {
-        const string alicePhrase = "amber anchor april arrow atom aurora autumn badge bamboo beacon berry blade";
-        const string bobPhrase = "cactus canyon cedar circle cloud comet coral crystal dawn delta dune ember";
+        const string alicePhrase = "amaze buffet cake entrance symptoms tiger lamb maze nestle python dusted faxed faxed";
+        const string bobPhrase = "update vague zinger boxes ornament renting glass gained island nabbing afield calamity nabbing";
         using var alice = new SessionIdentityProvider(alicePhrase);
         using var bob = new SessionIdentityProvider(bobPhrase);
         var marker = "encrypted-content-marker-49125";
@@ -116,8 +116,8 @@ public sealed class E2eeContentCodecTests
     [Fact]
     public void ContentEnvelopeConvenienceApi_BindsSenderAndKindButAllowsSenderCopyRecipient()
     {
-        const string alicePhrase = "amber anchor april arrow atom aurora autumn badge bamboo beacon berry blade";
-        const string bobPhrase = "cactus canyon cedar circle cloud comet coral crystal dawn delta dune ember";
+        const string alicePhrase = "amaze buffet cake entrance symptoms tiger lamb maze nestle python dusted faxed faxed";
+        const string bobPhrase = "update vague zinger boxes ornament renting glass gained island nabbing afield calamity nabbing";
         using var alice = new SessionIdentityProvider(alicePhrase);
         using var bob = new SessionIdentityProvider(bobPhrase);
         var aliceCodec = alice.CreateEnvelopeCodec();

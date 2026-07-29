@@ -30,7 +30,11 @@ E2EE in `MessageService`, because that layer contains plaintext. Default and
 release profiles remain disabled until a reviewed P03 producer and production
 adapter provide opaque bundles and durable receipts.
 
-Account restore uses recovery phrase input only. Session ID derivation is deterministic and crypto-backed (`PBKDF2-HMAC-SHA512` seed material -> Ed25519 keypair public key -> `05` Session ID), while raw Session ID login is intentionally blocked.
+Account restore accepts only the current canonical 13-word checksummed recovery
+phrase. Twelve-word Deep phrases and raw Session ID login are intentionally
+unsupported. Session ID derivation is deterministic and crypto-backed
+(`PBKDF2-HMAC-SHA512` seed material -> Ed25519 keypair public key -> `05`
+Session ID).
 During restore, runtime attempts a network profile display-name lookup (`IRecoveryProfileLookup`) with timeout before falling back to manual display-name input.
 
 E4 adds group admin/member-state lifecycle behavior into `ConversationService`: group rename, role promotion/demotion with last-admin safeguards, pending-removal updates, member removal, leave, destroy, group list/get APIs, and live local group-state publication/reception through Session storage.
@@ -40,10 +44,13 @@ E4 adds group admin/member-state lifecycle behavior into `ConversationService`: 
 ## Session-Specific Decisions
 
 - Account Session IDs use the `05` prefix; blinded IDs with `15`/`25` parse as valid contacts.
-- Groups v2 use `03` conversation IDs. Legacy groups are modeled as read-only conversations.
+- Groups v2 use `03` conversation IDs. There is no legacy-group conversation
+  placeholder or read-only compatibility branch.
 - Groups v2 force disappearing messages to delete-after-send. Communities keep disappearing messages disabled.
 - Local group sync publishes group state to member inbox storage and group messages to the group storage stream; `SessionStorageGroupSyncTransport` uses compat-service public namespaces for unsigned local e2e until the secure signed namespace layer is wired.
-- Attachments are metadata/pointer records: local plaintext handling and encrypted upload/download belong behind platform/service implementations.
+- Attachments are metadata/pointer records. Encrypted remote payloads use only
+  the current `DEEPATT2` authenticated chunked format; other encrypted formats
+  fail closed.
 - Sync plans preserve the key Session ordering rule: group keys are requested last after group info and members.
 - Persistent startup treats state as fresh only when the main database, WAL,
   and SHM files are all absent. Fresh state is created and attested as v10 in

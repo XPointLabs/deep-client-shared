@@ -18,7 +18,7 @@ It intentionally ports shared behavior and boundaries rather than UI line-by-lin
 - Platform service boundaries for push, media codec, permissions, background tasks, share extension equivalents, and calls.
 - P03 opaque personal storage transport (`SessionStorageMessageTransport`) using explicit reviewed-provider boundaries for canonical DPB1/MCP1 deposit and retrieval. The raw Session-compatible wire shape remains available only through explicit `SessionStorageMetadataMode.LegacyCompatibility` for Debug/survival lanes; release defaults reject it.
 - Session-compatible group sync transport (`SessionStorageGroupSyncTransport`) for local real group-state and group-message exchange via `/storage/store` and `/storage/retrieve`.
-- Encrypted attachment file transport (`HttpAttachmentFileTransport`) for local real upload/download via `/file`.
+- Encrypted attachment file transport (`HttpAttachmentFileTransport`) using the authenticated chunked `DEEPATT2` format for local real upload/download via `/file`.
 - HTTP call signaling transport (`HttpCallSignalingTransport`) for real call offer/answer/bye exchange via `/api/calls`.
 - HTTP transport integration (`HttpSessionTransport`) for custom production message APIs, plus `StubSessionBackend` for isolated tests.
 - Opt-in P11 persistent outbox dispatcher for already-opaque ciphertext bundles. Activation requires the feature flag, an outbox-capable store, and an explicit `IExternalTransportOutboxExecutor` backed by an independently killable bounded worker process; an in-process task/thread adapter is rejected as insufficient. Outcome-unknown attempts are persistently quarantined from redispatch. No default profile enables it and no platform executor is currently shipped.

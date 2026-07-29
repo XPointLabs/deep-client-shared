@@ -13,7 +13,7 @@ public sealed class MembershipTrustServiceTests
     private static readonly DateTimeOffset FixtureNow = DateTimeOffset.FromUnixTimeSeconds(1010);
 
     [Fact]
-    public async Task DisabledAndMissingVerifier_FailClosedWithoutLegacyEligibility()
+    public async Task DisabledAndMissingVerifier_FailClosed()
     {
         var profile = FixtureProfile();
         var disabled = new MembershipTrustService(
@@ -23,7 +23,6 @@ public sealed class MembershipTrustServiceTests
             MembershipTrustOptions.DormantDefaults);
         var disabledStatus = await disabled.InitializeAsync(profile);
         Assert.Equal(MembershipTrustState.Disabled, disabledStatus.State);
-        Assert.False(disabledStatus.LegacyRollbackEligible);
 
         var enabledWithoutVerifier = new MembershipTrustService(
             new InMemorySessionStore(),
@@ -32,7 +31,6 @@ public sealed class MembershipTrustServiceTests
             EnabledOptions());
         var missingVerifier = await enabledWithoutVerifier.InitializeAsync(profile);
         Assert.Equal(MembershipTrustState.VerifierUnavailable, missingVerifier.State);
-        Assert.False(missingVerifier.LegacyRollbackEligible);
     }
 
     [Fact]
@@ -89,8 +87,6 @@ public sealed class MembershipTrustServiceTests
 
         Assert.Equal(expected, first.State);
         Assert.Equal(expected, second.State);
-        Assert.False(first.LegacyRollbackEligible);
-        Assert.False(second.LegacyRollbackEligible);
     }
 
     [Fact]
@@ -190,7 +186,6 @@ public sealed class MembershipTrustServiceTests
             MembershipContractCodec.EncodeSignedMembership(alternate));
         Assert.Equal(MembershipTrustState.ForkDetected, fork.State);
         Assert.False(fork.Usable);
-        Assert.False(fork.LegacyRollbackEligible);
 
         var afterRestart = Service(store, verifier);
         Assert.Equal(
@@ -210,7 +205,6 @@ public sealed class MembershipTrustServiceTests
         clock.UtcNow = FixtureNow.AddMinutes(-10);
         var rollback = await service.EvaluateAsync(profile);
         Assert.Equal(MembershipTrustState.ClockRollback, rollback.State);
-        Assert.False(rollback.LegacyRollbackEligible);
 
         clock.UtcNow = FixtureNow;
         var revoked = await service.ApplyRevocationAsync(
@@ -253,7 +247,6 @@ public sealed class MembershipTrustServiceTests
             ExpectedCanonicalGenesisSha256: MembershipContractHash.Sha256(genesisBytes),
             CanonicalSignatures: EncodeGenesisSignatures(signatures)));
         Assert.Equal(MembershipTrustState.ProtocolUnsupported, wrongPin.State);
-        Assert.False(wrongPin.LegacyRollbackEligible);
     }
 
     [Fact]

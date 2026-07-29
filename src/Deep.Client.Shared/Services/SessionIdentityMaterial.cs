@@ -77,6 +77,7 @@ internal sealed class SessionIdentityMaterial : IDisposable
     public static SessionIdentityMaterial FromRecoveryPhrase(string recoveryPhrase)
     {
         var normalized = NormalizeRecoveryPhrase(recoveryPhrase);
+        SessionAccountService.ValidateRecoveryPhrase(normalized);
         byte[]? mnemonicBytes = null;
         byte[]? salt = null;
         byte[]? seed = null;

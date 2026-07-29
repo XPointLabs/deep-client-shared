@@ -123,8 +123,8 @@ baseline. They are created only with a wholly fresh database and are never
 added, altered, or backfilled on open. Any older or structurally incompatible
 database requires an explicit local reset. Account sign-out intentionally
 preserves trust profiles inside an already attested v10 database. Disabling P07
-leaves those baseline tables dormant; it does not delete them or activate
-legacy bootstrap.
+leaves those baseline tables dormant; it does not delete them or enable a
+rollback path.
 
 Remaining blockers include an approved production signature profile and
 external review, signed live bootstrap/checkpoints, P06/P07B source policy,

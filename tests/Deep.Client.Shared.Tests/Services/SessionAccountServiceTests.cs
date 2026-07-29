@@ -10,7 +10,7 @@ namespace Deep.Client.Shared.Tests.Services;
 
 public sealed class SessionAccountServiceTests
 {
-    private const string ValidRecoveryPhrase = "amber anchor april arrow atom aurora autumn badge bamboo beacon berry blade";
+    private const string ValidRecoveryPhrase = "amaze buffet cake entrance symptoms tiger lamb maze nestle python dusted faxed faxed";
 
     [Fact]
     public async Task LoginWithSameRecoveryPhrase_IsDeterministic()
@@ -26,15 +26,17 @@ public sealed class SessionAccountServiceTests
     }
 
     [Fact]
-    public async Task Login_NormalizesUnicodeWhitespaceInLegacyTwelveWordPhrase()
+    public async Task Login_RejectsTwelveWordPhrase()
     {
         var runtime = ClientRuntime.CreateStubbed();
-        var phraseWithMixedWhitespace = WithMixedUnicodeWhitespace(ValidRecoveryPhrase.ToUpperInvariant());
 
-        var account = await runtime.Accounts.LoginAsync(phraseWithMixedWhitespace, "Alice");
+        var exception = await Assert.ThrowsAsync<ArgumentException>(
+            () => runtime.Accounts.LoginAsync(
+                "amber anchor april arrow atom aurora autumn badge bamboo beacon berry blade",
+                "Alice"));
 
-        Assert.Equal(DeriveExpectedStandardSessionId(ValidRecoveryPhrase), account.SessionId.Value);
-        Assert.Equal(ValidRecoveryPhrase, await runtime.Accounts.GetRecoveryPhraseAsync());
+        Assert.Contains("must contain 13 words", exception.Message, StringComparison.Ordinal);
+        Assert.Null(await runtime.Accounts.GetRecoveryPhraseAsync());
     }
 
     [Fact]
@@ -81,6 +83,16 @@ public sealed class SessionAccountServiceTests
         Assert.Equal(
             "amaze buffet cake entrance symptoms tiger lamb maze nestle python dusted faxed faxed",
             phrase);
+    }
+
+    [Fact]
+    public void LegacyTwelveWordPhraseCannotCreateIdentityMaterial()
+    {
+        const string legacy =
+            "amber anchor april arrow atom aurora autumn badge bamboo beacon berry blade";
+
+        Assert.False(SessionAccountService.IsCanonicalRecoveryPhrase(legacy));
+        Assert.Throws<ArgumentException>(() => new SessionIdentityProvider(legacy));
     }
 
     [Fact]

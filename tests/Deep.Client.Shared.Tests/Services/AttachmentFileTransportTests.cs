@@ -1,4 +1,5 @@
 ﻿using System.Net;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Deep.Client.Shared.Domain;
@@ -90,6 +91,47 @@ public sealed class AttachmentFileTransportTests
         Assert.Equal(400, metadata.Width);
         Assert.Equal(240, metadata.Height);
         Assert.Equal("image/png", metadata.ContentType);
+    }
+
+    [Fact]
+    public async Task HttpAttachmentFileTransport_RejectsSingleShotCiphertextWithoutCurrentMagic()
+    {
+        var plain = Encoding.UTF8.GetBytes("single-shot attachment");
+        var key = Enumerable.Range(0, 32).Select(static value => (byte)value).ToArray();
+        var nonce = Enumerable.Range(32, 12).Select(static value => (byte)value).ToArray();
+        var cipher = new byte[plain.Length];
+        var tag = new byte[16];
+        using (var aes = new AesGcm(key, tag.Length))
+        {
+            aes.Encrypt(nonce, plain, cipher, tag);
+        }
+        var singleShotPayload = new byte[nonce.Length + tag.Length + cipher.Length];
+        nonce.CopyTo(singleShotPayload, 0);
+        tag.CopyTo(singleShotPayload, nonce.Length);
+        cipher.CopyTo(singleShotPayload, nonce.Length + tag.Length);
+
+        using var client = new HttpClient(new FakeHandler((_, _) =>
+            new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(singleShotPayload)
+            }))
+        {
+            BaseAddress = new Uri("https://file.local/")
+        };
+        var transport = new HttpAttachmentFileTransport(
+            client,
+            new HttpAttachmentFileTransportOptions("https://file.local"));
+        var metadata = new AttachmentMetadata(
+            "file-single-shot",
+            "single-shot.bin",
+            "application/octet-stream",
+            plain.Length,
+            new Uri("https://file.local/file/file-single-shot"),
+            Convert.ToBase64String(key),
+            Convert.ToBase64String(SHA256.HashData(plain)));
+
+        await Assert.ThrowsAsync<CryptographicException>(
+            () => transport.DownloadAsync(metadata));
     }
 
     [Theory]

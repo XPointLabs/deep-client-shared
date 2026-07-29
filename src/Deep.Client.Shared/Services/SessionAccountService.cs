@@ -70,20 +70,6 @@ public sealed class SessionAccountService
     {
     }
 
-    private static readonly string[] LegacyRecoveryWordList =
-    [
-        "amber", "anchor", "april", "arrow", "atom", "aurora", "autumn", "badge",
-        "bamboo", "beacon", "berry", "blade", "blossom", "breeze", "bridge", "cactus",
-        "candle", "canyon", "caper", "carbon", "cedar", "chisel", "cliff", "cloud",
-        "cobalt", "comet", "coral", "crown", "dawn", "delta", "desert", "ember",
-        "falcon", "fern", "fjord", "frost", "glacier", "harbor", "hazel", "horizon",
-        "island", "juniper", "keystone", "lagoon", "lantern", "lilac", "lotus", "marble",
-        "meadow", "meteor", "midnight", "mist", "nectar", "north", "oasis", "onyx",
-        "orchid", "pebble", "phoenix", "pine", "quartz", "river", "sable", "saffron",
-        "sage", "scarlet", "sierra", "signal", "silver", "spruce", "summit", "sunset",
-        "tempest", "thistle", "timber", "topaz", "valley", "velvet", "violet", "willow"
-    ];
-
     private static readonly string[] RecoveryWordList = LoadRecoveryWordList();
     private static readonly IReadOnlyDictionary<string, int> RecoveryWordIndexes = RecoveryWordList
         .Select(static (word, index) => new KeyValuePair<string, int>(word, index))
@@ -178,6 +164,43 @@ public sealed class SessionAccountService
 
     public Task<string?> GetRecoveryPhraseAsync(CancellationToken cancellationToken = default) =>
         settings.GetAsync<string>(ActiveRecoveryPhraseKey, cancellationToken);
+
+    public async Task<bool> HasUsableActiveIdentityAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var account = await GetActiveAccountAsync(cancellationToken).ConfigureAwait(false);
+        if (account is null)
+        {
+            return false;
+        }
+
+        var phrase = await GetRecoveryPhraseAsync(cancellationToken).ConfigureAwait(false);
+        if (!IsCanonicalRecoveryPhrase(phrase))
+        {
+            return false;
+        }
+
+        return DeriveSessionIdFromRecoveryPhrase(
+            NormalizeRecoveryPhrase(phrase!)) == account.SessionId;
+    }
+
+    public static bool IsCanonicalRecoveryPhrase(string? phrase)
+    {
+        if (string.IsNullOrWhiteSpace(phrase))
+        {
+            return false;
+        }
+
+        try
+        {
+            ValidateRecoveryPhrase(NormalizeRecoveryPhrase(phrase));
+            return true;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+    }
 
     public async Task<SessionAccount> UpdateDisplayNameAsync(string displayName, CancellationToken cancellationToken = default)
     {
@@ -523,26 +546,16 @@ public sealed class SessionAccountService
         return normalized.Length == 66 && normalized.All(Uri.IsHexDigit);
     }
 
-    private static string NormalizeRecoveryPhrase(string phrase) =>
+    internal static string NormalizeRecoveryPhrase(string phrase) =>
         SessionIdentityMaterial.NormalizeRecoveryPhrase(phrase);
 
-    private static void ValidateRecoveryPhrase(string normalizedPhrase)
+    internal static void ValidateRecoveryPhrase(string normalizedPhrase)
     {
         var words = normalizedPhrase.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-        if (words.Length == 12)
-        {
-            if (words.Any(word => !LegacyRecoveryWordList.Contains(word, StringComparer.Ordinal)))
-            {
-                throw new ArgumentException("Recovery phrase contains invalid legacy words.", nameof(normalizedPhrase));
-            }
-
-            return;
-        }
-
         if (words.Length != RecoveryPhraseWordCount)
         {
             throw new ArgumentException(
-                $"Recovery phrase must contain {RecoveryPhraseWordCount} words, or 12 words for a legacy Deep account.",
+                $"Recovery phrase must contain {RecoveryPhraseWordCount} words.",
                 nameof(normalizedPhrase));
         }
 

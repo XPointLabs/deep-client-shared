@@ -11,9 +11,9 @@ namespace Deep.Client.Shared.Tests.Services;
 public sealed partial class MetadataPrivacyCharacterizationTests
 {
     private const string AlicePhrase =
-        "amber anchor april arrow atom aurora autumn badge bamboo beacon berry blade";
+        "amaze buffet cake entrance symptoms tiger lamb maze nestle python dusted faxed faxed";
     private const string BobPhrase =
-        "cactus canyon cedar circle cloud comet coral crystal dawn delta dune ember";
+        "update vague zinger boxes ornament renting glass gained island nabbing afield calamity nabbing";
     private const string MetadataGate = "DEEP_SURVIVAL_METADATA_GATE";
 
     private const int SenderSessionIdOffset = 8;

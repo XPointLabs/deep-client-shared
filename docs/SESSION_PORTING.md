@@ -32,11 +32,11 @@ Use `deep-protocol` for protocol and crypto semantics. Do not recreate protocol 
 
 ## Domain Mapping
 
-- Session IDs and account material -> `Domain/Identifiers.cs`, `Domain/SessionAccount.cs`, `Services/SessionIdentityMaterial.cs`.
+- Session IDs and account material -> `Domain/Identifiers.cs`, `Domain/SessionAccount.cs`, `Services/SessionIdentityMaterial.cs`. Restore accepts only the current canonical 13-word checksummed phrase.
 - Contacts/conversations -> `Domain/Contacts.cs`, `Domain/ConversationDomain.cs`, `Services/ConversationService.cs`.
 - Messages/read/disappearing -> `Domain/Messages.cs`, `Services/MessageService.cs`.
-- Groups v2 scaffolding/member roles -> `Domain/Groups.cs`, `Services/ConversationService.cs`.
-- Attachments -> `Domain/Attachments.cs` plus platform media boundaries.
+- Groups v2 scaffolding/member roles -> `Domain/Groups.cs`, `Services/ConversationService.cs`; legacy-group placeholders are not supported.
+- Attachments -> `Domain/Attachments.cs` plus platform media boundaries; encrypted downloads accept only the authenticated chunked `DEEPATT2` format.
 - Push -> `Services/PushSubscriptionTransport.cs`, notification planning, and MAUI push adapters.
 - Calls -> `Services/RealtimeCallService.cs` and `Platform/PlatformServiceBoundaries.cs`.
 - Local state -> `Persistence/*`.

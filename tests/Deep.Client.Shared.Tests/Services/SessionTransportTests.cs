@@ -77,7 +77,7 @@ public sealed class SessionTransportTests
     {
         var sender = SessionId.CreateNew();
         using var recipientIdentity = new SessionIdentityProvider(
-            "amber anchor april arrow atom aurora autumn badge bamboo beacon berry blade");
+            "amaze buffet cake entrance symptoms tiger lamb maze nestle python dusted faxed faxed");
         var recipient = recipientIdentity.SessionId;
         var storedMessages = new List<JsonElement>();
         var retrieveRequests = new List<JsonElement>();
@@ -166,7 +166,7 @@ public sealed class SessionTransportTests
     public async Task SessionStorageMessageTransport_RetrievePreservesServerCursorOrder()
     {
         using var recipientIdentity = new SessionIdentityProvider(
-            "amber anchor april arrow atom aurora autumn badge bamboo beacon berry blade");
+            "amaze buffet cake entrance symptoms tiger lamb maze nestle python dusted faxed faxed");
         var sender = SessionId.CreateNew();
         var stored = new List<JsonElement>();
 
@@ -243,7 +243,7 @@ public sealed class SessionTransportTests
     {
         var sender = SessionId.CreateNew();
         using var recipientIdentity = new SessionIdentityProvider(
-            "amber anchor april arrow atom aurora autumn badge bamboo beacon berry blade");
+            "amaze buffet cake entrance symptoms tiger lamb maze nestle python dusted faxed faxed");
         var recipient = recipientIdentity.SessionId;
         JsonElement? storedMessage = null;
         var rpcMethods = new List<string>();
@@ -354,9 +354,9 @@ public sealed class SessionTransportTests
     public async Task RoutedOpaqueStorage_DepositAndRetrieveHideRawIdentityAndRotateAttemptMaterial()
     {
         using var sender = new SessionIdentityProvider(
-            "amber anchor april arrow atom aurora autumn badge bamboo beacon berry blade");
+            "amaze buffet cake entrance symptoms tiger lamb maze nestle python dusted faxed faxed");
         using var recipient = new SessionIdentityProvider(
-            "cactus canyon cedar circle cloud comet coral crystal dawn delta dune ember");
+            "update vague zinger boxes ornament renting glass gained island nabbing afield calamity nabbing");
         var finalRequests = new List<JsonElement>();
         var outerRequests = new List<string>();
         var onionRoute = new TestOnionRoute();

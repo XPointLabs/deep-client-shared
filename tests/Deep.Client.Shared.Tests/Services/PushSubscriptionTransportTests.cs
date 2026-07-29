@@ -13,7 +13,7 @@ namespace Deep.Client.Shared.Tests.Services;
 
 public sealed class PushSubscriptionTransportTests
 {
-    private const string ValidRecoveryPhrase = "amber anchor april arrow atom aurora autumn badge bamboo beacon berry blade";
+    private const string ValidRecoveryPhrase = "amaze buffet cake entrance symptoms tiger lamb maze nestle python dusted faxed faxed";
 
     [Fact]
     public async Task HttpPushSubscriptionTransport_UsesBackendContractJson()

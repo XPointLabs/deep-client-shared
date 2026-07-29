@@ -21,9 +21,8 @@ if ($runtime -match 'MembershipTrust|IMembershipSignatureVerifier') {
 if ($production -match 'FixtureMembershipVerifier|DeterministicMembershipVerifier|MembershipSigningDomains\.Frame') {
     throw 'P07 trust gate: production fixture verifier or signing helper detected.'
 }
-if ($flags -notmatch 'MembershipTrustEnabled = false' -or
-    $flags -notmatch 'LegacyEmbeddedBootstrapRollbackAllowed = false') {
-    throw 'P07 trust gate: dormant flags must remain false.'
+if ($flags -notmatch 'MembershipTrustEnabled = false') {
+    throw 'P07 trust gate: dormant trust flag must remain false.'
 }
 if ($p07Production -match 'https?://|(?:\d{1,3}\.){3}\d{1,3}') {
     throw 'P07 trust gate: endpoint material is forbidden in P07 production source.'

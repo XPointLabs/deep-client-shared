@@ -73,8 +73,6 @@ public sealed record MembershipTrustOptions
 {
     public bool Enabled { get; init; }
 
-    public bool LegacyEmbeddedBootstrapRollbackAllowed { get; init; }
-
     public ushort ClientProtocol { get; init; } = 2;
 
     public TimeSpan AllowedClockSkew { get; init; } = TimeSpan.Zero;
@@ -91,8 +89,7 @@ public sealed record MembershipTrustOptions
 public sealed record MembershipTrustStatus(
     MembershipTrustState State,
     MembershipTrustEvent Event,
-    bool Usable,
-    bool LegacyRollbackEligible)
+    bool Usable)
 {
     public static MembershipTrustStatus For(
         MembershipTrustState state,
@@ -100,8 +97,7 @@ public sealed record MembershipTrustStatus(
         new(
             state,
             @event,
-            state == MembershipTrustState.Healthy,
-            LegacyRollbackEligible: false);
+            state == MembershipTrustState.Healthy);
 }
 
 public sealed record MembershipTrustRecord

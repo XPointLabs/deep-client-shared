@@ -144,6 +144,7 @@ public sealed partial class SqliteSessionStore :
 
     public async Task UpsertAsync(Conversation conversation, CancellationToken cancellationToken = default)
     {
+        EnsureSupportedConversationKind(conversation.Kind);
         const string sql = """
             INSERT INTO conversations (id, updated_at, payload_json)
             VALUES ($id, $updatedAt, $payload)
@@ -164,7 +165,7 @@ public sealed partial class SqliteSessionStore :
     {
         const string sql = "SELECT payload_json FROM conversations WHERE id = $id;";
         var payload = await ExecuteScalarAsync<string?>(sql, cancellationToken, ("$id", id.Value)).ConfigureAwait(false);
-        return payload is null ? null : JsonSerializer.Deserialize<Conversation>(payload, SerializerOptions);
+        return payload is null ? null : DeserializeConversation(payload);
     }
 
     async IAsyncEnumerable<Conversation> IConversationRepository.ListAsync([EnumeratorCancellation] CancellationToken cancellationToken)
@@ -172,7 +173,7 @@ public sealed partial class SqliteSessionStore :
         const string sql = "SELECT payload_json FROM conversations ORDER BY updated_at DESC;";
         foreach (var payload in await QueryJsonAsync(sql, cancellationToken).ConfigureAwait(false))
         {
-            yield return JsonSerializer.Deserialize<Conversation>(payload, SerializerOptions)!;
+            yield return DeserializeConversation(payload);
         }
     }
 
@@ -845,11 +846,7 @@ public sealed partial class SqliteSessionStore :
                 await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
                 while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
                 {
-                    var conversation = JsonSerializer.Deserialize<Conversation>(reader.GetString(0), SerializerOptions);
-                    if (conversation is not null)
-                    {
-                        conversationItems.Add(conversation);
-                    }
+                    conversationItems.Add(DeserializeConversation(reader.GetString(0)));
                 }
             }
 
@@ -952,14 +949,7 @@ public sealed partial class SqliteSessionStore :
                     ConversationSettings.Default(ConversationKind.OneToOne),
                     now,
                     now)
-                : JsonSerializer.Deserialize<Conversation>(metadata.ConversationPayload, SerializerOptions)
-                    ?? new Conversation(
-                        conversationId,
-                        ConversationKind.OneToOne,
-                        desiredDisplayName,
-                        ConversationSettings.Default(ConversationKind.OneToOne),
-                        now,
-                        now);
+                : DeserializeConversation(metadata.ConversationPayload);
             var originalConversation = conversation;
             if (!string.Equals(conversation.DisplayName, desiredDisplayName, StringComparison.Ordinal))
             {
@@ -4970,6 +4960,25 @@ public sealed partial class SqliteSessionStore :
 
     private static int PrimarySqliteErrorCode(SqliteException exception) =>
         exception.SqliteExtendedErrorCode & 0xff;
+
+    private static Conversation DeserializeConversation(string payload)
+    {
+        var conversation = JsonSerializer.Deserialize<Conversation>(payload, SerializerOptions)
+            ?? throw new InvalidDataException("Stored conversation payload is null.");
+        EnsureSupportedConversationKind(conversation.Kind);
+        return conversation;
+    }
+
+    private static void EnsureSupportedConversationKind(ConversationKind kind)
+    {
+        if (kind is not (
+                ConversationKind.OneToOne or
+                ConversationKind.GroupV2 or
+                ConversationKind.Community))
+        {
+            throw new InvalidDataException("Stored conversation kind is unsupported.");
+        }
+    }
 
     private static bool MustPropagateWithoutReset(SqliteException exception) =>
         PrimarySqliteErrorCode(exception) is

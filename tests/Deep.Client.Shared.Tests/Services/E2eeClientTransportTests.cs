@@ -9,9 +9,9 @@ namespace Deep.Client.Shared.Tests.Services;
 
 public sealed class E2eeClientTransportTests
 {
-    private const string AlicePhrase = "amber anchor april arrow atom aurora autumn badge bamboo beacon berry blade";
-    private const string BobPhrase = "cactus canyon cedar circle cloud comet coral crystal dawn delta dune ember";
-    private const string CharliePhrase = "fabric feather fern flame forest frost galaxy garden glacier grove harbor hazel";
+    private const string AlicePhrase = "amaze buffet cake entrance symptoms tiger lamb maze nestle python dusted faxed faxed";
+    private const string BobPhrase = "update vague zinger boxes ornament renting glass gained island nabbing afield calamity nabbing";
+    private const string CharliePhrase = "sickness rhino tilt yeti innocent network dogs boat feast ionic subtly zodiac ionic";
     private static readonly DateTimeOffset Now = DateTimeOffset.Parse("2026-07-10T10:00:00Z");
     private static readonly ConversationId GroupId = ConversationId.Parse("03" + new string('c', 64));
     private static readonly TimeSpan ConcurrencyTimeout = TimeSpan.FromSeconds(5);

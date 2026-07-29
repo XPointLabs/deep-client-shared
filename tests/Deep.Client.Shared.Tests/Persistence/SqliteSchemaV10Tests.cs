@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Reflection;
+using Deep.Client.Shared.Domain;
 using Deep.Client.Shared.Persistence;
 using Microsoft.Data.Sqlite;
 
@@ -256,6 +257,47 @@ public sealed class SqliteSchemaV10Tests
             Assert.Equal(
                 "uncommitted",
                 await first.GetAsync<string>("writer.marker"));
+        }
+        finally
+        {
+            DeleteFiles(path);
+        }
+    }
+
+    [Fact]
+    public async Task RemovedConversationKindIsRejectedOnWriteAndRead()
+    {
+        var path = TempPath("removed-conversation-kind");
+        var now = DateTimeOffset.Parse("2026-07-29T00:00:00Z");
+        var id = ConversationId.ForCommunity("https://community.invalid", "room");
+        var valid = new Conversation(
+            id,
+            ConversationKind.Community,
+            "Community",
+            ConversationSettings.Default(ConversationKind.Community),
+            now,
+            now);
+        try
+        {
+            using var store = new SqliteSessionStore(path);
+            await store.UpsertAsync(valid);
+
+            var invalid = valid with { Kind = (ConversationKind)2 };
+            await Assert.ThrowsAsync<InvalidDataException>(
+                () => store.UpsertAsync(invalid));
+
+            using (var fixture = Open(path))
+            {
+                Execute(
+                    fixture,
+                    """
+                    UPDATE conversations
+                    SET payload_json = json_set(payload_json, '$.kind', 2);
+                    """);
+            }
+
+            await Assert.ThrowsAsync<InvalidDataException>(
+                () => store.GetAsync(id));
         }
         finally
         {

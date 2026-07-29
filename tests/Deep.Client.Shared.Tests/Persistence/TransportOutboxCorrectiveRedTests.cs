@@ -1,7 +1,6 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using Deep.Client.Shared.Features;
 using Deep.Client.Shared.Persistence;
 using Microsoft.Data.Sqlite;
 
@@ -324,51 +323,9 @@ public sealed class TransportOutboxCorrectiveRedTests
     }
 
     [Fact]
-    public void CompatibilitySurfacesRemainSourceAndBinaryStable()
+    public void TransportOutboxRepositoryRemainsAnExplicitCapability()
     {
         Assert.False(typeof(ITransportOutboxRepository).IsAssignableFrom(typeof(ILocalSessionStore)));
-        Assert.NotNull(typeof(ClientFeatureFlags).GetConstructor(
-        [
-            typeof(bool), typeof(bool), typeof(bool), typeof(bool), typeof(bool),
-            typeof(bool), typeof(bool), typeof(bool), typeof(bool), typeof(bool),
-            typeof(bool)
-        ]));
-        Assert.NotNull(typeof(ClientFeatureFlags).GetMethod(
-            "Deconstruct",
-            [
-                typeof(bool).MakeByRefType(), typeof(bool).MakeByRefType(),
-                typeof(bool).MakeByRefType(), typeof(bool).MakeByRefType(),
-                typeof(bool).MakeByRefType(), typeof(bool).MakeByRefType(),
-                typeof(bool).MakeByRefType(), typeof(bool).MakeByRefType(),
-                typeof(bool).MakeByRefType(), typeof(bool).MakeByRefType(),
-                typeof(bool).MakeByRefType()
-            ]));
-
-        var flags = new ClientFeatureFlags(
-            true, false, true, false, true, false, true, false, true, false, true);
-        var (
-            groups,
-            communities,
-            calls,
-            share,
-            attachmentEncryption,
-            backgroundSync,
-            push,
-            transportRequired,
-            stubAllowed,
-            membershipTrust,
-            rollbackAllowed) = flags;
-        Assert.True(groups);
-        Assert.False(communities);
-        Assert.True(calls);
-        Assert.False(share);
-        Assert.True(attachmentEncryption);
-        Assert.False(backgroundSync);
-        Assert.True(push);
-        Assert.False(transportRequired);
-        Assert.True(stubAllowed);
-        Assert.False(membershipTrust);
-        Assert.True(rollbackAllowed);
     }
 
     [Fact]

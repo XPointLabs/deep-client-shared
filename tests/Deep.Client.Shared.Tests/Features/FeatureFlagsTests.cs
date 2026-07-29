@@ -33,26 +33,13 @@ public sealed class FeatureFlagsTests
     }
 
     [Fact]
-    public void MembershipTrustAndLegacyRollback_AreDormantInEveryDefault()
+    public void PreProductionFeatures_AreDormantInEveryDefault()
     {
         Assert.False(ClientFeatureFlags.Defaults.MembershipTrustEnabled);
-        Assert.False(ClientFeatureFlags.Defaults.LegacyEmbeddedBootstrapRollbackAllowed);
         Assert.False(ClientFeatureFlags.ReleaseDefaults.MembershipTrustEnabled);
-        Assert.False(ClientFeatureFlags.ReleaseDefaults.LegacyEmbeddedBootstrapRollbackAllowed);
         Assert.False(ClientFeatureFlags.Defaults.PersistentTransportOutboxEnabled);
         Assert.False(ClientFeatureFlags.ReleaseDefaults.PersistentTransportOutboxEnabled);
         Assert.False(ClientFeatureFlags.Defaults.ClientMailboxAdapterEnabled);
         Assert.False(ClientFeatureFlags.ReleaseDefaults.ClientMailboxAdapterEnabled);
-    }
-
-    [Fact]
-    public void ExistingPositionalArguments_RemainSourceCompatible()
-    {
-        var flags = new ClientFeatureFlags(
-            true, false, false, false, true, true, true, false, true);
-
-        Assert.False(flags.MembershipTrustEnabled);
-        Assert.False(flags.LegacyEmbeddedBootstrapRollbackAllowed);
-        Assert.False(flags.PersistentTransportOutboxEnabled);
     }
 }

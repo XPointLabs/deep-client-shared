@@ -5,6 +5,15 @@ namespace Deep.Client.Shared.Tests.Domain;
 public sealed class DomainRulesTests
 {
     [Fact]
+    public void ConversationKindKeepsSupportedWireValuesAndLeavesLegacyValueInvalid()
+    {
+        Assert.Equal(0, (int)ConversationKind.OneToOne);
+        Assert.Equal(1, (int)ConversationKind.GroupV2);
+        Assert.Equal(3, (int)ConversationKind.Community);
+        Assert.False(Enum.IsDefined((ConversationKind)2));
+    }
+
+    [Fact]
     public void GroupV2DisappearingMessagesForceDeleteAfterSend()
     {
         var settings = DisappearingMessageSettings.Create(

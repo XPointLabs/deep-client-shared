@@ -6,6 +6,22 @@ namespace Deep.Client.Shared.Tests.Services;
 public sealed class SyncAndNotificationTests
 {
     [Fact]
+    public void RemovedLegacyConversationKindFailsClosed()
+    {
+        var now = DateTimeOffset.Parse("2026-05-28T00:00:00Z");
+        var conversation = new Conversation(
+            ConversationId.CreateGroupV2(),
+            (ConversationKind)2,
+            "Removed",
+            ConversationSettings.Default((ConversationKind)2),
+            now,
+            now);
+
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => new SyncOrchestrator().CreateConversationPlan(conversation));
+    }
+
+    [Fact]
     public void GroupSyncPlanRequestsKeysLast()
     {
         var now = DateTimeOffset.Parse("2026-05-28T00:00:00Z");

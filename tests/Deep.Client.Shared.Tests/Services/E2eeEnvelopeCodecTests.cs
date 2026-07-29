@@ -8,9 +8,9 @@ namespace Deep.Client.Shared.Tests.Services;
 
 public sealed class E2eeEnvelopeCodecTests
 {
-    private const string AlicePhrase = "amber anchor april arrow atom aurora autumn badge bamboo beacon berry blade";
-    private const string BobPhrase = "cactus canyon cedar circle cloud comet coral crystal dawn delta dune ember";
-    private const string CharliePhrase = "fabric feather fern flame forest frost galaxy garden glacier grove harbor hazel";
+    private const string AlicePhrase = "amaze buffet cake entrance symptoms tiger lamb maze nestle python dusted faxed faxed";
+    private const string BobPhrase = "update vague zinger boxes ornament renting glass gained island nabbing afield calamity nabbing";
+    private const string CharliePhrase = "sickness rhino tilt yeti innocent network dogs boat feast ionic subtly zodiac ionic";
 
     private const int SenderSessionIdOffset = 8;
     private const int SenderEd25519Offset = 41;

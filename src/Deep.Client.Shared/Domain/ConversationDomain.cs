@@ -2,10 +2,9 @@
 
 public enum ConversationKind
 {
-    OneToOne,
-    GroupV2,
-    LegacyGroup,
-    Community
+    OneToOne = 0,
+    GroupV2 = 1,
+    Community = 3
 }
 
 public enum MessageDirection
@@ -94,8 +93,6 @@ public sealed record Conversation(
     public bool SupportsDisappearingMessages => Kind is ConversationKind.OneToOne or ConversationKind.GroupV2;
 
     public bool SupportsReadReceipts => Kind == ConversationKind.OneToOne;
-
-    public bool IsWritable => Kind != ConversationKind.LegacyGroup;
 
     public Conversation Touch(DateTimeOffset now) => this with { UpdatedAt = now };
 }

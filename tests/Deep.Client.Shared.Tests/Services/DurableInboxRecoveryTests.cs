@@ -8,8 +8,8 @@ namespace Deep.Client.Shared.Tests.Services;
 
 public sealed class DurableInboxRecoveryTests
 {
-    private const string AlicePhrase = "amber anchor april arrow atom aurora autumn badge bamboo beacon berry blade";
-    private const string BobPhrase = "cactus canyon cedar circle cloud comet coral crystal dawn delta dune ember";
+    private const string AlicePhrase = "amaze buffet cake entrance symptoms tiger lamb maze nestle python dusted faxed faxed";
+    private const string BobPhrase = "update vague zinger boxes ornament renting glass gained island nabbing afield calamity nabbing";
     private static readonly DateTimeOffset Now = DateTimeOffset.Parse("2026-07-10T10:00:00Z");
 
     [Theory]

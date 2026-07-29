@@ -14,7 +14,7 @@ public sealed class AvatarProfileTransportTests
     public async Task HttpAvatarProfileTransport_UsesAvatarBackendContract()
     {
         using var identity = new SessionIdentityProvider(
-            "amber anchor april arrow atom aurora autumn badge bamboo beacon berry blade");
+            "amaze buffet cake entrance symptoms tiger lamb maze nestle python dusted faxed faxed");
         var sessionId = identity.SessionId;
         var avatarBytes = new byte[] { 0x89, 0x50, 0x4e, 0x47, 0x01 };
         var seenUpload = false;

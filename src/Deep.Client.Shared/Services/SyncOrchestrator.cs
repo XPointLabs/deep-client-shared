@@ -47,7 +47,10 @@ public sealed class SyncOrchestrator
             ConversationKind.Community => new SyncPlan(conversation.Id, Sort([
                 new SyncNamespace(0, "CommunityMessages", 10, TimeSpan.FromDays(14), 10)
             ])),
-            _ => new SyncPlan(conversation.Id, [])
+            _ => throw new ArgumentOutOfRangeException(
+                nameof(conversation),
+                conversation.Kind,
+                "Unsupported conversation kind.")
         };
 
     private static IReadOnlyList<SyncNamespace> Sort(IEnumerable<SyncNamespace> namespaces) =>

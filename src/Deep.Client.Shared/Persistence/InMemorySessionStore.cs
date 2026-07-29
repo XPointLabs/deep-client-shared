@@ -56,6 +56,7 @@ public sealed partial class InMemorySessionStore :
 
     public Task UpsertAsync(Conversation conversation, CancellationToken cancellationToken = default)
     {
+        EnsureSupportedConversationKind(conversation.Kind);
         conversations[conversation.Id.Value] = conversation;
         PersistState();
         return Task.CompletedTask;
@@ -1864,6 +1865,17 @@ public sealed partial class InMemorySessionStore :
     private static string ReadCursorSettingKey(ConversationId conversationId) =>
         $"sync.read-cursor.{conversationId.Value}";
 
+    private static void EnsureSupportedConversationKind(ConversationKind kind)
+    {
+        if (kind is not (
+                ConversationKind.OneToOne or
+                ConversationKind.GroupV2 or
+                ConversationKind.Community))
+        {
+            throw new InvalidDataException("Conversation kind is unsupported.");
+        }
+    }
+
     private void LoadState()
     {
         if (statePath is null || !File.Exists(statePath))
@@ -1889,6 +1901,7 @@ public sealed partial class InMemorySessionStore :
 
         foreach (var conversation in snapshot.Conversations)
         {
+            EnsureSupportedConversationKind(conversation.Kind);
             conversations[conversation.Id.Value] = conversation;
         }
 
