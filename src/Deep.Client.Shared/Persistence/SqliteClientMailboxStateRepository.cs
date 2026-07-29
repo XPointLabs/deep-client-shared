@@ -11,16 +11,19 @@ namespace Deep.Client.Shared.Persistence;
 /// </summary>
 public sealed class SqliteClientMailboxStateRepository :
     IClientMailboxStateRepository,
+    IClientMailboxCredentialStateRepository,
     IDisposable
 {
-    private const int SchemaVersion = 6;
+    private const int SchemaVersion = 7;
     private static readonly string[] CurrentTables =
     [
         "client_mailbox_meta",
         "client_mailbox_traversal",
         "client_mailbox_inbox",
         "client_mailbox_expired_quarantine",
-        "client_mailbox_coordinator_journal"
+        "client_mailbox_coordinator_journal",
+        "client_mailbox_credentials",
+        "client_mailbox_replay_counters"
     ];
     private static readonly IReadOnlyDictionary<string, string> CurrentTableDefinitions =
         new Dictionary<string, string>(StringComparer.Ordinal)
@@ -71,6 +74,20 @@ public sealed class SqliteClientMailboxStateRepository :
                         CHECK(length(statement_digest) = 32),
                     expires_at BLOB NOT NULL CHECK(length(expires_at) = 8),
                     PRIMARY KEY(installation_scope, statement_key)
+                )
+                """
+            , ["client_mailbox_credentials"] = """
+                CREATE TABLE client_mailbox_credentials (
+                    id INTEGER PRIMARY KEY CHECK(id = 1),
+                    generation BLOB NOT NULL CHECK(length(generation) = 32),
+                    active_epoch BLOB NOT NULL CHECK(length(active_epoch) = 8),
+                    canonical_bundle BLOB NOT NULL CHECK(length(canonical_bundle) = 2216)
+                )
+                """
+            , ["client_mailbox_replay_counters"] = """
+                CREATE TABLE client_mailbox_replay_counters (
+                    grant_key BLOB PRIMARY KEY NOT NULL CHECK(length(grant_key) = 32),
+                    next_counter BLOB NOT NULL CHECK(length(next_counter) = 8)
                 )
                 """
         };
@@ -154,6 +171,7 @@ public sealed class SqliteClientMailboxStateRepository :
             Password = encryptionKey
         }.ToString();
         this.commitFault = commitFault;
+        PreflightExistingSchema(options.StatePath, encryptionKey);
         Initialize();
     }
 
@@ -246,6 +264,100 @@ public sealed class SqliteClientMailboxStateRepository :
             expiresAtUnixSeconds,
             nowUnixSeconds,
             cancellationToken);
+
+    public async Task ImportCredentialGenerationAsync(
+        MailboxCredentialGeneration generation,
+        MailboxCredentialImportPolicy policy,
+        CancellationToken cancellationToken = default)
+    {
+        var candidate = MailboxCredentialStateMachine.Import(generation, policy);
+        var bundle = MailboxCredentialBinaryCodec.Encode(candidate.Generation);
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            using var connection = Open(); using var transaction = connection.BeginTransaction(deferred: false);
+            using var read = connection.CreateCommand(); read.Transaction = transaction;
+            read.CommandText = "SELECT canonical_bundle FROM client_mailbox_credentials WHERE id = 1;";
+            var existing = read.ExecuteScalar() as byte[];
+            if (existing is not null)
+            {
+                if (!CryptographicOperations.FixedTimeEquals(existing, bundle))
+                    throw new InvalidOperationException("Mailbox credential generation changed unexpectedly.");
+                transaction.Commit(); return;
+            }
+            using var insert = connection.CreateCommand(); insert.Transaction = transaction;
+            insert.CommandText = "INSERT INTO client_mailbox_credentials(id, generation, active_epoch, canonical_bundle) VALUES(1, $generation, $epoch, $bundle);";
+            insert.Parameters.Add("$generation", SqliteType.Blob).Value = candidate.Generation.Generation.ToArray();
+            insert.Parameters.Add("$epoch", SqliteType.Blob).Value = U64(candidate.ActiveEpoch);
+            insert.Parameters.Add("$bundle", SqliteType.Blob).Value = bundle;
+            insert.ExecuteNonQuery(); commitFault?.Invoke(ClientMailboxCommitFaultPoint.BeforeCommit);
+            transaction.Commit(); commitFault?.Invoke(ClientMailboxCommitFaultPoint.AfterCommit);
+        }
+        finally { gate.Release(); }
+    }
+
+    public async Task<MailboxCredentialGeneration> ReadCredentialGenerationAsync(
+        CancellationToken cancellationToken = default)
+    {
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try { using var connection = Open(); return ReadCredentials(connection, null).Generation.Clone(); }
+        finally { gate.Release(); }
+    }
+
+    public async Task<ulong> ReadActiveCredentialEpochAsync(CancellationToken cancellationToken = default)
+    {
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try { using var connection = Open(); return ReadCredentials(connection, null).ActiveEpoch; }
+        finally { gate.Release(); }
+    }
+
+    public async Task SwitchCredentialEpochAsync(ulong epoch, ulong nowUnixSeconds,
+        CancellationToken cancellationToken = default)
+    {
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            using var connection = Open(); using var transaction = connection.BeginTransaction(deferred: false);
+            var state = ReadCredentials(connection, transaction); MailboxCredentialStateMachine.Switch(state, epoch, nowUnixSeconds);
+            using var update = connection.CreateCommand(); update.Transaction = transaction;
+            update.CommandText = "UPDATE client_mailbox_credentials SET active_epoch = $epoch WHERE id = 1;";
+            update.Parameters.Add("$epoch", SqliteType.Blob).Value = U64(state.ActiveEpoch);
+            update.ExecuteNonQuery(); commitFault?.Invoke(ClientMailboxCommitFaultPoint.BeforeCommit);
+            transaction.Commit(); commitFault?.Invoke(ClientMailboxCommitFaultPoint.AfterCommit);
+        }
+        finally { gate.Release(); }
+    }
+
+    public async Task<MailboxCredentialGrantLease> AllocateReplayCounterAsync(
+        MailboxCredentialGrantKind kind, ulong nowUnixSeconds,
+        CancellationToken cancellationToken = default)
+    {
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            using var connection = Open(); using var transaction = connection.BeginTransaction(deferred: false);
+            var state = ReadCredentials(connection, transaction);
+            var provisional = MailboxCredentialStateMachine.Allocate(state, kind, nowUnixSeconds);
+            var key = SHA256.HashData(provisional.CanonicalGrant.Span);
+            using var read = connection.CreateCommand(); read.Transaction = transaction;
+            read.CommandText = "SELECT next_counter FROM client_mailbox_replay_counters WHERE grant_key = $key;";
+            read.Parameters.Add("$key", SqliteType.Blob).Value = key;
+            var stored = read.ExecuteScalar() as byte[];
+            var counter = stored is null ? provisional.ReplayCounter : ReadU64(stored);
+            if (counter == 0 || counter == ulong.MaxValue)
+                throw new InvalidOperationException("Mailbox replay counter is exhausted.");
+            var lease = new MailboxCredentialGrantLease(kind, provisional.Epoch, counter,
+                provisional.CanonicalGrant.Span);
+            using var upsert = connection.CreateCommand(); upsert.Transaction = transaction;
+            upsert.CommandText = "INSERT INTO client_mailbox_replay_counters(grant_key, next_counter) VALUES($key, $counter) ON CONFLICT(grant_key) DO UPDATE SET next_counter = excluded.next_counter;";
+            upsert.Parameters.Add("$key", SqliteType.Blob).Value = key;
+            upsert.Parameters.Add("$counter", SqliteType.Blob).Value = U64(checked(counter + 1));
+            upsert.ExecuteNonQuery(); commitFault?.Invoke(ClientMailboxCommitFaultPoint.BeforeCommit);
+            transaction.Commit(); commitFault?.Invoke(ClientMailboxCommitFaultPoint.AfterCommit);
+            return lease;
+        }
+        finally { gate.Release(); }
+    }
 
     internal int InstallationTraversalCountForTests()
     {
@@ -444,8 +556,18 @@ public sealed class SqliteClientMailboxStateRepository :
                 CREATE INDEX IF NOT EXISTS ix_client_mailbox_journal_scope_expiry
                     ON client_mailbox_coordinator_journal(
                         installation_scope, expires_at);
+                CREATE TABLE IF NOT EXISTS client_mailbox_credentials (
+                    id INTEGER PRIMARY KEY CHECK(id = 1),
+                    generation BLOB NOT NULL CHECK(length(generation) = 32),
+                    active_epoch BLOB NOT NULL CHECK(length(active_epoch) = 8),
+                    canonical_bundle BLOB NOT NULL CHECK(length(canonical_bundle) = 2216)
+                );
+                CREATE TABLE IF NOT EXISTS client_mailbox_replay_counters (
+                    grant_key BLOB PRIMARY KEY NOT NULL CHECK(length(grant_key) = 32),
+                    next_counter BLOB NOT NULL CHECK(length(next_counter) = 8)
+                );
                 INSERT INTO client_mailbox_meta(id, schema_version)
-                VALUES(1, 6)
+                VALUES(1, 7)
                 ON CONFLICT(id) DO NOTHING;
                 """;
             command.ExecuteNonQuery();
@@ -453,9 +575,33 @@ public sealed class SqliteClientMailboxStateRepository :
         transaction.Commit();
     }
 
+    private static void PreflightExistingSchema(string statePath, string encryptionKey)
+    {
+        if (!File.Exists(statePath))
+        {
+            return;
+        }
+
+        using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = statePath,
+            Mode = SqliteOpenMode.ReadOnly,
+            Cache = SqliteCacheMode.Private,
+            Pooling = false,
+            Password = encryptionKey
+        }.ToString());
+        connection.Open();
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "PRAGMA query_only = ON;";
+            command.ExecuteNonQuery();
+        }
+        EnsureCurrentSchemaOrFreshDatabase(connection, transaction: null);
+    }
+
     private static void EnsureCurrentSchemaOrFreshDatabase(
         SqliteConnection connection,
-        SqliteTransaction transaction)
+        SqliteTransaction? transaction)
     {
         using var tables = connection.CreateCommand();
         tables.Transaction = transaction;
@@ -541,6 +687,24 @@ public sealed class SqliteClientMailboxStateRepository :
                     ("statement_digest", "BLOB", true, 0),
                     ("expires_at", "BLOB", true, 0)
                 ]) ||
+            !HasExactColumns(
+                connection,
+                transaction,
+                "client_mailbox_credentials",
+                [
+                    ("id", "INTEGER", false, 1),
+                    ("generation", "BLOB", true, 0),
+                    ("active_epoch", "BLOB", true, 0),
+                    ("canonical_bundle", "BLOB", true, 0)
+                ]) ||
+            !HasExactColumns(
+                connection,
+                transaction,
+                "client_mailbox_replay_counters",
+                [
+                    ("grant_key", "BLOB", true, 1),
+                    ("next_counter", "BLOB", true, 0)
+                ]) ||
             !HasExactSchemaDefinitions(
                 connection,
                 transaction,
@@ -554,7 +718,7 @@ public sealed class SqliteClientMailboxStateRepository :
 
     private static bool HasExactColumns(
         SqliteConnection connection,
-        SqliteTransaction transaction,
+        SqliteTransaction? transaction,
         string table,
         IReadOnlyList<(string Name, string Type, bool NotNull, int PrimaryKeyOrder)>
             expected)
@@ -586,7 +750,7 @@ public sealed class SqliteClientMailboxStateRepository :
 
     private static bool HasExactIndexes(
         SqliteConnection connection,
-        SqliteTransaction transaction)
+        SqliteTransaction? transaction)
     {
         using var indexes = connection.CreateCommand();
         indexes.Transaction = transaction;
@@ -648,7 +812,7 @@ public sealed class SqliteClientMailboxStateRepository :
 
     private static bool HasExactSchemaDefinitions(
         SqliteConnection connection,
-        SqliteTransaction transaction,
+        SqliteTransaction? transaction,
         string type,
         IReadOnlyDictionary<string, string> expected)
     {
@@ -1512,6 +1676,21 @@ public sealed class SqliteClientMailboxStateRepository :
             throw new InvalidDataException(
                 "Installation-global mailbox traversal metadata exceeded its persistent bound.");
         }
+    }
+
+    private static MailboxCredentialStoredState ReadCredentials(
+        SqliteConnection connection, SqliteTransaction? transaction)
+    {
+        using var command = connection.CreateCommand(); command.Transaction = transaction;
+        command.CommandText = "SELECT active_epoch, canonical_bundle FROM client_mailbox_credentials WHERE id = 1;";
+        using var reader = command.ExecuteReader();
+        if (!reader.Read() || reader.IsDBNull(0) || reader.IsDBNull(1))
+            throw new InvalidOperationException("Mailbox credentials are not installed.");
+        var active = ReadU64((byte[])reader.GetValue(0));
+        var generation = MailboxCredentialBinaryCodec.Decode((byte[])reader.GetValue(1));
+        if (active != generation.Current.Epoch && active != generation.Next.Epoch)
+            throw new InvalidDataException("Mailbox credential state is invalid.");
+        return new MailboxCredentialStoredState { Generation = generation, ActiveEpoch = active };
     }
 
     private static byte[] U64(ulong value)
