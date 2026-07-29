@@ -13,6 +13,24 @@ public sealed class P14A2PackageAndStaticGateTests
         "60ce2e3a5140f245d6bcfecf60fa456c26ffe730";
     private const string CarrierSource =
         "dfb182d65d3e8d3ee44a2246ae94c68159bc692d";
+    private static readonly ExpectedPackage[] ExpectedPackages =
+    [
+        new("Deep.Protocol", ProtocolVersion, 149_753,
+            "588a889f362a618bd06b8277fd4afc8b6c64ec37797f4cdf291af1865f0fd779",
+            ProtocolSource),
+        new("Deep.Protocol.Abstractions", ProtocolVersion, 24_952,
+            "af23f03aade18ee726d5a6345e2a613c91fbea0bf62d3d0431dd629062e603bd",
+            ProtocolSource),
+        new("Deep.Protocol.MembershipRoutes", ProtocolVersion, 12_871,
+            "16f4a0dd0c33461d85ed15bf69268e4b78b70617c059aa60d3b662d922155b96",
+            ProtocolSource),
+        new("Deep.Protocol.ProfileCarrier", CarrierVersion, 28_902,
+            "e2d03040daaf7c7fe29952db3cfbc3227fb9f0da42740b5f57f65a02ae8118a2",
+            CarrierSource),
+        new("Deep.Protocol.Protobuf", ProtocolVersion, 50_213,
+            "ec5478d4ebc03fba3a97a4e0675b0fbdac4bd43c4503ed39033e1b6e469f1250",
+            ProtocolSource)
+    ];
 
     [Fact]
     public void UnifiedP10b3PackageSetIsExactAndLocallyPinned()
@@ -31,7 +49,7 @@ public sealed class P14A2PackageAndStaticGateTests
             root.GetProperty("publication").GetString());
 
         var packages = root.GetProperty("packages").EnumerateArray().ToArray();
-        Assert.Equal(5, packages.Length);
+        Assert.Equal(ExpectedPackages.Length, packages.Length);
         var files = Directory.GetFiles(Path.Combine(vendor, "packages"), "*.nupkg")
             .Select(Path.GetFileName)
             .Order(StringComparer.Ordinal)
@@ -40,11 +58,16 @@ public sealed class P14A2PackageAndStaticGateTests
             packages.Select(value => Path.GetFileName(value.GetProperty("file").GetString()!))
                 .Order(StringComparer.Ordinal),
             files);
-        foreach (var package in packages)
+        foreach (var expected in ExpectedPackages)
         {
+            var package = Assert.Single(packages,
+                value => value.GetProperty("id").GetString() == expected.Id);
             var path = Path.Combine(vendor, package.GetProperty("file").GetString()!);
-            Assert.Equal(package.GetProperty("bytes").GetInt64(), new FileInfo(path).Length);
-            Assert.Equal(package.GetProperty("sha256").GetString(), Sha256(path));
+            Assert.Equal(expected.Version, package.GetProperty("version").GetString());
+            Assert.Equal(expected.Bytes, package.GetProperty("bytes").GetInt64());
+            Assert.Equal(expected.Sha256, package.GetProperty("sha256").GetString());
+            Assert.Equal(expected.Bytes, new FileInfo(path).Length);
+            Assert.Equal(expected.Sha256, Sha256(path));
         }
     }
 
@@ -87,27 +110,30 @@ public sealed class P14A2PackageAndStaticGateTests
     }
 
     [Fact]
-    public void CarrierNuspecSeparatesCarrierIdentityFromProtocolDependency()
+    public void NuspecIdentityVersionAndRepositoryAreHardPinned()
     {
-        var package = Path.Combine(
-            RepositoryRoot(),
-            "vendor",
-            "p10b3",
-            "packages",
-            $"Deep.Protocol.ProfileCarrier.{CarrierVersion}.nupkg");
-        using var archive = ZipFile.OpenRead(package);
-        var nuspec = Assert.Single(archive.Entries,
-            value => value.FullName == "Deep.Protocol.ProfileCarrier.nuspec");
-        using var stream = nuspec.Open();
-        var xml = XDocument.Load(stream);
-        XNamespace ns = xml.Root!.Name.Namespace;
-        var metadata = xml.Root.Element(ns + "metadata")!;
-        Assert.Equal(
-            CarrierSource,
-            metadata.Element(ns + "repository")!.Attribute("commit")!.Value);
-        var protocol = Assert.Single(metadata.Descendants(ns + "dependency"),
-            value => value.Attribute("id")!.Value == "Deep.Protocol");
-        Assert.Equal($"[{ProtocolVersion}]", protocol.Attribute("version")!.Value);
+        foreach (var expected in ExpectedPackages)
+        {
+            var package = Path.Combine(
+                RepositoryRoot(),
+                "vendor",
+                "p10b3",
+                "packages",
+                $"{expected.Id}.{expected.Version}.nupkg");
+            using var archive = ZipFile.OpenRead(package);
+            var nuspec = Assert.Single(archive.Entries,
+                value => value.FullName == $"{expected.Id}.nuspec");
+            using var stream = nuspec.Open();
+            var xml = XDocument.Load(stream);
+            XNamespace ns = xml.Root!.Name.Namespace;
+            var metadata = xml.Root.Element(ns + "metadata")!;
+            Assert.Equal(expected.Id, metadata.Element(ns + "id")!.Value);
+            Assert.Equal(expected.Version, metadata.Element(ns + "version")!.Value);
+            Assert.Equal(
+                expected.Source,
+                metadata.Element(ns + "repository")!.Attribute("commit")!.Value);
+        }
+
         Assert.NotEqual(ProtocolSource, CarrierSource);
     }
 
@@ -135,6 +161,25 @@ public sealed class P14A2PackageAndStaticGateTests
         AssertPackagePin(manifest, project);
         Assert.Throws<InvalidDataException>(() => AssertPackagePin(
             manifest.Replace(ProtocolVersion, "0.3.0-p10b3.invalid",
+                StringComparison.Ordinal),
+            project));
+        foreach (var expected in ExpectedPackages)
+        {
+            Assert.Throws<InvalidDataException>(() => AssertPackagePin(
+                manifest.Replace(
+                    expected.Sha256,
+                    new string('0', 64),
+                    StringComparison.Ordinal),
+                project));
+        }
+        Assert.Throws<InvalidDataException>(() => AssertPackagePin(
+            manifest.Replace(
+                "\"id\": \"Deep.Protocol.Protobuf\"",
+                "\"id\": \"Deep.Protocol.Protobuf.Drift\"",
+                StringComparison.Ordinal),
+            project));
+        Assert.Throws<InvalidDataException>(() => AssertPackagePin(
+            manifest.Replace(ProtocolSource, new string('1', 40),
                 StringComparison.Ordinal),
             project));
         Assert.Throws<InvalidDataException>(() => AssertPackagePin(
@@ -169,20 +214,19 @@ public sealed class P14A2PackageAndStaticGateTests
                 != ProtocolSource
             || document.RootElement.GetProperty("profileCarrierSourceCommit").GetString()
                 != CarrierSource
-            || packages.Length != 5
-            || packages.Where(value =>
-                    value.GetProperty("id").GetString() !=
-                    "Deep.Protocol.ProfileCarrier")
-                .Any(value => value.GetProperty("version").GetString() != ProtocolVersion)
-            || packages.Single(value =>
-                    value.GetProperty("id").GetString() ==
-                    "Deep.Protocol.ProfileCarrier")
-                .GetProperty("version").GetString() != CarrierVersion
-            || packages.Single(value =>
-                    value.GetProperty("id").GetString() ==
-                    "Deep.Protocol.ProfileCarrier")
-                .GetProperty("sha256").GetString()
-                != "e2d03040daaf7c7fe29952db3cfbc3227fb9f0da42740b5f57f65a02ae8118a2"
+            || packages.Length != ExpectedPackages.Length
+            || ExpectedPackages.Any(expected =>
+                packages.Count(value =>
+                    value.GetProperty("id").GetString() == expected.Id) != 1 ||
+                packages.Single(value =>
+                        value.GetProperty("id").GetString() == expected.Id)
+                    .GetProperty("version").GetString() != expected.Version ||
+                packages.Single(value =>
+                        value.GetProperty("id").GetString() == expected.Id)
+                    .GetProperty("bytes").GetInt64() != expected.Bytes ||
+                packages.Single(value =>
+                        value.GetProperty("id").GetString() == expected.Id)
+                    .GetProperty("sha256").GetString() != expected.Sha256)
             || !projectText.Contains(
                 $"Deep.Protocol\" Version=\"[{ProtocolVersion}]",
                 StringComparison.Ordinal)
@@ -206,6 +250,13 @@ public sealed class P14A2PackageAndStaticGateTests
 
     private static string Sha256(string path) =>
         Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(path)));
+
+    private sealed record ExpectedPackage(
+        string Id,
+        string Version,
+        long Bytes,
+        string Sha256,
+        string Source);
 
     internal static string RepositoryRoot()
     {

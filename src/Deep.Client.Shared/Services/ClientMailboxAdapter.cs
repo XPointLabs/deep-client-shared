@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using Deep.Client.Shared.Features;
 using Deep.Client.Shared.Persistence;
@@ -56,6 +55,11 @@ public sealed class ClientMailboxPinnedRoute
         if (CryptographicOperations.FixedTimeEquals(firstReplicaId, secondReplicaId))
         {
             throw new ArgumentException("Pinned mailbox replicas must be distinct.");
+        }
+        if (CryptographicOperations.FixedTimeEquals(firstReplicaKey, secondReplicaKey))
+        {
+            throw new ArgumentException(
+                "Pinned mailbox replica signing keys must be distinct.");
         }
 
         PlacementId = placementId;
@@ -141,6 +145,9 @@ public sealed class ClientMailboxActivation
         issuerContext.Length == 32 &&
         issuerContext.AsSpan().IndexOfAnyExcept((byte)0) >= 0;
 
+    internal ClientMailboxScope ScopeFor(BlindedMailboxId mailboxId, ulong epoch) =>
+        ClientMailboxScope.Derive(issuerContext, mailboxId, epoch);
+
     public override string ToString() =>
         $"ClientMailboxActivation {{ Enabled = {Enabled}, " +
         $"IssuerContext = {(HasIssuerContext ? "[configured]" : "[missing]")}, " +
@@ -189,9 +196,6 @@ public interface IClientMailboxReceiptVerifier
 public sealed class PinnedClientMailboxReceiptVerifier(
     IMailboxPeerReplicationCrypto crypto) : IClientMailboxReceiptVerifier
 {
-    private readonly ConcurrentDictionary<string, byte[]> coordinatorStatements =
-        new(StringComparer.Ordinal);
-
     public MailboxReplicaReceiptV2 VerifyAccepted(
         ReadOnlySpan<byte> encodedMrr2,
         ClientMailboxReceiptExpectation expectation)
@@ -230,18 +234,6 @@ public sealed class PinnedClientMailboxReceiptVerifier(
                 receipt.Signature.Span))
         {
             throw InvalidReceipt("MQR3 coordinator signature is invalid.");
-        }
-
-        var signingBytes = MailboxReceiptV3Codec.GetQuorumSigningBytes(receipt);
-        var sequenceKey =
-            Convert.ToHexString(receipt.CoordinatorId.Span) +
-            ":" +
-            receipt.CoordinatorSequence.ToString(System.Globalization.CultureInfo.InvariantCulture);
-        var digest = SHA256.HashData(signingBytes);
-        var prior = coordinatorStatements.GetOrAdd(sequenceKey, digest);
-        if (!CryptographicOperations.FixedTimeEquals(prior, digest))
-        {
-            throw InvalidReceipt("MQR3 coordinator sequence equivocation detected.");
         }
 
         return new VerifiedMailboxDurableQuorumV3(
@@ -353,16 +345,17 @@ public sealed class ClientMailboxAdapter
     }
 
     public async Task<ClientMailboxStoreResult> StoreAsync(
-        ClientMailboxScope mailboxScope,
         OutboxAccountScope outboxScope,
         MailboxStoreRequest request,
         CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(mailboxScope);
         ArgumentNullException.ThrowIfNull(outboxScope);
         ArgumentNullException.ThrowIfNull(request);
         EnsureVersion(request.MixedVersion);
         EnsurePlacement(request.Envelope.PlacementId);
+        var mailboxScope = activation.ScopeFor(
+            request.Envelope.MailboxId,
+            request.Epoch);
         var encoded = MailboxClientCodec.EncodeStore(request);
         var logicalId = OutboxLogicalId.FromBytes(request.OperationId.Span);
         var dedup = OutboxDedupMaterial.FromBytes(
@@ -401,9 +394,11 @@ public sealed class ClientMailboxAdapter
                 .Single(static attempt =>
                     attempt.State == TransportOutboxAttemptState.Durable)
                 .GetEvidenceCopy();
-            var persistedDurable = receipts.VerifyDurable(
+            var persistedDurable = await VerifyAndJournalDurableAsync(
+                mailboxScope,
                 evidence,
-                StoreExpectation(request));
+                StoreExpectation(request),
+                cancellationToken).ConfigureAwait(false);
             return new ClientMailboxStoreResult(
                 ClientMailboxIngressState.Durable,
                 persistedDurable.Cursor,
@@ -462,9 +457,11 @@ public sealed class ClientMailboxAdapter
             throw new InvalidDataException("Mailbox ingress returned an unknown state.");
         }
 
-        var durable = receipts.VerifyDurable(
-            response.CanonicalReceipt.Span,
-            expectation);
+        var durable = await VerifyAndJournalDurableAsync(
+            mailboxScope,
+            response.CanonicalReceipt,
+            expectation,
+            cancellationToken).ConfigureAwait(false);
         snapshot = await ReadFoundAsync(outboxScope, logicalId, cancellationToken)
             .ConfigureAwait(false);
         await ApplyAsync(
@@ -498,21 +495,45 @@ public sealed class ClientMailboxAdapter
             durable.Disposition);
     }
 
+    public Task<ClientMailboxTraversal> ReadTraversalAsync(
+        BlindedMailboxId mailboxId,
+        ulong epoch,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(mailboxId);
+        return state.ReadTraversalAsync(
+            activation.ScopeFor(mailboxId, epoch),
+            cancellationToken);
+    }
+
+    public Task<IReadOnlyList<MailboxRetrievedEnvelope>> ReadDurableInboxAsync(
+        BlindedMailboxId mailboxId,
+        ulong epoch,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(mailboxId);
+        return state.ReadDurableInboxAsync(
+            activation.ScopeFor(mailboxId, epoch),
+            cancellationToken);
+    }
+
     public async Task<ClientMailboxRetrieveResult> RetrieveAsync(
-        ClientMailboxScope scope,
         MailboxRetrieveRequest request,
         CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(request);
         EnsureVersion(request.MixedVersion);
         EnsurePlacement(request.PlacementId);
-        var persistedCursor = await state.ReadAfterCursorAsync(scope, cancellationToken)
+        var scope = activation.ScopeFor(request.MailboxId, request.Epoch);
+        var traversal = await state.ReadTraversalAsync(scope, cancellationToken)
             .ConfigureAwait(false);
-        if (request.AfterCursor != persistedCursor)
+        if (request.AfterCursor != traversal.AfterCursor ||
+            !FixedEquals(
+                request.ContinuationToken.Span,
+                traversal.ContinuationToken))
         {
             throw new InvalidOperationException(
-                "MRT1 cursor does not match persistent mailbox state.");
+                "MRT1 cursor/token does not match durable mailbox traversal.");
         }
 
         var response = await ingress.RetrieveAsync(
@@ -529,24 +550,42 @@ public sealed class ClientMailboxAdapter
                 "MRP1 does not match the exact MRT1 mailbox operation.");
         }
 
-        var merged = await state.MergeRetrievePageAsync(scope, page, cancellationToken)
+        var committed = await state.CommitRetrievePageAsync(
+            scope,
+            traversal,
+            page,
+            cancellationToken)
             .ConfigureAwait(false);
         return new ClientMailboxRetrieveResult(
-            merged.AfterCursor,
+            committed.Traversal.AfterCursor,
             page.HasMore,
-            page.ContinuationToken.ToArray(),
-            merged.NewItems);
+            committed.Traversal.GetContinuationTokenCopy(),
+            committed.DurableInbox);
     }
 
     public async Task<ClientMailboxAckResult> AcknowledgeAsync(
-        ClientMailboxScope scope,
         MailboxAckRequest request,
         CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(request);
         EnsureVersion(request.MixedVersion);
         EnsurePlacement(request.PlacementId);
+        var canonicalAck = MailboxClientCodec.EncodeAck(request);
+        var scope = activation.ScopeFor(request.MailboxId, request.Epoch);
+        var traversal = await state.ReadTraversalAsync(scope, cancellationToken)
+            .ConfigureAwait(false);
+        var lastAcknowledgement = request.Acknowledgements[^1];
+        if (request.IsFinalPage
+                ? traversal.AfterCursor != 0 ||
+                  !request.ContinuationToken.IsEmpty
+                : traversal.AfterCursor != lastAcknowledgement.Cursor ||
+                  !FixedEquals(
+                      traversal.ContinuationToken,
+                      request.ContinuationToken.Span))
+        {
+            throw new InvalidOperationException(
+                "MAK1 does not match the durable page continuation authority.");
+        }
         var pending = await state.CheckAcknowledgementsAsync(
             scope,
             request.Acknowledgements,
@@ -560,9 +599,13 @@ public sealed class ClientMailboxAdapter
             throw new InvalidOperationException(
                 "MAK1 is not the next ordered persistent acknowledgement prefix.");
         }
+        var expectations = await state.ReadAckExpectationsAsync(
+            scope,
+            request.Acknowledgements,
+            cancellationToken).ConfigureAwait(false);
 
         var response = await ingress.AcknowledgeAsync(
-            MailboxClientCodec.EncodeAck(request),
+            canonicalAck,
             cancellationToken).ConfigureAwait(false);
         var aggregate = MailboxAggregateAckCodec.DecodeMqr3(response.Span);
         if (aggregate.Epoch != request.Epoch ||
@@ -575,8 +618,9 @@ public sealed class ClientMailboxAdapter
         for (var index = 0; index < request.Acknowledgements.Count; index++)
         {
             var acknowledgement = request.Acknowledgements[index];
-            _ = receipts.VerifyDurable(
-                aggregate.TombstoneQuorums[index].Span,
+            _ = await VerifyAndJournalDurableAsync(
+                scope,
+                aggregate.TombstoneQuorums[index],
                 new ClientMailboxReceiptExpectation
                 {
                     Epoch = request.Epoch,
@@ -584,11 +628,12 @@ public sealed class ClientMailboxAdapter
                     MailboxId = request.MailboxId,
                     Route = activation.Route!,
                     EnvelopeDigest = acknowledgement.EnvelopeDigest.ToArray(),
-                    ExpiresAtUnixSeconds = ReceiptExpiry(
-                        aggregate.TombstoneQuorums[index].Span),
+                    ExpiresAtUnixSeconds =
+                        expectations[index].ExpiresAtUnixSeconds,
                     AllowedDispositions = TombstoneDisposition,
                     Cursor = acknowledgement.Cursor
-                });
+                },
+                cancellationToken).ConfigureAwait(false);
         }
 
         var committed = await state.CommitAcknowledgementsAsync(
@@ -618,6 +663,44 @@ public sealed class ClientMailboxAdapter
             ExpiresAtUnixSeconds = request.Envelope.ExpiresAtUnixSeconds,
             AllowedDispositions = StoreDispositions
         };
+
+    private async Task<VerifiedMailboxDurableQuorumV3>
+        VerifyAndJournalDurableAsync(
+            ClientMailboxScope scope,
+            ReadOnlyMemory<byte> encodedMqr3,
+            ClientMailboxReceiptExpectation expectation,
+            CancellationToken cancellationToken)
+    {
+        var verified = receipts.VerifyDurable(encodedMqr3.Span, expectation);
+        var receipt = verified.CoordinatorReceipt;
+        var statementDigest = SHA256.HashData(
+            MailboxReceiptV3Codec.GetQuorumSigningBytes(receipt));
+        var nowUnixSeconds = checked(
+            (ulong)timeProvider.GetUtcNow().ToUnixTimeSeconds());
+        var result = await state.RecordCoordinatorStatementAsync(
+            scope,
+            expectation.Route.GetMembershipCommitmentCopy(),
+            expectation.Epoch,
+            receipt.CoordinatorId,
+            receipt.CoordinatorSequence,
+            statementDigest,
+            expectation.ExpiresAtUnixSeconds,
+            nowUnixSeconds,
+            cancellationToken).ConfigureAwait(false);
+        if (result == ClientMailboxCoordinatorRecordResult.Equivocation)
+        {
+            throw new MailboxReceiptException(
+                MailboxReceiptError.UnexpectedStatement,
+                "MQR3 coordinator sequence equivocation detected.");
+        }
+        if (result == ClientMailboxCoordinatorRecordResult.CapacityExceeded)
+        {
+            throw new InvalidOperationException(
+                "Mailbox coordinator journal capacity is exhausted.");
+        }
+
+        return verified;
+    }
 
     private void EnsureVersion(MailboxMixedVersionMarker marker)
     {
@@ -723,10 +806,6 @@ public sealed class ClientMailboxAdapter
 
         return candidate;
     }
-
-    private static ulong ReceiptExpiry(ReadOnlySpan<byte> encodedMqr3) =>
-        MailboxReceiptV3Codec.DecodeDurableQuorum(encodedMqr3)
-            .FirstReplica.ExpiresAtUnixSeconds;
 
     private static bool FixedEquals(ReadOnlySpan<byte> left, ReadOnlySpan<byte> right) =>
         left.Length == right.Length &&
