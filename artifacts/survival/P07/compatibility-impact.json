@@ -17,6 +17,7 @@
   "sqliteHeadAdditiveColumn": "history_bytes",
   "commitHistoryPolicy": "validate the same complete bounded canonical history as read before replay or successor success",
   "historicalReplayPolicy": "exact stored revision is Idempotent; divergent stored revision is Conflict after canonical-history validation",
+  "clockCommitPolicy": "both stores validate persisted clock state before replay, conflict, rollback, or applied outcomes",
   "preV2DormantTrustRows": "fail-closed-rebootstrap-required",
   "revocationOverflow": "terminal-fail-closed-rebootstrap-required",
   "existingTrustRowsUseExplicitAnchorDefaultUntilRewritten": true,

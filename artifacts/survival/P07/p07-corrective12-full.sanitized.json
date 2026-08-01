@@ -1,0 +1,1853 @@
+{
+    "schema":  "deep.p07.sanitized-test-evidence.v1",
+    "sourceCommit":  "13e39cf9ff4b0cf3b1c60084aa5af977db68f280",
+    "command":  "dotnet test Deep.Client.Shared.slnx --configuration Release --no-restore",
+    "originalLocalTrxSha256":  "d70617739cf1b0f7e02e3e951dd12d78038c32f182cb48a377d4466759faf717",
+    "privacy":  {
+                    "machineNamesRemoved":  true,
+                    "userNamesRemoved":  true,
+                    "absolutePathsRemoved":  true,
+                    "timestampsRemoved":  true,
+                    "executionIdsRemoved":  true
+                },
+    "counters":  {
+                     "total":  455,
+                     "executed":  455,
+                     "passed":  455,
+                     "failed":  0,
+                     "error":  0,
+                     "timeout":  0,
+                     "aborted":  0,
+                     "inconclusive":  0,
+                     "passedButRunAborted":  0,
+                     "notRunnable":  0,
+                     "notExecuted":  0,
+                     "disconnected":  0,
+                     "warning":  0,
+                     "completed":  0,
+                     "inProgress":  0,
+                     "pending":  0
+                 },
+    "tests":  [
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Domain.DomainRulesTests.CommunitiesDoNotEnableDisappearingMessages",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Domain.DomainRulesTests.GroupV2DisappearingMessagesForceDeleteAfterSend",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Domain.DomainRulesTests.NewSessionIdsUseSessionAccountPrefix",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Features.FeatureFlagsTests.DebugDefaults_DoesNotRequireTransportAndAllowsStub",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Features.FeatureFlagsTests.ExistingPositionalArguments_RemainSourceCompatible",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Features.FeatureFlagsTests.MembershipTrustAndLegacyRollback_AreDormantInEveryDefault",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Features.FeatureFlagsTests.ReleaseDefaults_RequiresTransportAndDisablesStub",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Features.FeatureFlagsTests.ReleaseInvariant_TransportRequiredImpliesNoStub",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.AccountDataPurgeTests.SignOut_PurgesAccountStateBeforeAnotherAccountUsesTheSameRuntime",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.AccountDataPurgeTests.SqliteSignOut_DoesNotReportCancellationAfterPurgeCommit",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.AccountDataPurgeTests.SqliteSignOut_PurgesAccountStateAcrossRestartAndPreservesSchemaMetadata",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.DurableInboxRepositoryTests.InMemoryStore_PersistsCursorAndDecodedItemAcrossRestart",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.DurableInboxRepositoryTests.SqliteStore_PersistsCursorAndDecodedItemAcrossRestart",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.DurableInboxRepositoryTests.Stores_BulkDiscardUnknownGroupRoutesWithoutTouchingKnownRoutes",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.DurableInboxRepositoryTests.Stores_PendingOwnerSuppressesSameDigestAndRejectsDifferentDigestWithoutClaimingEarly",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.DurableInboxRepositoryTests.Stores_RejectUnboundedBatch",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.DurableInboxRepositoryTests.Stores_RejectWireDigestCollisionWithoutAdvancingCursor",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.DurableInboxRepositoryTests.Stores_StageCursorAndAckAreScopedBoundedAndIdempotent",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.DurableInboxRepositoryTests.UnknownGroupRoutesAtPendingLimit_DoNotStarveFollowingDirectMessage",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.IncomingMessageNotificationRepositoryTests.AccountPurgeClearsPendingIncomingMessageNotifications",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.IncomingMessageNotificationRepositoryTests.ExcludingActiveConversationDoesNotStarveLaterNotifications",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.IncomingMessageNotificationRepositoryTests.InMemoryQueueAndPresentedStateSurviveReload",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.IncomingMessageNotificationRepositoryTests.MessageServiceUsesTheAccountGenerationBarrierForNotificationQueueAccess",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.IncomingMessageNotificationRepositoryTests.SqlitePhysicalMigrationDoesNotBackfillExistingMessages",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.IncomingMessageNotificationRepositoryTests.SqliteQueueAndPresentedStateSurviveReload",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.IncomingMessageNotificationRepositoryTests.StoresExcludeReadDeletedAndExpiredIncomingMessages",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.IncomingMessageNotificationRepositoryTests.StoresQueueOnlyNewIncomingMessagesUntilPresented",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.LocalStateMigrationTests.Migration_PreservesUnreadableArtifactsInsteadOfMarkingThemComplete",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.LocalStateMigrationTests.Migration_RestartsAfterEveryTargetStoreFaultWithoutLosingData",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.LocalStateMigrationTests.Migration_RetriesCleanupAfterImportWasCommitted",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.LocalStateMigrationTests.Migration_UsesValidBackupWhenPrimaryArtifactIsCorrupt",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.LocalStateMigrationTests.PurgeLegacyArtifacts_RemovesPrimaryBackupAndInterruptedTemporaryFiles",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.BoundedHistory_RepeatedReadsRemainCancelableAndEquivalent(sqlite: False)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.BoundedHistory_RepeatedReadsRemainCancelableAndEquivalent(sqlite: True)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.CancellationAfterDurableCommit_IsUncertainButRestartRevealsAppliedState(sqlite: False)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.CancellationAfterDurableCommit_IsUncertainButRestartRevealsAppliedState(sqlite: True)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.CancellationBeforeDurableCommit_RollsBackRecordAndHead(sqlite: False)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.CancellationBeforeDurableCommit_RollsBackRecordAndHead(sqlite: True)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.ConcurrentDifferentSuccessors_OnlyOneWins(sqlite: False)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.ConcurrentDifferentSuccessors_OnlyOneWins(sqlite: True)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.DeepHistoryCorruption_BeyondImmediatePredecessor_IsCorrupt(sqlite: False, corruption: \"deleted-record\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.DeepHistoryCorruption_BeyondImmediatePredecessor_IsCorrupt(sqlite: False, corruption: \"digest\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.DeepHistoryCorruption_BeyondImmediatePredecessor_IsCorrupt(sqlite: False, corruption: \"linkage\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.DeepHistoryCorruption_BeyondImmediatePredecessor_IsCorrupt(sqlite: True, corruption: \"deleted-record\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.DeepHistoryCorruption_BeyondImmediatePredecessor_IsCorrupt(sqlite: True, corruption: \"digest\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.DeepHistoryCorruption_BeyondImmediatePredecessor_IsCorrupt(sqlite: True, corruption: \"linkage\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.DomainAndInstallationProfileTracks_AreIndependent(sqlite: False)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.DomainAndInstallationProfileTracks_AreIndependent(sqlite: True)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.FirstCommitReplaySuccessorAndCasConflict_HaveParity(sqlite: False)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.FirstCommitReplaySuccessorAndCasConflict_HaveParity(sqlite: True)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.HistoricalReplayAndDivergence_HaveParity(sqlite: False)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.HistoricalReplayAndDivergence_HaveParity(sqlite: True)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.InMemoryCorruptClock_BlocksReplayRollbackAndSuccessor(corruption: \"digest\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.InMemoryCorruptClock_BlocksReplayRollbackAndSuccessor(corruption: \"version\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.InMemoryRestart_PreservesHeadAndPredecessor",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.InvalidSuccessorLinkage_IsRejectedAndHeadPreserved(sqlite: False)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.InvalidSuccessorLinkage_IsRejectedAndHeadPreserved(sqlite: True)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.ObservedClockHighWater_ConcurrentCasHasOneWinner(sqlite: False)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.ObservedClockHighWater_ConcurrentCasHasOneWinner(sqlite: True)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.ObservedClockHighWater_IsCasPersistedAndRejectsRollback(sqlite: False)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.ObservedClockHighWater_IsCasPersistedAndRejectsRollback(sqlite: True)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.OversizedCorruptHistory_FailsClosedWithoutSelectingOlderState(deleteHead: False)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.OversizedCorruptHistory_FailsClosedWithoutSelectingOlderState(deleteHead: True)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.PreCancelledWrite_DoesNotCreateRecordOrHead(sqlite: False)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.PreCancelledWrite_DoesNotCreateRecordOrHead(sqlite: True)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.SignedHeadLinkageMismatch_IsRejectedEvenWithValidRecordDigest(sqlite: False)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.SignedHeadLinkageMismatch_IsRejectedEvenWithValidRecordDigest(sqlite: True)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.SqliteCommit_OversizedExistingCandidateCannotAdvanceHead",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.SqliteCommit_ValidatesCanonicalHistoryBeforeSuccess(corruption: \"history-undercount\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.SqliteCommit_ValidatesCanonicalHistoryBeforeSuccess(corruption: \"missing-middle\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.SqliteCommit_ValidatesCanonicalHistoryBeforeSuccess(corruption: \"orphan\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.SqliteHistory_CumulativeValidBytesBeyondBudgetFailClosed",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.SqliteHistory_OversizedBlobFailsClosed",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.SqliteHistoryValidation_HasSingleOrderedQueryAndExplicitBudget",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.SqliteLegacyHead_AddsAndBackfillsHistoryByteBudget",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.SqliteOversizedClockDigest_BlocksReadReplayAndSuccessor",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.SqliteOversizedHeadDigest_BlocksReadIdempotencyAndSuccessor",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.StoredRecordsAndClocks_AreDefensiveCopies(sqlite: False)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.StoredRecordsAndClocks_AreDefensiveCopies(sqlite: True)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.SubsecondAndOffsetTimes_AreCanonicalAndIdempotent(sqlite: False)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustRepositoryContractTests.SubsecondAndOffsetTimes_AreCanonicalAndIdempotent(sqlite: True)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustSqliteRecoveryTests.CorruptPhysicalState_BlocksWithoutPriorFallback(corruption: \"canonical-hash\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustSqliteRecoveryTests.CorruptPhysicalState_BlocksWithoutPriorFallback(corruption: \"digest\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustSqliteRecoveryTests.CorruptPhysicalState_BlocksWithoutPriorFallback(corruption: \"missing-head\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustSqliteRecoveryTests.CorruptPhysicalState_BlocksWithoutPriorFallback(corruption: \"observed-at\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustSqliteRecoveryTests.CorruptPhysicalState_BlocksWithoutPriorFallback(corruption: \"orphan\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustSqliteRecoveryTests.CorruptPhysicalState_BlocksWithoutPriorFallback(corruption: \"payload\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustSqliteRecoveryTests.CorruptPhysicalState_BlocksWithoutPriorFallback(corruption: \"previous-hash\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustSqliteRecoveryTests.CorruptPhysicalState_BlocksWithoutPriorFallback(corruption: \"profile-binding\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustSqliteRecoveryTests.CorruptPhysicalState_BlocksWithoutPriorFallback(corruption: \"revision\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustSqliteRecoveryTests.CorruptPhysicalState_BlocksWithoutPriorFallback(corruption: \"state\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustSqliteRecoveryTests.CorruptPhysicalState_BlocksWithoutPriorFallback(corruption: \"valid-until\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustSqliteRecoveryTests.InMemoryCorruptionInAnotherProfile_DoesNotBlockCurrentProfile",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustSqliteRecoveryTests.LogicalSchemaThreeToFour_PreservesExistingDomainRows",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustSqliteRecoveryTests.MalformedOrOutOfRangeClockTimestamps_ReturnCorrupt(corruption: \"clock-observed-null\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustSqliteRecoveryTests.MalformedOrOutOfRangeClockTimestamps_ReturnCorrupt(corruption: \"clock-observed-out-of-range\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustSqliteRecoveryTests.MalformedOrOutOfRangeRecordTimestamps_ReturnCorrupt(corruption: \"observed-at-out-of-range\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustSqliteRecoveryTests.MalformedOrOutOfRangeRecordTimestamps_ReturnCorrupt(corruption: \"valid-from-null\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustSqliteRecoveryTests.MalformedOrOutOfRangeRecordTimestamps_ReturnCorrupt(corruption: \"valid-until-null\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustSqliteRecoveryTests.OrphanInAnotherProfile_DoesNotBlockCurrentProfile",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MembershipTrustSqliteRecoveryTests.RestartWithValidHead_IsFound",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MessageSyncRepositoryTests.SqliteStore_CreatesAllMessageSyncIndexes",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MessageSyncRepositoryTests.SqliteStore_UpgradesVersion4MessagesAndBackfillsSyncKeys",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.MessageSyncRepositoryTests.Stores_UseAddressedSyncQueriesAndDoNotAdvanceAnAlreadyReadCursor",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.PersistenceTests.ClientRuntime_CreatePersistent_MigratesLegacyInMemorySnapshotWithoutDataLoss",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.PersistenceTests.ClientRuntime_CreatePersistent_PreservesRestoredAccountAcrossRestart",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.PersistenceTests.ClientRuntime_CreatePersistent_RequiresAnExplicitTransport",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.PersistenceTests.ClientRuntime_ReleaseFlagsRejectUnauthenticatedTransport",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.PersistenceTests.ClientRuntime_ReleaseFlagsWrapAuthenticatedTransportWithE2ee",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.PersistenceTests.InMemorySessionStore_OpenOneToOneConversation_DisplayNameHintDoesNotOverwriteExplicitRename",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.PersistenceTests.LocalSchemaMigratorAppliesAllVersionsOnce",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.PersistenceTests.PersistentSessionStore_ReloadsConversationMessageAndSchemaState",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.PersistenceTests.SqliteConversationSummariesHandleFortyThousandRequestedConversations",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.PersistenceTests.SqliteSessionStore_DoesNotBlockCallerWhileDatabaseIsBusy",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.PersistenceTests.SqliteSessionStore_DoesNotInterpretSqlLikeKeyInputAsExecutableSql",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.PersistenceTests.SqliteSessionStore_MarksReadWithoutRewritingMessagePayload",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.PersistenceTests.SqliteSessionStore_MigratesPlaintextDatabaseToSqlCipher",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.PersistenceTests.SqliteSessionStore_OpenOneToOneConversation_DisplayNameHintDoesNotOverwriteExplicitRename",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.PersistenceTests.SqliteSessionStore_OpenOneToOneConversation_ReturnsEncryptedLocalSnapshot",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.PersistenceTests.SqliteSessionStore_RecoversInterruptedMigrationFromEncryptedTemp",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.PersistenceTests.SqliteSessionStore_RecoversInterruptedMigrationFromPlaintextBackup",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.PersistenceTests.SqliteSessionStore_ReloadsConversationMessageAndSchemaState",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.PersistenceTests.SqliteSessionStore_RemovesPlaintextBackupAfterCompletedMigration",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.PersistenceTests.StoreListsMessagesInConversationOrder",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.PersistenceTests.StoresConversationListSummariesInBatch",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.PersistenceTests.StoresCountUnreadMessagesWithoutLoadingConversationHistory",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.PersistenceTests.StoresOpenConversationListAsSingleConsistentSnapshot",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.PersistenceTests.StoresPageMessagesWithStableCompositeCursor",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.ReplayRepositoryTests.SqliteStore_PersistsReplayClaimsAfterReopen",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.ReplayRepositoryTests.Stores_AllowExactlyOneConcurrentFirstClaim",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.ReplayRepositoryTests.Stores_ClassifyFirstAndDuplicateReplayClaims",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.ReplayRepositoryTests.Stores_PruneExpiredReplayClaimsInBoundedBatches",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Persistence.ReplayRepositoryTests.Stores_RejectInvalidReplayClaimInput",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.AccountGenerationLifecycleTests.SignOutKeepsEnumerationScopedUntilEnumeratorIsDisposed",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.AccountGenerationLifecycleTests.SignOutWaitsForActiveMutationThenPurgesItAndRejectsLateWrites",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.AccountGenerationLifecycleTests.SignOutWaitsForActiveReadThenPurgesItAndRejectsLateReads",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.AttachmentFileTransportTests.HttpAttachmentFileTransport_AllowsLoopbackHttpForLocalTests",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.AttachmentFileTransportTests.HttpAttachmentFileTransport_PreservesImageDocumentClassification",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.AttachmentFileTransportTests.HttpAttachmentFileTransport_RejectsUnsafeInboundRemoteUri(remoteUri: \"http://file.local/file/file-abc\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.AttachmentFileTransportTests.HttpAttachmentFileTransport_RejectsUnsafeInboundRemoteUri(remoteUri: \"https://file.local:22/file/file-abc\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.AttachmentFileTransportTests.HttpAttachmentFileTransport_RejectsUnsafeInboundRemoteUri(remoteUri: \"https://other.local/file/file-abc\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.AttachmentFileTransportTests.HttpAttachmentFileTransport_RejectsUnsafeInboundRemoteUri(remoteUri: \"https://user:password@file.local/file/file-abc\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.AttachmentFileTransportTests.HttpAttachmentFileTransport_RoundTripsThroughLiveFileService_WhenConfigured",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.AttachmentFileTransportTests.HttpAttachmentFileTransport_UploadsEncryptedPayloadAndDownloadsPlaintext",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.AvatarProfileTransportTests.ClientRuntime_CreateStubbed_DisablesAvatarProfilesByDefault",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.AvatarProfileTransportTests.HttpAvatarProfileTransport_UsesAvatarBackendContract",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.AvatarProfileTransportTests.TryDownloadAsync_RejectsOversizedChunkedAvatar",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.ClientRuntimeStorageE2ETests.ClientRuntime_RoundTripsAttachmentMetadataThroughLiveFileAndStorage_WhenConfigured",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.ClientRuntimeStorageE2ETests.ClientRuntime_RoundTripsOneToOneMessageThroughLiveStorage_WhenConfigured",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.ClientRuntimeStorageE2ETests.ClientRuntime_RoundTripsRepliesAndReactionsThroughLiveStorage_WhenConfigured",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.ClientRuntimeStorageE2ETests.ClientRuntime_SyncsGroupStateAndMessagesThroughLiveStorage_WhenConfigured",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.ConversationServiceGroupTests.AccountPurgeRemovesPendingGroupStateOutbox",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.ConversationServiceGroupTests.GroupAddMember_DoesNotChangeRevision",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.ConversationServiceGroupTests.GroupStateOutbox_SurvivesRestartAndRetriesExactlyOnce",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.ConversationServiceGroupTests.LocalGroupMutations_IncrementAndPublishExactlyOnce",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.ConversationServiceGroupTests.ReceiveGroupUpdates_AcceptsRemovalAndRejectsRecipientResurrection",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.ConversationServiceGroupTests.ReceiveGroupUpdates_AppliesGenesisAndNextRevisionBeforeOlderTimestamp",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.ConversationServiceGroupTests.ReceiveGroupUpdates_RejectsChangedCreatorAndCreationTime",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.ConversationServiceGroupTests.ReceiveGroupUpdates_RejectsGenesisWithoutCreatorAuthenticationOrAdminMembership",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.ConversationServiceGroupTests.ReceiveGroupUpdates_RejectsRollbackAndGap(revision: 1)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.ConversationServiceGroupTests.ReceiveGroupUpdates_RejectsRollbackAndGap(revision: 3)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.ConversationServiceGroupTests.ReceiveGroupUpdates_RejectsSenderPromotedOnlyByUntrustedUpdate",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.ConversationServiceGroupTests.RemoveMemberPublishesFinalRevisionToRemovedMember",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.ConversationServiceTests.GeneratedFallbackDisplayName_IsNotStoredAsContactName",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.ConversationServiceTests.GetOrCreateOneToOne_DisplayNameHintDoesNotOverwriteExplicitRename",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.ConversationServiceTests.RawSessionIdDisplayName_IsNotStoredAsContactName",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.ConversationServiceTests.UpdateContactDisplayName_PersistsContactAndConversationTitle",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.ConversationServiceTests.UpdateContactDisplayName_PersistsThroughSqliteStore",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.DurableInboxDomainAckTests.GroupMessage_RestartRepairsPartialPersistenceBeforeAck",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.DurableInboxDomainAckTests.GroupState_RestartAcknowledgesAtomicPersistenceAfterCrash",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.DurableInboxDomainAckTests.GroupStateRevisionGapRemainsUnackedUntilMissingRevisionArrives",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.DurableInboxRecoveryTests.E2eeInbox_RestartRecoversEveryRetrieveStageDecodeBoundary(crashPoint: AfterPrepare)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.DurableInboxRecoveryTests.E2eeInbox_RestartRecoversEveryRetrieveStageDecodeBoundary(crashPoint: AfterStage)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.DurableInboxRecoveryTests.E2eeInbox_RestartRecoversEveryRetrieveStageDecodeBoundary(crashPoint: BeforeStage)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.DurableInboxRecoveryTests.MalformedStagedEntryIsDiscardedWithoutBlockingFollowingMessage",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.DurableInboxRecoveryTests.MessageService_RestartAfterDomainAppendBeforeAckIsIdempotent",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.DurableInboxRecoveryTests.ReactionWaitsWithoutAckUntilTargetArrivesInFollowingRawBatch",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.E2eeClientTransportTests.BlockedReceive_DoesNotBlockSendGroupSyncOrIdentityRefresh",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.E2eeClientTransportTests.ConcurrentReceivers_ShareOneAuthenticatedFetchWithoutLossOrRace",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.E2eeClientTransportTests.DirectSend_FansOutRecipientAndSenderCopiesWithoutPlaintextOuterFields",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.E2eeClientTransportTests.Dispose_DuringBlockedReceiveReturnsAndDefersIdentityZeroization",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.E2eeClientTransportTests.GroupFanout_IsBoundedConcurrentAndRetryUsesStableWireIds",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.E2eeClientTransportTests.GroupFanout_UsesOnlyPersonalInboxesAndGroupStateRoundTripsAuthenticatedSender",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.E2eeClientTransportTests.GroupReceive_RejectsRawSenderThatDoesNotMatchAuthenticatedSemanticSender",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.E2eeClientTransportTests.MixedInbox_DemultiplexesInOrderWithoutAdditionalFetches",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.E2eeClientTransportTests.PhraseAndAccountMismatch_FailsBeforeRawTransportUse",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.E2eeClientTransportTests.PhraseChange_DisposesPriorCachedIdentity",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.E2eeClientTransportTests.Receive_FailsClosedWhenRawTransportLacksAuthenticatedInboxContract",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.E2eeClientTransportTests.Receive_SkipsPlaintextMalformedOuterAndTamperedEntriesButContinuesBatch",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.E2eeClientTransportTests.RepeatedGroupStatePublishUsesStableOuterIdsForStorageIdempotency",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.E2eeClientTransportTests.Replay_SameDigestIsIgnoredAndDifferentDigestForLogicalIdIsRejected",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.E2eeContentCodecTests.ContentEnvelopeConvenienceApi_BindsSenderAndKindButAllowsSenderCopyRecipient",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.E2eeContentCodecTests.Decode_RejectsInvalidUtf8AndNonNfcInputIsNotEncoded",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.E2eeContentCodecTests.Decode_RejectsProtocolAndUserExpiryAndExcessiveFutureSkew",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.E2eeContentCodecTests.Decode_RejectsUnknownVersionKindsFlagsTruncationAndTrailingBytes",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.E2eeContentCodecTests.DmcContent_RoundTripsInsideEncryptedEnvelopeWithoutLeakingMarker",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.E2eeContentCodecTests.Encode_EnforcesBodyAttachmentAndAttachmentFieldLimits",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.E2eeContentCodecTests.Encode_EnforcesReplyReactionAndPayloadShapeLimits",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.E2eeContentCodecTests.Encode_RejectsInvalidExpiryConversationBindingAndGroupRevision",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.E2eeContentCodecTests.GroupMessage_RoundTripsAttachmentMetadataAndRevision",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.E2eeContentCodecTests.GroupState_RoundTripsCanonicalBinaryState",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.E2eeContentCodecTests.OneToOneMessage_RoundTripsReplyAndExpiries",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.E2eeContentCodecTests.Reaction_RoundTripsForDirectAndGroupConversations(conversationKind: GroupV2, remove: False)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.E2eeContentCodecTests.Reaction_RoundTripsForDirectAndGroupConversations(conversationKind: GroupV2, remove: True)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.E2eeContentCodecTests.Reaction_RoundTripsForDirectAndGroupConversations(conversationKind: OneToOne, remove: False)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.E2eeContentCodecTests.Reaction_RoundTripsForDirectAndGroupConversations(conversationKind: OneToOne, remove: True)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.E2eeEnvelopeCodecTests.Ciphertext_DoesNotContainMarkerPlaintext",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.E2eeEnvelopeCodecTests.Decrypt_RejectsCiphertextAndTagTamperEvenWhenResignedAndRejectsSignatureTamper",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.E2eeEnvelopeCodecTests.Decrypt_RejectsInvalidLengthFieldsTruncationTrailingBytesAndOversize",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.E2eeEnvelopeCodecTests.Decrypt_RejectsTamperInMajorAuthenticatedFields(offset: 0)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.E2eeEnvelopeCodecTests.Decrypt_RejectsTamperInMajorAuthenticatedFields(offset: 106)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.E2eeEnvelopeCodecTests.Decrypt_RejectsTamperInMajorAuthenticatedFields(offset: 124)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.E2eeEnvelopeCodecTests.Decrypt_RejectsTamperInMajorAuthenticatedFields(offset: 204)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.E2eeEnvelopeCodecTests.Decrypt_RejectsTamperInMajorAuthenticatedFields(offset: 41)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.E2eeEnvelopeCodecTests.Decrypt_RejectsTamperInMajorAuthenticatedFields(offset: 73)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.E2eeEnvelopeCodecTests.Decrypt_RejectsTamperInMajorAuthenticatedFields(offset: 8)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.E2eeEnvelopeCodecTests.Decrypt_RejectsUnknownVersionKindAndFlags",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.E2eeEnvelopeCodecTests.Decrypt_RejectsValidSignatureWhenSenderKeyDoesNotBindToSenderSessionId",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.E2eeEnvelopeCodecTests.Decrypt_RejectsWrongRecipientWithoutPlaintextFallback",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.E2eeEnvelopeCodecTests.DisposedIdentity_RefusesPrivateKeyOperations",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.E2eeEnvelopeCodecTests.Encrypt_RejectsUnknownKindInvalidSessionAndPlaintextLimits",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.E2eeEnvelopeCodecTests.Envelope_AcceptsExactMaximumAndProduces512KiBWireSize",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.E2eeEnvelopeCodecTests.MessageEnvelope_RoundTripsAuthenticatedMetadataPlaintextAndDigest",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.HttpCallSignalingTransportTests.AuthenticatedTransport_RejectsReplayAndStaleSignal",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.HttpCallSignalingTransportTests.AuthenticatedTransportEncryptsAndDecryptsSignalingPayload",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.HttpCallSignalingTransportTests.GetAsyncAuthenticatesAndReadsEphemeralIceConfiguration",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.HttpCallSignalingTransportTests.ReceiveAsync_ReadsInboxUsingRecipientPath",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.HttpCallSignalingTransportTests.SendAsync_PostsEnvelopeToConfiguredPath",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.InboxSyncCoalescingTests.AccountSwitchDoesNotLetOldCallerSynchronizeOrReturnNewAccountData",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.InboxSyncCoalescingTests.CancelingOneCallerDoesNotCancelCycleSharedWithAnotherCaller",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.InboxSyncCoalescingTests.ConcurrentSynchronizationsForSameAccountShareCurrentCycleAndResult",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.InboxSyncCoalescingTests.LogoutWhileCycleIsRunningSuppressesItsResultForAllCallers",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustPrivacyTests.ProductionSource_HasNoFixtureVerifierSigningHelperOrRuntimeRegistration",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustPrivacyTests.PublicStatusSerialization_IsCoarseAndExcludesSyntheticCanaries",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustPrivacyTests.PublicStatusText_IsFixedAndContainsNoRuntimeMaterial",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.ApplyContent_ExactReplayRejectsAuthorityRotationAfterReadiness",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.ApplyContent_NewCommitRejectsAuthorityRotationAfterVerificationBeforeCas",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.AuthorityDelegationEquivocation_PersistsForkAcrossRestart",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.AuthorityDelegationRevocationEquivocation_PersistsForkAcrossRestart",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.AuthorityReplayAndSuccessor_RevalidatePersistedChainBeforeReturning",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.BadDomainOneSignerWrongNetworkAndProtocol_FailClosed",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.BootstrapSequenceAlternative_ValidPersistsForkButInvalidDoesNot",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.CanonicalFixtureBootstrapAndIndependentContentTracks_AreHealthy",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.ClockRollbackAndRevocation_AreBlocking",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.ConcurrentAuthorityDelegationAndRevocation_PersistFork",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.ContentKeepsHistoricalSigningDelegationButIsNotHealthyAfterRotation",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.DisabledAndMissingVerifier_FailClosedWithoutLegacyEligibility",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.Evaluate_RevisionFenceRejectsConcurrentAuthorityChange",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.ExistingState_RejectsDelegationAndAnchorSubstitution",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.Initialize_SnapshotsProfileEnvelopeAndAnchorsBeforeVerification",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.OrdinaryProfile_CannotOccupyReservedSelfHostedNamespace",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.PublicApplyBoundary_HasNoTrustedP04ModelParameters",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.PublicOperation_ReadsClockExactlyOnce",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.PublicOperations_BoundUnexpectedRepositoryFailures(operation: \"bridge\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.PublicOperations_BoundUnexpectedRepositoryFailures(operation: \"delegation\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.PublicOperations_BoundUnexpectedRepositoryFailures(operation: \"evaluate\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.PublicOperations_BoundUnexpectedRepositoryFailures(operation: \"initialize\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.PublicOperations_BoundUnexpectedRepositoryFailures(operation: \"membership\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.PublicOperations_BoundUnexpectedRepositoryFailures(operation: \"revocation\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.PublicOperations_BoundUnexpectedRepositoryFailures(operation: \"self-hosted\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.PublicOperations_BoundUnexpectedVerifierFailures(operation: \"bridge\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.PublicOperations_BoundUnexpectedVerifierFailures(operation: \"delegation\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.PublicOperations_BoundUnexpectedVerifierFailures(operation: \"evaluate\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.PublicOperations_BoundUnexpectedVerifierFailures(operation: \"initialize\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.PublicOperations_BoundUnexpectedVerifierFailures(operation: \"membership\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.PublicOperations_BoundUnexpectedVerifierFailures(operation: \"revocation\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.PublicOperations_BoundUnexpectedVerifierFailures(operation: \"self-hosted\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.PublicOperations_BoundUnrequestedDependencyCancellation(operation: \"bridge\", dependency: \"repository\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.PublicOperations_BoundUnrequestedDependencyCancellation(operation: \"bridge\", dependency: \"verifier\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.PublicOperations_BoundUnrequestedDependencyCancellation(operation: \"delegation\", dependency: \"repository\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.PublicOperations_BoundUnrequestedDependencyCancellation(operation: \"delegation\", dependency: \"verifier\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.PublicOperations_BoundUnrequestedDependencyCancellation(operation: \"evaluate\", dependency: \"repository\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.PublicOperations_BoundUnrequestedDependencyCancellation(operation: \"evaluate\", dependency: \"verifier\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.PublicOperations_BoundUnrequestedDependencyCancellation(operation: \"initialize\", dependency: \"repository\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.PublicOperations_BoundUnrequestedDependencyCancellation(operation: \"initialize\", dependency: \"verifier\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.PublicOperations_BoundUnrequestedDependencyCancellation(operation: \"membership\", dependency: \"repository\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.PublicOperations_BoundUnrequestedDependencyCancellation(operation: \"membership\", dependency: \"verifier\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.PublicOperations_BoundUnrequestedDependencyCancellation(operation: \"revocation\", dependency: \"repository\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.PublicOperations_BoundUnrequestedDependencyCancellation(operation: \"revocation\", dependency: \"verifier\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.PublicOperations_BoundUnrequestedDependencyCancellation(operation: \"self-hosted\", dependency: \"repository\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.PublicOperations_BoundUnrequestedDependencyCancellation(operation: \"self-hosted\", dependency: \"verifier\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.PublicOperations_SanitizeRequestedCancellation(operation: \"bridge\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.PublicOperations_SanitizeRequestedCancellation(operation: \"delegation\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.PublicOperations_SanitizeRequestedCancellation(operation: \"evaluate\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.PublicOperations_SanitizeRequestedCancellation(operation: \"initialize\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.PublicOperations_SanitizeRequestedCancellation(operation: \"membership\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.PublicOperations_SanitizeRequestedCancellation(operation: \"revocation\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.PublicOperations_SanitizeRequestedCancellation(operation: \"self-hosted\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.PublicOperations_StillPropagateCancellation(operation: \"bridge\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.PublicOperations_StillPropagateCancellation(operation: \"delegation\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.PublicOperations_StillPropagateCancellation(operation: \"evaluate\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.PublicOperations_StillPropagateCancellation(operation: \"initialize\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.PublicOperations_StillPropagateCancellation(operation: \"membership\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.PublicOperations_StillPropagateCancellation(operation: \"revocation\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.PublicOperations_StillPropagateCancellation(operation: \"self-hosted\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.RestartCryptographicallyRevalidatesPersistedAuthorityAndContent",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.RevocationTargetsActiveDelegationAndPersistsBoundedRecoverySet",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.RevokedThenRotatedAuthority_RestartsAfterOriginalExpiry",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.RootSignedDelegation_RotatesFromHealthyAndAfterRevocation",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.RotatedAuthority_SurvivesOriginalBootstrapExpiryAndRestart",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.SameSequenceDifferentValidCandidate_PersistsForkAndNeverChoosesByArrival",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.SelfHostedGenesis_RequiresExactIndependentPinsAndSignatures",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.SelfHostedImport_SnapshotsSignatureEnvelopeBeforeVerification",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.SelfHostedImportBoundary_IsRawCanonicalAndNamespaceSeparated",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.SixtyFifthRevocation_PersistsTerminalMarkerAcrossSqliteRestart",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.TruncatedOrTrailingCanonicalEnvelope_FailsClosed(vectorId: \"deep-extension/membership/v1/signed-bridge\", expected: Corrupt)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MembershipTrustServiceTests.TruncatedOrTrailingCanonicalEnvelope_FailsClosed(vectorId: \"deep-extension/membership/v1/signed-membership\", expected: Corrupt)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MessageFlowTests.ApplyReadCursor_MarksOlderIncomingMessagesAsRead",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MessageFlowTests.BlockedContactCannotSendOrReceiveMessages",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MessageFlowTests.CreateGroupScaffoldPersistsConversationAndAdmin",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MessageFlowTests.DispatchOneToOne_MarksQueuedMessageFailedWhenTransportFails",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MessageFlowTests.DispatchPendingMessages_RetriesPersistedFailureAfterRestartCycle",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MessageFlowTests.GroupAdminOperations_RequireAdminPrivileges_AndUpdateMembers",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MessageFlowTests.GroupLifecycle_LeaveDestroyAndRename_UpdatePersistedConversationState",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MessageFlowTests.GroupRoleUpdates_PromoteAndDemote_Work_WithAdminSafeguard",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MessageFlowTests.InboxSync_CreatesConversationForPreviouslyUnknownSender",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MessageFlowTests.InboxSync_DoesNotCreateEmptySelfConversation",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MessageFlowTests.ListConversationMessages_ExcludesExpiredMessages",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MessageFlowTests.ListConversationMessagesBefore_ReturnsPreviousPageInConversationOrder",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MessageFlowTests.ListRecentConversationMessages_ReturnsNewestMessagesInConversationOrder",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MessageFlowTests.MarkAsRead_SetsReadCursor_AndUpdatesDeliveryState",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MessageFlowTests.MarkConversationAsRead_AtomicallyMarksIncomingMessagesAndSetsCursor",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MessageFlowTests.OutgoingConversationApprovesContact",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MessageFlowTests.PruneExpiredConversationMessages_RemovesExpiredRowsFromStore",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MessageFlowTests.QueueAndDispatchOneToOne_ExposeSendingBeforeNetworkCompletion",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MessageFlowTests.ReceiveAsync_DoesNotReinsertLegacySelfEchoReturnedByTransport",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MessageFlowTests.ReceiveAsync_DropsAlreadyExpiredInboundMessages",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MessageFlowTests.ReceiveAsync_RemovesLegacySelfEcho",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MessageFlowTests.ReceiveAsync_StoresUnseenSelfMessageFromAnotherDeviceAsOutgoing",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MessageFlowTests.ReceiveGroupAsync_AcceptsActiveMemberMessageAndReaction",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MessageFlowTests.ReceiveGroupAsync_RejectsOutsiderMessageWithoutPersistingConversationOrMessage",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MessageFlowTests.ReceiveGroupAsync_RejectsRemovedOrPendingMemberReactionsWithoutUpdatingTarget",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MessageFlowTests.ReceiveGroupAsync_RejectsRemovedRecipientBeforeFetchingEntries",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MessageFlowTests.RegisterSendReceiveOneToOneThroughStubbedBackend",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MessageFlowTests.RepliesAndReactionsRoundTripThroughMessageTransport",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MessageFlowTests.SendGroupAsync_IncludesMemberWakeRecipientsForPushDrivenSync",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MessageFlowTests.SendReceiveToSelf_PreservesSingleOutgoingMessage",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MetadataPrivacyCharacterizationTests.BetaMetadataGate_FailsForEachUnresolvedFinding(findingId: \"META-DPE1-CLEAR-RECIPIENT\", status: \"unresolved\", evidence: \"MetadataPrivacyCharacterizationTests.Dpe1Header_Co\"···)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MetadataPrivacyCharacterizationTests.BetaMetadataGate_FailsForEachUnresolvedFinding(findingId: \"META-DPE1-CLEAR-SENDER\", status: \"unresolved\", evidence: \"MetadataPrivacyCharacterizationTests.Dpe1Header_Co\"···)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MetadataPrivacyCharacterizationTests.BetaMetadataGate_FailsForEachUnresolvedFinding(findingId: \"META-OPAQUE-DEPOSIT-CAPABILITY\", status: \"unresolved\", evidence: \"No opaque deposit capability exists in the current\"···)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MetadataPrivacyCharacterizationTests.BetaMetadataGate_FailsForEachUnresolvedFinding(findingId: \"META-OPAQUE-RETRIEVE-CAPABILITY\", status: \"unresolved\", evidence: \"Current retrieval authenticates with the raw accou\"···)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MetadataPrivacyCharacterizationTests.BetaMetadataGate_FailsForEachUnresolvedFinding(findingId: \"META-PUSH-RAW-ACCOUNT\", status: \"unresolved\", evidence: \"MetadataPrivacyCharacterizationTests.PushSubscript\"···)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MetadataPrivacyCharacterizationTests.BetaMetadataGate_FailsForEachUnresolvedFinding(findingId: \"META-PUSH-ROTATING-HANDLE\", status: \"unresolved\", evidence: \"Current subscription binds a raw account to a prov\"···)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MetadataPrivacyCharacterizationTests.BetaMetadataGate_FailsForEachUnresolvedFinding(findingId: \"META-STORAGE-RAW-TARGET\", status: \"unresolved\", evidence: \"MetadataPrivacyCharacterizationTests.StorageStore_\"···)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MetadataPrivacyCharacterizationTests.BetaMetadataGate_FailsForEachUnresolvedFinding(findingId: \"META-STORAGE-STABLE-IDEMPOTENCY\", status: \"unresolved\", evidence: \"MetadataPrivacyCharacterizationTests.StorageStore_\"···)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MetadataPrivacyCharacterizationTests.Dpe1Header_ContainsClearSenderAndRecipientIdentifiers",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MetadataPrivacyCharacterizationTests.MetadataExpectations_HaveUniqueActionableEvidenceAndProducerContracts",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MetadataPrivacyCharacterizationTests.PushSubscription_ExposesRawAccountAndStableProviderToken",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MetadataPrivacyCharacterizationTests.StorageStore_ExposesTargetPairAndStableIdempotencyMaterial",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.MetadataPrivacyCharacterizationTests.SyntheticIdentifierScanner_DetectsExpectedManagedPayloadAndLogLeaks",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.OutboxDispatchTests.CancelingBackgroundOwnerTerminatesSharedDispatchAndAllowsRetry",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.OutboxDispatchTests.CancelingForegroundWaiterDoesNotCancelSharedBackgroundDispatch",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.OutboxDispatchTests.ClearConversationWaitsForDispatchQuiescenceAndPreventsStaleSend",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.OutboxDispatchTests.DeleteMessageWaitsForDispatchQuiescenceAndDoesNotResurrectRow",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.OutboxDispatchTests.DifferentMessagesFromSameSenderDispatchSequentiallyAcrossTransports",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.OutboxDispatchTests.ForegroundAndBackgroundDirectDispatchesShareOnePhysicalSend",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.OutboxDispatchTests.ForegroundAndBackgroundGroupDispatchesShareOnePhysicalSend",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.OutboxDispatchTests.LatePhysicalFailureDoesNotOverwritePersistedSentState",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.OutboxDispatchTests.LifecycleCancellationAfterPhysicalSendStillPersistsSentState",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.OutboxDispatchTests.MessageUpdateNeverRecreatesDeletedRow",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.OutboxDispatchTests.SignOutWaitsForDispatchQuiescenceAndPurgesQueuedMessages",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.PushNotificationCryptoTests.EnvelopeFailsClosedForTamperWrongKeyPlaintextAndOversize",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.PushNotificationCryptoTests.EnvelopeRoundTripsWithExplicitBinding",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.PushNotificationCryptoTests.PayloadSchemaRejectsMalformedAndOversizeData",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.PushNotificationCryptoTests.PayloadWindowRejectsExpiredFutureAndUnboundedLifetimes",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.PushNotificationCryptoTests.ReplayIdIsStableAndBoundToSubscriptionAndMessage",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.PushSignatureV2GoldenTests.GoldenFixture_PinsCanonicalBytesAndDeterministicEd25519Signatures",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.PushSignatureV2GoldenTests.GoldenSignatures_RejectTamperOfEveryCanonicalField",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.PushSignatureV2GoldenTests.PushDtos_AcceptAbsentOrExactVersionTwoAndAlwaysSerializeVersionTwo(includeVersion: False)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.PushSignatureV2GoldenTests.PushDtos_AcceptAbsentOrExactVersionTwoAndAlwaysSerializeVersionTwo(includeVersion: True)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.PushSignatureV2GoldenTests.PushDtos_RejectExplicitNonCanonicalInboundSignatureVersion(jsonValue: \"\\\"2\\\"\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.PushSignatureV2GoldenTests.PushDtos_RejectExplicitNonCanonicalInboundSignatureVersion(jsonValue: \"1\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.PushSignatureV2GoldenTests.PushDtos_RejectExplicitNonCanonicalInboundSignatureVersion(jsonValue: \"2.5\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.PushSignatureV2GoldenTests.PushDtos_RejectExplicitNonCanonicalInboundSignatureVersion(jsonValue: \"99\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.PushSignatureV2GoldenTests.PushDtos_RejectExplicitNonCanonicalInboundSignatureVersion(jsonValue: \"null\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.PushSubscriptionTransportTests.HttpPushSubscriptionTransport_RequiresHttpsOutsideExplicitLoopback",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.PushSubscriptionTransportTests.HttpPushSubscriptionTransport_UsesBackendContractJson",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.PushSubscriptionTransportTests.PushRegistrationCoordinator_AccountSwitchReRegistersForTheNewSession",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.PushSubscriptionTransportTests.PushRegistrationCoordinator_CancelledRemoteUnsubscribeKeepsLocalStateInvalidAndSignedRetryDurable",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.PushSubscriptionTransportTests.PushRegistrationCoordinator_CurrentAccountRegistrationIsIdempotent",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.PushSubscriptionTransportTests.PushRegistrationCoordinator_DoesNotAdvertiseUnconfiguredServerProviders(provider: \"apns\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.PushSubscriptionTransportTests.PushRegistrationCoordinator_DoesNotAdvertiseUnconfiguredServerProviders(provider: \"huawei\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.PushSubscriptionTransportTests.PushRegistrationCoordinator_DoesNotPersistLocalStateWhenRemoteSubscribeFails",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.PushSubscriptionTransportTests.PushRegistrationCoordinator_FailedUnsubscribeRetriesAfterSeedIsPurged",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.PushSubscriptionTransportTests.PushRegistrationCoordinator_InvalidatesAndResubscribesAfterTokenRotation",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.PushSubscriptionTransportTests.PushRegistrationCoordinator_LateSubscribeAfterTimedOutLogoutIsCompensated",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.PushSubscriptionTransportTests.PushRegistrationCoordinator_MapsWindowsProviderToWns(provider: \"wns\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.PushSubscriptionTransportTests.PushRegistrationCoordinator_MapsWindowsProviderToWns(provider: \"WNS\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.PushSubscriptionTransportTests.PushRegistrationCoordinator_RegisterAsync_ComposesVerifiableRemoteSubscription",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.PushSubscriptionTransportTests.PushRegistrationCoordinator_RoundTripsRemoteSubscriptionThroughLivePush_WhenConfigured",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.PushSubscriptionTransportTests.PushRegistrationCoordinator_SameAccountCanRegisterAfterOffOnAndRelogin",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.PushSubscriptionTransportTests.PushRegistrationCoordinator_SkipsUnsupportedProviders",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.PushSubscriptionTransportTests.PushRegistrationCoordinator_UnregisterAsync_UsesCachedRegistrationForRemoteUnsubscribe",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.PushSubscriptionTransportTests.PushRegistrationCoordinator_UnregisterCancelsLateSubscribeAndAllowsSameAccountReregister",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.PushSubscriptionTransportTests.PushRegistrationCoordinator_UnregisterWithoutAccountDoesNotBlockFutureLogin",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.RealtimeCallLiveE2ETests.CallServiceReturnsAuthenticatedProductionIceConfiguration_WhenConfigured",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.RealtimeCallLiveE2ETests.RealtimeCallService_RoundTripsCallLifecycleThroughLiveSignaling_WhenConfigured",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.RealtimeCallTests.ConcurrentNetworkSamplesAndHangup_NeverReviveTerminalCall",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.RealtimeCallTests.DegradedSamples_TriggerReconnectAndDiagnostics",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.RealtimeCallTests.OutgoingSetupAndTeardown_TransitionsAcrossPeers",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.RealtimeCallTests.ReconnectAttemptsExhausted_MarksCallFailed",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.RouterCancellationTests.RefreshRouteAsync_CallerCancellation_StopsFailoverAndPropagatesCancellation",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.RouterCancellationTests.RefreshRouteAsync_InternalNodeTimeout_ContinuesFailover",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.RouterCancellationTests.RefreshRouteAsync_OperationCanceledException_StopsFailoverWithoutWrapping",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.SessionAccountServiceTests.IdentityMaterialDisposeZeroizesAllKeyBuffers",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.SessionAccountServiceTests.Login_NormalizesUnicodeWhitespaceInLegacyTwelveWordPhrase",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.SessionAccountServiceTests.Login_NormalizesUnicodeWhitespaceInModernThirteenWordPhrase",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.SessionAccountServiceTests.Login_RejectsModernPhraseWithInvalidChecksum",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.SessionAccountServiceTests.LoginDerivesStandardSessionIdFromCurve25519PublicKey",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.SessionAccountServiceTests.LoginWithoutDisplayName_UsesRecoveredProfileName_WhenLookupSucceeds",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.SessionAccountServiceTests.LoginWithoutDisplayNameAndWithoutProfileLookup_Throws",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.SessionAccountServiceTests.LoginWithSameRecoveryPhrase_IsDeterministic",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.SessionAccountServiceTests.LoginWithSessionIdString_IsRejected",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.SessionAccountServiceTests.RecoveryPhraseEncoding_MatchesOriginalSessionMnemonicVector",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.SessionAccountServiceTests.Register_AccountCommitFailureDeletesNewSelfContact(throwAfterWrite: False)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.SessionAccountServiceTests.Register_AccountCommitFailureDeletesNewSelfContact(throwAfterWrite: True)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.SessionAccountServiceTests.Register_AccountCommitFailureRestoresPreviousAccountAndSelfContact",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.SessionAccountServiceTests.Register_DifferentPersistedAccountRequiresPurgeWhenRecoveryPhraseIsUnavailable(previousPhrase: \"corrupt recovery phrase\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.SessionAccountServiceTests.Register_DifferentPersistedAccountRequiresPurgeWhenRecoveryPhraseIsUnavailable(previousPhrase: null)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.SessionAccountServiceTests.Register_GeneratesSessionCompatible128BitPhraseWithChecksum",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.SessionAccountServiceTests.Register_RecoveryPhraseStorageFailureNeverPublishesActiveAccount(throwAfterWrite: False)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.SessionAccountServiceTests.Register_RecoveryPhraseStorageFailureNeverPublishesActiveAccount(throwAfterWrite: True)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.SessionAccountServiceTests.RegisteringDifferentAccountRequiresExplicitSignOutAndPreservesCurrentState",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.SessionAccountServiceTests.SignOut_ClearsActiveAccountAndRecoveryPhrase",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.SessionAccountServiceTests.SignOut_PurgeFailureLeavesTheActiveAccountAvailableForRetry",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.SessionAccountServiceTests.UpdateDisplayName_PersistsActiveAccountAndSelfContact",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.SessionTransportTests.HttpSessionTransport_SendAndReceive_UsesConfiguredPaths",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.SessionTransportTests.RoutedSessionStorageMessageTransport_SendAndReceive_UsesRouterRpcAndTracksRoute",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.SessionTransportTests.SessionStorageMessageTransport_RetrievePreservesServerCursorOrder",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.SessionTransportTests.SessionStorageMessageTransport_SendAndReceive_UsesStorageStoreRetrieveContract",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.SyncAndNotificationTests.GroupSyncPlanRequestsKeysLast",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.SyncAndNotificationTests.MutedConversationDoesNotCreateNotification",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.XNodeRpcClientTrustTests.CanonicalJson_MatchesServerVector",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.XNodeRpcClientTrustTests.RefreshRouteAsync_ConcurrentTargetsReturnTheirOwnValidatedSnapshots",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.XNodeRpcClientTrustTests.RefreshRouteAsync_RejectsAuthenticStaleResponse",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.XNodeRpcClientTrustTests.RefreshRouteAsync_RejectsDuplicateRouteIdentityMaterial(duplicate: \"routerId\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.XNodeRpcClientTrustTests.RefreshRouteAsync_RejectsDuplicateRouteIdentityMaterial(duplicate: \"rpcEndpoint\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.XNodeRpcClientTrustTests.RefreshRouteAsync_RejectsDuplicateRouteIdentityMaterial(duplicate: \"x25519PublicKey\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.XNodeRpcClientTrustTests.RefreshRouteAsync_RejectsFirstHopThatDoesNotMatchPinnedResponder",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.XNodeRpcClientTrustTests.RefreshRouteAsync_RejectsResponseBeforeParsingWhenByteLimitIsExceeded",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.XNodeRpcClientTrustTests.RefreshRouteAsync_RejectsRouteWithWrongHopCount(hopCount: 1)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.XNodeRpcClientTrustTests.RefreshRouteAsync_RejectsRouteWithWrongHopCount(hopCount: 2)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.XNodeRpcClientTrustTests.RefreshRouteAsync_RejectsRouteWithWrongHopCount(hopCount: 4)",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.XNodeRpcClientTrustTests.RefreshRouteAsync_RejectsSelfSignedHopOutsideTrustedBootstrapSet",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.XNodeRpcClientTrustTests.RefreshRouteAsync_RejectsTamperedResponseBinding(field: \"id\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.XNodeRpcClientTrustTests.RefreshRouteAsync_RejectsTamperedResponseBinding(field: \"method\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.XNodeRpcClientTrustTests.RefreshRouteAsync_RejectsTamperedResponseBinding(field: \"nonce\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.XNodeRpcClientTrustTests.RefreshRouteAsync_RejectsTamperedResponseBinding(field: \"requestPayloadSha256\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.XNodeRpcClientTrustTests.RefreshRouteAsync_RejectsTamperedResponseBinding(field: \"result\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.XNodeRpcClientTrustTests.RefreshRouteAsync_RejectsUnsignedResponse",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.XNodeRpcClientTrustTests.RefreshRouteAsync_RejectsUnusableSignedContact(failure: \"missing-capability\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.XNodeRpcClientTrustTests.RefreshRouteAsync_RejectsUnusableSignedContact(failure: \"stale-contact\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.XNodeRpcClientTrustTests.RefreshRouteAsync_RejectsUnusableSignedContact(failure: \"unreachable\")",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.XNodeRpcClientTrustTests.RefreshRouteAsync_RejectsWrongRouterPin",
+                      "outcome":  "Passed"
+                  },
+                  {
+                      "testName":  "Deep.Client.Shared.Tests.Services.XNodeRpcClientTrustTests.RefreshRouteAsync_RejectsWrongSignedRouteNonce",
+                      "outcome":  "Passed"
+                  }
+              ]
+}
