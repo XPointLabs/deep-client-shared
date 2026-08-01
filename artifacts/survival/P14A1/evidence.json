@@ -1,0 +1,200 @@
+{
+  "schema": "deep.survival.p14a1.evidence.v1",
+  "workPackage": "P14A1",
+  "acceptance": "ATOMIC-STAGING-PERSISTENCE-GO / SELF-HOSTED-RUNTIME-NO-GO",
+  "source": {
+    "reviewBaseCommit": "0947f77195986672eb479c2e7b340e18c3c62cfa",
+    "reviewBaseTree": "e99b25458ab34fb749741135ac97dd5b38b22b37",
+    "firstRedCommit": "f790367654df8dda5bb84350952598050553a967",
+    "firstGreenCommit": "8b27ffb3844ebe7ef6cab820dba9cbb7faf201db",
+    "correctiveRedCommit": "282c8e239675585432d68ea83db5cd4f19594df1",
+    "acceptedGreenCommit": "b2c3bbbceb6c173e28f9f2360c863052bf811cea",
+    "acceptedGreenTree": "3dc8677bf5c98ebf3d6ffdb8b18574eedcec5e2d",
+    "sourceDiff": {
+      "command": "git diff --binary --full-index --no-ext-diff 0947f77195986672eb479c2e7b340e18c3c62cfa b2c3bbbceb6c173e28f9f2360c863052bf811cea",
+      "sha256": "26bdf1d04963bbaf10282193e64d92aee4cd4a837f99f50f78591a6057cd8a81",
+      "bytes": 162139
+    }
+  },
+  "reviews": [
+    {
+      "name": "architecture-correctness",
+      "reviewedSourceCommit": "b2c3bbbceb6c173e28f9f2360c863052bf811cea",
+      "disposition": "GO",
+      "findings": {
+        "P0": 0,
+        "P1": 0,
+        "P2": 0,
+        "P3": 0
+      }
+    },
+    {
+      "name": "security-privacy",
+      "reviewedSourceCommit": "b2c3bbbceb6c173e28f9f2360c863052bf811cea",
+      "disposition": "GO",
+      "findings": {
+        "P0": 0,
+        "P1": 0,
+        "P2": 0,
+        "P3": 0
+      }
+    }
+  ],
+  "changedFilesFromReviewBase": [
+    {
+      "status": "modified",
+      "path": "docs/ARCHITECTURE.md"
+    },
+    {
+      "status": "added",
+      "path": "docs/P14A_ATOMIC_STAGING.md"
+    },
+    {
+      "status": "modified",
+      "path": "src/Deep.Client.Shared/Persistence/AccountGenerationSessionStore.cs"
+    },
+    {
+      "status": "added",
+      "path": "src/Deep.Client.Shared/Persistence/AtomicBoundedSettingsContracts.cs"
+    },
+    {
+      "status": "added",
+      "path": "src/Deep.Client.Shared/Persistence/InMemoryAtomicBoundedSettingsRepository.cs"
+    },
+    {
+      "status": "modified",
+      "path": "src/Deep.Client.Shared/Persistence/RepositoryContracts.cs"
+    },
+    {
+      "status": "added",
+      "path": "src/Deep.Client.Shared/Persistence/SqliteAtomicBoundedSettingsRepository.cs"
+    },
+    {
+      "status": "modified",
+      "path": "src/Deep.Client.Shared/Services/StagedSelfHostedProfileService.cs"
+    },
+    {
+      "status": "added",
+      "path": "tests/Deep.Client.Shared.Tests/Persistence/AtomicBoundedSettingsRepositoryTests.cs"
+    },
+    {
+      "status": "added",
+      "path": "tests/Deep.Client.Shared.Tests/Services/StagedSelfHostedProfileCorrectiveTests.cs"
+    },
+    {
+      "status": "modified",
+      "path": "tests/Deep.Client.Shared.Tests/Services/StagedSelfHostedProfileServiceTests.cs"
+    }
+  ],
+  "compatibility": {
+    "storage": "existing settings.payload_json",
+    "envelopeVersion": 1,
+    "keyScope": "dedicated staged-profile settings keys only",
+    "oldUnacceptedRows": "fail-closed-no-rewrite",
+    "newTable": false,
+    "physicalSchemaChange": false,
+    "logicalSchemaVersionChange": false,
+    "migration": false,
+    "sidecar": false
+  },
+  "limits": {
+    "revisionBytes": 16,
+    "maximumKeyCharacters": 256,
+    "maximumKeyUtf8Bytes": 512,
+    "maximumRepositoryValueUtf8Bytes": 786432,
+    "maximumCandidatesPerAccount": 16,
+    "maximumCandidateBytes": 65536,
+    "maximumAggregateCandidateBytes": 524288,
+    "maximumDisplayHintInputCharacters": 256,
+    "maximumDisplayHintUtf8Bytes": 64,
+    "maximumCasAttempts": 16
+  },
+  "guarantees": {
+    "atomicCas": [
+      "create-if-missing",
+      "replace-if-opaque-revision-matches",
+      "delete-if-opaque-revision-matches",
+      "bounded-conflict-retry",
+      "outcome-unknown-read-reconciliation"
+    ],
+    "sqlite": [
+      "stored-BLOB-length-projected-before-payload-select",
+      "revision-compare-and-mutation-in-one-immediate-transaction",
+      "independent-store-service-CAS-retry-proven-with-deterministic-read-barrier"
+    ],
+    "purge": [
+      "one-account-generation-lease-covers-each-complete-bounded-operation",
+      "sign-out-cancels-and-joins-in-flight-generation-before-settings-purge",
+      "old-generation-mutation-cannot-resurrect-staging-after-purge"
+    ],
+    "inMemoryRollback": [
+      "fault-callback-evaluated-outside-store-lock",
+      "captured-fault-injected-after-live-dictionary-mutation",
+      "fault-precedes-file-persistence-conclusion",
+      "create-replace-delete-restore-exact-live-value-and-revision",
+      "reopened-file-backed-store-observes-exact-pre-fault-state"
+    ],
+    "cancellation": [
+      "caller-cancellation-requires-associated-token-canceled",
+      "generation-cancellation-requires-generation-lease-token-canceled",
+      "rethrown-cancellation-has-fixed-text-and-no-inner-exception",
+      "unsolicited-pre-commit-cancellation-shaped-failure-is-dependency-failure",
+      "post-commit-or-mutation-uncertainty-is-outcome-unknown"
+    ],
+    "privacy": [
+      "no-public-scope-byte-export",
+      "no-public-display-hint",
+      "non-content-derived-public-hash-codes",
+      "no-raw-key-value-revision-account-or-provider-text-in-public-rendering",
+      "candidate-bytes-only-via-explicit-defensive-copy-export"
+    ]
+  },
+  "verification": {
+    "machineReadableSummary": "test-summary.json",
+    "artifactHashManifest": "HASHES.sha256",
+    "evidenceContentHashDefinition": "sha256-of-exact-UTF8-bytes-of-HASHES.sha256",
+    "rawTrxCommitted": false,
+    "rawTrxOmissionReason": "raw test logs can contain machine-local paths and nondeterministic metadata",
+    "formatVerified": true,
+    "diffCheckPassed": true,
+    "forbiddenProductionMatches": 0,
+    "runtimeRegistrationMatches": 0,
+    "schemaMigrationMatches": 0
+  },
+  "nonActivation": {
+    "dormant": true,
+    "runtimeRegistered": false,
+    "networkingAdded": false,
+    "transportAdded": false,
+    "dependencyInjectionAdded": false,
+    "loggingOrTelemetryAdded": false,
+    "deploymentPerformed": false,
+    "productionReady": false,
+    "apk": {
+      "applicable": false,
+      "reason": "shared-library dormant persistence boundary; no application packaging or runtime activation"
+    },
+    "remainingBlockers": [
+      "P14C canonical signed profile producer and contract approval",
+      "profile parser and verifier approval",
+      "trust selection and runtime activation approval",
+      "platform UX package",
+      "deployment isolation package"
+    ]
+  },
+  "sanitization": {
+    "absolutePaths": false,
+    "userOrMachineNames": false,
+    "timestamps": false,
+    "endpoints": false,
+    "accountOrCandidateIdentifiers": false,
+    "candidateOrScopeMaterial": false,
+    "rawExceptionText": false,
+    "credentialsOrSecrets": false
+  },
+  "externalActions": {
+    "networkUsed": false,
+    "pushPerformed": false,
+    "deployPerformed": false
+  }
+}
