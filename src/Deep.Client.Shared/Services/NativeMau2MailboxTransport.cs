@@ -54,6 +54,11 @@ public sealed class NativeMau2MailboxTransport :
         this.authority = authority ?? throw new ArgumentNullException(nameof(authority));
         this.decodePolicies = decodePolicies ?? throw new ArgumentNullException(nameof(decodePolicies));
         this.selfSelector = selfSelector ?? throw new ArgumentNullException(nameof(selfSelector));
+        if (!authority.UsesSharedPolicyCoordinator(
+                localStore.CanonicalStateIdentity,
+                activation.IssuerContext.Span))
+            throw new InvalidOperationException(
+                "Native MAU2 requires the exact store-bound shared policy authority.");
         authority.Validate();
         var requests = new MailboxAuthenticatedRequestFactory(credentials, authority);
         adapter = new ClientMailboxAdapter(
@@ -247,7 +252,8 @@ public sealed class NativeMau2MailboxTransport :
             return true;
         }
         catch (Exception exception) when (exception is
-            ArgumentException or FormatException or OverflowException or CryptographicException)
+            MailboxClientException or ArgumentException or FormatException or
+            OverflowException or CryptographicException)
         {
             return false;
         }

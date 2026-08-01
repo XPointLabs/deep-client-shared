@@ -132,6 +132,8 @@ public sealed class ClientMailboxActivation
     internal ClientMailboxJournalScope JournalScope =>
         ClientMailboxJournalScope.Derive(issuerContext);
 
+    internal ReadOnlyMemory<byte> IssuerContext => issuerContext.ToArray();
+
     public override string ToString() =>
         $"ClientMailboxActivation {{ Enabled = {Enabled}, " +
         $"IssuerContext = {(HasIssuerContext ? "[configured]" : "[missing]")}, " +
@@ -309,7 +311,7 @@ public sealed class ClientMailboxAdapter
     private readonly IMailboxClientDecodePolicyProvider decodePolicies;
     private readonly TimeProvider timeProvider;
 
-    public ClientMailboxAdapter(
+    internal ClientMailboxAdapter(
         ClientFeatureFlags flags,
         ClientMailboxActivation activation,
         IClientMailboxBinaryIngress ingress,
@@ -491,10 +493,6 @@ public sealed class ClientMailboxAdapter
             MailboxAuthenticatedOperation.Store);
         var envelope = MailboxAuthenticatedRequestTranscript.DecodeStoreBody(
             request.Binding.CanonicalRequest.Span);
-        var route = await ResolveDispatchRouteAsync(
-            selector, envelope.Epoch, envelope.MailboxId, envelope.PlacementId,
-            MailboxAuthenticatedOperation.Store,
-            cancellationToken).ConfigureAwait(false);
         var logicalId = OutboxLogicalId.FromBytes(
             request.Binding.OperationId.Span);
         var dedup = OutboxDedupMaterial.FromBytes(
@@ -507,13 +505,21 @@ public sealed class ClientMailboxAdapter
             cancellationToken).ConfigureAwait(false);
         if (snapshot.State == TransportOutboxState.Accepted)
         {
+            await using var recoveredPolicyLease =
+                await requests.AcquireDispatchPolicyAsync(cancellationToken)
+                    .ConfigureAwait(false);
+            requests.ReloadCommittedPolicy();
+            var recoveredRoute = await ResolveDispatchRouteAsync(
+                selector, envelope.Epoch, envelope.MailboxId, envelope.PlacementId,
+                MailboxAuthenticatedOperation.Store,
+                cancellationToken).ConfigureAwait(false);
             var accepted = snapshot.Attempts.Single(
                 static attempt =>
                     attempt.State == TransportOutboxAttemptState.Accepted);
             var evidence = accepted.GetEvidenceCopy();
             var persistedDurable = await VerifyAndJournalDurableAsync(
                 evidence,
-                StoreExpectation(envelope, route),
+                StoreExpectation(envelope, recoveredRoute),
                 cancellationToken).ConfigureAwait(false);
             await PromoteAcceptedAsync(
                 outboxScope,
@@ -528,19 +534,35 @@ public sealed class ClientMailboxAdapter
         }
         if (snapshot.State == TransportOutboxState.Durable)
         {
+            await using var recoveredPolicyLease =
+                await requests.AcquireDispatchPolicyAsync(cancellationToken)
+                    .ConfigureAwait(false);
+            requests.ReloadCommittedPolicy();
+            var recoveredRoute = await ResolveDispatchRouteAsync(
+                selector, envelope.Epoch, envelope.MailboxId, envelope.PlacementId,
+                MailboxAuthenticatedOperation.Store,
+                cancellationToken).ConfigureAwait(false);
             var evidence = snapshot.Attempts
                 .Single(static attempt =>
                     attempt.State == TransportOutboxAttemptState.Durable)
                 .GetEvidenceCopy();
             var persistedDurable = await VerifyAndJournalDurableAsync(
                 evidence,
-                StoreExpectation(envelope, route),
+                StoreExpectation(envelope, recoveredRoute),
                 cancellationToken).ConfigureAwait(false);
             return new ClientMailboxStoreResult(
                 persistedDurable.Cursor,
                 persistedDurable.Disposition);
         }
 
+        await using var policyLease =
+            await requests.AcquireDispatchPolicyAsync(cancellationToken)
+                .ConfigureAwait(false);
+        requests.ReloadCommittedPolicy();
+        var route = await ResolveDispatchRouteAsync(
+            selector, envelope.Epoch, envelope.MailboxId, envelope.PlacementId,
+            MailboxAuthenticatedOperation.Store,
+            cancellationToken).ConfigureAwait(false);
         var attempt = await BeginAttemptAsync(
             outboxScope,
             logicalId,
@@ -548,17 +570,15 @@ public sealed class ClientMailboxAdapter
             MailboxAuthenticatedOperation.Store,
             cancellationToken).ConfigureAwait(false);
 
-        // Authority time and selected route are revalidated immediately before I/O.
-        route = await ResolveDispatchRouteAsync(
-            selector, envelope.Epoch, envelope.MailboxId, envelope.PlacementId,
-            MailboxAuthenticatedOperation.Store,
-            cancellationToken).ConfigureAwait(false);
         var response = await ingress.StoreAsync(encoded, cancellationToken)
             .ConfigureAwait(false);
+        // Once ingress returned, caller cancellation must not skip the committed-policy
+        // fence or the exact route/grant revalidation for the received response.
+        requests.ReloadCommittedPolicy();
         route = await ResolveDispatchRouteAsync(
             selector, envelope.Epoch, envelope.MailboxId, envelope.PlacementId,
             MailboxAuthenticatedOperation.Store,
-            cancellationToken).ConfigureAwait(false);
+            CancellationToken.None).ConfigureAwait(false);
         var expectation = StoreExpectation(envelope, route);
         var durable = await VerifyAndJournalDurableAsync(
             response,
@@ -639,10 +659,6 @@ public sealed class ClientMailboxAdapter
             MailboxAuthenticatedOperation.Retrieve);
         var request = MailboxAuthenticatedRequestTranscript.DecodeRetrieveBody(
             authenticated.Binding.CanonicalRequest.Span);
-        var route = await ResolveDispatchRouteAsync(
-            selector, request.Epoch, request.MailboxId, request.PlacementId,
-            MailboxAuthenticatedOperation.Retrieve,
-            cancellationToken).ConfigureAwait(false);
         var logicalId = OutboxLogicalId.FromBytes(request.OperationId.Span);
         var dedup = OutboxDedupMaterial.FromBytes(
             authenticated.Binding.RequestDigest.Span);
@@ -658,6 +674,14 @@ public sealed class ClientMailboxAdapter
             TransportOutboxState.Accepted or
             TransportOutboxState.Durable)
         {
+            await using var recoveredPolicyLease =
+                await requests.AcquireDispatchPolicyAsync(cancellationToken)
+                    .ConfigureAwait(false);
+            requests.ReloadCommittedPolicy();
+            _ = await ResolveDispatchRouteAsync(
+                selector, request.Epoch, request.MailboxId, request.PlacementId,
+                MailboxAuthenticatedOperation.Retrieve,
+                cancellationToken).ConfigureAwait(false);
             var completedAttempt = outboxSnapshot.Attempts.Single(
                 attempt => attempt.State ==
                     (outboxSnapshot.State == TransportOutboxState.Accepted
@@ -697,24 +721,28 @@ public sealed class ClientMailboxAdapter
                 "MBR2 cursor/token does not match durable mailbox traversal.");
         }
 
+        await using var policyLease =
+            await requests.AcquireDispatchPolicyAsync(cancellationToken)
+                .ConfigureAwait(false);
+        requests.ReloadCommittedPolicy();
+        var route = await ResolveDispatchRouteAsync(
+            selector, request.Epoch, request.MailboxId, request.PlacementId,
+            MailboxAuthenticatedOperation.Retrieve,
+            cancellationToken).ConfigureAwait(false);
         var attempt = await BeginAttemptAsync(
             outboxScope,
             logicalId,
             outboxSnapshot,
             MailboxAuthenticatedOperation.Retrieve,
             cancellationToken).ConfigureAwait(false);
-        // Never dispatch a prepared request after its scoped authority expired or changed.
-        route = await ResolveDispatchRouteAsync(
-            selector, request.Epoch, request.MailboxId, request.PlacementId,
-            MailboxAuthenticatedOperation.Retrieve,
-            cancellationToken).ConfigureAwait(false);
         var response = await ingress.RetrieveAsync(
             canonicalMau2,
             cancellationToken).ConfigureAwait(false);
+        requests.ReloadCommittedPolicy();
         route = await ResolveDispatchRouteAsync(
             selector, request.Epoch, request.MailboxId, request.PlacementId,
             MailboxAuthenticatedOperation.Retrieve,
-            cancellationToken).ConfigureAwait(false);
+            CancellationToken.None).ConfigureAwait(false);
         var page = MailboxClientCodec.DecodeRetrievePage(
             response.Span, decodePolicies.GetCurrent());
         if (page.Epoch != request.Epoch ||
@@ -787,10 +815,6 @@ public sealed class ClientMailboxAdapter
             MailboxAuthenticatedOperation.Ack);
         var request = MailboxAuthenticatedRequestTranscript.DecodeAckBody(
             authenticated.Binding.CanonicalRequest.Span);
-        var route = await ResolveDispatchRouteAsync(
-            selector, request.Epoch, request.MailboxId, request.PlacementId,
-            MailboxAuthenticatedOperation.Ack,
-            cancellationToken).ConfigureAwait(false);
         var logicalId = OutboxLogicalId.FromBytes(request.OperationId.Span);
         var dedup = OutboxDedupMaterial.FromBytes(
             authenticated.Binding.RequestDigest.Span);
@@ -806,6 +830,14 @@ public sealed class ClientMailboxAdapter
             TransportOutboxState.Accepted or
             TransportOutboxState.Durable)
         {
+            await using var recoveredPolicyLease =
+                await requests.AcquireDispatchPolicyAsync(cancellationToken)
+                    .ConfigureAwait(false);
+            requests.ReloadCommittedPolicy();
+            _ = await ResolveDispatchRouteAsync(
+                selector, request.Epoch, request.MailboxId, request.PlacementId,
+                MailboxAuthenticatedOperation.Ack,
+                cancellationToken).ConfigureAwait(false);
             if (outboxSnapshot.State == TransportOutboxState.Accepted)
             {
                 var accepted = outboxSnapshot.Attempts.Single(
@@ -853,6 +885,14 @@ public sealed class ClientMailboxAdapter
             scope,
             request.Acknowledgements,
             cancellationToken).ConfigureAwait(false);
+        await using var policyLease =
+            await requests.AcquireDispatchPolicyAsync(cancellationToken)
+                .ConfigureAwait(false);
+        requests.ReloadCommittedPolicy();
+        var route = await ResolveDispatchRouteAsync(
+            selector, request.Epoch, request.MailboxId, request.PlacementId,
+            MailboxAuthenticatedOperation.Ack,
+            cancellationToken).ConfigureAwait(false);
         if (pending == ClientMailboxAckState.AlreadyCommitted)
         {
             var localAttempt = await BeginAttemptAsync(
@@ -861,17 +901,14 @@ public sealed class ClientMailboxAdapter
                 outboxSnapshot,
                 MailboxAuthenticatedOperation.Ack,
                 cancellationToken).ConfigureAwait(false);
-            route = await ResolveDispatchRouteAsync(
-                selector, request.Epoch, request.MailboxId, request.PlacementId,
-                MailboxAuthenticatedOperation.Ack,
-                cancellationToken).ConfigureAwait(false);
             var recoveredResponse = await ingress.AcknowledgeAsync(
                 canonicalMau2,
                 cancellationToken).ConfigureAwait(false);
+            requests.ReloadCommittedPolicy();
             route = await ResolveDispatchRouteAsync(
                 selector, request.Epoch, request.MailboxId, request.PlacementId,
                 MailboxAuthenticatedOperation.Ack,
-                cancellationToken).ConfigureAwait(false);
+                CancellationToken.None).ConfigureAwait(false);
             var recoveredAggregate = MailboxAggregateAckCodec.DecodeMqr3(
                 recoveredResponse.Span);
             if (recoveredAggregate.Epoch != request.Epoch ||
@@ -922,19 +959,14 @@ public sealed class ClientMailboxAdapter
             outboxSnapshot,
             MailboxAuthenticatedOperation.Ack,
             cancellationToken).ConfigureAwait(false);
-        // Revalidate immediately before sending MBA2.  A resumed frame is not
-        // authority to use stale membership, placement, or replica pins.
-        route = await ResolveDispatchRouteAsync(
-            selector, request.Epoch, request.MailboxId, request.PlacementId,
-            MailboxAuthenticatedOperation.Ack,
-            cancellationToken).ConfigureAwait(false);
         var response = await ingress.AcknowledgeAsync(
             canonicalMau2,
             cancellationToken).ConfigureAwait(false);
+        requests.ReloadCommittedPolicy();
         route = await ResolveDispatchRouteAsync(
             selector, request.Epoch, request.MailboxId, request.PlacementId,
             MailboxAuthenticatedOperation.Ack,
-            cancellationToken).ConfigureAwait(false);
+            CancellationToken.None).ConfigureAwait(false);
         var aggregate = MailboxAggregateAckCodec.DecodeMqr3(response.Span);
         if (aggregate.Epoch != request.Epoch ||
             !FixedEquals(aggregate.OperationId.Span, request.OperationId.Span) ||

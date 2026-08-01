@@ -13,7 +13,7 @@ public sealed class MailboxAuthenticatedRequestFactory
     private readonly IScopedMailboxCredentialRepository credentials;
     private readonly VerifiedOfficialMailboxAuthority authority;
 
-    public MailboxAuthenticatedRequestFactory(
+    internal MailboxAuthenticatedRequestFactory(
         IScopedMailboxCredentialRepository credentials,
         VerifiedOfficialMailboxAuthority authority)
     {
@@ -24,6 +24,14 @@ public sealed class MailboxAuthenticatedRequestFactory
 
     internal bool Uses(IScopedMailboxCredentialRepository repository) =>
         ReferenceEquals(credentials, repository);
+
+    internal ValueTask<IAsyncDisposable>
+        AcquireDispatchPolicyAsync(
+        CancellationToken cancellationToken = default) =>
+        authority.AcquireDispatchPolicyAsync(cancellationToken);
+
+    internal void ReloadCommittedPolicy() =>
+        authority.ReloadCommittedPolicy();
 
     public Task<ScopedMailboxResolvedRoute> ReadRouteAsync(
         MailboxCredentialSelector selector,

@@ -84,8 +84,9 @@ public sealed class VerifiedOfficialMailboxAuthority
     private readonly Func<bool> entitlement;
     private readonly IReadOnlyList<MailboxCapabilityIssuerAuthority>
         trustedIssuers;
+    private readonly MailboxRuntimePolicyCoordinator policyCoordinator;
 
-    public VerifiedOfficialMailboxAuthority(
+    internal VerifiedOfficialMailboxAuthority(
         ReadOnlyMemory<byte> networkId,
         ulong minimumGeneration,
         IReadOnlyList<MailboxCapabilityIssuerAuthority> trustedIssuers,
@@ -93,6 +94,21 @@ public sealed class VerifiedOfficialMailboxAuthority
         Func<bool> entitlement,
         IFreshMailboxCapabilityRevocationSource revocations,
         TimeProvider timeProvider)
+        : this(networkId, minimumGeneration, trustedIssuers,
+            requiresManagedEntitlement, entitlement, revocations, timeProvider,
+            MailboxRuntimePolicyCoordinator.Detached())
+    {
+    }
+
+    internal VerifiedOfficialMailboxAuthority(
+        ReadOnlyMemory<byte> networkId,
+        ulong minimumGeneration,
+        IReadOnlyList<MailboxCapabilityIssuerAuthority> trustedIssuers,
+        bool requiresManagedEntitlement,
+        Func<bool> entitlement,
+        IFreshMailboxCapabilityRevocationSource revocations,
+        TimeProvider timeProvider,
+        MailboxRuntimePolicyCoordinator policyCoordinator)
     {
         ArgumentNullException.ThrowIfNull(trustedIssuers);
         networkId = networkId.ToArray();
@@ -111,6 +127,8 @@ public sealed class VerifiedOfficialMailboxAuthority
             nameof(revocations));
         TimeProvider = timeProvider ?? throw new ArgumentNullException(
             nameof(timeProvider));
+        this.policyCoordinator = policyCoordinator ?? throw new ArgumentNullException(
+            nameof(policyCoordinator));
         Validate();
         policyFingerprint = ComputePolicyFingerprint(
             this.networkId, MinimumGeneration, RequiresManagedEntitlement,
@@ -167,6 +185,17 @@ public sealed class VerifiedOfficialMailboxAuthority
             }
         }
     }
+
+    internal ValueTask<IAsyncDisposable>
+        AcquireDispatchPolicyAsync(CancellationToken cancellationToken = default) =>
+        policyCoordinator.AcquireDispatchAsync(cancellationToken);
+
+    public void ReloadCommittedPolicy() => Revocations.ValidateFreshness();
+
+    internal bool UsesSharedPolicyCoordinator(
+        string canonicalStateIdentity,
+        ReadOnlySpan<byte> stableAuthorityId) =>
+        policyCoordinator.Matches(canonicalStateIdentity, stableAuthorityId);
 
     internal MailboxCapabilityIssuerAuthority ResolveIssuer(
         MailboxAuthenticatedGrant grant) => trustedIssuers.FirstOrDefault(
@@ -249,6 +278,27 @@ public sealed record ScopedMailboxPrepareBatchRequest(
     ReadOnlyMemory<byte> ParentOperationId,
     IReadOnlyList<ScopedMailboxBatchTarget> Targets,
     DateTimeOffset CreatedAt);
+
+internal sealed record MailboxBundleRuntimeCheckpoint(
+    int SchemaVersion,
+    string Lane,
+    string Platform,
+    string Ownership,
+    ulong CurrentEpoch,
+    string PairGeneration);
+
+internal sealed record MailboxRevocationRuntimeCheckpoint(
+    int SchemaVersion,
+    ulong GeneratedAtUnixSeconds,
+    ulong ExpiresAtUnixSeconds,
+    string SnapshotSha256,
+    string[] RevokedKeys);
+
+internal sealed record MailboxRuntimeSnapshotCheckpoint(
+    string BundleKey,
+    MailboxBundleRuntimeCheckpoint Bundle,
+    string RevocationKey,
+    MailboxRevocationRuntimeCheckpoint Revocation);
 
 public sealed class ScopedMailboxPreparedBatch
 {
@@ -378,48 +428,187 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
     internal async Task ApplyScopedMailboxRuntimeSnapshotAsync(
         IReadOnlyList<ScopedMailboxCredentialGeneration> generations,
         VerifiedOfficialMailboxAuthority authority,
-        bool rotate,
-        IReadOnlyDictionary<string, object> receipts,
+        MailboxRuntimeSnapshotCheckpoint checkpoint,
+        MailboxRuntimeCommitActivation? committedActivation = null,
         CancellationToken cancellationToken = default)
     {
         ValidateInstallBatch(generations, authority);
-        ArgumentNullException.ThrowIfNull(receipts);
-        if (receipts.Count is < 1 or > 4 || receipts.Any(static item =>
-                string.IsNullOrWhiteSpace(item.Key) || item.Value is null))
-            throw new ArgumentException("Mailbox runtime receipts are invalid.", nameof(receipts));
+        ArgumentNullException.ThrowIfNull(checkpoint);
+        ArgumentException.ThrowIfNullOrWhiteSpace(checkpoint.BundleKey);
+        ArgumentException.ThrowIfNullOrWhiteSpace(checkpoint.RevocationKey);
+        ValidateBundleCheckpoint(null, checkpoint.Bundle);
+        ValidateRevocationCheckpoint(null, checkpoint.Revocation);
+        var bundlePayload = System.Text.Json.JsonSerializer.Serialize(
+            checkpoint.Bundle, SerializerOptions);
+        var revocationPayload = System.Text.Json.JsonSerializer.Serialize(
+            checkpoint.Revocation, SerializerOptions);
         await _databaseGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             using var connection = OpenConnection();
             using var transaction = connection.BeginTransaction(deferred: false);
+            var priorBundleRow = ReadSettingWithPayload<MailboxBundleRuntimeCheckpoint>(
+                connection, transaction, checkpoint.BundleKey);
+            var priorRevocationRow = ReadSettingWithPayload<MailboxRevocationRuntimeCheckpoint>(
+                connection, transaction, checkpoint.RevocationKey);
+            var priorBundle = priorBundleRow.Value;
+            var priorRevocation = priorRevocationRow.Value;
+            if (priorBundle is not null) ValidateBundleCheckpoint(null, priorBundle);
+            if (priorRevocation is not null) ValidateRevocationCheckpoint(null, priorRevocation);
+            ValidateBundleCheckpoint(priorBundle, checkpoint.Bundle);
+            ValidateRevocationCheckpoint(priorRevocation, checkpoint.Revocation);
+            var rotate = priorBundle is not null &&
+                checkpoint.Bundle.CurrentEpoch > priorBundle.CurrentEpoch;
             if (rotate)
                 RotateCore(connection, transaction, generations, authority, cancellationToken);
             else
                 InstallCore(connection, transaction, generations, authority, cancellationToken);
-            foreach (var receipt in receipts)
-            {
-                using var upsert = connection.CreateCommand();
-                upsert.Transaction = transaction;
-                upsert.CommandText = """
-                    INSERT INTO settings(key,payload_json) VALUES($key,$payload)
-                    ON CONFLICT(key) DO UPDATE SET payload_json=excluded.payload_json;
-                    """;
-                upsert.Parameters.AddWithValue("$key", receipt.Key);
-                upsert.Parameters.AddWithValue(
-                    "$payload",
-                    System.Text.Json.JsonSerializer.Serialize(
-                        receipt.Value, receipt.Value.GetType(), SerializerOptions));
-                upsert.ExecuteNonQuery();
-            }
+            CompareExchangeSetting(connection, transaction, checkpoint.BundleKey,
+                priorBundleRow.Payload, bundlePayload);
+            CompareExchangeSetting(connection, transaction, checkpoint.RevocationKey,
+                priorRevocationRow.Payload, revocationPayload);
             commitFault?.Invoke(ClientMailboxCommitFaultPoint.BeforeCommit);
             cancellationToken.ThrowIfCancellationRequested();
             transaction.Commit();
+            committedActivation?.ActivateCommittedNoThrow();
         }
         finally
         {
             _databaseGate.Release();
         }
     }
+
+    internal MailboxRevocationRuntimeCheckpoint ReadMailboxRevocationCheckpoint(
+        string key)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(key);
+        using var connection = OpenConnection();
+        var checkpoint = ReadSettingWithPayload<MailboxRevocationRuntimeCheckpoint>(
+            connection, null, key).Value ?? throw new InvalidOperationException(
+            "Committed mailbox revocation authority is unavailable.");
+        ValidateRevocationCheckpoint(null, checkpoint);
+        return checkpoint;
+    }
+
+    private static (T? Value, string? Payload) ReadSettingWithPayload<T>(
+        SqliteConnection connection,
+        SqliteTransaction? transaction,
+        string key)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT payload_json FROM settings WHERE key=$key;";
+        command.Parameters.AddWithValue("$key", key);
+        var payload = command.ExecuteScalar() as string;
+        if (payload is null) return (default, null);
+        try
+        {
+            return (System.Text.Json.JsonSerializer.Deserialize<T>(payload, SerializerOptions)
+                ?? throw new InvalidDataException(
+                    "Mailbox runtime checkpoint is invalid JSON."), payload);
+        }
+        catch (System.Text.Json.JsonException exception)
+        {
+            throw new InvalidDataException(
+                "Mailbox runtime checkpoint is invalid JSON.", exception);
+        }
+    }
+
+    private static void CompareExchangeSetting(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string key,
+        string? priorPayload,
+        string payload)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = priorPayload is null
+            ? "INSERT OR IGNORE INTO settings(key,payload_json) VALUES($key,$payload);"
+            : "UPDATE settings SET payload_json=$payload WHERE key=$key AND payload_json=$prior;";
+        command.Parameters.AddWithValue("$key", key);
+        command.Parameters.AddWithValue("$payload", payload);
+        if (priorPayload is not null)
+            command.Parameters.AddWithValue("$prior", priorPayload);
+        if (command.ExecuteNonQuery() != 1)
+            throw new InvalidOperationException(
+                "Mailbox runtime checkpoint compare-and-swap failed.");
+    }
+
+    private static void ValidateBundleCheckpoint(
+        MailboxBundleRuntimeCheckpoint? prior,
+        MailboxBundleRuntimeCheckpoint current)
+    {
+        if (current.SchemaVersion != 1 || current.CurrentEpoch == 0 ||
+            string.IsNullOrWhiteSpace(current.Lane) ||
+            string.IsNullOrWhiteSpace(current.Platform) ||
+            string.IsNullOrWhiteSpace(current.Ownership) ||
+            !IsLowerHex(current.PairGeneration, 64) ||
+            current.Lane is not "android-windows-pair" ||
+            current.Platform is not ("android" or "windows") ||
+            current.Ownership is not ("UserManaged" or "OfficialManaged"))
+            throw new InvalidDataException("Mailbox bundle checkpoint is invalid.");
+        if (prior is null) return;
+        if (prior.SchemaVersion != current.SchemaVersion ||
+            !string.Equals(prior.Lane, current.Lane, StringComparison.Ordinal) ||
+            !string.Equals(prior.Platform, current.Platform, StringComparison.Ordinal) ||
+            !string.Equals(prior.Ownership, current.Ownership, StringComparison.Ordinal) ||
+            current.CurrentEpoch < prior.CurrentEpoch ||
+            current.CurrentEpoch == prior.CurrentEpoch && prior != current)
+            throw new InvalidDataException(
+                "Mailbox bundle checkpoint is not an exact replay or forward rotation.");
+    }
+
+    private static void ValidateRevocationCheckpoint(
+        MailboxRevocationRuntimeCheckpoint? prior,
+        MailboxRevocationRuntimeCheckpoint current)
+    {
+        if (current.SchemaVersion != 1 ||
+            current.GeneratedAtUnixSeconds >= current.ExpiresAtUnixSeconds ||
+            !IsLowerHex(current.SnapshotSha256, 64) || current.RevokedKeys is null ||
+            current.RevokedKeys.Length > 100_000 ||
+            !current.RevokedKeys.SequenceEqual(
+                current.RevokedKeys.OrderBy(static key => key, StringComparer.Ordinal),
+                StringComparer.Ordinal) ||
+            current.RevokedKeys.Any(static key => !IsCanonicalRevocationKey(key)) ||
+            current.RevokedKeys.Distinct(StringComparer.Ordinal).Count() !=
+                current.RevokedKeys.Length)
+            throw new InvalidDataException("Mailbox revocation checkpoint is invalid.");
+        if (prior is null) return;
+        var exact = prior.SchemaVersion == current.SchemaVersion &&
+            prior.GeneratedAtUnixSeconds == current.GeneratedAtUnixSeconds &&
+            prior.ExpiresAtUnixSeconds == current.ExpiresAtUnixSeconds &&
+            string.Equals(prior.SnapshotSha256, current.SnapshotSha256,
+                StringComparison.Ordinal) &&
+            prior.RevokedKeys.SequenceEqual(current.RevokedKeys,
+                StringComparer.Ordinal);
+        if (current.GeneratedAtUnixSeconds < prior.GeneratedAtUnixSeconds ||
+            current.GeneratedAtUnixSeconds == prior.GeneratedAtUnixSeconds && !exact)
+            throw new InvalidDataException(
+                "Mailbox revocation checkpoint is not an exact replay or monotonic replacement.");
+    }
+
+    private static bool IsLowerHex(string? value, int length) =>
+        value is { Length: > 0 } && value.Length == length &&
+        value.All(static c => c is >= '0' and <= '9' or >= 'a' and <= 'f');
+
+    private static bool IsCanonicalRevocationKey(string? value)
+    {
+        if (string.IsNullOrEmpty(value) || value.Length > 256) return false;
+        var parts = value.Split(':');
+        return parts.Length == 6 && IsUpperHex(parts[0], 64) &&
+            IsUpperHex(parts[1], 32) && parts[2] is ("1" or "2") &&
+            ulong.TryParse(parts[3], System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out var generation) &&
+            generation > 0 &&
+            ulong.TryParse(parts[4], System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out var epoch) &&
+            epoch == generation && IsUpperHex(parts[5], 64);
+    }
+
+    private static bool IsUpperHex(string value, int length) =>
+        value.Length == length &&
+        value.All(static c => c is >= '0' and <= '9' or >= 'A' and <= 'F');
 
     private static void InstallCore(
         SqliteConnection connection,

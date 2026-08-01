@@ -1,6 +1,9 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Security.AccessControl;
+using System.Security.Principal;
+using System.Runtime.Versioning;
 using Deep.Client.Shared.Domain;
 using Deep.Client.Shared.Persistence;
 using Deep.Client.Shared.Services;
@@ -121,6 +124,40 @@ public sealed partial class MailboxCredentialBundleImporterTests
         imported.Authority.Validate();
     }
 
+    [Fact]
+    public async Task Existing_authority_reloads_external_committed_revocation_checkpoint()
+    {
+        using var fixture = Fixture.Create();
+        using var identity = new SessionIdentityProvider(AlicePhrase);
+        using var store = new SqliteSessionStore(fixture.DatabasePath);
+        var imported = await MailboxCredentialBundleImporter.ImportAsync(
+            store, identity, fixture.AndroidOptions,
+            MailboxInfrastructureOwnership.UserManaged);
+        imported.Authority.Validate();
+
+        using (var connection = new SqliteConnection(
+            $"Data Source={fixture.DatabasePath};Pooling=False"))
+        {
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = """
+                UPDATE settings
+                SET payload_json=$payload
+                WHERE key LIKE 'deep.mailbox.revocation-import.v1:%';
+                """;
+            command.Parameters.AddWithValue("$payload", JsonSerializer.Serialize(
+                new MailboxRevocationRuntimeCheckpoint(
+                    1,
+                    checked((ulong)Now.AddMinutes(-10).ToUnixTimeSeconds()),
+                    checked((ulong)Now.AddMinutes(-1).ToUnixTimeSeconds()),
+                    new string('a', 64),
+                    [])));
+            Assert.Equal(1, command.ExecuteNonQuery());
+        }
+
+        Assert.Throws<InvalidOperationException>(imported.Authority.Validate);
+    }
+
     private static int CountRows(string path, string table)
     {
         using var connection = new SqliteConnection($"Data Source={path};Pooling=False");
@@ -128,6 +165,22 @@ public sealed partial class MailboxCredentialBundleImporterTests
         using var command = connection.CreateCommand();
         command.CommandText = $"SELECT count(*) FROM {table};";
         return Convert.ToInt32(command.ExecuteScalar());
+    }
+
+    private static MailboxRevocationRuntimeCheckpoint ReadImportedRevocation(
+        string path)
+    {
+        using var connection = new SqliteConnection(
+            $"Data Source={path};Pooling=False");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT payload_json FROM settings
+            WHERE key LIKE 'deep.mailbox.revocation-import.v1:%';
+            """;
+        return JsonSerializer.Deserialize<MailboxRevocationRuntimeCheckpoint>(
+            Assert.IsType<string>(command.ExecuteScalar()),
+            new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
     }
 
     private sealed class InjectedCommitFaultException : Exception;
@@ -246,6 +299,56 @@ public sealed partial class MailboxCredentialBundleImporterTests
                 MailboxInfrastructureOwnership.OfficialManaged));
     }
 
+    [Fact]
+    public async Task Importer_AppliesNewerSameEpochRevocations_ThenRealPairRotation()
+    {
+        using var initial = Fixture.Create(revocationVersion: 0);
+        using var newerRevocations = Fixture.Create(
+            databasePath: initial.DatabasePath,
+            revocationVersion: 1);
+        using var rotated = Fixture.Create(
+            currentEpoch: 8,
+            databasePath: initial.DatabasePath,
+            revocationVersion: 2);
+        using var identity = new SessionIdentityProvider(AlicePhrase);
+        using var store = new SqliteSessionStore(initial.DatabasePath);
+
+        var first = await MailboxCredentialBundleImporter.ImportAsync(
+            store, identity, initial.AndroidOptions,
+            MailboxInfrastructureOwnership.UserManaged);
+        var sameEpoch = await MailboxCredentialBundleImporter.ImportAsync(
+            store, identity, newerRevocations.AndroidOptions,
+            MailboxInfrastructureOwnership.UserManaged);
+        first.Authority.Validate();
+        Assert.Equal(
+            checked((ulong)Now.AddMinutes(-1).ToUnixTimeSeconds()),
+            ReadImportedRevocation(initial.DatabasePath).GeneratedAtUnixSeconds);
+        Assert.Equal(7UL, (await store.ReadScopedMailboxRouteAsync(
+            sameEpoch.SelfSelector, sameEpoch.Authority)).Epoch);
+
+        var next = await MailboxCredentialBundleImporter.ImportAsync(
+            store, identity, rotated.AndroidOptions with
+            {
+                TimeProvider = new FrozenTimeProvider(Now.AddMinutes(20))
+            },
+            MailboxInfrastructureOwnership.UserManaged);
+        first.Authority.Validate();
+        sameEpoch.Authority.Validate();
+        Assert.Equal(8UL, (await store.ReadScopedMailboxRouteAsync(
+            next.SelfSelector, next.Authority)).Epoch);
+        Assert.Equal(4, CountRows(
+            initial.DatabasePath, "mailbox_credential_epochs"));
+        Assert.Equal(
+            checked((ulong)Now.ToUnixTimeSeconds()),
+            ReadImportedRevocation(initial.DatabasePath).GeneratedAtUnixSeconds);
+        Assert.Equal(
+            rotated.AndroidOptions.ExpectedPairGeneration.ToArray(),
+            Convert.FromHexString((await store.GetAsync<
+                MailboxBundleRuntimeCheckpoint>(
+                    "deep.mailbox.bundle-import.v1:android:" +
+                    identity.SessionId.Value))!.PairGeneration));
+    }
+
     private static byte[] Bytes(int count, byte value) =>
         Enumerable.Repeat(value, count).ToArray();
 
@@ -274,8 +377,14 @@ public sealed partial class MailboxCredentialBundleImporterTests
         public SessionId BobSessionId { get; }
         public Uri Coordinator { get; }
 
-        public static Fixture Create()
+        public static Fixture Create(
+            ulong currentEpoch = 7,
+            string? databasePath = null,
+            int revocationVersion = 0)
         {
+            if (currentEpoch is < 7 or > 100 || revocationVersion is < 0 or > 2)
+                throw new ArgumentOutOfRangeException();
+            var epochOffset = checked((int)(currentEpoch - 7));
             var root = Path.Combine(Path.GetTempPath(), $"deep-mailbox-import-{Guid.NewGuid():N}");
             Directory.CreateDirectory(root);
             var pairRoot = Path.Combine(root, "pair");
@@ -302,8 +411,16 @@ public sealed partial class MailboxCredentialBundleImporterTests
                     signingPublicKey = Hex(replicaCrypto.GetPublicKey(Bytes(32, 0x62)))
                 }
             };
-            var current = Epoch(7, Now.AddMinutes(-5), Now.AddMinutes(30), 0x71);
-            var next = Epoch(8, Now.AddMinutes(20), Now.AddMinutes(60), 0x72);
+            var current = Epoch(
+                currentEpoch,
+                Now.AddMinutes(-5 + 25 * epochOffset),
+                Now.AddMinutes(30 + 30 * epochOffset),
+                checked((byte)(0x71 + epochOffset)));
+            var next = Epoch(
+                checked(currentEpoch + 1),
+                Now.AddMinutes(-5 + 25 * (epochOffset + 1)),
+                Now.AddMinutes(30 + 30 * (epochOffset + 1)),
+                checked((byte)(0x71 + epochOffset + 1)));
             var coordinator = new Uri("http://192.168.1.44:41801");
             var authorityObject = new
             {
@@ -312,8 +429,8 @@ public sealed partial class MailboxCredentialBundleImporterTests
                 protocol = "P10E/MCP2/MAU2/MIP1/RIP1/PRQ2",
                 networkId = Hex(network),
                 issuerPublicKey = Hex(issuer),
-                minimumGeneration = 7UL,
-                maximumGeneration = 8UL,
+                minimumGeneration = currentEpoch,
+                maximumGeneration = checked(currentEpoch + 1),
                 issuerValidFromUnixSeconds = current.notBeforeUnixSeconds,
                 issuerValidUntilUnixSeconds = next.expiresAtUnixSeconds,
                 coordinatorUrl = coordinator.ToString().TrimEnd('/'),
@@ -334,11 +451,13 @@ public sealed partial class MailboxCredentialBundleImporterTests
             var androidBytes = Bundle(
                 "android", authorityHash, network, issuer, coordinator,
                 aliceHolder, bobHolder, aliceMailbox, bobMailbox,
-                current, next, replicas, crypto, issuerSeed, 0x11);
+                current, next, replicas, crypto, issuerSeed,
+                checked((byte)(0x11 + epochOffset)));
             var windowsBytes = Bundle(
                 "windows", authorityHash, network, issuer, coordinator,
                 bobHolder, aliceHolder, bobMailbox, aliceMailbox,
-                current, next, replicas, crypto, issuerSeed, 0x31);
+                current, next, replicas, crypto, issuerSeed,
+                checked((byte)(0x71 + epochOffset)));
             var androidHash = SHA256.HashData(androidBytes);
             var windowsHash = SHA256.HashData(windowsBytes);
             var generation = SHA256.HashData(Encoding.UTF8.GetBytes(
@@ -375,8 +494,10 @@ public sealed partial class MailboxCredentialBundleImporterTests
                 schemaVersion = 1,
                 authoritySha256 = Hex(authorityHash),
                 issuerPublicKey = Hex(issuer),
-                generatedAtUnixSeconds = checked((ulong)Now.AddMinutes(-1).ToUnixTimeSeconds()),
-                expiresAtUnixSeconds = checked((ulong)Now.AddMinutes(20).ToUnixTimeSeconds()),
+                generatedAtUnixSeconds = checked((ulong)Now.AddMinutes(
+                    -2 + revocationVersion).ToUnixTimeSeconds()),
+                expiresAtUnixSeconds = checked((ulong)Now.AddMinutes(
+                    20 + revocationVersion).ToUnixTimeSeconds()),
                 revoked = Array.Empty<object>()
             });
             File.WriteAllBytes(revocationPath, revocationBytes);
@@ -408,6 +529,7 @@ public sealed partial class MailboxCredentialBundleImporterTests
             }
             var options = new MailboxCredentialBundleImportOptions(
                 pairRoot,
+                root,
                 authorityPath,
                 MailboxClientPlatform.Android,
                 authorityHash,
@@ -416,6 +538,7 @@ public sealed partial class MailboxCredentialBundleImporterTests
                 manifestHash,
                 bobHolder,
                 bob.SessionId,
+                root,
                 revocationPath,
                 SHA256.HashData(revocationBytes),
                 trustedMrXPublicKeySha256,
@@ -428,8 +551,10 @@ public sealed partial class MailboxCredentialBundleImporterTests
                 MrXApproval = Approval("official-managed")
             };
             CryptographicOperations.ZeroMemory(issuerSeed);
+            ProtectFixtureTree(root);
             return new Fixture(
-                root, Path.Combine(root, "state.db"), options, officialOptions,
+                root, databasePath ?? Path.Combine(root, "state.db"),
+                options, officialOptions,
                 bob.SessionId, coordinator);
         }
 
@@ -509,13 +634,15 @@ public sealed partial class MailboxCredentialBundleImporterTests
                 {
                     blindedMailboxId = Hex(ownMailbox),
                     retrieveAndAcknowledgeGrants = Grants(MailboxCapabilityDomain.Retrieve, serial),
-                    depositGrants = Grants(MailboxCapabilityDomain.Deposit, checked((byte)(serial + 2)))
+                    depositGrants = Grants(MailboxCapabilityDomain.Deposit,
+                        checked((byte)(serial + 0x10)))
                 },
                 peerMailboxRoute = new
                 {
                     holderPublicKey = Hex(peerHolder),
                     blindedMailboxId = Hex(peerMailbox),
-                    depositGrants = Grants(MailboxCapabilityDomain.Deposit, checked((byte)(serial + 4)))
+                    depositGrants = Grants(MailboxCapabilityDomain.Deposit,
+                        checked((byte)(serial + 0x20)))
                 },
                 hashes = new { mailboxRouteSha256 = Hex(SHA256.HashData(ownMailbox)) }
             });
@@ -564,6 +691,65 @@ public sealed partial class MailboxCredentialBundleImporterTests
 
         private static string Hex(ReadOnlySpan<byte> value) =>
             Convert.ToHexStringLower(value);
+
+        private static void ProtectFixtureTree(string root)
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                foreach (var file in Directory.EnumerateFiles(
+                    root, "*", SearchOption.AllDirectories))
+                    SetExclusiveWindowsAcl(file, isDirectory: false);
+                foreach (var directory in Directory.EnumerateDirectories(
+                    root, "*", SearchOption.AllDirectories).Prepend(root))
+                    SetExclusiveWindowsAcl(directory, isDirectory: true);
+                return;
+            }
+
+            foreach (var file in Directory.EnumerateFiles(
+                root, "*", SearchOption.AllDirectories))
+                File.SetUnixFileMode(
+                    file, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            foreach (var directory in Directory.EnumerateDirectories(
+                root, "*", SearchOption.AllDirectories).Prepend(root))
+                File.SetUnixFileMode(
+                    directory,
+                    UnixFileMode.UserRead | UnixFileMode.UserWrite |
+                    UnixFileMode.UserExecute);
+        }
+
+        [SupportedOSPlatform("windows")]
+        private static void SetExclusiveWindowsAcl(string path, bool isDirectory)
+        {
+            var current = WindowsIdentity.GetCurrent().User
+                ?? throw new InvalidDataException("Test identity has no SID.");
+            var system = new SecurityIdentifier(
+                WellKnownSidType.LocalSystemSid, null);
+            var administrators = new SecurityIdentifier(
+                WellKnownSidType.BuiltinAdministratorsSid, null);
+            FileSystemSecurity security = isDirectory
+                ? new DirectorySecurity()
+                : new FileSecurity();
+            security.SetOwner(current);
+            security.SetAccessRuleProtection(isProtected: true,
+                preserveInheritance: false);
+            foreach (var sid in new[] { current, system, administrators })
+            {
+                security.AddAccessRule(new FileSystemAccessRule(
+                    sid,
+                    FileSystemRights.FullControl,
+                    isDirectory
+                        ? InheritanceFlags.ContainerInherit |
+                          InheritanceFlags.ObjectInherit
+                        : InheritanceFlags.None,
+                    PropagationFlags.None,
+                    AccessControlType.Allow));
+            }
+            if (isDirectory)
+                new DirectoryInfo(path).SetAccessControl(
+                    (DirectorySecurity)security);
+            else
+                new FileInfo(path).SetAccessControl((FileSecurity)security);
+        }
     }
 
     private sealed class FrozenTimeProvider(DateTimeOffset now) : TimeProvider

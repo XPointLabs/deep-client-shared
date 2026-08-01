@@ -10,6 +10,104 @@ namespace Deep.Client.Shared.Tests.Services;
 public sealed partial class MailboxCredentialBundleImporterTests
 {
     [Fact]
+    public async Task NativeComposition_RejectsAuthorityImportedFromAnotherDatabase()
+    {
+        using var firstFixture = Fixture.Create();
+        using var secondFixture = Fixture.Create();
+        using var identity = new SessionIdentityProvider(AlicePhrase);
+        var clock = new MutableTimeProvider(Now);
+        using var firstStore = new SqliteSessionStore(firstFixture.DatabasePath);
+        using var secondStore = new SqliteSessionStore(secondFixture.DatabasePath);
+        var imported = await MailboxCredentialBundleImporter.ImportAsync(
+            firstStore,
+            identity,
+            firstFixture.AndroidOptions with { TimeProvider = clock },
+            MailboxInfrastructureOwnership.UserManaged);
+
+        Assert.Throws<InvalidOperationException>(() =>
+            new NativeMau2MailboxTransport(
+                ClientFeatureFlags.Defaults with
+                {
+                    ClientMailboxAdapterEnabled = true
+                },
+                imported.Activation,
+                new ScriptedRetrieveIngress(clock),
+                secondStore,
+                new PinnedClientMailboxReceiptVerifier(
+                    new SodiumClientMailboxReceiptCrypto()),
+                imported.DecodePolicies,
+                imported.Authority,
+                _ => imported.SelfSelector,
+                timeProvider: clock));
+    }
+
+    [Fact]
+    public async Task ImportedNativePreparedDispatch_WaitsForItsPublicationCoordinator()
+    {
+        using var fixture = Fixture.Create();
+        using var identity = new SessionIdentityProvider(AlicePhrase);
+        var clock = new MutableTimeProvider(Now);
+        using var store = new SqliteSessionStore(fixture.DatabasePath);
+        var imported = await MailboxCredentialBundleImporter.ImportAsync(
+            store,
+            identity,
+            fixture.AndroidOptions with { TimeProvider = clock },
+            MailboxInfrastructureOwnership.UserManaged);
+        var ingress = new ScriptedRetrieveIngress(clock);
+        using var transport = new NativeMau2MailboxTransport(
+            ClientFeatureFlags.Defaults with { ClientMailboxAdapterEnabled = true },
+            imported.Activation,
+            ingress,
+            store,
+            new PinnedClientMailboxReceiptVerifier(
+                new SodiumClientMailboxReceiptCrypto()),
+            imported.DecodePolicies,
+            imported.Authority,
+            sessionId => sessionId == imported.LocalSessionId
+                ? imported.SelfSelector
+                : throw new InvalidOperationException(
+                    "The acceptance transport has no selector for another identity."),
+            timeProvider: clock);
+        IReadOnlyList<IPreparedMailboxAuthenticatedSend> prepared;
+        using (var signer = new AcceptanceMailboxSigner(identity))
+        {
+            prepared = await transport.PrepareScopedMailboxBatchAsync(
+                signer,
+                [
+                    new MailboxAuthenticatedSendTarget(
+                        new OutboundMessageEnvelope(
+                            identity.SessionId,
+                            fixture.BobSessionId,
+                            Dpe1(Bytes(64, 0xc2)),
+                            [],
+                            Now,
+                            Now.AddMinutes(5),
+                            new MessageId("publication-coordinator-barrier")),
+                        imported.PeerSelector,
+                        imported.Authority)
+                ]);
+        }
+
+        var coordinator = MailboxRuntimePolicyCoordinator.For(
+            store.CanonicalStateIdentity,
+            imported.PeerSelector.IssuerContext.Span);
+        using var publication = await coordinator.AcquirePublicationAsync();
+        var dispatch = transport.SendPreparedMailboxAuthenticatedAsync(
+            Assert.Single(prepared));
+        var early = await Task.WhenAny(
+            ingress.StoreEntered.Task,
+            Task.Delay(TimeSpan.FromMilliseconds(250)));
+        Assert.NotSame(ingress.StoreEntered.Task, early);
+        Assert.Equal(0, ingress.StoreCalls);
+        Assert.False(dispatch.IsCompleted);
+
+        publication.Dispose();
+        await ingress.StoreEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => dispatch);
+        Assert.Equal(1, ingress.StoreCalls);
+    }
+
+    [Fact]
     public async Task ImportedSqliteCredentials_DriveNativeRetrieve_AndExpiredRevocationsBlockBeforeIngress()
     {
         using var fixture = Fixture.Create();
@@ -140,6 +238,7 @@ public sealed partial class MailboxCredentialBundleImporterTests
         Assert.Equal(0, ingress.StoreCalls);
         Assert.Equal(0, CountRows(fixture.DatabasePath, "mailbox_prepared_batches"));
         Assert.Equal(0, CountRows(fixture.DatabasePath, "mailbox_prepared_batch_targets"));
+        Assert.Equal(0, CountRows(fixture.DatabasePath, "mailbox_replay_counters"));
         Assert.Equal(0, CountRows(fixture.DatabasePath, "transport_outbox_items"));
 
         MailboxAuthenticatedSendTarget Target(
@@ -156,6 +255,114 @@ public sealed partial class MailboxCredentialBundleImporterTests
                 new MessageId(id)),
             selector,
             imported.Authority);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    public async Task ImportedNative_RejectsPoisonedMeo1_AndE2eeContinuesToValidEntry(
+        int tamperMode)
+    {
+        using var fixture = Fixture.Create();
+        using var localIdentity = new SessionIdentityProvider(AlicePhrase);
+        using var remoteIdentity = new SessionIdentityProvider(BobPhrase);
+        var clock = new MutableTimeProvider(Now);
+        using var store = new SqliteSessionStore(fixture.DatabasePath);
+        var imported = await MailboxCredentialBundleImporter.ImportAsync(
+            store,
+            localIdentity,
+            fixture.AndroidOptions with { TimeProvider = clock },
+            MailboxInfrastructureOwnership.UserManaged);
+        var innerDpe1 = remoteIdentity.CreateEnvelopeCodec().EncryptContent(
+            new E2eeContent(
+                E2eeContentKind.Message,
+                new MessageId("meo1-valid-following"),
+                ConversationKind.OneToOne,
+                ConversationId.ForOneToOne(localIdentity.SessionId),
+                remoteIdentity.SessionId,
+                localIdentity.SessionId,
+                Now,
+                Now.AddDays(1),
+                null,
+                "valid after poisoned MEO1",
+                []),
+            localIdentity.SessionId);
+        var ingress = new ScriptedRetrieveIngress(clock, innerDpe1);
+        using var native = new NativeMau2MailboxTransport(
+            ClientFeatureFlags.Defaults with { ClientMailboxAdapterEnabled = true },
+            imported.Activation,
+            ingress,
+            store,
+            new PinnedClientMailboxReceiptVerifier(
+                new SodiumClientMailboxReceiptCrypto()),
+            imported.DecodePolicies,
+            imported.Authority,
+            sessionId => sessionId == imported.LocalSessionId
+                ? imported.SelfSelector
+                : throw new InvalidOperationException(
+                    "The acceptance transport has no selector for another identity."),
+            timeProvider: clock);
+        var canonical = Assert.Single((await native.RetrieveAuthenticatedAsync(
+            localIdentity,
+            cursor: null,
+            limit: 1)).Entries);
+        var poisoned = DurableInboxWireEntry.CreateBounded(
+            canonical.ServerHash,
+            canonical.StorageTimestamp,
+            TamperMeo1(canonical.WirePayload, tamperMode));
+        var validFollowing = DurableInboxWireEntry.CreateBounded(
+            WithCursor(canonical.ServerHash, 2),
+            checked(canonical.StorageTimestamp + 1),
+            canonical.WirePayload);
+
+        Assert.False(native.TryDecodeInboxEntry(
+            poisoned,
+            localIdentity.SessionId,
+            out _));
+
+        var batchTransport = new InjectedBatchNativeTransport(
+            native,
+            [poisoned, validFollowing]);
+        using var e2ee = new E2eeClientTransport(
+            batchTransport,
+            _ => Task.FromResult<string?>(AlicePhrase),
+            new FrozenClock(Now),
+            store,
+            new DirectP2pMailboxDeliveryPolicy());
+        var message = Assert.Single(
+            await e2ee.ReceiveAsync(localIdentity.SessionId));
+        Assert.Equal(remoteIdentity.SessionId, message.Sender);
+        Assert.Equal("valid after poisoned MEO1", message.Body);
+        Assert.Equal(validFollowing.ServerHash, message.ServerHash);
+        Assert.Equal(1, batchTransport.RetrieveCalls);
+    }
+
+    private static string TamperMeo1(string wirePayload, int tamperMode)
+    {
+        var meo1 = Convert.FromBase64String(wirePayload);
+        switch (tamperMode)
+        {
+            case 0:
+                meo1[0] ^= 1;
+                break;
+            case 1:
+                meo1[5] = 1;
+                break;
+            case 2:
+                meo1[96] ^= 1;
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(tamperMode));
+        }
+        return Convert.ToBase64String(meo1);
+    }
+
+    private static string WithCursor(string itemHandle, ulong cursor)
+    {
+        var digestSeparator = itemHandle.LastIndexOf(':');
+        Assert.True(digestSeparator > 0);
+        return $"mau2-item-v1:{cursor:x16}:{itemHandle[(digestSeparator + 1)..]}";
     }
 
     [Theory]
@@ -428,6 +635,8 @@ public sealed partial class MailboxCredentialBundleImporterTests
         public int RetrieveCalls { get; private set; }
         public int AcknowledgeCalls { get; private set; }
         public int StoreCalls { get; private set; }
+        public TaskCompletionSource StoreEntered { get; } = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
         public byte[]? LastCanonicalRequest { get; private set; }
 
         public Task<ReadOnlyMemory<byte>> StoreAsync(
@@ -435,6 +644,7 @@ public sealed partial class MailboxCredentialBundleImporterTests
             CancellationToken cancellationToken = default)
         {
             StoreCalls++;
+            StoreEntered.TrySetResult();
             return Task.FromException<ReadOnlyMemory<byte>>(
                 new InvalidOperationException(
                     "Expired revocations must prevent the acceptance lane from storing."));
@@ -583,6 +793,82 @@ public sealed partial class MailboxCredentialBundleImporterTests
                 Signature = ReadOnlyMemory<byte>.Empty
             },
             replicaSeed);
+    }
+
+    private sealed class InjectedBatchNativeTransport(
+        NativeMau2MailboxTransport inner,
+        IReadOnlyList<DurableInboxWireEntry> entries) :
+        IAuthenticatedOpaqueMailboxTransport,
+        IAuthenticatedInboxTransport
+    {
+        public int InboxNamespace => inner.InboxNamespace;
+        public int RetrieveCalls { get; private set; }
+
+        public Task SendAsync(
+            OutboundMessageEnvelope envelope,
+            CancellationToken cancellationToken = default) =>
+            inner.SendAsync(envelope, cancellationToken);
+
+        public Task<IReadOnlyList<InboundMessageEnvelope>> ReceiveAsync(
+            SessionId recipient,
+            CancellationToken cancellationToken = default) =>
+            inner.ReceiveAsync(recipient, cancellationToken);
+
+        public Task<IReadOnlyList<IPreparedMailboxAuthenticatedSend>>
+            PrepareScopedMailboxBatchAsync(
+            IMailboxOperationSigner signer,
+            IReadOnlyList<MailboxAuthenticatedSendTarget> targets,
+            CancellationToken cancellationToken = default) =>
+            inner.PrepareScopedMailboxBatchAsync(signer, targets, cancellationToken);
+
+        public Task SendPreparedMailboxAuthenticatedAsync(
+            IPreparedMailboxAuthenticatedSend preparedSend,
+            CancellationToken cancellationToken = default) =>
+            inner.SendPreparedMailboxAuthenticatedAsync(preparedSend, cancellationToken);
+
+        public Task<IReadOnlyList<InboundMessageEnvelope>> ReceiveAuthenticatedAsync(
+            SessionIdentityProvider identity,
+            CancellationToken cancellationToken = default) =>
+            Task.FromException<IReadOnlyList<InboundMessageEnvelope>>(
+                new InvalidOperationException(
+                    "Injected acceptance batch requires cursor retrieval."));
+
+        public Task<AuthenticatedInboxBatch> RetrieveAuthenticatedAsync(
+            SessionIdentityProvider identity,
+            string? cursor,
+            int limit,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            RetrieveCalls++;
+            if (RetrieveCalls != 1)
+                return Task.FromResult(new AuthenticatedInboxBatch([], cursor));
+            Assert.Null(cursor);
+            Assert.True(limit >= entries.Count);
+            return Task.FromResult(new AuthenticatedInboxBatch(
+                entries,
+                entries[^1].ServerHash));
+        }
+
+        public bool TryDecodeInboxEntry(
+            DurableInboxWireEntry entry,
+            SessionId recipient,
+            out InboundMessageEnvelope envelope) =>
+            inner.TryDecodeInboxEntry(entry, recipient, out envelope);
+
+        public Task<OpaqueMailboxInboxPage> RetrieveOpaqueMailboxInboxAsync(
+            IMailboxOperationSigner signer,
+            OpaqueMailboxContinuation continuation,
+            CancellationToken cancellationToken = default) =>
+            inner.RetrieveOpaqueMailboxInboxAsync(
+                signer, continuation, cancellationToken);
+
+        public Task AcknowledgeOpaqueMailboxInboxAsync(
+            IMailboxOperationSigner signer,
+            string opaqueItemHandle,
+            CancellationToken cancellationToken = default) =>
+            inner.AcknowledgeOpaqueMailboxInboxAsync(
+                signer, opaqueItemHandle, cancellationToken);
     }
 
     private sealed class ScriptedCursorIngress(

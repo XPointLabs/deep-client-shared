@@ -28,7 +28,11 @@ public sealed class NativeMailboxAdapterTests
     [Fact]
     public void Factory_only_accepts_scoped_atomic_credential_preparation()
     {
-        var constructor = Assert.Single(typeof(MailboxAuthenticatedRequestFactory).GetConstructors());
+        Assert.Empty(typeof(MailboxAuthenticatedRequestFactory).GetConstructors());
+        var constructor = Assert.Single(
+            typeof(MailboxAuthenticatedRequestFactory).GetConstructors(
+                System.Reflection.BindingFlags.Instance |
+                System.Reflection.BindingFlags.NonPublic));
         Assert.Equal(typeof(IScopedMailboxCredentialRepository),
             constructor.GetParameters()[0].ParameterType);
         Assert.Null(typeof(MailboxAuthenticatedRequestFactory).GetMethod("LeaseCredentialAsync"));

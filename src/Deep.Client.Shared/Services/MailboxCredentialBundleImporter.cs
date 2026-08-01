@@ -26,6 +26,7 @@ public sealed record MailboxHolderIdentity(
 
 public sealed record MailboxCredentialBundleImportOptions(
     string PairRoot,
+    string AuthorityProtectedRoot,
     string AuthorityPublicPath,
     MailboxClientPlatform Platform,
     ReadOnlyMemory<byte> ExpectedAuthoritySha256,
@@ -34,6 +35,7 @@ public sealed record MailboxCredentialBundleImportOptions(
     ReadOnlyMemory<byte> ExpectedPairManifestSha256,
     ReadOnlyMemory<byte> ExpectedPeerHolderPublicKey,
     SessionId ExpectedPeerSessionId,
+    string RevocationProtectedRoot,
     string RevocationSnapshotPath,
     ReadOnlyMemory<byte> ExpectedRevocationSnapshotSha256,
     ReadOnlyMemory<byte> TrustedMrXPublicKeySha256,
@@ -81,8 +83,6 @@ public static class MailboxCredentialBundleImporter
          "pairGeneration", "pairManifestSha256", "revocationSnapshotSha256"];
     private static readonly ConditionalWeakTable<SqliteSessionStore, SemaphoreSlim>
         ImportGates = new();
-    private static readonly ConditionalWeakTable<SqliteSessionStore, DurableMailboxRevocationSnapshot>
-        RevocationSources = new();
 
     public static async Task<ImportedMailboxRuntimeMaterial> ImportAsync(
         SqliteSessionStore store,
@@ -137,6 +137,7 @@ public static class MailboxCredentialBundleImporter
         var holder = ExactBytes(identity.Ed25519PublicKey.Span, 32, "holder public key");
         ParsedMrXApproval? approval = null;
         SemaphoreSlim? importGate = null;
+        IMailboxRuntimePolicyLease? publicationLease = null;
         var gateHeld = false;
         try
         {
@@ -146,13 +147,16 @@ public static class MailboxCredentialBundleImporter
             await importGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             gateHeld = true;
             var root = RequireSafeRoot(options.PairRoot);
-            var authorityBytes = ReadStableBounded(RequireSafeFile(options.AuthorityPublicPath));
+            var authorityRoot = RequireSafeRoot(options.AuthorityProtectedRoot);
+            var authorityPath = RequireSafeFile(options.AuthorityPublicPath);
+            var authorityBytes = ReadStableBounded(authorityRoot, authorityPath);
             Require(Fixed(SHA256.HashData(authorityBytes), expectedAuthority),
                 "Public authority file differs from its independent pin.");
             using var publicAuthorityDocument = Parse(authorityBytes, "public authority");
             var publicAuthority = ParsePublicAuthority(
                 publicAuthorityDocument.RootElement, expectedIssuer);
-            var pointerBytes = ReadStableBounded(Path.Combine(root, "current-generation.json"));
+            var pointerBytes = ReadStableBounded(
+                root, SafeChild(root, "current-generation.json"));
             using var pointerDocument = Parse(pointerBytes, "generation pointer");
             var pointer = pointerDocument.RootElement;
             RequireExactProperties(pointer, PointerProperties, "generation pointer");
@@ -169,7 +173,7 @@ public static class MailboxCredentialBundleImporter
             RequireSafeDirectory(generationDirectory);
 
             var manifestBytes = ReadStableBounded(
-                SafeChild(generationDirectory, "pair-manifest.v1.json"));
+                root, SafeChild(generationDirectory, "pair-manifest.v1.json"));
             Require(Fixed(SHA256.HashData(manifestBytes), manifestHash),
                 "Pair manifest hash differs from the single resolved pointer.");
             using var manifestDocument = Parse(manifestBytes, "pair manifest");
@@ -185,9 +189,9 @@ public static class MailboxCredentialBundleImporter
             RequireExactProperties(files, ["android", "windows"], "pair files");
 
             var androidBytes = ReadStableBounded(
-                SafeChild(generationDirectory, "android.mailbox-credentials.v1.json"));
+                root, SafeChild(generationDirectory, "android.mailbox-credentials.v1.json"));
             var windowsBytes = ReadStableBounded(
-                SafeChild(generationDirectory, "windows.mailbox-credentials.v1.json"));
+                root, SafeChild(generationDirectory, "windows.mailbox-credentials.v1.json"));
             var androidHash = SHA256.HashData(androidBytes);
             var windowsHash = SHA256.HashData(windowsBytes);
             Require(Fixed(androidHash, LowerHex(files.GetProperty("android"), 32, "android bundle hash")) &&
@@ -215,11 +219,10 @@ public static class MailboxCredentialBundleImporter
                 "Mailbox holder keys do not map to the independently pinned Session IDs.");
 
             var parsedRevocations = LoadRevocations(
+                RequireSafeRoot(options.RevocationProtectedRoot),
                 options.RevocationSnapshotPath, expectedRevocation, expectedAuthority,
                 expectedIssuer, publicAuthority.MinimumGeneration,
                 publicAuthority.MaximumGeneration, timeProvider);
-            var candidateRevocations = new DurableMailboxRevocationSnapshot(
-                parsedRevocations, timeProvider);
             var issuers = new[]
             {
                 Issuer(expectedIssuer, MailboxCapabilityDomain.Deposit, publicAuthority),
@@ -231,20 +234,13 @@ public static class MailboxCredentialBundleImporter
                 throw new InvalidOperationException(
                     "Official-managed MAU2 requires an explicit entitlement source.");
             }
-            var candidateAuthority = new VerifiedOfficialMailboxAuthority(
-                selected.NetworkId,
-                publicAuthority.MinimumGeneration,
-                issuers,
-                requiresManagedEntitlement:
-                    ownership == MailboxInfrastructureOwnership.OfficialManaged,
-                options.ManagedEntitlement ?? (static () => true),
-                candidateRevocations,
-                timeProvider);
             var account = OutboxAccountScope.FromBytes(DomainHash(
                 "deep.mailbox.account-scope.v1", holder));
             var issuerContext = DomainHash(
                 "deep.mailbox.stable-authority-id.v1",
                 [(byte)ownership], selected.NetworkId, expectedIssuer);
+            var coordinator = MailboxRuntimePolicyCoordinator.For(
+                store.CanonicalStateIdentity, issuerContext);
             var selfSelector = new MailboxCredentialSelector(
                 account, MailboxCredentialScopeKind.Self,
                 holder, issuerContext);
@@ -289,7 +285,7 @@ public static class MailboxCredentialBundleImporter
             var receiptKey = "deep.mailbox.bundle-import.v1:" +
                 options.Platform.ToString().ToLowerInvariant() + ":" +
                 identity.SessionId.Value;
-            var receipt = new MailboxBundleImportReceipt(
+            var receipt = new MailboxBundleRuntimeCheckpoint(
                 1,
                 "android-windows-pair",
                 options.Platform.ToString().ToLowerInvariant(),
@@ -298,17 +294,25 @@ public static class MailboxCredentialBundleImporter
                 Convert.ToHexStringLower(generation));
             var revocationReceiptKey = "deep.mailbox.revocation-import.v1:" +
                 Convert.ToHexStringLower(issuerContext);
-            var revocationReceipt = new MailboxRevocationImportReceipt(
+            var revocationReceipt = new MailboxRevocationRuntimeCheckpoint(
                 1,
                 parsedRevocations.GeneratedAtUnixSeconds,
                 parsedRevocations.ExpiresAtUnixSeconds,
-                Convert.ToHexStringLower(expectedRevocation));
-            var prior = await store.GetAsync<MailboxBundleImportReceipt>(
-                receiptKey, cancellationToken).ConfigureAwait(false);
-            ValidateImportReceipt(prior, receipt);
-            var priorRevocationReceipt = await store.GetAsync<MailboxRevocationImportReceipt>(
-                revocationReceiptKey, cancellationToken).ConfigureAwait(false);
-            ValidateRevocationReceipt(priorRevocationReceipt, revocationReceipt);
+                Convert.ToHexStringLower(expectedRevocation),
+                parsedRevocations.Revoked.OrderBy(static key => key,
+                    StringComparer.Ordinal).ToArray());
+            var candidateRevocations = new SqliteMailboxRevocationSource(
+                store, revocationReceiptKey, revocationReceipt, timeProvider);
+            var candidateAuthority = new VerifiedOfficialMailboxAuthority(
+                selected.NetworkId,
+                publicAuthority.MinimumGeneration,
+                issuers,
+                requiresManagedEntitlement:
+                    ownership == MailboxInfrastructureOwnership.OfficialManaged,
+                options.ManagedEntitlement ?? (static () => true),
+                candidateRevocations,
+                timeProvider,
+                coordinator);
             var decodePolicies = new TimeProviderMailboxClientDecodePolicyProvider(
                 new MailboxEpochWindow
                 {
@@ -327,33 +331,8 @@ public static class MailboxCredentialBundleImporter
                 timeProvider);
             // Build every fallible runtime object before the credential transaction commits.
             _ = decodePolicies.GetCurrent();
-            await store.ApplyScopedMailboxRuntimeSnapshotAsync(
-                imports,
+            var preparedMaterial = new ImportedMailboxRuntimeMaterial(
                 candidateAuthority,
-                rotate: prior is not null && receipt.CurrentEpoch > prior.CurrentEpoch,
-                new Dictionary<string, object>(StringComparer.Ordinal)
-                {
-                    [receiptKey] = receipt,
-                    [revocationReceiptKey] = revocationReceipt
-                },
-                cancellationToken).ConfigureAwait(false);
-            // Publish only after the credential/checkpoint transaction committed.  A failed
-            // import therefore cannot advance authorization in the already-running process.
-            var revocations = RevocationSources.GetValue(
-                store,
-                _ => new DurableMailboxRevocationSnapshot(parsedRevocations, timeProvider));
-            revocations.ReplaceMonotonic(parsedRevocations);
-            var authority = new VerifiedOfficialMailboxAuthority(
-                selected.NetworkId,
-                publicAuthority.MinimumGeneration,
-                issuers,
-                requiresManagedEntitlement:
-                    ownership == MailboxInfrastructureOwnership.OfficialManaged,
-                options.ManagedEntitlement ?? (static () => true),
-                revocations,
-                timeProvider);
-            return new ImportedMailboxRuntimeMaterial(
-                authority,
                 new ClientMailboxActivation(true, issuerContext, ingressConfigured: true),
                 decodePolicies,
                 selected.Coordinator,
@@ -362,9 +341,22 @@ public static class MailboxCredentialBundleImporter
                 derivedLocalSession,
                 derivedPeerSession,
                 ownership);
+            publicationLease = await coordinator.AcquirePublicationAsync(
+                cancellationToken).ConfigureAwait(false);
+            var committedActivation = new MailboxRuntimeCommitActivation(
+                candidateRevocations, publicationLease);
+            await store.ApplyScopedMailboxRuntimeSnapshotAsync(
+                imports,
+                candidateAuthority,
+                new MailboxRuntimeSnapshotCheckpoint(
+                    receiptKey, receipt, revocationReceiptKey, revocationReceipt),
+                committedActivation,
+                cancellationToken).ConfigureAwait(false);
+            return preparedMaterial;
         }
         finally
         {
+            publicationLease?.Dispose();
             if (gateHeld) importGate!.Release();
             CryptographicOperations.ZeroMemory(holder);
             if (approval is not null)
@@ -455,35 +447,6 @@ public static class MailboxCredentialBundleImporter
             CryptographicOperations.ZeroMemory(signature);
             CryptographicOperations.ZeroMemory(publicKey);
         }
-    }
-
-    private static void ValidateImportReceipt(
-        MailboxBundleImportReceipt? prior,
-        MailboxBundleImportReceipt current)
-    {
-        if (prior is null) return;
-        Require(prior.SchemaVersion == 1 &&
-                string.Equals(prior.Lane, current.Lane, StringComparison.Ordinal) &&
-                string.Equals(prior.Platform, current.Platform, StringComparison.Ordinal),
-            "Durable mailbox import receipt is invalid.");
-        Require(current.CurrentEpoch >= prior.CurrentEpoch,
-            "Mailbox bundle import attempted an epoch rollback.");
-        if (current.CurrentEpoch == prior.CurrentEpoch)
-        {
-            Require(prior == current,
-                "Mailbox bundle import attempted non-idempotent same-epoch replacement.");
-        }
-    }
-
-    private static void ValidateRevocationReceipt(
-        MailboxRevocationImportReceipt? prior,
-        MailboxRevocationImportReceipt current)
-    {
-        if (prior is null) return;
-        Require(prior.SchemaVersion == current.SchemaVersion &&
-                (current.GeneratedAtUnixSeconds > prior.GeneratedAtUnixSeconds ||
-                 current == prior),
-            "Revocation snapshot is not an exact replay or a monotonic replacement.");
     }
 
     private static ParsedBundle ParseBundle(
@@ -740,6 +703,7 @@ public static class MailboxCredentialBundleImporter
         };
 
     private static ParsedMailboxRevocationSnapshot LoadRevocations(
+        string protectedRoot,
         string path,
         byte[] expectedHash,
         byte[] authority,
@@ -748,7 +712,7 @@ public static class MailboxCredentialBundleImporter
         ulong maximumGeneration,
         TimeProvider timeProvider)
     {
-        var bytes = ReadStableBounded(RequireSafeFile(path));
+        var bytes = ReadStableBounded(protectedRoot, RequireSafeFile(path));
         Require(Fixed(SHA256.HashData(bytes), expectedHash), "Revocation snapshot hash is not pinned.");
         using var document = Parse(bytes, "revocation snapshot");
         var root = document.RootElement;
@@ -838,18 +802,9 @@ public static class MailboxCredentialBundleImporter
         }
     }
 
-    private static byte[] ReadStableBounded(string path)
-    {
-        RequireNoReparsePath(path);
-        using var stream = new FileStream(
-            path, FileMode.Open, FileAccess.Read, FileShare.Read,
-            bufferSize: 16 * 1024, FileOptions.SequentialScan);
-        Require(stream.Length is > 0 and <= MaximumJsonBytes, "Mailbox JSON size is outside its bound.");
-        var bytes = new byte[stream.Length];
-        stream.ReadExactly(bytes);
-        Require(stream.Position == stream.Length, "Mailbox JSON read was truncated.");
-        return bytes;
-    }
+    private static byte[] ReadStableBounded(string protectedRoot, string path) =>
+        ProtectedMailboxFileReader.ReadBounded(
+            protectedRoot, path, MaximumJsonBytes);
 
     private static JsonDocument Parse(byte[] bytes, string label)
     {
@@ -935,18 +890,6 @@ public static class MailboxCredentialBundleImporter
 
     private sealed record ParsedReplica(byte[] Id, byte[] SigningKey);
     private sealed record ParsedMrXApproval(byte[] PayloadSha256);
-    private sealed record MailboxBundleImportReceipt(
-        int SchemaVersion,
-        string Lane,
-        string Platform,
-        string Ownership,
-        ulong CurrentEpoch,
-        string PairGeneration);
-    private sealed record MailboxRevocationImportReceipt(
-        int SchemaVersion,
-        ulong GeneratedAtUnixSeconds,
-        ulong ExpiresAtUnixSeconds,
-        string SnapshotSha256);
     private sealed record ParsedPublicAuthority(
         byte[] NetworkId,
         ulong MinimumGeneration,
@@ -1082,6 +1025,73 @@ public sealed class DurableMailboxRevocationSnapshot :
             GeneratedAtUnixSeconds == other.GeneratedAtUnixSeconds &&
             ExpiresAtUnixSeconds == other.ExpiresAtUnixSeconds &&
             Revoked.SetEquals(other.Revoked);
+    }
+}
+
+/// <summary>
+/// Fail-closed revocation source. Before publication it validates the already prepared
+/// immutable candidate; after the credential transaction commits every validation reads
+/// the authoritative SQLite checkpoint, which also fences independent processes.
+/// </summary>
+internal sealed class SqliteMailboxRevocationSource :
+    IFreshMailboxCapabilityRevocationSource
+{
+    private readonly SqliteSessionStore store;
+    private readonly string checkpointKey;
+    private readonly MailboxRevocationRuntimeCheckpoint prepared;
+    private readonly TimeProvider timeProvider;
+    private int activated;
+
+    internal SqliteMailboxRevocationSource(
+        SqliteSessionStore store,
+        string checkpointKey,
+        MailboxRevocationRuntimeCheckpoint prepared,
+        TimeProvider timeProvider)
+    {
+        this.store = store ?? throw new ArgumentNullException(nameof(store));
+        this.checkpointKey = string.IsNullOrWhiteSpace(checkpointKey)
+            ? throw new ArgumentException("Checkpoint key is required.", nameof(checkpointKey))
+            : checkpointKey;
+        this.prepared = prepared ?? throw new ArgumentNullException(nameof(prepared));
+        this.timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
+        ValidateFreshness(prepared);
+    }
+
+    internal void ActivateCommittedNoThrow() => Volatile.Write(ref activated, 1);
+
+    public void ValidateFreshness() => ValidateFreshness(Load());
+
+    public bool IsRevoked(MailboxCapabilityRevocationQuery query)
+    {
+        ArgumentNullException.ThrowIfNull(query);
+        var checkpoint = Load();
+        ValidateFreshness(checkpoint);
+        return Array.BinarySearch(
+            checkpoint.RevokedKeys,
+            DurableMailboxRevocationSnapshot.Key(
+                query.IssuerPublicKey.Span,
+                query.Serial.Span,
+                query.Domain,
+                query.Generation,
+                query.Epoch,
+                query.MembershipCommitment.Span),
+            StringComparer.Ordinal) >= 0;
+    }
+
+    private MailboxRevocationRuntimeCheckpoint Load() =>
+        Volatile.Read(ref activated) == 0
+            ? prepared
+            : store.ReadMailboxRevocationCheckpoint(checkpointKey);
+
+    private void ValidateFreshness(MailboxRevocationRuntimeCheckpoint checkpoint)
+    {
+        var now = timeProvider.GetUtcNow().ToUnixTimeSeconds();
+        if (now <= 0 || checked((ulong)now) < checkpoint.GeneratedAtUnixSeconds ||
+            checked((ulong)now) > checkpoint.ExpiresAtUnixSeconds)
+        {
+            throw new InvalidOperationException(
+                "Authenticated mailbox revocation snapshot is unavailable or expired.");
+        }
     }
 }
 

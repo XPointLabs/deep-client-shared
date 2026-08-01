@@ -30,6 +30,7 @@ public sealed partial class SqliteSessionStore :
         new(StringComparer.OrdinalIgnoreCase);
     [DebuggerBrowsable(DebuggerBrowsableState.Never)]
     private readonly string _connectionString;
+    private readonly string _canonicalStateIdentity;
     private readonly SemaphoreSlim _databaseGate = new(1, 1);
     private readonly Action<MembershipTrustCommitFaultPoint>? _membershipTrustFaultInjector;
     private int _disposed;
@@ -140,7 +141,10 @@ public sealed partial class SqliteSessionStore :
             using var poolIdentity = new SqliteConnection(_connectionString);
             SqliteConnection.ClearPool(poolIdentity);
         }
+        _canonicalStateIdentity = SqliteStateFileIdentity.Resolve(statePath);
     }
+
+    internal string CanonicalStateIdentity => _canonicalStateIdentity;
 
     public async Task UpsertAsync(Conversation conversation, CancellationToken cancellationToken = default)
     {
