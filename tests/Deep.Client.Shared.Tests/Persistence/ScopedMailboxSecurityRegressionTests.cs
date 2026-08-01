@@ -126,7 +126,7 @@ public sealed class ScopedMailboxSecurityRegressionTests
     }
 
     [Fact]
-    public async Task Prepared_batch_retry_binds_timestamp_and_exact_target_catalog()
+    public async Task Prepared_batch_retry_resumes_across_time_and_binds_exact_target_catalog()
     {
         using var fixture = new Fixture();
         await fixture.Store.InstallScopedCredentialAsync(
@@ -136,18 +136,27 @@ public sealed class ScopedMailboxSecurityRegressionTests
         var created = DateTimeOffset.FromUnixTimeSeconds(1050);
         var request = new ScopedMailboxPrepareBatchRequest(
             fixture.Account, parent, [target], created);
-        _ = await fixture.Store.PrepareScopedMailboxBatchAsync(
+        var first = await fixture.Store.PrepareScopedMailboxBatchAsync(
             request, fixture.Signer, fixture.Authority);
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            fixture.Store.PrepareScopedMailboxBatchAsync(
+        using var restarted = new SqliteSessionStore(fixture.Path);
+        var resumed = await restarted.PrepareScopedMailboxBatchAsync(
                 request with { CreatedAt = created.AddSeconds(1) },
+                fixture.Signer,
+                fixture.Authority);
+        Assert.Equal(
+            first.Frames.Single().GetCanonicalMau2Copy(),
+            resumed.Frames.Single().GetCanonicalMau2Copy());
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            restarted.PrepareScopedMailboxBatchAsync(
+                request with { Targets = [fixture.RetrieveTarget(0xb3)] },
                 fixture.Signer,
                 fixture.Authority));
 
         fixture.DeletePreparedTargets();
         await Assert.ThrowsAsync<InvalidDataException>(() =>
-            fixture.Store.PrepareScopedMailboxBatchAsync(
+            restarted.PrepareScopedMailboxBatchAsync(
                 request, fixture.Signer, fixture.Authority));
     }
 

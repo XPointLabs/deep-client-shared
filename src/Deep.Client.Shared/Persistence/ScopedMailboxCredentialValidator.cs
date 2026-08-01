@@ -1,4 +1,3 @@
-using System.Buffers.Binary;
 using System.Security.Cryptography;
 using Deep.Client.Shared.Services;
 using Deep.Protocol.DeepExtension.MailboxCapabilities;
@@ -243,14 +242,9 @@ internal static class ScopedMailboxCredentialValidator
         ScopedMailboxPrepareBatchRequest request)
     {
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        hash.AppendData("deep.mailbox.prepared-batch.v1"u8);
+        hash.AppendData("deep.mailbox.prepared-batch.v2"u8);
         hash.AppendData(request.AccountScope.Value);
         hash.AppendData(request.ParentOperationId.Span);
-        Span<byte> createdAt = stackalloc byte[8];
-        BinaryPrimitives.WriteInt64BigEndian(
-            createdAt,
-            request.CreatedAt.ToUnixTimeMilliseconds());
-        hash.AppendData(createdAt);
         foreach (var target in request.Targets)
         {
             hash.AppendData(target.Selector.ScopeId.Span);

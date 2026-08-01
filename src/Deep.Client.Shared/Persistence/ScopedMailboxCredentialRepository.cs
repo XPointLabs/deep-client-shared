@@ -1828,7 +1828,7 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
         using var read = connection.CreateCommand();
         read.Transaction = transaction;
         read.CommandText = """
-            SELECT plan_digest,target_count,created_at FROM mailbox_prepared_batches
+            SELECT plan_digest,target_count FROM mailbox_prepared_batches
             WHERE account_scope=$account AND parent_operation_id=$parent;
             """;
         read.Parameters.Add("$account", SqliteType.Blob).Value =
@@ -1841,8 +1841,7 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
             return null;
         }
         if (!Fixed((byte[])reader.GetValue(0), planDigest) ||
-            reader.GetInt32(1) != request.Targets.Count ||
-            reader.GetInt64(2) != request.CreatedAt.ToUnixTimeMilliseconds())
+            reader.GetInt32(1) != request.Targets.Count)
         {
             throw new InvalidOperationException(
                 "Mailbox batch operation conflicts with durable preparation.");

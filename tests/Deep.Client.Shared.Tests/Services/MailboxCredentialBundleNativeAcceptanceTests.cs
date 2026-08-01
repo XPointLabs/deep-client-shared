@@ -196,6 +196,65 @@ public sealed partial class MailboxCredentialBundleImporterTests
     }
 
     [Fact]
+    public async Task NativeRetrieve_RetriesExactPreparedFrame_AfterTransportFailureAndRestart()
+    {
+        using var fixture = Fixture.Create();
+        using var identity = new SessionIdentityProvider(AlicePhrase);
+        var clock = new MutableTimeProvider(Now);
+        var options = fixture.AndroidOptions with { TimeProvider = clock };
+        var ingress = new FailFirstRetrieveIngress(clock);
+        ImportedMailboxRuntimeMaterial imported;
+
+        using (var store = new SqliteSessionStore(fixture.DatabasePath))
+        {
+            imported = await MailboxCredentialBundleImporter.ImportAsync(
+                store,
+                identity,
+                options,
+                MailboxInfrastructureOwnership.UserManaged);
+            using var transport = Native(store);
+            var exception = await Assert.ThrowsAsync<ClientMailboxTransportException>(
+                () => transport.RetrieveAuthenticatedAsync(
+                    identity,
+                    cursor: null,
+                    limit: 1));
+            Assert.True(exception.Retryable);
+            Assert.Equal(
+                ClientMailboxTransportFailure.NetworkUnavailable,
+                exception.Failure);
+        }
+
+        clock.Set(Now.AddMinutes(1));
+        using (var restarted = new SqliteSessionStore(fixture.DatabasePath))
+        using (var transport = Native(restarted))
+        {
+            var page = await transport.RetrieveAuthenticatedAsync(
+                identity,
+                cursor: null,
+                limit: 1);
+            Assert.Single(page.Entries);
+        }
+
+        Assert.Equal(2, ingress.Requests.Count);
+        Assert.Equal(ingress.Requests[0], ingress.Requests[1]);
+
+        NativeMau2MailboxTransport Native(SqliteSessionStore store) => new(
+            ClientFeatureFlags.Defaults with { ClientMailboxAdapterEnabled = true },
+            imported.Activation,
+            ingress,
+            store,
+            new PinnedClientMailboxReceiptVerifier(
+                new SodiumClientMailboxReceiptCrypto()),
+            imported.DecodePolicies,
+            imported.Authority,
+            sessionId => sessionId == imported.LocalSessionId
+                ? imported.SelfSelector
+                : throw new InvalidOperationException(
+                    "The acceptance transport has no selector for another identity."),
+            timeProvider: clock);
+    }
+
+    [Fact]
     public async Task NativeBatch_WithMissingFinalCredential_PersistsAndDispatchesNothing()
     {
         using var fixture = Fixture.Create();
@@ -793,6 +852,42 @@ public sealed partial class MailboxCredentialBundleImporterTests
                 Signature = ReadOnlyMemory<byte>.Empty
             },
             replicaSeed);
+    }
+
+    private sealed class FailFirstRetrieveIngress(TimeProvider timeProvider) :
+        IClientMailboxBinaryIngress
+    {
+        private readonly ScriptedRetrieveIngress inner = new(timeProvider);
+
+        public List<byte[]> Requests { get; } = [];
+
+        public Task<ReadOnlyMemory<byte>> StoreAsync(
+            ReadOnlyMemory<byte> canonicalMau2,
+            CancellationToken cancellationToken = default) =>
+            inner.StoreAsync(canonicalMau2, cancellationToken);
+
+        public Task<ReadOnlyMemory<byte>> RetrieveAsync(
+            ReadOnlyMemory<byte> canonicalMau2,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Requests.Add(canonicalMau2.ToArray());
+            if (Requests.Count == 1)
+            {
+                return Task.FromException<ReadOnlyMemory<byte>>(
+                    new ClientMailboxTransportException(
+                        ClientMailboxTransportFailure.NetworkUnavailable,
+                        true,
+                        "Simulated commit-outcome-unknown transport failure."));
+            }
+
+            return inner.RetrieveAsync(canonicalMau2, cancellationToken);
+        }
+
+        public Task<ReadOnlyMemory<byte>> AcknowledgeAsync(
+            ReadOnlyMemory<byte> canonicalMau2,
+            CancellationToken cancellationToken = default) =>
+            inner.AcknowledgeAsync(canonicalMau2, cancellationToken);
     }
 
     private sealed class InjectedBatchNativeTransport(

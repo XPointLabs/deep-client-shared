@@ -387,8 +387,6 @@ public sealed class InMemoryScopedMailboxCredentialRepository :
         byte[] planDigest)
     {
         if (!Fixed(stored.PlanDigest, planDigest) ||
-            stored.CreatedAtUnixMilliseconds !=
-                request.CreatedAt.ToUnixTimeMilliseconds() ||
             stored.TargetCount != request.Targets.Count)
         {
             throw new InvalidOperationException(

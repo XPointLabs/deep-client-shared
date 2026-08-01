@@ -204,10 +204,17 @@ public sealed class ScopedMailboxRepositoryConformanceTests
             fixture.Self, fixture.Authority);
         var target = fixture.SelfTarget(0xc1);
         var first = await fixture.PrepareAsync(target);
+        Assert.Equal([2UL], fixture.NextCounters());
+        Assert.Equal(1, fixture.BatchCount());
+        Assert.Equal(1, fixture.OutboxCount());
+        fixture.Clock.Set(1051);
         var resumed = await fixture.PrepareAsync(target);
         Assert.Equal(
             first.Frames.Single().GetCanonicalMau2Copy(),
             resumed.Frames.Single().GetCanonicalMau2Copy());
+        Assert.Equal([2UL], fixture.NextCounters());
+        Assert.Equal(1, fixture.BatchCount());
+        Assert.Equal(1, fixture.OutboxCount());
 
         fixture.DeletePreparedTargets(Bytes(16, 0xc1));
         await Assert.ThrowsAsync<InvalidDataException>(() =>
