@@ -7,19 +7,19 @@ namespace Deep.Client.Shared.Tests.Services;
 
 public sealed class P14A2B1ActivationTrustRebindTests
 {
-    private const string AcceptedVersion = "0.2.0-p10j.2886880";
-    private const string AcceptedSource = "2886880d4c2060cd819765c53c77a02e1c475ea8";
+    private const string AcceptedVersion = "0.4.0-survival.e570512";
+    private const string AcceptedSource = "e5705123836b32060ec4392e813d5b8c44635e2e";
     private const string AcceptedSha256 =
-        "a4b13bd32d6dac2999dd997e567a3760af20b5697a5fd1045cca910cde2a1f36";
+        "48b64474f9b46e9c6e4017e20586a940ed138a8a28365195326a31d56e664ff3";
     private const string AcceptedContentHash =
-        "jx7NqNpTfqklFuNoZYIyrwunwH5q/a0aj5fgOlf7rLpaOU+Z7IGoZ6H+qKbHyLOtU0lHMZYRe1l4IYQGXSBK3w==";
-    private const string OldVersion = "0.1.0-p14.faa598f";
+        "fkyin9lcLXP2TtE4UPt2t9x0u55kTP2eymzEgAydbVM81prAervrt5yM8eH0p7xyZs5Rq0SJgcoy99/2MKkCnQ==";
+    private const string OldVersion = "0.2.0-p10j.2886880";
 
     [Fact]
     public void AcceptedCarrierIsTheOnlyCarrierInTheOfflineClosure()
     {
         var root = P14A2PackageAndStaticGateTests.RepositoryRoot();
-        var vendor = Path.Combine(root, "vendor", "p10j");
+        var vendor = Path.Combine(root, "vendor", "survival-beta-e570512");
         var packageDirectory = Path.Combine(vendor, "packages");
         var acceptedFile = $"Deep.Protocol.ProfileCarrier.{AcceptedVersion}.nupkg";
         var packages = Directory.GetFiles(
@@ -31,7 +31,7 @@ public sealed class P14A2B1ActivationTrustRebindTests
         Assert.Equal(new[] { acceptedFile }, packages);
 
         var packagePath = Path.Combine(packageDirectory, acceptedFile);
-        Assert.Equal(28_944, new FileInfo(packagePath).Length);
+        Assert.Equal(30_360, new FileInfo(packagePath).Length);
         Assert.Equal(AcceptedSha256, Sha256(packagePath));
         using var sha512 = SHA512.Create();
         using var packageStream = File.OpenRead(packagePath);
@@ -87,7 +87,7 @@ public sealed class P14A2B1ActivationTrustRebindTests
         var manifestPath = Path.Combine(
             root,
             "vendor",
-            "p10j",
+            "survival-beta-e570512",
             "package-provenance.json");
         using var manifest = JsonDocument.Parse(File.ReadAllBytes(manifestPath));
         var value = manifest.RootElement;
@@ -107,7 +107,7 @@ public sealed class P14A2B1ActivationTrustRebindTests
     }
 
     [Theory]
-    [InlineData("0.2.0-p14.invalid", AcceptedSha256, AcceptedContentHash)]
+    [InlineData("0.4.0-survival.invalid", AcceptedSha256, AcceptedContentHash)]
     [InlineData(AcceptedVersion,
         "0000000000000000000000000000000000000000000000000000000000000000",
         AcceptedContentHash)]
