@@ -113,17 +113,14 @@ public sealed class ClientMailboxActivation
     public ClientMailboxActivation(
         bool enabled,
         ReadOnlySpan<byte> issuerContext,
-        ClientMailboxPinnedRoute? route,
         bool ingressConfigured)
     {
         Enabled = enabled;
         this.issuerContext = issuerContext.ToArray();
-        Route = route;
         IngressConfigured = ingressConfigured;
     }
 
     public bool Enabled { get; }
-    public ClientMailboxPinnedRoute? Route { get; }
     public bool IngressConfigured { get; }
     public bool HasIssuerContext =>
         issuerContext.Length == 32 &&
@@ -138,7 +135,6 @@ public sealed class ClientMailboxActivation
     public override string ToString() =>
         $"ClientMailboxActivation {{ Enabled = {Enabled}, " +
         $"IssuerContext = {(HasIssuerContext ? "[configured]" : "[missing]")}, " +
-        $"Route = {(Route is null ? "[missing]" : "[configured]")}, " +
         $"Ingress = {(IngressConfigured ? "[configured]" : "[missing]")} }}";
 }
 
@@ -317,8 +313,7 @@ public sealed class ClientMailboxAdapter
         ClientFeatureFlags flags,
         ClientMailboxActivation activation,
         IClientMailboxBinaryIngress ingress,
-        ITransportOutboxRepository outbox,
-        IClientMailboxStateRepository state,
+        SqliteSessionStore localStore,
         IClientMailboxReceiptVerifier receipts,
         MailboxAuthenticatedRequestFactory requests,
         MailboxClientDecodePolicy decodePolicy,
@@ -327,8 +322,9 @@ public sealed class ClientMailboxAdapter
         ArgumentNullException.ThrowIfNull(flags);
         this.activation = activation ?? throw new ArgumentNullException(nameof(activation));
         this.ingress = ingress ?? throw new ArgumentNullException(nameof(ingress));
-        this.outbox = outbox ?? throw new ArgumentNullException(nameof(outbox));
-        this.state = state ?? throw new ArgumentNullException(nameof(state));
+        ArgumentNullException.ThrowIfNull(localStore);
+        this.outbox = localStore;
+        this.state = localStore;
         this.receipts = receipts ?? throw new ArgumentNullException(nameof(receipts));
         this.requests = requests ?? throw new ArgumentNullException(nameof(requests));
         this.decodePolicy = decodePolicy ?? throw new ArgumentNullException(nameof(decodePolicy));
@@ -336,22 +332,28 @@ public sealed class ClientMailboxAdapter
         if (!flags.ClientMailboxAdapterEnabled ||
             !activation.Enabled ||
             !activation.HasIssuerContext ||
-            activation.Route is null ||
             !activation.IngressConfigured)
         {
             throw new InvalidOperationException(
                 "Client mailbox adapter requires its disabled-by-default flag, issuer, placement and ingress.");
+        }
+        if (!requests.Uses(localStore))
+        {
+            throw new InvalidOperationException(
+                "Native mailbox preparation must share the SQLite local-state transaction.");
         }
     }
 
     public async Task<ClientMailboxStoreResult> StoreAsync(
         OutboxAccountScope outboxScope,
         IMailboxOperationSigner signer,
+        MailboxCredentialSelector selector,
         MailboxEncryptedEnvelope envelope,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(outboxScope);
         ArgumentNullException.ThrowIfNull(signer);
+        ArgumentNullException.ThrowIfNull(selector);
         ArgumentNullException.ThrowIfNull(envelope);
         var logicalId = OutboxLogicalId.FromBytes(envelope.OperationId.Span);
         await using var operationLease =
@@ -359,11 +361,12 @@ public sealed class ClientMailboxAdapter
                 outboxScope,
                 logicalId,
                 cancellationToken).ConfigureAwait(false);
-        var binding = MailboxAuthenticatedRequestTranscript.ForStore(envelope);
         var prepared = await PrepareOrResumeAsync(
             outboxScope,
-            binding,
+            MailboxAuthenticatedOperation.Store,
             () => requests.CreateStoreAsync(
+                outboxScope,
+                selector,
                 signer,
                 envelope,
                 cancellationToken),
@@ -371,6 +374,7 @@ public sealed class ClientMailboxAdapter
         EnsureSignerMatches(prepared, signer);
         return await DispatchStoreAsync(
             outboxScope,
+            selector,
             prepared,
             cancellationToken).ConfigureAwait(false);
     }
@@ -378,86 +382,32 @@ public sealed class ClientMailboxAdapter
     public async Task<ClientMailboxRetrieveResult> RetrieveAsync(
         OutboxAccountScope outboxScope,
         IMailboxOperationSigner signer,
-        BlindedMailboxId mailboxId,
-        ulong epoch,
+        MailboxCredentialSelector selector,
         ReadOnlyMemory<byte> operationId,
         ushort maximumItems,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(outboxScope);
         ArgumentNullException.ThrowIfNull(signer);
-        ArgumentNullException.ThrowIfNull(mailboxId);
+        ArgumentNullException.ThrowIfNull(selector);
         var logicalId = OutboxLogicalId.FromBytes(operationId.Span);
         await using var operationLease =
             await ClientMailboxOperationSingleFlight.EnterAsync(
                 outboxScope,
                 logicalId,
                 cancellationToken).ConfigureAwait(false);
-        var existing = await outbox.ReadTransportOutboxAsync(
-            outboxScope,
-            logicalId,
-            cancellationToken).ConfigureAwait(false);
-        if (existing.Result == TransportOutboxReadResult.Corrupt)
-        {
-            throw new IOException("Mailbox outbox state is corrupt.");
-        }
-        if (existing is
-            { Result: TransportOutboxReadResult.Found, Item: not null })
-        {
-            var canonical = existing.Item.GetCiphertextBundleCopy();
-            var decoded = MailboxAuthenticatedClientRequestCodec.Decode(
-                canonical);
-            if (decoded.Binding.Operation !=
-                    MailboxAuthenticatedOperation.Retrieve)
-            {
-                throw new InvalidOperationException(
-                    "Mailbox operation id conflicts with another operation.");
-            }
-            var persisted =
-                MailboxAuthenticatedRequestTranscript.DecodeRetrieveBody(
-                    decoded.Binding.CanonicalRequest.Span);
-            if (persisted.Epoch != epoch ||
-                persisted.MaximumItems != maximumItems ||
-                !FixedEquals(
-                    persisted.OperationId.Span,
-                    operationId.Span) ||
-                !FixedEquals(
-                    persisted.MailboxId.Bytes.Span,
-                    mailboxId.Bytes.Span) ||
-                !FixedEquals(
-                    persisted.PlacementId.Bytes.Span,
-                    activation.Route!.PlacementId.Bytes.Span))
-            {
-                throw new InvalidOperationException(
-                    "Mailbox operation id conflicts with the durable retrieve request.");
-            }
-
-            var recovered = new MailboxAuthenticatedRequestFrame(
-                MailboxAuthenticatedOperation.Retrieve,
-                canonical);
-            EnsureSignerMatches(recovered, signer);
-            return await DispatchRetrieveAsync(
-                outboxScope,
-                recovered,
-                cancellationToken).ConfigureAwait(false);
-        }
-
-        var scope = activation.ScopeFor(mailboxId, epoch);
+        var route = await requests.ReadRouteAsync(selector, cancellationToken)
+            .ConfigureAwait(false);
+        var scope = activation.ScopeFor(route.MailboxId, route.Epoch);
         await ReconcileExpiredAsync(scope, cancellationToken).ConfigureAwait(false);
         var traversal = await state.ReadTraversalAsync(scope, cancellationToken)
             .ConfigureAwait(false);
-        var binding = MailboxAuthenticatedRequestTranscript.ForRetrieve(
-            epoch,
-            operationId.Span,
-            mailboxId,
-            activation.Route!.PlacementId,
-            traversal.AfterCursor,
-            maximumItems,
-            traversal.ContinuationToken);
         var prepared = await PrepareOrResumeAsync(
             outboxScope,
-            binding,
+            MailboxAuthenticatedOperation.Retrieve,
             () => requests.CreateRetrieveAsync(
+                outboxScope,
+                selector,
                 signer,
                 operationId,
                 traversal.AfterCursor,
@@ -468,6 +418,7 @@ public sealed class ClientMailboxAdapter
         EnsureSignerMatches(prepared, signer);
         return await DispatchRetrieveAsync(
             outboxScope,
+            selector,
             prepared,
             cancellationToken).ConfigureAwait(false);
     }
@@ -475,8 +426,7 @@ public sealed class ClientMailboxAdapter
     public async Task<ClientMailboxAckResult> AcknowledgeAsync(
         OutboxAccountScope outboxScope,
         IMailboxOperationSigner signer,
-        BlindedMailboxId mailboxId,
-        ulong epoch,
+        MailboxCredentialSelector selector,
         ReadOnlyMemory<byte> operationId,
         bool isFinalPage,
         ReadOnlyMemory<byte> continuationToken,
@@ -485,7 +435,7 @@ public sealed class ClientMailboxAdapter
     {
         ArgumentNullException.ThrowIfNull(outboxScope);
         ArgumentNullException.ThrowIfNull(signer);
-        ArgumentNullException.ThrowIfNull(mailboxId);
+        ArgumentNullException.ThrowIfNull(selector);
         ArgumentNullException.ThrowIfNull(acknowledgements);
         var logicalId = OutboxLogicalId.FromBytes(operationId.Span);
         await using var operationLease =
@@ -493,18 +443,12 @@ public sealed class ClientMailboxAdapter
                 outboxScope,
                 logicalId,
                 cancellationToken).ConfigureAwait(false);
-        var binding = MailboxAuthenticatedRequestTranscript.ForAck(
-            epoch,
-            operationId.Span,
-            mailboxId,
-            activation.Route!.PlacementId,
-            isFinalPage,
-            continuationToken.Span,
-            acknowledgements);
         var prepared = await PrepareOrResumeAsync(
             outboxScope,
-            binding,
+            MailboxAuthenticatedOperation.Ack,
             () => requests.CreateAckAsync(
+                outboxScope,
+                selector,
                 signer,
                 operationId,
                 isFinalPage,
@@ -515,12 +459,14 @@ public sealed class ClientMailboxAdapter
         EnsureSignerMatches(prepared, signer);
         return await DispatchAcknowledgeAsync(
             outboxScope,
+            selector,
             prepared,
             cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<ClientMailboxStoreResult> DispatchStoreAsync(
         OutboxAccountScope outboxScope,
+        MailboxCredentialSelector selector,
         MailboxAuthenticatedRequestFrame authenticatedRequest,
         CancellationToken cancellationToken = default)
     {
@@ -532,7 +478,10 @@ public sealed class ClientMailboxAdapter
             MailboxAuthenticatedOperation.Store);
         var envelope = MailboxAuthenticatedRequestTranscript.DecodeStoreBody(
             request.Binding.CanonicalRequest.Span);
-        EnsurePlacement(envelope.PlacementId);
+        var route = await ResolveDispatchRouteAsync(
+            selector, envelope.Epoch, envelope.MailboxId, envelope.PlacementId,
+            MailboxAuthenticatedOperation.Store,
+            cancellationToken).ConfigureAwait(false);
         var logicalId = OutboxLogicalId.FromBytes(
             request.Binding.OperationId.Span);
         var dedup = OutboxDedupMaterial.FromBytes(
@@ -551,7 +500,7 @@ public sealed class ClientMailboxAdapter
             var evidence = accepted.GetEvidenceCopy();
             var persistedDurable = await VerifyAndJournalDurableAsync(
                 evidence,
-                StoreExpectation(envelope),
+                StoreExpectation(envelope, route),
                 cancellationToken).ConfigureAwait(false);
             await PromoteAcceptedAsync(
                 outboxScope,
@@ -572,7 +521,7 @@ public sealed class ClientMailboxAdapter
                 .GetEvidenceCopy();
             var persistedDurable = await VerifyAndJournalDurableAsync(
                 evidence,
-                StoreExpectation(envelope),
+                StoreExpectation(envelope, route),
                 cancellationToken).ConfigureAwait(false);
             return new ClientMailboxStoreResult(
                 persistedDurable.Cursor,
@@ -586,9 +535,14 @@ public sealed class ClientMailboxAdapter
             MailboxAuthenticatedOperation.Store,
             cancellationToken).ConfigureAwait(false);
 
+        // Authority time and selected route are revalidated immediately before I/O.
+        route = await ResolveDispatchRouteAsync(
+            selector, envelope.Epoch, envelope.MailboxId, envelope.PlacementId,
+            MailboxAuthenticatedOperation.Store,
+            cancellationToken).ConfigureAwait(false);
         var response = await ingress.StoreAsync(encoded, cancellationToken)
             .ConfigureAwait(false);
-        var expectation = StoreExpectation(envelope);
+        var expectation = StoreExpectation(envelope, route);
         var durable = await VerifyAndJournalDurableAsync(
             response,
             expectation,
@@ -630,24 +584,26 @@ public sealed class ClientMailboxAdapter
     }
 
     public async Task<ClientMailboxTraversal> ReadTraversalAsync(
-        BlindedMailboxId mailboxId,
-        ulong epoch,
+        MailboxCredentialSelector selector,
         CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(mailboxId);
-        var scope = activation.ScopeFor(mailboxId, epoch);
+        ArgumentNullException.ThrowIfNull(selector);
+        var route = await requests.ReadRouteAsync(selector, cancellationToken)
+            .ConfigureAwait(false);
+        var scope = activation.ScopeFor(route.MailboxId, route.Epoch);
         await ReconcileExpiredAsync(scope, cancellationToken).ConfigureAwait(false);
         return await state.ReadTraversalAsync(scope, cancellationToken)
             .ConfigureAwait(false);
     }
 
     public async Task<IReadOnlyList<MailboxRetrievedEnvelope>> ReadDurableInboxAsync(
-        BlindedMailboxId mailboxId,
-        ulong epoch,
+        MailboxCredentialSelector selector,
         CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(mailboxId);
-        var scope = activation.ScopeFor(mailboxId, epoch);
+        ArgumentNullException.ThrowIfNull(selector);
+        var route = await requests.ReadRouteAsync(selector, cancellationToken)
+            .ConfigureAwait(false);
+        var scope = activation.ScopeFor(route.MailboxId, route.Epoch);
         await ReconcileExpiredAsync(scope, cancellationToken).ConfigureAwait(false);
         return await state.ReadDurableInboxAsync(scope, cancellationToken)
             .ConfigureAwait(false);
@@ -655,6 +611,7 @@ public sealed class ClientMailboxAdapter
 
     private async Task<ClientMailboxRetrieveResult> DispatchRetrieveAsync(
         OutboxAccountScope outboxScope,
+        MailboxCredentialSelector selector,
         MailboxAuthenticatedRequestFrame authenticatedRequest,
         CancellationToken cancellationToken = default)
     {
@@ -665,7 +622,10 @@ public sealed class ClientMailboxAdapter
             MailboxAuthenticatedOperation.Retrieve);
         var request = MailboxAuthenticatedRequestTranscript.DecodeRetrieveBody(
             authenticated.Binding.CanonicalRequest.Span);
-        EnsurePlacement(request.PlacementId);
+        var route = await ResolveDispatchRouteAsync(
+            selector, request.Epoch, request.MailboxId, request.PlacementId,
+            MailboxAuthenticatedOperation.Retrieve,
+            cancellationToken).ConfigureAwait(false);
         var logicalId = OutboxLogicalId.FromBytes(request.OperationId.Span);
         var dedup = OutboxDedupMaterial.FromBytes(
             authenticated.Binding.RequestDigest.Span);
@@ -724,6 +684,11 @@ public sealed class ClientMailboxAdapter
             outboxScope,
             logicalId,
             outboxSnapshot,
+            MailboxAuthenticatedOperation.Retrieve,
+            cancellationToken).ConfigureAwait(false);
+        // Never dispatch a prepared request after its scoped authority expired or changed.
+        route = await ResolveDispatchRouteAsync(
+            selector, request.Epoch, request.MailboxId, request.PlacementId,
             MailboxAuthenticatedOperation.Retrieve,
             cancellationToken).ConfigureAwait(false);
         var response = await ingress.RetrieveAsync(
@@ -789,6 +754,7 @@ public sealed class ClientMailboxAdapter
 
     private async Task<ClientMailboxAckResult> DispatchAcknowledgeAsync(
         OutboxAccountScope outboxScope,
+        MailboxCredentialSelector selector,
         MailboxAuthenticatedRequestFrame authenticatedRequest,
         CancellationToken cancellationToken = default)
     {
@@ -799,7 +765,10 @@ public sealed class ClientMailboxAdapter
             MailboxAuthenticatedOperation.Ack);
         var request = MailboxAuthenticatedRequestTranscript.DecodeAckBody(
             authenticated.Binding.CanonicalRequest.Span);
-        EnsurePlacement(request.PlacementId);
+        var route = await ResolveDispatchRouteAsync(
+            selector, request.Epoch, request.MailboxId, request.PlacementId,
+            MailboxAuthenticatedOperation.Ack,
+            cancellationToken).ConfigureAwait(false);
         var logicalId = OutboxLogicalId.FromBytes(request.OperationId.Span);
         var dedup = OutboxDedupMaterial.FromBytes(
             authenticated.Binding.RequestDigest.Span);
@@ -870,6 +839,10 @@ public sealed class ClientMailboxAdapter
                 outboxSnapshot,
                 MailboxAuthenticatedOperation.Ack,
                 cancellationToken).ConfigureAwait(false);
+            route = await ResolveDispatchRouteAsync(
+                selector, request.Epoch, request.MailboxId, request.PlacementId,
+                MailboxAuthenticatedOperation.Ack,
+                cancellationToken).ConfigureAwait(false);
             var recoveredResponse = await ingress.AcknowledgeAsync(
                 canonicalMau2,
                 cancellationToken).ConfigureAwait(false);
@@ -897,7 +870,7 @@ public sealed class ClientMailboxAdapter
                         Epoch = request.Epoch,
                         OperationId = request.OperationId.ToArray(),
                         MailboxId = request.MailboxId,
-                        Route = activation.Route!,
+                        Route = route,
                         EnvelopeDigest =
                             acknowledgement.EnvelopeDigest.ToArray(),
                         ExpiresAtUnixSeconds =
@@ -923,6 +896,12 @@ public sealed class ClientMailboxAdapter
             outboxSnapshot,
             MailboxAuthenticatedOperation.Ack,
             cancellationToken).ConfigureAwait(false);
+        // Revalidate immediately before sending MBA2.  A resumed frame is not
+        // authority to use stale membership, placement, or replica pins.
+        route = await ResolveDispatchRouteAsync(
+            selector, request.Epoch, request.MailboxId, request.PlacementId,
+            MailboxAuthenticatedOperation.Ack,
+            cancellationToken).ConfigureAwait(false);
         var response = await ingress.AcknowledgeAsync(
             canonicalMau2,
             cancellationToken).ConfigureAwait(false);
@@ -944,7 +923,7 @@ public sealed class ClientMailboxAdapter
                     Epoch = request.Epoch,
                     OperationId = request.OperationId.ToArray(),
                     MailboxId = request.MailboxId,
-                    Route = activation.Route!,
+                    Route = route,
                     EnvelopeDigest = acknowledgement.EnvelopeDigest.ToArray(),
                     ExpiresAtUnixSeconds =
                         expectations[index].ExpiresAtUnixSeconds,
@@ -978,12 +957,13 @@ public sealed class ClientMailboxAdapter
     }
 
     private ClientMailboxReceiptExpectation StoreExpectation(
-        MailboxEncryptedEnvelope envelope) => new()
+        MailboxEncryptedEnvelope envelope,
+        ClientMailboxPinnedRoute route) => new()
         {
             Epoch = envelope.Epoch,
             OperationId = envelope.OperationId.ToArray(),
             MailboxId = envelope.MailboxId,
-            Route = activation.Route!,
+            Route = route,
             EnvelopeDigest = envelope.DeduplicationDigest.ToArray(),
             ExpiresAtUnixSeconds = envelope.ExpiresAtUnixSeconds,
             AllowedDispositions = StoreDispositions
@@ -1078,15 +1058,32 @@ public sealed class ClientMailboxAdapter
             checked((ulong)timeProvider.GetUtcNow().ToUnixTimeSeconds()),
             cancellationToken);
 
-    private void EnsurePlacement(BlindedPlacementId placementId)
+    private async Task<ClientMailboxPinnedRoute> ResolveDispatchRouteAsync(
+        MailboxCredentialSelector selector,
+        ulong epoch,
+        BlindedMailboxId mailboxId,
+        BlindedPlacementId placementId,
+        MailboxAuthenticatedOperation operation,
+        CancellationToken cancellationToken)
     {
-        if (!FixedEquals(
-                placementId.Bytes.Span,
-                activation.Route!.PlacementId.Bytes.Span))
+        var resolved = await requests.RevalidateDispatchAsync(
+                selector, operation, cancellationToken)
+            .ConfigureAwait(false);
+        if (resolved.Epoch != epoch ||
+            !FixedEquals(resolved.MailboxId.Bytes.Span, mailboxId.Bytes.Span) ||
+            !FixedEquals(resolved.PlacementId.Bytes.Span, placementId.Bytes.Span))
         {
             throw new InvalidOperationException(
-                "Mailbox operation does not match the pinned placement.");
+                "Mailbox operation no longer matches the selected scoped route.");
         }
+
+        return new ClientMailboxPinnedRoute(
+            resolved.PlacementId,
+            resolved.MembershipCommitment.Span,
+            resolved.Replicas.FirstId.Span,
+            resolved.Replicas.FirstSigningKey.Span,
+            resolved.Replicas.SecondId.Span,
+            resolved.Replicas.SecondSigningKey.Span);
     }
 
     private async Task<TransportOutboxItemSnapshot> ReadExactOutboxAsync(
@@ -1155,67 +1152,20 @@ public sealed class ClientMailboxAdapter
 
     private async Task<MailboxAuthenticatedRequestFrame> PrepareOrResumeAsync(
         OutboxAccountScope outboxScope,
-        MailboxAuthenticatedRequestBinding expectedBinding,
+        MailboxAuthenticatedOperation expectedOperation,
         Func<Task<MailboxAuthenticatedRequestFrame>> create,
         CancellationToken cancellationToken)
     {
-        ArgumentNullException.ThrowIfNull(expectedBinding);
         ArgumentNullException.ThrowIfNull(create);
-        var logicalId = OutboxLogicalId.FromBytes(
-            expectedBinding.OperationId.Span);
-        var read = await outbox.ReadTransportOutboxAsync(
-            outboxScope,
-            logicalId,
-            cancellationToken).ConfigureAwait(false);
-        if (read.Result == TransportOutboxReadResult.Corrupt)
-        {
-            throw new IOException("Mailbox outbox state is corrupt.");
-        }
-        if (read is { Result: TransportOutboxReadResult.Found, Item: not null })
-        {
-            return RecoverFrame(read.Item, expectedBinding);
-        }
-
         var frame = await create().ConfigureAwait(false);
         var canonical = frame.GetCanonicalMau2Copy();
-        var decoded = DecodeRequest(frame, expectedBinding.Operation);
-        EnsureExactBinding(decoded.Binding, expectedBinding);
-        var now = timeProvider.GetUtcNow();
-        var expiresAt = DateTimeOffset.FromUnixTimeSeconds(
-            checked((long)decoded.Presentation.Grant.ExpiresAtUnixSeconds));
-        if (expiresAt <= now.AddSeconds(1))
+        var decoded = DecodeRequest(frame, expectedOperation);
+        if (decoded.Binding.Operation != expectedOperation)
         {
             throw new InvalidOperationException(
-                "Mailbox authenticated request has no durable retry window.");
+                "Scoped mailbox preparation returned the wrong operation.");
         }
-
-        var prepared = TransportOutboxPreparedItem.Create(
-            outboxScope,
-            logicalId,
-            OutboxDedupMaterial.FromBytes(
-                expectedBinding.RequestDigest.Span),
-            canonical,
-            now,
-            expiresAt,
-            now);
-        var prepare = await outbox.PrepareTransportOutboxAsync(
-            prepared,
-            cancellationToken).ConfigureAwait(false);
-        if (prepare is not (
-            TransportOutboxCommitResult.Applied or
-            TransportOutboxCommitResult.Idempotent or
-            TransportOutboxCommitResult.Conflict))
-        {
-            throw new IOException("Mailbox outbox preparation failed.");
-        }
-
-        var snapshot = await ReadExactOutboxAsync(
-            outboxScope,
-            logicalId,
-            prepared.DedupMaterial,
-            canonical,
-            cancellationToken).ConfigureAwait(false);
-        return RecoverFrame(snapshot, expectedBinding);
+        return frame;
     }
 
     private static MailboxAuthenticatedRequestFrame RecoverFrame(

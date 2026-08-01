@@ -1,169 +1,25 @@
 ﻿using Deep.Protocol.DeepExtension.MailboxCapabilities;
 using Microsoft.Data.Sqlite;
 using System.Security.Cryptography;
-using System.Text;
 
 namespace Deep.Client.Shared.Persistence;
 
 /// <summary>
-/// SQLCipher-backed state containing only domain-separated scope hashes,
-/// encrypted envelopes, cursor/token state, and receipt commitments.
+/// Mailbox state is part of the single attested local-state database. This
+/// partial contains the normalized mailbox inbox implementation.
 /// </summary>
-public sealed class SqliteClientMailboxStateRepository :
-    IClientMailboxStateRepository,
-    IClientMailboxCredentialStateRepository,
-    IDisposable
+public sealed partial class SqliteSessionStore :
+    IClientMailboxStateRepository
 {
-    private const int SchemaVersion = 7;
-    private static readonly IReadOnlyDictionary<string, string> CurrentTableDefinitions =
-        new Dictionary<string, string>(StringComparer.Ordinal)
-        {
-            ["client_mailbox_meta"] = """
-                CREATE TABLE client_mailbox_meta (
-                    id INTEGER PRIMARY KEY CHECK(id = 1),
-                    schema_version INTEGER NOT NULL
-                )
-                """,
-            ["client_mailbox_traversal"] = """
-                CREATE TABLE client_mailbox_traversal (
-                    scope BLOB PRIMARY KEY NOT NULL CHECK(length(scope) = 32),
-                    after_cursor BLOB NOT NULL CHECK(length(after_cursor) = 8),
-                    continuation_token BLOB NOT NULL
-                )
-                """,
-            ["client_mailbox_inbox"] = """
-                CREATE TABLE client_mailbox_inbox (
-                    scope BLOB NOT NULL CHECK(length(scope) = 32),
-                    cursor BLOB NOT NULL CHECK(length(cursor) = 8),
-                    digest BLOB NOT NULL CHECK(length(digest) = 32),
-                    expires_at BLOB NOT NULL CHECK(length(expires_at) = 8),
-                    canonical_envelope BLOB NOT NULL,
-                    acknowledged INTEGER NOT NULL CHECK(acknowledged IN (0, 1)),
-                    PRIMARY KEY(scope, cursor),
-                    UNIQUE(scope, digest)
-                )
-                """,
-            ["client_mailbox_expired_quarantine"] = """
-                CREATE TABLE client_mailbox_expired_quarantine (
-                    scope BLOB NOT NULL CHECK(length(scope) = 32),
-                    cursor BLOB NOT NULL CHECK(length(cursor) = 8),
-                    digest BLOB NOT NULL CHECK(length(digest) = 32),
-                    expires_at BLOB NOT NULL CHECK(length(expires_at) = 8),
-                    canonical_envelope BLOB NOT NULL,
-                    quarantined_at INTEGER NOT NULL,
-                    reason TEXT NOT NULL,
-                    PRIMARY KEY(scope, cursor, digest)
-                )
-                """,
-            ["client_mailbox_coordinator_journal"] = """
-                CREATE TABLE client_mailbox_coordinator_journal (
-                    installation_scope BLOB NOT NULL
-                        CHECK(length(installation_scope) = 32),
-                    statement_key BLOB NOT NULL CHECK(length(statement_key) = 32),
-                    statement_digest BLOB NOT NULL
-                        CHECK(length(statement_digest) = 32),
-                    expires_at BLOB NOT NULL CHECK(length(expires_at) = 8),
-                    PRIMARY KEY(installation_scope, statement_key)
-                )
-                """
-            , ["client_mailbox_credentials"] = """
-                CREATE TABLE client_mailbox_credentials (
-                    id INTEGER PRIMARY KEY CHECK(id = 1),
-                    generation BLOB NOT NULL CHECK(length(generation) = 32),
-                    active_epoch BLOB NOT NULL CHECK(length(active_epoch) = 8),
-                    canonical_bundle BLOB NOT NULL CHECK(length(canonical_bundle) = 2216)
-                )
-                """
-            , ["client_mailbox_replay_counters"] = """
-                CREATE TABLE client_mailbox_replay_counters (
-                    grant_key BLOB PRIMARY KEY NOT NULL CHECK(length(grant_key) = 32),
-                    next_counter BLOB NOT NULL CHECK(length(next_counter) = 8)
-                )
-                """
-        };
-    private static readonly IReadOnlyDictionary<string, string[]> CurrentIndexes =
-        new Dictionary<string, string[]>(StringComparer.Ordinal)
-        {
-            ["ix_client_mailbox_inbox_scope_expiry"] = ["scope", "expires_at"],
-            ["ix_client_mailbox_inbox_expiry_scope"] = ["expires_at", "scope"],
-            ["ix_client_mailbox_inbox_scope_ack_cursor"] =
-                ["scope", "acknowledged", "cursor"],
-            ["ix_client_mailbox_quarantine_age"] =
-                ["quarantined_at", "expires_at", "scope"],
-            ["ix_client_mailbox_journal_scope_expiry"] =
-                ["installation_scope", "expires_at"]
-        };
-    private static readonly IReadOnlyDictionary<string, string> CurrentIndexDefinitions =
-        new Dictionary<string, string>(StringComparer.Ordinal)
-        {
-            ["ix_client_mailbox_inbox_scope_expiry"] = """
-                CREATE INDEX ix_client_mailbox_inbox_scope_expiry
-                    ON client_mailbox_inbox(scope, expires_at)
-                """,
-            ["ix_client_mailbox_inbox_expiry_scope"] = """
-                CREATE INDEX ix_client_mailbox_inbox_expiry_scope
-                    ON client_mailbox_inbox(expires_at, scope)
-                """,
-            ["ix_client_mailbox_inbox_scope_ack_cursor"] = """
-                CREATE INDEX ix_client_mailbox_inbox_scope_ack_cursor
-                    ON client_mailbox_inbox(scope, acknowledged, cursor)
-                """,
-            ["ix_client_mailbox_quarantine_age"] = """
-                CREATE INDEX ix_client_mailbox_quarantine_age
-                    ON client_mailbox_expired_quarantine(
-                        quarantined_at, expires_at, scope)
-                """,
-            ["ix_client_mailbox_journal_scope_expiry"] = """
-                CREATE INDEX ix_client_mailbox_journal_scope_expiry
-                    ON client_mailbox_coordinator_journal(
-                        installation_scope, expires_at)
-                """
-        };
-    private readonly string connectionString;
     private readonly Action<ClientMailboxCommitFaultPoint>? commitFault;
-    private readonly SemaphoreSlim gate = new(1, 1);
 
-    static SqliteClientMailboxStateRepository()
-    {
-        SQLitePCL.Batteries_V2.Init();
-    }
-
-    public SqliteClientMailboxStateRepository(SqliteSessionStoreOptions options)
-        : this(options, commitFault: null)
-    {
-    }
-
-    internal SqliteClientMailboxStateRepository(
+    internal SqliteSessionStore(
         SqliteSessionStoreOptions options,
-        Action<ClientMailboxCommitFaultPoint>? commitFault = null,
-        Action<ClientMailboxSchemaPreflightPoint>? schemaPreflightFault = null)
+        Action<ClientMailboxCommitFaultPoint> commitFault)
+        : this(options)
     {
-        ArgumentNullException.ThrowIfNull(options);
-        var encryptionKey = options.GetEncryptionKeyForStore();
-        if (string.IsNullOrWhiteSpace(options.StatePath) ||
-            string.IsNullOrWhiteSpace(encryptionKey))
-        {
-            throw new InvalidOperationException(
-                "Client mailbox SQLite state requires the SQLCipher session-store key path.");
-        }
-
-        var directory = Path.GetDirectoryName(Path.GetFullPath(options.StatePath));
-        if (!string.IsNullOrWhiteSpace(directory))
-        {
-            Directory.CreateDirectory(directory);
-        }
-
-        connectionString = new SqliteConnectionStringBuilder
-        {
-            DataSource = options.StatePath,
-            Mode = SqliteOpenMode.ReadWriteCreate,
-            Cache = SqliteCacheMode.Shared,
-            Pooling = false,
-            Password = encryptionKey
-        }.ToString();
-        this.commitFault = commitFault;
-        PreflightExistingSchema(options.StatePath, encryptionKey, schemaPreflightFault);
-        Initialize();
+        this.commitFault = commitFault ??
+            throw new ArgumentNullException(nameof(commitFault));
     }
 
     public Task<ClientMailboxTraversal> ReadTraversalAsync(
@@ -255,95 +111,6 @@ public sealed class SqliteClientMailboxStateRepository :
             expiresAtUnixSeconds,
             nowUnixSeconds,
             cancellationToken);
-
-    public async Task ImportCredentialGenerationAsync(
-        MailboxCredentialGeneration generation,
-        MailboxCredentialImportPolicy policy,
-        CancellationToken cancellationToken = default)
-    {
-        var candidate = MailboxCredentialStateMachine.Import(generation, policy);
-        var bundle = MailboxCredentialBinaryCodec.Encode(candidate.Generation);
-        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
-        {
-            using var connection = Open(); using var transaction = connection.BeginTransaction(deferred: false);
-            using var read = connection.CreateCommand(); read.Transaction = transaction;
-            read.CommandText = "SELECT canonical_bundle FROM client_mailbox_credentials WHERE id = 1;";
-            var existing = read.ExecuteScalar() as byte[];
-            if (existing is not null)
-            {
-                if (!CryptographicOperations.FixedTimeEquals(existing, bundle))
-                    throw new InvalidOperationException("Mailbox credential generation changed unexpectedly.");
-                transaction.Commit(); return;
-            }
-            using var insert = connection.CreateCommand(); insert.Transaction = transaction;
-            insert.CommandText = "INSERT INTO client_mailbox_credentials(id, generation, active_epoch, canonical_bundle) VALUES(1, $generation, $epoch, $bundle);";
-            insert.Parameters.Add("$generation", SqliteType.Blob).Value = candidate.Generation.Generation.ToArray();
-            insert.Parameters.Add("$epoch", SqliteType.Blob).Value = U64(candidate.ActiveEpoch);
-            insert.Parameters.Add("$bundle", SqliteType.Blob).Value = bundle;
-            insert.ExecuteNonQuery(); commitFault?.Invoke(ClientMailboxCommitFaultPoint.BeforeCommit);
-            transaction.Commit(); commitFault?.Invoke(ClientMailboxCommitFaultPoint.AfterCommit);
-        }
-        finally { gate.Release(); }
-    }
-
-    public async Task SwitchCredentialEpochAsync(ulong epoch, ulong nowUnixSeconds,
-        CancellationToken cancellationToken = default)
-    {
-        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
-        {
-            using var connection = Open(); using var transaction = connection.BeginTransaction(deferred: false);
-            var state = ReadCredentials(connection, transaction); MailboxCredentialStateMachine.Switch(state, epoch, nowUnixSeconds);
-            using var update = connection.CreateCommand(); update.Transaction = transaction;
-            update.CommandText = "UPDATE client_mailbox_credentials SET active_epoch = $epoch WHERE id = 1;";
-            update.Parameters.Add("$epoch", SqliteType.Blob).Value = U64(state.ActiveEpoch);
-            update.ExecuteNonQuery(); commitFault?.Invoke(ClientMailboxCommitFaultPoint.BeforeCommit);
-            transaction.Commit(); commitFault?.Invoke(ClientMailboxCommitFaultPoint.AfterCommit);
-        }
-        finally { gate.Release(); }
-    }
-
-    public async Task<MailboxCredentialOperationLease> LeaseCredentialAsync(
-        MailboxCredentialGrantKind kind,
-        ulong nowUnixSeconds,
-        MailboxCredentialLeaseExpectation? expectation = null,
-        CancellationToken cancellationToken = default)
-    {
-        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
-        {
-            using var connection = Open(); using var transaction = connection.BeginTransaction(deferred: false);
-            var state = ReadCredentials(connection, transaction);
-            var provisional = MailboxCredentialStateMachine.Allocate(
-                state,
-                kind,
-                nowUnixSeconds,
-                expectation);
-            var key = SHA256.HashData(provisional.CanonicalGrant.Span);
-            using var read = connection.CreateCommand(); read.Transaction = transaction;
-            read.CommandText = "SELECT next_counter FROM client_mailbox_replay_counters WHERE grant_key = $key;";
-            read.Parameters.Add("$key", SqliteType.Blob).Value = key;
-            var stored = read.ExecuteScalar() as byte[];
-            var counter = stored is null ? provisional.ReplayCounter : ReadU64(stored);
-            if (counter == 0 || counter == ulong.MaxValue)
-                throw new InvalidOperationException("Mailbox replay counter is exhausted.");
-            var lease = new MailboxCredentialOperationLease(
-                provisional.Generation,
-                kind,
-                provisional.ActiveEpoch,
-                counter,
-                provisional.CanonicalGrant.Span);
-            using var upsert = connection.CreateCommand(); upsert.Transaction = transaction;
-            upsert.CommandText = "INSERT INTO client_mailbox_replay_counters(grant_key, next_counter) VALUES($key, $counter) ON CONFLICT(grant_key) DO UPDATE SET next_counter = excluded.next_counter;";
-            upsert.Parameters.Add("$key", SqliteType.Blob).Value = key;
-            upsert.Parameters.Add("$counter", SqliteType.Blob).Value = U64(checked(counter + 1));
-            upsert.ExecuteNonQuery(); commitFault?.Invoke(ClientMailboxCommitFaultPoint.BeforeCommit);
-            transaction.Commit(); commitFault?.Invoke(ClientMailboxCommitFaultPoint.AfterCommit);
-            return lease;
-        }
-        finally { gate.Release(); }
-    }
 
     internal int InstallationTraversalCountForTests()
     {
@@ -481,422 +248,6 @@ public sealed class SqliteClientMailboxStateRepository :
         transaction.Commit();
     }
 
-    public void Dispose() => gate.Dispose();
-
-    private void Initialize()
-    {
-        using var connection = Open();
-        using var transaction = connection.BeginTransaction(deferred: false);
-        EnsureCurrentSchemaOrFreshDatabase(connection, transaction);
-        using (var command = connection.CreateCommand())
-        {
-            command.Transaction = transaction;
-            command.CommandText = """
-                CREATE TABLE IF NOT EXISTS client_mailbox_meta (
-                    id INTEGER PRIMARY KEY CHECK(id = 1),
-                    schema_version INTEGER NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS client_mailbox_traversal (
-                    scope BLOB PRIMARY KEY NOT NULL CHECK(length(scope) = 32),
-                    after_cursor BLOB NOT NULL CHECK(length(after_cursor) = 8),
-                    continuation_token BLOB NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS client_mailbox_inbox (
-                    scope BLOB NOT NULL CHECK(length(scope) = 32),
-                    cursor BLOB NOT NULL CHECK(length(cursor) = 8),
-                    digest BLOB NOT NULL CHECK(length(digest) = 32),
-                    expires_at BLOB NOT NULL CHECK(length(expires_at) = 8),
-                    canonical_envelope BLOB NOT NULL,
-                    acknowledged INTEGER NOT NULL CHECK(acknowledged IN (0, 1)),
-                    PRIMARY KEY(scope, cursor),
-                    UNIQUE(scope, digest)
-                );
-                CREATE INDEX IF NOT EXISTS ix_client_mailbox_inbox_scope_expiry
-                    ON client_mailbox_inbox(scope, expires_at);
-                CREATE INDEX IF NOT EXISTS ix_client_mailbox_inbox_expiry_scope
-                    ON client_mailbox_inbox(expires_at, scope);
-                CREATE INDEX IF NOT EXISTS ix_client_mailbox_inbox_scope_ack_cursor
-                    ON client_mailbox_inbox(scope, acknowledged, cursor);
-                CREATE TABLE IF NOT EXISTS client_mailbox_expired_quarantine (
-                    scope BLOB NOT NULL CHECK(length(scope) = 32),
-                    cursor BLOB NOT NULL CHECK(length(cursor) = 8),
-                    digest BLOB NOT NULL CHECK(length(digest) = 32),
-                    expires_at BLOB NOT NULL CHECK(length(expires_at) = 8),
-                    canonical_envelope BLOB NOT NULL,
-                    quarantined_at INTEGER NOT NULL,
-                    reason TEXT NOT NULL,
-                    PRIMARY KEY(scope, cursor, digest)
-                );
-                CREATE INDEX IF NOT EXISTS ix_client_mailbox_quarantine_age
-                    ON client_mailbox_expired_quarantine(
-                        quarantined_at, expires_at, scope);
-                CREATE TABLE IF NOT EXISTS client_mailbox_coordinator_journal (
-                    installation_scope BLOB NOT NULL
-                        CHECK(length(installation_scope) = 32),
-                    statement_key BLOB NOT NULL CHECK(length(statement_key) = 32),
-                    statement_digest BLOB NOT NULL
-                        CHECK(length(statement_digest) = 32),
-                    expires_at BLOB NOT NULL CHECK(length(expires_at) = 8),
-                    PRIMARY KEY(installation_scope, statement_key)
-                );
-                CREATE INDEX IF NOT EXISTS ix_client_mailbox_journal_scope_expiry
-                    ON client_mailbox_coordinator_journal(
-                        installation_scope, expires_at);
-                CREATE TABLE IF NOT EXISTS client_mailbox_credentials (
-                    id INTEGER PRIMARY KEY CHECK(id = 1),
-                    generation BLOB NOT NULL CHECK(length(generation) = 32),
-                    active_epoch BLOB NOT NULL CHECK(length(active_epoch) = 8),
-                    canonical_bundle BLOB NOT NULL CHECK(length(canonical_bundle) = 2216)
-                );
-                CREATE TABLE IF NOT EXISTS client_mailbox_replay_counters (
-                    grant_key BLOB PRIMARY KEY NOT NULL CHECK(length(grant_key) = 32),
-                    next_counter BLOB NOT NULL CHECK(length(next_counter) = 8)
-                );
-                INSERT INTO client_mailbox_meta(id, schema_version)
-                VALUES(1, 7)
-                ON CONFLICT(id) DO NOTHING;
-                """;
-            command.ExecuteNonQuery();
-        }
-        transaction.Commit();
-    }
-
-    private static void PreflightExistingSchema(
-        string statePath,
-        string encryptionKey,
-        Action<ClientMailboxSchemaPreflightPoint>? schemaPreflightFault)
-    {
-        if (!File.Exists(statePath))
-        {
-            return;
-        }
-
-        using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
-        {
-            DataSource = statePath,
-            Mode = SqliteOpenMode.ReadOnly,
-            Cache = SqliteCacheMode.Private,
-            Pooling = false,
-            Password = encryptionKey
-        }.ToString());
-        connection.Open();
-        using (var command = connection.CreateCommand())
-        {
-            command.CommandText = "PRAGMA query_only = ON;";
-            command.ExecuteNonQuery();
-        }
-        using var transaction = connection.BeginTransaction(deferred: true);
-        EnsureCurrentSchemaOrFreshDatabase(
-            connection,
-            transaction,
-            schemaPreflightFault);
-        transaction.Commit();
-    }
-
-    private static void EnsureCurrentSchemaOrFreshDatabase(
-        SqliteConnection connection,
-        SqliteTransaction? transaction,
-        Action<ClientMailboxSchemaPreflightPoint>? schemaPreflightFault = null)
-    {
-        var userObjects = ReadUserSchemaObjects(connection, transaction);
-        schemaPreflightFault?.Invoke(
-            ClientMailboxSchemaPreflightPoint.AfterCatalogSnapshot);
-        if (userObjects.Count == 0)
-        {
-            return;
-        }
-        if (!HasExactUserSchemaObjectSet(userObjects))
-        {
-            throw ResetRequired();
-        }
-
-        using var version = connection.CreateCommand();
-        version.Transaction = transaction;
-        version.CommandText =
-            "SELECT schema_version FROM client_mailbox_meta WHERE id = 1;";
-        var rawVersion = version.ExecuteScalar();
-        if (rawVersion is null || Convert.ToInt32(rawVersion) != SchemaVersion ||
-            !HasExactColumns(
-                connection,
-                transaction,
-                "client_mailbox_meta",
-                [("id", "INTEGER", false, 1), ("schema_version", "INTEGER", true, 0)]) ||
-            !HasExactColumns(
-                connection,
-                transaction,
-                "client_mailbox_traversal",
-                [
-                    ("scope", "BLOB", true, 1),
-                    ("after_cursor", "BLOB", true, 0),
-                    ("continuation_token", "BLOB", true, 0)
-                ]) ||
-            !HasExactColumns(
-                connection,
-                transaction,
-                "client_mailbox_inbox",
-                [
-                    ("scope", "BLOB", true, 1),
-                    ("cursor", "BLOB", true, 2),
-                    ("digest", "BLOB", true, 0),
-                    ("expires_at", "BLOB", true, 0),
-                    ("canonical_envelope", "BLOB", true, 0),
-                    ("acknowledged", "INTEGER", true, 0)
-                ]) ||
-            !HasExactColumns(
-                connection,
-                transaction,
-                "client_mailbox_expired_quarantine",
-                [
-                    ("scope", "BLOB", true, 1),
-                    ("cursor", "BLOB", true, 2),
-                    ("digest", "BLOB", true, 3),
-                    ("expires_at", "BLOB", true, 0),
-                    ("canonical_envelope", "BLOB", true, 0),
-                    ("quarantined_at", "INTEGER", true, 0),
-                    ("reason", "TEXT", true, 0)
-                ]) ||
-            !HasExactColumns(
-                connection,
-                transaction,
-                "client_mailbox_coordinator_journal",
-                [
-                    ("installation_scope", "BLOB", true, 1),
-                    ("statement_key", "BLOB", true, 2),
-                    ("statement_digest", "BLOB", true, 0),
-                    ("expires_at", "BLOB", true, 0)
-                ]) ||
-            !HasExactColumns(
-                connection,
-                transaction,
-                "client_mailbox_credentials",
-                [
-                    ("id", "INTEGER", false, 1),
-                    ("generation", "BLOB", true, 0),
-                    ("active_epoch", "BLOB", true, 0),
-                    ("canonical_bundle", "BLOB", true, 0)
-                ]) ||
-            !HasExactColumns(
-                connection,
-                transaction,
-                "client_mailbox_replay_counters",
-                [
-                    ("grant_key", "BLOB", true, 1),
-                    ("next_counter", "BLOB", true, 0)
-                ]) ||
-            !HasExactIndexes(connection, transaction))
-        {
-            throw ResetRequired();
-        }
-    }
-
-    private static IReadOnlyDictionary<(string Type, string Name), string>
-        ReadUserSchemaObjects(
-            SqliteConnection connection,
-            SqliteTransaction? transaction)
-    {
-        using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = """
-            SELECT type, name, sql
-            FROM sqlite_master
-            WHERE name NOT LIKE 'sqlite_%'
-            ORDER BY type, name;
-            """;
-        using var reader = command.ExecuteReader();
-        var objects = new Dictionary<(string Type, string Name), string>();
-        while (reader.Read())
-        {
-            if (reader.IsDBNull(2) ||
-                !objects.TryAdd(
-                    (reader.GetString(0), reader.GetString(1)),
-                    reader.GetString(2)))
-            {
-                throw ResetRequired();
-            }
-        }
-        return objects;
-    }
-
-    private static bool HasExactUserSchemaObjectSet(
-        IReadOnlyDictionary<(string Type, string Name), string> actual)
-    {
-        if (actual.Count != CurrentTableDefinitions.Count +
-                CurrentIndexDefinitions.Count)
-        {
-            return false;
-        }
-        foreach (var (name, sql) in CurrentTableDefinitions)
-        {
-            if (!actual.TryGetValue(("table", name), out var actualSql) ||
-                !string.Equals(
-                    NormalizeSchemaSql(actualSql),
-                    NormalizeSchemaSql(sql),
-                    StringComparison.Ordinal))
-            {
-                return false;
-            }
-        }
-        foreach (var (name, sql) in CurrentIndexDefinitions)
-        {
-            if (!actual.TryGetValue(("index", name), out var actualSql) ||
-                !string.Equals(
-                    NormalizeSchemaSql(actualSql),
-                    NormalizeSchemaSql(sql),
-                    StringComparison.Ordinal))
-            {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    private static bool HasExactColumns(
-        SqliteConnection connection,
-        SqliteTransaction? transaction,
-        string table,
-        IReadOnlyList<(string Name, string Type, bool NotNull, int PrimaryKeyOrder)>
-            expected)
-    {
-        using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = $"PRAGMA table_info(\"{table}\");";
-        using var reader = command.ExecuteReader();
-        var offset = 0;
-        while (reader.Read())
-        {
-            if (offset >= expected.Count)
-            {
-                return false;
-            }
-
-            var column = expected[offset++];
-            if (!string.Equals(reader.GetString(1), column.Name, StringComparison.Ordinal) ||
-                !string.Equals(reader.GetString(2), column.Type, StringComparison.Ordinal) ||
-                reader.GetBoolean(3) != column.NotNull ||
-                reader.GetInt32(5) != column.PrimaryKeyOrder)
-            {
-                return false;
-            }
-        }
-
-        return offset == expected.Count;
-    }
-
-    private static bool HasExactIndexes(
-        SqliteConnection connection,
-        SqliteTransaction? transaction)
-    {
-        using var indexes = connection.CreateCommand();
-        indexes.Transaction = transaction;
-        indexes.CommandText = """
-            SELECT name, sql FROM sqlite_master
-            WHERE type = 'index' AND name LIKE 'ix_client_mailbox_%';
-            """;
-        using var reader = indexes.ExecuteReader();
-        var names = new HashSet<string>(StringComparer.Ordinal);
-        while (reader.Read())
-        {
-            var name = reader.GetString(0);
-            if (!CurrentIndexDefinitions.TryGetValue(name, out var expectedSql) ||
-                reader.IsDBNull(1) ||
-                !string.Equals(
-                    NormalizeSchemaSql(reader.GetString(1)),
-                    NormalizeSchemaSql(expectedSql),
-                    StringComparison.Ordinal))
-            {
-                return false;
-            }
-
-            names.Add(name);
-        }
-        reader.Dispose();
-
-        if (!names.SetEquals(CurrentIndexes.Keys))
-        {
-            return false;
-        }
-
-        foreach (var (name, expectedColumns) in CurrentIndexes)
-        {
-            using var columns = connection.CreateCommand();
-            columns.Transaction = transaction;
-            columns.CommandText = $"PRAGMA index_info(\"{name}\");";
-            using var columnReader = columns.ExecuteReader();
-            var offset = 0;
-            while (columnReader.Read())
-            {
-                if (offset >= expectedColumns.Length ||
-                    !string.Equals(
-                        columnReader.GetString(2),
-                        expectedColumns[offset++],
-                        StringComparison.Ordinal))
-                {
-                    return false;
-                }
-            }
-
-            if (offset != expectedColumns.Length)
-            {
-                return false;
-            }
-        }
-
-        return true;
-    }
-
-    private static bool HasExactSchemaDefinitions(
-        SqliteConnection connection,
-        SqliteTransaction? transaction,
-        string type,
-        IReadOnlyDictionary<string, string> expected)
-    {
-        using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = """
-            SELECT name, sql FROM sqlite_master
-            WHERE type = $type AND name LIKE 'client_mailbox_%';
-            """;
-        command.Parameters.AddWithValue("$type", type);
-        using var reader = command.ExecuteReader();
-        var found = new HashSet<string>(StringComparer.Ordinal);
-        while (reader.Read())
-        {
-            var name = reader.GetString(0);
-            if (!expected.TryGetValue(name, out var expectedSql) ||
-                reader.IsDBNull(1) ||
-                !string.Equals(
-                    NormalizeSchemaSql(reader.GetString(1)),
-                    NormalizeSchemaSql(expectedSql),
-                    StringComparison.Ordinal))
-            {
-                return false;
-            }
-
-            found.Add(name);
-        }
-
-        return found.SetEquals(expected.Keys);
-    }
-
-    private static string NormalizeSchemaSql(string value)
-    {
-        var normalized = new StringBuilder(value.Length);
-        foreach (var character in value)
-        {
-            if (!char.IsWhiteSpace(character) && character != ';')
-            {
-                normalized.Append(char.ToUpperInvariant(character));
-            }
-        }
-
-        return normalized
-            .ToString()
-            .Replace("IFNOTEXISTS", string.Empty, StringComparison.Ordinal);
-    }
-
-    private static InvalidDataException ResetRequired() =>
-        new("Client mailbox state uses a pre-current or incompatible schema. Wipe/reset the local mailbox database before continuing.");
-
     private async Task<TResult> ReadNormalizedAsync<TResult>(
         ClientMailboxScope scope,
         Func<SqliteConnection, SqliteTransaction?, byte[], CancellationToken,
@@ -904,7 +255,7 @@ public sealed class SqliteClientMailboxStateRepository :
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(scope);
-        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        await _databaseGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             await using var connection = await OpenAsync(cancellationToken)
@@ -915,7 +266,7 @@ public sealed class SqliteClientMailboxStateRepository :
         }
         finally
         {
-            gate.Release();
+            _databaseGate.Release();
         }
     }
 
@@ -929,7 +280,7 @@ public sealed class SqliteClientMailboxStateRepository :
         ArgumentNullException.ThrowIfNull(expected);
         ArgumentNullException.ThrowIfNull(page);
         _ = MailboxClientCodec.EncodeRetrievePage(page);
-        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        await _databaseGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             await using var connection = await OpenAsync(cancellationToken)
@@ -1047,7 +398,7 @@ public sealed class SqliteClientMailboxStateRepository :
         }
         finally
         {
-            gate.Release();
+            _databaseGate.Release();
         }
     }
 
@@ -1058,7 +409,7 @@ public sealed class SqliteClientMailboxStateRepository :
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(acknowledgements);
-        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        await _databaseGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             await using var connection = await OpenAsync(cancellationToken)
@@ -1104,7 +455,7 @@ public sealed class SqliteClientMailboxStateRepository :
         }
         finally
         {
-            gate.Release();
+            _databaseGate.Release();
         }
     }
 
@@ -1120,7 +471,7 @@ public sealed class SqliteClientMailboxStateRepository :
             throw new ArgumentOutOfRangeException(nameof(nowUnixSeconds));
         }
 
-        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        await _databaseGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             await using var connection = await OpenAsync(cancellationToken)
@@ -1149,7 +500,7 @@ public sealed class SqliteClientMailboxStateRepository :
         }
         finally
         {
-            gate.Release();
+            _databaseGate.Release();
         }
     }
 
@@ -1171,7 +522,7 @@ public sealed class SqliteClientMailboxStateRepository :
             probe, membershipCommitment.Span, epoch, coordinatorId.Span,
             coordinatorSequence, statementDigest.Span, expiresAtUnixSeconds,
             nowUnixSeconds);
-        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        await _databaseGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             await using var connection = await OpenAsync(cancellationToken)
@@ -1267,7 +618,7 @@ public sealed class SqliteClientMailboxStateRepository :
         }
         finally
         {
-            gate.Release();
+            _databaseGate.Release();
         }
     }
 
@@ -1712,21 +1063,6 @@ public sealed class SqliteClientMailboxStateRepository :
         }
     }
 
-    private static MailboxCredentialStoredState ReadCredentials(
-        SqliteConnection connection, SqliteTransaction? transaction)
-    {
-        using var command = connection.CreateCommand(); command.Transaction = transaction;
-        command.CommandText = "SELECT active_epoch, canonical_bundle FROM client_mailbox_credentials WHERE id = 1;";
-        using var reader = command.ExecuteReader();
-        if (!reader.Read() || reader.IsDBNull(0) || reader.IsDBNull(1))
-            throw new InvalidOperationException("Mailbox credentials are not installed.");
-        var active = ReadU64((byte[])reader.GetValue(0));
-        var generation = MailboxCredentialBinaryCodec.Decode((byte[])reader.GetValue(1));
-        if (active != generation.Current.Epoch && active != generation.Next.Epoch)
-            throw new InvalidDataException("Mailbox credential state is invalid.");
-        return new MailboxCredentialStoredState { Generation = generation, ActiveEpoch = active };
-    }
-
     private static byte[] U64(ulong value)
     {
         var bytes = new byte[8];
@@ -1802,7 +1138,7 @@ public sealed class SqliteClientMailboxStateRepository :
 
     private SqliteConnection Open()
     {
-        var connection = new SqliteConnection(connectionString);
+        var connection = new SqliteConnection(_connectionString);
         connection.Open();
         Configure(connection);
         return connection;
@@ -1811,7 +1147,7 @@ public sealed class SqliteClientMailboxStateRepository :
     private async Task<SqliteConnection> OpenAsync(
         CancellationToken cancellationToken)
     {
-        var connection = new SqliteConnection(connectionString);
+        var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
@@ -1825,14 +1161,6 @@ public sealed class SqliteClientMailboxStateRepository :
 
     private static void Configure(SqliteConnection connection)
     {
-        using var cipher = connection.CreateCommand();
-        cipher.CommandText = "PRAGMA cipher_version;";
-        if (string.IsNullOrWhiteSpace(cipher.ExecuteScalar()?.ToString()))
-        {
-            throw new InvalidOperationException(
-                "SQLCipher support is unavailable for client mailbox state.");
-        }
-
         using var command = connection.CreateCommand();
         command.CommandText = """
             PRAGMA busy_timeout=5000;

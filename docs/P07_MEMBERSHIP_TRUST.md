@@ -118,11 +118,11 @@ Self-host import accepts a bounded canonical raw signature envelope, not trusted
 P04 model objects, and is restricted to the independent
 `install:self-hosted:` profile namespace.
 
-Membership trust tables are part of the single physical v10 local-state
+Membership trust tables are part of the single physical v11 local-state
 baseline. They are created only with a wholly fresh database and are never
 added, altered, or backfilled on open. Any older or structurally incompatible
 database requires an explicit local reset. Account sign-out intentionally
-preserves trust profiles inside an already attested v10 database. Disabling P07
+preserves trust profiles inside an already attested v11 database. Disabling P07
 leaves those baseline tables dormant; it does not delete them or enable a
 rollback path.
 

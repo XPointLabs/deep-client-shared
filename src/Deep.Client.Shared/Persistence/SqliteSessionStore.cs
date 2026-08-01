@@ -19,7 +19,7 @@ public sealed partial class SqliteSessionStore :
     IMembershipTrustRepository,
     IDisposable
 {
-    private const int PhysicalSchemaVersion = 10;
+    private const int PhysicalSchemaVersion = 11;
     private const int DeepApplicationId = 0x44454550;
     private const int MaximumSchemaDefinitionLength = 16 * 1024;
     private const int ReplayPruneBatchSize = 256;
@@ -2447,7 +2447,15 @@ public sealed partial class SqliteSessionStore :
             ValidateTransportOutboxSchema(connection, transaction);
             foreach (var table in new[]
                      {
-                         "transport_outbox_attempts", "transport_outbox_items", "group_state_outbox", "inbox_items", "inbox_cursors", "incoming_message_notifications", "messages", "groups", "conversations", "contacts", "replay_claims", "settings"
+                         "mailbox_prepared_batch_targets", "mailbox_prepared_batches",
+                         "mailbox_replay_counters", "mailbox_credential_grants",
+                         "mailbox_credential_epochs", "mailbox_credential_scopes",
+                         "client_mailbox_coordinator_journal",
+                         "client_mailbox_expired_quarantine", "client_mailbox_inbox",
+                         "client_mailbox_traversal", "transport_outbox_attempts",
+                         "transport_outbox_items", "group_state_outbox", "inbox_items",
+                         "inbox_cursors", "incoming_message_notifications", "messages",
+                         "groups", "conversations", "contacts", "replay_claims", "settings"
                      })
             {
                 await using var command = connection.CreateCommand();
@@ -2732,6 +2740,123 @@ public sealed partial class SqliteSessionStore :
                     digest BLOB NOT NULL
                 );
 
+                CREATE TABLE client_mailbox_traversal (
+                    scope BLOB PRIMARY KEY NOT NULL CHECK(length(scope) = 32),
+                    after_cursor BLOB NOT NULL CHECK(length(after_cursor) = 8),
+                    continuation_token BLOB NOT NULL
+                );
+
+                CREATE TABLE client_mailbox_inbox (
+                    scope BLOB NOT NULL CHECK(length(scope) = 32),
+                    cursor BLOB NOT NULL CHECK(length(cursor) = 8),
+                    digest BLOB NOT NULL CHECK(length(digest) = 32),
+                    expires_at BLOB NOT NULL CHECK(length(expires_at) = 8),
+                    canonical_envelope BLOB NOT NULL,
+                    acknowledged INTEGER NOT NULL CHECK(acknowledged IN (0, 1)),
+                    PRIMARY KEY(scope, cursor),
+                    UNIQUE(scope, digest)
+                );
+
+                CREATE TABLE client_mailbox_expired_quarantine (
+                    scope BLOB NOT NULL CHECK(length(scope) = 32),
+                    cursor BLOB NOT NULL CHECK(length(cursor) = 8),
+                    digest BLOB NOT NULL CHECK(length(digest) = 32),
+                    expires_at BLOB NOT NULL CHECK(length(expires_at) = 8),
+                    canonical_envelope BLOB NOT NULL,
+                    quarantined_at INTEGER NOT NULL,
+                    reason TEXT NOT NULL,
+                    PRIMARY KEY(scope, cursor, digest)
+                );
+
+                CREATE TABLE client_mailbox_coordinator_journal (
+                    installation_scope BLOB NOT NULL CHECK(length(installation_scope) = 32),
+                    statement_key BLOB NOT NULL CHECK(length(statement_key) = 32),
+                    statement_digest BLOB NOT NULL CHECK(length(statement_digest) = 32),
+                    expires_at BLOB NOT NULL CHECK(length(expires_at) = 8),
+                    PRIMARY KEY(installation_scope, statement_key)
+                );
+
+                CREATE TABLE mailbox_credential_scopes (
+                    scope_id BLOB NOT NULL PRIMARY KEY CHECK(length(scope_id) = 32),
+                    account_scope BLOB NOT NULL CHECK(length(account_scope) = 32),
+                    scope_kind INTEGER NOT NULL CHECK(scope_kind IN (1, 2, 3)),
+                    subject_id BLOB NOT NULL CHECK(length(subject_id) = 32),
+                    issuer_context BLOB NOT NULL CHECK(length(issuer_context) = 32),
+                    network_id BLOB NOT NULL CHECK(length(network_id) = 16),
+                    authority_policy_digest BLOB NOT NULL
+                        CHECK(length(authority_policy_digest) = 32),
+                    holder_key BLOB NOT NULL CHECK(length(holder_key) = 32),
+                    generation BLOB NOT NULL CHECK(length(generation) = 32),
+                    active_epoch BLOB NOT NULL CHECK(length(active_epoch) = 8),
+                    group_membership_commitment BLOB NULL
+                        CHECK(group_membership_commitment IS NULL OR length(group_membership_commitment) = 32),
+                    UNIQUE(account_scope, scope_kind, subject_id, issuer_context)
+                );
+
+                CREATE TABLE mailbox_credential_epochs (
+                    scope_id BLOB NOT NULL CHECK(length(scope_id) = 32),
+                    epoch BLOB NOT NULL CHECK(length(epoch) = 8),
+                    not_before BLOB NOT NULL CHECK(length(not_before) = 8),
+                    expires_at BLOB NOT NULL CHECK(length(expires_at) = 8),
+                    mailbox_id BLOB NOT NULL CHECK(length(mailbox_id) = 32),
+                    placement_id BLOB NOT NULL CHECK(length(placement_id) = 32),
+                    placement_commitment BLOB NOT NULL CHECK(length(placement_commitment) = 32),
+                    membership_commitment BLOB NOT NULL CHECK(length(membership_commitment) = 32),
+                    first_replica_id BLOB NOT NULL CHECK(length(first_replica_id) = 32),
+                    first_replica_key BLOB NOT NULL CHECK(length(first_replica_key) = 32),
+                    second_replica_id BLOB NOT NULL CHECK(length(second_replica_id) = 32),
+                    second_replica_key BLOB NOT NULL CHECK(length(second_replica_key) = 32),
+                    PRIMARY KEY(scope_id, epoch),
+                    FOREIGN KEY(scope_id) REFERENCES mailbox_credential_scopes(scope_id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE mailbox_credential_grants (
+                    scope_id BLOB NOT NULL CHECK(length(scope_id) = 32),
+                    epoch BLOB NOT NULL CHECK(length(epoch) = 8),
+                    role INTEGER NOT NULL CHECK(role IN (1, 2)),
+                    issuer_context BLOB NOT NULL CHECK(length(issuer_context) = 32),
+                    grant_digest BLOB NOT NULL CHECK(length(grant_digest) = 32),
+                    issuer_key BLOB NOT NULL CHECK(length(issuer_key) = 32),
+                    serial BLOB NOT NULL,
+                    canonical_grant BLOB NOT NULL,
+                    PRIMARY KEY(scope_id, epoch, role),
+                    UNIQUE(issuer_key, serial),
+                    FOREIGN KEY(scope_id, epoch)
+                        REFERENCES mailbox_credential_epochs(scope_id, epoch) ON DELETE CASCADE
+                );
+
+                CREATE TABLE mailbox_replay_counters (
+                    scope_id BLOB NOT NULL CHECK(length(scope_id) = 32),
+                    epoch BLOB NOT NULL CHECK(length(epoch) = 8),
+                    grant_digest BLOB NOT NULL CHECK(length(grant_digest) = 32),
+                    next_counter BLOB NOT NULL CHECK(length(next_counter) = 8),
+                    PRIMARY KEY(scope_id, epoch, grant_digest)
+                );
+
+                CREATE TABLE mailbox_prepared_batches (
+                    account_scope BLOB NOT NULL CHECK(length(account_scope) = 32),
+                    parent_operation_id BLOB NOT NULL CHECK(length(parent_operation_id) = 16),
+                    plan_digest BLOB NOT NULL CHECK(length(plan_digest) = 32),
+                    target_count INTEGER NOT NULL CHECK(target_count BETWEEN 1 AND 2048),
+                    created_at INTEGER NOT NULL,
+                    PRIMARY KEY(account_scope, parent_operation_id)
+                );
+
+                CREATE TABLE mailbox_prepared_batch_targets (
+                    account_scope BLOB NOT NULL CHECK(length(account_scope) = 32),
+                    parent_operation_id BLOB NOT NULL CHECK(length(parent_operation_id) = 16),
+                    target_ordinal INTEGER NOT NULL CHECK(target_ordinal BETWEEN 0 AND 2047),
+                    target_operation_id BLOB NOT NULL CHECK(length(target_operation_id) = 16),
+                    scope_id BLOB NOT NULL CHECK(length(scope_id) = 32),
+                    request_digest BLOB NOT NULL CHECK(length(request_digest) = 32),
+                    replay_counter BLOB NOT NULL CHECK(length(replay_counter) = 8),
+                    PRIMARY KEY(account_scope, parent_operation_id, target_ordinal),
+                    UNIQUE(account_scope, target_operation_id),
+                    FOREIGN KEY(account_scope, parent_operation_id)
+                        REFERENCES mailbox_prepared_batches(account_scope, parent_operation_id)
+                        ON DELETE CASCADE
+                );
+
                 CREATE TABLE transport_outbox_items (
                     account_scope BLOB NOT NULL,
                     logical_id BLOB NOT NULL,
@@ -2803,6 +2928,30 @@ public sealed partial class SqliteSessionStore :
 
                 CREATE INDEX idx_membership_trust_records_head
                     ON membership_trust_records(profile_key, domain, revision);
+
+                CREATE INDEX idx_client_mailbox_inbox_scope_expiry
+                    ON client_mailbox_inbox(scope, expires_at);
+
+                CREATE INDEX idx_client_mailbox_inbox_expiry_scope
+                    ON client_mailbox_inbox(expires_at, scope);
+
+                CREATE INDEX idx_client_mailbox_inbox_scope_ack_cursor
+                    ON client_mailbox_inbox(scope, acknowledged, cursor);
+
+                CREATE INDEX idx_client_mailbox_quarantine_age
+                    ON client_mailbox_expired_quarantine(quarantined_at, expires_at, scope);
+
+                CREATE INDEX idx_client_mailbox_journal_scope_expiry
+                    ON client_mailbox_coordinator_journal(installation_scope, expires_at);
+
+                CREATE INDEX idx_mailbox_credential_scope_lookup
+                    ON mailbox_credential_scopes(account_scope, scope_kind, subject_id, issuer_context);
+
+                CREATE INDEX idx_mailbox_credential_epoch_expiry
+                    ON mailbox_credential_epochs(scope_id, expires_at);
+
+                CREATE INDEX idx_mailbox_prepared_targets_scope
+                    ON mailbox_prepared_batch_targets(scope_id, account_scope, parent_operation_id);
 
                 CREATE INDEX idx_transport_outbox_ready
                     ON transport_outbox_items(account_scope, state, not_before, expires_at, created_at);
@@ -3138,6 +3287,103 @@ public sealed partial class SqliteSessionStore :
                 new("observed_at", "INTEGER", 1, null, 0),
                 new("digest", "BLOB", 1, null, 0)
             ],
+            ["client_mailbox_traversal"] =
+            [
+                new("scope", "BLOB", 1, null, 1),
+                new("after_cursor", "BLOB", 1, null, 0),
+                new("continuation_token", "BLOB", 1, null, 0)
+            ],
+            ["client_mailbox_inbox"] =
+            [
+                new("scope", "BLOB", 1, null, 1),
+                new("cursor", "BLOB", 1, null, 2),
+                new("digest", "BLOB", 1, null, 0),
+                new("expires_at", "BLOB", 1, null, 0),
+                new("canonical_envelope", "BLOB", 1, null, 0),
+                new("acknowledged", "INTEGER", 1, null, 0)
+            ],
+            ["client_mailbox_expired_quarantine"] =
+            [
+                new("scope", "BLOB", 1, null, 1),
+                new("cursor", "BLOB", 1, null, 2),
+                new("digest", "BLOB", 1, null, 3),
+                new("expires_at", "BLOB", 1, null, 0),
+                new("canonical_envelope", "BLOB", 1, null, 0),
+                new("quarantined_at", "INTEGER", 1, null, 0),
+                new("reason", "TEXT", 1, null, 0)
+            ],
+            ["client_mailbox_coordinator_journal"] =
+            [
+                new("installation_scope", "BLOB", 1, null, 1),
+                new("statement_key", "BLOB", 1, null, 2),
+                new("statement_digest", "BLOB", 1, null, 0),
+                new("expires_at", "BLOB", 1, null, 0)
+            ],
+            ["mailbox_credential_scopes"] =
+            [
+                new("scope_id", "BLOB", 1, null, 1),
+                new("account_scope", "BLOB", 1, null, 0),
+                new("scope_kind", "INTEGER", 1, null, 0),
+                new("subject_id", "BLOB", 1, null, 0),
+                new("issuer_context", "BLOB", 1, null, 0),
+                new("network_id", "BLOB", 1, null, 0),
+                new("authority_policy_digest", "BLOB", 1, null, 0),
+                new("holder_key", "BLOB", 1, null, 0),
+                new("generation", "BLOB", 1, null, 0),
+                new("active_epoch", "BLOB", 1, null, 0),
+                new("group_membership_commitment", "BLOB", 0, null, 0)
+            ],
+            ["mailbox_credential_epochs"] =
+            [
+                new("scope_id", "BLOB", 1, null, 1),
+                new("epoch", "BLOB", 1, null, 2),
+                new("not_before", "BLOB", 1, null, 0),
+                new("expires_at", "BLOB", 1, null, 0),
+                new("mailbox_id", "BLOB", 1, null, 0),
+                new("placement_id", "BLOB", 1, null, 0),
+                new("placement_commitment", "BLOB", 1, null, 0),
+                new("membership_commitment", "BLOB", 1, null, 0),
+                new("first_replica_id", "BLOB", 1, null, 0),
+                new("first_replica_key", "BLOB", 1, null, 0),
+                new("second_replica_id", "BLOB", 1, null, 0),
+                new("second_replica_key", "BLOB", 1, null, 0)
+            ],
+            ["mailbox_credential_grants"] =
+            [
+                new("scope_id", "BLOB", 1, null, 1),
+                new("epoch", "BLOB", 1, null, 2),
+                new("role", "INTEGER", 1, null, 3),
+                new("issuer_context", "BLOB", 1, null, 0),
+                new("grant_digest", "BLOB", 1, null, 0),
+                new("issuer_key", "BLOB", 1, null, 0),
+                new("serial", "BLOB", 1, null, 0),
+                new("canonical_grant", "BLOB", 1, null, 0)
+            ],
+            ["mailbox_replay_counters"] =
+            [
+                new("scope_id", "BLOB", 1, null, 1),
+                new("epoch", "BLOB", 1, null, 2),
+                new("grant_digest", "BLOB", 1, null, 3),
+                new("next_counter", "BLOB", 1, null, 0)
+            ],
+            ["mailbox_prepared_batches"] =
+            [
+                new("account_scope", "BLOB", 1, null, 1),
+                new("parent_operation_id", "BLOB", 1, null, 2),
+                new("plan_digest", "BLOB", 1, null, 0),
+                new("target_count", "INTEGER", 1, null, 0),
+                new("created_at", "INTEGER", 1, null, 0)
+            ],
+            ["mailbox_prepared_batch_targets"] =
+            [
+                new("account_scope", "BLOB", 1, null, 1),
+                new("parent_operation_id", "BLOB", 1, null, 2),
+                new("target_ordinal", "INTEGER", 1, null, 3),
+                new("target_operation_id", "BLOB", 1, null, 0),
+                new("scope_id", "BLOB", 1, null, 0),
+                new("request_digest", "BLOB", 1, null, 0),
+                new("replay_counter", "BLOB", 1, null, 0)
+            ],
             ["transport_outbox_items"] =
             [
                 new("account_scope", "BLOB", 1, null, 1),
@@ -3223,6 +3469,20 @@ public sealed partial class SqliteSessionStore :
             [
                 new(0, 0, "transport_outbox_items", "account_scope", "account_scope", "NO ACTION", "CASCADE", "NONE"),
                 new(0, 1, "transport_outbox_items", "logical_id", "logical_id", "NO ACTION", "CASCADE", "NONE")
+            ],
+            ["mailbox_credential_epochs"] =
+            [
+                new(0, 0, "mailbox_credential_scopes", "scope_id", "scope_id", "NO ACTION", "CASCADE", "NONE")
+            ],
+            ["mailbox_credential_grants"] =
+            [
+                new(0, 0, "mailbox_credential_epochs", "scope_id", "scope_id", "NO ACTION", "CASCADE", "NONE"),
+                new(0, 1, "mailbox_credential_epochs", "epoch", "epoch", "NO ACTION", "CASCADE", "NONE")
+            ],
+            ["mailbox_prepared_batch_targets"] =
+            [
+                new(0, 0, "mailbox_prepared_batches", "account_scope", "account_scope", "NO ACTION", "CASCADE", "NONE"),
+                new(0, 1, "mailbox_prepared_batches", "parent_operation_id", "parent_operation_id", "NO ACTION", "CASCADE", "NONE")
             ]
         };
 
@@ -3283,6 +3543,20 @@ public sealed partial class SqliteSessionStore :
             ["sqlite_autoindex_membership_trust_records_1"] = new("membership_trust_records", true, "pk", false, [Asc("profile_key"), Asc("domain"), Asc("revision")]),
             ["sqlite_autoindex_membership_trust_heads_1"] = new("membership_trust_heads", true, "pk", false, [Asc("profile_key"), Asc("domain")]),
             ["sqlite_autoindex_membership_trust_clock_1"] = new("membership_trust_clock", true, "pk", false, [Asc("profile_key")]),
+            ["sqlite_autoindex_client_mailbox_traversal_1"] = new("client_mailbox_traversal", true, "pk", false, [Asc("scope")]),
+            ["sqlite_autoindex_client_mailbox_inbox_1"] = new("client_mailbox_inbox", true, "pk", false, [Asc("scope"), Asc("cursor")]),
+            ["sqlite_autoindex_client_mailbox_inbox_2"] = new("client_mailbox_inbox", true, "u", false, [Asc("scope"), Asc("digest")]),
+            ["sqlite_autoindex_client_mailbox_expired_quarantine_1"] = new("client_mailbox_expired_quarantine", true, "pk", false, [Asc("scope"), Asc("cursor"), Asc("digest")]),
+            ["sqlite_autoindex_client_mailbox_coordinator_journal_1"] = new("client_mailbox_coordinator_journal", true, "pk", false, [Asc("installation_scope"), Asc("statement_key")]),
+            ["sqlite_autoindex_mailbox_credential_scopes_1"] = new("mailbox_credential_scopes", true, "pk", false, [Asc("scope_id")]),
+            ["sqlite_autoindex_mailbox_credential_scopes_2"] = new("mailbox_credential_scopes", true, "u", false, [Asc("account_scope"), Asc("scope_kind"), Asc("subject_id"), Asc("issuer_context")]),
+            ["sqlite_autoindex_mailbox_credential_epochs_1"] = new("mailbox_credential_epochs", true, "pk", false, [Asc("scope_id"), Asc("epoch")]),
+            ["sqlite_autoindex_mailbox_credential_grants_1"] = new("mailbox_credential_grants", true, "pk", false, [Asc("scope_id"), Asc("epoch"), Asc("role")]),
+            ["sqlite_autoindex_mailbox_credential_grants_2"] = new("mailbox_credential_grants", true, "u", false, [Asc("issuer_key"), Asc("serial")]),
+            ["sqlite_autoindex_mailbox_replay_counters_1"] = new("mailbox_replay_counters", true, "pk", false, [Asc("scope_id"), Asc("epoch"), Asc("grant_digest")]),
+            ["sqlite_autoindex_mailbox_prepared_batches_1"] = new("mailbox_prepared_batches", true, "pk", false, [Asc("account_scope"), Asc("parent_operation_id")]),
+            ["sqlite_autoindex_mailbox_prepared_batch_targets_1"] = new("mailbox_prepared_batch_targets", true, "pk", false, [Asc("account_scope"), Asc("parent_operation_id"), Asc("target_ordinal")]),
+            ["sqlite_autoindex_mailbox_prepared_batch_targets_2"] = new("mailbox_prepared_batch_targets", true, "u", false, [Asc("account_scope"), Asc("target_operation_id")]),
             ["sqlite_autoindex_transport_outbox_items_1"] = new("transport_outbox_items", true, "pk", false, [Asc("account_scope"), Asc("logical_id")]),
             ["sqlite_autoindex_transport_outbox_attempts_1"] = new("transport_outbox_attempts", true, "pk", false, [Asc("account_scope"), Asc("logical_id"), Asc("attempt_id")]),
             ["idx_messages_conversation_created"] = new("messages", false, "c", false, [Asc("conversation_id"), Asc("created_at")]),
@@ -3303,6 +3577,14 @@ public sealed partial class SqliteSessionStore :
             ["idx_inbox_items_logical_message"] = new("inbox_items", false, "c", false, [Asc("sender_session_id"), Asc("message_id"), Asc("sequence")]),
             ["idx_group_state_outbox_order"] = new("group_state_outbox", false, "c", false, [Asc("group_id"), Asc("revision"), Asc("sequence")]),
             ["idx_membership_trust_records_head"] = new("membership_trust_records", false, "c", false, [Asc("profile_key"), Asc("domain"), Asc("revision")]),
+            ["idx_client_mailbox_inbox_scope_expiry"] = new("client_mailbox_inbox", false, "c", false, [Asc("scope"), Asc("expires_at")]),
+            ["idx_client_mailbox_inbox_expiry_scope"] = new("client_mailbox_inbox", false, "c", false, [Asc("expires_at"), Asc("scope")]),
+            ["idx_client_mailbox_inbox_scope_ack_cursor"] = new("client_mailbox_inbox", false, "c", false, [Asc("scope"), Asc("acknowledged"), Asc("cursor")]),
+            ["idx_client_mailbox_quarantine_age"] = new("client_mailbox_expired_quarantine", false, "c", false, [Asc("quarantined_at"), Asc("expires_at"), Asc("scope")]),
+            ["idx_client_mailbox_journal_scope_expiry"] = new("client_mailbox_coordinator_journal", false, "c", false, [Asc("installation_scope"), Asc("expires_at")]),
+            ["idx_mailbox_credential_scope_lookup"] = new("mailbox_credential_scopes", false, "c", false, [Asc("account_scope"), Asc("scope_kind"), Asc("subject_id"), Asc("issuer_context")]),
+            ["idx_mailbox_credential_epoch_expiry"] = new("mailbox_credential_epochs", false, "c", false, [Asc("scope_id"), Asc("expires_at")]),
+            ["idx_mailbox_prepared_targets_scope"] = new("mailbox_prepared_batch_targets", false, "c", false, [Asc("scope_id"), Asc("account_scope"), Asc("parent_operation_id")]),
             ["idx_transport_outbox_ready"] = new("transport_outbox_items", false, "c", false, [Asc("account_scope"), Asc("state"), Asc("not_before"), Asc("expires_at"), Asc("created_at")]),
             ["idx_transport_outbox_expiry"] = new("transport_outbox_items", false, "c", false, [Asc("account_scope"), Asc("expires_at"), Asc("state")])
         };
@@ -4950,6 +5232,7 @@ public sealed partial class SqliteSessionStore :
         }
         using var poolIdentity = new SqliteConnection(_connectionString);
         SqliteConnection.ClearPool(poolIdentity);
+        _databaseGate.Dispose();
     }
 
     private static LocalStateResetRequiredException ResetRequired(

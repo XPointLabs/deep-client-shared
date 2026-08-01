@@ -96,7 +96,8 @@ public sealed class E2eeClientTransportTests
             raw,
             _ => Task.FromResult<string?>(AlicePhrase),
             new FrozenClock(Now),
-            new InMemorySessionStore());
+            new InMemorySessionStore(),
+            new TestCloudMailboxDeliveryPolicy());
         var envelope = CreateDirectWithExactDpe1Length(
             aliceIdentity,
             bobIdentity.SessionId,
@@ -124,7 +125,8 @@ public sealed class E2eeClientTransportTests
             raw,
             _ => Task.FromResult<string?>(AlicePhrase),
             new FrozenClock(Now),
-            new InMemorySessionStore());
+            new InMemorySessionStore(),
+            new TestCloudMailboxDeliveryPolicy());
         var envelope = CreateDirectWithExactDpe1Length(
             aliceIdentity,
             bobIdentity.SessionId,
@@ -160,7 +162,7 @@ public sealed class E2eeClientTransportTests
     }
 
     [Fact]
-    public async Task MailboxAuthenticatedGroupSend_PreparesEveryTargetBeforeAnyDispatch()
+    public async Task FreeP2pGroupSend_DoesNotEnterOfficialCloudPreparation()
     {
         using var aliceIdentity = new SessionIdentityProvider(AlicePhrase);
         using var bobIdentity = new SessionIdentityProvider(BobPhrase);
@@ -173,9 +175,10 @@ public sealed class E2eeClientTransportTests
             raw,
             _ => Task.FromResult<string?>(AlicePhrase),
             new FrozenClock(Now),
-            new InMemorySessionStore());
+            new InMemorySessionStore(),
+            new DirectP2pMailboxDeliveryPolicy());
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() => transport.SendGroupMessageAsync(
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => transport.SendGroupMessageAsync(
             new OutboundGroupMessageEnvelope(
                 new MessageId("mailbox-preflight-all-targets"),
                 GroupId,
@@ -186,11 +189,11 @@ public sealed class E2eeClientTransportTests
                 null,
                 NotifyRecipients: [bobIdentity.SessionId, charlieIdentity.SessionId])));
 
-        Assert.Equal([bobIdentity.SessionId, charlieIdentity.SessionId], raw.PrepareRecipients);
+        Assert.Contains("Direct P2P delivery requires", exception.Message,
+            StringComparison.Ordinal);
+        Assert.Empty(raw.PrepareRecipients);
         Assert.Equal(0, raw.SendCount);
-        Assert.Throws<ObjectDisposedException>(() => raw.LastSigner!.SignMailboxPresentation(
-            MailboxAuthenticatedOperation.Store,
-            MailboxPresentationSigningBytes(MailboxAuthenticatedOperation.Store)));
+        Assert.Null(raw.LastSigner);
     }
 
     [Fact]
@@ -203,7 +206,8 @@ public sealed class E2eeClientTransportTests
             cancelledRaw,
             _ => Task.FromResult<string?>(AlicePhrase),
             new FrozenClock(Now),
-            new InMemorySessionStore());
+            new InMemorySessionStore(),
+            new TestCloudMailboxDeliveryPolicy());
         using var cancellation = new CancellationTokenSource();
         var cancelledSend = cancelledTransport.SendAsync(
             CreateDirect(aliceIdentity.SessionId, bobIdentity.SessionId, "cancelled-mailbox", "body"),
@@ -222,16 +226,17 @@ public sealed class E2eeClientTransportTests
             blockingRaw,
             _ => Task.FromResult<string?>(AlicePhrase),
             new FrozenClock(Now),
-            new InMemorySessionStore());
+            new InMemorySessionStore(),
+            new TestCloudMailboxDeliveryPolicy());
         var send = transport.SendAsync(
             CreateDirect(aliceIdentity.SessionId, bobIdentity.SessionId, "dispose-mailbox", "body"));
         await blockingRaw.WaitForAuthenticatedSendAsync().WaitAsync(ConcurrencyTimeout);
         var leasedSigner = Assert.IsAssignableFrom<IMailboxOperationSigner>(blockingRaw.LastSigner);
 
-        transport.Dispose();
-        Assert.NotEmpty(leasedSigner.SignMailboxPresentation(
+        Assert.Throws<ObjectDisposedException>(() => leasedSigner.SignMailboxPresentation(
             MailboxAuthenticatedOperation.Store,
             MailboxPresentationSigningBytes(MailboxAuthenticatedOperation.Store)));
+        transport.Dispose();
         blockingRaw.ReleaseAuthenticatedSend();
         await send.WaitAsync(ConcurrencyTimeout);
         Assert.Throws<ObjectDisposedException>(() => leasedSigner.SignMailboxPresentation(
@@ -695,7 +700,8 @@ public sealed class E2eeClientTransportTests
             raw,
             _ => Task.FromResult<string?>(AlicePhrase),
             new FrozenClock(Now),
-            new InMemorySessionStore());
+            new InMemorySessionStore(),
+            new TestCloudMailboxDeliveryPolicy());
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => transport.ReceiveAsync(aliceIdentity.SessionId));
         Assert.Equal(0, raw.ReceiveCalls);
@@ -708,7 +714,8 @@ public sealed class E2eeClientTransportTests
             raw,
             _ => Task.FromResult<string?>(phraseProvider()),
             new FrozenClock(Now),
-            new InMemorySessionStore());
+            new InMemorySessionStore(),
+            new DirectP2pMailboxDeliveryPolicy());
 
     private static OutboundMessageEnvelope CreateDirect(
         SessionId sender,
@@ -908,7 +915,9 @@ public sealed class E2eeClientTransportTests
             .Replace('/', '_');
     }
 
-    private sealed class AuthenticatedRawTransport : ISessionMessageTransport, IAuthenticatedInboxTransport
+    private sealed class AuthenticatedRawTransport :
+        IDirectP2pSessionMessageTransport,
+        IAuthenticatedInboxTransport
     {
         private readonly bool blockAuthenticatedReceives;
         private readonly object gate = new();
@@ -1106,6 +1115,7 @@ public sealed class E2eeClientTransportTests
         private readonly object gate = new();
         private readonly List<OutboundMessageEnvelope> sent = [];
         private readonly List<SessionId> prepareRecipients = [];
+        private int batchPrepareCount;
         private readonly TaskCompletionSource<bool> authenticatedSendStarted =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource<bool> authenticatedSendRelease =
@@ -1128,6 +1138,8 @@ public sealed class E2eeClientTransportTests
                 }
             }
         }
+
+        public int BatchPrepareCount => Volatile.Read(ref batchPrepareCount);
 
         public int SendCount
         {
@@ -1155,13 +1167,15 @@ public sealed class E2eeClientTransportTests
 
         public bool LastSignerSignatureVerified { get; private set; }
 
-        public Task<IPreparedMailboxAuthenticatedSend> PrepareMailboxAuthenticatedSendAsync(
+        public Task<IReadOnlyList<IPreparedMailboxAuthenticatedSend>>
+            PrepareScopedMailboxBatchAsync(
             IMailboxOperationSigner signer,
-            OutboundMessageEnvelope envelope,
+            IReadOnlyList<MailboxAuthenticatedSendTarget> targets,
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            Assert.Equal(envelope.Sender, signer.SessionId);
+            ArgumentNullException.ThrowIfNull(targets);
+            Interlocked.Increment(ref batchPrepareCount);
             LastSigner = signer;
             var signingBytes = MailboxPresentationSigningBytes(MailboxAuthenticatedOperation.Store);
             var signature = signer.SignMailboxPresentation(
@@ -1171,17 +1185,19 @@ public sealed class E2eeClientTransportTests
                 signature,
                 signingBytes,
                 signer.GetEd25519PublicKey());
-            lock (gate)
+            var prepared = new List<IPreparedMailboxAuthenticatedSend>(targets.Count);
+            foreach (var target in targets)
             {
-                prepareRecipients.Add(envelope.Recipient);
+                Assert.Equal(target.Envelope.Sender, signer.SessionId);
+                lock (gate)
+                {
+                    prepareRecipients.Add(target.Envelope.Recipient);
+                }
+                if (target.Envelope.Recipient == RejectedPreparationRecipient)
+                    throw new InvalidOperationException("test last-target batch preparation rejection");
+                prepared.Add(new PreparedMailboxSend(target.Envelope));
             }
-
-            if (envelope.Recipient == RejectedPreparationRecipient)
-            {
-                throw new InvalidOperationException("test second-target preparation rejection");
-            }
-
-            return Task.FromResult<IPreparedMailboxAuthenticatedSend>(new PreparedMailboxSend(envelope));
+            return Task.FromResult<IReadOnlyList<IPreparedMailboxAuthenticatedSend>>(prepared);
         }
 
         public async Task SendPreparedMailboxAuthenticatedAsync(
@@ -1225,6 +1241,65 @@ public sealed class E2eeClientTransportTests
 
         private sealed record PreparedMailboxSend(OutboundMessageEnvelope Envelope) :
             IPreparedMailboxAuthenticatedSend;
+    }
+
+    private sealed class TestCloudMailboxDeliveryPolicy : IMailboxDeliveryPolicy
+    {
+        private static readonly OutboxAccountScope Account =
+            OutboxAccountScope.FromBytes(Enumerable.Repeat((byte)0x61, 32).ToArray());
+        private static readonly VerifiedOfficialMailboxAuthority Authority = new(
+            Enumerable.Repeat((byte)0x62, 16).ToArray(),
+            1,
+            [
+                Issuer(MailboxCapabilityDomain.Deposit),
+                Issuer(MailboxCapabilityDomain.Retrieve)
+            ],
+            true,
+            static () => true,
+            new NoRevocations(),
+            new FrozenTimeProvider(Now));
+
+        private static MailboxCapabilityIssuerAuthority Issuer(
+            MailboxCapabilityDomain domain) => new()
+        {
+            PublicKey = Enumerable.Repeat((byte)0x63, 32).ToArray(),
+            Domain = domain,
+            AllowedLifecycle = MailboxCapabilityLifecycle.Active,
+            MinimumGeneration = 1,
+            MaximumGeneration = ulong.MaxValue,
+            ValidFromUnixSeconds = 1,
+            ValidUntilUnixSeconds = ulong.MaxValue
+        };
+
+        public Task<MailboxDeliveryDecision> DecideAsync(
+            MailboxDeliveryRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var envelope = request.Envelope;
+            var subject = System.Security.Cryptography.SHA256.HashData(
+                Encoding.UTF8.GetBytes(envelope.Recipient.Value));
+            return Task.FromResult(new MailboxDeliveryDecision(
+                MailboxDeliveryMode.OfficialCloud,
+                Authority,
+                new MailboxCredentialSelector(
+                    Account,
+                    envelope.Recipient == envelope.Sender
+                        ? MailboxCredentialScopeKind.Self
+                        : MailboxCredentialScopeKind.Peer,
+                    subject,
+                    Enumerable.Repeat((byte)0x64, 32).ToArray())));
+        }
+    }
+
+    private sealed class NoRevocations : IMailboxCapabilityRevocationSource
+    {
+        public bool IsRevoked(MailboxCapabilityRevocationQuery query) => false;
+    }
+
+    private sealed class FrozenTimeProvider(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now;
     }
 
     private sealed class UnauthenticatedRawTransport : ISessionMessageTransport

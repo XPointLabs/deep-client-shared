@@ -1,0 +1,607 @@
+using System.Buffers.Binary;
+using System.Security.Cryptography;
+using Deep.Client.Shared.Domain;
+using Deep.Client.Shared.Persistence;
+using Deep.Client.Shared.Services;
+using Deep.Protocol.DeepExtension.MailboxCapabilities;
+using Microsoft.Data.Sqlite;
+using Sodium;
+
+namespace Deep.Client.Shared.Tests.Persistence;
+
+public sealed class ScopedMailboxRepositoryConformanceTests
+{
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Multi_scope_import_exact_retry_and_conflict_are_aligned(
+        bool inMemory)
+    {
+        using var fixture = new Fixture(inMemory);
+        await fixture.Repository.InstallScopedCredentialBatchAsync(
+            [fixture.Self, fixture.Peer], fixture.Authority);
+        await fixture.Repository.InstallScopedCredentialBatchAsync(
+            [fixture.Self, fixture.Peer], fixture.Authority);
+        Assert.Equal(2, fixture.CredentialCount());
+
+        var changed = fixture.Peer with
+        {
+            Generation = Bytes(32, 0xe1)
+        };
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            fixture.Repository.InstallScopedCredentialBatchAsync(
+                [fixture.Self, changed], fixture.Authority));
+        Assert.Equal(2, fixture.CredentialCount());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Prepare_fault_rolls_back_batch_counter_and_outbox(
+        bool inMemory)
+    {
+        using var fixture = new Fixture(inMemory);
+        await fixture.Repository.InstallScopedCredentialAsync(
+            fixture.Self, fixture.Authority);
+        fixture.ThrowBeforePreparePublish = true;
+
+        await Assert.ThrowsAsync<InjectedFaultException>(() =>
+            fixture.PrepareAsync(fixture.SelfTarget(0x91)));
+
+        Assert.Equal(0, fixture.BatchCount());
+        Assert.Equal(0, fixture.OutboxCount());
+        Assert.Empty(fixture.NextCounters());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Prepare_after_publish_fault_reports_unknown_but_keeps_atomic_state(
+        bool inMemory)
+    {
+        using var fixture = new Fixture(inMemory);
+        await fixture.Repository.InstallScopedCredentialAsync(
+            fixture.Self, fixture.Authority);
+        fixture.ThrowAfterPreparePublish = true;
+
+        await Assert.ThrowsAsync<TransportOutboxCommitOutcomeUnknownException>(
+            () => fixture.PrepareAsync(fixture.SelfTarget(0x92)));
+
+        Assert.Equal(1, fixture.BatchCount());
+        Assert.Equal(1, fixture.OutboxCount());
+        Assert.Equal([2UL], fixture.NextCounters());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Cancelled_prepare_publishes_no_batch_counter_or_outbox(
+        bool inMemory)
+    {
+        using var fixture = new Fixture(inMemory);
+        await fixture.Repository.InstallScopedCredentialAsync(
+            fixture.Self, fixture.Authority);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            fixture.PrepareAsync(
+                fixture.SelfTarget(0x93), cancellation.Token));
+
+        Assert.Equal(0, fixture.BatchCount());
+        Assert.Equal(0, fixture.OutboxCount());
+        Assert.Empty(fixture.NextCounters());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Concurrent_prepare_allocates_unique_counters_without_reuse(
+        bool inMemory)
+    {
+        using var fixture = new Fixture(inMemory);
+        await fixture.Repository.InstallScopedCredentialAsync(
+            fixture.Self, fixture.Authority);
+        var tasks = Enumerable.Range(0, 16)
+            .Select(index => fixture.PrepareAsync(
+                fixture.SelfTarget(checked((byte)(0xa0 + index)))))
+            .ToArray();
+        var batches = await Task.WhenAll(tasks);
+        var counters = batches
+            .Select(batch => MailboxAuthenticatedClientRequestCodec.Decode(
+                batch.Frames.Single().GetCanonicalMau2Copy())
+                .Presentation.ReplayCounter)
+            .Order()
+            .ToArray();
+
+        Assert.Equal(
+            Enumerable.Range(1, 16).Select(static value => (ulong)value),
+            counters);
+        Assert.Equal(16, fixture.BatchCount());
+        Assert.Equal(16, fixture.OutboxCount());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Counter_exhaustion_is_atomic_and_epoch_switch_restarts_namespace(
+        bool inMemory)
+    {
+        using var fixture = new Fixture(inMemory);
+        await fixture.Repository.InstallScopedCredentialAsync(
+            fixture.Self, fixture.Authority);
+        _ = await fixture.PrepareAsync(fixture.SelfTarget(0xb1));
+        fixture.SetAllNextCounters(ulong.MaxValue);
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            fixture.PrepareAsync(fixture.SelfTarget(0xb2)));
+        Assert.Equal(1, fixture.BatchCount());
+        Assert.Equal(1, fixture.OutboxCount());
+
+        fixture.Clock.Set(1150);
+        await fixture.Repository.SwitchScopedCredentialEpochAsync(
+            fixture.SelfSelector, 8, fixture.Authority);
+        var route = await fixture.Repository.ReadScopedMailboxRouteAsync(
+            fixture.SelfSelector, fixture.Authority);
+        Assert.Equal(8UL, route.Epoch);
+        var next = await fixture.PrepareAsync(
+            fixture.SelfTarget(0xb3, nextEpoch: true));
+        Assert.Equal(
+            1UL,
+            MailboxAuthenticatedClientRequestCodec.Decode(
+                next.Frames.Single().GetCanonicalMau2Copy())
+                .Presentation.ReplayCounter);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Exact_resume_and_corrupt_target_rejection_are_aligned(
+        bool inMemory)
+    {
+        using var fixture = new Fixture(inMemory);
+        await fixture.Repository.InstallScopedCredentialAsync(
+            fixture.Self, fixture.Authority);
+        var target = fixture.SelfTarget(0xc1);
+        var first = await fixture.PrepareAsync(target);
+        var resumed = await fixture.PrepareAsync(target);
+        Assert.Equal(
+            first.Frames.Single().GetCanonicalMau2Copy(),
+            resumed.Frames.Single().GetCanonicalMau2Copy());
+
+        fixture.DeletePreparedTargets(Bytes(16, 0xc1));
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
+            fixture.PrepareAsync(target));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Live_revocation_and_expiry_reject_dispatch_for_all_roles(
+        bool inMemory)
+    {
+        using var fixture = new Fixture(inMemory);
+        await fixture.Repository.InstallScopedCredentialAsync(
+            fixture.Self, fixture.Authority);
+        fixture.Revocations.Revoked = true;
+        foreach (var operation in new[]
+                 {
+                     MailboxAuthenticatedOperation.Store,
+                     MailboxAuthenticatedOperation.Retrieve,
+                     MailboxAuthenticatedOperation.Ack
+                 })
+        {
+            await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                fixture.Repository.RevalidateScopedMailboxDispatchAsync(
+                    fixture.SelfSelector,
+                    operation,
+                    fixture.Authority));
+        }
+
+        fixture.Revocations.Revoked = false;
+        fixture.Clock.Set(1500);
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            fixture.Repository.RevalidateScopedMailboxDispatchAsync(
+                fixture.SelfSelector,
+                MailboxAuthenticatedOperation.Store,
+                fixture.Authority));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Epoch_switch_requires_exact_persisted_authority_and_keeps_exact_import_retry(
+        bool inMemory)
+    {
+        using var fixture = new Fixture(inMemory);
+        await fixture.Repository.InstallScopedCredentialAsync(
+            fixture.Self, fixture.Authority);
+        fixture.Clock.Set(1150);
+        var wrongPolicy = fixture.AuthorityWithMinimumGeneration(2);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            fixture.Repository.SwitchScopedCredentialEpochAsync(
+                fixture.SelfSelector, 8, wrongPolicy));
+        Assert.Equal(
+            7UL,
+            (await fixture.Repository.ReadScopedMailboxRouteAsync(
+                fixture.SelfSelector, fixture.Authority)).Epoch);
+
+        await fixture.Repository.SwitchScopedCredentialEpochAsync(
+            fixture.SelfSelector, 8, fixture.Authority);
+        await fixture.Repository.InstallScopedCredentialAsync(
+            fixture.Self, fixture.Authority);
+        Assert.Equal(
+            8UL,
+            (await fixture.Repository.ReadScopedMailboxRouteAsync(
+                fixture.SelfSelector, fixture.Authority)).Epoch);
+    }
+
+    private sealed class Fixture : IDisposable
+    {
+        private readonly byte[] issuerSeed = Bytes(32, 0x01);
+        private readonly byte[] holderSeed = Bytes(32, 0x21);
+        private readonly SodiumMailboxCapabilityCrypto crypto = new();
+        private readonly InMemoryScopedMailboxCredentialRepository? memory;
+        private readonly SqliteSessionStore? sqlite;
+
+        public Fixture(bool inMemory)
+        {
+            Path = System.IO.Path.Combine(
+                System.IO.Path.GetTempPath(),
+                $"deep-scoped-conformance-{Guid.NewGuid():N}.db");
+            Clock = new MutableTimeProvider(1050);
+            Revocations = new MutableRevocations();
+            Account = OutboxAccountScope.FromBytes(Bytes(32, 0x11));
+            var issuerContext = Bytes(32, 0x12);
+            SelfSelector = new MailboxCredentialSelector(
+                Account,
+                MailboxCredentialScopeKind.Self,
+                Bytes(32, 0x13),
+                issuerContext);
+            PeerSelector = new MailboxCredentialSelector(
+                Account,
+                MailboxCredentialScopeKind.Peer,
+                Bytes(32, 0x14),
+                issuerContext);
+            IssuerPublicKey = crypto.GetPublicKey(issuerSeed);
+            Authority = new VerifiedOfficialMailboxAuthority(
+                Bytes(16, 0x15),
+                1,
+                [
+                    Issuer(IssuerPublicKey, MailboxCapabilityDomain.Deposit),
+                    Issuer(IssuerPublicKey, MailboxCapabilityDomain.Retrieve)
+                ],
+                true,
+                static () => true,
+                Revocations,
+                Clock);
+            Signer = new OperationSigner(
+                holderSeed,
+                crypto.GetPublicKey(holderSeed));
+            Self = Generation(SelfSelector, 0x31, peer: false);
+            Peer = Generation(PeerSelector, 0x41, peer: true);
+            if (inMemory)
+            {
+                memory = new InMemoryScopedMailboxCredentialRepository(point =>
+                {
+                    if (ThrowBeforePreparePublish &&
+                        point == InMemoryScopedMailboxFaultPoint
+                            .PrepareBeforePublish)
+                    {
+                        throw new InjectedFaultException();
+                    }
+                    if (ThrowAfterPreparePublish &&
+                        point == InMemoryScopedMailboxFaultPoint
+                            .PrepareAfterPublish)
+                    {
+                        throw new InjectedFaultException();
+                    }
+                });
+                Repository = memory;
+            }
+            else
+            {
+                sqlite = new SqliteSessionStore(
+                    new SqliteSessionStoreOptions(Path),
+                    point =>
+                    {
+                        if (ThrowBeforePreparePublish &&
+                            point == ClientMailboxCommitFaultPoint.BeforeCommit)
+                        {
+                            throw new InjectedFaultException();
+                        }
+                        if (ThrowAfterPreparePublish &&
+                            point == ClientMailboxCommitFaultPoint.AfterCommit)
+                        {
+                            throw new InjectedFaultException();
+                        }
+                    });
+                Repository = sqlite;
+            }
+        }
+
+        public string Path { get; }
+        public IScopedMailboxCredentialRepository Repository { get; }
+        public OutboxAccountScope Account { get; }
+        public MailboxCredentialSelector SelfSelector { get; }
+        public MailboxCredentialSelector PeerSelector { get; }
+        public VerifiedOfficialMailboxAuthority Authority { get; }
+        public byte[] IssuerPublicKey { get; }
+        public MutableTimeProvider Clock { get; }
+        public MutableRevocations Revocations { get; }
+        public OperationSigner Signer { get; }
+        public ScopedMailboxCredentialGeneration Self { get; }
+        public ScopedMailboxCredentialGeneration Peer { get; }
+        public bool ThrowBeforePreparePublish { get; set; }
+        public bool ThrowAfterPreparePublish { get; set; }
+
+        public VerifiedOfficialMailboxAuthority AuthorityWithMinimumGeneration(
+            ulong minimumGeneration) => new(
+            Authority.NetworkId,
+            minimumGeneration,
+            Authority.TrustedIssuers,
+            true,
+            static () => true,
+            Revocations,
+            Clock);
+
+        public ScopedMailboxBatchTarget SelfTarget(
+            byte operation,
+            bool nextEpoch = false)
+        {
+            var epoch = nextEpoch ? Self.Next : Self.Current;
+            return new ScopedMailboxBatchTarget(
+                SelfSelector,
+                MailboxAuthenticatedRequestTranscript.ForRetrieve(
+                    epoch.Epoch,
+                    Bytes(16, operation),
+                    new BlindedMailboxId(Self.MailboxId.Span),
+                    new BlindedPlacementId(epoch.PlacementId.Span),
+                    0,
+                    25,
+                    []));
+        }
+
+        public Task<ScopedMailboxPreparedBatch> PrepareAsync(
+            ScopedMailboxBatchTarget target,
+            CancellationToken cancellationToken = default) =>
+            Repository.PrepareScopedMailboxBatchAsync(
+                new ScopedMailboxPrepareBatchRequest(
+                    Account,
+                    target.Binding.OperationId,
+                    [target],
+                    DateTimeOffset.FromUnixTimeSeconds(Clock.Seconds)),
+                Signer,
+                Authority,
+                cancellationToken);
+
+        public int CredentialCount() => memory is not null
+            ? memory.CredentialCountForTests()
+            : Count("mailbox_credential_scopes");
+        public int BatchCount() => memory is not null
+            ? memory.PreparedBatchCountForTests()
+            : Count("mailbox_prepared_batches");
+        public int OutboxCount() => memory is not null
+            ? memory.EquivalentOutboxCountForTests()
+            : Count("transport_outbox_items");
+        public IReadOnlyList<ulong> NextCounters() => memory is not null
+            ? memory.NextCountersForTests()
+            : ReadSqliteCounters();
+
+        public void SetAllNextCounters(ulong value)
+        {
+            if (memory is not null)
+            {
+                memory.SetAllNextCountersForTests(value);
+                return;
+            }
+            using var connection = Open();
+            using var command = connection.CreateCommand();
+            command.CommandText =
+                "UPDATE mailbox_replay_counters SET next_counter=$value;";
+            command.Parameters.Add("$value", SqliteType.Blob).Value = U64(value);
+            command.ExecuteNonQuery();
+        }
+
+        public void DeletePreparedTargets(byte[] parent)
+        {
+            if (memory is not null)
+            {
+                memory.DeletePreparedTargetsForTests(Account, parent);
+                return;
+            }
+            using var connection = Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = """
+                DELETE FROM mailbox_prepared_batch_targets
+                WHERE account_scope=$account AND parent_operation_id=$parent;
+                """;
+            command.Parameters.Add("$account", SqliteType.Blob).Value =
+                Account.ToArray();
+            command.Parameters.Add("$parent", SqliteType.Blob).Value = parent;
+            command.ExecuteNonQuery();
+        }
+
+        private ScopedMailboxCredentialGeneration Generation(
+            MailboxCredentialSelector selector,
+            byte marker,
+            bool peer)
+        {
+            var currentPlacement = new BlindedPlacementId(Bytes(32, marker));
+            var nextPlacement = new BlindedPlacementId(
+                Bytes(32, checked((byte)(marker + 1))));
+            var current = new MailboxCredentialEpoch(
+                7,
+                900,
+                1200,
+                Bytes(32, checked((byte)(marker + 2))),
+                currentPlacement.Bytes.Span,
+                MailboxPlacementCommitment.Compute(currentPlacement));
+            var next = new MailboxCredentialEpoch(
+                8,
+                1100,
+                1400,
+                Bytes(32, checked((byte)(marker + 3))),
+                nextPlacement.Bytes.Span,
+                MailboxPlacementCommitment.Compute(nextPlacement));
+            var serial = checked((byte)(marker + 0x40));
+            return new ScopedMailboxCredentialGeneration(
+                selector,
+                SHA256.HashData([marker, (byte)1]),
+                crypto.GetPublicKey(holderSeed),
+                SHA256.HashData([marker, (byte)2]),
+                current,
+                next,
+                peer ? null : new MailboxCredentialGrantSet(
+                    Grant(MailboxCapabilityDomain.Retrieve, serial, current),
+                    Grant(MailboxCapabilityDomain.Retrieve,
+                        checked((byte)(serial + 1)), next)),
+                new MailboxCredentialGrantSet(
+                    Grant(MailboxCapabilityDomain.Deposit,
+                        checked((byte)(serial + 2)), current),
+                    Grant(MailboxCapabilityDomain.Deposit,
+                        checked((byte)(serial + 3)), next)),
+                new MailboxCredentialReplicaPair(
+                    Bytes(32, 0xd1),
+                    Bytes(32, 0xd2),
+                    Bytes(32, 0xd3),
+                    Bytes(32, 0xd4)));
+        }
+
+        private byte[] Grant(
+            MailboxCapabilityDomain domain,
+            byte serial,
+            MailboxCredentialEpoch epoch)
+        {
+            var unsigned = new MailboxAuthenticatedGrant
+            {
+                Domain = domain,
+                Lifecycle = MailboxCapabilityLifecycle.Active,
+                NetworkId = Authority.NetworkId,
+                Epoch = epoch.Epoch,
+                Generation = epoch.Epoch,
+                Serial = Bytes(16, serial),
+                NotBeforeUnixSeconds = epoch.NotBeforeUnixSeconds,
+                ExpiresAtUnixSeconds = epoch.ExpiresAtUnixSeconds,
+                OverlapUntilUnixSeconds = 0,
+                PlacementCommitment = epoch.PlacementCommitment,
+                MembershipCommitment = epoch.MembershipCommitment,
+                IssuerPublicKey = IssuerPublicKey,
+                HolderPublicKey = crypto.GetPublicKey(holderSeed),
+                IssuerSignature = new byte[64]
+            };
+            return MailboxAuthenticatedCapabilityCodec.EncodeGrant(
+                crypto.SignGrant(unsigned, issuerSeed));
+        }
+
+        private static MailboxCapabilityIssuerAuthority Issuer(
+            ReadOnlyMemory<byte> publicKey,
+            MailboxCapabilityDomain domain) => new()
+        {
+            PublicKey = publicKey.ToArray(),
+            Domain = domain,
+            AllowedLifecycle = MailboxCapabilityLifecycle.Active,
+            MinimumGeneration = 1,
+            MaximumGeneration = ulong.MaxValue,
+            ValidFromUnixSeconds = 1,
+            ValidUntilUnixSeconds = ulong.MaxValue
+        };
+
+        private int Count(string table)
+        {
+            using var connection = Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = $"SELECT count(*) FROM {table};";
+            return Convert.ToInt32(command.ExecuteScalar());
+        }
+
+        private IReadOnlyList<ulong> ReadSqliteCounters()
+        {
+            using var connection = Open();
+            using var command = connection.CreateCommand();
+            command.CommandText =
+                "SELECT next_counter FROM mailbox_replay_counters ORDER BY scope_id,epoch,grant_digest;";
+            using var reader = command.ExecuteReader();
+            var values = new List<ulong>();
+            while (reader.Read())
+            {
+                values.Add(BinaryPrimitives.ReadUInt64BigEndian(
+                    (byte[])reader.GetValue(0)));
+            }
+            return values;
+        }
+
+        private SqliteConnection Open()
+        {
+            var connection = new SqliteConnection(
+                $"Data Source={Path};Pooling=False");
+            connection.Open();
+            return connection;
+        }
+
+        public void Dispose()
+        {
+            sqlite?.Dispose();
+            SqliteConnection.ClearAllPools();
+            foreach (var candidate in new[] { Path, Path + "-wal", Path + "-shm" })
+            {
+                if (File.Exists(candidate))
+                {
+                    File.Delete(candidate);
+                }
+            }
+        }
+    }
+
+    private sealed class OperationSigner(byte[] seed, byte[] publicKey) :
+        IMailboxOperationSigner
+    {
+        public SessionId SessionId =>
+            SessionId.Parse("05" + new string('a', 64));
+        public byte[] GetEd25519PublicKey() => publicKey.ToArray();
+        public byte[] SignMailboxPresentation(
+            MailboxAuthenticatedOperation operation,
+            ReadOnlySpan<byte> canonicalPresentationSigningBytes) =>
+            PublicKeyAuth.SignDetached(
+                canonicalPresentationSigningBytes.ToArray(),
+                PublicKeyAuth.GenerateKeyPair(seed).PrivateKey);
+    }
+
+    private sealed class MutableRevocations :
+        IMailboxCapabilityRevocationSource
+    {
+        public bool Revoked { get; set; }
+        public bool IsRevoked(MailboxCapabilityRevocationQuery query) => Revoked;
+    }
+
+    private sealed class MutableTimeProvider(long seconds) : TimeProvider
+    {
+        public long Seconds { get; private set; } = seconds;
+        public override DateTimeOffset GetUtcNow() =>
+            DateTimeOffset.FromUnixTimeSeconds(Seconds);
+        public void Set(long value) => Seconds = value;
+    }
+
+    private sealed class InjectedFaultException : Exception;
+
+    private static byte[] U64(ulong value)
+    {
+        var encoded = new byte[8];
+        BinaryPrimitives.WriteUInt64BigEndian(encoded, value);
+        return encoded;
+    }
+
+    private static byte[] Bytes(int count, byte start)
+    {
+        var value = new byte[count];
+        for (var index = 0; index < count; index++)
+        {
+            value[index] = unchecked((byte)(start + index));
+        }
+        if (value.AsSpan().IndexOfAnyExcept((byte)0) < 0)
+        {
+            value[0] = 1;
+        }
+        return value;
+    }
+}

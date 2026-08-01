@@ -3,9 +3,7 @@ using System.Security.Cryptography;
 
 namespace Deep.Client.Shared.Persistence;
 
-public sealed class InMemoryClientMailboxStateRepository :
-    IClientMailboxStateRepository,
-    IClientMailboxCredentialStateRepository
+public sealed class InMemoryClientMailboxStateRepository : IClientMailboxStateRepository
 {
     private readonly Dictionary<string, ClientMailboxStoredState> states =
         new(StringComparer.Ordinal);
@@ -16,7 +14,6 @@ public sealed class InMemoryClientMailboxStateRepository :
         new(StringComparer.Ordinal);
     private readonly object gate = new();
     private readonly Action<ClientMailboxCommitFaultPoint>? commitFault;
-    private MailboxCredentialStoredState? credentials;
 
     public InMemoryClientMailboxStateRepository()
     {
@@ -28,68 +25,6 @@ public sealed class InMemoryClientMailboxStateRepository :
         this.commitFault = commitFault;
     }
 
-    public Task ImportCredentialGenerationAsync(
-        MailboxCredentialGeneration generation,
-        MailboxCredentialImportPolicy policy,
-        CancellationToken cancellationToken = default)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        var candidate = MailboxCredentialStateMachine.Import(generation, policy);
-        lock (gate)
-        {
-            if (credentials is not null)
-            {
-                if (!CryptographicOperations.FixedTimeEquals(
-                        MailboxCredentialBinaryCodec.Encode(credentials.Generation),
-                        MailboxCredentialBinaryCodec.Encode(candidate.Generation)))
-                {
-                    throw new InvalidOperationException("Mailbox credential generation changed unexpectedly.");
-                }
-                return Task.CompletedTask;
-            }
-            commitFault?.Invoke(ClientMailboxCommitFaultPoint.BeforeCommit);
-            credentials = candidate;
-            commitFault?.Invoke(ClientMailboxCommitFaultPoint.AfterCommit);
-            return Task.CompletedTask;
-        }
-    }
-
-    public Task SwitchCredentialEpochAsync(ulong epoch, ulong nowUnixSeconds,
-        CancellationToken cancellationToken = default)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        lock (gate)
-        {
-            var candidate = RequireCredentials().Clone();
-            MailboxCredentialStateMachine.Switch(candidate, epoch, nowUnixSeconds);
-            commitFault?.Invoke(ClientMailboxCommitFaultPoint.BeforeCommit);
-            credentials = candidate;
-            commitFault?.Invoke(ClientMailboxCommitFaultPoint.AfterCommit);
-            return Task.CompletedTask;
-        }
-    }
-
-    public Task<MailboxCredentialOperationLease> LeaseCredentialAsync(
-        MailboxCredentialGrantKind kind,
-        ulong nowUnixSeconds,
-        MailboxCredentialLeaseExpectation? expectation = null,
-        CancellationToken cancellationToken = default)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        lock (gate)
-        {
-            var candidate = RequireCredentials().Clone();
-            var lease = MailboxCredentialStateMachine.Allocate(
-                candidate,
-                kind,
-                nowUnixSeconds,
-                expectation);
-            commitFault?.Invoke(ClientMailboxCommitFaultPoint.BeforeCommit);
-            credentials = candidate;
-            commitFault?.Invoke(ClientMailboxCommitFaultPoint.AfterCommit);
-            return Task.FromResult(lease);
-        }
-    }
 
     public Task<ClientMailboxTraversal> ReadTraversalAsync(
         ClientMailboxScope scope,
@@ -418,13 +353,9 @@ public sealed class InMemoryClientMailboxStateRepository :
                     static pair => pair.Key,
                     static pair => pair.Value.Clone(),
                     StringComparer.Ordinal));
-            restarted.credentials = credentials?.Clone();
             return restarted;
         }
     }
-
-    private MailboxCredentialStoredState RequireCredentials() => credentials?.Clone()
-        ?? throw new InvalidOperationException("Mailbox credentials are not installed.");
 
     private Task<TResult> Read<TResult>(
         ClientMailboxScope scope,

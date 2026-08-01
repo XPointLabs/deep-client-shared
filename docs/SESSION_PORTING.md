@@ -51,11 +51,11 @@ Use `deep-protocol` for protocol and crypto semantics. Do not recreate protocol 
   sends prior route IDs. Production platform registration remains disabled until an external
   signer/indexer publishes a real artifact and the app receives reviewed genesis/delegation pins.
 - Group and call behavior currently covers launch-critical scaffolding/state, not every upstream management or media edge.
-- The native MAU2 adapter currently receives an explicit mailbox ID and epoch
-  for retrieve/ack orchestration. Replacing that parameter seam with the
-  reviewed self/peer/group scoped-credential resolver is required before
-  production activation; no singleton-credential compatibility fallback is
-  permitted.
+- Native official-cloud MAU2 preparation resolves opaque self, peer, and group
+  credential selectors. Replay counters, complete fan-out preparation, and
+  transport-outbox rows commit in the single attested local-state transaction.
+  Free direct P2P does not enter this resolver and requires the explicit
+  non-official `IDirectP2pSessionMessageTransport` composition capability.
 
 ## Non-Negotiable Runtime Parity
 
@@ -73,7 +73,7 @@ Use `deep-protocol` for protocol and crypto semantics. Do not recreate protocol 
 ## Local-State Baseline Rules
 
 - Before production launch, SQLite has one supported physical baseline:
-  application ID `DEEP`, schema version 10.
+  application ID `DEEP`, schema version 11.
 - State is fresh only when its main database, `-wal`, and `-shm` are all absent.
 - Existing state must pass exact key, version, integrity, catalog, column,
   foreign-key, and index attestation before runtime access.
@@ -101,5 +101,3 @@ For every runtime port, record:
 - Complete message request/approval state.
 - Full open/community group handling.
 - Native call media integration hooks once MAUI platform layer is ready.
-- Scoped self/recipient/group mailbox credential resolver and atomic fan-out
-  leasing for the native MAU2 adapter.

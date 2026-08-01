@@ -31,7 +31,8 @@ public sealed class DurableInboxRecoveryTests
                        raw,
                        _ => Task.FromResult<string?>(BobPhrase),
                        new FrozenClock(Now),
-                       new FaultingInboxRepository(store, crashPoint)))
+                       new FaultingInboxRepository(store, crashPoint),
+                       new DirectP2pMailboxDeliveryPolicy()))
             {
                 await Assert.ThrowsAsync<InjectedInboxCrashException>(() =>
                     receiver.ReceiveAsync(bobIdentity.SessionId));
@@ -42,7 +43,8 @@ public sealed class DurableInboxRecoveryTests
                 raw,
                 _ => Task.FromResult<string?>(BobPhrase),
                 new FrozenClock(Now),
-                restartedStore);
+                restartedStore,
+                new DirectP2pMailboxDeliveryPolicy());
 
             var recovered = Assert.Single(await restarted.ReceiveAsync(bobIdentity.SessionId));
             Assert.Equal("boundary-message", recovered.Id.Value);
@@ -75,7 +77,8 @@ public sealed class DurableInboxRecoveryTests
                        raw,
                        _ => Task.FromResult<string?>(BobPhrase),
                        new FrozenClock(Now),
-                       store))
+                       store,
+                       new DirectP2pMailboxDeliveryPolicy()))
             {
                 var faultingTransport = new FaultingAckTransport(receiver);
                 var messages = CreateMessageService(store, faultingTransport);
@@ -99,7 +102,8 @@ public sealed class DurableInboxRecoveryTests
                        raw,
                        _ => Task.FromResult<string?>(BobPhrase),
                        new FrozenClock(Now),
-                       restartedStore))
+                       restartedStore,
+                       new DirectP2pMailboxDeliveryPolicy()))
             {
                 var messages = CreateMessageService(restartedStore, restartedTransport);
                 Assert.Empty(await messages.ReceiveAsync(bobIdentity.SessionId));
@@ -121,7 +125,8 @@ public sealed class DurableInboxRecoveryTests
                 raw,
                 _ => Task.FromResult<string?>(BobPhrase),
                 new FrozenClock(Now),
-                finalStore);
+                finalStore,
+                new DirectP2pMailboxDeliveryPolicy());
             var finalMessages = CreateMessageService(finalStore, finalTransport);
             Assert.Empty(await finalMessages.ReceiveAsync(bobIdentity.SessionId));
             Assert.Single(await ToListAsync(
@@ -164,7 +169,8 @@ public sealed class DurableInboxRecoveryTests
             raw,
             _ => Task.FromResult<string?>(BobPhrase),
             new FrozenClock(Now),
-            store);
+            store,
+            new DirectP2pMailboxDeliveryPolicy());
 
         var received = Assert.Single(await receiver.ReceiveAsync(bobIdentity.SessionId));
         Assert.Equal("valid-after-malformed", received.Id.Value);
@@ -186,7 +192,8 @@ public sealed class DurableInboxRecoveryTests
                    raw,
                    _ => Task.FromResult<string?>(AlicePhrase),
                    new FrozenClock(Now),
-                   new InMemorySessionStore()))
+                   new InMemorySessionStore(),
+                   new DirectP2pMailboxDeliveryPolicy()))
         {
             await sender.SendAsync(new OutboundMessageEnvelope(
                 aliceIdentity.SessionId,
@@ -215,7 +222,8 @@ public sealed class DurableInboxRecoveryTests
             raw,
             _ => Task.FromResult<string?>(BobPhrase),
             new FrozenClock(Now.AddSeconds(1)),
-            store);
+            store,
+            new DirectP2pMailboxDeliveryPolicy());
         var messages = CreateMessageService(store, receiver);
 
         Assert.Empty(await messages.ReceiveAsync(bobIdentity.SessionId));
@@ -263,7 +271,8 @@ public sealed class DurableInboxRecoveryTests
             raw,
             _ => Task.FromResult<string?>(AlicePhrase),
             new FrozenClock(Now),
-            new InMemorySessionStore());
+            new InMemorySessionStore(),
+            new DirectP2pMailboxDeliveryPolicy());
         await transport.SendAsync(new OutboundMessageEnvelope(
             sender.SessionId,
             recipient.SessionId,
@@ -448,7 +457,9 @@ public sealed class DurableInboxRecoveryTests
         }
     }
 
-    private sealed class CursorRawTransport : ISessionMessageTransport, IAuthenticatedInboxTransport
+    private sealed class CursorRawTransport :
+        IDirectP2pSessionMessageTransport,
+        IAuthenticatedInboxTransport
     {
         private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
         private readonly object gate = new();

@@ -140,22 +140,25 @@ public sealed class OpaqueMetadataTransportTests
                 })
             });
         });
-        var raw = new SessionStorageMessageTransport(
-            client,
-            new SessionStorageMessageTransportOptions("https://storage.test"),
-            TestOpaqueDependencies.Create());
+        var raw = new NonOfficialFixtureTransport(
+            new SessionStorageMessageTransport(
+                client,
+                new SessionStorageMessageTransportOptions("https://storage.test"),
+                TestOpaqueDependencies.Create()));
         using var aliceIdentity = new SessionIdentityProvider(AlicePhrase);
         using var bobIdentity = new SessionIdentityProvider(BobPhrase);
         using var alice = new E2eeClientTransport(
             raw,
             _ => Task.FromResult<string?>(AlicePhrase),
             new SystemClock(),
-            new InMemorySessionStore());
+            new InMemorySessionStore(),
+            new DirectP2pMailboxDeliveryPolicy());
         using var bob = new E2eeClientTransport(
             raw,
             _ => Task.FromResult<string?>(BobPhrase),
             new SystemClock(),
-            new InMemorySessionStore());
+            new InMemorySessionStore(),
+            new DirectP2pMailboxDeliveryPolicy());
         var logical = new OutboundMessageEnvelope(
             aliceIdentity.SessionId,
             bobIdentity.SessionId,
@@ -316,6 +319,30 @@ public sealed class OpaqueMetadataTransportTests
 
         private static byte[] Derive(string domain, string value) =>
             SHA256.HashData(Encoding.UTF8.GetBytes($"deep-test/{domain}/{value}"));
+    }
+
+    private sealed class NonOfficialFixtureTransport(
+        SessionStorageMessageTransport inner) :
+        IDirectP2pSessionMessageTransport,
+        IAuthenticatedInboxTransport
+    {
+        public int InboxNamespace => inner.InboxNamespace;
+
+        public Task SendAsync(
+            OutboundMessageEnvelope envelope,
+            CancellationToken cancellationToken = default) =>
+            inner.SendAsync(envelope, cancellationToken);
+
+        public Task<IReadOnlyList<InboundMessageEnvelope>> ReceiveAsync(
+            SessionId recipient,
+            CancellationToken cancellationToken = default) =>
+            inner.ReceiveAsync(recipient, cancellationToken);
+
+        public Task<IReadOnlyList<InboundMessageEnvelope>>
+            ReceiveAuthenticatedAsync(
+            SessionIdentityProvider identity,
+            CancellationToken cancellationToken = default) =>
+            inner.ReceiveAuthenticatedAsync(identity, cancellationToken);
     }
 
     internal sealed class TestCompatibilityCrypto : ICompatibilityEnvelopeCrypto

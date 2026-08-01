@@ -13,7 +13,7 @@ This library follows the Session clients at a domain boundary level:
 `Persistence` defines repository abstractions for local storage. `SqliteSessionStore`
 is the production path (with SQLCipher-compatible key hook), while
 `InMemorySessionStore` remains test/dev only. The production database has one
-physical baseline: application ID `DEEP` and schema version 10. There is no
+physical baseline: application ID `DEEP` and schema version 11. There is no
 logical schema store and no local migration API.
 The dormant P14A boundary uses the existing settings table through the atomic,
 bounded, account-generation capability documented in
@@ -57,7 +57,7 @@ E4 adds group admin/member-state lifecycle behavior into `ConversationService`: 
   fail closed.
 - Sync plans preserve the key Session ordering rule: group keys are requested last after group info and members.
 - Persistent startup treats state as fresh only when the main database, WAL,
-  and SHM files are all absent. Fresh state is created and attested as v10 in
+  and SHM files are all absent. Fresh state is created and attested as v11 in
   one transaction. Existing state is opened only after non-pooled key preflight
   and exact read-only attestation; runtime operations then use isolated pooled
   connections. Unsupported, corrupt, keyed incorrectly, or schema-tampered
@@ -215,10 +215,11 @@ scopes, then other acknowledged rows. If only live unacknowledged ciphertext
 remains, the transaction fails closed instead of dropping or fabricating
 state. Tombstone expiry is checked against the persisted retrieved envelope.
 Length, overflow, and canonical-envelope decoder failures are normalized to
-`InvalidDataException`. The canonical mailbox schema is version 7 and is
-created only for a fresh local database. Any earlier or incompatible mailbox
-schema fails fast with an explicit wipe/reset-required error; no mailbox state
-is dual-read, migrated, or retained for compatibility.
+`InvalidDataException`. Mailbox inbox state, scoped official-cloud
+credentials, replay counters, prepared fan-out headers/targets, and MAU2
+outbox items share the exact physical schema version 11. Version 10, the old
+standalone mailbox schema, and every incompatible catalog require an explicit
+wipe/reset; none is dual-read, migrated, or retained for compatibility.
 
 ## Identity-authenticated mailbox seam
 
@@ -231,17 +232,51 @@ exact domain-separated MCP2 presentation signing, never generic signing or
 private-key access. It is invalidated before the operation's identity lease is
 released, including on exceptions and cancellation.
 
-The mailbox contract requires a successful
-`PrepareMailboxAuthenticatedSendAsync` result for every fan-out target before
-any `SendPreparedMailboxAuthenticatedAsync` dispatch. There is no optional
-prepare path. Its opaque prepared handles are created by the transport and
-may be dispatched only through that transport. This dormant producer contract
+The mailbox contract requires one successful
+`PrepareScopedMailboxBatchAsync` call covering every official-cloud fan-out
+target before any `SendPreparedMailboxAuthenticatedAsync` dispatch. There is
+no per-target preparation path. Its opaque prepared handles are created by the
+transport and may be dispatched only through that transport. This producer contract
 imposes the mailbox ciphertext bound of
 81,768 bytes (`MailboxClientLimits.MaximumCiphertextLength`) on the decoded
 DPE1 bytes after encryption, while ordinary DPE1 transports retain the
 existing 512-KiB envelope limit. Every direct/group fan-out copy is built and
 prepared before the first authenticated dispatch, preventing a later target
 failure from producing a partial remote fan-out.
+
+Free direct P2P and paid official-cloud delivery are selected only through an
+explicit `IMailboxDeliveryPolicy`; transport failure never changes that choice.
+The direct lane additionally requires an
+`IDirectP2pSessionMessageTransport` capability. Generic storage/XNode
+transports do not satisfy that capability merely because policy selected
+`DirectP2p`, so a free operation cannot silently consume official managed
+infrastructure.
+`ClientRuntime.CreatePersistent` requires that policy whenever authenticated
+E2EE transport is required and never supplies an implicit official-cloud
+fallback. This keeps a caller's free-P2P choice distinct from infrastructure
+usage at the composition boundary.
+Official-cloud import verifies the canonical MCG2 bytes, issuer signature,
+active lifecycle, independent monotonic generation floor, exact epoch validity
+and placement/membership bindings, and unique grant serials before one atomic
+commit. Trusted issuer entries have the protocol-defined key/domain,
+lifecycle, generation range, and hard validity bounds. A deterministic digest
+of the complete network/global-floor/issuer policy is persisted per scope and
+must match after restart; a single issuer key is not a policy fingerprint.
+Preparation and immediate
+pre-I/O dispatch each revalidate the selected scoped grant against the current
+clock, entitlement/authority, and revocation source. Prepared fan-out headers,
+the exact ordered target catalog, replay counters, holder signatures, and
+outbox rows are attested again on retry.
+
+`ScopedMailboxCredentialRepository` over SQLCipher SQLite is the production
+implementation. `InMemoryScopedMailboxCredentialRepository` is a test and
+development fake only. It publishes a copy-on-write aggregate containing
+credentials, counters, prepared batches, target catalogs, and outbox state
+under one lock, so cancellation or an injected fault before publication leaves
+the preceding state intact. A shared validation core and parameterized
+conformance tests keep its import, counter, epoch-switch, resume, revocation,
+and expiry behavior aligned with SQLite without creating a second production
+storage path.
 
 `OpaqueMailboxWireEntry`, `OpaqueMailboxContinuation`, and
 `OpaqueMailboxInboxPage` remain portable opaque receive contracts.

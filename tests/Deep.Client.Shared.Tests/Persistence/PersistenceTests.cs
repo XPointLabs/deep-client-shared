@@ -412,7 +412,8 @@ public sealed class PersistenceTests
             new InMemorySessionStore(),
             ClientFeatureFlags.ReleaseDefaults with { MetadataPrivateTransportRequired = false },
             new SystemClock(),
-            new AuthenticatedTestTransport());
+            new AuthenticatedTestTransport(),
+            mailboxDeliveryPolicy: new DirectP2pMailboxDeliveryPolicy());
 
         Assert.IsType<E2eeClientTransport>(runtime.MessageTransport);
         runtime.Dispose();
@@ -847,7 +848,7 @@ public sealed class PersistenceTests
     }
 
     private sealed class AuthenticatedTestTransport :
-        ISessionMessageTransport,
+        IDirectP2pSessionMessageTransport,
         IAuthenticatedInboxTransport
     {
         public Task SendAsync(OutboundMessageEnvelope envelope, CancellationToken cancellationToken = default) =>

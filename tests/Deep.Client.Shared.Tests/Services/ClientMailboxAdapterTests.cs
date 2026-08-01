@@ -36,7 +36,6 @@ public sealed class ClientMailboxAdapterTests
         var activation = new ClientMailboxActivation(
             enabled: false,
             issuer,
-            route: null,
             ingressConfigured: false);
         Assert.DoesNotContain(Convert.ToHexString(issuer), activation.ToString());
     }
@@ -1242,11 +1241,19 @@ public sealed class ClientMailboxAdapterTests
     }
 
     [Fact]
-    public void Sqlite_RequiresSqlCipherKeyPath()
+    public void Sqlite_UsesTheSingleSessionStorePath()
     {
-        Assert.Throws<InvalidOperationException>(() =>
-            new SqliteClientMailboxStateRepository(
-                new SqliteSessionStoreOptions(TempDatabase())));
+        var path = TempDatabase();
+        try
+        {
+            using var store = new SqliteSessionStore(
+                new SqliteSessionStoreOptions(path));
+            Assert.IsAssignableFrom<IClientMailboxStateRepository>(store);
+        }
+        finally
+        {
+            DeleteSqliteFiles(path);
+        }
     }
 
     [Fact]
@@ -1277,9 +1284,9 @@ public sealed class ClientMailboxAdapterTests
                 command.ExecuteNonQuery();
             }
 
-            var exception = Assert.Throws<InvalidDataException>(() =>
-                new SqliteClientMailboxStateRepository(Options(path)));
-            Assert.Contains("Wipe/reset", exception.Message, StringComparison.Ordinal);
+            var exception = Assert.Throws<LocalStateResetRequiredException>(() =>
+                new SqliteSessionStore(Options(path)));
+            Assert.Contains("Reset local data", exception.Message, StringComparison.Ordinal);
         }
         finally
         {
@@ -1312,9 +1319,9 @@ public sealed class ClientMailboxAdapterTests
                 command.ExecuteNonQuery();
             }
 
-            var exception = Assert.Throws<InvalidDataException>(() =>
-                new SqliteClientMailboxStateRepository(Options(path)));
-            Assert.Contains("Wipe/reset", exception.Message, StringComparison.Ordinal);
+            var exception = Assert.Throws<LocalStateResetRequiredException>(() =>
+                new SqliteSessionStore(Options(path)));
+            Assert.Contains("Reset local data", exception.Message, StringComparison.Ordinal);
         }
         finally
         {
@@ -1351,9 +1358,9 @@ public sealed class ClientMailboxAdapterTests
                 command.ExecuteNonQuery();
             }
 
-            var exception = Assert.Throws<InvalidDataException>(() =>
-                new SqliteClientMailboxStateRepository(Options(path)));
-            Assert.Contains("Wipe/reset", exception.Message, StringComparison.Ordinal);
+            var exception = Assert.Throws<LocalStateResetRequiredException>(() =>
+                new SqliteSessionStore(Options(path)));
+            Assert.Contains("Reset local data", exception.Message, StringComparison.Ordinal);
         }
         finally
         {
@@ -1425,9 +1432,9 @@ public sealed class ClientMailboxAdapterTests
                 command.ExecuteNonQuery();
             }
 
-            var exception = Assert.Throws<InvalidDataException>(() =>
-                new SqliteClientMailboxStateRepository(Options(path)));
-            Assert.Contains("Wipe/reset", exception.Message, StringComparison.Ordinal);
+            var exception = Assert.Throws<LocalStateResetRequiredException>(() =>
+                new SqliteSessionStore(Options(path)));
+            Assert.Contains("Reset local data", exception.Message, StringComparison.Ordinal);
         }
         finally
         {
@@ -1530,10 +1537,10 @@ public sealed class ClientMailboxAdapterTests
         string path,
         Action<ClientMailboxCommitFaultPoint> fault) =>
         sqlite
-            ? new SqliteClientMailboxStateRepository(Options(path), fault)
+            ? new SqliteSessionStore(Options(path), fault)
             : new InMemoryClientMailboxStateRepository(fault);
 
-    private static SqliteClientMailboxStateRepository CreateSqlite(string path) =>
+    private static SqliteSessionStore CreateSqlite(string path) =>
         new(Options(path));
 
     private static int ExpiredQuarantineCount(
@@ -1543,7 +1550,7 @@ public sealed class ClientMailboxAdapterTests
         {
             InMemoryClientMailboxStateRepository memory =>
                 memory.ExpiredQuarantineCountForTests(scope),
-            SqliteClientMailboxStateRepository sqlite =>
+            SqliteSessionStore sqlite =>
                 sqlite.ExpiredQuarantineCountForTests(scope),
             _ => throw new InvalidOperationException("Unknown test repository.")
         };
@@ -1554,7 +1561,7 @@ public sealed class ClientMailboxAdapterTests
         {
             InMemoryClientMailboxStateRepository memory =>
                 memory.InstallationInboxCountForTests(),
-            SqliteClientMailboxStateRepository sqlite =>
+            SqliteSessionStore sqlite =>
                 sqlite.InstallationInboxCountForTests(),
             _ => throw new InvalidOperationException("Unknown test repository.")
         };
@@ -1565,7 +1572,7 @@ public sealed class ClientMailboxAdapterTests
         {
             InMemoryClientMailboxStateRepository memory =>
                 memory.InstallationTraversalCountForTests(),
-            SqliteClientMailboxStateRepository sqlite =>
+            SqliteSessionStore sqlite =>
                 sqlite.InstallationTraversalCountForTests(),
             _ => throw new InvalidOperationException("Unknown test repository.")
         };
@@ -1576,7 +1583,7 @@ public sealed class ClientMailboxAdapterTests
         {
             InMemoryClientMailboxStateRepository memory =>
                 memory.InstallationTraversalTokenBytesForTests(),
-            SqliteClientMailboxStateRepository sqlite =>
+            SqliteSessionStore sqlite =>
                 sqlite.InstallationTraversalTokenBytesForTests(),
             _ => throw new InvalidOperationException("Unknown test repository.")
         };
@@ -1588,7 +1595,7 @@ public sealed class ClientMailboxAdapterTests
         {
             InMemoryClientMailboxStateRepository memory =>
                 memory.InboxEntryCountForTests(scope),
-            SqliteClientMailboxStateRepository sqlite =>
+            SqliteSessionStore sqlite =>
                 sqlite.NormalizedInboxCountForTests(scope),
             _ => throw new InvalidOperationException("Unknown test repository.")
         };
@@ -1599,7 +1606,7 @@ public sealed class ClientMailboxAdapterTests
         {
             InMemoryClientMailboxStateRepository memory =>
                 memory.InstallationExpiredQuarantineCountForTests(),
-            SqliteClientMailboxStateRepository sqlite =>
+            SqliteSessionStore sqlite =>
                 sqlite.InstallationExpiredQuarantineCountForTests(),
             _ => throw new InvalidOperationException("Unknown test repository.")
         };
@@ -1610,7 +1617,7 @@ public sealed class ClientMailboxAdapterTests
         {
             InMemoryClientMailboxStateRepository memory =>
                 memory.CoordinatorJournalCountForTests(),
-            SqliteClientMailboxStateRepository sqlite =>
+            SqliteSessionStore sqlite =>
                 sqlite.CoordinatorJournalCountForTests(),
             _ => throw new InvalidOperationException("Unknown test repository.")
         };
@@ -1627,7 +1634,7 @@ public sealed class ClientMailboxAdapterTests
                     count,
                     expiresAtUnixSeconds);
                 break;
-            case SqliteClientMailboxStateRepository sqlite:
+            case SqliteSessionStore sqlite:
                 sqlite.SeedCoordinatorJournalForTests(
                     count,
                     expiresAtUnixSeconds);
@@ -1646,7 +1653,7 @@ public sealed class ClientMailboxAdapterTests
             case InMemoryClientMailboxStateRepository memory:
                 memory.SeedCurrentStatesForTests(snapshots);
                 break;
-            case SqliteClientMailboxStateRepository sqlite:
+            case SqliteSessionStore sqlite:
                 sqlite.SeedCurrentStatesForTests(snapshots);
                 break;
             default:

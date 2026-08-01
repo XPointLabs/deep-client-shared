@@ -28,6 +28,15 @@ public interface IMailboxOperationSigner
 }
 
 /// <summary>
+/// Explicit composition capability for the free direct-P2P lane. Implementing
+/// it is a promise that <see cref="ISessionMessageTransport.SendAsync"/> does
+/// not consume official managed mailbox/storage infrastructure.
+/// </summary>
+public interface IDirectP2pSessionMessageTransport : ISessionMessageTransport
+{
+}
+
+/// <summary>
 /// Opaque, immutable result of one successful local mailbox-send preparation. A handle may be
 /// dispatched only through the transport which created it.
 /// </summary>
@@ -37,19 +46,27 @@ public interface IPreparedMailboxAuthenticatedSend
 
 /// <summary>
 /// Mailbox producer seam. Every target must be prepared successfully before any prepared send is
-/// dispatched. This required prepare operation is deliberately not optional.
+/// dispatched. Implementations must bind this single call to one durable
+/// <see cref="IScopedMailboxCredentialRepository.PrepareScopedMailboxBatchAsync"/>
+/// transaction; per-target preparation is not a supported implementation.
 /// </summary>
 public interface IMailboxIdentityAuthenticatedRawTransport : ISessionMessageTransport
 {
-    Task<IPreparedMailboxAuthenticatedSend> PrepareMailboxAuthenticatedSendAsync(
+    Task<IReadOnlyList<IPreparedMailboxAuthenticatedSend>>
+        PrepareScopedMailboxBatchAsync(
         IMailboxOperationSigner signer,
-        OutboundMessageEnvelope envelope,
+        IReadOnlyList<MailboxAuthenticatedSendTarget> targets,
         CancellationToken cancellationToken = default);
 
     Task SendPreparedMailboxAuthenticatedAsync(
         IPreparedMailboxAuthenticatedSend preparedSend,
         CancellationToken cancellationToken = default);
 }
+
+public sealed record MailboxAuthenticatedSendTarget(
+    OutboundMessageEnvelope Envelope,
+    MailboxCredentialSelector Selector,
+    VerifiedOfficialMailboxAuthority Authority);
 
 /// <summary>
 /// Opaque mailbox retrieval item. Deliberately contains no sender, recipient, Session ID, or
@@ -342,6 +359,7 @@ public sealed class E2eeClientTransport :
     private readonly Func<CancellationToken, Task<string?>> recoveryPhraseProvider;
     private readonly IClock clock;
     private readonly IDurableInboxRepository inboxRepository;
+    private readonly IMailboxDeliveryPolicy deliveryPolicy;
     private readonly object identityGate = new();
     private readonly SemaphoreSlim receiveGate = new(1, 1);
     private readonly object deliveredItemsGate = new();
@@ -356,41 +374,25 @@ public sealed class E2eeClientTransport :
         ISessionMessageTransport rawTransport,
         Func<CancellationToken, Task<string?>> recoveryPhraseProvider,
         IClock clock,
-        IDurableInboxRepository inboxRepository)
+        IDurableInboxRepository inboxRepository,
+        IMailboxDeliveryPolicy deliveryPolicy)
     {
         this.rawTransport = rawTransport ?? throw new ArgumentNullException(nameof(rawTransport));
         this.recoveryPhraseProvider = recoveryPhraseProvider ?? throw new ArgumentNullException(nameof(recoveryPhraseProvider));
         this.clock = clock ?? throw new ArgumentNullException(nameof(clock));
         this.inboxRepository = inboxRepository ?? throw new ArgumentNullException(nameof(inboxRepository));
+        this.deliveryPolicy = deliveryPolicy ?? throw new ArgumentNullException(nameof(deliveryPolicy));
     }
 
     public async Task SendAsync(OutboundMessageEnvelope envelope, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(envelope);
-        if (rawTransport is IMailboxIdentityAuthenticatedRawTransport authenticatedTransport)
-        {
-            await WithMailboxOperationSignerAsync(
-                async (identity, signer) =>
-                {
-                    var copies = BuildDirectCopies(identity, envelope);
-                    var prepared = await PrepareMailboxAuthenticatedCopiesAsync(
-                        authenticatedTransport,
-                        signer,
-                        copies,
-                        cancellationToken).ConfigureAwait(false);
-                    await SendPreparedMailboxCopiesSequentiallyAsync(
-                        authenticatedTransport,
-                        prepared,
-                        cancellationToken).ConfigureAwait(false);
-                },
-                cancellationToken).ConfigureAwait(false);
-            return;
-        }
-
         var copies = await WithIdentityAsync(
             identity => BuildDirectCopies(identity, envelope),
             cancellationToken).ConfigureAwait(false);
-        await SendCopiesSequentiallyAsync(copies, cancellationToken).ConfigureAwait(false);
+        await SendPolicySelectedCopiesAsync(
+            copies, MailboxDeliveryKind.Direct, concurrent: false, cancellationToken)
+            .ConfigureAwait(false);
     }
 
     public async Task<IReadOnlyList<InboundMessageEnvelope>> ReceiveAsync(
@@ -426,30 +428,12 @@ public sealed class E2eeClientTransport :
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(group);
-        if (rawTransport is IMailboxIdentityAuthenticatedRawTransport authenticatedTransport)
-        {
-            await WithMailboxOperationSignerAsync(
-                async (identity, signer) =>
-                {
-                    var copies = BuildGroupStateCopies(identity, group, updatedAt, recipients);
-                    var prepared = await PrepareMailboxAuthenticatedCopiesAsync(
-                        authenticatedTransport,
-                        signer,
-                        copies,
-                        cancellationToken).ConfigureAwait(false);
-                    await SendPreparedMailboxCopiesWithBoundedConcurrencyAsync(
-                        authenticatedTransport,
-                        prepared,
-                        cancellationToken).ConfigureAwait(false);
-                },
-                cancellationToken).ConfigureAwait(false);
-            return;
-        }
-
         var copies = await WithIdentityAsync(
             identity => BuildGroupStateCopies(identity, group, updatedAt, recipients),
             cancellationToken).ConfigureAwait(false);
-        await SendCopiesWithBoundedConcurrencyAsync(copies, cancellationToken).ConfigureAwait(false);
+        await SendPolicySelectedCopiesAsync(
+            copies, MailboxDeliveryKind.GroupState, concurrent: true, cancellationToken)
+            .ConfigureAwait(false);
     }
 
     public async Task<IReadOnlyList<InboundGroupStateEnvelope>> ReceiveGroupStatesAsync(
@@ -483,30 +467,12 @@ public sealed class E2eeClientTransport :
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(envelope);
-        if (rawTransport is IMailboxIdentityAuthenticatedRawTransport authenticatedTransport)
-        {
-            await WithMailboxOperationSignerAsync(
-                async (identity, signer) =>
-                {
-                    var copies = BuildGroupMessageCopies(identity, envelope);
-                    var prepared = await PrepareMailboxAuthenticatedCopiesAsync(
-                        authenticatedTransport,
-                        signer,
-                        copies,
-                        cancellationToken).ConfigureAwait(false);
-                    await SendPreparedMailboxCopiesWithBoundedConcurrencyAsync(
-                        authenticatedTransport,
-                        prepared,
-                        cancellationToken).ConfigureAwait(false);
-                },
-                cancellationToken).ConfigureAwait(false);
-            return;
-        }
-
         var copies = await WithIdentityAsync(
             identity => BuildGroupMessageCopies(identity, envelope),
             cancellationToken).ConfigureAwait(false);
-        await SendCopiesWithBoundedConcurrencyAsync(copies, cancellationToken).ConfigureAwait(false);
+        await SendPolicySelectedCopiesAsync(
+            copies, MailboxDeliveryKind.GroupMessage, concurrent: true, cancellationToken)
+            .ConfigureAwait(false);
     }
 
     public async Task<IReadOnlyList<InboundGroupMessageEnvelope>> ReceiveGroupMessagesAsync(
@@ -808,7 +774,6 @@ public sealed class E2eeClientTransport :
         var encrypted = identity.CreateEnvelopeCodec().EncryptContent(content, target);
         try
         {
-            EnsureMailboxPayloadBound(encrypted.Length);
             return new OutboundMessageEnvelope(
                 identity.SessionId,
                 target,
@@ -847,24 +812,90 @@ public sealed class E2eeClientTransport :
             async (copy, itemCancellationToken) =>
                 await rawTransport.SendAsync(copy, itemCancellationToken).ConfigureAwait(false));
 
-    private static async Task<IReadOnlyList<IPreparedMailboxAuthenticatedSend>> PrepareMailboxAuthenticatedCopiesAsync(
-        IMailboxIdentityAuthenticatedRawTransport authenticatedTransport,
-        IMailboxOperationSigner signer,
+    private async Task SendPolicySelectedCopiesAsync(
         IReadOnlyList<OutboundMessageEnvelope> copies,
+        MailboxDeliveryKind kind,
+        bool concurrent,
         CancellationToken cancellationToken)
     {
-        var prepared = new IPreparedMailboxAuthenticatedSend[copies.Count];
-        for (var index = 0; index < copies.Count; index++)
+        var direct = new List<OutboundMessageEnvelope>(copies.Count);
+        var cloud = new List<MailboxAuthenticatedSendTarget>(copies.Count);
+        foreach (var copy in copies)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            prepared[index] = await authenticatedTransport.PrepareMailboxAuthenticatedSendAsync(
-                signer,
-                copies[index],
-                cancellationToken).ConfigureAwait(false)
-                ?? throw new InvalidOperationException("Mailbox preparation returned a null handle.");
+            var decision = await deliveryPolicy.DecideAsync(
+                    new MailboxDeliveryRequest(copy, kind), cancellationToken)
+                .ConfigureAwait(false) ?? throw new InvalidOperationException(
+                    "Mailbox delivery policy returned no decision.");
+            decision.Validate();
+            if (decision.Mode == MailboxDeliveryMode.DirectP2p)
+            {
+                direct.Add(copy);
+            }
+            else
+            {
+                if (!TryDecodeWireBody(copy.Body, out var payload))
+                    throw new InvalidDataException("Cloud delivery requires canonical DPE1.");
+                try
+                {
+                    if (payload.Length > MailboxClientLimits.MaximumCiphertextLength)
+                        throw new E2eeMailboxPayloadTooLargeException(
+                            payload.Length, MailboxClientLimits.MaximumCiphertextLength);
+                }
+                finally
+                {
+                    CryptographicOperations.ZeroMemory(payload);
+                }
+                cloud.Add(new MailboxAuthenticatedSendTarget(
+                    copy, decision.Selector!, decision.OfficialAuthority!));
+            }
         }
+        IReadOnlyList<IPreparedMailboxAuthenticatedSend> prepared = [];
+        IMailboxIdentityAuthenticatedRawTransport? cloudTransport = null;
+        if (cloud.Count > 0)
+        {
+            cloudTransport = rawTransport as IMailboxIdentityAuthenticatedRawTransport
+                ?? throw new InvalidOperationException(
+                    "Official cloud delivery was selected without a mailbox transport.");
+            prepared = await WithMailboxOperationSignerAsync(
+                (_, signer) => cloudTransport.PrepareScopedMailboxBatchAsync(
+                    signer, cloud, cancellationToken), cancellationToken)
+                .ConfigureAwait(false);
+            if (prepared is null || prepared.Count != cloud.Count ||
+                prepared.Any(static value => value is null))
+                throw new InvalidOperationException(
+                    "Mailbox batch preparation returned invalid handles.");
+        }
+        if (concurrent)
+        {
+            EnsureDirectP2pTransport(direct);
+            await SendCopiesWithBoundedConcurrencyAsync(direct, cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            EnsureDirectP2pTransport(direct);
+            await SendCopiesSequentiallyAsync(direct, cancellationToken).ConfigureAwait(false);
+        }
+        if (cloudTransport is not null)
+        {
+            if (concurrent)
+                await SendPreparedMailboxCopiesWithBoundedConcurrencyAsync(
+                    cloudTransport, prepared, cancellationToken).ConfigureAwait(false);
+            else
+                await SendPreparedMailboxCopiesSequentiallyAsync(
+                    cloudTransport, prepared, cancellationToken).ConfigureAwait(false);
+        }
+    }
 
-        return prepared;
+    private void EnsureDirectP2pTransport(
+        IReadOnlyCollection<OutboundMessageEnvelope> direct)
+    {
+        if (direct.Count > 0 &&
+            rawTransport is not IDirectP2pSessionMessageTransport)
+        {
+            throw new InvalidOperationException(
+                "Direct P2P delivery requires an explicitly non-official infrastructure transport.");
+        }
     }
 
     private static async Task SendPreparedMailboxCopiesSequentiallyAsync(
@@ -894,17 +925,6 @@ public sealed class E2eeClientTransport :
                 await authenticatedTransport.SendPreparedMailboxAuthenticatedAsync(
                     preparedSend,
                     itemCancellationToken).ConfigureAwait(false));
-
-    private void EnsureMailboxPayloadBound(int payloadBytes)
-    {
-        if (rawTransport is IMailboxIdentityAuthenticatedRawTransport &&
-            payloadBytes > MailboxClientLimits.MaximumCiphertextLength)
-        {
-            throw new E2eeMailboxPayloadTooLargeException(
-                payloadBytes,
-                MailboxClientLimits.MaximumCiphertextLength);
-        }
-    }
 
     public async Task AcknowledgeInboxItemAsync(
         SessionId account,
@@ -1313,6 +1333,15 @@ public sealed class E2eeClientTransport :
         using var identityLease = await AcquireIdentityLeaseAsync(cancellationToken).ConfigureAwait(false);
         using var signer = new MailboxOperationSignerLease(identityLease.Identity);
         await operation(identityLease.Identity, signer).ConfigureAwait(false);
+    }
+
+    private async Task<T> WithMailboxOperationSignerAsync<T>(
+        Func<SessionIdentityProvider, IMailboxOperationSigner, Task<T>> operation,
+        CancellationToken cancellationToken)
+    {
+        using var identityLease = await AcquireIdentityLeaseAsync(cancellationToken).ConfigureAwait(false);
+        using var signer = new MailboxOperationSignerLease(identityLease.Identity);
+        return await operation(identityLease.Identity, signer).ConfigureAwait(false);
     }
 
     private async Task<IdentityLease> AcquireIdentityLeaseAsync(CancellationToken cancellationToken)

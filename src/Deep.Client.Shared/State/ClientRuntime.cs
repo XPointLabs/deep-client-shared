@@ -18,7 +18,8 @@ public sealed class ClientRuntime : IDisposable
         IGroupSyncTransport? groupSyncTransport = null,
         IAvatarProfileTransport? avatarProfiles = null,
         bool requireE2eeTransport = false,
-        IExternalTransportOutboxExecutor? transportOutboxExecutor = null)
+        IExternalTransportOutboxExecutor? transportOutboxExecutor = null,
+        IMailboxDeliveryPolicy? mailboxDeliveryPolicy = null)
     {
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(featureFlags);
@@ -72,11 +73,17 @@ public sealed class ClientRuntime : IDisposable
 
         if (transportRequired)
         {
+            if (mailboxDeliveryPolicy is null)
+            {
+                throw new InvalidOperationException(
+                    "TransportRequired requires an explicit mailbox delivery policy.");
+            }
             var encryptedTransport = new E2eeClientTransport(
                 messageTransport,
                 Accounts.GetRecoveryPhraseAsync,
                 clock,
-                Store);
+                Store,
+                mailboxDeliveryPolicy);
             MessageTransport = encryptedTransport;
             GroupSyncTransport = encryptedTransport;
             ownedMessageTransport = encryptedTransport;
@@ -151,7 +158,8 @@ public sealed class ClientRuntime : IDisposable
         string? sqlCipherKey = null,
         Func<ILocalSessionStore, ILocalSessionStore>? storeDecorator = null,
         bool requireE2eeTransport = false,
-        IExternalTransportOutboxExecutor? transportOutboxExecutor = null)
+        IExternalTransportOutboxExecutor? transportOutboxExecutor = null,
+        IMailboxDeliveryPolicy? mailboxDeliveryPolicy = null)
     {
         var resolvedFeatureFlags = featureFlags ?? ClientFeatureFlags.Defaults;
         if (backend is null)
@@ -166,6 +174,13 @@ public sealed class ClientRuntime : IDisposable
         {
             throw new InvalidOperationException(
                 "TransportRequired is enabled, but the configured transport is not authenticated E2EE.");
+        }
+
+        if ((requireE2eeTransport || resolvedFeatureFlags.TransportRequired) &&
+            mailboxDeliveryPolicy is null)
+        {
+            throw new InvalidOperationException(
+                "TransportRequired requires an explicit mailbox delivery policy.");
         }
 
         if (resolvedFeatureFlags.MetadataPrivateTransportRequired &&
@@ -187,7 +202,8 @@ public sealed class ClientRuntime : IDisposable
             groupSyncTransport,
             avatarProfiles,
             requireE2eeTransport,
-            transportOutboxExecutor);
+            transportOutboxExecutor,
+            mailboxDeliveryPolicy);
     }
 
     public static ClientRuntime CreatePersistentForTests(

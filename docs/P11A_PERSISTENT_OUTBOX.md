@@ -39,7 +39,7 @@ Ready-list admission includes only `Prepared` and explicitly `Accepted` items
 and excludes items whose bounded attempt budget is exhausted before ordering
 and `LIMIT`. A persisted `Attempted` item is outcome-unknown: adapter dispatch
 may have happened, so it is quarantined from automatic redispatch across
-process restart until expiry. This uses the v10 single-baseline state model and
+process restart until expiry. This uses the v11 single-baseline state model and
 has no migration path.
 
 Each external execution receives the smallest of the dispatcher timeout, the
@@ -175,8 +175,8 @@ store just wrote or interfere with unrelated persisted domains.
 
 ## Single-baseline local state
 
-The outbox tables are part of physical schema v10 and are created only with a
-wholly fresh local database. There is no v7/v8/v9 upgrade, quarantine, recovery
+The outbox tables are part of physical schema v11 and are created only with a
+wholly fresh local database. There is no v7/v8/v9/v10 upgrade, quarantine, recovery
 table, import, or rollback-in-place path. Any other version, any recovery-era
 object name, or any structural mismatch raises the explicit local-reset
 requirement without changing the database or its sidecars.
@@ -214,6 +214,6 @@ available only with an explicit external killable executor; the current direct
 and routed storage transports do not implement that process boundary or the
 opaque producer/receipt contract yet.
 Operational rollback never edits `user_version` and never drops or renames
-P11A tables in place. A binary that does not support the v10 baseline cannot
+P11A tables in place. A binary that does not support the v11 baseline cannot
 open the authoritative local-state file; pre-production rollback requires an
 explicit reset.
