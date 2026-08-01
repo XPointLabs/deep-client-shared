@@ -1,4 +1,3 @@
-using Deep.Client.Shared.Domain;
 using Deep.Client.Shared.Persistence;
 using Deep.Client.Shared.Services;
 
@@ -6,85 +5,42 @@ namespace Deep.Client.Shared.Tests.Services;
 
 public sealed class MailboxTransportOwnershipTests
 {
-    [Fact]
-    public async Task UserManagedPolicyIsFreeButDistinctFromDirectAndOfficialCloud()
+    [Theory]
+    [InlineData(MailboxInfrastructureOwnership.UserManaged)]
+    [InlineData(MailboxInfrastructureOwnership.OfficialManaged)]
+    public void AuthenticatedMau2OwnershipAlwaysRequiresAuthorityAndSelector(
+        MailboxInfrastructureOwnership ownership)
     {
-        var envelope = new OutboundMessageEnvelope(
-            new SessionId(new string('a', 64)),
-            new SessionId(new string('b', 64)),
-            "dpe1:AQ", [], DateTimeOffset.UnixEpoch.AddDays(1),
-            DateTimeOffset.UnixEpoch.AddDays(2));
-        var decision = await new UserManagedMailboxDeliveryPolicy().DecideAsync(
-            new MailboxDeliveryRequest(envelope, MailboxDeliveryKind.Direct));
-
-        decision.Validate();
-        Assert.Equal(MailboxDeliveryMode.UserManagedNetwork, decision.Mode);
-        Assert.Null(decision.OfficialAuthority);
-        Assert.Null(decision.Selector);
+        Assert.Throws<InvalidOperationException>(() => new MailboxDeliveryDecision(
+            MailboxTransportProtocol.AuthenticatedMau2,
+            ownership,
+            null,
+            null).Validate());
     }
 
     [Fact]
-    public void OwnershipCapabilitiesCannotRelabelOfficialMailboxAsFree()
+    public void UserManagedMau2IsNotDirectP2pAndNativeTransportHasNoFreeMarker()
     {
         Assert.False(typeof(IDirectP2pSessionMessageTransport)
             .IsAssignableFrom(typeof(NativeMau2MailboxTransport)));
-        Assert.False(typeof(IUserManagedSessionMessageTransport)
+        Assert.True(typeof(IMailboxIdentityAuthenticatedRawTransport)
             .IsAssignableFrom(typeof(NativeMau2MailboxTransport)));
-        Assert.Throws<ArgumentException>(() =>
-            new UserManagedSessionMessageTransport(new FakeOfficialMailbox()));
+        Assert.Throws<InvalidOperationException>(() => new MailboxDeliveryDecision(
+            MailboxTransportProtocol.DirectP2p,
+            MailboxInfrastructureOwnership.UserManaged,
+            null).Validate());
     }
 
     [Fact]
-    public void UserManagedWrapperDelegatesMetadataPrivacyWithoutClaimingDirectP2p()
+    public void DirectP2pCannotCarryBillingOrMailboxAuthority()
     {
-        var inner = new FakePrivateTransport();
-        using var wrapped = new UserManagedSessionMessageTransport(inner);
-
-        Assert.True(wrapped.UsesMetadataPrivateTransport);
-        Assert.IsAssignableFrom<IUserManagedSessionMessageTransport>(wrapped);
-        Assert.IsNotAssignableFrom<IDirectP2pSessionMessageTransport>(wrapped);
-    }
-
-    private sealed class FakePrivateTransport :
-        ISessionMessageTransport,
-        IAuthenticatedInboxTransport,
-        IMetadataPrivateSessionMessageTransport
-    {
-        public bool UsesMetadataPrivateTransport => true;
-        public Task SendAsync(OutboundMessageEnvelope envelope, CancellationToken cancellationToken = default) =>
-            Task.CompletedTask;
-        public Task<IReadOnlyList<InboundMessageEnvelope>> ReceiveAsync(
-            SessionId recipient, CancellationToken cancellationToken = default) =>
-            Task.FromResult<IReadOnlyList<InboundMessageEnvelope>>([]);
-        public Task<IReadOnlyList<InboundMessageEnvelope>> ReceiveAuthenticatedAsync(
-            SessionIdentityProvider identity, CancellationToken cancellationToken = default) =>
-            Task.FromResult<IReadOnlyList<InboundMessageEnvelope>>([]);
-    }
-
-    private sealed class FakeOfficialMailbox :
-        IAuthenticatedOpaqueMailboxTransport,
-        IAuthenticatedInboxTransport
-    {
-        public Task<IReadOnlyList<IPreparedMailboxAuthenticatedSend>> PrepareScopedMailboxBatchAsync(
-            IMailboxOperationSigner signer, IReadOnlyList<MailboxAuthenticatedSendTarget> targets,
-            CancellationToken cancellationToken = default) =>
-            Task.FromResult<IReadOnlyList<IPreparedMailboxAuthenticatedSend>>([]);
-        public Task SendPreparedMailboxAuthenticatedAsync(
-            IPreparedMailboxAuthenticatedSend preparedSend,
-            CancellationToken cancellationToken = default) => Task.CompletedTask;
-        public Task<OpaqueMailboxInboxPage> RetrieveOpaqueMailboxInboxAsync(
-            IMailboxOperationSigner signer, OpaqueMailboxContinuation continuation,
-            CancellationToken cancellationToken = default) => throw new NotSupportedException();
-        public Task AcknowledgeOpaqueMailboxInboxAsync(
-            IMailboxOperationSigner signer, string opaqueItemHandle,
-            CancellationToken cancellationToken = default) => Task.CompletedTask;
-        public Task SendAsync(OutboundMessageEnvelope envelope, CancellationToken cancellationToken = default) =>
-            Task.CompletedTask;
-        public Task<IReadOnlyList<InboundMessageEnvelope>> ReceiveAsync(
-            SessionId recipient, CancellationToken cancellationToken = default) =>
-            Task.FromResult<IReadOnlyList<InboundMessageEnvelope>>([]);
-        public Task<IReadOnlyList<InboundMessageEnvelope>> ReceiveAuthenticatedAsync(
-            SessionIdentityProvider identity, CancellationToken cancellationToken = default) =>
-            Task.FromResult<IReadOnlyList<InboundMessageEnvelope>>([]);
+        new MailboxDeliveryDecision(
+            MailboxTransportProtocol.DirectP2p,
+            MailboxInfrastructureOwnership.DirectP2p,
+            null).Validate();
+        Assert.Throws<InvalidOperationException>(() => new MailboxDeliveryDecision(
+            MailboxTransportProtocol.AuthenticatedMau2,
+            MailboxInfrastructureOwnership.DirectP2p,
+            null).Validate());
     }
 }

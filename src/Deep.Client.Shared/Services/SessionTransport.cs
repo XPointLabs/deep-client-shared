@@ -214,9 +214,7 @@ public sealed class SessionStorageMessageTransport :
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _opaque = opaque;
 
-        if (_options.MetadataMode is not (
-                SessionStorageMetadataMode.OpaqueP03 or
-                SessionStorageMetadataMode.LegacyCompatibility))
+        if (_options.MetadataMode != SessionStorageMetadataMode.OpaqueP03)
         {
             throw new ArgumentOutOfRangeException(nameof(options), "The storage metadata mode is undefined.");
         }
@@ -245,67 +243,33 @@ public sealed class SessionStorageMessageTransport :
                 exception);
         }
 
-        if (_options.MetadataMode == SessionStorageMetadataMode.OpaqueP03)
+        _opaque?.Validate();
+        if (_opaque is null)
         {
-            _opaque?.Validate();
-            if (_opaque is null)
-            {
-                throw new InvalidOperationException(
-                    "Opaque P03 storage requires explicit capability, crypto and replay dependencies.");
-            }
+            throw new InvalidOperationException(
+                "Opaque P03 storage requires explicit capability, crypto and replay dependencies.");
         }
     }
 
     public bool UsesMetadataPrivateTransport => UsesOpaqueMetadata;
 
-    public bool UsesOpaqueMetadata => _options.MetadataMode == SessionStorageMetadataMode.OpaqueP03;
+    public bool UsesOpaqueMetadata => true;
 
     public void Dispose() => _httpClient.Dispose();
 
     public async Task SendAsync(OutboundMessageEnvelope envelope, CancellationToken cancellationToken = default)
     {
-        if (UsesOpaqueMetadata)
-        {
-            var opaque = OpaqueSessionStorageCodec.EncodeDeposit(envelope, _options.TtlMilliseconds, _opaque!);
-            using var opaqueResponse = await PostJsonAsync(_storeUri, new
-            {
-                deposit_capability = opaque.Capability,
-                placement_key = opaque.PlacementKey,
-                @namespace = _options.Namespace,
-                attempt_id = opaque.AttemptId,
-                idempotency_key = opaque.IdempotencyKey,
-                data = opaque.Data
-            }, cancellationToken).ConfigureAwait(false);
-            opaqueResponse.EnsureSuccessStatusCode();
-            return;
-        }
-
-        var payload = new StoredMessagePayload(
-            (envelope.Id ?? MessageId.NewId()).Value,
-            envelope.Sender.Value,
-            envelope.Recipient.Value,
-            envelope.Body,
-            envelope.Attachments,
-            envelope.CreatedAt,
-            envelope.ExpiresAt,
-            envelope.ReplyTo,
-            envelope.Reaction);
-
-        var payloadJson = JsonSerializer.Serialize(payload, JsonOptions);
-        var payloadBytes = Encoding.UTF8.GetBytes(payloadJson);
-        var timestamp = envelope.CreatedAt.ToUnixTimeMilliseconds();
-        var idempotencyKey = BuildIdempotencyKey(envelope, payloadJson);
-
+        var opaque = OpaqueSessionStorageCodec.EncodeDeposit(
+            envelope, _options.TtlMilliseconds, _opaque!);
         using var response = await PostJsonAsync(_storeUri, new
         {
-            pubkey = envelope.Recipient.Value,
+            deposit_capability = opaque.Capability,
+            placement_key = opaque.PlacementKey,
             @namespace = _options.Namespace,
-            timestamp,
-            ttl = _options.TtlMilliseconds,
-            data = Convert.ToBase64String(payloadBytes),
-            idempotency_key = idempotencyKey
+            attempt_id = opaque.AttemptId,
+            idempotency_key = opaque.IdempotencyKey,
+            data = opaque.Data
         }, cancellationToken).ConfigureAwait(false);
-
         response.EnsureSuccessStatusCode();
     }
 
@@ -350,77 +314,33 @@ public sealed class SessionStorageMessageTransport :
             throw new ArgumentOutOfRangeException(nameof(limit));
         }
 
-        if (UsesOpaqueMetadata)
+        var opaque = OpaqueSessionStorageCodec.EncodeRetrieve(
+            identity, _options.TtlMilliseconds, _opaque!);
+        using var response = await PostJsonAsync(_retrieveUri, new
         {
-            var opaque = OpaqueSessionStorageCodec.EncodeRetrieve(identity, _options.TtlMilliseconds, _opaque!);
-            using var response = await PostJsonAsync(_retrieveUri, new
-            {
-                retrieve_capability = opaque.Capability,
-                placement_key = opaque.PlacementKey,
-                @namespace = _options.Namespace,
-                attempt_id = opaque.AttemptId,
-                last_hash = cursor
-            }, cancellationToken).ConfigureAwait(false);
-            response.EnsureSuccessStatusCode();
-            var payload = await response.Content.ReadFromJsonAsync<StorageRetrieveResponse>(JsonOptions, cancellationToken)
-                .ConfigureAwait(false) ?? new StorageRetrieveResponse([]);
-            var entries = payload.Messages
-                .Take(limit)
-                .Where(static item =>
-                    !string.IsNullOrWhiteSpace(item.Hash)
-                    && item.Hash.Length <= DurableInboxLimits.MaxServerHashChars)
-                .Select(static item => DurableInboxWireEntry.CreateBounded(
-                    item.Hash,
-                    item.Timestamp,
-                    item.Data ?? string.Empty))
-                .ToArray();
-            return new AuthenticatedInboxBatch(
-                entries,
-                entries.Length == 0 ? cursor : entries[^1].ServerHash);
-        }
-
-        var recipient = identity.SessionId;
-        var timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        var signatureMaterial = StorageSignatureCanonicalizer.CreateRetrieve(_options.Namespace, timestamp);
-        var signature = identity.SignDetached(signatureMaterial);
-        var ed25519PublicKey = identity.GetEd25519PublicKey();
-
-        try
-        {
-            using var response = await PostJsonAsync(_retrieveUri, new
-            {
-                pubkey = recipient.Value,
-                pubkey_ed25519 = Convert.ToHexString(ed25519PublicKey).ToLowerInvariant(),
-                @namespace = _options.Namespace,
-                timestamp,
-                signature = Convert.ToBase64String(signature),
-                last_hash = cursor
-            }, cancellationToken).ConfigureAwait(false);
-
-            response.EnsureSuccessStatusCode();
-            var payload = await response.Content.ReadFromJsonAsync<StorageRetrieveResponse>(JsonOptions, cancellationToken)
-                .ConfigureAwait(false) ?? new StorageRetrieveResponse([]);
-
-            var entries = payload.Messages
-                .Take(limit)
-                .Where(static item =>
-                    !string.IsNullOrWhiteSpace(item.Hash)
-                    && item.Hash.Length <= DurableInboxLimits.MaxServerHashChars)
-                .Select(static item => DurableInboxWireEntry.CreateBounded(
-                    item.Hash,
-                    item.Timestamp,
-                    item.Data ?? string.Empty))
-                .ToArray();
-            return new AuthenticatedInboxBatch(
-                entries,
-                entries.Length == 0 ? cursor : entries[^1].ServerHash);
-        }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(signatureMaterial);
-            CryptographicOperations.ZeroMemory(signature);
-            CryptographicOperations.ZeroMemory(ed25519PublicKey);
-        }
+            retrieve_capability = opaque.Capability,
+            placement_key = opaque.PlacementKey,
+            @namespace = _options.Namespace,
+            attempt_id = opaque.AttemptId,
+            last_hash = cursor
+        }, cancellationToken).ConfigureAwait(false);
+        response.EnsureSuccessStatusCode();
+        var payload = await response.Content.ReadFromJsonAsync<StorageRetrieveResponse>(
+            JsonOptions, cancellationToken).ConfigureAwait(false) ??
+            new StorageRetrieveResponse([]);
+        var entries = payload.Messages
+            .Take(limit)
+            .Where(static item =>
+                !string.IsNullOrWhiteSpace(item.Hash) &&
+                item.Hash.Length <= DurableInboxLimits.MaxServerHashChars)
+            .Select(static item => DurableInboxWireEntry.CreateBounded(
+                item.Hash,
+                item.Timestamp,
+                item.Data ?? string.Empty))
+            .ToArray();
+        return new AuthenticatedInboxBatch(
+            entries,
+            entries.Length == 0 ? cursor : entries[^1].ServerHash);
     }
 
     public bool TryDecodeInboxEntry(
@@ -428,62 +348,12 @@ public sealed class SessionStorageMessageTransport :
         SessionId recipient,
         out InboundMessageEnvelope envelope)
     {
-        if (UsesOpaqueMetadata)
-        {
-            return _opaqueDecodeCache.TryDecode(
-                entry,
-                recipient,
-                _options.TtlMilliseconds,
-                _opaque!,
-                out envelope);
-        }
-
-        envelope = default!;
-
-        try
-        {
-            var json = Encoding.UTF8.GetString(Convert.FromBase64String(entry.WirePayload));
-            var payload = JsonSerializer.Deserialize<StoredMessagePayload>(json, JsonOptions);
-            if (payload is null || !string.Equals(payload.Recipient, recipient.Value, StringComparison.Ordinal))
-            {
-                return false;
-            }
-
-            envelope = new InboundMessageEnvelope(
-                MessageId.Parse(payload.MessageId),
-                SessionId.Parse(payload.Sender),
-                recipient,
-                payload.Body,
-                payload.Attachments,
-                payload.CreatedAt,
-                payload.ExpiresAt,
-                entry.ServerHash,
-                payload.ReplyTo,
-                payload.Reaction);
-            return true;
-        }
-        catch (ArgumentException)
-        {
-            return false;
-        }
-        catch (FormatException)
-        {
-            return false;
-        }
-        catch (JsonException)
-        {
-            return false;
-        }
-    }
-
-    private static string BuildIdempotencyKey(OutboundMessageEnvelope envelope, string payloadJson)
-    {
-        var material = string.Join('\n',
-            "deep-storage-idempotency-v2",
-            envelope.Sender.Value,
-            envelope.Recipient.Value,
-            envelope.Id?.Value ?? Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(payloadJson))));
-        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(material))).ToLowerInvariant();
+        return _opaqueDecodeCache.TryDecode(
+            entry,
+            recipient,
+            _options.TtlMilliseconds,
+            _opaque!,
+            out envelope);
     }
 
     private async Task<HttpResponseMessage> PostJsonAsync<TPayload>(
@@ -496,17 +366,6 @@ public sealed class SessionStorageMessageTransport :
         return await _httpClient.PostAsync(resource, content, cancellationToken).ConfigureAwait(false);
     }
 
-    private sealed record StoredMessagePayload(
-        string MessageId,
-        string Sender,
-        string Recipient,
-        string Body,
-        IReadOnlyList<AttachmentMetadata> Attachments,
-        DateTimeOffset CreatedAt,
-        DateTimeOffset? ExpiresAt,
-        MessageReply? ReplyTo,
-        MessageReactionUpdate? Reaction);
-
     private sealed record StorageRetrieveResponse(
         [property: JsonPropertyName("messages")] IReadOnlyList<StorageMessageDto> Messages);
 
@@ -514,18 +373,6 @@ public sealed class SessionStorageMessageTransport :
         [property: JsonPropertyName("hash")] string Hash,
         [property: JsonPropertyName("timestamp")] long Timestamp,
         [property: JsonPropertyName("data")] string Data);
-}
-
-internal static class StorageSignatureCanonicalizer
-{
-    public static byte[] CreateRetrieve(int @namespace, long timestamp)
-    {
-        var namespaceValue = @namespace == 0
-            ? string.Empty
-            : @namespace.ToString(System.Globalization.CultureInfo.InvariantCulture);
-        return Encoding.UTF8.GetBytes(
-            $"retrieve{namespaceValue}{timestamp.ToString(System.Globalization.CultureInfo.InvariantCulture)}");
-    }
 }
 
 public sealed class StubSessionBackend : ISessionMessageTransport, IRecoveryProfileLookup

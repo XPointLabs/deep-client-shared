@@ -53,53 +53,21 @@ public sealed partial class MetadataPrivacyCharacterizationTests
     }
 
     [Fact]
-    public async Task StorageStore_ExposesTargetPairAndStableIdempotencyMaterial()
+    public void RemovedManagedStorageMode_IsRejectedBeforeNetworkIo()
     {
-        using var senderIdentity = new SessionIdentityProvider(AlicePhrase);
-        using var recipientIdentity = new SessionIdentityProvider(BobPhrase);
-        var requests = new List<JsonElement>();
-        using var client = new HttpClient(new CaptureHandler(async request =>
+        var requests = 0;
+        using var client = new HttpClient(new CaptureHandler(_ =>
         {
-            var bytes = await request.Content!.ReadAsByteArrayAsync();
-            using var document = JsonDocument.Parse(bytes);
-            requests.Add(document.RootElement.Clone());
-            return Json(new { hash = "synthetic-storage-hash" });
-        }))
-        {
-            BaseAddress = new Uri("https://storage.test/")
-        };
-        var transport = new SessionStorageMessageTransport(
+            requests++;
+            return Task.FromResult(Json(new { }));
+        })) { BaseAddress = new Uri("https://storage.test/") };
+        Assert.Throws<ArgumentOutOfRangeException>(() => new SessionStorageMessageTransport(
             client,
             new SessionStorageMessageTransportOptions(
                 "https://storage.test",
                 Namespace: 0,
-                MetadataMode: SessionStorageMetadataMode.LegacyCompatibility));
-        var message = new OutboundMessageEnvelope(
-            senderIdentity.SessionId,
-            recipientIdentity.SessionId,
-            "synthetic outer payload",
-            [],
-            DateTimeOffset.Parse("2026-07-18T00:00:00Z"),
-            null,
-            new MessageId("synthetic-message-p01"));
-
-        await transport.SendAsync(message);
-        await transport.SendAsync(message);
-
-        Assert.Equal(2, requests.Count);
-        Assert.All(
-            requests,
-            request => Assert.Equal(
-                recipientIdentity.SessionId.Value,
-                request.GetProperty("pubkey").GetString()));
-        Assert.Equal(
-            requests[0].GetProperty("idempotency_key").GetString(),
-            requests[1].GetProperty("idempotency_key").GetString());
-
-        var managedPayload = Convert.FromBase64String(requests[0].GetProperty("data").GetString()!);
-        using var payload = JsonDocument.Parse(managedPayload);
-        Assert.Equal(senderIdentity.SessionId.Value, payload.RootElement.GetProperty("sender").GetString());
-        Assert.Equal(recipientIdentity.SessionId.Value, payload.RootElement.GetProperty("recipient").GetString());
+                MetadataMode: (SessionStorageMetadataMode)2)));
+        Assert.Equal(0, requests);
     }
 
     [Fact]

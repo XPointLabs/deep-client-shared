@@ -78,7 +78,7 @@ public sealed class MailboxCredentialSelector
 public sealed class VerifiedOfficialMailboxAuthority
 {
     private static ReadOnlySpan<byte> FingerprintDomain =>
-        "deep.mailbox.official-authority-policy.v1"u8;
+        "deep.mailbox.authenticated-authority-policy.v1"u8;
     private readonly byte[] networkId;
     private readonly byte[] policyFingerprint;
     private readonly Func<bool> entitlement;
@@ -89,7 +89,7 @@ public sealed class VerifiedOfficialMailboxAuthority
         ReadOnlyMemory<byte> networkId,
         ulong minimumGeneration,
         IReadOnlyList<MailboxCapabilityIssuerAuthority> trustedIssuers,
-        bool isOfficial,
+        bool requiresManagedEntitlement,
         Func<bool> entitlement,
         IMailboxCapabilityRevocationSource revocations,
         TimeProvider timeProvider)
@@ -104,7 +104,7 @@ public sealed class VerifiedOfficialMailboxAuthority
             .ThenBy(static issuer => Convert.ToHexString(
                 issuer.PublicKey.Span), StringComparer.Ordinal)
             .ToArray());
-        IsOfficial = isOfficial;
+        RequiresManagedEntitlement = requiresManagedEntitlement;
         this.entitlement = entitlement ?? throw new ArgumentNullException(
             nameof(entitlement));
         Revocations = revocations ?? throw new ArgumentNullException(
@@ -120,8 +120,8 @@ public sealed class VerifiedOfficialMailboxAuthority
     public ulong MinimumGeneration { get; }
     public IReadOnlyList<MailboxCapabilityIssuerAuthority> TrustedIssuers =>
         Array.AsReadOnly(trustedIssuers.Select(CloneIssuer).ToArray());
-    public bool IsOfficial { get; }
-    public bool IsEntitled => entitlement();
+    public bool RequiresManagedEntitlement { get; }
+    public bool IsEntitled => !RequiresManagedEntitlement || entitlement();
     public IMailboxCapabilityRevocationSource Revocations { get; }
     public TimeProvider TimeProvider { get; }
     public ReadOnlyMemory<byte> PolicyFingerprint =>
@@ -132,7 +132,7 @@ public sealed class VerifiedOfficialMailboxAuthority
 
     public void Validate()
     {
-        if (!IsOfficial || !IsEntitled ||
+        if (!IsEntitled ||
             networkId.Length != 16 ||
             networkId.AsSpan().IndexOfAnyExcept((byte)0) < 0 ||
             MinimumGeneration == 0 ||
@@ -140,7 +140,7 @@ public sealed class VerifiedOfficialMailboxAuthority
             NowUnixSeconds == 0)
         {
             throw new InvalidOperationException(
-                "Official cloud mailbox authority or entitlement is unavailable.");
+                "Authenticated mailbox authority or managed entitlement is unavailable.");
         }
 
         var unique = new HashSet<string>(StringComparer.Ordinal);
@@ -161,7 +161,7 @@ public sealed class VerifiedOfficialMailboxAuthority
                     Convert.ToHexString(issuer.PublicKey.Span)))
             {
                 throw new InvalidOperationException(
-                    "Official cloud mailbox issuer authority is invalid.");
+                    "Authenticated mailbox issuer authority is invalid.");
             }
         }
     }

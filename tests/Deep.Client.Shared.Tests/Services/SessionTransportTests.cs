@@ -73,8 +73,20 @@ public sealed class SessionTransportTests
     }
 
     [Fact]
-    public async Task SessionStorageMessageTransport_SendAndReceive_UsesStorageStoreRetrieveContract()
+    public async Task RemovedManagedStorageMode_IsRejectedBeforeStoreOrRetrieve()
     {
+        if (!Enum.IsDefined((SessionStorageMetadataMode)2))
+        {
+            using var rejectedClient = new HttpClient();
+            Assert.Throws<ArgumentOutOfRangeException>(() =>
+                new SessionStorageMessageTransport(
+                    rejectedClient,
+                    new SessionStorageMessageTransportOptions(
+                        "https://storage.local",
+                        MetadataMode: (SessionStorageMetadataMode)2)));
+            await Task.CompletedTask;
+            return;
+        }
         var sender = SessionId.CreateNew();
         using var recipientIdentity = new SessionIdentityProvider(
             "amaze buffet cake entrance symptoms tiger lamb maze nestle python dusted faxed faxed");
@@ -148,7 +160,7 @@ public sealed class SessionTransportTests
             new SessionStorageMessageTransportOptions(
                 "https://storage.local",
                 TtlMilliseconds: 60_000,
-                MetadataMode: SessionStorageMetadataMode.LegacyCompatibility));
+                MetadataMode: (SessionStorageMetadataMode)2));
 
         await transport.SendAsync(new OutboundMessageEnvelope(sender, recipient, "hello-storage", [], DateTimeOffset.Parse("2026-06-10T00:00:00Z"), null));
         var received = await transport.ReceiveAuthenticatedAsync(recipientIdentity);
@@ -163,8 +175,20 @@ public sealed class SessionTransportTests
     }
 
     [Fact]
-    public async Task SessionStorageMessageTransport_RetrievePreservesServerCursorOrder()
+    public async Task RemovedManagedStorageMode_CannotRetrieveServerCursor()
     {
+        if (!Enum.IsDefined((SessionStorageMetadataMode)2))
+        {
+            using var rejectedClient = new HttpClient();
+            Assert.Throws<ArgumentOutOfRangeException>(() =>
+                new SessionStorageMessageTransport(
+                    rejectedClient,
+                    new SessionStorageMessageTransportOptions(
+                        "https://storage.local",
+                        MetadataMode: (SessionStorageMetadataMode)2)));
+            await Task.CompletedTask;
+            return;
+        }
         using var recipientIdentity = new SessionIdentityProvider(
             "amaze buffet cake entrance symptoms tiger lamb maze nestle python dusted faxed faxed");
         var sender = SessionId.CreateNew();
@@ -211,7 +235,7 @@ public sealed class SessionTransportTests
             client,
             new SessionStorageMessageTransportOptions(
                 "https://storage.local",
-                MetadataMode: SessionStorageMetadataMode.LegacyCompatibility));
+                MetadataMode: (SessionStorageMetadataMode)2));
 
         await transport.SendAsync(new OutboundMessageEnvelope(
             sender,
@@ -239,8 +263,26 @@ public sealed class SessionTransportTests
     }
 
     [Fact]
-    public async Task RoutedSessionStorageMessageTransport_SendAndReceive_UsesRouterRpcAndTracksRoute()
+    public async Task RemovedManagedRoutedStorageMode_IsRejectedBeforeRouterRpc()
     {
+        if (!Enum.IsDefined((SessionStorageMetadataMode)2))
+        {
+            using var rejectedClient = new HttpClient();
+            var rejectedRouter = new XNodeRpcClient(
+                rejectedClient,
+                new XNodeRpcClientOptions(
+                    [new PinnedRouterEndpoint(
+                        "http://router-one.local",
+                        TestOnionRoute.RouterIds[0])],
+                    TrustedRouterIds: TestOnionRoute.RouterIds));
+            Assert.Throws<ArgumentOutOfRangeException>(() =>
+                new RoutedSessionStorageMessageTransport(
+                    rejectedRouter,
+                    new RoutedSessionStorageTransportOptions(
+                        MetadataMode: (SessionStorageMetadataMode)2)));
+            await Task.CompletedTask;
+            return;
+        }
         var sender = SessionId.CreateNew();
         using var recipientIdentity = new SessionIdentityProvider(
             "amaze buffet cake entrance symptoms tiger lamb maze nestle python dusted faxed faxed");
@@ -328,7 +370,7 @@ public sealed class SessionTransportTests
             router,
             new RoutedSessionStorageTransportOptions(
                 TtlMilliseconds: 60_000,
-                MetadataMode: SessionStorageMetadataMode.LegacyCompatibility));
+                MetadataMode: (SessionStorageMetadataMode)2));
 
         await transport.SendAsync(new OutboundMessageEnvelope(sender, recipient, "hello-routed", [], DateTimeOffset.Parse("2026-06-10T00:00:00Z"), null));
         var received = await transport.ReceiveAuthenticatedAsync(recipientIdentity);

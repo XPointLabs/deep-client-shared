@@ -106,9 +106,15 @@ ship a capability derivation, production P03A crypto adapter, or durable capabil
 implementation. Release defaults therefore accept opaque metadata proof only from the two sealed
 shared transport implementations in `OpaqueP03` mode; an arbitrary transport cannot forge a
 marker interface. Production remains fail-closed until a reviewed producer supplies those
-dependencies. A local Debug/survival lane may opt
-into `SessionStorageMetadataMode.LegacyCompatibility` explicitly; it is never marked metadata
-private and `ClientFeatureFlags.ReleaseDefaults` rejects it.
+dependencies. The clean-break runtime has no managed-storage compatibility mode: HTTP and routed
+storage accept only opaque P03 metadata, and `ClientFeatureFlags.ReleaseDefaults` rejects any
+transport that cannot prove that boundary.
+
+The schema-v1 DEV-local mailbox credential importer is intentionally limited to one exact
+Android↔Windows holder pair. Its Mr. X-signed approval pins the lane, platform, ownership,
+authority, issuer, both holders and Session IDs, pair generation, manifest, and revocation
+snapshot. A durable per-holder receipt permits exact idempotent replay and rejects same-epoch
+replacement or epoch rollback. Schema v1 does not provision groups or third contacts.
 
 Route diagnostics expose only `TransportRouteSnapshot.TargetKeyDigest`, a lowercase SHA-256
 digest; the raw Session ID, placement key, or other route target is never retained in

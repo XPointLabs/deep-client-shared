@@ -44,13 +44,19 @@ public sealed class ScopedMailboxCredentialRepositoryTests
     public void DirectP2pCannotCarryCloudAuthority()
     {
         new MailboxDeliveryDecision(
-            MailboxDeliveryMode.DirectP2p, null).Validate();
+            MailboxTransportProtocol.DirectP2p,
+            MailboxInfrastructureOwnership.DirectP2p,
+            null).Validate();
         Assert.Throws<InvalidOperationException>(() =>
             new MailboxDeliveryDecision(
-                MailboxDeliveryMode.DirectP2p, Authority()).Validate());
+                MailboxTransportProtocol.DirectP2p,
+                MailboxInfrastructureOwnership.DirectP2p,
+                Authority()).Validate());
         Assert.Throws<InvalidOperationException>(() =>
             new MailboxDeliveryDecision(
-                MailboxDeliveryMode.OfficialCloud, null).Validate());
+                MailboxTransportProtocol.AuthenticatedMau2,
+                MailboxInfrastructureOwnership.OfficialManaged,
+                null).Validate());
     }
 
     [Fact]

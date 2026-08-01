@@ -25,10 +25,10 @@ public sealed class HttpServiceEndpointPolicyTests
             new HttpCallSignalingTransportOptions("http://192.168.1.44:41823/")));
         Assert.NotNull(factory.CreateSession(
             new HttpSessionTransportOptions("http://192.168.1.44:41820/")));
-        Assert.False(factory.CreateStorage(
+        Assert.Throws<ArgumentOutOfRangeException>(() => factory.CreateStorage(
             new SessionStorageMessageTransportOptions(
                 "http://192.168.1.44:41820/",
-                MetadataMode: SessionStorageMetadataMode.LegacyCompatibility)).UsesOpaqueMetadata);
+                MetadataMode: (SessionStorageMetadataMode)2)));
         Assert.NotNull(factory.CreateGroupSync(
             new SessionStorageGroupSyncTransportOptions("http://192.168.1.44:41820/")));
     }
@@ -143,14 +143,14 @@ public sealed class HttpServiceEndpointPolicyTests
             new HttpClient(),
             new SessionStorageMessageTransportOptions(
                 "https://storage.example/",
-                StorePath: path,
-                MetadataMode: SessionStorageMetadataMode.LegacyCompatibility)));
+                StorePath: path),
+            OpaqueMetadataTransportTests.TestOpaqueDependencies.Create()));
         Assert.Throws<ArgumentException>(() => new SessionStorageMessageTransport(
             new HttpClient(),
             new SessionStorageMessageTransportOptions(
                 "https://storage.example/",
-                RetrievePath: path,
-                MetadataMode: SessionStorageMetadataMode.LegacyCompatibility)));
+                RetrievePath: path),
+            OpaqueMetadataTransportTests.TestOpaqueDependencies.Create()));
         Assert.Throws<ArgumentException>(() => new SessionStorageGroupSyncTransport(
             new HttpClient(),
             new SessionStorageGroupSyncTransportOptions(

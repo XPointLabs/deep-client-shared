@@ -1280,7 +1280,8 @@ public sealed class E2eeClientTransportTests
             var subject = System.Security.Cryptography.SHA256.HashData(
                 Encoding.UTF8.GetBytes(envelope.Recipient.Value));
             return Task.FromResult(new MailboxDeliveryDecision(
-                MailboxDeliveryMode.OfficialCloud,
+                MailboxTransportProtocol.AuthenticatedMau2,
+                MailboxInfrastructureOwnership.OfficialManaged,
                 Authority,
                 new MailboxCredentialSelector(
                     Account,

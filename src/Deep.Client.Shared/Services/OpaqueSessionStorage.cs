@@ -9,8 +9,7 @@ namespace Deep.Client.Shared.Services;
 
 public enum SessionStorageMetadataMode
 {
-    OpaqueP03 = 1,
-    LegacyCompatibility = 2
+    OpaqueP03 = 1
 }
 
 public sealed record OpaqueMailboxDepositMaterial(

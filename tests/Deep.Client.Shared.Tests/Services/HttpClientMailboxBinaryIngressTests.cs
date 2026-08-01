@@ -259,6 +259,20 @@ public sealed class HttpClientMailboxBinaryIngressTests
             StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public void Physical_development_factory_accepts_only_exact_lab_origin()
+    {
+        using var ingress =
+            HttpClientMailboxBinaryIngress.CreatePhysicalDevelopment(
+                new Uri("http://192.168.1.44:41801/"),
+                Policy());
+        Assert.NotNull(ingress);
+        Assert.Throws<ArgumentException>(() =>
+            HttpClientMailboxBinaryIngress.CreatePhysicalDevelopment(
+                new Uri("http://192.168.1.45:41801/"),
+                Policy()));
+    }
+
     [Theory]
     [InlineData(true)]
     [InlineData(false)]

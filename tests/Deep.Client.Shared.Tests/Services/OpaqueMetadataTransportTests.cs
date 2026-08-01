@@ -205,35 +205,21 @@ public sealed class OpaqueMetadataTransportTests
     }
 
     [Fact]
-    public void LegacyCompatibility_IsExplicitAndNotMarkedMetadataPrivate()
+    public void UndefinedMetadataMode_IsRejectedAtConstruction()
     {
         using var client = CreateClient(_ => Task.FromResult(Json(new { })));
-        var transport = new SessionStorageMessageTransport(
+        Assert.Throws<ArgumentOutOfRangeException>(() => new SessionStorageMessageTransport(
             client,
             new SessionStorageMessageTransportOptions(
                 "https://storage.test",
-                MetadataMode: SessionStorageMetadataMode.LegacyCompatibility));
-
-        Assert.False(transport.UsesOpaqueMetadata);
+                MetadataMode: (SessionStorageMetadataMode)2)));
     }
 
     [Fact]
-    public void ReleaseRuntime_RejectsExplicitLegacyCompatibility()
+    public void MetadataMode_HasOnlyTheCleanBreakOpaqueValue()
     {
-        using var client = CreateClient(_ => Task.FromResult(Json(new { })));
-        var transport = new SessionStorageMessageTransport(
-            client,
-            new SessionStorageMessageTransportOptions(
-                "https://storage.test",
-                MetadataMode: SessionStorageMetadataMode.LegacyCompatibility));
-
-        var exception = Assert.Throws<InvalidOperationException>(() => new ClientRuntime(
-            new InMemorySessionStore(),
-            ClientFeatureFlags.ReleaseDefaults,
-            new SystemClock(),
-            transport));
-
-        Assert.Contains("not opaque P03", exception.Message, StringComparison.Ordinal);
+        Assert.Equal([SessionStorageMetadataMode.OpaqueP03],
+            Enum.GetValues<SessionStorageMetadataMode>());
     }
 
     private static HttpClient CreateClient(

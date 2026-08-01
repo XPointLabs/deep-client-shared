@@ -216,6 +216,27 @@ public sealed class HttpClientMailboxBinaryIngress :
         return CreateOwned(baseAddress, decodePolicy, CreateHandler());
     }
 
+    /// <summary>
+    /// Friend-assembly-only physical E2E lane. The exact private-LAN origin is intentionally
+    /// fixed so a runtime setting cannot turn this into a general cleartext transport.
+    /// Release composition never calls this entry point.
+    /// </summary>
+    internal static HttpClientMailboxBinaryIngress CreatePhysicalDevelopment(
+        Uri baseAddress,
+        MailboxClientDecodePolicy decodePolicy)
+    {
+        ArgumentNullException.ThrowIfNull(baseAddress);
+        ArgumentNullException.ThrowIfNull(decodePolicy);
+        if (baseAddress != new Uri("http://192.168.1.44:41801/"))
+        {
+            throw new ArgumentException(
+                "Physical mailbox HTTP is restricted to the exact DEV-local coordinator.",
+                nameof(baseAddress));
+        }
+
+        return CreateOwned(baseAddress, decodePolicy, CreateHandler());
+    }
+
     public void Dispose() => httpClient.Dispose();
 
     private static SocketsHttpHandler CreateHandler() =>

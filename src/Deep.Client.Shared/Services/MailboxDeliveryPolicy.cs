@@ -2,11 +2,17 @@ using Deep.Client.Shared.Persistence;
 
 namespace Deep.Client.Shared.Services;
 
-public enum MailboxDeliveryMode
+public enum MailboxTransportProtocol
 {
     DirectP2p = 1,
-    OfficialCloud = 2,
-    UserManagedNetwork = 3
+    AuthenticatedMau2 = 2
+}
+
+public enum MailboxInfrastructureOwnership
+{
+    DirectP2p = 1,
+    UserManaged = 2,
+    OfficialManaged = 3
 }
 
 /// <summary>Semantic delivery class is deliberately outside the encrypted wire body.</summary>
@@ -26,28 +32,44 @@ public sealed record MailboxDeliveryRequest(
 /// separate choices; transport failure never changes the selected mode.
 /// </summary>
 public sealed record MailboxDeliveryDecision(
-    MailboxDeliveryMode Mode,
-    VerifiedOfficialMailboxAuthority? OfficialAuthority,
+    MailboxTransportProtocol Protocol,
+    MailboxInfrastructureOwnership Ownership,
+    VerifiedOfficialMailboxAuthority? Authority,
     MailboxCredentialSelector? Selector = null)
 {
     public void Validate()
     {
-        if (Mode is MailboxDeliveryMode.DirectP2p or MailboxDeliveryMode.UserManagedNetwork)
+        if (Protocol == MailboxTransportProtocol.DirectP2p)
         {
-            if (OfficialAuthority is not null || Selector is not null)
+            if (Ownership != MailboxInfrastructureOwnership.DirectP2p ||
+                Authority is not null || Selector is not null)
             {
                 throw new InvalidOperationException(
                     "Direct P2P must not carry official-cloud authority.");
             }
             return;
         }
-        if (Mode != MailboxDeliveryMode.OfficialCloud ||
-            OfficialAuthority is null || Selector is null)
+        if (Protocol != MailboxTransportProtocol.AuthenticatedMau2 ||
+            Ownership is not (MailboxInfrastructureOwnership.UserManaged or
+                MailboxInfrastructureOwnership.OfficialManaged) ||
+            Authority is null || Selector is null)
         {
             throw new InvalidOperationException(
                 "Mailbox delivery policy is invalid.");
         }
-        OfficialAuthority.Validate();
+        if (Ownership == MailboxInfrastructureOwnership.UserManaged &&
+            Authority.RequiresManagedEntitlement)
+        {
+            throw new InvalidOperationException(
+                "User-managed MAU2 must not depend on managed-cloud entitlement.");
+        }
+        if (Ownership == MailboxInfrastructureOwnership.OfficialManaged &&
+            !Authority.RequiresManagedEntitlement)
+        {
+            throw new InvalidOperationException(
+                "Official-managed MAU2 must enforce entitlement at dispatch.");
+        }
+        Authority.Validate();
     }
 }
 
@@ -70,7 +92,9 @@ public sealed class DirectP2pMailboxDeliveryPolicy : IMailboxDeliveryPolicy
             throw new ArgumentOutOfRangeException(nameof(request));
         cancellationToken.ThrowIfCancellationRequested();
         return Task.FromResult(new MailboxDeliveryDecision(
-            MailboxDeliveryMode.DirectP2p, null));
+            MailboxTransportProtocol.DirectP2p,
+            MailboxInfrastructureOwnership.DirectP2p,
+            null));
     }
 }
 
@@ -79,32 +103,21 @@ public sealed class DirectP2pMailboxDeliveryPolicy : IMailboxDeliveryPolicy
 /// This lane is free and is deliberately distinct from both radio/direct P2P and the
 /// official managed cloud.
 /// </summary>
-public sealed class UserManagedMailboxDeliveryPolicy : IMailboxDeliveryPolicy
-{
-    public Task<MailboxDeliveryDecision> DecideAsync(
-        MailboxDeliveryRequest request,
-        CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(request);
-        ArgumentNullException.ThrowIfNull(request.Envelope);
-        if (!Enum.IsDefined(request.Kind))
-            throw new ArgumentOutOfRangeException(nameof(request));
-        cancellationToken.ThrowIfCancellationRequested();
-        return Task.FromResult(new MailboxDeliveryDecision(
-            MailboxDeliveryMode.UserManagedNetwork, null));
-    }
-}
-
-/// <summary>Fail-closed official-cloud policy. It has no transport fallback.</summary>
-public sealed class OfficialCloudMailboxDeliveryPolicy : IMailboxDeliveryPolicy
+public sealed class AuthenticatedMau2MailboxDeliveryPolicy : IMailboxDeliveryPolicy
 {
     private readonly VerifiedOfficialMailboxAuthority authority;
     private readonly Func<MailboxDeliveryRequest, MailboxCredentialSelector> selector;
+    private readonly MailboxInfrastructureOwnership ownership;
 
-    public OfficialCloudMailboxDeliveryPolicy(
+    public AuthenticatedMau2MailboxDeliveryPolicy(
+        MailboxInfrastructureOwnership ownership,
         VerifiedOfficialMailboxAuthority authority,
         Func<MailboxDeliveryRequest, MailboxCredentialSelector> selector)
     {
+        if (ownership is not (MailboxInfrastructureOwnership.UserManaged or
+            MailboxInfrastructureOwnership.OfficialManaged))
+            throw new ArgumentOutOfRangeException(nameof(ownership));
+        this.ownership = ownership;
         this.authority = authority ?? throw new ArgumentNullException(nameof(authority));
         this.selector = selector ?? throw new ArgumentNullException(nameof(selector));
         authority.Validate();
@@ -121,8 +134,11 @@ public sealed class OfficialCloudMailboxDeliveryPolicy : IMailboxDeliveryPolicy
         cancellationToken.ThrowIfCancellationRequested();
         authority.Validate();
         var selected = selector(request) ?? throw new InvalidOperationException(
-            "Official cloud has no scoped credential for this delivery target.");
+            "Authenticated MAU2 has no scoped credential for this delivery target.");
         return Task.FromResult(new MailboxDeliveryDecision(
-            MailboxDeliveryMode.OfficialCloud, authority, selected));
+            MailboxTransportProtocol.AuthenticatedMau2,
+            ownership,
+            authority,
+            selected));
     }
 }

@@ -39,9 +39,13 @@ public sealed class NativeMailboxAdapterTests
     [Fact]
     public void Direct_p2p_cannot_be_given_an_official_cloud_authority()
     {
-        new MailboxDeliveryDecision(MailboxDeliveryMode.DirectP2p, null).Validate();
+        new MailboxDeliveryDecision(
+            MailboxTransportProtocol.DirectP2p,
+            MailboxInfrastructureOwnership.DirectP2p,
+            null).Validate();
         Assert.Throws<InvalidOperationException>(() => new MailboxDeliveryDecision(
-            MailboxDeliveryMode.DirectP2p,
+            MailboxTransportProtocol.DirectP2p,
+            MailboxInfrastructureOwnership.DirectP2p,
             new VerifiedOfficialMailboxAuthority(
                 Enumerable.Repeat((byte)1, 16).ToArray(),
                 1,
