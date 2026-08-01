@@ -370,6 +370,7 @@ public sealed class E2eeClientTransport :
     private readonly IClock clock;
     private readonly IDurableInboxRepository inboxRepository;
     private readonly IMailboxDeliveryPolicy deliveryPolicy;
+    private readonly IDisposable? ownedRawTransport;
     private readonly object identityGate = new();
     private readonly SemaphoreSlim receiveGate = new(1, 1);
     private readonly object deliveredItemsGate = new();
@@ -385,13 +386,19 @@ public sealed class E2eeClientTransport :
         Func<CancellationToken, Task<string?>> recoveryPhraseProvider,
         IClock clock,
         IDurableInboxRepository inboxRepository,
-        IMailboxDeliveryPolicy deliveryPolicy)
+        IMailboxDeliveryPolicy deliveryPolicy,
+        bool ownsRawTransport = false)
     {
         this.rawTransport = rawTransport ?? throw new ArgumentNullException(nameof(rawTransport));
         this.recoveryPhraseProvider = recoveryPhraseProvider ?? throw new ArgumentNullException(nameof(recoveryPhraseProvider));
         this.clock = clock ?? throw new ArgumentNullException(nameof(clock));
         this.inboxRepository = inboxRepository ?? throw new ArgumentNullException(nameof(inboxRepository));
         this.deliveryPolicy = deliveryPolicy ?? throw new ArgumentNullException(nameof(deliveryPolicy));
+        ownedRawTransport = ownsRawTransport
+            ? rawTransport as IDisposable ?? throw new ArgumentException(
+                "An owned raw transport must implement IDisposable.",
+                nameof(rawTransport))
+            : null;
     }
 
     public async Task SendAsync(OutboundMessageEnvelope envelope, CancellationToken cancellationToken = default)
@@ -626,11 +633,18 @@ public sealed class E2eeClientTransport :
             cachedIdentity = null;
         }
 
-        identityToDestroy?.Destroy();
-
-        lock (deliveredItemsGate)
+        try
         {
-            deliveredItems.Clear();
+            identityToDestroy?.Destroy();
+
+            lock (deliveredItemsGate)
+            {
+                deliveredItems.Clear();
+            }
+        }
+        finally
+        {
+            ownedRawTransport?.Dispose();
         }
     }
 

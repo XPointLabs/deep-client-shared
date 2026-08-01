@@ -19,7 +19,8 @@ public sealed class ClientRuntime : IDisposable
         IAvatarProfileTransport? avatarProfiles = null,
         bool requireE2eeTransport = false,
         IExternalTransportOutboxExecutor? transportOutboxExecutor = null,
-        IMailboxDeliveryPolicy? mailboxDeliveryPolicy = null)
+        IMailboxDeliveryPolicy? mailboxDeliveryPolicy = null,
+        bool ownsMessageTransport = false)
     {
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(featureFlags);
@@ -83,7 +84,8 @@ public sealed class ClientRuntime : IDisposable
                 Accounts.GetRecoveryPhraseAsync,
                 clock,
                 Store,
-                mailboxDeliveryPolicy);
+                mailboxDeliveryPolicy,
+                ownsMessageTransport);
             MessageTransport = encryptedTransport;
             GroupSyncTransport = encryptedTransport;
             ownedMessageTransport = encryptedTransport;
@@ -98,8 +100,18 @@ public sealed class ClientRuntime : IDisposable
         Conversations = new ConversationService(Store, Store, Store, Store, clock, featureFlags, GroupSyncTransport);
         Messages = new MessageService(Conversations, Store, Store, Store, MessageTransport, GroupSyncTransport, clock);
         Inbox = new InboxSyncService(Accounts, Conversations, Messages);
+        var accountLifecycles = new List<IAccountGenerationLifecycle>
+        {
+            mutationBarrier,
+            Inbox,
+            Messages
+        };
+        if (messageTransport is IAccountGenerationLifecycle transportLifecycle)
+        {
+            accountLifecycles.Add(transportLifecycle);
+        }
         Accounts.RegisterAccountGenerationLifecycle(
-            new CompositeAccountGenerationLifecycle(mutationBarrier, Inbox, Messages));
+            new CompositeAccountGenerationLifecycle(accountLifecycles));
         Sync = new SyncOrchestrator();
         Notifications = new NotificationPlanner();
     }
@@ -159,7 +171,8 @@ public sealed class ClientRuntime : IDisposable
         Func<ILocalSessionStore, ILocalSessionStore>? storeDecorator = null,
         bool requireE2eeTransport = false,
         IExternalTransportOutboxExecutor? transportOutboxExecutor = null,
-        IMailboxDeliveryPolicy? mailboxDeliveryPolicy = null)
+        IMailboxDeliveryPolicy? mailboxDeliveryPolicy = null,
+        bool ownsMessageTransport = false)
     {
         var resolvedFeatureFlags = featureFlags ?? ClientFeatureFlags.Defaults;
         if (backend is null)
@@ -203,7 +216,8 @@ public sealed class ClientRuntime : IDisposable
             avatarProfiles,
             requireE2eeTransport,
             transportOutboxExecutor,
-            mailboxDeliveryPolicy);
+            mailboxDeliveryPolicy,
+            ownsMessageTransport);
     }
 
     public static ClientRuntime CreatePersistentForTests(

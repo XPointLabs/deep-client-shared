@@ -127,6 +127,33 @@ public sealed class AccountGenerationLifecycleTests
         Assert.Empty(await ToListAsync(((IConversationRepository)runtime.Store).ListAsync()));
     }
 
+    [Fact]
+    public async Task StoreBoundTransportLifecycleResetsOnLogoutAndResumesEachAccountGeneration()
+    {
+        var transport = new LifecycleTransport();
+        using var runtime = new ClientRuntime(
+            new InMemorySessionStore(),
+            ClientFeatureFlags.Defaults,
+            new FrozenClock(Now),
+            transport);
+
+        await runtime.Accounts.RegisterAsync("Alice");
+        var alice = await runtime.Accounts.GetActiveAccountAsync()
+            ?? throw new InvalidOperationException("Alice was not activated.");
+        var alicePhrase = await runtime.Accounts.GetRecoveryPhraseAsync()
+            ?? throw new InvalidOperationException("Alice has no recovery phrase.");
+        await runtime.Accounts.SignOutAsync();
+        await runtime.Accounts.LoginAsync(alicePhrase, "Alice again");
+        await runtime.Accounts.SignOutAsync();
+        await runtime.Accounts.RegisterAsync("Bob");
+        var bob = await runtime.Accounts.GetActiveAccountAsync()
+            ?? throw new InvalidOperationException("Bob was not activated.");
+
+        Assert.Equal([alice.SessionId, alice.SessionId], transport.StoppedAccounts);
+        Assert.Equal([alice.SessionId, alice.SessionId, bob.SessionId],
+            transport.ResumedAccounts);
+    }
+
     private static Conversation NewConversation(string displayName) =>
         new(
             ConversationId.ForOneToOne(SessionId.CreateNew()),
@@ -135,6 +162,33 @@ public sealed class AccountGenerationLifecycleTests
             ConversationSettings.Default(ConversationKind.OneToOne),
             Now,
             Now);
+
+    private sealed class LifecycleTransport :
+        ISessionMessageTransport,
+        IAccountGenerationLifecycle
+    {
+        public List<SessionId> StoppedAccounts { get; } = [];
+        public List<SessionId> ResumedAccounts { get; } = [];
+
+        public Task SendAsync(
+            OutboundMessageEnvelope envelope,
+            CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        public Task<IReadOnlyList<InboundMessageEnvelope>> ReceiveAsync(
+            SessionId recipient,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<InboundMessageEnvelope>>([]);
+
+        public Task StopAsync(
+            SessionId account,
+            CancellationToken cancellationToken = default)
+        {
+            StoppedAccounts.Add(account);
+            return Task.CompletedTask;
+        }
+
+        public void Resume(SessionId account) => ResumedAccounts.Add(account);
+    }
 
     public class BlockingMutationStoreProxy : DispatchProxy
     {
