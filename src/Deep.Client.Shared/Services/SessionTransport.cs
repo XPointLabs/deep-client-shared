@@ -192,6 +192,7 @@ public sealed record SessionStorageMessageTransportOptions(
 public sealed class SessionStorageMessageTransport :
     ISessionMessageTransport,
     IAuthenticatedInboxTransport,
+    IMetadataPrivateSessionMessageTransport,
     IDisposable
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
@@ -254,6 +255,8 @@ public sealed class SessionStorageMessageTransport :
             }
         }
     }
+
+    public bool UsesMetadataPrivateTransport => UsesOpaqueMetadata;
 
     public bool UsesOpaqueMetadata => _options.MetadataMode == SessionStorageMetadataMode.OpaqueP03;
 

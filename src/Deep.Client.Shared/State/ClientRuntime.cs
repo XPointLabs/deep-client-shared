@@ -249,6 +249,7 @@ public sealed class ClientRuntime : IDisposable
         {
             SessionStorageMessageTransport direct => direct.UsesOpaqueMetadata,
             RoutedSessionStorageMessageTransport routed => routed.UsesOpaqueMetadata,
+            IMetadataPrivateSessionMessageTransport opaque => opaque.UsesMetadataPrivateTransport,
             _ => false
         };
 }

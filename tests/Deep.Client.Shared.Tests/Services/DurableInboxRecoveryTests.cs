@@ -62,6 +62,35 @@ public sealed class DurableInboxRecoveryTests
     }
 
     [Fact]
+    public async Task OfficialMailboxAck_RemoteSuccessBeforeLocalCrashRetriesIdempotently()
+    {
+        var raw = new CursorRawTransport();
+        var official = new OpaqueAckTransport(raw);
+        using var aliceIdentity = new SessionIdentityProvider(AlicePhrase);
+        using var bobIdentity = new SessionIdentityProvider(BobPhrase);
+        await SendEncryptedDirectAsync(raw, aliceIdentity, bobIdentity, "remote-ack-boundary");
+        var store = new InMemorySessionStore();
+        using var receiver = new E2eeClientTransport(
+            official,
+            _ => Task.FromResult<string?>(BobPhrase),
+            new FrozenClock(Now),
+            new FaultingInboxRepository(store, InboxCrashPoint.BeforeAck),
+            new DirectP2pMailboxDeliveryPolicy());
+
+        var received = Assert.Single(await receiver.ReceiveAsync(bobIdentity.SessionId));
+        await Assert.ThrowsAsync<InjectedInboxCrashException>(() =>
+            receiver.AcknowledgeInboxItemAsync(bobIdentity.SessionId, received.ServerHash));
+        Assert.Equal(1, official.RemoteAckCount);
+        Assert.Equal(1, await store.CountPendingInboxItemsAsync(
+            new DurableInboxScope(bobIdentity.SessionId, official.InboxNamespace)));
+
+        await receiver.AcknowledgeInboxItemAsync(bobIdentity.SessionId, received.ServerHash);
+        Assert.Equal(2, official.RemoteAckCount);
+        Assert.Equal(0, await store.CountPendingInboxItemsAsync(
+            new DurableInboxScope(bobIdentity.SessionId, official.InboxNamespace)));
+    }
+
+    [Fact]
     public async Task MessageService_RestartAfterDomainAppendBeforeAckIsIdempotent()
     {
         var statePath = NewSqlitePath();
@@ -312,7 +341,8 @@ public sealed class DurableInboxRecoveryTests
     {
         BeforeStage,
         AfterStage,
-        AfterPrepare
+        AfterPrepare,
+        BeforeAck
     }
 
     private sealed class InjectedInboxCrashException : Exception;
@@ -372,8 +402,11 @@ public sealed class DurableInboxRecoveryTests
         public Task<DurableInboxAckResult> AcknowledgeInboxItemAsync(
             DurableInboxScope scope,
             string serverHash,
-            CancellationToken cancellationToken = default) =>
-            inner.AcknowledgeInboxItemAsync(scope, serverHash, cancellationToken);
+            CancellationToken cancellationToken = default)
+        {
+            ThrowOnce(InboxCrashPoint.BeforeAck);
+            return inner.AcknowledgeInboxItemAsync(scope, serverHash, cancellationToken);
+        }
 
         public Task DiscardInboxItemAsync(
             DurableInboxScope scope,
@@ -565,6 +598,47 @@ public sealed class DurableInboxRecoveryTests
             }
 
             inbox.Add(envelope);
+        }
+    }
+
+    private sealed class OpaqueAckTransport(CursorRawTransport inner) :
+        IAuthenticatedOpaqueMailboxTransport,
+        IAuthenticatedInboxTransport
+    {
+        private int remoteAckCount;
+        public int RemoteAckCount => Volatile.Read(ref remoteAckCount);
+        public int InboxNamespace => 0x4d32;
+
+        public Task SendAsync(OutboundMessageEnvelope envelope, CancellationToken cancellationToken = default) =>
+            inner.SendAsync(envelope, cancellationToken);
+        public Task<IReadOnlyList<InboundMessageEnvelope>> ReceiveAsync(
+            SessionId recipient, CancellationToken cancellationToken = default) =>
+            inner.ReceiveAsync(recipient, cancellationToken);
+        public Task<IReadOnlyList<InboundMessageEnvelope>> ReceiveAuthenticatedAsync(
+            SessionIdentityProvider identity, CancellationToken cancellationToken = default) =>
+            inner.ReceiveAuthenticatedAsync(identity, cancellationToken);
+        public Task<AuthenticatedInboxBatch> RetrieveAuthenticatedAsync(
+            SessionIdentityProvider identity, string? cursor, int limit,
+            CancellationToken cancellationToken = default) =>
+            inner.RetrieveAuthenticatedAsync(identity, cursor, limit, cancellationToken);
+        public bool TryDecodeInboxEntry(
+            DurableInboxWireEntry entry, SessionId recipient, out InboundMessageEnvelope envelope) =>
+            ((IAuthenticatedInboxTransport)inner).TryDecodeInboxEntry(entry, recipient, out envelope);
+        public Task<IReadOnlyList<IPreparedMailboxAuthenticatedSend>> PrepareScopedMailboxBatchAsync(
+            IMailboxOperationSigner signer, IReadOnlyList<MailboxAuthenticatedSendTarget> targets,
+            CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task SendPreparedMailboxAuthenticatedAsync(
+            IPreparedMailboxAuthenticatedSend preparedSend,
+            CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task<OpaqueMailboxInboxPage> RetrieveOpaqueMailboxInboxAsync(
+            IMailboxOperationSigner signer, OpaqueMailboxContinuation continuation,
+            CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task AcknowledgeOpaqueMailboxInboxAsync(
+            IMailboxOperationSigner signer, string opaqueItemHandle,
+            CancellationToken cancellationToken = default)
+        {
+            Interlocked.Increment(ref remoteAckCount);
+            return Task.CompletedTask;
         }
     }
 }

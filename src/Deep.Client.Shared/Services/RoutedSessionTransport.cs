@@ -1253,7 +1253,8 @@ public sealed record RoutedSessionStorageTransportOptions(
 
 public sealed class RoutedSessionStorageMessageTransport :
     ISessionMessageTransport,
-    IAuthenticatedInboxTransport
+    IAuthenticatedInboxTransport,
+    IMetadataPrivateSessionMessageTransport
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -1288,6 +1289,7 @@ public sealed class RoutedSessionStorageMessageTransport :
     }
 
     public bool UsesOpaqueMetadata => _options.MetadataMode == SessionStorageMetadataMode.OpaqueP03;
+    public bool UsesMetadataPrivateTransport => UsesOpaqueMetadata;
 
     public async Task SendAsync(OutboundMessageEnvelope envelope, CancellationToken cancellationToken = default)
     {

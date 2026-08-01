@@ -379,6 +379,19 @@ public sealed class ClientMailboxAdapter
             cancellationToken).ConfigureAwait(false);
     }
 
+    internal async Task<ClientMailboxStoreResult> DispatchPreparedStoreAsync(
+        OutboxAccountScope outboxScope,
+        MailboxCredentialSelector selector,
+        MailboxAuthenticatedRequestFrame prepared,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(outboxScope);
+        ArgumentNullException.ThrowIfNull(selector);
+        ArgumentNullException.ThrowIfNull(prepared);
+        return await DispatchStoreAsync(
+            outboxScope, selector, prepared, cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<ClientMailboxRetrieveResult> RetrieveAsync(
         OutboxAccountScope outboxScope,
         IMailboxOperationSigner signer,

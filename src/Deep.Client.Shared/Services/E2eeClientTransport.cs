@@ -37,6 +37,19 @@ public interface IDirectP2pSessionMessageTransport : ISessionMessageTransport
 }
 
 /// <summary>
+/// Explicit capability for a storage/relay network selected and operated independently by
+/// the user. It must never account traffic against the official managed cloud.
+/// </summary>
+public interface IUserManagedSessionMessageTransport : ISessionMessageTransport
+{
+}
+
+public interface IMetadataPrivateSessionMessageTransport : ISessionMessageTransport
+{
+    bool UsesMetadataPrivateTransport { get; }
+}
+
+/// <summary>
 /// Opaque, immutable result of one successful local mailbox-send preparation. A handle may be
 /// dispatched only through the transport which created it.
 /// </summary>
@@ -218,6 +231,11 @@ public interface IAuthenticatedOpaqueMailboxTransport :
     Task<OpaqueMailboxInboxPage> RetrieveOpaqueMailboxInboxAsync(
         IMailboxOperationSigner signer,
         OpaqueMailboxContinuation continuation,
+        CancellationToken cancellationToken = default);
+
+    Task AcknowledgeOpaqueMailboxInboxAsync(
+        IMailboxOperationSigner signer,
+        string opaqueItemHandle,
         CancellationToken cancellationToken = default);
 }
 
@@ -828,8 +846,10 @@ public sealed class E2eeClientTransport :
                 .ConfigureAwait(false) ?? throw new InvalidOperationException(
                     "Mailbox delivery policy returned no decision.");
             decision.Validate();
-            if (decision.Mode == MailboxDeliveryMode.DirectP2p)
+            if (decision.Mode is MailboxDeliveryMode.DirectP2p or
+                MailboxDeliveryMode.UserManagedNetwork)
             {
+                EnsureFreeTransport(decision.Mode);
                 direct.Add(copy);
             }
             else
@@ -891,10 +911,27 @@ public sealed class E2eeClientTransport :
         IReadOnlyCollection<OutboundMessageEnvelope> direct)
     {
         if (direct.Count > 0 &&
+            rawTransport is not IDirectP2pSessionMessageTransport &&
+            rawTransport is not IUserManagedSessionMessageTransport)
+        {
+            throw new InvalidOperationException(
+                "Free delivery requires an explicitly direct or user-managed transport.");
+        }
+    }
+
+    private void EnsureFreeTransport(MailboxDeliveryMode mode)
+    {
+        if (mode == MailboxDeliveryMode.DirectP2p &&
             rawTransport is not IDirectP2pSessionMessageTransport)
         {
             throw new InvalidOperationException(
-                "Direct P2P delivery requires an explicitly non-official infrastructure transport.");
+                "Direct P2P delivery requires an explicit direct-P2P transport.");
+        }
+        if (mode == MailboxDeliveryMode.UserManagedNetwork &&
+            rawTransport is not IUserManagedSessionMessageTransport)
+        {
+            throw new InvalidOperationException(
+                "User-managed delivery requires an explicit user-managed transport.");
         }
     }
 
@@ -942,6 +979,12 @@ public sealed class E2eeClientTransport :
                 }
 
                 var scope = new DurableInboxScope(account, authenticatedTransport.InboxNamespace);
+                if (rawTransport is IAuthenticatedOpaqueMailboxTransport opaqueMailbox)
+                {
+                    using var signer = new MailboxOperationSignerLease(identity);
+                    await opaqueMailbox.AcknowledgeOpaqueMailboxInboxAsync(
+                        signer, serverHash, cancellationToken).ConfigureAwait(false);
+                }
                 var ack = await inboxRepository.AcknowledgeInboxItemAsync(
                     scope,
                     serverHash,
@@ -1158,10 +1201,16 @@ public sealed class E2eeClientTransport :
             throw new E2eeProtocolException("Staged storage data is not a valid raw inbox entry.");
         }
 
-        return DecodeCandidate(identity, raw);
+        return DecodeCandidate(
+            identity,
+            raw,
+            trustCiphertextSender: authenticatedTransport is IAuthenticatedOpaqueMailboxTransport);
     }
 
-    private DecodedCandidate DecodeCandidate(SessionIdentityProvider identity, InboundMessageEnvelope raw)
+    private DecodedCandidate DecodeCandidate(
+        SessionIdentityProvider identity,
+        InboundMessageEnvelope raw,
+        bool trustCiphertextSender = false)
     {
         if (raw is null || raw.Recipient != identity.SessionId || raw.Attachments is null || raw.Attachments.Count != 0 ||
             raw.ReplyTo is not null || raw.Reaction is not null || string.IsNullOrWhiteSpace(raw.ServerHash) ||
@@ -1176,7 +1225,8 @@ public sealed class E2eeClientTransport :
                 envelope,
                 clock.UtcNow,
                 E2eeContentCodec.DefaultMaxFutureSkew);
-            if (raw.Sender != decoded.Envelope.Sender)
+            if (!trustCiphertextSender &&
+                raw.Sender != decoded.Envelope.Sender)
             {
                 throw new E2eeProtocolException("Raw sender does not match the authenticated DPE1 sender.");
             }

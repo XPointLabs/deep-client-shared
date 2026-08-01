@@ -5,7 +5,8 @@ namespace Deep.Client.Shared.Services;
 public enum MailboxDeliveryMode
 {
     DirectP2p = 1,
-    OfficialCloud = 2
+    OfficialCloud = 2,
+    UserManagedNetwork = 3
 }
 
 /// <summary>Semantic delivery class is deliberately outside the encrypted wire body.</summary>
@@ -31,7 +32,7 @@ public sealed record MailboxDeliveryDecision(
 {
     public void Validate()
     {
-        if (Mode == MailboxDeliveryMode.DirectP2p)
+        if (Mode is MailboxDeliveryMode.DirectP2p or MailboxDeliveryMode.UserManagedNetwork)
         {
             if (OfficialAuthority is not null || Selector is not null)
             {
@@ -70,5 +71,58 @@ public sealed class DirectP2pMailboxDeliveryPolicy : IMailboxDeliveryPolicy
         cancellationToken.ThrowIfCancellationRequested();
         return Task.FromResult(new MailboxDeliveryDecision(
             MailboxDeliveryMode.DirectP2p, null));
+    }
+}
+
+/// <summary>
+/// Selects infrastructure operated by the user (or by a community chosen by the user).
+/// This lane is free and is deliberately distinct from both radio/direct P2P and the
+/// official managed cloud.
+/// </summary>
+public sealed class UserManagedMailboxDeliveryPolicy : IMailboxDeliveryPolicy
+{
+    public Task<MailboxDeliveryDecision> DecideAsync(
+        MailboxDeliveryRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(request.Envelope);
+        if (!Enum.IsDefined(request.Kind))
+            throw new ArgumentOutOfRangeException(nameof(request));
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(new MailboxDeliveryDecision(
+            MailboxDeliveryMode.UserManagedNetwork, null));
+    }
+}
+
+/// <summary>Fail-closed official-cloud policy. It has no transport fallback.</summary>
+public sealed class OfficialCloudMailboxDeliveryPolicy : IMailboxDeliveryPolicy
+{
+    private readonly VerifiedOfficialMailboxAuthority authority;
+    private readonly Func<MailboxDeliveryRequest, MailboxCredentialSelector> selector;
+
+    public OfficialCloudMailboxDeliveryPolicy(
+        VerifiedOfficialMailboxAuthority authority,
+        Func<MailboxDeliveryRequest, MailboxCredentialSelector> selector)
+    {
+        this.authority = authority ?? throw new ArgumentNullException(nameof(authority));
+        this.selector = selector ?? throw new ArgumentNullException(nameof(selector));
+        authority.Validate();
+    }
+
+    public Task<MailboxDeliveryDecision> DecideAsync(
+        MailboxDeliveryRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(request.Envelope);
+        if (!Enum.IsDefined(request.Kind))
+            throw new ArgumentOutOfRangeException(nameof(request));
+        cancellationToken.ThrowIfCancellationRequested();
+        authority.Validate();
+        var selected = selector(request) ?? throw new InvalidOperationException(
+            "Official cloud has no scoped credential for this delivery target.");
+        return Task.FromResult(new MailboxDeliveryDecision(
+            MailboxDeliveryMode.OfficialCloud, authority, selected));
     }
 }
