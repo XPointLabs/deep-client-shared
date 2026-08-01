@@ -1,0 +1,9 @@
+{
+  "schema": "deep.p11a.compatibility-impact.v1",
+  "wireFormatChanged": false,
+  "runtimeRegistered": false,
+  "physicalSchemaVersion": 9,
+  "migration": "exact v8 tables with rows are quarantined transactionally; empty exact v8 migrates to v9",
+  "rollback": "schema/version/rename changes roll back together on validation or DDL failure",
+  "consumerImpact": "P11B/P12 adapters consume the account-scoped opaque outbox contract only after their own gates"
+}
