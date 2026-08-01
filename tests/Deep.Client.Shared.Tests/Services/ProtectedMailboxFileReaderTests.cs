@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using System.Security.AccessControl;
 using System.Security.Principal;
@@ -8,6 +9,28 @@ namespace Deep.Client.Shared.Tests.Services;
 
 public sealed class ProtectedMailboxFileReaderTests
 {
+    [Theory]
+    [InlineData(Architecture.Arm, 0x00004000, 0x00008000)]
+    [InlineData(Architecture.Arm64, 0x00004000, 0x00008000)]
+    [InlineData(Architecture.X64, 0x00010000, 0x00020000)]
+    public void Unix_path_flags_match_the_target_architecture(
+        Architecture architecture,
+        int expectedDirectory,
+        int expectedNoFollow)
+    {
+        var actual = ProtectedMailboxFileReader.UnixPathFlags(architecture);
+
+        Assert.Equal(expectedDirectory, actual.Directory);
+        Assert.Equal(expectedNoFollow, actual.NoFollow);
+    }
+
+    [Fact]
+    public void Unix_path_flags_fail_closed_for_an_unsupported_architecture()
+    {
+        Assert.Throws<PlatformNotSupportedException>(() =>
+            ProtectedMailboxFileReader.UnixPathFlags(Architecture.Wasm));
+    }
+
     [Fact]
     [UnsupportedOSPlatform("windows")]
     public void Unix_protected_file_is_read_from_openat_handle()

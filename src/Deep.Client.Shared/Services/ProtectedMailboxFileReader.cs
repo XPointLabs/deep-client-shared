@@ -30,8 +30,6 @@ internal static class ProtectedMailboxFileReader
 
     private const int UnixReadOnly = 0;
     private const int UnixNonBlock = 0x00000800;
-    private const int UnixDirectory = 0x00010000;
-    private const int UnixNoFollow = 0x00020000;
     private const int UnixCloseOnExec = 0x00080000;
     private const int UnixRegularFile = 0x00008000;
     private const int UnixFileTypeMask = 0x0000f000;
@@ -260,12 +258,14 @@ internal static class ProtectedMailboxFileReader
         IReadOnlyList<string> segments,
         int maxBytes)
     {
+        var pathFlags = UnixPathFlags(RuntimeInformation.ProcessArchitecture);
         var handles = new List<SafeFileHandle>(segments.Count + 1);
         try
         {
             var rootHandle = OpenUnix(
                 root,
-                UnixReadOnly | UnixDirectory | UnixNoFollow | UnixCloseOnExec);
+                UnixReadOnly | pathFlags.Directory |
+                pathFlags.NoFollow | UnixCloseOnExec);
             handles.Add(rootHandle);
             var physicalRoot = ValidateUnixHandle(
                 rootHandle, expectedPhysicalPath: null, directory: true);
@@ -279,7 +279,8 @@ internal static class ProtectedMailboxFileReader
                 var child = OpenAtUnix(
                     parent,
                     segments[index],
-                    UnixReadOnly | UnixDirectory | UnixNoFollow | UnixCloseOnExec);
+                    UnixReadOnly | pathFlags.Directory |
+                    pathFlags.NoFollow | UnixCloseOnExec);
                 handles.Add(child);
                 ValidateUnixHandle(child, physicalCurrent, directory: true);
                 parent = child;
@@ -288,7 +289,8 @@ internal static class ProtectedMailboxFileReader
             var file = OpenAtUnix(
                 parent,
                 segments[^1],
-                UnixReadOnly | UnixNonBlock | UnixNoFollow | UnixCloseOnExec);
+                UnixReadOnly | UnixNonBlock |
+                pathFlags.NoFollow | UnixCloseOnExec);
             handles.Add(file);
             var physicalRequested = Canonical(Path.Combine(
                 physicalRoot, Path.Combine(segments.ToArray())));
@@ -384,6 +386,17 @@ internal static class ProtectedMailboxFileReader
             throw Invalid("Protected mailbox descriptor path is too long.");
         return Encoding.UTF8.GetString(buffer, 0, checked((int)length));
     }
+
+    internal static (int Directory, int NoFollow) UnixPathFlags(
+        Architecture architecture) => architecture switch
+    {
+        // Android's ARM UAPI retains the historical ARM flag assignments,
+        // while x64 Linux uses the asm-generic assignments.
+        Architecture.Arm or Architecture.Arm64 => (0x00004000, 0x00008000),
+        Architecture.X64 => (0x00010000, 0x00020000),
+        _ => throw new PlatformNotSupportedException(
+            $"Protected mailbox Unix path flags do not support {architecture}.")
+    };
 
     private static byte[] ReadExactBounded(SafeFileHandle handle, int maxBytes)
     {
