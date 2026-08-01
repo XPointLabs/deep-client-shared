@@ -447,8 +447,9 @@ public sealed class ScopedMailboxSecurityRegressionTests
     }
 
     private sealed class MutableRevocations :
-        IMailboxCapabilityRevocationSource
+        IFreshMailboxCapabilityRevocationSource
     {
+        public void ValidateFreshness() { }
         public bool Revoked { get; set; }
         public bool IsRevoked(MailboxCapabilityRevocationQuery query) => Revoked;
     }

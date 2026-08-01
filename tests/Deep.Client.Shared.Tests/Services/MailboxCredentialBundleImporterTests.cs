@@ -5,12 +5,58 @@ using Deep.Client.Shared.Domain;
 using Deep.Client.Shared.Persistence;
 using Deep.Client.Shared.Services;
 using Deep.Protocol.DeepExtension.MailboxCapabilities;
+using Microsoft.Data.Sqlite;
 using Sodium;
 
 namespace Deep.Client.Shared.Tests.Services;
 
-public sealed class MailboxCredentialBundleImporterTests
+public sealed partial class MailboxCredentialBundleImporterTests
 {
+    [Fact]
+    public void Revocation_source_expires_fail_closed_and_replaces_monotonically()
+    {
+        var clock = new MutableTimeProvider(DateTimeOffset.FromUnixTimeSeconds(100));
+        var source = new DurableMailboxRevocationSnapshot(
+            new ParsedMailboxRevocationSnapshot(
+                90, 110, new HashSet<string>(StringComparer.Ordinal)),
+            clock);
+        source.ValidateFreshness();
+        clock.Set(DateTimeOffset.FromUnixTimeSeconds(111));
+        Assert.Throws<InvalidOperationException>(source.ValidateFreshness);
+
+        source.ReplaceMonotonic(new ParsedMailboxRevocationSnapshot(
+            111, 130, new HashSet<string>(StringComparer.Ordinal)));
+        source.ValidateFreshness();
+        Assert.Throws<InvalidDataException>(() => source.ReplaceMonotonic(
+            new ParsedMailboxRevocationSnapshot(
+                109, 140, new HashSet<string>(StringComparer.Ordinal))));
+    }
+
+    [Fact]
+    public void Decode_policy_reads_current_time_for_every_verification_snapshot()
+    {
+        var clock = new MutableTimeProvider(DateTimeOffset.FromUnixTimeSeconds(100));
+        var provider = new TimeProviderMailboxClientDecodePolicyProvider(
+            new MailboxEpochWindow
+            {
+                CurrentEpoch = 7,
+                NextEpoch = 8,
+                CurrentNotBeforeUnixSeconds = 90,
+                NextNotBeforeUnixSeconds = 105,
+                CurrentExpiresAtUnixSeconds = 110,
+                NextExpiresAtUnixSeconds = 130
+            },
+            new MailboxCapabilityDecodePolicy
+            {
+                CurrentBucket = 7,
+                MinimumGeneration = 7
+            },
+            clock);
+
+        Assert.Equal(100UL, provider.GetCurrent().NowUnixSeconds);
+        clock.Set(DateTimeOffset.FromUnixTimeSeconds(112));
+        Assert.Equal(112UL, provider.GetCurrent().NowUnixSeconds);
+    }
     private const string AlicePhrase =
         "amaze buffet cake entrance symptoms tiger lamb maze nestle python dusted faxed faxed";
     private const string BobPhrase =
@@ -44,6 +90,47 @@ public sealed class MailboxCredentialBundleImporterTests
         Assert.Equal(imported.SelfSelector.ScopeId.ToArray(),
             repeated.SelfSelector.ScopeId.ToArray());
     }
+
+    [Fact]
+    public async Task Commit_fault_publishes_neither_credentials_receipts_nor_live_policy()
+    {
+        using var fixture = Fixture.Create();
+        using var identity = new SessionIdentityProvider(AlicePhrase);
+        var failBeforeCommit = true;
+        using var store = new SqliteSessionStore(
+            new SqliteSessionStoreOptions(fixture.DatabasePath),
+            point =>
+            {
+                if (failBeforeCommit && point == ClientMailboxCommitFaultPoint.BeforeCommit)
+                    throw new InjectedCommitFaultException();
+            });
+
+        await Assert.ThrowsAsync<InjectedCommitFaultException>(() =>
+            MailboxCredentialBundleImporter.ImportAsync(
+                store, identity, fixture.AndroidOptions,
+                MailboxInfrastructureOwnership.UserManaged));
+        Assert.Null(await store.GetAsync<JsonElement?>(
+            "deep.mailbox.bundle-import.v1:android:" + identity.SessionId.Value));
+        Assert.Equal(0, CountRows(fixture.DatabasePath, "mailbox_credential_scopes"));
+
+        failBeforeCommit = false;
+        var imported = await MailboxCredentialBundleImporter.ImportAsync(
+            store, identity, fixture.AndroidOptions,
+            MailboxInfrastructureOwnership.UserManaged);
+        Assert.Equal(2, CountRows(fixture.DatabasePath, "mailbox_credential_scopes"));
+        imported.Authority.Validate();
+    }
+
+    private static int CountRows(string path, string table)
+    {
+        using var connection = new SqliteConnection($"Data Source={path};Pooling=False");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = $"SELECT count(*) FROM {table};";
+        return Convert.ToInt32(command.ExecuteScalar());
+    }
+
+    private sealed class InjectedCommitFaultException : Exception;
 
     [Fact]
     public async Task WholePairRollbackOrSubstitutionFailsAgainstSignedGenerationPins()
@@ -201,10 +288,19 @@ public sealed class MailboxCredentialBundleImporterTests
             var issuerSeed = Bytes(32, 0x41);
             var issuer = crypto.GetPublicKey(issuerSeed);
             var network = Bytes(16, 0x42);
+            var replicaCrypto = new SodiumMailboxPeerReplicationCrypto();
             var replicas = new[]
             {
-                new { id = Hex(Bytes(32, 0x51)), signingPublicKey = Hex(Bytes(32, 0x61)) },
-                new { id = Hex(Bytes(32, 0x52)), signingPublicKey = Hex(Bytes(32, 0x62)) }
+                new
+                {
+                    id = Hex(Bytes(32, 0x51)),
+                    signingPublicKey = Hex(replicaCrypto.GetPublicKey(Bytes(32, 0x61)))
+                },
+                new
+                {
+                    id = Hex(Bytes(32, 0x52)),
+                    signingPublicKey = Hex(replicaCrypto.GetPublicKey(Bytes(32, 0x62)))
+                }
             };
             var current = Epoch(7, Now.AddMinutes(-5), Now.AddMinutes(30), 0x71);
             var next = Epoch(8, Now.AddMinutes(20), Now.AddMinutes(60), 0x72);
@@ -285,6 +381,7 @@ public sealed class MailboxCredentialBundleImporterTests
             });
             File.WriteAllBytes(revocationPath, revocationBytes);
             using var mrX = PublicKeyAuth.GenerateKeyPair(Bytes(32, 0x91));
+            var trustedMrXPublicKeySha256 = SHA256.HashData(mrX.PublicKey);
             MrXSignedMailboxPolicyApproval Approval(string ownership)
             {
                 var payload = Json(new
@@ -307,8 +404,7 @@ public sealed class MailboxCredentialBundleImporterTests
                 return new MrXSignedMailboxPolicyApproval(
                     payload,
                     PublicKeyAuth.SignDetached(payload, mrX.PrivateKey),
-                    mrX.PublicKey,
-                    SHA256.HashData(mrX.PublicKey));
+                    mrX.PublicKey);
             }
             var options = new MailboxCredentialBundleImportOptions(
                 pairRoot,
@@ -322,6 +418,7 @@ public sealed class MailboxCredentialBundleImporterTests
                 bob.SessionId,
                 revocationPath,
                 SHA256.HashData(revocationBytes),
+                trustedMrXPublicKeySha256,
                 Approval("user-managed"),
                 DevelopmentOnly: true,
                 ManagedEntitlement: null,
@@ -472,5 +569,11 @@ public sealed class MailboxCredentialBundleImporterTests
     private sealed class FrozenTimeProvider(DateTimeOffset now) : TimeProvider
     {
         public override DateTimeOffset GetUtcNow() => now;
+    }
+
+    private sealed class MutableTimeProvider(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now;
+        public void Set(DateTimeOffset value) => now = value;
     }
 }

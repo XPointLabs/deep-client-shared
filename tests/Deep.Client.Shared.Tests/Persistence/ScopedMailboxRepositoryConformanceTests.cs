@@ -37,6 +37,47 @@ public sealed class ScopedMailboxRepositoryConformanceTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task Pair_rotation_is_atomic_monotonic_and_exactly_idempotent(
+        bool inMemory)
+    {
+        using var fixture = new Fixture(inMemory);
+        await fixture.Repository.InstallScopedCredentialBatchAsync(
+            [fixture.Self, fixture.Peer], fixture.Authority);
+        fixture.Clock.Set(1150);
+        var rotatedSelf = fixture.Rotate(fixture.Self, 0x91);
+        var rotatedPeer = fixture.Rotate(fixture.Peer, 0xa1);
+        var badPlacement = new BlindedPlacementId(Bytes(32, 0xf1));
+        var badPeer = rotatedPeer with
+        {
+            Current = new MailboxCredentialEpoch(
+                rotatedPeer.Current.Epoch,
+                rotatedPeer.Current.NotBeforeUnixSeconds,
+                rotatedPeer.Current.ExpiresAtUnixSeconds,
+                rotatedPeer.Current.MembershipCommitment.Span,
+                badPlacement.Bytes.Span,
+                MailboxPlacementCommitment.Compute(badPlacement))
+        };
+
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
+            fixture.Repository.RotateScopedCredentialBatchAsync(
+                [rotatedSelf, badPeer], fixture.Authority));
+        Assert.Equal(7UL, (await fixture.Repository.ReadScopedMailboxRouteAsync(
+            fixture.SelfSelector, fixture.Authority)).Epoch);
+
+        await fixture.Repository.RotateScopedCredentialBatchAsync(
+            [rotatedSelf, rotatedPeer], fixture.Authority);
+        await fixture.Repository.RotateScopedCredentialBatchAsync(
+            [rotatedSelf, rotatedPeer], fixture.Authority);
+        Assert.Equal(8UL, (await fixture.Repository.ReadScopedMailboxRouteAsync(
+            fixture.SelfSelector, fixture.Authority)).Epoch);
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            fixture.Repository.RotateScopedCredentialBatchAsync(
+                [fixture.Self, fixture.Peer], fixture.Authority));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task Prepare_fault_rolls_back_batch_counter_and_outbox(
         bool inMemory)
     {
@@ -335,6 +376,38 @@ public sealed class ScopedMailboxRepositoryConformanceTests
         public bool ThrowBeforePreparePublish { get; set; }
         public bool ThrowAfterPreparePublish { get; set; }
 
+        public ScopedMailboxCredentialGeneration Rotate(
+            ScopedMailboxCredentialGeneration prior,
+            byte marker)
+        {
+            var nextPlacement = new BlindedPlacementId(Bytes(32, marker));
+            var next = new MailboxCredentialEpoch(
+                prior.Next.Epoch + 1,
+                1300,
+                1700,
+                Bytes(32, checked((byte)(marker + 1))),
+                nextPlacement.Bytes.Span,
+                MailboxPlacementCommitment.Compute(nextPlacement));
+            var retrieve = prior.Retrieve is null ? null :
+                new MailboxCredentialGrantSet(
+                    prior.Retrieve.NextGrant.Span,
+                    Grant(MailboxCapabilityDomain.Retrieve,
+                        checked((byte)(marker + 2)), next));
+            return new ScopedMailboxCredentialGeneration(
+                prior.Selector,
+                SHA256.HashData([marker, (byte)9]),
+                prior.HolderPublicKey,
+                prior.MailboxId,
+                prior.Next,
+                next,
+                retrieve,
+                new MailboxCredentialGrantSet(
+                    prior.Deposit!.NextGrant.Span,
+                    Grant(MailboxCapabilityDomain.Deposit,
+                        checked((byte)(marker + 3)), next)),
+                prior.Replicas);
+        }
+
         public VerifiedOfficialMailboxAuthority AuthorityWithMinimumGeneration(
             ulong minimumGeneration) => new(
             Authority.NetworkId,
@@ -568,8 +641,9 @@ public sealed class ScopedMailboxRepositoryConformanceTests
     }
 
     private sealed class MutableRevocations :
-        IMailboxCapabilityRevocationSource
+        IFreshMailboxCapabilityRevocationSource
     {
+        public void ValidateFreshness() { }
         public bool Revoked { get; set; }
         public bool IsRevoked(MailboxCapabilityRevocationQuery query) => Revoked;
     }

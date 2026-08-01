@@ -127,8 +127,9 @@ public sealed class ScopedMailboxCredentialRepositoryTests
     private static byte[] Bytes(int count, byte value) =>
         Enumerable.Repeat(value, count).ToArray();
 
-    private sealed class NoRevocations : IMailboxCapabilityRevocationSource
+    private sealed class NoRevocations : IFreshMailboxCapabilityRevocationSource
     {
+        public void ValidateFreshness() { }
         public bool IsRevoked(MailboxCapabilityRevocationQuery query) => false;
     }
 

@@ -1293,8 +1293,9 @@ public sealed class E2eeClientTransportTests
         }
     }
 
-    private sealed class NoRevocations : IMailboxCapabilityRevocationSource
+    private sealed class NoRevocations : IFreshMailboxCapabilityRevocationSource
     {
+        public void ValidateFreshness() { }
         public bool IsRevoked(MailboxCapabilityRevocationQuery query) => false;
     }
 

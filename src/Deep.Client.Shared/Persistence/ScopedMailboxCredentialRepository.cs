@@ -91,7 +91,7 @@ public sealed class VerifiedOfficialMailboxAuthority
         IReadOnlyList<MailboxCapabilityIssuerAuthority> trustedIssuers,
         bool requiresManagedEntitlement,
         Func<bool> entitlement,
-        IMailboxCapabilityRevocationSource revocations,
+        IFreshMailboxCapabilityRevocationSource revocations,
         TimeProvider timeProvider)
     {
         ArgumentNullException.ThrowIfNull(trustedIssuers);
@@ -113,7 +113,8 @@ public sealed class VerifiedOfficialMailboxAuthority
             nameof(timeProvider));
         Validate();
         policyFingerprint = ComputePolicyFingerprint(
-            this.networkId, MinimumGeneration, this.trustedIssuers);
+            this.networkId, MinimumGeneration, RequiresManagedEntitlement,
+            this.trustedIssuers);
     }
 
     public ReadOnlyMemory<byte> NetworkId => networkId.ToArray();
@@ -122,7 +123,7 @@ public sealed class VerifiedOfficialMailboxAuthority
         Array.AsReadOnly(trustedIssuers.Select(CloneIssuer).ToArray());
     public bool RequiresManagedEntitlement { get; }
     public bool IsEntitled => !RequiresManagedEntitlement || entitlement();
-    public IMailboxCapabilityRevocationSource Revocations { get; }
+    public IFreshMailboxCapabilityRevocationSource Revocations { get; }
     public TimeProvider TimeProvider { get; }
     public ReadOnlyMemory<byte> PolicyFingerprint =>
         policyFingerprint.ToArray();
@@ -132,6 +133,7 @@ public sealed class VerifiedOfficialMailboxAuthority
 
     public void Validate()
     {
+        Revocations.ValidateFreshness();
         if (!IsEntitled ||
             networkId.Length != 16 ||
             networkId.AsSpan().IndexOfAnyExcept((byte)0) < 0 ||
@@ -185,11 +187,13 @@ public sealed class VerifiedOfficialMailboxAuthority
     private static byte[] ComputePolicyFingerprint(
         ReadOnlySpan<byte> network,
         ulong minimumGeneration,
+        bool requiresManagedEntitlement,
         IReadOnlyList<MailboxCapabilityIssuerAuthority> issuers)
     {
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         hash.AppendData(FingerprintDomain);
         hash.AppendData(network);
+        hash.AppendData([requiresManagedEntitlement ? (byte)1 : (byte)0]);
         Span<byte> encoded = stackalloc byte[8];
         System.Buffers.Binary.BinaryPrimitives.WriteUInt64BigEndian(
             encoded, minimumGeneration);
@@ -279,6 +283,15 @@ public interface IScopedMailboxCredentialRepository
         VerifiedOfficialMailboxAuthority authority,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Atomically rotates an existing batch from E/E+1 to E+1/E+2. The persisted E+1
+    /// epoch and all of its grants must be byte-identical to the incoming current epoch.
+    /// </summary>
+    Task RotateScopedCredentialBatchAsync(
+        IReadOnlyList<ScopedMailboxCredentialGeneration> generations,
+        VerifiedOfficialMailboxAuthority authority,
+        CancellationToken cancellationToken = default);
+
     Task SwitchScopedCredentialEpochAsync(
         MailboxCredentialSelector selector,
         ulong epoch,
@@ -331,57 +344,187 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
         {
             using var connection = OpenConnection();
             using var transaction = connection.BeginTransaction(deferred: false);
-            foreach (var generation in generations)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                if (CredentialExists(connection, transaction, generation))
-                {
-                    EnsureExactInstalledCredential(connection, transaction, generation, authority);
-                    continue;
-                }
-
-                EnsureNoCrossScopeMaterialReuse(connection, transaction, generation);
-                var selector = generation.Selector;
-                using (var insert = connection.CreateCommand())
-                {
-                    insert.Transaction = transaction;
-                    insert.CommandText = """
-                    INSERT INTO mailbox_credential_scopes(
-                        scope_id, account_scope, scope_kind, subject_id,
-                        issuer_context, network_id, authority_policy_digest, holder_key,
-                        generation, active_epoch, group_membership_commitment)
-                    VALUES($scope,$account,$kind,$subject,$issuer,$network,$authorityPolicy,
-                           $holder,$generation,$epoch,$membership);
-                    """;
-                    insert.Parameters.Add("$scope", SqliteType.Blob).Value = selector.ScopeId.ToArray();
-                    insert.Parameters.Add("$account", SqliteType.Blob).Value = selector.AccountScope.ToArray();
-                    insert.Parameters.AddWithValue("$kind", (int)selector.Kind);
-                    insert.Parameters.Add("$subject", SqliteType.Blob).Value = selector.SubjectId.ToArray();
-                    insert.Parameters.Add("$issuer", SqliteType.Blob).Value = selector.IssuerContext.ToArray();
-                    insert.Parameters.Add("$network", SqliteType.Blob).Value = authority.NetworkId.ToArray();
-                    insert.Parameters.Add("$authorityPolicy", SqliteType.Blob).Value =
-                        authority.PolicyFingerprint.ToArray();
-                    insert.Parameters.Add("$holder", SqliteType.Blob).Value = generation.HolderPublicKey.ToArray();
-                    insert.Parameters.Add("$generation", SqliteType.Blob).Value = generation.Generation.ToArray();
-                    insert.Parameters.Add("$epoch", SqliteType.Blob).Value = MailboxU64(generation.Current.Epoch);
-                    insert.Parameters.Add("$membership", SqliteType.Blob).Value =
-                        selector.GroupMembershipCommitment.IsEmpty
-                            ? DBNull.Value
-                            : selector.GroupMembershipCommitment.ToArray();
-                    insert.ExecuteNonQuery();
-                }
-
-                InsertEpoch(connection, transaction, generation, generation.Current);
-                InsertEpoch(connection, transaction, generation, generation.Next);
-                InsertGrants(connection, transaction, generation, generation.Current.Epoch);
-                InsertGrants(connection, transaction, generation, generation.Next.Epoch);
-            }
+            InstallCore(connection, transaction, generations, authority, cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
             transaction.Commit();
         }
         finally
         {
             _databaseGate.Release();
+        }
+    }
+
+    public async Task RotateScopedCredentialBatchAsync(
+        IReadOnlyList<ScopedMailboxCredentialGeneration> generations,
+        VerifiedOfficialMailboxAuthority authority,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateInstallBatch(generations, authority);
+        await _databaseGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            using var connection = OpenConnection();
+            using var transaction = connection.BeginTransaction(deferred: false);
+            RotateCore(connection, transaction, generations, authority, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            transaction.Commit();
+        }
+        finally
+        {
+            _databaseGate.Release();
+        }
+    }
+
+    internal async Task ApplyScopedMailboxRuntimeSnapshotAsync(
+        IReadOnlyList<ScopedMailboxCredentialGeneration> generations,
+        VerifiedOfficialMailboxAuthority authority,
+        bool rotate,
+        IReadOnlyDictionary<string, object> receipts,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateInstallBatch(generations, authority);
+        ArgumentNullException.ThrowIfNull(receipts);
+        if (receipts.Count is < 1 or > 4 || receipts.Any(static item =>
+                string.IsNullOrWhiteSpace(item.Key) || item.Value is null))
+            throw new ArgumentException("Mailbox runtime receipts are invalid.", nameof(receipts));
+        await _databaseGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            using var connection = OpenConnection();
+            using var transaction = connection.BeginTransaction(deferred: false);
+            if (rotate)
+                RotateCore(connection, transaction, generations, authority, cancellationToken);
+            else
+                InstallCore(connection, transaction, generations, authority, cancellationToken);
+            foreach (var receipt in receipts)
+            {
+                using var upsert = connection.CreateCommand();
+                upsert.Transaction = transaction;
+                upsert.CommandText = """
+                    INSERT INTO settings(key,payload_json) VALUES($key,$payload)
+                    ON CONFLICT(key) DO UPDATE SET payload_json=excluded.payload_json;
+                    """;
+                upsert.Parameters.AddWithValue("$key", receipt.Key);
+                upsert.Parameters.AddWithValue(
+                    "$payload",
+                    System.Text.Json.JsonSerializer.Serialize(
+                        receipt.Value, receipt.Value.GetType(), SerializerOptions));
+                upsert.ExecuteNonQuery();
+            }
+            commitFault?.Invoke(ClientMailboxCommitFaultPoint.BeforeCommit);
+            cancellationToken.ThrowIfCancellationRequested();
+            transaction.Commit();
+        }
+        finally
+        {
+            _databaseGate.Release();
+        }
+    }
+
+    private static void InstallCore(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        IReadOnlyList<ScopedMailboxCredentialGeneration> generations,
+        VerifiedOfficialMailboxAuthority authority,
+        CancellationToken cancellationToken)
+    {
+        foreach (var generation in generations)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (CredentialExists(connection, transaction, generation))
+            {
+                EnsureExactInstalledCredential(connection, transaction, generation, authority);
+                continue;
+            }
+            EnsureNoCrossScopeMaterialReuse(connection, transaction, generation);
+            var selector = generation.Selector;
+            using (var insert = connection.CreateCommand())
+            {
+                insert.Transaction = transaction;
+                insert.CommandText = """
+                    INSERT INTO mailbox_credential_scopes(
+                        scope_id,account_scope,scope_kind,subject_id,issuer_context,network_id,
+                        authority_policy_digest,holder_key,generation,active_epoch,
+                        group_membership_commitment)
+                    VALUES($scope,$account,$kind,$subject,$issuer,$network,$authorityPolicy,
+                           $holder,$generation,$epoch,$membership);
+                    """;
+                insert.Parameters.Add("$scope", SqliteType.Blob).Value = selector.ScopeId.ToArray();
+                insert.Parameters.Add("$account", SqliteType.Blob).Value = selector.AccountScope.ToArray();
+                insert.Parameters.AddWithValue("$kind", (int)selector.Kind);
+                insert.Parameters.Add("$subject", SqliteType.Blob).Value = selector.SubjectId.ToArray();
+                insert.Parameters.Add("$issuer", SqliteType.Blob).Value = selector.IssuerContext.ToArray();
+                insert.Parameters.Add("$network", SqliteType.Blob).Value = authority.NetworkId.ToArray();
+                insert.Parameters.Add("$authorityPolicy", SqliteType.Blob).Value = authority.PolicyFingerprint.ToArray();
+                insert.Parameters.Add("$holder", SqliteType.Blob).Value = generation.HolderPublicKey.ToArray();
+                insert.Parameters.Add("$generation", SqliteType.Blob).Value = generation.Generation.ToArray();
+                insert.Parameters.Add("$epoch", SqliteType.Blob).Value = MailboxU64(generation.Current.Epoch);
+                insert.Parameters.Add("$membership", SqliteType.Blob).Value =
+                    selector.GroupMembershipCommitment.IsEmpty
+                        ? DBNull.Value : selector.GroupMembershipCommitment.ToArray();
+                insert.ExecuteNonQuery();
+            }
+            InsertEpoch(connection, transaction, generation, generation.Current);
+            InsertEpoch(connection, transaction, generation, generation.Next);
+            InsertGrants(connection, transaction, generation, generation.Current.Epoch);
+            InsertGrants(connection, transaction, generation, generation.Next.Epoch);
+        }
+    }
+
+    private static void RotateCore(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        IReadOnlyList<ScopedMailboxCredentialGeneration> generations,
+        VerifiedOfficialMailboxAuthority authority,
+        CancellationToken cancellationToken)
+    {
+        foreach (var generation in generations)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!CredentialExists(connection, transaction, generation))
+                throw new InvalidOperationException(
+                    "Mailbox credential rotation requires an installed scope.");
+            if (IsExactInstalledGeneration(connection, transaction, generation, authority))
+            {
+                EnsureExactInstalledCredential(connection, transaction, generation, authority);
+                continue;
+            }
+            EnsureNoCrossScopeMaterialReuse(connection, transaction, generation);
+            EnsureExactRotationOverlap(connection, transaction, generation, authority);
+            EnsureNoSameScopeRotationReuse(connection, transaction, generation);
+            using (var deleteReplay = connection.CreateCommand())
+            {
+                deleteReplay.Transaction = transaction;
+                deleteReplay.CommandText = "DELETE FROM mailbox_replay_counters WHERE scope_id=$scope AND epoch<>$overlap;";
+                deleteReplay.Parameters.Add("$scope", SqliteType.Blob).Value = generation.Selector.ScopeId.ToArray();
+                deleteReplay.Parameters.Add("$overlap", SqliteType.Blob).Value = MailboxU64(generation.Current.Epoch);
+                deleteReplay.ExecuteNonQuery();
+            }
+            using (var deleteOld = connection.CreateCommand())
+            {
+                deleteOld.Transaction = transaction;
+                deleteOld.CommandText = "DELETE FROM mailbox_credential_epochs WHERE scope_id=$scope AND epoch<>$overlap;";
+                deleteOld.Parameters.Add("$scope", SqliteType.Blob).Value = generation.Selector.ScopeId.ToArray();
+                deleteOld.Parameters.Add("$overlap", SqliteType.Blob).Value = MailboxU64(generation.Current.Epoch);
+                if (deleteOld.ExecuteNonQuery() != 1)
+                    throw new InvalidDataException("Mailbox credential rotation expected exactly one retired epoch.");
+            }
+            InsertEpoch(connection, transaction, generation, generation.Next);
+            InsertGrants(connection, transaction, generation, generation.Next.Epoch);
+            using var update = connection.CreateCommand();
+            update.Transaction = transaction;
+            update.CommandText = """
+                UPDATE mailbox_credential_scopes
+                SET generation=$generation,active_epoch=$active,
+                    authority_policy_digest=$authorityPolicy
+                WHERE scope_id=$scope;
+                """;
+            update.Parameters.Add("$generation", SqliteType.Blob).Value = generation.Generation.ToArray();
+            update.Parameters.Add("$active", SqliteType.Blob).Value = MailboxU64(generation.Current.Epoch);
+            update.Parameters.Add("$authorityPolicy", SqliteType.Blob).Value = authority.PolicyFingerprint.ToArray();
+            update.Parameters.Add("$scope", SqliteType.Blob).Value = generation.Selector.ScopeId.ToArray();
+            if (update.ExecuteNonQuery() != 1)
+                throw new InvalidOperationException("Mailbox credential rotation lost its exact scope.");
         }
     }
 
@@ -994,6 +1137,167 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
         command.Parameters.Add("$scope", SqliteType.Blob).Value =
             generation.Selector.ScopeId.ToArray();
         return command.ExecuteScalar() is not null;
+    }
+
+    private static bool IsExactInstalledGeneration(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        ScopedMailboxCredentialGeneration generation,
+        VerifiedOfficialMailboxAuthority authority)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT generation,authority_policy_digest
+            FROM mailbox_credential_scopes WHERE scope_id=$scope;
+            """;
+        command.Parameters.Add("$scope", SqliteType.Blob).Value =
+            generation.Selector.ScopeId.ToArray();
+        using var reader = command.ExecuteReader();
+        return reader.Read() &&
+            Fixed((byte[])reader.GetValue(0), generation.Generation.Span) &&
+            Fixed((byte[])reader.GetValue(1), authority.PolicyFingerprint.Span);
+    }
+
+    private static void EnsureExactRotationOverlap(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        ScopedMailboxCredentialGeneration value,
+        VerifiedOfficialMailboxAuthority authority)
+    {
+        var selector = value.Selector;
+        using (var scope = connection.CreateCommand())
+        {
+            scope.Transaction = transaction;
+            scope.CommandText = """
+                SELECT account_scope,scope_kind,subject_id,issuer_context,network_id,
+                       holder_key,generation,active_epoch,group_membership_commitment
+                FROM mailbox_credential_scopes WHERE scope_id=$scope;
+                """;
+            scope.Parameters.Add("$scope", SqliteType.Blob).Value = selector.ScopeId.ToArray();
+            using var reader = scope.ExecuteReader();
+            if (!reader.Read() ||
+                !Fixed((byte[])reader.GetValue(0), selector.AccountScope.Value) ||
+                reader.GetInt32(1) != (int)selector.Kind ||
+                !Fixed((byte[])reader.GetValue(2), selector.SubjectId.Span) ||
+                !Fixed((byte[])reader.GetValue(3), selector.IssuerContext.Span) ||
+                !Fixed((byte[])reader.GetValue(4), authority.NetworkId.Span) ||
+                !Fixed((byte[])reader.GetValue(5), value.HolderPublicKey.Span) ||
+                Fixed((byte[])reader.GetValue(6), value.Generation.Span) ||
+                MailboxReadU64((byte[])reader.GetValue(7)) > value.Current.Epoch ||
+                (selector.GroupMembershipCommitment.IsEmpty
+                    ? !reader.IsDBNull(8)
+                    : reader.IsDBNull(8) || !Fixed((byte[])reader.GetValue(8),
+                        selector.GroupMembershipCommitment.Span)))
+            {
+                throw new InvalidOperationException(
+                    "Mailbox credential rotation changed its stable scope or did not advance.");
+            }
+        }
+
+        using (var epoch = connection.CreateCommand())
+        {
+            epoch.Transaction = transaction;
+            epoch.CommandText = """
+                SELECT not_before,expires_at,mailbox_id,placement_id,placement_commitment,
+                       membership_commitment,first_replica_id,first_replica_key,
+                       second_replica_id,second_replica_key
+                FROM mailbox_credential_epochs WHERE scope_id=$scope AND epoch=$epoch;
+                """;
+            epoch.Parameters.Add("$scope", SqliteType.Blob).Value = selector.ScopeId.ToArray();
+            epoch.Parameters.Add("$epoch", SqliteType.Blob).Value =
+                MailboxU64(value.Current.Epoch);
+            using var reader = epoch.ExecuteReader();
+            if (!reader.Read() ||
+                MailboxReadU64((byte[])reader.GetValue(0)) != value.Current.NotBeforeUnixSeconds ||
+                MailboxReadU64((byte[])reader.GetValue(1)) != value.Current.ExpiresAtUnixSeconds ||
+                !Fixed((byte[])reader.GetValue(2), value.MailboxId.Span) ||
+                !Fixed((byte[])reader.GetValue(3), value.Current.PlacementId.Span) ||
+                !Fixed((byte[])reader.GetValue(4), value.Current.PlacementCommitment.Span) ||
+                !Fixed((byte[])reader.GetValue(5), value.Current.MembershipCommitment.Span) ||
+                !Fixed((byte[])reader.GetValue(6), value.Replicas.FirstId.Span) ||
+                !Fixed((byte[])reader.GetValue(7), value.Replicas.FirstSigningKey.Span) ||
+                !Fixed((byte[])reader.GetValue(8), value.Replicas.SecondId.Span) ||
+                !Fixed((byte[])reader.GetValue(9), value.Replicas.SecondSigningKey.Span))
+            {
+                throw new InvalidOperationException(
+                    "Mailbox rotation E+1 is not byte-identical to the installed overlap.");
+            }
+        }
+
+        EnsureGrant(MailboxCredentialRole.Retrieve, value.Retrieve);
+        EnsureGrant(MailboxCredentialRole.Deposit, value.Deposit);
+        void EnsureGrant(MailboxCredentialRole role, MailboxCredentialGrantSet? set)
+        {
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = """
+                SELECT canonical_grant FROM mailbox_credential_grants
+                WHERE scope_id=$scope AND epoch=$epoch AND role=$role;
+                """;
+            command.Parameters.Add("$scope", SqliteType.Blob).Value = selector.ScopeId.ToArray();
+            command.Parameters.Add("$epoch", SqliteType.Blob).Value =
+                MailboxU64(value.Current.Epoch);
+            command.Parameters.AddWithValue("$role", (int)role);
+            var stored = command.ExecuteScalar() as byte[];
+            var expected = set?.CurrentGrant.ToArray();
+            if ((stored is null) != (expected is null) ||
+                stored is not null && !Fixed(stored, expected!))
+            {
+                throw new InvalidOperationException(
+                    "Mailbox rotation grants do not exactly preserve E+1.");
+            }
+        }
+    }
+
+    private static void EnsureNoSameScopeRotationReuse(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        ScopedMailboxCredentialGeneration generation)
+    {
+        using (var epoch = connection.CreateCommand())
+        {
+            epoch.Transaction = transaction;
+            epoch.CommandText = """
+                SELECT 1 FROM mailbox_credential_epochs
+                WHERE scope_id=$scope AND epoch<>$overlap AND
+                      (placement_id=$placement OR membership_commitment=$membership)
+                LIMIT 1;
+                """;
+            epoch.Parameters.Add("$scope", SqliteType.Blob).Value =
+                generation.Selector.ScopeId.ToArray();
+            epoch.Parameters.Add("$overlap", SqliteType.Blob).Value =
+                MailboxU64(generation.Current.Epoch);
+            epoch.Parameters.Add("$placement", SqliteType.Blob).Value =
+                generation.Next.PlacementId.ToArray();
+            epoch.Parameters.Add("$membership", SqliteType.Blob).Value =
+                generation.Next.MembershipCommitment.ToArray();
+            if (epoch.ExecuteScalar() is not null)
+                throw new InvalidDataException(
+                    "Mailbox rotation reuses retired E material for E+2.");
+        }
+        foreach (var grant in new[]
+        {
+            generation.Retrieve?.NextGrant,
+            generation.Deposit?.NextGrant
+        }.Where(static item => item.HasValue).Select(static item => item!.Value))
+        {
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = """
+                SELECT 1 FROM mailbox_credential_grants
+                WHERE scope_id=$scope AND epoch<>$overlap AND canonical_grant=$grant
+                LIMIT 1;
+                """;
+            command.Parameters.Add("$scope", SqliteType.Blob).Value =
+                generation.Selector.ScopeId.ToArray();
+            command.Parameters.Add("$overlap", SqliteType.Blob).Value =
+                MailboxU64(generation.Current.Epoch);
+            command.Parameters.Add("$grant", SqliteType.Blob).Value = grant.ToArray();
+            if (command.ExecuteScalar() is not null)
+                throw new InvalidDataException(
+                    "Mailbox rotation reuses a retired grant for E+2.");
+        }
     }
 
     private static void EnsureNoCrossScopeMaterialReuse(

@@ -306,8 +306,9 @@ public sealed class ClientRuntimeStorageE2ETests
                 ValidUntilUnixSeconds = now + 3_600
             };
 
-        private sealed class EmptyRevocations : IMailboxCapabilityRevocationSource
+        private sealed class EmptyRevocations : IFreshMailboxCapabilityRevocationSource
         {
+            public void ValidateFreshness() { }
             public bool IsRevoked(MailboxCapabilityRevocationQuery query) => false;
         }
 

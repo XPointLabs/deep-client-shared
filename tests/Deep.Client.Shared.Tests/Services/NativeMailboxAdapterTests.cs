@@ -63,8 +63,9 @@ public sealed class NativeMailboxAdapterTests
                 TimeProvider.System)).Validate());
     }
 
-    private sealed class NoRevocations : IMailboxCapabilityRevocationSource
+    private sealed class NoRevocations : IFreshMailboxCapabilityRevocationSource
     {
+        public void ValidateFreshness() { }
         public bool IsRevoked(MailboxCapabilityRevocationQuery query) => false;
     }
 }

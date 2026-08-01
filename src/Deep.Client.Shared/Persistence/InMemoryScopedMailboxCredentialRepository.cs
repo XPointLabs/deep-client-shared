@@ -10,7 +10,8 @@ internal enum InMemoryScopedMailboxFaultPoint
     ImportBeforePublish = 1,
     SwitchBeforePublish = 2,
     PrepareBeforePublish = 3,
-    PrepareAfterPublish = 4
+    PrepareAfterPublish = 4,
+    RotationBeforePublish = 5
 }
 
 /// <summary>
@@ -82,6 +83,51 @@ public sealed class InMemoryScopedMailboxCredentialRepository :
             }
             fault?.Invoke(
                 InMemoryScopedMailboxFaultPoint.ImportBeforePublish);
+            cancellationToken.ThrowIfCancellationRequested();
+            current = candidate;
+        }
+        return Task.CompletedTask;
+    }
+
+    public Task RotateScopedCredentialBatchAsync(
+        IReadOnlyList<ScopedMailboxCredentialGeneration> generations,
+        VerifiedOfficialMailboxAuthority authority,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ValidateImportBatch(generations, authority);
+        lock (gate)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var candidate = current.Clone();
+            foreach (var generation in generations)
+            {
+                var key = ScopeKey(generation.Selector.ScopeId.Span);
+                if (!candidate.Credentials.TryGetValue(key, out var existing))
+                    throw new InvalidOperationException(
+                        "Mailbox credential rotation requires an installed scope.");
+                var canonical = CredentialMaterial(generation, authority);
+                if (Fixed(existing.CanonicalMaterial, canonical))
+                    continue;
+                EnsureNoCrossScopeReuse(candidate, generation);
+                EnsureRotationOverlap(existing, generation, authority);
+                candidate.Credentials[key] = new StoredCredential(
+                    CloneGeneration(generation),
+                    canonical,
+                    authority.NetworkId.ToArray(),
+                    authority.PolicyFingerprint.ToArray(),
+                    generation.Current.Epoch);
+                var counterPrefix = key + ":";
+                var overlapMarker = ":" + generation.Current.Epoch.ToString("X16") + ":";
+                foreach (var counterKey in candidate.Counters.Keys
+                    .Where(item => item.StartsWith(counterPrefix, StringComparison.Ordinal) &&
+                        !item.Contains(overlapMarker, StringComparison.Ordinal))
+                    .ToArray())
+                {
+                    candidate.Counters.Remove(counterKey);
+                }
+            }
+            fault?.Invoke(InMemoryScopedMailboxFaultPoint.RotationBeforePublish);
             cancellationToken.ThrowIfCancellationRequested();
             current = candidate;
         }
@@ -572,6 +618,9 @@ public sealed class InMemoryScopedMailboxCredentialRepository :
     {
         foreach (var existing in snapshot.Credentials.Values)
         {
+            if (Fixed(existing.Generation.Selector.ScopeId.Span,
+                    generation.Selector.ScopeId.Span))
+                continue;
             foreach (var candidate in UniqueMaterials(generation))
             foreach (var persisted in UniqueMaterials(existing.Generation))
             {
@@ -597,6 +646,53 @@ public sealed class InMemoryScopedMailboxCredentialRepository :
                 }
             }
         }
+    }
+
+    private static void EnsureRotationOverlap(
+        StoredCredential existing,
+        ScopedMailboxCredentialGeneration incoming,
+        VerifiedOfficialMailboxAuthority authority)
+    {
+        var prior = existing.Generation;
+        if (prior.Next.Epoch != incoming.Current.Epoch ||
+            existing.ActiveEpoch > incoming.Current.Epoch ||
+            Fixed(prior.Generation.Span, incoming.Generation.Span) ||
+            !Fixed(existing.NetworkId, authority.NetworkId.Span) ||
+            !Fixed(prior.HolderPublicKey.Span, incoming.HolderPublicKey.Span) ||
+            !Fixed(prior.MailboxId.Span, incoming.MailboxId.Span) ||
+            !Fixed(prior.Selector.ScopeId.Span, incoming.Selector.ScopeId.Span) ||
+            !EqualEpoch(prior.Next, incoming.Current) ||
+            !EqualReplicas(prior.Replicas, incoming.Replicas) ||
+            !EqualOverlapGrant(prior.Retrieve, incoming.Retrieve) ||
+            !EqualOverlapGrant(prior.Deposit, incoming.Deposit) ||
+            EqualEpochMaterial(prior.Current, incoming.Next) ||
+            Grants(prior).Any(oldGrant =>
+                new[] { incoming.Retrieve?.NextGrant, incoming.Deposit?.NextGrant }
+                    .Where(static item => item.HasValue)
+                    .Any(nextGrant => Fixed(oldGrant.Span, nextGrant!.Value.Span))))
+        {
+            throw new InvalidOperationException(
+                "Mailbox rotation does not preserve exact E+1 overlap or reuses retired material.");
+        }
+
+        static bool EqualEpoch(MailboxCredentialEpoch left, MailboxCredentialEpoch right) =>
+            left.Epoch == right.Epoch &&
+            left.NotBeforeUnixSeconds == right.NotBeforeUnixSeconds &&
+            left.ExpiresAtUnixSeconds == right.ExpiresAtUnixSeconds &&
+            EqualEpochMaterial(left, right);
+        static bool EqualEpochMaterial(MailboxCredentialEpoch left, MailboxCredentialEpoch right) =>
+            Fixed(left.MembershipCommitment.Span, right.MembershipCommitment.Span) &&
+            Fixed(left.PlacementId.Span, right.PlacementId.Span) &&
+            Fixed(left.PlacementCommitment.Span, right.PlacementCommitment.Span);
+        static bool EqualReplicas(MailboxCredentialReplicaPair left, MailboxCredentialReplicaPair right) =>
+            Fixed(left.FirstId.Span, right.FirstId.Span) &&
+            Fixed(left.FirstSigningKey.Span, right.FirstSigningKey.Span) &&
+            Fixed(left.SecondId.Span, right.SecondId.Span) &&
+            Fixed(left.SecondSigningKey.Span, right.SecondSigningKey.Span);
+        static bool EqualOverlapGrant(MailboxCredentialGrantSet? oldSet, MailboxCredentialGrantSet? newSet) =>
+            oldSet is null && newSet is null ||
+            oldSet is not null && newSet is not null &&
+            Fixed(oldSet.NextGrant.Span, newSet.CurrentGrant.Span);
     }
 
     private static void ValidateStoredAuthority(

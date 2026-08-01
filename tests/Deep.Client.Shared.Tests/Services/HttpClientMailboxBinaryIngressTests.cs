@@ -228,7 +228,7 @@ public sealed class HttpClientMailboxBinaryIngressTests
         using var ingress =
             HttpClientMailboxBinaryIngress.CreateLoopbackDevelopment(
                 origin,
-                Policy());
+                Policies());
 
         var exception = await Assert.ThrowsAsync<ClientMailboxTransportException>(
             () => ingress.RetrieveAsync(RetrieveRequest()));
@@ -247,12 +247,12 @@ public sealed class HttpClientMailboxBinaryIngressTests
         Assert.Throws<ArgumentException>(() =>
             HttpClientMailboxBinaryIngress.CreateProduction(
                 new Uri("http://mailbox.example/"),
-                Policy(),
+                Policies(),
                 pins));
         Assert.Throws<ArgumentException>(() =>
             HttpClientMailboxBinaryIngress.CreateLoopbackDevelopment(
                 new Uri("http://mailbox.example/"),
-                Policy()));
+                Policies()));
         Assert.DoesNotContain(
             Convert.ToHexString(Bytes(SHA256.HashSizeInBytes, 0xd1)),
             pins.ToString(),
@@ -265,12 +265,12 @@ public sealed class HttpClientMailboxBinaryIngressTests
         using var ingress =
             HttpClientMailboxBinaryIngress.CreatePhysicalDevelopment(
                 new Uri("http://192.168.1.44:41801/"),
-                Policy());
+                Policies());
         Assert.NotNull(ingress);
         Assert.Throws<ArgumentException>(() =>
             HttpClientMailboxBinaryIngress.CreatePhysicalDevelopment(
                 new Uri("http://192.168.1.45:41801/"),
-                Policy()));
+                Policies()));
     }
 
     [Theory]
@@ -385,18 +385,18 @@ public sealed class HttpClientMailboxBinaryIngressTests
                 BindingFlags.Instance | BindingFlags.NonPublic,
                 binder: null,
                 timeout is null
-                    ? [typeof(HttpClient), typeof(MailboxClientDecodePolicy)]
+                    ? [typeof(HttpClient), typeof(IMailboxClientDecodePolicyProvider)]
                     :
                     [
                         typeof(HttpClient),
-                        typeof(MailboxClientDecodePolicy),
+                        typeof(IMailboxClientDecodePolicyProvider),
                         typeof(TimeSpan?)
                     ],
                 modifiers: null)!;
         return (HttpClientMailboxBinaryIngress)constructor.Invoke(
             timeout is null
-                ? [client, Policy()]
-                : [client, Policy(), timeout]);
+                ? [client, Policies()]
+                : [client, Policies(), timeout]);
     }
 
     private static HttpContent BlockingContent()
@@ -515,10 +515,9 @@ public sealed class HttpClientMailboxBinaryIngressTests
         });
     }
 
-    private static MailboxClientDecodePolicy Policy() => new()
-    {
-        NowUnixSeconds = 1050,
-        EpochWindow = new MailboxEpochWindow
+    private static IMailboxClientDecodePolicyProvider Policies() =>
+        new TimeProviderMailboxClientDecodePolicyProvider(
+        new MailboxEpochWindow
         {
             CurrentEpoch = 7,
             NextEpoch = 8,
@@ -527,12 +526,17 @@ public sealed class HttpClientMailboxBinaryIngressTests
             CurrentExpiresAtUnixSeconds = 1120,
             NextExpiresAtUnixSeconds = 1200
         },
-        CapabilityPolicy = new MailboxCapabilityDecodePolicy
+        new MailboxCapabilityDecodePolicy
         {
             CurrentBucket = 1050,
             MinimumGeneration = 7
-        }
-    };
+        },
+        new FixedTimeProvider(DateTimeOffset.FromUnixTimeSeconds(1050)));
+
+    private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now;
+    }
 
     private static byte[] Bytes(int count, byte start)
     {

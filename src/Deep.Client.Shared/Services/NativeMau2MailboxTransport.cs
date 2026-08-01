@@ -19,7 +19,6 @@ public sealed class NativeMau2MailboxTransport :
     IDisposable
 {
     private const string ItemHandlePrefix = "mau2-item-v1:";
-    private const string CursorPrefix = "mau2-cursor-v1:";
     private const int RetrievalLimit = 1;
     private static ReadOnlySpan<byte> StoreOperationDomain =>
         "deep.mau2.store-operation.v1"u8;
@@ -33,7 +32,7 @@ public sealed class NativeMau2MailboxTransport :
     private readonly ClientMailboxAdapter adapter;
     private readonly IScopedMailboxCredentialRepository credentials;
     private readonly VerifiedOfficialMailboxAuthority authority;
-    private readonly MailboxClientDecodePolicy decodePolicy;
+    private readonly IMailboxClientDecodePolicyProvider decodePolicies;
     private readonly Func<SessionId, MailboxCredentialSelector> selfSelector;
     private readonly IDisposable? ownedIngress;
     private int disposed;
@@ -44,7 +43,7 @@ public sealed class NativeMau2MailboxTransport :
         IClientMailboxBinaryIngress ingress,
         SqliteSessionStore localStore,
         IClientMailboxReceiptVerifier receipts,
-        MailboxClientDecodePolicy decodePolicy,
+        IMailboxClientDecodePolicyProvider decodePolicies,
         VerifiedOfficialMailboxAuthority authority,
         Func<SessionId, MailboxCredentialSelector> selfSelector,
         bool ownsIngress = false,
@@ -53,13 +52,13 @@ public sealed class NativeMau2MailboxTransport :
         ArgumentNullException.ThrowIfNull(ingress);
         credentials = localStore ?? throw new ArgumentNullException(nameof(localStore));
         this.authority = authority ?? throw new ArgumentNullException(nameof(authority));
-        this.decodePolicy = decodePolicy ?? throw new ArgumentNullException(nameof(decodePolicy));
+        this.decodePolicies = decodePolicies ?? throw new ArgumentNullException(nameof(decodePolicies));
         this.selfSelector = selfSelector ?? throw new ArgumentNullException(nameof(selfSelector));
         authority.Validate();
         var requests = new MailboxAuthenticatedRequestFactory(credentials, authority);
         adapter = new ClientMailboxAdapter(
             flags, activation, ingress, localStore, receipts, requests,
-            decodePolicy, timeProvider);
+            decodePolicies, timeProvider);
         ownedIngress = ownsIngress ? ingress as IDisposable ?? throw new ArgumentException(
             "An owned mailbox ingress must be disposable.", nameof(ingress)) : null;
     }
@@ -198,8 +197,13 @@ public sealed class NativeMau2MailboxTransport :
         var selector = RequireSelfSelector(identity.SessionId);
         var current = await adapter.ReadTraversalAsync(selector, cancellationToken)
             .ConfigureAwait(false);
-        if (cursor is not null && !string.Equals(cursor, EncodeCursor(current), StringComparison.Ordinal))
-            throw new InvalidOperationException("Durable inbox cursor does not match native mailbox traversal.");
+        if (cursor is not null)
+        {
+            // The generic durable-inbox repository owns cursor continuity.  Native only
+            // requires the exact canonical item-handle shape; the item may already have been
+            // acknowledged and removed from the MAU2 durable inbox before the next poll.
+            _ = DecodeItemHandle(cursor);
+        }
         var page = await RetrieveOpaqueMailboxInboxAsync(
             signer,
             new OpaqueMailboxContinuation(
@@ -210,7 +214,10 @@ public sealed class NativeMau2MailboxTransport :
                 EncodeItemHandle(entry.Cursor, entry.GetEnvelopeDigestCopy()),
                 authority.TimeProvider.GetUtcNow().ToUnixTimeMilliseconds(),
                 Convert.ToBase64String(entry.GetCanonicalMeo1Copy()))).ToArray();
-        var nextCursor = entries.Length == 0 ? cursor : EncodeCursor(page.Next);
+        // The external durable-inbox cursor is its final staged ServerHash.  The MAU2
+        // continuation remains private in ClientMailboxTraversal and is never exposed as
+        // the repository cursor: these are distinct monotonic namespaces.
+        var nextCursor = entries.Length == 0 ? cursor : entries[^1].ServerHash;
         return new AuthenticatedInboxBatch(entries, nextCursor);
     }
 
@@ -224,6 +231,7 @@ public sealed class NativeMau2MailboxTransport :
         {
             var (cursor, digest) = DecodeItemHandle(entry.ServerHash);
             var encoded = Convert.FromBase64String(entry.WirePayload);
+            var decodePolicy = decodePolicies.GetCurrent();
             var opaque = OpaqueMailboxWireEntry.DecodeAndVerify(
                 cursor, encoded, digest, decodePolicy);
             var decoded = MailboxClientCodec.DecodeEncryptedEnvelope(
@@ -271,7 +279,7 @@ public sealed class NativeMau2MailboxTransport :
                 candidate.Cursor,
                 MailboxClientCodec.EncodeEncryptedEnvelope(candidate.Envelope),
                 candidate.Envelope.DeduplicationDigest.Span,
-                decodePolicy))
+                decodePolicies.GetCurrent()))
             .ToArray();
         var next = result.HasMore
             ? new OpaqueMailboxContinuation(result.AfterCursor, result.ContinuationToken.Span)
@@ -388,14 +396,6 @@ public sealed class NativeMau2MailboxTransport :
         var digest = Convert.FromHexString(parts[1]);
         return (cursor, digest);
     }
-
-    private static string EncodeCursor(ClientMailboxTraversal traversal) =>
-        EncodeCursor(new OpaqueMailboxContinuation(
-            traversal.AfterCursor, traversal.ContinuationToken));
-
-    private static string EncodeCursor(OpaqueMailboxContinuation continuation) =>
-        $"{CursorPrefix}{continuation.AfterCursor:x16}:" +
-        Convert.ToHexStringLower(SHA256.HashData(continuation.GetTokenCopy()));
 
     private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(
         Volatile.Read(ref disposed) != 0, this);

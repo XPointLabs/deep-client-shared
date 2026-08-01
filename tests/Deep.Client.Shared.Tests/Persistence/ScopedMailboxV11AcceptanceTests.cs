@@ -664,8 +664,9 @@ public sealed class ScopedMailboxV11AcceptanceTests
                 PublicKeyAuth.GenerateKeyPair(seed).PrivateKey);
     }
 
-    private sealed class MutableRevocations : IMailboxCapabilityRevocationSource
+    private sealed class MutableRevocations : IFreshMailboxCapabilityRevocationSource
     {
+        public void ValidateFreshness() { }
         public bool Revoked { get; set; }
         public bool IsRevoked(MailboxCapabilityRevocationQuery query) => Revoked;
     }

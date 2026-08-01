@@ -135,23 +135,23 @@ public sealed class HttpClientMailboxBinaryIngress :
     IDisposable
 {
     private readonly HttpClient httpClient;
-    private readonly MailboxClientDecodePolicy decodePolicy;
+    private readonly IMailboxClientDecodePolicyProvider decodePolicies;
     private readonly TimeSpan? requestTimeoutOverride;
 
     private HttpClientMailboxBinaryIngress(
         HttpClient httpClient,
-        MailboxClientDecodePolicy decodePolicy)
-        : this(httpClient, decodePolicy, requestTimeoutOverride: null)
+        IMailboxClientDecodePolicyProvider decodePolicies)
+        : this(httpClient, decodePolicies, requestTimeoutOverride: null)
     {
     }
 
     private HttpClientMailboxBinaryIngress(
         HttpClient httpClient,
-        MailboxClientDecodePolicy decodePolicy,
+        IMailboxClientDecodePolicyProvider decodePolicies,
         TimeSpan? requestTimeoutOverride)
     {
         this.httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
-        this.decodePolicy = decodePolicy ?? throw new ArgumentNullException(nameof(decodePolicy));
+        this.decodePolicies = decodePolicies ?? throw new ArgumentNullException(nameof(decodePolicies));
         if (requestTimeoutOverride is { } timeout &&
             (timeout <= TimeSpan.Zero || timeout > TimeSpan.FromMinutes(1)))
         {
@@ -169,11 +169,11 @@ public sealed class HttpClientMailboxBinaryIngress :
 
     public static HttpClientMailboxBinaryIngress CreateProduction(
         Uri baseAddress,
-        MailboxClientDecodePolicy decodePolicy,
+        IMailboxClientDecodePolicyProvider decodePolicies,
         ClientMailboxTlsSpkiPinSet pins)
     {
         ArgumentNullException.ThrowIfNull(baseAddress);
-        ArgumentNullException.ThrowIfNull(decodePolicy);
+        ArgumentNullException.ThrowIfNull(decodePolicies);
         ArgumentNullException.ThrowIfNull(pins);
         if (!baseAddress.IsAbsoluteUri ||
             baseAddress.Scheme != Uri.UriSchemeHttps ||
@@ -191,15 +191,15 @@ public sealed class HttpClientMailboxBinaryIngress :
         handler.SslOptions.RemoteCertificateValidationCallback =
             (_, certificate, _, errors) =>
                 ValidatePinnedCertificate(pins, certificate, errors);
-        return CreateOwned(baseAddress, decodePolicy, handler);
+        return CreateOwned(baseAddress, decodePolicies, handler);
     }
 
     public static HttpClientMailboxBinaryIngress CreateLoopbackDevelopment(
         Uri baseAddress,
-        MailboxClientDecodePolicy decodePolicy)
+        IMailboxClientDecodePolicyProvider decodePolicies)
     {
         ArgumentNullException.ThrowIfNull(baseAddress);
-        ArgumentNullException.ThrowIfNull(decodePolicy);
+        ArgumentNullException.ThrowIfNull(decodePolicies);
         if (!baseAddress.IsAbsoluteUri ||
             baseAddress.Scheme != Uri.UriSchemeHttp ||
             !baseAddress.IsLoopback ||
@@ -213,7 +213,7 @@ public sealed class HttpClientMailboxBinaryIngress :
                 nameof(baseAddress));
         }
 
-        return CreateOwned(baseAddress, decodePolicy, CreateHandler());
+        return CreateOwned(baseAddress, decodePolicies, CreateHandler());
     }
 
     /// <summary>
@@ -223,10 +223,10 @@ public sealed class HttpClientMailboxBinaryIngress :
     /// </summary>
     internal static HttpClientMailboxBinaryIngress CreatePhysicalDevelopment(
         Uri baseAddress,
-        MailboxClientDecodePolicy decodePolicy)
+        IMailboxClientDecodePolicyProvider decodePolicies)
     {
         ArgumentNullException.ThrowIfNull(baseAddress);
-        ArgumentNullException.ThrowIfNull(decodePolicy);
+        ArgumentNullException.ThrowIfNull(decodePolicies);
         if (baseAddress != new Uri("http://192.168.1.44:41801/"))
         {
             throw new ArgumentException(
@@ -234,7 +234,7 @@ public sealed class HttpClientMailboxBinaryIngress :
                 nameof(baseAddress));
         }
 
-        return CreateOwned(baseAddress, decodePolicy, CreateHandler());
+        return CreateOwned(baseAddress, decodePolicies, CreateHandler());
     }
 
     public void Dispose() => httpClient.Dispose();
@@ -270,14 +270,14 @@ public sealed class HttpClientMailboxBinaryIngress :
 
     private static HttpClientMailboxBinaryIngress CreateOwned(
         Uri baseAddress,
-        MailboxClientDecodePolicy decodePolicy,
+        IMailboxClientDecodePolicyProvider decodePolicies,
         HttpMessageHandler handler) =>
         new(
             new HttpClient(handler, disposeHandler: true)
             {
                 BaseAddress = baseAddress
             },
-            decodePolicy);
+            decodePolicies);
 
     public Task<ReadOnlyMemory<byte>> StoreAsync(
         ReadOnlyMemory<byte> canonicalMau2,
@@ -456,7 +456,7 @@ public sealed class HttpClientMailboxBinaryIngress :
                     MailboxClientCodec.EncodeRetrievePage(
                         MailboxClientCodec.DecodeRetrievePage(
                             canonical,
-                            decodePolicy)),
+                            decodePolicies.GetCurrent())),
                 MailboxAuthenticatedOperation.Ack =>
                     MailboxAggregateAckCodec.EncodeMqr3(
                         MailboxAggregateAckCodec.DecodeMqr3(canonical)),

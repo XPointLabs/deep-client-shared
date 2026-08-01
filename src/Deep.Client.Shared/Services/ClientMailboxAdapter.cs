@@ -306,7 +306,7 @@ public sealed class ClientMailboxAdapter
     private readonly IClientMailboxStateRepository state;
     private readonly IClientMailboxReceiptVerifier receipts;
     private readonly MailboxAuthenticatedRequestFactory requests;
-    private readonly MailboxClientDecodePolicy decodePolicy;
+    private readonly IMailboxClientDecodePolicyProvider decodePolicies;
     private readonly TimeProvider timeProvider;
 
     public ClientMailboxAdapter(
@@ -316,7 +316,7 @@ public sealed class ClientMailboxAdapter
         SqliteSessionStore localStore,
         IClientMailboxReceiptVerifier receipts,
         MailboxAuthenticatedRequestFactory requests,
-        MailboxClientDecodePolicy decodePolicy,
+        IMailboxClientDecodePolicyProvider decodePolicies,
         TimeProvider? timeProvider = null)
     {
         ArgumentNullException.ThrowIfNull(flags);
@@ -327,7 +327,7 @@ public sealed class ClientMailboxAdapter
         this.state = localStore;
         this.receipts = receipts ?? throw new ArgumentNullException(nameof(receipts));
         this.requests = requests ?? throw new ArgumentNullException(nameof(requests));
-        this.decodePolicy = decodePolicy ?? throw new ArgumentNullException(nameof(decodePolicy));
+        this.decodePolicies = decodePolicies ?? throw new ArgumentNullException(nameof(decodePolicies));
         this.timeProvider = timeProvider ?? TimeProvider.System;
         if (!flags.ClientMailboxAdapterEnabled ||
             !activation.Enabled ||
@@ -555,6 +555,10 @@ public sealed class ClientMailboxAdapter
             cancellationToken).ConfigureAwait(false);
         var response = await ingress.StoreAsync(encoded, cancellationToken)
             .ConfigureAwait(false);
+        route = await ResolveDispatchRouteAsync(
+            selector, envelope.Epoch, envelope.MailboxId, envelope.PlacementId,
+            MailboxAuthenticatedOperation.Store,
+            cancellationToken).ConfigureAwait(false);
         var expectation = StoreExpectation(envelope, route);
         var durable = await VerifyAndJournalDurableAsync(
             response,
@@ -707,7 +711,12 @@ public sealed class ClientMailboxAdapter
         var response = await ingress.RetrieveAsync(
             canonicalMau2,
             cancellationToken).ConfigureAwait(false);
-        var page = MailboxClientCodec.DecodeRetrievePage(response.Span, decodePolicy);
+        route = await ResolveDispatchRouteAsync(
+            selector, request.Epoch, request.MailboxId, request.PlacementId,
+            MailboxAuthenticatedOperation.Retrieve,
+            cancellationToken).ConfigureAwait(false);
+        var page = MailboxClientCodec.DecodeRetrievePage(
+            response.Span, decodePolicies.GetCurrent());
         if (page.Epoch != request.Epoch ||
             !FixedEquals(page.OperationId.Span, request.OperationId.Span) ||
             page.Items.Any(item =>
@@ -859,6 +868,10 @@ public sealed class ClientMailboxAdapter
             var recoveredResponse = await ingress.AcknowledgeAsync(
                 canonicalMau2,
                 cancellationToken).ConfigureAwait(false);
+            route = await ResolveDispatchRouteAsync(
+                selector, request.Epoch, request.MailboxId, request.PlacementId,
+                MailboxAuthenticatedOperation.Ack,
+                cancellationToken).ConfigureAwait(false);
             var recoveredAggregate = MailboxAggregateAckCodec.DecodeMqr3(
                 recoveredResponse.Span);
             if (recoveredAggregate.Epoch != request.Epoch ||
@@ -917,6 +930,10 @@ public sealed class ClientMailboxAdapter
             cancellationToken).ConfigureAwait(false);
         var response = await ingress.AcknowledgeAsync(
             canonicalMau2,
+            cancellationToken).ConfigureAwait(false);
+        route = await ResolveDispatchRouteAsync(
+            selector, request.Epoch, request.MailboxId, request.PlacementId,
+            MailboxAuthenticatedOperation.Ack,
             cancellationToken).ConfigureAwait(false);
         var aggregate = MailboxAggregateAckCodec.DecodeMqr3(response.Span);
         if (aggregate.Epoch != request.Epoch ||
