@@ -352,6 +352,143 @@ public sealed partial class MailboxCredentialBundleImporterTests
     private static byte[] Bytes(int count, byte value) =>
         Enumerable.Repeat(value, count).ToArray();
 
+    [Fact]
+    public async Task Import_allows_platform_indirection_above_the_protected_root()
+    {
+        using var fixture = Fixture.Create();
+        using var identity = new SessionIdentityProvider(AlicePhrase);
+        var aliasContainer = Path.Combine(
+            Path.GetTempPath(), $"deep-mailbox-platform-alias-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(aliasContainer);
+        var originalRoot = fixture.AndroidOptions.AuthorityProtectedRoot;
+        var originalParent = Directory.GetParent(originalRoot)!.FullName;
+        var platformAlias = Path.Combine(aliasContainer, "platform-root");
+        Directory.CreateSymbolicLink(platformAlias, originalParent);
+        try
+        {
+            var aliasedRoot = Path.Combine(
+                platformAlias, Path.GetFileName(originalRoot));
+            var options = fixture.AndroidOptions with
+            {
+                PairRoot = Path.Combine(aliasedRoot, "pair"),
+                AuthorityProtectedRoot = aliasedRoot,
+                AuthorityPublicPath = Path.Combine(
+                    aliasedRoot, Path.GetFileName(fixture.AndroidOptions.AuthorityPublicPath)),
+                RevocationProtectedRoot = aliasedRoot,
+                RevocationSnapshotPath = Path.Combine(
+                    aliasedRoot, Path.GetFileName(fixture.AndroidOptions.RevocationSnapshotPath))
+            };
+            using var store = new SqliteSessionStore(Path.Combine(aliasContainer, "state.db"));
+
+            var imported = await MailboxCredentialBundleImporter.ImportAsync(
+                store, identity, options, MailboxInfrastructureOwnership.UserManaged);
+
+            Assert.Equal(identity.SessionId, imported.LocalSessionId);
+            Assert.Equal(fixture.BobSessionId, imported.PeerSessionId);
+        }
+        finally
+        {
+            Directory.Delete(platformAlias);
+            Directory.Delete(aliasContainer, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Import_rejects_reparse_points_inside_the_protected_root()
+    {
+        using var fixture = Fixture.Create();
+        using var identity = new SessionIdentityProvider(AlicePhrase);
+        var root = fixture.AndroidOptions.AuthorityProtectedRoot;
+        var pairAlias = Path.Combine(root, "pair-link");
+        Directory.CreateSymbolicLink(pairAlias, fixture.AndroidOptions.PairRoot);
+        using var pairStore = new SqliteSessionStore(Path.Combine(root, "pair-link-state.db"));
+
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
+            MailboxCredentialBundleImporter.ImportAsync(
+                pairStore, identity,
+                fixture.AndroidOptions with { PairRoot = pairAlias },
+                MailboxInfrastructureOwnership.UserManaged));
+
+        var authorityAlias = Path.Combine(root, "authority-link.json");
+        File.CreateSymbolicLink(
+            authorityAlias, fixture.AndroidOptions.AuthorityPublicPath);
+        using var authorityStore = new SqliteSessionStore(
+            Path.Combine(root, "authority-link-state.db"));
+
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
+            MailboxCredentialBundleImporter.ImportAsync(
+                authorityStore, identity,
+                fixture.AndroidOptions with { AuthorityPublicPath = authorityAlias },
+                MailboxInfrastructureOwnership.UserManaged));
+    }
+
+    [Fact]
+    public async Task Import_accepts_trailing_separators_but_rejects_filesystem_root()
+    {
+        using var fixture = Fixture.Create();
+        using var identity = new SessionIdentityProvider(AlicePhrase);
+        var separator = Path.DirectorySeparatorChar.ToString();
+        var options = fixture.AndroidOptions with
+        {
+            PairRoot = fixture.AndroidOptions.PairRoot + separator,
+            AuthorityProtectedRoot =
+                fixture.AndroidOptions.AuthorityProtectedRoot + separator,
+            RevocationProtectedRoot =
+                fixture.AndroidOptions.RevocationProtectedRoot + separator
+        };
+        using var store = new SqliteSessionStore(Path.Combine(
+            fixture.AndroidOptions.AuthorityProtectedRoot, "trailing-state.db"));
+        var imported = await MailboxCredentialBundleImporter.ImportAsync(
+            store, identity, options, MailboxInfrastructureOwnership.UserManaged);
+        Assert.Equal(identity.SessionId, imported.LocalSessionId);
+        Assert.Equal(fixture.BobSessionId, imported.PeerSessionId);
+
+        var filesystemRoot = Path.GetPathRoot(
+            fixture.AndroidOptions.AuthorityProtectedRoot)!;
+        using var rejectedStore = new SqliteSessionStore(Path.Combine(
+            fixture.AndroidOptions.AuthorityProtectedRoot, "root-state.db"));
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
+            MailboxCredentialBundleImporter.ImportAsync(
+                rejectedStore, identity,
+                fixture.AndroidOptions with { AuthorityProtectedRoot = filesystemRoot },
+                MailboxInfrastructureOwnership.UserManaged));
+    }
+
+    [Fact]
+    public async Task Import_rejects_missing_or_escaped_protected_roots()
+    {
+        using var fixture = Fixture.Create();
+        using var identity = new SessionIdentityProvider(AlicePhrase);
+        var root = fixture.AndroidOptions.AuthorityProtectedRoot;
+        using var missingStore = new SqliteSessionStore(Path.Combine(root, "missing-state.db"));
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
+            MailboxCredentialBundleImporter.ImportAsync(
+                missingStore, identity,
+                fixture.AndroidOptions with
+                {
+                    AuthorityProtectedRoot = Path.Combine(root, "missing")
+                },
+                MailboxInfrastructureOwnership.UserManaged));
+
+        var escapedRoot = Path.Combine(
+            Path.GetTempPath(), $"deep-mailbox-escape-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(escapedRoot);
+        try
+        {
+            using var escapedStore = new SqliteSessionStore(Path.Combine(
+                root, "escaped-state.db"));
+            await Assert.ThrowsAsync<InvalidDataException>(() =>
+                MailboxCredentialBundleImporter.ImportAsync(
+                    escapedStore, identity,
+                    fixture.AndroidOptions with { PairRoot = escapedRoot },
+                    MailboxInfrastructureOwnership.UserManaged));
+        }
+        finally
+        {
+            Directory.Delete(escapedRoot);
+        }
+    }
+
     private sealed class Fixture : IDisposable
     {
         private readonly string root;

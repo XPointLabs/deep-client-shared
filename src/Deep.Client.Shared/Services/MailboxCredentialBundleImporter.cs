@@ -146,9 +146,12 @@ public static class MailboxCredentialBundleImporter
             importGate = ImportGates.GetValue(store, static _ => new SemaphoreSlim(1, 1));
             await importGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             gateHeld = true;
-            var root = RequireSafeRoot(options.PairRoot);
             var authorityRoot = RequireSafeRoot(options.AuthorityProtectedRoot);
-            var authorityPath = RequireSafeFile(options.AuthorityPublicPath);
+            var root = RequireSafeRoot(authorityRoot, options.PairRoot);
+            var revocationRoot = RequireSafeRoot(
+                authorityRoot, options.RevocationProtectedRoot);
+            var authorityPath = RequireSafeFile(
+                authorityRoot, options.AuthorityPublicPath);
             var authorityBytes = ReadStableBounded(authorityRoot, authorityPath);
             Require(Fixed(SHA256.HashData(authorityBytes), expectedAuthority),
                 "Public authority file differs from its independent pin.");
@@ -170,7 +173,7 @@ public static class MailboxCredentialBundleImporter
                 "Generation pointer differs from the independently signed pair pins.");
             var generationDirectory = SafeChild(
                 root, "generations", Convert.ToHexStringLower(generation));
-            RequireSafeDirectory(generationDirectory);
+            RequireSafeDirectory(root, generationDirectory);
 
             var manifestBytes = ReadStableBounded(
                 root, SafeChild(generationDirectory, "pair-manifest.v1.json"));
@@ -219,7 +222,7 @@ public static class MailboxCredentialBundleImporter
                 "Mailbox holder keys do not map to the independently pinned Session IDs.");
 
             var parsedRevocations = LoadRevocations(
-                RequireSafeRoot(options.RevocationProtectedRoot),
+                revocationRoot,
                 options.RevocationSnapshotPath, expectedRevocation, expectedAuthority,
                 expectedIssuer, publicAuthority.MinimumGeneration,
                 publicAuthority.MaximumGeneration, timeProvider);
@@ -712,7 +715,8 @@ public static class MailboxCredentialBundleImporter
         ulong maximumGeneration,
         TimeProvider timeProvider)
     {
-        var bytes = ReadStableBounded(protectedRoot, RequireSafeFile(path));
+        var bytes = ReadStableBounded(
+            protectedRoot, RequireSafeFile(protectedRoot, path));
         Require(Fixed(SHA256.HashData(bytes), expectedHash), "Revocation snapshot hash is not pinned.");
         using var document = Parse(bytes, "revocation snapshot");
         var root = document.RootElement;
@@ -756,16 +760,33 @@ public static class MailboxCredentialBundleImporter
     private static string RequireSafeRoot(string path)
     {
         if (string.IsNullOrWhiteSpace(path)) throw new ArgumentException("Pair root is required.", nameof(path));
-        var full = Path.GetFullPath(path);
-        RequireSafeDirectory(full);
-        return full.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var full = CanonicalDirectory(path);
+        var comparison = Comparison();
+        var fileSystemRoot = Path.GetPathRoot(full);
+        Require(!string.IsNullOrEmpty(fileSystemRoot) &&
+                !full.Equals(CanonicalDirectory(fileSystemRoot), comparison),
+            "Mailbox protected root cannot be a filesystem root.");
+        Require(Directory.Exists(full), "Mailbox bundle directory is missing.");
+        RequireNoReparsePath(full, full);
+        return full;
     }
 
-    private static string RequireSafeFile(string path)
+    private static string RequireSafeRoot(string protectedRoot, string path)
+    {
+        var root = CanonicalDirectory(protectedRoot);
+        var full = CanonicalDirectory(path);
+        RequireContained(root, full, allowSame: true);
+        Require(Directory.Exists(full), "Mailbox bundle directory is missing.");
+        RequireNoReparsePath(full, root);
+        return full;
+    }
+
+    private static string RequireSafeFile(string protectedRoot, string path)
     {
         if (string.IsNullOrWhiteSpace(path)) throw new ArgumentException("A pinned file path is required.", nameof(path));
         var full = Path.GetFullPath(path);
-        RequireNoReparsePath(full);
+        RequireContained(protectedRoot, full, allowSame: false);
+        RequireNoReparsePath(full, protectedRoot);
         Require(File.Exists(full), "Pinned file is missing.");
         return full;
     }
@@ -773,34 +794,57 @@ public static class MailboxCredentialBundleImporter
     private static string SafeChild(string root, params string[] parts)
     {
         var candidate = Path.GetFullPath(Path.Combine([root, .. parts]));
-        var prefix = root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) +
-            Path.DirectorySeparatorChar;
-        Require(candidate.StartsWith(prefix, OperatingSystem.IsWindows()
-            ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal),
-            "Mailbox bundle path escaped its protected root.");
-        RequireNoReparsePath(candidate);
+        RequireContained(root, candidate, allowSame: false);
+        RequireNoReparsePath(candidate, root);
         return candidate;
     }
 
-    private static void RequireSafeDirectory(string path)
+    private static void RequireSafeDirectory(string protectedRoot, string path)
     {
+        RequireContained(protectedRoot, path, allowSame: true);
         Require(Directory.Exists(path), "Mailbox bundle directory is missing.");
-        RequireNoReparsePath(path);
+        RequireNoReparsePath(path, protectedRoot);
     }
 
-    private static void RequireNoReparsePath(string path)
+    private static void RequireNoReparsePath(string path, string protectedRoot)
     {
         var current = Path.GetFullPath(path);
-        while (!string.IsNullOrEmpty(current))
+        var root = CanonicalDirectory(protectedRoot);
+        var comparison = Comparison();
+        RequireContained(root, current, allowSame: true);
+        while (true)
         {
             if (File.Exists(current) || Directory.Exists(current))
                 Require((File.GetAttributes(current) & FileAttributes.ReparsePoint) == 0,
                     "Mailbox bundle path contains a reparse point.");
+            if (current.Equals(root, comparison)) return;
             var parent = Path.GetDirectoryName(current);
-            if (string.IsNullOrEmpty(parent) || string.Equals(parent, current, StringComparison.Ordinal)) break;
-            current = parent;
+            Require(!string.IsNullOrEmpty(parent) &&
+                    !string.Equals(parent, current, comparison),
+                "Mailbox bundle path did not reach its protected root.");
+            current = parent!;
         }
     }
+
+    private static void RequireContained(
+        string protectedRoot,
+        string candidate,
+        bool allowSame)
+    {
+        var root = CanonicalDirectory(protectedRoot);
+        var full = Path.GetFullPath(candidate);
+        var comparison = Comparison();
+        Require((allowSame && full.Equals(root, comparison)) ||
+                full.StartsWith(root + Path.DirectorySeparatorChar, comparison),
+            "Mailbox bundle path escaped its protected root.");
+    }
+
+    private static StringComparison Comparison() => OperatingSystem.IsWindows()
+        ? StringComparison.OrdinalIgnoreCase
+        : StringComparison.Ordinal;
+
+    private static string CanonicalDirectory(string path) =>
+        Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
 
     private static byte[] ReadStableBounded(string protectedRoot, string path) =>
         ProtectedMailboxFileReader.ReadBounded(

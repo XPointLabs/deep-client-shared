@@ -80,33 +80,40 @@ internal static class ProtectedMailboxFileReader
         if (segments.Any(static segment => segment.Contains(':')))
             throw Invalid("Windows alternate data streams are not accepted.");
 
-        var heldDirectories = new List<(SafeFileHandle Handle, string Expected)>(
+        var heldDirectories = new List<(SafeFileHandle Handle, string PhysicalPath)>(
             segments.Count);
         SafeFileHandle? file = null;
         try
         {
             var rootHandle = OpenWindows(
                 root, directory: true, ShareRead | ShareWrite);
-            heldDirectories.Add((rootHandle, root));
-            ValidateWindowsHandle(rootHandle, root, directory: true);
+            var physicalRoot = ValidateWindowsHandle(
+                rootHandle, expectedPhysicalPath: null, directory: true);
+            heldDirectories.Add((rootHandle, physicalRoot));
 
             var current = root;
+            var physicalCurrent = physicalRoot;
             for (var index = 0; index < segments.Count - 1; index++)
             {
                 current = Canonical(Path.Combine(current, segments[index]));
+                physicalCurrent = Canonical(Path.Combine(
+                    physicalCurrent, segments[index]));
                 var directory = OpenWindows(
                     current, directory: true, ShareRead | ShareWrite);
-                heldDirectories.Add((directory, current));
-                ValidateWindowsHandle(directory, current, directory: true);
+                ValidateWindowsHandle(
+                    directory, physicalCurrent, directory: true);
+                heldDirectories.Add((directory, physicalCurrent));
             }
 
             file = OpenWindows(requested, directory: false, ShareRead);
-            ValidateWindowsHandle(file, requested, directory: false);
+            var physicalRequested = Canonical(Path.Combine(
+                physicalRoot, Path.Combine(segments.ToArray())));
+            ValidateWindowsHandle(file, physicalRequested, directory: false);
             var bytes = ReadExactBounded(file, maxBytes);
-            ValidateWindowsHandle(file, requested, directory: false);
+            ValidateWindowsHandle(file, physicalRequested, directory: false);
             foreach (var directory in heldDirectories)
                 ValidateWindowsHandle(
-                    directory.Handle, directory.Expected, directory: true);
+                    directory.Handle, directory.PhysicalPath, directory: true);
             return bytes;
         }
         finally
@@ -138,9 +145,9 @@ internal static class ProtectedMailboxFileReader
     }
 
     [SupportedOSPlatform("windows")]
-    private static void ValidateWindowsHandle(
+    private static string ValidateWindowsHandle(
         SafeFileHandle handle,
-        string expectedPath,
+        string? expectedPhysicalPath,
         bool directory)
     {
         if (!GetFileInformationByHandle(handle, out var information))
@@ -149,12 +156,14 @@ internal static class ProtectedMailboxFileReader
         if ((attributes & FileAttributeReparsePoint) != 0 ||
             ((attributes & FileAttributeDirectory) != 0) != directory)
             throw Invalid("Protected mailbox input contains a reparse point or wrong object type.");
-        if (!string.Equals(
-                FinalWindowsPath(handle),
-                Canonical(expectedPath),
+        var physicalPath = FinalWindowsPath(handle);
+        if (expectedPhysicalPath is not null && !string.Equals(
+                physicalPath,
+                Canonical(expectedPhysicalPath),
                 StringComparison.OrdinalIgnoreCase))
             throw Invalid("Protected mailbox handle resolved to a different final path.");
         ValidateWindowsSecurity(handle, directory);
+        return physicalPath;
     }
 
     [SupportedOSPlatform("windows")]
@@ -258,19 +267,21 @@ internal static class ProtectedMailboxFileReader
                 root,
                 UnixReadOnly | UnixDirectory | UnixNoFollow | UnixCloseOnExec);
             handles.Add(rootHandle);
-            ValidateUnixHandle(rootHandle, root, directory: true);
+            var physicalRoot = ValidateUnixHandle(
+                rootHandle, expectedPhysicalPath: null, directory: true);
 
-            var current = root;
+            var physicalCurrent = physicalRoot;
             var parent = rootHandle;
             for (var index = 0; index < segments.Count - 1; index++)
             {
-                current = Canonical(Path.Combine(current, segments[index]));
+                physicalCurrent = Canonical(Path.Combine(
+                    physicalCurrent, segments[index]));
                 var child = OpenAtUnix(
                     parent,
                     segments[index],
                     UnixReadOnly | UnixDirectory | UnixNoFollow | UnixCloseOnExec);
                 handles.Add(child);
-                ValidateUnixHandle(child, current, directory: true);
+                ValidateUnixHandle(child, physicalCurrent, directory: true);
                 parent = child;
             }
 
@@ -279,9 +290,11 @@ internal static class ProtectedMailboxFileReader
                 segments[^1],
                 UnixReadOnly | UnixNonBlock | UnixNoFollow | UnixCloseOnExec);
             handles.Add(file);
-            ValidateUnixHandle(file, requested, directory: false);
+            var physicalRequested = Canonical(Path.Combine(
+                physicalRoot, Path.Combine(segments.ToArray())));
+            ValidateUnixHandle(file, physicalRequested, directory: false);
             var bytes = ReadExactBounded(file, maxBytes);
-            ValidateUnixHandle(file, requested, directory: false);
+            ValidateUnixHandle(file, physicalRequested, directory: false);
             return bytes;
         }
         finally
@@ -314,9 +327,9 @@ internal static class ProtectedMailboxFileReader
     }
 
     [UnsupportedOSPlatform("windows")]
-    private static void ValidateUnixHandle(
+    private static string ValidateUnixHandle(
         SafeFileHandle handle,
-        string expectedPath,
+        string? expectedPhysicalPath,
         bool directory)
     {
         var descriptor = checked((int)handle.DangerousGetHandle());
@@ -347,7 +360,8 @@ internal static class ProtectedMailboxFileReader
         }
 
         var finalPath = FinalUnixPath(descriptor);
-        if (!string.Equals(Canonical(finalPath), Canonical(expectedPath),
+        if (expectedPhysicalPath is not null &&
+            !string.Equals(Canonical(finalPath), Canonical(expectedPhysicalPath),
                 StringComparison.Ordinal))
             throw Invalid("Protected mailbox descriptor resolved to a different final path.");
         var expectedMode = directory
@@ -355,6 +369,7 @@ internal static class ProtectedMailboxFileReader
             : UnixFileMode.UserRead | UnixFileMode.UserWrite;
         if (File.GetUnixFileMode($"/proc/self/fd/{descriptor}") != expectedMode)
             throw Invalid("Protected mailbox modes must be exact directory 0700 and file 0600.");
+        return Canonical(finalPath);
     }
 
     [UnsupportedOSPlatform("windows")]
