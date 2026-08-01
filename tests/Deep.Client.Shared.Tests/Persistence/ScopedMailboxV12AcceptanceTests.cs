@@ -9,7 +9,7 @@ using Sodium;
 
 namespace Deep.Client.Shared.Tests.Persistence;
 
-public sealed class ScopedMailboxV11AcceptanceTests
+public sealed class ScopedMailboxV12AcceptanceTests
 {
     [Fact]
     public async Task Atomic_import_survives_restart_with_exact_scoped_routes()
@@ -402,7 +402,7 @@ public sealed class ScopedMailboxV11AcceptanceTests
         public Fixture()
         {
             Path = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
-                $"deep-scoped-v11-{Guid.NewGuid():N}.db");
+                $"deep-scoped-v12-{Guid.NewGuid():N}.db");
             Clock = new MutableTimeProvider(1050);
             Revocations = new MutableRevocations();
             Account = OutboxAccountScope.FromBytes(Bytes(32, 0x10));
@@ -557,7 +557,18 @@ public sealed class ScopedMailboxV11AcceptanceTests
             IReadOnlyList<ScopedMailboxBatchTarget> targets) =>
             store.PrepareScopedMailboxBatchAsync(
                 new ScopedMailboxPrepareBatchRequest(
-                    Account, parentOperationId, targets,
+                    Account,
+                    parentOperationId.Length == 16
+                        ? parentOperationId
+                        : SHA256.HashData(parentOperationId)[..16],
+                    parentOperationId.Length == 16
+                        ? parentOperationId
+                        : SHA256.HashData(parentOperationId)[..16],
+                    targets.Select(target => new ScopedMailboxBatchSelector(
+                        target.Selector,
+                        new MessageId(Convert.ToHexString(target.Binding.OperationId.Span)),
+                        target.Binding.Operation)).ToArray(),
+                    targets,
                     DateTimeOffset.FromUnixTimeSeconds(Clock.GetUtcNow().ToUnixTimeSeconds())),
                 Signer, Authority);
 
@@ -632,15 +643,15 @@ public sealed class ScopedMailboxV11AcceptanceTests
         private static MailboxCapabilityIssuerAuthority Issuer(
             ReadOnlyMemory<byte> publicKey,
             MailboxCapabilityDomain domain) => new()
-        {
-            PublicKey = publicKey.ToArray(),
-            Domain = domain,
-            AllowedLifecycle = MailboxCapabilityLifecycle.Active,
-            MinimumGeneration = 1,
-            MaximumGeneration = ulong.MaxValue,
-            ValidFromUnixSeconds = 1,
-            ValidUntilUnixSeconds = ulong.MaxValue
-        };
+            {
+                PublicKey = publicKey.ToArray(),
+                Domain = domain,
+                AllowedLifecycle = MailboxCapabilityLifecycle.Active,
+                MinimumGeneration = 1,
+                MaximumGeneration = ulong.MaxValue,
+                ValidFromUnixSeconds = 1,
+                ValidUntilUnixSeconds = ulong.MaxValue
+            };
 
         public void Dispose()
         {

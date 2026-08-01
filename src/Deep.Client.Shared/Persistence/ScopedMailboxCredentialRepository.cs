@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using Deep.Client.Shared.Domain;
 using Deep.Client.Shared.Services;
 using Deep.Protocol.DeepExtension.MailboxCapabilities;
 using Microsoft.Data.Sqlite;
@@ -264,6 +265,11 @@ public sealed record ScopedMailboxBatchTarget(
     MailboxCredentialSelector Selector,
     MailboxAuthenticatedRequestBinding Binding);
 
+public sealed record ScopedMailboxBatchSelector(
+    MailboxCredentialSelector Selector,
+    MessageId WireMessageId,
+    MailboxAuthenticatedOperation Operation);
+
 /// <summary>Opaque route material resolved only from a verified scoped credential.</summary>
 public sealed record ScopedMailboxResolvedRoute(
     ulong Epoch,
@@ -276,8 +282,16 @@ public sealed record ScopedMailboxResolvedRoute(
 public sealed record ScopedMailboxPrepareBatchRequest(
     OutboxAccountScope AccountScope,
     ReadOnlyMemory<byte> ParentOperationId,
+    ReadOnlyMemory<byte> SemanticOperationId,
+    IReadOnlyList<ScopedMailboxBatchSelector> Selectors,
     IReadOnlyList<ScopedMailboxBatchTarget> Targets,
     DateTimeOffset CreatedAt);
+
+public sealed record ScopedMailboxResumeBatchRequest(
+    OutboxAccountScope AccountScope,
+    ReadOnlyMemory<byte> ParentOperationId,
+    ReadOnlyMemory<byte> SemanticOperationId,
+    IReadOnlyList<ScopedMailboxBatchSelector> Selectors);
 
 internal sealed record MailboxBundleRuntimeCheckpoint(
     int SchemaVersion,
@@ -366,6 +380,17 @@ public interface IScopedMailboxCredentialRepository
 
     Task<ScopedMailboxPreparedBatch> PrepareScopedMailboxBatchAsync(
         ScopedMailboxPrepareBatchRequest request,
+        IMailboxOperationSigner signer,
+        VerifiedOfficialMailboxAuthority authority,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Resumes an already committed logical fan-out without requiring the caller to recreate
+    /// randomized ciphertext. A null result means that no batch exists; any persisted conflict,
+    /// stale authority, or corruption fails closed.
+    /// </summary>
+    Task<ScopedMailboxPreparedBatch?> TryResumeScopedMailboxBatchAsync(
+        ScopedMailboxResumeBatchRequest request,
         IMailboxOperationSigner signer,
         VerifiedOfficialMailboxAuthority authority,
         CancellationToken cancellationToken = default);
@@ -902,14 +927,27 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
         {
             using var connection = OpenConnection();
             using var transaction = connection.BeginTransaction(deferred: false);
+            var semanticOwnerExists = ValidateSemanticBatchOwnership(
+                connection, transaction,
+                request.AccountScope.Value,
+                request.SemanticOperationId.Span,
+                request.ParentOperationId.Span);
             var planDigest = ComputePlanDigest(request);
             var resumed = ReadPreparedBatch(
-                connection, transaction, request, planDigest);
+                connection, transaction,
+                new ScopedMailboxResumeBatchRequest(
+                    request.AccountScope, request.ParentOperationId,
+                    request.SemanticOperationId, request.Selectors),
+                planDigest);
             if (resumed is not null)
             {
-                for (var ordinal = 0; ordinal < request.Targets.Count; ordinal++)
+                for (var ordinal = 0; ordinal < request.Selectors.Count; ordinal++)
                 {
-                    var target = request.Targets[ordinal];
+                    var logical = request.Selectors[ordinal];
+                    var decoded = MailboxAuthenticatedClientRequestCodec.Decode(
+                        resumed.Frames[ordinal].GetCanonicalMau2Copy());
+                    var target = new ScopedMailboxBatchTarget(
+                        logical.Selector, decoded.Binding);
                     var resolved = ResolveForPrepare(
                         connection, transaction, target, signer, authority,
                         allocateCounter: false);
@@ -919,6 +957,9 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
                 transaction.Commit();
                 return resumed;
             }
+            if (semanticOwnerExists)
+                throw new InvalidDataException(
+                    "Mailbox semantic batch owner lost its prepared batch.");
 
             var frames = new List<MailboxAuthenticatedRequestFrame>(
                 request.Targets.Count);
@@ -927,13 +968,16 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
                 batch.Transaction = transaction;
                 batch.CommandText = """
                     INSERT INTO mailbox_prepared_batches(
-                        account_scope,parent_operation_id,plan_digest,target_count,created_at)
-                    VALUES($account,$parent,$digest,$count,$created);
+                        account_scope,parent_operation_id,semantic_operation_id,
+                        plan_digest,target_count,created_at)
+                    VALUES($account,$parent,$semantic,$digest,$count,$created);
                     """;
                 batch.Parameters.Add("$account", SqliteType.Blob).Value =
                     request.AccountScope.ToArray();
                 batch.Parameters.Add("$parent", SqliteType.Blob).Value =
                     request.ParentOperationId.ToArray();
+                batch.Parameters.Add("$semantic", SqliteType.Blob).Value =
+                    request.SemanticOperationId.ToArray();
                 batch.Parameters.Add("$digest", SqliteType.Blob).Value = planDigest;
                 batch.Parameters.AddWithValue("$count", request.Targets.Count);
                 batch.Parameters.AddWithValue(
@@ -998,6 +1042,66 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
             }
             return new ScopedMailboxPreparedBatch(
                 request.ParentOperationId, frames);
+        }
+        finally
+        {
+            _databaseGate.Release();
+        }
+    }
+
+    public async Task<ScopedMailboxPreparedBatch?> TryResumeScopedMailboxBatchAsync(
+        ScopedMailboxResumeBatchRequest request,
+        IMailboxOperationSigner signer,
+        VerifiedOfficialMailboxAuthority authority,
+        CancellationToken cancellationToken = default)
+    {
+        authority.Validate();
+        ScopedMailboxCredentialValidator.ValidateResumeBatch(request, signer);
+        await _databaseGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            using var connection = OpenConnection();
+            using var transaction = connection.BeginTransaction(deferred: false);
+            var semanticOwnerExists = ValidateSemanticBatchOwnership(
+                connection, transaction,
+                request.AccountScope.Value,
+                request.SemanticOperationId.Span,
+                request.ParentOperationId.Span);
+            var resumed = ReadPreparedBatch(
+                connection,
+                transaction,
+                request,
+                ScopedMailboxCredentialValidator.ComputePlanDigest(request));
+            if (resumed is null)
+            {
+                if (semanticOwnerExists)
+                    throw new InvalidDataException(
+                        "Mailbox semantic batch owner lost its prepared batch.");
+                transaction.Commit();
+                return null;
+            }
+
+            for (var ordinal = 0; ordinal < request.Selectors.Count; ordinal++)
+            {
+                var logical = request.Selectors[ordinal];
+                var frame = resumed.Frames[ordinal];
+                var decoded = MailboxAuthenticatedClientRequestCodec.Decode(
+                    frame.GetCanonicalMau2Copy());
+                if (decoded.Binding.Operation != logical.Operation)
+                {
+                    throw new InvalidDataException(
+                        "Mailbox prepared batch operation catalog is corrupt.");
+                }
+                var target = new ScopedMailboxBatchTarget(
+                    logical.Selector, decoded.Binding);
+                var resolved = ResolveForPrepare(
+                    connection, transaction, target, signer, authority,
+                    allocateCounter: false);
+                ValidateResumedFrame(frame, target, resolved, signer);
+            }
+            cancellationToken.ThrowIfCancellationRequested();
+            transaction.Commit();
+            return resumed;
         }
         finally
         {
@@ -1819,16 +1923,60 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
             bytes <= 256L * 1024 * 1024 - additionalBytes;
     }
 
+    private static bool ValidateSemanticBatchOwnership(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        ReadOnlySpan<byte> accountScope,
+        ReadOnlySpan<byte> semanticOperationId,
+        ReadOnlySpan<byte> parentOperationId)
+    {
+        using (var semantic = connection.CreateCommand())
+        {
+            semantic.Transaction = transaction;
+            semantic.CommandText = """
+                SELECT parent_operation_id FROM mailbox_prepared_batches
+                WHERE account_scope=$account AND semantic_operation_id=$semantic;
+                """;
+            semantic.Parameters.Add("$account", SqliteType.Blob).Value =
+                accountScope.ToArray();
+            semantic.Parameters.Add("$semantic", SqliteType.Blob).Value =
+                semanticOperationId.ToArray();
+            var ownedParent = semantic.ExecuteScalar() as byte[];
+            if (ownedParent is not null)
+            {
+                if (!Fixed(ownedParent, parentOperationId))
+                    throw new InvalidOperationException(
+                        "Mailbox semantic operation conflicts with its durable fan-out.");
+                return true;
+            }
+        }
+
+        using var parent = connection.CreateCommand();
+        parent.Transaction = transaction;
+        parent.CommandText = """
+            SELECT semantic_operation_id FROM mailbox_prepared_batches
+            WHERE account_scope=$account AND parent_operation_id=$parent;
+            """;
+        parent.Parameters.Add("$account", SqliteType.Blob).Value = accountScope.ToArray();
+        parent.Parameters.Add("$parent", SqliteType.Blob).Value = parentOperationId.ToArray();
+        var ownedSemantic = parent.ExecuteScalar() as byte[];
+        if (ownedSemantic is not null && !Fixed(ownedSemantic, semanticOperationId))
+            throw new InvalidOperationException(
+                "Mailbox logical fan-out belongs to another semantic operation.");
+        return ownedSemantic is not null;
+    }
+
     private static ScopedMailboxPreparedBatch? ReadPreparedBatch(
         SqliteConnection connection,
         SqliteTransaction transaction,
-        ScopedMailboxPrepareBatchRequest request,
+        ScopedMailboxResumeBatchRequest request,
         byte[] planDigest)
     {
         using var read = connection.CreateCommand();
         read.Transaction = transaction;
         read.CommandText = """
-            SELECT plan_digest,target_count FROM mailbox_prepared_batches
+            SELECT semantic_operation_id,plan_digest,target_count
+            FROM mailbox_prepared_batches
             WHERE account_scope=$account AND parent_operation_id=$parent;
             """;
         read.Parameters.Add("$account", SqliteType.Blob).Value =
@@ -1840,8 +1988,9 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
         {
             return null;
         }
-        if (!Fixed((byte[])reader.GetValue(0), planDigest) ||
-            reader.GetInt32(1) != request.Targets.Count)
+        if (!Fixed((byte[])reader.GetValue(0), request.SemanticOperationId.Span) ||
+            !Fixed((byte[])reader.GetValue(1), planDigest) ||
+            reader.GetInt32(2) != request.Selectors.Count)
         {
             throw new InvalidOperationException(
                 "Mailbox batch operation conflicts with durable preparation.");
@@ -1853,7 +2002,7 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
             byte[] OperationId,
             byte[] ScopeId,
             byte[] RequestDigest,
-            ulong Counter)>(request.Targets.Count);
+            ulong Counter)>(request.Selectors.Count);
         using (var targets = connection.CreateCommand())
         {
             targets.Transaction = transaction;
@@ -1879,48 +2028,44 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
                     MailboxReadU64((byte[])targetReader.GetValue(4))));
             }
         }
-        if (catalog.Count != request.Targets.Count)
+        if (catalog.Count != request.Selectors.Count)
         {
             throw new InvalidDataException(
                 "Mailbox prepared batch target catalog is incomplete.");
         }
 
         var frames = new List<MailboxAuthenticatedRequestFrame>(
-            request.Targets.Count);
-        for (var ordinal = 0; ordinal < request.Targets.Count; ordinal++)
+            request.Selectors.Count);
+        for (var ordinal = 0; ordinal < request.Selectors.Count; ordinal++)
         {
-            var target = request.Targets[ordinal];
+            var target = request.Selectors[ordinal];
             var persisted = catalog[ordinal];
             if (persisted.Ordinal != ordinal ||
                 persisted.Counter == 0 ||
-                !Fixed(persisted.OperationId, target.Binding.OperationId.Span) ||
-                !Fixed(persisted.ScopeId, target.Selector.ScopeId.Span) ||
-                !Fixed(persisted.RequestDigest, target.Binding.RequestDigest.Span))
+                !Fixed(persisted.ScopeId, target.Selector.ScopeId.Span))
             {
                 throw new InvalidDataException(
                     "Mailbox prepared batch target catalog is corrupt.");
             }
             var stored = ReadTransportOutboxItem(
                 connection, transaction, request.AccountScope.Value,
-                target.Binding.OperationId.Span)
+                persisted.OperationId)
                 ?? throw new InvalidDataException(
                     "Mailbox prepared batch lost an outbox target.");
             var canonical = stored.CiphertextBundle;
             var decoded =
                 MailboxAuthenticatedClientRequestCodec.Decode(canonical);
-            if (decoded.Binding.Operation != target.Binding.Operation ||
-                decoded.Presentation.Operation != target.Binding.Operation ||
+            if (decoded.Binding.Operation != target.Operation ||
+                decoded.Presentation.Operation != target.Operation ||
                 decoded.Presentation.ReplayCounter != persisted.Counter ||
                 !Fixed(decoded.Binding.OperationId.Span,
-                    target.Binding.OperationId.Span) ||
+                    persisted.OperationId) ||
                 !Fixed(decoded.Binding.RequestDigest.Span,
-                    target.Binding.RequestDigest.Span) ||
-                !Fixed(decoded.Binding.CanonicalRequest.Span,
-                    target.Binding.CanonicalRequest.Span) ||
+                    persisted.RequestDigest) ||
                 !Fixed(decoded.Presentation.OperationId.Span,
-                    target.Binding.OperationId.Span) ||
+                    persisted.OperationId) ||
                 !Fixed(decoded.Presentation.RequestDigest.Span,
-                    target.Binding.RequestDigest.Span))
+                    persisted.RequestDigest))
             {
                 throw new InvalidDataException(
                     "Mailbox prepared batch target is corrupt.");

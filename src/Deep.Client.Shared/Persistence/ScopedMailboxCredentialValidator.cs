@@ -6,6 +6,8 @@ namespace Deep.Client.Shared.Persistence;
 
 internal static class ScopedMailboxCredentialValidator
 {
+    private const int MaximumLogicalIdentifierUtf8Bytes = 512;
+    private static readonly System.Text.UTF8Encoding StrictUtf8 = new(false, true);
     internal const int MaximumBatchTargets = 2048;
     internal const long MaximumBatchRequestBytes = 128L * 1024 * 1024;
 
@@ -197,22 +199,40 @@ internal static class ScopedMailboxCredentialValidator
         ArgumentNullException.ThrowIfNull(request.AccountScope);
         ArgumentNullException.ThrowIfNull(request.Targets);
         ArgumentNullException.ThrowIfNull(signer);
+        ArgumentNullException.ThrowIfNull(request.Selectors);
         if (request.ParentOperationId.Length != 16 ||
             request.ParentOperationId.Span.IndexOfAnyExcept((byte)0) < 0 ||
+            request.SemanticOperationId.Length != 16 ||
+            request.SemanticOperationId.Span.IndexOfAnyExcept((byte)0) < 0 ||
             request.Targets.Count is < 1 or > MaximumBatchTargets ||
+            request.Selectors.Count != request.Targets.Count ||
             request.CreatedAt != TransportOutboxTime.Canonical(
                 request.CreatedAt))
         {
             throw new ArgumentException("Scoped mailbox batch is invalid.");
         }
+        ValidateResumeBatch(
+            new ScopedMailboxResumeBatchRequest(
+                request.AccountScope,
+                request.ParentOperationId,
+                request.SemanticOperationId,
+                request.Selectors),
+            signer);
 
-        byte[]? previous = null;
         long requestBytes = 0;
-        foreach (var target in request.Targets)
+        for (var ordinal = 0; ordinal < request.Targets.Count; ordinal++)
         {
+            var target = request.Targets[ordinal];
+            var selector = request.Selectors[ordinal];
             ArgumentNullException.ThrowIfNull(target);
             ArgumentNullException.ThrowIfNull(target.Selector);
             ArgumentNullException.ThrowIfNull(target.Binding);
+            if (!target.Selector.ScopeId.Span.SequenceEqual(selector.Selector.ScopeId.Span) ||
+                target.Binding.Operation != selector.Operation)
+            {
+                throw new InvalidOperationException(
+                    "Mailbox target does not match its logical batch selector.");
+            }
             if (!target.Selector.AccountScope.Equals(request.AccountScope))
             {
                 throw new InvalidOperationException(
@@ -225,33 +245,120 @@ internal static class ScopedMailboxCredentialValidator
                 throw new ArgumentException(
                     "Mailbox batch exceeds its canonical request byte bound.");
             }
-            var ordering = new byte[48];
-            target.Selector.ScopeId.Span.CopyTo(ordering);
-            target.Binding.OperationId.Span.CopyTo(ordering.AsSpan(32));
-            if (previous is not null &&
-                previous.AsSpan().SequenceCompareTo(ordering) >= 0)
-            {
-                throw new ArgumentException(
-                    "Mailbox targets are not in canonical unique order.");
-            }
-            previous = ordering;
         }
     }
 
     internal static byte[] ComputePlanDigest(
-        ScopedMailboxPrepareBatchRequest request)
+        ScopedMailboxPrepareBatchRequest request) =>
+        ComputePlanDigest(
+            request.AccountScope,
+            request.ParentOperationId,
+            request.SemanticOperationId,
+            request.Selectors);
+
+    internal static void ValidateResumeBatch(
+        ScopedMailboxResumeBatchRequest request,
+        IMailboxOperationSigner signer)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(request.AccountScope);
+        ArgumentNullException.ThrowIfNull(request.Selectors);
+        ArgumentNullException.ThrowIfNull(signer);
+        if (request.ParentOperationId.Length != 16 ||
+            request.ParentOperationId.Span.IndexOfAnyExcept((byte)0) < 0 ||
+            request.SemanticOperationId.Length != 16 ||
+            request.SemanticOperationId.Span.IndexOfAnyExcept((byte)0) < 0 ||
+            request.Selectors.Count is < 1 or > MaximumBatchTargets)
+        {
+            throw new ArgumentException("Scoped mailbox resume batch is invalid.");
+        }
+
+        byte[]? previousScope = null;
+        string? previousWire = null;
+        foreach (var selector in request.Selectors)
+        {
+            ValidateSelector(request.AccountScope, selector);
+            var scope = selector.Selector.ScopeId.ToArray();
+            var scopeOrder = previousScope is null
+                ? -1
+                : previousScope.AsSpan().SequenceCompareTo(scope);
+            if (previousScope is not null &&
+                (scopeOrder > 0 ||
+                 scopeOrder == 0 && string.CompareOrdinal(
+                     previousWire, selector.WireMessageId.Value) >= 0))
+            {
+                throw new ArgumentException(
+                    "Mailbox logical selectors are not in canonical unique order.");
+            }
+            previousScope = scope;
+            previousWire = selector.WireMessageId.Value;
+        }
+    }
+
+    internal static byte[] ComputePlanDigest(
+        ScopedMailboxResumeBatchRequest request) =>
+        ComputePlanDigest(
+            request.AccountScope,
+            request.ParentOperationId,
+            request.SemanticOperationId,
+            request.Selectors);
+
+    private static byte[] ComputePlanDigest(
+        OutboxAccountScope accountScope,
+        ReadOnlyMemory<byte> parentOperationId,
+        ReadOnlyMemory<byte> semanticOperationId,
+        IReadOnlyList<ScopedMailboxBatchSelector> selectors)
     {
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        hash.AppendData("deep.mailbox.prepared-batch.v2"u8);
-        hash.AppendData(request.AccountScope.Value);
-        hash.AppendData(request.ParentOperationId.Span);
-        foreach (var target in request.Targets)
+        hash.AppendData("deep.mailbox.logical-prepared-batch.v3"u8);
+        hash.AppendData(accountScope.Value);
+        hash.AppendData(parentOperationId.Span);
+        hash.AppendData(semanticOperationId.Span);
+        foreach (var selector in selectors)
         {
-            hash.AppendData(target.Selector.ScopeId.Span);
-            hash.AppendData(target.Binding.OperationId.Span);
-            hash.AppendData(target.Binding.RequestDigest.Span);
+            hash.AppendData([(byte)selector.Operation]);
+            hash.AppendData(selector.Selector.ScopeId.Span);
+            AppendString(hash, selector.WireMessageId.Value);
         }
         return hash.GetHashAndReset();
+    }
+
+    private static void ValidateSelector(
+        OutboxAccountScope accountScope,
+        ScopedMailboxBatchSelector value)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        ArgumentNullException.ThrowIfNull(value.Selector);
+        if (!value.Selector.AccountScope.Equals(accountScope) ||
+            string.IsNullOrWhiteSpace(value.WireMessageId.Value) ||
+            !Enum.IsDefined(value.Operation) ||
+            LogicalIdentifierByteCount(value.WireMessageId.Value) >
+                MaximumLogicalIdentifierUtf8Bytes)
+        {
+            throw new InvalidOperationException("Mailbox logical batch selector is invalid.");
+        }
+    }
+
+    private static void AppendString(IncrementalHash hash, string value)
+    {
+        var bytes = StrictUtf8.GetBytes(value);
+        Span<byte> length = stackalloc byte[4];
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(length, bytes.Length);
+        hash.AppendData(length);
+        hash.AppendData(bytes);
+    }
+
+    private static int LogicalIdentifierByteCount(string value)
+    {
+        try
+        {
+            return StrictUtf8.GetByteCount(value);
+        }
+        catch (System.Text.EncoderFallbackException exception)
+        {
+            throw new ArgumentException(
+                "Mailbox logical identifier is not valid UTF-8.", exception);
+        }
     }
 
     internal static MailboxAuthenticatedRequestFrame Sign(
@@ -312,14 +419,14 @@ internal static class ScopedMailboxCredentialValidator
 
     internal static MailboxCapabilityRevocationQuery RevocationQuery(
         MailboxAuthenticatedGrant grant) => new()
-    {
-        IssuerPublicKey = grant.IssuerPublicKey.ToArray(),
-        Serial = grant.Serial.ToArray(),
-        Domain = grant.Domain,
-        Generation = grant.Generation,
-        Epoch = grant.Epoch,
-        MembershipCommitment = grant.MembershipCommitment.ToArray()
-    };
+        {
+            IssuerPublicKey = grant.IssuerPublicKey.ToArray(),
+            Serial = grant.Serial.ToArray(),
+            Domain = grant.Domain,
+            Generation = grant.Generation,
+            Epoch = grant.Epoch,
+            MembershipCommitment = grant.MembershipCommitment.ToArray()
+        };
 
     internal static bool Fixed(
         ReadOnlySpan<byte> left,

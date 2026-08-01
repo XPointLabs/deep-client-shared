@@ -14,6 +14,7 @@ namespace Deep.Client.Shared.Services;
 /// </summary>
 public sealed class NativeMau2MailboxTransport :
     IAuthenticatedOpaqueMailboxTransport,
+    IResumableMailboxIdentityAuthenticatedRawTransport,
     IAuthenticatedInboxTransport,
     IMetadataPrivateSessionMessageTransport,
     IDisposable
@@ -22,8 +23,6 @@ public sealed class NativeMau2MailboxTransport :
     private const int RetrievalLimit = 1;
     private static ReadOnlySpan<byte> StoreOperationDomain =>
         "deep.mau2.store-operation.v1"u8;
-    private static ReadOnlySpan<byte> BatchOperationDomain =>
-        "deep.mau2.store-batch.v1"u8;
     private static ReadOnlySpan<byte> RetrieveOperationDomain =>
         "deep.mau2.retrieve-operation.v1"u8;
     private static ReadOnlySpan<byte> AckOperationDomain =>
@@ -72,19 +71,22 @@ public sealed class NativeMau2MailboxTransport :
     public bool UsesMetadataPrivateTransport => true;
 
     public async Task<IReadOnlyList<IPreparedMailboxAuthenticatedSend>>
-        PrepareScopedMailboxBatchAsync(
+        PrepareScopedMailboxLogicalBatchAsync(
         IMailboxOperationSigner signer,
+        MailboxLogicalSendBatch logicalBatch,
         IReadOnlyList<MailboxAuthenticatedSendTarget> targets,
         CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(signer);
+        ArgumentNullException.ThrowIfNull(logicalBatch);
         ArgumentNullException.ThrowIfNull(targets);
         if (targets.Count is 0 or > SqliteSessionStore.MaximumScopedMailboxBatchTargets ||
             targets.Any(static target => target is null))
         {
             throw new ArgumentException("Mailbox send batch is empty or outside its bound.", nameof(targets));
         }
+        ValidateLogicalTargets(logicalBatch, targets);
 
         authority.Validate();
         var bindings = new List<ScopedMailboxBatchTarget>(targets.Count);
@@ -128,10 +130,13 @@ public sealed class NativeMau2MailboxTransport :
         var account = preparedMetadata[0].Account;
         if (preparedMetadata.Any(item => !item.Account.Equals(account)))
             throw new InvalidOperationException("A mailbox batch cannot cross account scopes.");
-        var parentOperationId = BatchOperationId(bindings);
         var batch = await credentials.PrepareScopedMailboxBatchAsync(
             new ScopedMailboxPrepareBatchRequest(
-                account, parentOperationId, bindings,
+                account,
+                logicalBatch.Id,
+                logicalBatch.SemanticId,
+                LogicalSelectors(logicalBatch),
+                bindings,
                 TransportOutboxTime.Canonical(authority.TimeProvider.GetUtcNow())),
             signer, authority, cancellationToken).ConfigureAwait(false);
         if (batch.Frames.Count != preparedMetadata.Count)
@@ -139,6 +144,63 @@ public sealed class NativeMau2MailboxTransport :
         return batch.Frames.Select((frame, index) =>
             (IPreparedMailboxAuthenticatedSend)new PreparedSend(
                 this, preparedMetadata[index], frame)).ToArray();
+    }
+
+    public Task<IReadOnlyList<IPreparedMailboxAuthenticatedSend>>
+        PrepareScopedMailboxBatchAsync(
+        IMailboxOperationSigner signer,
+        IReadOnlyList<MailboxAuthenticatedSendTarget> targets,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(targets);
+        if (targets.Count == 0 || targets[0].Envelope.Id is not { } semanticId)
+            throw new ArgumentException(
+                "Mailbox send targets require stable wire IDs.", nameof(targets));
+        var logical = new MailboxLogicalSendBatch(
+            semanticId,
+            MailboxDeliveryKind.Direct,
+            targets.Select(target => new MailboxLogicalSendTarget(
+                target.Envelope.Id ?? throw new ArgumentException(
+                    "Mailbox send targets require stable wire IDs.", nameof(targets)),
+                target.Selector,
+                target.Authority)).ToArray());
+        return PrepareScopedMailboxLogicalBatchAsync(
+            signer, logical, targets, cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<IPreparedMailboxAuthenticatedSend>?>
+        TryResumeScopedMailboxBatchAsync(
+        IMailboxOperationSigner signer,
+        MailboxLogicalSendBatch batch,
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(signer);
+        ArgumentNullException.ThrowIfNull(batch);
+        authority.Validate();
+        var logicalTargets = batch.Targets;
+        foreach (var target in logicalTargets)
+        {
+            EnsureAuthority(target.Authority);
+            if (target.Selector.AccountScope is null)
+                throw new InvalidOperationException("Mailbox logical target has no account scope.");
+        }
+        var account = logicalTargets[0].Selector.AccountScope;
+        if (logicalTargets.Any(target => !target.Selector.AccountScope.Equals(account)))
+            throw new InvalidOperationException("A mailbox batch cannot cross account scopes.");
+        var resumed = await credentials.TryResumeScopedMailboxBatchAsync(
+            new ScopedMailboxResumeBatchRequest(
+                account, batch.Id, batch.SemanticId, LogicalSelectors(batch)),
+            signer, authority, cancellationToken).ConfigureAwait(false);
+        if (resumed is null)
+            return null;
+        if (resumed.Frames.Count != logicalTargets.Count)
+            throw new InvalidDataException("Scoped mailbox resume returned an invalid frame count.");
+        return resumed.Frames.Select((frame, index) =>
+            (IPreparedMailboxAuthenticatedSend)new PreparedSend(
+                this,
+                new PreparedMetadata(account, logicalTargets[index].Selector),
+                frame)).ToArray();
     }
 
     public async Task SendPreparedMailboxAuthenticatedAsync(
@@ -367,16 +429,32 @@ public sealed class NativeMau2MailboxTransport :
         return hash.GetHashAndReset()[..MailboxClientLimits.OperationIdLength];
     }
 
-    private static byte[] BatchOperationId(IReadOnlyList<ScopedMailboxBatchTarget> targets)
+    private static IReadOnlyList<ScopedMailboxBatchSelector> LogicalSelectors(
+        MailboxLogicalSendBatch batch) =>
+        batch.Targets.Select(target => new ScopedMailboxBatchSelector(
+            target.Selector,
+            target.WireMessageId,
+            MailboxAuthenticatedOperation.Store)).ToArray();
+
+    private static void ValidateLogicalTargets(
+        MailboxLogicalSendBatch batch,
+        IReadOnlyList<MailboxAuthenticatedSendTarget> targets)
     {
-        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        hash.AppendData(BatchOperationDomain);
-        foreach (var target in targets)
+        if (batch.Targets.Count != targets.Count)
+            throw new InvalidOperationException("Logical mailbox fan-out target count changed.");
+        for (var ordinal = 0; ordinal < targets.Count; ordinal++)
         {
-            hash.AppendData(target.Selector.ScopeId.Span);
-            hash.AppendData(target.Binding.OperationId.Span);
+            var logical = batch.Targets[ordinal];
+            var target = targets[ordinal];
+            if (target.Envelope.Id != logical.WireMessageId ||
+                !target.Selector.ScopeId.Span.SequenceEqual(logical.Selector.ScopeId.Span) ||
+                !target.Authority.PolicyFingerprint.Span.SequenceEqual(
+                    logical.Authority.PolicyFingerprint.Span))
+            {
+                throw new InvalidOperationException(
+                    "Logical mailbox fan-out changed before preparation.");
+            }
         }
-        return hash.GetHashAndReset()[..MailboxClientLimits.OperationIdLength];
     }
 
     private static byte[] CursorMaterial(ulong cursor, ReadOnlySpan<byte> token)

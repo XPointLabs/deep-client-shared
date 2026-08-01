@@ -71,21 +71,20 @@ public sealed partial class MailboxCredentialBundleImporterTests
         IReadOnlyList<IPreparedMailboxAuthenticatedSend> prepared;
         using (var signer = new AcceptanceMailboxSigner(identity))
         {
-            prepared = await transport.PrepareScopedMailboxBatchAsync(
-                signer,
-                [
-                    new MailboxAuthenticatedSendTarget(
-                        new OutboundMessageEnvelope(
-                            identity.SessionId,
-                            fixture.BobSessionId,
-                            Dpe1(Bytes(64, 0xc2)),
-                            [],
-                            Now,
-                            Now.AddMinutes(5),
-                            new MessageId("publication-coordinator-barrier")),
-                        imported.PeerSelector,
-                        imported.Authority)
-                ]);
+            MailboxAuthenticatedSendTarget[] targets =
+            [
+                new MailboxAuthenticatedSendTarget(
+                    new OutboundMessageEnvelope(
+                        identity.SessionId,
+                        fixture.BobSessionId,
+                        Dpe1(Bytes(64, 0xc2)),
+                        [], Now, Now.AddMinutes(5),
+                        new MessageId("publication-coordinator-barrier")),
+                    imported.PeerSelector,
+                    imported.Authority)
+            ];
+            prepared = await transport.PrepareScopedMailboxLogicalBatchAsync(
+                signer, LogicalBatch(targets), targets);
         }
 
         var coordinator = MailboxRuntimePolicyCoordinator.For(
@@ -160,21 +159,20 @@ public sealed partial class MailboxCredentialBundleImporterTests
         IReadOnlyList<IPreparedMailboxAuthenticatedSend> prepared;
         using (var signer = new AcceptanceMailboxSigner(identity))
         {
-            prepared = await transport.PrepareScopedMailboxBatchAsync(
-                signer,
-                [
-                    new MailboxAuthenticatedSendTarget(
-                        new OutboundMessageEnvelope(
-                            identity.SessionId,
-                            fixture.BobSessionId,
-                            Dpe1(Bytes(64, 0xc1)),
-                            [],
-                            Now,
-                            Now.AddMinutes(5),
-                            new MessageId("acceptance-expired-revocations")),
-                        imported.PeerSelector,
-                        imported.Authority)
-                ]);
+            MailboxAuthenticatedSendTarget[] targets =
+            [
+                new MailboxAuthenticatedSendTarget(
+                    new OutboundMessageEnvelope(
+                        identity.SessionId,
+                        fixture.BobSessionId,
+                        Dpe1(Bytes(64, 0xc1)),
+                        [], Now, Now.AddMinutes(5),
+                        new MessageId("acceptance-expired-revocations")),
+                    imported.PeerSelector,
+                    imported.Authority)
+            ];
+            prepared = await transport.PrepareScopedMailboxLogicalBatchAsync(
+                signer, LogicalBatch(targets), targets);
         }
         var preparedSend = Assert.Single(prepared);
         Assert.Equal((ulong)Now.ToUnixTimeSeconds(),
@@ -292,7 +290,8 @@ public sealed partial class MailboxCredentialBundleImporterTests
 
         using var signer = new AcceptanceMailboxSigner(identity);
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            transport.PrepareScopedMailboxBatchAsync(signer, [valid, invalid]));
+            transport.PrepareScopedMailboxLogicalBatchAsync(
+                signer, LogicalBatch([valid, invalid]), [valid, invalid]));
 
         Assert.Equal(0, ingress.StoreCalls);
         Assert.Equal(0, CountRows(fixture.DatabasePath, "mailbox_prepared_batches"));
@@ -675,9 +674,123 @@ public sealed partial class MailboxCredentialBundleImporterTests
         }
     }
 
+    [Fact]
+    public async Task NativeLogicalBatch_ReopensPeerAndSelfFramesByteIdentically()
+    {
+        using var fixture = Fixture.Create();
+        using var identity = new SessionIdentityProvider(AlicePhrase);
+        var clock = new MutableTimeProvider(Now);
+        ImportedMailboxRuntimeMaterial imported;
+        var firstIngress = new ScriptedRetrieveIngress(clock);
+        MailboxLogicalSendBatch logical;
+
+        using (var store = new SqliteSessionStore(fixture.DatabasePath))
+        {
+            imported = await MailboxCredentialBundleImporter.ImportAsync(
+                store, identity,
+                fixture.AndroidOptions with { TimeProvider = clock },
+                MailboxInfrastructureOwnership.UserManaged);
+            using var native = Native(store, firstIngress);
+            var targets = new[]
+            {
+                Target(imported.PeerSelector, fixture.BobSessionId, 0xd1, "wire-peer"),
+                Target(imported.SelfSelector, identity.SessionId, 0xd2, "wire-self")
+            }.OrderBy(target => Convert.ToHexString(target.Selector.ScopeId.Span),
+                StringComparer.Ordinal).ToArray();
+            logical = new MailboxLogicalSendBatch(
+                new MessageId("semantic-peer-self"),
+                MailboxDeliveryKind.Direct,
+                targets.Select(target => new MailboxLogicalSendTarget(
+                    target.Envelope.Id!.Value, target.Selector, target.Authority)).ToArray());
+            using var signer = new AcceptanceMailboxSigner(identity);
+            var prepared = await native.PrepareScopedMailboxLogicalBatchAsync(
+                signer, logical, targets);
+            var selectors = logical.Targets.Select(target =>
+                new ScopedMailboxBatchSelector(
+                    target.Selector, target.WireMessageId,
+                    MailboxAuthenticatedOperation.Store)).ToArray();
+            await Assert.ThrowsAsync<ArgumentException>(() =>
+                store.TryResumeScopedMailboxBatchAsync(
+                    new ScopedMailboxResumeBatchRequest(
+                        imported.PeerSelector.AccountScope,
+                        logical.Id,
+                        logical.SemanticId,
+                        selectors.Reverse().ToArray()),
+                    signer,
+                    imported.Authority));
+            await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                store.TryResumeScopedMailboxBatchAsync(
+                    new ScopedMailboxResumeBatchRequest(
+                        OutboxAccountScope.FromBytes(Bytes(32, 0xee)),
+                        logical.Id,
+                        logical.SemanticId,
+                        selectors),
+                    signer,
+                    imported.Authority));
+            foreach (var handle in prepared)
+            {
+                await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                    native.SendPreparedMailboxAuthenticatedAsync(handle));
+            }
+        }
+
+        var secondIngress = new ScriptedRetrieveIngress(clock);
+        clock.Set(Now.AddMinutes(1));
+        using (var reopened = new SqliteSessionStore(fixture.DatabasePath))
+        using (var native = Native(reopened, secondIngress))
+        using (var signer = new AcceptanceMailboxSigner(identity))
+        {
+            var resumed = await native.TryResumeScopedMailboxBatchAsync(signer, logical);
+            Assert.NotNull(resumed);
+            foreach (var handle in resumed)
+            {
+                await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                    native.SendPreparedMailboxAuthenticatedAsync(handle));
+            }
+        }
+
+        Assert.Equal(2, firstIngress.StoreRequests.Count);
+        Assert.Equal(2, secondIngress.StoreRequests.Count);
+        Assert.Equal(firstIngress.StoreRequests[0], secondIngress.StoreRequests[0]);
+        Assert.Equal(firstIngress.StoreRequests[1], secondIngress.StoreRequests[1]);
+
+        NativeMau2MailboxTransport Native(
+            SqliteSessionStore store,
+            IClientMailboxBinaryIngress ingress) => new(
+            ClientFeatureFlags.Defaults with { ClientMailboxAdapterEnabled = true },
+            imported.Activation, ingress, store,
+            new PinnedClientMailboxReceiptVerifier(
+                new SodiumClientMailboxReceiptCrypto()),
+            imported.DecodePolicies, imported.Authority,
+            sessionId => sessionId == imported.LocalSessionId
+                ? imported.SelfSelector
+                : throw new InvalidOperationException(),
+            timeProvider: clock);
+
+        MailboxAuthenticatedSendTarget Target(
+            MailboxCredentialSelector selector,
+            SessionId recipient,
+            byte fill,
+            string id) => new(
+            new OutboundMessageEnvelope(
+                identity.SessionId, recipient, Dpe1(Bytes(64, fill)), [],
+                Now, Now.AddMinutes(5), new MessageId(id)),
+            selector, imported.Authority);
+    }
+
     private static string Dpe1(ReadOnlySpan<byte> bytes) =>
         E2eeClientTransport.WireBodyPrefix + Convert.ToBase64String(bytes)
             .TrimEnd('=').Replace('+', '-').Replace('/', '_');
+
+    private static MailboxLogicalSendBatch LogicalBatch(
+        IReadOnlyList<MailboxAuthenticatedSendTarget> targets) =>
+        new(
+            targets[0].Envelope.Id ?? throw new InvalidOperationException(),
+            MailboxDeliveryKind.Direct,
+            targets.Select(target => new MailboxLogicalSendTarget(
+                target.Envelope.Id ?? throw new InvalidOperationException(),
+                target.Selector,
+                target.Authority)).ToArray());
 
     private sealed class ScriptedRetrieveIngress(
         TimeProvider timeProvider,
@@ -694,6 +807,7 @@ public sealed partial class MailboxCredentialBundleImporterTests
         public int RetrieveCalls { get; private set; }
         public int AcknowledgeCalls { get; private set; }
         public int StoreCalls { get; private set; }
+        public List<byte[]> StoreRequests { get; } = [];
         public TaskCompletionSource StoreEntered { get; } = new(
             TaskCreationOptions.RunContinuationsAsynchronously);
         public byte[]? LastCanonicalRequest { get; private set; }
@@ -703,6 +817,7 @@ public sealed partial class MailboxCredentialBundleImporterTests
             CancellationToken cancellationToken = default)
         {
             StoreCalls++;
+            StoreRequests.Add(canonicalMau2.ToArray());
             StoreEntered.TrySetResult();
             return Task.FromException<ReadOnlyMemory<byte>>(
                 new InvalidOperationException(

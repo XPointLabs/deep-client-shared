@@ -3,6 +3,29 @@ using Deep.Client.Shared.Persistence;
 
 namespace Deep.Client.Shared.Services;
 
+public enum MessageRetryRejection
+{
+    NotFound = 1,
+    NotOwned = 2,
+    NotOutgoing = 3,
+    NotRetryable = 4
+}
+
+public sealed class MessageRetryRejectedException : InvalidOperationException
+{
+    public MessageRetryRejectedException(MessageRetryRejection reason)
+        : base(reason switch
+        {
+            MessageRetryRejection.NotFound => "The message is not available for retry.",
+            MessageRetryRejection.NotOwned => "The message is not owned by this account.",
+            MessageRetryRejection.NotOutgoing => "Only outgoing messages can be retried.",
+            MessageRetryRejection.NotRetryable => "The message is not retryable.",
+            _ => "The message retry was rejected."
+        }) => Reason = reason;
+
+    public MessageRetryRejection Reason { get; }
+}
+
 public sealed class MessageService(
     ConversationService conversationService,
     IConversationRepository conversations,
@@ -409,7 +432,8 @@ public sealed class MessageService(
             now,
             attachments?.ToArray() ?? [],
             CalculateExpiry(conversation.Settings.DisappearingMessages, now),
-            ReplyTo: replyTo);
+            ReplyTo: replyTo,
+            NotifyRecipients: GroupNotifyRecipients(group, sender));
 
         await AppendAndTouchAsync(pending, conversation.Touch(now), cancellationToken).ConfigureAwait(false);
         return pending;
@@ -461,7 +485,6 @@ public sealed class MessageService(
                 .ToArray();
         }
 
-        var groupRecipients = new Dictionary<ConversationId, IReadOnlyList<SessionId>>();
         foreach (var pending in pendingMessages)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -469,18 +492,9 @@ public sealed class MessageService(
             {
                 if (pending.Recipient is null)
                 {
-                    if (!groupRecipients.TryGetValue(pending.ConversationId, out var notifyRecipients))
-                    {
-                        notifyRecipients = await ResolveGroupNotifyRecipientsAsync(
-                            pending.ConversationId,
-                            pending.Sender,
-                            cancellationToken).ConfigureAwait(false);
-                        groupRecipients[pending.ConversationId] = notifyRecipients;
-                    }
-
                     await DispatchAsync(
                         pending,
-                        notifyRecipients,
+                        pending.NotifyRecipients,
                         dispatchCancellationToken: cancellationToken,
                         waiterCancellationToken: cancellationToken).ConfigureAwait(false);
                 }
@@ -502,6 +516,34 @@ public sealed class MessageService(
         }
 
         return dispatched;
+    }
+
+    /// <summary>
+    /// Retries the exact durable outgoing envelope. Successful terminal states are idempotent and
+    /// never touch the network; concurrent manual and automatic retries share one physical send.
+    /// </summary>
+    public async Task<Message> RetryOutgoingAsync(
+        SessionId sender,
+        MessageId messageId,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var stored = await messages.GetAsync(messageId, cancellationToken).ConfigureAwait(false)
+            ?? throw new MessageRetryRejectedException(MessageRetryRejection.NotFound);
+        if (stored.Sender != sender)
+            throw new MessageRetryRejectedException(MessageRetryRejection.NotOwned);
+        if (stored.Direction != MessageDirection.Outgoing)
+            throw new MessageRetryRejectedException(MessageRetryRejection.NotOutgoing);
+        if (IsSuccessfulTerminal(stored))
+            return stored;
+        if (stored.DeliveryState is not (MessageDeliveryState.Sending or MessageDeliveryState.Failed))
+            throw new MessageRetryRejectedException(MessageRetryRejection.NotRetryable);
+
+        return await DispatchAsync(
+            stored,
+            groupNotifyRecipients: null,
+            dispatchCancellationToken: CancellationToken.None,
+            waiterCancellationToken: cancellationToken).ConfigureAwait(false);
     }
 
     async Task IAccountGenerationLifecycle.StopAsync(
@@ -648,10 +690,9 @@ public sealed class MessageService(
             if (pending.Recipient is null)
             {
                 var notifyRecipients = operation.GroupNotifyRecipients
-                    ?? await ResolveGroupNotifyRecipientsAsync(
-                        pending.ConversationId,
-                        pending.Sender,
-                        cancellationToken).ConfigureAwait(false);
+                    ?? pending.NotifyRecipients
+                    ?? throw new InvalidDataException(
+                        "Outgoing group message has no durable recipient snapshot.");
                 await groupSync.SendGroupMessageAsync(new OutboundGroupMessageEnvelope(
                     pending.Id,
                     pending.ConversationId,
@@ -836,10 +877,17 @@ public sealed class MessageService(
         if (owner.Sender != waiter.Sender ||
             owner.ConversationId != waiter.ConversationId ||
             owner.Recipient != waiter.Recipient ||
-            owner.Direction != waiter.Direction)
+            owner.Direction != waiter.Direction ||
+            !string.Equals(owner.Body, waiter.Body, StringComparison.Ordinal) ||
+            owner.CreatedAt != waiter.CreatedAt ||
+            owner.ExpiresAt != waiter.ExpiresAt ||
+            owner.ReplyTo != waiter.ReplyTo ||
+            !owner.Attachments.SequenceEqual(waiter.Attachments) ||
+            !(owner.NotifyRecipients ?? []).SequenceEqual(
+                waiter.NotifyRecipients ?? []))
         {
             throw new InvalidOperationException(
-                $"Message '{waiter.Id}' is already being dispatched with a different envelope.");
+                "A message is already being dispatched with a different envelope.");
         }
     }
 
@@ -1389,15 +1437,6 @@ public sealed class MessageService(
         source is IDurableInboxAcknowledger acknowledger
             ? acknowledger.AcknowledgeInboxItemAsync(account, serverHash, cancellationToken)
             : Task.CompletedTask;
-
-    private async Task<IReadOnlyList<SessionId>> ResolveGroupNotifyRecipientsAsync(
-        ConversationId groupId,
-        SessionId sender,
-        CancellationToken cancellationToken)
-    {
-        var group = await conversationService.GetGroupAsync(groupId, cancellationToken).ConfigureAwait(false);
-        return group is null ? [] : GroupNotifyRecipients(group, sender);
-    }
 
     private static IReadOnlyList<SessionId> GroupNotifyRecipients(Group group, SessionId sender) =>
         group.Members

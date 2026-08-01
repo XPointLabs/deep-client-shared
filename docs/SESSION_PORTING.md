@@ -54,6 +54,12 @@ Use `deep-protocol` for protocol and crypto semantics. Do not recreate protocol 
 - Native official-cloud MAU2 preparation resolves opaque self, peer, and group
   credential selectors. Replay counters, complete fan-out preparation, and
   transport-outbox rows commit in the single attested local-state transaction.
+  Outgoing retries derive a fixed 16-byte `deep.mailbox.logical-send-batch.v1`
+  identifier from the semantic message ID, delivery kind, and exact ordered
+  wire/scope selectors. A resumable MAU2 transport must revalidate the current
+  holder, grant, epoch, entitlement, revocation snapshot, target catalog, and
+  outbox before returning the originally persisted MAU2 bytes. Only a true
+  repository miss may create new DPE1 ciphertext and counters.
   Free direct P2P does not enter this resolver and requires the explicit
   non-official `IDirectP2pSessionMessageTransport` composition capability.
 
@@ -73,7 +79,7 @@ Use `deep-protocol` for protocol and crypto semantics. Do not recreate protocol 
 ## Local-State Baseline Rules
 
 - Before production launch, SQLite has one supported physical baseline:
-  application ID `DEEP`, schema version 11.
+  application ID `DEEP`, schema version 12.
 - State is fresh only when its main database, `-wal`, and `-shm` are all absent.
 - Existing state must pass exact key, version, integrity, catalog, column,
   foreign-key, and index attestation before runtime access.
@@ -81,6 +87,10 @@ Use `deep-protocol` for protocol and crypto semantics. Do not recreate protocol 
   local reset. Startup must not migrate, alter, backfill, import, repair,
   quarantine, delete, or rewrite it.
 - Legacy JSON/in-memory snapshots are not an approved local-state import path.
+- Outgoing group messages persist their initial recipient snapshot. E2EE binds
+  every semantic send to one durable full fan-out plan (recipient, wire ID,
+  Direct/Cloud route, and cloud scope) before encryption or network I/O; retry
+  never re-resolves membership or changes transport lanes.
 - Resource failures such as busy/locked, I/O, full, read-only, cannot-open, and
   out-of-memory are operational errors, not reset authorization.
 

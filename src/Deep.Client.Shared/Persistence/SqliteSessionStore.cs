@@ -19,7 +19,7 @@ public sealed partial class SqliteSessionStore :
     IMembershipTrustRepository,
     IDisposable
 {
-    private const int PhysicalSchemaVersion = 11;
+    private const int PhysicalSchemaVersion = 12;
     private const int DeepApplicationId = 0x44454550;
     private const int MaximumSchemaDefinitionLength = 16 * 1024;
     private const int ReplayPruneBatchSize = 256;
@@ -2452,6 +2452,7 @@ public sealed partial class SqliteSessionStore :
             foreach (var table in new[]
                      {
                          "mailbox_prepared_batch_targets", "mailbox_prepared_batches",
+                         "logical_dispatch_plans",
                          "mailbox_replay_counters", "mailbox_credential_grants",
                          "mailbox_credential_epochs", "mailbox_credential_scopes",
                          "client_mailbox_coordinator_journal",
@@ -2651,6 +2652,14 @@ public sealed partial class SqliteSessionStore :
                     payload_json TEXT NOT NULL
                 );
 
+                CREATE TABLE logical_dispatch_plans (
+                    owner_digest BLOB NOT NULL CHECK(length(owner_digest) = 32),
+                    semantic_operation_id BLOB NOT NULL CHECK(length(semantic_operation_id) = 16),
+                    plan_digest BLOB NOT NULL CHECK(length(plan_digest) = 32),
+                    created_at INTEGER NOT NULL,
+                    PRIMARY KEY(owner_digest, semantic_operation_id)
+                );
+
                 CREATE TABLE incoming_message_notifications (
                     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
                     message_id TEXT NOT NULL UNIQUE,
@@ -2840,10 +2849,12 @@ public sealed partial class SqliteSessionStore :
                 CREATE TABLE mailbox_prepared_batches (
                     account_scope BLOB NOT NULL CHECK(length(account_scope) = 32),
                     parent_operation_id BLOB NOT NULL CHECK(length(parent_operation_id) = 16),
+                    semantic_operation_id BLOB NOT NULL CHECK(length(semantic_operation_id) = 16),
                     plan_digest BLOB NOT NULL CHECK(length(plan_digest) = 32),
                     target_count INTEGER NOT NULL CHECK(target_count BETWEEN 1 AND 2048),
                     created_at INTEGER NOT NULL,
-                    PRIMARY KEY(account_scope, parent_operation_id)
+                    PRIMARY KEY(account_scope, parent_operation_id),
+                    UNIQUE(account_scope, semantic_operation_id)
                 );
 
                 CREATE TABLE mailbox_prepared_batch_targets (
@@ -3204,6 +3215,13 @@ public sealed partial class SqliteSessionStore :
                 new("self_echo_key", "TEXT", 0, null, 0),
                 new("payload_json", "TEXT", 1, null, 0)
             ],
+            ["logical_dispatch_plans"] =
+            [
+                new("owner_digest", "BLOB", 1, null, 1),
+                new("semantic_operation_id", "BLOB", 1, null, 2),
+                new("plan_digest", "BLOB", 1, null, 0),
+                new("created_at", "INTEGER", 1, null, 0)
+            ],
             ["incoming_message_notifications"] =
             [
                 new("sequence", "INTEGER", 0, null, 1),
@@ -3374,6 +3392,7 @@ public sealed partial class SqliteSessionStore :
             [
                 new("account_scope", "BLOB", 1, null, 1),
                 new("parent_operation_id", "BLOB", 1, null, 2),
+                new("semantic_operation_id", "BLOB", 1, null, 0),
                 new("plan_digest", "BLOB", 1, null, 0),
                 new("target_count", "INTEGER", 1, null, 0),
                 new("created_at", "INTEGER", 1, null, 0)
@@ -3538,6 +3557,7 @@ public sealed partial class SqliteSessionStore :
             ["sqlite_autoindex_contacts_1"] = new("contacts", true, "pk", false, [Asc("id")]),
             ["sqlite_autoindex_groups_1"] = new("groups", true, "pk", false, [Asc("id")]),
             ["sqlite_autoindex_messages_1"] = new("messages", true, "pk", false, [Asc("id")]),
+            ["sqlite_autoindex_logical_dispatch_plans_1"] = new("logical_dispatch_plans", true, "pk", false, [Asc("owner_digest"), Asc("semantic_operation_id")]),
             ["sqlite_autoindex_incoming_message_notifications_1"] = new("incoming_message_notifications", true, "u", false, [Asc("message_id")]),
             ["sqlite_autoindex_settings_1"] = new("settings", true, "pk", false, [Asc("key")]),
             ["sqlite_autoindex_replay_claims_1"] = new("replay_claims", true, "pk", false, [Asc("sender_session_id"), Asc("message_id")]),
@@ -3559,6 +3579,7 @@ public sealed partial class SqliteSessionStore :
             ["sqlite_autoindex_mailbox_credential_grants_2"] = new("mailbox_credential_grants", true, "u", false, [Asc("issuer_key"), Asc("serial")]),
             ["sqlite_autoindex_mailbox_replay_counters_1"] = new("mailbox_replay_counters", true, "pk", false, [Asc("scope_id"), Asc("epoch"), Asc("grant_digest")]),
             ["sqlite_autoindex_mailbox_prepared_batches_1"] = new("mailbox_prepared_batches", true, "pk", false, [Asc("account_scope"), Asc("parent_operation_id")]),
+            ["sqlite_autoindex_mailbox_prepared_batches_2"] = new("mailbox_prepared_batches", true, "u", false, [Asc("account_scope"), Asc("semantic_operation_id")]),
             ["sqlite_autoindex_mailbox_prepared_batch_targets_1"] = new("mailbox_prepared_batch_targets", true, "pk", false, [Asc("account_scope"), Asc("parent_operation_id"), Asc("target_ordinal")]),
             ["sqlite_autoindex_mailbox_prepared_batch_targets_2"] = new("mailbox_prepared_batch_targets", true, "u", false, [Asc("account_scope"), Asc("target_operation_id")]),
             ["sqlite_autoindex_transport_outbox_items_1"] = new("transport_outbox_items", true, "pk", false, [Asc("account_scope"), Asc("logical_id")]),

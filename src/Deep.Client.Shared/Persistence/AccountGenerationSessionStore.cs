@@ -76,6 +76,13 @@ internal class AccountGenerationSessionStore : ILocalSessionStore, IDisposable
     public Task UpdateAsync(Message value, CancellationToken token = default) =>
         MutateAsync(innerToken => Inner.UpdateAsync(value, innerToken), token);
 
+    public Task EnsureLogicalDispatchPlanAsync(
+        DurableLogicalDispatchPlan plan,
+        CancellationToken token = default) =>
+        MutateAsync(
+            innerToken => Inner.EnsureLogicalDispatchPlanAsync(plan, innerToken),
+            token);
+
     public Task DeleteAsync(MessageId id, CancellationToken token = default) =>
         MutateAsync(innerToken => Inner.DeleteAsync(id, innerToken), token);
 

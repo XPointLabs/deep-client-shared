@@ -70,6 +70,43 @@ public interface IMessageRepository
         CancellationToken cancellationToken = default);
 }
 
+public enum DurableLogicalDispatchKind
+{
+    DirectMessage = 1,
+    GroupMessage = 2,
+    GroupState = 3
+}
+
+public enum DurableLogicalDispatchRoute
+{
+    DirectP2p = 1,
+    OfficialCloud = 2
+}
+
+public sealed record DurableLogicalDispatchTarget(
+    SessionId Recipient,
+    MessageId WireMessageId,
+    DurableLogicalDispatchRoute Route,
+    ReadOnlyMemory<byte> CloudScopeId);
+
+public sealed record DurableLogicalDispatchPlan(
+    SessionId Sender,
+    MessageId SemanticMessageId,
+    DurableLogicalDispatchKind Kind,
+    IReadOnlyList<DurableLogicalDispatchTarget> Targets,
+    DateTimeOffset CreatedAt);
+
+public interface ILogicalDispatchPlanRepository
+{
+    /// <summary>
+    /// Atomically binds one semantic send to its exact recipient, wire-ID, and transport plan.
+    /// Exact retries are idempotent; every re-plan fails closed.
+    /// </summary>
+    Task EnsureLogicalDispatchPlanAsync(
+        DurableLogicalDispatchPlan plan,
+        CancellationToken cancellationToken = default);
+}
+
 public interface IConversationReadRepository
 {
     Task MarkConversationReadAsync(
@@ -594,6 +631,7 @@ public interface ILocalSessionStore :
     IMessageConversationPersistenceRepository,
     IIncomingMessageNotificationRepository,
     IDurableInboxRepository,
+    ILogicalDispatchPlanRepository,
     IAccountDataPurger,
     IGroupStatePersistenceRepository,
     IConversationListSummaryRepository,

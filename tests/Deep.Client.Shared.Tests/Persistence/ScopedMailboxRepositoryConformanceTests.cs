@@ -203,12 +203,14 @@ public sealed class ScopedMailboxRepositoryConformanceTests
         await fixture.Repository.InstallScopedCredentialAsync(
             fixture.Self, fixture.Authority);
         var target = fixture.SelfTarget(0xc1);
+        Assert.Null(await fixture.ResumeAsync(target));
         var first = await fixture.PrepareAsync(target);
         Assert.Equal([2UL], fixture.NextCounters());
         Assert.Equal(1, fixture.BatchCount());
         Assert.Equal(1, fixture.OutboxCount());
         fixture.Clock.Set(1051);
-        var resumed = await fixture.PrepareAsync(target);
+        var resumed = Assert.IsType<ScopedMailboxPreparedBatch>(
+            await fixture.ResumeAsync(target));
         Assert.Equal(
             first.Frames.Single().GetCanonicalMau2Copy(),
             resumed.Frames.Single().GetCanonicalMau2Copy());
@@ -218,7 +220,97 @@ public sealed class ScopedMailboxRepositoryConformanceTests
 
         fixture.DeletePreparedTargets(Bytes(16, 0xc1));
         await Assert.ThrowsAsync<InvalidDataException>(() =>
-            fixture.PrepareAsync(target));
+            fixture.ResumeAsync(target));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Semantic_operation_cannot_rebind_its_durable_fan_out(
+        bool inMemory)
+    {
+        using var fixture = new Fixture(inMemory);
+        await fixture.Repository.InstallScopedCredentialAsync(
+            fixture.Self, fixture.Authority);
+        var semantic = Bytes(16, 0xd0);
+        var originalTarget = fixture.SelfTarget(0xd1);
+        var changedTarget = fixture.SelfTarget(0xd2);
+        var original = fixture.BatchRequest(originalTarget, semantic);
+        var changed = fixture.BatchRequest(changedTarget, semantic);
+
+        _ = await fixture.Repository.PrepareScopedMailboxBatchAsync(
+            original, fixture.Signer, fixture.Authority);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            fixture.Repository.TryResumeScopedMailboxBatchAsync(
+                new ScopedMailboxResumeBatchRequest(
+                    changed.AccountScope,
+                    changed.ParentOperationId,
+                    changed.SemanticOperationId,
+                    changed.Selectors),
+                fixture.Signer,
+                fixture.Authority));
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            fixture.Repository.PrepareScopedMailboxBatchAsync(
+                changed, fixture.Signer, fixture.Authority));
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            fixture.Repository.PrepareScopedMailboxBatchAsync(
+                original with { SemanticOperationId = Bytes(16, 0xd3) },
+                fixture.Signer,
+                fixture.Authority));
+
+        Assert.Equal(1, fixture.BatchCount());
+        Assert.Equal(1, fixture.OutboxCount());
+        Assert.Equal([2UL], fixture.NextCounters());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Same_scope_batch_orders_by_stable_wire_id_not_random_operation_id(
+        bool inMemory)
+    {
+        using var fixture = new Fixture(inMemory);
+        await fixture.Repository.InstallScopedCredentialAsync(
+            fixture.Self, fixture.Authority);
+        var first = fixture.SelfTarget(0xe2);
+        var second = fixture.SelfTarget(0xe1);
+        var selectors = new[]
+        {
+            new ScopedMailboxBatchSelector(
+                fixture.SelfSelector,
+                new MessageId("wire-a"),
+                first.Binding.Operation),
+            new ScopedMailboxBatchSelector(
+                fixture.SelfSelector,
+                new MessageId("wire-b"),
+                second.Binding.Operation)
+        };
+        var request = new ScopedMailboxPrepareBatchRequest(
+            fixture.Account,
+            Bytes(16, 0xe3),
+            Bytes(16, 0xe4),
+            selectors,
+            [first, second],
+            DateTimeOffset.FromUnixTimeSeconds(fixture.Clock.Seconds));
+
+        var prepared = await fixture.Repository.PrepareScopedMailboxBatchAsync(
+            request, fixture.Signer, fixture.Authority);
+        Assert.Equal(2, prepared.Frames.Count);
+        Assert.Equal([3UL], fixture.NextCounters());
+
+        await Assert.ThrowsAsync<ArgumentException>(() =>
+            fixture.Repository.PrepareScopedMailboxBatchAsync(
+                request with
+                {
+                    Selectors = selectors.Reverse().ToArray(),
+                    Targets = new[] { second, first }
+                },
+                fixture.Signer,
+                fixture.Authority));
+        Assert.Equal(1, fixture.BatchCount());
+        Assert.Equal(2, fixture.OutboxCount());
+        Assert.Equal([3UL], fixture.NextCounters());
     }
 
     [Theory]
@@ -446,11 +538,36 @@ public sealed class ScopedMailboxRepositoryConformanceTests
             ScopedMailboxBatchTarget target,
             CancellationToken cancellationToken = default) =>
             Repository.PrepareScopedMailboxBatchAsync(
-                new ScopedMailboxPrepareBatchRequest(
+                BatchRequest(target, target.Binding.OperationId),
+                Signer,
+                Authority,
+                cancellationToken);
+
+        public ScopedMailboxPrepareBatchRequest BatchRequest(
+            ScopedMailboxBatchTarget target,
+            ReadOnlyMemory<byte> semanticOperationId) => new(
+            Account,
+            target.Binding.OperationId,
+            semanticOperationId,
+            [new ScopedMailboxBatchSelector(
+                target.Selector,
+                new MessageId(Convert.ToHexString(target.Binding.OperationId.Span)),
+                target.Binding.Operation)],
+            [target],
+            DateTimeOffset.FromUnixTimeSeconds(Clock.Seconds));
+
+        public Task<ScopedMailboxPreparedBatch?> ResumeAsync(
+            ScopedMailboxBatchTarget target,
+            CancellationToken cancellationToken = default) =>
+            Repository.TryResumeScopedMailboxBatchAsync(
+                new ScopedMailboxResumeBatchRequest(
                     Account,
                     target.Binding.OperationId,
-                    [target],
-                    DateTimeOffset.FromUnixTimeSeconds(Clock.Seconds)),
+                    target.Binding.OperationId,
+                    [new ScopedMailboxBatchSelector(
+                        target.Selector,
+                        new MessageId(Convert.ToHexString(target.Binding.OperationId.Span)),
+                        target.Binding.Operation)]),
                 Signer,
                 Authority,
                 cancellationToken);
@@ -577,15 +694,15 @@ public sealed class ScopedMailboxRepositoryConformanceTests
         private static MailboxCapabilityIssuerAuthority Issuer(
             ReadOnlyMemory<byte> publicKey,
             MailboxCapabilityDomain domain) => new()
-        {
-            PublicKey = publicKey.ToArray(),
-            Domain = domain,
-            AllowedLifecycle = MailboxCapabilityLifecycle.Active,
-            MinimumGeneration = 1,
-            MaximumGeneration = ulong.MaxValue,
-            ValidFromUnixSeconds = 1,
-            ValidUntilUnixSeconds = ulong.MaxValue
-        };
+            {
+                PublicKey = publicKey.ToArray(),
+                Domain = domain,
+                AllowedLifecycle = MailboxCapabilityLifecycle.Active,
+                MinimumGeneration = 1,
+                MaximumGeneration = ulong.MaxValue,
+                ValidFromUnixSeconds = 1,
+                ValidUntilUnixSeconds = ulong.MaxValue
+            };
 
         private int Count(string table)
         {

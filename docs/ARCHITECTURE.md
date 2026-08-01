@@ -13,7 +13,7 @@ This library follows the Session clients at a domain boundary level:
 `Persistence` defines repository abstractions for local storage. `SqliteSessionStore`
 is the production path (with SQLCipher-compatible key hook), while
 `InMemorySessionStore` remains test/dev only. The production database has one
-physical baseline: application ID `DEEP` and schema version 11. There is no
+physical baseline: application ID `DEEP` and schema version 12. There is no
 logical schema store and no local migration API.
 The dormant P14A boundary uses the existing settings table through the atomic,
 bounded, account-generation capability documented in
@@ -57,7 +57,7 @@ E4 adds group admin/member-state lifecycle behavior into `ConversationService`: 
   fail closed.
 - Sync plans preserve the key Session ordering rule: group keys are requested last after group info and members.
 - Persistent startup treats state as fresh only when the main database, WAL,
-  and SHM files are all absent. Fresh state is created and attested as v11 in
+  and SHM files are all absent. Fresh state is created and attested as v12 in
   one transaction. Existing state is opened only after non-pooled key preflight
   and exact read-only attestation; runtime operations then use isolated pooled
   connections. Unsupported, corrupt, keyed incorrectly, or schema-tampered
@@ -223,25 +223,43 @@ state. Tombstone expiry is checked against the persisted retrieved envelope.
 Length, overflow, and canonical-envelope decoder failures are normalized to
 `InvalidDataException`. Mailbox inbox state, scoped official-cloud
 credentials, replay counters, prepared fan-out headers/targets, and MAU2
-outbox items share the exact physical schema version 11. Version 10, the old
+outbox items share the exact physical schema version 12. Version 11, the old
 standalone mailbox schema, and every incompatible catalog require an explicit
 wipe/reset; none is dual-read, migrated, or retained for compatibility.
 
 ## Identity-authenticated mailbox seam
 
-`E2eeClientTransport` retains the existing `ISessionMessageTransport` send path
-unchanged. A transport may additionally implement
-`IMailboxIdentityAuthenticatedRawTransport`; only then does E2EE use the
-mailbox operation contract. It receives an `IMailboxOperationSigner`, not a
+`E2eeClientTransport` retains the existing `ISessionMessageTransport` direct
+send path. Official-cloud delivery requires the explicit derived capability
+`IResumableMailboxIdentityAuthenticatedRawTransport`; a transport implementing
+only `IMailboxIdentityAuthenticatedRawTransport` is rejected before encryption
+or network I/O. The mailbox operation contract receives an
+`IMailboxOperationSigner`, not a
 `SessionIdentityProvider`: the facade exposes only the public identity and
 exact domain-separated MCP2 presentation signing, never generic signing or
 private-key access. It is invalidated before the operation's identity lease is
 released, including on exceptions and cancellation.
 
-The mailbox contract requires one successful
-`PrepareScopedMailboxBatchAsync` call covering every official-cloud fan-out
-target before any `SendPreparedMailboxAuthenticatedAsync` dispatch. There is
-no per-target preparation path. Its opaque prepared handles are created by the
+For each send, E2EE first resolves and canonically orders the wire IDs and
+transport decisions for the complete recipient set. Before encryption or any
+network operation it atomically binds the semantic message to a local durable
+plan containing every recipient, wire ID, Direct/Cloud choice, and cloud scope.
+Exact retries are idempotent; recipient, route, or scope changes fail closed,
+including all-direct retries of an earlier cloud batch. Outgoing group messages
+also persist their exact notification-recipient snapshot in the message row and
+reuse it after restart instead of consulting current membership.
+
+The official-cloud subset is then canonically ordered by wire and credential
+scope IDs and derives a fixed 16-byte domain-separated logical
+batch ID from those selectors, the semantic message ID, and delivery kind.
+It calls `TryResumeScopedMailboxBatchAsync` before generating randomized DPE1
+ciphertext. A null result is exclusively a true durable miss; conflict,
+corruption, stale holder/grant/epoch, lost outbox state, entitlement loss, and
+revocation fail closed. Only that miss permits one
+`PrepareScopedMailboxLogicalBatchAsync` transaction covering every
+official-cloud fan-out target before any
+`SendPreparedMailboxAuthenticatedAsync` dispatch. There is no per-target or
+mixed resumed/new preparation path. Opaque prepared handles are created by the
 transport and may be dispatched only through that transport. This producer contract
 imposes the mailbox ciphertext bound of
 81,768 bytes (`MailboxClientLimits.MaximumCiphertextLength`) on the decoded

@@ -68,8 +68,112 @@ public interface IMailboxIdentityAuthenticatedRawTransport : ISessionMessageTran
         CancellationToken cancellationToken = default);
 }
 
+public interface IResumableMailboxIdentityAuthenticatedRawTransport :
+    IMailboxIdentityAuthenticatedRawTransport
+{
+    Task<IReadOnlyList<IPreparedMailboxAuthenticatedSend>?>
+        TryResumeScopedMailboxBatchAsync(
+        IMailboxOperationSigner signer,
+        MailboxLogicalSendBatch batch,
+        CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyList<IPreparedMailboxAuthenticatedSend>>
+        PrepareScopedMailboxLogicalBatchAsync(
+        IMailboxOperationSigner signer,
+        MailboxLogicalSendBatch batch,
+        IReadOnlyList<MailboxAuthenticatedSendTarget> targets,
+        CancellationToken cancellationToken = default);
+}
+
 public sealed record MailboxAuthenticatedSendTarget(
     OutboundMessageEnvelope Envelope,
+    MailboxCredentialSelector Selector,
+    VerifiedOfficialMailboxAuthority Authority);
+
+/// <summary>
+/// Ciphertext-independent identity of one semantic official-cloud fan-out. The 16-byte value is
+/// domain separated and commits to operation kind plus the exact ordered wire and credential
+/// scope identifiers. Its value is deliberately never formatted or logged.
+/// </summary>
+public sealed class MailboxLogicalSendBatch
+{
+    private const int MaximumIdentifierUtf8Bytes = 512;
+    private static ReadOnlySpan<byte> Domain => "deep.mailbox.logical-send-batch.v1"u8;
+    private static ReadOnlySpan<byte> SemanticDomain => "deep.mailbox.semantic-send.v1"u8;
+    private static readonly UTF8Encoding StrictUtf8 = new(false, true);
+    private readonly byte[] id;
+    private readonly byte[] semanticId;
+    private readonly IReadOnlyList<MailboxLogicalSendTarget> targets;
+
+    public MailboxLogicalSendBatch(
+        MessageId semanticMessageId,
+        MailboxDeliveryKind kind,
+        IReadOnlyList<MailboxLogicalSendTarget> targets)
+    {
+        if (string.IsNullOrWhiteSpace(semanticMessageId.Value))
+            throw new ArgumentException("Semantic message ID is required.", nameof(semanticMessageId));
+        if (!Enum.IsDefined(kind))
+            throw new ArgumentOutOfRangeException(nameof(kind));
+        ArgumentNullException.ThrowIfNull(targets);
+        if (targets.Count is < 1 or > SqliteSessionStore.MaximumScopedMailboxBatchTargets ||
+            targets.Any(static target => target is null))
+            throw new ArgumentException("Logical mailbox fan-out is invalid.", nameof(targets));
+
+        SemanticMessageId = semanticMessageId;
+        Kind = kind;
+        this.targets = Array.AsReadOnly(targets.ToArray());
+        using (var semanticHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256))
+        {
+            semanticHash.AppendData(SemanticDomain);
+            semanticHash.AppendData([(byte)kind]);
+            AppendString(semanticHash, semanticMessageId.Value);
+            semanticId = semanticHash.GetHashAndReset()[..MailboxClientLimits.OperationIdLength];
+        }
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        hash.AppendData(Domain);
+        hash.AppendData([(byte)kind]);
+        AppendString(hash, semanticMessageId.Value);
+        foreach (var target in targets)
+        {
+            ArgumentNullException.ThrowIfNull(target.Selector);
+            ArgumentNullException.ThrowIfNull(target.Authority);
+            if (string.IsNullOrWhiteSpace(target.WireMessageId.Value))
+                throw new ArgumentException("Logical mailbox wire ID is invalid.", nameof(targets));
+            hash.AppendData(target.Selector.ScopeId.Span);
+            AppendString(hash, target.WireMessageId.Value);
+        }
+        id = hash.GetHashAndReset()[..MailboxClientLimits.OperationIdLength];
+    }
+
+    public MessageId SemanticMessageId { get; }
+    public MailboxDeliveryKind Kind { get; }
+    public IReadOnlyList<MailboxLogicalSendTarget> Targets => targets;
+    internal ReadOnlyMemory<byte> Id => id.ToArray();
+    internal ReadOnlyMemory<byte> SemanticId => semanticId.ToArray();
+    public override string ToString() => "[opaque-mailbox-logical-send-batch]";
+
+    private static void AppendString(IncrementalHash hash, string value)
+    {
+        byte[] bytes;
+        try
+        {
+            bytes = StrictUtf8.GetBytes(value);
+        }
+        catch (EncoderFallbackException exception)
+        {
+            throw new ArgumentException("Logical mailbox identifier is not valid UTF-8.", exception);
+        }
+        if (bytes.Length is 0 or > MaximumIdentifierUtf8Bytes)
+            throw new ArgumentException("Logical mailbox identifier exceeds its bound.");
+        Span<byte> length = stackalloc byte[4];
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(length, bytes.Length);
+        hash.AppendData(length);
+        hash.AppendData(bytes);
+    }
+}
+
+public sealed record MailboxLogicalSendTarget(
+    MessageId WireMessageId,
     MailboxCredentialSelector Selector,
     VerifiedOfficialMailboxAuthority Authority);
 
@@ -404,11 +508,13 @@ public sealed class E2eeClientTransport :
     public async Task SendAsync(OutboundMessageEnvelope envelope, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(envelope);
-        var copies = await WithIdentityAsync(
-            identity => BuildDirectCopies(identity, envelope),
+        envelope = envelope with { Id = envelope.Id ?? MessageId.NewId() };
+        var plans = await WithIdentityAsync(
+            identity => BuildDirectPlans(identity, envelope),
             cancellationToken).ConfigureAwait(false);
-        await SendPolicySelectedCopiesAsync(
-            copies, MailboxDeliveryKind.Direct, concurrent: false, cancellationToken)
+        await SendPolicySelectedPlansAsync(
+            plans, envelope.Id.Value, MailboxDeliveryKind.Direct,
+            concurrent: false, cancellationToken)
             .ConfigureAwait(false);
     }
 
@@ -445,11 +551,15 @@ public sealed class E2eeClientTransport :
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(group);
-        var copies = await WithIdentityAsync(
-            identity => BuildGroupStateCopies(identity, group, updatedAt, recipients),
+        var plans = await WithIdentityAsync(
+            identity => BuildGroupStatePlans(identity, group, updatedAt, recipients),
             cancellationToken).ConfigureAwait(false);
-        await SendPolicySelectedCopiesAsync(
-            copies, MailboxDeliveryKind.GroupState, concurrent: true, cancellationToken)
+        var stateId = DeterministicMessageId(
+            "group-state", group.Id.Value,
+            group.Revision.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        await SendPolicySelectedPlansAsync(
+            plans, stateId, MailboxDeliveryKind.GroupState,
+            concurrent: true, cancellationToken)
             .ConfigureAwait(false);
     }
 
@@ -484,11 +594,12 @@ public sealed class E2eeClientTransport :
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(envelope);
-        var copies = await WithIdentityAsync(
-            identity => BuildGroupMessageCopies(identity, envelope),
+        var plans = await WithIdentityAsync(
+            identity => BuildGroupMessagePlans(identity, envelope),
             cancellationToken).ConfigureAwait(false);
-        await SendPolicySelectedCopiesAsync(
-            copies, MailboxDeliveryKind.GroupMessage, concurrent: true, cancellationToken)
+        await SendPolicySelectedPlansAsync(
+            plans, envelope.Id, MailboxDeliveryKind.GroupMessage,
+            concurrent: true, cancellationToken)
             .ConfigureAwait(false);
     }
 
@@ -669,7 +780,7 @@ public sealed class E2eeClientTransport :
         }
     }
 
-    private IReadOnlyList<OutboundMessageEnvelope> BuildDirectCopies(
+    private IReadOnlyList<WireCopyPlan> BuildDirectPlans(
         SessionIdentityProvider identity,
         OutboundMessageEnvelope envelope)
     {
@@ -693,10 +804,10 @@ public sealed class E2eeClientTransport :
             envelope.Reaction);
 
         var targets = new[] { envelope.Recipient, envelope.Sender }.Distinct().ToArray();
-        return BuildWireCopies(identity, content, targets, now);
+        return BuildWirePlans(content, targets, now);
     }
 
-    private IReadOnlyList<OutboundMessageEnvelope> BuildGroupMessageCopies(
+    private IReadOnlyList<WireCopyPlan> BuildGroupMessagePlans(
         SessionIdentityProvider identity,
         OutboundGroupMessageEnvelope envelope)
     {
@@ -709,7 +820,7 @@ public sealed class E2eeClientTransport :
             .Append(envelope.Sender)
             .Distinct()
             .ToArray();
-        var copies = new List<OutboundMessageEnvelope>(targets.Length);
+        var copies = new List<WireCopyPlan>(targets.Length);
 
         foreach (var target in targets)
         {
@@ -727,13 +838,13 @@ public sealed class E2eeClientTransport :
                 envelope.Attachments,
                 envelope.ReplyTo,
                 envelope.Reaction);
-            copies.Add(BuildWireCopy(identity, content, target, now));
+            copies.Add(new WireCopyPlan(content, target, now));
         }
 
         return copies;
     }
 
-    private IReadOnlyList<OutboundMessageEnvelope> BuildGroupStateCopies(
+    private IReadOnlyList<WireCopyPlan> BuildGroupStatePlans(
         SessionIdentityProvider identity,
         Group group,
         DateTimeOffset updatedAt,
@@ -751,7 +862,7 @@ public sealed class E2eeClientTransport :
             "group-state",
             group.Id.Value,
             group.Revision.ToString(System.Globalization.CultureInfo.InvariantCulture));
-        var copies = new List<OutboundMessageEnvelope>(targets.Length);
+        var copies = new List<WireCopyPlan>(targets.Length);
 
         foreach (var target in targets)
         {
@@ -768,22 +879,21 @@ public sealed class E2eeClientTransport :
                 string.Empty,
                 [],
                 GroupState: group);
-            copies.Add(BuildWireCopy(identity, content, target, now));
+            copies.Add(new WireCopyPlan(content, target, now));
         }
 
         return copies;
     }
 
-    private IReadOnlyList<OutboundMessageEnvelope> BuildWireCopies(
-        SessionIdentityProvider identity,
+    private static IReadOnlyList<WireCopyPlan> BuildWirePlans(
         E2eeContent content,
         IReadOnlyList<SessionId> targets,
         DateTimeOffset wireCreatedAt)
     {
-        var copies = new OutboundMessageEnvelope[targets.Count];
+        var copies = new WireCopyPlan[targets.Count];
         for (var index = 0; index < targets.Count; index++)
         {
-            copies[index] = BuildWireCopy(identity, content, targets[index], wireCreatedAt);
+            copies[index] = new WireCopyPlan(content, targets[index], wireCreatedAt);
         }
 
         return copies;
@@ -791,21 +901,19 @@ public sealed class E2eeClientTransport :
 
     private OutboundMessageEnvelope BuildWireCopy(
         SessionIdentityProvider identity,
-        E2eeContent content,
-        SessionId target,
-        DateTimeOffset wireCreatedAt)
+        WireCopyPlan plan)
     {
-        var encrypted = identity.CreateEnvelopeCodec().EncryptContent(content, target);
+        var encrypted = identity.CreateEnvelopeCodec().EncryptContent(plan.Content, plan.Target);
         try
         {
             return new OutboundMessageEnvelope(
                 identity.SessionId,
-                target,
+                plan.Target,
                 EncodeWireBody(encrypted),
                 [],
-                wireCreatedAt,
-                content.ProtocolExpiresAt,
-                DeterministicMessageId("wire", content.MessageId.Value, target.Value));
+                plan.WireCreatedAt,
+                plan.Content.ProtocolExpiresAt,
+                plan.WireMessageId);
         }
         finally
         {
@@ -836,61 +944,105 @@ public sealed class E2eeClientTransport :
             async (copy, itemCancellationToken) =>
                 await rawTransport.SendAsync(copy, itemCancellationToken).ConfigureAwait(false));
 
-    private async Task SendPolicySelectedCopiesAsync(
-        IReadOnlyList<OutboundMessageEnvelope> copies,
+    private async Task SendPolicySelectedPlansAsync(
+        IReadOnlyList<WireCopyPlan> plans,
+        MessageId semanticMessageId,
         MailboxDeliveryKind kind,
         bool concurrent,
         CancellationToken cancellationToken)
     {
-        var direct = new List<OutboundMessageEnvelope>(copies.Count);
-        var cloud = new List<MailboxAuthenticatedSendTarget>(copies.Count);
-        foreach (var copy in copies)
+        var directPlans = new List<WireCopyPlan>(plans.Count);
+        var cloudPlans = new List<(WireCopyPlan Plan, MailboxDeliveryDecision Decision)>(plans.Count);
+        var durableTargets = new List<DurableLogicalDispatchTarget>(plans.Count);
+        foreach (var plan in plans)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var decision = await deliveryPolicy.DecideAsync(
-                    new MailboxDeliveryRequest(copy, kind), cancellationToken)
+                    new MailboxDeliveryRequest(plan.RoutingEnvelope, kind), cancellationToken)
                 .ConfigureAwait(false) ?? throw new InvalidOperationException(
                     "Mailbox delivery policy returned no decision.");
             decision.Validate();
             if (decision.Protocol == MailboxTransportProtocol.DirectP2p)
             {
-                EnsureDirectP2pTransport([copy]);
-                direct.Add(copy);
+                directPlans.Add(plan);
+                durableTargets.Add(new DurableLogicalDispatchTarget(
+                    plan.Target,
+                    plan.WireMessageId,
+                    DurableLogicalDispatchRoute.DirectP2p,
+                    ReadOnlyMemory<byte>.Empty));
             }
             else
             {
-                if (!TryDecodeWireBody(copy.Body, out var payload))
-                    throw new InvalidDataException("Cloud delivery requires canonical DPE1.");
-                try
-                {
-                    if (payload.Length > MailboxClientLimits.MaximumCiphertextLength)
-                        throw new E2eeMailboxPayloadTooLargeException(
-                            payload.Length, MailboxClientLimits.MaximumCiphertextLength);
-                }
-                finally
-                {
-                    CryptographicOperations.ZeroMemory(payload);
-                }
-                cloud.Add(new MailboxAuthenticatedSendTarget(
-                    copy, decision.Selector!, decision.Authority!));
+                cloudPlans.Add((plan, decision));
+                durableTargets.Add(new DurableLogicalDispatchTarget(
+                    plan.Target,
+                    plan.WireMessageId,
+                    DurableLogicalDispatchRoute.OfficialCloud,
+                    decision.Selector!.ScopeId));
             }
         }
+        var dispatchPlans = inboxRepository as ILogicalDispatchPlanRepository
+            ?? throw new InvalidOperationException(
+                "E2EE sending requires durable logical dispatch-plan storage.");
+        await dispatchPlans.EnsureLogicalDispatchPlanAsync(
+            new DurableLogicalDispatchPlan(
+                plans[0].Content.Sender,
+                semanticMessageId,
+                kind switch
+                {
+                    MailboxDeliveryKind.Direct =>
+                        DurableLogicalDispatchKind.DirectMessage,
+                    MailboxDeliveryKind.GroupMessage =>
+                        DurableLogicalDispatchKind.GroupMessage,
+                    MailboxDeliveryKind.GroupState =>
+                        DurableLogicalDispatchKind.GroupState,
+                    _ => throw new ArgumentOutOfRangeException(nameof(kind))
+                },
+                durableTargets
+                    .OrderBy(static target => target.Recipient.Value,
+                        StringComparer.Ordinal)
+                    .ThenBy(static target => target.WireMessageId.Value,
+                        StringComparer.Ordinal)
+                    .ToArray(),
+                TransportOutboxTime.Canonical(clock.UtcNow)),
+            cancellationToken).ConfigureAwait(false);
+        cloudPlans = cloudPlans
+            .OrderBy(item => Convert.ToHexString(item.Decision.Selector!.ScopeId.Span),
+                StringComparer.Ordinal)
+            .ThenBy(item => item.Plan.WireMessageId.Value, StringComparer.Ordinal)
+            .ToList();
+        EnsureDirectP2pTransport(directPlans.Select(static plan => plan.RoutingEnvelope).ToArray());
         IReadOnlyList<IPreparedMailboxAuthenticatedSend> prepared = [];
-        IMailboxIdentityAuthenticatedRawTransport? cloudTransport = null;
-        if (cloud.Count > 0)
+        IResumableMailboxIdentityAuthenticatedRawTransport? cloudTransport = null;
+        if (cloudPlans.Count > 0)
         {
-            cloudTransport = rawTransport as IMailboxIdentityAuthenticatedRawTransport
+            cloudTransport = rawTransport as IResumableMailboxIdentityAuthenticatedRawTransport
                 ?? throw new InvalidOperationException(
-                    "Official cloud delivery was selected without a mailbox transport.");
+                    "Official cloud delivery requires durable logical-batch resumption.");
+            var logicalBatch = new MailboxLogicalSendBatch(
+                semanticMessageId,
+                kind,
+                cloudPlans.Select(item => new MailboxLogicalSendTarget(
+                    item.Plan.WireMessageId,
+                    item.Decision.Selector!,
+                    item.Decision.Authority!)).ToArray());
             prepared = await WithMailboxOperationSignerAsync(
-                (_, signer) => cloudTransport.PrepareScopedMailboxBatchAsync(
-                    signer, cloud, cancellationToken), cancellationToken)
+                async (_, signer) =>
+                    await cloudTransport.TryResumeScopedMailboxBatchAsync(
+                        signer, logicalBatch, cancellationToken).ConfigureAwait(false)
+                    ?? await PrepareFreshCloudBatchAsync(
+                        cloudTransport, signer, logicalBatch, cloudPlans,
+                        cancellationToken).ConfigureAwait(false),
+                cancellationToken)
                 .ConfigureAwait(false);
-            if (prepared is null || prepared.Count != cloud.Count ||
+            if (prepared is null || prepared.Count != cloudPlans.Count ||
                 prepared.Any(static value => value is null))
                 throw new InvalidOperationException(
                     "Mailbox batch preparation returned invalid handles.");
         }
+        var direct = await WithIdentityAsync(
+            identity => directPlans.Select(plan => BuildWireCopy(identity, plan)).ToArray(),
+            cancellationToken).ConfigureAwait(false);
         if (concurrent)
         {
             EnsureDirectP2pTransport(direct);
@@ -921,6 +1073,39 @@ public sealed class E2eeClientTransport :
             throw new InvalidOperationException(
                 "Direct P2P delivery requires an explicit direct-P2P transport.");
         }
+    }
+
+    private async Task<IReadOnlyList<IPreparedMailboxAuthenticatedSend>>
+        PrepareFreshCloudBatchAsync(
+        IResumableMailboxIdentityAuthenticatedRawTransport cloudTransport,
+        IMailboxOperationSigner signer,
+        MailboxLogicalSendBatch logicalBatch,
+        IReadOnlyList<(WireCopyPlan Plan, MailboxDeliveryDecision Decision)> cloudPlans,
+        CancellationToken cancellationToken)
+    {
+        var cloud = await WithIdentityAsync(
+            identity => cloudPlans.Select(item => new MailboxAuthenticatedSendTarget(
+                BuildWireCopy(identity, item.Plan),
+                item.Decision.Selector!,
+                item.Decision.Authority!)).ToArray(),
+            cancellationToken).ConfigureAwait(false);
+        foreach (var target in cloud)
+        {
+            if (!TryDecodeWireBody(target.Envelope.Body, out var payload))
+                throw new InvalidDataException("Cloud delivery requires canonical DPE1.");
+            try
+            {
+                if (payload.Length > MailboxClientLimits.MaximumCiphertextLength)
+                    throw new E2eeMailboxPayloadTooLargeException(
+                        payload.Length, MailboxClientLimits.MaximumCiphertextLength);
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(payload);
+            }
+        }
+        return await cloudTransport.PrepareScopedMailboxLogicalBatchAsync(
+            signer, logicalBatch, cloud, cancellationToken).ConfigureAwait(false);
     }
 
     private static async Task SendPreparedMailboxCopiesSequentiallyAsync(
@@ -1687,6 +1872,24 @@ public sealed class E2eeClientTransport :
         E2eeContent Content,
         string EnvelopeDigest,
         string ServerHash);
+
+    private sealed record WireCopyPlan(
+        E2eeContent Content,
+        SessionId Target,
+        DateTimeOffset WireCreatedAt)
+    {
+        public MessageId WireMessageId { get; } =
+            DeterministicMessageId("wire", Content.MessageId.Value, Target.Value);
+
+        public OutboundMessageEnvelope RoutingEnvelope { get; } = new(
+            Content.Sender,
+            Target,
+            string.Empty,
+            [],
+            WireCreatedAt,
+            Content.ProtocolExpiresAt,
+            DeterministicMessageId("wire", Content.MessageId.Value, Target.Value));
+    }
 
     private sealed record InboxDeliveryKey(string AccountSessionId, int Namespace, string ServerHash);
 }

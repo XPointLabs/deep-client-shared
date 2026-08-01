@@ -106,6 +106,29 @@ public sealed class OutboxDispatchTests
     }
 
     [Fact]
+    public async Task SameMessageIdCannotJoinSingleFlightWithChangedSemanticEnvelope()
+    {
+        var transport = new BarrierDispatchTransport();
+        using var runtime = CreateRuntime(transport);
+        var sender = await runtime.Accounts.RegisterAsync("Sender");
+        var pending = await runtime.Messages.QueueOneToOneAsync(
+            sender.SessionId, SessionId.CreateNew(), "immutable original");
+
+        var dispatch = runtime.Messages.DispatchOneToOneAsync(pending);
+        await transport.WaitForSendAsync(1);
+        var rejected = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            runtime.Messages.DispatchOneToOneAsync(
+                pending with { Body = "changed body" }));
+        Assert.DoesNotContain(pending.Id.Value, rejected.Message, StringComparison.Ordinal);
+        Assert.Equal(1, transport.PhysicalSendCount);
+
+        transport.CompleteSend(1);
+        Assert.Equal(
+            MessageDeliveryState.Sent,
+            (await dispatch.WaitAsync(TestTimeout)).DeliveryState);
+    }
+
+    [Fact]
     public async Task CancelingForegroundWaiterDoesNotCancelSharedBackgroundDispatch()
     {
         var transport = new BarrierDispatchTransport();
@@ -331,6 +354,102 @@ public sealed class OutboxDispatchTests
         {
             DeleteSqliteFiles(statePath);
         }
+    }
+
+    [Fact]
+    public async Task ManualAndAutomaticRetryShareOnePhysicalSendAndExactEnvelope()
+    {
+        var transport = new BarrierDispatchTransport();
+        using var runtime = CreateRuntime(transport);
+        var sender = await runtime.Accounts.RegisterAsync("Sender");
+        var attachment = new AttachmentMetadata(
+            "attachment-token", "opaque.bin", "application/octet-stream", 7);
+        var pending = await runtime.Messages.QueueOneToOneAsync(
+            sender.SessionId, SessionId.CreateNew(), "exact retry", [attachment]);
+        await runtime.Store.UpdateAsync(pending.Mark(MessageDeliveryState.Failed));
+
+        var automatic = runtime.Messages.DispatchPendingMessagesAsync(sender.SessionId);
+        await transport.WaitForSendAsync(1);
+        var manual = runtime.Messages.RetryOutgoingAsync(sender.SessionId, pending.Id);
+
+        Assert.Equal(1, transport.PhysicalSendCount);
+        transport.CompleteSend(1);
+        Assert.Equal(1, await automatic.WaitAsync(TestTimeout));
+        var result = await manual.WaitAsync(TestTimeout);
+        Assert.Equal(MessageDeliveryState.Sent, result.DeliveryState);
+        Assert.Equal(pending.Id, result.Id);
+        Assert.Equal(pending.Body, result.Body);
+        Assert.Equal(pending.Attachments, result.Attachments);
+        Assert.Equal(pending.CreatedAt, result.CreatedAt);
+        Assert.Equal(pending.ExpiresAt, result.ExpiresAt);
+    }
+
+    [Fact]
+    public async Task ManualRetryIsTerminalIdempotentAndRejectsNonOwnerWithoutIdentifiers()
+    {
+        var transport = new BarrierDispatchTransport();
+        using var runtime = CreateRuntime(transport);
+        var sender = await runtime.Accounts.RegisterAsync("Sender");
+        var pending = await runtime.Messages.QueueOneToOneAsync(
+            sender.SessionId, SessionId.CreateNew(), "terminal retry");
+        await runtime.Store.UpdateAsync(pending.Mark(MessageDeliveryState.Sent));
+
+        var terminal = await runtime.Messages.RetryOutgoingAsync(sender.SessionId, pending.Id);
+        Assert.Equal(MessageDeliveryState.Sent, terminal.DeliveryState);
+        Assert.Equal(0, transport.PhysicalSendCount);
+
+        var rejected = await Assert.ThrowsAsync<MessageRetryRejectedException>(() =>
+            runtime.Messages.RetryOutgoingAsync(SessionId.CreateNew(), pending.Id));
+        Assert.Equal(MessageRetryRejection.NotOwned, rejected.Reason);
+        Assert.DoesNotContain(pending.Id.Value, rejected.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(sender.SessionId.Value, rejected.Message, StringComparison.Ordinal);
+
+        var missingId = new MessageId("missing-retry-id");
+        var missing = await Assert.ThrowsAsync<MessageRetryRejectedException>(() =>
+            runtime.Messages.RetryOutgoingAsync(sender.SessionId, missingId));
+        Assert.Equal(MessageRetryRejection.NotFound, missing.Reason);
+        Assert.DoesNotContain(missingId.Value, missing.Message, StringComparison.Ordinal);
+
+        var incoming = pending with
+        {
+            Id = new MessageId("incoming-retry-id"),
+            Direction = MessageDirection.Incoming,
+            DeliveryState = MessageDeliveryState.Delivered
+        };
+        await runtime.Store.AppendAsync(incoming);
+        var wrongDirection = await Assert.ThrowsAsync<MessageRetryRejectedException>(() =>
+            runtime.Messages.RetryOutgoingAsync(sender.SessionId, incoming.Id));
+        Assert.Equal(MessageRetryRejection.NotOutgoing, wrongDirection.Reason);
+
+        var draft = pending with
+        {
+            Id = new MessageId("draft-retry-id"),
+            DeliveryState = MessageDeliveryState.Draft
+        };
+        await runtime.Store.AppendAsync(draft);
+        var notRetryable = await Assert.ThrowsAsync<MessageRetryRejectedException>(() =>
+            runtime.Messages.RetryOutgoingAsync(sender.SessionId, draft.Id));
+        Assert.Equal(MessageRetryRejection.NotRetryable, notRetryable.Reason);
+        Assert.Equal(0, transport.PhysicalSendCount);
+    }
+
+    [Fact]
+    public async Task FailedManualRetryRemainsFailed()
+    {
+        var transport = new BarrierDispatchTransport();
+        using var runtime = CreateRuntime(transport);
+        var sender = await runtime.Accounts.RegisterAsync("Sender");
+        var pending = await runtime.Messages.QueueOneToOneAsync(
+            sender.SessionId, SessionId.CreateNew(), "retry failure");
+        await runtime.Store.UpdateAsync(pending.Mark(MessageDeliveryState.Failed));
+
+        var retry = runtime.Messages.RetryOutgoingAsync(sender.SessionId, pending.Id);
+        await transport.WaitForSendAsync(1);
+        transport.FailSend(1, new HttpRequestException("synthetic"));
+        await Assert.ThrowsAsync<HttpRequestException>(() => retry);
+        Assert.Equal(
+            MessageDeliveryState.Failed,
+            (await runtime.Store.GetAsync(pending.Id))?.DeliveryState);
     }
 
     private static async Task AssertUpdateDoesNotRecreateDeletedRowAsync(IMessageRepository repository)

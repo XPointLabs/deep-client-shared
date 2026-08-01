@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text;
 using Deep.Client.Shared.Domain;
 using Deep.Client.Shared.Persistence;
@@ -113,6 +114,53 @@ public sealed class E2eeClientTransportTests
             MailboxPresentationSigningBytes(MailboxAuthenticatedOperation.Store)));
         Assert.All(raw.SentSnapshot(), item =>
             Assert.Equal(MailboxClientPayloadBytes, DecodeWireLength(item.Body)));
+    }
+
+    [Fact]
+    public async Task MailboxRetryResumesExactPreparedFanoutBeforeReencryption()
+    {
+        using var aliceIdentity = new SessionIdentityProvider(AlicePhrase);
+        using var bobIdentity = new SessionIdentityProvider(BobPhrase);
+        var raw = new MailboxBoundRawTransport();
+        using var transport = new E2eeClientTransport(
+            raw,
+            _ => Task.FromResult<string?>(AlicePhrase),
+            new FrozenClock(Now),
+            new InMemorySessionStore(),
+            new TestCloudMailboxDeliveryPolicy());
+        var envelope = CreateDirect(
+            aliceIdentity.SessionId, bobIdentity.SessionId,
+            "logical-restart-resend", "same semantic body");
+
+        await transport.SendAsync(envelope);
+        var first = raw.SentSnapshot().Select(static value => value.Body).ToArray();
+        await transport.SendAsync(envelope);
+        var all = raw.SentSnapshot();
+
+        Assert.Equal(1, raw.BatchPrepareCount);
+        Assert.Equal(1, raw.ResumeHitCount);
+        Assert.Equal(4, all.Count);
+        Assert.Equal(first, all.Skip(2).Select(static value => value.Body).ToArray());
+
+        var content = new E2eeContent(
+            E2eeContentKind.Message, envelope.Id!.Value,
+            ConversationKind.OneToOne,
+            ConversationId.ForOneToOne(envelope.Recipient),
+            envelope.Sender, envelope.Recipient, envelope.CreatedAt,
+            Now.AddDays(14), null, envelope.Body, []);
+        var firstEncryption = aliceIdentity.CreateEnvelopeCodec()
+            .EncryptContent(content, envelope.Recipient);
+        var secondEncryption = aliceIdentity.CreateEnvelopeCodec()
+            .EncryptContent(content, envelope.Recipient);
+        try
+        {
+            Assert.NotEqual(firstEncryption, secondEncryption);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(firstEncryption);
+            CryptographicOperations.ZeroMemory(secondEncryption);
+        }
     }
 
     [Fact]
@@ -1109,13 +1157,15 @@ public sealed class E2eeClientTransportTests
     }
 
     private sealed class MailboxBoundRawTransport :
-        IMailboxIdentityAuthenticatedRawTransport
+        IResumableMailboxIdentityAuthenticatedRawTransport
     {
         private readonly bool blockAuthenticatedSends;
         private readonly object gate = new();
         private readonly List<OutboundMessageEnvelope> sent = [];
         private readonly List<SessionId> prepareRecipients = [];
+        private readonly Dictionary<string, OutboundMessageEnvelope[]> resumable = [];
         private int batchPrepareCount;
+        private int resumeHitCount;
         private readonly TaskCompletionSource<bool> authenticatedSendStarted =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource<bool> authenticatedSendRelease =
@@ -1140,6 +1190,7 @@ public sealed class E2eeClientTransportTests
         }
 
         public int BatchPrepareCount => Volatile.Read(ref batchPrepareCount);
+        public int ResumeHitCount => Volatile.Read(ref resumeHitCount);
 
         public int SendCount
         {
@@ -1168,8 +1219,9 @@ public sealed class E2eeClientTransportTests
         public bool LastSignerSignatureVerified { get; private set; }
 
         public Task<IReadOnlyList<IPreparedMailboxAuthenticatedSend>>
-            PrepareScopedMailboxBatchAsync(
+            PrepareScopedMailboxLogicalBatchAsync(
             IMailboxOperationSigner signer,
+            MailboxLogicalSendBatch batch,
             IReadOnlyList<MailboxAuthenticatedSendTarget> targets,
             CancellationToken cancellationToken = default)
         {
@@ -1197,8 +1249,50 @@ public sealed class E2eeClientTransportTests
                     throw new InvalidOperationException("test last-target batch preparation rejection");
                 prepared.Add(new PreparedMailboxSend(target.Envelope));
             }
+            lock (gate)
+            {
+                resumable[LogicalKey(batch)] = targets
+                    .Select(static target => target.Envelope)
+                    .ToArray();
+            }
             return Task.FromResult<IReadOnlyList<IPreparedMailboxAuthenticatedSend>>(prepared);
         }
+
+        public Task<IReadOnlyList<IPreparedMailboxAuthenticatedSend>?>
+            TryResumeScopedMailboxBatchAsync(
+            IMailboxOperationSigner signer,
+            MailboxLogicalSendBatch batch,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            lock (gate)
+            {
+                if (!resumable.TryGetValue(LogicalKey(batch), out var envelopes))
+                    return Task.FromResult<IReadOnlyList<IPreparedMailboxAuthenticatedSend>?>(null);
+                Interlocked.Increment(ref resumeHitCount);
+                return Task.FromResult<IReadOnlyList<IPreparedMailboxAuthenticatedSend>?>(
+                    envelopes.Select(envelope =>
+                        (IPreparedMailboxAuthenticatedSend)new PreparedMailboxSend(envelope))
+                    .ToArray());
+            }
+        }
+
+        public Task<IReadOnlyList<IPreparedMailboxAuthenticatedSend>>
+            PrepareScopedMailboxBatchAsync(
+            IMailboxOperationSigner signer,
+            IReadOnlyList<MailboxAuthenticatedSendTarget> targets,
+            CancellationToken cancellationToken = default) =>
+            PrepareScopedMailboxLogicalBatchAsync(
+                signer,
+                new MailboxLogicalSendBatch(
+                    targets[0].Envelope.Id!.Value,
+                    MailboxDeliveryKind.Direct,
+                    targets.Select(target => new MailboxLogicalSendTarget(
+                        target.Envelope.Id!.Value,
+                        target.Selector,
+                        target.Authority)).ToArray()),
+                targets,
+                cancellationToken);
 
         public async Task SendPreparedMailboxAuthenticatedAsync(
             IPreparedMailboxAuthenticatedSend preparedSend,
@@ -1239,6 +1333,11 @@ public sealed class E2eeClientTransportTests
             }
         }
 
+        private static string LogicalKey(MailboxLogicalSendBatch batch) =>
+            $"{(int)batch.Kind}:{batch.SemanticMessageId.Value}:" +
+            string.Join("|", batch.Targets.Select(target =>
+                $"{target.WireMessageId.Value}:{Convert.ToHexString(target.Selector.ScopeId.Span)}"));
+
         private sealed record PreparedMailboxSend(OutboundMessageEnvelope Envelope) :
             IPreparedMailboxAuthenticatedSend;
     }
@@ -1261,15 +1360,15 @@ public sealed class E2eeClientTransportTests
 
         private static MailboxCapabilityIssuerAuthority Issuer(
             MailboxCapabilityDomain domain) => new()
-        {
-            PublicKey = Enumerable.Repeat((byte)0x63, 32).ToArray(),
-            Domain = domain,
-            AllowedLifecycle = MailboxCapabilityLifecycle.Active,
-            MinimumGeneration = 1,
-            MaximumGeneration = ulong.MaxValue,
-            ValidFromUnixSeconds = 1,
-            ValidUntilUnixSeconds = ulong.MaxValue
-        };
+            {
+                PublicKey = Enumerable.Repeat((byte)0x63, 32).ToArray(),
+                Domain = domain,
+                AllowedLifecycle = MailboxCapabilityLifecycle.Active,
+                MinimumGeneration = 1,
+                MaximumGeneration = ulong.MaxValue,
+                ValidFromUnixSeconds = 1,
+                ValidUntilUnixSeconds = ulong.MaxValue
+            };
 
         public Task<MailboxDeliveryDecision> DecideAsync(
             MailboxDeliveryRequest request,

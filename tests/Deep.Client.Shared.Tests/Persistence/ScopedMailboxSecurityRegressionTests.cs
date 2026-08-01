@@ -135,7 +135,8 @@ public sealed class ScopedMailboxSecurityRegressionTests
         var target = fixture.RetrieveTarget(0xb2);
         var created = DateTimeOffset.FromUnixTimeSeconds(1050);
         var request = new ScopedMailboxPrepareBatchRequest(
-            fixture.Account, parent, [target], created);
+            fixture.Account, parent, parent,
+            [Selector(target)], [target], created);
         var first = await fixture.Store.PrepareScopedMailboxBatchAsync(
             request, fixture.Signer, fixture.Authority);
 
@@ -150,7 +151,11 @@ public sealed class ScopedMailboxSecurityRegressionTests
 
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
             restarted.PrepareScopedMailboxBatchAsync(
-                request with { Targets = [fixture.RetrieveTarget(0xb3)] },
+                request with
+                {
+                    Targets = [fixture.RetrieveTarget(0xb3)],
+                    Selectors = [Selector(fixture.RetrieveTarget(0xb3))]
+                },
                 fixture.Signer,
                 fixture.Authority));
 
@@ -158,6 +163,149 @@ public sealed class ScopedMailboxSecurityRegressionTests
         await Assert.ThrowsAsync<InvalidDataException>(() =>
             restarted.PrepareScopedMailboxBatchAsync(
                 request, fixture.Signer, fixture.Authority));
+    }
+
+    private static ScopedMailboxBatchSelector Selector(ScopedMailboxBatchTarget target) =>
+        new(target.Selector,
+            new MessageId(Convert.ToHexString(target.Binding.OperationId.Span)),
+            target.Binding.Operation);
+
+    [Fact]
+    public async Task Logical_resume_reopens_exact_frames_and_fails_closed_on_conflict_revocation_and_corruption()
+    {
+        using var fixture = new Fixture();
+        await fixture.Store.InstallScopedCredentialAsync(
+            fixture.Generation, fixture.Authority);
+        var parent = Bytes(16, 0xc1);
+        var target = fixture.RetrieveTarget(0xc2);
+        var selector = Selector(target);
+        var prepare = new ScopedMailboxPrepareBatchRequest(
+            fixture.Account, parent, parent, [selector], [target],
+            DateTimeOffset.FromUnixTimeSeconds(1050));
+        var first = await fixture.Store.PrepareScopedMailboxBatchAsync(
+            prepare, fixture.Signer, fixture.Authority);
+
+        using var reopened = new SqliteSessionStore(fixture.Path);
+        var resume = new ScopedMailboxResumeBatchRequest(
+            fixture.Account, parent, parent, [selector]);
+        var exact = await reopened.TryResumeScopedMailboxBatchAsync(
+            resume, fixture.Signer, fixture.Authority);
+        Assert.NotNull(exact);
+        Assert.Equal(
+            first.Frames.Single().GetCanonicalMau2Copy(),
+            exact.Frames.Single().GetCanonicalMau2Copy());
+
+        var otherSeed = Bytes(32, 0xe1);
+        var otherSigner = new OperationSigner(
+            otherSeed,
+            new SodiumMailboxCapabilityCrypto().GetPublicKey(otherSeed));
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
+            reopened.TryResumeScopedMailboxBatchAsync(
+                resume, otherSigner, fixture.Authority));
+
+        var expiredAuthority = new VerifiedOfficialMailboxAuthority(
+            fixture.Authority.NetworkId,
+            fixture.Authority.MinimumGeneration,
+            fixture.Authority.TrustedIssuers,
+            true,
+            static () => true,
+            fixture.Revocations,
+            new FrozenTimeProvider(1201));
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            reopened.TryResumeScopedMailboxBatchAsync(
+                resume, fixture.Signer, expiredAuthority));
+
+        var entitled = true;
+        var unentitledAuthority = new VerifiedOfficialMailboxAuthority(
+            fixture.Authority.NetworkId,
+            fixture.Authority.MinimumGeneration,
+            fixture.Authority.TrustedIssuers,
+            true,
+            () => entitled,
+            fixture.Revocations,
+            fixture.Authority.TimeProvider);
+        entitled = false;
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            reopened.TryResumeScopedMailboxBatchAsync(
+                resume, fixture.Signer, unentitledAuthority));
+
+        var changedSelector = selector with
+        {
+            WireMessageId = new MessageId("different-wire-id")
+        };
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            reopened.TryResumeScopedMailboxBatchAsync(
+                resume with { Selectors = [changedSelector] },
+                fixture.Signer, fixture.Authority));
+
+        fixture.Revocations.Revoked = true;
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            reopened.TryResumeScopedMailboxBatchAsync(
+                resume, fixture.Signer, fixture.Authority));
+        fixture.Revocations.Revoked = false;
+
+        fixture.DeletePreparedTargets();
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
+            reopened.TryResumeScopedMailboxBatchAsync(
+                resume, fixture.Signer, fixture.Authority));
+    }
+
+    [Fact]
+    public async Task Restart_preserves_semantic_fan_out_owner_and_rejects_membership_replan()
+    {
+        using var fixture = new Fixture();
+        await fixture.Store.InstallScopedCredentialAsync(
+            fixture.Generation, fixture.Authority);
+        var semantic = Bytes(16, 0xd0);
+        var originalTarget = fixture.RetrieveTarget(0xd1);
+        var originalSelector = Selector(originalTarget);
+        var original = new ScopedMailboxPrepareBatchRequest(
+            fixture.Account,
+            originalTarget.Binding.OperationId,
+            semantic,
+            [originalSelector],
+            [originalTarget],
+            DateTimeOffset.FromUnixTimeSeconds(1050));
+        var prepared = await fixture.Store.PrepareScopedMailboxBatchAsync(
+            original, fixture.Signer, fixture.Authority);
+
+        using var reopened = new SqliteSessionStore(fixture.Path);
+        var changedTarget = fixture.RetrieveTarget(0xd2);
+        var changedSelector = Selector(changedTarget);
+        var changedResume = new ScopedMailboxResumeBatchRequest(
+            fixture.Account,
+            changedTarget.Binding.OperationId,
+            semantic,
+            [changedSelector]);
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            reopened.TryResumeScopedMailboxBatchAsync(
+                changedResume, fixture.Signer, fixture.Authority));
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            reopened.PrepareScopedMailboxBatchAsync(
+                new ScopedMailboxPrepareBatchRequest(
+                    fixture.Account,
+                    changedTarget.Binding.OperationId,
+                    semantic,
+                    [changedSelector],
+                    [changedTarget],
+                    DateTimeOffset.FromUnixTimeSeconds(1050)),
+                fixture.Signer,
+                fixture.Authority));
+
+        var exact = await reopened.TryResumeScopedMailboxBatchAsync(
+            new ScopedMailboxResumeBatchRequest(
+                fixture.Account,
+                originalTarget.Binding.OperationId,
+                semantic,
+                [originalSelector]),
+            fixture.Signer,
+            fixture.Authority);
+        Assert.NotNull(exact);
+        Assert.Equal(
+            prepared.Frames.Single().GetCanonicalMau2Copy(),
+            exact.Frames.Single().GetCanonicalMau2Copy());
+        Assert.Equal(1, fixture.Count("mailbox_prepared_batches"));
+        Assert.Equal(1, fixture.Count("transport_outbox_items"));
     }
 
     [Fact]
@@ -385,15 +533,15 @@ public sealed class ScopedMailboxSecurityRegressionTests
             ulong minimumGeneration = 1,
             ulong maximumGeneration = ulong.MaxValue,
             ulong validUntil = ulong.MaxValue) => new()
-        {
-            PublicKey = publicKey.ToArray(),
-            Domain = domain,
-            AllowedLifecycle = MailboxCapabilityLifecycle.Active,
-            MinimumGeneration = minimumGeneration,
-            MaximumGeneration = maximumGeneration,
-            ValidFromUnixSeconds = 1,
-            ValidUntilUnixSeconds = validUntil
-        };
+            {
+                PublicKey = publicKey.ToArray(),
+                Domain = domain,
+                AllowedLifecycle = MailboxCapabilityLifecycle.Active,
+                MinimumGeneration = minimumGeneration,
+                MaximumGeneration = maximumGeneration,
+                ValidFromUnixSeconds = 1,
+                ValidUntilUnixSeconds = validUntil
+            };
 
         public ScopedMailboxBatchTarget RetrieveTarget(byte operation) => new(
             Selector,

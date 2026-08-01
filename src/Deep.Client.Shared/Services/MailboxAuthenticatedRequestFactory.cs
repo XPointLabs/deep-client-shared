@@ -109,10 +109,16 @@ public sealed class MailboxAuthenticatedRequestFactory
         ArgumentNullException.ThrowIfNull(signer);
         if (!selector.AccountScope.Equals(accountScope))
             throw new InvalidOperationException("Mailbox selector belongs to another account scope.");
+        var logicalId = LogicalSingleOperationId(selector, binding);
         var prepared = await credentials.PrepareScopedMailboxBatchAsync(
             new ScopedMailboxPrepareBatchRequest(
                 accountScope,
-                binding.OperationId,
+                logicalId,
+                logicalId,
+                [new ScopedMailboxBatchSelector(
+                    selector,
+                    new Domain.MessageId(Convert.ToHexString(binding.OperationId.Span)),
+                    binding.Operation)],
                 [new ScopedMailboxBatchTarget(selector, binding)],
                 // The authority clock is sampled at each prepare/resume.  A
                 // caller clock must not keep an expired grant artificially live.
@@ -121,6 +127,19 @@ public sealed class MailboxAuthenticatedRequestFactory
             authority,
             cancellationToken).ConfigureAwait(false);
         return prepared.Frames.Single();
+    }
+
+    private static byte[] LogicalSingleOperationId(
+        MailboxCredentialSelector selector,
+        MailboxAuthenticatedRequestBinding binding)
+    {
+        using var hash = System.Security.Cryptography.IncrementalHash.CreateHash(
+            System.Security.Cryptography.HashAlgorithmName.SHA256);
+        hash.AppendData("deep.mailbox.logical-single-operation.v1"u8);
+        hash.AppendData([(byte)binding.Operation]);
+        hash.AppendData(selector.ScopeId.Span);
+        hash.AppendData(binding.OperationId.Span);
+        return hash.GetHashAndReset()[..MailboxClientLimits.OperationIdLength];
     }
 }
 

@@ -166,7 +166,8 @@ public sealed class ClientRuntimeStorageE2ETests
     private sealed class AuthenticatedMau2RuntimeHarness :
         IAuthenticatedOpaqueMailboxTransport,
         IAuthenticatedInboxTransport,
-        IMetadataPrivateSessionMessageTransport
+        IMetadataPrivateSessionMessageTransport,
+        IResumableMailboxIdentityAuthenticatedRawTransport
     {
         private readonly ConcurrentDictionary<string, ConcurrentQueue<InboundMessageEnvelope>>
             inboxes = new(StringComparer.Ordinal);
@@ -210,8 +211,9 @@ public sealed class ClientRuntimeStorageE2ETests
         public bool UsesMetadataPrivateTransport => true;
 
         public Task<IReadOnlyList<IPreparedMailboxAuthenticatedSend>>
-            PrepareScopedMailboxBatchAsync(
+            PrepareScopedMailboxLogicalBatchAsync(
                 IMailboxOperationSigner signer,
+                MailboxLogicalSendBatch batch,
                 IReadOnlyList<MailboxAuthenticatedSendTarget> targets,
                 CancellationToken cancellationToken = default)
         {
@@ -229,6 +231,27 @@ public sealed class ClientRuntimeStorageE2ETests
                     (IPreparedMailboxAuthenticatedSend)new Prepared(this, target.Envelope))
                     .ToArray());
         }
+
+        public Task<IReadOnlyList<IPreparedMailboxAuthenticatedSend>?>
+            TryResumeScopedMailboxBatchAsync(
+                IMailboxOperationSigner signer,
+                MailboxLogicalSendBatch batch,
+                CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<IPreparedMailboxAuthenticatedSend>?>(null);
+
+        public Task<IReadOnlyList<IPreparedMailboxAuthenticatedSend>>
+            PrepareScopedMailboxBatchAsync(
+                IMailboxOperationSigner signer,
+                IReadOnlyList<MailboxAuthenticatedSendTarget> targets,
+                CancellationToken cancellationToken = default) =>
+            PrepareScopedMailboxLogicalBatchAsync(
+                signer, Logical(targets), targets, cancellationToken);
+
+        private static MailboxLogicalSendBatch Logical(
+            IReadOnlyList<MailboxAuthenticatedSendTarget> targets) =>
+            new(targets[0].Envelope.Id!.Value, MailboxDeliveryKind.Direct,
+                targets.Select(target => new MailboxLogicalSendTarget(
+                    target.Envelope.Id!.Value, target.Selector, target.Authority)).ToArray());
 
         public Task SendPreparedMailboxAuthenticatedAsync(
             IPreparedMailboxAuthenticatedSend preparedSend,

@@ -226,14 +226,23 @@ public sealed class InMemoryScopedMailboxCredentialRepository :
             var batchKey = BatchKey(
                 request.AccountScope.Value,
                 request.ParentOperationId.Span);
+            var semanticOwnerExists = ValidateSemanticBatchOwnership(
+                candidate,
+                request.AccountScope.Value,
+                request.SemanticOperationId.Span,
+                request.ParentOperationId.Span);
             var planDigest =
                 ScopedMailboxCredentialValidator.ComputePlanDigest(request);
             if (candidate.Batches.TryGetValue(batchKey, out var resumed))
             {
-                return Task.FromResult(Resume(
+                return Task.FromResult(ResumeLogical(
                     candidate,
                     resumed,
-                    request,
+                    new ScopedMailboxResumeBatchRequest(
+                        request.AccountScope,
+                        request.ParentOperationId,
+                        request.SemanticOperationId,
+                        request.Selectors),
                     signer,
                     authority,
                     planDigest));
@@ -295,10 +304,20 @@ public sealed class InMemoryScopedMailboxCredentialRepository :
             candidate.Batches.Add(
                 batchKey,
                 new StoredBatch(
+                    request.SemanticOperationId.ToArray(),
                     planDigest.ToArray(),
                     request.CreatedAt.ToUnixTimeMilliseconds(),
                     request.Targets.Count,
                     targets));
+            if (semanticOwnerExists || !candidate.SemanticOwners.TryAdd(
+                    SemanticBatchKey(
+                        request.AccountScope.Value,
+                        request.SemanticOperationId.Span),
+                    batchKey))
+            {
+                throw new InvalidDataException(
+                    "Mailbox semantic operation owner is corrupt.");
+            }
             fault?.Invoke(
                 InMemoryScopedMailboxFaultPoint.PrepareBeforePublish);
             cancellationToken.ThrowIfCancellationRequested();
@@ -315,6 +334,45 @@ public sealed class InMemoryScopedMailboxCredentialRepository :
             }
             return Task.FromResult(new ScopedMailboxPreparedBatch(
                 request.ParentOperationId, frames));
+        }
+    }
+
+    public Task<ScopedMailboxPreparedBatch?> TryResumeScopedMailboxBatchAsync(
+        ScopedMailboxResumeBatchRequest request,
+        IMailboxOperationSigner signer,
+        VerifiedOfficialMailboxAuthority authority,
+        CancellationToken cancellationToken = default)
+    {
+        authority.Validate();
+        ScopedMailboxCredentialValidator.ValidateResumeBatch(request, signer);
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (gate)
+        {
+            var batchKey = BatchKey(
+                request.AccountScope.Value, request.ParentOperationId.Span);
+            var semanticOwnerExists = ValidateSemanticBatchOwnership(
+                current,
+                request.AccountScope.Value,
+                request.SemanticOperationId.Span,
+                request.ParentOperationId.Span);
+            if (!current.Batches.TryGetValue(batchKey, out var stored))
+            {
+                if (semanticOwnerExists)
+                {
+                    throw new InvalidDataException(
+                        "Mailbox semantic batch owner lost its prepared batch.");
+                }
+                return Task.FromResult<ScopedMailboxPreparedBatch?>(null);
+            }
+
+            var resumed = ResumeLogical(
+                current,
+                stored,
+                request,
+                signer,
+                authority,
+                ScopedMailboxCredentialValidator.ComputePlanDigest(request));
+            return Task.FromResult<ScopedMailboxPreparedBatch?>(resumed);
         }
     }
 
@@ -378,73 +436,65 @@ public sealed class InMemoryScopedMailboxCredentialRepository :
         }
     }
 
-    private static ScopedMailboxPreparedBatch Resume(
+    private static ScopedMailboxPreparedBatch ResumeLogical(
         Snapshot snapshot,
         StoredBatch stored,
-        ScopedMailboxPrepareBatchRequest request,
+        ScopedMailboxResumeBatchRequest request,
         IMailboxOperationSigner signer,
         VerifiedOfficialMailboxAuthority authority,
         byte[] planDigest)
     {
         if (!Fixed(stored.PlanDigest, planDigest) ||
-            stored.TargetCount != request.Targets.Count)
+            stored.TargetCount != request.Selectors.Count)
         {
             throw new InvalidOperationException(
                 "Mailbox batch operation conflicts with durable preparation.");
         }
-
         if (stored.Targets.Count != stored.TargetCount)
         {
             throw new InvalidDataException(
                 "Mailbox prepared batch target catalog is incomplete.");
         }
 
-        var frames = new List<MailboxAuthenticatedRequestFrame>(
-            request.Targets.Count);
-        for (var ordinal = 0; ordinal < request.Targets.Count; ordinal++)
+        var frames = new List<MailboxAuthenticatedRequestFrame>(stored.TargetCount);
+        for (var ordinal = 0; ordinal < stored.TargetCount; ordinal++)
         {
-            var requested = request.Targets[ordinal];
+            var logical = request.Selectors[ordinal];
             var persisted = stored.Targets[ordinal];
             if (persisted.Counter == 0 ||
-                persisted.Operation != requested.Binding.Operation ||
-                !Fixed(persisted.ScopeId,
-                    requested.Selector.ScopeId.Span) ||
-                !Fixed(persisted.OperationId,
-                    requested.Binding.OperationId.Span) ||
-                !Fixed(persisted.RequestDigest,
-                    requested.Binding.RequestDigest.Span) ||
-                !Fixed(persisted.CanonicalRequest,
-                    requested.Binding.CanonicalRequest.Span))
+                persisted.Operation != logical.Operation ||
+                !Fixed(persisted.ScopeId, logical.Selector.ScopeId.Span))
             {
                 throw new InvalidDataException(
                     "Mailbox prepared batch target catalog is corrupt.");
             }
             var outboxKey = OutboxKey(
-                request.AccountScope.Value,
-                requested.Binding.OperationId.Span);
+                request.AccountScope.Value, persisted.OperationId);
             if (!snapshot.Outbox.TryGetValue(outboxKey, out var outbox) ||
                 !Fixed(outbox, persisted.Frame))
             {
                 throw new InvalidDataException(
                     "Mailbox prepared batch lost an outbox target.");
             }
-            var role = ScopedMailboxCredentialValidator.RoleFor(
-                requested.Binding.Operation);
+            var decoded = MailboxAuthenticatedClientRequestCodec.Decode(persisted.Frame);
+            if (!Fixed(decoded.Binding.OperationId.Span, persisted.OperationId) ||
+                !Fixed(decoded.Binding.RequestDigest.Span, persisted.RequestDigest) ||
+                !Fixed(decoded.Binding.CanonicalRequest.Span, persisted.CanonicalRequest))
+            {
+                throw new InvalidDataException(
+                    "Mailbox prepared batch target is corrupt.");
+            }
+            var requested = new ScopedMailboxBatchTarget(
+                logical.Selector, decoded.Binding);
+            var role = ScopedMailboxCredentialValidator.RoleFor(logical.Operation);
             var resolved = Resolve(
-                snapshot,
-                requested.Selector,
-                role,
-                authority,
-                requested.Binding,
-                allocateCounter: false);
-            ValidateResumedFrame(
-                persisted, requested, resolved, signer);
+                snapshot, logical.Selector, role, authority,
+                decoded.Binding, allocateCounter: false);
+            ValidateResumedFrame(persisted, requested, resolved, signer);
             frames.Add(new MailboxAuthenticatedRequestFrame(
-                persisted.Operation,
-                persisted.Frame));
+                persisted.Operation, persisted.Frame));
         }
-        return new ScopedMailboxPreparedBatch(
-            request.ParentOperationId, frames);
+        return new ScopedMailboxPreparedBatch(request.ParentOperationId, frames);
     }
 
     private static void ValidateResumedFrame(
@@ -620,29 +670,29 @@ public sealed class InMemoryScopedMailboxCredentialRepository :
                     generation.Selector.ScopeId.Span))
                 continue;
             foreach (var candidate in UniqueMaterials(generation))
-            foreach (var persisted in UniqueMaterials(existing.Generation))
-            {
-                if (Fixed(candidate.Span, persisted.Span))
+                foreach (var persisted in UniqueMaterials(existing.Generation))
                 {
-                    throw new InvalidDataException(
-                        "Scoped mailbox credential material is already bound to another scope.");
+                    if (Fixed(candidate.Span, persisted.Span))
+                    {
+                        throw new InvalidDataException(
+                            "Scoped mailbox credential material is already bound to another scope.");
+                    }
                 }
-            }
             foreach (var candidate in Grants(generation))
-            foreach (var persisted in Grants(existing.Generation))
-            {
-                var left = MailboxAuthenticatedCapabilityCodec.DecodeGrant(
-                    candidate.Span);
-                var right = MailboxAuthenticatedCapabilityCodec.DecodeGrant(
-                    persisted.Span);
-                if (Fixed(left.IssuerPublicKey.Span,
-                        right.IssuerPublicKey.Span) &&
-                    Fixed(left.Serial.Span, right.Serial.Span))
+                foreach (var persisted in Grants(existing.Generation))
                 {
-                    throw new InvalidDataException(
-                        "Scoped mailbox grant serial is already bound to another scope.");
+                    var left = MailboxAuthenticatedCapabilityCodec.DecodeGrant(
+                        candidate.Span);
+                    var right = MailboxAuthenticatedCapabilityCodec.DecodeGrant(
+                        persisted.Span);
+                    if (Fixed(left.IssuerPublicKey.Span,
+                            right.IssuerPublicKey.Span) &&
+                        Fixed(left.Serial.Span, right.Serial.Span))
+                    {
+                        throw new InvalidDataException(
+                            "Scoped mailbox grant serial is already bound to another scope.");
+                    }
                 }
-            }
         }
     }
 
@@ -900,6 +950,10 @@ public sealed class InMemoryScopedMailboxCredentialRepository :
         ReadOnlySpan<byte> account,
         ReadOnlySpan<byte> parent) =>
         Convert.ToHexString(account) + ":" + Convert.ToHexString(parent);
+    private static string SemanticBatchKey(
+        ReadOnlySpan<byte> account,
+        ReadOnlySpan<byte> semantic) =>
+        Convert.ToHexString(account) + ":" + Convert.ToHexString(semantic);
     private static string OutboxKey(
         ReadOnlySpan<byte> account,
         ReadOnlySpan<byte> operation) =>
@@ -915,6 +969,43 @@ public sealed class InMemoryScopedMailboxCredentialRepository :
         ReadOnlySpan<byte> right) =>
         ScopedMailboxCredentialValidator.Fixed(left, right);
 
+    private static bool ValidateSemanticBatchOwnership(
+        Snapshot snapshot,
+        ReadOnlySpan<byte> accountScope,
+        ReadOnlySpan<byte> semanticOperationId,
+        ReadOnlySpan<byte> parentOperationId)
+    {
+        var batchKey = BatchKey(accountScope, parentOperationId);
+        var semanticKey = SemanticBatchKey(accountScope, semanticOperationId);
+        if (snapshot.SemanticOwners.TryGetValue(semanticKey, out var ownedBatchKey))
+        {
+            if (!string.Equals(ownedBatchKey, batchKey, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    "Mailbox semantic operation conflicts with its durable fan-out.");
+            }
+            if (!snapshot.Batches.TryGetValue(batchKey, out var ownedBatch) ||
+                !Fixed(ownedBatch.SemanticOperationId, semanticOperationId))
+            {
+                throw new InvalidDataException(
+                    "Mailbox semantic operation owner is corrupt.");
+            }
+            return true;
+        }
+
+        if (snapshot.Batches.TryGetValue(batchKey, out var parentBatch))
+        {
+            if (!Fixed(parentBatch.SemanticOperationId, semanticOperationId))
+            {
+                throw new InvalidOperationException(
+                    "Mailbox logical fan-out belongs to another semantic operation.");
+            }
+            throw new InvalidDataException(
+                "Mailbox prepared batch lost its semantic operation owner.");
+        }
+        return false;
+    }
+
     private sealed class Snapshot
     {
         public Dictionary<string, StoredCredential> Credentials { get; } =
@@ -922,6 +1013,8 @@ public sealed class InMemoryScopedMailboxCredentialRepository :
         public Dictionary<string, ulong> Counters { get; } =
             new(StringComparer.Ordinal);
         public Dictionary<string, StoredBatch> Batches { get; } =
+            new(StringComparer.Ordinal);
+        public Dictionary<string, string> SemanticOwners { get; } =
             new(StringComparer.Ordinal);
         public Dictionary<string, byte[]> Outbox { get; } =
             new(StringComparer.Ordinal);
@@ -941,6 +1034,10 @@ public sealed class InMemoryScopedMailboxCredentialRepository :
             foreach (var pair in Batches)
             {
                 clone.Batches.Add(pair.Key, pair.Value.Clone());
+            }
+            foreach (var pair in SemanticOwners)
+            {
+                clone.SemanticOwners.Add(pair.Key, pair.Value);
             }
             foreach (var pair in Outbox)
             {
@@ -972,17 +1069,20 @@ public sealed class InMemoryScopedMailboxCredentialRepository :
     }
 
     private sealed class StoredBatch(
+        byte[] semanticOperationId,
         byte[] planDigest,
         long createdAtUnixMilliseconds,
         int targetCount,
         List<StoredTarget> targets)
     {
+        public byte[] SemanticOperationId { get; } = semanticOperationId;
         public byte[] PlanDigest { get; } = planDigest;
         public long CreatedAtUnixMilliseconds { get; } =
             createdAtUnixMilliseconds;
         public int TargetCount { get; } = targetCount;
         public List<StoredTarget> Targets { get; } = targets;
         public StoredBatch Clone() => new(
+            SemanticOperationId.ToArray(),
             PlanDigest.ToArray(),
             CreatedAtUnixMilliseconds,
             TargetCount,

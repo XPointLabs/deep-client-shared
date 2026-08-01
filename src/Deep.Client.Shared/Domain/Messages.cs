@@ -28,7 +28,8 @@ public sealed record Message(
     DateTimeOffset? ReadAt = null,
     string? ServerHash = null,
     MessageReply? ReplyTo = null,
-    IReadOnlyList<MessageReaction>? Reactions = null)
+    IReadOnlyList<MessageReaction>? Reactions = null,
+    IReadOnlyList<SessionId>? NotifyRecipients = null)
 {
     public bool HasAttachments => Attachments.Count > 0;
 

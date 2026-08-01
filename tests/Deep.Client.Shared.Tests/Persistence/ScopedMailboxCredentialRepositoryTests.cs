@@ -1,3 +1,4 @@
+using Deep.Client.Shared.Domain;
 using Deep.Client.Shared.Persistence;
 using Deep.Client.Shared.Services;
 using Deep.Protocol.DeepExtension.MailboxCapabilities;
@@ -76,7 +77,14 @@ public sealed class ScopedMailboxCredentialRepositoryTests
                 new BlindedPlacementId(Bytes(32, 6)), 0, 1, []);
             var target = new ScopedMailboxBatchTarget(selector, binding);
             var request = new ScopedMailboxPrepareBatchRequest(
-                account, Bytes(16, 7),
+                account, Bytes(16, 7), Bytes(16, 7),
+                Enumerable.Repeat(
+                    new ScopedMailboxBatchSelector(
+                        selector,
+                        new MessageId(Convert.ToHexString(binding.OperationId.Span)),
+                        binding.Operation),
+                    SqliteSessionStore.MaximumScopedMailboxBatchTargets + 1)
+                    .ToArray(),
                 Enumerable.Repeat(
                     target,
                     SqliteSessionStore.MaximumScopedMailboxBatchTargets + 1)
