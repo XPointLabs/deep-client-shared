@@ -140,9 +140,42 @@ public sealed class ClientMailboxActivation
         $"Ingress = {(IngressConfigured ? "[configured]" : "[missing]")} }}";
 }
 
-public sealed record ClientMailboxStoreResult(
-    ulong? Cursor,
-    MailboxReplicaDisposition? Disposition);
+public sealed class ClientMailboxStoreResult
+{
+    private const int RouterIdLength = 32;
+    private readonly byte[] entryRouterId;
+
+    internal ClientMailboxStoreResult(
+        ulong? cursor,
+        MailboxReplicaDisposition? disposition,
+        bool ingressDispatched,
+        ReadOnlySpan<byte> entryRouterId)
+    {
+        if (entryRouterId.Length != RouterIdLength ||
+            entryRouterId.IndexOfAnyExcept((byte)0) < 0)
+        {
+            throw new ArgumentException(
+                "A mailbox store result requires an exact non-zero verified coordinator ID.",
+                nameof(entryRouterId));
+        }
+
+        Cursor = cursor;
+        Disposition = disposition;
+        IngressDispatched = ingressDispatched;
+        this.entryRouterId = entryRouterId.ToArray();
+    }
+
+    public ulong? Cursor { get; }
+    public MailboxReplicaDisposition? Disposition { get; }
+
+    /// <summary>
+    /// True only when this call contacted ingress. False means the durable result
+    /// was recovered from the local outbox and is not evidence of a current route.
+    /// </summary>
+    public bool IngressDispatched { get; }
+
+    public ReadOnlyMemory<byte> EntryRouterId => entryRouterId.ToArray();
+}
 
 public sealed record ClientMailboxRetrieveResult(
     ulong AfterCursor,
@@ -530,7 +563,9 @@ public sealed class ClientMailboxAdapter
                 cancellationToken).ConfigureAwait(false);
             return new ClientMailboxStoreResult(
                 persistedDurable.Cursor,
-                persistedDurable.Disposition);
+                persistedDurable.Disposition,
+                ingressDispatched: false,
+                persistedDurable.CoordinatorReceipt.CoordinatorId.Span);
         }
         if (snapshot.State == TransportOutboxState.Durable)
         {
@@ -552,7 +587,9 @@ public sealed class ClientMailboxAdapter
                 cancellationToken).ConfigureAwait(false);
             return new ClientMailboxStoreResult(
                 persistedDurable.Cursor,
-                persistedDurable.Disposition);
+                persistedDurable.Disposition,
+                ingressDispatched: false,
+                persistedDurable.CoordinatorReceipt.CoordinatorId.Span);
         }
 
         await using var policyLease =
@@ -617,7 +654,9 @@ public sealed class ClientMailboxAdapter
             cancellationToken).ConfigureAwait(false);
         return new ClientMailboxStoreResult(
             durable.Cursor,
-            durable.Disposition);
+            durable.Disposition,
+            ingressDispatched: true,
+            durable.CoordinatorReceipt.CoordinatorId.Span);
     }
 
     public async Task<ClientMailboxTraversal> ReadTraversalAsync(

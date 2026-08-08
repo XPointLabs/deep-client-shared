@@ -10,6 +10,223 @@ namespace Deep.Client.Shared.Tests.Services;
 public sealed partial class MailboxCredentialBundleImporterTests
 {
     [Fact]
+    public async Task NativeDirectDispatch_ObservesOnlyAuthenticatedCurrentAttemptRoute()
+    {
+        using var fixture = Fixture.Create();
+        using var identity = new SessionIdentityProvider(AlicePhrase);
+        var clock = new MutableTimeProvider(Now);
+        using var store = new SqliteSessionStore(fixture.DatabasePath);
+        var imported = await MailboxCredentialBundleImporter.ImportAsync(
+            store,
+            identity,
+            fixture.AndroidOptions with { TimeProvider = clock },
+            MailboxInfrastructureOwnership.UserManaged);
+        var ingress = new ScriptedRetrieveIngress(
+            clock,
+            storeCoordinatorIds:
+            [
+                Bytes(32, 0x51),
+                Bytes(32, 0x52)
+            ]);
+        var observer = new RecordingRouteUsageObserver();
+        using var transport = new NativeMau2MailboxTransport(
+            ClientFeatureFlags.Defaults with { ClientMailboxAdapterEnabled = true },
+            imported.Activation,
+            ingress,
+            store,
+            new PinnedClientMailboxReceiptVerifier(
+                new SodiumClientMailboxReceiptCrypto()),
+            imported.DecodePolicies,
+            imported.Authority,
+            sessionId => sessionId == imported.LocalSessionId
+                ? imported.SelfSelector
+                : throw new InvalidOperationException(
+                    "The acceptance transport has no selector for another identity."),
+            timeProvider: clock,
+            routeUsageObserver: observer);
+
+        await DispatchAsync("route-first", 0xd1);
+        await DispatchAsync("route-second", 0xd2);
+
+        var observations = observer.Snapshot();
+        Assert.Equal(4, observations.Count);
+        Assert.Equal(MailboxDispatchRouteOutcome.Started, observations[0].Outcome);
+        Assert.Equal(MailboxDispatchRouteOutcome.Started, observations[2].Outcome);
+        Assert.Empty(observations[0].EntryRouterId.ToArray());
+        Assert.Empty(observations[2].EntryRouterId.ToArray());
+        var durable = observations
+            .Where(static usage => usage.Outcome == MailboxDispatchRouteOutcome.Durable)
+            .ToArray();
+        Assert.Equal(2, durable.Length);
+        Assert.All(durable, usage =>
+        {
+            Assert.Equal(ConversationId.ForOneToOne(fixture.BobSessionId),
+                usage.ConversationId);
+            Assert.Equal(fixture.BobSessionId, usage.Recipient);
+        });
+        Assert.Equal(Bytes(32, 0x51), durable[0].EntryRouterId.ToArray());
+        Assert.Equal(Bytes(32, 0x52), durable[1].EntryRouterId.ToArray());
+        Assert.NotEqual(durable[0].AttemptId, durable[1].AttemptId);
+        Assert.Equal(observations[0].AttemptId, durable[0].AttemptId);
+        Assert.Equal(observations[2].AttemptId, durable[1].AttemptId);
+
+        async Task DispatchAsync(string messageId, byte fill)
+        {
+            var target = DispatchTarget(
+                identity,
+                imported,
+                imported.PeerSelector,
+                fixture.BobSessionId,
+                fill,
+                messageId);
+            IReadOnlyList<IPreparedMailboxAuthenticatedSend> prepared;
+            using (var signer = new AcceptanceMailboxSigner(identity))
+            {
+                prepared = await transport.PrepareScopedMailboxLogicalBatchAsync(
+                    signer,
+                    LogicalBatch([target]),
+                    [target]);
+            }
+            await transport.SendPreparedMailboxAuthenticatedAsync(
+                Assert.Single(prepared));
+        }
+    }
+
+    [Fact]
+    public async Task NativeDirectDispatch_RecoveryFailureAndObserverFailureNeverReuseRoute()
+    {
+        using var fixture = Fixture.Create();
+        using var identity = new SessionIdentityProvider(AlicePhrase);
+        var clock = new MutableTimeProvider(Now);
+        using var store = new SqliteSessionStore(fixture.DatabasePath);
+        var imported = await MailboxCredentialBundleImporter.ImportAsync(
+            store,
+            identity,
+            fixture.AndroidOptions with { TimeProvider = clock },
+            MailboxInfrastructureOwnership.UserManaged);
+        var ingress = new ScriptedRetrieveIngress(
+            clock,
+            storeCoordinatorIds: [Bytes(32, 0x51)]);
+        var observer = new RecordingRouteUsageObserver(throwAfterRecording: true);
+        using var transport = Native(ingress, observer);
+        var target = DispatchTarget(
+            identity,
+            imported,
+            imported.PeerSelector,
+            fixture.BobSessionId,
+            0xd2,
+            "route-recovered");
+        var logical = LogicalBatch([target]);
+
+        await DispatchFreshAsync(transport, logical, target);
+        await DispatchFreshAsync(transport, logical, target);
+
+        var firstTwo = observer.Snapshot();
+        Assert.Equal(4, firstTwo.Count);
+        Assert.Equal(MailboxDispatchRouteOutcome.Started, firstTwo[0].Outcome);
+        Assert.Equal(MailboxDispatchRouteOutcome.Durable, firstTwo[1].Outcome);
+        Assert.Equal(Bytes(32, 0x51), firstTwo[1].EntryRouterId.ToArray());
+        Assert.Equal(MailboxDispatchRouteOutcome.Started, firstTwo[2].Outcome);
+        Assert.Equal(MailboxDispatchRouteOutcome.NoDispatch, firstTwo[3].Outcome);
+        Assert.Empty(firstTwo[3].EntryRouterId.ToArray());
+        Assert.Equal(firstTwo[0].AttemptId, firstTwo[1].AttemptId);
+        Assert.Equal(firstTwo[2].AttemptId, firstTwo[3].AttemptId);
+        Assert.NotEqual(firstTwo[1].AttemptId, firstTwo[3].AttemptId);
+        Assert.Equal(1, ingress.StoreCalls);
+
+        var canceledTarget = DispatchTarget(
+            identity,
+            imported,
+            imported.PeerSelector,
+            fixture.BobSessionId,
+            0xd4,
+            "route-canceled");
+        IReadOnlyList<IPreparedMailboxAuthenticatedSend> canceledPrepared;
+        using (var signer = new AcceptanceMailboxSigner(identity))
+        {
+            canceledPrepared = await transport.PrepareScopedMailboxLogicalBatchAsync(
+                signer,
+                LogicalBatch([canceledTarget]),
+                [canceledTarget]);
+        }
+        using (var canceled = new CancellationTokenSource())
+        {
+            canceled.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+                transport.SendPreparedMailboxAuthenticatedAsync(
+                    Assert.Single(canceledPrepared),
+                    canceled.Token));
+        }
+        var cancellationObservations = observer.Snapshot();
+        Assert.Equal(MailboxDispatchRouteOutcome.Started,
+            cancellationObservations[4].Outcome);
+        var canceledUsage = cancellationObservations[5];
+        Assert.Equal(cancellationObservations[4].AttemptId, canceledUsage.AttemptId);
+        Assert.Equal(MailboxDispatchRouteOutcome.Canceled, canceledUsage.Outcome);
+        Assert.Empty(canceledUsage.EntryRouterId.ToArray());
+        Assert.Equal(1, ingress.StoreCalls);
+
+        var failingIngress = new ScriptedRetrieveIngress(clock);
+        var failingObserver = new RecordingRouteUsageObserver();
+        using var failingTransport = Native(failingIngress, failingObserver);
+        var failingTarget = DispatchTarget(
+            identity,
+            imported,
+            imported.PeerSelector,
+            fixture.BobSessionId,
+            0xd3,
+            "route-failed");
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            DispatchFreshAsync(
+                failingTransport,
+                LogicalBatch([failingTarget]),
+                failingTarget));
+        var failedObservations = failingObserver.Snapshot();
+        Assert.Equal(2, failedObservations.Count);
+        Assert.Equal(MailboxDispatchRouteOutcome.Started,
+            failedObservations[0].Outcome);
+        var failed = failedObservations[1];
+        Assert.Equal(failedObservations[0].AttemptId, failed.AttemptId);
+        Assert.Equal(MailboxDispatchRouteOutcome.Failed, failed.Outcome);
+        Assert.Empty(failed.EntryRouterId.ToArray());
+
+        NativeMau2MailboxTransport Native(
+            IClientMailboxBinaryIngress source,
+            IMailboxDispatchRouteUsageObserver routeObserver) => new(
+            ClientFeatureFlags.Defaults with { ClientMailboxAdapterEnabled = true },
+            imported.Activation,
+            source,
+            store,
+            new PinnedClientMailboxReceiptVerifier(
+                new SodiumClientMailboxReceiptCrypto()),
+            imported.DecodePolicies,
+            imported.Authority,
+            sessionId => sessionId == imported.LocalSessionId
+                ? imported.SelfSelector
+                : throw new InvalidOperationException(
+                    "The acceptance transport has no selector for another identity."),
+            timeProvider: clock,
+            routeUsageObserver: routeObserver);
+
+        async Task DispatchFreshAsync(
+            NativeMau2MailboxTransport native,
+            MailboxLogicalSendBatch batch,
+            MailboxAuthenticatedSendTarget sendTarget)
+        {
+            IReadOnlyList<IPreparedMailboxAuthenticatedSend> prepared;
+            using (var signer = new AcceptanceMailboxSigner(identity))
+            {
+                prepared = await native.PrepareScopedMailboxLogicalBatchAsync(
+                    signer,
+                    batch,
+                    [sendTarget]);
+            }
+            await native.SendPreparedMailboxAuthenticatedAsync(
+                Assert.Single(prepared));
+        }
+    }
+
+    [Fact]
     public async Task NativeComposition_RejectsAuthorityImportedFromAnotherDatabase()
     {
         using var firstFixture = Fixture.Create();
@@ -701,7 +918,11 @@ public sealed partial class MailboxCredentialBundleImporterTests
                 new MessageId("semantic-peer-self"),
                 MailboxDeliveryKind.Direct,
                 targets.Select(target => new MailboxLogicalSendTarget(
-                    target.Envelope.Id!.Value, target.Selector, target.Authority)).ToArray());
+                    target.Envelope.Id!.Value,
+                    target.Selector,
+                    target.Authority,
+                    target.Envelope.Sender,
+                    target.Envelope.Recipient)).ToArray());
             using var signer = new AcceptanceMailboxSigner(identity);
             var prepared = await native.PrepareScopedMailboxLogicalBatchAsync(
                 signer, logical, targets);
@@ -782,6 +1003,24 @@ public sealed partial class MailboxCredentialBundleImporterTests
         E2eeClientTransport.WireBodyPrefix + Convert.ToBase64String(bytes)
             .TrimEnd('=').Replace('+', '-').Replace('/', '_');
 
+    private static MailboxAuthenticatedSendTarget DispatchTarget(
+        SessionIdentityProvider identity,
+        ImportedMailboxRuntimeMaterial imported,
+        MailboxCredentialSelector selector,
+        SessionId recipient,
+        byte fill,
+        string id) => new(
+        new OutboundMessageEnvelope(
+            identity.SessionId,
+            recipient,
+            Dpe1(Bytes(64, fill)),
+            [],
+            Now,
+            Now.AddMinutes(5),
+            new MessageId(id)),
+        selector,
+        imported.Authority);
+
     private static MailboxLogicalSendBatch LogicalBatch(
         IReadOnlyList<MailboxAuthenticatedSendTarget> targets) =>
         new(
@@ -790,11 +1029,14 @@ public sealed partial class MailboxCredentialBundleImporterTests
             targets.Select(target => new MailboxLogicalSendTarget(
                 target.Envelope.Id ?? throw new InvalidOperationException(),
                 target.Selector,
-                target.Authority)).ToArray());
+                target.Authority,
+                target.Envelope.Sender,
+                target.Envelope.Recipient)).ToArray());
 
     private sealed class ScriptedRetrieveIngress(
         TimeProvider timeProvider,
-        byte[]? responseCiphertext = null) :
+        byte[]? responseCiphertext = null,
+        IReadOnlyList<byte[]>? storeCoordinatorIds = null) :
         IClientMailboxBinaryIngress
     {
         private static readonly byte[] FirstReplicaId = Bytes(32, 0x51);
@@ -816,13 +1058,76 @@ public sealed partial class MailboxCredentialBundleImporterTests
             ReadOnlyMemory<byte> canonicalMau2,
             CancellationToken cancellationToken = default)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             StoreCalls++;
             StoreRequests.Add(canonicalMau2.ToArray());
             StoreEntered.TrySetResult();
+            if (storeCoordinatorIds is not null &&
+                StoreCalls <= storeCoordinatorIds.Count)
+            {
+                var authenticated = MailboxAuthenticatedClientRequestCodec.Decode(
+                    canonicalMau2.Span);
+                var envelope = MailboxAuthenticatedRequestTranscript.DecodeStoreBody(
+                    authenticated.Binding.CanonicalRequest.Span);
+                var now = checked((ulong)timeProvider.GetUtcNow().ToUnixTimeSeconds());
+                var firstId = FirstReplicaId;
+                var secondId = SecondReplicaId;
+                var first = StoreReplica(
+                    firstId, FirstReplicaSeed, envelope,
+                    authenticated.Presentation.Grant.MembershipCommitment.Span, now);
+                var second = StoreReplica(
+                    secondId, SecondReplicaSeed, envelope,
+                    authenticated.Presentation.Grant.MembershipCommitment.Span, now);
+                var coordinatorId = storeCoordinatorIds[StoreCalls - 1];
+                byte[] coordinatorSeed;
+                if (coordinatorId.AsSpan().SequenceEqual(firstId))
+                    coordinatorSeed = FirstReplicaSeed;
+                else if (coordinatorId.AsSpan().SequenceEqual(secondId))
+                    coordinatorSeed = SecondReplicaSeed;
+                else
+                    throw new InvalidOperationException("Scripted coordinator is not pinned.");
+                var unsigned = new MailboxDurableQuorumReceiptV3
+                {
+                    CoordinatorId = coordinatorId,
+                    CoordinatorSequence = checked((ulong)StoreCalls),
+                    FirstReplica = first,
+                    SecondReplica = second,
+                    Signature = ReadOnlyMemory<byte>.Empty
+                };
+                return Task.FromResult<ReadOnlyMemory<byte>>(
+                    MailboxReceiptV3Codec.EncodeDurableQuorum(
+                        receiptCrypto.SignQuorumResponse(unsigned, coordinatorSeed)));
+            }
             return Task.FromException<ReadOnlyMemory<byte>>(
                 new InvalidOperationException(
                     "Expired revocations must prevent the acceptance lane from storing."));
         }
+
+        private MailboxReplicaReceiptV2 StoreReplica(
+            byte[] replicaId,
+            byte[] replicaSeed,
+            MailboxEncryptedEnvelope envelope,
+            ReadOnlySpan<byte> membershipCommitment,
+            ulong nowUnixSeconds) => receiptCrypto.SignReplicaResponse(
+            new MailboxReplicaReceiptV2
+            {
+                Status = MailboxReceiptStatus.Durable,
+                Disposition = MailboxReplicaDisposition.Stored,
+                ReplicaId = replicaId,
+                OperationId = envelope.OperationId.ToArray(),
+                Epoch = envelope.Epoch,
+                Cursor = checked((ulong)StoreCalls),
+                AcceptedAtUnixSeconds = nowUnixSeconds,
+                DurableAtUnixSeconds = nowUnixSeconds,
+                ExpiresAtUnixSeconds = envelope.ExpiresAtUnixSeconds,
+                BlindedMailboxId = envelope.MailboxId.Bytes,
+                PlacementCommitment = MailboxPlacementCommitment.Compute(
+                    envelope.PlacementId),
+                MembershipCommitment = membershipCommitment.ToArray(),
+                EnvelopeDigest = envelope.DeduplicationDigest.ToArray(),
+                Signature = ReadOnlyMemory<byte>.Empty
+            },
+            replicaSeed);
 
         public Task<ReadOnlyMemory<byte>> RetrieveAsync(
             ReadOnlyMemory<byte> canonicalMau2,
@@ -967,6 +1272,31 @@ public sealed partial class MailboxCredentialBundleImporterTests
                 Signature = ReadOnlyMemory<byte>.Empty
             },
             replicaSeed);
+    }
+
+    private sealed class RecordingRouteUsageObserver(bool throwAfterRecording = false) :
+        IMailboxDispatchRouteUsageObserver
+    {
+        private readonly object gate = new();
+        private readonly List<MailboxDispatchRouteUsage> observations = [];
+
+        public void Observe(MailboxDispatchRouteUsage usage)
+        {
+            lock (gate)
+            {
+                observations.Add(usage);
+            }
+            if (throwAfterRecording)
+                throw new InvalidOperationException("diagnostic-observer-failure");
+        }
+
+        public IReadOnlyList<MailboxDispatchRouteUsage> Snapshot()
+        {
+            lock (gate)
+            {
+                return observations.ToArray();
+            }
+        }
     }
 
     private sealed class FailFirstRetrieveIngress(TimeProvider timeProvider) :

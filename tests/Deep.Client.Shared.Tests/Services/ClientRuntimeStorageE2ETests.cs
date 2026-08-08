@@ -251,7 +251,11 @@ public sealed class ClientRuntimeStorageE2ETests
             IReadOnlyList<MailboxAuthenticatedSendTarget> targets) =>
             new(targets[0].Envelope.Id!.Value, MailboxDeliveryKind.Direct,
                 targets.Select(target => new MailboxLogicalSendTarget(
-                    target.Envelope.Id!.Value, target.Selector, target.Authority)).ToArray());
+                    target.Envelope.Id!.Value,
+                    target.Selector,
+                    target.Authority,
+                    target.Envelope.Sender,
+                    target.Envelope.Recipient)).ToArray());
 
         public Task SendPreparedMailboxAuthenticatedAsync(
             IPreparedMailboxAuthenticatedSend preparedSend,

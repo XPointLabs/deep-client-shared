@@ -1290,7 +1290,9 @@ public sealed class E2eeClientTransportTests
                     targets.Select(target => new MailboxLogicalSendTarget(
                         target.Envelope.Id!.Value,
                         target.Selector,
-                        target.Authority)).ToArray()),
+                        target.Authority,
+                        target.Envelope.Sender,
+                        target.Envelope.Recipient)).ToArray()),
                 targets,
                 cancellationToken);
 

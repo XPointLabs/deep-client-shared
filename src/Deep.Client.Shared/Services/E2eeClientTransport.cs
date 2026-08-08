@@ -175,7 +175,9 @@ public sealed class MailboxLogicalSendBatch
 public sealed record MailboxLogicalSendTarget(
     MessageId WireMessageId,
     MailboxCredentialSelector Selector,
-    VerifiedOfficialMailboxAuthority Authority);
+    VerifiedOfficialMailboxAuthority Authority,
+    SessionId Sender,
+    SessionId Recipient);
 
 /// <summary>
 /// Opaque mailbox retrieval item. Deliberately contains no sender, recipient, Session ID, or
@@ -1025,7 +1027,9 @@ public sealed class E2eeClientTransport :
                 cloudPlans.Select(item => new MailboxLogicalSendTarget(
                     item.Plan.WireMessageId,
                     item.Decision.Selector!,
-                    item.Decision.Authority!)).ToArray());
+                    item.Decision.Authority!,
+                    item.Plan.RoutingEnvelope.Sender,
+                    item.Plan.RoutingEnvelope.Recipient)).ToArray());
             prepared = await WithMailboxOperationSignerAsync(
                 async (_, signer) =>
                     await cloudTransport.TryResumeScopedMailboxBatchAsync(

@@ -33,6 +33,7 @@ public sealed class NativeMau2MailboxTransport :
     private readonly VerifiedOfficialMailboxAuthority authority;
     private readonly IMailboxClientDecodePolicyProvider decodePolicies;
     private readonly Func<SessionId, MailboxCredentialSelector> selfSelector;
+    private readonly IMailboxDispatchRouteUsageObserver? routeUsageObserver;
     private readonly IDisposable? ownedIngress;
     private int disposed;
 
@@ -46,13 +47,15 @@ public sealed class NativeMau2MailboxTransport :
         VerifiedOfficialMailboxAuthority authority,
         Func<SessionId, MailboxCredentialSelector> selfSelector,
         bool ownsIngress = false,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        IMailboxDispatchRouteUsageObserver? routeUsageObserver = null)
     {
         ArgumentNullException.ThrowIfNull(ingress);
         credentials = localStore ?? throw new ArgumentNullException(nameof(localStore));
         this.authority = authority ?? throw new ArgumentNullException(nameof(authority));
         this.decodePolicies = decodePolicies ?? throw new ArgumentNullException(nameof(decodePolicies));
         this.selfSelector = selfSelector ?? throw new ArgumentNullException(nameof(selfSelector));
+        this.routeUsageObserver = routeUsageObserver;
         if (!authority.UsesSharedPolicyCoordinator(
                 localStore.CanonicalStateIdentity,
                 activation.IssuerContext.Span))
@@ -119,7 +122,9 @@ public sealed class NativeMau2MailboxTransport :
                 var binding = MailboxAuthenticatedRequestTranscript.ForStore(envelope);
                 bindings.Add(new ScopedMailboxBatchTarget(target.Selector, binding));
                 preparedMetadata.Add(new PreparedMetadata(
-                    target.Selector.AccountScope, target.Selector));
+                    target.Selector.AccountScope,
+                    target.Selector,
+                    DirectUsage(logicalBatch.Kind, target.Envelope)));
             }
             finally
             {
@@ -163,7 +168,9 @@ public sealed class NativeMau2MailboxTransport :
                 target.Envelope.Id ?? throw new ArgumentException(
                     "Mailbox send targets require stable wire IDs.", nameof(targets)),
                 target.Selector,
-                target.Authority)).ToArray());
+                target.Authority,
+                target.Envelope.Sender,
+                target.Envelope.Recipient)).ToArray());
         return PrepareScopedMailboxLogicalBatchAsync(
             signer, logical, targets, cancellationToken);
     }
@@ -199,7 +206,10 @@ public sealed class NativeMau2MailboxTransport :
         return resumed.Frames.Select((frame, index) =>
             (IPreparedMailboxAuthenticatedSend)new PreparedSend(
                 this,
-                new PreparedMetadata(account, logicalTargets[index].Selector),
+                new PreparedMetadata(
+                    account,
+                    logicalTargets[index].Selector,
+                    DirectUsage(batch.Kind, logicalTargets[index])),
                 frame)).ToArray();
     }
 
@@ -212,9 +222,42 @@ public sealed class NativeMau2MailboxTransport :
             throw new ArgumentException("Prepared mailbox handle belongs to another transport.", nameof(preparedSend));
         if (Interlocked.Exchange(ref prepared.Dispatched, 1) != 0)
             throw new InvalidOperationException("Prepared mailbox handle was already dispatched.");
-        await adapter.DispatchPreparedStoreAsync(
-            prepared.Metadata.Account, prepared.Metadata.Selector,
-            prepared.Frame, cancellationToken).ConfigureAwait(false);
+        var usage = prepared.Metadata.DirectUsage;
+        var attemptId = Guid.NewGuid();
+        PublishTerminalRouteUsage(
+            usage,
+            attemptId,
+            MailboxDispatchRouteOutcome.Started);
+        try
+        {
+            var result = await adapter.DispatchPreparedStoreAsync(
+                prepared.Metadata.Account, prepared.Metadata.Selector,
+                prepared.Frame, cancellationToken).ConfigureAwait(false);
+            if (usage is not null)
+            {
+                PublishRouteUsage(new MailboxDispatchRouteUsage(
+                    usage.MessageId,
+                    usage.ConversationId,
+                    usage.Recipient,
+                    attemptId,
+                    result.IngressDispatched
+                        ? MailboxDispatchRouteOutcome.Durable
+                        : MailboxDispatchRouteOutcome.NoDispatch,
+                    result.IngressDispatched
+                        ? result.EntryRouterId.Span
+                        : ReadOnlySpan<byte>.Empty));
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            PublishTerminalRouteUsage(usage, attemptId, MailboxDispatchRouteOutcome.Canceled);
+            throw;
+        }
+        catch
+        {
+            PublishTerminalRouteUsage(usage, attemptId, MailboxDispatchRouteOutcome.Failed);
+            throw;
+        }
     }
 
     public Task SendAsync(
@@ -447,6 +490,8 @@ public sealed class NativeMau2MailboxTransport :
             var logical = batch.Targets[ordinal];
             var target = targets[ordinal];
             if (target.Envelope.Id != logical.WireMessageId ||
+                target.Envelope.Sender != logical.Sender ||
+                target.Envelope.Recipient != logical.Recipient ||
                 !target.Selector.ScopeId.Span.SequenceEqual(logical.Selector.ScopeId.Span) ||
                 !target.Authority.PolicyFingerprint.Span.SequenceEqual(
                     logical.Authority.PolicyFingerprint.Span))
@@ -454,6 +499,55 @@ public sealed class NativeMau2MailboxTransport :
                 throw new InvalidOperationException(
                     "Logical mailbox fan-out changed before preparation.");
             }
+        }
+    }
+
+    private static DirectUsageMetadata? DirectUsage(
+        MailboxDeliveryKind kind,
+        OutboundMessageEnvelope envelope) =>
+        kind == MailboxDeliveryKind.Direct
+            ? new DirectUsageMetadata(
+                envelope.Id ?? throw new InvalidOperationException(
+                    "A direct mailbox target requires a stable wire message ID."),
+                ConversationId.ForOneToOne(envelope.Recipient),
+                envelope.Recipient)
+            : null;
+
+    private static DirectUsageMetadata? DirectUsage(
+        MailboxDeliveryKind kind,
+        MailboxLogicalSendTarget target) =>
+        kind == MailboxDeliveryKind.Direct
+            ? new DirectUsageMetadata(
+                target.WireMessageId,
+                ConversationId.ForOneToOne(target.Recipient),
+                target.Recipient)
+            : null;
+
+    private void PublishTerminalRouteUsage(
+        DirectUsageMetadata? usage,
+        Guid attemptId,
+        MailboxDispatchRouteOutcome outcome)
+    {
+        if (usage is null)
+            return;
+        PublishRouteUsage(new MailboxDispatchRouteUsage(
+            usage.MessageId,
+            usage.ConversationId,
+            usage.Recipient,
+            attemptId,
+            outcome,
+            ReadOnlySpan<byte>.Empty));
+    }
+
+    private void PublishRouteUsage(MailboxDispatchRouteUsage usage)
+    {
+        try
+        {
+            routeUsageObserver?.Observe(usage);
+        }
+        catch
+        {
+            // Diagnostic observers must never alter delivery semantics.
         }
     }
 
@@ -486,7 +580,13 @@ public sealed class NativeMau2MailboxTransport :
 
     private sealed record PreparedMetadata(
         OutboxAccountScope Account,
-        MailboxCredentialSelector Selector);
+        MailboxCredentialSelector Selector,
+        DirectUsageMetadata? DirectUsage);
+
+    private sealed record DirectUsageMetadata(
+        MessageId MessageId,
+        ConversationId ConversationId,
+        SessionId Recipient);
 
     private sealed class PreparedSend : IPreparedMailboxAuthenticatedSend
     {
