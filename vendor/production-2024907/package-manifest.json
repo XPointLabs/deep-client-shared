@@ -1,0 +1,60 @@
+{
+  "schema": "deep-production-protocol-closure.v2",
+  "sourceRepository": "deep-protocol",
+  "sourceCommit": "20249077913abfd9ad69f957aa07e57ff55b5e24",
+  "sourceArchiveSha256": "d6541afcfd5ad486e9d331f44406bd20ad7ac6ef2bb8bc55b9bcd239ddb6956c",
+  "publication": "local-only-not-published",
+  "build": {
+    "independentGitArchiveBuilds": 2,
+    "stablePathMap": "/_/deep-protocol",
+    "normalizedNuGetOpc": true,
+    "byteIdentical": true
+  },
+  "packages": [
+    {
+      "id": "Deep.Protocol",
+      "version": "0.4.0-production.2024907",
+      "file": "packages/Deep.Protocol.0.4.0-production.2024907.nupkg",
+      "bytes": 218744,
+      "sha256": "00bfaf36679fc905c9c83b644d717367ce1f2a3864f0009ef998da714f3fddfc",
+      "sha512": "d53e0c854c73af57ae17fa4ed942cc7047825cf8ff1156df4b458656bae6bddce7159c38aadda44d41a38d595edea07399d33f7d8952f2549a8a8880227b1ebd",
+      "contentHash": "4UtigGZqDJyCOaVEXa2GpK2cp/O2FVpGCO026O31qYzNIEh0tv1l725o2ItCITJh4ozRJP0tGa8FohppPqVmOQ=="
+    },
+    {
+      "id": "Deep.Protocol.Abstractions",
+      "version": "0.4.0-production.2024907",
+      "file": "packages/Deep.Protocol.Abstractions.0.4.0-production.2024907.nupkg",
+      "bytes": 24956,
+      "sha256": "b3790c2599be43ab593364dc57b558e97d36333a56c3b3b7cd6427e78629a9a2",
+      "sha512": "b73c4664a18354848dda9124c7ad88fa5310be39e9aa6d78297cd5a55223befc5844330c85efcbbcbdf571750691d06f8cacd6d5e7b179e7d737ac2a9dd59907",
+      "contentHash": "a/shd1eEhiyPcy6XSwV5NfQcgTduNTdcLys7IF9jm6ZQQrF4AqqjJNJ0CxUbtBncp2RUcDwugg8Lyw9n9KZjnw=="
+    },
+    {
+      "id": "Deep.Protocol.MembershipRoutes",
+      "version": "0.4.0-production.2024907",
+      "file": "packages/Deep.Protocol.MembershipRoutes.0.4.0-production.2024907.nupkg",
+      "bytes": 48182,
+      "sha256": "91698919918caba2e671dcef87d02f1fc6168d330fc852ab15e90cdb29c209d7",
+      "sha512": "e68f5ea66a23997541a507cbf6d1444632e8f8885233a0d639c9946a7a30664f0a3c392ef4bc046a8e0a13200374ddd647794704681e71dab16f0812ade2555b",
+      "contentHash": "5o9epmojmXVBpQfL9tFERjLo+IhSM6DWOcmUanowZk8KPDku9LwEao4KEyADdN3WR3lHBGgecdqxbwgSreJVWw=="
+    },
+    {
+      "id": "Deep.Protocol.ProfileCarrier",
+      "version": "0.4.0-survival.2024907",
+      "file": "packages/Deep.Protocol.ProfileCarrier.0.4.0-survival.2024907.nupkg",
+      "bytes": 72713,
+      "sha256": "4eba47d1829f4613c1414590de825c9390e6d26f1301bf9edb2294c90838b522",
+      "sha512": "386e3c821f7fc4aeba1c3c75254c6254ec5098939565240e39db399e3a79b8b9417ddae6ccadb86feab667363dbb4ab0e6423a3ca7493b63914dd8de84b38cc9",
+      "contentHash": "OG48gh9/xK66HDx1JUxiVOxQmJOVZSQOOds5njp5uLlBfdrmzK24b+q2ZzY9u0qw5kI6PKdJO2ORTdjehLOMyQ=="
+    },
+    {
+      "id": "Deep.Protocol.Protobuf",
+      "version": "0.4.0-production.2024907",
+      "file": "packages/Deep.Protocol.Protobuf.0.4.0-production.2024907.nupkg",
+      "bytes": 50210,
+      "sha256": "c42b0463013d98a9c5d5200db5c875a6d320a2b6c80e1062b8c76ac5aac205a2",
+      "sha512": "ad318fc294e7986e7cd296d57b484d52a6c09dbcc39e2315aa2d403935bb5744c2c29ed0a9f68da1ef48bf3d649f53be675db34d1ccf42fd3b2a1078b389174f",
+      "contentHash": "LJZWHPkNilHuBFS9EZYMvAtTk64dwfa8LfWgzvrK3j3qNFlevUIpBgVvll4ENY2nxYpsZTLjKYJlKaZURDFxdw=="
+    }
+  ]
+}

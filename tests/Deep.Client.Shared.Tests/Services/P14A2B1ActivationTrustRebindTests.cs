@@ -7,19 +7,19 @@ namespace Deep.Client.Shared.Tests.Services;
 
 public sealed class P14A2B1ActivationTrustRebindTests
 {
-    private const string AcceptedVersion = "0.4.0-survival.e570512";
-    private const string AcceptedSource = "e5705123836b32060ec4392e813d5b8c44635e2e";
+    private const string AcceptedVersion = "0.4.0-survival.2024907";
+    private const string AcceptedSource = "20249077913abfd9ad69f957aa07e57ff55b5e24";
     private const string AcceptedSha256 =
-        "48b64474f9b46e9c6e4017e20586a940ed138a8a28365195326a31d56e664ff3";
+        "4eba47d1829f4613c1414590de825c9390e6d26f1301bf9edb2294c90838b522";
     private const string AcceptedContentHash =
-        "fkyin9lcLXP2TtE4UPt2t9x0u55kTP2eymzEgAydbVM81prAervrt5yM8eH0p7xyZs5Rq0SJgcoy99/2MKkCnQ==";
+        "OG48gh9/xK66HDx1JUxiVOxQmJOVZSQOOds5njp5uLlBfdrmzK24b+q2ZzY9u0qw5kI6PKdJO2ORTdjehLOMyQ==";
     private const string OldVersion = "0.2.0-p10j.2886880";
 
     [Fact]
     public void AcceptedCarrierIsTheOnlyCarrierInTheOfflineClosure()
     {
         var root = P14A2PackageAndStaticGateTests.RepositoryRoot();
-        var vendor = Path.Combine(root, "vendor", "survival-beta-e570512");
+        var vendor = Path.Combine(root, "vendor", "production-2024907");
         var packageDirectory = Path.Combine(vendor, "packages");
         var acceptedFile = $"Deep.Protocol.ProfileCarrier.{AcceptedVersion}.nupkg";
         var packages = Directory.GetFiles(
@@ -31,7 +31,7 @@ public sealed class P14A2B1ActivationTrustRebindTests
         Assert.Equal(new[] { acceptedFile }, packages);
 
         var packagePath = Path.Combine(packageDirectory, acceptedFile);
-        Assert.Equal(30_360, new FileInfo(packagePath).Length);
+        Assert.Equal(72_713, new FileInfo(packagePath).Length);
         Assert.Equal(AcceptedSha256, Sha256(packagePath));
         using var sha512 = SHA512.Create();
         using var packageStream = File.OpenRead(packagePath);
@@ -87,13 +87,13 @@ public sealed class P14A2B1ActivationTrustRebindTests
         var manifestPath = Path.Combine(
             root,
             "vendor",
-            "survival-beta-e570512",
-            "package-provenance.json");
+            "production-2024907",
+            "package-manifest.json");
         using var manifest = JsonDocument.Parse(File.ReadAllBytes(manifestPath));
         var value = manifest.RootElement;
         Assert.Equal(
             AcceptedSource,
-            value.GetProperty("profileCarrierSourceCommit").GetString());
+            value.GetProperty("sourceCommit").GetString());
         var carrierPackage = Assert.Single(
             value.GetProperty("packages").EnumerateArray(),
             package => package.GetProperty("id").GetString() ==
