@@ -184,6 +184,12 @@ public sealed class ScopedMailboxRepositoryConformanceTests
         var route = await fixture.Repository.ReadScopedMailboxRouteAsync(
             fixture.SelfSelector, fixture.Authority);
         Assert.Equal(8UL, route.Epoch);
+        Assert.Equal(
+            fixture.Self.NextReplicas.FirstId.ToArray(),
+            route.Replicas.FirstId.ToArray());
+        Assert.Equal(
+            fixture.Self.NextReplicas.SecondId.ToArray(),
+            route.Replicas.SecondId.ToArray());
         var next = await fixture.PrepareAsync(
             fixture.SelfTarget(0xb3, nextEpoch: true));
         Assert.Equal(
@@ -191,6 +197,34 @@ public sealed class ScopedMailboxRepositoryConformanceTests
             MailboxAuthenticatedClientRequestCodec.Decode(
                 next.Frames.Single().GetCanonicalMau2Copy())
                 .Presentation.ReplayCounter);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Prepared_retry_cannot_rebind_to_rotated_epoch_or_replica_pair(
+        bool inMemory)
+    {
+        using var fixture = new Fixture(inMemory);
+        await fixture.Repository.InstallScopedCredentialAsync(
+            fixture.Self, fixture.Authority);
+        var currentRoute = await fixture.Repository.ReadScopedMailboxRouteAsync(
+            fixture.SelfSelector, fixture.Authority);
+        Assert.Equal(
+            fixture.Self.CurrentReplicas.FirstId.ToArray(),
+            currentRoute.Replicas.FirstId.ToArray());
+        var target = fixture.SelfTarget(0xb4);
+        _ = await fixture.PrepareAsync(target);
+
+        fixture.Clock.Set(1150);
+        await fixture.Repository.SwitchScopedCredentialEpochAsync(
+            fixture.SelfSelector, fixture.Self.Next.Epoch, fixture.Authority);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            fixture.ResumeAsync(target));
+        Assert.Equal(1, fixture.BatchCount());
+        Assert.Equal(1, fixture.OutboxCount());
+        Assert.Equal([2UL], fixture.NextCounters());
     }
 
     [Theory]
@@ -504,7 +538,12 @@ public sealed class ScopedMailboxRepositoryConformanceTests
                     prior.Deposit!.NextGrant.Span,
                     Grant(MailboxCapabilityDomain.Deposit,
                         checked((byte)(marker + 3)), next)),
-                prior.Replicas);
+                prior.NextReplicas,
+                new MailboxCredentialReplicaPair(
+                    Bytes(32, checked((byte)(marker + 4))),
+                    Bytes(32, checked((byte)(marker + 5))),
+                    Bytes(32, checked((byte)(marker + 6))),
+                    Bytes(32, checked((byte)(marker + 7)))));
         }
 
         public VerifiedOfficialMailboxAuthority AuthorityWithMinimumGeneration(
@@ -662,7 +701,12 @@ public sealed class ScopedMailboxRepositoryConformanceTests
                     Bytes(32, 0xd1),
                     Bytes(32, 0xd2),
                     Bytes(32, 0xd3),
-                    Bytes(32, 0xd4)));
+                    Bytes(32, 0xd4)),
+                new MailboxCredentialReplicaPair(
+                    Bytes(32, 0xe1),
+                    Bytes(32, 0xe2),
+                    Bytes(32, 0xe3),
+                    Bytes(32, 0xe4)));
         }
 
         private byte[] Grant(

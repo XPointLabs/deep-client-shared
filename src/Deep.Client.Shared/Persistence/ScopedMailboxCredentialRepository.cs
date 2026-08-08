@@ -259,7 +259,18 @@ public sealed record ScopedMailboxCredentialGeneration(
     MailboxCredentialEpoch Next,
     MailboxCredentialGrantSet? Retrieve,
     MailboxCredentialGrantSet? Deposit,
-    MailboxCredentialReplicaPair Replicas);
+    MailboxCredentialReplicaPair CurrentReplicas,
+    MailboxCredentialReplicaPair NextReplicas)
+{
+    public MailboxCredentialReplicaPair ReplicasFor(ulong epoch) =>
+        epoch == Current.Epoch
+            ? CurrentReplicas
+            : epoch == Next.Epoch
+                ? NextReplicas
+                : throw new ArgumentOutOfRangeException(
+                    nameof(epoch),
+                    "Replica pins are unavailable for the requested credential epoch.");
+}
 
 public sealed record ScopedMailboxBatchTarget(
     MailboxCredentialSelector Selector,
@@ -313,6 +324,22 @@ internal sealed record MailboxRuntimeSnapshotCheckpoint(
     MailboxBundleRuntimeCheckpoint Bundle,
     string RevocationKey,
     MailboxRevocationRuntimeCheckpoint Revocation);
+
+internal sealed record ProductionMailboxRuntimePublicationJournal(
+    int SchemaVersion,
+    ulong TargetTrustRevision,
+    string TargetTrustStateSha256,
+    ulong CurrentEpoch,
+    string PairGeneration,
+    string SignedBundleSha256,
+    string SignedBundleBase64,
+    ulong VerificationExpiresAtUnixSeconds,
+    ulong RefreshAfterUnixSeconds,
+    ulong VerifiedAtUnixSeconds,
+    string RouteCertificateSha256,
+    string RouteAdvertisementSha256,
+    string RouteDomainSha256,
+    ulong RouteAdvertisementSequence);
 
 public sealed class ScopedMailboxPreparedBatch
 {
@@ -398,6 +425,8 @@ public interface IScopedMailboxCredentialRepository
 
 public sealed partial class SqliteSessionStore : IScopedMailboxCredentialRepository
 {
+    private const int MaximumProductionPublicationPayloadChars =
+        ProductionMailboxLocalOwnerJournalCodec.MaximumBase64Length + 4_096;
     public const int MaximumScopedMailboxBatchTargets = 2048;
     public const long MaximumScopedMailboxBatchRequestBytes =
         128L * 1024 * 1024;
@@ -456,6 +485,176 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
         MailboxRuntimeSnapshotCheckpoint checkpoint,
         MailboxRuntimeCommitActivation? committedActivation = null,
         CancellationToken cancellationToken = default)
+        => await ApplyScopedMailboxRuntimeSnapshotCoreAsync(
+            generations,
+            authority,
+            checkpoint,
+            publicationJournalKey: null,
+            activeBundleKey: null,
+            publicationJournal: null,
+            committedActivation,
+            cancellationToken).ConfigureAwait(false);
+
+    internal async Task StageProductionMailboxRuntimePublicationAsync(
+        string journalKey,
+        ProductionMailboxRuntimePublicationJournal journal,
+        CancellationToken cancellationToken = default)
+        => await StageProductionMailboxRuntimePublicationAsync(
+            journalKey, activeBundleKey: null, journal, cancellationToken)
+            .ConfigureAwait(false);
+
+    internal async Task StageProductionMailboxRuntimePublicationAsync(
+        string journalKey,
+        string? activeBundleKey,
+        ProductionMailboxRuntimePublicationJournal journal,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(journalKey);
+        if (activeBundleKey is not null)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(activeBundleKey);
+            if (string.Equals(journalKey, activeBundleKey, StringComparison.Ordinal))
+                throw new ArgumentException(
+                    "Production publication journal and active-bundle keys must differ.");
+        }
+        ValidateProductionPublicationJournal(journal);
+        var payload = System.Text.Json.JsonSerializer.Serialize(
+            journal, SerializerOptions);
+        await _databaseGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            using var connection = OpenConnection();
+            using var transaction = connection.BeginTransaction(deferred: false);
+            var prior = ReadProductionPublicationWithPayload(
+                connection, transaction, journalKey);
+            if (activeBundleKey is not null)
+            {
+                var active = ReadProductionPublicationWithPayload(
+                    connection, transaction, activeBundleKey).Value;
+                if (active is not null)
+                {
+                    ValidateProductionPublicationJournal(active);
+                    ValidateProductionPublicationForward(active, journal);
+                }
+            }
+            if (prior.Value is not null)
+            {
+                ValidateProductionPublicationJournal(prior.Value);
+                if (prior.Value != journal)
+                    throw new InvalidOperationException(
+                        "A different production mailbox publication is already pending.");
+            }
+            else
+            {
+                CompareExchangeSetting(connection, transaction, journalKey, null, payload);
+            }
+            commitFault?.Invoke(ClientMailboxCommitFaultPoint.BeforeCommit);
+            cancellationToken.ThrowIfCancellationRequested();
+            transaction.Commit();
+            commitFault?.Invoke(ClientMailboxCommitFaultPoint.AfterCommit);
+        }
+        finally
+        {
+            _databaseGate.Release();
+        }
+    }
+
+    internal async Task<ProductionMailboxRuntimePublicationJournal?>
+        ReadProductionMailboxRuntimePublicationAsync(
+            string key,
+            CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(key);
+        await _databaseGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            using var connection = OpenConnection();
+            var value = ReadProductionPublicationWithPayload(connection, null, key).Value;
+            if (value is not null) ValidateProductionPublicationJournal(value);
+            return value;
+        }
+        finally
+        {
+            _databaseGate.Release();
+        }
+    }
+
+    internal async Task<bool> IsProductionMailboxRuntimePublicationCompleteAsync(
+        MailboxRuntimeSnapshotCheckpoint checkpoint,
+        string journalKey,
+        string activeBundleKey,
+        ProductionMailboxRuntimePublicationJournal journal,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(checkpoint);
+        ArgumentException.ThrowIfNullOrWhiteSpace(journalKey);
+        ArgumentException.ThrowIfNullOrWhiteSpace(activeBundleKey);
+        ValidateProductionPublicationJournal(journal);
+        await _databaseGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            using var connection = OpenConnection();
+            using var transaction = connection.BeginTransaction(deferred: false);
+            var pending = ReadProductionPublicationWithPayload(
+                connection, transaction, journalKey).Value;
+            var active = ReadProductionPublicationWithPayload(
+                connection, transaction, activeBundleKey);
+            var bundle = ReadSettingWithPayload<MailboxBundleRuntimeCheckpoint>(
+                connection, transaction, checkpoint.BundleKey);
+            var revocation = ReadSettingWithPayload<MailboxRevocationRuntimeCheckpoint>(
+                connection, transaction, checkpoint.RevocationKey);
+            if (active.Value is not null) ValidateProductionPublicationJournal(active.Value);
+            if (bundle.Value is not null) ValidateBundleCheckpoint(null, bundle.Value);
+            if (revocation.Value is not null)
+                ValidateRevocationCheckpoint(null, revocation.Value);
+            transaction.Commit();
+            return pending is null &&
+                string.Equals(active.Payload,
+                    System.Text.Json.JsonSerializer.Serialize(journal, SerializerOptions),
+                    StringComparison.Ordinal) &&
+                string.Equals(bundle.Payload,
+                    System.Text.Json.JsonSerializer.Serialize(
+                        checkpoint.Bundle, SerializerOptions),
+                    StringComparison.Ordinal) &&
+                string.Equals(revocation.Payload,
+                    System.Text.Json.JsonSerializer.Serialize(
+                        checkpoint.Revocation, SerializerOptions),
+                    StringComparison.Ordinal);
+        }
+        finally
+        {
+            _databaseGate.Release();
+        }
+    }
+
+    internal async Task CompleteProductionMailboxRuntimePublicationAsync(
+        IReadOnlyList<ScopedMailboxCredentialGeneration> generations,
+        VerifiedOfficialMailboxAuthority authority,
+        MailboxRuntimeSnapshotCheckpoint checkpoint,
+        string journalKey,
+        string activeBundleKey,
+        ProductionMailboxRuntimePublicationJournal journal,
+        MailboxRuntimeCommitActivation? committedActivation = null,
+        CancellationToken cancellationToken = default)
+        => await ApplyScopedMailboxRuntimeSnapshotCoreAsync(
+            generations,
+            authority,
+            checkpoint,
+            journalKey,
+            activeBundleKey,
+            journal,
+            committedActivation,
+            cancellationToken).ConfigureAwait(false);
+
+    private async Task ApplyScopedMailboxRuntimeSnapshotCoreAsync(
+        IReadOnlyList<ScopedMailboxCredentialGeneration> generations,
+        VerifiedOfficialMailboxAuthority authority,
+        MailboxRuntimeSnapshotCheckpoint checkpoint,
+        string? publicationJournalKey,
+        string? activeBundleKey,
+        ProductionMailboxRuntimePublicationJournal? publicationJournal,
+        MailboxRuntimeCommitActivation? committedActivation,
+        CancellationToken cancellationToken)
     {
         ValidateInstallBatch(generations, authority);
         ArgumentNullException.ThrowIfNull(checkpoint);
@@ -463,6 +662,25 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
         ArgumentException.ThrowIfNullOrWhiteSpace(checkpoint.RevocationKey);
         ValidateBundleCheckpoint(null, checkpoint.Bundle);
         ValidateRevocationCheckpoint(null, checkpoint.Revocation);
+        if ((publicationJournalKey is null) != (publicationJournal is null) ||
+            (activeBundleKey is null) != (publicationJournal is null))
+            throw new ArgumentException(
+                "Production publication journal, active-bundle key, and value must be supplied together.");
+        if (publicationJournal is not null)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(publicationJournalKey);
+            ArgumentException.ThrowIfNullOrWhiteSpace(activeBundleKey);
+            if (string.Equals(publicationJournalKey, activeBundleKey,
+                    StringComparison.Ordinal))
+                throw new ArgumentException(
+                    "Production publication journal and active-bundle keys must differ.");
+            ValidateProductionPublicationJournal(publicationJournal);
+            if (publicationJournal.CurrentEpoch != checkpoint.Bundle.CurrentEpoch ||
+                !string.Equals(publicationJournal.PairGeneration,
+                    checkpoint.Bundle.PairGeneration, StringComparison.Ordinal))
+                throw new InvalidDataException(
+                    "Production publication journal differs from its runtime snapshot.");
+        }
         var bundlePayload = System.Text.Json.JsonSerializer.Serialize(
             checkpoint.Bundle, SerializerOptions);
         var revocationPayload = System.Text.Json.JsonSerializer.Serialize(
@@ -476,6 +694,27 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
                 connection, transaction, checkpoint.BundleKey);
             var priorRevocationRow = ReadSettingWithPayload<MailboxRevocationRuntimeCheckpoint>(
                 connection, transaction, checkpoint.RevocationKey);
+            string? publicationPayload = null;
+            (ProductionMailboxRuntimePublicationJournal? Value, string? Payload)
+                activeBundleRow = default;
+            if (publicationJournal is not null)
+            {
+                var pending = ReadProductionPublicationWithPayload(
+                    connection, transaction, publicationJournalKey!);
+                if (pending.Value is null || pending.Value != publicationJournal)
+                    throw new InvalidOperationException(
+                        "Production mailbox publication journal is unavailable or changed.");
+                publicationPayload = pending.Payload;
+                activeBundleRow =
+                    ReadProductionPublicationWithPayload(
+                        connection, transaction, activeBundleKey!);
+                if (activeBundleRow.Value is not null)
+                {
+                    ValidateProductionPublicationJournal(activeBundleRow.Value);
+                    ValidateProductionPublicationForward(
+                        activeBundleRow.Value, publicationJournal);
+                }
+            }
             var priorBundle = priorBundleRow.Value;
             var priorRevocation = priorRevocationRow.Value;
             if (priorBundle is not null) ValidateBundleCheckpoint(null, priorBundle);
@@ -492,10 +731,18 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
                 priorBundleRow.Payload, bundlePayload);
             CompareExchangeSetting(connection, transaction, checkpoint.RevocationKey,
                 priorRevocationRow.Payload, revocationPayload);
+            if (publicationJournal is not null)
+            {
+                CompareExchangeSetting(connection, transaction, activeBundleKey!,
+                    activeBundleRow.Payload, publicationPayload!);
+                DeleteSettingCompareExchange(
+                    connection, transaction, publicationJournalKey!, publicationPayload!);
+            }
             commitFault?.Invoke(ClientMailboxCommitFaultPoint.BeforeCommit);
             cancellationToken.ThrowIfCancellationRequested();
             transaction.Commit();
             committedActivation?.ActivateCommittedNoThrow();
+            commitFault?.Invoke(ClientMailboxCommitFaultPoint.AfterCommit);
         }
         finally
         {
@@ -539,6 +786,48 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
         }
     }
 
+    private static (ProductionMailboxRuntimePublicationJournal? Value, string? Payload)
+        ReadProductionPublicationWithPayload(
+            SqliteConnection connection,
+            SqliteTransaction? transaction,
+            string key)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            "SELECT length(payload_json),payload_json FROM settings WHERE key=$key;";
+        command.Parameters.AddWithValue("$key", key);
+        using var reader = command.ExecuteReader();
+        if (!reader.Read()) return (null, null);
+        var length = reader.GetInt64(0);
+        if (length is <= 0 or > MaximumProductionPublicationPayloadChars)
+            throw new InvalidDataException(
+                "Production mailbox publication payload exceeds its strict bound.");
+        var payload = reader.GetString(1);
+        if (payload.Length != length)
+            throw new InvalidDataException(
+                "Production mailbox publication payload length is inconsistent.");
+        try
+        {
+            var value = System.Text.Json.JsonSerializer
+                .Deserialize<ProductionMailboxRuntimePublicationJournal>(
+                    payload, SerializerOptions)
+                ?? throw new InvalidDataException(
+                    "Production mailbox publication payload is invalid JSON.");
+            var canonical = System.Text.Json.JsonSerializer.Serialize(
+                value, SerializerOptions);
+            if (!string.Equals(payload, canonical, StringComparison.Ordinal))
+                throw new InvalidDataException(
+                    "Production mailbox publication payload is not canonical JSON.");
+            return (value, payload);
+        }
+        catch (System.Text.Json.JsonException exception)
+        {
+            throw new InvalidDataException(
+                "Production mailbox publication payload is invalid JSON.", exception);
+        }
+    }
+
     private static void CompareExchangeSetting(
         SqliteConnection connection,
         SqliteTransaction transaction,
@@ -560,6 +849,93 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
                 "Mailbox runtime checkpoint compare-and-swap failed.");
     }
 
+    private static void DeleteSettingCompareExchange(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string key,
+        string priorPayload)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            "DELETE FROM settings WHERE key=$key AND payload_json=$prior;";
+        command.Parameters.AddWithValue("$key", key);
+        command.Parameters.AddWithValue("$prior", priorPayload);
+        if (command.ExecuteNonQuery() != 1)
+            throw new InvalidOperationException(
+                "Production mailbox publication journal compare-and-delete failed.");
+    }
+
+    private static void ValidateProductionPublicationJournal(
+        ProductionMailboxRuntimePublicationJournal? journal)
+    {
+        if (journal is null || journal.SchemaVersion != 2 ||
+            journal.TargetTrustRevision == 0 || journal.CurrentEpoch == 0 ||
+            journal.RefreshAfterUnixSeconds == 0 ||
+            journal.RefreshAfterUnixSeconds >= journal.VerificationExpiresAtUnixSeconds ||
+            journal.VerifiedAtUnixSeconds == 0 ||
+            journal.VerifiedAtUnixSeconds > journal.VerificationExpiresAtUnixSeconds ||
+            !IsLowerHex(journal.TargetTrustStateSha256, 64) ||
+            !IsLowerHex(journal.PairGeneration, 64) ||
+            !IsLowerHex(journal.SignedBundleSha256, 64) ||
+            !IsLowerHex(journal.RouteCertificateSha256, 64) ||
+            !IsLowerHex(journal.RouteAdvertisementSha256, 64) ||
+            !IsLowerHex(journal.RouteDomainSha256, 64) ||
+            journal.RouteAdvertisementSequence == 0 ||
+            string.IsNullOrEmpty(journal.SignedBundleBase64) ||
+            journal.SignedBundleBase64.Length >
+                ProductionMailboxLocalOwnerJournalCodec.MaximumBase64Length)
+            throw new InvalidDataException(
+                "Production mailbox publication journal is invalid.");
+        byte[] encoded;
+        try
+        {
+            encoded = Convert.FromBase64String(journal.SignedBundleBase64);
+        }
+        catch (FormatException exception)
+        {
+            throw new InvalidDataException(
+                "Production mailbox publication journal bundle is not canonical base64.",
+                exception);
+        }
+        try
+        {
+            if (encoded.Length is <= 0 or >
+                    ProductionMailboxLocalOwnerJournalCodec.MaximumEncodedLength ||
+                !string.Equals(
+                    Convert.ToBase64String(encoded),
+                    journal.SignedBundleBase64,
+                    StringComparison.Ordinal) ||
+                !string.Equals(
+                    Convert.ToHexStringLower(SHA256.HashData(encoded)),
+                    journal.SignedBundleSha256,
+                    StringComparison.Ordinal))
+                throw new InvalidDataException(
+                    "Production mailbox publication journal bundle hash is invalid.");
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(encoded);
+        }
+    }
+
+    private static void ValidateProductionPublicationForward(
+        ProductionMailboxRuntimePublicationJournal prior,
+        ProductionMailboxRuntimePublicationJournal current)
+    {
+        if (current.TargetTrustRevision < prior.TargetTrustRevision ||
+            current.CurrentEpoch < prior.CurrentEpoch ||
+            !string.Equals(current.RouteDomainSha256,
+                prior.RouteDomainSha256, StringComparison.Ordinal) ||
+            current.RouteAdvertisementSequence < prior.RouteAdvertisementSequence ||
+            current.RouteAdvertisementSequence == prior.RouteAdvertisementSequence &&
+                !string.Equals(current.RouteAdvertisementSha256,
+                    prior.RouteAdvertisementSha256, StringComparison.Ordinal) ||
+            current.TargetTrustRevision == prior.TargetTrustRevision && current != prior)
+            throw new InvalidDataException(
+                "Production active public bundle is not an exact replay or forward rotation.");
+    }
+
     private static void ValidateBundleCheckpoint(
         MailboxBundleRuntimeCheckpoint? prior,
         MailboxBundleRuntimeCheckpoint current)
@@ -569,7 +945,8 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
             string.IsNullOrWhiteSpace(current.Platform) ||
             string.IsNullOrWhiteSpace(current.Ownership) ||
             !IsLowerHex(current.PairGeneration, 64) ||
-            current.Lane is not "android-windows-pair" ||
+            current.Lane is not ("android-windows-pair" or
+                "production-local-owner") ||
             current.Platform is not ("android" or "windows") ||
             current.Ownership is not ("UserManaged" or "OfficialManaged"))
             throw new InvalidDataException("Mailbox bundle checkpoint is invalid.");
@@ -628,7 +1005,7 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
             generation > 0 &&
             ulong.TryParse(parts[4], System.Globalization.NumberStyles.None,
                 System.Globalization.CultureInfo.InvariantCulture, out var epoch) &&
-            epoch == generation && IsUpperHex(parts[5], 64);
+            epoch > 0 && IsUpperHex(parts[5], 64);
     }
 
     private static bool IsUpperHex(string value, int length) =>
@@ -1508,10 +1885,10 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
                 !Fixed((byte[])reader.GetValue(3), value.Current.PlacementId.Span) ||
                 !Fixed((byte[])reader.GetValue(4), value.Current.PlacementCommitment.Span) ||
                 !Fixed((byte[])reader.GetValue(5), value.Current.MembershipCommitment.Span) ||
-                !Fixed((byte[])reader.GetValue(6), value.Replicas.FirstId.Span) ||
-                !Fixed((byte[])reader.GetValue(7), value.Replicas.FirstSigningKey.Span) ||
-                !Fixed((byte[])reader.GetValue(8), value.Replicas.SecondId.Span) ||
-                !Fixed((byte[])reader.GetValue(9), value.Replicas.SecondSigningKey.Span))
+                !Fixed((byte[])reader.GetValue(6), value.CurrentReplicas.FirstId.Span) ||
+                !Fixed((byte[])reader.GetValue(7), value.CurrentReplicas.FirstSigningKey.Span) ||
+                !Fixed((byte[])reader.GetValue(8), value.CurrentReplicas.SecondId.Span) ||
+                !Fixed((byte[])reader.GetValue(9), value.CurrentReplicas.SecondSigningKey.Span))
             {
                 throw new InvalidOperationException(
                     "Mailbox rotation E+1 is not byte-identical to the installed overlap.");
@@ -1720,6 +2097,7 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
             command.Parameters.Add("$scope", SqliteType.Blob).Value = selector.ScopeId.ToArray();
             command.Parameters.Add("$epoch", SqliteType.Blob).Value = MailboxU64(epoch.Epoch);
             using var reader = command.ExecuteReader();
+            var replicas = value.ReplicasFor(epoch.Epoch);
             if (!reader.Read() ||
                 MailboxReadU64((byte[])reader.GetValue(0)) != epoch.NotBeforeUnixSeconds ||
                 MailboxReadU64((byte[])reader.GetValue(1)) != epoch.ExpiresAtUnixSeconds ||
@@ -1727,10 +2105,10 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
                 !Fixed((byte[])reader.GetValue(3), epoch.PlacementId.Span) ||
                 !Fixed((byte[])reader.GetValue(4), epoch.PlacementCommitment.Span) ||
                 !Fixed((byte[])reader.GetValue(5), epoch.MembershipCommitment.Span) ||
-                !Fixed((byte[])reader.GetValue(6), value.Replicas.FirstId.Span) ||
-                !Fixed((byte[])reader.GetValue(7), value.Replicas.FirstSigningKey.Span) ||
-                !Fixed((byte[])reader.GetValue(8), value.Replicas.SecondId.Span) ||
-                !Fixed((byte[])reader.GetValue(9), value.Replicas.SecondSigningKey.Span))
+                !Fixed((byte[])reader.GetValue(6), replicas.FirstId.Span) ||
+                !Fixed((byte[])reader.GetValue(7), replicas.FirstSigningKey.Span) ||
+                !Fixed((byte[])reader.GetValue(8), replicas.SecondId.Span) ||
+                !Fixed((byte[])reader.GetValue(9), replicas.SecondSigningKey.Span))
             {
                 throw new InvalidOperationException(
                     "Mailbox credential import epoch conflicts with persisted material.");
@@ -1813,14 +2191,15 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
             epoch.PlacementCommitment.ToArray();
         insert.Parameters.Add("$membership", SqliteType.Blob).Value =
             epoch.MembershipCommitment.ToArray();
+        var replicas = generation.ReplicasFor(epoch.Epoch);
         insert.Parameters.Add("$firstId", SqliteType.Blob).Value =
-            generation.Replicas.FirstId.ToArray();
+            replicas.FirstId.ToArray();
         insert.Parameters.Add("$firstKey", SqliteType.Blob).Value =
-            generation.Replicas.FirstSigningKey.ToArray();
+            replicas.FirstSigningKey.ToArray();
         insert.Parameters.Add("$secondId", SqliteType.Blob).Value =
-            generation.Replicas.SecondId.ToArray();
+            replicas.SecondId.ToArray();
         insert.Parameters.Add("$secondKey", SqliteType.Blob).Value =
-            generation.Replicas.SecondSigningKey.ToArray();
+            replicas.SecondSigningKey.ToArray();
         insert.ExecuteNonQuery();
     }
 

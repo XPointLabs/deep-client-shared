@@ -9,7 +9,8 @@ using Sodium;
 
 namespace Deep.Client.Shared.Tests.Persistence;
 
-public sealed class ScopedMailboxV12AcceptanceTests
+[Collection("SQLite global pool isolation")]
+public sealed class ScopedMailboxV13AcceptanceTests
 {
     [Fact]
     public async Task Atomic_import_survives_restart_with_exact_scoped_routes()
@@ -402,7 +403,7 @@ public sealed class ScopedMailboxV12AcceptanceTests
         public Fixture()
         {
             Path = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
-                $"deep-scoped-v12-{Guid.NewGuid():N}.db");
+                $"deep-scoped-v13-{Guid.NewGuid():N}.db");
             Clock = new MutableTimeProvider(1050);
             Revocations = new MutableRevocations();
             Account = OutboxAccountScope.FromBytes(Bytes(32, 0x10));
@@ -496,7 +497,10 @@ public sealed class ScopedMailboxV12AcceptanceTests
                 deposit,
                 new MailboxCredentialReplicaPair(
                     Bytes(32, 0x81), replicaCrypto.GetPublicKey(firstSeed),
-                    Bytes(32, 0xa1), replicaCrypto.GetPublicKey(secondSeed)));
+                    Bytes(32, 0xa1), replicaCrypto.GetPublicKey(secondSeed)),
+                new MailboxCredentialReplicaPair(
+                    Bytes(32, 0x82), replicaCrypto.GetPublicKey(firstSeed),
+                    Bytes(32, 0xa2), replicaCrypto.GetPublicKey(secondSeed)));
         }
 
         public ScopedMailboxBatchTarget RetrieveTarget(

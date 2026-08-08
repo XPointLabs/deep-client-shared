@@ -270,6 +270,7 @@ public static class MailboxCredentialBundleImporter
                     new MailboxCredentialGrantSet(
                         MailboxAuthenticatedCapabilityCodec.EncodeGrant(selected.OwnDeposit.Current),
                         MailboxAuthenticatedCapabilityCodec.EncodeGrant(selected.OwnDeposit.Next)),
+                    replicas,
                     replicas),
                 new ScopedMailboxCredentialGeneration(
                     peerSelector,
@@ -283,6 +284,7 @@ public static class MailboxCredentialBundleImporter
                     new MailboxCredentialGrantSet(
                         MailboxAuthenticatedCapabilityCodec.EncodeGrant(selected.PeerDeposit.Current),
                         MailboxAuthenticatedCapabilityCodec.EncodeGrant(selected.PeerDeposit.Next)),
+                    replicas,
                     replicas)
             };
             var receiptKey = "deep.mailbox.bundle-import.v1:" +

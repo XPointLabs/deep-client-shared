@@ -13,6 +13,7 @@ public sealed class MailboxRuntimeCheckpointConcurrencyTests
 {
     private const string BundleKey = "test.mailbox.runtime.bundle";
     private const string RevocationKey = "test.mailbox.runtime.revocation";
+    private const string ActiveBundleKey = "test.mailbox.runtime.active-public-bundle";
 
     [Fact]
     public async Task IndependentStores_ConcurrentNewerAndStaleRevocation_PublishOnlyNewerAtomically()
@@ -198,6 +199,221 @@ public sealed class MailboxRuntimeCheckpointConcurrencyTests
         await finalWriter.DisposeAsync();
     }
 
+    [Theory]
+    [InlineData((int)ClientMailboxCommitFaultPoint.BeforeCommit, false)]
+    [InlineData((int)ClientMailboxCommitFaultPoint.AfterCommit, true)]
+    public async Task PublicationJournal_StageFaultReflectsDurableBoundary(
+        int faultPointValue,
+        bool durable)
+    {
+        using var fixture = new Fixture();
+        var faultPoint = (ClientMailboxCommitFaultPoint)faultPointValue;
+        using var store = new SqliteSessionStore(
+            new SqliteSessionStoreOptions(fixture.Path),
+            point =>
+            {
+                if (point == faultPoint) throw new InjectedPublicationFaultException();
+            });
+        var journal = Journal('1');
+
+        await Assert.ThrowsAsync<InjectedPublicationFaultException>(() =>
+            store.StageProductionMailboxRuntimePublicationAsync(
+                PublicationKey, journal));
+
+        Assert.Equal(
+            durable ? journal : null,
+            await store.GetAsync<ProductionMailboxRuntimePublicationJournal>(
+                PublicationKey));
+    }
+
+    [Theory]
+    [InlineData((int)ClientMailboxCommitFaultPoint.BeforeCommit, false)]
+    [InlineData((int)ClientMailboxCommitFaultPoint.AfterCommit, true)]
+    public async Task PublicationJournal_ActivationFaultRecoversAtExactBoundary(
+        int faultPointValue,
+        bool runtimeDurable)
+    {
+        using var fixture = new Fixture();
+        var checkpoint = Checkpoint(7, '1', 100, 1_000, 'a');
+        var journal = Journal('1');
+        using (var staging = new SqliteSessionStore(fixture.Path))
+            await staging.StageProductionMailboxRuntimePublicationAsync(
+                PublicationKey, journal);
+        var faultPoint = (ClientMailboxCommitFaultPoint)faultPointValue;
+        using var completing = new SqliteSessionStore(
+            new SqliteSessionStoreOptions(fixture.Path),
+            point =>
+            {
+                if (point == faultPoint) throw new InjectedPublicationFaultException();
+            });
+
+        await Assert.ThrowsAsync<InjectedPublicationFaultException>(() =>
+            completing.CompleteProductionMailboxRuntimePublicationAsync(
+                [fixture.Initial],
+                fixture.Authority,
+                checkpoint,
+                PublicationKey,
+                ActiveBundleKey,
+                journal));
+
+        Assert.Equal(
+            runtimeDurable ? null : journal,
+            await completing.GetAsync<ProductionMailboxRuntimePublicationJournal>(
+                PublicationKey));
+        Assert.Equal(
+            runtimeDurable ? checkpoint.Bundle : null,
+            await completing.GetAsync<MailboxBundleRuntimeCheckpoint>(BundleKey));
+        Assert.Equal(
+            runtimeDurable ? journal : null,
+            await completing.GetAsync<ProductionMailboxRuntimePublicationJournal>(
+                ActiveBundleKey));
+        if (runtimeDurable)
+            Assert.Equal(7UL,
+                (await completing.ReadScopedMailboxRouteAsync(
+                    fixture.Selector, fixture.Authority)).Epoch);
+    }
+
+    [Fact]
+    public async Task IndependentStores_ConcurrentDifferentPublication_OnlyOneJournalWins()
+    {
+        using var fixture = new Fixture();
+        using var firstEntered = new ManualResetEventSlim();
+        using var releaseFirst = new ManualResetEventSlim();
+        using var first = new SqliteSessionStore(
+            new SqliteSessionStoreOptions(fixture.Path),
+            point =>
+            {
+                if (point != ClientMailboxCommitFaultPoint.BeforeCommit) return;
+                firstEntered.Set();
+                if (!releaseFirst.Wait(TimeSpan.FromSeconds(5)))
+                    throw new TimeoutException("Publication journal race timed out.");
+            });
+        using var second = new SqliteSessionStore(fixture.Path);
+        var winner = Journal('1');
+        var conflicting = Journal('2');
+
+        var firstTask = Task.Run(() =>
+            first.StageProductionMailboxRuntimePublicationAsync(
+                PublicationKey, winner));
+        Assert.True(firstEntered.Wait(TimeSpan.FromSeconds(5)));
+        var secondTask = Task.Run(async () =>
+        {
+            try
+            {
+                await second.StageProductionMailboxRuntimePublicationAsync(
+                    PublicationKey, conflicting);
+                return null;
+            }
+            catch (Exception exception)
+            {
+                return exception;
+            }
+        });
+        await Task.Delay(50);
+        releaseFirst.Set();
+        await firstTask;
+        var conflict = await secondTask;
+
+        Assert.True(
+            conflict is InvalidOperationException or
+                SqliteException { SqliteErrorCode: 5 },
+            conflict?.ToString());
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            second.StageProductionMailboxRuntimePublicationAsync(
+                PublicationKey, conflicting));
+        Assert.Equal(winner,
+            await first.GetAsync<ProductionMailboxRuntimePublicationJournal>(
+                PublicationKey));
+    }
+
+    [Fact]
+    public async Task PublicationStage_RejectsRouteRollbackAndConflictBeforeTrustCommit()
+    {
+        using var fixture = new Fixture();
+        using var store = new SqliteSessionStore(fixture.Path);
+        var active = Journal('1') with
+        {
+            RouteAdvertisementSequence = 5,
+            RouteAdvertisementSha256 = Hex('5')
+        };
+        await store.SetAsync(ActiveBundleKey, active);
+
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
+            store.StageProductionMailboxRuntimePublicationAsync(
+                PublicationKey,
+                ActiveBundleKey,
+                active with
+                {
+                    TargetTrustRevision = 8,
+                    CurrentEpoch = 8,
+                    PairGeneration = Hex('2'),
+                    RouteAdvertisementSequence = 4,
+                    RouteAdvertisementSha256 = Hex('4')
+                }));
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
+            store.StageProductionMailboxRuntimePublicationAsync(
+                PublicationKey,
+                ActiveBundleKey,
+                active with
+                {
+                    TargetTrustRevision = 8,
+                    CurrentEpoch = 8,
+                    PairGeneration = Hex('2'),
+                    RouteAdvertisementSha256 = Hex('6')
+                }));
+
+        await store.StageProductionMailboxRuntimePublicationAsync(
+            PublicationKey,
+            ActiveBundleKey,
+            active with
+            {
+                TargetTrustRevision = 8,
+                CurrentEpoch = 8,
+                PairGeneration = Hex('2'),
+                RouteAdvertisementSequence = 6,
+                RouteAdvertisementSha256 = Hex('6')
+            });
+        Assert.Equal(6UL,
+            (await store.GetAsync<ProductionMailboxRuntimePublicationJournal>(
+                PublicationKey))!.RouteAdvertisementSequence);
+    }
+
+    [Fact]
+    public async Task PublicationJournal_RejectsNoncanonicalDuplicateAndUnknownJson()
+    {
+        using var fixture = new Fixture();
+        using var store = new SqliteSessionStore(fixture.Path);
+        var journal = Journal('1');
+        await store.StageProductionMailboxRuntimePublicationAsync(
+            PublicationKey, journal);
+        var canonical = JsonSerializer.Serialize(
+            journal, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        using var document = JsonDocument.Parse(canonical);
+        var reordered = "{" + string.Join(",",
+            document.RootElement.EnumerateObject().Reverse().Select(property =>
+                JsonSerializer.Serialize(property.Name) + ":" +
+                property.Value.GetRawText())) + "}";
+        var variants = new[]
+        {
+            " " + canonical,
+            reordered,
+            canonical[..^1] + ",\"unknown\":1}",
+            canonical[..^1] + ",\"verifiedAtUnixSeconds\":80}",
+            canonical.Replace("\"schemaVersion\"", "\"\\u0073chemaVersion\"",
+                StringComparison.Ordinal)
+        };
+
+        foreach (var variant in variants)
+        {
+            WriteSetting(fixture.Path, PublicationKey, variant);
+            await Assert.ThrowsAsync<InvalidDataException>(() =>
+                store.ReadProductionMailboxRuntimePublicationAsync(PublicationKey));
+            WriteSetting(fixture.Path, PublicationKey, canonical);
+        }
+        Assert.Equal(journal,
+            await store.ReadProductionMailboxRuntimePublicationAsync(PublicationKey));
+    }
+
     [Fact]
     public void SqliteFileIdentity_CollapsesHardLinkAliasesToOneCoordinator()
     {
@@ -242,6 +458,28 @@ public sealed class MailboxRuntimeCheckpointConcurrencyTests
             Hex(pair)),
         RevocationKey,
         Revocation(generatedAt, expiresAt, snapshot));
+
+    private const string PublicationKey = "test.mailbox.runtime.publication";
+
+    private static ProductionMailboxRuntimePublicationJournal Journal(char pair)
+    {
+        byte[] signedBundle = [1];
+        return new ProductionMailboxRuntimePublicationJournal(
+            2,
+            7,
+            Hex('a'),
+            7,
+            Hex(pair),
+            Convert.ToHexStringLower(SHA256.HashData(signedBundle)),
+            Convert.ToBase64String(signedBundle),
+            100,
+            90,
+            80,
+            Hex('b'),
+            Hex('c'),
+            Hex('d'),
+            1);
+    }
 
     private static MailboxRevocationRuntimeCheckpoint Revocation(
         ulong generatedAt,
@@ -342,6 +580,8 @@ public sealed class MailboxRuntimeCheckpointConcurrencyTests
         return connection;
     }
 
+    private sealed class InjectedPublicationFaultException : Exception;
+
     private sealed class Fixture : IDisposable
     {
         private readonly byte[] issuerSeed = Bytes(32, 0x01);
@@ -407,7 +647,12 @@ public sealed class MailboxRuntimeCheckpointConcurrencyTests
                     prior.Deposit!.NextGrant.Span,
                     Grant(MailboxCapabilityDomain.Deposit,
                         checked((byte)(marker + 3)), next)),
-                prior.Replicas);
+                prior.NextReplicas,
+                new MailboxCredentialReplicaPair(
+                    Bytes(32, checked((byte)(marker + 4))),
+                    Bytes(32, checked((byte)(marker + 5))),
+                    Bytes(32, checked((byte)(marker + 6))),
+                    Bytes(32, checked((byte)(marker + 7)))));
         }
 
         private ScopedMailboxCredentialGeneration Generation(
@@ -452,7 +697,12 @@ public sealed class MailboxRuntimeCheckpointConcurrencyTests
                     Bytes(32, 0xd1),
                     Bytes(32, 0xd2),
                     Bytes(32, 0xd3),
-                    Bytes(32, 0xd4)));
+                    Bytes(32, 0xd4)),
+                new MailboxCredentialReplicaPair(
+                    Bytes(32, 0xe1),
+                    Bytes(32, 0xe2),
+                    Bytes(32, 0xe3),
+                    Bytes(32, 0xe4)));
         }
 
         private byte[] Grant(

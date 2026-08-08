@@ -43,7 +43,8 @@ internal static class ScopedMailboxCredentialValidator
         ArgumentNullException.ThrowIfNull(value.Selector);
         ArgumentNullException.ThrowIfNull(value.Current);
         ArgumentNullException.ThrowIfNull(value.Next);
-        ArgumentNullException.ThrowIfNull(value.Replicas);
+        ArgumentNullException.ThrowIfNull(value.CurrentReplicas);
+        ArgumentNullException.ThrowIfNull(value.NextReplicas);
         ArgumentNullException.ThrowIfNull(serials);
         authority.Validate();
         if (!Nonzero(value.Generation.Span, 32) ||
@@ -68,7 +69,7 @@ internal static class ScopedMailboxCredentialValidator
                     new BlindedPlacementId(
                         value.Next.PlacementId.Span))) ||
             value.Selector.Kind == MailboxCredentialScopeKind.Self &&
-                (value.Retrieve is null || value.Deposit is null) ||
+                value.Retrieve is null ||
             value.Selector.Kind == MailboxCredentialScopeKind.Peer &&
                 (value.Deposit is null || value.Retrieve is not null) ||
             value.Selector.Kind == MailboxCredentialScopeKind.Group &&

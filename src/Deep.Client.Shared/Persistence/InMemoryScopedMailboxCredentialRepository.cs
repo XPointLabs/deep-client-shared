@@ -621,7 +621,7 @@ public sealed class InMemoryScopedMailboxCredentialRepository :
             new BlindedPlacementId(epoch.PlacementId.Span),
             epoch.PlacementCommitment,
             epoch.MembershipCommitment,
-            CloneReplicas(generation.Replicas));
+            CloneReplicas(generation.ReplicasFor(epoch.Epoch)));
     }
 
     private static void ValidateImportBatch(
@@ -710,7 +710,7 @@ public sealed class InMemoryScopedMailboxCredentialRepository :
             !Fixed(prior.MailboxId.Span, incoming.MailboxId.Span) ||
             !Fixed(prior.Selector.ScopeId.Span, incoming.Selector.ScopeId.Span) ||
             !EqualEpoch(prior.Next, incoming.Current) ||
-            !EqualReplicas(prior.Replicas, incoming.Replicas) ||
+            !EqualReplicas(prior.NextReplicas, incoming.CurrentReplicas) ||
             !EqualOverlapGrant(prior.Retrieve, incoming.Retrieve) ||
             !EqualOverlapGrant(prior.Deposit, incoming.Deposit) ||
             EqualEpochMaterial(prior.Current, incoming.Next) ||
@@ -846,11 +846,19 @@ public sealed class InMemoryScopedMailboxCredentialRepository :
         WriteEpoch(stream, generation.Next);
         WriteGrantSet(stream, generation.Retrieve);
         WriteGrantSet(stream, generation.Deposit);
-        Write(stream, generation.Replicas.FirstId.Span);
-        Write(stream, generation.Replicas.FirstSigningKey.Span);
-        Write(stream, generation.Replicas.SecondId.Span);
-        Write(stream, generation.Replicas.SecondSigningKey.Span);
+        WriteReplicas(stream, generation.CurrentReplicas);
+        WriteReplicas(stream, generation.NextReplicas);
         return stream.ToArray();
+    }
+
+    private static void WriteReplicas(
+        Stream stream,
+        MailboxCredentialReplicaPair replicas)
+    {
+        Write(stream, replicas.FirstId.Span);
+        Write(stream, replicas.FirstSigningKey.Span);
+        Write(stream, replicas.SecondId.Span);
+        Write(stream, replicas.SecondSigningKey.Span);
     }
 
     private static void WriteEpoch(
@@ -919,7 +927,8 @@ public sealed class InMemoryScopedMailboxCredentialRepository :
         CloneEpoch(generation.Next),
         CloneGrantSet(generation.Retrieve),
         CloneGrantSet(generation.Deposit),
-        CloneReplicas(generation.Replicas));
+        CloneReplicas(generation.CurrentReplicas),
+        CloneReplicas(generation.NextReplicas));
 
     private static MailboxCredentialEpoch CloneEpoch(
         MailboxCredentialEpoch epoch) => new(

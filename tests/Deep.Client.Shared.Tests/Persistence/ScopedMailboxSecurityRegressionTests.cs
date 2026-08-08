@@ -451,7 +451,12 @@ public sealed class ScopedMailboxSecurityRegressionTests
                     Bytes(32, 0x71),
                     Bytes(32, 0x72),
                     Bytes(32, 0x73),
-                    Bytes(32, 0x74)));
+                    Bytes(32, 0x74)),
+                new MailboxCredentialReplicaPair(
+                    Bytes(32, 0x81),
+                    Bytes(32, 0x82),
+                    Bytes(32, 0x83),
+                    Bytes(32, 0x84)));
             Signer = new OperationSigner(
                 holderSeed,
                 crypto.GetPublicKey(holderSeed));
