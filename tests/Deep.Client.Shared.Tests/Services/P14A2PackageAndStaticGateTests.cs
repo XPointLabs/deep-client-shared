@@ -7,45 +7,45 @@ namespace Deep.Client.Shared.Tests.Services;
 
 public sealed class P14A2PackageAndStaticGateTests
 {
-    private const string ProtocolVersion = "0.4.0-production.2024907";
-    private const string CarrierVersion = "0.4.0-survival.2024907";
+    private const string ProtocolVersion = "0.4.0-production.1059184";
+    private const string CarrierVersion = "0.4.0-survival.1059184";
     private const string ProtocolSource =
-        "20249077913abfd9ad69f957aa07e57ff55b5e24";
+        "105918421eb5621bec86aeaac56013b269472aa7";
     private const string CarrierSource =
-        "20249077913abfd9ad69f957aa07e57ff55b5e24";
+        "105918421eb5621bec86aeaac56013b269472aa7";
     private static readonly ExpectedPackage[] ExpectedPackages =
     [
-        new("Deep.Protocol", ProtocolVersion, 218_744,
-            "00bfaf36679fc905c9c83b644d717367ce1f2a3864f0009ef998da714f3fddfc",
-            "d53e0c854c73af57ae17fa4ed942cc7047825cf8ff1156df4b458656bae6bddce7159c38aadda44d41a38d595edea07399d33f7d8952f2549a8a8880227b1ebd",
-            "4UtigGZqDJyCOaVEXa2GpK2cp/O2FVpGCO026O31qYzNIEh0tv1l725o2ItCITJh4ozRJP0tGa8FohppPqVmOQ==",
+        new("Deep.Protocol", ProtocolVersion, 218_889,
+            "e4c29cd2de20d7863cdb7af993468953208e6a8097cee4de2a7cdfb468918c7f",
+            "e9ca4409a1976287d83e0b8866c659d0fdcce46c14f28e03482eeafb16bb8e7e783739d4662aad20bcde29d4ec6221cffe24782ac30429cb7d937f8c0b3d609f",
+            "6cpECaGXYofYPguIZsZZ0P3M5GwU8o4DSC7q+xa7jn54NznUZiqtILzeKdTsYiHP/iR4KsMEKct9k3+MCz1gnw==",
             ProtocolSource),
-        new("Deep.Protocol.Abstractions", ProtocolVersion, 24_956,
-            "b3790c2599be43ab593364dc57b558e97d36333a56c3b3b7cd6427e78629a9a2",
-            "b73c4664a18354848dda9124c7ad88fa5310be39e9aa6d78297cd5a55223befc5844330c85efcbbcbdf571750691d06f8cacd6d5e7b179e7d737ac2a9dd59907",
-            "a/shd1eEhiyPcy6XSwV5NfQcgTduNTdcLys7IF9jm6ZQQrF4AqqjJNJ0CxUbtBncp2RUcDwugg8Lyw9n9KZjnw==",
+        new("Deep.Protocol.Abstractions", ProtocolVersion, 25_043,
+            "dcb00f2646b5a8bcf907f3936f761a00a6f0f360386e6631cd6e6513c711efe8",
+            "bf83ff15bb158ed99d2a89696908a7f1e1bd7103ab01a04ff63c8ee229e8277e96afcd5fffe9b67dfda738802abbe07a60671581795ee255a09dc8f4ec734b90",
+            "v4P/FbsVjtmdKolpaQin8eG9cQOrAaBP9jyO4inoJ36Wr81f/+m2ff2nOIAqu+B6YGcVgXle4lWgncj07HNLkA==",
             ProtocolSource),
-        new("Deep.Protocol.MembershipRoutes", ProtocolVersion, 48_182,
-            "91698919918caba2e671dcef87d02f1fc6168d330fc852ab15e90cdb29c209d7",
-            "e68f5ea66a23997541a507cbf6d1444632e8f8885233a0d639c9946a7a30664f0a3c392ef4bc046a8e0a13200374ddd647794704681e71dab16f0812ade2555b",
-            "5o9epmojmXVBpQfL9tFERjLo+IhSM6DWOcmUanowZk8KPDku9LwEao4KEyADdN3WR3lHBGgecdqxbwgSreJVWw==",
+        new("Deep.Protocol.MembershipRoutes", ProtocolVersion, 54_559,
+            "c2c1f3a5179cc10d32ed479225d730b9961fc7fbe7bd2e328b96f2a3fab1447b",
+            "a14c22458a0ac9f74cc4a864364f084386436db8dd8d457e7bcb7ff61036454d9d80e6f2062c65b41dd94a174bfc385665e5e3073dcc7472ee364e95db0230bc",
+            "oUwiRYoKyfdMxKhkNk8IQ4ZDbbjdjUV+e8t/9hA2RU2dgObyBixltB3ZShdL/DhWZeXjBz3MdHLuNk6V2wIwvA==",
             ProtocolSource),
-        new("Deep.Protocol.ProfileCarrier", CarrierVersion, 72_713,
-            "4eba47d1829f4613c1414590de825c9390e6d26f1301bf9edb2294c90838b522",
-            "386e3c821f7fc4aeba1c3c75254c6254ec5098939565240e39db399e3a79b8b9417ddae6ccadb86feab667363dbb4ab0e6423a3ca7493b63914dd8de84b38cc9",
-            "OG48gh9/xK66HDx1JUxiVOxQmJOVZSQOOds5njp5uLlBfdrmzK24b+q2ZzY9u0qw5kI6PKdJO2ORTdjehLOMyQ==",
+        new("Deep.Protocol.ProfileCarrier", CarrierVersion, 49_716,
+            "3b03f0ee3e3491e849bea02fd4ef71882f44d3623f6039913bf7595b972cfa90",
+            "a7a519c7bab16fdbd3d0993f4070daf68dbf182b9e7e1cf5128c3b3f12b55748a84227464858eb5c6c59b2036b22831678363c26e8a229a55f34a3607a5cc560",
+            "p6UZx7qxb9vT0Jk/QHDa9o2/GCuefhz1Eow7PxK1V0ioQidGSFjrXGxZsgNrIoMWeDY8JuiiKaVfNKNgelzFYA==",
             CarrierSource),
-        new("Deep.Protocol.Protobuf", ProtocolVersion, 50_210,
-            "c42b0463013d98a9c5d5200db5c875a6d320a2b6c80e1062b8c76ac5aac205a2",
-            "ad318fc294e7986e7cd296d57b484d52a6c09dbcc39e2315aa2d403935bb5744c2c29ed0a9f68da1ef48bf3d649f53be675db34d1ccf42fd3b2a1078b389174f",
-            "LJZWHPkNilHuBFS9EZYMvAtTk64dwfa8LfWgzvrK3j3qNFlevUIpBgVvll4ENY2nxYpsZTLjKYJlKaZURDFxdw==",
+        new("Deep.Protocol.Protobuf", ProtocolVersion, 50_302,
+            "8912fa06c207bf48cddd251347ab7e7544c03485dff4222a3ec2fb86b8f13a56",
+            "b5894d8db2c5f7635d05011dd5e58ceb76f927028d296bd55b3eeaba3ee58dfaa25a518e66ff113312cf53cb1a5d7e0f3d964a6de463981da8761f7291715e1c",
+            "tYlNjbLF92NdBQEd1eWM63b5JwKNKWvVWz7quj7ljfqiWlGOZv8RMxLPU8saXX4PPZZKbeRjmB2odh9ykXFeHA==",
             ProtocolSource)
     ];
 
     [Fact]
     public void UnifiedSurvivalBetaPackageSetIsExactAndLocallyPinned()
     {
-        var vendor = Path.Combine(RepositoryRoot(), "vendor", "production-2024907");
+        var vendor = Path.Combine(RepositoryRoot(), "vendor", "production-1059184");
         using var document = JsonDocument.Parse(File.ReadAllBytes(
             Path.Combine(vendor, "package-manifest.json")));
         var root = document.RootElement;
@@ -125,7 +125,7 @@ public sealed class P14A2PackageAndStaticGateTests
             var package = Path.Combine(
                 RepositoryRoot(),
                 "vendor",
-                "production-2024907",
+                "production-1059184",
                 "packages",
                 $"{expected.Id}.{expected.Version}.nupkg");
             using var archive = ZipFile.OpenRead(package);
@@ -140,6 +140,34 @@ public sealed class P14A2PackageAndStaticGateTests
             Assert.Equal(
                 expected.Source,
                 metadata.Element(ns + "repository")!.Attribute("commit")!.Value);
+            var requiredInternal = expected.Id switch
+            {
+                "Deep.Protocol" => new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["Deep.Protocol.Abstractions"] = $"[{ProtocolVersion}]",
+                    ["Deep.Protocol.Protobuf"] = $"[{ProtocolVersion}]"
+                },
+                "Deep.Protocol.MembershipRoutes" or "Deep.Protocol.ProfileCarrier" =>
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["Deep.Protocol"] = $"[{ProtocolVersion}]"
+                    },
+                _ => new Dictionary<string, string>(StringComparer.Ordinal)
+            };
+            var actualInternal = metadata.Descendants(ns + "dependency")
+                .Where(value => value.Attribute("id")!.Value.StartsWith(
+                    "Deep.Protocol", StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+            Assert.Equal(requiredInternal.Count, actualInternal.Length);
+            Assert.Equal(actualInternal.Length, actualInternal
+                .Select(value => value.Attribute("id")!.Value)
+                .Distinct(StringComparer.OrdinalIgnoreCase).Count());
+            foreach (var dependency in actualInternal)
+            {
+                var id = dependency.Attribute("id")!.Value;
+                Assert.True(requiredInternal.TryGetValue(id, out var requiredVersion));
+                Assert.Equal(requiredVersion, dependency.Attribute("version")!.Value);
+            }
         }
 
         Assert.Equal(ProtocolSource, CarrierSource);
@@ -151,7 +179,7 @@ public sealed class P14A2PackageAndStaticGateTests
         var text = File.ReadAllText(Path.Combine(RepositoryRoot(), "NuGet.Config"));
         Assert.Contains("<clear", text, StringComparison.Ordinal);
         Assert.Contains("production-protocol-closure", text, StringComparison.Ordinal);
-        Assert.Contains("vendor\\production-2024907\\packages", text, StringComparison.Ordinal);
+        Assert.Contains("vendor\\production-1059184\\packages", text, StringComparison.Ordinal);
         Assert.Contains("Deep.Protocol*", text, StringComparison.Ordinal);
         Assert.DoesNotContain("nuget.org", text, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("http://", text, StringComparison.OrdinalIgnoreCase);
@@ -163,7 +191,7 @@ public sealed class P14A2PackageAndStaticGateTests
     {
         var root = RepositoryRoot();
         var manifest = File.ReadAllText(Path.Combine(
-            root, "vendor", "production-2024907", "package-manifest.json"));
+            root, "vendor", "production-1059184", "package-manifest.json"));
         var project = File.ReadAllText(Path.Combine(
             root, "src", "Deep.Client.Shared", "Deep.Client.Shared.csproj"));
         AssertPackagePin(manifest, project);
@@ -182,8 +210,8 @@ public sealed class P14A2PackageAndStaticGateTests
         }
         Assert.Throws<InvalidDataException>(() => AssertPackagePin(
             manifest.Replace(
-                "\"id\": \"Deep.Protocol.Protobuf\"",
-                "\"id\": \"Deep.Protocol.Protobuf.Drift\"",
+                "\"id\":\"Deep.Protocol.Protobuf\"",
+                "\"id\":\"Deep.Protocol.Protobuf.Drift\"",
                 StringComparison.Ordinal),
             project));
         Assert.Throws<InvalidDataException>(() => AssertPackagePin(
@@ -192,7 +220,7 @@ public sealed class P14A2PackageAndStaticGateTests
             project));
         Assert.Throws<InvalidDataException>(() => AssertPackagePin(
             manifest.Replace(
-                "4eba47d1829f4613c1414590de825c9390e6d26f1301bf9edb2294c90838b522",
+                "3b03f0ee3e3491e849bea02fd4ef71882f44d3623f6039913bf7595b972cfa90",
                 new string('0', 64),
                 StringComparison.Ordinal),
             project));

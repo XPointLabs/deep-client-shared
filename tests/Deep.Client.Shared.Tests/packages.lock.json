@@ -37,41 +37,41 @@
       },
       "Deep.Protocol": {
         "type": "Transitive",
-        "resolved": "0.4.0-production.2024907",
-        "contentHash": "4UtigGZqDJyCOaVEXa2GpK2cp/O2FVpGCO026O31qYzNIEh0tv1l725o2ItCITJh4ozRJP0tGa8FohppPqVmOQ==",
+        "resolved": "0.4.0-production.1059184",
+        "contentHash": "6cpECaGXYofYPguIZsZZ0P3M5GwU8o4DSC7q+xa7jn54NznUZiqtILzeKdTsYiHP/iR4KsMEKct9k3+MCz1gnw==",
         "dependencies": {
-          "Deep.Protocol.Abstractions": "0.4.0-production.2024907",
-          "Deep.Protocol.Protobuf": "0.4.0-production.2024907",
+          "Deep.Protocol.Abstractions": "[0.4.0-production.1059184]",
+          "Deep.Protocol.Protobuf": "[0.4.0-production.1059184]",
           "Sodium.Core": "1.4.1"
         }
       },
       "Deep.Protocol.Abstractions": {
         "type": "Transitive",
-        "resolved": "0.4.0-production.2024907",
-        "contentHash": "a/shd1eEhiyPcy6XSwV5NfQcgTduNTdcLys7IF9jm6ZQQrF4AqqjJNJ0CxUbtBncp2RUcDwugg8Lyw9n9KZjnw=="
+        "resolved": "0.4.0-production.1059184",
+        "contentHash": "v4P/FbsVjtmdKolpaQin8eG9cQOrAaBP9jyO4inoJ36Wr81f/+m2ff2nOIAqu+B6YGcVgXle4lWgncj07HNLkA=="
       },
       "Deep.Protocol.MembershipRoutes": {
         "type": "Transitive",
-        "resolved": "0.4.0-production.2024907",
-        "contentHash": "5o9epmojmXVBpQfL9tFERjLo+IhSM6DWOcmUanowZk8KPDku9LwEao4KEyADdN3WR3lHBGgecdqxbwgSreJVWw==",
+        "resolved": "0.4.0-production.1059184",
+        "contentHash": "oUwiRYoKyfdMxKhkNk8IQ4ZDbbjdjUV+e8t/9hA2RU2dgObyBixltB3ZShdL/DhWZeXjBz3MdHLuNk6V2wIwvA==",
         "dependencies": {
-          "Deep.Protocol": "0.4.0-production.2024907"
+          "Deep.Protocol": "[0.4.0-production.1059184]"
         }
       },
       "Deep.Protocol.ProfileCarrier": {
         "type": "Transitive",
-        "resolved": "0.4.0-survival.2024907",
-        "contentHash": "OG48gh9/xK66HDx1JUxiVOxQmJOVZSQOOds5njp5uLlBfdrmzK24b+q2ZzY9u0qw5kI6PKdJO2ORTdjehLOMyQ==",
+        "resolved": "0.4.0-survival.1059184",
+        "contentHash": "p6UZx7qxb9vT0Jk/QHDa9o2/GCuefhz1Eow7PxK1V0ioQidGSFjrXGxZsgNrIoMWeDY8JuiiKaVfNKNgelzFYA==",
         "dependencies": {
-          "Deep.Protocol": "[0.4.0-production.2024907]",
+          "Deep.Protocol": "[0.4.0-production.1059184]",
           "Sodium.Core": "[1.4.1]",
           "libsodium": "[1.0.22]"
         }
       },
       "Deep.Protocol.Protobuf": {
         "type": "Transitive",
-        "resolved": "0.4.0-production.2024907",
-        "contentHash": "LJZWHPkNilHuBFS9EZYMvAtTk64dwfa8LfWgzvrK3j3qNFlevUIpBgVvll4ENY2nxYpsZTLjKYJlKaZURDFxdw==",
+        "resolved": "0.4.0-production.1059184",
+        "contentHash": "tYlNjbLF92NdBQEd1eWM63b5JwKNKWvVWz7quj7ljfqiWlGOZv8RMxLPU8saXX4PPZZKbeRjmB2odh9ykXFeHA==",
         "dependencies": {
           "Google.Protobuf": "3.32.1"
         }
@@ -196,9 +196,9 @@
       "deep.client.shared": {
         "type": "Project",
         "dependencies": {
-          "Deep.Protocol": "[0.4.0-production.2024907, 0.4.0-production.2024907]",
-          "Deep.Protocol.MembershipRoutes": "[0.4.0-production.2024907, 0.4.0-production.2024907]",
-          "Deep.Protocol.ProfileCarrier": "[0.4.0-survival.2024907, 0.4.0-survival.2024907]",
+          "Deep.Protocol": "[0.4.0-production.1059184, 0.4.0-production.1059184]",
+          "Deep.Protocol.MembershipRoutes": "[0.4.0-production.1059184, 0.4.0-production.1059184]",
+          "Deep.Protocol.ProfileCarrier": "[0.4.0-survival.1059184, 0.4.0-survival.1059184]",
           "Microsoft.Data.Sqlite.Core": "[10.0.9, )",
           "SQLitePCLRaw.bundle_e_sqlcipher": "[2.1.11, )",
           "Sodium.Core": "[1.4.1, )"
