@@ -7,19 +7,19 @@ namespace Deep.Client.Shared.Tests.Services;
 
 public sealed class P14A2B1ActivationTrustRebindTests
 {
-    private const string AcceptedVersion = "0.4.0-survival.2eb8b1e";
-    private const string AcceptedSource = "2eb8b1eb4605216b239f63d1ad8e587a28918134";
+    private const string AcceptedVersion = "0.4.0-survival.588229f";
+    private const string AcceptedSource = "588229f6beed9266382b17ce3c8b9303e3d36b2a";
     private const string AcceptedSha256 =
-        "9aa96a224d8797be3436c998c8f8b1a8e06168323eb8aa09e1d2ea984182ab08";
+        "557991ea8a0bf6ffcbffdebfdccb8aebccbad6abc52bdafe25d55b4e534ed676";
     private const string AcceptedContentHash =
-        "nPR4dhudniy/j/9k5qXtdQ68hgEN11LVvS4NCkVuzvIV/c2JNwAAjgli1vMm12PXlS9JWsnXwUFAyfo8SIjsaQ==";
+        "6i8h2KGAFQO3x7uoxZmmFSLX7RsqPg7iXsDLtoo0voYLKQHJEqwu1O9bQVtDkZZoBuBrrqa/vDQ2IU19rufmkw==";
     private const string OldVersion = "0.2.0-p10j.2886880";
 
     [Fact]
     public void AcceptedCarrierIsTheOnlyCarrierInTheOfflineClosure()
     {
         var root = P14A2PackageAndStaticGateTests.RepositoryRoot();
-        var vendor = Path.Combine(root, "vendor", "production-2eb8b1e");
+        var vendor = Path.Combine(root, "vendor", "production-588229f");
         var packageDirectory = Path.Combine(vendor, "packages");
         var acceptedFile = $"Deep.Protocol.ProfileCarrier.{AcceptedVersion}.nupkg";
         var packages = Directory.GetFiles(
@@ -31,7 +31,7 @@ public sealed class P14A2B1ActivationTrustRebindTests
         Assert.Equal(new[] { acceptedFile }, packages);
 
         var packagePath = Path.Combine(packageDirectory, acceptedFile);
-        Assert.Equal(49_708, new FileInfo(packagePath).Length);
+        Assert.Equal(49_853, new FileInfo(packagePath).Length);
         Assert.Equal(AcceptedSha256, Sha256(packagePath));
         using var sha512 = SHA512.Create();
         using var packageStream = File.OpenRead(packagePath);
@@ -87,7 +87,7 @@ public sealed class P14A2B1ActivationTrustRebindTests
         var manifestPath = Path.Combine(
             root,
             "vendor",
-            "production-2eb8b1e",
+            "production-588229f",
             "package-manifest.json");
         using var manifest = JsonDocument.Parse(File.ReadAllBytes(manifestPath));
         var value = manifest.RootElement;

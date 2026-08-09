@@ -9,45 +9,45 @@ namespace Deep.Client.Shared.Tests.Services;
 
 public sealed class P14A2PackageAndStaticGateTests
 {
-    private const string ProtocolVersion = "0.4.0-production.2eb8b1e";
-    private const string CarrierVersion = "0.4.0-survival.2eb8b1e";
+    private const string ProtocolVersion = "0.4.0-production.588229f";
+    private const string CarrierVersion = "0.4.0-survival.588229f";
     private const string ProtocolSource =
-        "2eb8b1eb4605216b239f63d1ad8e587a28918134";
+        "588229f6beed9266382b17ce3c8b9303e3d36b2a";
     private const string CarrierSource =
-        "2eb8b1eb4605216b239f63d1ad8e587a28918134";
+        "588229f6beed9266382b17ce3c8b9303e3d36b2a";
     private static readonly ExpectedPackage[] ExpectedPackages =
     [
-        new("Deep.Protocol", ProtocolVersion, 218_772,
-            "247a90915853b274f95f2e2aa69b71689f666d95a29150f45152326988104a8b",
-            "ee85f1aa2078221d4f8f91f73133004dbad997d10f736fdc39836a7696ec6d578959ee1b494b6345b57dd957ac95374618cb72e630412bb82431231304c5177b",
-            "7oXxqiB4Ih1Pj5H3MTMATbrZl9EPc2/cOYNqdpbsbVeJWe4bSUtjRbV92VeslTdGGMty5jBBK7gkMSMTBMUXew==",
+        new("Deep.Protocol", ProtocolVersion, 218_899,
+            "026b63904f04bf841348d37732208cc52e13199f6483492eb652c85ae496e498",
+            "e3f0d235bc10b73740a3c8950d15f743fbe6c4c207e46ad2727304da24677488ca4d4ab2aea03427a57b9c71993e543ee762c57f3be0079655cda412646f6d94",
+            "4/DSNbwQtzdAo8iVDRX3Q/vmxMIH5GrScnME2iRndIjKTUqyrqA0J6V7nHGZPlQ+52LFfzvgB5ZVzaQSZG9tlA==",
             ProtocolSource),
-        new("Deep.Protocol.Abstractions", ProtocolVersion, 24_930,
-            "66cd9b24bd441daaf9127700d52e577749cb67ed4ba9ab87ce416f1de65dac79",
-            "a9de2f1fd7095f8f5b3ba9528ee7b075aab9b4e7116005e3a0cbf760ff0739ca91623600e7d40b19a9a9c6a435de315db65115cd1a29e9e726e068eb51215817",
-            "qd4vH9cJX49bO6lSjuewdaq5tOcRYAXjoMv3YP8HOcqRYjYA59QLGampxqQ13jFdtlEVzRop6ecm4GjrUSFYFw==",
+        new("Deep.Protocol.Abstractions", ProtocolVersion, 24_965,
+            "1651c6b2bb84b8320fe795920d53cd64e9f0a8b684d97993739f9b107b0e1082",
+            "07845043ddbdda11b88505dd9d35d7f5385977cc48ec026645a364da036210b5046cca844c256d57285257b250c62673db265ae8c9f22eaebcb4ebd34af28096",
+            "B4RQQ9292hG4hQXdnTXX9ThZd8xI7AJmRaNk2gNiELUEbMqETCVtVyhSV7JQxiZz2yZa6MnyLq68tOvTSvKAlg==",
             ProtocolSource),
-        new("Deep.Protocol.MembershipRoutes", ProtocolVersion, 175_350,
-            "cf5651b70f66a0e18b43e40274021fa948414aa300c4ce8ba63889f5638dc5c3",
-            "fdbf6581d9a8affad57ed4bd63d66c9d1759668f5e46de5d6d7138d18a090597761388cc72e72ac8c02b11bf9d1bb0c37297eeb5153a684e2034ed0b41398b38",
-            "/b9lgdmor/rVftS9Y9ZsnRdZZo9eRt5dbXE40YoJBZd2E4jMcucqyMArEb+dG7DDcpfutRU6aE4gNO0LQTmLOA==",
+        new("Deep.Protocol.MembershipRoutes", ProtocolVersion, 181_181,
+            "229a74b058be8a7a4278232833aa28b5afd56e2801f7e8ebef30173a676f8da3",
+            "1297be1acf10384af118b4127aa8480228eda613c892709022643b1ba5dd24c5d7c23bec2d96fa49ba97c96d3dfaf5e0da3c32061f9cc1d2d5f9293a2a74ee97",
+            "Epe+Gs8QOErxGLQSeqhIAijtphPIknCQImQ7G6XdJMXXwjvsLZb6SbqXyW09+vXg2jwyBh+cwdLV+Sk6KnTulw==",
             ProtocolSource),
-        new("Deep.Protocol.ProfileCarrier", CarrierVersion, 49_708,
-            "9aa96a224d8797be3436c998c8f8b1a8e06168323eb8aa09e1d2ea984182ab08",
-            "9cf478761b9d9e2cbf8fff64e6a5ed750ebc86010dd752d5bd2e0d0a456ecef215fdcd893700008e0962d6f326d763d7952f495ac9d7c14140c9fa3c4888ec69",
-            "nPR4dhudniy/j/9k5qXtdQ68hgEN11LVvS4NCkVuzvIV/c2JNwAAjgli1vMm12PXlS9JWsnXwUFAyfo8SIjsaQ==",
+        new("Deep.Protocol.ProfileCarrier", CarrierVersion, 49_853,
+            "557991ea8a0bf6ffcbffdebfdccb8aebccbad6abc52bdafe25d55b4e534ed676",
+            "ea2f21d8a1801503b7c7bba8c599a61522d7ed1b2a3e0ee25ec0cbb68a34be860b2901c912ac2ed4ef5b415b4391966806e06baea6bfbc3436214d7daee7e693",
+            "6i8h2KGAFQO3x7uoxZmmFSLX7RsqPg7iXsDLtoo0voYLKQHJEqwu1O9bQVtDkZZoBuBrrqa/vDQ2IU19rufmkw==",
             CarrierSource),
-        new("Deep.Protocol.Protobuf", ProtocolVersion, 50_183,
-            "8f8fdd8e0fd7e09e55a7eec95ef190e50d9c7235a769b5407f85adee36d6cfb7",
-            "7c3c10a1f5b25e21597eec44ab2d57fff1e17a83928e4b8e91e871af24ee83366cd8edce5c12aaf3f3d637002e2a0653da08ed0fd0bb27980ab0723a06e67b78",
-            "fDwQofWyXiFZfuxEqy1X//HheoOSjkuOkehxryTugzZs2O3OXBKq8/PWNwAuKgZT2gjtD9C7J5gKsHI6BuZ7eA==",
+        new("Deep.Protocol.Protobuf", ProtocolVersion, 50_211,
+            "309ce298498311d2c3aa001f99a5a72c28fd687223c461402125c194dfe7e75b",
+            "1e162b94047ac94a852b79d688f397fbfb7cb6b8a078a88e5aab7bfe4eac8f9ae1c014810e0c52a8b05234f680bbfc580cbcb058cdcf546349bea0712a8b599f",
+            "HhYrlAR6yUqFK3nWiPOX+/t8trigeKiOWqt7/k6sj5rhwBSBDgxSqLBSNPaAu/xYDLywWM3PVGNJvqBxKotZnw==",
             ProtocolSource)
     ];
 
     [Fact]
     public void UnifiedSurvivalBetaPackageSetIsExactAndLocallyPinned()
     {
-        var vendor = Path.Combine(RepositoryRoot(), "vendor", "production-2eb8b1e");
+        var vendor = Path.Combine(RepositoryRoot(), "vendor", "production-588229f");
         using var document = JsonDocument.Parse(File.ReadAllBytes(
             Path.Combine(vendor, "package-manifest.json")));
         var root = document.RootElement;
@@ -127,7 +127,7 @@ public sealed class P14A2PackageAndStaticGateTests
             var package = Path.Combine(
                 RepositoryRoot(),
                 "vendor",
-                "production-2eb8b1e",
+                "production-588229f",
                 "packages",
                 $"{expected.Id}.{expected.Version}.nupkg");
             using var archive = ZipFile.OpenRead(package);
@@ -302,12 +302,62 @@ public sealed class P14A2PackageAndStaticGateTests
     }
 
     [Fact]
+    public void RouteHistoryProtocolEExposesOnlyNextCommitPlanCapabilities()
+    {
+        foreach (var capability in new[]
+                 {
+                     typeof(VerifiedProductionMailboxRouteHistoryCursor),
+                     typeof(ProductionMailboxRouteHistoryBatchCommitPlan),
+                     typeof(ProductionMailboxRouteHistoryDurableRouteState),
+                     typeof(ProductionMailboxRouteHistoryCumulativeState),
+                     typeof(ProductionMailboxRouteHistoryFinalArtifacts)
+                 })
+        {
+            Assert.True(capability.IsSealed);
+            Assert.Empty(capability.GetConstructors(
+                BindingFlags.Public | BindingFlags.Instance));
+        }
+
+        var methods = typeof(ProductionMailboxRouteHistoryAuthoring).GetMethods(
+            BindingFlags.Public | BindingFlags.Static);
+        var verify = Assert.Single(methods,
+            method => method.Name == "VerifyNextBatchForCommit");
+        Assert.Equal(typeof(ProductionMailboxRouteHistoryBatchCommitPlan),
+            verify.ReturnType);
+        Assert.Contains(verify.GetParameters(), parameter =>
+            parameter.ParameterType ==
+            typeof(VerifiedProductionMailboxRouteHistoryCursor));
+        Assert.DoesNotContain(methods, method => method.Name == "VerifyBatch");
+        Assert.DoesNotContain(methods.SelectMany(method => method.GetParameters()),
+            parameter => parameter.ParameterType.IsInterface &&
+                         parameter.ParameterType.Name.Contains(
+                             "Verifier", StringComparison.Ordinal));
+
+        var plan = typeof(ProductionMailboxRouteHistoryBatchCommitPlan);
+        Assert.Equal(typeof(ProductionMailboxRouteHistoryDurableRouteState),
+            plan.GetProperty("CurrentDurableRouteState")!.PropertyType);
+        Assert.Equal(typeof(ProductionMailboxRouteHistoryDurableRouteState),
+            plan.GetProperty("NextDurableRouteState")!.PropertyType);
+        Assert.Equal(typeof(ProductionMailboxRouteHistoryCumulativeState),
+            plan.GetProperty("CurrentCumulativeState")!.PropertyType);
+        Assert.Equal(typeof(ProductionMailboxRouteHistoryCumulativeState),
+            plan.GetProperty("NextCumulativeState")!.PropertyType);
+        Assert.Equal(typeof(ProductionMailboxRouteHistoryFinalArtifacts),
+            plan.GetProperty("FinalArtifacts")!.PropertyType);
+        Assert.DoesNotContain(plan.GetMethods(
+                BindingFlags.Public | BindingFlags.Instance),
+            method => method.Name.Contains("Commit", StringComparison.Ordinal) ||
+                      method.Name.Contains("Publish", StringComparison.Ordinal) ||
+                      method.ReturnType.Name.Contains("Activation", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void NuGetSourcesAreLocalAndDeepPackagesMapOnlyToSurvivalBeta()
     {
         var text = File.ReadAllText(Path.Combine(RepositoryRoot(), "NuGet.Config"));
         Assert.Contains("<clear", text, StringComparison.Ordinal);
         Assert.Contains("production-protocol-closure", text, StringComparison.Ordinal);
-        Assert.Contains("vendor\\production-2eb8b1e\\packages", text, StringComparison.Ordinal);
+        Assert.Contains("vendor\\production-588229f\\packages", text, StringComparison.Ordinal);
         Assert.Contains("Deep.Protocol*", text, StringComparison.Ordinal);
         Assert.DoesNotContain("nuget.org", text, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("http://", text, StringComparison.OrdinalIgnoreCase);
@@ -319,7 +369,7 @@ public sealed class P14A2PackageAndStaticGateTests
     {
         var root = RepositoryRoot();
         var manifest = File.ReadAllText(Path.Combine(
-            root, "vendor", "production-2eb8b1e", "package-manifest.json"));
+            root, "vendor", "production-588229f", "package-manifest.json"));
         var project = File.ReadAllText(Path.Combine(
             root, "src", "Deep.Client.Shared", "Deep.Client.Shared.csproj"));
         AssertPackagePin(manifest, project);
@@ -348,7 +398,7 @@ public sealed class P14A2PackageAndStaticGateTests
             project));
         Assert.Throws<InvalidDataException>(() => AssertPackagePin(
             manifest.Replace(
-                "9aa96a224d8797be3436c998c8f8b1a8e06168323eb8aa09e1d2ea984182ab08",
+                "557991ea8a0bf6ffcbffdebfdccb8aebccbad6abc52bdafe25d55b4e534ed676",
                 new string('0', 64),
                 StringComparison.Ordinal),
             project));
