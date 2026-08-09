@@ -717,23 +717,23 @@ public sealed class MembershipRouteSelectionTests
         var package = Path.Combine(
             root,
             "vendor",
-            "production-cc39def",
+            "production-62fd84a",
             "packages",
-            "Deep.Protocol.MembershipRoutes.0.4.0-production.cc39def.nupkg");
+            "Deep.Protocol.MembershipRoutes.0.4.0-production.62fd84a.nupkg");
         using var manifest = JsonDocument.Parse(File.ReadAllBytes(
-            Path.Combine(root, "vendor", "production-cc39def", "package-manifest.json")));
+            Path.Combine(root, "vendor", "production-62fd84a", "package-manifest.json")));
         var packageEntry = Assert.Single(
             manifest.RootElement.GetProperty("packages").EnumerateArray(),
             entry => entry.GetProperty("id").GetString() ==
                 "Deep.Protocol.MembershipRoutes");
         var expectedHash = packageEntry.GetProperty("sha256").GetString();
 
-        Assert.Equal(134_217, new FileInfo(package).Length);
+        Assert.Equal(170_466, new FileInfo(package).Length);
         Assert.Equal(
             expectedHash,
             Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(package))));
         Assert.Equal(
-            "cc39defbf9c24bf7d99f6346a86c7602379b62ea",
+            "62fd84a36580855a64307bf8020ce6a94d4ac741",
             manifest.RootElement.GetProperty("sourceCommit").GetString());
 
         foreach (var relative in new[]
@@ -746,10 +746,10 @@ public sealed class MembershipRouteSelectionTests
             var dependency = locked.RootElement.GetProperty("dependencies").GetProperty("net10.0")
                 .GetProperty("Deep.Protocol.MembershipRoutes");
             Assert.Equal(
-                "0.4.0-production.cc39def",
+                "0.4.0-production.62fd84a",
                 dependency.GetProperty("resolved").GetString());
             Assert.Equal(
-                "Lszd79KT0K3ORoGiwEg/3azLCaVKHC4HWInrwrfEhWDqe7kCHcRYQ9YbB1zDCVXdM0Vr9X5JwQlppSWIXhK/zA==",
+                "w2RWPi08pc2+jquhCGWp+v0v0+37JcBe80ClZVP1S7uvmpThjhgJuE4JnrpTHKStHHx1HYN79ZV0W24wiGUXQQ==",
                 dependency.GetProperty("contentHash").GetString());
         }
     }
