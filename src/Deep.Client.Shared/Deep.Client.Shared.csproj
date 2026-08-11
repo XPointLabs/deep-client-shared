@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
@@ -9,9 +9,9 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Deep.Protocol" Version="[0.4.0-production.588229f]" />
-    <PackageReference Include="Deep.Protocol.MembershipRoutes" Version="[0.4.0-production.588229f]" />
-    <PackageReference Include="Deep.Protocol.ProfileCarrier" Version="[0.4.0-survival.588229f]" />
+    <PackageReference Include="Deep.Protocol" Version="[0.4.0-production.bb4cd70]" />
+    <PackageReference Include="Deep.Protocol.MembershipRoutes" Version="[0.4.0-production.bb4cd70]" />
+    <PackageReference Include="Deep.Protocol.ProfileCarrier" Version="[0.4.0-survival.bb4cd70]" />
     <PackageReference Include="Microsoft.Data.Sqlite.Core" Version="10.0.9" />
     <PackageReference Include="Sodium.Core" Version="1.4.1" />
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlcipher" Version="2.1.11" />

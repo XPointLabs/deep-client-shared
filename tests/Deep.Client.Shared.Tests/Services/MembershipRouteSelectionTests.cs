@@ -717,23 +717,23 @@ public sealed class MembershipRouteSelectionTests
         var package = Path.Combine(
             root,
             "vendor",
-            "production-588229f",
+            "production-bb4cd70",
             "packages",
-            "Deep.Protocol.MembershipRoutes.0.4.0-production.588229f.nupkg");
+            "Deep.Protocol.MembershipRoutes.0.4.0-production.bb4cd70.nupkg");
         using var manifest = JsonDocument.Parse(File.ReadAllBytes(
-            Path.Combine(root, "vendor", "production-588229f", "package-manifest.json")));
+            Path.Combine(root, "vendor", "production-bb4cd70", "package-manifest.json")));
         var packageEntry = Assert.Single(
             manifest.RootElement.GetProperty("packages").EnumerateArray(),
             entry => entry.GetProperty("id").GetString() ==
                 "Deep.Protocol.MembershipRoutes");
         var expectedHash = packageEntry.GetProperty("sha256").GetString();
 
-        Assert.Equal(181_181, new FileInfo(package).Length);
+        Assert.Equal(183_958, new FileInfo(package).Length);
         Assert.Equal(
             expectedHash,
             Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(package))));
         Assert.Equal(
-            "588229f6beed9266382b17ce3c8b9303e3d36b2a",
+            "bb4cd70d6166b36c6a46d362c25cbc0f90583882",
             manifest.RootElement.GetProperty("sourceCommit").GetString());
 
         foreach (var relative in new[]
@@ -746,10 +746,10 @@ public sealed class MembershipRouteSelectionTests
             var dependency = locked.RootElement.GetProperty("dependencies").GetProperty("net10.0")
                 .GetProperty("Deep.Protocol.MembershipRoutes");
             Assert.Equal(
-                "0.4.0-production.588229f",
+                "0.4.0-production.bb4cd70",
                 dependency.GetProperty("resolved").GetString());
             Assert.Equal(
-                "Epe+Gs8QOErxGLQSeqhIAijtphPIknCQImQ7G6XdJMXXwjvsLZb6SbqXyW09+vXg2jwyBh+cwdLV+Sk6KnTulw==",
+                "/WtL01qkkzE3yxhZgY2uXq4RH0ZUW2/Pi/hTVA1GoRFkfupxXgyx3uJoNFur6Wo+E0MHS/BQCig466yVmW3h1Q==",
                 dependency.GetProperty("contentHash").GetString());
         }
     }
