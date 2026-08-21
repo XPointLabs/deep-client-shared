@@ -13,7 +13,7 @@ This library follows the Session clients at a domain boundary level:
 `Persistence` defines repository abstractions for local storage. `SqliteSessionStore`
 is the production path (with SQLCipher-compatible key hook), while
 `InMemorySessionStore` remains test/dev only. The production database has one
-physical baseline: application ID `DEEP` and schema version 12. There is no
+physical baseline: application ID `DEEP` and schema version 13. There is no
 logical schema store and no local migration API.
 The dormant P14A boundary uses the existing settings table through the atomic,
 bounded, account-generation capability documented in
@@ -57,7 +57,7 @@ E4 adds group admin/member-state lifecycle behavior into `ConversationService`: 
   fail closed.
 - Sync plans preserve the key Session ordering rule: group keys are requested last after group info and members.
 - Persistent startup treats state as fresh only when the main database, WAL,
-  and SHM files are all absent. Fresh state is created and attested as v12 in
+  and SHM files are all absent. Fresh state is created and attested as v13 in
   one transaction. Existing state is opened only after non-pooled key preflight
   and exact read-only attestation; runtime operations then use isolated pooled
   connections. Unsupported, corrupt, keyed incorrectly, or schema-tampered
@@ -223,8 +223,8 @@ state. Tombstone expiry is checked against the persisted retrieved envelope.
 Length, overflow, and canonical-envelope decoder failures are normalized to
 `InvalidDataException`. Mailbox inbox state, scoped official-cloud
 credentials, replay counters, prepared fan-out headers/targets, and MAU2
-outbox items share the exact physical schema version 12. Version 11, the old
-standalone mailbox schema, and every incompatible catalog require an explicit
+outbox items share the exact physical schema version 13. Version 12 and every
+older or incompatible catalog require an explicit
 wipe/reset; none is dual-read, migrated, or retained for compatibility.
 
 ## Identity-authenticated mailbox seam
