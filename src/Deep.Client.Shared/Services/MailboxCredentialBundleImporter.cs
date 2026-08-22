@@ -44,16 +44,42 @@ public sealed record MailboxCredentialBundleImportOptions(
     Func<bool>? ManagedEntitlement,
     TimeProvider TimeProvider);
 
-public sealed record ImportedMailboxRuntimeMaterial(
-    VerifiedOfficialMailboxAuthority Authority,
-    ClientMailboxActivation Activation,
-    IMailboxClientDecodePolicyProvider DecodePolicies,
-    Uri Coordinator,
-    MailboxCredentialSelector SelfSelector,
-    MailboxCredentialSelector PeerSelector,
-    SessionId LocalSessionId,
-    SessionId PeerSessionId,
-    MailboxInfrastructureOwnership Ownership);
+public sealed class ImportedMailboxRuntimeMaterial
+{
+    internal ImportedMailboxRuntimeMaterial(
+        VerifiedOfficialMailboxAuthority authority,
+        ClientMailboxActivation activation,
+        IMailboxClientDecodePolicyProvider decodePolicies,
+        Uri coordinator,
+        MailboxCredentialSelector selfSelector,
+        MailboxCredentialSelector peerSelector,
+        SessionId localSessionId,
+        SessionId peerSessionId,
+        MailboxInfrastructureOwnership ownership)
+    {
+        Authority = authority;
+        Activation = activation;
+        DecodePolicies = decodePolicies;
+        Coordinator = coordinator;
+        PhysicalCoordinator = new VerifiedPhysicalMailboxCoordinator(coordinator);
+        SelfSelector = selfSelector;
+        PeerSelector = peerSelector;
+        LocalSessionId = localSessionId;
+        PeerSessionId = peerSessionId;
+        Ownership = ownership;
+    }
+
+    public VerifiedOfficialMailboxAuthority Authority { get; }
+    public ClientMailboxActivation Activation { get; }
+    public IMailboxClientDecodePolicyProvider DecodePolicies { get; }
+    public Uri Coordinator { get; }
+    internal VerifiedPhysicalMailboxCoordinator PhysicalCoordinator { get; }
+    public MailboxCredentialSelector SelfSelector { get; }
+    public MailboxCredentialSelector PeerSelector { get; }
+    public SessionId LocalSessionId { get; }
+    public SessionId PeerSessionId { get; }
+    public MailboxInfrastructureOwnership Ownership { get; }
+}
 
 /// <summary>
 /// Clean-break schema-v1 importer for the atomic DEV-local Android/Windows mailbox pair.

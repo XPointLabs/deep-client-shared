@@ -260,17 +260,27 @@ public sealed class HttpClientMailboxBinaryIngressTests
     }
 
     [Fact]
-    public void Physical_development_factory_accepts_only_exact_lab_origin()
+    public void Physical_development_factory_requires_verified_private_lan_authority()
     {
+        var authority = new VerifiedPhysicalMailboxCoordinator(
+            new Uri("http://10.23.218.169:41801/"));
         using var ingress =
             HttpClientMailboxBinaryIngress.CreatePhysicalDevelopment(
-                new Uri("http://192.168.1.44:41801/"),
+                authority,
                 Policies());
         Assert.NotNull(ingress);
-        Assert.Throws<ArgumentException>(() =>
-            HttpClientMailboxBinaryIngress.CreatePhysicalDevelopment(
-                new Uri("http://192.168.1.45:41801/"),
-                Policies()));
+        foreach (var invalid in new[]
+                 {
+                     "http://8.8.8.8:41801/",
+                     "http://mailbox.local:41801/",
+                     "http://10.23.218.169:41802/",
+                     "https://10.23.218.169:41801/",
+                     "http://10.23.218.169:41801/path"
+                 })
+        {
+            Assert.Throws<ArgumentException>(() =>
+                new VerifiedPhysicalMailboxCoordinator(new Uri(invalid)));
+        }
     }
 
     [Theory]

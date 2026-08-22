@@ -2,11 +2,52 @@ using System.Buffers;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Security;
+using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using Deep.Protocol.DeepExtension.MailboxCapabilities;
 
 namespace Deep.Client.Shared.Services;
+
+internal sealed class VerifiedPhysicalMailboxCoordinator
+{
+    internal const int Port = 41801;
+
+    internal VerifiedPhysicalMailboxCoordinator(Uri origin)
+    {
+        ArgumentNullException.ThrowIfNull(origin);
+        if (!origin.IsAbsoluteUri ||
+            origin.Scheme != Uri.UriSchemeHttp ||
+            !string.IsNullOrEmpty(origin.UserInfo) ||
+            origin.AbsolutePath != "/" ||
+            !string.IsNullOrEmpty(origin.Query) ||
+            !string.IsNullOrEmpty(origin.Fragment) ||
+            origin.Port != Port ||
+            !IPAddress.TryParse(origin.IdnHost, out var address) ||
+            address.AddressFamily != AddressFamily.InterNetwork ||
+            !string.Equals(origin.IdnHost, address.ToString(), StringComparison.Ordinal) ||
+            !IsDevelopmentLocal(address))
+        {
+            throw new ArgumentException(
+                "Physical mailbox authority requires a canonical DEV-local IPv4 coordinator.",
+                nameof(origin));
+        }
+
+        Origin = origin;
+    }
+
+    internal Uri Origin { get; }
+
+    private static bool IsDevelopmentLocal(IPAddress address)
+    {
+        var bytes = address.GetAddressBytes();
+        return bytes[0] == 10 ||
+               bytes[0] == 127 ||
+               bytes[0] == 169 && bytes[1] == 254 ||
+               bytes[0] == 172 && bytes[1] is >= 16 and <= 31 ||
+               bytes[0] == 192 && bytes[1] == 168;
+    }
+}
 
 public enum ClientMailboxTransportFailure
 {
@@ -222,19 +263,12 @@ public sealed class HttpClientMailboxBinaryIngress :
     /// Release composition never calls this entry point.
     /// </summary>
     internal static HttpClientMailboxBinaryIngress CreatePhysicalDevelopment(
-        Uri baseAddress,
+        VerifiedPhysicalMailboxCoordinator authority,
         IMailboxClientDecodePolicyProvider decodePolicies)
     {
-        ArgumentNullException.ThrowIfNull(baseAddress);
+        ArgumentNullException.ThrowIfNull(authority);
         ArgumentNullException.ThrowIfNull(decodePolicies);
-        if (baseAddress != new Uri("http://192.168.1.44:41801/"))
-        {
-            throw new ArgumentException(
-                "Physical mailbox HTTP is restricted to the exact DEV-local coordinator.",
-                nameof(baseAddress));
-        }
-
-        return CreateOwned(baseAddress, decodePolicies, CreateHandler());
+        return CreateOwned(authority.Origin, decodePolicies, CreateHandler());
     }
 
     public void Dispose() => httpClient.Dispose();
