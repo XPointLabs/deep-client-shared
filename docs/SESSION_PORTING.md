@@ -45,6 +45,10 @@ Use `deep-protocol` for protocol and crypto semantics. Do not recreate protocol 
 
 - `StubSessionBackend` exists for deterministic unit/UI tests only.
 - SQLite persistence is the production local-store shape; upstream client database schemas are not copied directly.
+- Mailbox bundle imports are scoped to the exact local/peer session pair. Each
+  scoped credential generation is derived from its holder, mailbox, epochs,
+  grants, and replicas rather than from the enclosing pair bundle, so rotating
+  one peer cannot rebind or invalidate another peer route.
 - Some crypto-sensitive behavior is represented behind protocol/transport abstractions until production adapters are available.
 - P07 membership LKG is now consumed by a portable verified route-catalog provider. MRL1 members
   are selected locally as exact ingress/core/storage routes and disjoint retrieve fallback never

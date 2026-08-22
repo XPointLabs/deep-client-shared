@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Security.Cryptography;
 using System.Runtime.CompilerServices;
 using System.Text;
@@ -280,42 +281,47 @@ public static class MailboxCredentialBundleImporter
             var replicas = new MailboxCredentialReplicaPair(
                 selected.Replicas[0].Id, selected.Replicas[0].SigningKey,
                 selected.Replicas[1].Id, selected.Replicas[1].SigningKey);
+            var ownRetrieve = new MailboxCredentialGrantSet(
+                MailboxAuthenticatedCapabilityCodec.EncodeGrant(selected.OwnRetrieve.Current),
+                MailboxAuthenticatedCapabilityCodec.EncodeGrant(selected.OwnRetrieve.Next));
+            var ownDeposit = new MailboxCredentialGrantSet(
+                MailboxAuthenticatedCapabilityCodec.EncodeGrant(selected.OwnDeposit.Current),
+                MailboxAuthenticatedCapabilityCodec.EncodeGrant(selected.OwnDeposit.Next));
+            var peerDeposit = new MailboxCredentialGrantSet(
+                MailboxAuthenticatedCapabilityCodec.EncodeGrant(selected.PeerDeposit.Current),
+                MailboxAuthenticatedCapabilityCodec.EncodeGrant(selected.PeerDeposit.Next));
             var imports = new[]
             {
                 new ScopedMailboxCredentialGeneration(
                     selfSelector,
-                    DomainHash("deep.mailbox.scoped-import-generation.v1",
-                        generation, selfSelector.ScopeId.ToArray(), selected.OwnMailbox),
+                    ScopedGeneration(
+                        selfSelector, holder, selected.OwnMailbox,
+                        epochs.Current, epochs.Next, ownRetrieve, ownDeposit, replicas),
                     holder,
                     selected.OwnMailbox,
                     epochs.Current,
                     epochs.Next,
-                    new MailboxCredentialGrantSet(
-                        MailboxAuthenticatedCapabilityCodec.EncodeGrant(selected.OwnRetrieve.Current),
-                        MailboxAuthenticatedCapabilityCodec.EncodeGrant(selected.OwnRetrieve.Next)),
-                    new MailboxCredentialGrantSet(
-                        MailboxAuthenticatedCapabilityCodec.EncodeGrant(selected.OwnDeposit.Current),
-                        MailboxAuthenticatedCapabilityCodec.EncodeGrant(selected.OwnDeposit.Next)),
+                    ownRetrieve,
+                    ownDeposit,
                     replicas,
                     replicas),
                 new ScopedMailboxCredentialGeneration(
                     peerSelector,
-                    DomainHash("deep.mailbox.scoped-import-generation.v1",
-                        generation, peerSelector.ScopeId.ToArray(), selected.PeerMailbox),
+                    ScopedGeneration(
+                        peerSelector, holder, selected.PeerMailbox,
+                        epochs.Current, epochs.Next, null, peerDeposit, replicas),
                     holder,
                     selected.PeerMailbox,
                     epochs.Current,
                     epochs.Next,
                     Retrieve: null,
-                    new MailboxCredentialGrantSet(
-                        MailboxAuthenticatedCapabilityCodec.EncodeGrant(selected.PeerDeposit.Current),
-                        MailboxAuthenticatedCapabilityCodec.EncodeGrant(selected.PeerDeposit.Next)),
+                    peerDeposit,
                     replicas,
                     replicas)
             };
             var receiptKey = "deep.mailbox.bundle-import.v1:" +
                 options.Platform.ToString().ToLowerInvariant() + ":" +
-                identity.SessionId.Value;
+                identity.SessionId.Value + ":" + derivedPeerSession.Value;
             var receipt = new MailboxBundleRuntimeCheckpoint(
                 1,
                 "android-windows-pair",
@@ -928,6 +934,57 @@ public static class MailboxCredentialBundleImporter
         hash.AppendData(Encoding.UTF8.GetBytes(domain));
         foreach (var value in values) hash.AppendData(value);
         return hash.GetHashAndReset();
+    }
+
+    private static byte[] ScopedGeneration(
+        MailboxCredentialSelector selector,
+        ReadOnlySpan<byte> holder,
+        ReadOnlySpan<byte> mailbox,
+        MailboxCredentialEpoch current,
+        MailboxCredentialEpoch next,
+        MailboxCredentialGrantSet? retrieve,
+        MailboxCredentialGrantSet deposit,
+        MailboxCredentialReplicaPair replicas)
+    {
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        hash.AppendData("deep.mailbox.scoped-import-generation.v2"u8);
+        hash.AppendData([(byte)selector.Kind]);
+        hash.AppendData(selector.ScopeId.Span);
+        hash.AppendData(holder);
+        hash.AppendData(mailbox);
+        AppendEpoch(hash, current);
+        AppendEpoch(hash, next);
+        AppendGrantSet(hash, retrieve);
+        AppendGrantSet(hash, deposit);
+        hash.AppendData(replicas.FirstId.Span);
+        hash.AppendData(replicas.FirstSigningKey.Span);
+        hash.AppendData(replicas.SecondId.Span);
+        hash.AppendData(replicas.SecondSigningKey.Span);
+        return hash.GetHashAndReset();
+    }
+
+    private static void AppendEpoch(IncrementalHash hash, MailboxCredentialEpoch epoch)
+    {
+        Span<byte> scalar = stackalloc byte[8];
+        BinaryPrimitives.WriteUInt64BigEndian(scalar, epoch.Epoch);
+        hash.AppendData(scalar);
+        BinaryPrimitives.WriteUInt64BigEndian(scalar, epoch.NotBeforeUnixSeconds);
+        hash.AppendData(scalar);
+        BinaryPrimitives.WriteUInt64BigEndian(scalar, epoch.ExpiresAtUnixSeconds);
+        hash.AppendData(scalar);
+        hash.AppendData(epoch.MembershipCommitment.Span);
+        hash.AppendData(epoch.PlacementId.Span);
+        hash.AppendData(epoch.PlacementCommitment.Span);
+    }
+
+    private static void AppendGrantSet(
+        IncrementalHash hash,
+        MailboxCredentialGrantSet? grants)
+    {
+        hash.AppendData([grants is null ? (byte)0 : (byte)1]);
+        if (grants is null) return;
+        hash.AppendData(grants.CurrentGrant.Span);
+        hash.AppendData(grants.NextGrant.Span);
     }
 
     private static byte[] PairGeneration(

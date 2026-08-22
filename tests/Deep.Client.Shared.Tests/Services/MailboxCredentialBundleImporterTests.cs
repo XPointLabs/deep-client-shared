@@ -64,6 +64,8 @@ public sealed partial class MailboxCredentialBundleImporterTests
         "amaze buffet cake entrance symptoms tiger lamb maze nestle python dusted faxed faxed";
     private const string BobPhrase =
         "update vague zinger boxes ornament renting glass gained island nabbing afield calamity nabbing";
+    private const string CharliePhrase =
+        "sickness rhino tilt yeti innocent network dogs boat feast ionic subtly zodiac ionic";
     private static readonly DateTimeOffset Now =
         DateTimeOffset.Parse("2026-08-01T10:00:00Z");
 
@@ -113,7 +115,8 @@ public sealed partial class MailboxCredentialBundleImporterTests
                 store, identity, fixture.AndroidOptions,
                 MailboxInfrastructureOwnership.UserManaged));
         Assert.Null(await store.GetAsync<JsonElement?>(
-            "deep.mailbox.bundle-import.v1:android:" + identity.SessionId.Value));
+            "deep.mailbox.bundle-import.v1:android:" + identity.SessionId.Value + ":" +
+            fixture.BobSessionId.Value));
         Assert.Equal(0, CountRows(fixture.DatabasePath, "mailbox_credential_scopes"));
 
         failBeforeCommit = false;
@@ -346,7 +349,38 @@ public sealed partial class MailboxCredentialBundleImporterTests
             Convert.FromHexString((await store.GetAsync<
                 MailboxBundleRuntimeCheckpoint>(
                     "deep.mailbox.bundle-import.v1:android:" +
-                    identity.SessionId.Value))!.PairGeneration));
+                    identity.SessionId.Value + ":" + rotated.BobSessionId.Value))!
+                .PairGeneration));
+    }
+
+    [Fact]
+    public async Task SameEpochNewPeerUsesDistinctScopeAndKeepsExistingPeerRoute()
+    {
+        using var initial = Fixture.Create();
+        using var replacement = Fixture.Create(
+            databasePath: initial.DatabasePath,
+            peerPhrase: CharliePhrase);
+        using var identity = new SessionIdentityProvider(AlicePhrase);
+        using var store = new SqliteSessionStore(initial.DatabasePath);
+
+        var first = await MailboxCredentialBundleImporter.ImportAsync(
+            store, identity, initial.AndroidOptions,
+            MailboxInfrastructureOwnership.UserManaged);
+        var second = await MailboxCredentialBundleImporter.ImportAsync(
+            store, identity, replacement.AndroidOptions,
+            MailboxInfrastructureOwnership.UserManaged);
+
+        Assert.NotEqual(first.PeerSessionId, second.PeerSessionId);
+        Assert.NotNull(await store.ReadScopedMailboxRouteAsync(
+            first.PeerSelector, second.Authority));
+        Assert.NotNull(await store.ReadScopedMailboxRouteAsync(
+            second.PeerSelector, second.Authority));
+        Assert.NotNull(await store.GetAsync<MailboxBundleRuntimeCheckpoint>(
+            "deep.mailbox.bundle-import.v1:android:" + identity.SessionId.Value + ":" +
+            first.PeerSessionId.Value));
+        Assert.NotNull(await store.GetAsync<MailboxBundleRuntimeCheckpoint>(
+            "deep.mailbox.bundle-import.v1:android:" + identity.SessionId.Value + ":" +
+            second.PeerSessionId.Value));
     }
 
     private static byte[] Bytes(int count, byte value) =>
@@ -517,7 +551,8 @@ public sealed partial class MailboxCredentialBundleImporterTests
         public static Fixture Create(
             ulong currentEpoch = 7,
             string? databasePath = null,
-            int revocationVersion = 0)
+            int revocationVersion = 0,
+            string peerPhrase = BobPhrase)
         {
             if (currentEpoch is < 7 or > 100 || revocationVersion is < 0 or > 2)
                 throw new ArgumentOutOfRangeException();
@@ -527,7 +562,7 @@ public sealed partial class MailboxCredentialBundleImporterTests
             var pairRoot = Path.Combine(root, "pair");
             Directory.CreateDirectory(pairRoot);
             using var alice = new SessionIdentityProvider(AlicePhrase);
-            using var bob = new SessionIdentityProvider(BobPhrase);
+            using var bob = new SessionIdentityProvider(peerPhrase);
             var aliceHolder = alice.GetEd25519PublicKey();
             var bobHolder = bob.GetEd25519PublicKey();
             var crypto = new SodiumMailboxCapabilityCrypto();
@@ -584,17 +619,21 @@ public sealed partial class MailboxCredentialBundleImporterTests
             File.WriteAllBytes(authorityPath, authorityBytes);
             var authorityHash = SHA256.HashData(authorityBytes);
             var aliceMailbox = Bytes(32, 0x81);
-            var bobMailbox = Bytes(32, 0x82);
+            var peerVariant = string.Equals(peerPhrase, BobPhrase, StringComparison.Ordinal)
+                ? (byte)0
+                : (byte)1;
+            var bobMailbox = Bytes(32, checked((byte)(0x82 + peerVariant)));
             var androidBytes = Bundle(
                 "android", authorityHash, network, issuer, coordinator,
                 aliceHolder, bobHolder, aliceMailbox, bobMailbox,
                 current, next, replicas, crypto, issuerSeed,
-                checked((byte)(0x11 + epochOffset)));
+                checked((byte)(0x11 + epochOffset)),
+                checked((byte)(0x31 + epochOffset + 4 * peerVariant)));
             var windowsBytes = Bundle(
                 "windows", authorityHash, network, issuer, coordinator,
                 bobHolder, aliceHolder, bobMailbox, aliceMailbox,
                 current, next, replicas, crypto, issuerSeed,
-                checked((byte)(0x71 + epochOffset)));
+                checked((byte)(0x71 + epochOffset + peerVariant)));
             var androidHash = SHA256.HashData(androidBytes);
             var windowsHash = SHA256.HashData(windowsBytes);
             var generation = SHA256.HashData(Encoding.UTF8.GetBytes(
@@ -747,7 +786,8 @@ public sealed partial class MailboxCredentialBundleImporterTests
             object[] replicas,
             SodiumMailboxCapabilityCrypto crypto,
             byte[] issuerSeed,
-            byte serial)
+            byte serial,
+            byte? peerSerial = null)
         {
             object Grants(MailboxCapabilityDomain domain, byte firstSerial) => new[]
             {
@@ -779,7 +819,7 @@ public sealed partial class MailboxCredentialBundleImporterTests
                     holderPublicKey = Hex(peerHolder),
                     blindedMailboxId = Hex(peerMailbox),
                     depositGrants = Grants(MailboxCapabilityDomain.Deposit,
-                        checked((byte)(serial + 0x20)))
+                        peerSerial ?? checked((byte)(serial + 0x20)))
                 },
                 hashes = new { mailboxRouteSha256 = Hex(SHA256.HashData(ownMailbox)) }
             });
