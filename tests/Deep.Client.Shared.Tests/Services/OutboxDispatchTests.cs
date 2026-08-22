@@ -452,6 +452,28 @@ public sealed class OutboxDispatchTests
             (await runtime.Store.GetAsync(pending.Id))?.DeliveryState);
     }
 
+    [Fact]
+    public async Task FailedDispatchNotifiesObserverWithoutChangingOutboxFailure()
+    {
+        var transport = new BarrierDispatchTransport();
+        var observer = new RecordingFailureObserver();
+        using var runtime = CreateRuntime(transport, failureObserver: observer);
+        var sender = await runtime.Accounts.RegisterAsync("Sender");
+        var pending = await runtime.Messages.QueueOneToOneAsync(
+            sender.SessionId, SessionId.CreateNew(), "observe failure");
+        var failure = new HttpRequestException("synthetic transport rejection");
+
+        var dispatch = runtime.Messages.DispatchOneToOneAsync(pending);
+        await transport.WaitForSendAsync(1);
+        transport.FailSend(1, failure);
+
+        Assert.Same(failure, await Assert.ThrowsAsync<HttpRequestException>(() => dispatch));
+        Assert.Same(failure, Assert.Single(observer.Failures));
+        Assert.Equal(
+            MessageDeliveryState.Failed,
+            (await runtime.Store.GetAsync(pending.Id))?.DeliveryState);
+    }
+
     private static async Task AssertUpdateDoesNotRecreateDeletedRowAsync(IMessageRepository repository)
     {
         var sender = SessionId.CreateNew();
@@ -498,13 +520,22 @@ public sealed class OutboxDispatchTests
 
     private static ClientRuntime CreateRuntime(
         BarrierDispatchTransport transport,
-        ILocalSessionStore? store = null) =>
+        ILocalSessionStore? store = null,
+        IMessageDispatchFailureObserver? failureObserver = null) =>
         new(
             store ?? new InMemorySessionStore(),
             ClientFeatureFlags.Defaults,
             new FrozenClock(Now),
             transport,
-            transport);
+            transport,
+            messageDispatchFailureObserver: failureObserver);
+
+    private sealed class RecordingFailureObserver : IMessageDispatchFailureObserver
+    {
+        public List<Exception> Failures { get; } = [];
+
+        public void Observe(Exception exception) => Failures.Add(exception);
+    }
 
     private sealed class BarrierDispatchTransport : ISessionMessageTransport, IGroupSyncTransport
     {

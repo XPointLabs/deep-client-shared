@@ -20,7 +20,8 @@ public sealed class ClientRuntime : IDisposable
         bool requireE2eeTransport = false,
         IExternalTransportOutboxExecutor? transportOutboxExecutor = null,
         IMailboxDeliveryPolicy? mailboxDeliveryPolicy = null,
-        bool ownsMessageTransport = false)
+        bool ownsMessageTransport = false,
+        IMessageDispatchFailureObserver? messageDispatchFailureObserver = null)
     {
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(featureFlags);
@@ -98,7 +99,15 @@ public sealed class ClientRuntime : IDisposable
         }
 
         Conversations = new ConversationService(Store, Store, Store, Store, clock, featureFlags, GroupSyncTransport);
-        Messages = new MessageService(Conversations, Store, Store, Store, MessageTransport, GroupSyncTransport, clock);
+        Messages = new MessageService(
+            Conversations,
+            Store,
+            Store,
+            Store,
+            MessageTransport,
+            GroupSyncTransport,
+            clock,
+            messageDispatchFailureObserver);
         Inbox = new InboxSyncService(Accounts, Conversations, Messages);
         var accountLifecycles = new List<IAccountGenerationLifecycle>
         {

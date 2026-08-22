@@ -26,6 +26,11 @@ public sealed class MessageRetryRejectedException : InvalidOperationException
     public MessageRetryRejection Reason { get; }
 }
 
+public interface IMessageDispatchFailureObserver
+{
+    void Observe(Exception exception);
+}
+
 public sealed class MessageService(
     ConversationService conversationService,
     IConversationRepository conversations,
@@ -33,7 +38,8 @@ public sealed class MessageService(
     ISettingsRepository settings,
     ISessionMessageTransport transport,
     IGroupSyncTransport groupSync,
-    IClock clock) : IAccountGenerationLifecycle
+    IClock clock,
+    IMessageDispatchFailureObserver? dispatchFailureObserver = null) : IAccountGenerationLifecycle
 {
     private readonly object outboxGate = new();
     private readonly Dictionary<MessageId, OutboxDispatch> inFlightDispatches = [];
@@ -725,8 +731,17 @@ public sealed class MessageService(
         {
             throw;
         }
-        catch when (!physicalDispatchCompleted)
+        catch (Exception exception) when (!physicalDispatchCompleted)
         {
+            try
+            {
+                dispatchFailureObserver?.Observe(exception);
+            }
+            catch
+            {
+                // Operational diagnostics must never alter durable outbox semantics.
+            }
+
             var terminal = await MarkFailedUnlessTerminalAsync(operation.Pending).ConfigureAwait(false);
             if (terminal is not null)
             {
