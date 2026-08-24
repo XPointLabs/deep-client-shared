@@ -302,6 +302,7 @@ public sealed partial class SqliteSessionStore :
                 connection, transaction, scopeBytes, cancellationToken)
                 .ConfigureAwait(false);
             if (traversal.AfterCursor != expected.AfterCursor ||
+                traversal.PollGeneration != expected.PollGeneration ||
                 !CryptographicOperations.FixedTimeEquals(
                     traversal.ContinuationToken, expected.ContinuationToken))
             {
@@ -375,9 +376,13 @@ public sealed partial class SqliteSessionStore :
                 committedPage.Add(item);
             }
 
+            var nextGeneration = checked(expected.PollGeneration + 1);
             var next = page.HasMore
-                ? new ClientMailboxTraversal(page.NextCursor, page.ContinuationToken.Span)
-                : new ClientMailboxTraversal(0, []);
+                ? new ClientMailboxTraversal(
+                    page.NextCursor,
+                    page.ContinuationToken.Span,
+                    nextGeneration)
+                : new ClientMailboxTraversal(0, [], nextGeneration);
             await WriteTraversalAsync(
                 connection, transaction, scopeBytes, next, cancellationToken)
                 .ConfigureAwait(false);
@@ -622,6 +627,29 @@ public sealed partial class SqliteSessionStore :
         }
     }
 
+    private static async Task<ulong> ReadPollGenerationAsync(
+        SqliteConnection connection,
+        SqliteTransaction? transaction,
+        byte[] scope,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT generation FROM client_mailbox_poll_clock
+            WHERE scope = $scope;
+            """;
+        command.Parameters.Add("$scope", SqliteType.Blob).Value = scope;
+        var encoded = await command.ExecuteScalarAsync(cancellationToken)
+            .ConfigureAwait(false);
+        return encoded is null
+            ? 0
+            : encoded is byte[] { Length: 8 } bytes
+                ? ReadU64(bytes)
+                : throw new InvalidDataException(
+                    "The durable mailbox poll clock is corrupt.");
+    }
+
     private static async Task<ClientMailboxTraversal> ReadTraversalCoreAsync(
         SqliteConnection connection,
         SqliteTransaction? transaction,
@@ -637,11 +665,18 @@ public sealed partial class SqliteSessionStore :
         command.Parameters.Add("$scope", SqliteType.Blob).Value = scope;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken)
             .ConfigureAwait(false);
-        return await reader.ReadAsync(cancellationToken).ConfigureAwait(false)
-            ? new ClientMailboxTraversal(
-                ReadU64(reader.GetFieldValue<byte[]>(0)),
-                reader.GetFieldValue<byte[]>(1))
-            : new ClientMailboxTraversal(0, []);
+        var found = await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+        var afterCursor = found
+            ? ReadU64(reader.GetFieldValue<byte[]>(0))
+            : 0;
+        var continuationToken = found
+            ? reader.GetFieldValue<byte[]>(1)
+            : [];
+        await reader.DisposeAsync().ConfigureAwait(false);
+        var pollGeneration = await ReadPollGenerationAsync(
+            connection, transaction, scope, cancellationToken).ConfigureAwait(false);
+        return new ClientMailboxTraversal(
+            afterCursor, continuationToken, pollGeneration);
     }
 
     private static async Task<ClientMailboxStoredState> LoadNormalizedStateAsync(
@@ -656,6 +691,7 @@ public sealed partial class SqliteSessionStore :
         var state = new ClientMailboxStoredState
         {
             AfterCursor = traversal.AfterCursor,
+            PollGeneration = traversal.PollGeneration,
             ContinuationToken = traversal.GetContinuationTokenCopy()
         };
         await using var command = connection.CreateCommand();
@@ -706,6 +742,66 @@ public sealed partial class SqliteSessionStore :
         command.Parameters.Add("$token", SqliteType.Blob).Value =
             traversal.GetContinuationTokenCopy();
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+
+        await using var clock = connection.CreateCommand();
+        clock.Transaction = transaction;
+        clock.CommandText = """
+            UPDATE client_mailbox_poll_clock
+            SET generation = $generation
+            WHERE scope = $scope AND generation = $expected;
+            """;
+        clock.Parameters.Add("$scope", SqliteType.Blob).Value = scope;
+        clock.Parameters.Add("$generation", SqliteType.Blob).Value =
+            U64(traversal.PollGeneration);
+        var expectedGeneration = checked(traversal.PollGeneration - 1);
+        clock.Parameters.Add("$expected", SqliteType.Blob).Value =
+            U64(expectedGeneration);
+        var updated = await clock.ExecuteNonQueryAsync(cancellationToken)
+            .ConfigureAwait(false);
+        var inserted = false;
+        if (updated == 0 && expectedGeneration == 0)
+        {
+            await using var insertClock = connection.CreateCommand();
+            insertClock.Transaction = transaction;
+            insertClock.CommandText = """
+                INSERT INTO client_mailbox_poll_clock(scope, generation)
+                VALUES($scope, $generation);
+                """;
+            insertClock.Parameters.Add("$scope", SqliteType.Blob).Value = scope;
+            insertClock.Parameters.Add("$generation", SqliteType.Blob).Value =
+                U64(traversal.PollGeneration);
+            try
+            {
+                updated = await insertClock.ExecuteNonQueryAsync(cancellationToken)
+                    .ConfigureAwait(false);
+                inserted = updated == 1;
+            }
+            catch (SqliteException exception)
+            {
+                throw new InvalidOperationException(
+                    "Mailbox poll generation changed before durable page commit.",
+                    exception);
+            }
+        }
+        if (updated != 1)
+        {
+            throw new InvalidOperationException(
+                "Mailbox poll generation changed before durable page commit.");
+        }
+
+        if (inserted)
+        {
+            await using var count = connection.CreateCommand();
+            count.Transaction = transaction;
+            count.CommandText = "SELECT count(*) FROM client_mailbox_poll_clock;";
+            if (Convert.ToInt64(await count.ExecuteScalarAsync(cancellationToken)
+                    .ConfigureAwait(false)) >
+                ClientMailboxStateLimits.MaximumInstallationPollClocks)
+            {
+                throw new InvalidDataException(
+                    "Installation-global mailbox poll-clock bound was exceeded.");
+            }
+        }
     }
 
     private static async Task EnforceInboxCapacityAsync(
@@ -1081,7 +1177,8 @@ public sealed partial class SqliteSessionStore :
         {
             traversal.Transaction = transaction;
             traversal.CommandText = """
-                INSERT INTO client_mailbox_traversal(scope, after_cursor, continuation_token)
+                INSERT INTO client_mailbox_traversal(
+                    scope, after_cursor, continuation_token)
                 VALUES($scope, $cursor, $token);
                 """;
             traversal.Parameters.Add("$scope", SqliteType.Blob).Value = scope;

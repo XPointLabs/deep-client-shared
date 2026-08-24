@@ -388,9 +388,14 @@ public sealed class NativeMau2MailboxTransport :
         ArgumentNullException.ThrowIfNull(signer);
         ArgumentNullException.ThrowIfNull(continuation);
         var selector = RequireSelfSelector(signer.SessionId);
+        var current = await adapter.ReadTraversalAsync(selector, cancellationToken)
+            .ConfigureAwait(false);
         var operationId = OperationId(
             RetrieveOperationDomain,
-            CursorMaterial(continuation.AfterCursor, continuation.GetTokenCopy()));
+            RetrievalMaterial(
+                current.PollGeneration,
+                continuation.AfterCursor,
+                continuation.GetTokenCopy()));
         var result = await adapter.RetrieveAsync(
             selector.AccountScope, signer, selector, operationId,
             RetrievalLimit, cancellationToken).ConfigureAwait(false);
@@ -571,6 +576,18 @@ public sealed class NativeMau2MailboxTransport :
         var material = new byte[8 + token.Length];
         BinaryPrimitives.WriteUInt64BigEndian(material, cursor);
         token.CopyTo(material.AsSpan(8));
+        return material;
+    }
+
+    private static byte[] RetrievalMaterial(
+        ulong pollGeneration,
+        ulong cursor,
+        ReadOnlySpan<byte> token)
+    {
+        var material = new byte[16 + token.Length];
+        BinaryPrimitives.WriteUInt64BigEndian(material, pollGeneration);
+        BinaryPrimitives.WriteUInt64BigEndian(material.AsSpan(8), cursor);
+        token.CopyTo(material.AsSpan(16));
         return material;
     }
 

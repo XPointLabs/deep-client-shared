@@ -533,6 +533,49 @@ public sealed partial class MailboxCredentialBundleImporterTests
     }
 
     [Fact]
+    public async Task NativeRetrieve_AfterSuccessfulEmptyPoll_UsesNewDurableOperation()
+    {
+        using var fixture = Fixture.Create();
+        using var identity = new SessionIdentityProvider(AlicePhrase);
+        var clock = new MutableTimeProvider(Now);
+        using var store = new SqliteSessionStore(fixture.DatabasePath);
+        var imported = await MailboxCredentialBundleImporter.ImportAsync(
+            store,
+            identity,
+            fixture.AndroidOptions with { TimeProvider = clock },
+            MailboxInfrastructureOwnership.UserManaged);
+        var ingress = new EmptyThenMessageRetrieveIngress(clock);
+        using var transport = new NativeMau2MailboxTransport(
+            ClientFeatureFlags.Defaults with { ClientMailboxAdapterEnabled = true },
+            imported.Activation,
+            ingress,
+            store,
+            new PinnedClientMailboxReceiptVerifier(
+                new SodiumClientMailboxReceiptCrypto()),
+            imported.DecodePolicies,
+            imported.Authority,
+            sessionId => sessionId == imported.LocalSessionId
+                ? imported.SelfSelector
+                : throw new InvalidOperationException(
+                    "The acceptance transport has no selector for another identity."),
+            timeProvider: clock);
+
+        var empty = await transport.RetrieveAuthenticatedAsync(
+            identity,
+            cursor: null,
+            limit: 1);
+        var delivered = await transport.RetrieveAuthenticatedAsync(
+            identity,
+            cursor: null,
+            limit: 1);
+
+        Assert.Empty(empty.Entries);
+        Assert.Equal(2, ingress.RetrieveCalls);
+        Assert.Equal(2, ingress.DistinctOperationIds);
+        Assert.Single(delivered.Entries);
+    }
+
+    [Fact]
     public async Task NativeBatch_WithMissingFinalCredential_PersistsAndDispatchesNothing()
     {
         using var fixture = Fixture.Create();
@@ -1396,6 +1439,82 @@ public sealed partial class MailboxCredentialBundleImporterTests
             ReadOnlyMemory<byte> canonicalMau2,
             CancellationToken cancellationToken = default) =>
             inner.AcknowledgeAsync(canonicalMau2, cancellationToken);
+    }
+
+    private sealed class EmptyThenMessageRetrieveIngress(TimeProvider timeProvider) :
+        IClientMailboxBinaryIngress
+    {
+        private readonly Dictionary<string, byte[]> outcomes =
+            new(StringComparer.Ordinal);
+
+        public int RetrieveCalls { get; private set; }
+        public int DistinctOperationIds => outcomes.Count;
+
+        public Task<ReadOnlyMemory<byte>> StoreAsync(
+            ReadOnlyMemory<byte> canonicalMau2,
+            CancellationToken cancellationToken = default) =>
+            Task.FromException<ReadOnlyMemory<byte>>(
+                new InvalidOperationException("The poll regression does not store."));
+
+        public Task<ReadOnlyMemory<byte>> RetrieveAsync(
+            ReadOnlyMemory<byte> canonicalMau2,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            RetrieveCalls++;
+            var authenticated = MailboxAuthenticatedClientRequestCodec.Decode(
+                canonicalMau2.Span);
+            var request = MailboxAuthenticatedRequestTranscript.DecodeRetrieveBody(
+                authenticated.Binding.CanonicalRequest.Span);
+            var key = Convert.ToHexString(request.OperationId.Span);
+            if (!outcomes.TryGetValue(key, out var response))
+            {
+                var items = outcomes.Count == 0
+                    ? Array.Empty<MailboxRetrievedEnvelope>()
+                    : [Message(request)];
+                response = MailboxClientCodec.EncodeRetrievePage(
+                    new MailboxRetrievePage
+                    {
+                        Epoch = request.Epoch,
+                        OperationId = request.OperationId.ToArray(),
+                        NextCursor = items.Length == 0 ? 0UL : 1UL,
+                        HasMore = false,
+                        ContinuationToken = ReadOnlyMemory<byte>.Empty,
+                        Items = items
+                    });
+                outcomes.Add(key, response);
+            }
+
+            return Task.FromResult<ReadOnlyMemory<byte>>(response);
+        }
+
+        public Task<ReadOnlyMemory<byte>> AcknowledgeAsync(
+            ReadOnlyMemory<byte> canonicalMau2,
+            CancellationToken cancellationToken = default) =>
+            Task.FromException<ReadOnlyMemory<byte>>(
+                new InvalidOperationException("The poll regression does not acknowledge."));
+
+        private MailboxRetrievedEnvelope Message(
+            MailboxAuthenticatedRetrieveBody request)
+        {
+            var now = checked((ulong)timeProvider.GetUtcNow().ToUnixTimeSeconds());
+            var ciphertext = Bytes(64, 0xb7);
+            return new MailboxRetrievedEnvelope
+            {
+                Cursor = 1,
+                Envelope = new MailboxEncryptedEnvelope
+                {
+                    Epoch = request.Epoch,
+                    MailboxId = request.MailboxId,
+                    PlacementId = request.PlacementId,
+                    OperationId = Bytes(16, 0xb8),
+                    DeduplicationDigest = SHA256.HashData(ciphertext),
+                    CreatedAtUnixSeconds = now,
+                    ExpiresAtUnixSeconds = checked(now + 300),
+                    Ciphertext = ciphertext
+                }
+            };
+        }
     }
 
     private sealed class InjectedBatchNativeTransport(

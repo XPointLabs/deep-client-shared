@@ -107,11 +107,11 @@ public sealed class ClientMailboxAdapterTests
                     {
                         Assert.Single(
                             await repository.ReadDurableInboxAsync(scope));
+                        var recoveredTraversal =
+                            await repository.ReadTraversalAsync(scope);
                         var recovered = await repository.CommitRetrievePageAsync(
                             scope,
-                            new ClientMailboxTraversal(
-                                page.NextCursor,
-                                page.ContinuationToken.Span),
+                            recoveredTraversal,
                             Page(2, 0, hasMore: false, token: []));
                         Assert.Empty(recovered.DurableInbox);
                         Assert.Single(
@@ -171,9 +171,11 @@ public sealed class ClientMailboxAdapterTests
             Assert.Single(final.DurableInbox);
 
             repository = Restart(repository, sqlite, path, scope);
+            var nextCycleTraversal =
+                await repository.ReadTraversalAsync(scope);
             var newCycle = await repository.CommitRetrievePageAsync(
                 scope,
-                new ClientMailboxTraversal(0, []),
+                nextCycleTraversal,
                 Page(1, 2, hasMore: false, token: []));
             Assert.Equal(2, newCycle.DurableInbox.Count);
         }
@@ -196,19 +198,19 @@ public sealed class ClientMailboxAdapterTests
         try
         {
             var first = Page(1, 100, true, Range(0x40, 32));
-            await repository.CommitRetrievePageAsync(
+            var firstCommit = await repository.CommitRetrievePageAsync(
                 scope,
                 new ClientMailboxTraversal(0, []),
                 first);
             var second = Page(101, 100, true, Range(0x50, 32));
-            await repository.CommitRetrievePageAsync(
+            var secondCommit = await repository.CommitRetrievePageAsync(
                 scope,
-                new ClientMailboxTraversal(100, first.ContinuationToken.Span),
+                firstCommit.Traversal,
                 second);
             await Assert.ThrowsAsync<InvalidDataException>(() =>
                 repository.CommitRetrievePageAsync(
                     scope,
-                    new ClientMailboxTraversal(200, second.ContinuationToken.Span),
+                    secondCommit.Traversal,
                     Page(201, 1, false, [])));
             var unchanged = await repository.ReadTraversalAsync(scope);
             Assert.Equal(200UL, unchanged.AfterCursor);
@@ -733,9 +735,10 @@ public sealed class ClientMailboxAdapterTests
         {
             var scope = UniqueScope(index + 38000);
             var page = Page(1, 0, hasMore: false, token: []);
+            var traversal = await repository.ReadTraversalAsync(scope);
             await repository.CommitRetrievePageAsync(
                 scope,
-                new ClientMailboxTraversal(0, []),
+                traversal,
                 page);
             Assert.Equal(
                 ClientMailboxAckState.Conflict,

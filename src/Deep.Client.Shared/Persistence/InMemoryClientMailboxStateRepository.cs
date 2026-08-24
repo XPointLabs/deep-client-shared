@@ -9,6 +9,8 @@ public sealed class InMemoryClientMailboxStateRepository : IClientMailboxStateRe
         new(StringComparer.Ordinal);
     private readonly Dictionary<string, ClientMailboxJournalState> journals =
         new(StringComparer.Ordinal);
+    private readonly Dictionary<string, ulong> pollGenerations =
+        new(StringComparer.Ordinal);
     private readonly Dictionary<string, List<ClientMailboxExpiredQuarantineEntry>>
         expiredQuarantine =
         new(StringComparer.Ordinal);
@@ -28,8 +30,18 @@ public sealed class InMemoryClientMailboxStateRepository : IClientMailboxStateRe
 
     public Task<ClientMailboxTraversal> ReadTraversalAsync(
         ClientMailboxScope scope,
-        CancellationToken cancellationToken = default) =>
-        Read(scope, ClientMailboxStateMachine.Traversal, cancellationToken);
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ArgumentNullException.ThrowIfNull(scope);
+        lock (gate)
+        {
+            var state = Get(scope).Clone();
+            var key = Key(scope);
+            state.PollGeneration = pollGenerations.GetValueOrDefault(key);
+            return Task.FromResult(ClientMailboxStateMachine.Traversal(state));
+        }
+    }
 
     public Task<IReadOnlyList<MailboxRetrievedEnvelope>> ReadDurableInboxAsync(
         ClientMailboxScope scope,
@@ -89,11 +101,19 @@ public sealed class InMemoryClientMailboxStateRepository : IClientMailboxStateRe
             }
 
             var key = Key(scope);
+            if (!pollGenerations.ContainsKey(key) &&
+                pollGenerations.Count >=
+                    ClientMailboxStateLimits.MaximumInstallationPollClocks)
+            {
+                throw new InvalidDataException(
+                    "Installation-global mailbox poll-clock bound was exceeded.");
+            }
             if (!candidateStates.TryGetValue(key, out var candidate))
             {
                 candidate = new ClientMailboxStoredState();
                 candidateStates.Add(key, candidate);
             }
+            candidate.PollGeneration = pollGenerations.GetValueOrDefault(key);
 
             var result = ClientMailboxStateMachine.CommitPage(
                 candidate,
@@ -104,6 +124,7 @@ public sealed class InMemoryClientMailboxStateRepository : IClientMailboxStateRe
             commitFault?.Invoke(ClientMailboxCommitFaultPoint.BeforeCommit);
             Replace(states, candidateStates);
             Replace(expiredQuarantine, candidateQuarantine);
+            pollGenerations[key] = result.Traversal.PollGeneration;
             commitFault?.Invoke(ClientMailboxCommitFaultPoint.AfterCommit);
             return Task.FromResult(result);
         }
@@ -345,6 +366,8 @@ public sealed class InMemoryClientMailboxStateRepository : IClientMailboxStateRe
         lock (gate)
         {
             var restarted = new InMemoryClientMailboxStateRepository();
+            Replace(restarted.pollGenerations, new Dictionary<string, ulong>(
+                pollGenerations, StringComparer.Ordinal));
             Replace(restarted.states, CloneStates());
             Replace(restarted.expiredQuarantine, CloneExpiredQuarantine());
             Replace(

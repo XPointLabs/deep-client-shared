@@ -14,6 +14,7 @@ public static class ClientMailboxStateLimits
     public const int MaximumInstallationInboxEntries = 1000;
     public const int MaximumInstallationInboxBytes = 32 * 1024 * 1024;
     public const int MaximumInstallationScopes = 1024;
+    public const int MaximumInstallationPollClocks = 1_000_000;
     public const int MaximumInstallationTraversalTokenBytes = 128 * 1024;
     public const int MaximumInstallationExpiredQuarantineEntries = 1000;
     public const int MaximumInstallationExpiredQuarantineBytes = 32 * 1024 * 1024;
@@ -149,7 +150,8 @@ public sealed class ClientMailboxTraversal
 
     internal ClientMailboxTraversal(
         ulong afterCursor,
-        ReadOnlySpan<byte> continuationToken)
+        ReadOnlySpan<byte> continuationToken,
+        ulong pollGeneration = 0)
     {
         if (afterCursor == 0 != continuationToken.IsEmpty ||
             continuationToken.Length > MailboxClientLimits.MaximumContinuationTokenLength)
@@ -158,10 +160,12 @@ public sealed class ClientMailboxTraversal
         }
 
         AfterCursor = afterCursor;
+        PollGeneration = pollGeneration;
         this.continuationToken = continuationToken.ToArray();
     }
 
     public ulong AfterCursor { get; }
+    internal ulong PollGeneration { get; }
     public byte[] GetContinuationTokenCopy() => continuationToken.ToArray();
     internal ReadOnlySpan<byte> ContinuationToken => continuationToken;
 }
@@ -306,6 +310,7 @@ internal sealed class ClientMailboxCoordinatorStatement
 internal sealed class ClientMailboxStoredState
 {
     public ulong AfterCursor { get; set; }
+    public ulong PollGeneration { get; set; }
     public byte[] ContinuationToken { get; set; } = [];
     public List<ClientMailboxStoredEntry> Entries { get; } = [];
 
@@ -314,6 +319,7 @@ internal sealed class ClientMailboxStoredState
         var clone = new ClientMailboxStoredState
         {
             AfterCursor = AfterCursor,
+            PollGeneration = PollGeneration,
             ContinuationToken = ContinuationToken.ToArray()
         };
         clone.Entries.AddRange(Entries.Select(static entry => entry.Clone()));
@@ -339,7 +345,10 @@ internal static class ClientMailboxStateMachine
     public static ClientMailboxTraversal Traversal(ClientMailboxStoredState state)
     {
         Validate(state);
-        return new ClientMailboxTraversal(state.AfterCursor, state.ContinuationToken);
+        return new ClientMailboxTraversal(
+            state.AfterCursor,
+            state.ContinuationToken,
+            state.PollGeneration);
     }
 
     public static ClientMailboxReceiveCommitResult CommitPage(
@@ -353,6 +362,7 @@ internal static class ClientMailboxStateMachine
         Validate(state);
         _ = MailboxClientCodec.EncodeRetrievePage(page);
         if (state.AfterCursor != expected.AfterCursor ||
+            state.PollGeneration != expected.PollGeneration ||
             !FixedEquals(state.ContinuationToken, expected.ContinuationToken))
         {
             throw new InvalidOperationException(
@@ -416,6 +426,7 @@ internal static class ClientMailboxStateMachine
             state.AfterCursor = 0;
             state.ContinuationToken = [];
         }
+        state.PollGeneration = checked(state.PollGeneration + 1);
 
         PruneAcknowledged(state);
         Validate(state);

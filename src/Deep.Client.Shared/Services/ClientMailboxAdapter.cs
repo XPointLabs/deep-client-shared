@@ -794,35 +794,20 @@ public sealed class ClientMailboxAdapter
                 "MRP1 does not match the exact authenticated MBR2 operation.");
         }
 
-        ClientMailboxReceiveCommitResult committed;
-        if (await IsRetrieveOutcomeAlreadyCommittedAsync(
-                scope,
-                traversal,
-                page,
-                cancellationToken).ConfigureAwait(false))
+        if (request.AfterCursor != traversal.AfterCursor ||
+            !FixedEquals(
+                request.ContinuationToken.Span,
+                traversal.ContinuationToken))
         {
-            committed = new ClientMailboxReceiveCommitResult(
-                traversal,
-                page.Items);
+            throw new InvalidOperationException(
+                "Persisted MBR2 no longer matches mailbox traversal and its outcome is absent.");
         }
-        else
-        {
-            if (request.AfterCursor != traversal.AfterCursor ||
-                !FixedEquals(
-                    request.ContinuationToken.Span,
-                    traversal.ContinuationToken))
-            {
-                throw new InvalidOperationException(
-                    "Persisted MBR2 no longer matches mailbox traversal and its outcome is absent.");
-            }
-
-            committed = await state.CommitRetrievePageAsync(
-                scope,
-                traversal,
-                page,
-                cancellationToken)
-                .ConfigureAwait(false);
-        }
+        var committed = await state.CommitRetrievePageAsync(
+            scope,
+            traversal,
+            page,
+            cancellationToken)
+            .ConfigureAwait(false);
         var summaryEvidence = ClientMailboxRetrieveOutcomeSummary.Encode(
             request,
             page,
@@ -1069,50 +1054,6 @@ public sealed class ClientMailboxAdapter
             ExpiresAtUnixSeconds = envelope.ExpiresAtUnixSeconds,
             AllowedDispositions = StoreDispositions
         };
-
-    private async Task<bool> IsRetrieveOutcomeAlreadyCommittedAsync(
-        ClientMailboxScope scope,
-        ClientMailboxTraversal traversal,
-        MailboxRetrievePage page,
-        CancellationToken cancellationToken)
-    {
-        var expectedCursor = page.HasMore ? page.NextCursor : 0UL;
-        var expectedToken = page.HasMore
-            ? page.ContinuationToken.Span
-            : ReadOnlySpan<byte>.Empty;
-        if (traversal.AfterCursor != expectedCursor ||
-            !FixedEquals(
-                traversal.ContinuationToken,
-                expectedToken))
-        {
-            return false;
-        }
-
-        if (page.Items.Count == 0)
-        {
-            return true;
-        }
-
-        var durable = await state.ReadDurableInboxAsync(
-            scope,
-            cancellationToken).ConfigureAwait(false);
-        foreach (var item in page.Items)
-        {
-            var persisted = durable.SingleOrDefault(
-                candidate => candidate.Cursor == item.Cursor);
-            if (persisted is null ||
-                !FixedEquals(
-                    MailboxClientCodec.EncodeEncryptedEnvelope(
-                        persisted.Envelope),
-                    MailboxClientCodec.EncodeEncryptedEnvelope(
-                        item.Envelope)))
-            {
-                return false;
-            }
-        }
-
-        return true;
-    }
 
     private async Task<VerifiedMailboxDurableQuorumV3>
         VerifyAndJournalDurableAsync(

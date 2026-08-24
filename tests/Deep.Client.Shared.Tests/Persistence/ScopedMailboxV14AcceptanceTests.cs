@@ -10,7 +10,7 @@ using Sodium;
 namespace Deep.Client.Shared.Tests.Persistence;
 
 [Collection("SQLite global pool isolation")]
-public sealed class ScopedMailboxV13AcceptanceTests
+public sealed class ScopedMailboxV14AcceptanceTests
 {
     [Fact]
     public async Task Atomic_import_survives_restart_with_exact_scoped_routes()
@@ -403,7 +403,7 @@ public sealed class ScopedMailboxV13AcceptanceTests
         public Fixture()
         {
             Path = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
-                $"deep-scoped-v13-{Guid.NewGuid():N}.db");
+                $"deep-scoped-v14-{Guid.NewGuid():N}.db");
             Clock = new MutableTimeProvider(1050);
             Revocations = new MutableRevocations();
             Account = OutboxAccountScope.FromBytes(Bytes(32, 0x10));

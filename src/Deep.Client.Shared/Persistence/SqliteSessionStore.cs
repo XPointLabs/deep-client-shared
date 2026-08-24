@@ -19,7 +19,7 @@ public sealed partial class SqliteSessionStore :
     IMembershipTrustRepository,
     IDisposable
 {
-    private const int PhysicalSchemaVersion = 13;
+    private const int PhysicalSchemaVersion = 14;
     private const int DeepApplicationId = 0x44454550;
     private const int MaximumSchemaDefinitionLength = 16 * 1024;
     private const int ReplayPruneBatchSize = 256;
@@ -2759,6 +2759,11 @@ public sealed partial class SqliteSessionStore :
                     continuation_token BLOB NOT NULL
                 );
 
+                CREATE TABLE client_mailbox_poll_clock (
+                    scope BLOB PRIMARY KEY NOT NULL CHECK(length(scope) = 32),
+                    generation BLOB NOT NULL CHECK(length(generation) = 8)
+                );
+
                 CREATE TABLE client_mailbox_inbox (
                     scope BLOB NOT NULL CHECK(length(scope) = 32),
                     cursor BLOB NOT NULL CHECK(length(cursor) = 8),
@@ -3315,6 +3320,11 @@ public sealed partial class SqliteSessionStore :
                 new("after_cursor", "BLOB", 1, null, 0),
                 new("continuation_token", "BLOB", 1, null, 0)
             ],
+            ["client_mailbox_poll_clock"] =
+            [
+                new("scope", "BLOB", 1, null, 1),
+                new("generation", "BLOB", 1, null, 0)
+            ],
             ["client_mailbox_inbox"] =
             [
                 new("scope", "BLOB", 1, null, 1),
@@ -3568,6 +3578,7 @@ public sealed partial class SqliteSessionStore :
             ["sqlite_autoindex_membership_trust_heads_1"] = new("membership_trust_heads", true, "pk", false, [Asc("profile_key"), Asc("domain")]),
             ["sqlite_autoindex_membership_trust_clock_1"] = new("membership_trust_clock", true, "pk", false, [Asc("profile_key")]),
             ["sqlite_autoindex_client_mailbox_traversal_1"] = new("client_mailbox_traversal", true, "pk", false, [Asc("scope")]),
+            ["sqlite_autoindex_client_mailbox_poll_clock_1"] = new("client_mailbox_poll_clock", true, "pk", false, [Asc("scope")]),
             ["sqlite_autoindex_client_mailbox_inbox_1"] = new("client_mailbox_inbox", true, "pk", false, [Asc("scope"), Asc("cursor")]),
             ["sqlite_autoindex_client_mailbox_inbox_2"] = new("client_mailbox_inbox", true, "u", false, [Asc("scope"), Asc("digest")]),
             ["sqlite_autoindex_client_mailbox_expired_quarantine_1"] = new("client_mailbox_expired_quarantine", true, "pk", false, [Asc("scope"), Asc("cursor"), Asc("digest")]),
