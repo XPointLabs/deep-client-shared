@@ -79,7 +79,8 @@ public sealed class InMemoryScopedMailboxCredentialRepository :
                         canonical,
                         authority.NetworkId.ToArray(),
                         authority.PolicyFingerprint.ToArray(),
-                        generation.Current.Epoch));
+                        ScopedMailboxCredentialValidator.ActiveEpochForInstall(
+                            generation, authority)));
             }
             fault?.Invoke(
                 InMemoryScopedMailboxFaultPoint.ImportBeforePublish);
@@ -116,7 +117,8 @@ public sealed class InMemoryScopedMailboxCredentialRepository :
                     canonical,
                     authority.NetworkId.ToArray(),
                     authority.PolicyFingerprint.ToArray(),
-                    generation.Current.Epoch);
+                    ScopedMailboxCredentialValidator.ActiveEpochForInstall(
+                        generation, authority));
                 var counterPrefix = key + ":";
                 var overlapMarker = ":" + generation.Current.Epoch.ToString("X16") + ":";
                 foreach (var counterKey in candidate.Counters.Keys

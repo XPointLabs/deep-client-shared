@@ -1044,7 +1044,9 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
                 insert.Parameters.Add("$authorityPolicy", SqliteType.Blob).Value = authority.PolicyFingerprint.ToArray();
                 insert.Parameters.Add("$holder", SqliteType.Blob).Value = generation.HolderPublicKey.ToArray();
                 insert.Parameters.Add("$generation", SqliteType.Blob).Value = generation.Generation.ToArray();
-                insert.Parameters.Add("$epoch", SqliteType.Blob).Value = MailboxU64(generation.Current.Epoch);
+                insert.Parameters.Add("$epoch", SqliteType.Blob).Value = MailboxU64(
+                    ScopedMailboxCredentialValidator.ActiveEpochForInstall(
+                        generation, authority));
                 insert.Parameters.Add("$membership", SqliteType.Blob).Value =
                     selector.GroupMembershipCommitment.IsEmpty
                         ? DBNull.Value : selector.GroupMembershipCommitment.ToArray();
@@ -1106,7 +1108,9 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
                 WHERE scope_id=$scope;
                 """;
             update.Parameters.Add("$generation", SqliteType.Blob).Value = generation.Generation.ToArray();
-            update.Parameters.Add("$active", SqliteType.Blob).Value = MailboxU64(generation.Current.Epoch);
+            update.Parameters.Add("$active", SqliteType.Blob).Value = MailboxU64(
+                ScopedMailboxCredentialValidator.ActiveEpochForInstall(
+                    generation, authority));
             update.Parameters.Add("$authorityPolicy", SqliteType.Blob).Value = authority.PolicyFingerprint.ToArray();
             update.Parameters.Add("$scope", SqliteType.Blob).Value = generation.Selector.ScopeId.ToArray();
             if (update.ExecuteNonQuery() != 1)

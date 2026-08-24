@@ -233,6 +233,29 @@ public sealed class ScopedMailboxRepositoryConformanceTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task Install_after_current_expiry_starts_on_exact_valid_next_epoch(
+        bool inMemory)
+    {
+        using var fixture = new Fixture(inMemory);
+        fixture.Clock.Set(1201);
+
+        await fixture.Repository.InstallScopedCredentialAsync(
+            fixture.Self, fixture.Authority);
+        var active = await fixture.Repository.ReadScopedMailboxRouteAsync(
+            fixture.SelfSelector, fixture.Authority);
+
+        Assert.Equal(8UL, active.Epoch);
+        Assert.Equal(
+            fixture.Self.NextReplicas.FirstId.ToArray(),
+            active.Replicas.FirstId.ToArray());
+        Assert.Equal(
+            fixture.Self.NextReplicas.SecondId.ToArray(),
+            active.Replicas.SecondId.ToArray());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task Prepared_retry_cannot_rebind_to_rotated_epoch_or_replica_pair(
         bool inMemory)
     {

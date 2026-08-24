@@ -97,6 +97,34 @@ public sealed partial class MailboxCredentialBundleImporterTests
     }
 
     [Fact]
+    public async Task Exact_pair_reimport_after_current_expiry_preserves_promoted_next_epoch()
+    {
+        using var fixture = Fixture.Create(revocationLifetimeMinutes: 120);
+        using var identity = new SessionIdentityProvider(AlicePhrase);
+        using var store = new SqliteSessionStore(fixture.DatabasePath);
+
+        var initial = await MailboxCredentialBundleImporter.ImportAsync(
+            store, identity, fixture.AndroidOptions,
+            MailboxInfrastructureOwnership.UserManaged);
+        var afterHandoff = fixture.AndroidOptions with
+        {
+            TimeProvider = new FrozenTimeProvider(Now.AddMinutes(31))
+        };
+
+        var repeated = await MailboxCredentialBundleImporter.ImportAsync(
+            store, identity, afterHandoff,
+            MailboxInfrastructureOwnership.UserManaged);
+        var route = await store.ReadScopedMailboxRouteAsync(
+            repeated.SelfSelector, repeated.Authority);
+
+        Assert.Equal(8UL, route.Epoch);
+        Assert.Equal(initial.SelfSelector.ScopeId.ToArray(),
+            repeated.SelfSelector.ScopeId.ToArray());
+        Assert.Equal(4, CountRows(
+            fixture.DatabasePath, "mailbox_credential_epochs"));
+    }
+
+    [Fact]
     public async Task Commit_fault_publishes_neither_credentials_receipts_nor_live_policy()
     {
         using var fixture = Fixture.Create();

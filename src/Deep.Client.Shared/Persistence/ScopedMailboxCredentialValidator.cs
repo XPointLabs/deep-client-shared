@@ -57,7 +57,9 @@ internal static class ScopedMailboxCredentialValidator
                 value.Current.ExpiresAtUnixSeconds ||
             value.Current.ExpiresAtUnixSeconds >=
                 value.Next.ExpiresAtUnixSeconds ||
-            authority.NowUnixSeconds > value.Current.ExpiresAtUnixSeconds ||
+            authority.NowUnixSeconds > value.Next.ExpiresAtUnixSeconds ||
+            authority.NowUnixSeconds > value.Current.ExpiresAtUnixSeconds &&
+                authority.NowUnixSeconds < value.Next.NotBeforeUnixSeconds ||
             !Fixed(
                 value.Current.PlacementCommitment.Span,
                 MailboxPlacementCommitment.Compute(
@@ -81,6 +83,17 @@ internal static class ScopedMailboxCredentialValidator
 
         ValidateEpoch(value, value.Current, authority, serials);
         ValidateEpoch(value, value.Next, authority, serials);
+    }
+
+    internal static ulong ActiveEpochForInstall(
+        ScopedMailboxCredentialGeneration value,
+        VerifiedOfficialMailboxAuthority authority)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        ArgumentNullException.ThrowIfNull(authority);
+        return authority.NowUnixSeconds > value.Current.ExpiresAtUnixSeconds
+            ? value.Next.Epoch
+            : value.Current.Epoch;
     }
 
     internal static MailboxAuthenticatedGrant ValidateCanonicalGrant(
