@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
 using System.Reflection;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using Deep.Client.Shared.Services;
 
@@ -9,6 +10,22 @@ namespace Deep.Client.Shared.Tests.Services;
 [Collection("HTTP default proxy isolation")]
 public sealed class HttpServiceEndpointPolicyTests
 {
+    [Fact]
+    public void FactoryOwnedHandler_UsesOnlySystemTlsValidationWithOnlineRevocation()
+    {
+        using var handler = HttpServiceTransportFactory.CreateHttpHandler(
+            new HttpServiceClientOptions(),
+            new HttpServiceNetworkHooks());
+
+        Assert.Null(handler.SslOptions.RemoteCertificateValidationCallback);
+        Assert.Equal(
+            X509RevocationMode.Online,
+            handler.SslOptions.CertificateRevocationCheckMode);
+        Assert.False(handler.AllowAutoRedirect);
+        Assert.False(handler.UseCookies);
+        Assert.False(handler.UseProxy);
+    }
+
     [Fact]
     public void PhysicalFactory_ConstructsAllSevenTransportsWithPlatformNeutralDefaultPaths()
     {

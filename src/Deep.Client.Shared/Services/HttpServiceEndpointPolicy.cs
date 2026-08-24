@@ -1,6 +1,6 @@
 using System.Net;
-using System.Net.Security;
 using System.Net.Sockets;
+using System.Security.Cryptography.X509Certificates;
 using System.Text.RegularExpressions;
 
 namespace Deep.Client.Shared.Services;
@@ -352,8 +352,7 @@ public sealed record HttpServiceClientOptions(
     string? UserAgent = null);
 
 internal sealed record HttpServiceNetworkHooks(
-    Func<SocketsHttpConnectionContext, CancellationToken, ValueTask<Stream>>? ConnectCallback = null,
-    RemoteCertificateValidationCallback? ServerCertificateValidationCallback = null);
+    Func<SocketsHttpConnectionContext, CancellationToken, ValueTask<Stream>>? ConnectCallback = null);
 
 public sealed class HttpServiceTransportFactory
 {
@@ -468,10 +467,28 @@ public sealed class HttpServiceTransportFactory
         HttpServiceClientOptions? options,
         HttpServiceNetworkHooks? networkHooks)
     {
-        options ??= new HttpServiceClientOptions();
-        var timeout = options.Timeout == default
+        var handler = CreateHttpHandler(options, networkHooks);
+        var timeout = options is null || options.Timeout == default
             ? TimeSpan.FromSeconds(100)
             : options.Timeout;
+
+        var client = new HttpClient(handler, disposeHandler: true)
+        {
+            Timeout = timeout
+        };
+        if (!string.IsNullOrWhiteSpace(options?.UserAgent))
+        {
+            client.DefaultRequestHeaders.UserAgent.ParseAdd(options.UserAgent);
+        }
+
+        return client;
+    }
+
+    internal static SocketsHttpHandler CreateHttpHandler(
+        HttpServiceClientOptions? options,
+        HttpServiceNetworkHooks? networkHooks)
+    {
+        options ??= new HttpServiceClientOptions();
         var connectTimeout = options.ConnectTimeout == default
             ? TimeSpan.FromSeconds(10)
             : options.ConnectTimeout;
@@ -481,6 +498,9 @@ public sealed class HttpServiceTransportFactory
         var lifetime = options.PooledConnectionLifetime == default
             ? TimeSpan.FromMinutes(5)
             : options.PooledConnectionLifetime;
+        var timeout = options.Timeout == default
+            ? TimeSpan.FromSeconds(100)
+            : options.Timeout;
         if (timeout <= TimeSpan.Zero ||
             connectTimeout <= TimeSpan.Zero ||
             idleTimeout <= TimeSpan.Zero ||
@@ -498,23 +518,18 @@ public sealed class HttpServiceTransportFactory
             PooledConnectionLifetime = lifetime,
             ConnectCallback = networkHooks?.ConnectCallback
         };
-        handler.SslOptions.RemoteCertificateValidationCallback =
-            networkHooks?.ServerCertificateValidationCallback;
 
-        // These invariants are deliberately assigned after caller customization.
+        // Public HTTPS services use the platform validator as the sole TLS
+        // authority. Keep the callback unset so CA, hostname, validity, and
+        // platform policy cannot be replaced by application code, and require
+        // online revocation checking for certificates that advertise it.
+        handler.SslOptions.CertificateRevocationCheckMode = X509RevocationMode.Online;
+
+        // These invariants are deliberately assigned after network customization.
         handler.AllowAutoRedirect = false;
         handler.UseCookies = false;
         handler.UseProxy = false;
 
-        var client = new HttpClient(handler, disposeHandler: true)
-        {
-            Timeout = timeout
-        };
-        if (!string.IsNullOrWhiteSpace(options.UserAgent))
-        {
-            client.DefaultRequestHeaders.UserAgent.ParseAdd(options.UserAgent);
-        }
-
-        return client;
+        return handler;
     }
 }
