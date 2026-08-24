@@ -1103,6 +1103,9 @@ public sealed partial class MailboxCredentialBundleImporterTests
                 localIdentity.SessionId,
                 message.ServerHash);
             Assert.Equal(1, ingress.AcknowledgeCalls);
+            Assert.Null(await ((IMailboxAckCorrelationProjectionSource)native)
+                .ProjectMailboxAckCorrelationAsync(
+                    localIdentity.SessionId, message.ServerHash, default));
         }
 
         using (var reopened = new SqliteSessionStore(fixture.DatabasePath))

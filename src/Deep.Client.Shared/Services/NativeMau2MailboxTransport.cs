@@ -477,6 +477,10 @@ public sealed class NativeMau2MailboxTransport :
                     request.Acknowledgements[0].EnvelopeDigest.Span, digest))
                 throw new InvalidDataException(
                     "Persisted ACK outbox does not match the exact inbox row.");
+            if ((item.State == TransportOutboxState.Prepared && item.Attempts.Count == 0)
+                || (item.State == TransportOutboxState.Durable && item.Attempts.Count == 1
+                    && item.Attempts[0].State == TransportOutboxAttemptState.Durable))
+                return null;
             var state = item.State switch
             {
                 TransportOutboxState.Attempted when item.Attempts.Count == 1
