@@ -66,6 +66,11 @@ Use `deep-protocol` for protocol and crypto semantics. Do not recreate protocol 
   repository miss may create new DPE1 ciphertext and counters.
   Free direct P2P does not enter this resolver and requires the explicit
   non-official `IDirectP2pSessionMessageTransport` composition capability.
+- Direct-message receive drains at most 256 ordered durable inbox items per
+  foreground synchronization. One-item MAU2 retrieval remains unchanged: each
+  item is applied to durable domain state and acknowledged before the next
+  continuation is requested. Deferred items stop the drain without an ACK, and
+  batch transports are never polled repeatedly by this rule.
 
 ## Non-Negotiable Runtime Parity
 

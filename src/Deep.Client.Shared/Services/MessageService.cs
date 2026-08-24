@@ -167,21 +167,52 @@ public sealed class MessageService(
     public async Task<IReadOnlyList<Message>> ReceiveAsync(SessionId recipient, CancellationToken cancellationToken = default)
     {
         await RepairSelfConversationAsync(recipient, cancellationToken).ConfigureAwait(false);
-        var envelopes = await transport.ReceiveAsync(recipient, cancellationToken).ConfigureAwait(false);
-        var received = new List<Message>(envelopes.Count);
+        var received = new List<Message>();
+        var orderedDurableDrain = transport is IDurableInboxAcknowledger;
+        var remainingOrderedItems = DurableInboxLimits.MaxBatchCount;
 
-        foreach (var envelope in envelopes.OrderBy(static envelope => envelope.Reaction is not null))
+        while (remainingOrderedItems > 0)
         {
-            var applied = await ApplyDirectEnvelopeAsync(recipient, envelope, cancellationToken).ConfigureAwait(false);
-            if (applied.ShouldAcknowledge)
+            var envelopes = await transport.ReceiveAsync(recipient, cancellationToken).ConfigureAwait(false);
+            if (envelopes.Count == 0)
             {
-                await AcknowledgeInboxItemAsync(transport, recipient, envelope.ServerHash, cancellationToken)
-                    .ConfigureAwait(false);
+                break;
             }
 
-            if (applied.Message is not null)
+            if (orderedDurableDrain && envelopes.Count > remainingOrderedItems)
             {
-                received.Add(applied.Message);
+                throw new InvalidOperationException(
+                    "The durable inbox exceeded the bounded receive drain.");
+            }
+
+            // Native MAU2 deliberately exposes one ordered item per retrieve so its
+            // continuation authority can be acknowledged only after durable domain
+            // application. Drain that lane inside one public receive, but never loop a
+            // general batch transport or a deferred, unacknowledged item.
+            var continueOrderedDrain = orderedDurableDrain && envelopes.Count == 1;
+            foreach (var envelope in envelopes.OrderBy(static envelope => envelope.Reaction is not null))
+            {
+                var applied = await ApplyDirectEnvelopeAsync(recipient, envelope, cancellationToken).ConfigureAwait(false);
+                if (applied.ShouldAcknowledge)
+                {
+                    await AcknowledgeInboxItemAsync(transport, recipient, envelope.ServerHash, cancellationToken)
+                        .ConfigureAwait(false);
+                    remainingOrderedItems--;
+                }
+                else
+                {
+                    continueOrderedDrain = false;
+                }
+
+                if (applied.Message is not null)
+                {
+                    received.Add(applied.Message);
+                }
+            }
+
+            if (!continueOrderedDrain)
+            {
+                break;
             }
         }
 

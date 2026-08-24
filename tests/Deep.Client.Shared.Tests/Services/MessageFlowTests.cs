@@ -419,6 +419,107 @@ public sealed class MessageFlowTests
     }
 
     [Fact]
+    public async Task ReceiveAsync_DrainsOrderedDurableItemsOnlyAfterEachAcknowledgement()
+    {
+        var clock = new FrozenClock(DateTimeOffset.Parse("2026-05-28T00:00:00Z"));
+        var transport = new OrderedDurableMessageTransport();
+        var runtime = new ClientRuntime(
+            new InMemorySessionStore(),
+            Deep.Client.Shared.Features.ClientFeatureFlags.Defaults,
+            clock,
+            transport);
+        var recipient = await runtime.Accounts.RegisterAsync("Receiver");
+        var sender = SessionId.CreateNew();
+        transport.Enqueue(Inbound("anchor", "anchor-hash", []));
+        transport.Enqueue(Inbound(
+            "voice-message",
+            "voice-hash",
+            [new AttachmentMetadata(
+                "voice-attachment",
+                "voice-message.ogg",
+                "audio/ogg",
+                4096,
+                new Uri("https://files.example.test/voice"),
+                Convert.ToBase64String(new byte[32]),
+                Convert.ToBase64String(Enumerable.Repeat((byte)1, 32).ToArray()))]));
+
+        var received = await runtime.Messages.ReceiveAsync(recipient.SessionId);
+
+        Assert.Equal(["anchor", "voice-message"], received.Select(static message => message.Body));
+        Assert.Equal(["anchor-hash", "voice-hash"], transport.Acknowledged);
+        Assert.Equal(3, transport.ReceiveCount);
+
+        InboundMessageEnvelope Inbound(
+            string body,
+            string serverHash,
+            IReadOnlyList<AttachmentMetadata> attachments) =>
+            new(
+                MessageId.NewId(),
+                sender,
+                recipient.SessionId,
+                body,
+                attachments,
+                clock.UtcNow,
+                null,
+                serverHash);
+    }
+
+    [Fact]
+    public async Task ReceiveAsync_BoundsOrderedDurableDrainAtRepositoryBatchLimit()
+    {
+        var clock = new FrozenClock(DateTimeOffset.Parse("2026-05-28T00:00:00Z"));
+        var transport = new OrderedDurableMessageTransport();
+        var runtime = new ClientRuntime(
+            new InMemorySessionStore(),
+            Deep.Client.Shared.Features.ClientFeatureFlags.Defaults,
+            clock,
+            transport);
+        var recipient = await runtime.Accounts.RegisterAsync("Receiver");
+        var sender = SessionId.CreateNew();
+        for (var index = 0; index <= DurableInboxLimits.MaxBatchCount; index++)
+        {
+            transport.Enqueue(new InboundMessageEnvelope(
+                MessageId.NewId(), sender, recipient.SessionId, $"message-{index}", [],
+                clock.UtcNow.AddMilliseconds(index), null, $"server-hash-{index}"));
+        }
+
+        var first = await runtime.Messages.ReceiveAsync(recipient.SessionId);
+        var second = await runtime.Messages.ReceiveAsync(recipient.SessionId);
+
+        Assert.Equal(DurableInboxLimits.MaxBatchCount, first.Count);
+        Assert.Single(second);
+        Assert.Equal("message-256", second[0].Body);
+        Assert.Equal(DurableInboxLimits.MaxBatchCount + 1, transport.Acknowledged.Count);
+    }
+
+    [Fact]
+    public async Task ReceiveAsync_StopsOrderedDrainWhenReactionMustRemainUnacknowledged()
+    {
+        var clock = new FrozenClock(DateTimeOffset.Parse("2026-05-28T00:00:00Z"));
+        var transport = new OrderedDurableMessageTransport();
+        var runtime = new ClientRuntime(
+            new InMemorySessionStore(),
+            Deep.Client.Shared.Features.ClientFeatureFlags.Defaults,
+            clock,
+            transport);
+        var recipient = await runtime.Accounts.RegisterAsync("Receiver");
+        var sender = SessionId.CreateNew();
+        transport.Enqueue(new InboundMessageEnvelope(
+            MessageId.NewId(), sender, recipient.SessionId, string.Empty, [],
+            clock.UtcNow, null, "deferred-reaction-hash",
+            Reaction: new MessageReactionUpdate(MessageId.NewId(), "👍", Remove: false)));
+        transport.Enqueue(new InboundMessageEnvelope(
+            MessageId.NewId(), sender, recipient.SessionId, "must-not-be-fetched", [],
+            clock.UtcNow, null, "later-hash"));
+
+        var received = await runtime.Messages.ReceiveAsync(recipient.SessionId);
+
+        Assert.Empty(received);
+        Assert.Empty(transport.Acknowledged);
+        Assert.Equal(1, transport.ReceiveCount);
+    }
+
+    [Fact]
     public async Task MarkAsRead_SetsReadCursor_AndUpdatesDeliveryState()
     {
         var clock = new FrozenClock(DateTimeOffset.Parse("2026-05-28T00:00:00Z"));
@@ -845,6 +946,53 @@ public sealed class MessageFlowTests
                 .ToArray();
             envelopes.Clear();
             return Task.FromResult<IReadOnlyList<InboundMessageEnvelope>>(result);
+        }
+    }
+
+    private sealed class OrderedDurableMessageTransport :
+        ISessionMessageTransport,
+        IDurableInboxAcknowledger
+    {
+        private readonly Queue<InboundMessageEnvelope> pending = new();
+        private InboundMessageEnvelope? current;
+
+        public List<string> Acknowledged { get; } = [];
+        public int ReceiveCount { get; private set; }
+
+        public void Enqueue(InboundMessageEnvelope envelope) => pending.Enqueue(envelope);
+
+        public Task SendAsync(
+            OutboundMessageEnvelope envelope,
+            CancellationToken cancellationToken = default) =>
+            Task.CompletedTask;
+
+        public Task<IReadOnlyList<InboundMessageEnvelope>> ReceiveAsync(
+            SessionId recipient,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            ReceiveCount++;
+            current ??= pending.Count == 0 ? null : pending.Dequeue();
+            IReadOnlyList<InboundMessageEnvelope> result = current is null ? [] : [current];
+            return Task.FromResult(result);
+        }
+
+        public Task AcknowledgeInboxItemAsync(
+            SessionId account,
+            string serverHash,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (current is null ||
+                current.Recipient != account ||
+                !string.Equals(current.ServerHash, serverHash, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("Acknowledgement is not the ordered current item.");
+            }
+
+            Acknowledged.Add(serverHash);
+            current = null;
+            return Task.CompletedTask;
         }
     }
 
