@@ -79,7 +79,7 @@ public sealed class MailboxCredentialSelector
 public sealed class VerifiedOfficialMailboxAuthority
 {
     private static ReadOnlySpan<byte> FingerprintDomain =>
-        "deep.mailbox.authenticated-authority-policy.v1"u8;
+        "deep.mailbox.authenticated-authority-policy.v2"u8;
     private readonly byte[] networkId;
     private readonly byte[] policyFingerprint;
     private readonly Func<bool> entitlement;
@@ -238,12 +238,6 @@ public sealed class VerifiedOfficialMailboxAuthority
             hash.AppendData(encoded);
             System.Buffers.Binary.BinaryPrimitives.WriteUInt64BigEndian(
                 encoded, issuer.MaximumGeneration);
-            hash.AppendData(encoded);
-            System.Buffers.Binary.BinaryPrimitives.WriteUInt64BigEndian(
-                encoded, issuer.ValidFromUnixSeconds);
-            hash.AppendData(encoded);
-            System.Buffers.Binary.BinaryPrimitives.WriteUInt64BigEndian(
-                encoded, issuer.ValidUntilUnixSeconds);
             hash.AppendData(encoded);
         }
         return hash.GetHashAndReset();

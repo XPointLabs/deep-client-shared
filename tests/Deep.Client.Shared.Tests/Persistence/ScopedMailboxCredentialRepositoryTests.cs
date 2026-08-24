@@ -61,6 +61,30 @@ public sealed class ScopedMailboxCredentialRepositoryTests
     }
 
     [Fact]
+    public void AuthorityPolicyFingerprintIsStableAcrossAuthenticatedWindowRenewal()
+    {
+        var first = Authority(Issuer(Bytes(32, 9)) with
+        {
+            ValidFromUnixSeconds = 100,
+            ValidUntilUnixSeconds = 200
+        });
+        var renewed = Authority(Issuer(Bytes(32, 9)) with
+        {
+            ValidFromUnixSeconds = 150,
+            ValidUntilUnixSeconds = 300
+        });
+        var changedGeneration = Authority(Issuer(Bytes(32, 9)) with
+        {
+            MaximumGeneration = 2,
+            ValidFromUnixSeconds = 150,
+            ValidUntilUnixSeconds = 300
+        });
+
+        Assert.Equal(first.PolicyFingerprint.ToArray(), renewed.PolicyFingerprint.ToArray());
+        Assert.NotEqual(first.PolicyFingerprint.ToArray(), changedGeneration.PolicyFingerprint.ToArray());
+    }
+
+    [Fact]
     public async Task TargetOverflowFailsBeforeSignerOrDatabaseMutation()
     {
         var path = Path.Combine(
@@ -116,7 +140,11 @@ public sealed class ScopedMailboxCredentialRepositoryTests
     }
 
     private static VerifiedOfficialMailboxAuthority Authority() =>
-        new(Bytes(16, 8), 1, [Issuer(Bytes(32, 9))], true,
+        Authority(Issuer(Bytes(32, 9)));
+
+    private static VerifiedOfficialMailboxAuthority Authority(
+        MailboxCapabilityIssuerAuthority issuer) =>
+        new(Bytes(16, 8), 1, [issuer], true,
             static () => true,
             new NoRevocations(),
             TimeProvider.System);
