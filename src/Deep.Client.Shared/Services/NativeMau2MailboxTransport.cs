@@ -16,6 +16,7 @@ public sealed class NativeMau2MailboxTransport :
     IAuthenticatedOpaqueMailboxTransport,
     IResumableMailboxIdentityAuthenticatedRawTransport,
     IAuthenticatedInboxTransport,
+    IMailboxAckCorrelationProjectionSource,
     IMetadataPrivateSessionMessageTransport,
     IDisposable
 {
@@ -28,6 +29,7 @@ public sealed class NativeMau2MailboxTransport :
 
     private readonly ClientMailboxAdapter adapter;
     private readonly IScopedMailboxCredentialRepository credentials;
+    private readonly ITransportOutboxRepository outbox;
     private readonly VerifiedOfficialMailboxAuthority authority;
     private readonly IMailboxClientDecodePolicyProvider decodePolicies;
     private readonly Func<SessionId, MailboxCredentialSelector> selfSelector;
@@ -50,6 +52,7 @@ public sealed class NativeMau2MailboxTransport :
     {
         ArgumentNullException.ThrowIfNull(ingress);
         credentials = localStore ?? throw new ArgumentNullException(nameof(localStore));
+        outbox = localStore;
         this.authority = authority ?? throw new ArgumentNullException(nameof(authority));
         this.decodePolicies = decodePolicies ?? throw new ArgumentNullException(nameof(decodePolicies));
         this.selfSelector = selfSelector ?? throw new ArgumentNullException(nameof(selfSelector));
@@ -426,6 +429,86 @@ public sealed class NativeMau2MailboxTransport :
             traversal.ContinuationToken.ToArray(),
             [new MailboxAcknowledgement { Cursor = cursor, EnvelopeDigest = digest }],
             cancellationToken).ConfigureAwait(false);
+    }
+
+    async Task<MailboxAckCorrelationProjection?>
+        IMailboxAckCorrelationProjectionSource.ProjectMailboxAckCorrelationAsync(
+        SessionId account,
+        string serverHash,
+        CancellationToken cancellationToken)
+    {
+        ThrowIfDisposed();
+        var selector = RequireSelfSelector(account);
+        var (cursor, digest) = DecodeItemHandle(serverHash);
+        byte[]? material = null;
+        byte[]? operationId = null;
+        byte[]? canonical = null;
+        byte[]? canonicalHash = null;
+        try
+        {
+            material = CursorMaterial(cursor, digest);
+            operationId = OperationId(AckOperationDomain, material);
+            var logicalId = OutboxLogicalId.FromBytes(operationId);
+            var read = await outbox.ReadTransportOutboxAsync(
+                selector.AccountScope, logicalId, cancellationToken).ConfigureAwait(false);
+            if (read.Result == TransportOutboxReadResult.Missing) return null;
+            var item = read.Result == TransportOutboxReadResult.Found
+                ? read.Item ?? throw new InvalidDataException(
+                    "ACK outbox projection returned no item.")
+                : throw new InvalidDataException("ACK outbox projection returned an invalid result.");
+            canonical = item.GetCiphertextBundleCopy();
+            var authenticated = MailboxAuthenticatedClientRequestCodec.Decode(canonical);
+            if (authenticated.Binding.Operation != MailboxAuthenticatedOperation.Ack
+                || authenticated.Presentation.Operation != MailboxAuthenticatedOperation.Ack
+                || !CryptographicOperations.FixedTimeEquals(
+                    authenticated.Binding.OperationId.Span, operationId)
+                || !CryptographicOperations.FixedTimeEquals(
+                    item.LogicalId.Value, operationId)
+                || !CryptographicOperations.FixedTimeEquals(
+                    item.DedupMaterial.Value, authenticated.Binding.RequestDigest.Span))
+                throw new InvalidDataException(
+                    "Persisted ACK outbox binding is not canonical.");
+            var request = MailboxAuthenticatedRequestTranscript.DecodeAckBody(
+                authenticated.Binding.CanonicalRequest.Span);
+            if (!CryptographicOperations.FixedTimeEquals(request.OperationId.Span, operationId)
+                || request.Acknowledgements.Count != 1
+                || request.Acknowledgements[0].Cursor != cursor
+                || !CryptographicOperations.FixedTimeEquals(
+                    request.Acknowledgements[0].EnvelopeDigest.Span, digest))
+                throw new InvalidDataException(
+                    "Persisted ACK outbox does not match the exact inbox row.");
+            var state = item.State switch
+            {
+                TransportOutboxState.Attempted when item.Attempts.Count == 1
+                    && item.Attempts[0].State == TransportOutboxAttemptState.Attempted =>
+                    MailboxAckCorrelationState.AmbiguousAttempted,
+                TransportOutboxState.Durable when item.Attempts.Count == 2
+                    && item.Attempts.Count(static attempt =>
+                        attempt.State == TransportOutboxAttemptState.Attempted) == 1
+                    && item.Attempts.Count(static attempt =>
+                        attempt.State == TransportOutboxAttemptState.Durable) == 1 =>
+                    MailboxAckCorrelationState.RecoveredDurable,
+                _ => throw new InvalidDataException(
+                    "Persisted ACK outbox is not an exact crash-recovery lifecycle.")
+            };
+            canonicalHash = SHA256.HashData(canonical);
+            using var correlation = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            correlation.AppendData("deep.physical-e2e.ack-correlation.v1\0"u8);
+            correlation.AppendData(operationId);
+            correlation.AppendData(canonicalHash);
+            return new MailboxAckCorrelationProjection(
+                Convert.ToHexStringLower(correlation.GetHashAndReset()),
+                state,
+                item.Attempts.Count);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(digest);
+            if (material is not null) CryptographicOperations.ZeroMemory(material);
+            if (operationId is not null) CryptographicOperations.ZeroMemory(operationId);
+            if (canonical is not null) CryptographicOperations.ZeroMemory(canonical);
+            if (canonicalHash is not null) CryptographicOperations.ZeroMemory(canonicalHash);
+        }
     }
 
     public void Dispose()

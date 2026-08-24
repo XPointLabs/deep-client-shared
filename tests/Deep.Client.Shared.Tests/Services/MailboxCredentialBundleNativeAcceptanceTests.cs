@@ -970,6 +970,96 @@ public sealed partial class MailboxCredentialBundleImporterTests
     }
 
     [Fact]
+    public async Task AckCorrelationProjection_ProvesSamePersistedCanonicalRequestAcrossRecovery()
+    {
+        using var fixture = Fixture.Create();
+        using var identity = new SessionIdentityProvider(AlicePhrase);
+        var clock = new MutableTimeProvider(Now);
+        var ingress = new DropFirstAckResponseIngress(clock);
+        ImportedMailboxRuntimeMaterial imported;
+        string serverHash;
+        string ambiguousHash;
+        using var signer = new AcceptanceMailboxSigner(identity);
+        using (var firstStore = new SqliteSessionStore(fixture.DatabasePath))
+        {
+            imported = await MailboxCredentialBundleImporter.ImportAsync(
+                firstStore,
+                identity,
+                fixture.AndroidOptions with { TimeProvider = clock },
+                MailboxInfrastructureOwnership.UserManaged);
+            using var first = Native(firstStore);
+            var entry = Assert.Single((await first.RetrieveAuthenticatedAsync(
+                identity, cursor: null, limit: 1)).Entries);
+            serverHash = entry.ServerHash;
+            await Assert.ThrowsAsync<ClientMailboxTransportException>(() =>
+                first.AcknowledgeOpaqueMailboxInboxAsync(signer, serverHash));
+            var ambiguous = Assert.IsType<MailboxAckCorrelationProjection>(
+                await ((IMailboxAckCorrelationProjectionSource)first)
+                    .ProjectMailboxAckCorrelationAsync(
+                        identity.SessionId, serverHash, default));
+            Assert.Equal(MailboxAckCorrelationState.AmbiguousAttempted, ambiguous.State);
+            Assert.Equal(1, ambiguous.AttemptCount);
+            Assert.Matches("^[a-f0-9]{64}$", ambiguous.CorrelationHash);
+            ambiguousHash = ambiguous.CorrelationHash;
+        }
+
+        clock.Set(clock.GetUtcNow().AddMinutes(1));
+        using var reopened = new SqliteSessionStore(fixture.DatabasePath);
+        using var restarted = Native(reopened);
+        await restarted.AcknowledgeOpaqueMailboxInboxAsync(signer, serverHash);
+        var recovered = Assert.IsType<MailboxAckCorrelationProjection>(
+            await ((IMailboxAckCorrelationProjectionSource)restarted)
+                .ProjectMailboxAckCorrelationAsync(
+                    identity.SessionId, serverHash, default));
+        Assert.Equal(MailboxAckCorrelationState.RecoveredDurable, recovered.State);
+        Assert.Equal(2, recovered.AttemptCount);
+        Assert.Equal(ambiguousHash, recovered.CorrelationHash);
+
+        var unrelated = serverHash[..^1]
+            + (serverHash[^1] == '0' ? '1' : '0');
+        Assert.Null(await ((IMailboxAckCorrelationProjectionSource)restarted)
+            .ProjectMailboxAckCorrelationAsync(identity.SessionId, unrelated, default));
+
+        NativeMau2MailboxTransport Native(SqliteSessionStore store) => new(
+            ClientFeatureFlags.Defaults with { ClientMailboxAdapterEnabled = true },
+            imported.Activation,
+            ingress,
+            store,
+            new PinnedClientMailboxReceiptVerifier(
+                new SodiumClientMailboxReceiptCrypto()),
+            imported.DecodePolicies,
+            imported.Authority,
+            sessionId => sessionId == imported.LocalSessionId
+                ? imported.SelfSelector
+                : throw new InvalidOperationException(
+                    "The acceptance transport has no selector for another identity."),
+            timeProvider: clock);
+    }
+
+    [Fact]
+    public void AckCorrelationProjection_DoesNotExpandThePublicTransportSurface()
+    {
+        var assembly = typeof(E2eeClientTransport).Assembly;
+        var source = assembly.GetType(
+            "Deep.Client.Shared.Services.IMailboxAckCorrelationProjectionSource");
+        var projection = assembly.GetType(
+            "Deep.Client.Shared.Services.MailboxAckCorrelationProjection");
+        var state = assembly.GetType(
+            "Deep.Client.Shared.Services.MailboxAckCorrelationState");
+
+        Assert.NotNull(source);
+        Assert.NotNull(projection);
+        Assert.NotNull(state);
+        Assert.False(source.IsPublic);
+        Assert.False(projection.IsPublic);
+        Assert.False(state.IsPublic);
+        Assert.Null(typeof(E2eeClientTransport).GetMethod(
+            "ProjectMailboxAckCorrelationAsync"));
+        Assert.Null(typeof(NativeMau2MailboxTransport).GetMethod(
+            "ProjectMailboxAckCorrelationAsync"));
+    }
+
+    [Fact]
     public async Task E2eeGenericCursor_SurvivesNativeAckAndFullRestart_WithoutReplay()
     {
         using var fixture = Fixture.Create();
@@ -1505,6 +1595,37 @@ public sealed partial class MailboxCredentialBundleImporterTests
             ReadOnlyMemory<byte> canonicalMau2,
             CancellationToken cancellationToken = default) =>
             inner.AcknowledgeAsync(canonicalMau2, cancellationToken);
+    }
+
+    private sealed class DropFirstAckResponseIngress(TimeProvider timeProvider) :
+        IClientMailboxBinaryIngress
+    {
+        private readonly ScriptedCursorIngress inner = new(timeProvider);
+        private int acknowledgeCalls;
+
+        public Task<ReadOnlyMemory<byte>> StoreAsync(
+            ReadOnlyMemory<byte> canonicalMau2,
+            CancellationToken cancellationToken = default) =>
+            inner.StoreAsync(canonicalMau2, cancellationToken);
+
+        public Task<ReadOnlyMemory<byte>> RetrieveAsync(
+            ReadOnlyMemory<byte> canonicalMau2,
+            CancellationToken cancellationToken = default) =>
+            inner.RetrieveAsync(canonicalMau2, cancellationToken);
+
+        public async Task<ReadOnlyMemory<byte>> AcknowledgeAsync(
+            ReadOnlyMemory<byte> canonicalMau2,
+            CancellationToken cancellationToken = default)
+        {
+            var response = await inner.AcknowledgeAsync(
+                canonicalMau2, cancellationToken).ConfigureAwait(false);
+            if (Interlocked.Increment(ref acknowledgeCalls) == 1)
+                throw new ClientMailboxTransportException(
+                    ClientMailboxTransportFailure.NetworkUnavailable,
+                    true,
+                    "Simulated durable ACK response loss.");
+            return response;
+        }
     }
 
     private sealed class EmptyThenMessageRetrieveIngress(TimeProvider timeProvider) :

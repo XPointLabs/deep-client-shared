@@ -434,6 +434,25 @@ public interface IDurableInboxAcknowledger
         CancellationToken cancellationToken = default);
 }
 
+internal interface IMailboxAckCorrelationProjectionSource
+{
+    Task<MailboxAckCorrelationProjection?> ProjectMailboxAckCorrelationAsync(
+        SessionId account,
+        string serverHash,
+        CancellationToken cancellationToken = default);
+}
+
+internal enum MailboxAckCorrelationState
+{
+    AmbiguousAttempted = 1,
+    RecoveredDurable = 2
+}
+
+internal sealed record MailboxAckCorrelationProjection(
+    string CorrelationHash,
+    MailboxAckCorrelationState State,
+    int AttemptCount);
+
 public interface IKnownGroupInboxReceiver
 {
     Task<IReadOnlyList<InboundGroupMessageEnvelope>> ReceiveKnownGroupMessagesAsync(
@@ -454,6 +473,7 @@ public sealed class E2eeClientTransport :
     ISessionMessageTransport,
     IGroupSyncTransport,
     IDurableInboxAcknowledger,
+    IMailboxAckCorrelationProjectionSource,
     IKnownGroupInboxReceiver,
     IGroupInboxMaintenance,
     IDisposable
@@ -1177,6 +1197,15 @@ public sealed class E2eeClientTransport :
             throw new E2eeProtocolException("The durable inbox replay digest changed before acknowledgement.");
         }
     }
+
+    Task<MailboxAckCorrelationProjection?>
+        IMailboxAckCorrelationProjectionSource.ProjectMailboxAckCorrelationAsync(
+        SessionId account,
+        string serverHash,
+        CancellationToken cancellationToken) =>
+        rawTransport is IMailboxAckCorrelationProjectionSource source
+            ? source.ProjectMailboxAckCorrelationAsync(account, serverHash, cancellationToken)
+            : Task.FromResult<MailboxAckCorrelationProjection?>(null);
 
     private async Task<IReadOnlyList<DecodedCandidate>> ReceiveCandidatesAsync(
         SessionIdentityProvider identity,
