@@ -19,7 +19,8 @@ public sealed class NativeMailboxAdapterTests
             parameter => parameter.ParameterType == typeof(MailboxCredentialSelector));
         Assert.DoesNotContain(retrieve.GetParameters(),
             parameter => parameter.ParameterType == typeof(BlindedMailboxId) ||
-                         parameter.ParameterType == typeof(ulong));
+                         parameter.ParameterType == typeof(ulong) ||
+                         parameter.ParameterType == typeof(ReadOnlyMemory<byte>));
         Assert.DoesNotContain(acknowledge.GetParameters(),
             parameter => parameter.ParameterType == typeof(BlindedMailboxId) ||
                          parameter.ParameterType == typeof(ulong));

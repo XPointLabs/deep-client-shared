@@ -23,8 +23,6 @@ public sealed class NativeMau2MailboxTransport :
     private const int RetrievalLimit = 1;
     private static ReadOnlySpan<byte> StoreOperationDomain =>
         "deep.mau2.store-operation.v1"u8;
-    private static ReadOnlySpan<byte> RetrieveOperationDomain =>
-        "deep.mau2.retrieve-operation.v1"u8;
     private static ReadOnlySpan<byte> AckOperationDomain =>
         "deep.mau2.ack-operation.v1"u8;
 
@@ -388,16 +386,8 @@ public sealed class NativeMau2MailboxTransport :
         ArgumentNullException.ThrowIfNull(signer);
         ArgumentNullException.ThrowIfNull(continuation);
         var selector = RequireSelfSelector(signer.SessionId);
-        var current = await adapter.ReadTraversalAsync(selector, cancellationToken)
-            .ConfigureAwait(false);
-        var operationId = OperationId(
-            RetrieveOperationDomain,
-            RetrievalMaterial(
-                current.PollGeneration,
-                continuation.AfterCursor,
-                continuation.GetTokenCopy()));
         var result = await adapter.RetrieveAsync(
-            selector.AccountScope, signer, selector, operationId,
+            selector.AccountScope, signer, selector,
             RetrievalLimit, cancellationToken).ConfigureAwait(false);
         var durable = result.NewItems.Count > 0
             ? result.NewItems
@@ -576,18 +566,6 @@ public sealed class NativeMau2MailboxTransport :
         var material = new byte[8 + token.Length];
         BinaryPrimitives.WriteUInt64BigEndian(material, cursor);
         token.CopyTo(material.AsSpan(8));
-        return material;
-    }
-
-    private static byte[] RetrievalMaterial(
-        ulong pollGeneration,
-        ulong cursor,
-        ReadOnlySpan<byte> token)
-    {
-        var material = new byte[16 + token.Length];
-        BinaryPrimitives.WriteUInt64BigEndian(material, pollGeneration);
-        BinaryPrimitives.WriteUInt64BigEndian(material.AsSpan(8), cursor);
-        token.CopyTo(material.AsSpan(16));
         return material;
     }
 

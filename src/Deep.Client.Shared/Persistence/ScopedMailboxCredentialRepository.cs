@@ -1198,10 +1198,83 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
         try
         {
             using var connection = OpenConnection();
-            using var command = connection.CreateCommand();
-            command.CommandText = """
+            using var transaction = connection.BeginTransaction(deferred: false);
+            var now = authority.NowUnixSeconds;
+            var route = ReadScopedRouteRow(
+                connection,
+                transaction,
+                selector,
+                authority,
+                epoch: null);
+            if (now > route.ExpiresAtUnixSeconds)
+            {
+                if (route.Epoch == ulong.MaxValue)
+                {
+                    throw new InvalidOperationException(
+                        "Exact scoped mailbox route is unavailable.");
+                }
+                var nextEpoch = checked(route.Epoch + 1);
+                var next = ReadScopedRouteRow(
+                    connection,
+                    transaction,
+                    selector,
+                    authority,
+                    nextEpoch);
+                if (now < next.NotBeforeUnixSeconds ||
+                    now > next.ExpiresAtUnixSeconds)
+                {
+                    throw new InvalidOperationException(
+                        "Exact scoped mailbox route is unavailable.");
+                }
+
+                using var update = connection.CreateCommand();
+                update.Transaction = transaction;
+                update.CommandText = """
+                    UPDATE mailbox_credential_scopes SET active_epoch=$next
+                    WHERE scope_id=$scope AND active_epoch=$active;
+                    """;
+                update.Parameters.Add("$scope", SqliteType.Blob).Value =
+                    selector.ScopeId.ToArray();
+                update.Parameters.Add("$next", SqliteType.Blob).Value =
+                    MailboxU64(nextEpoch);
+                update.Parameters.Add("$active", SqliteType.Blob).Value =
+                    MailboxU64(route.Epoch);
+                if (update.ExecuteNonQuery() != 1)
+                {
+                    throw new InvalidOperationException(
+                        "Mailbox epoch changed concurrently.");
+                }
+                route = next;
+            }
+            else if (now < route.NotBeforeUnixSeconds)
+            {
+                throw new InvalidOperationException(
+                    "Exact scoped mailbox route is unavailable.");
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            transaction.Commit();
+            return route.ToResolved();
+        }
+        finally
+        {
+            _databaseGate.Release();
+        }
+    }
+
+    private static ScopedMailboxRouteRow ReadScopedRouteRow(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        MailboxCredentialSelector selector,
+        VerifiedOfficialMailboxAuthority authority,
+        ulong? epoch)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = epoch is null
+            ? """
                 SELECT s.account_scope,s.network_id,s.authority_policy_digest,
-                       s.group_membership_commitment,s.active_epoch,
+                       s.group_membership_commitment,e.epoch,
                        e.not_before,e.expires_at,e.mailbox_id,e.placement_id,
                        e.placement_commitment,e.membership_commitment,
                        e.first_replica_id,e.first_replica_key,
@@ -1210,38 +1283,76 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
                 JOIN mailbox_credential_epochs e
                   ON e.scope_id=s.scope_id AND e.epoch=s.active_epoch
                 WHERE s.scope_id=$scope;
+                """
+            : """
+                SELECT s.account_scope,s.network_id,s.authority_policy_digest,
+                       s.group_membership_commitment,e.epoch,
+                       e.not_before,e.expires_at,e.mailbox_id,e.placement_id,
+                       e.placement_commitment,e.membership_commitment,
+                       e.first_replica_id,e.first_replica_key,
+                       e.second_replica_id,e.second_replica_key
+                FROM mailbox_credential_scopes s
+                JOIN mailbox_credential_epochs e ON e.scope_id=s.scope_id
+                WHERE s.scope_id=$scope AND e.epoch=$epoch;
                 """;
-            command.Parameters.Add("$scope", SqliteType.Blob).Value =
-                selector.ScopeId.ToArray();
-            using var reader = command.ExecuteReader();
-            if (!reader.Read() ||
-                !Fixed((byte[])reader.GetValue(0), selector.AccountScope.Value) ||
-                !Fixed((byte[])reader.GetValue(1), authority.NetworkId.Span) ||
-                !Fixed((byte[])reader.GetValue(2), authority.PolicyFingerprint.Span) ||
-                authority.NowUnixSeconds < MailboxReadU64((byte[])reader.GetValue(5)) ||
-                authority.NowUnixSeconds > MailboxReadU64((byte[])reader.GetValue(6)) ||
-                selector.Kind == MailboxCredentialScopeKind.Group &&
-                (reader.IsDBNull(3) || !Fixed((byte[])reader.GetValue(3),
-                    selector.GroupMembershipCommitment.Span)))
-            {
-                throw new InvalidOperationException(
-                    "Exact scoped mailbox route is unavailable.");
-            }
-            return new ScopedMailboxResolvedRoute(
-                MailboxReadU64((byte[])reader.GetValue(4)),
-                MailboxReadU64((byte[])reader.GetValue(6)),
-                new BlindedMailboxId((byte[])reader.GetValue(7)),
-                new BlindedPlacementId((byte[])reader.GetValue(8)),
-                (byte[])reader.GetValue(9),
-                (byte[])reader.GetValue(10),
-                new MailboxCredentialReplicaPair(
-                    (byte[])reader.GetValue(11), (byte[])reader.GetValue(12),
-                    (byte[])reader.GetValue(13), (byte[])reader.GetValue(14)));
-        }
-        finally
+        command.Parameters.Add("$scope", SqliteType.Blob).Value =
+            selector.ScopeId.ToArray();
+        if (epoch is not null)
         {
-            _databaseGate.Release();
+            command.Parameters.Add("$epoch", SqliteType.Blob).Value =
+                MailboxU64(epoch.Value);
         }
+        using var reader = command.ExecuteReader();
+        if (!reader.Read() ||
+            !Fixed((byte[])reader.GetValue(0), selector.AccountScope.Value) ||
+            !Fixed((byte[])reader.GetValue(1), authority.NetworkId.Span) ||
+            !Fixed((byte[])reader.GetValue(2), authority.PolicyFingerprint.Span) ||
+            selector.Kind == MailboxCredentialScopeKind.Group &&
+            (reader.IsDBNull(3) || !Fixed((byte[])reader.GetValue(3),
+                selector.GroupMembershipCommitment.Span)))
+        {
+            throw new InvalidOperationException(
+                "Exact scoped mailbox route is unavailable.");
+        }
+        return new ScopedMailboxRouteRow(
+            MailboxReadU64((byte[])reader.GetValue(4)),
+            MailboxReadU64((byte[])reader.GetValue(5)),
+            MailboxReadU64((byte[])reader.GetValue(6)),
+            (byte[])reader.GetValue(7),
+            (byte[])reader.GetValue(8),
+            (byte[])reader.GetValue(9),
+            (byte[])reader.GetValue(10),
+            (byte[])reader.GetValue(11),
+            (byte[])reader.GetValue(12),
+            (byte[])reader.GetValue(13),
+            (byte[])reader.GetValue(14));
+    }
+
+    private sealed record ScopedMailboxRouteRow(
+        ulong Epoch,
+        ulong NotBeforeUnixSeconds,
+        ulong ExpiresAtUnixSeconds,
+        byte[] MailboxId,
+        byte[] PlacementId,
+        byte[] PlacementCommitment,
+        byte[] MembershipCommitment,
+        byte[] FirstReplicaId,
+        byte[] FirstReplicaKey,
+        byte[] SecondReplicaId,
+        byte[] SecondReplicaKey)
+    {
+        internal ScopedMailboxResolvedRoute ToResolved() => new(
+            Epoch,
+            ExpiresAtUnixSeconds,
+            new BlindedMailboxId(MailboxId),
+            new BlindedPlacementId(PlacementId),
+            PlacementCommitment,
+            MembershipCommitment,
+            new MailboxCredentialReplicaPair(
+                FirstReplicaId,
+                FirstReplicaKey,
+                SecondReplicaId,
+                SecondReplicaKey));
     }
 
     public async Task<ScopedMailboxResolvedRoute> RevalidateScopedMailboxDispatchAsync(

@@ -377,11 +377,16 @@ public sealed class ScopedMailboxV14AcceptanceTests
     }
 
     [Fact]
-    public async Task Route_read_rejects_expired_authority_dynamically()
+    public async Task Route_read_promotes_once_then_rejects_exhausted_authority()
     {
         using var fixture = new Fixture();
         await fixture.Store.InstallScopedCredentialAsync(fixture.Self, fixture.Authority);
         fixture.Clock.SetUnixSeconds(1201);
+        var promoted = await fixture.Store.ReadScopedMailboxRouteAsync(
+            fixture.SelfSelector, fixture.Authority);
+        Assert.Equal(8UL, promoted.Epoch);
+
+        fixture.Clock.SetUnixSeconds(1401);
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
             fixture.Store.ReadScopedMailboxRouteAsync(
                 fixture.SelfSelector, fixture.Authority));

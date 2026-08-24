@@ -71,6 +71,30 @@ public sealed class MailboxAuthenticatedRequestFactory
     {
         var route = await ReadRouteAsync(selector, cancellationToken)
             .ConfigureAwait(false);
+        return await CreateRetrieveAsync(
+            accountScope,
+            selector,
+            signer,
+            route,
+            operationId,
+            afterCursor,
+            maximumItems,
+            continuationToken,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    internal async Task<MailboxAuthenticatedRequestFrame> CreateRetrieveAsync(
+        OutboxAccountScope accountScope,
+        MailboxCredentialSelector selector,
+        IMailboxOperationSigner signer,
+        ScopedMailboxResolvedRoute route,
+        ReadOnlyMemory<byte> operationId,
+        ulong afterCursor,
+        ushort maximumItems,
+        ReadOnlyMemory<byte> continuationToken,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(route);
         var binding = MailboxAuthenticatedRequestTranscript.ForRetrieve(
             route.Epoch, operationId.Span, route.MailboxId, route.PlacementId,
             afterCursor, maximumItems, continuationToken.Span);

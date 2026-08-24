@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Security.Cryptography;
 using Deep.Client.Shared.Features;
 using Deep.Client.Shared.Persistence;
@@ -323,6 +324,8 @@ public sealed class PinnedClientMailboxReceiptVerifier(
 
 public sealed class ClientMailboxAdapter
 {
+    private static ReadOnlySpan<byte> RetrieveOperationDomain =>
+        "deep.mau2.retrieve-operation.v2"u8;
     private static readonly IReadOnlySet<MailboxReplicaDisposition> StoreDispositions =
         new HashSet<MailboxReplicaDisposition>
         {
@@ -431,45 +434,117 @@ public sealed class ClientMailboxAdapter
         OutboxAccountScope outboxScope,
         IMailboxOperationSigner signer,
         MailboxCredentialSelector selector,
-        ReadOnlyMemory<byte> operationId,
         ushort maximumItems,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(outboxScope);
         ArgumentNullException.ThrowIfNull(signer);
         ArgumentNullException.ThrowIfNull(selector);
-        var logicalId = OutboxLogicalId.FromBytes(operationId.Span);
-        await using var operationLease =
-            await ClientMailboxOperationSingleFlight.EnterAsync(
+        for (var readAttempt = 0; readAttempt < 3; readAttempt++)
+        {
+            var route = await requests.ReadRouteAsync(selector, cancellationToken)
+                .ConfigureAwait(false);
+            var scope = activation.ScopeFor(route.MailboxId, route.Epoch);
+            await ReconcileExpiredAsync(scope, cancellationToken).ConfigureAwait(false);
+            var traversal = await state.ReadTraversalAsync(scope, cancellationToken)
+                .ConfigureAwait(false);
+            var operationId = RetrieveOperationId(route, traversal);
+            var logicalId = OutboxLogicalId.FromBytes(operationId);
+            await using var operationLease =
+                await ClientMailboxOperationSingleFlight.EnterAsync(
+                    outboxScope,
+                    logicalId,
+                    cancellationToken).ConfigureAwait(false);
+
+            var confirmedRoute = await requests.ReadRouteAsync(
+                    selector,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            var confirmedScope = activation.ScopeFor(
+                confirmedRoute.MailboxId,
+                confirmedRoute.Epoch);
+            await ReconcileExpiredAsync(confirmedScope, cancellationToken)
+                .ConfigureAwait(false);
+            var confirmedTraversal = await state.ReadTraversalAsync(
+                    confirmedScope,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (!SameRetrieveContext(
+                    route,
+                    traversal,
+                    confirmedRoute,
+                    confirmedTraversal))
+            {
+                continue;
+            }
+
+            var prepared = await PrepareOrResumeAsync(
                 outboxScope,
-                logicalId,
+                MailboxAuthenticatedOperation.Retrieve,
+                () => requests.CreateRetrieveAsync(
+                    outboxScope,
+                    selector,
+                    signer,
+                    confirmedRoute,
+                    operationId,
+                    confirmedTraversal.AfterCursor,
+                    maximumItems,
+                    confirmedTraversal.ContinuationToken.ToArray(),
+                    cancellationToken),
                 cancellationToken).ConfigureAwait(false);
-        var route = await requests.ReadRouteAsync(selector, cancellationToken)
-            .ConfigureAwait(false);
-        var scope = activation.ScopeFor(route.MailboxId, route.Epoch);
-        await ReconcileExpiredAsync(scope, cancellationToken).ConfigureAwait(false);
-        var traversal = await state.ReadTraversalAsync(scope, cancellationToken)
-            .ConfigureAwait(false);
-        var prepared = await PrepareOrResumeAsync(
-            outboxScope,
-            MailboxAuthenticatedOperation.Retrieve,
-            () => requests.CreateRetrieveAsync(
+            EnsureSignerMatches(prepared, signer);
+            return await DispatchRetrieveAsync(
                 outboxScope,
                 selector,
-                signer,
-                operationId,
-                traversal.AfterCursor,
-                maximumItems,
-                traversal.ContinuationToken.ToArray(),
-                cancellationToken),
-            cancellationToken).ConfigureAwait(false);
-        EnsureSignerMatches(prepared, signer);
-        return await DispatchRetrieveAsync(
-            outboxScope,
-            selector,
-            prepared,
-            cancellationToken).ConfigureAwait(false);
+                prepared,
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        throw new IOException(
+            "Mailbox retrieve route changed repeatedly before durable preparation.");
     }
+
+    private static byte[] RetrieveOperationId(
+        ScopedMailboxResolvedRoute route,
+        ClientMailboxTraversal traversal)
+    {
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        hash.AppendData(RetrieveOperationDomain);
+        Span<byte> scalar = stackalloc byte[8];
+        BinaryPrimitives.WriteUInt64BigEndian(scalar, route.Epoch);
+        hash.AppendData(scalar);
+        hash.AppendData(route.MailboxId.Bytes.Span);
+        hash.AppendData(route.PlacementId.Bytes.Span);
+        BinaryPrimitives.WriteUInt64BigEndian(scalar, traversal.PollGeneration);
+        hash.AppendData(scalar);
+        BinaryPrimitives.WriteUInt64BigEndian(scalar, traversal.AfterCursor);
+        hash.AppendData(scalar);
+        Span<byte> length = stackalloc byte[2];
+        BinaryPrimitives.WriteUInt16BigEndian(
+            length,
+            checked((ushort)traversal.ContinuationToken.Length));
+        hash.AppendData(length);
+        hash.AppendData(traversal.ContinuationToken);
+        return hash.GetHashAndReset()[..MailboxClientLimits.OperationIdLength];
+    }
+
+    private static bool SameRetrieveContext(
+        ScopedMailboxResolvedRoute expectedRoute,
+        ClientMailboxTraversal expectedTraversal,
+        ScopedMailboxResolvedRoute actualRoute,
+        ClientMailboxTraversal actualTraversal) =>
+        expectedRoute.Epoch == actualRoute.Epoch &&
+        FixedEquals(
+            expectedRoute.MailboxId.Bytes.Span,
+            actualRoute.MailboxId.Bytes.Span) &&
+        FixedEquals(
+            expectedRoute.PlacementId.Bytes.Span,
+            actualRoute.PlacementId.Bytes.Span) &&
+        expectedTraversal.PollGeneration == actualTraversal.PollGeneration &&
+        expectedTraversal.AfterCursor == actualTraversal.AfterCursor &&
+        FixedEquals(
+            expectedTraversal.ContinuationToken,
+            actualTraversal.ContinuationToken);
 
     public async Task<ClientMailboxAckResult> AcknowledgeAsync(
         OutboxAccountScope outboxScope,

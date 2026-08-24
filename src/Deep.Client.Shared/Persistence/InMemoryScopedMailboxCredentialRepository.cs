@@ -181,6 +181,31 @@ public sealed class InMemoryScopedMailboxCredentialRepository :
         {
             var stored = GetCredential(current, selector);
             ValidateStoredAuthority(stored, selector, authority);
+            var active = Epoch(stored.Generation, stored.ActiveEpoch);
+            if (authority.NowUnixSeconds > active.ExpiresAtUnixSeconds)
+            {
+                var candidate = current.Clone();
+                stored = GetCredential(candidate, selector);
+                if (stored.ActiveEpoch == ulong.MaxValue)
+                {
+                    throw new InvalidOperationException(
+                        "Exact scoped mailbox route is unavailable.");
+                }
+                var nextEpoch = checked(stored.ActiveEpoch + 1);
+                var next = Epoch(stored.Generation, nextEpoch);
+                if (next.Epoch != stored.Generation.Next.Epoch ||
+                    authority.NowUnixSeconds < next.NotBeforeUnixSeconds ||
+                    authority.NowUnixSeconds > next.ExpiresAtUnixSeconds)
+                {
+                    throw new InvalidOperationException(
+                        "Exact scoped mailbox route is unavailable.");
+                }
+
+                stored.ActiveEpoch = nextEpoch;
+                fault?.Invoke(InMemoryScopedMailboxFaultPoint.SwitchBeforePublish);
+                cancellationToken.ThrowIfCancellationRequested();
+                current = candidate;
+            }
             return Task.FromResult(Route(stored, selector, authority));
         }
     }

@@ -533,6 +533,72 @@ public sealed partial class MailboxCredentialBundleImporterTests
     }
 
     [Fact]
+    public async Task NativeRetrieve_AfterCredentialEpochRotation_UsesRouteBoundOperation()
+    {
+        using var fixture = Fixture.Create(revocationLifetimeMinutes: 45);
+        using var identity = new SessionIdentityProvider(AlicePhrase);
+        var clock = new MutableTimeProvider(Now);
+        var options = fixture.AndroidOptions with { TimeProvider = clock };
+        var ingress = new FailFirstRetrieveIngress(clock);
+        ImportedMailboxRuntimeMaterial imported;
+
+        using (var store = new SqliteSessionStore(fixture.DatabasePath))
+        {
+            imported = await MailboxCredentialBundleImporter.ImportAsync(
+                store,
+                identity,
+                options,
+                MailboxInfrastructureOwnership.UserManaged);
+            using var transport = Native(store);
+            await Assert.ThrowsAsync<ClientMailboxTransportException>(() =>
+                transport.RetrieveAuthenticatedAsync(
+                    identity,
+                    cursor: null,
+                    limit: 1));
+        }
+
+        clock.Set(Now.AddMinutes(31));
+        using (var restarted = new SqliteSessionStore(fixture.DatabasePath))
+        using (var transport = Native(restarted))
+        {
+            var page = await transport.RetrieveAuthenticatedAsync(
+                identity,
+                cursor: null,
+                limit: 1);
+            Assert.Single(page.Entries);
+        }
+
+        Assert.Equal(2, ingress.Requests.Count);
+        var first = Retrieve(ingress.Requests[0]);
+        var second = Retrieve(ingress.Requests[1]);
+        Assert.Equal(7UL, first.Epoch);
+        Assert.Equal(8UL, second.Epoch);
+        Assert.NotEqual(
+            first.OperationId.ToArray(),
+            second.OperationId.ToArray());
+
+        NativeMau2MailboxTransport Native(SqliteSessionStore store) => new(
+            ClientFeatureFlags.Defaults with { ClientMailboxAdapterEnabled = true },
+            imported.Activation,
+            ingress,
+            store,
+            new PinnedClientMailboxReceiptVerifier(
+                new SodiumClientMailboxReceiptCrypto()),
+            imported.DecodePolicies,
+            imported.Authority,
+            sessionId => sessionId == imported.LocalSessionId
+                ? imported.SelfSelector
+                : throw new InvalidOperationException(
+                    "The acceptance transport has no selector for another identity."),
+            timeProvider: clock);
+
+        static MailboxAuthenticatedRetrieveBody Retrieve(byte[] canonical) =>
+            MailboxAuthenticatedRequestTranscript.DecodeRetrieveBody(
+                MailboxAuthenticatedClientRequestCodec.Decode(canonical)
+                    .Binding.CanonicalRequest.Span);
+    }
+
+    [Fact]
     public async Task NativeRetrieve_AfterSuccessfulEmptyPoll_UsesNewDurableOperation()
     {
         using var fixture = Fixture.Create();

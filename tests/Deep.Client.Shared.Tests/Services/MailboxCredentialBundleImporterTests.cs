@@ -552,9 +552,12 @@ public sealed partial class MailboxCredentialBundleImporterTests
             ulong currentEpoch = 7,
             string? databasePath = null,
             int revocationVersion = 0,
-            string peerPhrase = BobPhrase)
+            string peerPhrase = BobPhrase,
+            int revocationLifetimeMinutes = 20)
         {
-            if (currentEpoch is < 7 or > 100 || revocationVersion is < 0 or > 2)
+            if (currentEpoch is < 7 or > 100 ||
+                revocationVersion is < 0 or > 2 ||
+                revocationLifetimeMinutes is < 20 or > 120)
                 throw new ArgumentOutOfRangeException();
             var epochOffset = checked((int)(currentEpoch - 7));
             var root = Path.Combine(Path.GetTempPath(), $"deep-mailbox-import-{Guid.NewGuid():N}");
@@ -673,7 +676,7 @@ public sealed partial class MailboxCredentialBundleImporterTests
                 generatedAtUnixSeconds = checked((ulong)Now.AddMinutes(
                     -2 + revocationVersion).ToUnixTimeSeconds()),
                 expiresAtUnixSeconds = checked((ulong)Now.AddMinutes(
-                    20 + revocationVersion).ToUnixTimeSeconds()),
+                    revocationLifetimeMinutes + revocationVersion).ToUnixTimeSeconds()),
                 revoked = Array.Empty<object>()
             });
             File.WriteAllBytes(revocationPath, revocationBytes);

@@ -202,6 +202,37 @@ public sealed class ScopedMailboxRepositoryConformanceTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task Route_read_atomically_promotes_exact_expired_epoch_to_next(
+        bool inMemory)
+    {
+        using var fixture = new Fixture(inMemory);
+        await fixture.Repository.InstallScopedCredentialAsync(
+            fixture.Self, fixture.Authority);
+        Assert.Equal(7UL, (await fixture.Repository.ReadScopedMailboxRouteAsync(
+            fixture.SelfSelector,
+            fixture.Authority)).Epoch);
+
+        fixture.Clock.Set(1201);
+        var promoted = await fixture.Repository.ReadScopedMailboxRouteAsync(
+            fixture.SelfSelector,
+            fixture.Authority);
+        var replay = await fixture.Repository.ReadScopedMailboxRouteAsync(
+            fixture.SelfSelector,
+            fixture.Authority);
+
+        Assert.Equal(8UL, promoted.Epoch);
+        Assert.Equal(8UL, replay.Epoch);
+        Assert.Equal(
+            fixture.Self.NextReplicas.FirstId.ToArray(),
+            promoted.Replicas.FirstId.ToArray());
+        Assert.Equal(
+            fixture.Self.NextReplicas.SecondId.ToArray(),
+            promoted.Replicas.SecondId.ToArray());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task Prepared_retry_cannot_rebind_to_rotated_epoch_or_replica_pair(
         bool inMemory)
     {
