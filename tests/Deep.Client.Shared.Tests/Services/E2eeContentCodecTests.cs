@@ -173,7 +173,7 @@ public sealed class E2eeContentCodecTests
             Alice,
             Bob,
             Now,
-            Now.AddDays(15),
+            Now.Add(E2eeContentCodec.MaxProtocolLifetime),
             null,
             string.Empty,
             [],
@@ -327,6 +327,12 @@ public sealed class E2eeContentCodecTests
     [Fact]
     public void Encode_RejectsInvalidExpiryConversationBindingAndGroupRevision()
     {
+        Assert.Equal(TimeSpan.FromDays(7), E2eeContentCodec.MaxProtocolLifetime);
+        Assert.NotEmpty(E2eeContentCodec.Encode(CreateDirectMessage() with
+        {
+            ProtocolExpiresAt = Now.Add(E2eeContentCodec.MaxProtocolLifetime)
+        }));
+
         Assert.Throws<ArgumentException>(() => E2eeContentCodec.Encode(CreateDirectMessage() with
         {
             ProtocolExpiresAt = Now
@@ -334,7 +340,7 @@ public sealed class E2eeContentCodecTests
 
         Assert.Throws<ArgumentException>(() => E2eeContentCodec.Encode(CreateDirectMessage() with
         {
-            ProtocolExpiresAt = Now.AddDays(15).AddMilliseconds(1)
+            ProtocolExpiresAt = Now.Add(E2eeContentCodec.MaxProtocolLifetime).AddMilliseconds(1)
         }));
 
         Assert.Throws<ArgumentException>(() => E2eeContentCodec.Encode(CreateDirectMessage() with

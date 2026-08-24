@@ -147,7 +147,7 @@ public sealed class E2eeClientTransportTests
             ConversationKind.OneToOne,
             ConversationId.ForOneToOne(envelope.Recipient),
             envelope.Sender, envelope.Recipient, envelope.CreatedAt,
-            Now.AddDays(14), null, envelope.Body, []);
+            Now.Add(E2eeContentCodec.MaxProtocolLifetime), null, envelope.Body, []);
         var firstEncryption = aliceIdentity.CreateEnvelopeCodec()
             .EncryptContent(content, envelope.Recipient);
         var secondEncryption = aliceIdentity.CreateEnvelopeCodec()

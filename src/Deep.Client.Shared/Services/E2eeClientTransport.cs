@@ -1707,7 +1707,7 @@ public sealed class E2eeClientTransport :
         {
             throw new ArgumentOutOfRangeException(
                 nameof(userExpiresAt),
-                "Message expiry must be active and contained within the 15-day protocol lifetime.");
+                "Message expiry must be active and contained within the 7-day protocol lifetime.");
         }
     }
 

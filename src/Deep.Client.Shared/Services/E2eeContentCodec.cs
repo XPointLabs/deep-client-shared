@@ -3,6 +3,7 @@ using System.Buffers.Binary;
 using System.Security.Cryptography;
 using System.Text;
 using Deep.Client.Shared.Domain;
+using Deep.Protocol.DeepExtension.MailboxCapabilities;
 
 namespace Deep.Client.Shared.Services;
 
@@ -46,7 +47,8 @@ public static class E2eeContentCodec
     public const int MaxGroupNameBytes = 256;
     public const int MaxGroupMembers = 2048;
     public static readonly TimeSpan DefaultMaxFutureSkew = TimeSpan.FromMinutes(5);
-    public static readonly TimeSpan MaxProtocolLifetime = TimeSpan.FromDays(15);
+    public static readonly TimeSpan MaxProtocolLifetime =
+        TimeSpan.FromSeconds(MailboxClientLimits.MaximumTtlSeconds);
 
     private const ushort UserExpiryFlag = 1 << 0;
     private const ushort ReplyFlag = 1 << 1;
@@ -297,7 +299,7 @@ public static class E2eeContentCodec
         if (content.ProtocolExpiresAt <= content.IssuedAt ||
             content.ProtocolExpiresAt - content.IssuedAt > MaxProtocolLifetime)
         {
-            throw new ArgumentException("Protocol expiry must be later than issue time and no more than 15 days later.", nameof(content));
+            throw new ArgumentException("Protocol expiry must be later than issue time and no more than 7 days later.", nameof(content));
         }
 
         if (content.UserExpiresAt is { } userExpiry &&
