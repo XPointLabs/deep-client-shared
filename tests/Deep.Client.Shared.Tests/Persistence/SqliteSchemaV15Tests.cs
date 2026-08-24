@@ -7,14 +7,14 @@ using Microsoft.Data.Sqlite;
 namespace Deep.Client.Shared.Tests.Persistence;
 
 [Collection("SQLite global pool isolation")]
-public sealed class SqliteSchemaV14Tests
+public sealed class SqliteSchemaV15Tests
 {
     private const int ApplicationId = 0x44454550;
-    private const string CorrectKey = "deep-v14-correct-key-4a838277930e";
-    private const string WrongKey = "deep-v14-wrong-key-c992865b0267";
+    private const string CorrectKey = "deep-v15-correct-key-4a838277930e";
+    private const string WrongKey = "deep-v15-wrong-key-c992865b0267";
 
     [Fact]
-    public void FreshDatabaseHasExactV14AttestationAndNoLogicalSchemaTables()
+    public void FreshDatabaseHasExactV15AttestationAndNoLogicalSchemaTables()
     {
         var path = TempPath("fresh");
         try
@@ -25,7 +25,7 @@ public sealed class SqliteSchemaV14Tests
             SqliteConnection.ClearAllPools();
 
             using var connection = Open(path);
-            Assert.Equal(14, Scalar(connection, "PRAGMA user_version;"));
+            Assert.Equal(15, Scalar(connection, "PRAGMA user_version;"));
             Assert.Equal(ApplicationId, Scalar(connection, "PRAGMA application_id;"));
             Assert.Equal(
                 "ok",
@@ -64,14 +64,14 @@ public sealed class SqliteSchemaV14Tests
         {
             using (var store = new SqliteSessionStore(path))
             {
-                await store.SetAsync("v14.marker", "preserved");
+                await store.SetAsync("v15.marker", "preserved");
             }
             SqliteConnection.ClearAllPools();
             var before = ReadCatalog(path);
 
             using (var reopened = new SqliteSessionStore(path))
             {
-                Assert.Equal("preserved", await reopened.GetAsync<string>("v14.marker"));
+                Assert.Equal("preserved", await reopened.GetAsync<string>("v15.marker"));
             }
             SqliteConnection.ClearAllPools();
 
@@ -91,6 +91,9 @@ public sealed class SqliteSchemaV14Tests
     [InlineData(11)]
     [InlineData(12)]
     [InlineData(13)]
+    [InlineData(14)]
+    [InlineData(16)]
+    [InlineData(99)]
     public void ExistingUnsupportedVersionIsRejectedWithoutChangingAnyStateFile(int version)
     {
         var path = TempPath($"version-{version}");
@@ -344,13 +347,13 @@ public sealed class SqliteSchemaV14Tests
     [InlineData("CREATE VIEW hostile_view AS SELECT id FROM messages;")]
     [InlineData("CREATE TRIGGER hostile_trigger AFTER INSERT ON settings BEGIN DELETE FROM settings; END;")]
     [InlineData("CREATE TABLE transport_outbox_items_v8_recovery(marker INTEGER);")]
-    public void TamperedV14CatalogIsRejectedWithoutFurtherMutation(string tamperSql)
+    public void TamperedV15CatalogIsRejectedWithoutFurtherMutation(string tamperSql)
     {
         AssertTamperRejected(tamperSql);
     }
 
     [Fact]
-    public void MissingV14ColumnIsRejectedWithoutFurtherMutation()
+    public void MissingV15ColumnIsRejectedWithoutFurtherMutation()
     {
         AssertTamperRejected(
             """
@@ -360,7 +363,7 @@ public sealed class SqliteSchemaV14Tests
     }
 
     [Fact]
-    public void MissingV14ForeignKeyIsRejectedWithoutFurtherMutation()
+    public void MissingV15ForeignKeyIsRejectedWithoutFurtherMutation()
     {
         AssertTamperRejected(
             """
@@ -413,7 +416,7 @@ public sealed class SqliteSchemaV14Tests
     }
 
     [Fact]
-    public void CorruptV14DatabaseIsRejectedWithoutChangingBytes()
+    public void CorruptV15DatabaseIsRejectedWithoutChangingBytes()
     {
         var path = TempPath("corrupt");
         try

@@ -19,7 +19,7 @@ public sealed partial class SqliteSessionStore :
     IMembershipTrustRepository,
     IDisposable
 {
-    private const int PhysicalSchemaVersion = 14;
+    private const int PhysicalSchemaVersion = 15;
     private const int DeepApplicationId = 0x44454550;
     private const int MaximumSchemaDefinitionLength = 16 * 1024;
     private const int ReplayPruneBatchSize = 256;

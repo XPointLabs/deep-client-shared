@@ -13,7 +13,7 @@ This library follows the Session clients at a domain boundary level:
 `Persistence` defines repository abstractions for local storage. `SqliteSessionStore`
 is the production path (with SQLCipher-compatible key hook), while
 `InMemorySessionStore` remains test/dev only. The production database has one
-physical baseline: application ID `DEEP` and schema version 13. There is no
+physical baseline: application ID `DEEP` and schema version 15. There is no
 logical schema store and no local migration API.
 The dormant P14A boundary uses the existing settings table through the atomic,
 bounded, account-generation capability documented in
@@ -223,7 +223,7 @@ state. Tombstone expiry is checked against the persisted retrieved envelope.
 Length, overflow, and canonical-envelope decoder failures are normalized to
 `InvalidDataException`. Mailbox inbox state, scoped official-cloud
 credentials, replay counters, prepared fan-out headers/targets, and MAU2
-outbox items share the exact physical schema version 13. Version 12 and every
+outbox items share the exact physical schema version 15. Version 14 and every
 older or incompatible catalog require an explicit
 wipe/reset; none is dual-read, migrated, or retained for compatibility.
 

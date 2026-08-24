@@ -88,7 +88,9 @@ Use `deep-protocol` for protocol and crypto semantics. Do not recreate protocol 
 ## Local-State Baseline Rules
 
 - Before production launch, SQLite has one supported physical baseline:
-  application ID `DEEP`, schema version 13.
+  application ID `DEEP`, schema version 15. The DMC1 v2 attachment-kind clean
+  break invalidates every earlier local state instead of importing opaque v1
+  message/outbox bytes.
 - State is fresh only when its main database, `-wal`, and `-shm` are all absent.
 - Existing state must pass exact key, version, integrity, catalog, column,
   foreign-key, and index attestation before runtime access.
