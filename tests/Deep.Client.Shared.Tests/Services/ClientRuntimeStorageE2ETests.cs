@@ -110,6 +110,38 @@ public sealed class ClientRuntimeStorageE2ETests
     }
 
     [Fact]
+    public async Task AuthenticatedMau2Runtime_RoundTripsExplicitVoiceAttachmentMetadataToRecipient()
+    {
+        var harness = new AuthenticatedMau2RuntimeHarness();
+        var attachments = new InMemoryAttachmentTransport();
+        using var alice = CreateRuntime(harness);
+        using var bob = CreateRuntime(harness);
+        var aliceAccount = await alice.Accounts.RegisterAsync("Alice Voice MAU2");
+        var bobAccount = await bob.Accounts.RegisterAsync("Bob Voice MAU2");
+        await using var upload = new MemoryStream(Enumerable.Repeat((byte)0x56, 4_096).ToArray());
+        var voice = await attachments.UploadAsync(new AttachmentFileUpload(
+            "voice-message.wav",
+            "audio/wav",
+            upload,
+            Duration: TimeSpan.FromSeconds(4),
+            Kind: AttachmentKind.VoiceMessage));
+
+        await alice.Messages.SendOneToOneAsync(
+            aliceAccount.SessionId,
+            bobAccount.SessionId,
+            "[Голосовое сообщение]",
+            [voice]);
+        var message = Assert.Single(await bob.Messages.ReceiveAsync(bobAccount.SessionId));
+        var receivedVoice = Assert.Single(message.Attachments);
+
+        Assert.Equal(voice, receivedVoice);
+        Assert.Equal(AttachmentKind.VoiceMessage, receivedVoice.Kind);
+        Assert.Equal(TimeSpan.FromSeconds(4), receivedVoice.Duration);
+        Assert.Equal("audio/wav", receivedVoice.ContentType);
+        Assert.Equal(0, harness.RawSendCount);
+    }
+
+    [Fact]
     public async Task AuthenticatedMau2Runtime_SyncsGroupStateMessagesRepliesAndReactions()
     {
         var harness = new AuthenticatedMau2RuntimeHarness();
@@ -371,7 +403,12 @@ public sealed class ClientRuntimeStorageE2ETests
                 content.Length,
                 new Uri($"https://attachments.invalid/{id}"),
                 Convert.ToBase64String(Enumerable.Repeat((byte)0x51, 32).ToArray()),
-                Convert.ToBase64String(System.Security.Cryptography.SHA256.HashData(content)));
+                Convert.ToBase64String(System.Security.Cryptography.SHA256.HashData(content)),
+                upload.Width,
+                upload.Height,
+                upload.Duration,
+                upload.IsDocument,
+                upload.Kind);
         }
 
         public Task<AttachmentFileDownload> DownloadAsync(

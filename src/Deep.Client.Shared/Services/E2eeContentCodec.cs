@@ -36,7 +36,7 @@ public static class E2eeContentCodec
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
     private static ReadOnlySpan<byte> Magic => "DMC1"u8;
 
-    public const byte ProtocolVersion = 1;
+    public const byte ProtocolVersion = 2;
     public const int MaxBodyBytes = 64 * 1024;
     public const int MaxAttachments = 32;
     public const int MaxFilenameBytes = 255;
@@ -569,6 +569,7 @@ public static class E2eeContentCodec
         WriteInt32(writer, attachment.Height ?? -1);
         WriteInt64(writer, attachment.Duration?.Ticks ?? -1);
         WriteByte(writer, attachment.IsDocument ? (byte)1 : (byte)0);
+        WriteByte(writer, EncodeAttachmentKind(attachment.Kind));
     }
 
     private static AttachmentMetadata ReadAttachment(ref ContentReader reader)
@@ -584,7 +585,8 @@ public static class E2eeContentCodec
             DecodeOptionalNonNegative(reader.ReadInt32(), "attachment width"),
             DecodeOptionalNonNegative(reader.ReadInt32(), "attachment height"),
             DecodeDuration(reader.ReadInt64()),
-            reader.ReadBoolean("attachment document flag"));
+            reader.ReadBoolean("attachment document flag"),
+            DecodeAttachmentKind(reader.ReadByte()));
 
         ValidateAttachment(attachment, true);
         return attachment;
@@ -609,6 +611,15 @@ public static class E2eeContentCodec
             attachment.Width is < 0 || attachment.Height is < 0 || attachment.Duration is { } duration && duration < TimeSpan.Zero)
         {
             throw Invalid("DMC1 attachment values are invalid.");
+        }
+
+        if (attachment.Kind is not AttachmentKind.File and not AttachmentKind.VoiceMessage ||
+            attachment.Kind == AttachmentKind.VoiceMessage &&
+            (!attachment.ContentType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase) ||
+             attachment.Duration is not { } voiceDuration || voiceDuration <= TimeSpan.Zero ||
+             attachment.IsDocument))
+        {
+            throw Invalid("DMC1 attachment kind is invalid.");
         }
 
         ValidateNfcString(attachment.RemoteUri.OriginalString, nameof(attachment.RemoteUri), MaxUriBytes, allowEmpty: false, inbound);
@@ -740,6 +751,20 @@ public static class E2eeContentCodec
         0 => GroupMemberRole.Standard,
         1 => GroupMemberRole.Admin,
         _ => throw InvalidContent("DMC1 group member role is not supported.")
+    };
+
+    private static byte EncodeAttachmentKind(AttachmentKind kind) => kind switch
+    {
+        AttachmentKind.File => 0,
+        AttachmentKind.VoiceMessage => 1,
+        _ => throw new ArgumentOutOfRangeException(nameof(kind), "DMC1 attachment kind is not supported.")
+    };
+
+    private static AttachmentKind DecodeAttachmentKind(byte value) => value switch
+    {
+        0 => AttachmentKind.File,
+        1 => AttachmentKind.VoiceMessage,
+        _ => throw InvalidContent("DMC1 attachment kind is not supported.")
     };
 
     private static byte EncodeConversationKind(ConversationKind kind) => kind switch

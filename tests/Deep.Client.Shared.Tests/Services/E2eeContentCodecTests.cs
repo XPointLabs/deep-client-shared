@@ -61,6 +61,90 @@ public sealed class E2eeContentCodecTests
         Assert.Equal(attachment, decodedAttachment);
     }
 
+    [Fact]
+    public void DirectMessage_RoundTripsExplicitVoiceAttachmentKind()
+    {
+        var voice = new AttachmentMetadata(
+            "voice-attachment-001",
+            "voice-message.wav",
+            "audio/wav",
+            8_192,
+            new Uri("https://files.example.test/download/voice-attachment-001"),
+            Convert.ToBase64String(Enumerable.Range(0, 32).Select(static value => (byte)value).ToArray()),
+            Convert.ToBase64String(Enumerable.Range(32, 32).Select(static value => (byte)value).ToArray()),
+            Duration: TimeSpan.FromSeconds(4),
+            Kind: AttachmentKind.VoiceMessage);
+        var content = CreateDirectMessage() with
+        {
+            Body = "[Голосовое сообщение]",
+            Attachments = [voice]
+        };
+
+        var decoded = RoundTrip(content);
+
+        Assert.Equal(E2eeContentCodec.ProtocolVersion, 2);
+        Assert.Equal(voice, Assert.Single(decoded.Attachments));
+        Assert.Equal(AttachmentKind.VoiceMessage, decoded.Attachments[0].Kind);
+    }
+
+    [Theory]
+    [InlineData("application/octet-stream", 4, false)]
+    [InlineData("audio/wav", 0, false)]
+    [InlineData("audio/wav", 4, true)]
+    public void Encode_RejectsInvalidVoiceAttachmentShape(string contentType, int durationSeconds, bool isDocument)
+    {
+        var invalidVoice = CreateAttachment() with
+        {
+            ContentType = contentType,
+            Duration = TimeSpan.FromSeconds(durationSeconds),
+            IsDocument = isDocument,
+            Kind = AttachmentKind.VoiceMessage
+        };
+        var content = CreateDirectMessage() with { Attachments = [invalidVoice] };
+
+        Assert.Throws<ArgumentException>(() => E2eeContentCodec.Encode(content));
+    }
+
+    [Fact]
+    public void Decode_RejectsUnknownAttachmentKind()
+    {
+        var voice = CreateAttachment() with
+        {
+            ContentType = "audio/wav",
+            Duration = TimeSpan.FromSeconds(4),
+            IsDocument = false,
+            Kind = AttachmentKind.VoiceMessage
+        };
+        var encoded = E2eeContentCodec.Encode(CreateDirectMessage() with { Attachments = [voice] });
+        encoded[^1] = 0xff;
+
+        Assert.Throws<E2eeProtocolException>(() => E2eeContentCodec.Decode(encoded, Now));
+    }
+
+    [Fact]
+    public void Encode_RejectsUnknownAttachmentKind()
+    {
+        var attachment = CreateAttachment() with { Kind = (AttachmentKind)0xff };
+
+        Assert.Throws<ArgumentException>(() =>
+            E2eeContentCodec.Encode(CreateDirectMessage() with { Attachments = [attachment] }));
+    }
+
+    [Fact]
+    public void Decode_RejectsAttachmentMissingRequiredKindByte()
+    {
+        var voice = CreateAttachment() with
+        {
+            ContentType = "audio/wav",
+            Duration = TimeSpan.FromSeconds(4),
+            IsDocument = false,
+            Kind = AttachmentKind.VoiceMessage
+        };
+        var encoded = E2eeContentCodec.Encode(CreateDirectMessage() with { Attachments = [voice] });
+
+        Assert.Throws<E2eeProtocolException>(() => E2eeContentCodec.Decode(encoded[..^1], Now));
+    }
+
     [Theory]
     [InlineData(ConversationKind.OneToOne, false)]
     [InlineData(ConversationKind.OneToOne, true)]
@@ -193,14 +277,24 @@ public sealed class E2eeContentCodecTests
         Assert.Equal(group.Members, decoded.GroupState?.Members);
     }
 
-    [Fact]
-    public void Decode_RejectsUnknownVersionKindsFlagsTruncationAndTrailingBytes()
+    [Theory]
+    [InlineData((byte)0)]
+    [InlineData((byte)1)]
+    [InlineData((byte)3)]
+    [InlineData(byte.MaxValue)]
+    public void Decode_RejectsEveryNonCurrentVersion(byte unsupportedVersion)
     {
         var valid = E2eeContentCodec.Encode(CreateDirectMessage());
-
         var version = valid.ToArray();
-        version[4] = 2;
+        version[4] = unsupportedVersion;
+
         Assert.Throws<E2eeProtocolException>(() => E2eeContentCodec.Decode(version, Now));
+    }
+
+    [Fact]
+    public void Decode_RejectsUnknownKindsFlagsTruncationAndTrailingBytes()
+    {
+        var valid = E2eeContentCodec.Encode(CreateDirectMessage());
 
         var contentKind = valid.ToArray();
         contentKind[5] = 0xff;

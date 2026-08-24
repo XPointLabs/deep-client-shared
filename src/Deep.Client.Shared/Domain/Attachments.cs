@@ -1,5 +1,11 @@
 ﻿namespace Deep.Client.Shared.Domain;
 
+public enum AttachmentKind : byte
+{
+    File = 0,
+    VoiceMessage = 1
+}
+
 public sealed record AttachmentMetadata(
     string AttachmentId,
     string FileName,
@@ -11,7 +17,8 @@ public sealed record AttachmentMetadata(
     int? Width = null,
     int? Height = null,
     TimeSpan? Duration = null,
-    bool IsDocument = false)
+    bool IsDocument = false,
+    AttachmentKind Kind = AttachmentKind.File)
 {
     public bool IsUploaded => RemoteUri is not null;
 
@@ -24,7 +31,8 @@ public sealed record AttachmentMetadata(
         int? width = null,
         int? height = null,
         TimeSpan? duration = null,
-        bool isDocument = false) =>
+        bool isDocument = false,
+        AttachmentKind kind = AttachmentKind.File) =>
         new(
             Guid.NewGuid().ToString("n"),
             fileName,
@@ -33,5 +41,6 @@ public sealed record AttachmentMetadata(
             Width: width,
             Height: height,
             Duration: duration,
-            IsDocument: isDocument);
+            IsDocument: isDocument,
+            Kind: kind);
 }

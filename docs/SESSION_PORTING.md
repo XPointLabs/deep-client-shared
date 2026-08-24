@@ -36,7 +36,7 @@ Use `deep-protocol` for protocol and crypto semantics. Do not recreate protocol 
 - Contacts/conversations -> `Domain/Contacts.cs`, `Domain/ConversationDomain.cs`, `Services/ConversationService.cs`.
 - Messages/read/disappearing -> `Domain/Messages.cs`, `Services/MessageService.cs`.
 - Groups v2 scaffolding/member roles -> `Domain/Groups.cs`, `Services/ConversationService.cs`; legacy-group placeholders are not supported.
-- Attachments -> `Domain/Attachments.cs` plus platform media boundaries; encrypted downloads accept only the authenticated chunked `DEEPATT2` format.
+- Attachments -> `Domain/Attachments.cs` plus platform media boundaries; encrypted downloads accept only the authenticated chunked `DEEPATT2` format. Voice messages carry an explicit `AttachmentKind.VoiceMessage` through the current DMC1 v2 content grammar; MIME type alone never grants voice-message semantics, and DMC1 v1 is rejected rather than migrated.
 - Push -> `Services/PushSubscriptionTransport.cs`, notification planning, and MAUI push adapters.
 - Calls -> `Services/RealtimeCallService.cs` and `Platform/PlatformServiceBoundaries.cs`.
 - Local state -> `Persistence/*`.

@@ -26,7 +26,13 @@ public sealed class E2eeClientTransportTests
         var raw = new AuthenticatedRawTransport();
         using var alice = CreateTransport(raw, () => AlicePhrase);
         using var bob = CreateTransport(raw, () => BobPhrase);
-        var attachment = CreateAttachment();
+        var attachment = CreateAttachment() with
+        {
+            ContentType = "audio/wav",
+            Duration = TimeSpan.FromSeconds(4),
+            IsDocument = false,
+            Kind = AttachmentKind.VoiceMessage
+        };
         var messageId = new MessageId("semantic-message-id");
         var message = new OutboundMessageEnvelope(
             aliceIdentity.SessionId,
@@ -68,6 +74,7 @@ public sealed class E2eeClientTransportTests
         Assert.Equal(bobIdentity.SessionId, incoming.Recipient);
         Assert.Equal(messageId, incoming.Id);
         Assert.Equal(message.Body, incoming.Body);
+        Assert.Equal(attachment, Assert.Single(incoming.Attachments));
         Assert.Equal(0, raw.StandardReceiveCalls);
         Assert.True(raw.LastAuthenticationVerified);
 

@@ -94,6 +94,31 @@ public sealed class AttachmentFileTransportTests
     }
 
     [Fact]
+    public async Task HttpAttachmentFileTransport_PreservesExplicitVoiceKindAndDuration()
+    {
+        using var client = new HttpClient(new FakeHandler((request, _) =>
+            request.Method == HttpMethod.Post && request.RequestUri!.AbsolutePath == "/file"
+                ? JsonResponse("""{"id":"file-voice","expires":1781814400}""")
+                : new HttpResponseMessage(HttpStatusCode.NotFound)))
+        {
+            BaseAddress = new Uri("https://file.local/")
+        };
+        var transport = new HttpAttachmentFileTransport(client, new HttpAttachmentFileTransportOptions("https://file.local"));
+        await using var upload = new MemoryStream([1, 2, 3, 4]);
+
+        var metadata = await transport.UploadAsync(new AttachmentFileUpload(
+            "voice.wav",
+            "audio/wav",
+            upload,
+            Duration: TimeSpan.FromSeconds(4),
+            Kind: AttachmentKind.VoiceMessage));
+
+        Assert.Equal(AttachmentKind.VoiceMessage, metadata.Kind);
+        Assert.Equal(TimeSpan.FromSeconds(4), metadata.Duration);
+        Assert.Equal("audio/wav", metadata.ContentType);
+    }
+
+    [Fact]
     public async Task HttpAttachmentFileTransport_RejectsSingleShotCiphertextWithoutCurrentMagic()
     {
         var plain = Encoding.UTF8.GetBytes("single-shot attachment");

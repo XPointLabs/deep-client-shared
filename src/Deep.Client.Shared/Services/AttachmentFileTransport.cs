@@ -17,7 +17,8 @@ public sealed record AttachmentFileUpload(
     int? Width = null,
     int? Height = null,
     TimeSpan? Duration = null,
-    bool IsDocument = false);
+    bool IsDocument = false,
+    AttachmentKind Kind = AttachmentKind.File);
 
 public sealed record AttachmentFileDownload(
     string FileName,
@@ -177,7 +178,8 @@ public sealed class HttpAttachmentFileTransport : IAttachmentFileTransport, IDis
                 upload.Width,
                 upload.Height,
                 upload.Duration,
-                upload.IsDocument);
+                upload.IsDocument,
+                upload.Kind);
         }
         finally
         {

@@ -146,6 +146,61 @@ public sealed class MessageSyncRepositoryTests
         }
     }
 
+    [Fact]
+    public async Task SqliteStore_PreservesExplicitVoiceAttachmentAcrossRestart()
+    {
+        var statePath = NewSqlitePath();
+        var account = SessionId.CreateNew();
+        var remote = SessionId.CreateNew();
+        var conversationId = ConversationId.ForOneToOne(remote);
+        var voice = new AttachmentMetadata(
+            "voice-1",
+            "voice-message.wav",
+            "audio/wav",
+            4_096,
+            new Uri("https://files.example.test/voice-1"),
+            Convert.ToBase64String(Enumerable.Repeat((byte)0x31, 32).ToArray()),
+            Convert.ToBase64String(Enumerable.Repeat((byte)0x42, 32).ToArray()),
+            Duration: TimeSpan.FromSeconds(4),
+            Kind: AttachmentKind.VoiceMessage);
+        var message = new Message(
+            MessageId.NewId(),
+            conversationId,
+            remote,
+            account,
+            "[Голосовое сообщение]",
+            MessageDirection.Incoming,
+            MessageDeliveryState.Delivered,
+            Now,
+            [voice]);
+
+        try
+        {
+            using (var store = new SqliteSessionStore(statePath))
+            {
+                await store.AppendAsync(message);
+            }
+
+            using var reopened = new SqliteSessionStore(statePath);
+            var restored = new List<Message>();
+            await foreach (var item in ((IMessageRepository)reopened)
+                               .ListRecentForConversationAsync(conversationId, Now.AddMinutes(1), 10))
+            {
+                restored.Add(item);
+            }
+
+            var restoredVoice = Assert.Single(Assert.Single(restored).Attachments);
+            Assert.Equal(voice, restoredVoice);
+            Assert.Equal(AttachmentKind.VoiceMessage, restoredVoice.Kind);
+            Assert.Equal(TimeSpan.FromSeconds(4), restoredVoice.Duration);
+            Assert.Equal("audio/wav", restoredVoice.ContentType);
+        }
+        finally
+        {
+            DeleteSqliteFiles(statePath);
+        }
+    }
+
     private static async Task ForEachStoreAsync(
         Func<ILocalSessionStore, IMessageSyncRepository, Task> assertion)
     {
