@@ -27,27 +27,27 @@ public sealed class HttpServiceEndpointPolicyTests
     }
 
     [Fact]
-    public void PhysicalFactory_ConstructsAllSevenTransportsWithPlatformNeutralDefaultPaths()
+    public void ProductionFactory_ConstructsAllSevenTransportsWithHttpsOrigins()
     {
         var factory = new HttpServiceTransportFactory(
-            HttpServiceEndpointPolicy.PhysicalE2eDevelopment);
+            HttpServiceEndpointPolicy.Production);
 
         Assert.NotNull(factory.CreateAvatar(
-            new HttpAvatarProfileTransportOptions("http://192.168.1.44:41821/")));
+            new HttpAvatarProfileTransportOptions("https://192.168.1.44:41821/")));
         Assert.True(factory.CreateAttachment(
-            new HttpAttachmentFileTransportOptions("http://192.168.1.44:41821/")).IsEnabled);
+            new HttpAttachmentFileTransportOptions("https://192.168.1.44:41821/")).IsEnabled);
         Assert.True(factory.CreatePush(
-            new HttpPushSubscriptionTransportOptions("http://192.168.1.44:41822/")).IsEnabled);
+            new HttpPushSubscriptionTransportOptions("https://192.168.1.44:41822/")).IsEnabled);
         Assert.NotNull(factory.CreateCallSignaling(
-            new HttpCallSignalingTransportOptions("http://192.168.1.44:41823/")));
+            new HttpCallSignalingTransportOptions("https://192.168.1.44:41823/")));
         Assert.NotNull(factory.CreateSession(
-            new HttpSessionTransportOptions("http://192.168.1.44:41820/")));
+            new HttpSessionTransportOptions("https://192.168.1.44:41820/")));
         Assert.Throws<ArgumentOutOfRangeException>(() => factory.CreateStorage(
             new SessionStorageMessageTransportOptions(
-                "http://192.168.1.44:41820/",
+                "https://192.168.1.44:41820/",
                 MetadataMode: (SessionStorageMetadataMode)2)));
         Assert.NotNull(factory.CreateGroupSync(
-            new SessionStorageGroupSyncTransportOptions("http://192.168.1.44:41820/")));
+            new SessionStorageGroupSyncTransportOptions("https://192.168.1.44:41820/")));
     }
 
     [Theory]
@@ -60,10 +60,10 @@ public sealed class HttpServiceEndpointPolicyTests
     [InlineData("http://192.168.1.44:41822/?mode=dev")]
     [InlineData("http://192.168.1.44:41822/#dev")]
     [InlineData("http://192.168.1.44:41822/not-an-origin")]
-    public void PhysicalFactory_RejectsNonCanonicalOrNonLocalHttp(string baseUrl)
+    public void ProductionFactory_RejectsNonLoopbackHttp(string baseUrl)
     {
         var factory = new HttpServiceTransportFactory(
-            HttpServiceEndpointPolicy.PhysicalE2eDevelopment);
+            HttpServiceEndpointPolicy.Production);
 
         Assert.Throws<ArgumentException>(() => factory.CreatePush(
             new HttpPushSubscriptionTransportOptions(baseUrl)));
@@ -303,7 +303,7 @@ public sealed class HttpServiceEndpointPolicyTests
     }
 
     [Fact]
-    public async Task PhysicalFactory_IgnoresSystemProxyAndConnectsConfiguredAuthority()
+    public async Task ProductionLoopbackFactory_IgnoresSystemProxyAndConnectsConfiguredAuthority()
     {
         using var backend = new TcpListener(IPAddress.Loopback, 0);
         using var hostileProxy = new TcpListener(IPAddress.Loopback, 0);
@@ -319,7 +319,7 @@ public sealed class HttpServiceEndpointPolicyTests
             HttpClient.DefaultProxy = new WebProxy(
                 $"http://127.0.0.1:{proxyPort}/");
             var factory = new HttpServiceTransportFactory(
-                    HttpServiceEndpointPolicy.PhysicalE2eDevelopment)
+                    HttpServiceEndpointPolicy.Production)
                 .BindNetwork(new HttpServiceNetworkHooks(
                     async (context, cancellationToken) =>
                     {
@@ -344,18 +344,18 @@ public sealed class HttpServiceEndpointPolicyTests
                     }));
             using var transport = factory.CreatePush(
                 new HttpPushSubscriptionTransportOptions(
-                    $"http://192.168.1.44:{backendPort}/"));
+                    $"http://127.0.0.1:{backendPort}/"));
 
             await transport.SubscribeAsync(CreatePushRequest());
             var request = await backendRequest;
             await Task.Delay(100);
 
-            Assert.Equal("192.168.1.44", connectedAuthority?.Host);
+            Assert.Equal("127.0.0.1", connectedAuthority?.Host);
             Assert.Equal(backendPort, connectedAuthority?.Port);
             Assert.Contains("\"token\":\"token\"", request, StringComparison.Ordinal);
             Assert.False(
                 hostileProxy.Pending(),
-                "System proxy received a physical HTTP request.");
+                "System proxy received a loopback HTTP test request.");
         }
         finally
         {
@@ -376,12 +376,12 @@ public sealed class HttpServiceEndpointPolicyTests
     }
 
     [Fact]
-    public void DevelopmentAuthority_IsNotPubliclyAcquirable()
+    public void DevelopmentAuthority_DoesNotExist()
     {
         var type = typeof(HttpServiceEndpointPolicy);
         Assert.Empty(type.GetConstructors(BindingFlags.Public | BindingFlags.Instance));
         Assert.DoesNotContain(
-            type.GetMembers(BindingFlags.Public | BindingFlags.Static),
+            type.GetMembers(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static),
             member => member.Name.Contains("Development", StringComparison.OrdinalIgnoreCase) ||
                       member.Name.Contains("DevLocal", StringComparison.OrdinalIgnoreCase) ||
                       member.Name.Contains("Physical", StringComparison.OrdinalIgnoreCase));

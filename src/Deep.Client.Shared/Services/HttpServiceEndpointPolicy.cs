@@ -1,5 +1,3 @@
-using System.Net;
-using System.Net.Sockets;
 using System.Security.Cryptography.X509Certificates;
 using System.Text.RegularExpressions;
 
@@ -7,30 +5,17 @@ namespace Deep.Client.Shared.Services;
 
 /// <summary>
 /// Explicit authority for HTTP service origins used by client transports.
-/// The development-local authority is deliberately obtainable only as an exact
-/// policy instance; transports never inspect process environment or accept a
-/// boolean cleartext bypass.
+/// Only loopback test endpoints may use cleartext; physical/UAT and public
+/// transports always use HTTPS with the platform TLS validator.
 /// </summary>
 public sealed class HttpServiceEndpointPolicy
 {
-    private enum PolicyKind
+    private HttpServiceEndpointPolicy()
     {
-        Production,
-        PhysicalE2eDevelopment
-    }
-
-    private readonly PolicyKind kind;
-
-    private HttpServiceEndpointPolicy(PolicyKind kind)
-    {
-        this.kind = kind;
     }
 
     public static HttpServiceEndpointPolicy Production { get; } =
-        new(PolicyKind.Production);
-
-    internal static HttpServiceEndpointPolicy PhysicalE2eDevelopment { get; } =
-        new(PolicyKind.PhysicalE2eDevelopment);
+        new();
 
     internal Uri RequireOrigin(string value, string description)
     {
@@ -67,22 +52,10 @@ public sealed class HttpServiceEndpointPolicy
             return;
         }
 
-        if (kind == PolicyKind.Production)
-        {
-            if (!value.IsLoopback)
-            {
-                throw new ArgumentException(
-                    $"{description} must use HTTPS unless it is an explicit loopback test endpoint.");
-            }
-
-            return;
-        }
-
-        if (!TryGetCanonicalLiteralIpv4(value, out var address) ||
-            !IsDevelopmentLocal(address))
+        if (!value.IsLoopback)
         {
             throw new ArgumentException(
-                $"{description} development HTTP requires a canonical literal loopback, RFC1918, or IPv4 link-local address.");
+                $"{description} must use HTTPS unless it is an explicit loopback test endpoint.");
         }
     }
 
@@ -103,51 +76,6 @@ public sealed class HttpServiceEndpointPolicy
         string.Equals(left.IdnHost, right.IdnHost, StringComparison.OrdinalIgnoreCase) &&
         left.Port == right.Port;
 
-    private static bool TryGetCanonicalLiteralIpv4(Uri value, out IPAddress address)
-    {
-        address = IPAddress.None;
-        var original = value.OriginalString;
-        var schemeSeparator = original.IndexOf("://", StringComparison.Ordinal);
-        if (schemeSeparator < 0)
-        {
-            return false;
-        }
-
-        var authorityStart = schemeSeparator + 3;
-        var authorityEnd = original.IndexOfAny(['/', '?', '#'], authorityStart);
-        var authority = authorityEnd < 0
-            ? original[authorityStart..]
-            : original[authorityStart..authorityEnd];
-        if (authority.Length == 0 || authority[0] == '[' || authority.Contains('@'))
-        {
-            return false;
-        }
-
-        var portSeparator = authority.LastIndexOf(':');
-        var rawHost = portSeparator < 0 ? authority : authority[..portSeparator];
-        if (rawHost.Length == 0 ||
-            rawHost.Contains(':') ||
-            !IPAddress.TryParse(rawHost, out var parsed) ||
-            parsed.AddressFamily != AddressFamily.InterNetwork ||
-            !string.Equals(rawHost, parsed.ToString(), StringComparison.Ordinal))
-        {
-            address = IPAddress.None;
-            return false;
-        }
-
-        address = parsed;
-        return true;
-    }
-
-    private static bool IsDevelopmentLocal(IPAddress address)
-    {
-        var bytes = address.GetAddressBytes();
-        return bytes[0] == 10 ||
-               bytes[0] == 127 ||
-               bytes[0] == 169 && bytes[1] == 254 ||
-               bytes[0] == 172 && bytes[1] is >= 16 and <= 31 ||
-               bytes[0] == 192 && bytes[1] == 168;
-    }
 }
 
 internal sealed class HttpServiceOrigin
