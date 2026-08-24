@@ -17,15 +17,24 @@ public sealed record MembershipRouteEndpointPolicy
         AllowDevLocalHttp = true
     };
 
+    public static MembershipRouteEndpointPolicy DevLocalHttps { get; } = new();
+
     internal bool IsExplicitDevLocal =>
-        ReferenceEquals(this, DevLocalHttp);
+        ReferenceEquals(this, DevLocalHttp) ||
+        ReferenceEquals(this, DevLocalHttps);
+
+    private bool UsesCanonicalDevLocalScheme(Uri value) =>
+        ReferenceEquals(this, DevLocalHttp)
+            ? value.Scheme == Uri.UriSchemeHttp
+            : ReferenceEquals(this, DevLocalHttps) &&
+              value.Scheme == Uri.UriSchemeHttps;
 
     internal bool IsCanonicalDevLocalCatalogOrigin(Uri value)
     {
         try
         {
             if (!IsExplicitDevLocal ||
-                value.Scheme != Uri.UriSchemeHttp ||
+                !UsesCanonicalDevLocalScheme(value) ||
                 value.AbsolutePath != "/" ||
                 value.Port <= 0 ||
                 !IsLocalIpv4(value.Host))
@@ -49,7 +58,7 @@ public sealed record MembershipRouteEndpointPolicy
         try
         {
             if (!IsExplicitDevLocal ||
-                value.Scheme != Uri.UriSchemeHttp ||
+                !UsesCanonicalDevLocalScheme(value) ||
                 value.AbsolutePath != HttpMembershipRouteArtifactSource.DefaultArtifactPath ||
                 value.Port <= 0 ||
                 !IsLocalIpv4(value.Host))
@@ -136,6 +145,12 @@ public sealed record MembershipRouteEndpointPolicy
             throw new ArgumentException(
                 $"{description} requires HTTPS unless explicit development-local HTTP is enabled for a local IPv4 address.");
         }
+        if (ReferenceEquals(this, DevLocalHttps) &&
+            !IsLocalIpv4(value.Host))
+        {
+            throw new ArgumentException(
+                $"{description} requires an exact local IPv4 host under the development-local HTTPS policy.");
+        }
 
         var builder = new UriBuilder(value.Scheme, value.IdnHost)
         {
@@ -166,7 +181,7 @@ public sealed record MembershipRouteEndpointPolicy
 
 internal interface ICanonicalDevLocalMembershipRouteArtifactSource
 {
-    bool IsCanonicalDevLocalHttpSource { get; }
+    bool IsCanonicalDevLocalSource { get; }
 }
 
 public sealed record DevLocalMembershipTrustBootstrapOptions(

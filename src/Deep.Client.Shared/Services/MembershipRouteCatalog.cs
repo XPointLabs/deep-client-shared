@@ -55,10 +55,10 @@ public sealed class HttpMembershipRouteArtifactSource :
 
     private readonly HttpClient _httpClient;
     private readonly Uri[] _catalogEndpoints;
-    private readonly bool _isCanonicalDevLocalHttpSource;
+    private readonly bool _isCanonicalDevLocalSource;
 
-    bool ICanonicalDevLocalMembershipRouteArtifactSource.IsCanonicalDevLocalHttpSource =>
-        _isCanonicalDevLocalHttpSource;
+    bool ICanonicalDevLocalMembershipRouteArtifactSource.IsCanonicalDevLocalSource =>
+        _isCanonicalDevLocalSource;
 
     public HttpMembershipRouteArtifactSource(
         HttpClient httpClient,
@@ -74,7 +74,7 @@ public sealed class HttpMembershipRouteArtifactSource :
         var policy = endpointPolicy ?? MembershipRouteEndpointPolicy.Production;
         var suppliedEndpoints = bootstrapEndpoints?.ToArray()
             ?? throw new ArgumentNullException(nameof(bootstrapEndpoints));
-        _isCanonicalDevLocalHttpSource =
+        _isCanonicalDevLocalSource =
             suppliedEndpoints.Length == 1 &&
             suppliedEndpoints.All(policy.IsCanonicalDevLocalCatalogOrigin);
         _catalogEndpoints = suppliedEndpoints
@@ -89,11 +89,11 @@ public sealed class HttpMembershipRouteArtifactSource :
     private HttpMembershipRouteArtifactSource(
         HttpClient httpClient,
         Uri[] catalogEndpoints,
-        bool isCanonicalDevLocalHttpSource)
+        bool isCanonicalDevLocalSource)
     {
         _httpClient = httpClient;
         _catalogEndpoints = catalogEndpoints;
-        _isCanonicalDevLocalHttpSource = isCanonicalDevLocalHttpSource;
+        _isCanonicalDevLocalSource = isCanonicalDevLocalSource;
     }
 
     public static HttpMembershipRouteArtifactSource FromCatalogUrls(
@@ -104,7 +104,7 @@ public sealed class HttpMembershipRouteArtifactSource :
         var policy = endpointPolicy ?? MembershipRouteEndpointPolicy.Production;
         var suppliedUrls = catalogUrls?.ToArray()
             ?? throw new ArgumentNullException(nameof(catalogUrls));
-        var isCanonicalDevLocalHttpSource =
+        var isCanonicalDevLocalSource =
             suppliedUrls.Length == 1 &&
             suppliedUrls.All(policy.IsCanonicalDevLocalCatalogUri);
         var endpoints = suppliedUrls
@@ -116,7 +116,7 @@ public sealed class HttpMembershipRouteArtifactSource :
         return new HttpMembershipRouteArtifactSource(
             httpClient,
             endpoints,
-            isCanonicalDevLocalHttpSource);
+            isCanonicalDevLocalSource);
     }
 
     public async Task<byte[]> FetchAsync(CancellationToken cancellationToken = default)
@@ -131,7 +131,7 @@ public sealed class HttpMembershipRouteArtifactSource :
                     endpoint,
                     HttpCompletionOption.ResponseHeadersRead,
                     cancellationToken).ConfigureAwait(false);
-                if (_isCanonicalDevLocalHttpSource &&
+                if (_isCanonicalDevLocalSource &&
                     response.RequestMessage?.RequestUri is { } responseUri &&
                     !string.Equals(
                         responseUri.AbsoluteUri,
@@ -311,16 +311,16 @@ public sealed class VerifiedMembershipRouteCatalogProvider : IMembershipRouteCat
         if (endpointPolicy is null || !endpointPolicy.IsExplicitDevLocal)
         {
             throw new ArgumentException(
-                "Development membership trust bootstrap requires the explicit development-local HTTP endpoint policy.",
+                "Development membership trust bootstrap requires an explicit development-local endpoint policy.",
                 nameof(endpointPolicy));
         }
         if (source is not ICanonicalDevLocalMembershipRouteArtifactSource
             {
-                IsCanonicalDevLocalHttpSource: true
+                IsCanonicalDevLocalSource: true
             })
         {
             throw new ArgumentException(
-                "Development membership trust bootstrap requires a canonical local-IPv4 HTTP catalog source.",
+                "Development membership trust bootstrap requires a canonical local-IPv4 catalog source.",
                 nameof(source));
         }
         _endpointPolicy = endpointPolicy;

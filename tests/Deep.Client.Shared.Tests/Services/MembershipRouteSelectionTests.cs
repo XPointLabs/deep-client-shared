@@ -520,6 +520,46 @@ public sealed class MembershipRouteSelectionTests
             MembershipRouteEndpointPolicy.DevLocalHttp));
     }
 
+    [Fact]
+    public void DevHttpsCatalog_AcceptsOnlyExactLocalIpv4Https()
+    {
+        var accepted = HttpMembershipRouteArtifactSource.FromCatalogUrls(
+            new HttpClient(),
+            [new Uri("https://192.168.50.7:41810/api/network/membership-route-catalog")],
+            MembershipRouteEndpointPolicy.DevLocalHttps);
+
+        Assert.NotNull(accepted);
+        Assert.Throws<ArgumentException>(() =>
+            HttpMembershipRouteArtifactSource.FromCatalogUrls(
+                new HttpClient(),
+                [new Uri("http://192.168.50.7:41810/api/network/membership-route-catalog")],
+                MembershipRouteEndpointPolicy.DevLocalHttps));
+        Assert.Throws<ArgumentException>(() =>
+            HttpMembershipRouteArtifactSource.FromCatalogUrls(
+                new HttpClient(),
+                [new Uri("https://membership.example/api/network/membership-route-catalog")],
+                MembershipRouteEndpointPolicy.DevLocalHttps));
+    }
+
+    [Fact]
+    public void DevBootstrapProvider_AcceptsCanonicalLocalHttpsPolicy()
+    {
+        var fixture = SignedArtifact();
+        var store = new InMemorySessionStore();
+        var source = HttpMembershipRouteArtifactSource.FromCatalogUrls(
+            new HttpClient(),
+            [new Uri("https://192.168.50.7:41810/api/network/membership-route-catalog")],
+            MembershipRouteEndpointPolicy.DevLocalHttps);
+
+        Assert.NotNull(new VerifiedMembershipRouteCatalogProvider(
+            TrustService(store),
+            store,
+            fixture.Bootstrap,
+            source,
+            new InMemoryMembershipRouteArtifactCache(),
+            endpointPolicy: MembershipRouteEndpointPolicy.DevLocalHttps));
+    }
+
     [Theory]
     [InlineData("https://user:password@registry.example/api/network/membership-route-catalog")]
     [InlineData("https://registry.example/api/network/membership-route-catalog?mirror=1")]
