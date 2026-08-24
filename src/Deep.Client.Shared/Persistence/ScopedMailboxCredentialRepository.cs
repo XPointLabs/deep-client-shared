@@ -278,6 +278,7 @@ public sealed record ScopedMailboxBatchSelector(
 /// <summary>Opaque route material resolved only from a verified scoped credential.</summary>
 public sealed record ScopedMailboxResolvedRoute(
     ulong Epoch,
+    ulong ExpiresAtUnixSeconds,
     BlindedMailboxId MailboxId,
     BlindedPlacementId PlacementId,
     ReadOnlyMemory<byte> PlacementCommitment,
@@ -1228,6 +1229,7 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
             }
             return new ScopedMailboxResolvedRoute(
                 MailboxReadU64((byte[])reader.GetValue(4)),
+                MailboxReadU64((byte[])reader.GetValue(6)),
                 new BlindedMailboxId((byte[])reader.GetValue(7)),
                 new BlindedPlacementId((byte[])reader.GetValue(8)),
                 (byte[])reader.GetValue(9),
@@ -1609,6 +1611,7 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
             holder,
             new ScopedMailboxResolvedRoute(
                 activeEpoch,
+                expires,
                 new BlindedMailboxId(mailbox),
                 new BlindedPlacementId(placement),
                 placementCommitment,

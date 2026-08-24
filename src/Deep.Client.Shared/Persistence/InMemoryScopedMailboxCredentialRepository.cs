@@ -617,6 +617,7 @@ public sealed class InMemoryScopedMailboxCredentialRepository :
         }
         return new ScopedMailboxResolvedRoute(
             epoch.Epoch,
+            epoch.ExpiresAtUnixSeconds,
             new BlindedMailboxId(generation.MailboxId.Span),
             new BlindedPlacementId(epoch.PlacementId.Span),
             epoch.PlacementCommitment,

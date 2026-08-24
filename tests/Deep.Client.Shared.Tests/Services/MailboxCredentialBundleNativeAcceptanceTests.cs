@@ -10,6 +10,69 @@ namespace Deep.Client.Shared.Tests.Services;
 public sealed partial class MailboxCredentialBundleImporterTests
 {
     [Fact]
+    public async Task NativePreparation_CapsMailboxRetentionToAuthenticatedEpoch()
+    {
+        using var fixture = Fixture.Create();
+        using var identity = new SessionIdentityProvider(AlicePhrase);
+        var clock = new MutableTimeProvider(Now);
+        using var store = new SqliteSessionStore(fixture.DatabasePath);
+        var imported = await MailboxCredentialBundleImporter.ImportAsync(
+            store,
+            identity,
+            fixture.AndroidOptions with { TimeProvider = clock },
+            MailboxInfrastructureOwnership.UserManaged);
+        var ingress = new ScriptedRetrieveIngress(
+            clock,
+            storeCoordinatorIds: [Bytes(32, 0x51)]);
+        using var transport = new NativeMau2MailboxTransport(
+            ClientFeatureFlags.Defaults with { ClientMailboxAdapterEnabled = true },
+            imported.Activation,
+            ingress,
+            store,
+            new PinnedClientMailboxReceiptVerifier(
+                new SodiumClientMailboxReceiptCrypto()),
+            imported.DecodePolicies,
+            imported.Authority,
+            sessionId => sessionId == imported.LocalSessionId
+                ? imported.SelfSelector
+                : throw new InvalidOperationException(),
+            timeProvider: clock);
+        var route = await store.ReadScopedMailboxRouteAsync(
+            imported.PeerSelector,
+            imported.Authority);
+        var target = new MailboxAuthenticatedSendTarget(
+            new OutboundMessageEnvelope(
+                identity.SessionId,
+                fixture.BobSessionId,
+                Dpe1(Bytes(64, 0xd7)),
+                [],
+                Now,
+                Now.AddDays(7),
+                new MessageId("epoch-bounded-retention")),
+            imported.PeerSelector,
+            imported.Authority);
+
+        IReadOnlyList<IPreparedMailboxAuthenticatedSend> prepared;
+        using (var signer = new AcceptanceMailboxSigner(identity))
+        {
+            prepared = await transport.PrepareScopedMailboxLogicalBatchAsync(
+                signer,
+                LogicalBatch([target]),
+                [target]);
+        }
+        await transport.SendPreparedMailboxAuthenticatedAsync(
+            Assert.Single(prepared));
+
+        var authenticated = MailboxAuthenticatedClientRequestCodec.Decode(
+            Assert.Single(ingress.StoreRequests));
+        var envelope = MailboxAuthenticatedRequestTranscript.DecodeStoreBody(
+            authenticated.Binding.CanonicalRequest.Span);
+        Assert.Equal(route.ExpiresAtUnixSeconds, envelope.ExpiresAtUnixSeconds);
+        Assert.True(envelope.ExpiresAtUnixSeconds <
+            checked((ulong)Now.AddDays(7).ToUnixTimeSeconds()));
+    }
+
+    [Fact]
     public async Task NativeDirectDispatch_ObservesOnlyAuthenticatedCurrentAttemptRoute()
     {
         using var fixture = Fixture.Create();

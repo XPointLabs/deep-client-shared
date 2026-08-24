@@ -105,6 +105,23 @@ public sealed class NativeMau2MailboxTransport :
             var ciphertext = DecodeDpe1(target.Envelope.Body);
             try
             {
+                var createdAtUnixSeconds = ToUnixSeconds(
+                    target.Envelope.CreatedAt,
+                    nameof(targets));
+                var requestedExpiresAtUnixSeconds = ToUnixSeconds(
+                    target.Envelope.ExpiresAt ?? throw new InvalidOperationException(
+                        "Mailbox DPE1 target requires its protocol expiry."),
+                    nameof(targets));
+                var expiresAtUnixSeconds = Math.Min(
+                    requestedExpiresAtUnixSeconds,
+                    route.ExpiresAtUnixSeconds);
+                if (expiresAtUnixSeconds <= createdAtUnixSeconds ||
+                    expiresAtUnixSeconds - createdAtUnixSeconds <
+                        MailboxClientLimits.MinimumTtlSeconds)
+                {
+                    throw new InvalidOperationException(
+                        "The active mailbox epoch cannot retain this message for the minimum protocol lifetime.");
+                }
                 var operationId = OperationId(StoreOperationDomain, ciphertext);
                 var envelope = new MailboxEncryptedEnvelope
                 {
@@ -113,10 +130,8 @@ public sealed class NativeMau2MailboxTransport :
                     PlacementId = route.PlacementId,
                     OperationId = operationId,
                     DeduplicationDigest = SHA256.HashData(ciphertext),
-                    CreatedAtUnixSeconds = ToUnixSeconds(target.Envelope.CreatedAt, nameof(targets)),
-                    ExpiresAtUnixSeconds = ToUnixSeconds(
-                        target.Envelope.ExpiresAt ?? throw new InvalidOperationException(
-                            "Mailbox DPE1 target requires its protocol expiry."), nameof(targets)),
+                    CreatedAtUnixSeconds = createdAtUnixSeconds,
+                    ExpiresAtUnixSeconds = expiresAtUnixSeconds,
                     Ciphertext = ciphertext.ToArray()
                 };
                 var binding = MailboxAuthenticatedRequestTranscript.ForStore(envelope);
