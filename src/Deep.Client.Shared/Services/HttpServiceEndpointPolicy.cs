@@ -1,6 +1,7 @@
 using System.Net.Security;
 using System.Security.Cryptography.X509Certificates;
 using System.Text.RegularExpressions;
+using Deep.Protocol.DeepExtension.PrivacyRouting;
 
 namespace Deep.Client.Shared.Services;
 
@@ -348,6 +349,41 @@ public sealed class HttpServiceTransportFactory
                 timeProvider,
                 endpointPolicy));
 
+    internal PrivacyRoutedMailboxBinaryIngress CreatePrivacyRoutedMailboxIngress(
+        PrivacyMailboxRoute primaryRoute,
+        PrivacyMailboxRoute fallbackRoute,
+        IMailboxClientDecodePolicyProvider decodePolicies,
+        HttpServiceClientOptions? clientOptions = null,
+        int paddingBlockBytes = PrivacyRoutingLimits.DefaultPaddingBlockBytes)
+    {
+        ArgumentNullException.ThrowIfNull(primaryRoute);
+        ArgumentNullException.ThrowIfNull(fallbackRoute);
+        ArgumentNullException.ThrowIfNull(decodePolicies);
+
+        PrivacyManagedIngressHttpTransport? primary = null;
+        PrivacyManagedIngressHttpTransport? fallback = null;
+        try
+        {
+            primary = CreatePrivacyManagedIngress(primaryRoute.EntryOrigin, clientOptions);
+            fallback = CreatePrivacyManagedIngress(fallbackRoute.EntryOrigin, clientOptions);
+            var ingress = new PrivacyRoutedMailboxBinaryIngress(
+                primaryRoute,
+                fallbackRoute,
+                decodePolicies,
+                primary,
+                fallback,
+                paddingBlockBytes);
+            primary = null;
+            fallback = null;
+            return ingress;
+        }
+        finally
+        {
+            fallback?.Dispose();
+            primary?.Dispose();
+        }
+    }
+
     private TTransport CreateOwned<TTransport>(
         HttpServiceClientOptions? options,
         Func<HttpClient, TTransport> create)
@@ -356,6 +392,28 @@ public sealed class HttpServiceTransportFactory
         try
         {
             return create(client);
+        }
+        catch
+        {
+            client.Dispose();
+            throw;
+        }
+    }
+
+    private PrivacyManagedIngressHttpTransport CreatePrivacyManagedIngress(
+        Uri origin,
+        HttpServiceClientOptions? options)
+    {
+        var handler = CreateHttpHandler(options, networkHooks);
+        handler.AutomaticDecompression = System.Net.DecompressionMethods.None;
+        var client = new HttpClient(handler, disposeHandler: true)
+        {
+            Timeout = Timeout.InfiniteTimeSpan
+        };
+        try
+        {
+            client.BaseAddress = origin;
+            return new PrivacyManagedIngressHttpTransport(client);
         }
         catch
         {

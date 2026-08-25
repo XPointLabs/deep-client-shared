@@ -158,6 +158,31 @@ public sealed class PrivacyRoutedMailboxBinaryIngressTests
         Assert.Equal(0, fallback.Attempts);
     }
 
+    [Fact]
+    public async Task FactoryOwnedIngress_UsesBoundNetworkHooksForPrimaryAndFallbackRoutes()
+    {
+        using var fixture = new RouteFixture();
+        var connectedAuthorities = new List<string>();
+        var factory = new HttpServiceTransportFactory(HttpServiceEndpointPolicy.Production)
+            .BindNetwork(new HttpServiceNetworkHooks(
+                ConnectCallback: (context, _) =>
+                {
+                    connectedAuthorities.Add(context.DnsEndPoint.Host);
+                    return ValueTask.FromResult<Stream>(new MemoryStream());
+                }));
+        using var ingress = factory.CreatePrivacyRoutedMailboxIngress(
+            fixture.PrimaryRoute,
+            fixture.FallbackRoute,
+            Policies(),
+            new HttpServiceClientOptions(Timeout: TimeSpan.FromSeconds(2)),
+            PrivacyRoutingLimits.MinimumPaddingBlockBytes);
+
+        await Assert.ThrowsAsync<ClientMailboxTransportException>(
+            () => ingress.RetrieveAsync(RetrieveRequest()));
+
+        Assert.Equal(["primary.example", "fallback.example"], connectedAuthorities);
+    }
+
     private static byte[] RetrieveRequest()
     {
         var operationId = Bytes(16, 0x11);

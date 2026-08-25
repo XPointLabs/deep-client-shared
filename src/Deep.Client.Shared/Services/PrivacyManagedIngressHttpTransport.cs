@@ -49,12 +49,10 @@ internal sealed class PrivacyManagedIngressHttpTransport :
         ArgumentNullException.ThrowIfNull(origin);
         ValidateOrigin(origin);
 
-        var handler = new SocketsHttpHandler
-        {
-            AllowAutoRedirect = false,
-            AutomaticDecompression = DecompressionMethods.None,
-            UseCookies = false
-        };
+        var handler = HttpServiceTransportFactory.CreateHttpHandler(
+            new HttpServiceClientOptions(Timeout: RequestTimeout),
+            networkHooks: null);
+        handler.AutomaticDecompression = DecompressionMethods.None;
         httpClient = new HttpClient(handler, disposeHandler: true)
         {
             BaseAddress = origin,
