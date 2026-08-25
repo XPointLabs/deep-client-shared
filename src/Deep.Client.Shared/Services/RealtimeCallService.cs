@@ -4,6 +4,7 @@ using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Deep.Client.Shared.Domain;
 using Sodium;
 
@@ -38,7 +39,8 @@ public sealed record CallSignalEnvelope(
     string Payload,
     DateTimeOffset CreatedAt,
     string? SenderEd25519 = null,
-    string? Signature = null);
+    string? Signature = null,
+    string? Nonce = null);
 
 public sealed record CallNetworkSample(
     double RttMs,
@@ -180,9 +182,12 @@ public sealed class HttpCallSignalingTransport :
 
     public async Task SendAsync(CallSignalEnvelope envelope, CancellationToken cancellationToken = default)
     {
-        var outgoing = _recoveryPhraseProvider is null
-            ? envelope
-            : await EncryptAndSignAsync(envelope, cancellationToken).ConfigureAwait(false);
+        if (_recoveryPhraseProvider is null)
+        {
+            throw new InvalidOperationException("Authenticated call signaling is required.");
+        }
+
+        var outgoing = await EncryptAndSignAsync(envelope, cancellationToken).ConfigureAwait(false);
         using var request = CreateRequest(HttpMethod.Post, _signalUri);
         request.Content = JsonContent.Create(outgoing);
         using var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
@@ -200,13 +205,7 @@ public sealed class HttpCallSignalingTransport :
             "Call inbox resource");
         if (_recoveryPhraseProvider is null)
         {
-            using var unauthenticatedResponse = await _httpClient.GetAsync(
-                resource,
-                HttpCompletionOption.ResponseHeadersRead,
-                cancellationToken).ConfigureAwait(false);
-            unauthenticatedResponse.EnsureSuccessStatusCode();
-            return await ReadJsonBoundedAsync<List<CallSignalEnvelope>>(unauthenticatedResponse.Content, cancellationToken)
-                .ConfigureAwait(false) ?? [];
+            throw new InvalidOperationException("Authenticated call signaling is required.");
         }
 
         var recoveryPhrase = await _recoveryPhraseProvider(cancellationToken).ConfigureAwait(false);
@@ -221,13 +220,20 @@ public sealed class HttpCallSignalingTransport :
             return [];
         }
 
-        var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        var timestamp = _timeProvider.GetUtcNow().ToUnixTimeSeconds();
+        var nonce = CallSignalAuthentication.CreateNonce();
         using var request = CreateRequest(HttpMethod.Get, resource);
         request.Headers.TryAddWithoutValidation("X-Deep-Ed25519", recipientIdentity.Ed25519PublicKeyHex);
         request.Headers.TryAddWithoutValidation("X-Deep-Timestamp", timestamp.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        request.Headers.TryAddWithoutValidation(CallSignalAuthentication.NonceHeader, nonce);
         request.Headers.TryAddWithoutValidation(
             "X-Deep-Signature",
-            Convert.ToBase64String(recipientIdentity.SignDetached(CallSignalAuthentication.BuildInboxSigningPayload(recipient, timestamp))));
+            Convert.ToBase64String(recipientIdentity.SignDetached(
+                CallSignalAuthentication.BuildInboxSigningPayload(
+                    recipient,
+                    timestamp,
+                    nonce,
+                    resource.AbsolutePath))));
         using var response = await _httpClient.SendAsync(
             request,
             HttpCompletionOption.ResponseHeadersRead,
@@ -269,7 +275,8 @@ public sealed class HttpCallSignalingTransport :
             throw new InvalidOperationException("ICE configuration recipient does not match the active account.");
         }
 
-        var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        var timestamp = _timeProvider.GetUtcNow().ToUnixTimeSeconds();
+        var nonce = CallSignalAuthentication.CreateNonce();
         var resource = _serviceOrigin.Format(
             _iceServersPathFormat,
             "recipient",
@@ -278,9 +285,15 @@ public sealed class HttpCallSignalingTransport :
         using var request = CreateRequest(HttpMethod.Get, resource);
         request.Headers.TryAddWithoutValidation("X-Deep-Ed25519", identity.Ed25519PublicKeyHex);
         request.Headers.TryAddWithoutValidation("X-Deep-Timestamp", timestamp.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        request.Headers.TryAddWithoutValidation(CallSignalAuthentication.NonceHeader, nonce);
         request.Headers.TryAddWithoutValidation(
             "X-Deep-Signature",
-            Convert.ToBase64String(identity.SignDetached(CallSignalAuthentication.BuildIceSigningPayload(recipient, timestamp))));
+            Convert.ToBase64String(identity.SignDetached(
+                CallSignalAuthentication.BuildIceSigningPayload(
+                    recipient,
+                    timestamp,
+                    nonce,
+                    resource.AbsolutePath))));
         using var response = await _httpClient.SendAsync(
             request,
             HttpCompletionOption.ResponseHeadersRead,
@@ -324,7 +337,8 @@ public sealed class HttpCallSignalingTransport :
         {
             Payload = "sealed-v1:" + Convert.ToBase64String(cipher),
             SenderEd25519 = identity.Ed25519PublicKeyHex,
-            Signature = null
+            Signature = null,
+            Nonce = CallSignalAuthentication.CreateNonce()
         };
         return encrypted with
         {
@@ -343,6 +357,7 @@ public sealed class HttpCallSignalingTransport :
             if (!envelope.Payload.StartsWith("sealed-v1:", StringComparison.Ordinal)
                 || string.IsNullOrWhiteSpace(envelope.SenderEd25519)
                 || string.IsNullOrWhiteSpace(envelope.Signature)
+                || !CallSignalAuthentication.IsNonce(envelope.Nonce)
                 || envelope.Recipient != recipient.SessionId
                 || (_timeProvider.GetUtcNow() - envelope.CreatedAt).Duration() > _signalFreshness
                 || envelope.Payload.Length > _options.MaxResponseBytes)
@@ -372,7 +387,8 @@ public sealed class HttpCallSignalingTransport :
             try
             {
                 decrypted = envelope with { Payload = Encoding.UTF8.GetString(plain) };
-                var replayKey = Convert.ToHexString(SHA256.HashData(signature)).ToLowerInvariant();
+                var replayKey = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
+                    $"{envelope.Sender.Value}\n{envelope.Nonce}")));
                 PruneReplayCache();
                 if (!_replayCache.TryAdd(
                         replayKey,
@@ -453,8 +469,12 @@ public sealed class HttpCallSignalingTransport :
 
 public static class CallSignalAuthentication
 {
-    private const string Version = "deep-call-signal-v1";
-    internal static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private const string Version = "deep-call-signal-v2";
+    internal const string NonceHeader = "X-Deep-Nonce";
+    internal static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
+    {
+        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow
+    };
 
     public static byte[] BuildSigningPayload(CallSignalEnvelope envelope) =>
         JsonSerializer.SerializeToUtf8Bytes(new
@@ -467,14 +487,59 @@ public static class CallSignalAuthentication
             type = envelope.Type.ToString(),
             envelope.Payload,
             createdAtUnixMs = envelope.CreatedAt.ToUnixTimeMilliseconds(),
-            senderEd25519 = envelope.SenderEd25519
+            senderEd25519 = envelope.SenderEd25519,
+            nonce = envelope.Nonce
         }, JsonOptions);
 
-    public static byte[] BuildInboxSigningPayload(SessionId recipient, long timestamp) =>
-        Encoding.UTF8.GetBytes($"deep-call-inbox-v1\n{recipient.Value}\n{timestamp}");
+    public static byte[] BuildInboxSigningPayload(
+        SessionId recipient,
+        long timestamp,
+        string nonce,
+        string? absolutePath = null) =>
+        BuildAuthenticatedGetPayload(
+            "deep-call-inbox-v2",
+            absolutePath ?? $"/api/calls/inbox/{recipient.Value}",
+            recipient,
+            timestamp,
+            nonce);
 
-    public static byte[] BuildIceSigningPayload(SessionId recipient, long timestamp) =>
-        Encoding.UTF8.GetBytes($"deep-call-ice-v1\n{recipient.Value}\n{timestamp}");
+    public static byte[] BuildIceSigningPayload(
+        SessionId recipient,
+        long timestamp,
+        string nonce,
+        string? absolutePath = null) =>
+        BuildAuthenticatedGetPayload(
+            "deep-call-ice-v2",
+            absolutePath ?? $"/api/calls/ice-servers/{recipient.Value}",
+            recipient,
+            timestamp,
+            nonce);
+
+    internal static string CreateNonce() =>
+        Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(16));
+
+    internal static bool IsNonce(string? value) =>
+        value is { Length: 32 }
+        && value.All(static character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
+
+    private static byte[] BuildAuthenticatedGetPayload(
+        string purpose,
+        string absolutePath,
+        SessionId recipient,
+        long timestamp,
+        string nonce)
+    {
+        if (!IsNonce(nonce)
+            || string.IsNullOrWhiteSpace(absolutePath)
+            || !absolutePath.StartsWith("/", StringComparison.Ordinal)
+            || absolutePath.Contains("?", StringComparison.Ordinal))
+        {
+            throw new ArgumentException("Call authentication canonical fields are invalid.");
+        }
+
+        return Encoding.UTF8.GetBytes(
+            $"{purpose}\nGET\n{absolutePath}\n{recipient.Value}\n{timestamp}\n{nonce}");
+    }
 }
 
 public sealed class InMemoryCallSignalingTransport : ICallSignalingTransport, ICallIceConfigurationProvider

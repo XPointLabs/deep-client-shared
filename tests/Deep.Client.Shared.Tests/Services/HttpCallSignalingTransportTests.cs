@@ -10,7 +10,7 @@ namespace Deep.Client.Shared.Tests.Services;
 public sealed class HttpCallSignalingTransportTests
 {
     [Fact]
-    public async Task SendAsync_PostsEnvelopeToConfiguredPath()
+    public async Task SendAsyncWithoutIdentityFailsClosedBeforeNetwork()
     {
         var handler = new RecordingHandler((request, _) =>
         {
@@ -24,13 +24,13 @@ public sealed class HttpCallSignalingTransportTests
             new HttpClient(handler),
             new HttpCallSignalingTransportOptions("http://localhost:18082"));
 
-        await transport.SendAsync(BuildEnvelope());
+        await Assert.ThrowsAsync<InvalidOperationException>(() => transport.SendAsync(BuildEnvelope()));
 
-        Assert.Equal(1, handler.RequestCount);
+        Assert.Equal(0, handler.RequestCount);
     }
 
     [Fact]
-    public async Task ReceiveAsync_ReadsInboxUsingRecipientPath()
+    public async Task ReceiveAsyncWithoutIdentityFailsClosedBeforeNetwork()
     {
         var sender = SessionId.CreateNew();
         var recipient = SessionId.CreateNew();
@@ -64,13 +64,9 @@ public sealed class HttpCallSignalingTransportTests
             new HttpClient(handler),
             new HttpCallSignalingTransportOptions("http://localhost:18082"));
 
-        var inbound = await transport.ReceiveAsync(recipient);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => transport.ReceiveAsync(recipient));
 
-        Assert.Single(inbound);
-        Assert.Equal("call-1", inbound[0].CallId);
-        Assert.Equal(CallSignalType.Offer, inbound[0].Type);
-        Assert.Equal(sender, inbound[0].Sender);
-        Assert.Equal(recipient, inbound[0].Recipient);
+        Assert.Equal(0, handler.RequestCount);
     }
 
     [Fact]
@@ -116,6 +112,16 @@ public sealed class HttpCallSignalingTransportTests
         Assert.StartsWith("sealed-v1:", wire.GetProperty("payload").GetString());
         Assert.DoesNotContain("private-offer", storedEnvelope, StringComparison.Ordinal);
         Assert.False(string.IsNullOrWhiteSpace(wire.GetProperty("signature").GetString()));
+        var nonce = wire.GetProperty("nonce").GetString();
+        Assert.True(CallSignalAuthentication.IsNonce(nonce));
+        var signedEnvelope = JsonSerializer.Deserialize<CallSignalEnvelope>(
+            storedEnvelope!,
+            CallSignalAuthentication.JsonOptions);
+        Assert.NotNull(signedEnvelope);
+        Assert.True(Sodium.PublicKeyAuth.VerifyDetached(
+            Convert.FromBase64String(signedEnvelope.Signature!),
+            CallSignalAuthentication.BuildSigningPayload(signedEnvelope with { Signature = null }),
+            Convert.FromHexString(signedEnvelope.SenderEd25519!)));
         Assert.Equal(envelope.Payload, received.Payload);
     }
 
@@ -187,9 +193,15 @@ public sealed class HttpCallSignalingTransportTests
             Assert.Contains("/api/calls/ice-servers/", request.RequestUri?.AbsolutePath, StringComparison.Ordinal);
             Assert.Equal(64, request.Headers.GetValues("X-Deep-Ed25519").Single().Length);
             var timestamp = long.Parse(request.Headers.GetValues("X-Deep-Timestamp").Single(), System.Globalization.CultureInfo.InvariantCulture);
+            var nonce = request.Headers.GetValues(CallSignalAuthentication.NonceHeader).Single();
+            Assert.True(CallSignalAuthentication.IsNonce(nonce));
             Assert.True(Sodium.PublicKeyAuth.VerifyDetached(
                 Convert.FromBase64String(request.Headers.GetValues("X-Deep-Signature").Single()),
-                CallSignalAuthentication.BuildIceSigningPayload(account.SessionId, timestamp),
+                CallSignalAuthentication.BuildIceSigningPayload(
+                    account.SessionId,
+                    timestamp,
+                    nonce,
+                    request.RequestUri!.AbsolutePath),
                 Convert.FromHexString(request.Headers.GetValues("X-Deep-Ed25519").Single())));
 
             const string json = """
@@ -218,6 +230,45 @@ public sealed class HttpCallSignalingTransportTests
 
         var server = Assert.Single(configuration.IceServers);
         Assert.Equal("temporary", server.Credential);
+    }
+
+    [Fact]
+    public async Task ReceiveAsyncUsesFreshNonceAndPathBoundCanonicalSignature()
+    {
+        var runtime = Deep.Client.Shared.State.ClientRuntime.CreateStubbed();
+        var account = await runtime.Accounts.RegisterAsync("Alice");
+        var phrase = await runtime.Accounts.GetRecoveryPhraseAsync();
+        var observedNonces = new List<string>();
+        var handler = new RecordingHandler((request, _) =>
+        {
+            var timestamp = long.Parse(
+                request.Headers.GetValues("X-Deep-Timestamp").Single(),
+                System.Globalization.CultureInfo.InvariantCulture);
+            var nonce = request.Headers.GetValues(CallSignalAuthentication.NonceHeader).Single();
+            observedNonces.Add(nonce);
+            Assert.True(Sodium.PublicKeyAuth.VerifyDetached(
+                Convert.FromBase64String(request.Headers.GetValues("X-Deep-Signature").Single()),
+                CallSignalAuthentication.BuildInboxSigningPayload(
+                    account.SessionId,
+                    timestamp,
+                    nonce,
+                    request.RequestUri!.AbsolutePath),
+                Convert.FromHexString(request.Headers.GetValues("X-Deep-Ed25519").Single())));
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("[]", Encoding.UTF8, "application/json")
+            });
+        });
+        var transport = new HttpCallSignalingTransport(
+            new HttpClient(handler),
+            new HttpCallSignalingTransportOptions("http://localhost:18082"),
+            _ => Task.FromResult(phrase));
+
+        await transport.ReceiveAsync(account.SessionId);
+        await transport.ReceiveAsync(account.SessionId);
+
+        Assert.Equal(2, observedNonces.Distinct(StringComparer.Ordinal).Count());
+        Assert.All(observedNonces, nonce => Assert.True(CallSignalAuthentication.IsNonce(nonce)));
     }
 
     private static CallSignalEnvelope BuildEnvelope()

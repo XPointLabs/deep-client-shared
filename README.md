@@ -16,7 +16,7 @@ service layer for Deep clients.
 - Notification planning abstractions.
 - Platform service boundaries for push, media codec, permissions, background tasks, share extension equivalents, and calls.
 - Encrypted attachment file transport (`HttpAttachmentFileTransport`) using the authenticated chunked `DEEPATT2` format for local real upload/download via `/file`.
-- HTTP call signaling transport (`HttpCallSignalingTransport`) for real call offer/answer/bye exchange via `/api/calls`.
+- HTTP call signaling transport (`HttpCallSignalingTransport`) for real call offer/answer/bye exchange via `/api/calls`. The transport fails closed without active identity material. Its clean-break `deep-call-*-v2` canonical contract gives every signal, inbox read, and ICE request a fresh signed 128-bit nonce; GET signatures also bind method and absolute path. There is no unauthenticated or v1 wire fallback.
 - `StubSessionBackend` remains only as a deterministic in-memory test transport;
   no Session HTTP/storage/onion implementation is shipped by this assembly.
 - Deep-native authenticated mailbox delivery through
