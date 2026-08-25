@@ -42,7 +42,7 @@ public sealed class HttpServiceEndpointPolicyTests
     }
 
     [Fact]
-    public void ProductionFactory_ConstructsAllSevenTransportsWithHttpsOrigins()
+    public void ProductionFactory_ConstructsAllFourTransportsWithHttpsOrigins()
     {
         var factory = new HttpServiceTransportFactory(
             HttpServiceEndpointPolicy.Production);
@@ -55,14 +55,6 @@ public sealed class HttpServiceEndpointPolicyTests
             new HttpPushSubscriptionTransportOptions("https://192.168.1.44:41822/")).IsEnabled);
         Assert.NotNull(factory.CreateCallSignaling(
             new HttpCallSignalingTransportOptions("https://192.168.1.44:41823/")));
-        Assert.NotNull(factory.CreateSession(
-            new HttpSessionTransportOptions("https://192.168.1.44:41820/")));
-        Assert.Throws<ArgumentOutOfRangeException>(() => factory.CreateStorage(
-            new SessionStorageMessageTransportOptions(
-                "https://192.168.1.44:41820/",
-                MetadataMode: (SessionStorageMetadataMode)2)));
-        Assert.NotNull(factory.CreateGroupSync(
-            new SessionStorageGroupSyncTransportOptions("https://192.168.1.44:41820/")));
     }
 
     [Theory]
@@ -158,41 +150,6 @@ public sealed class HttpServiceEndpointPolicyTests
             new HttpCallSignalingTransportOptions(
                 "https://calls.example/",
                 IceServersPathFormat: recipientTemplate)));
-        Assert.Throws<ArgumentException>(() => new HttpSessionTransport(
-            new HttpClient(),
-            new HttpSessionTransportOptions("https://session.example/", SendPath: path)));
-        Assert.Throws<ArgumentException>(() => new HttpSessionTransport(
-            new HttpClient(),
-            new HttpSessionTransportOptions(
-                "https://session.example/",
-                InboxPathFormat: recipientTemplate)));
-        Assert.Throws<ArgumentException>(() => new HttpSessionTransport(
-            new HttpClient(),
-            new HttpSessionTransportOptions(
-                "https://session.example/",
-                ProfilePathFormat: sessionTemplate)));
-        Assert.Throws<ArgumentException>(() => new SessionStorageMessageTransport(
-            new HttpClient(),
-            new SessionStorageMessageTransportOptions(
-                "https://storage.example/",
-                StorePath: path),
-            OpaqueMetadataTransportTests.TestOpaqueDependencies.Create()));
-        Assert.Throws<ArgumentException>(() => new SessionStorageMessageTransport(
-            new HttpClient(),
-            new SessionStorageMessageTransportOptions(
-                "https://storage.example/",
-                RetrievePath: path),
-            OpaqueMetadataTransportTests.TestOpaqueDependencies.Create()));
-        Assert.Throws<ArgumentException>(() => new SessionStorageGroupSyncTransport(
-            new HttpClient(),
-            new SessionStorageGroupSyncTransportOptions(
-                "https://storage.example/",
-                StorePath: path)));
-        Assert.Throws<ArgumentException>(() => new SessionStorageGroupSyncTransport(
-            new HttpClient(),
-            new SessionStorageGroupSyncTransportOptions(
-                "https://storage.example/",
-                RetrievePath: path)));
     }
 
     [Theory]
@@ -204,30 +161,20 @@ public sealed class HttpServiceEndpointPolicyTests
     [InlineData("\\")]
     [InlineData(".")]
     [InlineData("..")]
-    public async Task SessionAndCall_RejectUnsafePlaceholderValuesBeforeNetwork(
+    public async Task Call_RejectsUnsafePlaceholderValuesBeforeNetwork(
         string value)
     {
         var networkRequests = 0;
-        using var sessionClient = new HttpClient(new CaptureHandler(_ =>
-        {
-            Interlocked.Increment(ref networkRequests);
-            return SuccessResponse();
-        }));
         using var callClient = new HttpClient(new CaptureHandler(_ =>
         {
             Interlocked.Increment(ref networkRequests);
             return SuccessResponse();
         }));
-        var session = new HttpSessionTransport(
-            sessionClient,
-            new HttpSessionTransportOptions("https://session.example/"));
         var calls = new HttpCallSignalingTransport(
             callClient,
             new HttpCallSignalingTransportOptions("https://calls.example/"));
         var unsafeSessionId = new Deep.Client.Shared.Domain.SessionId(value);
 
-        await Assert.ThrowsAsync<ArgumentException>(
-            () => session.ReceiveAsync(unsafeSessionId));
         await Assert.ThrowsAsync<ArgumentException>(
             () => calls.ReceiveAsync(unsafeSessionId));
         Assert.Equal(0, networkRequests);
@@ -241,10 +188,7 @@ public sealed class HttpServiceEndpointPolicyTests
             typeof(HttpAvatarProfileTransport),
             typeof(HttpAttachmentFileTransport),
             typeof(HttpPushSubscriptionTransport),
-            typeof(HttpCallSignalingTransport),
-            typeof(HttpSessionTransport),
-            typeof(SessionStorageMessageTransport),
-            typeof(SessionStorageGroupSyncTransport)
+            typeof(HttpCallSignalingTransport)
         ];
         Assert.All(
             transportTypes,

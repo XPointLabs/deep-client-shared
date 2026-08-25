@@ -267,6 +267,23 @@ public sealed partial class MailboxCredentialBundleImporterTests
     }
 
     [Fact]
+    public async Task MrXPolicyMustBindExpectedPrivacyRoutesArtifact()
+    {
+        using var fixture = Fixture.Create();
+        using var identity = new SessionIdentityProvider(AlicePhrase);
+        using var store = new SqliteSessionStore(fixture.DatabasePath);
+        var options = fixture.AndroidOptions with
+        {
+            ExpectedPrivacyRoutesSha256 = Bytes(32, 0x5a)
+        };
+
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
+            MailboxCredentialBundleImporter.ImportAsync(
+                store, identity, options,
+                MailboxInfrastructureOwnership.UserManaged));
+    }
+
+    [Fact]
     public async Task ExpiredOrUnpinnedRevocationSnapshotFailsClosed()
     {
         using var fixture = Fixture.Create();
@@ -710,6 +727,7 @@ public sealed partial class MailboxCredentialBundleImporterTests
             File.WriteAllBytes(revocationPath, revocationBytes);
             using var mrX = PublicKeyAuth.GenerateKeyPair(Bytes(32, 0x91));
             var trustedMrXPublicKeySha256 = SHA256.HashData(mrX.PublicKey);
+            var privacyRoutesSha256 = Bytes(32, 0xe1);
             MrXSignedMailboxPolicyApproval Approval(string ownership)
             {
                 var payload = Json(new
@@ -727,7 +745,8 @@ public sealed partial class MailboxCredentialBundleImporterTests
                     windowsSessionId = bob.SessionId.Value,
                     pairGeneration = Hex(generation),
                     pairManifestSha256 = Hex(manifestHash),
-                    revocationSnapshotSha256 = Hex(SHA256.HashData(revocationBytes))
+                    revocationSnapshotSha256 = Hex(SHA256.HashData(revocationBytes)),
+                    privacyRoutesSha256 = Hex(privacyRoutesSha256)
                 });
                 return new MrXSignedMailboxPolicyApproval(
                     payload,
@@ -748,6 +767,7 @@ public sealed partial class MailboxCredentialBundleImporterTests
                 root,
                 revocationPath,
                 SHA256.HashData(revocationBytes),
+                privacyRoutesSha256,
                 trustedMrXPublicKeySha256,
                 Approval("user-managed"),
                 DevelopmentOnly: true,

@@ -45,22 +45,13 @@ public sealed record ProductionMailboxLocalOwnerBundle(
     ulong IssuedAtUnixSeconds,
     ulong ExpiresAtUnixSeconds);
 
-public sealed record ProductionMailboxReplicaIngressRoute(
-    ulong Epoch,
-    Uri FirstEndpoint,
-    ClientMailboxTlsSpkiPinSet FirstPins,
-    Uri SecondEndpoint,
-    ClientMailboxTlsSpkiPinSet SecondPins);
-
 public sealed record ImportedProductionMailboxRuntimeMaterial(
     VerifiedOfficialMailboxAuthority Authority,
     ClientMailboxActivation Activation,
     IMailboxClientDecodePolicyProvider DecodePolicies,
     MailboxCredentialSelector SelfSelector,
     SessionId LocalSessionId,
-    MailboxInfrastructureOwnership Ownership,
-    ProductionMailboxReplicaIngressRoute CurrentIngress,
-    ProductionMailboxReplicaIngressRoute NextIngress);
+    MailboxInfrastructureOwnership Ownership);
 
 public enum ProductionMailboxActiveBundleStatus
 {
@@ -664,9 +655,7 @@ public static class ProductionMailboxCredentialBundleImporter
                     decodePolicies,
                     selector,
                     holder.SessionId,
-                    ownership,
-                    IngressRoute(verified.CurrentSelection),
-                    IngressRoute(verified.NextSelection));
+                    ownership);
             var encodedTrustState = ProductionMailboxTrustStateCodec.Encode(
                 verified.StateToCommit);
             var encodedBundle = ProductionMailboxLocalOwnerJournalCodec.Encode(bundle);
@@ -764,9 +753,7 @@ public static class ProductionMailboxCredentialBundleImporter
                 decodePolicies,
                 selector,
                 holder.SessionId,
-                ownership,
-                IngressRoute(verified.CurrentSelection),
-                IngressRoute(verified.NextSelection));
+                ownership);
         }
         finally
         {
@@ -1130,18 +1117,6 @@ public static class ProductionMailboxCredentialBundleImporter
             selection.Replicas[1].ReplicaId.Span,
             MailboxPeerReplicationCodec.DecodeMembershipProof(
                 selection.Replicas[1].CanonicalMIP1Proof.Span).SigningPublicKey.Span);
-
-    private static ProductionMailboxReplicaIngressRoute IngressRoute(
-        VerifiedProductionMailboxSelection selection) => new(
-            selection.Proof.Epoch,
-            selection.Replicas[0].HttpsEndpoint,
-            new ClientMailboxTlsSpkiPinSet(
-                selection.Replicas[0].CurrentSpkiSha256,
-                selection.Replicas[0].NextSpkiSha256),
-            selection.Replicas[1].HttpsEndpoint,
-            new ClientMailboxTlsSpkiPinSet(
-                selection.Replicas[1].CurrentSpkiSha256,
-                selection.Replicas[1].NextSpkiSha256));
 
     private static string[] BuildRevocationKeys(
         IReadOnlyList<ReadOnlyMemory<byte>> serials,

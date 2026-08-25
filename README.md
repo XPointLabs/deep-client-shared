@@ -15,36 +15,17 @@ service layer for Deep clients.
 - Local persistence abstractions with production `SqliteSessionStore` (SQLCipher-compatible key hook) plus in-memory implementation for tests.
 - Notification planning abstractions.
 - Platform service boundaries for push, media codec, permissions, background tasks, share extension equivalents, and calls.
-- P03 opaque personal storage transport (`SessionStorageMessageTransport`) using explicit reviewed-provider boundaries for canonical DPB1/MCP1 deposit and retrieval. The raw Session-compatible wire shape remains available only through explicit `SessionStorageMetadataMode.LegacyCompatibility` for Debug/survival lanes; release defaults reject it.
-- Session-compatible group sync transport (`SessionStorageGroupSyncTransport`) for local real group-state and group-message exchange via `/storage/store` and `/storage/retrieve`.
 - Encrypted attachment file transport (`HttpAttachmentFileTransport`) using the authenticated chunked `DEEPATT2` format for local real upload/download via `/file`.
 - HTTP call signaling transport (`HttpCallSignalingTransport`) for real call offer/answer/bye exchange via `/api/calls`.
-- HTTP transport integration (`HttpSessionTransport`) for custom production message APIs, plus `StubSessionBackend` for isolated tests.
+- `StubSessionBackend` remains only as a deterministic in-memory test transport;
+  no Session HTTP/storage/onion implementation is shipped by this assembly.
+- Deep-native authenticated mailbox delivery through
+  `PrivacyRoutedMailboxBinaryIngress`: exact canonical MAU2 is sealed over one
+  of two pinned, router-disjoint three-hop routes. Only a proven
+  before-forward rejection may select the fallback; ambiguous outcomes remain
+  attached to the durable outbox attempt. Public entry transport is strict
+  HTTP/2 HTTPS with platform trust and has no direct-replica fallback.
 - Opt-in P11 persistent outbox dispatcher for already-opaque ciphertext bundles. Activation requires the feature flag, an outbox-capable store, and an explicit `IExternalTransportOutboxExecutor` backed by an independently killable bounded worker process; an in-process task/thread adapter is rejected as insufficient. Outcome-unknown attempts retain a persisted `NotBefore` lease and become retryable only after that bounded lease expires; accepted-only receipts remain retryable until the currently authorized attempt becomes durable. No default profile enables it and no platform executor is currently shipped.
-- Verified membership routing with production-secure HTTPS endpoint defaults. The
-  `DEV-LOCAL-ONLY` bootstrap path is additive and dormant: a caller must supply the
-  exact catalog URL, explicitly select `MembershipRouteEndpointPolicy.DevLocalHttp`,
-  and provide the lowercase SHA-256 of the exact artifact bytes through
-  `DevLocalMembershipTrustBootstrapOptions`. Development HTTP is accepted only for
-  loopback, RFC1918, or IPv4 link-local addresses at the exact
-  `/api/network/membership-route-catalog` path. The embedded bootstrap is accepted
-  only after the whole-artifact pin matches and is converted into a
-  `MembershipTrustProfile`; it is never a TOFU or production trust-root source.
-  Its exact `install:deep-survival-dev-v2` artifact base is not used directly as
-  a repository key. The verified profile key is
-  `install:deep-survival-dev-v2:<lowercase-64-hex-artifact-sha256>`, isolating the
-  authority and membership LKG for every regenerated fixture without clearing or
-  migrating account, session, conversation, or other local state.
-  MAUI activation must require both handoff values
-  `DEEP_DEV_LOCAL_MEMBERSHIP_TRUST_URL` and
-  `DEEP_DEV_LOCAL_MEMBERSHIP_TRUST_SHA256`, use
-  `HttpMembershipRouteArtifactSource.FromCatalogUrls`, and construct
-  `VerifiedMembershipRouteCatalogProvider` with the dev-bootstrap overload and the
-  same explicit development endpoint policy. Missing either value must leave
-  membership routing disabled/fail closed. That overload accepts exactly one
-  canonical literal-local-IPv4 HTTP catalog source; default/lookalike policies,
-  HTTPS (including local HTTPS), hostnames, public or noncanonical addresses,
-  multiple sources, and redirects away from the exact URL are rejected.
 
 Persistent runtime includes:
 
@@ -57,13 +38,6 @@ Persistent runtime includes:
 
 ```powershell
 dotnet test Deep.Client.Shared.slnx
-```
-
-To include the live local storage round-trip tests for 1:1 messages, group state, and group messages, start the main repository docker stack and set:
-
-```powershell
-$env:DEEP_STORAGE_URL = "http://127.0.0.1:18100"
-dotnet test Deep.Client.Shared.slnx --configuration Release
 ```
 
 To include the live local push subscribe/unsubscribe test as well, set:

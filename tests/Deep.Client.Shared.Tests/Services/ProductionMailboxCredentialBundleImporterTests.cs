@@ -42,11 +42,6 @@ public sealed class ProductionMailboxCredentialBundleImporterTests
                     clock);
 
             Assert.Equal(holder.SessionId, material.LocalSessionId);
-            Assert.Equal(9UL, material.CurrentIngress.Epoch);
-            Assert.Equal(10UL, material.NextIngress.Epoch);
-            Assert.NotEqual(
-                material.CurrentIngress.FirstEndpoint,
-                material.NextIngress.FirstEndpoint);
             var route = await store.ReadScopedMailboxRouteAsync(
                 material.SelfSelector, material.Authority);
             Assert.Equal(mailbox, route.MailboxId.Bytes.ToArray());

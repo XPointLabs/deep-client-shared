@@ -39,6 +39,7 @@ public sealed record MailboxCredentialBundleImportOptions(
     string RevocationProtectedRoot,
     string RevocationSnapshotPath,
     ReadOnlyMemory<byte> ExpectedRevocationSnapshotSha256,
+    ReadOnlyMemory<byte> ExpectedPrivacyRoutesSha256,
     ReadOnlyMemory<byte> TrustedMrXPublicKeySha256,
     MrXSignedMailboxPolicyApproval MrXApproval,
     bool DevelopmentOnly,
@@ -62,7 +63,6 @@ public sealed class ImportedMailboxRuntimeMaterial
         Activation = activation;
         DecodePolicies = decodePolicies;
         Coordinator = coordinator;
-        PhysicalCoordinator = new VerifiedPhysicalMailboxCoordinator(coordinator);
         SelfSelector = selfSelector;
         PeerSelector = peerSelector;
         LocalSessionId = localSessionId;
@@ -74,7 +74,6 @@ public sealed class ImportedMailboxRuntimeMaterial
     public ClientMailboxActivation Activation { get; }
     public IMailboxClientDecodePolicyProvider DecodePolicies { get; }
     public Uri Coordinator { get; }
-    internal VerifiedPhysicalMailboxCoordinator PhysicalCoordinator { get; }
     public MailboxCredentialSelector SelfSelector { get; }
     public MailboxCredentialSelector PeerSelector { get; }
     public SessionId LocalSessionId { get; }
@@ -107,7 +106,8 @@ public static class MailboxCredentialBundleImporter
         ["schemaVersion", "developmentOnly", "lane", "platform", "ownership",
          "authoritySha256", "issuerPublicKey", "androidHolderPublicKey",
          "windowsHolderPublicKey", "androidSessionId", "windowsSessionId",
-         "pairGeneration", "pairManifestSha256", "revocationSnapshotSha256"];
+         "pairGeneration", "pairManifestSha256", "revocationSnapshotSha256",
+         "privacyRoutesSha256"];
     private static readonly ConditionalWeakTable<SqliteSessionStore, SemaphoreSlim>
         ImportGates = new();
 
@@ -155,6 +155,8 @@ public static class MailboxCredentialBundleImporter
         var expectedIssuer = ExactBytes(options.ExpectedIssuerPublicKey.Span, 32, "issuer pin");
         var expectedRevocation = ExactBytes(
             options.ExpectedRevocationSnapshotSha256.Span, 32, "revocation snapshot pin");
+        var expectedPrivacyRoutes = ExactBytes(
+            options.ExpectedPrivacyRoutesSha256.Span, 32, "privacy routes pin");
         var trustedMrX = ExactBytes(
             options.TrustedMrXPublicKeySha256.Span, 32, "trusted Mr. X public-key pin");
         var expectedGeneration = ExactBytes(options.ExpectedPairGeneration.Span, 32, "pair generation pin");
@@ -169,7 +171,8 @@ public static class MailboxCredentialBundleImporter
         try
         {
             approval = ValidateMrXApproval(
-                options, ownership, holder, identity.SessionId, trustedMrX);
+                options, ownership, holder, identity.SessionId, trustedMrX,
+                expectedPrivacyRoutes);
             importGate = ImportGates.GetValue(store, static _ => new SemaphoreSlim(1, 1));
             await importGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             gateHeld = true;
@@ -401,6 +404,7 @@ public static class MailboxCredentialBundleImporter
             CryptographicOperations.ZeroMemory(expectedAuthority);
             CryptographicOperations.ZeroMemory(expectedIssuer);
             CryptographicOperations.ZeroMemory(expectedRevocation);
+            CryptographicOperations.ZeroMemory(expectedPrivacyRoutes);
             CryptographicOperations.ZeroMemory(trustedMrX);
             CryptographicOperations.ZeroMemory(expectedGeneration);
             CryptographicOperations.ZeroMemory(expectedManifest);
@@ -413,7 +417,8 @@ public static class MailboxCredentialBundleImporter
         MailboxInfrastructureOwnership ownership,
         byte[] localHolder,
         SessionId localSessionId,
-        byte[] trustedMrXPublicKeySha256)
+        byte[] trustedMrXPublicKeySha256,
+        byte[] expectedPrivacyRoutesSha256)
     {
         var approval = options.MrXApproval ?? throw new ArgumentNullException(
             nameof(options.MrXApproval));
@@ -454,7 +459,9 @@ public static class MailboxCredentialBundleImporter
                     Fixed(LowerHex(root.GetProperty("pairManifestSha256"), 32, "policy manifest"),
                         options.ExpectedPairManifestSha256.Span) &&
                     Fixed(LowerHex(root.GetProperty("revocationSnapshotSha256"), 32,
-                        "policy revocations"), options.ExpectedRevocationSnapshotSha256.Span),
+                        "policy revocations"), options.ExpectedRevocationSnapshotSha256.Span) &&
+                    Fixed(LowerHex(root.GetProperty("privacyRoutesSha256"), 32,
+                        "policy privacy routes"), expectedPrivacyRoutesSha256),
                 "Mr. X mailbox policy differs from the configured independent pins.");
             var androidHolder = LowerHex(
                 root.GetProperty("androidHolderPublicKey"), 32, "policy Android holder");

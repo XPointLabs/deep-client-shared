@@ -270,8 +270,6 @@ public sealed class ClientRuntime : IDisposable
     private static bool IsTrustedOpaqueTransport(ISessionMessageTransport transport) =>
         transport switch
         {
-            SessionStorageMessageTransport direct => direct.UsesOpaqueMetadata,
-            RoutedSessionStorageMessageTransport routed => routed.UsesOpaqueMetadata,
             IMetadataPrivateSessionMessageTransport opaque => opaque.UsesMetadataPrivateTransport,
             _ => false
         };

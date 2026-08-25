@@ -82,7 +82,7 @@ public sealed class P14A2B1ProviderCompatibilityTests
     [Fact]
     public void NewProviderRemainsTestOnlyAndProductConstructionRemainsManual()
     {
-        var root = P14A2PackageAndStaticGateTests.RepositoryRoot();
+        var root = TestRepositoryRoot.Find();
         var productSource = string.Join(
             "\n",
             Directory.GetFiles(

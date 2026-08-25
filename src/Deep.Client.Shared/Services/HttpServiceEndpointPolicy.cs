@@ -348,35 +348,6 @@ public sealed class HttpServiceTransportFactory
                 timeProvider,
                 endpointPolicy));
 
-    public HttpSessionTransport CreateSession(
-        HttpSessionTransportOptions options,
-        HttpServiceClientOptions? clientOptions = null) =>
-        CreateOwned(
-            clientOptions,
-            client => new HttpSessionTransport(client, options, endpointPolicy));
-
-    public SessionStorageMessageTransport CreateStorage(
-        SessionStorageMessageTransportOptions options,
-        OpaqueSessionStorageDependencies? opaque = null,
-        HttpServiceClientOptions? clientOptions = null) =>
-        CreateOwned(
-            clientOptions,
-            client => new SessionStorageMessageTransport(
-                client,
-                options,
-                opaque,
-                endpointPolicy));
-
-    public SessionStorageGroupSyncTransport CreateGroupSync(
-        SessionStorageGroupSyncTransportOptions options,
-        HttpServiceClientOptions? clientOptions = null) =>
-        CreateOwned(
-            clientOptions,
-            client => new SessionStorageGroupSyncTransport(
-                client,
-                options,
-                endpointPolicy));
-
     private TTransport CreateOwned<TTransport>(
         HttpServiceClientOptions? options,
         Func<HttpClient, TTransport> create)

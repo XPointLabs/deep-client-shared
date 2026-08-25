@@ -290,7 +290,7 @@ public sealed class DormantSelfHostedProfileVerificationCorrectiveC1Tests
     public void ServiceOwnsAndZerosTransferredSnapshotOnEveryVerifierExit()
     {
         var source = File.ReadAllText(Path.Combine(
-            P14A2PackageAndStaticGateTests.RepositoryRoot(),
+            TestRepositoryRoot.Find(),
             "src",
             "Deep.Client.Shared",
             "Services",
