@@ -1,6 +1,0 @@
-*.log -text
-*.xml -text
-*.trx -text
-**/*.log -text
-**/*.xml -text
-**/*.trx -text

@@ -15,10 +15,15 @@ is the production path (with SQLCipher-compatible key hook), while
 `InMemorySessionStore` remains test/dev only. The production database has one
 physical baseline: application ID `DEEP` and schema version 15. There is no
 logical schema store and no local migration API.
-The dormant P14A boundary uses the existing settings table through the atomic,
-bounded, account-generation capability documented in
-[`P14A_ATOMIC_STAGING.md`](P14A_ATOMIC_STAGING.md); it remains staged,
-unverified, non-activating, and absent from runtime composition.
+The dormant self-hosted profile boundary uses the existing settings table
+through an atomic, bounded, account-generation capability. It stores at most
+16 opaque candidates per account, 64 KiB per candidate and 512 KiB in total.
+Sign-out closes the generation barrier before purging settings, so an
+old-generation write cannot recreate state. Candidate verification is an
+explicit in-memory operation over a defensive copy; there is no default DI,
+network, UI, selection or activation path. A verified snapshot remains only a
+snapshot and must be exported and re-verified inside a future approved atomic
+activation transaction.
 
 `Services` contains account registration/login, conversation creation, message send/receive through an `ISessionMessageTransport` (`HttpSessionTransport` in production, stub in tests), group-state/group-message sync through `IGroupSyncTransport`, sync plan creation, read-receipt/state-sync helpers, notification planning, and realtime call signaling/state handling (`RealtimeCallService`).
 

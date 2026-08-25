@@ -1,12 +1,11 @@
 ﻿# Deep Client Shared
 
-`deep-client-shared` is the portable .NET domain/state/services layer for a Session-style client.
-It intentionally ports shared behavior and boundaries rather than UI line-by-line.
+`deep-client-shared` is the portable .NET domain, state, persistence, and
+service layer for Deep clients.
 
 ## Agent Specs
 
 - Start with [`AGENTS.md`](AGENTS.md) before changing shared runtime behavior.
-- Use [`docs/SESSION_PORTING.md`](docs/SESSION_PORTING.md) when migrating Session domain, storage, sync, push, attachment, group, or call semantics.
 - UI-specific behavior belongs in `deep-client-maui`; this repo owns portable contracts and runtime state.
 
 ## Scope
