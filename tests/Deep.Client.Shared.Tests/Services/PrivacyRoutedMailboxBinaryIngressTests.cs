@@ -15,7 +15,8 @@ public sealed class PrivacyRoutedMailboxBinaryIngressTests
         var response = RetrieveResponse();
         var primary = new OpeningTransport(fixture.PrimaryKeys, response);
         var fallback = new OpeningTransport(fixture.FallbackKeys, response);
-        using var ingress = fixture.Create(primary, fallback);
+        var observer = new RecordingRouteSelectionObserver();
+        using var ingress = fixture.Create(primary, fallback, observer);
 
         var actual = await ingress.RetrieveAsync(request);
 
@@ -23,6 +24,8 @@ public sealed class PrivacyRoutedMailboxBinaryIngressTests
         Assert.Equal(request, Assert.Single(primary.ExitPayloads));
         Assert.Equal(PrivacyRoutingOperation.Retrieve, Assert.Single(primary.Operations));
         Assert.Empty(fallback.ExitPayloads);
+        Assert.Equal(PrivacyMailboxRouteSelection.Primary, observer.Selection);
+        Assert.Equal(fixture.PrimaryRoute.Hops[0].RouterId.ToArray(), observer.EntryRouterId);
     }
 
     [Fact]
@@ -33,13 +36,16 @@ public sealed class PrivacyRoutedMailboxBinaryIngressTests
         var response = RetrieveResponse();
         var primary = new RejectingTransport(retryable: true);
         var fallback = new OpeningTransport(fixture.FallbackKeys, response);
-        using var ingress = fixture.Create(primary, fallback);
+        var observer = new RecordingRouteSelectionObserver();
+        using var ingress = fixture.Create(primary, fallback, observer);
 
         var actual = await ingress.RetrieveAsync(request);
 
         Assert.Equal(response, actual.ToArray());
         Assert.Equal(1, primary.Attempts);
         Assert.Equal(request, Assert.Single(fallback.ExitPayloads));
+        Assert.Equal(PrivacyMailboxRouteSelection.Fallback, observer.Selection);
+        Assert.Equal(fixture.FallbackRoute.Hops[0].RouterId.ToArray(), observer.EntryRouterId);
     }
 
     [Fact]
@@ -276,13 +282,15 @@ public sealed class PrivacyRoutedMailboxBinaryIngressTests
 
         internal PrivacyRoutedMailboxBinaryIngress Create(
             IPrivacyManagedIngressTransport primary,
-            IPrivacyManagedIngressTransport fallback) => new(
+            IPrivacyManagedIngressTransport fallback,
+            IPrivacyMailboxRouteSelectionObserver? observer = null) => new(
                 PrimaryRoute,
                 FallbackRoute,
                 Policies(),
                 primary,
                 fallback,
-                PrivacyRoutingLimits.MinimumPaddingBlockBytes);
+                PrivacyRoutingLimits.MinimumPaddingBlockBytes,
+                observer);
 
         public void Dispose()
         {
@@ -306,6 +314,21 @@ public sealed class PrivacyRoutedMailboxBinaryIngressTests
                 .Select(index => PublicKeyBox.GenerateKeyPair(
                     Bytes(32, checked((byte)(seed + index * 13)))))
                 .ToArray();
+    }
+
+    private sealed class RecordingRouteSelectionObserver :
+        IPrivacyMailboxRouteSelectionObserver
+    {
+        internal PrivacyMailboxRouteSelection? Selection { get; private set; }
+        internal byte[]? EntryRouterId { get; private set; }
+
+        public void Observe(
+            PrivacyMailboxRouteSelection selection,
+            ReadOnlyMemory<byte> entryRouterId)
+        {
+            Selection = selection;
+            EntryRouterId = entryRouterId.ToArray();
+        }
     }
 
     private sealed class OpeningTransport(

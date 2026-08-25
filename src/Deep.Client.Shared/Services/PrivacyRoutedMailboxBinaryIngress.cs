@@ -4,6 +4,19 @@ using Deep.Protocol.DeepExtension.PrivacyRouting;
 
 namespace Deep.Client.Shared.Services;
 
+internal enum PrivacyMailboxRouteSelection
+{
+    Primary = 1,
+    Fallback = 2
+}
+
+internal interface IPrivacyMailboxRouteSelectionObserver
+{
+    void Observe(
+        PrivacyMailboxRouteSelection selection,
+        ReadOnlyMemory<byte> entryRouterId);
+}
+
 public sealed class PrivacyMailboxRoute
 {
     private readonly PrivacyRoutingHop[] hops;
@@ -81,6 +94,7 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
     private readonly IPrivacyManagedIngressTransport primary;
     private readonly IPrivacyManagedIngressTransport fallback;
     private readonly IMailboxClientDecodePolicyProvider decodePolicies;
+    private readonly IPrivacyMailboxRouteSelectionObserver? routeSelectionObserver;
     private readonly int paddingBlockBytes;
     private int disposed;
 
@@ -120,7 +134,8 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
         IMailboxClientDecodePolicyProvider decodePolicies,
         IPrivacyManagedIngressTransport primary,
         IPrivacyManagedIngressTransport fallback,
-        int paddingBlockBytes = PrivacyRoutingLimits.DefaultPaddingBlockBytes)
+        int paddingBlockBytes = PrivacyRoutingLimits.DefaultPaddingBlockBytes,
+        IPrivacyMailboxRouteSelectionObserver? routeSelectionObserver = null)
     {
         this.primaryRoute = primaryRoute ??
             throw new ArgumentNullException(nameof(primaryRoute));
@@ -130,6 +145,7 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
             throw new ArgumentNullException(nameof(decodePolicies));
         this.primary = primary ?? throw new ArgumentNullException(nameof(primary));
         this.fallback = fallback ?? throw new ArgumentNullException(nameof(fallback));
+        this.routeSelectionObserver = routeSelectionObserver;
         ValidatePadding(paddingBlockBytes);
         this.paddingBlockBytes = paddingBlockBytes;
         EnsureDisjoint(primaryRoute, fallbackRoute);
@@ -188,12 +204,14 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
 
         try
         {
-            return await DispatchAsync(
+            var response = await DispatchAsync(
                 primaryRoute,
                 primary,
                 privacyOperation,
                 canonicalMau2,
                 cancellationToken).ConfigureAwait(false);
+            PublishRouteSelection(PrivacyMailboxRouteSelection.Primary, primaryRoute);
+            return response;
         }
         catch (PrivacyIngressRejectedBeforeForwardException exception)
             when (exception.Retryable)
@@ -201,12 +219,14 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
             cancellationToken.ThrowIfCancellationRequested();
             try
             {
-                return await DispatchAsync(
+                var response = await DispatchAsync(
                     fallbackRoute,
                     fallback,
                     privacyOperation,
                     canonicalMau2,
                     cancellationToken).ConfigureAwait(false);
+                PublishRouteSelection(PrivacyMailboxRouteSelection.Fallback, fallbackRoute);
+                return response;
             }
             catch (PrivacyIngressRejectedBeforeForwardException fallbackException)
             {
@@ -216,6 +236,22 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
         catch (PrivacyIngressRejectedBeforeForwardException exception)
         {
             throw Rejected(exception);
+        }
+    }
+
+    private void PublishRouteSelection(
+        PrivacyMailboxRouteSelection selection,
+        PrivacyMailboxRoute route)
+    {
+        try
+        {
+            routeSelectionObserver?.Observe(
+                selection,
+                route.PinnedHops[0].RouterId.ToArray());
+        }
+        catch
+        {
+            // A diagnostic observer must never alter authenticated delivery.
         }
     }
 

@@ -354,7 +354,8 @@ public sealed class HttpServiceTransportFactory
         PrivacyMailboxRoute fallbackRoute,
         IMailboxClientDecodePolicyProvider decodePolicies,
         HttpServiceClientOptions? clientOptions = null,
-        int paddingBlockBytes = PrivacyRoutingLimits.DefaultPaddingBlockBytes)
+        int paddingBlockBytes = PrivacyRoutingLimits.DefaultPaddingBlockBytes,
+        IPrivacyMailboxRouteSelectionObserver? routeSelectionObserver = null)
     {
         ArgumentNullException.ThrowIfNull(primaryRoute);
         ArgumentNullException.ThrowIfNull(fallbackRoute);
@@ -372,7 +373,8 @@ public sealed class HttpServiceTransportFactory
                 decodePolicies,
                 primary,
                 fallback,
-                paddingBlockBytes);
+                paddingBlockBytes,
+                routeSelectionObserver);
             primary = null;
             fallback = null;
             return ingress;
