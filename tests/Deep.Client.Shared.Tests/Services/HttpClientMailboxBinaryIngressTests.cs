@@ -1,7 +1,9 @@
 using System.Net;
+using System.Net.Security;
 using System.Net.Sockets;
 using System.Reflection;
 using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using Deep.Client.Shared.Services;
 using Deep.Protocol.DeepExtension.MailboxCapabilities;
 
@@ -263,19 +265,26 @@ public sealed class HttpClientMailboxBinaryIngressTests
     public void Physical_development_factory_requires_verified_private_lan_authority()
     {
         var authority = new VerifiedPhysicalMailboxCoordinator(
-            new Uri("http://10.23.218.169:41801/"));
+            new Uri("https://10.23.218.169:41801/"));
+        RemoteCertificateValidationCallback callback = static (_, _, _, _) => false;
         using var ingress =
             HttpClientMailboxBinaryIngress.CreatePhysicalDevelopment(
                 authority,
-                Policies());
+                Policies(),
+                callback);
         Assert.NotNull(ingress);
+        using var handler = HttpClientMailboxBinaryIngress.CreatePhysicalHandler(callback);
+        Assert.Same(callback, handler.SslOptions.RemoteCertificateValidationCallback);
+        Assert.Equal(X509RevocationMode.Online,
+            handler.SslOptions.CertificateRevocationCheckMode);
+        Assert.False(handler.UseProxy);
         foreach (var invalid in new[]
                  {
-                     "http://8.8.8.8:41801/",
-                     "http://mailbox.local:41801/",
-                     "http://10.23.218.169:41802/",
-                     "https://10.23.218.169:41801/",
-                     "http://10.23.218.169:41801/path"
+                     "http://10.23.218.169:41801/",
+                     "https://mailbox.local:41801/",
+                     "https://10.23.218.169:41802/",
+                     "https://8.8.8.8:41801/",
+                     "https://10.23.218.169:41801/path"
                  })
         {
             Assert.Throws<ArgumentException>(() =>

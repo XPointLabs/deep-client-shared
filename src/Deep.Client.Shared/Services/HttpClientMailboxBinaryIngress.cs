@@ -17,7 +17,7 @@ internal sealed class VerifiedPhysicalMailboxCoordinator
     {
         ArgumentNullException.ThrowIfNull(origin);
         if (!origin.IsAbsoluteUri ||
-            origin.Scheme != Uri.UriSchemeHttp ||
+            origin.Scheme != Uri.UriSchemeHttps ||
             !string.IsNullOrEmpty(origin.UserInfo) ||
             origin.AbsolutePath != "/" ||
             !string.IsNullOrEmpty(origin.Query) ||
@@ -258,17 +258,32 @@ public sealed class HttpClientMailboxBinaryIngress :
     }
 
     /// <summary>
-    /// Friend-assembly-only physical E2E lane. The exact private-LAN origin is intentionally
-    /// fixed so a runtime setting cannot turn this into a general cleartext transport.
+    /// Friend-assembly-only physical E2E lane. The exact private-LAN HTTPS origin is
+    /// intentionally fixed so a runtime setting cannot weaken transport security.
     /// Release composition never calls this entry point.
     /// </summary>
     internal static HttpClientMailboxBinaryIngress CreatePhysicalDevelopment(
         VerifiedPhysicalMailboxCoordinator authority,
-        IMailboxClientDecodePolicyProvider decodePolicies)
+        IMailboxClientDecodePolicyProvider decodePolicies,
+        RemoteCertificateValidationCallback? serverCertificateValidationCallback)
     {
         ArgumentNullException.ThrowIfNull(authority);
         ArgumentNullException.ThrowIfNull(decodePolicies);
-        return CreateOwned(authority.Origin, decodePolicies, CreateHandler());
+        return CreateOwned(
+            authority.Origin,
+            decodePolicies,
+            CreatePhysicalHandler(serverCertificateValidationCallback));
+    }
+
+    internal static SocketsHttpHandler CreatePhysicalHandler(
+        RemoteCertificateValidationCallback? serverCertificateValidationCallback)
+    {
+        var handler = CreateHandler();
+        handler.UseProxy = false;
+        handler.SslOptions.CertificateRevocationCheckMode = X509RevocationMode.Online;
+        handler.SslOptions.RemoteCertificateValidationCallback =
+            serverCertificateValidationCallback;
+        return handler;
     }
 
     public void Dispose() => httpClient.Dispose();

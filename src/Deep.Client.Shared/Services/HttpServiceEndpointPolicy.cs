@@ -1,3 +1,4 @@
+using System.Net.Security;
 using System.Security.Cryptography.X509Certificates;
 using System.Text.RegularExpressions;
 
@@ -280,7 +281,8 @@ public sealed record HttpServiceClientOptions(
     string? UserAgent = null);
 
 internal sealed record HttpServiceNetworkHooks(
-    Func<SocketsHttpConnectionContext, CancellationToken, ValueTask<Stream>>? ConnectCallback = null);
+    Func<SocketsHttpConnectionContext, CancellationToken, ValueTask<Stream>>? ConnectCallback = null,
+    RemoteCertificateValidationCallback? ServerCertificateValidationCallback = null);
 
 public sealed class HttpServiceTransportFactory
 {
@@ -447,11 +449,13 @@ public sealed class HttpServiceTransportFactory
             ConnectCallback = networkHooks?.ConnectCallback
         };
 
-        // Public HTTPS services use the platform validator as the sole TLS
-        // authority. Keep the callback unset so CA, hostname, validity, and
-        // platform policy cannot be replaced by application code, and require
-        // online revocation checking for certificates that advertise it.
+        // Public HTTPS services use the platform validator by default. The only
+        // optional callback is a friend-assembly network hook for the compiled
+        // physical UAT trust root; ordinary and release composition leave it null.
+        // Online revocation remains mandatory for certificates that advertise it.
         handler.SslOptions.CertificateRevocationCheckMode = X509RevocationMode.Online;
+        handler.SslOptions.RemoteCertificateValidationCallback =
+            networkHooks?.ServerCertificateValidationCallback;
 
         // These invariants are deliberately assigned after network customization.
         handler.AllowAutoRedirect = false;

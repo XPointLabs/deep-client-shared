@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Security;
 using System.Net.Sockets;
 using System.Reflection;
 using System.Security.Cryptography.X509Certificates;
@@ -24,6 +25,20 @@ public sealed class HttpServiceEndpointPolicyTests
         Assert.False(handler.AllowAutoRedirect);
         Assert.False(handler.UseCookies);
         Assert.False(handler.UseProxy);
+    }
+
+    [Fact]
+    public void FactoryOwnedHandler_AppliesOnlyAnExplicitInternalValidationHook()
+    {
+        RemoteCertificateValidationCallback callback = static (_, _, _, _) => false;
+        using var handler = HttpServiceTransportFactory.CreateHttpHandler(
+            new HttpServiceClientOptions(),
+            new HttpServiceNetworkHooks(ServerCertificateValidationCallback: callback));
+
+        Assert.Same(callback, handler.SslOptions.RemoteCertificateValidationCallback);
+        Assert.Equal(
+            X509RevocationMode.Online,
+            handler.SslOptions.CertificateRevocationCheckMode);
     }
 
     [Fact]

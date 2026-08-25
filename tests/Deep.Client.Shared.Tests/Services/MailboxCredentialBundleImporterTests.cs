@@ -624,7 +624,7 @@ public sealed partial class MailboxCredentialBundleImporterTests
                 Now.AddMinutes(-5 + 25 * (epochOffset + 1)),
                 Now.AddMinutes(30 + 30 * (epochOffset + 1)),
                 checked((byte)(0x71 + epochOffset + 1)));
-            var coordinator = new Uri("http://192.168.1.44:41801");
+            var coordinator = new Uri("https://192.168.1.44:41801");
             var authorityObject = new
             {
                 schemaVersion = 2,
