@@ -951,6 +951,7 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
             !string.Equals(prior.Platform, current.Platform, StringComparison.Ordinal) ||
             !string.Equals(prior.Ownership, current.Ownership, StringComparison.Ordinal) ||
             current.CurrentEpoch < prior.CurrentEpoch ||
+            current.CurrentEpoch - prior.CurrentEpoch > 1 ||
             current.CurrentEpoch == prior.CurrentEpoch && prior != current)
             throw new InvalidDataException(
                 "Mailbox bundle checkpoint is not an exact replay or forward rotation.");

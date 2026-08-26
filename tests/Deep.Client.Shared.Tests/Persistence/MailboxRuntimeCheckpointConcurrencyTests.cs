@@ -147,6 +147,38 @@ public sealed class MailboxRuntimeCheckpointConcurrencyTests
                 fixture.Selector, fixture.Authority)).Epoch);
     }
 
+    [Fact]
+    public async Task ForwardCheckpointGap_IsRejectedWithoutChangingRuntimeSnapshot()
+    {
+        using var fixture = new Fixture();
+        using var store = new SqliteSessionStore(fixture.Path);
+        var committed = Checkpoint(
+            epoch: 7, pair: '3', generatedAt: 100, expiresAt: 1_000,
+            snapshot: 'd');
+        await store.ApplyScopedMailboxRuntimeSnapshotAsync(
+            [fixture.Initial], fixture.Authority, committed);
+        var validRotation = fixture.Rotate(fixture.Initial, 0x61);
+        var skippedCheckpoint = Checkpoint(
+            epoch: 9, pair: '4', generatedAt: 200, expiresAt: 1_200,
+            snapshot: 'e');
+
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
+            store.ApplyScopedMailboxRuntimeSnapshotAsync(
+                [validRotation], fixture.Authority, skippedCheckpoint));
+
+        Assert.Equal(committed.Bundle,
+            await store.GetAsync<MailboxBundleRuntimeCheckpoint>(BundleKey));
+        AssertRevocationEqual(committed.Revocation,
+            store.ReadMailboxRevocationCheckpoint(RevocationKey));
+        Assert.Equal(7UL,
+            (await store.ReadScopedMailboxRouteAsync(
+                fixture.Selector, fixture.Authority)).Epoch);
+        Assert.Equal(fixture.Initial.Next.PlacementId.ToArray(),
+            ReadEpochPlacement(fixture.Path, epoch: 8));
+        Assert.Equal(1, Count(fixture.Path, "mailbox_credential_scopes"));
+        Assert.Equal(2, Count(fixture.Path, "mailbox_credential_epochs"));
+    }
+
     [Theory]
     [InlineData("{")]
     [InlineData("{\"schemaVersion\":1,\"generatedAtUnixSeconds\":200," +
