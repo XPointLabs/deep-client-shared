@@ -87,7 +87,13 @@ public enum ProductionMailboxActiveBundleStatus
 
 public sealed record ProductionMailboxActiveBundleLoadResult(
     ProductionMailboxActiveBundleStatus Status,
-    ImportedProductionMailboxRuntimeMaterial? Material);
+    ImportedProductionMailboxRuntimeMaterial? Material,
+    ProductionMailboxLocalOwnerPublicRoute? PublicRoute = null);
+
+public sealed record ProductionMailboxLocalOwnerPublicRoute(
+    ReadOnlyMemory<byte> MailboxOwnerEd25519PublicKey,
+    ReadOnlyMemory<byte> CanonicalRouteAdvertisement,
+    ulong ExpiresAtUnixSeconds);
 
 /// <summary>
 /// Imports exact Registry LocalOwner and PeerDeposit responses. PeerDeposit requires the caller
@@ -472,7 +478,11 @@ public static class ProductionMailboxCredentialBundleImporter
             checked((ulong)now) >= active.Value.Journal.RefreshAfterUnixSeconds
                 ? ProductionMailboxActiveBundleStatus.RefreshRecommended
                 : ProductionMailboxActiveBundleStatus.Valid,
-            material);
+            material,
+            new ProductionMailboxLocalOwnerPublicRoute(
+                active.Value.Bundle.MailboxOwnerEd25519PublicKey.ToArray(),
+                active.Value.Bundle.CanonicalRouteAdvertisement.ToArray(),
+                active.Value.Bundle.ExpiresAtUnixSeconds));
     }
 
     private static void RequirePersistedExpiryMatchesSignedTopology(

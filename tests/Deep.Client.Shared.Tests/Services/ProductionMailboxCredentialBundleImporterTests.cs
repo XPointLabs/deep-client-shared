@@ -1205,6 +1205,11 @@ public sealed class ProductionMailboxCredentialBundleImporterTests
 
             Assert.Equal(ProductionMailboxActiveBundleStatus.Valid, restarted.Status);
             Assert.NotNull(restarted.Material);
+            Assert.NotNull(restarted.PublicRoute);
+            Assert.Equal(context.Bundle.MailboxOwnerEd25519PublicKey.ToArray(),
+                restarted.PublicRoute.MailboxOwnerEd25519PublicKey.ToArray());
+            Assert.Equal(context.Bundle.CanonicalRouteAdvertisement.ToArray(),
+                restarted.PublicRoute.CanonicalRouteAdvertisement.ToArray());
             Assert.Equal(context.Holder.SessionId, restarted.Material.LocalSessionId);
             Assert.True(restarted.Material.Authority.RequiresManagedEntitlement);
             Assert.True(restarted.Material.Authority.IsEntitled);
