@@ -72,6 +72,256 @@ public sealed class ProductionMailboxCredentialBundleImporterTests
     }
 
     [Fact]
+    public async Task PeerDeposit_ImportsExactDepositPairForAuthenticatedContact()
+    {
+        var context = await CreatePeerBundleContextAsync();
+        var root = Path.Combine(Path.GetTempPath(), "deep-production-peer-importer-" +
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            using var store = new SqliteSessionStore(Path.Combine(root, "state.db"));
+            var trust = new MemoryTrustStore();
+
+            var material = await ProductionMailboxCredentialBundleImporter
+                .ImportPeerDepositAsync(
+                    store,
+                    context.Holder,
+                    context.RecipientSessionId,
+                    context.RecipientOwnerPublicKey,
+                    context.Bundle,
+                    context.Fixture.BuildAnchor,
+                    trust,
+                    context.Fixture.ClientIdentity,
+                    MailboxInfrastructureOwnership.OfficialManaged,
+                    context.Clock);
+
+            Assert.Equal(context.Holder.SessionId, material.LocalSessionId);
+            Assert.Equal(context.RecipientSessionId, material.RecipientSessionId);
+            Assert.Equal(MailboxCredentialScopeKind.Peer, material.PeerSelector.Kind);
+            Assert.Equal(context.RecipientPublicKey,
+                material.PeerSelector.SubjectId.ToArray());
+            var route = await store.ReadScopedMailboxRouteAsync(
+                material.PeerSelector, material.Authority);
+            Assert.Equal(context.Mailbox, route.MailboxId.Bytes.ToArray());
+            Assert.Equal(context.Fixture.CurrentPlacement.Bytes.ToArray(),
+                route.PlacementId.Bytes.ToArray());
+            Assert.Equal(1UL, (await trust.ReadAsync())!.Revision);
+
+            var replay = await ProductionMailboxCredentialBundleImporter
+                .ImportPeerDepositAsync(
+                    store,
+                    context.Holder,
+                    context.RecipientSessionId,
+                    context.RecipientOwnerPublicKey,
+                    context.Bundle,
+                    context.Fixture.BuildAnchor,
+                    trust,
+                    context.Fixture.ClientIdentity,
+                    MailboxInfrastructureOwnership.OfficialManaged,
+                    new FixedTimeProvider(
+                        ProductionMailboxProvisioningContractTests.Now + 1));
+            Assert.Equal(material.PeerSelector.ScopeId.ToArray(),
+                replay.PeerSelector.ScopeId.ToArray());
+            Assert.Equal(1, trust.Writes);
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task PeerDeposit_RejectsRetrieveGrantsBeforeMutation()
+    {
+        var context = await CreatePeerBundleContextAsync();
+        var authority = ProductionMailboxAuthorityCodec.Decode(
+            context.Bundle.ControlPlane.CanonicalAuthority.Span);
+        var topology = ProductionMailboxTopologyCodec.Decode(
+            context.Bundle.ControlPlane.CanonicalTopology.Span);
+        var retrieveCurrent = Grant(
+            topology.CurrentEpoch,
+            authority,
+            context.Holder.Ed25519PublicKey.ToArray(),
+            context.Fixture.CurrentPlacement,
+            Bytes(0xd1, 16),
+            context.Fixture.IssuerPrivateKey,
+            MailboxCapabilityDomain.Retrieve);
+        var retrieveNext = Grant(
+            topology.NextEpoch,
+            authority,
+            context.Holder.Ed25519PublicKey.ToArray(),
+            context.Fixture.NextPlacement,
+            Bytes(0xe1, 16),
+            context.Fixture.IssuerPrivateKey,
+            MailboxCapabilityDomain.Retrieve);
+        var bundle = context.Bundle with
+        {
+            Grants =
+            [
+                Binding(retrieveCurrent),
+                Binding(retrieveNext)
+            ]
+        };
+        var root = Path.Combine(Path.GetTempPath(), "deep-production-peer-retrieve-" +
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            using var store = new SqliteSessionStore(Path.Combine(root, "state.db"));
+            var trust = new MemoryTrustStore();
+            await Assert.ThrowsAsync<InvalidDataException>(() =>
+                ProductionMailboxCredentialBundleImporter.ImportPeerDepositAsync(
+                    store,
+                    context.Holder,
+                    context.RecipientSessionId,
+                    context.RecipientOwnerPublicKey,
+                    bundle,
+                    context.Fixture.BuildAnchor,
+                    trust,
+                    context.Fixture.ClientIdentity,
+                    MailboxInfrastructureOwnership.OfficialManaged,
+                    context.Clock));
+            Assert.Equal(0, trust.Writes);
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData("session")]
+    [InlineData("owner")]
+    [InlineData("route")]
+    public async Task PeerDeposit_RejectsWrongAuthenticatedContactOrRouteBeforeMutation(
+        string mutation)
+    {
+        var context = await CreatePeerBundleContextAsync();
+        var expectedSession = mutation == "session"
+            ? SessionIdFromEd25519(PublicKeyAuth.GenerateKeyPair(Bytes(0x91, 32)).PublicKey)
+            : context.RecipientSessionId;
+        var expectedOwner = mutation == "owner"
+            ? PublicKeyAuth.GenerateKeyPair(Bytes(0x92, 32)).PublicKey
+            : context.RecipientOwnerPublicKey;
+        var bundle = mutation == "route"
+            ? context.Bundle with
+            {
+                BlindedMailboxId = ChangedBytes(context.Bundle.BlindedMailboxId)
+            }
+            : context.Bundle;
+        var root = Path.Combine(Path.GetTempPath(), "deep-production-peer-contact-" +
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            using var store = new SqliteSessionStore(Path.Combine(root, "state.db"));
+            var trust = new MemoryTrustStore();
+            await Assert.ThrowsAsync<InvalidDataException>(() =>
+                ProductionMailboxCredentialBundleImporter.ImportPeerDepositAsync(
+                    store,
+                    context.Holder,
+                    expectedSession,
+                    expectedOwner,
+                    bundle,
+                    context.Fixture.BuildAnchor,
+                    trust,
+                    context.Fixture.ClientIdentity,
+                    MailboxInfrastructureOwnership.OfficialManaged,
+                    context.Clock));
+            Assert.Equal(0, trust.Writes);
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task PeerDeposit_RejectsExpiredBundleAndConflictingReplay()
+    {
+        var context = await CreatePeerBundleContextAsync();
+        var root = Path.Combine(Path.GetTempPath(), "deep-production-peer-replay-" +
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            using var store = new SqliteSessionStore(Path.Combine(root, "state.db"));
+            var trust = new MemoryTrustStore();
+            var imported = await ProductionMailboxCredentialBundleImporter
+                .ImportPeerDepositAsync(
+                    store,
+                    context.Holder,
+                    context.RecipientSessionId,
+                    context.RecipientOwnerPublicKey,
+                    context.Bundle,
+                    context.Fixture.BuildAnchor,
+                    trust,
+                    context.Fixture.ClientIdentity,
+                    MailboxInfrastructureOwnership.OfficialManaged,
+                    context.Clock);
+
+            var authority = ProductionMailboxAuthorityCodec.Decode(
+                context.Bundle.ControlPlane.CanonicalAuthority.Span);
+            var topology = ProductionMailboxTopologyCodec.Decode(
+                context.Bundle.ControlPlane.CanonicalTopology.Span);
+            var conflict = context.Bundle with
+            {
+                Grants =
+                [
+                    Binding(Grant(topology.CurrentEpoch, authority,
+                        context.Holder.Ed25519PublicKey.ToArray(),
+                        context.Fixture.CurrentPlacement, Bytes(0xf1, 16),
+                        context.Fixture.IssuerPrivateKey,
+                        MailboxCapabilityDomain.Deposit)),
+                    Binding(Grant(topology.NextEpoch, authority,
+                        context.Holder.Ed25519PublicKey.ToArray(),
+                        context.Fixture.NextPlacement, Bytes(0xa1, 16),
+                        context.Fixture.IssuerPrivateKey,
+                        MailboxCapabilityDomain.Deposit))
+                ]
+            };
+            await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                ProductionMailboxCredentialBundleImporter.ImportPeerDepositAsync(
+                    store,
+                    context.Holder,
+                    context.RecipientSessionId,
+                    context.RecipientOwnerPublicKey,
+                    conflict,
+                    context.Fixture.BuildAnchor,
+                    trust,
+                    context.Fixture.ClientIdentity,
+                    MailboxInfrastructureOwnership.OfficialManaged,
+                    context.Clock));
+            _ = await store.ReadScopedMailboxRouteAsync(
+                imported.PeerSelector, imported.Authority);
+
+            using var expiredStore = new SqliteSessionStore(
+                Path.Combine(root, "expired.db"));
+            await Assert.ThrowsAsync<InvalidDataException>(() =>
+                ProductionMailboxCredentialBundleImporter.ImportPeerDepositAsync(
+                    expiredStore,
+                    context.Holder,
+                    context.RecipientSessionId,
+                    context.RecipientOwnerPublicKey,
+                    context.Bundle,
+                    context.Fixture.BuildAnchor,
+                    new MemoryTrustStore(),
+                    context.Fixture.ClientIdentity,
+                    MailboxInfrastructureOwnership.OfficialManaged,
+                    new FixedTimeProvider(context.Bundle.ExpiresAtUnixSeconds + 1)));
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task PeerDeposit_IsNotAcceptedByLocalOwnerImporter()
     {
         var fixture = ProductionMailboxProvisioningContractTests
@@ -1311,6 +1561,91 @@ public sealed class ProductionMailboxCredentialBundleImporterTests
             fixture, clock, holder, mailbox, bundle);
     }
 
+    private static async Task<PeerBundleContext> CreatePeerBundleContextAsync()
+    {
+        var fixture = ProductionMailboxProvisioningContractTests
+            .CreateSignedFixture(sharedPlacement: true);
+        var clock = new FixedTimeProvider(ProductionMailboxProvisioningContractTests.Now);
+        var preview = await ProductionMailboxControlPlaneVerifier.VerifyAsync(
+            fixture.Artifacts,
+            fixture.BuildAnchor,
+            new MemoryTrustStore(),
+            fixture.ClientIdentity,
+            MailboxInfrastructureOwnership.OfficialManaged,
+            fixture.CurrentPlacement,
+            fixture.NextPlacement,
+            clock);
+        var holderPair = PublicKeyAuth.GenerateKeyPair(Bytes(0x32, 32));
+        var holder = new MailboxHolderIdentity(
+            SessionIdFromEd25519(holderPair.PublicKey), holderPair.PublicKey);
+        var recipientPair = PublicKeyAuth.GenerateKeyPair(Bytes(0x42, 32));
+        var recipientSessionId = SessionIdFromEd25519(recipientPair.PublicKey);
+        var recipientOwner = PublicKeyAuth.GenerateKeyPair(Bytes(0x52, 32));
+        var mailbox = Bytes(0x72, 32);
+        var route = CreateRouteClosure(
+            preview.Authority,
+            fixture,
+            recipientOwner,
+            mailbox,
+            fixture.CurrentPlacement,
+            routeLifetimeSeconds: 300);
+        var currentGrant = Grant(
+            preview.Topology.Snapshot.CurrentEpoch,
+            preview.Authority.Authority,
+            holderPair.PublicKey,
+            fixture.CurrentPlacement,
+            Bytes(0xb2, 16),
+            fixture.IssuerPrivateKey,
+            MailboxCapabilityDomain.Deposit);
+        var nextGrant = Grant(
+            preview.Topology.Snapshot.NextEpoch,
+            preview.Authority.Authority,
+            holderPair.PublicKey,
+            fixture.NextPlacement,
+            Bytes(0xc2, 16),
+            fixture.IssuerPrivateKey,
+            MailboxCapabilityDomain.Deposit);
+        var selectionCommitment =
+            ProductionMailboxReplicaSelection.ComputeSelectionInputCommitment(
+                fixture.CurrentPlacement);
+        var idempotency = ComputePeerDepositIdempotency(
+            fixture,
+            holderPair.PublicKey,
+            recipientOwner.PublicKey,
+            mailbox,
+            fixture.CurrentPlacement.Bytes.Span,
+            selectionCommitment);
+        var bundle = new ProductionMailboxPeerDepositBundle(
+            holderPair.PublicKey,
+            recipientPair.PublicKey,
+            recipientOwner.PublicKey,
+            idempotency,
+            mailbox,
+            fixture.CurrentPlacement.Bytes,
+            selectionCommitment,
+            fixture.Artifacts,
+            [
+                Selection(preview.CurrentSelection,
+                    fixture.Artifacts.CanonicalCurrentSelection),
+                Selection(preview.NextSelection,
+                    fixture.Artifacts.CanonicalNextSelection)
+            ],
+            [Binding(currentGrant), Binding(nextGrant)],
+            route.Advertisement,
+            SHA256.HashData(route.Advertisement),
+            ProductionMailboxProvisioningContractTests.Now,
+            preview.Topology.Snapshot.CurrentEpoch.NotAfterUnixSeconds);
+        return new PeerBundleContext(
+            fixture,
+            clock,
+            holder,
+            recipientSessionId,
+            recipientPair.PublicKey,
+            recipientOwner.PublicKey,
+            mailbox,
+            bundle);
+    }
+
     private static ProductionMailboxSelectionBinding Selection(
         VerifiedProductionMailboxSelection verified,
         ReadOnlyMemory<byte> canonical) => new(
@@ -1449,17 +1784,52 @@ public sealed class ProductionMailboxCredentialBundleImporterTests
             zero);
     }
 
+    private static byte[] ComputePeerDepositIdempotency(
+        ProductionMailboxProvisioningContractTests.SignedFixture fixture,
+        ReadOnlySpan<byte> holder,
+        ReadOnlySpan<byte> owner,
+        ReadOnlySpan<byte> mailbox,
+        ReadOnlySpan<byte> placement,
+        ReadOnlySpan<byte> selectionCommitment)
+    {
+        Span<byte> zero = stackalloc byte[32];
+        return ProductionMailboxIssuanceIdempotency.Compute(
+            SHA256.HashData(fixture.Artifacts.CanonicalAuthority.Span),
+            SHA256.HashData(fixture.Artifacts.CanonicalRevocationSnapshot.Span),
+            SHA256.HashData(fixture.Artifacts.CanonicalTopology.Span),
+            holder,
+            owner,
+            mailbox,
+            placement,
+            selectionCommitment,
+            ProductionMailboxIssuanceIntent.PeerDeposit,
+            fixture.ClientIdentity.Platform == MailboxClientPlatform.Android
+                ? ProductionMailboxClientPlatform.Android
+                : ProductionMailboxClientPlatform.Windows,
+            fixture.ClientIdentity.SigningCertificateSha256.Span,
+            fixture.ClientIdentity.BuildArtifactSha256.Span,
+            zero);
+    }
+
+    private static ProductionMailboxGrantBinding Binding(
+        MailboxAuthenticatedGrant grant) => new(
+            grant.Domain,
+            grant.Epoch,
+            grant.Generation,
+            MailboxAuthenticatedCapabilityCodec.EncodeGrant(grant));
+
     private static MailboxAuthenticatedGrant Grant(
         ProductionMailboxTopologyEpoch epoch,
         ProductionMailboxAuthority authority,
         byte[] holder,
         BlindedPlacementId placement,
         byte[] serial,
-        byte[] issuerPrivateKey)
+        byte[] issuerPrivateKey,
+        MailboxCapabilityDomain domain = MailboxCapabilityDomain.Retrieve)
     {
         var unsigned = new MailboxAuthenticatedGrant
         {
-            Domain = MailboxCapabilityDomain.Retrieve,
+            Domain = domain,
             Lifecycle = MailboxCapabilityLifecycle.Active,
             NetworkId = authority.NetworkId,
             Epoch = epoch.Epoch,
@@ -1490,6 +1860,13 @@ public sealed class ProductionMailboxCredentialBundleImporterTests
 
     private static byte[] Bytes(byte seed, int length) => Enumerable.Range(0, length)
         .Select(index => unchecked((byte)(seed + index))).ToArray();
+
+    private static byte[] ChangedBytes(ReadOnlyMemory<byte> value)
+    {
+        var changed = value.ToArray();
+        changed[^1] ^= 1;
+        return changed;
+    }
 
     private sealed class FixedTimeProvider(ulong now) : TimeProvider
     {
@@ -1534,6 +1911,16 @@ public sealed class ProductionMailboxCredentialBundleImporterTests
         MailboxHolderIdentity Holder,
         byte[] Mailbox,
         ProductionMailboxLocalOwnerBundle Bundle);
+
+    private sealed record PeerBundleContext(
+        ProductionMailboxProvisioningContractTests.SignedFixture Fixture,
+        FixedTimeProvider Clock,
+        MailboxHolderIdentity Holder,
+        SessionId RecipientSessionId,
+        byte[] RecipientPublicKey,
+        byte[] RecipientOwnerPublicKey,
+        byte[] Mailbox,
+        ProductionMailboxPeerDepositBundle Bundle);
 
     private sealed record RouteClosure(byte[] Certificate, byte[] Advertisement);
 

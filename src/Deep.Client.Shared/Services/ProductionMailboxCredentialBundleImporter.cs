@@ -45,12 +45,35 @@ public sealed record ProductionMailboxLocalOwnerBundle(
     ulong IssuedAtUnixSeconds,
     ulong ExpiresAtUnixSeconds);
 
+public sealed record ProductionMailboxPeerDepositBundle(
+    ReadOnlyMemory<byte> HolderEd25519PublicKey,
+    ReadOnlyMemory<byte> RecipientEd25519PublicKey,
+    ReadOnlyMemory<byte> MailboxOwnerEd25519PublicKey,
+    ReadOnlyMemory<byte> IdempotencyKey,
+    ReadOnlyMemory<byte> BlindedMailboxId,
+    ReadOnlyMemory<byte> BlindedPlacementId,
+    ReadOnlyMemory<byte> SelectionInputCommitment,
+    ProductionMailboxControlPlaneArtifacts ControlPlane,
+    IReadOnlyList<ProductionMailboxSelectionBinding> Selections,
+    IReadOnlyList<ProductionMailboxGrantBinding> Grants,
+    ReadOnlyMemory<byte> CanonicalRouteAdvertisement,
+    ReadOnlyMemory<byte> RouteAdvertisementSha256,
+    ulong IssuedAtUnixSeconds,
+    ulong ExpiresAtUnixSeconds);
+
 public sealed record ImportedProductionMailboxRuntimeMaterial(
     VerifiedOfficialMailboxAuthority Authority,
     ClientMailboxActivation Activation,
     IMailboxClientDecodePolicyProvider DecodePolicies,
     MailboxCredentialSelector SelfSelector,
     SessionId LocalSessionId,
+    MailboxInfrastructureOwnership Ownership);
+
+public sealed record ImportedProductionMailboxPeerDepositMaterial(
+    VerifiedOfficialMailboxAuthority Authority,
+    MailboxCredentialSelector PeerSelector,
+    SessionId LocalSessionId,
+    SessionId RecipientSessionId,
     MailboxInfrastructureOwnership Ownership);
 
 public enum ProductionMailboxActiveBundleStatus
@@ -67,8 +90,9 @@ public sealed record ProductionMailboxActiveBundleLoadResult(
     ImportedProductionMailboxRuntimeMaterial? Material);
 
 /// <summary>
-/// Imports an exact Registry LocalOwner response. PeerDeposit is deliberately absent until an
-/// owner-signed, authority-bound public-route advertisement contract exists.
+/// Imports exact Registry LocalOwner and PeerDeposit responses. PeerDeposit requires the caller
+/// to supply the independently authenticated recipient Session ID and mailbox-owner key; PRA1 is
+/// never treated as a public Session directory.
 /// </summary>
 public static class ProductionMailboxCredentialBundleImporter
 {
@@ -78,6 +102,8 @@ public static class ProductionMailboxCredentialBundleImporter
         "deep.mailbox.stable-authority-id.v1"u8;
     private static ReadOnlySpan<byte> GenerationDomain =>
         "deep.mailbox.production-local-owner-generation.v1"u8;
+    private static ReadOnlySpan<byte> PeerGenerationDomain =>
+        "deep.mailbox.production-peer-deposit-generation.v1"u8;
 
     internal enum PublicationFaultPoint
     {
@@ -111,6 +137,225 @@ public static class ProductionMailboxCredentialBundleImporter
             verifyOnly: false,
             persistedJournal: null,
             cancellationToken).ConfigureAwait(false);
+
+    public static async Task<ImportedProductionMailboxPeerDepositMaterial>
+        ImportPeerDepositAsync(
+            SqliteSessionStore store,
+            MailboxHolderIdentity holder,
+            SessionId expectedRecipientSessionId,
+            ReadOnlyMemory<byte> expectedRecipientMailboxOwnerEd25519PublicKey,
+            ProductionMailboxPeerDepositBundle bundle,
+            ProductionMailboxTrustAnchor buildAnchor,
+            IProductionMailboxTrustStateStore trustStateStore,
+            ProductionMailboxClientApprovalIdentity clientIdentity,
+            MailboxInfrastructureOwnership ownership,
+            TimeProvider? timeProvider = null,
+            CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(store);
+        ArgumentNullException.ThrowIfNull(holder);
+        ArgumentNullException.ThrowIfNull(bundle);
+        ArgumentNullException.ThrowIfNull(buildAnchor);
+        ArgumentNullException.ThrowIfNull(trustStateStore);
+        ArgumentNullException.ThrowIfNull(clientIdentity);
+        if (ownership != MailboxInfrastructureOwnership.OfficialManaged)
+            throw new InvalidOperationException(
+                "Registry PeerDeposit provisioning is official-managed only.");
+
+        bundle = FreezePeerDepositBundle(bundle);
+        clientIdentity = FreezeClientIdentity(clientIdentity);
+        var expectedOwner = ExactNonzero(
+            expectedRecipientMailboxOwnerEd25519PublicKey.Span, 32,
+            "expected recipient owner key");
+        var holderKey = ExactNonzero(
+            bundle.HolderEd25519PublicKey.Span, 32, "holder key");
+        var recipientKey = ExactNonzero(
+            bundle.RecipientEd25519PublicKey.Span, 32, "recipient Session key");
+        var ownerKey = ExactNonzero(
+            bundle.MailboxOwnerEd25519PublicKey.Span, 32, "recipient owner key");
+        var idempotency = ExactNonzero(
+            bundle.IdempotencyKey.Span, 32, "idempotency key");
+        var mailbox = ExactNonzero(
+            bundle.BlindedMailboxId.Span, 32, "mailbox ID");
+        var placement = ExactNonzero(
+            bundle.BlindedPlacementId.Span, 32, "placement ID");
+        var selectionCommitment = ExactNonzero(
+            bundle.SelectionInputCommitment.Span, 32, "selection commitment");
+        try
+        {
+            Require(Fixed(holderKey, holder.Ed25519PublicKey.Span),
+                "Registry holder differs from the active Session holder.");
+            Require(holder.SessionId == SessionIdFromEd25519(holderKey),
+                "Registry holder does not map to the active Session ID.");
+            var recipientSessionId = SessionIdFromEd25519(recipientKey);
+            Require(recipientSessionId == expectedRecipientSessionId,
+                "Registry recipient does not map to the authenticated contact Session ID.");
+            Require(Fixed(ownerKey, expectedOwner),
+                "Registry PeerDeposit changed the authenticated contact owner identity.");
+
+            var clock = timeProvider ?? TimeProvider.System;
+            var now = clock.GetUtcNow().ToUnixTimeSeconds();
+            Require(now > 0,
+                "Production mailbox verification time is outside its valid range.");
+            var verifiedAt = checked((ulong)now);
+            Require(bundle.IssuedAtUnixSeconds > 0 &&
+                    bundle.IssuedAtUnixSeconds < bundle.ExpiresAtUnixSeconds &&
+                    verifiedAt >= bundle.IssuedAtUnixSeconds &&
+                    verifiedAt <= bundle.ExpiresAtUnixSeconds,
+                "Registry PeerDeposit response is expired or has an invalid issuance window.");
+            Require(bundle.Selections is { Count: 2 } && bundle.Grants is { Count: 2 },
+                "Registry PeerDeposit requires exact current/next selections and grants.");
+
+            var placementId = new BlindedPlacementId(placement);
+            Require(Fixed(
+                    ProductionMailboxReplicaSelection.ComputeSelectionInputCommitment(
+                        placementId),
+                    selectionCommitment),
+                "Registry selection commitment does not match its placement.");
+            var verified = await ProductionMailboxControlPlaneVerifier.VerifyAsync(
+                bundle.ControlPlane,
+                buildAnchor,
+                trustStateStore,
+                clientIdentity,
+                ownership,
+                placementId,
+                placementId,
+                clock,
+                cancellationToken).ConfigureAwait(false);
+            ValidateSelectionBinding(bundle.Selections[0], verified.CurrentSelection);
+            ValidateSelectionBinding(bundle.Selections[1], verified.NextSelection);
+
+            var authority = verified.Authority.Authority;
+            var topology = verified.Topology.Snapshot;
+            Require(Fixed(authority.NetworkId.Span, topology.NetworkId.Span),
+                "Verified production control-plane network IDs differ.");
+            Require(bundle.ExpiresAtUnixSeconds ==
+                    topology.CurrentEpoch.NotAfterUnixSeconds,
+                "Registry PeerDeposit expiry differs from its current epoch.");
+            var route = VerifyPeerRouteClosure(
+                bundle,
+                verified,
+                ownerKey,
+                mailbox,
+                placement,
+                selectionCommitment,
+                clientIdentity,
+                verifiedAt);
+
+            var grants = bundle.Grants.Select(DecodeGrant).ToArray();
+            Require(grants.Length == 2 && grants.All(static value =>
+                    value.Binding.Domain == MailboxCapabilityDomain.Deposit),
+                "PeerDeposit accepts deposit grants only.");
+            ValidateGrant(
+                grants[0], MailboxCapabilityDomain.Deposit, holderKey, authority,
+                topology.CurrentEpoch, placementId, "PeerDeposit");
+            ValidateGrant(
+                grants[1], MailboxCapabilityDomain.Deposit, holderKey, authority,
+                topology.NextEpoch, placementId, "PeerDeposit");
+            Require(!Fixed(grants[0].Grant.Serial.Span, grants[1].Grant.Serial.Span),
+                "Current and next PeerDeposit grant serials must differ.");
+
+            var issuer = authority.MailboxIssuerEd25519PublicKey.ToArray();
+            var issuerAuthority = new MailboxCapabilityIssuerAuthority
+            {
+                PublicKey = issuer,
+                Domain = MailboxCapabilityDomain.Deposit,
+                AllowedLifecycle = MailboxCapabilityLifecycle.Active,
+                MinimumGeneration = topology.CurrentEpoch.Generation,
+                MaximumGeneration = topology.NextEpoch.Generation,
+                ValidFromUnixSeconds = topology.CurrentEpoch.NotBeforeUnixSeconds,
+                ValidUntilUnixSeconds = topology.NextEpoch.NotAfterUnixSeconds
+            };
+            var account = OutboxAccountScope.FromBytes(
+                DomainHash(AccountDomain, holderKey));
+            var issuerContext = DomainHash(
+                AuthorityDomain,
+                new byte[] { (byte)ownership },
+                authority.NetworkId,
+                issuer);
+            var selector = new MailboxCredentialSelector(
+                account,
+                MailboxCredentialScopeKind.Peer,
+                recipientKey,
+                issuerContext);
+            var revoked = BuildRevocationKeys(
+                verified.Revocations.Snapshot.RevokedGrantSerials,
+                issuer,
+                topology);
+            var revocationReceipt = new MailboxRevocationRuntimeCheckpoint(
+                1,
+                verified.Revocations.Snapshot.IssuedAtUnixSeconds,
+                verified.Revocations.Snapshot.ExpiresAtUnixSeconds,
+                Convert.ToHexStringLower(
+                    verified.Revocations.CanonicalSnapshotHash.Span),
+                revoked);
+            var revocationKey = "deep.mailbox.production-revocation.v1:" +
+                Convert.ToHexStringLower(issuerContext);
+            var revocationSource = new SqliteMailboxRevocationSource(
+                store, revocationKey, revocationReceipt, clock);
+            var coordinator = MailboxRuntimePolicyCoordinator.For(
+                store.CanonicalStateIdentity, issuerContext);
+            var runtimeAuthority = new VerifiedOfficialMailboxAuthority(
+                authority.NetworkId,
+                topology.CurrentEpoch.Generation,
+                [issuerAuthority],
+                requiresManagedEntitlement: true,
+                static () => true,
+                revocationSource,
+                clock,
+                coordinator);
+            var generation = DomainHash(
+                PeerGenerationDomain,
+                verified.Authority.CanonicalAuthorityHash,
+                verified.Topology.CanonicalTopologyHash,
+                idempotency,
+                holderKey,
+                recipientKey,
+                ownerKey,
+                mailbox,
+                route.CertificateHash,
+                route.AdvertisementHash,
+                route.RouteDomainHash,
+                UInt64Bytes(route.Sequence),
+                SHA256.HashData(grants[0].Binding.CanonicalGrant.Span),
+                SHA256.HashData(grants[1].Binding.CanonicalGrant.Span));
+            var credential = new ScopedMailboxCredentialGeneration(
+                selector,
+                generation,
+                holderKey,
+                mailbox,
+                ToEpoch(topology.CurrentEpoch, placementId),
+                ToEpoch(topology.NextEpoch, placementId),
+                Retrieve: null,
+                new MailboxCredentialGrantSet(
+                    grants[0].Binding.CanonicalGrant.Span,
+                    grants[1].Binding.CanonicalGrant.Span),
+                ReplicaPair(verified.CurrentSelection),
+                ReplicaPair(verified.NextSelection));
+
+            await CommitTrustStateRecoveringAmbiguousOutcomeAsync(
+                verified, trustStateStore, cancellationToken).ConfigureAwait(false);
+            await store.InstallScopedCredentialAsync(
+                credential, runtimeAuthority, CancellationToken.None).ConfigureAwait(false);
+            return new ImportedProductionMailboxPeerDepositMaterial(
+                runtimeAuthority,
+                selector,
+                holder.SessionId,
+                recipientSessionId,
+                ownership);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(expectedOwner);
+            CryptographicOperations.ZeroMemory(holderKey);
+            CryptographicOperations.ZeroMemory(recipientKey);
+            CryptographicOperations.ZeroMemory(ownerKey);
+            CryptographicOperations.ZeroMemory(idempotency);
+            CryptographicOperations.ZeroMemory(mailbox);
+            CryptographicOperations.ZeroMemory(placement);
+            CryptographicOperations.ZeroMemory(selectionCommitment);
+        }
+    }
 
     public static async Task<ImportedProductionMailboxRuntimeMaterial?>
         TryRecoverPendingLocalOwnerAsync(
@@ -542,8 +787,12 @@ public static class ProductionMailboxCredentialBundleImporter
                     grants.All(static value =>
                         value.Binding.Domain == MailboxCapabilityDomain.Retrieve),
                 "LocalOwner accepts retrieve grants only.");
-            ValidateGrant(grants[0], holderKey, authority, topology.CurrentEpoch, placementId);
-            ValidateGrant(grants[1], holderKey, authority, topology.NextEpoch, placementId);
+            ValidateGrant(
+                grants[0], MailboxCapabilityDomain.Retrieve, holderKey, authority,
+                topology.CurrentEpoch, placementId, "LocalOwner");
+            ValidateGrant(
+                grants[1], MailboxCapabilityDomain.Retrieve, holderKey, authority,
+                topology.NextEpoch, placementId, "LocalOwner");
             Require(!Fixed(grants[0].Grant.Serial.Span, grants[1].Grant.Serial.Span),
                 "Current and next LocalOwner grant serials must differ.");
 
@@ -791,6 +1040,128 @@ public static class ProductionMailboxCredentialBundleImporter
         }
     }
 
+    private static ProductionMailboxPeerDepositBundle FreezePeerDepositBundle(
+        ProductionMailboxPeerDepositBundle bundle)
+    {
+        try
+        {
+            ArgumentNullException.ThrowIfNull(bundle.ControlPlane);
+            Require(bundle.Selections is { Count: 2 } && bundle.Grants is { Count: 2 },
+                "Registry PeerDeposit requires exact current/next selections and grants.");
+            Require(bundle.HolderEd25519PublicKey.Length == 32 &&
+                    bundle.RecipientEd25519PublicKey.Length == 32 &&
+                    bundle.MailboxOwnerEd25519PublicKey.Length == 32 &&
+                    bundle.IdempotencyKey.Length == 32 &&
+                    bundle.BlindedMailboxId.Length == 32 &&
+                    bundle.BlindedPlacementId.Length == 32 &&
+                    bundle.SelectionInputCommitment.Length == 32 &&
+                    bundle.RouteAdvertisementSha256.Length == 32,
+                "Registry PeerDeposit fixed fields have invalid lengths.");
+            Require(bundle.CanonicalRouteAdvertisement.Length ==
+                    ProductionMailboxRouteAdvertisementConstants.CanonicalAdvertisementLength,
+                "Registry PeerDeposit PRA1 has an invalid length.");
+            var selections = bundle.Selections.Select(static binding =>
+            {
+                ArgumentNullException.ThrowIfNull(binding);
+                Require(binding.CanonicalSelection.Length is >= 410 and <=
+                        ProductionMailboxTopologyConstants.MaximumSelectionArtifactBytes &&
+                        binding.Replicas is { Count: 2 },
+                    "Registry PeerDeposit PMS1 envelope is outside strict bounds.");
+                return new ProductionMailboxSelectionBinding(
+                    binding.Epoch,
+                    binding.Generation,
+                    binding.CanonicalSelection.ToArray(),
+                    binding.Replicas.Select(static replica =>
+                    {
+                        ArgumentNullException.ThrowIfNull(replica);
+                        Require(replica.ReplicaId.Length == 32 &&
+                                replica.CurrentSpkiSha256.Length == 32 &&
+                                replica.NextSpkiSha256.Length == 32 &&
+                                replica.HttpsEndpoint is not null &&
+                                replica.HttpsEndpoint.OriginalString.Length <=
+                                ProductionMailboxAuthorityConstants.MaximumEndpointLength,
+                            "Registry PeerDeposit replica envelope is outside strict bounds.");
+                        return new ProductionMailboxReplicaBinding(
+                            replica.ReplicaId.ToArray(),
+                            replica.HttpsEndpoint!,
+                            replica.CurrentSpkiSha256.ToArray(),
+                            replica.NextSpkiSha256.ToArray());
+                    }).ToArray());
+            }).ToArray();
+            var grants = bundle.Grants.Select(static binding =>
+            {
+                ArgumentNullException.ThrowIfNull(binding);
+                Require(binding.CanonicalGrant.Length ==
+                        MailboxAuthenticatedCapabilityLimits.GrantLength,
+                    "Registry PeerDeposit MCG2 envelope has an invalid length.");
+                return new ProductionMailboxGrantBinding(
+                    binding.Domain,
+                    binding.Epoch,
+                    binding.Generation,
+                    binding.CanonicalGrant.ToArray());
+            }).ToArray();
+            return new ProductionMailboxPeerDepositBundle(
+                bundle.HolderEd25519PublicKey.ToArray(),
+                bundle.RecipientEd25519PublicKey.ToArray(),
+                bundle.MailboxOwnerEd25519PublicKey.ToArray(),
+                bundle.IdempotencyKey.ToArray(),
+                bundle.BlindedMailboxId.ToArray(),
+                bundle.BlindedPlacementId.ToArray(),
+                bundle.SelectionInputCommitment.ToArray(),
+                new ProductionMailboxControlPlaneArtifacts(
+                    BoundedCopy(
+                        bundle.ControlPlane.CanonicalAuthority,
+                        821,
+                        ProductionMailboxAuthorityConstants.MaximumArtifactBytes,
+                        "PMA1"),
+                    BoundedCopy(
+                        bundle.ControlPlane.CanonicalRevocationSnapshot,
+                        ProductionMailboxRevocationSnapshotConstants
+                            .FixedArtifactBytesWithoutSerials,
+                        ProductionMailboxRevocationSnapshotConstants.MaximumArtifactBytes,
+                        "PMR1"),
+                    BoundedCopy(
+                        bundle.ControlPlane.CanonicalTopology,
+                        780,
+                        ProductionMailboxTopologyConstants.MaximumTopologyArtifactBytes,
+                        "PMT1"),
+                    BoundedCopy(
+                        bundle.ControlPlane.CanonicalCurrentSelection,
+                        410,
+                        ProductionMailboxTopologyConstants.MaximumSelectionArtifactBytes,
+                        "current PMS1"),
+                    BoundedCopy(
+                        bundle.ControlPlane.CanonicalNextSelection,
+                        410,
+                        ProductionMailboxTopologyConstants.MaximumSelectionArtifactBytes,
+                        "next PMS1")),
+                selections,
+                grants,
+                bundle.CanonicalRouteAdvertisement.ToArray(),
+                bundle.RouteAdvertisementSha256.ToArray(),
+                bundle.IssuedAtUnixSeconds,
+                bundle.ExpiresAtUnixSeconds);
+        }
+        catch (Exception exception) when (exception is InvalidDataException or
+            ArgumentException or InvalidOperationException or OverflowException)
+        {
+            throw new InvalidDataException(
+                "Registry PeerDeposit bundle is malformed or outside its bounds.",
+                exception);
+        }
+    }
+
+    private static byte[] BoundedCopy(
+        ReadOnlyMemory<byte> value,
+        int minimumLength,
+        int maximumLength,
+        string label)
+    {
+        Require(value.Length >= minimumLength && value.Length <= maximumLength,
+            $"Registry PeerDeposit {label} is outside strict bounds.");
+        return value.ToArray();
+    }
+
     private static ProductionMailboxClientApprovalIdentity FreezeClientIdentity(
         ProductionMailboxClientApprovalIdentity identity)
     {
@@ -942,6 +1313,105 @@ public static class ProductionMailboxCredentialBundleImporter
         }
     }
 
+    private static VerifiedRouteClosure VerifyPeerRouteClosure(
+        ProductionMailboxPeerDepositBundle bundle,
+        VerifiedProductionMailboxControlPlane verified,
+        ReadOnlySpan<byte> ownerKey,
+        ReadOnlySpan<byte> mailbox,
+        ReadOnlySpan<byte> placement,
+        ReadOnlySpan<byte> selectionCommitment,
+        ProductionMailboxClientApprovalIdentity clientIdentity,
+        ulong verifiedAtUnixSeconds)
+    {
+        var advertisementBytes = bundle.CanonicalRouteAdvertisement.ToArray();
+        try
+        {
+            Require(advertisementBytes.Length ==
+                    ProductionMailboxRouteAdvertisementConstants.CanonicalAdvertisementLength,
+                "Registry PeerDeposit route closure is incomplete.");
+            var advertisementHash = SHA256.HashData(advertisementBytes);
+            Require(Fixed(advertisementHash, bundle.RouteAdvertisementSha256.Span),
+                "Registry PRA1 envelope hash differs from its canonical bytes.");
+
+            var decoded = ProductionMailboxRouteAdvertisementCodec.DecodeAdvertisement(
+                advertisementBytes);
+            var certificateBytes = ProductionMailboxRouteAdvertisementCodec.EncodeCertificate(
+                decoded.Certificate);
+            var certificateHash = SHA256.HashData(certificateBytes);
+            Require(Fixed(decoded.Certificate.MailboxOwnerEd25519PublicKey.Span, ownerKey) &&
+                    Fixed(decoded.Certificate.BlindedMailboxId.Span, mailbox) &&
+                    Fixed(decoded.Certificate.BlindedPlacementId.Span, placement) &&
+                    Fixed(decoded.Certificate.SelectionInputCommitment.Span,
+                        selectionCommitment),
+                "Registry PRA1 route differs from the authenticated contact route.");
+            var certificate = ProductionMailboxRouteCertificateVerifier.Verify(
+                certificateBytes,
+                verified.Authority,
+                verifiedAtUnixSeconds,
+                0,
+                new SodiumProductionMailboxRouteSignatureVerifier());
+            var routeDomain = ProductionMailboxRouteAdvertisementCodec
+                .ComputeRouteDomainHash(certificate.Certificate);
+            var advertisement = ProductionMailboxRouteAdvertisementVerifier.Verify(
+                advertisementBytes,
+                verified.Authority,
+                new ProductionMailboxRouteAdvertisementVerificationContext
+                {
+                    NowUnixSeconds = verifiedAtUnixSeconds,
+                    ClockSkewSeconds = 0,
+                    ExpectedRouteDomainHash = routeDomain,
+                    LastAcceptedSequence = 0,
+                    LastAcceptedAdvertisementHash = new byte[32]
+                },
+                new SodiumProductionMailboxRouteSignatureVerifier());
+            Require(Fixed(
+                    ProductionMailboxRouteAdvertisementCodec.EncodeCertificate(
+                        advertisement.Advertisement.Certificate),
+                    certificateBytes),
+                "Registry PRA1 embeds a different PRC1 certificate.");
+
+            Span<byte> zeros = stackalloc byte[32];
+            var expectedIdempotency = ProductionMailboxIssuanceIdempotency.Compute(
+                SHA256.HashData(bundle.ControlPlane.CanonicalAuthority.Span),
+                SHA256.HashData(bundle.ControlPlane.CanonicalRevocationSnapshot.Span),
+                SHA256.HashData(bundle.ControlPlane.CanonicalTopology.Span),
+                bundle.HolderEd25519PublicKey.Span,
+                ownerKey,
+                mailbox,
+                placement,
+                selectionCommitment,
+                ProductionMailboxIssuanceIntent.PeerDeposit,
+                clientIdentity.Platform switch
+                {
+                    MailboxClientPlatform.Android => ProductionMailboxClientPlatform.Android,
+                    MailboxClientPlatform.Windows => ProductionMailboxClientPlatform.Windows,
+                    _ => throw new InvalidDataException(
+                        "Registry PeerDeposit client platform is invalid.")
+                },
+                clientIdentity.SigningCertificateSha256.Span,
+                clientIdentity.BuildArtifactSha256.Span,
+                zeros);
+            Require(Fixed(expectedIdempotency, bundle.IdempotencyKey.Span),
+                "Registry PeerDeposit idempotency key is not bound to its issuance request.");
+            return new VerifiedRouteClosure(
+                certificateHash,
+                advertisementHash,
+                routeDomain,
+                advertisement.NextAcceptedSequence,
+                certificate.Certificate.ExpiresAtUnixSeconds,
+                advertisement.Advertisement.ExpiresAtUnixSeconds);
+        }
+        catch (ProductionMailboxRouteAdvertisementException exception)
+        {
+            throw new InvalidDataException(
+                "Registry PeerDeposit route closure failed verification.", exception);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(advertisementBytes);
+        }
+    }
+
     private static byte[] DecodeLowerHex32(string value, string label)
     {
         if (value is null || value.Length != 64 || value.Any(static character =>
@@ -1047,13 +1517,15 @@ public static class ProductionMailboxCredentialBundleImporter
 
     private static void ValidateGrant(
         DecodedGrant decoded,
+        MailboxCapabilityDomain expectedDomain,
         ReadOnlySpan<byte> holder,
         ProductionMailboxAuthority authority,
         ProductionMailboxTopologyEpoch epoch,
-        BlindedPlacementId placement)
+        BlindedPlacementId placement,
+        string lane)
     {
         var grant = decoded.Grant;
-        Require(grant.Domain == MailboxCapabilityDomain.Retrieve &&
+        Require(grant.Domain == expectedDomain &&
                 grant.Lifecycle == MailboxCapabilityLifecycle.Active &&
                 grant.OverlapUntilUnixSeconds == 0 &&
                 grant.Epoch == epoch.Epoch && grant.Generation == epoch.Generation &&
@@ -1071,7 +1543,7 @@ public static class ProductionMailboxCredentialBundleImporter
                     grant.IssuerPublicKey.Span,
                     MailboxAuthenticatedCapabilityCodec.GetGrantSigningBytes(grant),
                     grant.IssuerSignature.Span),
-            "Registry LocalOwner grant is not bound to the verified control plane.");
+            $"Registry {lane} grant is not bound to the verified control plane.");
     }
 
     private static void ValidateSelectionBinding(
