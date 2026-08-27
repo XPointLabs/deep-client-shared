@@ -75,6 +75,154 @@ public sealed class ProductionMailboxCredentialBundleImporterTests
     }
 
     [Fact]
+    public async Task LocalOwner_OfflineCheckpointCatchesUpAcrossGenerationGap()
+    {
+        var context = await CreateBundleContextAsync();
+        var rotatedFixture = ProductionMailboxProvisioningContractTests
+            .CreateRotatedSignedFixture(context.Fixture, generationSteps: 3);
+        var rotatedBundle = CreateRotatedLocalOwnerBundle(
+            context, rotatedFixture,
+            ProductionMailboxSelectionSuccessorMode.OfflineCheckpoint);
+        var root = Path.Combine(Path.GetTempPath(), "deep-production-offline-catchup-" +
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            using var store = new SqliteSessionStore(Path.Combine(root, "state.db"));
+            var trust = new MemoryTrustStore();
+            var initial = await ProductionMailboxCredentialBundleImporter
+                .ImportLocalOwnerAsync(
+                    store, context.Holder, context.Bundle,
+                    context.Bundle.MailboxOwnerEd25519PublicKey,
+                    context.Fixture.BuildAnchor, trust, context.Fixture.ClientIdentity,
+                    MailboxInfrastructureOwnership.OfficialManaged, context.Clock);
+
+            var caughtUp = await ProductionMailboxCredentialBundleImporter
+                .ImportLocalOwnerAsync(
+                    store, context.Holder, rotatedBundle,
+                    rotatedBundle.MailboxOwnerEd25519PublicKey,
+                    context.Fixture.BuildAnchor, trust, context.Fixture.ClientIdentity,
+                    MailboxInfrastructureOwnership.OfficialManaged, context.Clock);
+
+            Assert.Equal(initial.SelfSelector.ScopeId.ToArray(),
+                caughtUp.SelfSelector.ScopeId.ToArray());
+            Assert.Equal(2UL, (await trust.ReadAsync())!.Revision);
+            Assert.Equal(2, trust.Writes);
+            _ = await store.ReadScopedMailboxRouteAsync(
+                caughtUp.SelfSelector, caughtUp.Authority);
+            await Assert.ThrowsAsync<InvalidDataException>(() =>
+                ProductionMailboxCredentialBundleImporter.ImportLocalOwnerAsync(
+                    store, context.Holder, context.Bundle,
+                    context.Bundle.MailboxOwnerEd25519PublicKey,
+                    context.Fixture.BuildAnchor, trust, context.Fixture.ClientIdentity,
+                    MailboxInfrastructureOwnership.OfficialManaged, context.Clock));
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task LocalOwner_DirectSuccessorRotatesExactNextEpoch()
+    {
+        var context = await CreateBundleContextAsync();
+        var rotatedFixture = ProductionMailboxProvisioningContractTests
+            .CreateRotatedSignedFixture(context.Fixture, generationSteps: 1);
+        var rotatedBundle = CreateRotatedLocalOwnerBundle(
+            context, rotatedFixture,
+            ProductionMailboxSelectionSuccessorMode.DirectPromotion);
+        var root = Path.Combine(Path.GetTempPath(), "deep-production-direct-successor-" +
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            using var store = new SqliteSessionStore(Path.Combine(root, "state.db"));
+            var trust = new MemoryTrustStore();
+            _ = await ProductionMailboxCredentialBundleImporter.ImportLocalOwnerAsync(
+                store, context.Holder, context.Bundle,
+                context.Bundle.MailboxOwnerEd25519PublicKey,
+                context.Fixture.BuildAnchor, trust, context.Fixture.ClientIdentity,
+                MailboxInfrastructureOwnership.OfficialManaged, context.Clock);
+            var rotated = await ProductionMailboxCredentialBundleImporter
+                .ImportLocalOwnerAsync(
+                    store, context.Holder, rotatedBundle,
+                    rotatedBundle.MailboxOwnerEd25519PublicKey,
+                    context.Fixture.BuildAnchor, trust, context.Fixture.ClientIdentity,
+                    MailboxInfrastructureOwnership.OfficialManaged, context.Clock);
+            _ = await store.ReadScopedMailboxRouteAsync(
+                rotated.SelfSelector, rotated.Authority);
+            Assert.Equal(2UL, (await trust.ReadAsync())!.Revision);
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task LocalOwner_OfflineCheckpointRestartRecoversAmbiguousTrustCommit()
+    {
+        var context = await CreateBundleContextAsync();
+        var rotatedFixture = ProductionMailboxProvisioningContractTests
+            .CreateRotatedSignedFixture(context.Fixture, generationSteps: 3);
+        var rotatedBundle = CreateRotatedLocalOwnerBundle(
+            context, rotatedFixture,
+            ProductionMailboxSelectionSuccessorMode.OfflineCheckpoint);
+        var database = Path.Combine(Path.GetTempPath(), "deep-production-offline-restart-" +
+            Guid.NewGuid().ToString("N"), "state.db");
+        Directory.CreateDirectory(Path.GetDirectoryName(database)!);
+        var trust = new MemoryTrustStore();
+        try
+        {
+            using (var store = new SqliteSessionStore(database))
+            {
+                _ = await ProductionMailboxCredentialBundleImporter.ImportLocalOwnerAsync(
+                    store, context.Holder, context.Bundle,
+                    context.Bundle.MailboxOwnerEd25519PublicKey,
+                    context.Fixture.BuildAnchor, trust, context.Fixture.ClientIdentity,
+                    MailboxInfrastructureOwnership.OfficialManaged, context.Clock);
+                await Assert.ThrowsAsync<InjectedPublicationFaultException>(() =>
+                    ProductionMailboxCredentialBundleImporter
+                        .ImportLocalOwnerWithFaultInjectionAsync(
+                            store, context.Holder, rotatedBundle,
+                            rotatedBundle.MailboxOwnerEd25519PublicKey,
+                            context.Fixture.BuildAnchor, trust,
+                            context.Fixture.ClientIdentity,
+                            MailboxInfrastructureOwnership.OfficialManaged,
+                            point =>
+                            {
+                                if (point == ProductionMailboxCredentialBundleImporter
+                                        .PublicationFaultPoint.AfterTrustCommit)
+                                    throw new InjectedPublicationFaultException();
+                            },
+                            context.Clock));
+                Assert.Equal(2UL, (await trust.ReadAsync())!.Revision);
+            }
+
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            using var restarted = new SqliteSessionStore(database);
+            var recovered = await ProductionMailboxCredentialBundleImporter
+                .TryRecoverPendingLocalOwnerAsync(
+                    restarted, context.Holder, context.Fixture.BuildAnchor, trust,
+                    context.Fixture.ClientIdentity,
+                    rotatedBundle.MailboxOwnerEd25519PublicKey,
+                    MailboxInfrastructureOwnership.OfficialManaged, context.Clock);
+            Assert.NotNull(recovered);
+            _ = await restarted.ReadScopedMailboxRouteAsync(
+                recovered.SelfSelector, recovered.Authority);
+            Assert.Equal(2, trust.Writes);
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            Directory.Delete(Path.GetDirectoryName(database)!, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task PeerDeposit_ImportsExactDepositPairForAuthenticatedContact()
     {
         var context = await CreatePeerBundleContextAsync();
@@ -135,6 +283,140 @@ public sealed class ProductionMailboxCredentialBundleImporterTests
         {
             Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
             Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task PeerDeposit_RotatesStableSelectorByMonotonicRouteSequence()
+    {
+        var context = await CreatePeerBundleContextAsync();
+        var root = Path.Combine(Path.GetTempPath(), "deep-production-peer-rotation-" +
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            using var store = new SqliteSessionStore(Path.Combine(root, "state.db"));
+            var trust = new MemoryTrustStore();
+            var first = await ProductionMailboxCredentialBundleImporter
+                .ImportPeerDepositAsync(
+                    store, context.Holder, context.RecipientSessionId,
+                    context.RecipientOwnerPublicKey, context.Bundle,
+                    context.Fixture.BuildAnchor, trust, context.Fixture.ClientIdentity,
+                    MailboxInfrastructureOwnership.OfficialManaged, context.Clock);
+            var rotatedBundle = RotatePeerBundle(context, routeSequence: 2, serialSeed: 0xd2);
+
+            var rotated = await ProductionMailboxCredentialBundleImporter
+                .ImportPeerDepositAsync(
+                    store, context.Holder, context.RecipientSessionId,
+                    context.RecipientOwnerPublicKey, rotatedBundle,
+                    context.Fixture.BuildAnchor, trust, context.Fixture.ClientIdentity,
+                    MailboxInfrastructureOwnership.OfficialManaged, context.Clock);
+
+            Assert.Equal(first.PeerSelector.ScopeId.ToArray(),
+                rotated.PeerSelector.ScopeId.ToArray());
+            _ = await store.ReadScopedMailboxRouteAsync(
+                rotated.PeerSelector, rotated.Authority);
+            Assert.Equal(1, trust.Writes);
+            await Assert.ThrowsAsync<InvalidDataException>(() =>
+                ProductionMailboxCredentialBundleImporter.ImportPeerDepositAsync(
+                    store, context.Holder, context.RecipientSessionId,
+                    context.RecipientOwnerPublicKey, context.Bundle,
+                    context.Fixture.BuildAnchor, trust, context.Fixture.ClientIdentity,
+                    MailboxInfrastructureOwnership.OfficialManaged, context.Clock));
+            _ = await store.ReadScopedMailboxRouteAsync(
+                rotated.PeerSelector, rotated.Authority);
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task PeerDeposit_RestartRecoversTrustCommitBeforeCredentialCommit()
+    {
+        var context = await CreatePeerBundleContextAsync();
+        var database = Path.Combine(Path.GetTempPath(), "deep-production-peer-recovery-" +
+            Guid.NewGuid().ToString("N"), "state.db");
+        Directory.CreateDirectory(Path.GetDirectoryName(database)!);
+        var trust = new MemoryTrustStore();
+        try
+        {
+            using (var store = new SqliteSessionStore(database))
+            {
+                var error = await Assert.ThrowsAsync<InjectedPublicationFaultException>(() =>
+                    ProductionMailboxCredentialBundleImporter
+                        .ImportPeerDepositWithFaultInjectionAsync(
+                            store, context.Holder, context.RecipientSessionId,
+                            context.RecipientOwnerPublicKey, context.Bundle,
+                            context.Fixture.BuildAnchor, trust,
+                            context.Fixture.ClientIdentity,
+                            MailboxInfrastructureOwnership.OfficialManaged,
+                            point =>
+                            {
+                                if (point == ProductionMailboxCredentialBundleImporter
+                                        .PublicationFaultPoint.AfterTrustCommit)
+                                    throw new InjectedPublicationFaultException();
+                            },
+                            context.Clock));
+                Assert.NotNull(error);
+                Assert.Equal(1UL, (await trust.ReadAsync())!.Revision);
+            }
+
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            using var restarted = new SqliteSessionStore(database);
+            var recovered = await ProductionMailboxCredentialBundleImporter
+                .ImportPeerDepositAsync(
+                    restarted, context.Holder, context.RecipientSessionId,
+                    context.RecipientOwnerPublicKey, context.Bundle,
+                    context.Fixture.BuildAnchor, trust, context.Fixture.ClientIdentity,
+                    MailboxInfrastructureOwnership.OfficialManaged, context.Clock);
+            _ = await restarted.ReadScopedMailboxRouteAsync(
+                recovered.PeerSelector, recovered.Authority);
+            Assert.Equal(1, trust.Writes);
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            Directory.Delete(Path.GetDirectoryName(database)!, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task PeerDeposit_RecoversAmbiguousSqliteCompletionByExactReadback()
+    {
+        var context = await CreatePeerBundleContextAsync();
+        var database = Path.Combine(Path.GetTempPath(), "deep-production-peer-ambiguous-" +
+            Guid.NewGuid().ToString("N"), "state.db");
+        Directory.CreateDirectory(Path.GetDirectoryName(database)!);
+        var afterCommit = 0;
+        try
+        {
+            using var store = new SqliteSessionStore(
+                new SqliteSessionStoreOptions(database),
+                point =>
+                {
+                    if (point == ClientMailboxCommitFaultPoint.AfterCommit &&
+                        Interlocked.Increment(ref afterCommit) == 2)
+                        throw new InjectedPublicationFaultException();
+                });
+            var trust = new MemoryTrustStore();
+            var imported = await ProductionMailboxCredentialBundleImporter
+                .ImportPeerDepositAsync(
+                    store, context.Holder, context.RecipientSessionId,
+                    context.RecipientOwnerPublicKey, context.Bundle,
+                    context.Fixture.BuildAnchor, trust, context.Fixture.ClientIdentity,
+                    MailboxInfrastructureOwnership.OfficialManaged, context.Clock);
+            _ = await store.ReadScopedMailboxRouteAsync(
+                imported.PeerSelector, imported.Authority);
+            Assert.Equal(2, afterCommit);
+            Assert.Equal(1, trust.Writes);
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            Directory.Delete(Path.GetDirectoryName(database)!, recursive: true);
         }
     }
 
@@ -290,7 +572,7 @@ public sealed class ProductionMailboxCredentialBundleImporterTests
                         MailboxCapabilityDomain.Deposit))
                 ]
             };
-            await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            await Assert.ThrowsAsync<InvalidDataException>(() =>
                 ProductionMailboxCredentialBundleImporter.ImportPeerDepositAsync(
                     store,
                     context.Holder,
@@ -1569,7 +1851,7 @@ public sealed class ProductionMailboxCredentialBundleImporterTests
             ProductionMailboxProvisioningContractTests.Now,
             preview.Topology.Snapshot.CurrentEpoch.NotAfterUnixSeconds);
         return new BundleContext(
-            fixture, clock, holder, mailbox, bundle);
+            fixture, clock, holder, ownerPair.PrivateKey, mailbox, bundle);
     }
 
     private static async Task<PeerBundleContext> CreatePeerBundleContextAsync()
@@ -1653,8 +1935,208 @@ public sealed class ProductionMailboxCredentialBundleImporterTests
             recipientSessionId,
             recipientPair.PublicKey,
             recipientOwner.PublicKey,
+            recipientOwner.PrivateKey,
             mailbox,
             bundle);
+    }
+
+    private static ProductionMailboxLocalOwnerBundle CreateRotatedLocalOwnerBundle(
+        BundleContext context,
+        ProductionMailboxProvisioningContractTests.SignedFixture rotated,
+        ProductionMailboxSelectionSuccessorMode mode)
+    {
+        var oldAuthority = ProductionMailboxAuthorityCodec.Decode(
+            context.Bundle.ControlPlane.CanonicalAuthority.Span);
+        var oldTopology = ProductionMailboxTopologyCodec.Decode(
+            context.Bundle.ControlPlane.CanonicalTopology.Span);
+        var authority = ProductionMailboxAuthorityCodec.Decode(
+            rotated.Artifacts.CanonicalAuthority.Span);
+        var topology = ProductionMailboxTopologyCodec.Decode(
+            rotated.Artifacts.CanonicalTopology.Span);
+        var owner = PublicKeyAuth.GenerateKeyPair(context.OwnerPrivateKey[..32]);
+        var placement = rotated.CurrentPlacement;
+        var selectionCommitment =
+            ProductionMailboxReplicaSelection.ComputeSelectionInputCommitment(placement);
+        var route = CreateRouteClosure(
+            authority,
+            SHA256.HashData(rotated.Artifacts.CanonicalAuthority.Span),
+            rotated,
+            owner,
+            context.Mailbox,
+            placement,
+            routeLifetimeSeconds: 300,
+            routeSequence: 2);
+        var currentGrant = Grant(
+            topology.CurrentEpoch,
+            authority,
+            context.Holder.Ed25519PublicKey.ToArray(),
+            placement,
+            Bytes(0xe2, 16),
+            rotated.IssuerPrivateKey);
+        var nextGrant = Grant(
+            topology.NextEpoch,
+            authority,
+            context.Holder.Ed25519PublicKey.ToArray(),
+            placement,
+            Bytes(0xf2, 16),
+            rotated.IssuerPrivateKey);
+        var oldSelection = context.Bundle.ControlPlane.CanonicalNextSelection.ToArray();
+        var newSelection = rotated.Artifacts.CanonicalCurrentSelection.ToArray();
+        var oldProof = ProductionMailboxTopologyCodec.DecodeSelection(oldSelection);
+        var newProof = ProductionMailboxTopologyCodec.DecodeSelection(newSelection);
+        var successor = new ProductionMailboxSelectionSuccessorProof
+        {
+            Mode = mode,
+            NetworkId = authority.NetworkId,
+            OldEpoch = oldProof.Epoch,
+            OldEpochGeneration = oldProof.Generation,
+            NewEpoch = newProof.Epoch,
+            NewEpochGeneration = newProof.Generation,
+            MailboxOwnerEd25519PublicKey = owner.PublicKey,
+            BlindedMailboxId = context.Mailbox,
+            BlindedPlacementId = placement.Bytes,
+            SelectionInputCommitment = selectionCommitment,
+            OldCanonicalAuthorityHash = SHA256.HashData(
+                context.Bundle.ControlPlane.CanonicalAuthority.Span),
+            NewCanonicalAuthorityHash = SHA256.HashData(
+                rotated.Artifacts.CanonicalAuthority.Span),
+            OldTopologyGeneration = oldTopology.TopologyGeneration,
+            OldCanonicalTopologyHash = SHA256.HashData(
+                context.Bundle.ControlPlane.CanonicalTopology.Span),
+            NewTopologyGeneration = topology.TopologyGeneration,
+            NewCanonicalTopologyHash = SHA256.HashData(
+                rotated.Artifacts.CanonicalTopology.Span),
+            OldCanonicalSelectionHash = SHA256.HashData(oldSelection),
+            NewCanonicalSelectionHash = SHA256.HashData(newSelection),
+            IssuedAtUnixSeconds = ProductionMailboxProvisioningContractTests.Now,
+            ExpiresAtUnixSeconds = checked(
+                ProductionMailboxProvisioningContractTests.Now + 40),
+            CanonicalNewAuthority = rotated.Artifacts.CanonicalAuthority.ToArray(),
+            OldCanonicalSelection = oldSelection,
+            NewCanonicalSelection = newSelection,
+            OldIssuerSignature = new byte[64],
+            NewIssuerSignature = new byte[64]
+        };
+        if (mode == ProductionMailboxSelectionSuccessorMode.DirectPromotion)
+        {
+            successor = successor with
+            {
+                OldIssuerSignature = PublicKeyAuth.SignDetached(
+                    ProductionMailboxSelectionSuccessorCodec
+                        .GetOldIssuerSigningBytes(successor),
+                    context.Fixture.IssuerPrivateKey)
+            };
+        }
+        successor = successor with
+        {
+            NewIssuerSignature = PublicKeyAuth.SignDetached(
+                ProductionMailboxSelectionSuccessorCodec
+                    .GetNewIssuerSigningBytes(successor),
+                rotated.IssuerPrivateKey)
+        };
+        var canonicalSuccessor =
+            ProductionMailboxSelectionSuccessorCodec.Encode(successor);
+        return new ProductionMailboxLocalOwnerBundle(
+            context.Holder.Ed25519PublicKey.ToArray(),
+            owner.PublicKey,
+            ComputeLocalOwnerIdempotency(
+                rotated, context.Holder.Ed25519PublicKey.Span, owner.PublicKey),
+            context.Mailbox,
+            placement.Bytes,
+            selectionCommitment,
+            rotated.Artifacts,
+            [
+                SelectionBinding(rotated.Artifacts.CanonicalCurrentSelection, topology),
+                SelectionBinding(rotated.Artifacts.CanonicalNextSelection, topology)
+            ],
+            [
+                mode == ProductionMailboxSelectionSuccessorMode.DirectPromotion
+                    ? context.Bundle.Grants[1]
+                    : Binding(currentGrant),
+                Binding(nextGrant)
+            ],
+            route.Certificate,
+            SHA256.HashData(route.Certificate),
+            route.Advertisement,
+            SHA256.HashData(route.Advertisement),
+            canonicalSuccessor,
+            SHA256.HashData(canonicalSuccessor),
+            ProductionMailboxProvisioningContractTests.Now,
+            topology.CurrentEpoch.NotAfterUnixSeconds);
+    }
+
+    private static ProductionMailboxSelectionBinding SelectionBinding(
+        ReadOnlyMemory<byte> canonical,
+        ProductionMailboxTopologySnapshot topology)
+    {
+        var proof = ProductionMailboxTopologyCodec.DecodeSelection(canonical.Span);
+        var epoch = proof.Epoch == topology.CurrentEpoch.Epoch
+            ? topology.CurrentEpoch
+            : proof.Epoch == topology.NextEpoch.Epoch
+                ? topology.NextEpoch
+                : throw new InvalidDataException("Selection epoch is outside topology.");
+        return new ProductionMailboxSelectionBinding(
+            proof.Epoch,
+            proof.Generation,
+            canonical.ToArray(),
+            proof.Replicas.Select(replica =>
+            {
+                var node = epoch.Nodes.Single(value =>
+                    value.NodeId.Span.SequenceEqual(replica.ReplicaId.Span));
+                return new ProductionMailboxReplicaBinding(
+                    node.NodeId.ToArray(),
+                    new Uri(node.HttpsEndpoint, UriKind.Absolute),
+                    node.CurrentSpkiSha256.ToArray(),
+                    node.NextSpkiSha256.ToArray());
+            }).ToArray());
+    }
+
+    private static ProductionMailboxPeerDepositBundle RotatePeerBundle(
+        PeerBundleContext context,
+        ulong routeSequence,
+        byte serialSeed)
+    {
+        var authority = ProductionMailboxAuthorityCodec.Decode(
+            context.Bundle.ControlPlane.CanonicalAuthority.Span);
+        var topology = ProductionMailboxTopologyCodec.Decode(
+            context.Bundle.ControlPlane.CanonicalTopology.Span);
+        var advertisement = ProductionMailboxRouteAdvertisementCodec.DecodeAdvertisement(
+            context.Bundle.CanonicalRouteAdvertisement.Span) with
+        {
+            Sequence = routeSequence,
+            OwnerSignature = new byte[64]
+        };
+        advertisement = advertisement with
+        {
+            OwnerSignature = PublicKeyAuth.SignDetached(
+                ProductionMailboxRouteAdvertisementCodec
+                    .GetAdvertisementSigningBytes(advertisement),
+                context.RecipientOwnerPrivateKey)
+        };
+        var encodedAdvertisement =
+            ProductionMailboxRouteAdvertisementCodec.EncodeAdvertisement(advertisement);
+        var currentGrant = Grant(
+            topology.CurrentEpoch,
+            authority,
+            context.Holder.Ed25519PublicKey.ToArray(),
+            context.Fixture.CurrentPlacement,
+            Bytes(serialSeed, 16),
+            context.Fixture.IssuerPrivateKey,
+            MailboxCapabilityDomain.Deposit);
+        var nextGrant = Grant(
+            topology.NextEpoch,
+            authority,
+            context.Holder.Ed25519PublicKey.ToArray(),
+            context.Fixture.NextPlacement,
+            Bytes(checked((byte)(serialSeed + 0x10)), 16),
+            context.Fixture.IssuerPrivateKey,
+            MailboxCapabilityDomain.Deposit);
+        return context.Bundle with
+        {
+            Grants = [Binding(currentGrant), Binding(nextGrant)],
+            CanonicalRouteAdvertisement = encodedAdvertisement,
+            RouteAdvertisementSha256 = SHA256.HashData(encodedAdvertisement)
+        };
     }
 
     private static ProductionMailboxSelectionBinding Selection(
@@ -1719,14 +2201,32 @@ public sealed class ProductionMailboxCredentialBundleImporterTests
         KeyPair owner,
         byte[] mailbox,
         BlindedPlacementId placement,
-        ulong routeLifetimeSeconds)
+        ulong routeLifetimeSeconds) => CreateRouteClosure(
+            authority.Authority,
+            authority.CanonicalAuthorityHash,
+            fixture,
+            owner,
+            mailbox,
+            placement,
+            routeLifetimeSeconds,
+            routeSequence: 1);
+
+    private static RouteClosure CreateRouteClosure(
+        ProductionMailboxAuthority authority,
+        ReadOnlyMemory<byte> canonicalAuthorityHash,
+        ProductionMailboxProvisioningContractTests.SignedFixture fixture,
+        KeyPair owner,
+        byte[] mailbox,
+        BlindedPlacementId placement,
+        ulong routeLifetimeSeconds,
+        ulong routeSequence)
     {
         var certificate = new ProductionMailboxRouteCertificate
         {
-            NetworkId = authority.Authority.NetworkId,
-            AuthorityGeneration = authority.Authority.AuthorityGeneration,
-            CanonicalAuthorityHash = authority.CanonicalAuthorityHash,
-            IssuerEd25519PublicKey = authority.Authority.MailboxIssuerEd25519PublicKey,
+            NetworkId = authority.NetworkId,
+            AuthorityGeneration = authority.AuthorityGeneration,
+            CanonicalAuthorityHash = canonicalAuthorityHash,
+            IssuerEd25519PublicKey = authority.MailboxIssuerEd25519PublicKey,
             MailboxOwnerEd25519PublicKey = owner.PublicKey,
             BlindedMailboxId = mailbox,
             BlindedPlacementId = placement.Bytes,
@@ -1747,7 +2247,7 @@ public sealed class ProductionMailboxCredentialBundleImporterTests
         var advertisement = new ProductionMailboxRouteAdvertisement
         {
             Certificate = certificate,
-            Sequence = 1,
+            Sequence = routeSequence,
             PublishedAtUnixSeconds = ProductionMailboxProvisioningContractTests.Now,
             ExpiresAtUnixSeconds = certificate.ExpiresAtUnixSeconds,
             OwnerSignature = new byte[64]
@@ -1920,6 +2420,7 @@ public sealed class ProductionMailboxCredentialBundleImporterTests
         ProductionMailboxProvisioningContractTests.SignedFixture Fixture,
         FixedTimeProvider Clock,
         MailboxHolderIdentity Holder,
+        byte[] OwnerPrivateKey,
         byte[] Mailbox,
         ProductionMailboxLocalOwnerBundle Bundle);
 
@@ -1930,6 +2431,7 @@ public sealed class ProductionMailboxCredentialBundleImporterTests
         SessionId RecipientSessionId,
         byte[] RecipientPublicKey,
         byte[] RecipientOwnerPublicKey,
+        byte[] RecipientOwnerPrivateKey,
         byte[] Mailbox,
         ProductionMailboxPeerDepositBundle Bundle);
 

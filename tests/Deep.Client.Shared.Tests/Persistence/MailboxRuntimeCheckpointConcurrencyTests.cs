@@ -314,7 +314,8 @@ public sealed class MailboxRuntimeCheckpointConcurrencyTests
                 checkpoint,
                 PublicationKey,
                 ActiveBundleKey,
-                journal));
+                journal,
+                allowOfflineCheckpoint: false));
 
         Assert.Equal(
             runtimeDurable ? null : journal,
@@ -402,9 +403,8 @@ public sealed class MailboxRuntimeCheckpointConcurrencyTests
             store.StageProductionMailboxRuntimePublicationAsync(
                 PublicationKey,
                 ActiveBundleKey,
-                active with
+                WithTrustRevision(active, 8) with
                 {
-                    TargetTrustRevision = 8,
                     CurrentEpoch = 8,
                     PairGeneration = Hex('2'),
                     RouteAdvertisementSequence = 4,
@@ -414,9 +414,8 @@ public sealed class MailboxRuntimeCheckpointConcurrencyTests
             store.StageProductionMailboxRuntimePublicationAsync(
                 PublicationKey,
                 ActiveBundleKey,
-                active with
+                WithTrustRevision(active, 8) with
                 {
-                    TargetTrustRevision = 8,
                     CurrentEpoch = 8,
                     PairGeneration = Hex('2'),
                     RouteAdvertisementSha256 = Hex('6')
@@ -425,9 +424,8 @@ public sealed class MailboxRuntimeCheckpointConcurrencyTests
         await store.StageProductionMailboxRuntimePublicationAsync(
             PublicationKey,
             ActiveBundleKey,
-            active with
+            WithTrustRevision(active, 8) with
             {
-                TargetTrustRevision = 8,
                 CurrentEpoch = 8,
                 PairGeneration = Hex('2'),
                 RouteAdvertisementSequence = 6,
@@ -524,10 +522,12 @@ public sealed class MailboxRuntimeCheckpointConcurrencyTests
     private static ProductionMailboxRuntimePublicationJournal Journal(char pair)
     {
         byte[] signedBundle = [1];
+        var trustState = TrustState(7);
         return new ProductionMailboxRuntimePublicationJournal(
-            2,
+            3,
             7,
-            Hex('a'),
+            Convert.ToHexStringLower(SHA256.HashData(trustState)),
+            Convert.ToBase64String(trustState),
             7,
             Hex(pair),
             Convert.ToHexStringLower(SHA256.HashData(signedBundle)),
@@ -539,6 +539,36 @@ public sealed class MailboxRuntimeCheckpointConcurrencyTests
             Hex('c'),
             Hex('d'),
             1);
+    }
+
+    private static ProductionMailboxRuntimePublicationJournal WithTrustRevision(
+        ProductionMailboxRuntimePublicationJournal journal,
+        ulong revision)
+    {
+        var trustState = TrustState(revision);
+        return journal with
+        {
+            TargetTrustRevision = revision,
+            TargetTrustStateSha256 =
+                Convert.ToHexStringLower(SHA256.HashData(trustState)),
+            TargetTrustStateBase64 = Convert.ToBase64String(trustState)
+        };
+    }
+
+    private static byte[] TrustState(ulong revision)
+    {
+        var anchor = new ProductionMailboxTrustAnchor(
+            Enumerable.Repeat((byte)1, 32).ToArray(),
+            Enumerable.Repeat((byte)2, 16).ToArray(),
+            6,
+            Enumerable.Repeat((byte)3, 32).ToArray(),
+            5,
+            Enumerable.Repeat((byte)4, 32).ToArray(),
+            Enumerable.Repeat((byte)5, 32).ToArray(),
+            2,
+            Enumerable.Repeat((byte)6, 32).ToArray());
+        return ProductionMailboxTrustStateCodec.Encode(
+            new ProductionMailboxTrustState(revision, anchor, anchor, anchor));
     }
 
     private static MailboxRevocationRuntimeCheckpoint Revocation(

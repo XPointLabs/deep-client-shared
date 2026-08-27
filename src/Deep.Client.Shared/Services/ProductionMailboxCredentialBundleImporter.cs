@@ -157,6 +157,65 @@ public static class ProductionMailboxCredentialBundleImporter
             MailboxInfrastructureOwnership ownership,
             TimeProvider? timeProvider = null,
             CancellationToken cancellationToken = default)
+        => await ImportPeerDepositCoreAsync(
+            store,
+            holder,
+            expectedRecipientSessionId,
+            expectedRecipientMailboxOwnerEd25519PublicKey,
+            bundle,
+            buildAnchor,
+            trustStateStore,
+            clientIdentity,
+            ownership,
+            timeProvider,
+            faultInjector: null,
+            cancellationToken).ConfigureAwait(false);
+
+    internal static async Task<ImportedProductionMailboxPeerDepositMaterial>
+        ImportPeerDepositWithFaultInjectionAsync(
+            SqliteSessionStore store,
+            MailboxHolderIdentity holder,
+            SessionId expectedRecipientSessionId,
+            ReadOnlyMemory<byte> expectedRecipientMailboxOwnerEd25519PublicKey,
+            ProductionMailboxPeerDepositBundle bundle,
+            ProductionMailboxTrustAnchor buildAnchor,
+            IProductionMailboxTrustStateStore trustStateStore,
+            ProductionMailboxClientApprovalIdentity clientIdentity,
+            MailboxInfrastructureOwnership ownership,
+            Action<PublicationFaultPoint> faultInjector,
+            TimeProvider? timeProvider = null,
+            CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(faultInjector);
+        return await ImportPeerDepositCoreAsync(
+            store,
+            holder,
+            expectedRecipientSessionId,
+            expectedRecipientMailboxOwnerEd25519PublicKey,
+            bundle,
+            buildAnchor,
+            trustStateStore,
+            clientIdentity,
+            ownership,
+            timeProvider,
+            faultInjector,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task<ImportedProductionMailboxPeerDepositMaterial>
+        ImportPeerDepositCoreAsync(
+            SqliteSessionStore store,
+            MailboxHolderIdentity holder,
+            SessionId expectedRecipientSessionId,
+            ReadOnlyMemory<byte> expectedRecipientMailboxOwnerEd25519PublicKey,
+            ProductionMailboxPeerDepositBundle bundle,
+            ProductionMailboxTrustAnchor buildAnchor,
+            IProductionMailboxTrustStateStore trustStateStore,
+            ProductionMailboxClientApprovalIdentity clientIdentity,
+            MailboxInfrastructureOwnership ownership,
+            TimeProvider? timeProvider,
+            Action<PublicationFaultPoint>? faultInjector,
+            CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(holder);
@@ -330,10 +389,74 @@ public static class ProductionMailboxCredentialBundleImporter
                 ReplicaPair(verified.CurrentSelection),
                 ReplicaPair(verified.NextSelection));
 
+            var encodedTrustState = ProductionMailboxTrustStateCodec.Encode(
+                verified.StateToCommit);
+            var publication = new ProductionMailboxPeerCredentialPublication(
+                1,
+                Convert.ToHexStringLower(selector.ScopeId.Span),
+                topology.CurrentEpoch.Epoch,
+                topology.NextEpoch.Epoch,
+                route.Sequence,
+                Convert.ToHexStringLower(SHA256.HashData(generation)),
+                verified.StateToCommit.Revision,
+                Convert.ToHexStringLower(SHA256.HashData(encodedTrustState)));
+            CryptographicOperations.ZeroMemory(encodedTrustState);
+            var journalKey = PeerPublicationJournalKey(selector);
+            var activeKey = PeerActivePublicationKey(selector);
+            await using var publicationLease = await coordinator.AcquirePublicationAsync(
+                cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await store.StageProductionMailboxPeerCredentialPublicationAsync(
+                    journalKey,
+                    activeKey,
+                    publication,
+                    cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                // SQLite may report an I/O/process fault after commit. Replaying the exact
+                // journal is safe and will reject any competing route sequence.
+                await store.StageProductionMailboxPeerCredentialPublicationAsync(
+                    journalKey,
+                    activeKey,
+                    publication,
+                    CancellationToken.None).ConfigureAwait(false);
+            }
+            faultInjector?.Invoke(PublicationFaultPoint.AfterJournalCommit);
             await CommitTrustStateRecoveringAmbiguousOutcomeAsync(
                 verified, trustStateStore, cancellationToken).ConfigureAwait(false);
-            await store.InstallScopedCredentialAsync(
-                credential, runtimeAuthority, CancellationToken.None).ConfigureAwait(false);
+            faultInjector?.Invoke(PublicationFaultPoint.AfterTrustCommit);
+            var runtimeActivation = new MailboxRuntimeCommitActivation(
+                revocationSource, publicationLease);
+            try
+            {
+                await store.CompleteProductionMailboxPeerCredentialPublicationAsync(
+                    credential,
+                    runtimeAuthority,
+                    journalKey,
+                    activeKey,
+                    publication,
+                    revocationKey,
+                    revocationReceipt,
+                    runtimeActivation,
+                    CancellationToken.None).ConfigureAwait(false);
+            }
+            catch
+            {
+                if (!await store.IsProductionMailboxPeerCredentialPublicationCompleteAsync(
+                        credential,
+                        runtimeAuthority,
+                        journalKey,
+                        activeKey,
+                        publication,
+                        revocationKey,
+                        revocationReceipt,
+                        CancellationToken.None).ConfigureAwait(false))
+                    throw;
+                runtimeActivation.ActivateCommittedNoThrow();
+            }
+            faultInjector?.Invoke(PublicationFaultPoint.AfterRuntimeCommit);
             return new ImportedProductionMailboxPeerDepositMaterial(
                 runtimeAuthority,
                 selector,
@@ -720,7 +843,6 @@ public static class ProductionMailboxCredentialBundleImporter
         var verifiedAt = persistedJournal?.VerifiedAtUnixSeconds ?? checked((ulong)actualNow);
         Require(verifiedAt > 0 && verifiedAt <= checked((ulong)actualNow),
             "Production mailbox persisted verification time is invalid.");
-        var verificationClock = new FixedUnixTimeProvider(verifiedAt);
         var holderKey = ExactNonzero(bundle.HolderEd25519PublicKey.Span, 32, "holder key");
         var ownerKey = ExactNonzero(bundle.MailboxOwnerEd25519PublicKey.Span, 32, "owner key");
         var idempotency = ExactNonzero(bundle.IdempotencyKey.Span, 32, "idempotency key");
@@ -740,10 +862,6 @@ public static class ProductionMailboxCredentialBundleImporter
             Require(verifiedAt >= bundle.IssuedAtUnixSeconds &&
                     verifiedAt <= bundle.ExpiresAtUnixSeconds,
                 "Registry LocalOwner response is expired.");
-            Require(bundle.CanonicalSelectionSuccessor.IsEmpty &&
-                    bundle.SelectionSuccessorSha256.IsEmpty,
-                "Registry LocalOwner selection-successor activation is not supported yet.");
-
             var placementId = new BlindedPlacementId(placement);
             Require(Fixed(
                     ProductionMailboxReplicaSelection.ComputeSelectionInputCommitment(placementId),
@@ -752,15 +870,16 @@ public static class ProductionMailboxCredentialBundleImporter
             Require(bundle.Selections is { Count: 2 } && bundle.Grants is { Count: 2 },
                 "Registry LocalOwner requires exact current/next selections and grants.");
 
-            var verified = await ProductionMailboxControlPlaneVerifier.VerifyAsync(
-                bundle.ControlPlane,
+            var verified = await VerifyLocalOwnerControlPlaneAsync(
+                store,
+                holder,
+                bundle,
                 buildAnchor,
                 trustStateStore,
                 clientIdentity,
                 ownership,
                 placementId,
-                placementId,
-                verificationClock,
+                verifiedAt,
                 cancellationToken).ConfigureAwait(false);
             ValidateSelectionBinding(bundle.Selections[0], verified.CurrentSelection);
             ValidateSelectionBinding(bundle.Selections[1], verified.NextSelection);
@@ -914,9 +1033,10 @@ public static class ProductionMailboxCredentialBundleImporter
                     refreshAfter < hardExpiresAt,
                 "Registry route closure leaves no safe refresh interval.");
             var publicationJournal = new ProductionMailboxRuntimePublicationJournal(
-                2,
+                3,
                 verified.StateToCommit.Revision,
                 Convert.ToHexStringLower(SHA256.HashData(encodedTrustState)),
+                Convert.ToBase64String(encodedTrustState),
                 topology.CurrentEpoch.Epoch,
                 Convert.ToHexStringLower(generation),
                 Convert.ToHexStringLower(SHA256.HashData(encodedBundle)),
@@ -970,6 +1090,10 @@ public static class ProductionMailboxCredentialBundleImporter
                     publicationJournalKey,
                     activeBundleKey,
                     publicationJournal,
+                    !bundle.CanonicalSelectionSuccessor.IsEmpty &&
+                        ProductionMailboxSelectionSuccessorCodec.Decode(
+                            bundle.CanonicalSelectionSuccessor.Span).Mode ==
+                        ProductionMailboxSelectionSuccessorMode.OfflineCheckpoint,
                     runtimeActivation,
                     CancellationToken.None).ConfigureAwait(false);
             }
@@ -1006,6 +1130,263 @@ public static class ProductionMailboxCredentialBundleImporter
             CryptographicOperations.ZeroMemory(selectionCommitment);
             CryptographicOperations.ZeroMemory(expectedOwner);
         }
+    }
+
+    private static async Task<VerifiedProductionMailboxControlPlane>
+        VerifyLocalOwnerControlPlaneAsync(
+            SqliteSessionStore store,
+            MailboxHolderIdentity holder,
+            ProductionMailboxLocalOwnerBundle bundle,
+            ProductionMailboxTrustAnchor buildAnchor,
+            IProductionMailboxTrustStateStore trustStateStore,
+            ProductionMailboxClientApprovalIdentity clientIdentity,
+            MailboxInfrastructureOwnership ownership,
+            BlindedPlacementId placement,
+            ulong verifiedAt,
+            CancellationToken cancellationToken)
+    {
+        var hasSuccessor = !bundle.CanonicalSelectionSuccessor.IsEmpty ||
+            !bundle.SelectionSuccessorSha256.IsEmpty;
+        if (!hasSuccessor)
+        {
+            return await ProductionMailboxControlPlaneVerifier.VerifyAsync(
+                bundle.ControlPlane,
+                buildAnchor,
+                trustStateStore,
+                clientIdentity,
+                ownership,
+                placement,
+                placement,
+                new FixedUnixTimeProvider(verifiedAt),
+                cancellationToken).ConfigureAwait(false);
+        }
+        Require(!bundle.CanonicalSelectionSuccessor.IsEmpty &&
+                bundle.SelectionSuccessorSha256.Length == 32 &&
+                Fixed(SHA256.HashData(bundle.CanonicalSelectionSuccessor.Span),
+                    bundle.SelectionSuccessorSha256.Span),
+            "Registry LocalOwner selection successor hash is invalid.");
+
+        var active = await ReadPersistedLocalOwnerAsync(
+            store,
+            ActiveBundleKey(holder),
+            "Active production mailbox public bundle",
+            cancellationToken).ConfigureAwait(false);
+        var predecessor = active ?? throw new InvalidDataException(
+            "Registry LocalOwner selection successor has no exact local predecessor.");
+        var oldStateBytes = Convert.FromBase64String(
+            predecessor.Journal.TargetTrustStateBase64);
+        ProductionMailboxTrustState oldState;
+        try
+        {
+            oldState = ProductionMailboxTrustStateCodec.Decode(oldStateBytes);
+            Require(string.Equals(
+                    Convert.ToHexStringLower(SHA256.HashData(oldStateBytes)),
+                    predecessor.Journal.TargetTrustStateSha256,
+                    StringComparison.Ordinal),
+                "Active production mailbox trust state is corrupt.");
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(oldStateBytes);
+        }
+        Require(Fixed(oldState.Root.MrXPublicKeySha256.Span,
+                    buildAnchor.MrXPublicKeySha256.Span) &&
+                Fixed(oldState.Root.NetworkId.Span, buildAnchor.NetworkId.Span),
+            "Active production mailbox trust state belongs to another build trust domain.");
+        var oldPlacement = new BlindedPlacementId(
+            predecessor.Bundle.BlindedPlacementId.Span);
+        var oldVerified = await ProductionMailboxControlPlaneVerifier.VerifyAsync(
+            predecessor.Bundle.ControlPlane,
+            oldState.Root,
+            new FixedProductionMailboxTrustStateStore(oldState),
+            clientIdentity,
+            ownership,
+            oldPlacement,
+            oldPlacement,
+            new FixedUnixTimeProvider(predecessor.Journal.VerifiedAtUnixSeconds),
+            cancellationToken).ConfigureAwait(false);
+        Require(TrustStateEquals(oldVerified.StateToCommit, oldState),
+            "Active production mailbox control plane differs from its committed trust state.");
+
+        try
+        {
+            var successor = ProductionMailboxSelectionSuccessorCodec.Decode(
+                bundle.CanonicalSelectionSuccessor.Span);
+            var oldSelection = predecessor.Bundle.ControlPlane.CanonicalNextSelection;
+            var context = new ProductionMailboxSelectionSuccessorVerificationContext
+            {
+                ExpectedNetworkId = buildAnchor.NetworkId.ToArray(),
+                ExpectedMailboxOwnerEd25519PublicKey =
+                    bundle.MailboxOwnerEd25519PublicKey.ToArray(),
+                ExpectedBlindedMailboxId = bundle.BlindedMailboxId.ToArray(),
+                ExpectedBlindedPlacementId = bundle.BlindedPlacementId.ToArray(),
+                PinnedMrXPublicKeySha256 = buildAnchor.MrXPublicKeySha256.ToArray(),
+                ExpectedOldCanonicalSelectionHash = SHA256.HashData(oldSelection.Span),
+                NowUnixSeconds = verifiedAt,
+                ClockSkewSeconds = ProductionMailboxAuthorityConstants.MaximumClockSkewSeconds
+            };
+            if (successor.Mode == ProductionMailboxSelectionSuccessorMode.DirectPromotion)
+            {
+                var verified = await ProductionMailboxControlPlaneVerifier.VerifyAsync(
+                    bundle.ControlPlane,
+                    buildAnchor,
+                    trustStateStore,
+                    clientIdentity,
+                    ownership,
+                    placement,
+                    placement,
+                    new FixedUnixTimeProvider(verifiedAt),
+                    cancellationToken).ConfigureAwait(false);
+                _ = ProductionMailboxSelectionSuccessorVerifier.VerifyDirectPromotion(
+                    bundle.CanonicalSelectionSuccessor.Span,
+                    oldVerified.Authority,
+                    oldVerified.Topology,
+                    verified.Authority,
+                    verified.Topology,
+                    context,
+                    new SodiumProductionMailboxAuthoritySignatureVerifier(),
+                    new SodiumProductionMailboxTopologySignatureVerifier(),
+                    new SodiumProductionMailboxSelectionSuccessorSignatureVerifier());
+                await RequireObservedTrustStateAsync(
+                    trustStateStore, oldState, verified.StateToCommit, cancellationToken)
+                    .ConfigureAwait(false);
+                return verified;
+            }
+            Require(successor.Mode ==
+                    ProductionMailboxSelectionSuccessorMode.OfflineCheckpoint,
+                "Registry LocalOwner selection successor mode is unsupported.");
+            var offline = ProductionMailboxSelectionSuccessorVerifier
+                .VerifyOfflineCheckpointClosure(
+                    bundle.CanonicalSelectionSuccessor.Span,
+                    bundle.ControlPlane.CanonicalAuthority.Span,
+                    bundle.ControlPlane.CanonicalRevocationSnapshot.Span,
+                    bundle.ControlPlane.CanonicalTopology.Span,
+                    oldSelection.Span,
+                    bundle.ControlPlane.CanonicalCurrentSelection.Span,
+                    bundle.ControlPlane.CanonicalNextSelection.Span,
+                    oldVerified.Authority,
+                    oldVerified.Topology,
+                    new ProductionMailboxOfflineCheckpointClosureVerificationContext
+                    {
+                        ExpectedNetworkId = buildAnchor.NetworkId.ToArray(),
+                        ExpectedMailboxOwnerEd25519PublicKey =
+                            bundle.MailboxOwnerEd25519PublicKey.ToArray(),
+                        ExpectedBlindedMailboxId = bundle.BlindedMailboxId.ToArray(),
+                        ExpectedBlindedPlacementId = bundle.BlindedPlacementId.ToArray(),
+                        ExpectedSelectionInputCommitment =
+                            bundle.SelectionInputCommitment.ToArray(),
+                        PinnedMrXPublicKeySha256 =
+                            buildAnchor.MrXPublicKeySha256.ToArray(),
+                        ExpectedOldAuthorityGeneration =
+                            oldState.Current.AuthorityGeneration,
+                        ExpectedOldCanonicalAuthorityHash =
+                            oldState.Current.AuthorityHash.ToArray(),
+                        ExpectedOldRevocationGeneration =
+                            oldState.Current.RevocationGeneration,
+                        ExpectedOldRevocationHeadHash =
+                            oldState.Current.RevocationHeadHash.ToArray(),
+                        ExpectedOldRevocationSnapshotHash =
+                            oldState.Current.RevocationSnapshotHash.ToArray(),
+                        ExpectedOldTopologyGeneration =
+                            oldState.Current.TopologyGeneration,
+                        ExpectedOldCanonicalTopologyHash =
+                            oldState.Current.TopologyHash.ToArray(),
+                        ExpectedOldCanonicalSelectionHash =
+                            SHA256.HashData(oldSelection.Span),
+                        VerifiedAtUnixSeconds = verifiedAt,
+                        ClockSkewSeconds =
+                            ProductionMailboxAuthorityConstants.MaximumClockSkewSeconds
+                    });
+            ProductionMailboxControlPlaneVerifier.VerifyOwnershipAndApproval(
+                offline.Authority.Authority, ownership, clientIdentity);
+            var next = offline.NextCommitAnchor;
+            var nextAnchor = new ProductionMailboxTrustAnchor(
+                next.MrXPublicKeySha256.ToArray(),
+                next.NetworkId.ToArray(),
+                next.AuthorityGeneration,
+                next.AuthorityHash.ToArray(),
+                next.RevocationGeneration,
+                next.RevocationHeadHash.ToArray(),
+                next.RevocationSnapshotHash.ToArray(),
+                next.TopologyGeneration,
+                next.TopologyHash.ToArray());
+            Require(IsAtOrAfterBuildTrustFloor(nextAnchor, buildAnchor),
+                "Offline production checkpoint is behind the build trust floor.");
+            var nextState = new ProductionMailboxTrustState(
+                checked(oldState.Revision + 1),
+                oldState.Root,
+                oldState.Current,
+                nextAnchor);
+            await RequireObservedTrustStateAsync(
+                trustStateStore, oldState, nextState, cancellationToken)
+                .ConfigureAwait(false);
+            return new VerifiedProductionMailboxControlPlane(
+                offline.Authority,
+                offline.Revocations,
+                offline.Topology,
+                offline.CurrentSelection,
+                offline.NextSelection,
+                nextState,
+                oldState.Revision);
+        }
+        catch (Exception exception) when (exception is
+            ProductionMailboxSelectionSuccessorException or
+            ProductionMailboxAuthorityException or
+            ProductionMailboxTopologyException or
+            FormatException or OverflowException)
+        {
+            throw new InvalidDataException(
+                "Registry LocalOwner selection successor failed verification.",
+                exception);
+        }
+    }
+
+    private static bool IsAtOrAfterBuildTrustFloor(
+        ProductionMailboxTrustAnchor candidate,
+        ProductionMailboxTrustAnchor build) =>
+        (candidate.AuthorityGeneration > build.AuthorityGeneration ||
+            candidate.AuthorityGeneration == build.AuthorityGeneration &&
+            Fixed(candidate.AuthorityHash.Span, build.AuthorityHash.Span)) &&
+        candidate.RevocationGeneration >= build.RevocationGeneration &&
+            (candidate.RevocationGeneration != build.RevocationGeneration ||
+             Fixed(candidate.RevocationHeadHash.Span,
+                 build.RevocationHeadHash.Span) &&
+             Fixed(candidate.RevocationSnapshotHash.Span,
+                 build.RevocationSnapshotHash.Span)) &&
+        candidate.TopologyGeneration >= build.TopologyGeneration &&
+            (candidate.TopologyGeneration != build.TopologyGeneration ||
+             Fixed(candidate.TopologyHash.Span, build.TopologyHash.Span));
+
+    private static async Task RequireObservedTrustStateAsync(
+        IProductionMailboxTrustStateStore trustStateStore,
+        ProductionMailboxTrustState predecessor,
+        ProductionMailboxTrustState candidate,
+        CancellationToken cancellationToken)
+    {
+        var observed = await trustStateStore.ReadAsync(cancellationToken)
+            .ConfigureAwait(false);
+        if (!TrustStateEquals(observed, predecessor) &&
+            !TrustStateEquals(observed, candidate))
+            throw new InvalidDataException(
+                "Production mailbox protected trust state is not the exact predecessor or committed successor.");
+    }
+
+    private sealed class FixedProductionMailboxTrustStateStore(
+        ProductionMailboxTrustState state) : IProductionMailboxTrustStateStore
+    {
+        private readonly ProductionMailboxTrustState frozen =
+            ProductionMailboxControlPlaneVerifier.FreezeState(state);
+
+        public Task<ProductionMailboxTrustState?> ReadAsync(
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult<ProductionMailboxTrustState?>(
+                ProductionMailboxControlPlaneVerifier.FreezeState(frozen));
+
+        public Task CommitAsync(
+            ulong expectedRevision,
+            ProductionMailboxTrustState replacement,
+            CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("Fixed trust state is verify-only.");
     }
 
     private static ProductionMailboxLocalOwnerBundle FreezeLocalOwnerBundle(
@@ -1438,6 +1819,16 @@ public static class ProductionMailboxCredentialBundleImporter
     private static string ActiveBundleKey(MailboxHolderIdentity holder) =>
         "deep.mailbox.production-local-owner.v1:" + holder.SessionId.Value +
         ":active-public-bundle-v1";
+
+    private static string PeerPublicationJournalKey(
+        MailboxCredentialSelector selector) =>
+        "deep.mailbox.production-peer-deposit.v1:" +
+        Convert.ToHexStringLower(selector.ScopeId.Span) + ":publication-v1";
+
+    private static string PeerActivePublicationKey(
+        MailboxCredentialSelector selector) =>
+        "deep.mailbox.production-peer-deposit.v1:" +
+        Convert.ToHexStringLower(selector.ScopeId.Span) + ":active-v1";
 
     private static async Task CommitTrustStateRecoveringAmbiguousOutcomeAsync(
         VerifiedProductionMailboxControlPlane verified,

@@ -324,6 +324,7 @@ internal sealed record ProductionMailboxRuntimePublicationJournal(
     int SchemaVersion,
     ulong TargetTrustRevision,
     string TargetTrustStateSha256,
+    string TargetTrustStateBase64,
     ulong CurrentEpoch,
     string PairGeneration,
     string SignedBundleSha256,
@@ -335,6 +336,22 @@ internal sealed record ProductionMailboxRuntimePublicationJournal(
     string RouteAdvertisementSha256,
     string RouteDomainSha256,
     ulong RouteAdvertisementSequence);
+
+/// <summary>
+/// Durable compare/exchange marker coupling one authenticated PeerDeposit route sequence to the
+/// exact scoped credential bytes and protected production trust revision.  The marker is staged
+/// before the external protected-LKG commit and consumed in the same SQLite transaction that
+/// installs or rotates the peer credential, so a retry can resolve either ambiguous commit.
+/// </summary>
+internal sealed record ProductionMailboxPeerCredentialPublication(
+    int SchemaVersion,
+    string ScopeIdSha256,
+    ulong CurrentEpoch,
+    ulong NextEpoch,
+    ulong RouteSequence,
+    string CredentialGenerationSha256,
+    ulong TargetTrustRevision,
+    string TargetTrustStateSha256);
 
 public sealed class ScopedMailboxPreparedBatch
 {
@@ -489,6 +506,7 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
             publicationJournal: null,
             committedActivation,
             allowDevelopmentPairRebind: false,
+            allowProductionOfflineCheckpoint: false,
             cancellationToken).ConfigureAwait(false);
 
     internal async Task ApplyDevelopmentMailboxRuntimeSnapshotAsync(
@@ -506,6 +524,7 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
             publicationJournal: null,
             committedActivation,
             allowDevelopmentPairRebind: true,
+            allowProductionOfflineCheckpoint: false,
             cancellationToken).ConfigureAwait(false);
 
     internal async Task StageProductionMailboxRuntimePublicationAsync(
@@ -592,6 +611,185 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
         }
     }
 
+    internal async Task StageProductionMailboxPeerCredentialPublicationAsync(
+        string journalKey,
+        string activeKey,
+        ProductionMailboxPeerCredentialPublication publication,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(journalKey);
+        ArgumentException.ThrowIfNullOrWhiteSpace(activeKey);
+        if (string.Equals(journalKey, activeKey, StringComparison.Ordinal))
+            throw new ArgumentException(
+                "Peer publication journal and active keys must differ.");
+        ValidateProductionPeerPublication(publication);
+        var payload = System.Text.Json.JsonSerializer.Serialize(
+            publication, SerializerOptions);
+        await _databaseGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            using var connection = OpenConnection();
+            using var transaction = connection.BeginTransaction(deferred: false);
+            var active = ReadSettingWithPayload<ProductionMailboxPeerCredentialPublication>(
+                connection, transaction, activeKey);
+            if (active.Value is not null)
+            {
+                ValidateProductionPeerPublication(active.Value);
+                ValidateProductionPeerPublicationForward(active.Value, publication);
+            }
+            var pending = ReadSettingWithPayload<ProductionMailboxPeerCredentialPublication>(
+                connection, transaction, journalKey);
+            if (pending.Value is not null)
+            {
+                ValidateProductionPeerPublication(pending.Value);
+                if (pending.Value != publication)
+                    throw new InvalidOperationException(
+                        "A different production peer credential publication is already pending.");
+            }
+            else
+            {
+                CompareExchangeSetting(connection, transaction, journalKey, null, payload);
+            }
+            commitFault?.Invoke(ClientMailboxCommitFaultPoint.BeforeCommit);
+            cancellationToken.ThrowIfCancellationRequested();
+            transaction.Commit();
+            commitFault?.Invoke(ClientMailboxCommitFaultPoint.AfterCommit);
+        }
+        finally
+        {
+            _databaseGate.Release();
+        }
+    }
+
+    internal async Task CompleteProductionMailboxPeerCredentialPublicationAsync(
+        ScopedMailboxCredentialGeneration generation,
+        VerifiedOfficialMailboxAuthority authority,
+        string journalKey,
+        string activeKey,
+        ProductionMailboxPeerCredentialPublication publication,
+        string revocationKey,
+        MailboxRevocationRuntimeCheckpoint revocation,
+        MailboxRuntimeCommitActivation? committedActivation = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(generation);
+        ArgumentNullException.ThrowIfNull(authority);
+        ArgumentException.ThrowIfNullOrWhiteSpace(journalKey);
+        ArgumentException.ThrowIfNullOrWhiteSpace(activeKey);
+        ArgumentException.ThrowIfNullOrWhiteSpace(revocationKey);
+        ValidateInstallBatch([generation], authority);
+        ValidateProductionPeerGeneration(generation, publication);
+        ValidateProductionPeerPublication(publication);
+        ValidateRevocationCheckpoint(null, revocation);
+        await _databaseGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            using var connection = OpenConnection();
+            using var transaction = connection.BeginTransaction(deferred: false);
+            var pending = ReadSettingWithPayload<ProductionMailboxPeerCredentialPublication>(
+                connection, transaction, journalKey);
+            if (pending.Value is null || pending.Value != publication)
+                throw new InvalidOperationException(
+                    "Production peer credential publication journal is unavailable or changed.");
+            ValidateProductionPeerPublication(pending.Value);
+            var active = ReadSettingWithPayload<ProductionMailboxPeerCredentialPublication>(
+                connection, transaction, activeKey);
+            var priorRevocation = ReadSettingWithPayload<MailboxRevocationRuntimeCheckpoint>(
+                connection, transaction, revocationKey);
+            if (priorRevocation.Value is not null)
+                ValidateRevocationCheckpoint(priorRevocation.Value, revocation);
+            if (active.Value is null)
+            {
+                InstallCore(connection, transaction, [generation], authority, cancellationToken);
+            }
+            else
+            {
+                ValidateProductionPeerPublication(active.Value);
+                ValidateProductionPeerPublicationForward(active.Value, publication);
+                if (active.Value == publication)
+                {
+                    EnsureExactInstalledCredential(
+                        connection, transaction, generation, authority);
+                }
+                else
+                {
+                    ReplaceProductionPeerCredentialCore(
+                        connection, transaction, generation, authority, cancellationToken);
+                }
+            }
+            var payload = System.Text.Json.JsonSerializer.Serialize(
+                publication, SerializerOptions);
+            CompareExchangeSetting(connection, transaction, activeKey, active.Payload, payload);
+            CompareExchangeSetting(
+                connection,
+                transaction,
+                revocationKey,
+                priorRevocation.Payload,
+                System.Text.Json.JsonSerializer.Serialize(revocation, SerializerOptions));
+            DeleteSettingCompareExchange(connection, transaction, journalKey, pending.Payload!);
+            commitFault?.Invoke(ClientMailboxCommitFaultPoint.BeforeCommit);
+            cancellationToken.ThrowIfCancellationRequested();
+            transaction.Commit();
+            committedActivation?.ActivateCommittedNoThrow();
+            commitFault?.Invoke(ClientMailboxCommitFaultPoint.AfterCommit);
+        }
+        finally
+        {
+            _databaseGate.Release();
+        }
+    }
+
+    internal async Task<bool> IsProductionMailboxPeerCredentialPublicationCompleteAsync(
+        ScopedMailboxCredentialGeneration generation,
+        VerifiedOfficialMailboxAuthority authority,
+        string journalKey,
+        string activeKey,
+        ProductionMailboxPeerCredentialPublication publication,
+        string revocationKey,
+        MailboxRevocationRuntimeCheckpoint revocation,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(generation);
+        ArgumentNullException.ThrowIfNull(authority);
+        ValidateInstallBatch([generation], authority);
+        ValidateProductionPeerGeneration(generation, publication);
+        ValidateProductionPeerPublication(publication);
+        ArgumentException.ThrowIfNullOrWhiteSpace(revocationKey);
+        ValidateRevocationCheckpoint(null, revocation);
+        await _databaseGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            using var connection = OpenConnection();
+            using var transaction = connection.BeginTransaction(deferred: false);
+            var pending = ReadSettingWithPayload<ProductionMailboxPeerCredentialPublication>(
+                connection, transaction, journalKey);
+            var active = ReadSettingWithPayload<ProductionMailboxPeerCredentialPublication>(
+                connection, transaction, activeKey);
+            var committedRevocation = ReadSettingWithPayload<MailboxRevocationRuntimeCheckpoint>(
+                connection, transaction, revocationKey);
+            if (pending.Value is not null)
+                ValidateProductionPeerPublication(pending.Value);
+            if (active.Value is not null)
+                ValidateProductionPeerPublication(active.Value);
+            if (committedRevocation.Value is not null)
+                ValidateRevocationCheckpoint(null, committedRevocation.Value);
+            if (pending.Value is not null || active.Value != publication ||
+                !RevocationCheckpointEquals(committedRevocation.Value, revocation))
+                return false;
+            EnsureExactInstalledCredential(connection, transaction, generation, authority);
+            transaction.Commit();
+            return true;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+        finally
+        {
+            _databaseGate.Release();
+        }
+    }
+
     internal async Task<bool> IsProductionMailboxRuntimePublicationCompleteAsync(
         MailboxRuntimeSnapshotCheckpoint checkpoint,
         string journalKey,
@@ -647,6 +845,7 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
         string journalKey,
         string activeBundleKey,
         ProductionMailboxRuntimePublicationJournal journal,
+        bool allowOfflineCheckpoint,
         MailboxRuntimeCommitActivation? committedActivation = null,
         CancellationToken cancellationToken = default)
         => await ApplyScopedMailboxRuntimeSnapshotCoreAsync(
@@ -658,6 +857,7 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
             journal,
             committedActivation,
             allowDevelopmentPairRebind: false,
+            allowProductionOfflineCheckpoint: allowOfflineCheckpoint,
             cancellationToken).ConfigureAwait(false);
 
     private async Task ApplyScopedMailboxRuntimeSnapshotCoreAsync(
@@ -669,6 +869,7 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
         ProductionMailboxRuntimePublicationJournal? publicationJournal,
         MailboxRuntimeCommitActivation? committedActivation,
         bool allowDevelopmentPairRebind,
+        bool allowProductionOfflineCheckpoint,
         CancellationToken cancellationToken)
     {
         ValidateInstallBatch(generations, authority);
@@ -737,11 +938,18 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
             ValidateBundleCheckpoint(
                 priorBundle,
                 checkpoint.Bundle,
-                allowDevelopmentPairRebind);
+                allowDevelopmentPairRebind,
+                allowProductionOfflineCheckpoint);
             ValidateRevocationCheckpoint(priorRevocation, checkpoint.Revocation);
-            var rotate = priorBundle is not null &&
+            var offlineReplace = priorBundle is not null &&
+                allowProductionOfflineCheckpoint &&
+                checkpoint.Bundle.CurrentEpoch > priorBundle.CurrentEpoch + 1;
+            var rotate = priorBundle is not null && !offlineReplace &&
                 checkpoint.Bundle.CurrentEpoch > priorBundle.CurrentEpoch;
-            if (rotate)
+            if (offlineReplace)
+                ReplaceProductionLocalOwnerCredentialCore(
+                    connection, transaction, generations, authority, cancellationToken);
+            else if (rotate)
                 RotateCore(connection, transaction, generations, authority, cancellationToken);
             else
                 InstallCore(connection, transaction, generations, authority, cancellationToken);
@@ -887,7 +1095,7 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
     private static void ValidateProductionPublicationJournal(
         ProductionMailboxRuntimePublicationJournal? journal)
     {
-        if (journal is null || journal.SchemaVersion != 2 ||
+        if (journal is null || journal.SchemaVersion != 3 ||
             journal.TargetTrustRevision == 0 || journal.CurrentEpoch == 0 ||
             journal.RefreshAfterUnixSeconds == 0 ||
             journal.RefreshAfterUnixSeconds >= journal.VerificationExpiresAtUnixSeconds ||
@@ -905,6 +1113,33 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
                 ProductionMailboxLocalOwnerJournalCodec.MaximumBase64Length)
             throw new InvalidDataException(
                 "Production mailbox publication journal is invalid.");
+        byte[] trustState;
+        try
+        {
+            trustState = Convert.FromBase64String(journal.TargetTrustStateBase64);
+        }
+        catch (FormatException exception)
+        {
+            throw new InvalidDataException(
+                "Production mailbox publication journal trust state is not canonical base64.",
+                exception);
+        }
+        try
+        {
+            if (trustState.Length != ProductionMailboxTrustStateCodec.EncodedLength ||
+                !string.Equals(Convert.ToBase64String(trustState),
+                    journal.TargetTrustStateBase64, StringComparison.Ordinal) ||
+                !string.Equals(Convert.ToHexStringLower(SHA256.HashData(trustState)),
+                    journal.TargetTrustStateSha256, StringComparison.Ordinal) ||
+                ProductionMailboxTrustStateCodec.Decode(trustState).Revision !=
+                    journal.TargetTrustRevision)
+                throw new InvalidDataException(
+                    "Production mailbox publication journal trust state is invalid.");
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(trustState);
+        }
         byte[] encoded;
         try
         {
@@ -954,10 +1189,63 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
                 "Production active public bundle is not an exact replay or forward rotation.");
     }
 
+    private static void ValidateProductionPeerPublication(
+        ProductionMailboxPeerCredentialPublication? publication)
+    {
+        if (publication is null || publication.SchemaVersion != 1 ||
+            publication.CurrentEpoch is 0 or ulong.MaxValue ||
+            publication.NextEpoch != publication.CurrentEpoch + 1 ||
+            publication.RouteSequence == 0 ||
+            publication.TargetTrustRevision == 0 ||
+            !IsLowerHex(publication.ScopeIdSha256, 64) ||
+            !IsLowerHex(publication.CredentialGenerationSha256, 64) ||
+            !IsLowerHex(publication.TargetTrustStateSha256, 64))
+            throw new InvalidDataException(
+                "Production peer credential publication is invalid.");
+    }
+
+    private static void ValidateProductionPeerPublicationForward(
+        ProductionMailboxPeerCredentialPublication prior,
+        ProductionMailboxPeerCredentialPublication current)
+    {
+        if (!string.Equals(prior.ScopeIdSha256, current.ScopeIdSha256,
+                StringComparison.Ordinal) ||
+            current.TargetTrustRevision < prior.TargetTrustRevision ||
+            current.TargetTrustRevision == prior.TargetTrustRevision &&
+                !string.Equals(current.TargetTrustStateSha256,
+                    prior.TargetTrustStateSha256, StringComparison.Ordinal) ||
+            current.CurrentEpoch < prior.CurrentEpoch ||
+            current.RouteSequence < prior.RouteSequence ||
+            current.RouteSequence == prior.RouteSequence && current != prior)
+            throw new InvalidDataException(
+                "Production peer credential is not an exact replay or forward rotation.");
+    }
+
+    private static void ValidateProductionPeerGeneration(
+        ScopedMailboxCredentialGeneration generation,
+        ProductionMailboxPeerCredentialPublication publication)
+    {
+        if (generation.Selector.Kind != MailboxCredentialScopeKind.Peer ||
+            generation.Retrieve is not null || generation.Deposit is null ||
+            generation.Current.Epoch != publication.CurrentEpoch ||
+            generation.Next.Epoch != publication.NextEpoch ||
+            !string.Equals(
+                Convert.ToHexStringLower(generation.Selector.ScopeId.Span),
+                publication.ScopeIdSha256,
+                StringComparison.Ordinal) ||
+            !string.Equals(
+                Convert.ToHexStringLower(SHA256.HashData(generation.Generation.Span)),
+                publication.CredentialGenerationSha256,
+                StringComparison.Ordinal))
+            throw new InvalidDataException(
+                "Production peer credential differs from its publication journal.");
+    }
+
     private static void ValidateBundleCheckpoint(
         MailboxBundleRuntimeCheckpoint? prior,
         MailboxBundleRuntimeCheckpoint current,
-        bool allowDevelopmentPairRebind = false)
+        bool allowDevelopmentPairRebind = false,
+        bool allowProductionOfflineCheckpoint = false)
     {
         if (current.SchemaVersion != 1 || current.CurrentEpoch == 0 ||
             string.IsNullOrWhiteSpace(current.Lane) ||
@@ -981,12 +1269,22 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
             prior.CurrentEpoch == current.CurrentEpoch &&
             !string.Equals(prior.PairGeneration,
                 current.PairGeneration, StringComparison.Ordinal);
+        var authenticatedProductionOfflineCheckpoint =
+            allowProductionOfflineCheckpoint &&
+            prior.SchemaVersion == current.SchemaVersion &&
+            string.Equals(prior.Lane, "production-local-owner", StringComparison.Ordinal) &&
+            string.Equals(current.Lane, "production-local-owner", StringComparison.Ordinal) &&
+            string.Equals(prior.Platform, current.Platform, StringComparison.Ordinal) &&
+            string.Equals(prior.Ownership, "OfficialManaged", StringComparison.Ordinal) &&
+            string.Equals(current.Ownership, "OfficialManaged", StringComparison.Ordinal) &&
+            current.CurrentEpoch > prior.CurrentEpoch;
         if (prior.SchemaVersion != current.SchemaVersion ||
             !string.Equals(prior.Lane, current.Lane, StringComparison.Ordinal) ||
             !string.Equals(prior.Platform, current.Platform, StringComparison.Ordinal) ||
             !string.Equals(prior.Ownership, current.Ownership, StringComparison.Ordinal) ||
             current.CurrentEpoch < prior.CurrentEpoch ||
-            current.CurrentEpoch - prior.CurrentEpoch > 1 ||
+            current.CurrentEpoch - prior.CurrentEpoch > 1 &&
+                !authenticatedProductionOfflineCheckpoint ||
             current.CurrentEpoch == prior.CurrentEpoch && prior != current &&
                 !authenticatedDevelopmentPairRebind)
             throw new InvalidDataException(
@@ -1021,6 +1319,17 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
             throw new InvalidDataException(
                 "Mailbox revocation checkpoint is not an exact replay or monotonic replacement.");
     }
+
+    private static bool RevocationCheckpointEquals(
+        MailboxRevocationRuntimeCheckpoint? left,
+        MailboxRevocationRuntimeCheckpoint right) =>
+        left is not null &&
+        left.SchemaVersion == right.SchemaVersion &&
+        left.GeneratedAtUnixSeconds == right.GeneratedAtUnixSeconds &&
+        left.ExpiresAtUnixSeconds == right.ExpiresAtUnixSeconds &&
+        string.Equals(left.SnapshotSha256, right.SnapshotSha256,
+            StringComparison.Ordinal) &&
+        left.RevokedKeys.SequenceEqual(right.RevokedKeys, StringComparer.Ordinal);
 
     private static bool IsLowerHex(string? value, int length) =>
         value is { Length: > 0 } && value.Length == length &&
@@ -1153,6 +1462,131 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
             if (update.ExecuteNonQuery() != 1)
                 throw new InvalidOperationException("Mailbox credential rotation lost its exact scope.");
         }
+    }
+
+    private static void ReplaceProductionPeerCredentialCore(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        ScopedMailboxCredentialGeneration generation,
+        VerifiedOfficialMailboxAuthority authority,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var selector = generation.Selector;
+        if (selector.Kind != MailboxCredentialScopeKind.Peer ||
+            generation.Retrieve is not null || generation.Deposit is null)
+            throw new InvalidDataException(
+                "Production peer rotation requires a deposit-only peer scope.");
+        using (var read = connection.CreateCommand())
+        {
+            read.Transaction = transaction;
+            read.CommandText = """
+                SELECT account_scope,scope_kind,subject_id,issuer_context,network_id,
+                       holder_key,group_membership_commitment
+                FROM mailbox_credential_scopes WHERE scope_id=$scope;
+                """;
+            read.Parameters.Add("$scope", SqliteType.Blob).Value =
+                selector.ScopeId.ToArray();
+            using var reader = read.ExecuteReader();
+            if (!reader.Read())
+                throw new InvalidOperationException(
+                    "Production peer rotation requires an installed scope.");
+            if (!Fixed((byte[])reader.GetValue(0), selector.AccountScope.Value) ||
+                reader.GetInt32(1) != (int)MailboxCredentialScopeKind.Peer ||
+                !Fixed((byte[])reader.GetValue(2), selector.SubjectId.Span) ||
+                !Fixed((byte[])reader.GetValue(3), selector.IssuerContext.Span) ||
+                !Fixed((byte[])reader.GetValue(4), authority.NetworkId.Span) ||
+                !Fixed((byte[])reader.GetValue(5), generation.HolderPublicKey.Span) ||
+                !reader.IsDBNull(6) || reader.Read())
+                throw new InvalidDataException(
+                    "Production peer rotation changed the stable credential scope.");
+        }
+
+        EnsureNoCrossScopeMaterialReuse(connection, transaction, generation);
+        using (var replay = connection.CreateCommand())
+        {
+            replay.Transaction = transaction;
+            replay.CommandText =
+                "DELETE FROM mailbox_replay_counters WHERE scope_id=$scope;";
+            replay.Parameters.Add("$scope", SqliteType.Blob).Value =
+                selector.ScopeId.ToArray();
+            replay.ExecuteNonQuery();
+        }
+        using (var delete = connection.CreateCommand())
+        {
+            delete.Transaction = transaction;
+            delete.CommandText =
+                "DELETE FROM mailbox_credential_scopes WHERE scope_id=$scope;";
+            delete.Parameters.Add("$scope", SqliteType.Blob).Value =
+                selector.ScopeId.ToArray();
+            if (delete.ExecuteNonQuery() != 1)
+                throw new InvalidOperationException(
+                    "Production peer rotation lost its exact scope.");
+        }
+        InstallCore(connection, transaction, [generation], authority, cancellationToken);
+    }
+
+    private static void ReplaceProductionLocalOwnerCredentialCore(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        IReadOnlyList<ScopedMailboxCredentialGeneration> generations,
+        VerifiedOfficialMailboxAuthority authority,
+        CancellationToken cancellationToken)
+    {
+        if (generations is not { Count: 1 })
+            throw new InvalidDataException(
+                "Offline production catch-up requires exactly one local-owner scope.");
+        var generation = generations[0];
+        var selector = generation.Selector;
+        if (selector.Kind != MailboxCredentialScopeKind.Self ||
+            generation.Retrieve is null || generation.Deposit is not null)
+            throw new InvalidDataException(
+                "Offline production catch-up requires a retrieve-only self scope.");
+        cancellationToken.ThrowIfCancellationRequested();
+        using (var read = connection.CreateCommand())
+        {
+            read.Transaction = transaction;
+            read.CommandText = """
+                SELECT account_scope,scope_kind,subject_id,issuer_context,network_id,
+                       holder_key,group_membership_commitment
+                FROM mailbox_credential_scopes WHERE scope_id=$scope;
+                """;
+            read.Parameters.Add("$scope", SqliteType.Blob).Value =
+                selector.ScopeId.ToArray();
+            using var reader = read.ExecuteReader();
+            if (!reader.Read() ||
+                !Fixed((byte[])reader.GetValue(0), selector.AccountScope.Value) ||
+                reader.GetInt32(1) != (int)MailboxCredentialScopeKind.Self ||
+                !Fixed((byte[])reader.GetValue(2), selector.SubjectId.Span) ||
+                !Fixed((byte[])reader.GetValue(3), selector.IssuerContext.Span) ||
+                !Fixed((byte[])reader.GetValue(4), authority.NetworkId.Span) ||
+                !Fixed((byte[])reader.GetValue(5), generation.HolderPublicKey.Span) ||
+                !reader.IsDBNull(6) || reader.Read())
+                throw new InvalidDataException(
+                    "Offline production catch-up changed the stable local-owner scope.");
+        }
+        EnsureNoCrossScopeMaterialReuse(connection, transaction, generation);
+        using (var replay = connection.CreateCommand())
+        {
+            replay.Transaction = transaction;
+            replay.CommandText =
+                "DELETE FROM mailbox_replay_counters WHERE scope_id=$scope;";
+            replay.Parameters.Add("$scope", SqliteType.Blob).Value =
+                selector.ScopeId.ToArray();
+            replay.ExecuteNonQuery();
+        }
+        using (var delete = connection.CreateCommand())
+        {
+            delete.Transaction = transaction;
+            delete.CommandText =
+                "DELETE FROM mailbox_credential_scopes WHERE scope_id=$scope;";
+            delete.Parameters.Add("$scope", SqliteType.Blob).Value =
+                selector.ScopeId.ToArray();
+            if (delete.ExecuteNonQuery() != 1)
+                throw new InvalidOperationException(
+                    "Offline production catch-up lost its exact local-owner scope.");
+        }
+        InstallCore(connection, transaction, generations, authority, cancellationToken);
     }
 
     public async Task SwitchScopedCredentialEpochAsync(
@@ -2016,6 +2450,8 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
 
         using (var epoch = connection.CreateCommand())
         {
+            // The blinded placement is the stable mailbox route and intentionally survives an
+            // epoch handoff.  Epoch membership, grants, and generation remain non-reusable.
             epoch.Transaction = transaction;
             epoch.CommandText = """
                 SELECT not_before,expires_at,mailbox_id,placement_id,placement_commitment,
@@ -2080,15 +2516,13 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
             epoch.CommandText = """
                 SELECT 1 FROM mailbox_credential_epochs
                 WHERE scope_id=$scope AND epoch<>$overlap AND
-                      (placement_id=$placement OR membership_commitment=$membership)
+                      membership_commitment=$membership
                 LIMIT 1;
                 """;
             epoch.Parameters.Add("$scope", SqliteType.Blob).Value =
                 generation.Selector.ScopeId.ToArray();
             epoch.Parameters.Add("$overlap", SqliteType.Blob).Value =
                 MailboxU64(generation.Current.Epoch);
-            epoch.Parameters.Add("$placement", SqliteType.Blob).Value =
-                generation.Next.PlacementId.ToArray();
             epoch.Parameters.Add("$membership", SqliteType.Blob).Value =
                 generation.Next.MembershipCommitment.ToArray();
             if (epoch.ExecuteScalar() is not null)

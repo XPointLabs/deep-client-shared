@@ -241,8 +241,8 @@ public static class ProductionMailboxControlPlaneVerifier
                 ClockSkewSeconds = ProductionMailboxAuthorityConstants.MaximumClockSkewSeconds
             },
             new SodiumProductionMailboxAuthoritySignatureVerifier());
-        VerifyOwnership(verifiedAuthority.Authority, expectedOwnership);
-        VerifyApproval(verifiedAuthority.Authority.MrXApproval, frozenClientIdentity);
+        VerifyOwnershipAndApproval(
+            verifiedAuthority.Authority, expectedOwnership, frozenClientIdentity);
 
         var revocations = ProductionMailboxRevocationSnapshotVerifier.Verify(
             frozenArtifacts.CanonicalRevocationSnapshot.Span,
@@ -345,6 +345,17 @@ public static class ProductionMailboxControlPlaneVerifier
         };
         if (actual != expected)
             throw new InvalidDataException("PMA1 ownership does not match the selected mode.");
+    }
+
+    internal static void VerifyOwnershipAndApproval(
+        ProductionMailboxAuthority authority,
+        MailboxInfrastructureOwnership expectedOwnership,
+        ProductionMailboxClientApprovalIdentity clientIdentity)
+    {
+        ArgumentNullException.ThrowIfNull(authority);
+        ArgumentNullException.ThrowIfNull(clientIdentity);
+        VerifyOwnership(authority, expectedOwnership);
+        VerifyApproval(authority.MrXApproval, FreezeIdentity(clientIdentity));
     }
 
     private static void VerifyApproval(

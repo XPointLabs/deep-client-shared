@@ -448,7 +448,144 @@ public sealed class ProductionMailboxProvisioningContractTests
             Bytes(17, 32));
         return new SignedFixture(
             artifacts, buildAnchor, clientIdentity, currentPlacement, nextPlacement,
-            issuer.PrivateKey);
+            issuer.PrivateKey, mrX.PrivateKey);
+    }
+
+    internal static SignedFixture CreateRotatedSignedFixture(
+        SignedFixture previous,
+        ulong generationSteps)
+    {
+        if (generationSteps == 0) throw new ArgumentOutOfRangeException(nameof(generationSteps));
+        var oldAuthority = ProductionMailboxAuthorityCodec.Decode(
+            previous.Artifacts.CanonicalAuthority.Span);
+        var oldTopology = ProductionMailboxTopologyCodec.Decode(
+            previous.Artifacts.CanonicalTopology.Span);
+        var issuer = PublicKeyAuth.GenerateKeyPair(previous.IssuerPrivateKey[..32]);
+        var mrX = PublicKeyAuth.GenerateKeyPair(previous.MrXPrivateKey[..32]);
+        var currentEpochNumber = checked(oldTopology.NextEpoch.Epoch + generationSteps - 1);
+        var nextEpochNumber = checked(currentEpochNumber + 1);
+        var currentGeneration = checked(oldTopology.NextEpoch.Generation + generationSteps - 1);
+        var nextGeneration = checked(currentGeneration + 1);
+        var currentSeed = generationSteps == 1 ? 0x50 : 0x90;
+        var nextSeed = currentSeed + 0x40;
+        var currentNotBefore = generationSteps == 1
+            ? oldAuthority.NextEpoch.NotBeforeUnixSeconds
+            : Now - 50;
+        var currentNotAfter = generationSteps == 1
+            ? oldAuthority.NextEpoch.NotAfterUnixSeconds
+            : Now + 400;
+        var nextNotBefore = Now - 25;
+        var nextNotAfter = generationSteps == 1 ? Now + 2_500 : Now + 450;
+        var currentDescriptors = Descriptors(
+            currentEpochNumber, currentNotBefore, currentNotAfter, currentSeed);
+        var nextDescriptors = Descriptors(
+            nextEpochNumber, nextNotBefore, nextNotAfter, nextSeed);
+        var currentRoot = MembershipRouteDescriptorCodec.ComputeRoot(currentDescriptors);
+        var nextRoot = MembershipRouteDescriptorCodec.ComputeRoot(nextDescriptors);
+        var draftAuthority = oldAuthority with
+        {
+            AuthorityGeneration = checked(oldAuthority.AuthorityGeneration + generationSteps),
+            PreviousAuthorityHash = generationSteps == 1
+                ? SHA256.HashData(previous.Artifacts.CanonicalAuthority.Span)
+                : Bytes(0xa1, 32),
+            CurrentEpoch = AuthorityEpoch(
+                currentEpochNumber, currentGeneration, currentRoot,
+                generationSteps == 1
+                    ? oldAuthority.NextEpoch.TopologyPlacementCommitment.ToArray()
+                    : Bytes(0xa2, 32),
+                currentNotBefore, currentNotAfter),
+            NextEpoch = AuthorityEpoch(
+                nextEpochNumber, nextGeneration, nextRoot, Bytes(0xa3, 32),
+                nextNotBefore, nextNotAfter),
+            Revocation = oldAuthority.Revocation with
+            {
+                SnapshotHash = Bytes(0xa4, 32),
+                HeadHash = Bytes(0xa5, 32),
+                PreviousHeadHash = generationSteps == 1
+                    ? oldAuthority.Revocation.HeadHash
+                    : Bytes(0xa6, 32),
+                Generation = checked(oldAuthority.Revocation.Generation + generationSteps),
+                IssuedAtUnixSeconds = Now - 10,
+                ExpiresAtUnixSeconds = generationSteps == 1
+                    ? Now + 2_500
+                    : Now + 1_000
+            },
+            MrXApproval = oldAuthority.MrXApproval with
+            {
+                RolloutNotBeforeUnixSeconds = Now - 20,
+                RolloutNotAfterUnixSeconds = generationSteps == 1
+                    ? Now + 2_500
+                    : Now + 400
+            },
+            Signature = new byte[64]
+        };
+        draftAuthority = SignAuthority(draftAuthority, mrX.PrivateKey);
+        var unsignedRevocations = new ProductionMailboxRevocationSnapshot
+        {
+            NetworkId = draftAuthority.NetworkId,
+            AuthorityGeneration = draftAuthority.AuthorityGeneration,
+            AuthorityBindingHash =
+                ProductionMailboxRevocationSnapshotCodec.ComputeAuthorityBindingHash(
+                    draftAuthority),
+            RevocationGeneration = draftAuthority.Revocation.Generation,
+            RevocationHeadHash = draftAuthority.Revocation.HeadHash,
+            PreviousRevocationHeadHash = draftAuthority.Revocation.PreviousHeadHash,
+            IssuedAtUnixSeconds = draftAuthority.Revocation.IssuedAtUnixSeconds,
+            ExpiresAtUnixSeconds = draftAuthority.Revocation.ExpiresAtUnixSeconds,
+            RevokedGrantSerials = [],
+            IssuerSignature = new byte[64]
+        };
+        var revocations = unsignedRevocations with
+        {
+            IssuerSignature = PublicKeyAuth.SignDetached(
+                ProductionMailboxRevocationSnapshotCodec.GetSigningBytes(unsignedRevocations),
+                issuer.PrivateKey)
+        };
+        var revocationBytes = ProductionMailboxRevocationSnapshotCodec.Encode(revocations);
+        var authority = SignAuthority(draftAuthority with
+        {
+            Revocation = draftAuthority.Revocation with
+            {
+                SnapshotHash = SHA256.HashData(revocationBytes)
+            }
+        }, mrX.PrivateKey);
+        var authorityBytes = ProductionMailboxAuthorityCodec.Encode(authority);
+        var topology = SignTopology(new ProductionMailboxTopologySnapshot
+        {
+            NetworkId = authority.NetworkId,
+            AuthorityGeneration = authority.AuthorityGeneration,
+            CanonicalAuthorityHash = SHA256.HashData(authorityBytes),
+            TopologyGeneration = checked(oldTopology.TopologyGeneration + generationSteps),
+            PreviousTopologyHash = generationSteps == 1
+                ? SHA256.HashData(previous.Artifacts.CanonicalTopology.Span)
+                : Bytes(0xa7, 32),
+            IssuedAtUnixSeconds = Now - 5,
+            ExpiresAtUnixSeconds = Now + 400,
+            CurrentEpoch = TopologyEpoch(authority.CurrentEpoch, currentDescriptors),
+            NextEpoch = TopologyEpoch(authority.NextEpoch, nextDescriptors),
+            IssuerSignature = new byte[64]
+        }, issuer.PrivateKey);
+        var topologyBytes = ProductionMailboxTopologyCodec.Encode(topology);
+        var placement = new BlindedPlacementId(previous.CurrentPlacement.Bytes.Span);
+        var currentSelection = SignSelection(
+            authority, topology, currentDescriptors, topology.CurrentEpoch,
+            placement, issuer.PrivateKey);
+        var nextSelection = SignSelection(
+            authority, topology, nextDescriptors, topology.NextEpoch,
+            placement, issuer.PrivateKey);
+        return new SignedFixture(
+            new ProductionMailboxControlPlaneArtifacts(
+                authorityBytes,
+                revocationBytes,
+                topologyBytes,
+                ProductionMailboxTopologyCodec.EncodeSelection(currentSelection),
+                ProductionMailboxTopologyCodec.EncodeSelection(nextSelection)),
+            previous.BuildAnchor,
+            previous.ClientIdentity,
+            placement,
+            placement,
+            issuer.PrivateKey,
+            mrX.PrivateKey);
     }
 
     private static ProductionMailboxSelectionProof SignSelection(
@@ -626,7 +763,8 @@ public sealed class ProductionMailboxProvisioningContractTests
         ProductionMailboxClientApprovalIdentity ClientIdentity,
         BlindedPlacementId CurrentPlacement,
         BlindedPlacementId NextPlacement,
-        byte[] IssuerPrivateKey);
+        byte[] IssuerPrivateKey,
+        byte[] MrXPrivateKey);
 
     private sealed class FixedTimeProvider(ulong now) : TimeProvider
     {
