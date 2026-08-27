@@ -42,6 +42,9 @@ public sealed class ProductionMailboxCredentialBundleImporterTests
                     clock);
 
             Assert.Equal(holder.SessionId, material.LocalSessionId);
+            Assert.Equal(
+                [MailboxCapabilityDomain.Deposit, MailboxCapabilityDomain.Retrieve],
+                material.Authority.TrustedIssuers.Select(static issuer => issuer.Domain));
             var route = await store.ReadScopedMailboxRouteAsync(
                 material.SelfSelector, material.Authority);
             Assert.Equal(mailbox, route.MailboxId.Bytes.ToArray());
@@ -98,6 +101,9 @@ public sealed class ProductionMailboxCredentialBundleImporterTests
 
             Assert.Equal(context.Holder.SessionId, material.LocalSessionId);
             Assert.Equal(context.RecipientSessionId, material.RecipientSessionId);
+            Assert.Equal(
+                [MailboxCapabilityDomain.Deposit, MailboxCapabilityDomain.Retrieve],
+                material.Authority.TrustedIssuers.Select(static issuer => issuer.Domain));
             Assert.Equal(MailboxCredentialScopeKind.Peer, material.PeerSelector.Kind);
             Assert.Equal(context.RecipientPublicKey,
                 material.PeerSelector.SubjectId.ToArray());

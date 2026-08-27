@@ -256,16 +256,7 @@ public static class ProductionMailboxCredentialBundleImporter
                 "Current and next PeerDeposit grant serials must differ.");
 
             var issuer = authority.MailboxIssuerEd25519PublicKey.ToArray();
-            var issuerAuthority = new MailboxCapabilityIssuerAuthority
-            {
-                PublicKey = issuer,
-                Domain = MailboxCapabilityDomain.Deposit,
-                AllowedLifecycle = MailboxCapabilityLifecycle.Active,
-                MinimumGeneration = topology.CurrentEpoch.Generation,
-                MaximumGeneration = topology.NextEpoch.Generation,
-                ValidFromUnixSeconds = topology.CurrentEpoch.NotBeforeUnixSeconds,
-                ValidUntilUnixSeconds = topology.NextEpoch.NotAfterUnixSeconds
-            };
+            var issuerAuthorities = IssuerAuthorities(issuer, topology);
             var account = OutboxAccountScope.FromBytes(
                 DomainHash(AccountDomain, holderKey));
             var issuerContext = DomainHash(
@@ -298,7 +289,7 @@ public static class ProductionMailboxCredentialBundleImporter
             var runtimeAuthority = new VerifiedOfficialMailboxAuthority(
                 authority.NetworkId,
                 topology.CurrentEpoch.Generation,
-                [issuerAuthority],
+                issuerAuthorities,
                 requiresManagedEntitlement: true,
                 static () => true,
                 revocationSource,
@@ -797,16 +788,7 @@ public static class ProductionMailboxCredentialBundleImporter
                 "Current and next LocalOwner grant serials must differ.");
 
             var issuer = authority.MailboxIssuerEd25519PublicKey.ToArray();
-            var issuerAuthority = new MailboxCapabilityIssuerAuthority
-            {
-                PublicKey = issuer,
-                Domain = MailboxCapabilityDomain.Retrieve,
-                AllowedLifecycle = MailboxCapabilityLifecycle.Active,
-                MinimumGeneration = topology.CurrentEpoch.Generation,
-                MaximumGeneration = topology.NextEpoch.Generation,
-                ValidFromUnixSeconds = topology.CurrentEpoch.NotBeforeUnixSeconds,
-                ValidUntilUnixSeconds = topology.NextEpoch.NotAfterUnixSeconds
-            };
+            var issuerAuthorities = IssuerAuthorities(issuer, topology);
             var account = OutboxAccountScope.FromBytes(DomainHash(AccountDomain, holderKey));
             var issuerContext = DomainHash(
                 AuthorityDomain,
@@ -835,7 +817,7 @@ public static class ProductionMailboxCredentialBundleImporter
             var runtimeAuthority = new VerifiedOfficialMailboxAuthority(
                 authority.NetworkId,
                 topology.CurrentEpoch.Generation,
-                [issuerAuthority],
+                issuerAuthorities,
                 requiresManagedEntitlement: true,
                 static () => true,
                 revocationSource,
@@ -1570,6 +1552,28 @@ public static class ProductionMailboxCredentialBundleImporter
                 "Registry replica envelope differs from its verified MIP1 route.");
         }
     }
+
+    private static IReadOnlyList<MailboxCapabilityIssuerAuthority> IssuerAuthorities(
+        ReadOnlyMemory<byte> issuer,
+        ProductionMailboxTopologySnapshot topology) =>
+    [
+        IssuerAuthority(MailboxCapabilityDomain.Deposit, issuer, topology),
+        IssuerAuthority(MailboxCapabilityDomain.Retrieve, issuer, topology)
+    ];
+
+    private static MailboxCapabilityIssuerAuthority IssuerAuthority(
+        MailboxCapabilityDomain domain,
+        ReadOnlyMemory<byte> issuer,
+        ProductionMailboxTopologySnapshot topology) => new()
+    {
+        PublicKey = issuer.ToArray(),
+        Domain = domain,
+        AllowedLifecycle = MailboxCapabilityLifecycle.Active,
+        MinimumGeneration = topology.CurrentEpoch.Generation,
+        MaximumGeneration = topology.NextEpoch.Generation,
+        ValidFromUnixSeconds = topology.CurrentEpoch.NotBeforeUnixSeconds,
+        ValidUntilUnixSeconds = topology.NextEpoch.NotAfterUnixSeconds
+    };
 
     private static MailboxCredentialEpoch ToEpoch(
         ProductionMailboxTopologyEpoch epoch,
