@@ -49,6 +49,54 @@ public sealed class ContactMailboxInvitationServiceTests
         Assert.Equal(route.CanonicalAdvertisement, verified.CanonicalRouteAdvertisement.ToArray());
     }
 
+    [Fact]
+    public void CanonicalBinary_RoundTripsTextAtExactFixedLengthAndVerifies()
+    {
+        var fixture = CreateInvitation();
+
+        var binary = ContactMailboxInvitationService.DecodeCanonicalText(fixture.Text);
+        var restoredText = ContactMailboxInvitationService.EncodeCanonicalBinary(binary);
+        var verified = ContactMailboxInvitationService.ParseAndVerify(
+            binary,
+            new FixedTimeProvider(Now));
+
+        Assert.Equal(585, ContactMailboxInvitationService.CanonicalBinaryLength);
+        Assert.Equal(ContactMailboxInvitationService.CanonicalBinaryLength, binary.Length);
+        Assert.Equal(fixture.Text, restoredText);
+        Assert.Equal(ContactMailboxInvitationService.ParseAndVerify(
+            fixture.Text,
+            new FixedTimeProvider(Now)).SessionId, verified.SessionId);
+    }
+
+    [Theory]
+    [InlineData(-1, ContactMailboxInvitationError.InvalidLength)]
+    [InlineData(1, ContactMailboxInvitationError.Oversize)]
+    public void CanonicalBinary_RejectsAnyNonFixedLength(int delta, ContactMailboxInvitationError expected)
+    {
+        var fixture = CreateInvitation();
+        var binary = ContactMailboxInvitationService.DecodeCanonicalText(fixture.Text);
+        Array.Resize(ref binary, binary.Length + delta);
+
+        var error = Assert.Throws<ContactMailboxInvitationException>(() =>
+            ContactMailboxInvitationService.ParseAndVerify(
+                binary,
+                new FixedTimeProvider(Now)));
+
+        Assert.Equal(expected, error.Error);
+    }
+
+    [Fact]
+    public void CanonicalBinary_RejectsNonCanonicalReservedFieldBeforeCryptoVerification()
+    {
+        var binary = ContactMailboxInvitationService.DecodeCanonicalText(CreateInvitation().Text);
+        binary[5] = 1;
+
+        var error = Assert.Throws<ContactMailboxInvitationException>(() =>
+            ContactMailboxInvitationService.EncodeCanonicalBinary(binary));
+
+        Assert.Equal(ContactMailboxInvitationError.ReservedFieldNotZero, error.Error);
+    }
+
     [Theory]
     [InlineData(ContactMailboxInvitationCodec.SessionEd25519Offset)]
     [InlineData(ContactMailboxInvitationCodec.MailboxOwnerEd25519Offset)]

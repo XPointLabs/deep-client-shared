@@ -11,7 +11,8 @@ public enum E2eeContentKind : byte
 {
     Message = 1,
     Reaction = 2,
-    GroupState = 3
+    GroupState = 3,
+    GroupRoutes = 4
 }
 
 public sealed record E2eeContent(
@@ -29,7 +30,8 @@ public sealed record E2eeContent(
     MessageReply? Reply = null,
     MessageReactionUpdate? Reaction = null,
     long? GroupRevision = null,
-    Group? GroupState = null);
+    Group? GroupState = null,
+    GroupMailboxRouteBundle? GroupRoutes = null);
 
 public static class E2eeContentCodec
 {
@@ -108,6 +110,14 @@ public static class E2eeContentCodec
         if (content.Kind == E2eeContentKind.GroupState)
         {
             WriteGroupState(writer, content.GroupState!);
+            return FinishEncoding(writer, content);
+        }
+
+        if (content.Kind == E2eeContentKind.GroupRoutes)
+        {
+            var encodedBundle = GroupMailboxRouteBundleCodec.Encode(content.GroupRoutes!);
+            WriteUInt32(writer, checked((uint)encodedBundle.Length));
+            WriteBytes(writer, encodedBundle);
             return FinishEncoding(writer, content);
         }
 
@@ -229,6 +239,37 @@ public static class E2eeContentCodec
                 GroupState: group);
             ValidateDecoded(groupStateContent, now, maxFutureSkew);
             return groupStateContent;
+        }
+
+        if (kind == E2eeContentKind.GroupRoutes)
+        {
+            if (flags != 0)
+            {
+                throw InvalidContent("DMC1 group routes flags are invalid.");
+            }
+
+            var bundleLength = reader.ReadUInt32Length("group routes", GroupMailboxRouteBundleCodec.MaximumEncodedBytes);
+            var bundle = GroupMailboxRouteBundleCodec.Decode(reader.ReadSpan(bundleLength));
+            if (!reader.IsAtEnd)
+            {
+                throw InvalidContent("DMC1 group routes have trailing bytes.");
+            }
+
+            var groupRoutesContent = new E2eeContent(
+                kind,
+                messageId,
+                conversationKind,
+                conversationId,
+                sender,
+                recipient,
+                issuedAt,
+                protocolExpiresAt,
+                userExpiresAt,
+                string.Empty,
+                [],
+                GroupRoutes: bundle);
+            ValidateDecoded(groupRoutesContent, now, maxFutureSkew);
+            return groupRoutesContent;
         }
 
         var body = reader.ReadString32("body", MaxBodyBytes, allowEmpty: true);
@@ -378,7 +419,7 @@ public static class E2eeContentCodec
 
         if (content.Kind == E2eeContentKind.Message)
         {
-            if (content.GroupState is not null || content.Reaction is not null ||
+            if (content.GroupState is not null || content.GroupRoutes is not null || content.Reaction is not null ||
                 (content.Body.Length == 0 && content.Attachments.Count == 0))
             {
                 throw invalid("DMC1 message payload shape is invalid.");
@@ -389,7 +430,7 @@ public static class E2eeContentCodec
 
         if (content.Kind == E2eeContentKind.Reaction)
         {
-            if (content.GroupState is not null || content.Reaction is null || content.Body.Length != 0 ||
+            if (content.GroupState is not null || content.GroupRoutes is not null || content.Reaction is null || content.Body.Length != 0 ||
                 content.Attachments.Count != 0 || content.Reply is not null)
             {
                 throw invalid("DMC1 reaction payload shape is invalid.");
@@ -398,7 +439,21 @@ public static class E2eeContentCodec
             return;
         }
 
-        if (content.GroupState is null || content.ConversationKind != ConversationKind.GroupV2 ||
+        if (content.Kind == E2eeContentKind.GroupRoutes)
+        {
+            if (content.GroupState is not null || content.GroupRoutes is null
+                || content.GroupRoutes.GroupId != content.ConversationId
+                || content.ConversationKind != ConversationKind.GroupV2
+                || content.Body.Length != 0 || content.Attachments.Count != 0 || content.Reply is not null
+                || content.Reaction is not null || content.GroupRevision is not null || content.UserExpiresAt is not null)
+            {
+                throw invalid("DMC1 group-routes payload shape is invalid.");
+            }
+
+            return;
+        }
+
+        if (content.GroupState is null || content.GroupRoutes is not null || content.ConversationKind != ConversationKind.GroupV2 ||
             content.Body.Length != 0 || content.Attachments.Count != 0 || content.Reply is not null ||
             content.Reaction is not null || content.GroupRevision is not null || content.UserExpiresAt is not null)
         {
@@ -475,6 +530,16 @@ public static class E2eeContentCodec
             WriteInt64(writer, member.JoinedAt.ToUnixTimeMilliseconds());
             WriteByte(writer, member.IsPendingRemoval ? PendingRemovalMemberFlag : (byte)0);
         }
+    }
+
+    public static byte[] ComputeGroupMembershipDigest(Group group)
+    {
+        ArgumentNullException.ThrowIfNull(group);
+        ValidateGroupState(group, group.Id, DateTimeOffset.MaxValue, inbound: false);
+        var writer = new ArrayBufferWriter<byte>();
+        WriteString16(writer, group.Id.Value, nameof(group.Id), MaxConversationIdBytes, allowEmpty: false);
+        WriteGroupState(writer, group with { IsKicked = false });
+        return SHA256.HashData(writer.WrittenSpan);
     }
 
     private static Group ReadGroupState(ref ContentReader reader, ConversationId groupId)
@@ -786,12 +851,14 @@ public static class E2eeContentCodec
         1 => E2eeContentKind.Message,
         2 => E2eeContentKind.Reaction,
         3 => E2eeContentKind.GroupState,
+        4 => E2eeContentKind.GroupRoutes,
         _ => throw InvalidContent("DMC1 content kind is not supported.")
     };
 
     private static void ValidateContentKind(E2eeContentKind kind, string fieldName)
     {
-        if (kind is not E2eeContentKind.Message and not E2eeContentKind.Reaction and not E2eeContentKind.GroupState)
+        if (kind is not E2eeContentKind.Message and not E2eeContentKind.Reaction
+            and not E2eeContentKind.GroupState and not E2eeContentKind.GroupRoutes)
         {
             throw new ArgumentOutOfRangeException(fieldName, "DMC1 content kind is not supported.");
         }
@@ -954,6 +1021,17 @@ public static class E2eeContentCodec
             }
 
             return ReadString((int)length, fieldName, maxBytes, allowEmpty);
+        }
+
+        public int ReadUInt32Length(string fieldName, int maxBytes)
+        {
+            var length = BinaryPrimitives.ReadUInt32BigEndian(ReadSpan(sizeof(uint)));
+            if (length > maxBytes)
+            {
+                throw InvalidContent($"DMC1 {fieldName} length is invalid.");
+            }
+
+            return checked((int)length);
         }
 
         public SessionId ReadSessionId(string fieldName)

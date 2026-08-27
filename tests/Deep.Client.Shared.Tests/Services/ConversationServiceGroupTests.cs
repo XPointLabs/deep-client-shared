@@ -302,10 +302,194 @@ public sealed class ConversationServiceGroupTests
         Assert.DoesNotContain(persisted!.Members, member => member.SessionId == recipient);
     }
 
-    private static ClientRuntime CreateRuntime(RecordingGroupSyncTransport transport) =>
+    [Fact]
+    public async Task LocalMutation_CapturesImmutableRoutesBeforePersistenceAndPublishesStateThenRoutes()
+    {
+        var transport = new RecordingGroupSyncTransport();
+        var exchange = new RecordingGroupMailboxRouteExchange();
+        var runtime = CreateRuntime(transport, exchange);
+        var owner = Session('1');
+        var member = Session('2');
+
+        var group = await runtime.Conversations.CreateGroupScaffoldAsync(owner, "Routed", [member]);
+
+        var captured = Assert.Single(exchange.Captured);
+        var published = Assert.Single(transport.PublishedRoutes);
+        Assert.Equal(group.Id, published.GroupId);
+        Assert.Equal(["state:1", "routes:1"], transport.PublishOrder);
+        Assert.NotSame(captured, published);
+        Assert.NotSame(captured.MembershipDigest, published.MembershipDigest);
+        GroupMailboxRouteBundleCodec.ValidateForGroup(published, group);
+    }
+
+    [Fact]
+    public async Task LocalMutation_WithoutCompleteRoutesFailsBeforePersistence()
+    {
+        var transport = new RecordingGroupSyncTransport();
+        var exchange = new RecordingGroupMailboxRouteExchange { ReturnMissingBundle = true };
+        var runtime = CreateRuntime(transport, exchange);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            runtime.Conversations.CreateGroupScaffoldAsync(Session('1'), "Blocked", [Session('2')]));
+
+        Assert.Empty(await runtime.Conversations.ListGroupsAsync());
+        Assert.Empty(transport.Published);
+    }
+
+    [Fact]
+    public async Task ReceiveGroupRoutes_ImportsAllThirdMemberRoutesWithoutCreatingDirectContacts()
+    {
+        var transport = new RecordingGroupSyncTransport();
+        var exchange = new RecordingGroupMailboxRouteExchange();
+        var runtime = CreateRuntime(transport, exchange);
+        var owner = Session('1');
+        var recipient = Session('2');
+        var third = Session('3');
+        var group = GroupState(owner, recipient, revision: 1) with
+        {
+            Members =
+            [
+                new GroupMember(owner, GroupMemberRole.Admin, CreatedAt),
+                new GroupMember(recipient, GroupMemberRole.Standard, CreatedAt),
+                new GroupMember(third, GroupMemberRole.Standard, CreatedAt)
+            ]
+        };
+        transport.Incoming = [Envelope(group, owner, CreatedAt)];
+        transport.IncomingRoutes = [RouteEnvelope(group, owner, "routes-third")];
+
+        var applied = await runtime.Conversations.ReceiveGroupUpdatesAsync(recipient);
+
+        Assert.Single(applied);
+        var imported = Assert.Single(exchange.Imported);
+        Assert.Equal(new[] { owner, recipient, third }.OrderBy(static id => id.Value),
+            imported.Bundle.Invitations.Select(static invitation => invitation.Member));
+        Assert.Null(await runtime.Conversations.GetContactAsync(owner));
+        Assert.Null(await runtime.Conversations.GetContactAsync(third));
+        Assert.Contains("routes-third", transport.AcknowledgedHashes);
+    }
+
+    [Fact]
+    public async Task ReceiveGroupRoutes_UnauthorizedSenderIsDiscardedBeforeImport()
+    {
+        var transport = new RecordingGroupSyncTransport();
+        var exchange = new RecordingGroupMailboxRouteExchange();
+        var runtime = CreateRuntime(transport, exchange);
+        var owner = Session('1');
+        var recipient = Session('2');
+        var attacker = Session('3');
+        var group = GroupState(owner, recipient, revision: 1);
+        await StoreGroupAsync(runtime, group);
+        transport.IncomingRoutes = [RouteEnvelope(group, attacker, "routes-attacker")];
+
+        await runtime.Conversations.ReceiveGroupUpdatesAsync(recipient);
+
+        Assert.Empty(exchange.Imported);
+        Assert.Contains("routes-attacker", transport.AcknowledgedHashes);
+    }
+
+    [Fact]
+    public async Task ReceiveGroupRoutes_TransientImportFailureRetriesAndAcknowledgesOnlyAfterSuccess()
+    {
+        var transport = new RecordingGroupSyncTransport();
+        var exchange = new RecordingGroupMailboxRouteExchange { ImportFailuresRemaining = 1 };
+        var runtime = CreateRuntime(transport, exchange);
+        var owner = Session('1');
+        var recipient = Session('2');
+        var group = GroupState(owner, recipient, revision: 1);
+        await StoreGroupAsync(runtime, group);
+        transport.IncomingRoutes = [RouteEnvelope(group, owner, "routes-retry")];
+
+        await Assert.ThrowsAsync<HttpRequestException>(() =>
+            runtime.Conversations.ReceiveGroupUpdatesAsync(recipient));
+        Assert.DoesNotContain("routes-retry", transport.AcknowledgedHashes);
+
+        await runtime.Conversations.ReceiveGroupUpdatesAsync(recipient);
+
+        Assert.Single(exchange.Imported);
+        Assert.Contains("routes-retry", transport.AcknowledgedHashes);
+    }
+
+    [Fact]
+    public async Task GroupOutbox_RetriesLegacyStateBeforeRouteBundleAndKeepsStableBundle()
+    {
+        var store = new InMemorySessionStore();
+        var transport = new RecordingGroupSyncTransport { RouteFailuresRemaining = 1 };
+        var exchange = new RecordingGroupMailboxRouteExchange();
+        using var runtime = new ClientRuntime(
+            store,
+            Deep.Client.Shared.Features.ClientFeatureFlags.Defaults,
+            new FrozenClock(CreatedAt),
+            new StubSessionBackend(),
+            transport,
+            groupMailboxRoutes: exchange);
+
+        var group = await runtime.Conversations.CreateGroupScaffoldAsync(Session('1'), "Retry", [Session('2')]);
+        var pending = Assert.Single(await store.ListPendingGroupStatePublishesAsync(GroupStateOutboxLimits.MaxPublishBatch));
+        var stableBytes = GroupMailboxRouteBundleCodec.Encode(pending.RouteBundle!);
+
+        Assert.Equal(1, await runtime.Conversations.FlushPendingGroupStatesAsync());
+
+        Assert.Equal(["state:1", "routes:1", "state:1", "routes:1"], transport.PublishOrder);
+        Assert.Equal(stableBytes, GroupMailboxRouteBundleCodec.Encode(transport.PublishedRoutes[^1]));
+        Assert.Empty(await store.ListPendingGroupStatePublishesAsync(GroupStateOutboxLimits.MaxPublishBatch));
+        Assert.Equal(group.Id, transport.PublishedRoutes[^1].GroupId);
+    }
+
+    [Fact]
+    public async Task GroupRouteBundleOutbox_SurvivesSqliteRestartByteForByte()
+    {
+        var statePath = Path.Combine(Path.GetTempPath(), $"deep-group-routes-{Guid.NewGuid():N}.db");
+        var owner = Session('1');
+        var member = Session('2');
+        var failingTransport = new RecordingGroupSyncTransport { RouteFailuresRemaining = 1 };
+        byte[] expected;
+
+        try
+        {
+            using (var runtime = new ClientRuntime(
+                       new SqliteSessionStore(statePath),
+                       Deep.Client.Shared.Features.ClientFeatureFlags.Defaults,
+                       new FrozenClock(CreatedAt),
+                       new StubSessionBackend(),
+                       failingTransport,
+                       groupMailboxRoutes: new RecordingGroupMailboxRouteExchange()))
+            {
+                await runtime.Conversations.CreateGroupScaffoldAsync(owner, "Restart routes", [member]);
+                var pending = Assert.Single(await ((IGroupStatePersistenceRepository)runtime.Store)
+                    .ListPendingGroupStatePublishesAsync(GroupStateOutboxLimits.MaxPublishBatch));
+                expected = GroupMailboxRouteBundleCodec.Encode(pending.RouteBundle!);
+            }
+
+            var resumedTransport = new RecordingGroupSyncTransport();
+            using var resumed = new ClientRuntime(
+                new SqliteSessionStore(statePath),
+                Deep.Client.Shared.Features.ClientFeatureFlags.Defaults,
+                new FrozenClock(CreatedAt),
+                new StubSessionBackend(),
+                resumedTransport);
+
+            Assert.Equal(1, await resumed.Conversations.FlushPendingGroupStatesAsync());
+            Assert.Equal(expected, GroupMailboxRouteBundleCodec.Encode(Assert.Single(resumedTransport.PublishedRoutes)));
+        }
+        finally
+        {
+            foreach (var path in new[] { statePath, statePath + "-wal", statePath + "-shm" })
+            {
+                if (File.Exists(path))
+                {
+                    File.Delete(path);
+                }
+            }
+        }
+    }
+
+    private static ClientRuntime CreateRuntime(
+        RecordingGroupSyncTransport transport,
+        IGroupMailboxRouteExchange? exchange = null) =>
         ClientRuntime.CreateStubbed(
             clock: new FrozenClock(CreatedAt),
-            groupSyncTransport: transport);
+            groupSyncTransport: transport,
+            groupMailboxRoutes: exchange);
 
     private static Task StoreGroupAsync(ClientRuntime runtime, Group group) =>
         ((IGroupRepository)runtime.Store).UpsertAsync(group);
@@ -328,10 +512,24 @@ public sealed class ConversationServiceGroupTests
         DateTimeOffset updatedAt) =>
         new(group, updatedAt, $"hash-{group.Revision}-{updatedAt.Ticks}", sender);
 
+    private static InboundGroupMailboxRouteEnvelope RouteEnvelope(
+        Group group,
+        SessionId sender,
+        string serverHash) =>
+        new(
+            RecordingGroupMailboxRouteExchange.CreateBundle(group),
+            sender,
+            CreatedAt,
+            CreatedAt.AddHours(1),
+            serverHash);
+
     private static SessionId Session(char value) =>
         SessionId.Parse("05" + new string(value, 64));
 
-    private sealed class RecordingGroupSyncTransport : IGroupSyncTransport
+    private sealed class RecordingGroupSyncTransport :
+        IGroupSyncTransport,
+        IGroupMailboxRouteSyncTransport,
+        IDurableInboxAcknowledger
     {
         public List<Group> Published { get; } = [];
 
@@ -339,7 +537,17 @@ public sealed class ConversationServiceGroupTests
 
         public int FailuresRemaining { get; set; }
 
+        public int RouteFailuresRemaining { get; set; }
+
+        public List<GroupMailboxRouteBundle> PublishedRoutes { get; } = [];
+
+        public List<string> PublishOrder { get; } = [];
+
+        public List<string> AcknowledgedHashes { get; } = [];
+
         public IReadOnlyList<InboundGroupStateEnvelope> Incoming { get; set; } = [];
+
+        public IReadOnlyList<InboundGroupMailboxRouteEnvelope> IncomingRoutes { get; set; } = [];
 
         public Task PublishGroupStateAsync(
             Group group,
@@ -355,6 +563,38 @@ public sealed class ConversationServiceGroupTests
 
             Published.Add(group);
             PublishedRecipients.Add(recipients?.ToArray() ?? []);
+            PublishOrder.Add($"state:{group.Revision}");
+            return Task.CompletedTask;
+        }
+
+        public Task PublishGroupMailboxRoutesAsync(
+            GroupMailboxRouteBundle bundle,
+            DateTimeOffset updatedAt,
+            IEnumerable<SessionId> recipients,
+            CancellationToken cancellationToken = default)
+        {
+            PublishOrder.Add($"routes:{bundle.GroupRevision}");
+            if (RouteFailuresRemaining > 0)
+            {
+                RouteFailuresRemaining--;
+                throw new HttpRequestException("injected route publish failure");
+            }
+
+            PublishedRoutes.Add(bundle);
+            return Task.CompletedTask;
+        }
+
+        public Task<IReadOnlyList<InboundGroupMailboxRouteEnvelope>> ReceiveGroupMailboxRoutesAsync(
+            SessionId member,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(IncomingRoutes);
+
+        public Task AcknowledgeInboxItemAsync(
+            SessionId account,
+            string serverHash,
+            CancellationToken cancellationToken = default)
+        {
+            AcknowledgedHashes.Add(serverHash);
             return Task.CompletedTask;
         }
 
@@ -372,5 +612,58 @@ public sealed class ConversationServiceGroupTests
             ConversationId groupId,
             CancellationToken cancellationToken = default) =>
             Task.FromResult<IReadOnlyList<InboundGroupMessageEnvelope>>([]);
+    }
+
+    private sealed class RecordingGroupMailboxRouteExchange : IGroupMailboxRouteExchange
+    {
+        public List<GroupMailboxRouteBundle> Captured { get; } = [];
+
+        public List<(SessionId Account, Group Group, GroupMailboxRouteBundle Bundle)> Imported { get; } = [];
+
+        public bool ReturnMissingBundle { get; set; }
+
+        public int ImportFailuresRemaining { get; set; }
+
+        public Task<GroupMailboxRouteBundle?> CaptureForPublishAsync(
+            Group group,
+            CancellationToken cancellationToken = default)
+        {
+            if (ReturnMissingBundle)
+            {
+                return Task.FromResult<GroupMailboxRouteBundle?>(null);
+            }
+
+            var bundle = CreateBundle(group);
+            Captured.Add(bundle);
+            return Task.FromResult<GroupMailboxRouteBundle?>(bundle);
+        }
+
+        public Task ImportReceivedAsync(
+            SessionId localAccount,
+            Group group,
+            GroupMailboxRouteBundle bundle,
+            CancellationToken cancellationToken = default)
+        {
+            if (ImportFailuresRemaining > 0)
+            {
+                ImportFailuresRemaining--;
+                throw new HttpRequestException("injected route import failure");
+            }
+
+            Imported.Add((localAccount, group, bundle));
+            return Task.CompletedTask;
+        }
+
+        public static GroupMailboxRouteBundle CreateBundle(Group group) =>
+            new(
+                group.Id,
+                group.Revision,
+                E2eeContentCodec.ComputeGroupMembershipDigest(group),
+                group.Members
+                    .Select(static member => new GroupMemberMailboxInvitation(
+                        member.SessionId,
+                        Enumerable.Repeat((byte)member.SessionId.Value[^1], 585).ToArray()))
+                    .OrderBy(static invitation => invitation.Member.Value, StringComparer.Ordinal)
+                    .ToArray());
     }
 }

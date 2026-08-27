@@ -7,14 +7,14 @@ using Microsoft.Data.Sqlite;
 namespace Deep.Client.Shared.Tests.Persistence;
 
 [Collection("SQLite global pool isolation")]
-public sealed class SqliteSchemaV15Tests
+public sealed class SqliteSchemaV16Tests
 {
     private const int ApplicationId = 0x44454550;
-    private const string CorrectKey = "deep-v15-correct-key-4a838277930e";
-    private const string WrongKey = "deep-v15-wrong-key-c992865b0267";
+    private const string CorrectKey = "deep-v16-correct-key-4a838277930e";
+    private const string WrongKey = "deep-v16-wrong-key-c992865b0267";
 
     [Fact]
-    public void FreshDatabaseHasExactV15AttestationAndNoLogicalSchemaTables()
+    public void FreshDatabaseHasExactV16AttestationAndNoLogicalSchemaTables()
     {
         var path = TempPath("fresh");
         try
@@ -25,7 +25,7 @@ public sealed class SqliteSchemaV15Tests
             SqliteConnection.ClearAllPools();
 
             using var connection = Open(path);
-            Assert.Equal(15, Scalar(connection, "PRAGMA user_version;"));
+            Assert.Equal(16, Scalar(connection, "PRAGMA user_version;"));
             Assert.Equal(ApplicationId, Scalar(connection, "PRAGMA application_id;"));
             Assert.Equal(
                 "ok",
@@ -64,14 +64,14 @@ public sealed class SqliteSchemaV15Tests
         {
             using (var store = new SqliteSessionStore(path))
             {
-                await store.SetAsync("v15.marker", "preserved");
+                await store.SetAsync("v16.marker", "preserved");
             }
             SqliteConnection.ClearAllPools();
             var before = ReadCatalog(path);
 
             using (var reopened = new SqliteSessionStore(path))
             {
-                Assert.Equal("preserved", await reopened.GetAsync<string>("v15.marker"));
+                Assert.Equal("preserved", await reopened.GetAsync<string>("v16.marker"));
             }
             SqliteConnection.ClearAllPools();
 
@@ -92,7 +92,7 @@ public sealed class SqliteSchemaV15Tests
     [InlineData(12)]
     [InlineData(13)]
     [InlineData(14)]
-    [InlineData(16)]
+    [InlineData(15)]
     [InlineData(99)]
     public void ExistingUnsupportedVersionIsRejectedWithoutChangingAnyStateFile(int version)
     {

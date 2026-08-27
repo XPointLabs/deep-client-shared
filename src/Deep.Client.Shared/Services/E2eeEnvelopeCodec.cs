@@ -447,6 +447,7 @@ public sealed class E2eeEnvelopeCodec
         E2eeContentKind.Message => E2eeEnvelopeKind.Message,
         E2eeContentKind.Reaction => E2eeEnvelopeKind.Reaction,
         E2eeContentKind.GroupState => E2eeEnvelopeKind.GroupState,
+        E2eeContentKind.GroupRoutes => E2eeEnvelopeKind.GroupState,
         _ => throw new ArgumentOutOfRangeException(nameof(kind), "Unknown DMC1 content kind.")
     };
 

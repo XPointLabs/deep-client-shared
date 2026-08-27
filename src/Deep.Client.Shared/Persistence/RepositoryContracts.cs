@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Deep.Client.Shared.Domain;
+using Deep.Client.Shared.Services;
 
 namespace Deep.Client.Shared.Persistence;
 
@@ -302,7 +303,8 @@ public enum DurableInboxItemKind
 {
     DirectMessage = 1,
     GroupState = 2,
-    GroupMessage = 3
+    GroupMessage = 3,
+    GroupRoutes = 4
 }
 
 public sealed record DurableInboxDecodedMetadata(
@@ -454,7 +456,8 @@ public sealed record GroupStateOutboxItem(
     string OperationId,
     Group Group,
     DateTimeOffset UpdatedAt,
-    IReadOnlyList<SessionId> Recipients);
+    IReadOnlyList<SessionId> Recipients,
+    GroupMailboxRouteBundle? RouteBundle = null);
 
 public interface IGroupStatePersistenceRepository
 {

@@ -91,6 +91,8 @@ public sealed class VerifiedContactMailboxInvitation
 /// </summary>
 public static class ContactMailboxInvitationService
 {
+    public const int CanonicalBinaryLength = ContactMailboxInvitationCodec.CanonicalLength;
+
     public static string Create(
         SessionIdentityProvider sessionIdentity,
         ReadOnlySpan<byte> mailboxOwnerEd25519PublicKey,
@@ -145,6 +147,25 @@ public static class ContactMailboxInvitationService
         uint clockSkewSeconds = ContactMailboxInvitationCodec.MaximumClockSkewSeconds)
     {
         var envelope = ContactMailboxInvitationCodec.DecodeText(text);
+        var now = ToUnixSeconds(
+            (timeProvider ?? TimeProvider.System).GetUtcNow(),
+            "Invitation clock is invalid.");
+        return ContactMailboxInvitationVerifier.Verify(envelope, now, clockSkewSeconds);
+    }
+
+    public static byte[] DecodeCanonicalText(string text) =>
+        ContactMailboxInvitationCodec.Encode(ContactMailboxInvitationCodec.DecodeText(text));
+
+    public static string EncodeCanonicalBinary(ReadOnlySpan<byte> canonicalInvitation) =>
+        ContactMailboxInvitationCodec.EncodeText(
+            ContactMailboxInvitationCodec.Decode(canonicalInvitation));
+
+    public static VerifiedContactMailboxInvitation ParseAndVerify(
+        ReadOnlySpan<byte> canonicalInvitation,
+        TimeProvider? timeProvider = null,
+        uint clockSkewSeconds = ContactMailboxInvitationCodec.MaximumClockSkewSeconds)
+    {
+        var envelope = ContactMailboxInvitationCodec.Decode(canonicalInvitation);
         var now = ToUnixSeconds(
             (timeProvider ?? TimeProvider.System).GetUtcNow(),
             "Invitation clock is invalid.");

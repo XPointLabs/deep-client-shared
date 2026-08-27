@@ -499,6 +499,49 @@ public sealed class E2eeClientTransportTests
     }
 
     [Fact]
+    public async Task GroupRouteBundle_IsEncryptedAuthenticatedAndUsesStableIdsForExactBytes()
+    {
+        using var aliceIdentity = new SessionIdentityProvider(AlicePhrase);
+        using var bobIdentity = new SessionIdentityProvider(BobPhrase);
+        var raw = new AuthenticatedRawTransport();
+        using var alice = CreateTransport(raw, () => AlicePhrase);
+        using var bob = CreateTransport(raw, () => BobPhrase);
+        var group = CreateGroup(aliceIdentity.SessionId, bobIdentity.SessionId, aliceIdentity.SessionId);
+        var bundle = new GroupMailboxRouteBundle(
+            group.Id,
+            group.Revision,
+            E2eeContentCodec.ComputeGroupMembershipDigest(group),
+            group.Members
+                .Select(static member => new GroupMemberMailboxInvitation(
+                    member.SessionId,
+                    Enumerable.Repeat((byte)member.SessionId.Value[^1], 585).ToArray()))
+                .OrderBy(static invitation => invitation.Member.Value, StringComparer.Ordinal)
+                .ToArray());
+        var routes = (IGroupMailboxRouteSyncTransport)alice;
+
+        await routes.PublishGroupMailboxRoutesAsync(bundle, Now, [bobIdentity.SessionId]);
+        var first = raw.SentSnapshot();
+        Assert.Equal(2, first.Count);
+        Assert.All(first, item =>
+        {
+            Assert.DoesNotContain(GroupId.Value, item.Body, StringComparison.Ordinal);
+            Assert.DoesNotContain("GMR1", item.Body, StringComparison.Ordinal);
+        });
+
+        var inbound = Assert.Single(await ((IGroupMailboxRouteSyncTransport)bob)
+            .ReceiveGroupMailboxRoutesAsync(bobIdentity.SessionId));
+        Assert.Equal(aliceIdentity.SessionId, inbound.Sender);
+        Assert.Equal(bundle.GroupId, inbound.Bundle.GroupId);
+        Assert.Equal(bundle.GroupRevision, inbound.Bundle.GroupRevision);
+        GroupMailboxRouteBundleCodec.ValidateForGroup(inbound.Bundle, group);
+
+        await routes.PublishGroupMailboxRoutesAsync(bundle, Now, [bobIdentity.SessionId]);
+        var second = raw.SentSnapshot().Skip(first.Count).ToArray();
+        var secondByRecipient = second.ToDictionary(static item => item.Recipient);
+        Assert.All(first, item => Assert.Equal(item.Id, secondByRecipient[item.Recipient].Id));
+    }
+
+    [Fact]
     public async Task GroupReceive_RejectsRawSenderThatDoesNotMatchAuthenticatedSemanticSender()
     {
         using var aliceIdentity = new SessionIdentityProvider(AlicePhrase);

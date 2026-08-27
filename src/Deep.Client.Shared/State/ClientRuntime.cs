@@ -21,7 +21,8 @@ public sealed class ClientRuntime : IDisposable
         IExternalTransportOutboxExecutor? transportOutboxExecutor = null,
         IMailboxDeliveryPolicy? mailboxDeliveryPolicy = null,
         bool ownsMessageTransport = false,
-        IMessageDispatchFailureObserver? messageDispatchFailureObserver = null)
+        IMessageDispatchFailureObserver? messageDispatchFailureObserver = null,
+        IGroupMailboxRouteExchange? groupMailboxRoutes = null)
     {
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(featureFlags);
@@ -98,7 +99,8 @@ public sealed class ClientRuntime : IDisposable
             GroupSyncTransport = groupSyncTransport ?? new DisabledGroupSyncTransport();
         }
 
-        Conversations = new ConversationService(Store, Store, Store, Store, clock, featureFlags, GroupSyncTransport);
+        Conversations = new ConversationService(
+            Store, Store, Store, Store, clock, featureFlags, GroupSyncTransport, groupMailboxRoutes);
         Messages = new MessageService(
             Conversations,
             Store,
@@ -159,7 +161,8 @@ public sealed class ClientRuntime : IDisposable
         StubSessionBackend? backend = null,
         IGroupSyncTransport? groupSyncTransport = null,
         IAvatarProfileTransport? avatarProfiles = null,
-        IExternalTransportOutboxExecutor? transportOutboxExecutor = null) =>
+        IExternalTransportOutboxExecutor? transportOutboxExecutor = null,
+        IGroupMailboxRouteExchange? groupMailboxRoutes = null) =>
         new(
             new InMemorySessionStore(),
             featureFlags ?? ClientFeatureFlags.Defaults,
@@ -167,7 +170,8 @@ public sealed class ClientRuntime : IDisposable
             backend ?? new StubSessionBackend(),
             groupSyncTransport,
             avatarProfiles,
-            transportOutboxExecutor: transportOutboxExecutor);
+            transportOutboxExecutor: transportOutboxExecutor,
+            groupMailboxRoutes: groupMailboxRoutes);
 
     public static ClientRuntime CreatePersistent(
         string statePath,
@@ -181,7 +185,8 @@ public sealed class ClientRuntime : IDisposable
         bool requireE2eeTransport = false,
         IExternalTransportOutboxExecutor? transportOutboxExecutor = null,
         IMailboxDeliveryPolicy? mailboxDeliveryPolicy = null,
-        bool ownsMessageTransport = false)
+        bool ownsMessageTransport = false,
+        IGroupMailboxRouteExchange? groupMailboxRoutes = null)
     {
         var resolvedFeatureFlags = featureFlags ?? ClientFeatureFlags.Defaults;
         if (backend is null)
@@ -226,7 +231,8 @@ public sealed class ClientRuntime : IDisposable
             requireE2eeTransport,
             transportOutboxExecutor,
             mailboxDeliveryPolicy,
-            ownsMessageTransport);
+            ownsMessageTransport,
+            groupMailboxRoutes: groupMailboxRoutes);
     }
 
     public static ClientRuntime CreatePersistentForTests(
@@ -238,7 +244,8 @@ public sealed class ClientRuntime : IDisposable
         IAvatarProfileTransport? avatarProfiles = null,
         string? sqlCipherKey = null,
         Func<ILocalSessionStore, ILocalSessionStore>? storeDecorator = null,
-        IExternalTransportOutboxExecutor? transportOutboxExecutor = null) =>
+        IExternalTransportOutboxExecutor? transportOutboxExecutor = null,
+        IGroupMailboxRouteExchange? groupMailboxRoutes = null) =>
         CreatePersistent(
             statePath,
             featureFlags ?? ClientFeatureFlags.Defaults,
@@ -249,7 +256,8 @@ public sealed class ClientRuntime : IDisposable
             sqlCipherKey,
             storeDecorator,
             requireE2eeTransport: false,
-            transportOutboxExecutor);
+            transportOutboxExecutor,
+            groupMailboxRoutes: groupMailboxRoutes);
 
     public void Dispose()
     {

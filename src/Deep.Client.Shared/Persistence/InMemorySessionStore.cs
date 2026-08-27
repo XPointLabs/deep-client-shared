@@ -2187,6 +2187,10 @@ public sealed partial class InMemorySessionStore :
         }
 
         ValidateGroupOutboxOperationId(outboxItem.OperationId);
+        if (outboxItem.RouteBundle is not null)
+        {
+            GroupMailboxRouteBundleCodec.ValidateForGroup(outboxItem.RouteBundle, group);
+        }
         if (!string.Equals(
                 JsonSerializer.Serialize(outboxItem.Group, SerializerOptions),
                 JsonSerializer.Serialize(group, SerializerOptions),

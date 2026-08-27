@@ -11,10 +11,18 @@ public sealed class ConversationService(
     IGroupStatePersistenceRepository groupStatePersistence,
     IClock clock,
     ClientFeatureFlags featureFlags,
-    IGroupSyncTransport groupSync)
+    IGroupSyncTransport groupSync,
+    IGroupMailboxRouteExchange? groupMailboxRoutes = null)
 {
     private readonly SemaphoreSlim groupOutboxGate = new(1, 1);
     private readonly SemaphoreSlim contactMutationGate = new(1, 1);
+    private readonly IGroupMailboxRouteSyncTransport groupRouteSync =
+        groupSync as IGroupMailboxRouteSyncTransport
+        ?? (groupMailboxRoutes is null
+            ? new DisabledGroupMailboxRouteSyncTransport()
+            : throw new ArgumentException(
+                "A group mailbox route exchange requires a route-capable group transport.",
+                nameof(groupSync)));
 
     public Task<Conversation> GetOrCreateOneToOneAsync(
         SessionId counterpart,
@@ -303,6 +311,11 @@ public sealed class ConversationService(
             }
         }
 
+        if (groupMailboxRoutes is not null)
+        {
+            await ReceiveAndImportGroupMailboxRoutesAsync(memberId, cancellationToken).ConfigureAwait(false);
+        }
+
         return applied;
     }
 
@@ -529,6 +542,26 @@ public sealed class ConversationService(
         return updated;
     }
 
+    public async Task<Group?> RefreshGroupMailboxRoutesAsync(
+        ConversationId groupId,
+        SessionId requestor,
+        CancellationToken cancellationToken = default)
+    {
+        if (groupMailboxRoutes is null)
+        {
+            throw new InvalidOperationException("Authenticated group mailbox route exchange is not configured.");
+        }
+
+        var group = await groups.GetAsync(groupId, cancellationToken).ConfigureAwait(false);
+        if (group is null || !group.HasAdmin(requestor) || group.IsDestroyed || group.IsKicked)
+        {
+            return null;
+        }
+
+        await PersistGroupWithConversationAsync(group, cancellationToken).ConfigureAwait(false);
+        return group;
+    }
+
     private async Task PersistGroupWithConversationAsync(
         Group group,
         CancellationToken cancellationToken,
@@ -537,6 +570,18 @@ public sealed class ConversationService(
         DateTimeOffset? updatedAt = null)
     {
         var now = updatedAt ?? clock.UtcNow;
+        GroupMailboxRouteBundle? routeBundle = null;
+        if (publish && groupMailboxRoutes is not null)
+        {
+            routeBundle = await groupMailboxRoutes.CaptureForPublishAsync(group, cancellationToken)
+                .ConfigureAwait(false)
+                ?? throw new InvalidOperationException(
+                    "Authenticated mailbox routes are required for every group member before mutation.");
+            GroupMailboxRouteBundleCodec.ValidateForGroup(routeBundle, group);
+            routeBundle = GroupMailboxRouteBundleCodec.Decode(
+                GroupMailboxRouteBundleCodec.Encode(routeBundle));
+        }
+
         var conversation = await conversations.GetAsync(group.Id, cancellationToken).ConfigureAwait(false)
             ?? new Conversation(
                 group.Id,
@@ -564,7 +609,8 @@ public sealed class ConversationService(
                 GroupStateOperationId(group),
                 group,
                 now,
-                targetRecipients);
+                targetRecipients,
+                routeBundle);
         }
 
         await groupStatePersistence.PersistGroupStateAsync(
@@ -603,6 +649,14 @@ public sealed class ConversationService(
                         item.UpdatedAt,
                         item.Recipients,
                         cancellationToken).ConfigureAwait(false);
+                    if (item.RouteBundle is not null)
+                    {
+                        await groupRouteSync.PublishGroupMailboxRoutesAsync(
+                            item.RouteBundle,
+                            item.UpdatedAt,
+                            item.Recipients,
+                            cancellationToken).ConfigureAwait(false);
+                    }
                     await groupStatePersistence.AcknowledgeGroupStatePublishAsync(
                         item.OperationId,
                         cancellationToken).ConfigureAwait(false);
@@ -629,6 +683,60 @@ public sealed class ConversationService(
         catch
         {
             // The committed outbox item remains durable and will be retried by the next sync cycle.
+        }
+    }
+
+    private async Task ReceiveAndImportGroupMailboxRoutesAsync(
+        SessionId memberId,
+        CancellationToken cancellationToken)
+    {
+        var envelopes = await groupRouteSync.ReceiveGroupMailboxRoutesAsync(memberId, cancellationToken)
+            .ConfigureAwait(false);
+        foreach (var envelope in envelopes
+                     .OrderBy(static item => item.Bundle.GroupRevision)
+                     .ThenBy(static item => item.IssuedAt))
+        {
+            var group = await groups.GetAsync(envelope.Bundle.GroupId, cancellationToken).ConfigureAwait(false);
+            var shouldAcknowledge = true;
+            if (group is null || envelope.Bundle.GroupRevision > group.Revision)
+            {
+                shouldAcknowledge = false;
+            }
+            else if (envelope.Bundle.GroupRevision == group.Revision
+                     && !group.IsDestroyed
+                     && !group.IsKicked
+                     && group.HasAdmin(envelope.Sender)
+                     && group.Members.Any(member => member.SessionId == memberId))
+            {
+                var valid = true;
+                try
+                {
+                    GroupMailboxRouteBundleCodec.ValidateForGroup(envelope.Bundle, group);
+                }
+                catch (ArgumentException)
+                {
+                    valid = false;
+                }
+                catch (InvalidOperationException)
+                {
+                    valid = false;
+                }
+
+                if (valid)
+                {
+                    await groupMailboxRoutes!.ImportReceivedAsync(
+                        memberId,
+                        group,
+                        envelope.Bundle,
+                        cancellationToken).ConfigureAwait(false);
+                }
+            }
+
+            if (shouldAcknowledge)
+            {
+                await AcknowledgeInboxItemAsync(groupRouteSync, memberId, envelope.ServerHash, cancellationToken)
+                    .ConfigureAwait(false);
+            }
         }
     }
 

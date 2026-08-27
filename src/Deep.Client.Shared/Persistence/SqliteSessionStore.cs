@@ -19,7 +19,7 @@ public sealed partial class SqliteSessionStore :
     IMembershipTrustRepository,
     IDisposable
 {
-    private const int PhysicalSchemaVersion = 15;
+    private const int PhysicalSchemaVersion = 16;
     private const int DeepApplicationId = 0x44454550;
     private const int MaximumSchemaDefinitionLength = 16 * 1024;
     private const int ReplayPruneBatchSize = 256;
@@ -2355,9 +2355,9 @@ public sealed partial class SqliteSessionStore :
                 insertOutbox.Transaction = transaction;
                 insertOutbox.CommandText = """
                     INSERT INTO group_state_outbox (
-                        operation_id, group_id, revision, updated_at, group_payload, recipients_json)
+                        operation_id, group_id, revision, updated_at, group_payload, recipients_json, route_bundle)
                     VALUES (
-                        $operationId, $groupId, $revision, $updatedAt, $groupPayload, $recipientsJson)
+                        $operationId, $groupId, $revision, $updatedAt, $groupPayload, $recipientsJson, $routeBundle)
                     ON CONFLICT(operation_id) DO NOTHING;
                     """;
                 insertOutbox.Parameters.AddWithValue("$operationId", outboxItem.OperationId);
@@ -2366,6 +2366,11 @@ public sealed partial class SqliteSessionStore :
                 insertOutbox.Parameters.AddWithValue("$updatedAt", outboxItem.UpdatedAt.ToUnixTimeMilliseconds());
                 insertOutbox.Parameters.AddWithValue("$groupPayload", groupPayload);
                 insertOutbox.Parameters.AddWithValue("$recipientsJson", recipientsPayload);
+                insertOutbox.Parameters.AddWithValue(
+                    "$routeBundle",
+                    outboxItem.RouteBundle is null
+                        ? DBNull.Value
+                        : GroupMailboxRouteBundleCodec.Encode(outboxItem.RouteBundle));
                 var inserted = await insertOutbox.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
                 if (inserted == 0)
                 {
@@ -2404,7 +2409,7 @@ public sealed partial class SqliteSessionStore :
         {
             await using var command = connection.CreateCommand();
             command.CommandText = """
-                SELECT operation_id, group_payload, updated_at, recipients_json
+                SELECT operation_id, group_payload, updated_at, recipients_json, route_bundle
                 FROM group_state_outbox
                 ORDER BY group_id, revision, sequence
                 LIMIT $limit;
@@ -2422,7 +2427,10 @@ public sealed partial class SqliteSessionStore :
                     reader.GetString(0),
                     group,
                     DateTimeOffset.FromUnixTimeMilliseconds(reader.GetInt64(2)),
-                    recipients));
+                    recipients,
+                    reader.IsDBNull(4)
+                        ? null
+                        : GroupMailboxRouteBundleCodec.Decode((byte[])reader.GetValue(4))));
             }
 
             return (IReadOnlyList<GroupStateOutboxItem>)result;
@@ -2711,7 +2719,8 @@ public sealed partial class SqliteSessionStore :
                     revision INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL,
                     group_payload TEXT NOT NULL,
-                    recipients_json TEXT NOT NULL
+                    recipients_json TEXT NOT NULL,
+                    route_bundle BLOB NULL
                 );
 
                 CREATE TABLE membership_trust_records (
@@ -3275,7 +3284,8 @@ public sealed partial class SqliteSessionStore :
                 new("revision", "INTEGER", 1, null, 0),
                 new("updated_at", "INTEGER", 1, null, 0),
                 new("group_payload", "TEXT", 1, null, 0),
-                new("recipients_json", "TEXT", 1, null, 0)
+                new("recipients_json", "TEXT", 1, null, 0),
+                new("route_bundle", "BLOB", 0, null, 0)
             ],
             ["membership_trust_records"] =
             [
@@ -5031,7 +5041,7 @@ public sealed partial class SqliteSessionStore :
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = """
-            SELECT group_id, revision, updated_at, group_payload, recipients_json
+            SELECT group_id, revision, updated_at, group_payload, recipients_json, route_bundle
             FROM group_state_outbox
             WHERE operation_id = $operationId;
             """;
@@ -5042,7 +5052,8 @@ public sealed partial class SqliteSessionStore :
             || reader.GetInt64(1) != item.Group.Revision
             || reader.GetInt64(2) != item.UpdatedAt.ToUnixTimeMilliseconds()
             || !string.Equals(reader.GetString(3), groupPayload, StringComparison.Ordinal)
-            || !string.Equals(reader.GetString(4), recipientsPayload, StringComparison.Ordinal))
+            || !string.Equals(reader.GetString(4), recipientsPayload, StringComparison.Ordinal)
+            || !SameRouteBundle(reader.IsDBNull(5) ? null : (byte[])reader.GetValue(5), item.RouteBundle))
         {
             throw new InvalidOperationException("A group outbox operation ID was reused with different state.");
         }
@@ -5071,6 +5082,10 @@ public sealed partial class SqliteSessionStore :
         }
 
         ValidateGroupOutboxOperationId(outboxItem.OperationId);
+        if (outboxItem.RouteBundle is not null)
+        {
+            GroupMailboxRouteBundleCodec.ValidateForGroup(outboxItem.RouteBundle, group);
+        }
         if (outboxItem.UpdatedAt != updatedAt
             || outboxItem.Recipients.Count == 0
             || outboxItem.Recipients.Count > 4096
@@ -5082,6 +5097,16 @@ public sealed partial class SqliteSessionStore :
         {
             throw new ArgumentException("Group outbox state is invalid.", nameof(outboxItem));
         }
+    }
+
+    private static bool SameRouteBundle(byte[]? persisted, GroupMailboxRouteBundle? candidate)
+    {
+        if (persisted is null || candidate is null)
+        {
+            return persisted is null && candidate is null;
+        }
+
+        return persisted.AsSpan().SequenceEqual(GroupMailboxRouteBundleCodec.Encode(candidate));
     }
 
     private static void ValidateGroupOutboxLimit(int limit)

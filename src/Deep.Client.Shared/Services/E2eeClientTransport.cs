@@ -472,6 +472,7 @@ public interface IGroupInboxMaintenance
 public sealed class E2eeClientTransport :
     ISessionMessageTransport,
     IGroupSyncTransport,
+    IGroupMailboxRouteSyncTransport,
     IDurableInboxAcknowledger,
     IMailboxAckCorrelationProjectionSource,
     IKnownGroupInboxReceiver,
@@ -602,6 +603,55 @@ public sealed class E2eeClientTransport :
                         routeKey: null,
                         cancellationToken).ConfigureAwait(false);
                     return candidates.Select(static candidate => ToGroupStateEnvelope(candidate)).ToArray();
+                },
+                cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            receiveGate.Release();
+        }
+    }
+
+    public async Task PublishGroupMailboxRoutesAsync(
+        GroupMailboxRouteBundle bundle,
+        DateTimeOffset updatedAt,
+        IEnumerable<SessionId> recipients,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(bundle);
+        ArgumentNullException.ThrowIfNull(recipients);
+        var encodedBundle = GroupMailboxRouteBundleCodec.Encode(bundle);
+        var bundleHash = Convert.ToHexStringLower(SHA256.HashData(encodedBundle));
+        var plans = await WithIdentityAsync(
+            identity => BuildGroupMailboxRoutePlans(identity, bundle, updatedAt, recipients, bundleHash),
+            cancellationToken).ConfigureAwait(false);
+        var routeId = DeterministicMessageId(
+            "group-routes",
+            bundle.GroupId.Value,
+            bundle.GroupRevision.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            bundleHash);
+        await SendPolicySelectedPlansAsync(
+            plans, routeId, MailboxDeliveryKind.GroupState,
+            concurrent: true, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<InboundGroupMailboxRouteEnvelope>> ReceiveGroupMailboxRoutesAsync(
+        SessionId member,
+        CancellationToken cancellationToken = default)
+    {
+        await receiveGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await WithIdentityAsync(
+                async identity =>
+                {
+                    EnsureLocalAccount(identity, member, nameof(member));
+                    var candidates = await ReceiveCandidatesAsync(
+                        identity,
+                        DurableInboxItemKind.GroupRoutes,
+                        routeKey: null,
+                        cancellationToken).ConfigureAwait(false);
+                    return candidates.Select(static candidate => ToGroupMailboxRouteEnvelope(candidate)).ToArray();
                 },
                 cancellationToken).ConfigureAwait(false);
         }
@@ -901,6 +951,52 @@ public sealed class E2eeClientTransport :
                 string.Empty,
                 [],
                 GroupState: group);
+            copies.Add(new WireCopyPlan(content, target, now));
+        }
+
+        return copies;
+    }
+
+    private IReadOnlyList<WireCopyPlan> BuildGroupMailboxRoutePlans(
+        SessionIdentityProvider identity,
+        GroupMailboxRouteBundle bundle,
+        DateTimeOffset updatedAt,
+        IEnumerable<SessionId> recipients,
+        string bundleHash)
+    {
+        EnsureCanonicalGroupId(bundle.GroupId, nameof(bundle));
+        var now = clock.UtcNow;
+        var protocolExpiresAt = GetProtocolExpiry(updatedAt, now);
+        var targets = recipients
+            .Append(identity.SessionId)
+            .Distinct()
+            .ToArray();
+        if (targets.Length == 0)
+        {
+            throw new ArgumentException("At least one group route recipient is required.", nameof(recipients));
+        }
+
+        var routeId = DeterministicMessageId(
+            "group-routes",
+            bundle.GroupId.Value,
+            bundle.GroupRevision.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            bundleHash);
+        var copies = new List<WireCopyPlan>(targets.Length);
+        foreach (var target in targets)
+        {
+            var content = new E2eeContent(
+                E2eeContentKind.GroupRoutes,
+                routeId,
+                ConversationKind.GroupV2,
+                bundle.GroupId,
+                identity.SessionId,
+                target,
+                updatedAt,
+                protocolExpiresAt,
+                null,
+                string.Empty,
+                [],
+                GroupRoutes: bundle);
             copies.Add(new WireCopyPlan(content, target, now));
         }
 
@@ -1448,11 +1544,13 @@ public sealed class E2eeClientTransport :
 
     private static void ValidateLocalSemanticBinding(E2eeContent content, SessionId localSessionId)
     {
-        if (content.Kind == E2eeContentKind.GroupState)
+        if (content.Kind is E2eeContentKind.GroupState or E2eeContentKind.GroupRoutes)
         {
-            if (content.Recipient != localSessionId || content.GroupState is null)
+            if (content.Recipient != localSessionId
+                || (content.Kind == E2eeContentKind.GroupState && content.GroupState is null)
+                || (content.Kind == E2eeContentKind.GroupRoutes && content.GroupRoutes is null))
             {
-                throw new E2eeProtocolException("DMC1 group state is not addressed to the local account.");
+                throw new E2eeProtocolException("DMC1 group control state is not addressed to the local account.");
             }
 
             return;
@@ -1478,6 +1576,8 @@ public sealed class E2eeClientTransport :
         new(
             content.Kind == E2eeContentKind.GroupState
                 ? DurableInboxItemKind.GroupState
+                : content.Kind == E2eeContentKind.GroupRoutes
+                    ? DurableInboxItemKind.GroupRoutes
                 : content.ConversationKind == ConversationKind.OneToOne
                     ? DurableInboxItemKind.DirectMessage
                     : DurableInboxItemKind.GroupMessage,
@@ -1524,6 +1624,17 @@ public sealed class E2eeClientTransport :
             content.IssuedAt,
             candidate.ServerHash,
             content.Sender);
+    }
+
+    private static InboundGroupMailboxRouteEnvelope ToGroupMailboxRouteEnvelope(DecodedCandidate candidate)
+    {
+        var content = candidate.Content;
+        return new InboundGroupMailboxRouteEnvelope(
+            content.GroupRoutes!,
+            content.Sender,
+            content.IssuedAt,
+            content.ProtocolExpiresAt,
+            candidate.ServerHash);
     }
 
     private static InboundGroupMessageEnvelope ToGroupMessageEnvelope(DecodedCandidate candidate)
