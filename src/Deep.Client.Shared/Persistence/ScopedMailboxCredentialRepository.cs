@@ -488,6 +488,24 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
             activeBundleKey: null,
             publicationJournal: null,
             committedActivation,
+            allowDevelopmentPairRebind: false,
+            cancellationToken).ConfigureAwait(false);
+
+    internal async Task ApplyDevelopmentMailboxRuntimeSnapshotAsync(
+        IReadOnlyList<ScopedMailboxCredentialGeneration> generations,
+        VerifiedOfficialMailboxAuthority authority,
+        MailboxRuntimeSnapshotCheckpoint checkpoint,
+        MailboxRuntimeCommitActivation? committedActivation = null,
+        CancellationToken cancellationToken = default)
+        => await ApplyScopedMailboxRuntimeSnapshotCoreAsync(
+            generations,
+            authority,
+            checkpoint,
+            publicationJournalKey: null,
+            activeBundleKey: null,
+            publicationJournal: null,
+            committedActivation,
+            allowDevelopmentPairRebind: true,
             cancellationToken).ConfigureAwait(false);
 
     internal async Task StageProductionMailboxRuntimePublicationAsync(
@@ -639,6 +657,7 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
             activeBundleKey,
             journal,
             committedActivation,
+            allowDevelopmentPairRebind: false,
             cancellationToken).ConfigureAwait(false);
 
     private async Task ApplyScopedMailboxRuntimeSnapshotCoreAsync(
@@ -649,6 +668,7 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
         string? activeBundleKey,
         ProductionMailboxRuntimePublicationJournal? publicationJournal,
         MailboxRuntimeCommitActivation? committedActivation,
+        bool allowDevelopmentPairRebind,
         CancellationToken cancellationToken)
     {
         ValidateInstallBatch(generations, authority);
@@ -714,7 +734,10 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
             var priorRevocation = priorRevocationRow.Value;
             if (priorBundle is not null) ValidateBundleCheckpoint(null, priorBundle);
             if (priorRevocation is not null) ValidateRevocationCheckpoint(null, priorRevocation);
-            ValidateBundleCheckpoint(priorBundle, checkpoint.Bundle);
+            ValidateBundleCheckpoint(
+                priorBundle,
+                checkpoint.Bundle,
+                allowDevelopmentPairRebind);
             ValidateRevocationCheckpoint(priorRevocation, checkpoint.Revocation);
             var rotate = priorBundle is not null &&
                 checkpoint.Bundle.CurrentEpoch > priorBundle.CurrentEpoch;
@@ -933,7 +956,8 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
 
     private static void ValidateBundleCheckpoint(
         MailboxBundleRuntimeCheckpoint? prior,
-        MailboxBundleRuntimeCheckpoint current)
+        MailboxBundleRuntimeCheckpoint current,
+        bool allowDevelopmentPairRebind = false)
     {
         if (current.SchemaVersion != 1 || current.CurrentEpoch == 0 ||
             string.IsNullOrWhiteSpace(current.Lane) ||
@@ -946,13 +970,25 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
             current.Ownership is not ("UserManaged" or "OfficialManaged"))
             throw new InvalidDataException("Mailbox bundle checkpoint is invalid.");
         if (prior is null) return;
+        var authenticatedDevelopmentPairRebind =
+            allowDevelopmentPairRebind &&
+            prior.SchemaVersion == current.SchemaVersion &&
+            string.Equals(prior.Lane, "android-windows-pair", StringComparison.Ordinal) &&
+            string.Equals(current.Lane, "android-windows-pair", StringComparison.Ordinal) &&
+            string.Equals(prior.Platform, current.Platform, StringComparison.Ordinal) &&
+            string.Equals(prior.Ownership, "UserManaged", StringComparison.Ordinal) &&
+            string.Equals(current.Ownership, "UserManaged", StringComparison.Ordinal) &&
+            prior.CurrentEpoch == current.CurrentEpoch &&
+            !string.Equals(prior.PairGeneration,
+                current.PairGeneration, StringComparison.Ordinal);
         if (prior.SchemaVersion != current.SchemaVersion ||
             !string.Equals(prior.Lane, current.Lane, StringComparison.Ordinal) ||
             !string.Equals(prior.Platform, current.Platform, StringComparison.Ordinal) ||
             !string.Equals(prior.Ownership, current.Ownership, StringComparison.Ordinal) ||
             current.CurrentEpoch < prior.CurrentEpoch ||
             current.CurrentEpoch - prior.CurrentEpoch > 1 ||
-            current.CurrentEpoch == prior.CurrentEpoch && prior != current)
+            current.CurrentEpoch == prior.CurrentEpoch && prior != current &&
+                !authenticatedDevelopmentPairRebind)
             throw new InvalidDataException(
                 "Mailbox bundle checkpoint is not an exact replay or forward rotation.");
     }

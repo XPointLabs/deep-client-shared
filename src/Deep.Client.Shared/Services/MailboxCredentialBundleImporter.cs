@@ -385,13 +385,26 @@ public static class MailboxCredentialBundleImporter
                 cancellationToken).ConfigureAwait(false);
             var committedActivation = new MailboxRuntimeCommitActivation(
                 candidateRevocations, publicationLease);
-            await store.ApplyScopedMailboxRuntimeSnapshotAsync(
-                imports,
-                candidateAuthority,
-                new MailboxRuntimeSnapshotCheckpoint(
-                    receiptKey, receipt, revocationReceiptKey, revocationReceipt),
-                committedActivation,
-                cancellationToken).ConfigureAwait(false);
+            var checkpoint = new MailboxRuntimeSnapshotCheckpoint(
+                receiptKey, receipt, revocationReceiptKey, revocationReceipt);
+            if (options.DevelopmentOnly)
+            {
+                await store.ApplyDevelopmentMailboxRuntimeSnapshotAsync(
+                    imports,
+                    candidateAuthority,
+                    checkpoint,
+                    committedActivation,
+                    cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                await store.ApplyScopedMailboxRuntimeSnapshotAsync(
+                    imports,
+                    candidateAuthority,
+                    checkpoint,
+                    committedActivation,
+                    cancellationToken).ConfigureAwait(false);
+            }
             return preparedMaterial;
         }
         finally

@@ -148,6 +148,34 @@ public sealed class MailboxRuntimeCheckpointConcurrencyTests
     }
 
     [Fact]
+    public async Task AuthenticatedDevelopmentPairRebind_AllowsSameEpochPairReplacement()
+    {
+        using var fixture = new Fixture();
+        using var store = new SqliteSessionStore(fixture.Path);
+        var committed = Checkpoint(
+            epoch: 7, pair: '3', generatedAt: 100, expiresAt: 1_000,
+            snapshot: 'd');
+        await store.ApplyScopedMailboxRuntimeSnapshotAsync(
+            [fixture.Initial], fixture.Authority, committed);
+        var replacement = committed with
+        {
+            Bundle = committed.Bundle with { PairGeneration = Hex('4') },
+            Revocation = Revocation(200, 1_200, 'e')
+        };
+
+        await store.ApplyDevelopmentMailboxRuntimeSnapshotAsync(
+            [fixture.Initial], fixture.Authority, replacement);
+
+        Assert.Equal(replacement.Bundle,
+            await store.GetAsync<MailboxBundleRuntimeCheckpoint>(BundleKey));
+        AssertRevocationEqual(replacement.Revocation,
+            store.ReadMailboxRevocationCheckpoint(RevocationKey));
+        Assert.Equal(7UL,
+            (await store.ReadScopedMailboxRouteAsync(
+                fixture.Selector, fixture.Authority)).Epoch);
+    }
+
+    [Fact]
     public async Task ForwardCheckpointGap_IsRejectedWithoutChangingRuntimeSnapshot()
     {
         using var fixture = new Fixture();
