@@ -74,6 +74,29 @@ public sealed class ProductionMailboxCredentialBundleImporterTests
         }
     }
 
+    [Theory]
+    [InlineData(4, true)]
+    [InlineData(ProductionMailboxAuthorityConstants.MaximumClockSkewSeconds, true)]
+    [InlineData(ProductionMailboxAuthorityConstants.MaximumClockSkewSeconds + 1, false)]
+    public async Task LocalOwner_ResponseAllowsBoundedClockSkewBeforeIssuedAt(
+        int secondsBeforeIssuedAt,
+        bool expectedAccepted)
+    {
+        var context = await CreateBundleContextAsync();
+        var bundle = context.Bundle with
+        {
+            IssuedAtUnixSeconds = checked(
+                ProductionMailboxProvisioningContractTests.Now +
+                (ulong)secondsBeforeIssuedAt)
+        };
+
+        await AssertLocalOwnerResponseWindowAsync(
+            context,
+            bundle,
+            ProductionMailboxProvisioningContractTests.Now,
+            expectedAccepted);
+    }
+
     [Fact]
     public async Task LocalOwner_OfflineCheckpointCatchesUpAcrossGenerationGap()
     {
@@ -600,7 +623,9 @@ public sealed class ProductionMailboxCredentialBundleImporterTests
                     new MemoryTrustStore(),
                     context.Fixture.ClientIdentity,
                     MailboxInfrastructureOwnership.OfficialManaged,
-                    new FixedTimeProvider(context.Bundle.ExpiresAtUnixSeconds + 1)));
+                    new FixedTimeProvider(checked(
+                        context.Bundle.ExpiresAtUnixSeconds +
+                        (ulong)ProductionMailboxAuthorityConstants.MaximumClockSkewSeconds + 1))));
         }
         finally
         {
@@ -1769,6 +1794,46 @@ public sealed class ProductionMailboxCredentialBundleImporterTests
     private static string ActiveBundleKey(MailboxHolderIdentity holder) =>
         "deep.mailbox.production-local-owner.v1:" + holder.SessionId.Value +
         ":active-public-bundle-v1";
+
+    private static async Task AssertLocalOwnerResponseWindowAsync(
+        BundleContext context,
+        ProductionMailboxLocalOwnerBundle bundle,
+        ulong verifiedAt,
+        bool expectedAccepted)
+    {
+        var root = Path.Combine(Path.GetTempPath(),
+            "deep-production-mailbox-response-window-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            using var store = new SqliteSessionStore(Path.Combine(root, "state.db"));
+            var trust = new MemoryTrustStore();
+            var import = () => ProductionMailboxCredentialBundleImporter
+                .ImportLocalOwnerAsync(
+                    store,
+                    context.Holder,
+                    bundle,
+                    bundle.MailboxOwnerEd25519PublicKey,
+                    context.Fixture.BuildAnchor,
+                    trust,
+                    context.Fixture.ClientIdentity,
+                    MailboxInfrastructureOwnership.OfficialManaged,
+                    new FixedTimeProvider(verifiedAt));
+
+            if (expectedAccepted)
+                _ = await import();
+            else
+            {
+                await Assert.ThrowsAsync<InvalidDataException>(import);
+                Assert.Equal(0, trust.Writes);
+            }
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            Directory.Delete(root, recursive: true);
+        }
+    }
 
     private static async Task<BundleContext> CreateBundleContextAsync(
         ulong routeLifetimeSeconds = 300)

@@ -263,10 +263,10 @@ public static class ProductionMailboxCredentialBundleImporter
             Require(now > 0,
                 "Production mailbox verification time is outside its valid range.");
             var verifiedAt = checked((ulong)now);
-            Require(bundle.IssuedAtUnixSeconds > 0 &&
-                    bundle.IssuedAtUnixSeconds < bundle.ExpiresAtUnixSeconds &&
-                    verifiedAt >= bundle.IssuedAtUnixSeconds &&
-                    verifiedAt <= bundle.ExpiresAtUnixSeconds,
+            Require(ResponseWindowContains(
+                    bundle.IssuedAtUnixSeconds,
+                    bundle.ExpiresAtUnixSeconds,
+                    verifiedAt),
                 "Registry PeerDeposit response is expired or has an invalid issuance window.");
             Require(bundle.Selections is { Count: 2 } && bundle.Grants is { Count: 2 },
                 "Registry PeerDeposit requires exact current/next selections and grants.");
@@ -859,8 +859,10 @@ public static class ProductionMailboxCredentialBundleImporter
             Require(bundle.IssuedAtUnixSeconds > 0 &&
                     bundle.IssuedAtUnixSeconds < bundle.ExpiresAtUnixSeconds,
                 "Registry issuance window is invalid.");
-            Require(verifiedAt >= bundle.IssuedAtUnixSeconds &&
-                    verifiedAt <= bundle.ExpiresAtUnixSeconds,
+            Require(ResponseWindowContains(
+                    bundle.IssuedAtUnixSeconds,
+                    bundle.ExpiresAtUnixSeconds,
+                    verifiedAt),
                 "Registry LocalOwner response is expired.");
             var placementId = new BlindedPlacementId(placement);
             Require(Fixed(
@@ -2048,6 +2050,20 @@ public static class ProductionMailboxCredentialBundleImporter
         if (value.Length != length || value.IndexOfAnyExcept((byte)0) < 0)
             throw new InvalidDataException($"Registry {label} is invalid.");
         return value.ToArray();
+    }
+
+    private static bool ResponseWindowContains(
+        ulong issuedAt,
+        ulong expiresAt,
+        ulong verifiedAt)
+    {
+        if (issuedAt == 0 || issuedAt >= expiresAt || verifiedAt == 0)
+            return false;
+
+        var maximumSkew =
+            (ulong)ProductionMailboxAuthorityConstants.MaximumClockSkewSeconds;
+        return (verifiedAt >= issuedAt || issuedAt - verifiedAt <= maximumSkew) &&
+               (verifiedAt <= expiresAt || verifiedAt - expiresAt <= maximumSkew);
     }
 
     private static bool Fixed(ReadOnlySpan<byte> left, ReadOnlySpan<byte> right) =>
