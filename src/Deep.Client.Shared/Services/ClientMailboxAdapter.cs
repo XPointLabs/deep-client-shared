@@ -342,6 +342,7 @@ public sealed class ClientMailboxAdapter
     private readonly IClientMailboxBinaryIngress ingress;
     private readonly ITransportOutboxRepository outbox;
     private readonly IClientMailboxStateRepository state;
+    private readonly ITerminalRetrieveRetirementRepository terminalRetrieveRetirement;
     private readonly IClientMailboxReceiptVerifier receipts;
     private readonly MailboxAuthenticatedRequestFactory requests;
     private readonly IMailboxClientDecodePolicyProvider decodePolicies;
@@ -363,6 +364,7 @@ public sealed class ClientMailboxAdapter
         ArgumentNullException.ThrowIfNull(localStore);
         this.outbox = localStore;
         this.state = localStore;
+        this.terminalRetrieveRetirement = localStore;
         this.receipts = receipts ?? throw new ArgumentNullException(nameof(receipts));
         this.requests = requests ?? throw new ArgumentNullException(nameof(requests));
         this.decodePolicies = decodePolicies ?? throw new ArgumentNullException(nameof(decodePolicies));
@@ -561,6 +563,51 @@ public sealed class ClientMailboxAdapter
         FixedEquals(
             expectedTraversal.ContinuationToken,
             actualTraversal.ContinuationToken);
+
+    private static void RequireTerminalRetrieveAttempt(
+        TransportOutboxItemSnapshot snapshot,
+        ScopedMailboxResolvedRoute route,
+        ClientMailboxTraversal traversal,
+        ReadOnlySpan<byte> expectedOperationId)
+    {
+        if (snapshot.State != TransportOutboxState.Attempted ||
+            snapshot.Attempts.Count == 0 ||
+            snapshot.GetAcknowledgementEvidenceCopy() is not null ||
+            snapshot.Attempts.Any(static attempt =>
+                attempt.State != TransportOutboxAttemptState.Attempted ||
+                attempt.GetEvidenceCopy().Length != 0))
+        {
+            throw new InvalidOperationException(
+                "Terminal retrieve retirement requires an attempted operation without accepted or durable evidence.");
+        }
+
+        var canonical = snapshot.GetCiphertextBundleCopy();
+        var authenticated = DecodeRequest(
+            new MailboxAuthenticatedRequestFrame(
+                MailboxAuthenticatedOperation.Retrieve,
+                canonical),
+            MailboxAuthenticatedOperation.Retrieve);
+        var request = MailboxAuthenticatedRequestTranscript.DecodeRetrieveBody(
+            authenticated.Binding.CanonicalRequest.Span);
+        if (!FixedEquals(snapshot.LogicalId.Value, expectedOperationId) ||
+            !FixedEquals(
+                snapshot.DedupMaterial.Value,
+                authenticated.Binding.RequestDigest.Span) ||
+            !FixedEquals(request.OperationId.Span, expectedOperationId) ||
+            request.Epoch != route.Epoch ||
+            !FixedEquals(request.MailboxId.Bytes.Span, route.MailboxId.Bytes.Span) ||
+            !FixedEquals(
+                request.PlacementId.Bytes.Span,
+                route.PlacementId.Bytes.Span) ||
+            request.AfterCursor != traversal.AfterCursor ||
+            !FixedEquals(
+                request.ContinuationToken.Span,
+                traversal.ContinuationToken))
+        {
+            throw new InvalidOperationException(
+                "Attempted retrieve does not match the exact durable operation and traversal.");
+        }
+    }
 
     public async Task<ClientMailboxAckResult> AcknowledgeAsync(
         OutboxAccountScope outboxScope,
@@ -761,6 +808,81 @@ public sealed class ClientMailboxAdapter
         await ReconcileExpiredAsync(scope, cancellationToken).ConfigureAwait(false);
         return await state.ReadTraversalAsync(scope, cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    internal async Task RetireTerminallyRejectedRetrieveAsync(
+        OutboxAccountScope outboxScope,
+        MailboxCredentialSelector selector,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(outboxScope);
+        ArgumentNullException.ThrowIfNull(selector);
+        if (!selector.AccountScope.Equals(outboxScope))
+            throw new InvalidOperationException(
+                "Mailbox selector belongs to another account scope.");
+
+        var route = await requests.ReadRouteAsync(selector, cancellationToken)
+            .ConfigureAwait(false);
+        var scope = activation.ScopeFor(route.MailboxId, route.Epoch);
+        var traversal = await state.ReadTraversalAsync(scope, cancellationToken)
+            .ConfigureAwait(false);
+        var operationId = RetrieveOperationId(route, traversal);
+        var logicalId = OutboxLogicalId.FromBytes(operationId);
+        await using var operationLease =
+            await ClientMailboxOperationSingleFlight.EnterAsync(
+                outboxScope,
+                logicalId,
+                cancellationToken).ConfigureAwait(false);
+
+        var confirmedRoute = await requests.ReadRouteAsync(
+                selector,
+                cancellationToken)
+            .ConfigureAwait(false);
+        var confirmedScope = activation.ScopeFor(
+            confirmedRoute.MailboxId,
+            confirmedRoute.Epoch);
+        var confirmedTraversal = await state.ReadTraversalAsync(
+                confirmedScope,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (!SameRetrieveContext(
+                route,
+                traversal,
+                confirmedRoute,
+                confirmedTraversal))
+        {
+            throw new InvalidOperationException(
+                "Mailbox retrieve context changed before terminal retirement.");
+        }
+
+        var snapshot = await ReadFoundAsync(
+                outboxScope,
+                logicalId,
+                cancellationToken)
+            .ConfigureAwait(false);
+        RequireTerminalRetrieveAttempt(
+            snapshot,
+            confirmedRoute,
+            confirmedTraversal,
+            operationId);
+        var next = await terminalRetrieveRetirement
+            .RetireTerminallyRejectedRetrieveAsync(
+                confirmedScope,
+                confirmedTraversal,
+                outboxScope,
+                logicalId,
+                snapshot.Revision,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (next.AfterCursor != confirmedTraversal.AfterCursor ||
+            next.PollGeneration != checked(confirmedTraversal.PollGeneration + 1) ||
+            !FixedEquals(
+                next.ContinuationToken,
+                confirmedTraversal.ContinuationToken))
+        {
+            throw new InvalidDataException(
+                "Terminal retrieve retirement returned an invalid traversal rollover.");
+        }
     }
 
     public async Task<IReadOnlyList<MailboxRetrievedEnvelope>> ReadDurableInboxAsync(

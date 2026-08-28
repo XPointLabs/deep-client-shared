@@ -312,6 +312,17 @@ internal sealed class ClientMailboxCoordinatorStatement
     };
 }
 
+internal interface ITerminalRetrieveRetirementRepository
+{
+    Task<ClientMailboxTraversal> RetireTerminallyRejectedRetrieveAsync(
+        ClientMailboxScope scope,
+        ClientMailboxTraversal expectedTraversal,
+        OutboxAccountScope accountScope,
+        OutboxLogicalId logicalId,
+        ulong expectedOutboxRevision,
+        CancellationToken cancellationToken = default);
+}
+
 internal sealed class ClientMailboxStoredState
 {
     public ulong AfterCursor { get; set; }

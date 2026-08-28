@@ -500,6 +500,10 @@ public sealed partial class MailboxCredentialBundleImporterTests
             Assert.Equal(
                 ClientMailboxTransportFailure.NetworkUnavailable,
                 exception.Failure);
+            await Assert.ThrowsAsync<ArgumentException>(() =>
+                transport.RetireTerminallyRejectedRetrieveAsync(
+                    identity.SessionId,
+                    exception));
         }
 
         clock.Set(Now.AddMinutes(1));
@@ -530,6 +534,274 @@ public sealed partial class MailboxCredentialBundleImporterTests
                 : throw new InvalidOperationException(
                     "The acceptance transport has no selector for another identity."),
             timeProvider: clock);
+    }
+
+    [Theory]
+    [InlineData(ClientMailboxTransportFailure.AuthorizationRejected)]
+    [InlineData(ClientMailboxTransportFailure.ConflictOrExpired)]
+    public async Task NativeRetrieve_TerminalRetirementRetainsAttemptAndRollsExactPoll(
+        ClientMailboxTransportFailure failure)
+    {
+        using var fixture = Fixture.Create();
+        using var identity = new SessionIdentityProvider(AlicePhrase);
+        var clock = new MutableTimeProvider(Now);
+        using var store = new SqliteSessionStore(fixture.DatabasePath);
+        var imported = await MailboxCredentialBundleImporter.ImportAsync(
+            store,
+            identity,
+            fixture.AndroidOptions with { TimeProvider = clock },
+            MailboxInfrastructureOwnership.UserManaged);
+        var ingress = new TerminalFirstRetrieveIngress(clock, failure);
+        using var transport = new NativeMau2MailboxTransport(
+            ClientFeatureFlags.Defaults with { ClientMailboxAdapterEnabled = true },
+            imported.Activation,
+            ingress,
+            store,
+            new PinnedClientMailboxReceiptVerifier(
+                new SodiumClientMailboxReceiptCrypto()),
+            imported.DecodePolicies,
+            imported.Authority,
+            sessionId => sessionId == imported.LocalSessionId
+                ? imported.SelfSelector
+                : throw new InvalidOperationException(
+                    "The acceptance transport has no selector for another identity."),
+            timeProvider: clock);
+        var terminal = new ClientMailboxTransportException(
+            failure,
+            retryable: false,
+            "Canonical terminal credential rejection.");
+
+        await Assert.ThrowsAsync<IOException>(() =>
+            transport.RetireTerminallyRejectedRetrieveAsync(
+                identity.SessionId,
+                terminal));
+        var observed = await Assert.ThrowsAsync<ClientMailboxTransportException>(() =>
+            transport.RetrieveAuthenticatedAsync(
+                identity,
+                cursor: null,
+                limit: 1));
+        Assert.Equal(failure, observed.Failure);
+        Assert.False(observed.Retryable);
+
+        var firstRequest = Retrieve(Assert.Single(ingress.Requests));
+        var before = await store.ReadTransportOutboxAsync(
+            imported.SelfSelector.AccountScope,
+            OutboxLogicalId.FromBytes(firstRequest.OperationId.Span));
+        Assert.Equal(TransportOutboxReadResult.Found, before.Result);
+        Assert.Equal(TransportOutboxState.Attempted, before.Item!.State);
+        Assert.All(before.Item.Attempts, static attempt =>
+        {
+            Assert.Equal(TransportOutboxAttemptState.Attempted, attempt.State);
+            Assert.Empty(attempt.GetEvidenceCopy());
+        });
+
+        var mailboxScope = imported.Activation.ScopeFor(
+            firstRequest.MailboxId,
+            firstRequest.Epoch);
+        var stateRepository = (IClientMailboxStateRepository)store;
+        var retirementRepository = (ITerminalRetrieveRetirementRepository)store;
+        var currentTraversal = await stateRepository.ReadTraversalAsync(mailboxScope);
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            retirementRepository.RetireTerminallyRejectedRetrieveAsync(
+                mailboxScope,
+                currentTraversal,
+                imported.SelfSelector.AccountScope,
+                OutboxLogicalId.FromBytes(Bytes(
+                    TransportOutboxLimits.LogicalIdBytes,
+                    0xee)),
+                before.Item.Revision));
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            retirementRepository.RetireTerminallyRejectedRetrieveAsync(
+                mailboxScope,
+                new ClientMailboxTraversal(
+                    currentTraversal.AfterCursor,
+                    currentTraversal.ContinuationToken,
+                    checked(currentTraversal.PollGeneration + 1)),
+                imported.SelfSelector.AccountScope,
+                OutboxLogicalId.FromBytes(firstRequest.OperationId.Span),
+                before.Item.Revision));
+
+        await transport.RetireTerminallyRejectedRetrieveAsync(
+            identity.SessionId,
+            observed);
+
+        var retained = await store.ReadTransportOutboxAsync(
+            imported.SelfSelector.AccountScope,
+            OutboxLogicalId.FromBytes(firstRequest.OperationId.Span));
+        Assert.Equal(TransportOutboxReadResult.Found, retained.Result);
+        Assert.Equal(before.Item.Revision, retained.Item!.Revision);
+        Assert.Equal(before.Item.GetCiphertextBundleCopy(),
+            retained.Item.GetCiphertextBundleCopy());
+        Assert.Equal(TransportOutboxState.Attempted, retained.Item.State);
+
+        var page = await transport.RetrieveAuthenticatedAsync(
+            identity,
+            cursor: null,
+            limit: 1);
+        Assert.Single(page.Entries);
+        Assert.Equal(2, ingress.Requests.Count);
+        var nextRequest = Retrieve(ingress.Requests[1]);
+        Assert.NotEqual(
+            firstRequest.OperationId.ToArray(),
+            nextRequest.OperationId.ToArray());
+
+        var stillRetained = await store.ReadTransportOutboxAsync(
+            imported.SelfSelector.AccountScope,
+            OutboxLogicalId.FromBytes(firstRequest.OperationId.Span));
+        Assert.Equal(TransportOutboxReadResult.Found, stillRetained.Result);
+        Assert.Equal(TransportOutboxState.Attempted, stillRetained.Item!.State);
+
+        static MailboxAuthenticatedRetrieveBody Retrieve(byte[] canonical) =>
+            MailboxAuthenticatedRequestTranscript.DecodeRetrieveBody(
+                MailboxAuthenticatedClientRequestCodec.Decode(canonical)
+                    .Binding.CanonicalRequest.Span);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task NativeRetrieve_TerminalRetirementRejectsAcceptedOrDurableEvidence(
+        bool durable)
+    {
+        using var fixture = Fixture.Create();
+        using var identity = new SessionIdentityProvider(AlicePhrase);
+        var clock = new MutableTimeProvider(Now);
+        using var store = new SqliteSessionStore(fixture.DatabasePath);
+        var imported = await MailboxCredentialBundleImporter.ImportAsync(
+            store,
+            identity,
+            fixture.AndroidOptions with { TimeProvider = clock },
+            MailboxInfrastructureOwnership.UserManaged);
+        var ingress = new TerminalFirstRetrieveIngress(
+            clock,
+            ClientMailboxTransportFailure.AuthorizationRejected);
+        using var transport = new NativeMau2MailboxTransport(
+            ClientFeatureFlags.Defaults with { ClientMailboxAdapterEnabled = true },
+            imported.Activation,
+            ingress,
+            store,
+            new PinnedClientMailboxReceiptVerifier(
+                new SodiumClientMailboxReceiptCrypto()),
+            imported.DecodePolicies,
+            imported.Authority,
+            sessionId => sessionId == imported.LocalSessionId
+                ? imported.SelfSelector
+                : throw new InvalidOperationException(
+                    "The acceptance transport has no selector for another identity."),
+            timeProvider: clock);
+        var terminal = await Assert.ThrowsAsync<ClientMailboxTransportException>(() =>
+            transport.RetrieveAuthenticatedAsync(
+                identity,
+                cursor: null,
+                limit: 1));
+        var request = MailboxAuthenticatedRequestTranscript.DecodeRetrieveBody(
+            MailboxAuthenticatedClientRequestCodec.Decode(
+                    Assert.Single(ingress.Requests))
+                .Binding.CanonicalRequest.Span);
+        var logicalId = OutboxLogicalId.FromBytes(request.OperationId.Span);
+        var attempted = (await store.ReadTransportOutboxAsync(
+            imported.SelfSelector.AccountScope,
+            logicalId)).Item!;
+        var attempt = Assert.Single(attempted.Attempts);
+        var acceptedAt = clock.GetUtcNow().AddSeconds(1);
+        Assert.Equal(
+            TransportOutboxCommitResult.Applied,
+            await store.ApplyTransportOutboxTransitionAsync(
+                imported.SelfSelector.AccountScope,
+                TransportOutboxTransition.Accepted(
+                    imported.SelfSelector.AccountScope,
+                    logicalId,
+                    attempted.Revision,
+                    attempt.AttemptId,
+                    OutboxTransitionSource.Adapter,
+                    OutboxTransitionReason.AdapterAccepted,
+                    acceptedAt,
+                    acceptedAt.AddMinutes(1),
+                    Bytes(32, 0xa1))));
+        var terminalState = (await store.ReadTransportOutboxAsync(
+            imported.SelfSelector.AccountScope,
+            logicalId)).Item!;
+        if (durable)
+        {
+            Assert.Equal(
+                TransportOutboxCommitResult.Applied,
+                await store.ApplyTransportOutboxTransitionAsync(
+                    imported.SelfSelector.AccountScope,
+                    TransportOutboxTransition.Durable(
+                        imported.SelfSelector.AccountScope,
+                        logicalId,
+                        terminalState.Revision,
+                        attempt.AttemptId,
+                        OutboxTransitionSource.Adapter,
+                        OutboxTransitionReason.AdapterConfirmedDurable,
+                        acceptedAt.AddSeconds(1),
+                        Bytes(32, 0xa2))));
+            terminalState = (await store.ReadTransportOutboxAsync(
+                imported.SelfSelector.AccountScope,
+                logicalId)).Item!;
+        }
+
+        var mailboxScope = imported.Activation.ScopeFor(
+            request.MailboxId,
+            request.Epoch);
+        var beforeTraversal = await ((IClientMailboxStateRepository)store)
+            .ReadTraversalAsync(mailboxScope);
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            transport.RetireTerminallyRejectedRetrieveAsync(
+                identity.SessionId,
+                terminal));
+        var afterTraversal = await ((IClientMailboxStateRepository)store)
+            .ReadTraversalAsync(mailboxScope);
+        Assert.Equal(beforeTraversal.AfterCursor, afterTraversal.AfterCursor);
+        Assert.Equal(beforeTraversal.PollGeneration, afterTraversal.PollGeneration);
+        Assert.Equal(
+            durable ? TransportOutboxState.Durable : TransportOutboxState.Accepted,
+            terminalState.State);
+        Assert.NotEmpty(Assert.Single(terminalState.Attempts).GetEvidenceCopy());
+    }
+
+    [Fact]
+    public async Task NativeRetrieve_OutcomeUnknownRemainsExactPreparedFrame()
+    {
+        using var fixture = Fixture.Create();
+        using var identity = new SessionIdentityProvider(AlicePhrase);
+        var clock = new MutableTimeProvider(Now);
+        using var store = new SqliteSessionStore(fixture.DatabasePath);
+        var imported = await MailboxCredentialBundleImporter.ImportAsync(
+            store,
+            identity,
+            fixture.AndroidOptions with { TimeProvider = clock },
+            MailboxInfrastructureOwnership.UserManaged);
+        var ingress = new OutcomeUnknownFirstRetrieveIngress(clock);
+        using var transport = new NativeMau2MailboxTransport(
+            ClientFeatureFlags.Defaults with { ClientMailboxAdapterEnabled = true },
+            imported.Activation,
+            ingress,
+            store,
+            new PinnedClientMailboxReceiptVerifier(
+                new SodiumClientMailboxReceiptCrypto()),
+            imported.DecodePolicies,
+            imported.Authority,
+            sessionId => sessionId == imported.LocalSessionId
+                ? imported.SelfSelector
+                : throw new InvalidOperationException(
+                    "The acceptance transport has no selector for another identity."),
+            timeProvider: clock);
+
+        await Assert.ThrowsAsync<ClientMailboxDispatchOutcomeUnknownException>(() =>
+            transport.RetrieveAuthenticatedAsync(
+                identity,
+                cursor: null,
+                limit: 1));
+        clock.Set(Now.AddMinutes(1));
+        var page = await transport.RetrieveAuthenticatedAsync(
+            identity,
+            cursor: null,
+            limit: 1);
+
+        Assert.Single(page.Entries);
+        Assert.Equal(2, ingress.Requests.Count);
+        Assert.Equal(ingress.Requests[0], ingress.Requests[1]);
     }
 
     [Fact]
@@ -1761,6 +2033,75 @@ public sealed partial class MailboxCredentialBundleImporterTests
             }
 
             return inner.RetrieveAsync(canonicalMau2, cancellationToken);
+        }
+
+        public Task<ReadOnlyMemory<byte>> AcknowledgeAsync(
+            ReadOnlyMemory<byte> canonicalMau2,
+            CancellationToken cancellationToken = default) =>
+            inner.AcknowledgeAsync(canonicalMau2, cancellationToken);
+    }
+
+    private sealed class TerminalFirstRetrieveIngress(
+        TimeProvider timeProvider,
+        ClientMailboxTransportFailure failure) :
+        IClientMailboxBinaryIngress
+    {
+        private readonly ScriptedRetrieveIngress inner = new(timeProvider);
+
+        public List<byte[]> Requests { get; } = [];
+
+        public Task<ReadOnlyMemory<byte>> StoreAsync(
+            ReadOnlyMemory<byte> canonicalMau2,
+            CancellationToken cancellationToken = default) =>
+            inner.StoreAsync(canonicalMau2, cancellationToken);
+
+        public Task<ReadOnlyMemory<byte>> RetrieveAsync(
+            ReadOnlyMemory<byte> canonicalMau2,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Requests.Add(canonicalMau2.ToArray());
+            if (Requests.Count == 1)
+            {
+                return Task.FromException<ReadOnlyMemory<byte>>(
+                    new ClientMailboxTransportException(
+                        failure,
+                        retryable: false,
+                        "Simulated canonical terminal credential rejection."));
+            }
+
+            return inner.RetrieveAsync(canonicalMau2, cancellationToken);
+        }
+
+        public Task<ReadOnlyMemory<byte>> AcknowledgeAsync(
+            ReadOnlyMemory<byte> canonicalMau2,
+            CancellationToken cancellationToken = default) =>
+            inner.AcknowledgeAsync(canonicalMau2, cancellationToken);
+    }
+
+    private sealed class OutcomeUnknownFirstRetrieveIngress(TimeProvider timeProvider) :
+        IClientMailboxBinaryIngress
+    {
+        private readonly ScriptedRetrieveIngress inner = new(timeProvider);
+
+        public List<byte[]> Requests { get; } = [];
+
+        public Task<ReadOnlyMemory<byte>> StoreAsync(
+            ReadOnlyMemory<byte> canonicalMau2,
+            CancellationToken cancellationToken = default) =>
+            inner.StoreAsync(canonicalMau2, cancellationToken);
+
+        public Task<ReadOnlyMemory<byte>> RetrieveAsync(
+            ReadOnlyMemory<byte> canonicalMau2,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Requests.Add(canonicalMau2.ToArray());
+            return Requests.Count == 1
+                ? Task.FromException<ReadOnlyMemory<byte>>(
+                    new ClientMailboxDispatchOutcomeUnknownException(
+                        "Simulated privacy-terminal outcome unknown."))
+                : inner.RetrieveAsync(canonicalMau2, cancellationToken);
         }
 
         public Task<ReadOnlyMemory<byte>> AcknowledgeAsync(

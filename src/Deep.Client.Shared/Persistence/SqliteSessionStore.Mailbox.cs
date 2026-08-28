@@ -9,7 +9,8 @@ namespace Deep.Client.Shared.Persistence;
 /// partial contains the normalized mailbox inbox implementation.
 /// </summary>
 public sealed partial class SqliteSessionStore :
-    IClientMailboxStateRepository
+    IClientMailboxStateRepository,
+    ITerminalRetrieveRetirementRepository
 {
     private readonly Action<ClientMailboxCommitFaultPoint>? commitFault;
 
@@ -39,6 +40,80 @@ public sealed partial class SqliteSessionStore :
             scope,
             expectedTraversal,
             cancellationToken);
+
+    async Task<ClientMailboxTraversal>
+        ITerminalRetrieveRetirementRepository.RetireTerminallyRejectedRetrieveAsync(
+        ClientMailboxScope scope,
+        ClientMailboxTraversal expectedTraversal,
+        OutboxAccountScope accountScope,
+        OutboxLogicalId logicalId,
+        ulong expectedOutboxRevision,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        ArgumentNullException.ThrowIfNull(expectedTraversal);
+        ArgumentNullException.ThrowIfNull(accountScope);
+        ArgumentNullException.ThrowIfNull(logicalId);
+        if (expectedOutboxRevision == 0)
+            throw new ArgumentOutOfRangeException(nameof(expectedOutboxRevision));
+
+        await _databaseGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await using var connection = await OpenAsync(cancellationToken)
+                .ConfigureAwait(false);
+            await using var transaction =
+                connection.BeginTransaction(deferred: false);
+            var scopeBytes = scope.ToArray();
+            var current = await ReadTraversalCoreAsync(
+                connection,
+                transaction,
+                scopeBytes,
+                cancellationToken).ConfigureAwait(false);
+            var candidate = new ClientMailboxStoredState
+            {
+                AfterCursor = current.AfterCursor,
+                PollGeneration = current.PollGeneration,
+                ContinuationToken = current.GetContinuationTokenCopy()
+            };
+            var next = ClientMailboxStateMachine.AdvanceRetrievePoll(
+                candidate,
+                expectedTraversal);
+
+            var outboxItem = ReadTransportOutboxItem(
+                connection,
+                transaction,
+                accountScope.Value,
+                logicalId.Value);
+            if (outboxItem is null ||
+                outboxItem.Revision != expectedOutboxRevision ||
+                outboxItem.State != TransportOutboxState.Attempted ||
+                outboxItem.AcknowledgementEvidence is not null ||
+                outboxItem.Attempts.Count == 0 ||
+                outboxItem.Attempts.Any(static attempt =>
+                    attempt.State != TransportOutboxAttemptState.Attempted ||
+                    attempt.Evidence.Length != 0))
+            {
+                throw new InvalidOperationException(
+                    "Terminal retrieve retirement requires the exact attempted outbox operation without accepted or durable evidence.");
+            }
+
+            await WriteTraversalAsync(
+                connection,
+                transaction,
+                scopeBytes,
+                next,
+                cancellationToken).ConfigureAwait(false);
+            commitFault?.Invoke(ClientMailboxCommitFaultPoint.BeforeCommit);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            commitFault?.Invoke(ClientMailboxCommitFaultPoint.AfterCommit);
+            return next;
+        }
+        finally
+        {
+            _databaseGate.Release();
+        }
+    }
 
     public Task<IReadOnlyList<MailboxRetrievedEnvelope>> ReadDurableInboxAsync(
         ClientMailboxScope scope,

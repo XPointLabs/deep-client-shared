@@ -411,6 +411,37 @@ public sealed class NativeMau2MailboxTransport :
         return new OpaqueMailboxInboxPage(continuation, next, item);
     }
 
+    /// <summary>
+    /// Retires only the exact current RETRIEVE after a canonical, non-retryable privacy-terminal
+    /// credential rejection. The attempted outbox row is retained; only its traversal poll
+    /// generation is atomically rolled forward. Outcome-unknown and retryable failures are
+    /// rejected by contract.
+    /// </summary>
+    public async Task RetireTerminallyRejectedRetrieveAsync(
+        SessionId account,
+        ClientMailboxTransportException terminalFailure,
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(terminalFailure);
+        if (terminalFailure.Retryable ||
+            terminalFailure.Failure is not (
+                ClientMailboxTransportFailure.AuthorizationRejected or
+                ClientMailboxTransportFailure.ConflictOrExpired))
+        {
+            throw new ArgumentException(
+                "Retrieve retirement requires a non-retryable credential terminal rejection.",
+                nameof(terminalFailure));
+        }
+
+        var selector = RequireSelfSelector(account);
+        await adapter.RetireTerminallyRejectedRetrieveAsync(
+                selector.AccountScope,
+                selector,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
     public async Task AcknowledgeOpaqueMailboxInboxAsync(
         IMailboxOperationSigner signer,
         string opaqueItemHandle,
