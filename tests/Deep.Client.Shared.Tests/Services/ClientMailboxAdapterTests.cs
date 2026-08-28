@@ -189,6 +189,73 @@ public sealed class ClientMailboxAdapterTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task RetrievePollRollover_IsAtomicPersistentAndPreservesTraversal(
+        bool sqlite)
+    {
+        var path = TempDatabase();
+        var scope = Scope(0x2a);
+        IClientMailboxStateRepository repository = CreateRepository(sqlite, path);
+        try
+        {
+            var page = Page(
+                1,
+                1,
+                hasMore: true,
+                token: Range(0x6a, 32));
+            var committed = await repository.CommitRetrievePageAsync(
+                scope,
+                new ClientMailboxTraversal(0, []),
+                page);
+            var before = committed.Traversal;
+
+            var rolled = await repository.AdvanceRetrievePollAsync(
+                scope,
+                before);
+
+            Assert.Equal(before.AfterCursor, rolled.AfterCursor);
+            Assert.Equal(
+                before.GetContinuationTokenCopy(),
+                rolled.GetContinuationTokenCopy());
+            Assert.Equal(before.PollGeneration + 1, rolled.PollGeneration);
+            await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                repository.AdvanceRetrievePollAsync(scope, before));
+            Assert.Single(await repository.ReadDurableInboxAsync(scope));
+
+            repository = RestartInstallation(repository, sqlite, path);
+            var recovered = await repository.ReadTraversalAsync(scope);
+            Assert.Equal(rolled.AfterCursor, recovered.AfterCursor);
+            Assert.Equal(rolled.PollGeneration, recovered.PollGeneration);
+            Assert.Equal(
+                rolled.GetContinuationTokenCopy(),
+                recovered.GetContinuationTokenCopy());
+            Assert.Single(await repository.ReadDurableInboxAsync(scope));
+            var acknowledgement = page.Items[0].ToAcknowledgement();
+            Assert.Equal(
+                ClientMailboxAckState.Pending,
+                await repository.CheckAcknowledgementsAsync(
+                    scope,
+                    [acknowledgement]));
+            Assert.Equal(
+                ClientMailboxAckState.Pending,
+                await repository.CommitAcknowledgementsAsync(
+                    scope,
+                    [acknowledgement]));
+            Assert.Equal(
+                ClientMailboxAckState.AlreadyCommitted,
+                await repository.CheckAcknowledgementsAsync(
+                    scope,
+                    [acknowledgement]));
+        }
+        finally
+        {
+            (repository as IDisposable)?.Dispose();
+            DeleteSqliteFiles(path);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task CapacityFailure_UsesCloneValidateSwapAndPreservesTraversal(
         bool sqlite)
     {

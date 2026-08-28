@@ -31,6 +31,15 @@ public sealed partial class SqliteSessionStore :
                 ReadTraversalCoreAsync(connection, transaction, value, token),
             cancellationToken);
 
+    public Task<ClientMailboxTraversal> AdvanceRetrievePollAsync(
+        ClientMailboxScope scope,
+        ClientMailboxTraversal expectedTraversal,
+        CancellationToken cancellationToken = default) =>
+        AdvanceRetrievePollNormalizedAsync(
+            scope,
+            expectedTraversal,
+            cancellationToken);
+
     public Task<IReadOnlyList<MailboxRetrievedEnvelope>> ReadDurableInboxAsync(
         ClientMailboxScope scope,
         CancellationToken cancellationToken = default) =>
@@ -400,6 +409,56 @@ public sealed partial class SqliteSessionStore :
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             commitFault?.Invoke(ClientMailboxCommitFaultPoint.AfterCommit);
             return new(next, durable);
+        }
+        finally
+        {
+            _databaseGate.Release();
+        }
+    }
+
+    private async Task<ClientMailboxTraversal> AdvanceRetrievePollNormalizedAsync(
+        ClientMailboxScope scope,
+        ClientMailboxTraversal expected,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        ArgumentNullException.ThrowIfNull(expected);
+        await _databaseGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await using var connection = await OpenAsync(cancellationToken)
+                .ConfigureAwait(false);
+            await using var transaction =
+                connection.BeginTransaction(deferred: false);
+            var scopeBytes = scope.ToArray();
+            var current = await ReadTraversalCoreAsync(
+                connection,
+                transaction,
+                scopeBytes,
+                cancellationToken).ConfigureAwait(false);
+            var candidate = new ClientMailboxStoredState
+            {
+                AfterCursor = current.AfterCursor,
+                PollGeneration = current.PollGeneration,
+                ContinuationToken = current.GetContinuationTokenCopy()
+            };
+            var next = ClientMailboxStateMachine.AdvanceRetrievePoll(
+                candidate,
+                expected);
+            await WriteTraversalAsync(
+                connection,
+                transaction,
+                scopeBytes,
+                next,
+                cancellationToken).ConfigureAwait(false);
+            await EnforceInstallationScopeCapacityAsync(
+                connection,
+                transaction,
+                cancellationToken).ConfigureAwait(false);
+            commitFault?.Invoke(ClientMailboxCommitFaultPoint.BeforeCommit);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            commitFault?.Invoke(ClientMailboxCommitFaultPoint.AfterCommit);
+            return next;
         }
         finally
         {

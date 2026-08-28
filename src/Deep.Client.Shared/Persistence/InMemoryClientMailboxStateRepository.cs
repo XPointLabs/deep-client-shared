@@ -43,6 +43,37 @@ public sealed class InMemoryClientMailboxStateRepository : IClientMailboxStateRe
         }
     }
 
+    public Task<ClientMailboxTraversal> AdvanceRetrievePollAsync(
+        ClientMailboxScope scope,
+        ClientMailboxTraversal expectedTraversal,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ArgumentNullException.ThrowIfNull(scope);
+        ArgumentNullException.ThrowIfNull(expectedTraversal);
+        lock (gate)
+        {
+            var key = Key(scope);
+            var candidate = Get(scope).Clone();
+            candidate.PollGeneration = pollGenerations.GetValueOrDefault(key);
+            var next = ClientMailboxStateMachine.AdvanceRetrievePoll(
+                candidate,
+                expectedTraversal);
+            if (!pollGenerations.ContainsKey(key) &&
+                pollGenerations.Count >=
+                    ClientMailboxStateLimits.MaximumInstallationPollClocks)
+            {
+                throw new InvalidDataException(
+                    "Installation-global mailbox poll-clock bound was exceeded.");
+            }
+
+            commitFault?.Invoke(ClientMailboxCommitFaultPoint.BeforeCommit);
+            pollGenerations[key] = next.PollGeneration;
+            commitFault?.Invoke(ClientMailboxCommitFaultPoint.AfterCommit);
+            return Task.FromResult(next);
+        }
+    }
+
     public Task<IReadOnlyList<MailboxRetrievedEnvelope>> ReadDurableInboxAsync(
         ClientMailboxScope scope,
         CancellationToken cancellationToken = default) =>

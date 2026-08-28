@@ -440,7 +440,7 @@ public sealed class ClientMailboxAdapter
         ArgumentNullException.ThrowIfNull(outboxScope);
         ArgumentNullException.ThrowIfNull(signer);
         ArgumentNullException.ThrowIfNull(selector);
-        for (var readAttempt = 0; readAttempt < 3; readAttempt++)
+        for (var routeChangeCount = 0; routeChangeCount < 3;)
         {
             var route = await requests.ReadRouteAsync(selector, cancellationToken)
                 .ConfigureAwait(false);
@@ -475,6 +475,7 @@ public sealed class ClientMailboxAdapter
                     confirmedRoute,
                     confirmedTraversal))
             {
+                routeChangeCount++;
                 continue;
             }
 
@@ -493,11 +494,15 @@ public sealed class ClientMailboxAdapter
                     cancellationToken),
                 cancellationToken).ConfigureAwait(false);
             EnsureSignerMatches(prepared, signer);
-            return await DispatchRetrieveAsync(
+            var result = await DispatchRetrieveAsync(
                 outboxScope,
                 selector,
                 prepared,
                 cancellationToken).ConfigureAwait(false);
+            if (result is not null)
+            {
+                return result;
+            }
         }
 
         throw new IOException(
@@ -506,15 +511,26 @@ public sealed class ClientMailboxAdapter
 
     private static byte[] RetrieveOperationId(
         ScopedMailboxResolvedRoute route,
+        ClientMailboxTraversal traversal) =>
+        RetrieveOperationId(
+            route.Epoch,
+            route.MailboxId,
+            route.PlacementId,
+            traversal);
+
+    private static byte[] RetrieveOperationId(
+        ulong epoch,
+        BlindedMailboxId mailboxId,
+        BlindedPlacementId placementId,
         ClientMailboxTraversal traversal)
     {
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         hash.AppendData(RetrieveOperationDomain);
         Span<byte> scalar = stackalloc byte[8];
-        BinaryPrimitives.WriteUInt64BigEndian(scalar, route.Epoch);
+        BinaryPrimitives.WriteUInt64BigEndian(scalar, epoch);
         hash.AppendData(scalar);
-        hash.AppendData(route.MailboxId.Bytes.Span);
-        hash.AppendData(route.PlacementId.Bytes.Span);
+        hash.AppendData(mailboxId.Bytes.Span);
+        hash.AppendData(placementId.Bytes.Span);
         BinaryPrimitives.WriteUInt64BigEndian(scalar, traversal.PollGeneration);
         hash.AppendData(scalar);
         BinaryPrimitives.WriteUInt64BigEndian(scalar, traversal.AfterCursor);
@@ -760,7 +776,7 @@ public sealed class ClientMailboxAdapter
             .ConfigureAwait(false);
     }
 
-    private async Task<ClientMailboxRetrieveResult> DispatchRetrieveAsync(
+    private async Task<ClientMailboxRetrieveResult?> DispatchRetrieveAsync(
         OutboxAccountScope outboxScope,
         MailboxCredentialSelector selector,
         MailboxAuthenticatedRequestFrame authenticatedRequest,
@@ -825,6 +841,15 @@ public sealed class ClientMailboxAdapter
         }
         var traversal = await state.ReadTraversalAsync(scope, cancellationToken)
             .ConfigureAwait(false);
+        var currentOperationId = RetrieveOperationId(
+            request.Epoch,
+            request.MailboxId,
+            request.PlacementId,
+            traversal);
+        if (!FixedEquals(currentOperationId, request.OperationId.Span))
+        {
+            return null;
+        }
         if (outboxSnapshot.State == TransportOutboxState.Prepared &&
             (request.AfterCursor != traversal.AfterCursor ||
              !FixedEquals(
@@ -833,6 +858,15 @@ public sealed class ClientMailboxAdapter
         {
             throw new InvalidOperationException(
                 "MBR2 cursor/token does not match durable mailbox traversal.");
+        }
+        if (outboxSnapshot.Attempts.Count >=
+            TransportOutboxLimits.MaxAttemptsPerItem)
+        {
+            _ = await state.AdvanceRetrievePollAsync(
+                scope,
+                traversal,
+                cancellationToken).ConfigureAwait(false);
+            return null;
         }
 
         await using var policyLease =

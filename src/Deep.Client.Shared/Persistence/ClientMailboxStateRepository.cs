@@ -215,6 +215,11 @@ public interface IClientMailboxStateRepository
         ClientMailboxScope scope,
         CancellationToken cancellationToken = default);
 
+    Task<ClientMailboxTraversal> AdvanceRetrievePollAsync(
+        ClientMailboxScope scope,
+        ClientMailboxTraversal expectedTraversal,
+        CancellationToken cancellationToken = default);
+
     Task<IReadOnlyList<MailboxRetrievedEnvelope>> ReadDurableInboxAsync(
         ClientMailboxScope scope,
         CancellationToken cancellationToken = default);
@@ -349,6 +354,26 @@ internal static class ClientMailboxStateMachine
             state.AfterCursor,
             state.ContinuationToken,
             state.PollGeneration);
+    }
+
+    public static ClientMailboxTraversal AdvanceRetrievePoll(
+        ClientMailboxStoredState state,
+        ClientMailboxTraversal expected)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+        ArgumentNullException.ThrowIfNull(expected);
+        Validate(state);
+        if (state.AfterCursor != expected.AfterCursor ||
+            state.PollGeneration != expected.PollGeneration ||
+            !FixedEquals(state.ContinuationToken, expected.ContinuationToken))
+        {
+            throw new InvalidOperationException(
+                "Mailbox traversal changed before retrieve poll rollover.");
+        }
+
+        state.PollGeneration = checked(state.PollGeneration + 1);
+        Validate(state);
+        return Traversal(state);
     }
 
     public static ClientMailboxReceiveCommitResult CommitPage(

@@ -533,6 +533,175 @@ public sealed partial class MailboxCredentialBundleImporterTests
     }
 
     [Fact]
+    public async Task NativeRetrieve_ExhaustedAttemptsRollsToNewPollAcrossRestart()
+    {
+        using var fixture = Fixture.Create();
+        using var identity = new SessionIdentityProvider(AlicePhrase);
+        var clock = new MutableTimeProvider(Now);
+        var options = fixture.AndroidOptions with { TimeProvider = clock };
+        var ingress = new FailBoundedRetrieveIngress(clock);
+        ImportedMailboxRuntimeMaterial imported;
+
+        using (var store = new SqliteSessionStore(fixture.DatabasePath))
+        {
+            imported = await MailboxCredentialBundleImporter.ImportAsync(
+                store,
+                identity,
+                options,
+                MailboxInfrastructureOwnership.UserManaged);
+            using var transport = Native(store);
+            for (var attempt = 0;
+                 attempt < TransportOutboxLimits.MaxAttemptsPerItem;
+                 attempt++)
+            {
+                var exception = await Assert.ThrowsAsync<
+                    ClientMailboxTransportException>(() =>
+                    transport.RetrieveAuthenticatedAsync(
+                        identity,
+                        cursor: null,
+                        limit: 1));
+                Assert.True(exception.Retryable);
+                clock.Set(clock.GetUtcNow().AddMinutes(1));
+            }
+
+            var firstRequest = Retrieve(ingress.Requests[0]);
+            var exhausted = await store.ReadTransportOutboxAsync(
+                imported.SelfSelector.AccountScope,
+                OutboxLogicalId.FromBytes(firstRequest.OperationId.Span));
+            Assert.Equal(TransportOutboxReadResult.Found, exhausted.Result);
+            Assert.Equal(
+                TransportOutboxLimits.MaxAttemptsPerItem,
+                exhausted.Item!.Attempts.Count);
+            Assert.Equal(TransportOutboxState.Attempted, exhausted.Item.State);
+        }
+
+        using (var restarted = new SqliteSessionStore(fixture.DatabasePath))
+        using (var transport = Native(restarted))
+        {
+            var page = await transport.RetrieveAuthenticatedAsync(
+                identity,
+                cursor: null,
+                limit: 1);
+            Assert.Single(page.Entries);
+
+            var firstRequest = Retrieve(ingress.Requests[0]);
+            var nextRequest = Retrieve(ingress.Requests[^1]);
+            Assert.NotEqual(
+                firstRequest.OperationId.ToArray(),
+                nextRequest.OperationId.ToArray());
+            Assert.All(
+                ingress.Requests.Take(
+                    TransportOutboxLimits.MaxAttemptsPerItem),
+                request => Assert.Equal(ingress.Requests[0], request));
+
+            var exhausted = await restarted.ReadTransportOutboxAsync(
+                imported.SelfSelector.AccountScope,
+                OutboxLogicalId.FromBytes(firstRequest.OperationId.Span));
+            Assert.Equal(TransportOutboxState.Attempted, exhausted.Item!.State);
+            Assert.Equal(
+                TransportOutboxLimits.MaxAttemptsPerItem,
+                exhausted.Item.Attempts.Count);
+            Assert.All(exhausted.Item.Attempts, static attempt =>
+            {
+                Assert.Equal(
+                    TransportOutboxAttemptState.Attempted,
+                    attempt.State);
+                Assert.Empty(attempt.GetEvidenceCopy());
+            });
+        }
+
+        Assert.Equal(
+            TransportOutboxLimits.MaxAttemptsPerItem + 1,
+            ingress.Requests.Count);
+        Assert.Equal(2, ingress.DistinctOperationIds);
+
+        NativeMau2MailboxTransport Native(SqliteSessionStore store) => new(
+            ClientFeatureFlags.Defaults with { ClientMailboxAdapterEnabled = true },
+            imported.Activation,
+            ingress,
+            store,
+            new PinnedClientMailboxReceiptVerifier(
+                new SodiumClientMailboxReceiptCrypto()),
+            imported.DecodePolicies,
+            imported.Authority,
+            sessionId => sessionId == imported.LocalSessionId
+                ? imported.SelfSelector
+                : throw new InvalidOperationException(
+                    "The acceptance transport has no selector for another identity."),
+            timeProvider: clock);
+
+        static MailboxAuthenticatedRetrieveBody Retrieve(byte[] canonical) =>
+            MailboxAuthenticatedRequestTranscript.DecodeRetrieveBody(
+                MailboxAuthenticatedClientRequestCodec.Decode(canonical)
+                    .Binding.CanonicalRequest.Span);
+    }
+
+    [Fact]
+    public async Task NativeStore_ExhaustedAttemptsRemainsFailClosed()
+    {
+        using var fixture = Fixture.Create();
+        using var identity = new SessionIdentityProvider(AlicePhrase);
+        var clock = new MutableTimeProvider(Now);
+        using var store = new SqliteSessionStore(fixture.DatabasePath);
+        var imported = await MailboxCredentialBundleImporter.ImportAsync(
+            store,
+            identity,
+            fixture.AndroidOptions with { TimeProvider = clock },
+            MailboxInfrastructureOwnership.UserManaged);
+        var ingress = new FailAllStoreIngress(clock);
+        using var transport = new NativeMau2MailboxTransport(
+            ClientFeatureFlags.Defaults with { ClientMailboxAdapterEnabled = true },
+            imported.Activation,
+            ingress,
+            store,
+            new PinnedClientMailboxReceiptVerifier(
+                new SodiumClientMailboxReceiptCrypto()),
+            imported.DecodePolicies,
+            imported.Authority,
+            _ => imported.PeerSelector,
+            timeProvider: clock);
+        var target = DispatchTarget(
+            identity,
+            imported,
+            imported.PeerSelector,
+            fixture.BobSessionId,
+            0xdc,
+            "store-attempt-bound");
+        var logical = LogicalBatch([target]);
+
+        for (var attempt = 0;
+             attempt < TransportOutboxLimits.MaxAttemptsPerItem;
+             attempt++)
+        {
+            await Assert.ThrowsAsync<ClientMailboxTransportException>(
+                DispatchAsync);
+            clock.Set(clock.GetUtcNow().AddMinutes(1));
+        }
+
+        var exhausted = await Assert.ThrowsAsync<IOException>(DispatchAsync);
+        Assert.Equal(
+            "Mailbox outbox transition was not committed.",
+            exhausted.Message);
+        Assert.Equal(
+            TransportOutboxLimits.MaxAttemptsPerItem,
+            ingress.StoreRequests.Count);
+        Assert.All(
+            ingress.StoreRequests,
+            request => Assert.Equal(ingress.StoreRequests[0], request));
+
+        async Task DispatchAsync()
+        {
+            using var signer = new AcceptanceMailboxSigner(identity);
+            var prepared = await transport.PrepareScopedMailboxLogicalBatchAsync(
+                signer,
+                logical,
+                [target]);
+            await transport.SendPreparedMailboxAuthenticatedAsync(
+                Assert.Single(prepared));
+        }
+    }
+
+    [Fact]
     public async Task NativeRetrieve_AfterCredentialEpochRotation_UsesRouteBoundOperation()
     {
         using var fixture = Fixture.Create(revocationLifetimeMinutes: 45);
@@ -1593,6 +1762,82 @@ public sealed partial class MailboxCredentialBundleImporterTests
 
             return inner.RetrieveAsync(canonicalMau2, cancellationToken);
         }
+
+        public Task<ReadOnlyMemory<byte>> AcknowledgeAsync(
+            ReadOnlyMemory<byte> canonicalMau2,
+            CancellationToken cancellationToken = default) =>
+            inner.AcknowledgeAsync(canonicalMau2, cancellationToken);
+    }
+
+    private sealed class FailBoundedRetrieveIngress(TimeProvider timeProvider) :
+        IClientMailboxBinaryIngress
+    {
+        private readonly ScriptedRetrieveIngress inner = new(timeProvider);
+
+        public List<byte[]> Requests { get; } = [];
+
+        public int DistinctOperationIds => Requests
+            .Select(static canonical =>
+                MailboxAuthenticatedRequestTranscript.DecodeRetrieveBody(
+                    MailboxAuthenticatedClientRequestCodec.Decode(canonical)
+                        .Binding.CanonicalRequest.Span))
+            .Select(static request => Convert.ToHexString(request.OperationId.Span))
+            .Distinct(StringComparer.Ordinal)
+            .Count();
+
+        public Task<ReadOnlyMemory<byte>> StoreAsync(
+            ReadOnlyMemory<byte> canonicalMau2,
+            CancellationToken cancellationToken = default) =>
+            inner.StoreAsync(canonicalMau2, cancellationToken);
+
+        public Task<ReadOnlyMemory<byte>> RetrieveAsync(
+            ReadOnlyMemory<byte> canonicalMau2,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Requests.Add(canonicalMau2.ToArray());
+            if (Requests.Count <= TransportOutboxLimits.MaxAttemptsPerItem)
+            {
+                return Task.FromException<ReadOnlyMemory<byte>>(
+                    new ClientMailboxTransportException(
+                        ClientMailboxTransportFailure.NetworkUnavailable,
+                        true,
+                        "Simulated bounded outcome-unknown retrieve failure."));
+            }
+
+            return inner.RetrieveAsync(canonicalMau2, cancellationToken);
+        }
+
+        public Task<ReadOnlyMemory<byte>> AcknowledgeAsync(
+            ReadOnlyMemory<byte> canonicalMau2,
+            CancellationToken cancellationToken = default) =>
+            inner.AcknowledgeAsync(canonicalMau2, cancellationToken);
+    }
+
+    private sealed class FailAllStoreIngress(TimeProvider timeProvider) :
+        IClientMailboxBinaryIngress
+    {
+        private readonly ScriptedRetrieveIngress inner = new(timeProvider);
+
+        public List<byte[]> StoreRequests { get; } = [];
+
+        public Task<ReadOnlyMemory<byte>> StoreAsync(
+            ReadOnlyMemory<byte> canonicalMau2,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            StoreRequests.Add(canonicalMau2.ToArray());
+            return Task.FromException<ReadOnlyMemory<byte>>(
+                new ClientMailboxTransportException(
+                    ClientMailboxTransportFailure.NetworkUnavailable,
+                    true,
+                    "Simulated bounded outcome-unknown store failure."));
+        }
+
+        public Task<ReadOnlyMemory<byte>> RetrieveAsync(
+            ReadOnlyMemory<byte> canonicalMau2,
+            CancellationToken cancellationToken = default) =>
+            inner.RetrieveAsync(canonicalMau2, cancellationToken);
 
         public Task<ReadOnlyMemory<byte>> AcknowledgeAsync(
             ReadOnlyMemory<byte> canonicalMau2,
