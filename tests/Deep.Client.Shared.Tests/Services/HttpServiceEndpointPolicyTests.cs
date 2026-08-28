@@ -42,6 +42,21 @@ public sealed class HttpServiceEndpointPolicyTests
     }
 
     [Fact]
+    public void BoundFactoryHandler_PreservesItsExplicitValidationHook()
+    {
+        RemoteCertificateValidationCallback callback = static (_, _, _, _) => false;
+        var factory = new HttpServiceTransportFactory(HttpServiceEndpointPolicy.Production)
+            .BindNetwork(new HttpServiceNetworkHooks(
+                ServerCertificateValidationCallback: callback));
+
+        using var handler = factory.CreateBoundHttpHandler(new HttpServiceClientOptions());
+
+        Assert.Same(callback, handler.SslOptions.RemoteCertificateValidationCallback);
+        Assert.Equal(X509RevocationMode.Online,
+            handler.SslOptions.CertificateRevocationCheckMode);
+    }
+
+    [Fact]
     public void ProductionFactory_ConstructsAllFourTransportsWithHttpsOrigins()
     {
         var factory = new HttpServiceTransportFactory(

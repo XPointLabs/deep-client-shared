@@ -307,6 +307,10 @@ public sealed class HttpServiceTransportFactory
     internal HttpServiceTransportFactory BindNetwork(HttpServiceNetworkHooks hooks) =>
         new(endpointPolicy, hooks ?? throw new ArgumentNullException(nameof(hooks)));
 
+    internal SocketsHttpHandler CreateBoundHttpHandler(
+        HttpServiceClientOptions? options = null) =>
+        CreateHttpHandler(options, networkHooks);
+
     public HttpAvatarProfileTransport CreateAvatar(
         HttpAvatarProfileTransportOptions options,
         HttpServiceClientOptions? clientOptions = null,
