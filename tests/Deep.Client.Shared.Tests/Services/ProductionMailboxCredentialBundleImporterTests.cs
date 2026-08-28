@@ -97,6 +97,57 @@ public sealed class ProductionMailboxCredentialBundleImporterTests
             expectedAccepted);
     }
 
+    [Theory]
+    [InlineData(4, true)]
+    [InlineData(ProductionMailboxRouteAdvertisementConstants.MaximumClockSkewSeconds, true)]
+    [InlineData(ProductionMailboxRouteAdvertisementConstants.MaximumClockSkewSeconds + 1, false)]
+    public async Task LocalOwner_RouteClosureAllowsBoundedClockSkewBeforePrc1IssuedAt(
+        int secondsPrc1IssuedAtAhead,
+        bool expectedAccepted)
+    {
+        var now = ProductionMailboxProvisioningContractTests.Now;
+        var context = await CreateBundleContextAsync(
+            routeLifetimeSeconds: 500,
+            routeIssuedAtUnixSeconds: checked(now + (ulong)secondsPrc1IssuedAtAhead));
+        var root = Path.Combine(Path.GetTempPath(),
+            "deep-production-mailbox-prc1-window-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            using var store = new SqliteSessionStore(Path.Combine(root, "state.db"));
+            var trust = new MemoryTrustStore();
+            var import = () => ProductionMailboxCredentialBundleImporter
+                .ImportLocalOwnerAsync(
+                    store,
+                    context.Holder,
+                    context.Bundle,
+                    context.Bundle.MailboxOwnerEd25519PublicKey,
+                    context.Fixture.BuildAnchor,
+                    trust,
+                    context.Fixture.ClientIdentity,
+                    MailboxInfrastructureOwnership.OfficialManaged,
+                    new FixedTimeProvider(now));
+
+            if (expectedAccepted)
+            {
+                _ = await import();
+            }
+            else
+            {
+                var exception = await Assert.ThrowsAsync<InvalidDataException>(import);
+                Assert.Equal(
+                    "PRC1 is not yet valid.",
+                    exception.InnerException?.Message);
+                Assert.Equal(0, trust.Writes);
+            }
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     [Fact]
     public async Task LocalOwner_OfflineCheckpointCatchesUpAcrossGenerationGap()
     {
@@ -307,6 +358,41 @@ public sealed class ProductionMailboxCredentialBundleImporterTests
             Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
             Directory.Delete(root, recursive: true);
         }
+    }
+
+    [Theory]
+    [InlineData(ProductionMailboxRouteAdvertisementConstants.MaximumClockSkewSeconds, true)]
+    [InlineData(ProductionMailboxRouteAdvertisementConstants.MaximumClockSkewSeconds + 1, false)]
+    public async Task PeerDeposit_RouteClosureAllowsBoundedClockSkewBeforePrc1IssuedAt(
+        int secondsPrc1IssuedAtAhead,
+        bool expectedAccepted)
+    {
+        var now = ProductionMailboxProvisioningContractTests.Now;
+        var context = await CreatePeerBundleContextAsync(
+            routeLifetimeSeconds: 500,
+            routeIssuedAtUnixSeconds: checked(now + (ulong)secondsPrc1IssuedAtAhead));
+
+        await AssertPeerDepositRouteClosureWindowAsync(
+            context,
+            expectedAccepted ? null : "PRC1 is not yet valid.");
+    }
+
+    [Theory]
+    [InlineData(ProductionMailboxRouteAdvertisementConstants.MaximumClockSkewSeconds, true)]
+    [InlineData(ProductionMailboxRouteAdvertisementConstants.MaximumClockSkewSeconds + 1, false)]
+    public async Task PeerDeposit_RouteClosureAllowsBoundedClockSkewBeforePra1PublishedAt(
+        int secondsPra1PublishedAtAhead,
+        bool expectedAccepted)
+    {
+        var now = ProductionMailboxProvisioningContractTests.Now;
+        var context = await CreatePeerBundleContextAsync(
+            routeLifetimeSeconds: 500,
+            routePublishedAtUnixSeconds: checked(
+                now + (ulong)secondsPra1PublishedAtAhead));
+
+        await AssertPeerDepositRouteClosureWindowAsync(
+            context,
+            expectedAccepted ? null : "PRA1 is not yet valid.");
     }
 
     [Fact]
@@ -1835,8 +1921,52 @@ public sealed class ProductionMailboxCredentialBundleImporterTests
         }
     }
 
+    private static async Task AssertPeerDepositRouteClosureWindowAsync(
+        PeerBundleContext context,
+        string? expectedFailureMessage)
+    {
+        var root = Path.Combine(Path.GetTempPath(),
+            "deep-production-peer-route-window-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            using var store = new SqliteSessionStore(Path.Combine(root, "state.db"));
+            var trust = new MemoryTrustStore();
+            var import = () => ProductionMailboxCredentialBundleImporter
+                .ImportPeerDepositAsync(
+                    store,
+                    context.Holder,
+                    context.RecipientSessionId,
+                    context.RecipientOwnerPublicKey,
+                    context.Bundle,
+                    context.Fixture.BuildAnchor,
+                    trust,
+                    context.Fixture.ClientIdentity,
+                    MailboxInfrastructureOwnership.OfficialManaged,
+                    context.Clock);
+
+            if (expectedFailureMessage is null)
+            {
+                _ = await import();
+                Assert.Equal(1, trust.Writes);
+            }
+            else
+            {
+                var exception = await Assert.ThrowsAsync<InvalidDataException>(import);
+                Assert.Equal(expectedFailureMessage, exception.InnerException?.Message);
+                Assert.Equal(0, trust.Writes);
+            }
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     private static async Task<BundleContext> CreateBundleContextAsync(
-        ulong routeLifetimeSeconds = 300)
+        ulong routeLifetimeSeconds = 300,
+        ulong? routeIssuedAtUnixSeconds = null)
     {
         var fixture = ProductionMailboxProvisioningContractTests
             .CreateSignedFixture(sharedPlacement: true);
@@ -1875,7 +2005,8 @@ public sealed class ProductionMailboxCredentialBundleImporterTests
             ownerPair,
             mailbox,
             fixture.CurrentPlacement,
-            routeLifetimeSeconds);
+            routeLifetimeSeconds,
+            routeIssuedAtUnixSeconds);
         var idempotency = ComputeLocalOwnerIdempotency(
             fixture,
             holderPair.PublicKey,
@@ -1919,7 +2050,10 @@ public sealed class ProductionMailboxCredentialBundleImporterTests
             fixture, clock, holder, ownerPair.PrivateKey, mailbox, bundle);
     }
 
-    private static async Task<PeerBundleContext> CreatePeerBundleContextAsync()
+    private static async Task<PeerBundleContext> CreatePeerBundleContextAsync(
+        ulong routeLifetimeSeconds = 300,
+        ulong? routeIssuedAtUnixSeconds = null,
+        ulong? routePublishedAtUnixSeconds = null)
     {
         var fixture = ProductionMailboxProvisioningContractTests
             .CreateSignedFixture(sharedPlacement: true);
@@ -1946,7 +2080,9 @@ public sealed class ProductionMailboxCredentialBundleImporterTests
             recipientOwner,
             mailbox,
             fixture.CurrentPlacement,
-            routeLifetimeSeconds: 300);
+            routeLifetimeSeconds,
+            routeIssuedAtUnixSeconds,
+            routePublishedAtUnixSeconds);
         var currentGrant = Grant(
             preview.Topology.Snapshot.CurrentEpoch,
             preview.Authority.Authority,
@@ -2266,7 +2402,9 @@ public sealed class ProductionMailboxCredentialBundleImporterTests
         KeyPair owner,
         byte[] mailbox,
         BlindedPlacementId placement,
-        ulong routeLifetimeSeconds) => CreateRouteClosure(
+        ulong routeLifetimeSeconds,
+        ulong? routeIssuedAtUnixSeconds = null,
+        ulong? routePublishedAtUnixSeconds = null) => CreateRouteClosure(
             authority.Authority,
             authority.CanonicalAuthorityHash,
             fixture,
@@ -2274,7 +2412,9 @@ public sealed class ProductionMailboxCredentialBundleImporterTests
             mailbox,
             placement,
             routeLifetimeSeconds,
-            routeSequence: 1);
+            routeSequence: 1,
+            routeIssuedAtUnixSeconds,
+            routePublishedAtUnixSeconds);
 
     private static RouteClosure CreateRouteClosure(
         ProductionMailboxAuthority authority,
@@ -2284,8 +2424,16 @@ public sealed class ProductionMailboxCredentialBundleImporterTests
         byte[] mailbox,
         BlindedPlacementId placement,
         ulong routeLifetimeSeconds,
-        ulong routeSequence)
+        ulong routeSequence,
+        ulong? routeIssuedAtUnixSeconds = null,
+        ulong? routePublishedAtUnixSeconds = null)
     {
+        var issuedAtUnixSeconds = routeIssuedAtUnixSeconds ??
+            ProductionMailboxProvisioningContractTests.Now - 10;
+        var publishedAtUnixSeconds = routePublishedAtUnixSeconds ??
+            Math.Max(
+                ProductionMailboxProvisioningContractTests.Now,
+                issuedAtUnixSeconds);
         var certificate = new ProductionMailboxRouteCertificate
         {
             NetworkId = authority.NetworkId,
@@ -2297,7 +2445,7 @@ public sealed class ProductionMailboxCredentialBundleImporterTests
             BlindedPlacementId = placement.Bytes,
             SelectionInputCommitment =
                 ProductionMailboxReplicaSelection.ComputeSelectionInputCommitment(placement),
-            IssuedAtUnixSeconds = ProductionMailboxProvisioningContractTests.Now - 10,
+            IssuedAtUnixSeconds = issuedAtUnixSeconds,
             ExpiresAtUnixSeconds = checked(
                 ProductionMailboxProvisioningContractTests.Now + routeLifetimeSeconds),
             IssuerSignature = new byte[64]
@@ -2313,7 +2461,7 @@ public sealed class ProductionMailboxCredentialBundleImporterTests
         {
             Certificate = certificate,
             Sequence = routeSequence,
-            PublishedAtUnixSeconds = ProductionMailboxProvisioningContractTests.Now,
+            PublishedAtUnixSeconds = publishedAtUnixSeconds,
             ExpiresAtUnixSeconds = certificate.ExpiresAtUnixSeconds,
             OwnerSignature = new byte[64]
         };

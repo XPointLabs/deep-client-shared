@@ -1010,14 +1010,6 @@ public static class ProductionMailboxCredentialBundleImporter
                     Convert.ToHexStringLower(generation)),
                 revocationKey,
                 revocationReceipt);
-            if (verifyOnly)
-                return new ImportedProductionMailboxRuntimeMaterial(
-                    runtimeAuthority,
-                    new ClientMailboxActivation(true, issuerContext, ingressConfigured: true),
-                    decodePolicies,
-                    selector,
-                    holder.SessionId,
-                    ownership);
             var encodedTrustState = ProductionMailboxTrustStateCodec.Encode(
                 verified.StateToCommit);
             var encodedBundle = ProductionMailboxLocalOwnerJournalCodec.Encode(bundle);
@@ -1055,6 +1047,14 @@ public static class ProductionMailboxCredentialBundleImporter
                     "Persisted production mailbox journal is not bound to its verified closure.");
             CryptographicOperations.ZeroMemory(encodedTrustState);
             CryptographicOperations.ZeroMemory(encodedBundle);
+            if (verifyOnly)
+                return new ImportedProductionMailboxRuntimeMaterial(
+                    runtimeAuthority,
+                    new ClientMailboxActivation(true, issuerContext, ingressConfigured: true),
+                    decodePolicies,
+                    selector,
+                    holder.SessionId,
+                    ownership);
             var publicationJournalKey = PublicationJournalKey(holder);
             var activeBundleKey = ActiveBundleKey(holder);
             await using var publication = await coordinator.AcquirePublicationAsync(
@@ -1562,6 +1562,10 @@ public static class ProductionMailboxCredentialBundleImporter
             DateTimeOffset.FromUnixTimeSeconds(checked((long)unixSeconds));
     }
 
+    private static uint RouteVerificationClockSkewSeconds => checked((uint)Math.Min(
+        ProductionMailboxAuthorityConstants.MaximumClockSkewSeconds,
+        ProductionMailboxRouteAdvertisementConstants.MaximumClockSkewSeconds));
+
     private static VerifiedRouteClosure VerifyRouteClosure(
         ProductionMailboxLocalOwnerBundle bundle,
         VerifiedProductionMailboxControlPlane verified,
@@ -1601,7 +1605,7 @@ public static class ProductionMailboxCredentialBundleImporter
                 certificateBytes,
                 verified.Authority,
                 verifiedAtUnixSeconds,
-                0,
+                RouteVerificationClockSkewSeconds,
                 new SodiumProductionMailboxRouteSignatureVerifier());
             var routeDomain = ProductionMailboxRouteAdvertisementCodec
                 .ComputeRouteDomainHash(certificate.Certificate);
@@ -1629,7 +1633,7 @@ public static class ProductionMailboxCredentialBundleImporter
                 new ProductionMailboxRouteAdvertisementVerificationContext
                 {
                     NowUnixSeconds = verifiedAtUnixSeconds,
-                    ClockSkewSeconds = 0,
+                    ClockSkewSeconds = RouteVerificationClockSkewSeconds,
                     ExpectedRouteDomainHash = routeDomain,
                     LastAcceptedSequence = lastSequence,
                     LastAcceptedAdvertisementHash = lastHash
@@ -1723,7 +1727,7 @@ public static class ProductionMailboxCredentialBundleImporter
                 certificateBytes,
                 verified.Authority,
                 verifiedAtUnixSeconds,
-                0,
+                RouteVerificationClockSkewSeconds,
                 new SodiumProductionMailboxRouteSignatureVerifier());
             var routeDomain = ProductionMailboxRouteAdvertisementCodec
                 .ComputeRouteDomainHash(certificate.Certificate);
@@ -1733,7 +1737,7 @@ public static class ProductionMailboxCredentialBundleImporter
                 new ProductionMailboxRouteAdvertisementVerificationContext
                 {
                     NowUnixSeconds = verifiedAtUnixSeconds,
-                    ClockSkewSeconds = 0,
+                    ClockSkewSeconds = RouteVerificationClockSkewSeconds,
                     ExpectedRouteDomainHash = routeDomain,
                     LastAcceptedSequence = 0,
                     LastAcceptedAdvertisementHash = new byte[32]
