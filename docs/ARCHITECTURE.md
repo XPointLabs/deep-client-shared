@@ -55,6 +55,14 @@ identity/correlation headers, early data, content coding, and direct-mailbox
 fallback are absent. The host/proxy must suppress noncanonical response headers
 including `Date` and `Server`.
 
+This is the current implemented carrier boundary, not yet the final
+anti-blocking composition. `PrivacyManagedIngressHttpTransport` opens a direct
+HTTPS connection to the signed entry origin. The MAUI Reality/Xray runtime is
+not injected into this transport, so current tests prove onion privacy but do
+not prove traffic masking or operation when the entry HTTPS origin is blocked.
+Release requires an explicit masked-carrier implementation of
+`IPrivacyManagedIngressTransport` with no silent direct-HTTPS fallback.
+
 Fallback is allowed only when the primary proves forwarding did not start:
 
 - canonical DIE1 `BeforeForward` with retryable policy;
@@ -79,7 +87,7 @@ approval.
 
 ## Persistence and recovery
 
-The production store is SQLCipher-backed schema v15. Unsupported schemas and
+The production store is SQLCipher-backed schema v16. Unsupported schemas and
 incorrect keys require explicit reset; there are no migrations or dual
 readers. Mailbox request preparation, replay-counter leasing, outbox attempts,
 durable receipts, traversal cursors, continuation tokens, encrypted inbox rows,
@@ -92,10 +100,26 @@ the bounded retry lease; replica and operation idempotency handle the replay.
 A crash after accepted evidence promotes the same attempt without allocating a
 new counter.
 
+## Transport profiles and future ownership
+
+`MailboxDeliveryPolicy` keeps protocol and infrastructure ownership
+orthogonal. `AuthenticatedMau2` may be `OfficialManaged` or `UserManaged`;
+`DirectP2p` must carry neither official authority nor mailbox selectors. The
+portable E2EE, group fanout and durable logical outbox paths already expose the
+required seams, but there is no production
+`IDirectP2pSessionMessageTransport` implementation.
+
+Future on-prem composition must provide a distinct user-managed
+authority/acquisition provider. It must not weaken official public-address
+policy or make Registry, PMA1, billing or Mr. X implicit dependencies of these
+portable contracts.
+
 ## Other portable boundaries
 
 Attachments, push, call signaling, profile carrier verification, notification
 planning, and platform-service interfaces remain separate from mailbox privacy
-routing. Group domain/state APIs remain, but the former Session storage group
-transport was removed; group network activation stays disabled until a
-Deep-native authenticated group protocol is implemented and reviewed.
+routing. The former Session group transport was removed. Group state, routes,
+messages, replies and reactions now fan out as authenticated E2EE copies to
+members' personal mailbox selectors through the same delivery policy. This is
+covered by local tests; current Android/Windows physical group evidence is
+still missing and no Direct-P2P group transport is implemented.
