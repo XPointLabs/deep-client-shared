@@ -109,6 +109,14 @@ portable E2EE, group fanout and durable logical outbox paths already expose the
 required seams, but there is no production
 `IDirectP2pSessionMessageTransport` implementation.
 
+Future `DirectP2p` is a peer mesh requirement, not only a one-hop socket. The
+same transport boundary must support direct links and authenticated multi-hop
+store-and-forward without changing E2EE message or group contracts. Relays
+must not receive plaintext or conversation keys. Routing must define bounded
+TTL/hop count, loop and replay suppression, duplicate handling, partition
+healing, relay consent and resource/abuse limits. It must not silently fall
+back to an official mailbox.
+
 Future on-prem composition must provide a distinct user-managed
 authority/acquisition provider. It must not weaken official public-address
 policy or make Registry, PMA1, billing or Mr. X implicit dependencies of these
