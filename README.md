@@ -10,18 +10,26 @@ service layer for Deep clients.
 
 ## Scope
 
+The bullets below inventory the current pre-cutover implementation. They are not
+the clean-break target. Target ownership/interfaces are normative in
+`../docs/architecture/PROTOCOL-REGISTRY-V1.md`; Session-style sync, Registry
+calls, PMT1 routes and direct HTTP file paths are removal inputs.
+
 - Conversation, contact, group, message, attachment, read receipt, and disappearing-message domain models.
 - Sync orchestration primitives matching Session config/message namespaces.
 - Local persistence abstractions with production `SqliteSessionStore` (SQLCipher-compatible key hook) plus in-memory implementation for tests.
 - Notification planning abstractions.
 - Platform service boundaries for push, media codec, permissions, background tasks, share extension equivalents, and calls.
 - Encrypted attachment file transport (`HttpAttachmentFileTransport`) using the authenticated chunked `DEEPATT2` format for local real upload/download via `/file`.
-- HTTP call signaling transport (`HttpCallSignalingTransport`) for real call offer/answer/bye exchange via `/api/calls`. The transport fails closed without active identity material. Its clean-break `deep-call-*-v2` canonical contract gives every signal, inbox read, and ICE request a fresh signed 128-bit nonce; GET signatures also bind method and absolute path. There is no unauthenticated or v1 wire fallback.
+- Legacy HTTP call signaling transport (`HttpCallSignalingTransport`) for
+  pre-cutover UAT only. Target signaling is typed DMC2 ratcheted events and
+  CallRelay allocation; this type is deleted at destructive cutover.
 - `StubSessionBackend` remains only as a deterministic in-memory test transport;
   no Session HTTP/storage/onion implementation is shipped by this assembly.
 - Deep-native authenticated mailbox delivery through
   `PrivacyRoutedMailboxBinaryIngress`: exact canonical MAU2 is sealed over one
-  of two pinned, router-disjoint three-hop routes. Only a proven
+  of two currently pinned, router-disjoint lab routes. OfficialXPoint3 target
+  has one exact three-hop route and makes no disjoint fallback claim. Only a proven
   before-forward rejection may select the fallback; ambiguous outcomes remain
   attached to the durable outbox attempt. Public entry transport is strict
   HTTP/2 HTTPS with platform trust and has no direct-replica fallback.

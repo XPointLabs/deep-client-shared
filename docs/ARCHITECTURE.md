@@ -7,7 +7,10 @@ durable mailbox state machines, E2EE orchestration, and transport interfaces.
 MAUI composition and platform TLS/secure-storage integration live in
 `deep-client-maui`; exact wire codecs and cryptography live in `deep-protocol`.
 
-The release message path is Deep-native authenticated MAU2. The assembly no
+The currently implemented transport path is Deep-native authenticated MAU2.
+Its Session-derived static-key E2EE and revision-only group model are
+pre-production evidence and must be replaced by the clean-break `DPE2/DMC2`
+ratchet and `DeepSmallGroupV1` before any public release. The assembly no
 longer contains Session storage, Session RPC, JSON/base64 onion routing,
 membership-route bootstrap, direct replica MAU2 HTTP, or their fallback APIs.
 `StubSessionBackend` is retained only for deterministic unit tests and is
@@ -38,14 +41,16 @@ client -> entry relay -> core relay -> mailbox exit
 ```
 
 Each hop is pinned by a nonzero 32-byte RouterId and a separately provisioned
-32-byte X25519 public key. Ed25519-to-X25519 conversion is not present. The
-primary and fallback routes must have distinct HTTPS entry origins and must be
-fully disjoint across all six RouterIds and X25519 keys.
+32-byte X25519 traffic key. Ed25519-to-X25519 conversion is not present. The
+three RouterIds and traffic keys inside one route are distinct. A fallback may
+reuse routers in the initial three-node deployment and therefore provides only
+best-effort liveness, not an independent failure domain. Full six-router
+disjointness is a later topology capability and is not a v1 release claim.
 
 The protocol-owned `BuildForCanonicalMailboxRequest` derives a
 domain-separated operation binding from exact MAU2 and generates a fresh CSPRNG
 attempt ID, hop replay IDs, ephemeral hop keys, and end-to-end reply key. The
-mailbox exit returns DPR1 inside authenticated DRS1. A success DPR1 carries the
+mailbox exit returns XPR1 inside authenticated XRS1. A success XPR1 carries the
 canonical mailbox response; a closed failure code maps to a sanitized
 `ClientMailboxTransportException`.
 
@@ -128,6 +133,8 @@ Attachments, push, call signaling, profile carrier verification, notification
 planning, and platform-service interfaces remain separate from mailbox privacy
 routing. The former Session group transport was removed. Group state, routes,
 messages, replies and reactions now fan out as authenticated E2EE copies to
-members' personal mailbox selectors through the same delivery policy. This is
-covered by local tests; current Android/Windows physical group evidence is
-still missing and no Direct-P2P group transport is implemented.
+members' personal mailbox selectors through the same delivery policy. This
+current path has no owner-sequenced predecessor-bound epoch or fork latch and
+is not release evidence. The target keeps pairwise fanout but submits up to
+100 members/500 active devices as one bounded durable logical batch with
+device revoke/rekey semantics. No Direct-P2P group transport is implemented.
