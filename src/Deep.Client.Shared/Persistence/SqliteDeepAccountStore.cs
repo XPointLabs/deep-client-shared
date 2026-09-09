@@ -745,7 +745,15 @@ public sealed class SqliteDeepAccountStore : IDeepAccountStore
         {
             for (var column = 0; column < 4; column++)
             {
-                var bytes = Encoding.UTF8.GetBytes(reader.GetString(column));
+                var value = reader.GetString(column);
+                // sqlite_schema preserves whitespace from the submitted DDL. Keep the
+                // sealed fingerprint independent of Git checkout line endings so the
+                // same store generation is accepted on Windows and Unix builds.
+                if (column == 3)
+                {
+                    value = value.ReplaceLineEndings("\n");
+                }
+                var bytes = Encoding.UTF8.GetBytes(value);
                 try
                 {
                     BinaryPrimitives.WriteUInt32BigEndian(length, checked((uint)bytes.Length));

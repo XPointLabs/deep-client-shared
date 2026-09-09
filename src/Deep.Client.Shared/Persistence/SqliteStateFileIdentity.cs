@@ -28,7 +28,9 @@ internal static class SqliteStateFileIdentity
             return $"win:{information.VolumeSerialNumber:x8}:{index:x16}";
         }
 
-        if (OperatingSystem.IsLinux() || OperatingSystem.IsAndroid())
+        if (OperatingSystem.IsLinux() || OperatingSystem.IsAndroid()
+            || OperatingSystem.IsMacOS() || OperatingSystem.IsMacCatalyst()
+            || OperatingSystem.IsIOS())
         {
             var stat = Marshal.AllocHGlobal(256);
             try
@@ -39,7 +41,10 @@ internal static class SqliteStateFileIdentity
                     throw new IOException(
                         "Unable to resolve the SQLite state file identity.",
                         Marshal.GetExceptionForHR(Marshal.GetHRForLastWin32Error()));
-                var device = unchecked((ulong)Marshal.ReadInt64(stat, 0));
+                var device = OperatingSystem.IsMacOS() || OperatingSystem.IsMacCatalyst()
+                    || OperatingSystem.IsIOS()
+                    ? unchecked((uint)Marshal.ReadInt32(stat, 0))
+                    : unchecked((ulong)Marshal.ReadInt64(stat, 0));
                 var inode = unchecked((ulong)Marshal.ReadInt64(stat, 8));
                 if (device == 0 || inode == 0)
                     throw new InvalidDataException(
@@ -53,7 +58,7 @@ internal static class SqliteStateFileIdentity
         }
 
         throw new PlatformNotSupportedException(
-            "SQLite state identity requires Windows, Linux, or Android.");
+            "SQLite state identity requires Windows, Linux, Android, macOS, Mac Catalyst, or iOS.");
     }
 
     [StructLayout(LayoutKind.Sequential)]
