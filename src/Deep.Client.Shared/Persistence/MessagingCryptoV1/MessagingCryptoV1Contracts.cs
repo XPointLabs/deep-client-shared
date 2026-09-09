@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Security.Cryptography;
+using Deep.Client.Shared.Persistence.PreKeyV1;
 
 namespace Deep.Client.Shared.Persistence.MessagingCryptoV1;
 
@@ -140,6 +141,7 @@ internal enum MessagingCryptoV1CommitDisposition
     AlreadyForkLatched = 6,
     CapacityExceeded = 7,
     RollbackLatched = 8,
+    PreKeyUnavailable = 9,
 }
 
 internal sealed record MessagingCryptoV1CommitResult(
@@ -159,40 +161,110 @@ internal sealed record MessagingCryptoV1HeadSnapshot(
     bool ForkLatched,
     bool TerminallyLatched);
 
-internal sealed class MessagingCryptoV1PreparedInitialization : IDisposable
+internal enum MessagingCryptoV1InitialPreKeySource
 {
-    private byte[]? operationId;
+    LocalAtomicInventory = 1,
+    DeviceWideOneTimeReservation = 2,
+    DeviceWideLastResortReservation = 3,
+}
+
+/// <summary>
+/// Closed handoff from the verified XPC1/DPH2 handshake into durable storage.
+/// Production construction is restricted to the device-wide pre-key owner after
+/// its durable reservation has been bound to the exact TRS1.
+/// </summary>
+internal sealed class MessagingCryptoV1InitialSessionHandoff : IDisposable
+{
+    private byte[]? claimOperationId;
+    private byte[]? xpc1FullReplayHash;
+    private byte[]? dph2FullReplayHash;
+    private byte[]? x25519PreKeyId;
+    private byte[]? mlKemPreKeyId;
     private byte[]? exactTrs1;
     private int consumed;
+    private readonly MessagingCryptoV1InitialPreKeySource preKeySource;
 
-    private MessagingCryptoV1PreparedInitialization(ReadOnlySpan<byte> operationId, ReadOnlySpan<byte> exactTrs1)
+    private MessagingCryptoV1InitialSessionHandoff(
+        MessagingCryptoV1InitialPreKeySource preKeySource,
+        ReadOnlySpan<byte> claimOperationId,
+        ReadOnlySpan<byte> xpc1FullReplayHash,
+        ReadOnlySpan<byte> dph2FullReplayHash,
+        ReadOnlySpan<byte> x25519PreKeyId,
+        ReadOnlySpan<byte> mlKemPreKeyId,
+        ReadOnlySpan<byte> exactTrs1)
     {
-        MessagingCryptoV1PreparedTransition.Validate32(operationId, nameof(operationId));
+        MessagingCryptoV1PreparedTransition.Validate32(claimOperationId, nameof(claimOperationId));
+        MessagingCryptoV1PreparedTransition.Validate32(xpc1FullReplayHash, nameof(xpc1FullReplayHash));
+        MessagingCryptoV1PreparedTransition.Validate32(dph2FullReplayHash, nameof(dph2FullReplayHash));
+        if (!Enum.IsDefined(preKeySource)) throw new ArgumentOutOfRangeException(nameof(preKeySource));
+        if (preKeySource == MessagingCryptoV1InitialPreKeySource.DeviceWideLastResortReservation)
+        {
+            if (!x25519PreKeyId.IsEmpty)
+                throw new ArgumentException("A last-resort reservation has no one-time X25519 pre-key ID.", nameof(x25519PreKeyId));
+        }
+        else MessagingCryptoV1PreparedTransition.Validate32(x25519PreKeyId, nameof(x25519PreKeyId));
+        MessagingCryptoV1PreparedTransition.Validate32(mlKemPreKeyId, nameof(mlKemPreKeyId));
         MessagingCryptoV1PreparedTransition.ValidateTrs1(exactTrs1, nameof(exactTrs1));
-        this.operationId = MessagingCryptoV1PreparedTransition.Copy32(operationId, nameof(operationId));
+        this.preKeySource = preKeySource;
+        this.claimOperationId = MessagingCryptoV1PreparedTransition.Copy32(claimOperationId, nameof(claimOperationId));
+        this.xpc1FullReplayHash = MessagingCryptoV1PreparedTransition.Copy32(xpc1FullReplayHash, nameof(xpc1FullReplayHash));
+        this.dph2FullReplayHash = MessagingCryptoV1PreparedTransition.Copy32(dph2FullReplayHash, nameof(dph2FullReplayHash));
+        this.x25519PreKeyId = x25519PreKeyId.ToArray();
+        this.mlKemPreKeyId = MessagingCryptoV1PreparedTransition.Copy32(mlKemPreKeyId, nameof(mlKemPreKeyId));
         this.exactTrs1 = MessagingCryptoV1PreparedTransition.CopyBoundedTrs1(exactTrs1, nameof(exactTrs1));
     }
 
 #if DEEP_TEST_INTERNALS
-    internal static MessagingCryptoV1PreparedInitialization CreateForTests(
-        ReadOnlySpan<byte> operationId,
-        ReadOnlySpan<byte> exactTrs1) => new(operationId, exactTrs1);
+    internal static MessagingCryptoV1InitialSessionHandoff CreateForTests(
+        ReadOnlySpan<byte> claimOperationId,
+        ReadOnlySpan<byte> xpc1FullReplayHash,
+        ReadOnlySpan<byte> dph2FullReplayHash,
+        ReadOnlySpan<byte> x25519PreKeyId,
+        ReadOnlySpan<byte> mlKemPreKeyId,
+        ReadOnlySpan<byte> exactTrs1) => new(MessagingCryptoV1InitialPreKeySource.LocalAtomicInventory,
+            claimOperationId, xpc1FullReplayHash, dph2FullReplayHash,
+            x25519PreKeyId, mlKemPreKeyId, exactTrs1);
 #endif
+
+    internal static MessagingCryptoV1InitialSessionHandoff CreateFromDeviceWidePreKeyOwner(
+        SqlitePreKeyV1SecretOwner.InitialSessionCommitPermit permit)
+    {
+        ArgumentNullException.ThrowIfNull(permit);
+        using var payload = permit.Consume();
+        return new MessagingCryptoV1InitialSessionHandoff(
+            payload.PreKeySource,
+            payload.ClaimOperationId,
+            payload.Xpc1FullReplayHash,
+            payload.Dph2FullReplayHash,
+            payload.X25519PreKeyId,
+            payload.MlKemPreKeyId,
+            payload.ExactTrs1);
+    }
 
     internal InitializationPayload Consume()
     {
         if (Interlocked.CompareExchange(ref consumed, 1, 0) != 0)
-            throw new InvalidOperationException("The prepared initialization is single-use.");
+            throw new InvalidOperationException("The verified initial-session handoff is single-use.");
         return new InitializationPayload(
-            Interlocked.Exchange(ref operationId, null)!,
-            Interlocked.Exchange(ref exactTrs1, null)!);
+            preKeySource,
+            Take(ref claimOperationId),
+            Take(ref xpc1FullReplayHash),
+            Take(ref dph2FullReplayHash),
+            Take(ref x25519PreKeyId),
+            Take(ref mlKemPreKeyId),
+            Take(ref exactTrs1));
     }
 
-    internal bool IsClearedForTesting => operationId is null && exactTrs1 is null;
+    internal bool IsClearedForTesting => claimOperationId is null && xpc1FullReplayHash is null &&
+        dph2FullReplayHash is null && x25519PreKeyId is null && mlKemPreKeyId is null && exactTrs1 is null;
 
     public void Dispose()
     {
-        Zero(Interlocked.Exchange(ref operationId, null));
+        Zero(Interlocked.Exchange(ref claimOperationId, null));
+        Zero(Interlocked.Exchange(ref xpc1FullReplayHash, null));
+        Zero(Interlocked.Exchange(ref dph2FullReplayHash, null));
+        Zero(Interlocked.Exchange(ref x25519PreKeyId, null));
+        Zero(Interlocked.Exchange(ref mlKemPreKeyId, null));
         Zero(Interlocked.Exchange(ref exactTrs1, null));
     }
 
@@ -201,14 +273,35 @@ internal sealed class MessagingCryptoV1PreparedInitialization : IDisposable
         if (value is not null) CryptographicOperations.ZeroMemory(value);
     }
 
-    internal sealed class InitializationPayload(byte[] operationId, byte[] exactTrs1) : IDisposable
+    private static byte[] Take(ref byte[]? value) =>
+        Interlocked.Exchange(ref value, null) ??
+        throw new InvalidOperationException(
+            "The verified initial-session handoff lost ownership.");
+
+    internal sealed class InitializationPayload(
+        MessagingCryptoV1InitialPreKeySource preKeySource,
+        byte[] claimOperationId,
+        byte[] xpc1FullReplayHash,
+        byte[] dph2FullReplayHash,
+        byte[] x25519PreKeyId,
+        byte[] mlKemPreKeyId,
+        byte[] exactTrs1) : IDisposable
     {
-        internal byte[] OperationId { get; } = operationId;
+        internal MessagingCryptoV1InitialPreKeySource PreKeySource { get; } = preKeySource;
+        internal byte[] ClaimOperationId { get; } = claimOperationId;
+        internal byte[] Xpc1FullReplayHash { get; } = xpc1FullReplayHash;
+        internal byte[] Dph2FullReplayHash { get; } = dph2FullReplayHash;
+        internal byte[] X25519PreKeyId { get; } = x25519PreKeyId;
+        internal byte[] MlKemPreKeyId { get; } = mlKemPreKeyId;
         internal byte[] ExactTrs1 { get; } = exactTrs1;
 
         public void Dispose()
         {
-            CryptographicOperations.ZeroMemory(OperationId);
+            CryptographicOperations.ZeroMemory(ClaimOperationId);
+            CryptographicOperations.ZeroMemory(Xpc1FullReplayHash);
+            CryptographicOperations.ZeroMemory(Dph2FullReplayHash);
+            CryptographicOperations.ZeroMemory(X25519PreKeyId);
+            CryptographicOperations.ZeroMemory(MlKemPreKeyId);
             CryptographicOperations.ZeroMemory(ExactTrs1);
         }
     }

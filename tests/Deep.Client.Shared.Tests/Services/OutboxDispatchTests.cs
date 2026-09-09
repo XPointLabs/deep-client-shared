@@ -291,25 +291,33 @@ public sealed class OutboxDispatchTests
         var second = await runtime.Messages.QueueOneToOneAsync(sender.SessionId, recipient, "queued before clear");
 
         var firstDispatch = runtime.Messages.DispatchOneToOneAsync(first);
-        await transport.WaitForSendAsync(1);
-        var secondDispatch = runtime.Messages.DispatchOneToOneAsync(second);
-        var clear = runtime.Messages.ClearConversationMessagesAsync(first.ConversationId);
+        try
+        {
+            await transport.WaitForSendAsync(1);
+            var secondDispatch = runtime.Messages.DispatchOneToOneAsync(second);
+            var clear = runtime.Messages.ClearConversationMessagesAsync(first.ConversationId);
 
-        await transport.WaitForCancellationAsync(1);
-        Assert.False(clear.IsCompleted);
-        Assert.Equal(1, transport.PhysicalSendCount);
+            await transport.WaitForCancellationAsync(1);
+            Assert.False(clear.IsCompleted);
+            Assert.Equal(1, transport.PhysicalSendCount);
 
-        transport.CompleteSend(1);
-        Assert.Equal(2, await clear.WaitAsync(TestTimeout));
-        Assert.Equal(MessageDeliveryState.Sent, (await firstDispatch.WaitAsync(TestTimeout)).DeliveryState);
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(
-            async () => await secondDispatch.WaitAsync(TestTimeout));
+            transport.CompleteSend(1);
+            Assert.Equal(2, await clear.WaitAsync(TestTimeout));
+            Assert.Equal(MessageDeliveryState.Sent, (await firstDispatch.WaitAsync(TestTimeout)).DeliveryState);
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                async () => await secondDispatch.WaitAsync(TestTimeout));
 
-        Assert.Empty(await ToListAsync(
-            ((IMessageRepository)runtime.Store).ListForConversationAsync(first.ConversationId)));
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(
-            async () => await runtime.Messages.DispatchOneToOneAsync(second).WaitAsync(TestTimeout));
-        Assert.Equal(1, transport.PhysicalSendCount);
+            Assert.Empty(await ToListAsync(
+                ((IMessageRepository)runtime.Store).ListForConversationAsync(first.ConversationId)));
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                async () => await runtime.Messages.DispatchOneToOneAsync(second).WaitAsync(TestTimeout));
+            Assert.Equal(1, transport.PhysicalSendCount);
+        }
+        finally
+        {
+            transport.CompleteSend(1);
+            transport.CompleteSend(2);
+        }
     }
 
     [Fact]

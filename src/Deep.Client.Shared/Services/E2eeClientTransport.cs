@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using Deep.Client.Shared.Domain;
 using Deep.Client.Shared.Persistence;
+using Deep.Client.Shared.Persistence.MessagingV1;
 using Deep.Protocol.DeepExtension.MailboxCapabilities;
 
 namespace Deep.Client.Shared.Services;
@@ -434,7 +435,7 @@ public interface IDurableInboxAcknowledger
         CancellationToken cancellationToken = default);
 }
 
-internal interface IMailboxAckCorrelationProjectionSource
+public interface IMailboxAckCorrelationProjectionSource
 {
     Task<MailboxAckCorrelationProjection?> ProjectMailboxAckCorrelationAsync(
         SessionId account,
@@ -442,13 +443,13 @@ internal interface IMailboxAckCorrelationProjectionSource
         CancellationToken cancellationToken = default);
 }
 
-internal enum MailboxAckCorrelationState
+public enum MailboxAckCorrelationState
 {
     AmbiguousAttempted = 1,
     RecoveredDurable = 2
 }
 
-internal sealed record MailboxAckCorrelationProjection(
+public sealed record MailboxAckCorrelationProjection(
     string CorrelationHash,
     MailboxAckCorrelationState State,
     int AttemptCount);
@@ -540,6 +541,12 @@ public sealed class E2eeClientTransport :
             concurrent: false, cancellationToken)
             .ConfigureAwait(false);
     }
+
+    internal Task<SessionId> GetLocalSessionIdForMsg01Async(
+        CancellationToken cancellationToken = default) =>
+        WithIdentityAsync(
+            static identity => Task.FromResult(identity.SessionId),
+            cancellationToken);
 
     public async Task<IReadOnlyList<InboundMessageEnvelope>> ReceiveAsync(
         SessionId recipient,

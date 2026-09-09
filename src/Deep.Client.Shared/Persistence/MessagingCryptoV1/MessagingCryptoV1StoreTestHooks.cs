@@ -7,6 +7,16 @@ internal enum MessagingCryptoV1StoreFailpoint
     AfterStateUpdate = 3,
     BeforeCommit = 4,
     AfterCommit = 5,
+    BeforeInitialTransaction = 6,
+    AfterInitialStateInsert = 7,
+    AfterInitialPreKeyConsumption = 8,
+    BeforeInitialCommit = 9,
+    AfterInitialCommit = 10,
+    BeforeInitiatorInitialTransaction = 11,
+    AfterInitiatorInitialStateInsert = 12,
+    AfterInitiatorInitialOutboxInsert = 13,
+    BeforeInitiatorInitialCommit = 14,
+    AfterInitiatorInitialCommit = 15,
 }
 
 internal sealed class MessagingCryptoV1InjectedCrashException(MessagingCryptoV1StoreFailpoint point) :

@@ -28,11 +28,15 @@ public sealed partial class SqliteSessionStore :
     private static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerDefaults.Web);
     private static readonly ConcurrentDictionary<string, object> InitializationGates =
         new(StringComparer.OrdinalIgnoreCase);
+    private static readonly object PoolLifetimeGate = new();
+    private static readonly Dictionary<string, int> ActivePoolLeases =
+        new(StringComparer.Ordinal);
     [DebuggerBrowsable(DebuggerBrowsableState.Never)]
     private readonly string _connectionString;
     private readonly string _canonicalStateIdentity;
     private readonly SemaphoreSlim _databaseGate = new(1, 1);
     private readonly Action<MembershipTrustCommitFaultPoint>? _membershipTrustFaultInjector;
+    private readonly Action<SqliteSessionStorePoolLifetimePoint>? _poolLifetimeObserver;
     private int _disposed;
 
     private sealed record OneToOneOpenMetadata(
@@ -64,6 +68,14 @@ public sealed partial class SqliteSessionStore :
     internal SqliteSessionStore(
         SqliteSessionStoreOptions options,
         Action<MembershipTrustCommitFaultPoint>? faultInjector)
+        : this(options, faultInjector, null)
+    {
+    }
+
+    internal SqliteSessionStore(
+        SqliteSessionStoreOptions options,
+        Action<MembershipTrustCommitFaultPoint>? faultInjector,
+        Action<SqliteSessionStorePoolLifetimePoint>? poolLifetimeObserver)
     {
         var statePath = options.StatePath;
         if (string.IsNullOrWhiteSpace(statePath))
@@ -76,72 +88,88 @@ public sealed partial class SqliteSessionStore :
         var encryptionKey = options.GetEncryptionKeyForStore();
         encryptionKey = string.IsNullOrWhiteSpace(encryptionKey) ? null : encryptionKey;
         _membershipTrustFaultInjector = faultInjector;
+        _poolLifetimeObserver = poolLifetimeObserver;
         _connectionString = ConnectionStringFor(
             statePath,
             encryptionKey,
             SqliteOpenMode.ReadWrite,
             pooling: true);
 
-        var initializationGate = InitializationGates.GetOrAdd(statePath, static _ => new object());
-        lock (initializationGate)
+        var poolLeaseRegistered = false;
+        try
         {
-            var mainExists = File.Exists(statePath);
-            var walExists = File.Exists(statePath + "-wal");
-            var shmExists = File.Exists(statePath + "-shm");
-            var isFresh = !mainExists && !walExists && !shmExists;
+            RegisterPoolLease(_connectionString);
+            poolLeaseRegistered = true;
+            _poolLifetimeObserver?.Invoke(
+                SqliteSessionStorePoolLifetimePoint.BeforeSchemaInitialization);
 
-            if (!isFresh && !mainExists)
+            var initializationGate = InitializationGates.GetOrAdd(statePath, static _ => new object());
+            lock (initializationGate)
             {
-                throw ResetRequired(
-                    LocalStateResetRequiredReason.InvalidCurrentSchema,
-                    "Local state is incomplete. Reset local data before retrying.");
-            }
-            if (mainExists && new FileInfo(statePath).Length == 0)
-            {
-                throw ResetRequired(
-                    LocalStateResetRequiredReason.InvalidCurrentSchema,
-                    "Local state is empty or damaged. Reset local data before retrying.");
-            }
+                var mainExists = File.Exists(statePath);
+                var walExists = File.Exists(statePath + "-wal");
+                var shmExists = File.Exists(statePath + "-shm");
+                var isFresh = !mainExists && !walExists && !shmExists;
 
-            if (!string.IsNullOrWhiteSpace(directory))
-            {
-                Directory.CreateDirectory(directory);
-            }
+                if (!isFresh && !mainExists)
+                {
+                    throw ResetRequired(
+                        LocalStateResetRequiredReason.InvalidCurrentSchema,
+                        "Local state is incomplete. Reset local data before retrying.");
+                }
+                if (mainExists && new FileInfo(statePath).Length == 0)
+                {
+                    throw ResetRequired(
+                        LocalStateResetRequiredReason.InvalidCurrentSchema,
+                        "Local state is empty or damaged. Reset local data before retrying.");
+                }
 
-            try
-            {
-                InitializeSchema(
-                    statePath,
-                    encryptionKey,
-                    isFresh,
-                    immutableExisting: !isFresh && !walExists && !shmExists);
-            }
-            catch (LocalStateResetRequiredException)
-            {
-                throw;
-            }
-            catch (InvalidDataException exception)
-            {
-                throw ResetRequired(
-                    LocalStateResetRequiredReason.InvalidCurrentSchema,
-                    "Local state does not match the current schema. Reset local data before retrying.",
-                    exception);
-            }
-            catch (SqliteException exception) when (!MustPropagateWithoutReset(exception))
-            {
-                var reason = PrimarySqliteErrorCode(exception) == 26
-                    ? LocalStateResetRequiredReason.UnreadableOrWrongKey
-                    : LocalStateResetRequiredReason.InvalidCurrentSchema;
-                var message = reason == LocalStateResetRequiredReason.UnreadableOrWrongKey
-                    ? "Local state is unreadable or cannot be opened with the configured key. Reset local data before retrying."
-                    : "Local state is corrupt or incompatible. Reset local data before retrying.";
-                throw ResetRequired(reason, message, exception);
-            }
+                if (!string.IsNullOrWhiteSpace(directory))
+                {
+                    Directory.CreateDirectory(directory);
+                }
 
-            using var poolIdentity = new SqliteConnection(_connectionString);
-            SqliteConnection.ClearPool(poolIdentity);
+                try
+                {
+                    InitializeSchema(
+                        statePath,
+                        encryptionKey,
+                        isFresh,
+                        immutableExisting: !isFresh && !walExists && !shmExists);
+                }
+                catch (LocalStateResetRequiredException)
+                {
+                    throw;
+                }
+                catch (InvalidDataException exception)
+                {
+                    throw ResetRequired(
+                        LocalStateResetRequiredReason.InvalidCurrentSchema,
+                        "Local state does not match the current schema. Reset local data before retrying.",
+                        exception);
+                }
+                catch (SqliteException exception) when (!MustPropagateWithoutReset(exception))
+                {
+                    var reason = PrimarySqliteErrorCode(exception) == 26
+                        ? LocalStateResetRequiredReason.UnreadableOrWrongKey
+                        : LocalStateResetRequiredReason.InvalidCurrentSchema;
+                    var message = reason == LocalStateResetRequiredReason.UnreadableOrWrongKey
+                        ? "Local state is unreadable or cannot be opened with the configured key. Reset local data before retrying."
+                        : "Local state is corrupt or incompatible. Reset local data before retrying.";
+                    throw ResetRequired(reason, message, exception);
+                }
+
+            }
+            _canonicalStateIdentity = SqliteStateFileIdentity.Resolve(statePath);
         }
-        _canonicalStateIdentity = SqliteStateFileIdentity.Resolve(statePath);
+        catch
+        {
+            if (poolLeaseRegistered)
+            {
+                ReleasePoolLease(_connectionString, _poolLifetimeObserver);
+            }
+            throw;
+        }
     }
 
     internal string CanonicalStateIdentity => _canonicalStateIdentity;
@@ -1208,9 +1236,11 @@ public sealed partial class SqliteSessionStore :
             return MembershipTrustCommitResult.Corrupt;
         }
         cancellationToken.ThrowIfCancellationRequested();
+        ThrowIfDisposed();
         await _databaseGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            ThrowIfDisposed();
             using var connection = OpenConnection();
             using var transaction = connection.BeginTransaction();
 
@@ -1346,9 +1376,11 @@ public sealed partial class SqliteSessionStore :
     {
         MembershipTrustRepositoryValidation.ValidateKey(opaqueProfileKey, domain);
         cancellationToken.ThrowIfCancellationRequested();
+        ThrowIfDisposed();
         await _databaseGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            ThrowIfDisposed();
             using var connection = OpenConnection();
             using var transaction = connection.BeginTransaction();
             var history = await ValidateMembershipTrustHistoryAsync(
@@ -1588,9 +1620,11 @@ public sealed partial class SqliteSessionStore :
     {
         MembershipTrustClockRecord.Validate(record);
         cancellationToken.ThrowIfCancellationRequested();
+        ThrowIfDisposed();
         await _databaseGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            ThrowIfDisposed();
             using var connection = OpenConnection();
             using var transaction = connection.BeginTransaction();
             MembershipTrustClockRecord? current = null;
@@ -1693,9 +1727,11 @@ public sealed partial class SqliteSessionStore :
     {
         MembershipTrustRepositoryValidation.ValidateProfileKey(opaqueProfileKey);
         cancellationToken.ThrowIfCancellationRequested();
+        ThrowIfDisposed();
         await _databaseGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            ThrowIfDisposed();
             using var connection = OpenConnection();
             await using var command = connection.CreateCommand();
             command.CommandText = """
@@ -5155,18 +5191,36 @@ public sealed partial class SqliteSessionStore :
 
     private SqliteConnection OpenConnection()
     {
+        ThrowIfDisposed();
         var connection = new SqliteConnection(_connectionString);
-        connection.Open();
-        ConfigureConnection(connection);
-        return connection;
+        try
+        {
+            connection.Open();
+            ConfigureConnection(connection);
+            return connection;
+        }
+        catch
+        {
+            connection.Dispose();
+            throw;
+        }
     }
 
     private async Task<SqliteConnection> OpenConnectionAsync(CancellationToken cancellationToken)
     {
+        ThrowIfDisposed();
         var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-        ConfigureConnection(connection);
-        return connection;
+        try
+        {
+            await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+            ConfigureConnection(connection);
+            return connection;
+        }
+        catch
+        {
+            await connection.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
     }
 
     private async Task WithConnectionAsync(
@@ -5214,12 +5268,14 @@ public sealed partial class SqliteSessionStore :
     {
         ArgumentNullException.ThrowIfNull(action);
         cancellationToken.ThrowIfCancellationRequested();
+        ThrowIfDisposed();
 
         return await Task.Run(async () =>
         {
             await _databaseGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
+                ThrowIfDisposed();
                 await using var connection = await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
                 return await action(connection).ConfigureAwait(false);
             }
@@ -5285,15 +5341,70 @@ public sealed partial class SqliteSessionStore :
         command.ExecuteNonQuery();
     }
 
+    private static void RegisterPoolLease(string connectionString)
+    {
+        lock (PoolLifetimeGate)
+        {
+            ActivePoolLeases.TryGetValue(connectionString, out var current);
+            ActivePoolLeases[connectionString] = checked(current + 1);
+        }
+    }
+
+    private static void ReleasePoolLease(
+        string connectionString,
+        Action<SqliteSessionStorePoolLifetimePoint>? poolLifetimeObserver)
+    {
+        lock (PoolLifetimeGate)
+        {
+            if (!ActivePoolLeases.TryGetValue(connectionString, out var current) || current <= 0)
+            {
+                throw new InvalidOperationException("The SQLite pool lease is not registered.");
+            }
+
+            if (current > 1)
+            {
+                ActivePoolLeases[connectionString] = current - 1;
+                return;
+            }
+
+            try
+            {
+                poolLifetimeObserver?.Invoke(
+                    SqliteSessionStorePoolLifetimePoint.BeforePoolClear);
+                using var poolIdentity = new SqliteConnection(connectionString);
+                SqliteConnection.ClearPool(poolIdentity);
+            }
+            finally
+            {
+                ActivePoolLeases.Remove(connectionString);
+            }
+        }
+    }
+
+    private void ThrowIfDisposed()
+    {
+        if (Volatile.Read(ref _disposed) != 0)
+        {
+            throw new ObjectDisposedException(nameof(SqliteSessionStore));
+        }
+    }
+
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
         {
             return;
         }
-        using var poolIdentity = new SqliteConnection(_connectionString);
-        SqliteConnection.ClearPool(poolIdentity);
-        _databaseGate.Dispose();
+
+        _databaseGate.Wait();
+        try
+        {
+            ReleasePoolLease(_connectionString, _poolLifetimeObserver);
+        }
+        finally
+        {
+            _databaseGate.Release();
+        }
     }
 
     private static LocalStateResetRequiredException ResetRequired(
@@ -5334,6 +5445,12 @@ public sealed partial class SqliteSessionStore :
             13 or // SQLITE_FULL
             14;   // SQLITE_CANTOPEN
 
+}
+
+internal enum SqliteSessionStorePoolLifetimePoint
+{
+    BeforeSchemaInitialization,
+    BeforePoolClear
 }
 
 [DebuggerDisplay("{ToString(),nq}")]

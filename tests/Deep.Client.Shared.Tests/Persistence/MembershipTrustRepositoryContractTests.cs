@@ -8,6 +8,210 @@ namespace Deep.Client.Shared.Tests.Persistence;
 
 public sealed class MembershipTrustRepositoryContractTests
 {
+    [Fact]
+    public async Task SqliteDisposeWaitsForActiveOperationBeforeReleasingItsPoolLease()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"deep-pool-lifetime-{Guid.NewGuid():N}.db");
+        using var operationEnteredCommit = new ManualResetEventSlim();
+        using var allowOperationToFinish = new ManualResetEventSlim();
+        using var disposeStarted = new ManualResetEventSlim();
+        using var disposeReturned = new ManualResetEventSlim();
+        var store = new SqliteSessionStore(
+            new SqliteSessionStoreOptions(path),
+            point =>
+            {
+                if (point == MembershipTrustCommitFaultPoint.BeforeDurableCommit)
+                {
+                    operationEnteredCommit.Set();
+                    allowOperationToFinish.Wait();
+                }
+            });
+        var sibling = new SqliteSessionStore(path);
+        Task<MembershipTrustCommitResult>? commit = null;
+        Task? queuedOperation = null;
+        Task? dispose = null;
+
+        try
+        {
+            commit = Task.Run(() =>
+                store.CommitMembershipTrustAsync(Record(1, 6, 0x61), null));
+            Assert.True(operationEnteredCommit.Wait(TimeSpan.FromSeconds(5)));
+            queuedOperation = store.SetAsync("pool.queued", "must-not-run-after-dispose");
+
+            dispose = Task.Factory.StartNew(
+                () =>
+                {
+                    disposeStarted.Set();
+                    store.Dispose();
+                    disposeReturned.Set();
+                },
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default);
+            Assert.True(disposeStarted.Wait(TimeSpan.FromSeconds(5)));
+            Assert.False(disposeReturned.Wait(TimeSpan.FromMilliseconds(100)));
+
+            allowOperationToFinish.Set();
+            Assert.Equal(MembershipTrustCommitResult.Applied, await commit);
+            await dispose.WaitAsync(TimeSpan.FromSeconds(5));
+            await Assert.ThrowsAsync<ObjectDisposedException>(() => queuedOperation!);
+
+            await sibling.SetAsync("pool.sibling", "still-usable");
+            Assert.Equal("still-usable", await sibling.GetAsync<string>("pool.sibling"));
+        }
+        finally
+        {
+            allowOperationToFinish.Set();
+            if (commit is not null)
+            {
+                await commit.WaitAsync(TimeSpan.FromSeconds(5));
+            }
+            if (queuedOperation is not null && !queuedOperation.IsCompleted)
+            {
+                await queuedOperation.WaitAsync(TimeSpan.FromSeconds(5));
+            }
+            if (dispose is not null)
+            {
+                await dispose.WaitAsync(TimeSpan.FromSeconds(5));
+            }
+            store.Dispose();
+            sibling.Dispose();
+            DeleteSqliteFiles(path);
+        }
+    }
+
+    [Fact]
+    public async Task DisposedStoresForSameAndDifferentDatabasesReleaseFilesWithoutGlobalPoolClear()
+    {
+        var firstPath = Path.Combine(Path.GetTempPath(), $"deep-pool-first-{Guid.NewGuid():N}.db");
+        var secondPath = Path.Combine(Path.GetTempPath(), $"deep-pool-second-{Guid.NewGuid():N}.db");
+        try
+        {
+            using (var first = new SqliteSessionStore(firstPath))
+            using (var sameDatabase = new SqliteSessionStore(firstPath))
+            using (var differentDatabase = new SqliteSessionStore(secondPath))
+            {
+                await first.SetAsync("pool.first", "one");
+                await sameDatabase.SetAsync("pool.same", "two");
+                await differentDatabase.SetAsync("pool.different", "three");
+            }
+
+            DeleteSqliteFiles(firstPath);
+            DeleteSqliteFiles(secondPath);
+            Assert.False(File.Exists(firstPath));
+            Assert.False(File.Exists(secondPath));
+        }
+        finally
+        {
+            DeleteSqliteFiles(firstPath);
+            DeleteSqliteFiles(secondPath);
+        }
+    }
+
+    [Fact]
+    public async Task ConstructorAdmissionPreventsConcurrentLastDisposeFromClearingSharedPool()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"deep-pool-admission-{Guid.NewGuid():N}.db");
+        using var constructorAdmitted = new ManualResetEventSlim();
+        using var allowConstructorToContinue = new ManualResetEventSlim();
+        var firstPoolClears = 0;
+        var finalPoolClears = 0;
+        var first = new SqliteSessionStore(
+            new SqliteSessionStoreOptions(path),
+            faultInjector: null,
+            point =>
+            {
+                if (point == SqliteSessionStorePoolLifetimePoint.BeforePoolClear)
+                {
+                    Interlocked.Increment(ref firstPoolClears);
+                }
+            });
+        SqliteSessionStore? admitted = null;
+        Task<SqliteSessionStore>? construction = null;
+
+        try
+        {
+            await first.SetAsync("pool.admission", "before-race");
+            construction = Task.Factory.StartNew(
+                () => new SqliteSessionStore(
+                    new SqliteSessionStoreOptions(path),
+                    faultInjector: null,
+                    point =>
+                    {
+                        if (point == SqliteSessionStorePoolLifetimePoint.BeforeSchemaInitialization)
+                        {
+                            constructorAdmitted.Set();
+                            allowConstructorToContinue.Wait();
+                        }
+                        else if (point == SqliteSessionStorePoolLifetimePoint.BeforePoolClear)
+                        {
+                            Interlocked.Increment(ref finalPoolClears);
+                        }
+                    }),
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default);
+
+            Assert.True(constructorAdmitted.Wait(TimeSpan.FromSeconds(5)));
+            first.Dispose();
+            Assert.Equal(0, Volatile.Read(ref firstPoolClears));
+
+            allowConstructorToContinue.Set();
+            admitted = await construction.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal("before-race", await admitted.GetAsync<string>("pool.admission"));
+
+            admitted.Dispose();
+            Assert.Equal(1, Volatile.Read(ref finalPoolClears));
+        }
+        finally
+        {
+            allowConstructorToContinue.Set();
+            first.Dispose();
+            if (construction is not null)
+            {
+                try
+                {
+                    admitted ??= await construction.WaitAsync(TimeSpan.FromSeconds(5));
+                }
+                catch
+                {
+                    // Preserve the original assertion or construction failure.
+                }
+            }
+            admitted?.Dispose();
+            DeleteSqliteFiles(path);
+        }
+    }
+
+    [Fact]
+    public void FailedConstructorReleasesItsPoolAdmission()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"deep-pool-failed-constructor-{Guid.NewGuid():N}.db");
+        var poolClears = 0;
+        try
+        {
+            File.WriteAllBytes(path, []);
+
+            Assert.Throws<LocalStateResetRequiredException>(() =>
+                new SqliteSessionStore(
+                    new SqliteSessionStoreOptions(path),
+                    faultInjector: null,
+                    point =>
+                    {
+                        if (point == SqliteSessionStorePoolLifetimePoint.BeforePoolClear)
+                        {
+                            Interlocked.Increment(ref poolClears);
+                        }
+                    }));
+
+            Assert.Equal(1, Volatile.Read(ref poolClears));
+        }
+        finally
+        {
+            DeleteSqliteFiles(path);
+        }
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -1166,6 +1370,17 @@ public sealed class MembershipTrustRepositoryContractTests
             state: MembershipTrustState.Healthy,
             observedAt: DateTimeOffset.FromUnixTimeSeconds(1010),
             validUntil: DateTimeOffset.FromUnixTimeSeconds(1200));
+
+    private static void DeleteSqliteFiles(string path)
+    {
+        foreach (var candidate in new[] { path, path + "-wal", path + "-shm" })
+        {
+            if (File.Exists(candidate))
+            {
+                File.Delete(candidate);
+            }
+        }
+    }
 
     private sealed class StoreScope(IMembershipTrustRepository store, IDisposable? disposable) : IDisposable
     {

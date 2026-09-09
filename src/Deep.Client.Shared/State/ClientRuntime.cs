@@ -1,13 +1,18 @@
 ﻿using Deep.Client.Shared.Features;
 using Deep.Client.Shared.Persistence;
+using Deep.Client.Shared.Persistence.GroupV1;
+using Deep.Client.Shared.Persistence.MessagingV1;
 using Deep.Client.Shared.Services;
+using Deep.Client.Shared.Services.GroupV1;
 
 namespace Deep.Client.Shared.State;
 
-public sealed class ClientRuntime : IDisposable
+public sealed class ClientRuntime : IDisposable, IAsyncDisposable
 {
     private readonly IDisposable? ownedMessageTransport;
+    private readonly MessageNetworkRuntime messageNetwork;
     private readonly AccountGenerationMutationBarrier mutationBarrier;
+    private readonly TaskCompletionSource<bool> disposalCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private int disposed;
 
     public ClientRuntime(
@@ -22,12 +27,20 @@ public sealed class ClientRuntime : IDisposable
         IMailboxDeliveryPolicy? mailboxDeliveryPolicy = null,
         bool ownsMessageTransport = false,
         IMessageDispatchFailureObserver? messageDispatchFailureObserver = null,
-        IGroupMailboxRouteExchange? groupMailboxRoutes = null)
+        IGroupMailboxRouteExchange? groupMailboxRoutes = null,
+        MessagingV1PersistenceOptions? messagingV1Persistence = null,
+        SqliteGroupStateStore? groupV1StateStore = null)
     {
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(featureFlags);
         ArgumentNullException.ThrowIfNull(clock);
         ArgumentNullException.ThrowIfNull(messageTransport);
+        var transportRequired = requireE2eeTransport || featureFlags.TransportRequired;
+        if (transportRequired && featureFlags.PersistentTransportOutboxEnabled)
+        {
+            throw new InvalidOperationException(
+                "MSG-01 and the legacy transport outbox cannot own the same production dispatch path.");
+        }
 
         mutationBarrier = new AccountGenerationMutationBarrier();
         Store = AccountGenerationSessionStore.Create(store, mutationBarrier);
@@ -35,7 +48,6 @@ public sealed class ClientRuntime : IDisposable
         Clock = clock;
         AvatarProfiles = avatarProfiles ?? new DisabledAvatarProfileTransport();
         Accounts = new SessionAccountService(store, store, clock, messageTransport as IRecoveryProfileLookup);
-
         if (featureFlags.PersistentTransportOutboxEnabled)
         {
             if (store is not ITransportOutboxRepository outboxRepository)
@@ -60,11 +72,9 @@ public sealed class ClientRuntime : IDisposable
                 "A transport outbox executor was configured while PersistentTransportOutboxEnabled is disabled.");
         }
 
-        var transportRequired = requireE2eeTransport || featureFlags.TransportRequired;
-        if (transportRequired && messageTransport is not IAuthenticatedInboxTransport)
+        if (transportRequired && messageTransport is not IMsg01AuthenticatedEvidenceSource)
         {
-            throw new InvalidOperationException(
-                "TransportRequired is enabled, but the configured transport is not authenticated E2EE.");
+            throw new MessagingV1CryptoUnavailableException();
         }
 
         if (featureFlags.MetadataPrivateTransportRequired &&
@@ -76,40 +86,82 @@ public sealed class ClientRuntime : IDisposable
 
         if (transportRequired)
         {
+            if (messagingV1Persistence is null)
+            {
+                throw new InvalidOperationException(
+                    "TransportRequired requires persistent MSG-01 authoritative state options.");
+            }
             if (mailboxDeliveryPolicy is null)
             {
                 throw new InvalidOperationException(
                     "TransportRequired requires an explicit mailbox delivery policy.");
             }
-            var encryptedTransport = new E2eeClientTransport(
-                messageTransport,
-                Accounts.GetRecoveryPhraseAsync,
-                clock,
-                Store,
-                mailboxDeliveryPolicy,
-                ownsMessageTransport);
-            MessageTransport = encryptedTransport;
-            GroupSyncTransport = encryptedTransport;
-            ownedMessageTransport = encryptedTransport;
-            Accounts.AccountStateChanged += encryptedTransport.RetireCachedIdentity;
+            GroupMessageDispatchSafetyService? groupDispatchSafety = null;
+            if (groupV1StateStore is not null)
+            {
+                var messageScope = messagingV1Persistence.IdentityScope
+                    ?? throw new InvalidOperationException(
+                        "A production GroupV1 store requires an exact DeepAccount-bound MSG-01 scope.");
+                if (!messageScope.LocalAccountId.Span.SequenceEqual(
+                        groupV1StateStore.Scope.AccountId.Bytes.Span)
+                    || messageScope.DatabaseGeneration !=
+                        groupV1StateStore.Scope.AccountGeneration)
+                {
+                    throw new InvalidOperationException(
+                        "The production MSG-01 and GroupV1 stores belong to different account generations.");
+                }
+                groupDispatchSafety = new GroupMessageDispatchSafetyService(groupV1StateStore);
+            }
+            var verifiedSession = (IMsg01AuthenticatedEvidenceSource)messageTransport;
+            Msg01AuthoritativeTransport authoritativeTransport;
+            var messagingOwner = messagingV1Persistence.CreateOwner(
+                verifiedSession.EvidenceAuthority);
+            try
+            {
+                authoritativeTransport = new Msg01AuthoritativeTransport(
+                    messageTransport,
+                    groupSyncTransport,
+                    verifiedSession,
+                    messagingOwner,
+                    clock,
+                    ownsMessageTransport,
+                    groupDispatchSafety);
+            }
+            catch
+            {
+                messagingOwner.Dispose();
+                throw;
+            }
+            MessageTransport = authoritativeTransport;
+            GroupSyncTransport = authoritativeTransport;
+            ownedMessageTransport = authoritativeTransport;
+            HasGroupV1FirstDispatchAuthority = groupDispatchSafety is not null;
         }
         else
         {
+            if (groupV1StateStore is not null)
+            {
+                throw new InvalidOperationException(
+                    "A GroupV1 production store cannot be attached while the authoritative MSG-01 transport is disabled.");
+            }
             MessageTransport = messageTransport;
             GroupSyncTransport = groupSyncTransport ?? new DisabledGroupSyncTransport();
         }
 
         Conversations = new ConversationService(
             Store, Store, Store, Store, clock, featureFlags, GroupSyncTransport, groupMailboxRoutes);
+        messageNetwork = new MessageNetworkRuntime(
+            Store,
+            MessageTransport,
+            GroupSyncTransport,
+            messageDispatchFailureObserver);
         Messages = new MessageService(
             Conversations,
             Store,
             Store,
             Store,
-            MessageTransport,
-            GroupSyncTransport,
             clock,
-            messageDispatchFailureObserver);
+            messageNetwork);
         Inbox = new InboxSyncService(Accounts, Conversations, Messages);
         var accountLifecycles = new List<IAccountGenerationLifecycle>
         {
@@ -155,6 +207,8 @@ public sealed class ClientRuntime : IDisposable
 
     public bool IsDisposed => Volatile.Read(ref disposed) != 0;
 
+    internal bool HasGroupV1FirstDispatchAuthority { get; }
+
     public static ClientRuntime CreateStubbed(
         ClientFeatureFlags? featureFlags = null,
         IClock? clock = null,
@@ -197,10 +251,9 @@ public sealed class ClientRuntime : IDisposable
         }
 
         if ((requireE2eeTransport || resolvedFeatureFlags.TransportRequired) &&
-            backend is not IAuthenticatedInboxTransport)
+            backend is not IMsg01AuthenticatedEvidenceSource)
         {
-            throw new InvalidOperationException(
-                "TransportRequired is enabled, but the configured transport is not authenticated E2EE.");
+            throw new MessagingV1CryptoUnavailableException();
         }
 
         if ((requireE2eeTransport || resolvedFeatureFlags.TransportRequired) &&
@@ -218,21 +271,38 @@ public sealed class ClientRuntime : IDisposable
         }
 
         var store = new SqliteSessionStore(new SqliteSessionStoreOptions(statePath, sqlCipherKey));
+        ILocalSessionStore? runtimeStore = null;
+        try
+        {
+            runtimeStore = storeDecorator?.Invoke(store) ?? store;
+            var messagingV1Persistence = requireE2eeTransport || resolvedFeatureFlags.TransportRequired
+                ? new MessagingV1PersistenceOptions(
+                    statePath + ".msg01",
+                    !string.IsNullOrWhiteSpace(sqlCipherKey)
+                        ? sqlCipherKey
+                        : throw new InvalidOperationException(
+                            "TransportRequired requires a nonempty SQLCipher key for MSG-01."))
+                : null;
 
-        var runtimeStore = storeDecorator?.Invoke(store) ?? store;
-
-        return new(
-            runtimeStore,
-            resolvedFeatureFlags,
-            clock ?? new SystemClock(),
-            backend,
-            groupSyncTransport,
-            avatarProfiles,
-            requireE2eeTransport,
-            transportOutboxExecutor,
-            mailboxDeliveryPolicy,
-            ownsMessageTransport,
-            groupMailboxRoutes: groupMailboxRoutes);
+            return new(
+                runtimeStore,
+                resolvedFeatureFlags,
+                clock ?? new SystemClock(),
+                backend,
+                groupSyncTransport,
+                avatarProfiles,
+                requireE2eeTransport,
+                transportOutboxExecutor,
+                mailboxDeliveryPolicy,
+                ownsMessageTransport,
+                groupMailboxRoutes: groupMailboxRoutes,
+                messagingV1Persistence: messagingV1Persistence);
+        }
+        catch
+        {
+            DisposeStartupFailureStore(runtimeStore, store);
+            throw;
+        }
     }
 
     public static ClientRuntime CreatePersistentForTests(
@@ -259,19 +329,34 @@ public sealed class ClientRuntime : IDisposable
             transportOutboxExecutor,
             groupMailboxRoutes: groupMailboxRoutes);
 
-    public void Dispose()
+    public void Dispose() => DisposeAsync().AsTask().GetAwaiter().GetResult();
+
+    public async ValueTask DisposeAsync()
     {
-        if (Interlocked.Exchange(ref disposed, 1) != 0)
+        if (Interlocked.CompareExchange(ref disposed, 1, 0) != 0)
         {
+            await disposalCompletion.Task.ConfigureAwait(false);
             return;
         }
-
-        Inbox.Dispose();
-        mutationBarrier.Dispose();
-        ownedMessageTransport?.Dispose();
-        if (Store is IDisposable disposableStore)
+        try
         {
-            disposableStore.Dispose();
+            Inbox.Dispose();
+            mutationBarrier.Dispose();
+            await messageNetwork.DisposeAsync().ConfigureAwait(false);
+            if (ownedMessageTransport is IAsyncDisposable asyncTransport)
+                await asyncTransport.DisposeAsync().ConfigureAwait(false);
+            else
+                ownedMessageTransport?.Dispose();
+            if (Store is IAsyncDisposable asyncStore)
+                await asyncStore.DisposeAsync().ConfigureAwait(false);
+            else if (Store is IDisposable disposableStore)
+                disposableStore.Dispose();
+            disposalCompletion.TrySetResult(true);
+        }
+        catch (Exception exception)
+        {
+            disposalCompletion.TrySetException(exception);
+            throw;
         }
     }
 
@@ -281,4 +366,39 @@ public sealed class ClientRuntime : IDisposable
             IMetadataPrivateSessionMessageTransport opaque => opaque.UsesMetadataPrivateTransport,
             _ => false
         };
+
+    private static void DisposeStartupFailureStore(
+        ILocalSessionStore? runtimeStore,
+        SqliteSessionStore store)
+    {
+        if (!ReferenceEquals(runtimeStore, store))
+        {
+            DisposeStartupResource(runtimeStore);
+        }
+
+        DisposeStartupResource(store);
+    }
+
+    private static void DisposeStartupResource(ILocalSessionStore? store)
+    {
+        if (store is null)
+        {
+            return;
+        }
+
+        try
+        {
+            if (store is IAsyncDisposable asyncStore)
+            {
+                asyncStore.DisposeAsync().GetAwaiter().GetResult();
+            }
+            else if (store is IDisposable disposable)
+            {
+                disposable.Dispose();
+            }
+        }
+        catch
+        {
+        }
+    }
 }

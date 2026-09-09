@@ -16,7 +16,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\src\Deep.Client.Shared\Deep.Client.Shared.csproj" />
+    <ProjectReference Include="..\..\src\Deep.Client.Shared\Deep.Client.Shared.csproj"
+                      AdditionalProperties="EnableDeepTestInternals=true" />
   </ItemGroup>
 
   <ItemGroup>

@@ -41,6 +41,10 @@ public sealed class MessagingCryptoV1PreparationLeaseTests
         {
             AssertContext(afterRestart, initial, stateCommitment, journalHead, 7, 0,
                 ExactDpe2ReceiveReplayDisposition.Fresh);
+            Assert.Equal(beforeRestart.ExactTrs1Hash, afterRestart.ExactTrs1Hash);
+            Assert.Equal(beforeRestart.ExpectedStateCommitment, afterRestart.ExpectedStateCommitment);
+            Assert.Equal(beforeRestart.LatestProtectedCommitment, afterRestart.LatestProtectedCommitment);
+            Assert.Equal(beforeRestart.JournalPredecessor, afterRestart.JournalPredecessor);
             Assert.Equal(beforeRestart.RetentionCommitment, afterRestart.RetentionCommitment);
         }
 
@@ -135,6 +139,7 @@ public sealed class MessagingCryptoV1PreparationLeaseTests
             Assert.Equal(2UL, replay.ExpectedStateGeneration);
             Assert.Equal(1UL, replay.ExpectedJournalGeneration);
             Assert.Equal(committedHead, replay.JournalPredecessor);
+            Assert.Equal(SHA256.HashData(exactDpe2), replay.ExactReceiveEnvelopeHash);
             Assert.Equal(
                 RetentionCommitment(fixture.Scope, committedHead, journalGeneration: 1, exactDpe2Count: 1),
                 replay.RetentionCommitment);
@@ -143,6 +148,25 @@ public sealed class MessagingCryptoV1PreparationLeaseTests
         var changed = Dpe2(fixture.Scope, operationSeed: 0x22, ciphertextSeed: 0x62);
         await Assert.ThrowsAsync<CryptographicException>(async () =>
             await reopened.AcquireReceivePreparationLeaseAsync(changed));
+    }
+
+    [Fact]
+    public async Task ReceivePreparationLeaseOwnsExactEnvelopeAgainstCallerMutation()
+    {
+        using var fixture = new Fixture();
+        var initial = Trs1(fixture.Scope, 1, 0x63);
+        var exactDpe2 = Dpe2(fixture.Scope, operationSeed: 0x23, ciphertextSeed: 0x64);
+        var expectedHash = SHA256.HashData(exactDpe2);
+        await using var store = fixture.Open();
+        await Initialize(store, initial);
+
+        using var lease = await store.AcquireReceivePreparationLeaseAsync(exactDpe2);
+        CryptographicOperations.ZeroMemory(exactDpe2);
+        using var snapshot = lease.CaptureForTesting();
+
+        Assert.Equal(expectedHash, snapshot.ExactReceiveEnvelopeHash);
+        Assert.Equal(ExactDpe2ReceiveReplayDisposition.Fresh, snapshot.ReceiveReplayDisposition);
+        CryptographicOperations.ZeroMemory(expectedHash);
     }
 
     [Fact]
@@ -216,7 +240,7 @@ public sealed class MessagingCryptoV1PreparationLeaseTests
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         Append(hash, "Deep/Client/MessagingCryptoV1/replay-retention/v1"u8);
         Append(hash, U64(1));
-        Append(hash, U64(2));
+        Append(hash, U64(3));
         Append(hash, U64(MessagingCryptoV1Limits.MaximumJournalEntries));
         Append(hash, U64(journalGeneration == 0 ? 0UL : 1UL));
         Append(hash, U64(journalGeneration));
@@ -229,8 +253,11 @@ public sealed class MessagingCryptoV1PreparationLeaseTests
 
     private static async Task<byte[]> Initialize(SqliteMessagingCryptoV1Store store, byte[] state)
     {
-        using var initialization = MessagingCryptoV1PreparedInitialization.CreateForTests(Bytes(0x10), state);
-        return (await store.InitializeAsync(initialization)).JournalHead.ToArray();
+        await store.ProvisionOpaqueInitialPreKeysForTestsAsync(
+            Bytes(0xE1), Bytes(0xF1), Bytes(0xE2), Bytes(0xF2));
+        using var initialization = MessagingCryptoV1InitialSessionHandoff.CreateForTests(
+            Bytes(0x10), Bytes(0xA5), Bytes(0xA6), Bytes(0xE1), Bytes(0xE2), state);
+        return (await store.CommitInitialSessionAsync(initialization)).JournalHead.ToArray();
     }
 
     private static byte[] Dpe2(

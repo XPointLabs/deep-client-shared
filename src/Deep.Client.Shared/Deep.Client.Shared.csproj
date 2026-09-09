@@ -4,13 +4,16 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <RuntimeIdentifiers>win-arm64</RuntimeIdentifiers>
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
   </PropertyGroup>
 
+  <PropertyGroup Condition="'$(EnableDeepTestInternals)' == 'true'">
+    <DefineConstants>$(DefineConstants);DEEP_TEST_INTERNALS</DefineConstants>
+  </PropertyGroup>
+
   <ItemGroup>
-    <PackageReference Include="Deep.Protocol" Version="[0.5.0-survival.e75bfed]" />
-    <PackageReference Include="Deep.Protocol.MembershipRoutes" Version="[0.5.0-survival.e75bfed]" />
+    <ProjectReference Include="..\..\..\deep-protocol\src\Deep.Protocol\Deep.Protocol.csproj" />
+    <ProjectReference Include="..\..\..\deep-protocol\src\Deep.Protocol.MembershipRoutes\Deep.Protocol.MembershipRoutes.csproj" />
     <PackageReference Include="Deep.Protocol.ProfileCarrier" Version="[0.5.0-survival.e75bfed]" />
     <PackageReference Include="Microsoft.Data.Sqlite.Core" Version="10.0.9" />
     <PackageReference Include="Sodium.Core" Version="1.4.1" />
@@ -18,6 +21,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Retained only for the not-yet-recomposed legacy runtime; STORE-01 never reads it. -->
     <EmbeddedResource Include="Resources\Mnemonic\english.txt"
                       LogicalName="Deep.Client.Shared.Resources.Mnemonic.english.txt" />
   </ItemGroup>

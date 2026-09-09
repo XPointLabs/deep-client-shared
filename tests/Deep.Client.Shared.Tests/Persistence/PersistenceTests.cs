@@ -365,13 +365,36 @@ public sealed class PersistenceTests
     [Fact]
     public void ClientRuntime_ReleaseFlagsRejectUnauthenticatedTransport()
     {
-        var exception = Assert.Throws<InvalidOperationException>(() => new ClientRuntime(
+        var exception = Assert.Throws<MessagingV1CryptoUnavailableException>(() => new ClientRuntime(
             new InMemorySessionStore(),
             ClientFeatureFlags.ReleaseDefaults,
             new SystemClock(),
             new StubSessionBackend()));
 
-        Assert.Contains("authenticated E2EE", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(
+            MessagingV1CryptoUnavailableException.ProductionCapabilityUnavailable,
+            exception.Code);
+    }
+
+    [Fact]
+    public void ClientRuntime_CreatePersistent_DisposesSqliteStoreWhenStartupDecoratorFails()
+    {
+        var statePath = Path.Combine(Path.GetTempPath(), $"deep-client-runtime-startup-failure-{Guid.NewGuid():N}.db");
+        try
+        {
+            Assert.Throws<InvalidOperationException>(() => ClientRuntime.CreatePersistent(
+                statePath,
+                backend: new StubSessionBackend(),
+                storeDecorator: _ => throw new InvalidOperationException("startup guard")));
+
+            AssertCanOpenFileExclusively(statePath);
+            AssertCanOpenSqliteAgain(statePath);
+            AssertCanDeleteDatabase(statePath);
+        }
+        finally
+        {
+            DeleteSqliteFiles(statePath);
+        }
     }
 
     [Fact]
@@ -406,18 +429,18 @@ public sealed class PersistenceTests
     }
 
     [Fact]
-    public void ClientRuntime_ReleaseFlagsWrapAuthenticatedTransportWithE2ee()
+    public void ClientRuntime_ReleaseFlagsRejectLegacyDpe1TransportWithoutMsg01Evidence()
     {
-        var runtime = new ClientRuntime(
+        var exception = Assert.Throws<MessagingV1CryptoUnavailableException>(() => new ClientRuntime(
             new InMemorySessionStore(),
             ClientFeatureFlags.ReleaseDefaults with { MetadataPrivateTransportRequired = false },
             new SystemClock(),
             new AuthenticatedTestTransport(),
-            mailboxDeliveryPolicy: new DirectP2pMailboxDeliveryPolicy());
+            mailboxDeliveryPolicy: new DirectP2pMailboxDeliveryPolicy()));
 
-        Assert.IsType<E2eeClientTransport>(runtime.MessageTransport);
-        runtime.Dispose();
-        Assert.True(runtime.IsDisposed);
+        Assert.Equal(
+            MessagingV1CryptoUnavailableException.ProductionCapabilityUnavailable,
+            exception.Code);
     }
 
     [Fact]
@@ -844,6 +867,41 @@ public sealed class PersistenceTests
             catch (IOException)
             {
             }
+        }
+    }
+
+    private static void AssertCanOpenSqliteAgain(string statePath)
+    {
+        SqliteConnection.ClearAllPools();
+        using var connection = new SqliteConnection($"Data Source={statePath};Pooling=False");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "PRAGMA schema_version;";
+        Assert.True(Convert.ToInt64(command.ExecuteScalar()) >= 0);
+    }
+
+    private static void AssertCanOpenFileExclusively(string statePath)
+    {
+        using var stream = new FileStream(
+            statePath,
+            FileMode.Open,
+            FileAccess.ReadWrite,
+            FileShare.None);
+    }
+
+    private static void AssertCanDeleteDatabase(string statePath)
+    {
+        SqliteConnection.ClearAllPools();
+        var paths = new[] { statePath, statePath + "-wal", statePath + "-shm" };
+        foreach (var path in paths)
+        {
+            if (!File.Exists(path))
+            {
+                continue;
+            }
+
+            File.Delete(path);
+            Assert.False(File.Exists(path));
         }
     }
 

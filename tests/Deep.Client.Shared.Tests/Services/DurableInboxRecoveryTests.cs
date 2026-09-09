@@ -287,7 +287,8 @@ public sealed class DurableInboxRecoveryTests
             clock,
             ClientFeatureFlags.Defaults,
             groupSync);
-        return new MessageService(conversations, store, store, store, transport, groupSync, clock);
+        var network = new MessageNetworkRuntime(store, transport, groupSync, null);
+        return new MessageService(conversations, store, store, store, clock, network);
     }
 
     private static async Task SendEncryptedDirectAsync(

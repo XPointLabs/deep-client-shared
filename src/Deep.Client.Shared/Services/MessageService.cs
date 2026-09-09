@@ -36,19 +36,10 @@ public sealed class MessageService(
     IConversationRepository conversations,
     IMessageRepository messages,
     ISettingsRepository settings,
-    ISessionMessageTransport transport,
-    IGroupSyncTransport groupSync,
     IClock clock,
-    IMessageDispatchFailureObserver? dispatchFailureObserver = null) : IAccountGenerationLifecycle
+    MessageNetworkRuntime network) : IAccountGenerationLifecycle
 {
-    private readonly object outboxGate = new();
-    private readonly Dictionary<MessageId, OutboxDispatch> inFlightDispatches = [];
-    private readonly Dictionary<SessionId, Queue<OutboxDispatch>> senderDispatchQueues = [];
-    private readonly HashSet<SessionId> stoppedAccountGenerations = [];
-    private readonly Dictionary<ConversationId, int> conversationDispatchBarriers = [];
-    private readonly Dictionary<MessageId, int> messageDispatchBarriers = [];
-
-    public bool SupportsDurableGroupInboxMaintenance => groupSync is IGroupInboxMaintenance;
+    public bool SupportsDurableGroupInboxMaintenance => network.SupportsDurableGroupInboxMaintenance;
 
     public Task<IReadOnlyList<PendingIncomingMessageNotification>> ListPendingIncomingMessageNotificationIdsAsync(
         int limit,
@@ -78,9 +69,7 @@ public sealed class MessageService(
         SessionId account,
         IReadOnlyCollection<ConversationId> knownGroupIds,
         CancellationToken cancellationToken = default) =>
-        groupSync is IGroupInboxMaintenance maintenance
-            ? maintenance.DiscardUnknownGroupMessagesAsync(account, knownGroupIds, cancellationToken)
-            : Task.FromResult(0);
+        network.DiscardUnknownGroupsAsync(account, knownGroupIds, cancellationToken);
 
     public async Task<Message> SendOneToOneAsync(
         SessionId sender,
@@ -145,6 +134,11 @@ public sealed class MessageService(
             CalculateExpiry(conversation.Settings.DisappearingMessages, now),
             ReplyTo: replyTo);
 
+        // MSG-01 must durably own the canonical envelope and immutable fanout
+        // before the legacy repository is updated as a UI projection. A crash in
+        // the opposite order would leave an undeliverable legacy-only message.
+        await network.PrepareAuthoritativeAsync(
+            pending, groupRecipients: null, cancellationToken).ConfigureAwait(false);
         await AppendAndTouchAsync(pending, conversation.Touch(now), cancellationToken).ConfigureAwait(false);
         return pending;
     }
@@ -168,12 +162,12 @@ public sealed class MessageService(
     {
         await RepairSelfConversationAsync(recipient, cancellationToken).ConfigureAwait(false);
         var received = new List<Message>();
-        var orderedDurableDrain = transport is IDurableInboxAcknowledger;
+        var orderedDurableDrain = network.UsesOrderedDirectInbox;
         var remainingOrderedItems = DurableInboxLimits.MaxBatchCount;
 
         while (remainingOrderedItems > 0)
         {
-            var envelopes = await transport.ReceiveAsync(recipient, cancellationToken).ConfigureAwait(false);
+            var envelopes = await network.ReceiveDirectAsync(recipient, cancellationToken).ConfigureAwait(false);
             if (envelopes.Count == 0)
             {
                 break;
@@ -195,7 +189,7 @@ public sealed class MessageService(
                 var applied = await ApplyDirectEnvelopeAsync(recipient, envelope, cancellationToken).ConfigureAwait(false);
                 if (applied.ShouldAcknowledge)
                 {
-                    await AcknowledgeInboxItemAsync(transport, recipient, envelope.ServerHash, cancellationToken)
+                    await network.AcknowledgeDirectAsync(recipient, envelope.ServerHash, cancellationToken)
                         .ConfigureAwait(false);
                     remainingOrderedItems--;
                 }
@@ -472,6 +466,8 @@ public sealed class MessageService(
             ReplyTo: replyTo,
             NotifyRecipients: GroupNotifyRecipients(group, sender));
 
+        await network.PrepareAuthoritativeAsync(
+            pending, pending.NotifyRecipients, cancellationToken).ConfigureAwait(false);
         await AppendAndTouchAsync(pending, conversation.Touch(now), cancellationToken).ConfigureAwait(false);
         return pending;
     }
@@ -494,6 +490,11 @@ public sealed class MessageService(
         SessionId sender,
         CancellationToken cancellationToken = default)
     {
+        // In production MSG-01 is the sole durable outbox/recovery owner. The legacy
+        // repository is only a UI projection and must never decide what is dispatched.
+        if (network.UsesAuthoritativeMsg01)
+            return await network.RecoverAuthoritativeAsync(sender, cancellationToken).ConfigureAwait(false);
+
         var dispatched = 0;
         IReadOnlyList<Message> pendingMessages;
         if (messages is IMessageSyncRepository syncRepository)
@@ -571,7 +572,9 @@ public sealed class MessageService(
             throw new MessageRetryRejectedException(MessageRetryRejection.NotOwned);
         if (stored.Direction != MessageDirection.Outgoing)
             throw new MessageRetryRejectedException(MessageRetryRejection.NotOutgoing);
-        if (IsSuccessfulTerminal(stored))
+        // A legacy UI projection is not authoritative when MSG-01 owns the runtime.
+        // Entering the MSG transaction again is idempotent and reads its durable head.
+        if (IsSuccessfulTerminal(stored) && !network.UsesAuthoritativeMsg01)
             return stored;
         if (stored.DeliveryState is not (MessageDeliveryState.Sending or MessageDeliveryState.Failed))
             throw new MessageRetryRejectedException(MessageRetryRejection.NotRetryable);
@@ -585,358 +588,20 @@ public sealed class MessageService(
 
     async Task IAccountGenerationLifecycle.StopAsync(
         SessionId account,
-        CancellationToken cancellationToken)
-    {
-        IReadOnlyList<OutboxDispatch> operations;
-        lock (outboxGate)
-        {
-            stoppedAccountGenerations.Add(account);
-            operations = inFlightDispatches.Values
-                .Where(operation => operation.Pending.Sender == account)
-                .ToArray();
-        }
+        CancellationToken cancellationToken) =>
+        await network.StopAsync(account, cancellationToken).ConfigureAwait(false);
 
-        await CancelAndAwaitDispatchesAsync(operations, cancellationToken).ConfigureAwait(false);
-    }
+    void IAccountGenerationLifecycle.Resume(SessionId account) => network.Resume(account);
 
-    void IAccountGenerationLifecycle.Resume(SessionId account)
-    {
-        lock (outboxGate)
-        {
-            stoppedAccountGenerations.Remove(account);
-        }
-    }
-
-    private async Task<Message> DispatchAsync(
+    private Task<Message> DispatchAsync(
         Message pending,
         IReadOnlyList<SessionId>? groupNotifyRecipients,
         CancellationToken dispatchCancellationToken,
-        CancellationToken waiterCancellationToken)
-    {
-        waiterCancellationToken.ThrowIfCancellationRequested();
-
-        OutboxDispatch operation;
-        var startSenderQueue = false;
-        lock (outboxGate)
-        {
-            ThrowIfDispatchBlocked(pending);
-
-            if (inFlightDispatches.TryGetValue(pending.Id, out operation!))
-            {
-                EnsureCompatibleDispatch(operation.Pending, pending);
-            }
-            else
-            {
-                operation = new OutboxDispatch(pending, groupNotifyRecipients, dispatchCancellationToken);
-                inFlightDispatches.Add(pending.Id, operation);
-
-                if (!senderDispatchQueues.TryGetValue(pending.Sender, out var senderQueue))
-                {
-                    senderQueue = new Queue<OutboxDispatch>();
-                    senderDispatchQueues.Add(pending.Sender, senderQueue);
-                    startSenderQueue = true;
-                }
-
-                senderQueue.Enqueue(operation);
-            }
-        }
-
-        if (startSenderQueue)
-        {
-            _ = ProcessSenderDispatchQueueAsync(pending.Sender);
-        }
-
-        return await operation.Completion.Task.WaitAsync(waiterCancellationToken).ConfigureAwait(false);
-    }
-
-    private async Task ProcessSenderDispatchQueueAsync(SessionId sender)
-    {
-        while (TryTakeNextSenderDispatch(sender, out var operation))
-        {
-            await ExecuteDispatchAsync(operation).ConfigureAwait(false);
-        }
-    }
-
-    private bool TryTakeNextSenderDispatch(SessionId sender, out OutboxDispatch operation)
-    {
-        lock (outboxGate)
-        {
-            if (senderDispatchQueues.TryGetValue(sender, out var senderQueue) && senderQueue.Count > 0)
-            {
-                operation = senderQueue.Dequeue();
-                return true;
-            }
-
-            senderDispatchQueues.Remove(sender);
-            operation = null!;
-            return false;
-        }
-    }
-
-    private async Task ExecuteDispatchAsync(OutboxDispatch operation)
-    {
-        try
-        {
-            var result = await ExecuteOwnedDispatchAsync(operation).ConfigureAwait(false);
-            operation.Completion.TrySetResult(result);
-        }
-        catch (OperationCanceledException exception)
-        {
-            operation.Completion.TrySetCanceled(exception.CancellationToken);
-        }
-        catch (Exception exception)
-        {
-            operation.Completion.TrySetException(exception);
-        }
-        finally
-        {
-            lock (outboxGate)
-            {
-                if (inFlightDispatches.TryGetValue(operation.Pending.Id, out var current) &&
-                    ReferenceEquals(current, operation))
-                {
-                    inFlightDispatches.Remove(operation.Pending.Id);
-                }
-            }
-
-            operation.Dispose();
-        }
-    }
-
-    private async Task<Message> ExecuteOwnedDispatchAsync(OutboxDispatch operation)
-    {
-        var cancellationToken = operation.DispatchCancellationToken;
-        var physicalDispatchCompleted = false;
-        try
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            var stored = await messages.GetAsync(operation.Pending.Id, cancellationToken).ConfigureAwait(false);
-            if (stored is null)
-            {
-                throw new OperationCanceledException(
-                    $"Message '{operation.Pending.Id}' is no longer present in the durable outbox.",
-                    cancellationToken);
-            }
-
-            if (IsSuccessfulTerminal(stored))
-            {
-                return stored;
-            }
-
-            var pending = stored;
-            if (pending.Recipient is null)
-            {
-                var notifyRecipients = operation.GroupNotifyRecipients
-                    ?? pending.NotifyRecipients
-                    ?? throw new InvalidDataException(
-                        "Outgoing group message has no durable recipient snapshot.");
-                await groupSync.SendGroupMessageAsync(new OutboundGroupMessageEnvelope(
-                    pending.Id,
-                    pending.ConversationId,
-                    pending.Sender,
-                    pending.Body,
-                    pending.Attachments,
-                    pending.CreatedAt,
-                    pending.ExpiresAt,
-                    pending.ReplyTo,
-                    NotifyRecipients: notifyRecipients), cancellationToken).ConfigureAwait(false);
-                physicalDispatchCompleted = true;
-            }
-            else
-            {
-                await transport.SendAsync(new OutboundMessageEnvelope(
-                    pending.Sender,
-                    pending.Recipient.Value,
-                    pending.Body,
-                    pending.Attachments,
-                    pending.CreatedAt,
-                    pending.ExpiresAt,
-                    pending.Id,
-                    pending.ReplyTo), cancellationToken).ConfigureAwait(false);
-                physicalDispatchCompleted = true;
-            }
-
-            return await MarkSentUnlessTerminalAsync(pending).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (Exception exception) when (!physicalDispatchCompleted)
-        {
-            try
-            {
-                dispatchFailureObserver?.Observe(exception);
-            }
-            catch
-            {
-                // Operational diagnostics must never alter durable outbox semantics.
-            }
-
-            var terminal = await MarkFailedUnlessTerminalAsync(operation.Pending).ConfigureAwait(false);
-            if (terminal is not null)
-            {
-                return terminal;
-            }
-
-            throw;
-        }
-    }
-
-    private async Task<Message> MarkSentUnlessTerminalAsync(Message pending)
-    {
-        var stored = await messages.GetAsync(pending.Id, CancellationToken.None).ConfigureAwait(false);
-        if (stored is null)
-        {
-            return pending.Mark(MessageDeliveryState.Sent);
-        }
-
-        if (IsSuccessfulTerminal(stored))
-        {
-            return stored;
-        }
-
-        var sent = stored.Mark(MessageDeliveryState.Sent);
-        await messages.UpdateAsync(sent, CancellationToken.None).ConfigureAwait(false);
-        return sent;
-    }
-
-    private async Task<Message?> MarkFailedUnlessTerminalAsync(Message pending)
-    {
-        var stored = await messages.GetAsync(pending.Id, CancellationToken.None).ConfigureAwait(false);
-        if (stored is null)
-        {
-            return null;
-        }
-
-        if (IsSuccessfulTerminal(stored))
-        {
-            return stored;
-        }
-
-        await messages.UpdateAsync(
-            stored.Mark(MessageDeliveryState.Failed),
-            CancellationToken.None).ConfigureAwait(false);
-        return null;
-    }
+        CancellationToken waiterCancellationToken) =>
+        network.DispatchAsync(pending, groupNotifyRecipients, dispatchCancellationToken, waiterCancellationToken);
 
     private static bool IsSuccessfulTerminal(Message message) =>
-        message.DeliveryState is
-            MessageDeliveryState.Sent or
-            MessageDeliveryState.Delivered or
-            MessageDeliveryState.Read;
-
-    private void ThrowIfDispatchBlocked(Message pending)
-    {
-        if (stoppedAccountGenerations.Contains(pending.Sender)
-            || conversationDispatchBarriers.ContainsKey(pending.ConversationId)
-            || messageDispatchBarriers.ContainsKey(pending.Id))
-        {
-            throw new OperationCanceledException(
-                $"Message '{pending.Id}' was invalidated by an account or conversation lifecycle barrier.");
-        }
-    }
-
-    private IReadOnlyList<OutboxDispatch> BeginMessageDispatchBarrier(MessageId messageId)
-    {
-        lock (outboxGate)
-        {
-            IncrementBarrier(messageDispatchBarriers, messageId);
-            return inFlightDispatches.TryGetValue(messageId, out var operation)
-                ? [operation]
-                : [];
-        }
-    }
-
-    private void EndMessageDispatchBarrier(MessageId messageId)
-    {
-        lock (outboxGate)
-        {
-            DecrementBarrier(messageDispatchBarriers, messageId);
-        }
-    }
-
-    private IReadOnlyList<OutboxDispatch> BeginConversationDispatchBarrier(ConversationId conversationId)
-    {
-        lock (outboxGate)
-        {
-            IncrementBarrier(conversationDispatchBarriers, conversationId);
-            return inFlightDispatches.Values
-                .Where(operation => operation.Pending.ConversationId == conversationId)
-                .ToArray();
-        }
-    }
-
-    private void EndConversationDispatchBarrier(ConversationId conversationId)
-    {
-        lock (outboxGate)
-        {
-            DecrementBarrier(conversationDispatchBarriers, conversationId);
-        }
-    }
-
-    private static async Task CancelAndAwaitDispatchesAsync(
-        IReadOnlyList<OutboxDispatch> operations,
-        CancellationToken cancellationToken)
-    {
-        foreach (var operation in operations)
-        {
-            operation.Cancel();
-        }
-
-        foreach (var operation in operations)
-        {
-            try
-            {
-                await operation.Completion.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch
-            {
-                // The destructive lifecycle operation only needs dispatch quiescence, not its result.
-            }
-        }
-    }
-
-    private static void IncrementBarrier<TKey>(Dictionary<TKey, int> barriers, TKey key)
-        where TKey : notnull =>
-        barriers[key] = barriers.GetValueOrDefault(key) + 1;
-
-    private static void DecrementBarrier<TKey>(Dictionary<TKey, int> barriers, TKey key)
-        where TKey : notnull
-    {
-        if (barriers[key] == 1)
-        {
-            barriers.Remove(key);
-        }
-        else
-        {
-            barriers[key]--;
-        }
-    }
-
-    private static void EnsureCompatibleDispatch(Message owner, Message waiter)
-    {
-        if (owner.Sender != waiter.Sender ||
-            owner.ConversationId != waiter.ConversationId ||
-            owner.Recipient != waiter.Recipient ||
-            owner.Direction != waiter.Direction ||
-            !string.Equals(owner.Body, waiter.Body, StringComparison.Ordinal) ||
-            owner.CreatedAt != waiter.CreatedAt ||
-            owner.ExpiresAt != waiter.ExpiresAt ||
-            owner.ReplyTo != waiter.ReplyTo ||
-            !owner.Attachments.SequenceEqual(waiter.Attachments) ||
-            !(owner.NotifyRecipients ?? []).SequenceEqual(
-                waiter.NotifyRecipients ?? []))
-        {
-            throw new InvalidOperationException(
-                "A message is already being dispatched with a different envelope.");
-        }
-    }
-
+        message.DeliveryState is MessageDeliveryState.Sent or MessageDeliveryState.Delivered or MessageDeliveryState.Read;
     public async Task<Message?> SendReactionOneToOneAsync(
         SessionId sender,
         SessionId recipient,
@@ -947,7 +612,7 @@ public sealed class MessageService(
     {
         var conversationId = ConversationId.ForOneToOne(recipient);
         var update = new MessageReactionUpdate(targetMessageId, NormalizeEmoji(emoji), remove);
-        await transport.SendAsync(new OutboundMessageEnvelope(
+        await network.SendDirectControlAsync(new OutboundMessageEnvelope(
             sender,
             recipient,
             string.Empty,
@@ -974,7 +639,7 @@ public sealed class MessageService(
         }
 
         var update = new MessageReactionUpdate(targetMessageId, NormalizeEmoji(emoji), remove);
-        await groupSync.SendGroupMessageAsync(new OutboundGroupMessageEnvelope(
+        await network.SendGroupControlAsync(new OutboundGroupMessageEnvelope(
             MessageId.NewId(),
             groupId,
             sender,
@@ -998,7 +663,7 @@ public sealed class MessageService(
             return [];
         }
 
-        var envelopes = await groupSync.ReceiveGroupMessagesAsync(groupId, cancellationToken).ConfigureAwait(false);
+        var envelopes = await network.ReceiveGroupAsync(groupId, cancellationToken).ConfigureAwait(false);
         return await ApplyGroupEnvelopesAsync(recipient, group, envelopes, cancellationToken).ConfigureAwait(false);
     }
 
@@ -1017,10 +682,10 @@ public sealed class MessageService(
             return [];
         }
 
-        if (groupSync is IKnownGroupInboxReceiver batchReceiver)
+        if (network.HasKnownGroupReceiver)
         {
             var byId = activeGroups.ToDictionary(static group => group.Id);
-            var envelopes = await batchReceiver.ReceiveKnownGroupMessagesAsync(
+            var envelopes = await network.ReceiveKnownGroupsAsync(
                 recipient,
                 byId.Keys.ToArray(),
                 cancellationToken).ConfigureAwait(false);
@@ -1050,7 +715,7 @@ public sealed class MessageService(
             },
             async (group, itemCancellationToken) =>
             {
-                var envelopes = await groupSync.ReceiveGroupMessagesAsync(group.Id, itemCancellationToken).ConfigureAwait(false);
+                var envelopes = await network.ReceiveGroupAsync(group.Id, itemCancellationToken).ConfigureAwait(false);
                 var received = await ApplyGroupEnvelopesAsync(
                     recipient,
                     group,
@@ -1077,7 +742,7 @@ public sealed class MessageService(
             var applied = await ApplyGroupEnvelopeAsync(recipient, group, envelope, cancellationToken).ConfigureAwait(false);
             if (applied.ShouldAcknowledge)
             {
-                await AcknowledgeInboxItemAsync(groupSync, recipient, envelope.ServerHash, cancellationToken)
+                await network.AcknowledgeGroupAsync(recipient, envelope.ServerHash, cancellationToken)
                     .ConfigureAwait(false);
             }
 
@@ -1394,23 +1059,16 @@ public sealed class MessageService(
     public async Task<bool> DeleteMessageAsync(MessageId messageId, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var operations = BeginMessageDispatchBarrier(messageId);
-        try
+        await using var barrier = network.BeginMessageBarrier(messageId);
+        await barrier.QuiesceAsync(cancellationToken).ConfigureAwait(false);
+        var existing = await messages.GetAsync(messageId, cancellationToken).ConfigureAwait(false);
+        if (existing is null)
         {
-            await CancelAndAwaitDispatchesAsync(operations, cancellationToken).ConfigureAwait(false);
-            var existing = await messages.GetAsync(messageId, cancellationToken).ConfigureAwait(false);
-            if (existing is null)
-            {
-                return false;
-            }
+            return false;
+        }
 
-            await messages.DeleteAsync(messageId, cancellationToken).ConfigureAwait(false);
-            return true;
-        }
-        finally
-        {
-            EndMessageDispatchBarrier(messageId);
-        }
+        await messages.DeleteAsync(messageId, cancellationToken).ConfigureAwait(false);
+        return true;
     }
 
     public async Task<int> ClearConversationMessagesAsync(
@@ -1418,33 +1076,26 @@ public sealed class MessageService(
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var operations = BeginConversationDispatchBarrier(conversationId);
-        try
+        await using var barrier = network.BeginConversationBarrier(conversationId);
+        await barrier.QuiesceAsync(cancellationToken).ConfigureAwait(false);
+        if (messages is IMessageConversationPersistenceRepository persistenceRepository)
         {
-            await CancelAndAwaitDispatchesAsync(operations, cancellationToken).ConfigureAwait(false);
-            if (messages is IMessageConversationPersistenceRepository persistenceRepository)
-            {
-                return await persistenceRepository.ClearConversationMessagesAsync(conversationId, cancellationToken)
-                    .ConfigureAwait(false);
-            }
-
-            var messageIds = new List<MessageId>();
-            await foreach (var message in messages.ListForConversationAsync(conversationId, cancellationToken).ConfigureAwait(false))
-            {
-                messageIds.Add(message.Id);
-            }
-
-            foreach (var messageId in messageIds)
-            {
-                await messages.DeleteAsync(messageId, cancellationToken).ConfigureAwait(false);
-            }
-
-            return messageIds.Count;
+            return await persistenceRepository.ClearConversationMessagesAsync(conversationId, cancellationToken)
+                .ConfigureAwait(false);
         }
-        finally
+
+        var messageIds = new List<MessageId>();
+        await foreach (var message in messages.ListForConversationAsync(conversationId, cancellationToken).ConfigureAwait(false))
         {
-            EndConversationDispatchBarrier(conversationId);
+            messageIds.Add(message.Id);
         }
+
+        foreach (var messageId in messageIds)
+        {
+            await messages.DeleteAsync(messageId, cancellationToken).ConfigureAwait(false);
+        }
+
+        return messageIds.Count;
     }
 
     private Task AppendAndTouchAsync(
@@ -1561,38 +1212,6 @@ public sealed class MessageService(
 
     private static DateTimeOffset? CalculateExpiry(DisappearingMessageSettings settings, DateTimeOffset now) =>
         settings.Mode == DisappearingMode.Disabled ? null : now.Add(settings.Duration!.Value);
-
-    private sealed class OutboxDispatch(
-        Message pending,
-        IReadOnlyList<SessionId>? groupNotifyRecipients,
-        CancellationToken dispatchCancellationToken) : IDisposable
-    {
-        private readonly CancellationTokenSource dispatchCancellation =
-            CancellationTokenSource.CreateLinkedTokenSource(dispatchCancellationToken);
-
-        public Message Pending { get; } = pending;
-
-        public IReadOnlyList<SessionId>? GroupNotifyRecipients { get; } = groupNotifyRecipients?.ToArray();
-
-        public CancellationToken DispatchCancellationToken => dispatchCancellation.Token;
-
-        public TaskCompletionSource<Message> Completion { get; } =
-            new(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        public void Cancel()
-        {
-            try
-            {
-                dispatchCancellation.Cancel();
-            }
-            catch (ObjectDisposedException)
-            {
-                // Completion won the race with lifecycle cancellation.
-            }
-        }
-
-        public void Dispose() => dispatchCancellation.Dispose();
-    }
 
     private sealed record InboxApplicationResult(Message? Message, bool ShouldAcknowledge)
     {

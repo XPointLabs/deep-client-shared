@@ -6,6 +6,7 @@ using System.Text.Json;
 using Deep.Client.Shared.Domain;
 using Deep.Client.Shared.Persistence;
 using Deep.Protocol.DeepExtension.MailboxCapabilities;
+using Microsoft.Data.Sqlite;
 using Sodium;
 
 namespace Deep.Client.Shared.Services;
@@ -1214,6 +1215,39 @@ internal sealed class SqliteMailboxRevocationSource :
     {
         ArgumentNullException.ThrowIfNull(query);
         var checkpoint = Load();
+        ValidateFreshness(checkpoint);
+        return Array.BinarySearch(
+            checkpoint.RevokedKeys,
+            DurableMailboxRevocationSnapshot.Key(
+                query.IssuerPublicKey.Span,
+                query.Serial.Span,
+                query.Domain,
+                query.Generation,
+                query.Epoch,
+                query.MembershipCommitment.Span),
+            StringComparer.Ordinal) >= 0;
+    }
+
+    internal bool IsRevokedInTransaction(
+        SqliteSessionStore expectedStore,
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        MailboxCapabilityRevocationQuery query)
+    {
+        ArgumentNullException.ThrowIfNull(expectedStore);
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(transaction);
+        ArgumentNullException.ThrowIfNull(query);
+        if (!ReferenceEquals(store, expectedStore))
+        {
+            throw new InvalidOperationException(
+                "Mailbox revocation authority belongs to another store.");
+        }
+
+        var checkpoint = Volatile.Read(ref activated) == 0
+            ? prepared
+            : store.ReadMailboxRevocationCheckpoint(
+                connection, transaction, checkpointKey);
         ValidateFreshness(checkpoint);
         return Array.BinarySearch(
             checkpoint.RevokedKeys,

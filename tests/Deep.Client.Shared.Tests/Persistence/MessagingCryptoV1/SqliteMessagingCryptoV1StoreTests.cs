@@ -18,8 +18,9 @@ public sealed class SqliteMessagingCryptoV1StoreTests
 
         await using (var store = fixture.Open())
         {
+            await ProvisionInitialPreKeys(store);
             using var initialization = Initialization(0x11, initial);
-            var initialized = await store.InitializeAsync(initialization);
+            var initialized = await store.CommitInitialSessionAsync(initialization);
             Assert.Equal(MessagingCryptoV1CommitDisposition.Initialized, initialized.Disposition);
             Assert.True(initialization.IsClearedForTesting);
             genesisHead = initialized.JournalHead.ToArray();
@@ -70,8 +71,9 @@ public sealed class SqliteMessagingCryptoV1StoreTests
         var winner = Trs1(fixture.Scope, 5, 0x15);
         var stale = Trs1(fixture.Scope, 5, 0x16);
         await using var first = fixture.Open();
+        await ProvisionInitialPreKeys(first);
         using var initialization = Initialization(0x10, initial);
-        var initialized = await first.InitializeAsync(initialization);
+        var initialized = await first.CommitInitialSessionAsync(initialization);
         await using var second = fixture.Open(allowCreate: false);
 
         using var winnerTransition = Transition(0x20, 0x30, 0x40,
@@ -98,8 +100,9 @@ public sealed class SqliteMessagingCryptoV1StoreTests
 
         await using (var store = fixture.Open())
         {
+            await ProvisionInitialPreKeys(store);
             using var initialization = Initialization(0x12, initial);
-            genesisHead = (await store.InitializeAsync(initialization)).JournalHead.ToArray();
+            genesisHead = (await store.CommitInitialSessionAsync(initialization)).JournalHead.ToArray();
             using var accepted = Transition(0x22, 0x42, 0x52, genesisHead, initial, next);
             Assert.Equal(MessagingCryptoV1CommitDisposition.Committed,
                 (await store.CommitAsync(accepted)).Disposition);
@@ -140,8 +143,9 @@ public sealed class SqliteMessagingCryptoV1StoreTests
 
         await using (var store = fixture.Open())
         {
+            await ProvisionInitialPreKeys(store);
             using var initialization = Initialization(0x14, initial);
-            var initialized = await store.InitializeAsync(initialization);
+            var initialized = await store.CommitInitialSessionAsync(initialization);
             using var transition = MessagingCryptoV1PreparedTransition.CreateForTests(
                 MessagingCryptoV1Direction.RollbackLatch,
                 Bytes(0x26), Bytes(0x46), Bytes(0x56), initialized.JournalHead.Span,
@@ -181,8 +185,9 @@ public sealed class SqliteMessagingCryptoV1StoreTests
         byte[] genesisHead;
         await using (var store = fixture.Open())
         {
+            await ProvisionInitialPreKeys(store);
             using var initialization = Initialization(0x13, initial);
-            genesisHead = (await store.InitializeAsync(initialization)).JournalHead.ToArray();
+            genesisHead = (await store.CommitInitialSessionAsync(initialization)).JournalHead.ToArray();
             using var transition = Transition(0x25, 0x45, 0x55, genesisHead, initial, next);
             using (MessagingCryptoV1StoreTestHooks.Push(point =>
                        { if (point == failpoint) throw new MessagingCryptoV1InjectedCrashException(point); }))
@@ -213,8 +218,9 @@ public sealed class SqliteMessagingCryptoV1StoreTests
         var initial = Trs1(fixture.Scope, 1, 0x21);
         await using (var store = fixture.Open())
         {
+            await ProvisionInitialPreKeys(store);
             using var initialization = Initialization(0x18, initial);
-            await store.InitializeAsync(initialization);
+            await store.CommitInitialSessionAsync(initialization);
         }
 
         var wrongKey = Enumerable.Repeat((byte)0xEE, 32).ToArray();
@@ -244,6 +250,132 @@ public sealed class SqliteMessagingCryptoV1StoreTests
     }
 
     [Fact]
+    public async Task InitialSessionConsumesBothPreKeysAndLostCallbackIsExactReplayAfterRestart()
+    {
+        using var fixture = new StoreFixture();
+        var initial = Trs1(fixture.Scope, 1, 0x2A);
+        await using (var store = fixture.Open())
+        {
+            await ProvisionInitialPreKeys(store);
+            Assert.Equal(2, await store.ReadInitialPreKeyCountForTestsAsync());
+            using var handoff = Initialization(0x31, initial);
+            Assert.Equal(MessagingCryptoV1CommitDisposition.Initialized,
+                (await store.CommitInitialSessionAsync(handoff)).Disposition);
+            Assert.Equal(0, await store.ReadInitialPreKeyCountForTestsAsync());
+            Assert.True(handoff.IsClearedForTesting);
+        }
+
+        await using var restarted = fixture.Open(allowCreate: false);
+        using var replay = Initialization(0x31, initial);
+        Assert.Equal(MessagingCryptoV1CommitDisposition.ExactReplay,
+            (await restarted.CommitInitialSessionAsync(replay)).Disposition);
+        Assert.Equal(0, await restarted.ReadInitialPreKeyCountForTestsAsync());
+    }
+
+    [Fact]
+    public async Task MissingMandatoryPreKeyFailsClosedWithoutCreatingState()
+    {
+        using var fixture = new StoreFixture();
+        var initial = Trs1(fixture.Scope, 1, 0x2B);
+        await using var store = fixture.Open();
+        using (var handoff = Initialization(0x32, initial))
+        {
+            var result = await store.CommitInitialSessionAsync(handoff);
+            Assert.Equal(MessagingCryptoV1CommitDisposition.PreKeyUnavailable, result.Disposition);
+        }
+        Assert.Null(await store.ReadHeadAsync());
+
+        await ProvisionInitialPreKeys(store);
+        using var retry = Initialization(0x32, initial);
+        Assert.Equal(MessagingCryptoV1CommitDisposition.Initialized,
+            (await store.CommitInitialSessionAsync(retry)).Disposition);
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    [InlineData(5)]
+    public async Task ChangedClaimBytesOrConsumedPreKeyReuseDurablyLatchFork(int conflictKind)
+    {
+        using var fixture = new StoreFixture();
+        var initial = Trs1(fixture.Scope, 1, 0x2C);
+        await using (var store = fixture.Open())
+        {
+            await ProvisionInitialPreKeys(store);
+            using var accepted = Initialization(0x33, initial);
+            await store.CommitInitialSessionAsync(accepted);
+
+            using var conflicting = conflictKind switch
+            {
+                1 => Initialization(0x33, initial, xpc1: 0xB5),
+                2 => Initialization(0x33, initial, dph2: 0xB6),
+                3 => Initialization(0x33, Trs1(fixture.Scope, 1, 0x2D)),
+                4 => Initialization(0x34, Trs1(fixture.Scope, 1, 0x2D), x25519: 0xE1, mlKem: 0xE3),
+                5 => Initialization(0x34, Trs1(fixture.Scope, 1, 0x2D), x25519: 0xE3, mlKem: 0xE2),
+                _ => throw new ArgumentOutOfRangeException(nameof(conflictKind)),
+            };
+            var result = await store.CommitInitialSessionAsync(conflicting);
+            Assert.Equal(MessagingCryptoV1CommitDisposition.ForkLatched, result.Disposition);
+            Assert.True(result.ForkLatched);
+        }
+
+        await using var restarted = fixture.Open(allowCreate: false);
+        Assert.True((await restarted.ReadHeadAsync())!.ForkLatched);
+        using var exactOriginal = Initialization(0x33, initial);
+        Assert.Equal(MessagingCryptoV1CommitDisposition.AlreadyForkLatched,
+            (await restarted.CommitInitialSessionAsync(exactOriginal)).Disposition);
+    }
+
+    [Theory]
+    [InlineData(6, false)]
+    [InlineData(7, false)]
+    [InlineData(8, false)]
+    [InlineData(9, false)]
+    [InlineData(10, true)]
+    public async Task InitialSessionCrashIsPriorOrExactCommittedState(int pointValue, bool committed)
+    {
+        var point = (MessagingCryptoV1StoreFailpoint)pointValue;
+        using var fixture = new StoreFixture();
+        var initial = Trs1(fixture.Scope, 1, 0x2E);
+        await using (var store = fixture.Open())
+        {
+            await ProvisionInitialPreKeys(store);
+            using var handoff = Initialization(0x35, initial);
+            using (MessagingCryptoV1StoreTestHooks.Push(hit =>
+                       { if (hit == point) throw new MessagingCryptoV1InjectedCrashException(hit); }))
+                await Assert.ThrowsAsync<MessagingCryptoV1InjectedCrashException>(async () =>
+                    await store.CommitInitialSessionAsync(handoff));
+        }
+
+        await using var restarted = fixture.Open(allowCreate: false);
+        Assert.Equal(committed, await restarted.ReadHeadAsync() is not null);
+        Assert.Equal(committed ? 0 : 2, await restarted.ReadInitialPreKeyCountForTestsAsync());
+        using var retry = Initialization(0x35, initial);
+        Assert.Equal(committed ? MessagingCryptoV1CommitDisposition.ExactReplay : MessagingCryptoV1CommitDisposition.Initialized,
+            (await restarted.CommitInitialSessionAsync(retry)).Disposition);
+    }
+
+    [Fact]
+    public async Task ConcurrentExactInitialHandoffsCommitOnceAndReplayOnce()
+    {
+        using var fixture = new StoreFixture();
+        var initial = Trs1(fixture.Scope, 1, 0x2F);
+        await using var firstStore = fixture.Open();
+        await ProvisionInitialPreKeys(firstStore);
+        await using var secondStore = fixture.Open(allowCreate: false);
+        using var first = Initialization(0x36, initial);
+        using var second = Initialization(0x36, initial);
+        var results = await Task.WhenAll(
+            firstStore.CommitInitialSessionAsync(first).AsTask(),
+            secondStore.CommitInitialSessionAsync(second).AsTask());
+        Assert.Equal(1, results.Count(result => result.Disposition == MessagingCryptoV1CommitDisposition.Initialized));
+        Assert.Equal(1, results.Count(result => result.Disposition == MessagingCryptoV1CommitDisposition.ExactReplay));
+        Assert.Equal(0, await firstStore.ReadInitialPreKeyCountForTestsAsync());
+    }
+
+    [Fact]
     public async Task BoundsEncryptionAndManagedSecretZeroizationAreEnforced()
     {
         using var fixture = new StoreFixture();
@@ -252,8 +384,9 @@ public sealed class SqliteMessagingCryptoV1StoreTests
         await using var store = new SqliteMessagingCryptoV1Store(options);
         options.Dispose();
         Assert.True(options.IsKeyZeroedForTesting);
+        await ProvisionInitialPreKeys(store);
         using (var initialization = Initialization(0x19, initial))
-            await store.InitializeAsync(initialization);
+            await store.CommitInitialSessionAsync(initialization);
 
         Span<byte> first16 = stackalloc byte[16];
         using (var stream = new FileStream(fixture.Path, FileMode.Open, FileAccess.Read,
@@ -272,7 +405,7 @@ public sealed class SqliteMessagingCryptoV1StoreTests
         var malformed = Trs1(fixture.Scope, 2, 0x29);
         malformed[^1] ^= 0x01;
         using var invalid = Initialization(0x1B, malformed);
-        await Assert.ThrowsAsync<FormatException>(async () => await store.InitializeAsync(invalid));
+        await Assert.ThrowsAsync<FormatException>(async () => await store.CommitInitialSessionAsync(invalid));
         Assert.True(invalid.IsClearedForTesting);
         CryptographicOperations.ZeroMemory(malformed);
 
@@ -282,8 +415,21 @@ public sealed class SqliteMessagingCryptoV1StoreTests
             typeof(ExactDpe2SqliteDurableTransactionAuthority).GetInterfaces());
     }
 
-    private static MessagingCryptoV1PreparedInitialization Initialization(byte seed, byte[] state) =>
-        MessagingCryptoV1PreparedInitialization.CreateForTests(Bytes(seed), state);
+    private static MessagingCryptoV1InitialSessionHandoff Initialization(
+        byte seed,
+        byte[] state,
+        byte xpc1 = 0xA5,
+        byte dph2 = 0xA6,
+        byte x25519 = 0xE1,
+        byte mlKem = 0xE2) =>
+        MessagingCryptoV1InitialSessionHandoff.CreateForTests(
+            Bytes(seed), Bytes(xpc1), Bytes(dph2), Bytes(x25519), Bytes(mlKem), state);
+
+    private static ValueTask ProvisionInitialPreKeys(
+        SqliteMessagingCryptoV1Store store,
+        byte x25519 = 0xE1,
+        byte mlKem = 0xE2) => store.ProvisionOpaqueInitialPreKeysForTestsAsync(
+            Bytes(x25519), Bytes(0xF1), Bytes(mlKem), Bytes(0xF2));
 
     private static MessagingCryptoV1PreparedTransition Transition(
         byte operation,

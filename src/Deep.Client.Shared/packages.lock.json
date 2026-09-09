@@ -2,24 +2,6 @@
   "version": 1,
   "dependencies": {
     "net10.0": {
-      "Deep.Protocol": {
-        "type": "Direct",
-        "requested": "[0.5.0-survival.e75bfed, 0.5.0-survival.e75bfed]",
-        "resolved": "0.5.0-survival.e75bfed",
-        "contentHash": "rP+PCdnvA/2hxhOWktTyHeQE4fSCkSPBp/zsyPO1AD58aUjeJgyj3T+SnvC6/NHHbJ9AMY2ldvMr5xUJ4mEB6w==",
-        "dependencies": {
-          "Sodium.Core": "1.4.1"
-        }
-      },
-      "Deep.Protocol.MembershipRoutes": {
-        "type": "Direct",
-        "requested": "[0.5.0-survival.e75bfed, 0.5.0-survival.e75bfed]",
-        "resolved": "0.5.0-survival.e75bfed",
-        "contentHash": "Qai77oSkC2cvKlllat3/CIPU+rhqejqVzQL0LUDgrPD1NG/jgj9GtLVSIFkPqehk9EzjIc/2B5iY0Vk1h++hOw==",
-        "dependencies": {
-          "Deep.Protocol": "0.5.0-survival.e75bfed"
-        }
-      },
       "Deep.Protocol.ProfileCarrier": {
         "type": "Direct",
         "requested": "[0.5.0-survival.e75bfed, 0.5.0-survival.e75bfed]",
@@ -81,9 +63,21 @@
         "dependencies": {
           "SQLitePCLRaw.core": "2.1.11"
         }
+      },
+      "deep.protocol": {
+        "type": "Project",
+        "dependencies": {
+          "Sodium.Core": "[1.4.1, 1.4.1]"
+        }
+      },
+      "deep.protocol.membershiproutes": {
+        "type": "Project",
+        "dependencies": {
+          "Deep.Protocol": "[1.0.0, )"
+        }
       }
     },
-    "net10.0/win-arm64": {
+    "net10.0/win-x64": {
       "libsodium": {
         "type": "Transitive",
         "resolved": "1.0.22",

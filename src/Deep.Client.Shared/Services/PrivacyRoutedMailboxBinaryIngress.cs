@@ -4,29 +4,50 @@ using Deep.Protocol.DeepExtension.PrivacyRouting;
 
 namespace Deep.Client.Shared.Services;
 
-internal enum PrivacyMailboxRouteSelection
+public enum PrivacyMailboxRouteSelection
 {
     Primary = 1,
     Fallback = 2
 }
 
-internal interface IPrivacyMailboxRouteSelectionObserver
+public interface IPrivacyMailboxRouteSelectionObserver
 {
     void Observe(
         PrivacyMailboxRouteSelection selection,
         ReadOnlyMemory<byte> entryRouterId);
 }
 
+public sealed class PrivacyMailboxOnionAttempt
+{
+    public PrivacyMailboxOnionAttempt(
+        VerifiedOnionPathContext path,
+        VerifiedCanonicalOnionRequest request)
+    {
+        Path = path ?? throw new ArgumentNullException(nameof(path));
+        Request = request ?? throw new ArgumentNullException(nameof(request));
+    }
+
+    public VerifiedOnionPathContext Path { get; }
+    public VerifiedCanonicalOnionRequest Request { get; }
+    public ReadOnlyMemory<byte> EntryRouterId => Path.EntryRouterId;
+}
+
+public interface IPrivacyMailboxPathProvider
+{
+    ValueTask<PrivacyMailboxOnionAttempt> PrepareAsync(
+        OnionOperation operation,
+        ReadOnlyMemory<byte> exactCanonicalRequest,
+        CancellationToken cancellationToken);
+}
+
 public sealed class PrivacyMailboxRoute
 {
-    private readonly PrivacyRoutingHop[] hops;
-
     public PrivacyMailboxRoute(
         Uri entryOrigin,
-        IReadOnlyList<PrivacyRoutingHop> hops)
+        IPrivacyMailboxPathProvider pathProvider)
     {
         ArgumentNullException.ThrowIfNull(entryOrigin);
-        ArgumentNullException.ThrowIfNull(hops);
+        ArgumentNullException.ThrowIfNull(pathProvider);
         if (!entryOrigin.IsAbsoluteUri ||
             entryOrigin.Scheme != Uri.UriSchemeHttps ||
             !string.IsNullOrEmpty(entryOrigin.UserInfo) ||
@@ -39,49 +60,21 @@ public sealed class PrivacyMailboxRoute
                 nameof(entryOrigin));
         }
 
-        if (hops.Count != PrivacyRoutingLimits.RouteHopCount ||
-            hops.Any(static hop => hop is null))
-        {
-            throw new ArgumentException(
-                "A privacy mailbox route requires exactly three pinned hops.",
-                nameof(hops));
-        }
-
-        for (var left = 0; left < hops.Count; left++)
-        {
-            for (var right = left + 1; right < hops.Count; right++)
-            {
-                if (CryptographicOperations.FixedTimeEquals(
-                    hops[left].RouterId.Span,
-                    hops[right].RouterId.Span) ||
-                    CryptographicOperations.FixedTimeEquals(
-                        hops[left].X25519PublicKey.Span,
-                        hops[right].X25519PublicKey.Span))
-                {
-                    throw new ArgumentException(
-                        "A privacy mailbox route cannot repeat a router identity or X25519 key.",
-                        nameof(hops));
-                }
-            }
-        }
-
         EntryOrigin = entryOrigin;
-        this.hops = hops.ToArray();
+        PathProvider = pathProvider;
     }
 
     public Uri EntryOrigin { get; }
 
-    public IReadOnlyList<PrivacyRoutingHop> Hops => hops.ToArray();
-
-    internal IReadOnlyList<PrivacyRoutingHop> PinnedHops => hops;
+    public IPrivacyMailboxPathProvider PathProvider { get; }
 
     public override string ToString() =>
-        $"PrivacyMailboxRoute {{ Entry = {EntryOrigin}, Hops = {hops.Length}, Keys = [configured] }}";
+        $"PrivacyMailboxRoute {{ Entry = {EntryOrigin}, Path = [verified-attempt-provider] }}";
 }
 
 /// <summary>
-/// Wraps exact canonical MAU2 in a three-hop Deep-native privacy frame. A disjoint fallback route
-/// is attempted only when the primary ingress proves that forwarding never started. There is no
+/// Wraps exact canonical MAU2 in a three-hop Deep-native privacy frame. A best-effort fallback
+/// attempt is allowed only when the primary ingress proves that forwarding never started. There is no
 /// direct mailbox HTTPS fallback. Every response is opened with the per-attempt reply context
 /// before the existing mailbox adapter verifies and journals its canonical durable evidence.
 /// </summary>
@@ -94,6 +87,7 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
     private readonly IPrivacyManagedIngressTransport primary;
     private readonly IPrivacyManagedIngressTransport fallback;
     private readonly IMailboxClientDecodePolicyProvider decodePolicies;
+    private readonly PrivacyRoutingCodec codec;
     private readonly IPrivacyMailboxRouteSelectionObserver? routeSelectionObserver;
     private readonly int paddingBlockBytes;
     private int disposed;
@@ -102,11 +96,13 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
         PrivacyMailboxRoute primaryRoute,
         PrivacyMailboxRoute fallbackRoute,
         IMailboxClientDecodePolicyProvider decodePolicies,
-        int paddingBlockBytes = PrivacyRoutingLimits.DefaultPaddingBlockBytes)
+        PrivacyRoutingCodec codec,
+        int paddingBlockBytes = OnionLimits.DefaultPaddingBlockBytes)
         : this(
             primaryRoute,
             fallbackRoute,
             decodePolicies,
+            codec,
             CreateOwned(primaryRoute, fallbackRoute, decodePolicies, paddingBlockBytes),
             paddingBlockBytes)
     {
@@ -116,12 +112,14 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
         PrivacyMailboxRoute primaryRoute,
         PrivacyMailboxRoute fallbackRoute,
         IMailboxClientDecodePolicyProvider decodePolicies,
+        PrivacyRoutingCodec codec,
         OwnedTransports transports,
         int paddingBlockBytes)
         : this(
             primaryRoute,
             fallbackRoute,
             decodePolicies,
+            codec,
             transports.Primary,
             transports.Fallback,
             paddingBlockBytes)
@@ -132,9 +130,10 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
         PrivacyMailboxRoute primaryRoute,
         PrivacyMailboxRoute fallbackRoute,
         IMailboxClientDecodePolicyProvider decodePolicies,
+        PrivacyRoutingCodec codec,
         IPrivacyManagedIngressTransport primary,
         IPrivacyManagedIngressTransport fallback,
-        int paddingBlockBytes = PrivacyRoutingLimits.DefaultPaddingBlockBytes,
+        int paddingBlockBytes = OnionLimits.DefaultPaddingBlockBytes,
         IPrivacyMailboxRouteSelectionObserver? routeSelectionObserver = null)
     {
         this.primaryRoute = primaryRoute ??
@@ -143,12 +142,12 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
             throw new ArgumentNullException(nameof(fallbackRoute));
         this.decodePolicies = decodePolicies ??
             throw new ArgumentNullException(nameof(decodePolicies));
+        this.codec = codec ?? throw new ArgumentNullException(nameof(codec));
         this.primary = primary ?? throw new ArgumentNullException(nameof(primary));
         this.fallback = fallback ?? throw new ArgumentNullException(nameof(fallback));
         this.routeSelectionObserver = routeSelectionObserver;
         ValidatePadding(paddingBlockBytes);
         this.paddingBlockBytes = paddingBlockBytes;
-        EnsureDisjoint(primaryRoute, fallbackRoute);
     }
 
     public Task<ReadOnlyMemory<byte>> StoreAsync(
@@ -157,7 +156,7 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
         SendAsync(
             canonicalMau2,
             MailboxAuthenticatedOperation.Store,
-            PrivacyRoutingOperation.Store,
+            OnionOperation.Store,
             cancellationToken);
 
     public Task<ReadOnlyMemory<byte>> RetrieveAsync(
@@ -166,7 +165,7 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
         SendAsync(
             canonicalMau2,
             MailboxAuthenticatedOperation.Retrieve,
-            PrivacyRoutingOperation.Retrieve,
+            OnionOperation.Retrieve,
             cancellationToken);
 
     public Task<ReadOnlyMemory<byte>> AcknowledgeAsync(
@@ -175,7 +174,7 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
         SendAsync(
             canonicalMau2,
             MailboxAuthenticatedOperation.Ack,
-            PrivacyRoutingOperation.Acknowledge,
+            OnionOperation.Acknowledge,
             cancellationToken);
 
     public void Dispose()
@@ -195,12 +194,14 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
     private async Task<ReadOnlyMemory<byte>> SendAsync(
         ReadOnlyMemory<byte> canonicalMau2,
         MailboxAuthenticatedOperation expectedMau2Operation,
-        PrivacyRoutingOperation privacyOperation,
+        OnionOperation privacyOperation,
         CancellationToken cancellationToken)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
         cancellationToken.ThrowIfCancellationRequested();
-        ValidateCanonicalMau2(canonicalMau2.Span, expectedMau2Operation);
+        _ = ValidateCanonicalMau2(
+            canonicalMau2.Span,
+            expectedMau2Operation);
 
         try
         {
@@ -210,7 +211,6 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
                 privacyOperation,
                 canonicalMau2,
                 cancellationToken).ConfigureAwait(false);
-            PublishRouteSelection(PrivacyMailboxRouteSelection.Primary, primaryRoute);
             return response;
         }
         catch (PrivacyIngressRejectedBeforeForwardException exception)
@@ -225,7 +225,6 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
                     privacyOperation,
                     canonicalMau2,
                     cancellationToken).ConfigureAwait(false);
-                PublishRouteSelection(PrivacyMailboxRouteSelection.Fallback, fallbackRoute);
                 return response;
             }
             catch (PrivacyIngressRejectedBeforeForwardException fallbackException)
@@ -241,13 +240,13 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
 
     private void PublishRouteSelection(
         PrivacyMailboxRouteSelection selection,
-        PrivacyMailboxRoute route)
+        ReadOnlyMemory<byte> entryRouterId)
     {
         try
         {
             routeSelectionObserver?.Observe(
                 selection,
-                route.PinnedHops[0].RouterId.ToArray());
+                entryRouterId);
         }
         catch
         {
@@ -258,45 +257,52 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
     private async Task<ReadOnlyMemory<byte>> DispatchAsync(
         PrivacyMailboxRoute route,
         IPrivacyManagedIngressTransport transport,
-        PrivacyRoutingOperation operation,
+        OnionOperation operation,
         ReadOnlyMemory<byte> canonicalMau2,
         CancellationToken cancellationToken)
     {
         try
         {
-            using var request = PrivacyRoutingRequestBuilder.BuildForCanonicalMailboxRequest(
-                route.PinnedHops,
-                operation,
-                canonicalMau2.Span,
-                paddingBlockBytes);
+            var attempt = await route.PathProvider.PrepareAsync(
+                    operation,
+                    canonicalMau2,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (attempt is null ||
+                attempt.Request.Operation != operation ||
+                !CryptographicOperations.FixedTimeEquals(
+                    attempt.Request.CanonicalBytes.Span,
+                    canonicalMau2.Span))
+            {
+                throw new ClientMailboxTransportException(
+                    ClientMailboxTransportFailure.ProtocolViolation,
+                    retryable: false,
+                    "The privacy route provider returned an attempt for another operation or canonical request.");
+            }
+
+            using var request = await codec.BuildAsync(
+                attempt.Path,
+                attempt.Request,
+                cancellationToken).ConfigureAwait(false);
             var encryptedResponse = await transport.ForwardAsync(
                 request.Frame,
                 cancellationToken).ConfigureAwait(false);
             PrivacyRoutingOpenedResponse opened;
             try
             {
-                opened = PrivacyRoutingResponseCodec.Open(
-                    encryptedResponse.Span,
-                    request.ReplyContext);
+                opened = await codec.OpenResponseAsync(
+                    encryptedResponse,
+                    request.ReplyContext,
+                    cancellationToken).ConfigureAwait(false);
             }
-            catch (PrivacyRoutingProtocolException exception)
+            catch (OnionBoundaryException exception)
             {
                 throw new ClientMailboxDispatchOutcomeUnknownException(
                     "Privacy-routed mailbox response authentication failed after forwarding.",
                     exception);
             }
 
-            PrivacyRoutingTerminalResult terminal;
-            try
-            {
-                terminal = PrivacyRoutingResultCodec.Decode(opened.Payload.Span);
-            }
-            catch (PrivacyRoutingProtocolException exception)
-            {
-                throw new ClientMailboxDispatchOutcomeUnknownException(
-                    "Privacy-routed mailbox terminal result is not canonical.",
-                    exception);
-            }
+            var terminal = opened.Result;
 
             if (terminal.Operation != operation)
             {
@@ -304,12 +310,17 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
                     "Privacy-routed mailbox terminal result changed operation.");
             }
 
-            if (terminal.Kind == PrivacyRoutingResultKind.Failure)
+            if (terminal.Kind == OnionTerminalResultKind.Failure)
             {
                 throw MapTerminalFailure(terminal);
             }
 
             ValidateCanonicalResponse(terminal.Body.Span, operation);
+            PublishRouteSelection(
+                ReferenceEquals(route, primaryRoute)
+                    ? PrivacyMailboxRouteSelection.Primary
+                    : PrivacyMailboxRouteSelection.Fallback,
+                attempt.EntryRouterId);
             return terminal.Body;
         }
         catch (PrivacyIngressRejectedBeforeForwardException)
@@ -320,7 +331,7 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
         {
             throw;
         }
-        catch (PrivacyRoutingProtocolException exception)
+        catch (OnionBoundaryException exception)
         {
             throw new ClientMailboxTransportException(
                 ClientMailboxTransportFailure.ProtocolViolation,
@@ -330,7 +341,7 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
         }
     }
 
-    private static void ValidateCanonicalMau2(
+    private static ReadOnlyMemory<byte> ValidateCanonicalMau2(
         ReadOnlySpan<byte> canonicalMau2,
         MailboxAuthenticatedOperation expectedOperation)
     {
@@ -363,6 +374,8 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
                     retryable: false,
                     "Privacy ingress rejected a non-canonical or mismatched MAU2 operation.");
             }
+
+            return request.Presentation.Grant.NetworkId.ToArray();
         }
         finally
         {
@@ -372,22 +385,22 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
 
     private void ValidateCanonicalResponse(
         ReadOnlySpan<byte> response,
-        PrivacyRoutingOperation operation)
+        OnionOperation operation)
     {
         byte[] roundTrip;
         try
         {
             roundTrip = operation switch
             {
-                PrivacyRoutingOperation.Store =>
+                OnionOperation.Store =>
                     MailboxReceiptV3Codec.EncodeDurableQuorum(
                         MailboxReceiptV3Codec.DecodeDurableQuorum(response)),
-                PrivacyRoutingOperation.Retrieve =>
+                OnionOperation.Retrieve =>
                     MailboxClientCodec.EncodeRetrievePage(
                         MailboxClientCodec.DecodeRetrievePage(
                             response,
                             decodePolicies.GetCurrent())),
-                PrivacyRoutingOperation.Acknowledge =>
+                OnionOperation.Acknowledge =>
                     MailboxAggregateAckCodec.EncodeMqr3(
                         MailboxAggregateAckCodec.DecodeMqr3(response)),
                 _ => throw new ArgumentOutOfRangeException(nameof(operation))
@@ -416,39 +429,6 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
         }
     }
 
-    private static void EnsureDisjoint(
-        PrivacyMailboxRoute primary,
-        PrivacyMailboxRoute fallback)
-    {
-        if (Uri.Compare(
-                primary.EntryOrigin,
-                fallback.EntryOrigin,
-                UriComponents.SchemeAndServer,
-                UriFormat.SafeUnescaped,
-                StringComparison.OrdinalIgnoreCase) == 0)
-        {
-            throw new ArgumentException(
-                "Primary and fallback privacy entry origins must be distinct.",
-                nameof(fallback));
-        }
-
-        foreach (var primaryHop in primary.PinnedHops)
-        {
-            if (fallback.PinnedHops.Any(fallbackHop =>
-                    CryptographicOperations.FixedTimeEquals(
-                        primaryHop.RouterId.Span,
-                        fallbackHop.RouterId.Span) ||
-                    CryptographicOperations.FixedTimeEquals(
-                        primaryHop.X25519PublicKey.Span,
-                        fallbackHop.X25519PublicKey.Span)))
-            {
-                throw new ArgumentException(
-                    "Primary and fallback privacy routes must be identity/key-disjoint.",
-                    nameof(fallback));
-            }
-        }
-    }
-
     private static OwnedTransports CreateOwned(
         PrivacyMailboxRoute? primaryRoute,
         PrivacyMailboxRoute? fallbackRoute,
@@ -459,7 +439,6 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
         ArgumentNullException.ThrowIfNull(fallbackRoute);
         ArgumentNullException.ThrowIfNull(decodePolicies);
         ValidatePadding(paddingBlockBytes);
-        EnsureDisjoint(primaryRoute, fallbackRoute);
         PrivacyManagedIngressHttpTransport? primary = null;
         try
         {
@@ -477,8 +456,8 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
 
     private static void ValidatePadding(int paddingBlockBytes)
     {
-        if (paddingBlockBytes is < PrivacyRoutingLimits.MinimumPaddingBlockBytes or
-            > PrivacyRoutingLimits.MaximumPaddingBlockBytes ||
+        if (paddingBlockBytes is < OnionLimits.MinimumPaddingBlockBytes or
+            > OnionLimits.MaximumPaddingBlockBytes ||
             (paddingBlockBytes & (paddingBlockBytes - 1)) != 0)
         {
             throw new ArgumentOutOfRangeException(
@@ -495,11 +474,11 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
             exception);
 
     private static Exception MapTerminalFailure(
-        PrivacyRoutingTerminalResult terminal)
+        VerifiedOnionTerminalResult terminal)
     {
         var code = terminal.FailureCode ?? throw new ClientMailboxDispatchOutcomeUnknownException(
             "Privacy-routing failure omitted its canonical code.");
-        if (code == PrivacyRoutingFailureCode.OutcomeUnknown)
+        if (code == OnionFailureCode.OutcomeUnknown)
         {
             return new ClientMailboxDispatchOutcomeUnknownException(
                 "Mailbox exit reported an outcome-unknown terminal failure.");
@@ -507,20 +486,20 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
 
         var failure = code switch
         {
-            PrivacyRoutingFailureCode.MalformedRequest =>
+            OnionFailureCode.MalformedRequest =>
                 ClientMailboxTransportFailure.MalformedRequest,
-            PrivacyRoutingFailureCode.AuthenticationRejected =>
+            OnionFailureCode.AuthenticationRejected =>
                 ClientMailboxTransportFailure.AuthenticationRejected,
-            PrivacyRoutingFailureCode.AuthorizationRejected =>
+            OnionFailureCode.AuthorizationRejected =>
                 ClientMailboxTransportFailure.AuthorizationRejected,
-            PrivacyRoutingFailureCode.ReplayRejected or
-                PrivacyRoutingFailureCode.MailboxNotFound or
-                PrivacyRoutingFailureCode.Conflict =>
+            OnionFailureCode.ReplayRejected or
+                OnionFailureCode.MailboxNotFound or
+                OnionFailureCode.Conflict =>
                 ClientMailboxTransportFailure.ConflictOrExpired,
-            PrivacyRoutingFailureCode.CapacityExceeded =>
+            OnionFailureCode.CapacityExceeded =>
                 ClientMailboxTransportFailure.Throttled,
-            PrivacyRoutingFailureCode.Unavailable or
-                PrivacyRoutingFailureCode.InternalFailure =>
+            OnionFailureCode.Unavailable or
+                OnionFailureCode.InternalFailure =>
                 ClientMailboxTransportFailure.DependencyUnavailable,
             _ => throw new ClientMailboxDispatchOutcomeUnknownException(
                 "Mailbox exit reported an unsupported terminal failure.")

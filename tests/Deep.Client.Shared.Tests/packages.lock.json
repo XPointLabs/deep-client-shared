@@ -35,22 +35,6 @@
         "resolved": "3.1.4",
         "contentHash": "5mj99LvCqrq3CNi06xYdyIAXOEh+5b33F2nErCzI5zWiDdLHXiPXEWFSUAF8zlIv0ZWqjZNCwHTQeAPYbF3pCg=="
       },
-      "Deep.Protocol": {
-        "type": "Transitive",
-        "resolved": "0.5.0-survival.e75bfed",
-        "contentHash": "rP+PCdnvA/2hxhOWktTyHeQE4fSCkSPBp/zsyPO1AD58aUjeJgyj3T+SnvC6/NHHbJ9AMY2ldvMr5xUJ4mEB6w==",
-        "dependencies": {
-          "Sodium.Core": "1.4.1"
-        }
-      },
-      "Deep.Protocol.MembershipRoutes": {
-        "type": "Transitive",
-        "resolved": "0.5.0-survival.e75bfed",
-        "contentHash": "Qai77oSkC2cvKlllat3/CIPU+rhqejqVzQL0LUDgrPD1NG/jgj9GtLVSIFkPqehk9EzjIc/2B5iY0Vk1h++hOw==",
-        "dependencies": {
-          "Deep.Protocol": "0.5.0-survival.e75bfed"
-        }
-      },
       "Deep.Protocol.ProfileCarrier": {
         "type": "Transitive",
         "resolved": "0.5.0-survival.e75bfed",
@@ -176,13 +160,37 @@
       "deep.client.shared": {
         "type": "Project",
         "dependencies": {
-          "Deep.Protocol": "[0.5.0-survival.e75bfed, 0.5.0-survival.e75bfed]",
-          "Deep.Protocol.MembershipRoutes": "[0.5.0-survival.e75bfed, 0.5.0-survival.e75bfed]",
+          "Deep.Protocol": "[1.0.0, )",
+          "Deep.Protocol.MembershipRoutes": "[0.1.0-p16.local, )",
           "Deep.Protocol.ProfileCarrier": "[0.5.0-survival.e75bfed, 0.5.0-survival.e75bfed]",
           "Microsoft.Data.Sqlite.Core": "[10.0.9, )",
           "SQLitePCLRaw.bundle_e_sqlcipher": "[2.1.11, )",
           "Sodium.Core": "[1.4.1, )"
         }
+      },
+      "deep.protocol": {
+        "type": "Project",
+        "dependencies": {
+          "Sodium.Core": "[1.4.1, 1.4.1]"
+        }
+      },
+      "deep.protocol.membershiproutes": {
+        "type": "Project",
+        "dependencies": {
+          "Deep.Protocol": "[1.0.0, )"
+        }
+      }
+    },
+    "net10.0/win-x64": {
+      "libsodium": {
+        "type": "Transitive",
+        "resolved": "1.0.22",
+        "contentHash": "KPD9SloJFclrsjnhABu7dzWrcyYkwPbvx5l1gRSPAX/0n+OBtSiVCKtGFv4n+ecWUHU0tCG9LSSwoZZx673zBQ=="
+      },
+      "SQLitePCLRaw.lib.e_sqlcipher": {
+        "type": "Transitive",
+        "resolved": "2.1.11",
+        "contentHash": "Cg6UPeDbH8jyaOs1vqXYIgeewH0wYrBnmbC5Ml3GYBo+GKzNmyxrWSO52JV68bfB7Addt/PZLMekJV1RH2ftWQ=="
       }
     }
   }

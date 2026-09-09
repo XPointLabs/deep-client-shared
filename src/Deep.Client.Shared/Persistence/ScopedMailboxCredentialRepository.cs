@@ -193,6 +193,16 @@ public sealed class VerifiedOfficialMailboxAuthority
 
     public void ReloadCommittedPolicy() => Revocations.ValidateFreshness();
 
+    internal bool IsRevokedInStoreTransaction(
+        SqliteSessionStore store,
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        MailboxCapabilityRevocationQuery query) =>
+        Revocations is SqliteMailboxRevocationSource sqlite
+            ? sqlite.IsRevokedInTransaction(
+                store, connection, transaction, query)
+            : Revocations.IsRevoked(query);
+
     internal bool UsesSharedPolicyCoordinator(
         string canonicalStateIdentity,
         ReadOnlySpan<byte> stableAuthorityId) =>
@@ -980,9 +990,35 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
         string key)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(key);
-        using var connection = OpenConnection();
+        ThrowIfDisposed();
+        _databaseGate.Wait();
+        try
+        {
+            ThrowIfDisposed();
+            using var connection = OpenConnection();
+            var checkpoint = ReadSettingWithPayload<MailboxRevocationRuntimeCheckpoint>(
+                connection, null, key).Value ?? throw new InvalidOperationException(
+                "Committed mailbox revocation authority is unavailable.");
+            ValidateRevocationCheckpoint(null, checkpoint);
+            return checkpoint;
+        }
+        finally
+        {
+            _databaseGate.Release();
+        }
+    }
+
+    internal MailboxRevocationRuntimeCheckpoint ReadMailboxRevocationCheckpoint(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string key)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(transaction);
+        ArgumentException.ThrowIfNullOrWhiteSpace(key);
+        ThrowIfDisposed();
         var checkpoint = ReadSettingWithPayload<MailboxRevocationRuntimeCheckpoint>(
-            connection, null, key).Value ?? throw new InvalidOperationException(
+            connection, transaction, key).Value ?? throw new InvalidOperationException(
             "Committed mailbox revocation authority is unavailable.");
         ValidateRevocationCheckpoint(null, checkpoint);
         return checkpoint;
@@ -1943,7 +1979,6 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
                     "$created", request.CreatedAt.ToUnixTimeMilliseconds());
                 batch.ExecuteNonQuery();
             }
-
             for (var ordinal = 0; ordinal < request.Targets.Count; ordinal++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -2075,7 +2110,7 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
         byte[] HolderKey,
         ScopedMailboxResolvedRoute Route);
 
-    private static ResolvedGrant ResolveForPrepare(
+    private ResolvedGrant ResolveForPrepare(
         SqliteConnection connection,
         SqliteTransaction transaction,
         ScopedMailboxBatchTarget target,
@@ -2102,7 +2137,7 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
             allocateCounter);
     }
 
-    private static ResolvedGrant ResolveActiveGrant(
+    private ResolvedGrant ResolveActiveGrant(
         SqliteConnection connection,
         SqliteTransaction transaction,
         MailboxCredentialSelector selector,
@@ -2179,7 +2214,16 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
             membershipCommitment,
             holder,
             authority,
-            rejectRevoked: true);
+            rejectRevoked: false);
+        if (authority.IsRevokedInStoreTransaction(
+                this,
+                connection,
+                transaction,
+                ScopedMailboxCredentialValidator.RevocationQuery(grant)))
+        {
+            throw new InvalidOperationException(
+                "Scoped mailbox grant is revoked.");
+        }
         var replicas = new MailboxCredentialReplicaPair(
             (byte[])reader.GetValue(12),
             (byte[])reader.GetValue(13),

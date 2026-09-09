@@ -1,29 +1,34 @@
 using System.Collections.Concurrent;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
 using Deep.Client.Shared.Domain;
+using Deep.Client.Shared.Domain.MessagingV1;
 using Deep.Client.Shared.Features;
 using Deep.Client.Shared.Persistence;
+using Deep.Client.Shared.Persistence.MessagingV1;
 using Deep.Client.Shared.Services;
 using Deep.Client.Shared.State;
-using Deep.Protocol.DeepExtension.MailboxCapabilities;
+using Deep.Client.Shared.Tests.MessagingV1;
 
 namespace Deep.Client.Shared.Tests.Services;
 
 /// <summary>
-/// Runtime-level E2E coverage for the authenticated MAU2 composition boundary. The harness is
-/// deliberately not a direct-P2P transport and rejects raw SendAsync, so every delivered copy
-/// must pass through one scoped authenticated batch before dispatch.
+/// Runtime-level E2E coverage for the authoritative MSG-01 storage boundary. Each client gets
+/// its own authenticated session endpoint while the harness shares only opaque network queues.
+/// Raw direct/group sends are rejected, so every delivered copy must pass through MSG-01.
 /// </summary>
 public sealed class ClientRuntimeStorageE2ETests
 {
     [Fact]
-    public async Task AuthenticatedMau2Runtime_RoundTripsOneToOneMessage()
+    public async Task AuthoritativeMsg01Runtime_RoundTripsOneToOneMessage()
     {
-        var harness = new AuthenticatedMau2RuntimeHarness();
+        using var harness = new SharedMsg01TestBus();
         using var alice = CreateRuntime(harness);
         using var bob = CreateRuntime(harness);
-        var aliceAccount = await alice.Accounts.RegisterAsync("Alice MAU2");
-        var bobAccount = await bob.Accounts.RegisterAsync("Bob MAU2");
-        var body = $"client-mau2-e2e-{Guid.NewGuid():N}";
+        var aliceAccount = await alice.Accounts.RegisterAsync("Alice MSG01");
+        var bobAccount = await bob.Accounts.RegisterAsync("Bob MSG01");
+        var body = $"client-msg01-e2e-{Guid.NewGuid():N}";
 
         var sent = await alice.Messages.SendOneToOneAsync(
             aliceAccount.SessionId, bobAccount.SessionId, body);
@@ -36,18 +41,18 @@ public sealed class ClientRuntimeStorageE2ETests
             message.Recipient == bobAccount.SessionId &&
             !string.IsNullOrWhiteSpace(message.ServerHash));
         Assert.Equal(1, harness.PreparedBatchCount);
-        Assert.Equal(2, harness.DispatchedCount);
+        Assert.Equal(1, harness.DispatchedCount);
         Assert.Equal(0, harness.RawSendCount);
     }
 
     [Fact]
-    public async Task AuthenticatedMau2Runtime_RoundTripsRepliesAndReactions()
+    public async Task AuthoritativeMsg01Runtime_RoundTripsRepliesAndReactions()
     {
-        var harness = new AuthenticatedMau2RuntimeHarness();
+        using var harness = new SharedMsg01TestBus();
         using var alice = CreateRuntime(harness);
         using var bob = CreateRuntime(harness);
-        var aliceAccount = await alice.Accounts.RegisterAsync("Alice Reply MAU2");
-        var bobAccount = await bob.Accounts.RegisterAsync("Bob Reply MAU2");
+        var aliceAccount = await alice.Accounts.RegisterAsync("Alice Reply MSG01");
+        var bobAccount = await bob.Accounts.RegisterAsync("Bob Reply MSG01");
         var original = await alice.Messages.SendOneToOneAsync(
             aliceAccount.SessionId,
             bobAccount.SessionId,
@@ -57,7 +62,7 @@ public sealed class ClientRuntimeStorageE2ETests
         var reply = await bob.Messages.SendOneToOneAsync(
             bobAccount.SessionId,
             aliceAccount.SessionId,
-            "reply-mau2",
+            "reply-msg01",
             replyToMessageId: bobOriginal.Id);
         var aliceReply = Assert.Single(
             await alice.Messages.ReceiveAsync(aliceAccount.SessionId));
@@ -77,16 +82,16 @@ public sealed class ClientRuntimeStorageE2ETests
     }
 
     [Fact]
-    public async Task AuthenticatedMau2Runtime_RoundTripsAttachmentMetadata()
+    public async Task AuthoritativeMsg01Runtime_RoundTripsAttachmentMetadata()
     {
-        var harness = new AuthenticatedMau2RuntimeHarness();
+        using var harness = new SharedMsg01TestBus();
         var attachments = new InMemoryAttachmentTransport();
         using var alice = CreateRuntime(harness);
         using var bob = CreateRuntime(harness);
-        var aliceAccount = await alice.Accounts.RegisterAsync("Alice Attachment MAU2");
-        var bobAccount = await bob.Accounts.RegisterAsync("Bob Attachment MAU2");
+        var aliceAccount = await alice.Accounts.RegisterAsync("Alice Attachment MSG01");
+        var bobAccount = await bob.Accounts.RegisterAsync("Bob Attachment MSG01");
         var attachmentBytes = System.Text.Encoding.UTF8.GetBytes(
-            $"attachment-mau2-{Guid.NewGuid():N}");
+            $"attachment-msg01-{Guid.NewGuid():N}");
         await using var upload = new MemoryStream(attachmentBytes);
         var attachment = await attachments.UploadAsync(
             new AttachmentFileUpload("proof.txt", "text/plain", upload));
@@ -94,10 +99,10 @@ public sealed class ClientRuntimeStorageE2ETests
         await alice.Messages.SendOneToOneAsync(
             aliceAccount.SessionId,
             bobAccount.SessionId,
-            "attachment over MAU2",
+            "attachment over MSG01",
             [attachment]);
         var received = await bob.Messages.ReceiveAsync(bobAccount.SessionId);
-        var message = Assert.Single(received, item => item.Body == "attachment over MAU2");
+        var message = Assert.Single(received, item => item.Body == "attachment over MSG01");
         var receivedAttachment = Assert.Single(message.Attachments);
         var download = await attachments.DownloadAsync(receivedAttachment);
 
@@ -110,14 +115,14 @@ public sealed class ClientRuntimeStorageE2ETests
     }
 
     [Fact]
-    public async Task AuthenticatedMau2Runtime_RoundTripsExplicitVoiceAttachmentMetadataToRecipient()
+    public async Task AuthoritativeMsg01Runtime_RoundTripsExplicitVoiceAttachmentMetadataToRecipient()
     {
-        var harness = new AuthenticatedMau2RuntimeHarness();
+        using var harness = new SharedMsg01TestBus();
         var attachments = new InMemoryAttachmentTransport();
         using var alice = CreateRuntime(harness);
         using var bob = CreateRuntime(harness);
-        var aliceAccount = await alice.Accounts.RegisterAsync("Alice Voice MAU2");
-        var bobAccount = await bob.Accounts.RegisterAsync("Bob Voice MAU2");
+        var aliceAccount = await alice.Accounts.RegisterAsync("Alice Voice MSG01");
+        var bobAccount = await bob.Accounts.RegisterAsync("Bob Voice MSG01");
         await using var upload = new MemoryStream(Enumerable.Repeat((byte)0x56, 4_096).ToArray());
         var voice = await attachments.UploadAsync(new AttachmentFileUpload(
             "voice-message.wav",
@@ -142,16 +147,16 @@ public sealed class ClientRuntimeStorageE2ETests
     }
 
     [Fact]
-    public async Task AuthenticatedMau2Runtime_SyncsGroupStateMessagesRepliesAndReactions()
+    public async Task AuthoritativeMsg01Runtime_SyncsGroupStateMessagesRepliesAndReactions()
     {
-        var harness = new AuthenticatedMau2RuntimeHarness();
+        using var harness = new SharedMsg01TestBus();
         using var alice = CreateRuntime(harness);
         using var bob = CreateRuntime(harness);
-        var aliceAccount = await alice.Accounts.RegisterAsync("Alice Group MAU2");
-        var bobAccount = await bob.Accounts.RegisterAsync("Bob Group MAU2");
+        var aliceAccount = await alice.Accounts.RegisterAsync("Alice Group MSG01");
+        var bobAccount = await bob.Accounts.RegisterAsync("Bob Group MSG01");
         var group = await alice.Conversations.CreateGroupScaffoldAsync(
             aliceAccount.SessionId,
-            $"mau2-group-{Guid.NewGuid():N}",
+            $"msg01-group-{Guid.NewGuid():N}",
             [bobAccount.SessionId]);
 
         var bobGroupUpdates = await bob.Conversations.ReceiveGroupUpdatesAsync(
@@ -161,7 +166,7 @@ public sealed class ClientRuntimeStorageE2ETests
         Assert.NotNull(bobGroup);
         Assert.Equal(group.Name, bobGroup!.Name);
 
-        var body = $"group-mau2-message-{Guid.NewGuid():N}";
+        var body = $"group-msg01-message-{Guid.NewGuid():N}";
         var sent = await alice.Messages.SendGroupAsync(
             aliceAccount.SessionId, group.Id, body);
         var received = await bob.Messages.ReceiveGroupAsync(
@@ -170,7 +175,7 @@ public sealed class ClientRuntimeStorageE2ETests
         var reply = await bob.Messages.SendGroupAsync(
             bobAccount.SessionId,
             group.Id,
-            "group-mau2-reply",
+            "group-msg01-reply",
             replyToMessageId: bobOriginal.Id);
         var aliceReply = Assert.Single(
             await alice.Messages.ReceiveGroupAsync(aliceAccount.SessionId, group.Id));
@@ -186,199 +191,440 @@ public sealed class ClientRuntimeStorageE2ETests
         Assert.Equal(0, harness.RawSendCount);
     }
 
-    private static ClientRuntime CreateRuntime(AuthenticatedMau2RuntimeHarness harness) =>
-        new(
+    private static ClientRuntime CreateRuntime(SharedMsg01TestBus harness) =>
+        CreateRuntimeCore(harness, new VerifiedMsg01Endpoint(harness));
+
+    private static ClientRuntime CreateRuntimeCore(
+        SharedMsg01TestBus harness,
+        VerifiedMsg01Endpoint endpoint) => new(
             new InMemorySessionStore(),
-            ClientFeatureFlags.ReleaseDefaults,
+            ClientFeatureFlags.ReleaseDefaults with
+            {
+                MetadataPrivateTransportRequired = false
+            },
             new SystemClock(),
-            harness,
+            endpoint,
+            groupSyncTransport: endpoint,
             requireE2eeTransport: true,
-            mailboxDeliveryPolicy: harness.Policy);
+            mailboxDeliveryPolicy: new DirectP2pMailboxDeliveryPolicy(),
+            messagingV1Persistence: harness.NewMessagingPersistence());
 
-    private sealed class AuthenticatedMau2RuntimeHarness :
-        IAuthenticatedOpaqueMailboxTransport,
-        IAuthenticatedInboxTransport,
-        IMetadataPrivateSessionMessageTransport,
-        IResumableMailboxIdentityAuthenticatedRawTransport
+    private sealed class SharedMsg01TestBus : IDisposable
     {
-        private readonly ConcurrentDictionary<string, ConcurrentQueue<InboundMessageEnvelope>>
+        internal readonly ConcurrentDictionary<string, ConcurrentQueue<InboundMessageEnvelope>>
             inboxes = new(StringComparer.Ordinal);
-        private readonly VerifiedOfficialMailboxAuthority authority;
-        private readonly MailboxCredentialSelector selector;
-        private int preparedBatchCount;
-        private int dispatchedCount;
-        private int rawSendCount;
+        internal readonly ConcurrentDictionary<string, ConcurrentQueue<InboundGroupStateEnvelope>>
+            groupStates = new(StringComparer.Ordinal);
+        internal readonly ConcurrentDictionary<string, ConcurrentQueue<InboundGroupMessageEnvelope>>
+            groupMessages = new(StringComparer.Ordinal);
+        private readonly ConcurrentBag<string> messagingPaths = [];
+        internal int preparedBatchCount;
+        internal int dispatchedCount;
+        internal int rawSendCount;
 
-        public AuthenticatedMau2RuntimeHarness()
-        {
-            var now = checked((ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds());
-            var issuer = Enumerable.Repeat((byte)0x31, 32).ToArray();
-            authority = new VerifiedOfficialMailboxAuthority(
-                Enumerable.Repeat((byte)0x21, 16).ToArray(),
-                1,
-                [
-                    Issuer(issuer, MailboxCapabilityDomain.Deposit, now),
-                    Issuer(issuer, MailboxCapabilityDomain.Retrieve, now)
-                ],
-                requiresManagedEntitlement: false,
-                static () => false,
-                new EmptyRevocations(),
-                TimeProvider.System);
-            selector = new MailboxCredentialSelector(
-                OutboxAccountScope.FromBytes(Enumerable.Repeat((byte)0x41, 32).ToArray()),
-                MailboxCredentialScopeKind.Peer,
-                Enumerable.Repeat((byte)0x42, 32).ToArray(),
-                Enumerable.Repeat((byte)0x43, 32).ToArray());
-            Policy = new AuthenticatedMau2MailboxDeliveryPolicy(
-                MailboxInfrastructureOwnership.UserManaged,
-                authority,
-                _ => selector);
-        }
-
-        public IMailboxDeliveryPolicy Policy { get; }
         public int PreparedBatchCount => Volatile.Read(ref preparedBatchCount);
         public int DispatchedCount => Volatile.Read(ref dispatchedCount);
         public int RawSendCount => Volatile.Read(ref rawSendCount);
-        public int InboxNamespace => unchecked((int)0x4d415532);
-        public bool UsesMetadataPrivateTransport => true;
 
-        public Task<IReadOnlyList<IPreparedMailboxAuthenticatedSend>>
-            PrepareScopedMailboxLogicalBatchAsync(
-                IMailboxOperationSigner signer,
-                MailboxLogicalSendBatch batch,
-                IReadOnlyList<MailboxAuthenticatedSendTarget> targets,
-                CancellationToken cancellationToken = default)
+        internal MessagingV1PersistenceOptions NewMessagingPersistence()
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            Assert.NotEmpty(targets);
-            Assert.All(targets, target =>
-            {
-                Assert.Same(authority, target.Authority);
-                Assert.Equal(signer.SessionId, target.Envelope.Sender);
-                Assert.Equal(selector.ScopeId.ToArray(), target.Selector.ScopeId.ToArray());
-            });
-            Interlocked.Increment(ref preparedBatchCount);
-            return Task.FromResult<IReadOnlyList<IPreparedMailboxAuthenticatedSend>>(
-                targets.Select(target =>
-                    (IPreparedMailboxAuthenticatedSend)new Prepared(this, target.Envelope))
-                    .ToArray());
+            var path = Path.Combine(
+                Path.GetTempPath(),
+                $"deep-msg01-storage-{Guid.NewGuid():N}.db");
+            messagingPaths.Add(path);
+            return new MessagingV1PersistenceOptions(path, new string('A', 64));
         }
 
-        public Task<IReadOnlyList<IPreparedMailboxAuthenticatedSend>?>
-            TryResumeScopedMailboxBatchAsync(
-                IMailboxOperationSigner signer,
-                MailboxLogicalSendBatch batch,
-                CancellationToken cancellationToken = default) =>
-            Task.FromResult<IReadOnlyList<IPreparedMailboxAuthenticatedSend>?>(null);
+        public void Dispose()
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            foreach (var path in messagingPaths)
+            {
+                foreach (var candidate in new[] { path, path + "-wal", path + "-shm" })
+                {
+                    if (File.Exists(candidate))
+                    {
+                        File.Delete(candidate);
+                    }
+                }
+            }
+        }
 
-        public Task<IReadOnlyList<IPreparedMailboxAuthenticatedSend>>
-            PrepareScopedMailboxBatchAsync(
-                IMailboxOperationSigner signer,
-                IReadOnlyList<MailboxAuthenticatedSendTarget> targets,
-                CancellationToken cancellationToken = default) =>
-            PrepareScopedMailboxLogicalBatchAsync(
-                signer, Logical(targets), targets, cancellationToken);
+    }
 
-        private static MailboxLogicalSendBatch Logical(
-            IReadOnlyList<MailboxAuthenticatedSendTarget> targets) =>
-            new(targets[0].Envelope.Id!.Value, MailboxDeliveryKind.Direct,
-                targets.Select(target => new MailboxLogicalSendTarget(
-                    target.Envelope.Id!.Value,
-                    target.Selector,
-                    target.Authority,
-                    target.Envelope.Sender,
-                    target.Envelope.Recipient)).ToArray());
+    private sealed class VerifiedMsg01Endpoint :
+        IDirectP2pSessionMessageTransport,
+        IAuthenticatedInboxTransport,
+        IGroupSyncTransport,
+        IMsg01AuthenticatedEvidenceSource,
+        IAccountGenerationLifecycle
+    {
+        private readonly SharedMsg01TestBus bus;
+        private readonly Msg01VerifiedSessionAuthority evidenceAuthority =
+            MessagingV1Fixture.CreateEvidenceAuthority();
+        private readonly ConcurrentDictionary<string, byte[]> inboundRatchetHeads =
+            new(StringComparer.Ordinal);
+        private SessionId? localAccount;
+        private long sequence;
 
-        public Task SendPreparedMailboxAuthenticatedAsync(
-            IPreparedMailboxAuthenticatedSend preparedSend,
+        internal VerifiedMsg01Endpoint(SharedMsg01TestBus bus) =>
+            this.bus = bus;
+
+        public Msg01VerifiedSessionAuthority EvidenceAuthority => evidenceAuthority;
+
+        public void Resume(SessionId account) => localAccount = account;
+
+        public Task StopAsync(
+            SessionId account,
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var prepared = Assert.IsType<Prepared>(preparedSend);
-            Assert.Same(this, prepared.Owner);
-            Assert.Equal(0, Interlocked.Exchange(ref prepared.Dispatched, 1));
-            var envelope = prepared.Envelope;
-            var inbound = new InboundMessageEnvelope(
-                envelope.Id ?? MessageId.NewId(),
-                envelope.Sender,
-                envelope.Recipient,
-                envelope.Body,
-                envelope.Attachments,
-                envelope.CreatedAt,
-                envelope.ExpiresAt,
-                $"mau2-{Interlocked.Increment(ref dispatchedCount)}",
-                envelope.ReplyTo,
-                envelope.Reaction);
-            inboxes.GetOrAdd(envelope.Recipient.Value, static _ => new())
-                .Enqueue(inbound);
+            if (localAccount == account)
+            {
+                localAccount = null;
+            }
             return Task.CompletedTask;
+        }
+
+        public ValueTask<SessionId> GetLocalAccountAsync(
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return localAccount is { } account
+                ? ValueTask.FromResult(account)
+                : ValueTask.FromException<SessionId>(
+                    new InvalidOperationException("No test MSG-01 account is active."));
+        }
+
+        public ValueTask<DirectoryHeadHash32> ResolveFanoutTargetAsync(
+            Msg01ResolveFanoutTargetRequest request,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.FromResult(DirectoryHeadHash32.FromBytes(Hash(
+                "directory",
+                Convert.ToHexString(request.Target.AccountId.ToArray()))));
+        }
+
+        public ValueTask<Msg01PreparedTransportAttempt> PrepareAttemptAsync(
+            Msg01PrepareAttemptRequest request,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Interlocked.Increment(ref bus.preparedBatchCount);
+            return ValueTask.FromResult(new Msg01PreparedTransportAttempt(
+                DirectoryHeadHash32.FromBytes(Hash(
+                    "directory",
+                    Convert.ToHexString(request.Target.AccountId.ToArray()))),
+                RatchetStateHash32.FromBytes(Hash(
+                    "ratchet-before",
+                    Convert.ToHexString(request.Target.DeviceId.ToArray()))),
+                RatchetTransitionHash32.FromBytes(Hash(
+                    "ratchet-after",
+                    Convert.ToHexString(request.AttemptId.ToArray()))),
+                request.CanonicalPayload.Span));
+        }
+
+        public ValueTask<Msg01AuthenticatedDispatchResult> DispatchPreparedAsync(
+            Msg01DispatchEvidenceRequest request,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            DispatchPayload(request);
+            Interlocked.Increment(ref bus.dispatchedCount);
+            return ValueTask.FromResult(AuthenticatedResult(
+                request,
+                MessageEvidencePurpose.TargetOutcome));
+        }
+
+        public ValueTask<Msg01AuthenticatedDispatchResult> ReconcilePreparedAsync(
+            Msg01DispatchEvidenceRequest request,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.FromResult(AuthenticatedResult(
+                request,
+                MessageEvidencePurpose.AttemptReconciliation));
+        }
+
+        public ValueTask<Msg01AuthenticatedInboundResult> GetInboundResultAsync(
+            Msg01InboundEvidenceRequest request,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var ratchetKey = Convert.ToHexString(request.Claim.Key.AuthorAccountId.ToArray())
+                + Convert.ToHexString(request.Claim.Key.ConversationId.ToArray());
+            byte[] beforeBytes;
+            byte[] sealedState;
+            byte[] afterBytes;
+            lock (inboundRatchetHeads)
+            {
+                beforeBytes = inboundRatchetHeads.TryGetValue(ratchetKey, out var current)
+                    ? current.ToArray()
+                    : Hash("inbound-before", ratchetKey);
+                sealedState = Hash(
+                    "inbound-state",
+                    Convert.ToHexString(beforeBytes)
+                    + Convert.ToHexString(request.CanonicalEnvelope.Span));
+                afterBytes = SHA256.HashData(sealedState);
+                inboundRatchetHeads[ratchetKey] = afterBytes.ToArray();
+            }
+            var before = RatchetStateHash32.FromBytes(beforeBytes);
+            var after = RatchetStateHash32.FromBytes(afterBytes);
+            var replay = checked((ulong)Interlocked.Increment(ref sequence));
+            var nonce = Hash(
+                "inbound-nonce",
+                replay.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            var sessionId = RatchetSessionId32.FromBytes(Hash("session", ratchetKey));
+            var context = new MessageCapabilityTrustedContext(
+                MessageEvidencePurpose.InboundMaterialization,
+                request.Scope,
+                request.Claim.Key,
+                receiptId: request.ReceiptId,
+                requestHash: SHA256.HashData(request.CanonicalEnvelope.Span),
+                envelopeHash: request.Claim.EventHash.ToArray(),
+                ratchetBeforeHash: before.ToArray(),
+                ratchetAfterHash: after.ToArray(),
+                replayCounter: replay,
+                replayNonce: nonce,
+                ratchetSessionId: sessionId);
+            return ValueTask.FromResult(new Msg01AuthenticatedInboundResult(
+                sessionId,
+                before,
+                after,
+                sealedState,
+                replay,
+                nonce,
+                MessagingV1Fixture.Authenticate(
+                    context,
+                    SHA256.HashData(request.CanonicalEnvelope.Span))));
+        }
+
+        public ValueTask AcknowledgeReceiptAsync(
+            ReadOnlyMemory<byte> authenticatedReceipt,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.CompletedTask;
         }
 
         public Task SendAsync(
             OutboundMessageEnvelope envelope,
             CancellationToken cancellationToken = default)
         {
-            Interlocked.Increment(ref rawSendCount);
-            throw new InvalidOperationException("Authenticated MAU2 forbids raw-send fallback.");
+            Interlocked.Increment(ref bus.rawSendCount);
+            return Task.FromException(
+                new InvalidOperationException("MSG-01 forbids raw direct dispatch."));
         }
 
         public Task<IReadOnlyList<InboundMessageEnvelope>> ReceiveAsync(
             SessionId recipient,
-            CancellationToken cancellationToken = default) =>
-            Task.FromException<IReadOnlyList<InboundMessageEnvelope>>(
-                new InvalidOperationException("Authenticated MAU2 requires the holder identity."));
-
-        public Task<IReadOnlyList<InboundMessageEnvelope>> ReceiveAuthenticatedAsync(
-            SessionIdentityProvider identity,
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var result = new List<InboundMessageEnvelope>();
-            if (inboxes.TryGetValue(identity.SessionId.Value, out var inbox))
-                while (inbox.TryDequeue(out var envelope)) result.Add(envelope);
-            return Task.FromResult<IReadOnlyList<InboundMessageEnvelope>>(result);
+            return Task.FromResult<IReadOnlyList<InboundMessageEnvelope>>(
+                Drain(bus.inboxes, recipient.Value));
         }
 
-        public Task<OpaqueMailboxInboxPage> RetrieveOpaqueMailboxInboxAsync(
-            IMailboxOperationSigner signer,
-            OpaqueMailboxContinuation continuation,
+        public Task<IReadOnlyList<InboundMessageEnvelope>> ReceiveAuthenticatedAsync(
+            SessionIdentityProvider identity,
             CancellationToken cancellationToken = default) =>
-            Task.FromException<OpaqueMailboxInboxPage>(new NotSupportedException());
+            ReceiveAsync(identity.SessionId, cancellationToken);
 
-        public Task AcknowledgeOpaqueMailboxInboxAsync(
-            IMailboxOperationSigner signer,
-            string opaqueItemHandle,
+        public Task PublishGroupStateAsync(
+            Group group,
+            DateTimeOffset updatedAt,
+            IEnumerable<SessionId>? recipients = null,
             CancellationToken cancellationToken = default) =>
-            Task.CompletedTask;
+            RawGroupDispatch();
 
-        private static MailboxCapabilityIssuerAuthority Issuer(
-            byte[] key,
-            MailboxCapabilityDomain domain,
-            ulong now) => new()
+        public Task SendGroupMessageAsync(
+            OutboundGroupMessageEnvelope envelope,
+            CancellationToken cancellationToken = default) =>
+            RawGroupDispatch();
+
+        public Task<IReadOnlyList<InboundGroupStateEnvelope>> ReceiveGroupStatesAsync(
+            SessionId member,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult<IReadOnlyList<InboundGroupStateEnvelope>>(
+                Drain(bus.groupStates, member.Value));
+        }
+
+        public Task<IReadOnlyList<InboundGroupMessageEnvelope>> ReceiveGroupMessagesAsync(
+            ConversationId groupId,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult<IReadOnlyList<InboundGroupMessageEnvelope>>(
+                Drain(bus.groupMessages, groupId.Value));
+        }
+
+        private Task RawGroupDispatch()
+        {
+            Interlocked.Increment(ref bus.rawSendCount);
+            return Task.FromException(
+                new InvalidOperationException("MSG-01 forbids raw group dispatch."));
+        }
+
+        private void DispatchPayload(Msg01DispatchEvidenceRequest request)
+        {
+            switch (request.Kind)
             {
-                PublicKey = key,
-                Domain = domain,
-                AllowedLifecycle = MailboxCapabilityLifecycle.Active,
-                MinimumGeneration = 1,
-                MaximumGeneration = 2,
-                ValidFromUnixSeconds = now - 60,
-                ValidUntilUnixSeconds = now + 3_600
-            };
-
-        private sealed class EmptyRevocations : IFreshMailboxCapabilityRevocationSource
-        {
-            public void ValidateFreshness() { }
-            public bool IsRevoked(MailboxCapabilityRevocationQuery query) => false;
+                case MessagePayloadKind.DirectMessage:
+                {
+                    var payload = Deserialize<DirectWirePayload>(request.Ciphertext.Span);
+                    RequireTarget(payload.Recipient, request.Target);
+                    bus.inboxes.GetOrAdd(payload.Recipient.Value, static _ => new())
+                        .Enqueue(new InboundMessageEnvelope(
+                            payload.Id,
+                            payload.Sender,
+                            payload.Recipient,
+                            payload.Body,
+                            payload.Attachments,
+                            payload.CreatedAt,
+                            payload.ExpiresAt,
+                            NextServerHash(),
+                            payload.ReplyTo,
+                            payload.Reaction));
+                    break;
+                }
+                case MessagePayloadKind.GroupState:
+                {
+                    var payload = Deserialize<GroupStateWirePayload>(request.Ciphertext.Span);
+                    var recipient = payload.Group.Members
+                        .Select(static item => item.SessionId)
+                        .Single(candidate => TargetAccount(candidate).Equals(request.Target.AccountId));
+                    bus.groupStates.GetOrAdd(recipient.Value, static _ => new())
+                        .Enqueue(new InboundGroupStateEnvelope(
+                            payload.Group,
+                            payload.UpdatedAt,
+                            NextServerHash(),
+                            payload.Group.CreatedBy));
+                    break;
+                }
+                case MessagePayloadKind.GroupMessage:
+                {
+                    var payload = Deserialize<GroupMessageWirePayload>(request.Ciphertext.Span);
+                    bus.groupMessages.GetOrAdd(payload.GroupId.Value, static _ => new())
+                        .Enqueue(new InboundGroupMessageEnvelope(
+                            payload.Id,
+                            payload.GroupId,
+                            payload.Sender,
+                            payload.Body,
+                            payload.Attachments,
+                            payload.CreatedAt,
+                            payload.ExpiresAt,
+                            NextServerHash(),
+                            payload.ReplyTo,
+                            payload.Reaction));
+                    break;
+                }
+                case MessagePayloadKind.GroupMailboxRoutes:
+                    break;
+                default:
+                    throw new InvalidDataException("Unsupported MSG-01 test payload kind.");
+            }
         }
 
-        private sealed class Prepared(
-            AuthenticatedMau2RuntimeHarness owner,
-            OutboundMessageEnvelope envelope) : IPreparedMailboxAuthenticatedSend
+        private Msg01AuthenticatedDispatchResult AuthenticatedResult(
+            Msg01DispatchEvidenceRequest request,
+            MessageEvidencePurpose purpose)
         {
-            public AuthenticatedMau2RuntimeHarness Owner { get; } = owner;
-            public OutboundMessageEnvelope Envelope { get; } = envelope;
-            public int Dispatched;
+            var replay = checked((ulong)Interlocked.Increment(ref sequence));
+            var nonce = Hash(
+                "dispatch-nonce",
+                replay.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            var context = new MessageCapabilityTrustedContext(
+                purpose,
+                request.Scope,
+                request.ClaimKey,
+                request.Target,
+                request.AttemptId,
+                VerifiedTargetOutcomeKind.Accepted,
+                targetOperationId: request.OperationId,
+                bindingHash: request.BindingHash,
+                requestHash: request.RequestHash.ToArray(),
+                envelopeHash: request.EnvelopeHash.ToArray(),
+                ratchetBeforeHash: request.RatchetBeforeHash.ToArray(),
+                ratchetAfterHash: request.RatchetAfterHash.ToArray(),
+                replayCounter: replay,
+                replayNonce: nonce);
+            return new Msg01AuthenticatedDispatchResult(
+                VerifiedTargetOutcomeKind.Accepted,
+                false,
+                replay,
+                nonce,
+                MessagingV1Fixture.Authenticate(
+                    context,
+                    SHA256.HashData(request.Ciphertext.Span)));
         }
+
+        private void RequireTarget(SessionId recipient, RecipientDeviceTarget target)
+        {
+            if (!TargetAccount(recipient).Equals(target.AccountId))
+                throw new InvalidDataException("MSG-01 payload was dispatched to another target.");
+        }
+
+        private string NextServerHash() =>
+            $"msg01-{Interlocked.Increment(ref sequence):x16}";
+
+        private static MessagingAccountId32 TargetAccount(SessionId account) =>
+            MessagingAccountId32.FromBytes(Hash("account", account.Value));
+
+        private static T Deserialize<T>(ReadOnlySpan<byte> payload) =>
+            JsonSerializer.Deserialize<T>(payload)
+            ?? throw new InvalidDataException("MSG-01 test payload is malformed.");
+
+        private static IReadOnlyList<T> Drain<T>(
+            ConcurrentDictionary<string, ConcurrentQueue<T>> queues,
+            string key)
+        {
+            if (!queues.TryGetValue(key, out var queue))
+                return [];
+            var result = new List<T>();
+            while (queue.TryDequeue(out var item))
+                result.Add(item);
+            return result;
+        }
+
+        private static byte[] Hash(string domain, string value)
+        {
+            var input = Encoding.UTF8.GetBytes($"Deep/MSG-01/{domain}/v1\0{value}");
+            try
+            {
+                return SHA256.HashData(input);
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(input);
+            }
+        }
+
+        private sealed record DirectWirePayload(
+            MessageId Id,
+            SessionId Sender,
+            SessionId Recipient,
+            string Body,
+            IReadOnlyList<AttachmentMetadata> Attachments,
+            DateTimeOffset CreatedAt,
+            DateTimeOffset? ExpiresAt,
+            MessageReply? ReplyTo,
+            MessageReactionUpdate? Reaction);
+
+        private sealed record GroupMessageWirePayload(
+            MessageId Id,
+            ConversationId GroupId,
+            SessionId Sender,
+            string Body,
+            IReadOnlyList<AttachmentMetadata> Attachments,
+            DateTimeOffset CreatedAt,
+            DateTimeOffset? ExpiresAt,
+            MessageReply? ReplyTo,
+            MessageReactionUpdate? Reaction);
+
+        private sealed record GroupStateWirePayload(Group Group, DateTimeOffset UpdatedAt);
     }
 
     private sealed class InMemoryAttachmentTransport : IAttachmentFileTransport

@@ -90,14 +90,18 @@ public sealed class DurableInboxDomainAckTests
             var store = new InMemorySessionStore(statePath);
             await ((IGroupRepository)store).UpsertAsync(group);
             var conversations = CreateConversationService(store, store, sync);
+            var crashingMessages = new ThrowAfterMessageAppendRepository(store);
             var service = new MessageService(
                 conversations,
                 store,
-                new ThrowAfterMessageAppendRepository(store),
+                crashingMessages,
                 store,
-                new EmptySessionTransport(),
-                sync,
-                new FrozenClock(Now));
+                new FrozenClock(Now),
+                new MessageNetworkRuntime(
+                    crashingMessages,
+                    new EmptySessionTransport(),
+                    sync,
+                    null));
 
             await Assert.ThrowsAsync<InjectedDomainCrashException>(() =>
                 service.ReceiveGroupAsync(recipient, group.Id));
@@ -113,9 +117,12 @@ public sealed class DurableInboxDomainAckTests
                 restarted,
                 restarted,
                 restarted,
-                new EmptySessionTransport(),
-                sync,
-                new FrozenClock(Now));
+                new FrozenClock(Now),
+                new MessageNetworkRuntime(
+                    restarted,
+                    new EmptySessionTransport(),
+                    sync,
+                    null));
             Assert.Empty(await resumed.ReceiveGroupAsync(recipient, group.Id));
 
             Assert.Equal(1, sync.AckCount);

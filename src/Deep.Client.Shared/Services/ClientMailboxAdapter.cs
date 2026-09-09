@@ -384,6 +384,12 @@ public sealed class ClientMailboxAdapter
         }
     }
 
+    internal bool Uses(
+        IClientMailboxBinaryIngress expectedIngress,
+        MailboxAuthenticatedRequestFactory expectedRequests) =>
+        ReferenceEquals(ingress, expectedIngress) &&
+        ReferenceEquals(requests, expectedRequests);
+
     public async Task<ClientMailboxStoreResult> StoreAsync(
         OutboxAccountScope outboxScope,
         IMailboxOperationSigner signer,

@@ -79,6 +79,27 @@ internal static class MessagingCryptoV1Trs1
             terminal);
     }
 
+    internal static void RequireResponderContactBinding(
+        ReadOnlySpan<byte> encoded,
+        ReadOnlySpan<byte> remoteDeviceId,
+        ulong remoteDeviceGeneration)
+    {
+        if (remoteDeviceId.Length != 32 || remoteDeviceId.IndexOfAnyExcept((byte)0) < 0 ||
+            remoteDeviceGeneration == 0)
+            throw new ArgumentException(
+                "The verified remote-device binding must contain a nonzero ID and generation.",
+                nameof(remoteDeviceId));
+        if (encoded.Length < PrefixSize + BindingSize)
+            throw new FormatException("TRS1 is truncated before its directional device binding.");
+
+        const int remoteDeviceOffset = PrefixSize + 168;
+        const int remoteDeviceGenerationOffset = PrefixSize + 200;
+        if (!Fixed(encoded.Slice(remoteDeviceOffset, 32), remoteDeviceId) ||
+            BinaryPrimitives.ReadUInt64BigEndian(encoded[remoteDeviceGenerationOffset..]) != remoteDeviceGeneration)
+            throw new CryptographicException(
+                "TRS1 remote-device binding differs from the verified DPH2 initiator.");
+    }
+
     internal static byte[] Sha256Domain(string label, ReadOnlySpan<byte> value)
     {
         var labelBytes = Encoding.ASCII.GetBytes(label);

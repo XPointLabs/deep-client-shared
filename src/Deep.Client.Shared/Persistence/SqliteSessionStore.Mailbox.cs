@@ -1369,25 +1369,43 @@ public sealed partial class SqliteSessionStore :
 
     private SqliteConnection Open()
     {
+        ThrowIfDisposed();
         var connection = new SqliteConnection(_connectionString);
-        connection.Open();
-        Configure(connection);
-        return connection;
+        try
+        {
+            connection.Open();
+            Configure(connection);
+            return connection;
+        }
+        catch
+        {
+            connection.Dispose();
+            throw;
+        }
     }
 
     private async Task<SqliteConnection> OpenAsync(
         CancellationToken cancellationToken)
     {
+        ThrowIfDisposed();
         var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-        await using var command = connection.CreateCommand();
-        command.CommandText = """
-            PRAGMA busy_timeout=5000;
-            PRAGMA journal_mode=WAL;
-            PRAGMA synchronous=FULL;
-            """;
-        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        return connection;
+        try
+        {
+            await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+            await using var command = connection.CreateCommand();
+            command.CommandText = """
+                PRAGMA busy_timeout=5000;
+                PRAGMA journal_mode=WAL;
+                PRAGMA synchronous=FULL;
+                """;
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            return connection;
+        }
+        catch
+        {
+            await connection.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
     }
 
     private static void Configure(SqliteConnection connection)

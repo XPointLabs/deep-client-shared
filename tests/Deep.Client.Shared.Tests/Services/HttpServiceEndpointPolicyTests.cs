@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
 using System.Reflection;
+using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using Deep.Client.Shared.Services;
@@ -22,6 +23,7 @@ public sealed class HttpServiceEndpointPolicyTests
         Assert.Equal(
             X509RevocationMode.Online,
             handler.SslOptions.CertificateRevocationCheckMode);
+        Assert.Equal(DecompressionMethods.None, handler.AutomaticDecompression);
         Assert.False(handler.AllowAutoRedirect);
         Assert.False(handler.UseCookies);
         Assert.False(handler.UseProxy);
@@ -42,18 +44,43 @@ public sealed class HttpServiceEndpointPolicyTests
     }
 
     [Fact]
-    public void BoundFactoryHandler_PreservesItsExplicitValidationHook()
+    public void BoundFactory_ConstructsOwnedRequestTransportWithoutExposingHandler()
     {
         RemoteCertificateValidationCallback callback = static (_, _, _, _) => false;
         var factory = new HttpServiceTransportFactory(HttpServiceEndpointPolicy.Production)
             .BindNetwork(new HttpServiceNetworkHooks(
                 ServerCertificateValidationCallback: callback));
 
-        using var handler = factory.CreateBoundHttpHandler(new HttpServiceClientOptions());
+        using var transport = factory.CreateRequestTransport(
+            new HttpServiceRequestTransportOptions(
+                "https://registry.example/",
+                ["/api/request"],
+                "application/json",
+                "application/json",
+                1024,
+                4096,
+                TimeSpan.FromSeconds(5)),
+            new HttpServiceClientOptions());
 
-        Assert.Same(callback, handler.SslOptions.RemoteCertificateValidationCallback);
-        Assert.Equal(X509RevocationMode.Online,
-            handler.SslOptions.CertificateRevocationCheckMode);
+        Assert.IsAssignableFrom<IDisposable>(transport);
+    }
+
+    [Fact]
+    public void PreferredAddressesAndAppScopedTrustAreOrderIndependent()
+    {
+        var root = CreateCertificateAuthority();
+        var address = IPAddress.Parse("192.0.2.8");
+        var factory = new HttpServiceTransportFactory(HttpServiceEndpointPolicy.Production);
+
+        var trustThenAddress = factory
+            .WithAppScopedPrivateCertificateAuthority(root)
+            .WithPreferredConnectAddresses([address]);
+        var addressThenTrust = factory
+            .WithPreferredConnectAddresses([address])
+            .WithAppScopedPrivateCertificateAuthority(root);
+
+        AssertCompleteNetworkBinding(trustThenAddress);
+        AssertCompleteNetworkBinding(addressThenTrust);
     }
 
     [Fact]
@@ -70,6 +97,37 @@ public sealed class HttpServiceEndpointPolicyTests
             new HttpPushSubscriptionTransportOptions("https://192.168.1.44:41822/")).IsEnabled);
         Assert.NotNull(factory.CreateCallSignaling(
             new HttpCallSignalingTransportOptions("https://192.168.1.44:41823/")));
+    }
+
+    private static void AssertCompleteNetworkBinding(HttpServiceTransportFactory factory)
+    {
+        var field = typeof(HttpServiceTransportFactory).GetField(
+            "networkHooks", BindingFlags.NonPublic | BindingFlags.Instance);
+        var hooks = Assert.IsType<HttpServiceNetworkHooks>(field!.GetValue(factory));
+        Assert.NotNull(hooks.ConnectCallback);
+        Assert.NotNull(hooks.ServerCertificateValidationCallback);
+    }
+
+    private static byte[] CreateCertificateAuthority()
+    {
+        using var key = RSA.Create(2048);
+        var request = new CertificateRequest(
+            "CN=Deep HTTP binding test root",
+            key,
+            HashAlgorithmName.SHA256,
+            RSASignaturePadding.Pkcs1);
+        request.CertificateExtensions.Add(new X509BasicConstraintsExtension(
+            certificateAuthority: true,
+            hasPathLengthConstraint: false,
+            pathLengthConstraint: 0,
+            critical: true));
+        request.CertificateExtensions.Add(new X509KeyUsageExtension(
+            X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign,
+            critical: true));
+        using var certificate = request.CreateSelfSigned(
+            DateTimeOffset.UtcNow.AddMinutes(-1),
+            DateTimeOffset.UtcNow.AddDays(1));
+        return certificate.Export(X509ContentType.Cert);
     }
 
     [Theory]
@@ -203,7 +261,9 @@ public sealed class HttpServiceEndpointPolicyTests
             typeof(HttpAvatarProfileTransport),
             typeof(HttpAttachmentFileTransport),
             typeof(HttpPushSubscriptionTransport),
-            typeof(HttpCallSignalingTransport)
+            typeof(HttpCallSignalingTransport),
+            typeof(HttpServiceRequestTransport),
+            typeof(Deep.Client.Shared.Services.XPointNetworkV1.HttpContactResolveDirectoryArtifactSource)
         ];
         Assert.All(
             transportTypes,
@@ -216,7 +276,8 @@ public sealed class HttpServiceEndpointPolicyTests
         var surfaceTypes = new[]
             {
                 typeof(HttpServiceTransportFactory),
-                typeof(HttpServiceClientOptions)
+                typeof(HttpServiceClientOptions),
+                typeof(HttpServiceRequestTransportOptions)
             }
             .SelectMany(type => type.GetMembers(BindingFlags.Public | BindingFlags.Instance))
             .SelectMany(GetSurfaceTypes)
@@ -227,6 +288,12 @@ public sealed class HttpServiceEndpointPolicyTests
         Assert.DoesNotContain(
             surfaceTypes,
             type => typeof(Delegate).IsAssignableFrom(UnwrapSurfaceType(type)));
+        Assert.False(typeof(HttpServiceNetworkHooks).IsPublic);
+        Assert.DoesNotContain(
+            typeof(HttpServiceTransportFactory).GetMethods(
+                BindingFlags.Public | BindingFlags.Instance),
+            method => method.Name == "BindNetwork" ||
+                      method.Name.Contains("Handler", StringComparison.Ordinal));
     }
 
     [Fact]

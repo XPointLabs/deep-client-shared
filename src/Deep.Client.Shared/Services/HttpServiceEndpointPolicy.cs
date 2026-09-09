@@ -1,6 +1,11 @@
 using System.Net.Security;
+using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text.RegularExpressions;
+using Deep.Client.Shared.Services.ContactV1;
+using Deep.Client.Shared.Services.GroupV1;
+using Deep.Client.Shared.Services.XPointNetworkV1;
 using Deep.Protocol.DeepExtension.PrivacyRouting;
 
 namespace Deep.Client.Shared.Services;
@@ -287,6 +292,8 @@ internal sealed record HttpServiceNetworkHooks(
 
 public sealed class HttpServiceTransportFactory
 {
+    private static readonly TimeSpan PreferredConnectFallbackDelay = TimeSpan.FromMilliseconds(250);
+    private static readonly TimeSpan PreferredConnectAttemptTimeout = TimeSpan.FromSeconds(5);
     private readonly HttpServiceEndpointPolicy endpointPolicy;
     private readonly HttpServiceNetworkHooks? networkHooks;
 
@@ -307,9 +314,75 @@ public sealed class HttpServiceTransportFactory
     internal HttpServiceTransportFactory BindNetwork(HttpServiceNetworkHooks hooks) =>
         new(endpointPolicy, hooks ?? throw new ArgumentNullException(nameof(hooks)));
 
-    internal SocketsHttpHandler CreateBoundHttpHandler(
-        HttpServiceClientOptions? options = null) =>
-        CreateHttpHandler(options, networkHooks);
+    /// <summary>
+    /// Returns a factory which tries the supplied deployment-owned addresses before DNS
+    /// results while retaining the original DNS authority for HTTPS validation. This is
+    /// deliberately narrower than exposing an HTTP handler or connection callback.
+    /// </summary>
+    public HttpServiceTransportFactory WithPreferredConnectAddresses(
+        IReadOnlyList<System.Net.IPAddress> preferredAddresses)
+    {
+        ArgumentNullException.ThrowIfNull(preferredAddresses);
+        var addresses = preferredAddresses
+            .Select(static address => address is null
+                ? throw new ArgumentException("A preferred connect address is null.", nameof(preferredAddresses))
+                : address.AddressFamily == AddressFamily.InterNetworkV6
+                    ? new System.Net.IPAddress(address.GetAddressBytes(), address.ScopeId)
+                    : new System.Net.IPAddress(address.GetAddressBytes()))
+            .Distinct()
+            .ToArray();
+        if (addresses.Length == 0)
+            return this;
+        if (addresses.Length > 16)
+            throw new ArgumentOutOfRangeException(
+                nameof(preferredAddresses), "At most 16 preferred connect addresses are supported.");
+        return new HttpServiceTransportFactory(
+            endpointPolicy,
+            new HttpServiceNetworkHooks(
+                (context, cancellationToken) => ConnectPreferredAsync(
+                    context, addresses, cancellationToken),
+                networkHooks?.ServerCertificateValidationCallback));
+    }
+
+    /// <summary>
+    /// Adds one application-scoped private root for physical pre-release environments.
+    /// DNS-name validation, server-auth EKU validation, and online revocation remain required.
+    /// No certificate callback or mutable handler crosses the public boundary.
+    /// </summary>
+    public HttpServiceTransportFactory WithAppScopedPrivateCertificateAuthority(
+        ReadOnlyMemory<byte> rootCertificateDer)
+    {
+        if (rootCertificateDer.IsEmpty)
+            throw new ArgumentException("The app-scoped private root is empty.", nameof(rootCertificateDer));
+        using var parsed = X509CertificateLoader.LoadCertificate(rootCertificateDer.Span);
+        if (!IsCertificateAuthority(parsed))
+            throw new CryptographicException("The app-scoped certificate is not a CA certificate.");
+        var exactRoot = parsed.RawData.ToArray();
+        return new HttpServiceTransportFactory(
+            endpointPolicy,
+            new HttpServiceNetworkHooks(
+                networkHooks?.ConnectCallback,
+                (_, certificate, presentedChain, errors) =>
+                    ValidateWithAppScopedRoot(certificate, presentedChain, errors, exactRoot)));
+    }
+
+    public HttpServiceRequestTransport CreateRequestTransport(
+        HttpServiceRequestTransportOptions options,
+        HttpServiceClientOptions? clientOptions = null) =>
+        CreateOwned(
+            clientOptions,
+            client => new HttpServiceRequestTransport(client, options, endpointPolicy));
+
+    internal HttpContactResolveDirectoryArtifactSource CreateContactResolveDirectoryArtifactSource(
+        HttpContactResolveDirectoryOptions options,
+        IOnionMonotonicClock monotonicClock,
+        HttpServiceClientOptions? clientOptions = null) =>
+        CreateOwned(
+            clientOptions,
+            client => new HttpContactResolveDirectoryArtifactSource(
+                client,
+                options,
+                monotonicClock));
 
     public HttpAvatarProfileTransport CreateAvatar(
         HttpAvatarProfileTransportOptions options,
@@ -353,17 +426,19 @@ public sealed class HttpServiceTransportFactory
                 timeProvider,
                 endpointPolicy));
 
-    internal PrivacyRoutedMailboxBinaryIngress CreatePrivacyRoutedMailboxIngress(
+    public PrivacyRoutedMailboxBinaryIngress CreatePrivacyRoutedMailboxIngress(
         PrivacyMailboxRoute primaryRoute,
         PrivacyMailboxRoute fallbackRoute,
         IMailboxClientDecodePolicyProvider decodePolicies,
+        PrivacyRoutingCodec codec,
         HttpServiceClientOptions? clientOptions = null,
-        int paddingBlockBytes = PrivacyRoutingLimits.DefaultPaddingBlockBytes,
+        int paddingBlockBytes = OnionLimits.DefaultPaddingBlockBytes,
         IPrivacyMailboxRouteSelectionObserver? routeSelectionObserver = null)
     {
         ArgumentNullException.ThrowIfNull(primaryRoute);
         ArgumentNullException.ThrowIfNull(fallbackRoute);
         ArgumentNullException.ThrowIfNull(decodePolicies);
+        ArgumentNullException.ThrowIfNull(codec);
 
         PrivacyManagedIngressHttpTransport? primary = null;
         PrivacyManagedIngressHttpTransport? fallback = null;
@@ -375,6 +450,7 @@ public sealed class HttpServiceTransportFactory
                 primaryRoute,
                 fallbackRoute,
                 decodePolicies,
+                codec,
                 primary,
                 fallback,
                 paddingBlockBytes,
@@ -382,6 +458,79 @@ public sealed class HttpServiceTransportFactory
             primary = null;
             fallback = null;
             return ingress;
+        }
+        finally
+        {
+            fallback?.Dispose();
+            primary?.Dispose();
+        }
+    }
+
+    public PrivacyRoutedContactResolverTransport CreatePrivacyRoutedContactResolverTransport(
+        PrivacyMailboxRoute primaryRoute,
+        PrivacyMailboxRoute fallbackRoute,
+        PrivacyRoutingCodec codec,
+        HttpServiceClientOptions? clientOptions = null,
+        IPrivacyMailboxRouteSelectionObserver? routeSelectionObserver = null)
+    {
+        ArgumentNullException.ThrowIfNull(primaryRoute);
+        ArgumentNullException.ThrowIfNull(fallbackRoute);
+        ArgumentNullException.ThrowIfNull(codec);
+
+        PrivacyManagedIngressHttpTransport? primary = null;
+        PrivacyManagedIngressHttpTransport? fallback = null;
+        try
+        {
+            primary = CreatePrivacyManagedIngress(primaryRoute.EntryOrigin, clientOptions);
+            fallback = CreatePrivacyManagedIngress(fallbackRoute.EntryOrigin, clientOptions);
+            var transport = new PrivacyRoutedContactResolverTransport(
+                primaryRoute,
+                fallbackRoute,
+                codec,
+                primary,
+                fallback,
+                routeSelectionObserver);
+            primary = null;
+            fallback = null;
+            return transport;
+        }
+        finally
+        {
+            fallback?.Dispose();
+            primary?.Dispose();
+        }
+    }
+
+    public PrivacyRoutedGroupControlTransport CreatePrivacyRoutedGroupControlTransport(
+        GroupControlIngressRoute primaryRoute,
+        GroupControlIngressRoute fallbackRoute,
+        GroupControlPrivacyPathProvider pathProvider,
+        PrivacyRoutingCodec codec,
+        HttpServiceClientOptions? clientOptions = null,
+        IPrivacyMailboxRouteSelectionObserver? routeSelectionObserver = null)
+    {
+        ArgumentNullException.ThrowIfNull(primaryRoute);
+        ArgumentNullException.ThrowIfNull(fallbackRoute);
+        ArgumentNullException.ThrowIfNull(pathProvider);
+        ArgumentNullException.ThrowIfNull(codec);
+
+        PrivacyManagedIngressHttpTransport? primary = null;
+        PrivacyManagedIngressHttpTransport? fallback = null;
+        try
+        {
+            primary = CreatePrivacyManagedIngress(primaryRoute.EntryOrigin, clientOptions);
+            fallback = CreatePrivacyManagedIngress(fallbackRoute.EntryOrigin, clientOptions);
+            var transport = new PrivacyRoutedGroupControlTransport(
+                primaryRoute,
+                fallbackRoute,
+                pathProvider,
+                codec,
+                primary,
+                fallback,
+                routeSelectionObserver);
+            primary = null;
+            fallback = null;
+            return transport;
         }
         finally
         {
@@ -449,6 +598,176 @@ public sealed class HttpServiceTransportFactory
         return client;
     }
 
+    private static async ValueTask<Stream> ConnectPreferredAsync(
+        SocketsHttpConnectionContext context,
+        IReadOnlyList<System.Net.IPAddress> preferredAddresses,
+        CancellationToken cancellationToken)
+    {
+        var resolved = await System.Net.Dns.GetHostAddressesAsync(
+                context.DnsEndPoint.Host, cancellationToken)
+            .ConfigureAwait(false);
+        var ordered = preferredAddresses.Concat(resolved).Distinct().ToArray();
+        if (ordered.Length == 0)
+            throw new HttpRequestException(
+                $"DNS returned no addresses for {context.DnsEndPoint.Host}.");
+
+        using var raceCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var pending = ordered
+            .Select((address, index) => ConnectCandidateAsync(
+                address,
+                context.DnsEndPoint.Port,
+                TimeSpan.FromMilliseconds(PreferredConnectFallbackDelay.TotalMilliseconds * index),
+                raceCancellation.Token))
+            .ToList();
+        Exception? lastError = null;
+        Socket? winner = null;
+        try
+        {
+            while (pending.Count > 0)
+            {
+                var completed = await Task.WhenAny(pending).ConfigureAwait(false);
+                pending.Remove(completed);
+                var result = await completed.ConfigureAwait(false);
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    result.Socket?.Dispose();
+                    cancellationToken.ThrowIfCancellationRequested();
+                }
+                if (result.Socket is not null)
+                {
+                    winner = result.Socket;
+                    break;
+                }
+                lastError = result.Error;
+            }
+        }
+        finally
+        {
+            raceCancellation.Cancel();
+            foreach (var attempt in pending)
+            {
+                try
+                {
+                    var result = await attempt.ConfigureAwait(false);
+                    result.Socket?.Dispose();
+                }
+                catch (OperationCanceledException)
+                {
+                    // The winner or caller cancellation stopped this candidate.
+                }
+            }
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        if (winner is not null)
+            return new NetworkStream(winner, ownsSocket: true);
+        throw new HttpRequestException(
+            $"Unable to connect to {context.DnsEndPoint.Host}.", lastError);
+    }
+
+    private static async Task<PreferredConnectResult> ConnectCandidateAsync(
+        System.Net.IPAddress address,
+        int port,
+        TimeSpan delay,
+        CancellationToken cancellationToken)
+    {
+        Socket? socket = null;
+        try
+        {
+            if (delay > TimeSpan.Zero)
+                await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+            socket = new Socket(address.AddressFamily, SocketType.Stream, ProtocolType.Tcp)
+            {
+                NoDelay = true
+            };
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(PreferredConnectAttemptTimeout);
+            await socket.ConnectAsync(new System.Net.IPEndPoint(address, port), timeout.Token)
+                .ConfigureAwait(false);
+            var connected = socket;
+            socket = null;
+            return new PreferredConnectResult(connected, null);
+        }
+        catch (Exception exception) when (exception is SocketException or OperationCanceledException)
+        {
+            return new PreferredConnectResult(null, exception);
+        }
+        finally
+        {
+            socket?.Dispose();
+        }
+    }
+
+    private sealed record PreferredConnectResult(Socket? Socket, Exception? Error);
+
+    private static bool ValidateWithAppScopedRoot(
+        System.Security.Cryptography.X509Certificates.X509Certificate? certificate,
+        X509Chain? presentedChain,
+        SslPolicyErrors errors,
+        ReadOnlySpan<byte> exactRoot)
+    {
+        if (certificate is null ||
+            (errors & (SslPolicyErrors.RemoteCertificateNameMismatch |
+                SslPolicyErrors.RemoteCertificateNotAvailable)) != 0)
+            return false;
+        if (errors == SslPolicyErrors.None)
+            return true;
+        if (errors != SslPolicyErrors.RemoteCertificateChainErrors)
+            return false;
+
+        try
+        {
+            using var leaf = X509CertificateLoader.LoadCertificate(certificate.GetRawCertData());
+            using var root = X509CertificateLoader.LoadCertificate(exactRoot);
+            using var chain = new X509Chain();
+            var intermediates = new List<X509Certificate2>();
+            try
+            {
+                chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
+                chain.ChainPolicy.CustomTrustStore.Add(root);
+                chain.ChainPolicy.RevocationMode = X509RevocationMode.Online;
+                chain.ChainPolicy.RevocationFlag = X509RevocationFlag.ExcludeRoot;
+                chain.ChainPolicy.VerificationFlags = X509VerificationFlags.NoFlag;
+                chain.ChainPolicy.UrlRetrievalTimeout = TimeSpan.FromSeconds(5);
+                chain.ChainPolicy.ApplicationPolicy.Add(new System.Security.Cryptography.Oid(
+                    "1.3.6.1.5.5.7.3.1"));
+                if (presentedChain is not null)
+                {
+                    foreach (var element in presentedChain.ChainElements)
+                    {
+                        if (element.Certificate.RawData.AsSpan().SequenceEqual(leaf.RawData) ||
+                            element.Certificate.RawData.AsSpan().SequenceEqual(root.RawData))
+                            continue;
+                        var intermediate = X509CertificateLoader.LoadCertificate(
+                            element.Certificate.RawData);
+                        intermediates.Add(intermediate);
+                        chain.ChainPolicy.ExtraStore.Add(intermediate);
+                    }
+                }
+                return chain.Build(leaf);
+            }
+            finally
+            {
+                foreach (var intermediate in intermediates)
+                    intermediate.Dispose();
+            }
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    private static bool IsCertificateAuthority(X509Certificate2 certificate)
+    {
+        foreach (var extension in certificate.Extensions)
+        {
+            if (extension is X509BasicConstraintsExtension constraints)
+                return constraints.CertificateAuthority;
+        }
+        return false;
+    }
+
     internal static SocketsHttpHandler CreateHttpHandler(
         HttpServiceClientOptions? options,
         HttpServiceNetworkHooks? networkHooks)
@@ -493,6 +812,7 @@ public sealed class HttpServiceTransportFactory
             networkHooks?.ServerCertificateValidationCallback;
 
         // These invariants are deliberately assigned after network customization.
+        handler.AutomaticDecompression = System.Net.DecompressionMethods.None;
         handler.AllowAutoRedirect = false;
         handler.UseCookies = false;
         handler.UseProxy = false;

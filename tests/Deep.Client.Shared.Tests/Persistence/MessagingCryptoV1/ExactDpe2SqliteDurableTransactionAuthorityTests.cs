@@ -187,8 +187,11 @@ public sealed class ExactDpe2SqliteDurableTransactionAuthorityTests
 
     private static async Task<byte[]> Initialize(SqliteMessagingCryptoV1Store store, byte[] state)
     {
-        using var initialization = MessagingCryptoV1PreparedInitialization.CreateForTests(Bytes(0x10), state);
-        return (await store.InitializeAsync(initialization)).JournalHead.ToArray();
+        await store.ProvisionOpaqueInitialPreKeysForTestsAsync(
+            Bytes(0xE1), Bytes(0xF1), Bytes(0xE2), Bytes(0xF2));
+        using var initialization = MessagingCryptoV1InitialSessionHandoff.CreateForTests(
+            Bytes(0x10), Bytes(0xA5), Bytes(0xA6), Bytes(0xE1), Bytes(0xE2), state);
+        return (await store.CommitInitialSessionAsync(initialization)).JournalHead.ToArray();
     }
 
     private static ExactDpe2DurablePersistencePlan Plan(

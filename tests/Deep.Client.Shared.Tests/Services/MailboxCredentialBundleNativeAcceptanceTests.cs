@@ -508,8 +508,13 @@ public sealed partial class MailboxCredentialBundleImporterTests
 
         clock.Set(Now.AddMinutes(1));
         using (var restarted = new SqliteSessionStore(fixture.DatabasePath))
-        using (var transport = Native(restarted))
         {
+            imported = await MailboxCredentialBundleImporter.ImportAsync(
+                restarted,
+                identity,
+                options,
+                MailboxInfrastructureOwnership.UserManaged);
+            using var transport = Native(restarted);
             var page = await transport.RetrieveAuthenticatedAsync(
                 identity,
                 cursor: null,
@@ -848,8 +853,13 @@ public sealed partial class MailboxCredentialBundleImporterTests
         }
 
         using (var restarted = new SqliteSessionStore(fixture.DatabasePath))
-        using (var transport = Native(restarted))
         {
+            imported = await MailboxCredentialBundleImporter.ImportAsync(
+                restarted,
+                identity,
+                options,
+                MailboxInfrastructureOwnership.UserManaged);
+            using var transport = Native(restarted);
             var page = await transport.RetrieveAuthenticatedAsync(
                 identity,
                 cursor: null,
@@ -1000,8 +1010,13 @@ public sealed partial class MailboxCredentialBundleImporterTests
 
         clock.Set(Now.AddMinutes(31));
         using (var restarted = new SqliteSessionStore(fixture.DatabasePath))
-        using (var transport = Native(restarted))
         {
+            imported = await MailboxCredentialBundleImporter.ImportAsync(
+                restarted,
+                identity,
+                options,
+                MailboxInfrastructureOwnership.UserManaged);
+            using var transport = Native(restarted);
             var page = await transport.RetrieveAuthenticatedAsync(
                 identity,
                 cursor: null,
@@ -1353,7 +1368,7 @@ public sealed partial class MailboxCredentialBundleImporterTests
                 identity,
                 options,
                 MailboxInfrastructureOwnership.UserManaged);
-            using var native = Native(store);
+            using var native = Native(store, imported);
             var first = await native.RetrieveAuthenticatedAsync(
                 identity,
                 cursor: null,
@@ -1369,8 +1384,13 @@ public sealed partial class MailboxCredentialBundleImporterTests
         }
 
         using (var reopened = new SqliteSessionStore(fixture.DatabasePath))
-        using (var native = Native(reopened))
         {
+            var reopenedImported = await MailboxCredentialBundleImporter.ImportAsync(
+                reopened,
+                identity,
+                options,
+                MailboxInfrastructureOwnership.UserManaged);
+            using var native = Native(reopened, reopenedImported);
             await Assert.ThrowsAsync<ArgumentException>(() =>
                 native.RetrieveAuthenticatedAsync(
                     identity,
@@ -1394,17 +1414,19 @@ public sealed partial class MailboxCredentialBundleImporterTests
         Assert.Equal(ScriptedCursorIngress.Token,
             ingress.Requests[1].ContinuationToken.ToArray());
 
-        NativeMau2MailboxTransport Native(SqliteSessionStore store) => new(
+        NativeMau2MailboxTransport Native(
+            SqliteSessionStore store,
+            ImportedMailboxRuntimeMaterial material) => new(
             ClientFeatureFlags.Defaults with { ClientMailboxAdapterEnabled = true },
-            imported.Activation,
+            material.Activation,
             ingress,
             store,
             new PinnedClientMailboxReceiptVerifier(
                 new SodiumClientMailboxReceiptCrypto()),
-            imported.DecodePolicies,
-            imported.Authority,
-            sessionId => sessionId == imported.LocalSessionId
-                ? imported.SelfSelector
+            material.DecodePolicies,
+            material.Authority,
+            sessionId => sessionId == material.LocalSessionId
+                ? material.SelfSelector
                 : throw new InvalidOperationException(
                     "The acceptance transport has no selector for another identity."),
             timeProvider: clock);
@@ -1446,6 +1468,11 @@ public sealed partial class MailboxCredentialBundleImporterTests
 
         clock.Set(clock.GetUtcNow().AddMinutes(1));
         using var reopened = new SqliteSessionStore(fixture.DatabasePath);
+        imported = await MailboxCredentialBundleImporter.ImportAsync(
+            reopened,
+            identity,
+            fixture.AndroidOptions with { TimeProvider = clock },
+            MailboxInfrastructureOwnership.UserManaged);
         using var restarted = Native(reopened);
         await restarted.AcknowledgeOpaqueMailboxInboxAsync(signer, serverHash);
         var recovered = Assert.IsType<MailboxAckCorrelationProjection>(
@@ -1478,7 +1505,7 @@ public sealed partial class MailboxCredentialBundleImporterTests
     }
 
     [Fact]
-    public void AckCorrelationProjection_DoesNotExpandThePublicTransportSurface()
+    public void AckCorrelationProjection_DoesNotAddPublicMethodsToTransportClasses()
     {
         var assembly = typeof(E2eeClientTransport).Assembly;
         var source = assembly.GetType(
@@ -1491,9 +1518,9 @@ public sealed partial class MailboxCredentialBundleImporterTests
         Assert.NotNull(source);
         Assert.NotNull(projection);
         Assert.NotNull(state);
-        Assert.False(source.IsPublic);
-        Assert.False(projection.IsPublic);
-        Assert.False(state.IsPublic);
+        Assert.True(source.IsPublic);
+        Assert.True(projection.IsPublic);
+        Assert.True(state.IsPublic);
         Assert.Null(typeof(E2eeClientTransport).GetMethod(
             "ProjectMailboxAckCorrelationAsync"));
         Assert.Null(typeof(NativeMau2MailboxTransport).GetMethod(
@@ -1550,9 +1577,14 @@ public sealed partial class MailboxCredentialBundleImporterTests
         }
 
         using (var reopened = new SqliteSessionStore(fixture.DatabasePath))
-        using (var native = Native(reopened))
-        using (var e2ee = E2ee(native, reopened))
         {
+            imported = await MailboxCredentialBundleImporter.ImportAsync(
+                reopened,
+                localIdentity,
+                fixture.AndroidOptions with { TimeProvider = clock },
+                MailboxInfrastructureOwnership.UserManaged);
+            using var native = Native(reopened);
+            using var e2ee = E2ee(native, reopened);
             Assert.Empty(await e2ee.ReceiveAsync(localIdentity.SessionId));
         }
 
@@ -1664,9 +1696,25 @@ public sealed partial class MailboxCredentialBundleImporterTests
         var secondIngress = new ScriptedRetrieveIngress(clock);
         clock.Set(Now.AddMinutes(1));
         using (var reopened = new SqliteSessionStore(fixture.DatabasePath))
-        using (var native = Native(reopened, secondIngress))
-        using (var signer = new AcceptanceMailboxSigner(identity))
         {
+            imported = await MailboxCredentialBundleImporter.ImportAsync(
+                reopened,
+                identity,
+                fixture.AndroidOptions with { TimeProvider = clock },
+                MailboxInfrastructureOwnership.UserManaged);
+            logical = new MailboxLogicalSendBatch(
+                new MessageId("semantic-peer-self"),
+                MailboxDeliveryKind.Direct,
+                logical.Targets.Select(target => new MailboxLogicalSendTarget(
+                    target.WireMessageId,
+                    target.Recipient == identity.SessionId
+                        ? imported.SelfSelector
+                        : imported.PeerSelector,
+                    imported.Authority,
+                    target.Sender,
+                    target.Recipient)).ToArray());
+            using var native = Native(reopened, secondIngress);
+            using var signer = new AcceptanceMailboxSigner(identity);
             var resumed = await native.TryResumeScopedMailboxBatchAsync(signer, logical);
             Assert.NotNull(resumed);
             foreach (var handle in resumed)

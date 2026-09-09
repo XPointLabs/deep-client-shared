@@ -8,7 +8,7 @@ using Sodium;
 
 namespace Deep.Client.Shared.Services;
 
-internal interface IAccountGenerationLifecycle
+public interface IAccountGenerationLifecycle
 {
     Task StopAsync(SessionId account, CancellationToken cancellationToken = default);
 
