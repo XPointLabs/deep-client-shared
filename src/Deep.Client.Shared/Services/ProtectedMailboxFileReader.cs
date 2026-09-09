@@ -390,12 +390,23 @@ internal static class ProtectedMailboxFileReader
         var buffer = new byte[32 * 1024];
         if (IsDarwin())
         {
-            if (Fcntl(descriptor, DarwinGetPath, buffer) != 0)
-                throw Win32("Unable to resolve protected mailbox descriptor path.");
-            var terminator = Array.IndexOf(buffer, (byte)0);
-            if (terminator <= 0)
-                throw Invalid("Protected mailbox descriptor path is unavailable.");
-            return Encoding.UTF8.GetString(buffer, 0, terminator);
+            var nativeBuffer = Marshal.AllocHGlobal(buffer.Length);
+            try
+            {
+                for (var offset = 0; offset < buffer.Length; offset++)
+                    Marshal.WriteByte(nativeBuffer, offset, 0);
+                if (Fcntl(descriptor, DarwinGetPath, nativeBuffer) != 0)
+                    throw Win32("Unable to resolve protected mailbox descriptor path.");
+                Marshal.Copy(nativeBuffer, buffer, 0, buffer.Length);
+                var terminator = Array.IndexOf(buffer, (byte)0);
+                if (terminator <= 0)
+                    throw Invalid("Protected mailbox descriptor path is unavailable.");
+                return Encoding.UTF8.GetString(buffer, 0, terminator);
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(nativeBuffer);
+            }
         }
         var length = ReadLink(
             $"/proc/self/fd/{descriptor}", buffer, checked((nuint)buffer.Length));
@@ -407,9 +418,10 @@ internal static class ProtectedMailboxFileReader
     }
 
     internal static (int Directory, int NoFollow) UnixPathFlags(
-        Architecture architecture)
+        Architecture architecture,
+        bool? darwin = null)
     {
-        if (IsDarwin())
+        if (darwin ?? IsDarwin())
             return (0x00100000, 0x00000100);
         return architecture switch
         {
@@ -584,5 +596,5 @@ internal static class ProtectedMailboxFileReader
     private static extern nint ReadLink(string path, byte[] buffer, nuint size);
 
     [DllImport("libc", EntryPoint = "fcntl", SetLastError = true)]
-    private static extern int Fcntl(int descriptor, int command, byte[] buffer);
+    private static extern int Fcntl(int descriptor, int command, IntPtr buffer);
 }

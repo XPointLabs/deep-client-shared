@@ -18,7 +18,8 @@ public sealed class ProtectedMailboxFileReaderTests
         int expectedDirectory,
         int expectedNoFollow)
     {
-        var actual = ProtectedMailboxFileReader.UnixPathFlags(architecture);
+        var actual = ProtectedMailboxFileReader.UnixPathFlags(
+            architecture, darwin: false);
 
         Assert.Equal(expectedDirectory, actual.Directory);
         Assert.Equal(expectedNoFollow, actual.NoFollow);
@@ -28,14 +29,28 @@ public sealed class ProtectedMailboxFileReaderTests
     public void Unix_path_flags_fail_closed_for_an_unsupported_architecture()
     {
         Assert.Throws<PlatformNotSupportedException>(() =>
-            ProtectedMailboxFileReader.UnixPathFlags(Architecture.Wasm));
+            ProtectedMailboxFileReader.UnixPathFlags(
+                Architecture.Wasm, darwin: false));
+    }
+
+    [Theory]
+    [InlineData(Architecture.Arm64)]
+    [InlineData(Architecture.X64)]
+    public void Darwin_path_flags_are_architecture_independent(
+        Architecture architecture)
+    {
+        var actual = ProtectedMailboxFileReader.UnixPathFlags(
+            architecture, darwin: true);
+
+        Assert.Equal(0x00100000, actual.Directory);
+        Assert.Equal(0x00000100, actual.NoFollow);
     }
 
     [Fact]
     [UnsupportedOSPlatform("windows")]
     public void Unix_protected_file_is_read_from_openat_handle()
     {
-        if (!(OperatingSystem.IsLinux() || OperatingSystem.IsAndroid())) return;
+        if (!IsSupportedUnix()) return;
         using var fixture = UnixFixture.Create();
         var directory = fixture.ProtectedDirectory("generation");
         var path = fixture.ProtectedFile(directory, "bundle.json", [7, 8, 9]);
@@ -49,7 +64,7 @@ public sealed class ProtectedMailboxFileReaderTests
     [UnsupportedOSPlatform("windows")]
     public void Unix_weak_mode_and_intermediate_symlink_are_rejected()
     {
-        if (!(OperatingSystem.IsLinux() || OperatingSystem.IsAndroid())) return;
+        if (!IsSupportedUnix()) return;
         using var fixture = UnixFixture.Create();
         var weak = Path.Combine(fixture.Root, "weak.json");
         File.WriteAllBytes(weak, [0x31]);
@@ -73,13 +88,17 @@ public sealed class ProtectedMailboxFileReaderTests
     [UnsupportedOSPlatform("windows")]
     public void Unix_empty_file_is_rejected()
     {
-        if (!(OperatingSystem.IsLinux() || OperatingSystem.IsAndroid())) return;
+        if (!IsSupportedUnix()) return;
         using var fixture = UnixFixture.Create();
         var path = fixture.ProtectedFile(fixture.Root, "empty.json", []);
 
         Assert.Throws<InvalidDataException>(() =>
             ProtectedMailboxFileReader.ReadBounded(fixture.Root, path, 1));
     }
+
+    private static bool IsSupportedUnix() =>
+        OperatingSystem.IsLinux() || OperatingSystem.IsAndroid()
+        || OperatingSystem.IsMacOS() || OperatingSystem.IsMacCatalyst();
 
     [Fact]
     [SupportedOSPlatform("windows")]
