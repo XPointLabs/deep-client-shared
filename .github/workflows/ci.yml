@@ -7,13 +7,17 @@ on:
 jobs:
   test:
     name: test-${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ fromJSON(matrix.runner) }}
     strategy:
       fail-fast: false
       matrix:
         # Apple client validation is intentionally deferred until the operator
         # explicitly re-enables the Apple platform sprint.
-        os: [ubuntu-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            runner: '["self-hosted","Linux","X64","ubuntu-latest"]'
+          - os: windows-latest
+            runner: '["self-hosted","Windows","X64","windows-latest"]'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -25,6 +29,8 @@ jobs:
           token: ${{ secrets.XPOINTLABS_CI_TOKEN }}
           path: deep-protocol
       - uses: actions/setup-dotnet@v4
+        env:
+          DOTNET_INSTALL_DIR: ${{ runner.tool_cache }}/dotnet
         with:
           dotnet-version: 10.0.301
       - run: dotnet restore Deep.Client.Shared.slnx
@@ -40,7 +46,7 @@ jobs:
 
   package-placeholder:
     name: build-shared-artifacts
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, ubuntu-latest]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -52,6 +58,8 @@ jobs:
           token: ${{ secrets.XPOINTLABS_CI_TOKEN }}
           path: deep-protocol
       - uses: actions/setup-dotnet@v4
+        env:
+          DOTNET_INSTALL_DIR: ${{ runner.tool_cache }}/dotnet
         with:
           dotnet-version: 10.0.301
       - run: dotnet pack src/Deep.Client.Shared/Deep.Client.Shared.csproj --configuration Release --output artifacts
