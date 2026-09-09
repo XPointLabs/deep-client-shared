@@ -27,7 +27,13 @@ jobs:
           dotnet-version: 10.0.301
       - run: dotnet restore Deep.Client.Shared.slnx
         working-directory: deep-client-shared
-      - run: dotnet test Deep.Client.Shared.slnx --configuration Release --no-restore -m:1
+      - name: Test complete approved Windows runtime surface
+        if: runner.os == 'Windows'
+        run: dotnet test Deep.Client.Shared.slnx --configuration Release --no-restore -m:1
+        working-directory: deep-client-shared
+      - name: Test portable surface without Windows-only approved ML-KEM runtime
+        if: runner.os != 'Windows'
+        run: dotnet test Deep.Client.Shared.slnx --configuration Release --no-restore -m:1 --filter "RequiresApprovedMlKemRuntime!=true"
         working-directory: deep-client-shared
 
   package-placeholder:

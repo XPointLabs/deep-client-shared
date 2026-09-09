@@ -20,6 +20,7 @@ using Deep.Protocol.MessagingWire;
 
 namespace Deep.Client.Shared.Tests.Services.ContactV1;
 
+[Trait("RequiresApprovedMlKemRuntime", "true")]
 public sealed class ContactInitialSessionCoordinatorTests
 {
     [Theory]

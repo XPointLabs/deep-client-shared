@@ -11,6 +11,7 @@ using System.Reflection;
 namespace Deep.Client.Shared.Tests.Persistence.PreKeyV1;
 
 [Collection("SQLite global pool isolation")]
+[Trait("RequiresApprovedMlKemRuntime", "true")]
 public sealed class SqlitePreKeyV1InventoryOwnerTests
 {
     [Fact]
