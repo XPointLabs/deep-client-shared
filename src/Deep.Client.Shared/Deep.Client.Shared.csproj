@@ -14,7 +14,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\..\deep-protocol\src\Deep.Protocol\Deep.Protocol.csproj" />
     <ProjectReference Include="..\..\..\deep-protocol\src\Deep.Protocol.MembershipRoutes\Deep.Protocol.MembershipRoutes.csproj" />
-    <PackageReference Include="Deep.Protocol.ProfileCarrier" Version="[0.5.0-survival.e75bfed]" />
+    <ProjectReference Include="..\..\..\deep-protocol\src\Deep.Protocol.ProfileCarrier\Deep.Protocol.ProfileCarrier.csproj" />
     <PackageReference Include="Microsoft.Data.Sqlite.Core" Version="10.0.9" />
     <PackageReference Include="Sodium.Core" Version="1.4.1" />
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlcipher" Version="2.1.11" />

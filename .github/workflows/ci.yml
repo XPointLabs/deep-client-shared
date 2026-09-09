@@ -27,7 +27,7 @@ jobs:
           dotnet-version: 10.0.301
       - run: dotnet restore Deep.Client.Shared.slnx
         working-directory: deep-client-shared
-      - run: dotnet test Deep.Client.Shared.slnx --configuration Release --no-restore
+      - run: dotnet test Deep.Client.Shared.slnx --configuration Release --no-restore -m:1
         working-directory: deep-client-shared
 
   package-placeholder:

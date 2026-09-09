@@ -35,16 +35,6 @@
         "resolved": "3.1.4",
         "contentHash": "5mj99LvCqrq3CNi06xYdyIAXOEh+5b33F2nErCzI5zWiDdLHXiPXEWFSUAF8zlIv0ZWqjZNCwHTQeAPYbF3pCg=="
       },
-      "Deep.Protocol.ProfileCarrier": {
-        "type": "Transitive",
-        "resolved": "0.5.0-survival.e75bfed",
-        "contentHash": "Y/jRyPSVoUWSmYiV/HtDHUpa47By71XGekIv3BVHNIrtVGjw+juj6j6eB04i6pK/Iw9+O9tvdMA0YYcDxBQoqQ==",
-        "dependencies": {
-          "Deep.Protocol": "0.5.0-survival.e75bfed",
-          "Sodium.Core": "[1.4.1]",
-          "libsodium": "[1.0.22]"
-        }
-      },
       "libsodium": {
         "type": "Transitive",
         "resolved": "1.0.22",
@@ -162,7 +152,7 @@
         "dependencies": {
           "Deep.Protocol": "[1.0.0, )",
           "Deep.Protocol.MembershipRoutes": "[0.1.0-p16.local, )",
-          "Deep.Protocol.ProfileCarrier": "[0.5.0-survival.e75bfed, 0.5.0-survival.e75bfed]",
+          "Deep.Protocol.ProfileCarrier": "[0.4.0-survival.e570512, )",
           "Microsoft.Data.Sqlite.Core": "[10.0.9, )",
           "SQLitePCLRaw.bundle_e_sqlcipher": "[2.1.11, )",
           "Sodium.Core": "[1.4.1, )"
@@ -178,6 +168,14 @@
         "type": "Project",
         "dependencies": {
           "Deep.Protocol": "[1.0.0, )"
+        }
+      },
+      "deep.protocol.profilecarrier": {
+        "type": "Project",
+        "dependencies": {
+          "Deep.Protocol": "[1.0.0, )",
+          "Sodium.Core": "[1.4.1, 1.4.1]",
+          "libsodium": "[1.0.22, 1.0.22]"
         }
       }
     },

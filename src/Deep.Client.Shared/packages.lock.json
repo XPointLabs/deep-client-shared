@@ -2,17 +2,6 @@
   "version": 1,
   "dependencies": {
     "net10.0": {
-      "Deep.Protocol.ProfileCarrier": {
-        "type": "Direct",
-        "requested": "[0.5.0-survival.e75bfed, 0.5.0-survival.e75bfed]",
-        "resolved": "0.5.0-survival.e75bfed",
-        "contentHash": "Y/jRyPSVoUWSmYiV/HtDHUpa47By71XGekIv3BVHNIrtVGjw+juj6j6eB04i6pK/Iw9+O9tvdMA0YYcDxBQoqQ==",
-        "dependencies": {
-          "Deep.Protocol": "0.5.0-survival.e75bfed",
-          "Sodium.Core": "[1.4.1]",
-          "libsodium": "[1.0.22]"
-        }
-      },
       "Microsoft.Data.Sqlite.Core": {
         "type": "Direct",
         "requested": "[10.0.9, )",
@@ -74,6 +63,14 @@
         "type": "Project",
         "dependencies": {
           "Deep.Protocol": "[1.0.0, )"
+        }
+      },
+      "deep.protocol.profilecarrier": {
+        "type": "Project",
+        "dependencies": {
+          "Deep.Protocol": "[1.0.0, )",
+          "Sodium.Core": "[1.4.1, 1.4.1]",
+          "libsodium": "[1.0.22, 1.0.22]"
         }
       }
     },
