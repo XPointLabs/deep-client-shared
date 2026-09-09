@@ -592,11 +592,13 @@ public sealed class MailboxRuntimeCheckpointConcurrencyTests
                     "Unable to create hard-link alias for the identity test.");
             return;
         }
-        if ((OperatingSystem.IsLinux() || OperatingSystem.IsAndroid()) &&
+        if ((OperatingSystem.IsLinux() || OperatingSystem.IsAndroid()
+                || OperatingSystem.IsMacOS() || OperatingSystem.IsMacCatalyst()
+                || OperatingSystem.IsIOS()) &&
             LinkUnix(existing, alias) == 0)
             return;
         throw new PlatformNotSupportedException(
-            "Hard-link identity test requires Windows, Linux, or Android.");
+            "Hard-link identity test requires a supported production platform.");
     }
 
     [DllImport("kernel32.dll", EntryPoint = "CreateHardLinkW",

@@ -29,8 +29,11 @@ internal static class ProtectedMailboxFileReader
     private const int SeFileObject = 1;
 
     private const int UnixReadOnly = 0;
-    private const int UnixNonBlock = 0x00000800;
-    private const int UnixCloseOnExec = 0x00080000;
+    private const int LinuxNonBlock = 0x00000800;
+    private const int LinuxCloseOnExec = 0x00080000;
+    private const int DarwinNonBlock = 0x00000004;
+    private const int DarwinCloseOnExec = 0x01000000;
+    private const int DarwinGetPath = 50;
     private const int UnixRegularFile = 0x00008000;
     private const int UnixFileTypeMask = 0x0000f000;
 
@@ -62,10 +65,12 @@ internal static class ProtectedMailboxFileReader
 
         if (OperatingSystem.IsWindows())
             return ReadWindows(root, requested, segments, maxBytes);
-        if (OperatingSystem.IsLinux() || OperatingSystem.IsAndroid())
+        if (OperatingSystem.IsLinux() || OperatingSystem.IsAndroid()
+            || OperatingSystem.IsMacOS() || OperatingSystem.IsMacCatalyst()
+            || OperatingSystem.IsIOS())
             return ReadUnix(root, requested, segments, maxBytes);
         throw new PlatformNotSupportedException(
-            "Protected mailbox handle reads require Windows, Linux, or Android.");
+            "Protected mailbox handle reads require Windows, Linux, Android, macOS, Mac Catalyst, or iOS.");
     }
 
     [SupportedOSPlatform("windows")]
@@ -259,13 +264,15 @@ internal static class ProtectedMailboxFileReader
         int maxBytes)
     {
         var pathFlags = UnixPathFlags(RuntimeInformation.ProcessArchitecture);
+        var closeOnExec = IsDarwin() ? DarwinCloseOnExec : LinuxCloseOnExec;
+        var nonBlock = IsDarwin() ? DarwinNonBlock : LinuxNonBlock;
         var handles = new List<SafeFileHandle>(segments.Count + 1);
         try
         {
             var rootHandle = OpenUnix(
                 root,
                 UnixReadOnly | pathFlags.Directory |
-                pathFlags.NoFollow | UnixCloseOnExec);
+                pathFlags.NoFollow | closeOnExec);
             handles.Add(rootHandle);
             var physicalRoot = ValidateUnixHandle(
                 rootHandle, expectedPhysicalPath: null, directory: true);
@@ -280,7 +287,7 @@ internal static class ProtectedMailboxFileReader
                     parent,
                     segments[index],
                     UnixReadOnly | pathFlags.Directory |
-                    pathFlags.NoFollow | UnixCloseOnExec);
+                    pathFlags.NoFollow | closeOnExec);
                 handles.Add(child);
                 ValidateUnixHandle(child, physicalCurrent, directory: true);
                 parent = child;
@@ -289,8 +296,8 @@ internal static class ProtectedMailboxFileReader
             var file = OpenAtUnix(
                 parent,
                 segments[^1],
-                UnixReadOnly | UnixNonBlock |
-                pathFlags.NoFollow | UnixCloseOnExec);
+                UnixReadOnly | nonBlock |
+                pathFlags.NoFollow | closeOnExec);
             handles.Add(file);
             var physicalRequested = Canonical(Path.Combine(
                 physicalRoot, Path.Combine(segments.ToArray())));
@@ -336,20 +343,23 @@ internal static class ProtectedMailboxFileReader
     {
         var descriptor = checked((int)handle.DangerousGetHandle());
         var stat = Marshal.AllocHGlobal(256);
+        int nativeMode;
         try
         {
             for (var offset = 0; offset < 256; offset++)
                 Marshal.WriteByte(stat, offset, 0);
             if (FStat(descriptor, stat) != 0)
                 throw Win32("Unable to inspect protected mailbox input.");
-            var (modeOffset, ownerOffset) = RuntimeInformation.ProcessArchitecture switch
-            {
-                Architecture.X64 => (24, 28),
-                Architecture.Arm64 => (16, 24),
-                _ => throw new PlatformNotSupportedException(
-                    "Protected mailbox Unix ownership checks require x64 or arm64.")
-            };
-            var nativeMode = Marshal.ReadInt32(stat, modeOffset);
+            var (modeOffset, ownerOffset) = IsDarwin()
+                ? (4, 16)
+                : RuntimeInformation.ProcessArchitecture switch
+                {
+                    Architecture.X64 => (24, 28),
+                    Architecture.Arm64 => (16, 24),
+                    _ => throw new PlatformNotSupportedException(
+                        "Protected mailbox Unix ownership checks require x64 or arm64.")
+                };
+            nativeMode = Marshal.ReadInt32(stat, modeOffset);
             var owner = unchecked((uint)Marshal.ReadInt32(stat, ownerOffset));
             if (owner != GetEffectiveUserId())
                 throw Invalid("Protected mailbox input is not owned by the current euid.");
@@ -369,7 +379,7 @@ internal static class ProtectedMailboxFileReader
         var expectedMode = directory
             ? UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
             : UnixFileMode.UserRead | UnixFileMode.UserWrite;
-        if (File.GetUnixFileMode($"/proc/self/fd/{descriptor}") != expectedMode)
+        if ((UnixFileMode)(nativeMode & 0x1ff) != expectedMode)
             throw Invalid("Protected mailbox modes must be exact directory 0700 and file 0600.");
         return Canonical(finalPath);
     }
@@ -378,6 +388,15 @@ internal static class ProtectedMailboxFileReader
     private static string FinalUnixPath(int descriptor)
     {
         var buffer = new byte[32 * 1024];
+        if (IsDarwin())
+        {
+            if (Fcntl(descriptor, DarwinGetPath, buffer) != 0)
+                throw Win32("Unable to resolve protected mailbox descriptor path.");
+            var terminator = Array.IndexOf(buffer, (byte)0);
+            if (terminator <= 0)
+                throw Invalid("Protected mailbox descriptor path is unavailable.");
+            return Encoding.UTF8.GetString(buffer, 0, terminator);
+        }
         var length = ReadLink(
             $"/proc/self/fd/{descriptor}", buffer, checked((nuint)buffer.Length));
         if (length < 0)
@@ -388,15 +407,24 @@ internal static class ProtectedMailboxFileReader
     }
 
     internal static (int Directory, int NoFollow) UnixPathFlags(
-        Architecture architecture) => architecture switch
+        Architecture architecture)
     {
-        // Android's ARM UAPI retains the historical ARM flag assignments,
-        // while x64 Linux uses the asm-generic assignments.
-        Architecture.Arm or Architecture.Arm64 => (0x00004000, 0x00008000),
-        Architecture.X64 => (0x00010000, 0x00020000),
-        _ => throw new PlatformNotSupportedException(
-            $"Protected mailbox Unix path flags do not support {architecture}.")
-    };
+        if (IsDarwin())
+            return (0x00100000, 0x00000100);
+        return architecture switch
+        {
+            // Android's ARM UAPI retains the historical ARM flag assignments,
+            // while x64 Linux uses the asm-generic assignments.
+            Architecture.Arm or Architecture.Arm64 => (0x00004000, 0x00008000),
+            Architecture.X64 => (0x00010000, 0x00020000),
+            _ => throw new PlatformNotSupportedException(
+                $"Protected mailbox Unix path flags do not support {architecture}.")
+        };
+    }
+
+    private static bool IsDarwin() =>
+        OperatingSystem.IsMacOS() || OperatingSystem.IsMacCatalyst()
+        || OperatingSystem.IsIOS();
 
     private static byte[] ReadExactBounded(SafeFileHandle handle, int maxBytes)
     {
@@ -554,4 +582,7 @@ internal static class ProtectedMailboxFileReader
     [UnsupportedOSPlatform("windows")]
     [DllImport("libc", EntryPoint = "readlink", SetLastError = true)]
     private static extern nint ReadLink(string path, byte[] buffer, nuint size);
+
+    [DllImport("libc", EntryPoint = "fcntl", SetLastError = true)]
+    private static extern int Fcntl(int descriptor, int command, byte[] buffer);
 }
