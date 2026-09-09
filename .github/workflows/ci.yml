@@ -8,7 +8,7 @@ on:
 jobs:
   test:
     name: test-${{ matrix.os }}
-    runs-on: ${{ fromJSON(matrix.runner) }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
@@ -16,9 +16,7 @@ jobs:
         # explicitly re-enables the Apple platform sprint.
         include:
           - os: ubuntu-latest
-            runner: '["self-hosted","Linux","X64","ubuntu-latest"]'
-          - os: windows-latest
-            runner: '["self-hosted","Windows","X64","windows-latest"]'
+          - os: windows-2022
     steps:
       - uses: actions/checkout@v4
         with:
@@ -27,7 +25,7 @@ jobs:
         with:
           repository: ${{ github.repository_owner }}/deep-protocol
           ref: ${{ github.ref_name }}
-          token: ${{ secrets.XPOINTLABS_CI_TOKEN }}
+          token: ${{ secrets.XPOINTLABS_CI_TOKEN || github.token }}
           path: deep-protocol
       - uses: actions/setup-dotnet@v4
         env:
@@ -47,7 +45,7 @@ jobs:
 
   package-placeholder:
     name: build-shared-artifacts
-    runs-on: [self-hosted, Linux, X64, ubuntu-latest]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
@@ -56,7 +54,7 @@ jobs:
         with:
           repository: ${{ github.repository_owner }}/deep-protocol
           ref: ${{ github.ref_name }}
-          token: ${{ secrets.XPOINTLABS_CI_TOKEN }}
+          token: ${{ secrets.XPOINTLABS_CI_TOKEN || github.token }}
           path: deep-protocol
       - uses: actions/setup-dotnet@v4
         env:
