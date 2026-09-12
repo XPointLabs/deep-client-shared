@@ -312,13 +312,7 @@ public sealed class ProtectedDeviceAgreementLeaseBridgeTests
                     binder: null,
                     args: [identity, verifiedDevice],
                     culture: null));
-                authority = Assert.IsType<LocalDeviceX25519AgreementAuthority>(
-                    typeof(OwnedGenesisDeviceSecrets).GetMethod(
-                        "CreateAgreementAuthority",
-                        BindingFlags.Instance | BindingFlags.NonPublic,
-                        binder: null,
-                        types: [typeof(VerifiedDeviceRelative)],
-                        modifiers: null)!.Invoke(device, [relative]));
+                authority = device.CreateAgreementAuthority(relative);
 
                 var closure = ApplicationCoreVerifier.CreateIdentityClosure(identity, [relative]);
                 var firstVerified = VerifiedDirectory(closure, relative, 1, new byte[32]);
