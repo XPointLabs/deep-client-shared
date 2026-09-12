@@ -30,6 +30,7 @@ public sealed class ProductionContactResolvePathAuthoritySource :
     IContactResolvePlacementContextSource,
     IContactResolveClaimPathAuthoritySource,
     IContactResolvePermanentPathAuthoritySource,
+    IMailboxPrivacyNetworkAuthoritySource,
     IDisposable
 {
     private readonly XPointNetworkGenesisPin genesisPin;
@@ -144,6 +145,30 @@ public sealed class ProductionContactResolvePathAuthoritySource :
             throw Fail("request-placement-mismatch",
                 "XIQ1 does not bind the exact current verified view and InviteResolver placement.");
         return authority;
+    }
+
+    async ValueTask<VerifiedOnionNetworkContext>
+        IMailboxPrivacyNetworkAuthoritySource.GetCurrentForMailboxAsync(
+            ReadOnlyMemory<byte> placementCommitment,
+            CancellationToken cancellationToken)
+    {
+        if (placementCommitment.Length != 32 ||
+            placementCommitment.Span.IndexOfAnyExcept((byte)0) < 0)
+        {
+            throw Fail(
+                "mailbox-placement-commitment-invalid",
+                "Mailbox authority refresh requires one exact non-zero placement commitment.");
+        }
+
+        var authority = await MintCurrentAuthorityAsync(
+                genesisPin.NetworkId,
+                placementCommitment,
+                ReadOnlyMemory<byte>.Empty,
+                AccountDirectoryAdp1ResultKind.NonMembership,
+                ContactServiceRequestKind.ResolveInvite,
+                cancellationToken)
+            .ConfigureAwait(false);
+        return authority.Network;
     }
 
     async ValueTask<ContactResolvePathAuthority>

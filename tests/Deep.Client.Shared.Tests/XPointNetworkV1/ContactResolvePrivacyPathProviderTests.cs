@@ -1,9 +1,12 @@
 using System.Collections;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using Deep.Client.Shared.Persistence;
 using Deep.Client.Shared.Persistence.XPointNetworkV1;
+using Deep.Client.Shared.Services;
 using Deep.Client.Shared.Services.XPointNetworkV1;
 using Deep.Protocol.ContactV1;
+using Deep.Protocol.DeepExtension.MailboxCapabilities;
 using Deep.Protocol.DeepExtension.PrivacyRouting;
 using Deep.Protocol.XPointNetworkV1;
 
@@ -156,11 +159,100 @@ public sealed class ContactResolvePrivacyPathProviderTests
         Assert.Equal(exactXpk1, attempt.Request.CanonicalBytes.ToArray());
     }
 
+    [Fact]
+    public async Task MailboxPathProvider_RequiresRouteBindingAndUsesBothExactReplicas()
+    {
+        var network = Network(7, [1, 2, 3, 4]);
+        var placementId = new BlindedPlacementId(B(32, 0x81));
+        var placementCommitment = MailboxPlacementCommitment.Compute(placementId);
+        var route = new ScopedMailboxResolvedRoute(
+            7,
+            100,
+            new BlindedMailboxId(B(32, 0x82)),
+            placementId,
+            placementCommitment,
+            B(32, 0x83),
+            new MailboxCredentialReplicaPair(
+                B(32, 3), B(32, 0x93),
+                B(32, 4), B(32, 0x94)));
+        var exactMau2 = RetrieveMau2(network, route);
+        var guards = new InMemoryProtectedEntryGuardStore();
+        var source = new MailboxSource(network);
+        var primary = new MailboxPrivacyPathProvider(
+            source,
+            guards,
+            PrivacyMailboxRouteSelection.Primary,
+            () => B(32, 0x51));
+        var fallback = new MailboxPrivacyPathProvider(
+            source,
+            guards,
+            PrivacyMailboxRouteSelection.Fallback,
+            () => B(32, 0x51));
+
+        var first = await primary.PrepareOnRouteAsync(
+            OnionOperation.Retrieve, exactMau2, route, default);
+        var second = await fallback.PrepareOnRouteAsync(
+            OnionOperation.Retrieve, exactMau2, route, default);
+
+        Assert.Equal(exactMau2, first.Request.CanonicalBytes.ToArray());
+        Assert.Equal(exactMau2, second.Request.CanonicalBytes.ToArray());
+        Assert.NotEqual(first.EntryRouterId.ToArray(), second.EntryRouterId.ToArray());
+        Assert.Equal(2, source.CallCount);
+        var unbound = await Assert.ThrowsAsync<ClientMailboxTransportException>(async () =>
+            await primary.PrepareAsync(OnionOperation.Retrieve, exactMau2, default));
+        Assert.Equal(ClientMailboxTransportFailure.ProtocolViolation, unbound.Failure);
+    }
+
     private static ContactResolvePrivacyPathProvider Provider(
         VerifiedOnionNetworkContext network,
         VerifiedContactServicePlacement placement,
         IProtectedEntryGuardStore store) => new(
             new Source(network, placement), store, () => B(32, 0x51));
+
+    private static byte[] RetrieveMau2(
+        VerifiedOnionNetworkContext network,
+        ScopedMailboxResolvedRoute route)
+    {
+        var binding = MailboxAuthenticatedRequestTranscript.ForRetrieve(
+            route.Epoch,
+            B(16, 0x84),
+            route.MailboxId,
+            route.PlacementId,
+            0,
+            1,
+            []);
+        var grant = new MailboxAuthenticatedGrant
+        {
+            Domain = MailboxCapabilityDomain.Retrieve,
+            Lifecycle = MailboxCapabilityLifecycle.Active,
+            NetworkId = network.NetworkId,
+            Epoch = route.Epoch,
+            Generation = 1,
+            Serial = B(16, 0x85),
+            NotBeforeUnixSeconds = 1,
+            ExpiresAtUnixSeconds = route.ExpiresAtUnixSeconds,
+            OverlapUntilUnixSeconds = 0,
+            PlacementCommitment = route.PlacementCommitment,
+            MembershipCommitment = route.MembershipCommitment,
+            IssuerPublicKey = B(32, 0x86),
+            HolderPublicKey = B(32, 0x87),
+            IssuerSignature = B(64, 0x88)
+        };
+        return MailboxAuthenticatedClientRequestCodec.Encode(
+            new MailboxAuthenticatedClientRequest
+            {
+                Binding = binding,
+                Presentation = new MailboxAuthenticatedPresentation
+                {
+                    Operation = MailboxAuthenticatedOperation.Retrieve,
+                    OperationId = binding.OperationId,
+                    ReplayCounter = 1,
+                    RequestDigest = binding.RequestDigest,
+                    Grant = grant,
+                    HolderSignature = B(64, 0x89)
+                }
+            });
+    }
 
     private static byte[] Xiq(
         VerifiedOnionNetworkContext network,
@@ -279,5 +371,21 @@ public sealed class ContactResolvePrivacyPathProviderTests
             ContactResolveCanonicalPathRequest request,
             CancellationToken cancellationToken) =>
             ValueTask.FromResult(new ContactResolvePathAuthority(network, placement));
+    }
+
+    private sealed class MailboxSource(VerifiedOnionNetworkContext network)
+        : IMailboxPrivacyNetworkAuthoritySource
+    {
+        public int CallCount { get; private set; }
+
+        public ValueTask<VerifiedOnionNetworkContext> GetCurrentForMailboxAsync(
+            ReadOnlyMemory<byte> placementCommitment,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Assert.Equal(32, placementCommitment.Length);
+            CallCount++;
+            return ValueTask.FromResult(network);
+        }
     }
 }

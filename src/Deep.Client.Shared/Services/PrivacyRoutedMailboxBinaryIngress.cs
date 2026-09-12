@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using Deep.Client.Shared.Persistence;
 using Deep.Protocol.DeepExtension.MailboxCapabilities;
 using Deep.Protocol.DeepExtension.PrivacyRouting;
 
@@ -37,6 +38,15 @@ public interface IPrivacyMailboxPathProvider
     ValueTask<PrivacyMailboxOnionAttempt> PrepareAsync(
         OnionOperation operation,
         ReadOnlyMemory<byte> exactCanonicalRequest,
+        CancellationToken cancellationToken);
+}
+
+internal interface IRouteBoundPrivacyMailboxPathProvider
+{
+    ValueTask<PrivacyMailboxOnionAttempt> PrepareOnRouteAsync(
+        OnionOperation operation,
+        ReadOnlyMemory<byte> exactCanonicalRequest,
+        ScopedMailboxResolvedRoute route,
         CancellationToken cancellationToken);
 }
 
@@ -103,6 +113,7 @@ public sealed class PrivacyMailboxRoute
 /// </summary>
 public sealed class PrivacyRoutedMailboxBinaryIngress :
     IClientMailboxBinaryIngress,
+    IRouteBoundClientMailboxBinaryIngress,
     IDisposable
 {
     private readonly PrivacyMailboxRoute primaryRoute;
@@ -180,6 +191,7 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
             canonicalMau2,
             MailboxAuthenticatedOperation.Store,
             OnionOperation.Store,
+            routeBinding: null,
             cancellationToken);
 
     public Task<ReadOnlyMemory<byte>> RetrieveAsync(
@@ -189,6 +201,7 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
             canonicalMau2,
             MailboxAuthenticatedOperation.Retrieve,
             OnionOperation.Retrieve,
+            routeBinding: null,
             cancellationToken);
 
     public Task<ReadOnlyMemory<byte>> AcknowledgeAsync(
@@ -198,6 +211,40 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
             canonicalMau2,
             MailboxAuthenticatedOperation.Ack,
             OnionOperation.Acknowledge,
+            routeBinding: null,
+            cancellationToken);
+
+    Task<ReadOnlyMemory<byte>> IRouteBoundClientMailboxBinaryIngress.StoreOnRouteAsync(
+        ReadOnlyMemory<byte> canonicalMau2,
+        ScopedMailboxResolvedRoute route,
+        CancellationToken cancellationToken) =>
+        SendAsync(
+            canonicalMau2,
+            MailboxAuthenticatedOperation.Store,
+            OnionOperation.Store,
+            route,
+            cancellationToken);
+
+    Task<ReadOnlyMemory<byte>> IRouteBoundClientMailboxBinaryIngress.RetrieveOnRouteAsync(
+        ReadOnlyMemory<byte> canonicalMau2,
+        ScopedMailboxResolvedRoute route,
+        CancellationToken cancellationToken) =>
+        SendAsync(
+            canonicalMau2,
+            MailboxAuthenticatedOperation.Retrieve,
+            OnionOperation.Retrieve,
+            route,
+            cancellationToken);
+
+    Task<ReadOnlyMemory<byte>> IRouteBoundClientMailboxBinaryIngress.AcknowledgeOnRouteAsync(
+        ReadOnlyMemory<byte> canonicalMau2,
+        ScopedMailboxResolvedRoute route,
+        CancellationToken cancellationToken) =>
+        SendAsync(
+            canonicalMau2,
+            MailboxAuthenticatedOperation.Ack,
+            OnionOperation.Acknowledge,
+            route,
             cancellationToken);
 
     public void Dispose()
@@ -218,6 +265,7 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
         ReadOnlyMemory<byte> canonicalMau2,
         MailboxAuthenticatedOperation expectedMau2Operation,
         OnionOperation privacyOperation,
+        ScopedMailboxResolvedRoute? routeBinding,
         CancellationToken cancellationToken)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
@@ -225,6 +273,13 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
         _ = ValidateCanonicalMau2(
             canonicalMau2.Span,
             expectedMau2Operation);
+        if (routeBinding is null)
+        {
+            throw new ClientMailboxTransportException(
+                ClientMailboxTransportFailure.ProtocolViolation,
+                retryable: false,
+                "Privacy-routed mailbox ingress requires the exact verified credential route.");
+        }
 
         try
         {
@@ -233,6 +288,7 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
                 primary,
                 privacyOperation,
                 canonicalMau2,
+                routeBinding,
                 cancellationToken).ConfigureAwait(false);
             return response;
         }
@@ -247,6 +303,7 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
                     fallback,
                     privacyOperation,
                     canonicalMau2,
+                    routeBinding,
                     cancellationToken).ConfigureAwait(false);
                 return response;
             }
@@ -282,13 +339,22 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
         IPrivacyManagedIngressTransport transport,
         OnionOperation operation,
         ReadOnlyMemory<byte> canonicalMau2,
+        ScopedMailboxResolvedRoute routeBinding,
         CancellationToken cancellationToken)
     {
         try
         {
-            var attempt = await route.PathProvider.PrepareAsync(
+            if (route.PathProvider is not IRouteBoundPrivacyMailboxPathProvider routeBoundProvider)
+            {
+                throw new ClientMailboxTransportException(
+                    ClientMailboxTransportFailure.ProtocolViolation,
+                    retryable: false,
+                    "The privacy mailbox path provider does not accept a verified credential route binding.");
+            }
+            var attempt = await routeBoundProvider.PrepareOnRouteAsync(
                     operation,
                     canonicalMau2,
+                    routeBinding,
                     cancellationToken)
                 .ConfigureAwait(false);
             if (attempt is null ||
@@ -301,6 +367,16 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
                     ClientMailboxTransportFailure.ProtocolViolation,
                     retryable: false,
                     "The privacy route provider returned an attempt for another operation or canonical request.");
+            }
+            if (!route.ExpectedEntryRouterId.IsEmpty &&
+                !CryptographicOperations.FixedTimeEquals(
+                    route.ExpectedEntryRouterId.Span,
+                    attempt.EntryRouterId.Span))
+            {
+                throw new ClientMailboxTransportException(
+                    ClientMailboxTransportFailure.ProtocolViolation,
+                    retryable: false,
+                    "The verified mailbox path selected another managed ingress identity.");
             }
 
             using var request = await codec.BuildAsync(

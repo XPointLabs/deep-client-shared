@@ -21,6 +21,24 @@ public interface IClientMailboxBinaryIngress
         CancellationToken cancellationToken = default);
 }
 
+internal interface IRouteBoundClientMailboxBinaryIngress
+{
+    Task<ReadOnlyMemory<byte>> StoreOnRouteAsync(
+        ReadOnlyMemory<byte> canonicalMau2,
+        ScopedMailboxResolvedRoute route,
+        CancellationToken cancellationToken);
+
+    Task<ReadOnlyMemory<byte>> RetrieveOnRouteAsync(
+        ReadOnlyMemory<byte> canonicalMau2,
+        ScopedMailboxResolvedRoute route,
+        CancellationToken cancellationToken);
+
+    Task<ReadOnlyMemory<byte>> AcknowledgeOnRouteAsync(
+        ReadOnlyMemory<byte> canonicalMau2,
+        ScopedMailboxResolvedRoute route,
+        CancellationToken cancellationToken);
+}
+
 public sealed class ClientMailboxPinnedRoute
 {
     private readonly byte[] membershipCommitment;
@@ -696,7 +714,7 @@ public sealed class ClientMailboxAdapter
             var evidence = accepted.GetEvidenceCopy();
             var persistedDurable = await VerifyAndJournalDurableAsync(
                 evidence,
-                StoreExpectation(envelope, recoveredRoute),
+                StoreExpectation(envelope, recoveredRoute.Pinned),
                 cancellationToken).ConfigureAwait(false);
             await PromoteAcceptedAsync(
                 outboxScope,
@@ -727,7 +745,7 @@ public sealed class ClientMailboxAdapter
                 .GetEvidenceCopy();
             var persistedDurable = await VerifyAndJournalDurableAsync(
                 evidence,
-                StoreExpectation(envelope, recoveredRoute),
+                StoreExpectation(envelope, recoveredRoute.Pinned),
                 cancellationToken).ConfigureAwait(false);
             return new ClientMailboxStoreResult(
                 persistedDurable.Cursor,
@@ -751,7 +769,11 @@ public sealed class ClientMailboxAdapter
             MailboxAuthenticatedOperation.Store,
             cancellationToken).ConfigureAwait(false);
 
-        var response = await ingress.StoreAsync(encoded, cancellationToken)
+        var response = await DispatchIngressAsync(
+                MailboxAuthenticatedOperation.Store,
+                encoded,
+                route.Resolved,
+                cancellationToken)
             .ConfigureAwait(false);
         // Once ingress returned, caller cancellation must not skip the committed-policy
         // fence or the exact route/grant revalidation for the received response.
@@ -760,7 +782,7 @@ public sealed class ClientMailboxAdapter
             selector, envelope.Epoch, envelope.MailboxId, envelope.PlacementId,
             MailboxAuthenticatedOperation.Store,
             CancellationToken.None).ConfigureAwait(false);
-        var expectation = StoreExpectation(envelope, route);
+        var expectation = StoreExpectation(envelope, route.Pinned);
         var durable = await VerifyAndJournalDurableAsync(
             response,
             expectation,
@@ -1011,9 +1033,12 @@ public sealed class ClientMailboxAdapter
             outboxSnapshot,
             MailboxAuthenticatedOperation.Retrieve,
             cancellationToken).ConfigureAwait(false);
-        var response = await ingress.RetrieveAsync(
-            canonicalMau2,
-            cancellationToken).ConfigureAwait(false);
+        var response = await DispatchIngressAsync(
+                MailboxAuthenticatedOperation.Retrieve,
+                canonicalMau2,
+                route.Resolved,
+                cancellationToken)
+            .ConfigureAwait(false);
         requests.ReloadCommittedPolicy();
         route = await ResolveDispatchRouteAsync(
             selector, request.Epoch, request.MailboxId, request.PlacementId,
@@ -1162,9 +1187,12 @@ public sealed class ClientMailboxAdapter
                 outboxSnapshot,
                 MailboxAuthenticatedOperation.Ack,
                 cancellationToken).ConfigureAwait(false);
-            var recoveredResponse = await ingress.AcknowledgeAsync(
-                canonicalMau2,
-                cancellationToken).ConfigureAwait(false);
+            var recoveredResponse = await DispatchIngressAsync(
+                    MailboxAuthenticatedOperation.Ack,
+                    canonicalMau2,
+                    route.Resolved,
+                    cancellationToken)
+                .ConfigureAwait(false);
             requests.ReloadCommittedPolicy();
             route = await ResolveDispatchRouteAsync(
                 selector, request.Epoch, request.MailboxId, request.PlacementId,
@@ -1194,7 +1222,7 @@ public sealed class ClientMailboxAdapter
                         Epoch = request.Epoch,
                         OperationId = request.OperationId.ToArray(),
                         MailboxId = request.MailboxId,
-                        Route = route,
+                        Route = route.Pinned,
                         EnvelopeDigest =
                             acknowledgement.EnvelopeDigest.ToArray(),
                         ExpiresAtUnixSeconds =
@@ -1220,9 +1248,12 @@ public sealed class ClientMailboxAdapter
             outboxSnapshot,
             MailboxAuthenticatedOperation.Ack,
             cancellationToken).ConfigureAwait(false);
-        var response = await ingress.AcknowledgeAsync(
-            canonicalMau2,
-            cancellationToken).ConfigureAwait(false);
+        var response = await DispatchIngressAsync(
+                MailboxAuthenticatedOperation.Ack,
+                canonicalMau2,
+                route.Resolved,
+                cancellationToken)
+            .ConfigureAwait(false);
         requests.ReloadCommittedPolicy();
         route = await ResolveDispatchRouteAsync(
             selector, request.Epoch, request.MailboxId, request.PlacementId,
@@ -1246,7 +1277,7 @@ public sealed class ClientMailboxAdapter
                     Epoch = request.Epoch,
                     OperationId = request.OperationId.ToArray(),
                     MailboxId = request.MailboxId,
-                    Route = route,
+                    Route = route.Pinned,
                     EnvelopeDigest = acknowledgement.EnvelopeDigest.ToArray(),
                     ExpiresAtUnixSeconds =
                         expectations[index].ExpiresAtUnixSeconds,
@@ -1277,6 +1308,38 @@ public sealed class ClientMailboxAdapter
         return new ClientMailboxAckResult(
             committed == ClientMailboxAckState.AlreadyCommitted,
             request.Acknowledgements.Count);
+    }
+
+    private Task<ReadOnlyMemory<byte>> DispatchIngressAsync(
+        MailboxAuthenticatedOperation operation,
+        ReadOnlyMemory<byte> canonicalMau2,
+        ScopedMailboxResolvedRoute route,
+        CancellationToken cancellationToken)
+    {
+        if (ingress is IRouteBoundClientMailboxBinaryIngress routeBound)
+        {
+            return operation switch
+            {
+                MailboxAuthenticatedOperation.Store =>
+                    routeBound.StoreOnRouteAsync(canonicalMau2, route, cancellationToken),
+                MailboxAuthenticatedOperation.Retrieve =>
+                    routeBound.RetrieveOnRouteAsync(canonicalMau2, route, cancellationToken),
+                MailboxAuthenticatedOperation.Ack =>
+                    routeBound.AcknowledgeOnRouteAsync(canonicalMau2, route, cancellationToken),
+                _ => throw new ArgumentOutOfRangeException(nameof(operation))
+            };
+        }
+
+        return operation switch
+        {
+            MailboxAuthenticatedOperation.Store =>
+                ingress.StoreAsync(canonicalMau2, cancellationToken),
+            MailboxAuthenticatedOperation.Retrieve =>
+                ingress.RetrieveAsync(canonicalMau2, cancellationToken),
+            MailboxAuthenticatedOperation.Ack =>
+                ingress.AcknowledgeAsync(canonicalMau2, cancellationToken),
+            _ => throw new ArgumentOutOfRangeException(nameof(operation))
+        };
     }
 
     private ClientMailboxReceiptExpectation StoreExpectation(
@@ -1337,7 +1400,7 @@ public sealed class ClientMailboxAdapter
             checked((ulong)timeProvider.GetUtcNow().ToUnixTimeSeconds()),
             cancellationToken);
 
-    private async Task<ClientMailboxPinnedRoute> ResolveDispatchRouteAsync(
+    private async Task<ClientMailboxDispatchRoute> ResolveDispatchRouteAsync(
         MailboxCredentialSelector selector,
         ulong epoch,
         BlindedMailboxId mailboxId,
@@ -1356,14 +1419,20 @@ public sealed class ClientMailboxAdapter
                 "Mailbox operation no longer matches the selected scoped route.");
         }
 
-        return new ClientMailboxPinnedRoute(
-            resolved.PlacementId,
-            resolved.MembershipCommitment.Span,
-            resolved.Replicas.FirstId.Span,
-            resolved.Replicas.FirstSigningKey.Span,
-            resolved.Replicas.SecondId.Span,
-            resolved.Replicas.SecondSigningKey.Span);
+        return new ClientMailboxDispatchRoute(
+            resolved,
+            new ClientMailboxPinnedRoute(
+                resolved.PlacementId,
+                resolved.MembershipCommitment.Span,
+                resolved.Replicas.FirstId.Span,
+                resolved.Replicas.FirstSigningKey.Span,
+                resolved.Replicas.SecondId.Span,
+                resolved.Replicas.SecondSigningKey.Span));
     }
+
+    private sealed record ClientMailboxDispatchRoute(
+        ScopedMailboxResolvedRoute Resolved,
+        ClientMailboxPinnedRoute Pinned);
 
     private async Task<TransportOutboxItemSnapshot> ReadExactOutboxAsync(
         OutboxAccountScope scope,
