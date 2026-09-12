@@ -15,6 +15,7 @@ public static class DeepAccountStoreContract
     public const string DatabaseGenerationSlot = "deep.store.v1.database-generation";
     public const string DatabaseAccountManifestSlot = "deep.store.v1.database-account-manifest";
     public const string PendingAccountSlot = "deep.store.v1.pending-account";
+    public const string RetainedRecoveryPhraseSlot = "deep.store.v1.recovery-phrase";
 }
 
 public enum DeepAccountCommitFaultPoint

@@ -387,7 +387,7 @@ public sealed class DeepAccountStore01Tests
     }
 
     [Fact]
-    public async Task PrepareCreate_RevealsPhraseOnceAndDoesNotMutateBeforeConfirmation()
+    public async Task PreparedCreate_AtomicallyRetainsConfirmedPhraseWithAccount()
     {
         await using var store = new InMemoryDeepAccountStore();
         using var innerSecureStorage = new InMemoryDeepSecureStorage();
@@ -407,9 +407,10 @@ public sealed class DeepAccountStore01Tests
         var created = await service.CommitPreparedAsync(draft, confirmation);
 
         Assert.NotNull(created.Identity);
-        Assert.Equal(9, trackingStorage.LastWrittenSlots.Count);
-        Assert.DoesNotContain(trackingStorage.LastWrittenSlots, slot =>
-            slot.Contains("recovery", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal(10, trackingStorage.LastWrittenSlots.Count);
+        Assert.Contains(
+            DeepAccountStoreContract.RetainedRecoveryPhraseSlot,
+            trackingStorage.LastWrittenSlots);
         try
         {
             foreach (var slot in trackingStorage.LastWrittenSlots)
@@ -421,7 +422,17 @@ public sealed class DeepAccountStore01Tests
                 }
                 try
                 {
-                    Assert.False(stored.AsSpan().SequenceEqual(phraseBytes));
+                    if (string.Equals(
+                            slot,
+                            DeepAccountStoreContract.RetainedRecoveryPhraseSlot,
+                            StringComparison.Ordinal))
+                    {
+                        Assert.Equal(phraseBytes, stored);
+                    }
+                    else
+                    {
+                        Assert.False(stored.AsSpan().SequenceEqual(phraseBytes));
+                    }
                 }
                 finally
                 {
@@ -462,25 +473,54 @@ public sealed class DeepAccountStore01Tests
     }
 
     [Fact]
-    public async Task CommitPrepared_ConsumesDraftAndUnsafeOneShotCreateIsAbsent()
+    public async Task OneShotCreate_CommitsAccountAndRetainsPhraseWithoutUiConfirmation()
     {
         await using var store = new InMemoryDeepAccountStore();
         using var secureStorage = new InMemoryDeepSecureStorage();
         var service = CreateService(store, secureStorage);
-        using var draft = service.PrepareCreate("Alice");
-        var phraseBytes = RevealPhraseBytes(draft);
-        using var confirmation = DeepOwnedRecoveryPhraseUtf8.CopyFrom(phraseBytes);
-
-        var result = await service.CommitPreparedAsync(draft, confirmation);
+        var result = await service.CreateAsync("Alice");
 
         Assert.NotNull(result.Identity);
-        await Assert.ThrowsAsync<ObjectDisposedException>(() =>
-            service.CommitPreparedAsync(draft, confirmation));
-        Assert.DoesNotContain(
+        Assert.Contains(
             typeof(DeepAccountService).GetMethods(),
             static method => string.Equals(method.Name, "CreateAsync", StringComparison.Ordinal));
         Assert.Single(typeof(DeepAccountCreationResult).GetProperties());
-        CryptographicOperations.ZeroMemory(phraseBytes);
+        Assert.True(await service.HasRetainedRecoveryPhraseAsync());
+        var words = 0;
+        Assert.True(await service.RevealRetainedRecoveryPhraseAsync(
+            phrase =>
+            {
+                words = 1;
+                foreach (var value in phrase)
+                {
+                    if (value == (byte)' ')
+                    {
+                        words++;
+                    }
+                }
+            }));
+        Assert.Equal(24, words);
+    }
+
+    [Fact]
+    public async Task RetainedPhrase_CanBeDeletedWithoutDeletingAccountOrDeviceKeys()
+    {
+        await using var store = new InMemoryDeepAccountStore();
+        using var secureStorage = new InMemoryDeepSecureStorage();
+        var service = CreateService(store, secureStorage);
+        var created = await service.CreateAsync("Alice");
+
+        await service.DeleteRetainedRecoveryPhraseAsync();
+
+        Assert.False(await service.HasRetainedRecoveryPhraseAsync());
+        Assert.False(await service.RevealRetainedRecoveryPhraseAsync(static _ =>
+            throw new InvalidOperationException("Missing phrase must not invoke the callback.")));
+        var identity = await service.GetLocalIdentityAsync();
+        Assert.NotNull(identity);
+        Assert.Equal(created.Identity.Account.PermanentId, identity.Account.PermanentId);
+        using var deviceSigning = await secureStorage.ReadOwnedAsync(
+            identity.SecureSlots.DeviceSigningKey);
+        Assert.NotNull(deviceSigning);
     }
 
     [Fact]

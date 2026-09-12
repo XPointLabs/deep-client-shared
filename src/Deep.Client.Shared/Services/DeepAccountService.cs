@@ -58,6 +58,20 @@ public sealed partial class DeepAccountService
         }
     }
 
+    public async Task<DeepAccountCreationResult> CreateAsync(
+        string displayName,
+        CancellationToken cancellationToken = default)
+    {
+        var normalizedName = NormalizeDisplayName(displayName);
+        var phrase = DeepRecoveryV1.Generate();
+        return await CommitNewIdentityAsync(
+                phrase,
+                normalizedName,
+                DeepAccountActivationState.ActiveLocal,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
     public async Task<DeepAccountCreationResult> CommitPreparedAsync(
         DeepPreparedAccountCreationDraft draft,
         DeepOwnedRecoveryPhraseUtf8 userConfirmation,
@@ -117,6 +131,109 @@ public sealed partial class DeepAccountService
         }
     }
 
+    public async Task<bool> HasRetainedRecoveryPhraseAsync(
+        CancellationToken cancellationToken = default)
+    {
+        await ProcessMutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await using var mutationLease = await store
+                .AcquireMutationLeaseAsync(cancellationToken)
+                .ConfigureAwait(false);
+            var reconciled = await RecoverPendingSecureStorageAsync(
+                    mutationLease,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (reconciled.Identity is null)
+            {
+                return false;
+            }
+
+            using var retained = await secureStorage
+                .ReadOwnedAsync(
+                    DeepAccountStoreContract.RetainedRecoveryPhraseSlot,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (retained is null)
+            {
+                return false;
+            }
+            ValidateRetainedRecoveryPhrase(retained);
+            return true;
+        }
+        finally
+        {
+            ProcessMutationGate.Release();
+        }
+    }
+
+    public async Task<bool> RevealRetainedRecoveryPhraseAsync(
+        DeepRecoveryPhraseUtf8Consumer consumer,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(consumer);
+        await ProcessMutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await using var mutationLease = await store
+                .AcquireMutationLeaseAsync(cancellationToken)
+                .ConfigureAwait(false);
+            var reconciled = await RecoverPendingSecureStorageAsync(
+                    mutationLease,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (reconciled.Identity is null)
+            {
+                return false;
+            }
+
+            using var retained = await secureStorage
+                .ReadOwnedAsync(
+                    DeepAccountStoreContract.RetainedRecoveryPhraseSlot,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (retained is null)
+            {
+                return false;
+            }
+            ValidateRetainedRecoveryPhrase(retained);
+            retained.Use(bytes => consumer(bytes));
+            return true;
+        }
+        finally
+        {
+            ProcessMutationGate.Release();
+        }
+    }
+
+    public async Task DeleteRetainedRecoveryPhraseAsync(
+        CancellationToken cancellationToken = default)
+    {
+        await ProcessMutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await using var mutationLease = await store
+                .AcquireMutationLeaseAsync(cancellationToken)
+                .ConfigureAwait(false);
+            var reconciled = await RecoverPendingSecureStorageAsync(
+                    mutationLease,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (reconciled.Identity is null)
+            {
+                throw new InvalidOperationException("No local Deep account exists.");
+            }
+            await secureStorage.DeleteBatchAsync(
+                    [DeepAccountStoreContract.RetainedRecoveryPhraseSlot],
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            ProcessMutationGate.Release();
+        }
+    }
+
     public async Task<DeepAccount> UpdateDisplayNameAsync(
         string displayName,
         CancellationToken cancellationToken = default)
@@ -166,7 +283,8 @@ public sealed partial class DeepAccountService
             var slotsToDelete = new HashSet<string>(StringComparer.Ordinal)
             {
                 PendingSecureStorageJournalSlot,
-                DeepAccountStoreContract.DatabaseAccountManifestSlot
+                DeepAccountStoreContract.DatabaseAccountManifestSlot,
+                DeepAccountStoreContract.RetainedRecoveryPhraseSlot
             };
             if (current is not null)
             {
@@ -194,6 +312,7 @@ public sealed partial class DeepAccountService
         DeepAccountActivationState activationState,
         CancellationToken cancellationToken)
     {
+        using var retainedRecoveryPhrase = RetainedRecoveryPhraseBytes.CopyFrom(phrase);
         DeepRecoveryAccountCapabilities capabilities;
         try
         {
@@ -214,79 +333,79 @@ public sealed partial class DeepAccountService
             await ProcessMutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
-            await using var mutationLease = await store
-                .AcquireMutationLeaseAsync(cancellationToken)
-                .ConfigureAwait(false);
-            var reconciled = await RecoverPendingSecureStorageAsync(
-                    mutationLease,
-                    cancellationToken)
-                .ConfigureAwait(false);
-            if (reconciled.Identity is not null)
-            {
-                throw new DeepAccountAlreadyExistsException();
-            }
+                await using var mutationLease = await store
+                    .AcquireMutationLeaseAsync(cancellationToken)
+                    .ConfigureAwait(false);
+                var reconciled = await RecoverPendingSecureStorageAsync(
+                        mutationLease,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                if (reconciled.Identity is not null)
+                {
+                    throw new DeepAccountAlreadyExistsException();
+                }
 
-            var permanentId = DeepPermanentIdV1.FromCapabilities(capabilities);
-            var accountIdentity = capabilities.AccountIdentity;
+                var permanentId = DeepPermanentIdV1.FromCapabilities(capabilities);
+                var accountIdentity = capabilities.AccountIdentity;
 
-            using var deviceSecrets = new OwnedGenesisDeviceSecrets();
-            using var persistedDeviceSecrets = deviceSecrets.ExportOwnedPersistenceCopy();
-            var deviceSigningKey = new byte[DeepAccountStoreContract.KeyMaterialSize];
-            var deviceAgreementKey = new byte[DeepAccountStoreContract.KeyMaterialSize];
-            var deviceId = new byte[DeepAccountStoreContract.KeyMaterialSize];
-            var deviceRevocationHandle = new byte[DeepAccountStoreContract.KeyMaterialSize];
-            var devicePrekey = RandomNumberGenerator.GetBytes(DeepAccountStoreContract.KeyMaterialSize);
-            var pushKey = RandomNumberGenerator.GetBytes(DeepAccountStoreContract.KeyMaterialSize);
-            var messageStoreInstanceIdBytes = RandomNumberGenerator.GetBytes(
-                DeepAccountStoreContract.KeyMaterialSize);
-            byte[]? pendingJournal = null;
-            try
-            {
-                persistedDeviceSecrets.CopyTo(
-                    deviceSigningKey,
-                    deviceAgreementKey,
-                    deviceId,
-                    deviceRevocationHandle);
-                var prekeyPublic = DeepIdentityCrypto.DeriveX25519PublicKey(devicePrekey);
+                using var deviceSecrets = new OwnedGenesisDeviceSecrets();
+                using var persistedDeviceSecrets = deviceSecrets.ExportOwnedPersistenceCopy();
+                var deviceSigningKey = new byte[DeepAccountStoreContract.KeyMaterialSize];
+                var deviceAgreementKey = new byte[DeepAccountStoreContract.KeyMaterialSize];
+                var deviceId = new byte[DeepAccountStoreContract.KeyMaterialSize];
+                var deviceRevocationHandle = new byte[DeepAccountStoreContract.KeyMaterialSize];
+                var devicePrekey = RandomNumberGenerator.GetBytes(DeepAccountStoreContract.KeyMaterialSize);
+                var pushKey = RandomNumberGenerator.GetBytes(DeepAccountStoreContract.KeyMaterialSize);
+                var messageStoreInstanceIdBytes = RandomNumberGenerator.GetBytes(
+                    DeepAccountStoreContract.KeyMaterialSize);
+                byte[]? pendingJournal = null;
                 try
                 {
-                    var now = clock.UtcNow;
-                    var deviceIdentity = deviceSecrets.CreateLocalIntent(accountIdentity);
-                    var slots = store.GetGenerationSecureStorageSlots();
-                    var device = new DeepDevice(
-                        deviceIdentity,
-                        prekeyPublic,
-                        now);
-                    var account = new DeepAccount(
-                        permanentId,
-                        accountIdentity,
-                        displayName,
-                        now,
-                        activationState,
-                        deviceIdentity.DeviceId);
-                    var profile = new DeepLocalProfile(displayName, now);
-                    var identity = new DeepLocalIdentitySnapshot(
-                        DeepAccountStoreContract.CurrentStoreGeneration,
-                        networkId.ToArray(),
-                        account,
-                        device,
-                        profile,
-                        slots);
-                    var operation = DeepAccountCreationOperation.Create(identity);
-                    var immutableIdentityCommitment = DeepAccountImmutableIdentityHash.Compute(identity);
-                    var messageStoreInstanceId = MessageStoreInstanceId32.FromBytes(
-                        messageStoreInstanceIdBytes);
+                    persistedDeviceSecrets.CopyTo(
+                        deviceSigningKey,
+                        deviceAgreementKey,
+                        deviceId,
+                        deviceRevocationHandle);
+                    var prekeyPublic = DeepIdentityCrypto.DeriveX25519PublicKey(devicePrekey);
                     try
                     {
+                        var now = clock.UtcNow;
+                        var deviceIdentity = deviceSecrets.CreateLocalIntent(accountIdentity);
+                        var slots = store.GetGenerationSecureStorageSlots();
+                        var device = new DeepDevice(
+                            deviceIdentity,
+                            prekeyPublic,
+                            now);
+                        var account = new DeepAccount(
+                            permanentId,
+                            accountIdentity,
+                            displayName,
+                            now,
+                            activationState,
+                            deviceIdentity.DeviceId);
+                        var profile = new DeepLocalProfile(displayName, now);
+                        var identity = new DeepLocalIdentitySnapshot(
+                            DeepAccountStoreContract.CurrentStoreGeneration,
+                            networkId.ToArray(),
+                            account,
+                            device,
+                            profile,
+                            slots);
+                        var operation = DeepAccountCreationOperation.Create(identity);
+                        var immutableIdentityCommitment = DeepAccountImmutableIdentityHash.Compute(identity);
+                        var messageStoreInstanceId = MessageStoreInstanceId32.FromBytes(
+                            messageStoreInstanceIdBytes);
+                        try
+                        {
 
-                    pendingJournal = SqliteDeepAccountStoreBootstrap.EncodeAccountManifest(
-                        operation,
-                        immutableIdentityCommitment,
-                        messageStoreInstanceId,
-                        slots);
+                            pendingJournal = SqliteDeepAccountStoreBootstrap.EncodeAccountManifest(
+                                operation,
+                                immutableIdentityCommitment,
+                                messageStoreInstanceId,
+                                slots);
 
-                    var writes = new[]
-                    {
+                            var writes = new[]
+                            {
                         new DeepSecureStorageWrite(PendingSecureStorageJournalSlot, pendingJournal),
                         new DeepSecureStorageWrite(
                             DeepAccountStoreContract.DatabaseAccountManifestSlot,
@@ -301,88 +420,92 @@ public sealed partial class DeepAccountService
                         new DeepSecureStorageWrite(slots.PushKey, pushKey),
                         new DeepSecureStorageWrite(
                             slots.MessageStoreInstanceId,
-                            messageStoreInstanceIdBytes)
+                            messageStoreInstanceIdBytes),
+                        new DeepSecureStorageWrite(
+                            DeepAccountStoreContract.RetainedRecoveryPhraseSlot,
+                            retainedRecoveryPhrase.Value)
                     };
-                    await secureStorage.WriteBatchAsync(writes, cancellationToken).ConfigureAwait(false);
-                    try
-                    {
-                        await store.CreateAsync(
-                                reconciled.MutationCapability,
-                                identity,
-                                operation,
-                                immutableIdentityCommitment,
-                                cancellationToken)
-                            .ConfigureAwait(false);
-                    }
-                    catch (Exception creationFailure)
-                    {
-                        DeepAccountCreationOperation? committedOperation;
-                        try
-                        {
-                            committedOperation = await store
-                                .ReadCreationOperationAsync(CancellationToken.None)
-                                .ConfigureAwait(false);
-                        }
-                        catch (Exception reconciliationFailure)
-                        {
-                            throw new DeepAccountCreationOutcomeUnknownException(
-                                creationFailure,
-                                reconciliationFailure);
-                        }
+                            await secureStorage.WriteBatchAsync(writes, cancellationToken).ConfigureAwait(false);
+                            try
+                            {
+                                await store.CreateAsync(
+                                        reconciled.MutationCapability,
+                                        identity,
+                                        operation,
+                                        immutableIdentityCommitment,
+                                        cancellationToken)
+                                    .ConfigureAwait(false);
+                            }
+                            catch (Exception creationFailure)
+                            {
+                                DeepAccountCreationOperation? committedOperation;
+                                try
+                                {
+                                    committedOperation = await store
+                                        .ReadCreationOperationAsync(CancellationToken.None)
+                                        .ConfigureAwait(false);
+                                }
+                                catch (Exception reconciliationFailure)
+                                {
+                                    throw new DeepAccountCreationOutcomeUnknownException(
+                                        creationFailure,
+                                        reconciliationFailure);
+                                }
 
-                        if (committedOperation is null)
-                        {
-                            await secureStorage.DeleteBatchAsync(
-                                    AccountSlots(slots)
-                                        .Append(PendingSecureStorageJournalSlot)
-                                        .Append(DeepAccountStoreContract.DatabaseAccountManifestSlot)
-                                        .ToArray(),
-                                    CancellationToken.None)
-                                .ConfigureAwait(false);
-                            throw;
+                                if (committedOperation is null)
+                                {
+                                    await secureStorage.DeleteBatchAsync(
+                                            AccountSlots(slots)
+                                                .Append(PendingSecureStorageJournalSlot)
+                                                .Append(DeepAccountStoreContract.DatabaseAccountManifestSlot)
+                                                .Append(DeepAccountStoreContract.RetainedRecoveryPhraseSlot)
+                                                .ToArray(),
+                                            CancellationToken.None)
+                                        .ConfigureAwait(false);
+                                    throw;
+                                }
+
+                                if (!committedOperation.Matches(operation))
+                                {
+                                    throw ResetRequired("A different account creation operation committed while reconciliation was pending.");
+                                }
+
+                                identity = await store.ReadAsync(deviceIdentity, CancellationToken.None).ConfigureAwait(false)
+                                    ?? throw ResetRequired("The committed account creation receipt has no identity row.");
+                                if (!operation.MatchesIdentity(identity))
+                                {
+                                    throw ResetRequired("The committed account does not match its creation operation.");
+                                }
+                            }
+
+                            await TryDeletePendingJournalAfterProvenCommitAsync().ConfigureAwait(false);
+
+                            return new DeepAccountCreationResult(identity);
                         }
-
-                        if (!committedOperation.Matches(operation))
+                        finally
                         {
-                            throw ResetRequired("A different account creation operation committed while reconciliation was pending.");
+                            CryptographicOperations.ZeroMemory(immutableIdentityCommitment);
                         }
-
-                        identity = await store.ReadAsync(deviceIdentity, CancellationToken.None).ConfigureAwait(false)
-                            ?? throw ResetRequired("The committed account creation receipt has no identity row.");
-                        if (!operation.MatchesIdentity(identity))
-                        {
-                            throw ResetRequired("The committed account does not match its creation operation.");
-                        }
-                    }
-
-                    await TryDeletePendingJournalAfterProvenCommitAsync().ConfigureAwait(false);
-
-                    return new DeepAccountCreationResult(identity);
                     }
                     finally
                     {
-                        CryptographicOperations.ZeroMemory(immutableIdentityCommitment);
+                        CryptographicOperations.ZeroMemory(prekeyPublic);
                     }
                 }
                 finally
                 {
-                    CryptographicOperations.ZeroMemory(prekeyPublic);
+                    CryptographicOperations.ZeroMemory(deviceSigningKey);
+                    CryptographicOperations.ZeroMemory(deviceAgreementKey);
+                    CryptographicOperations.ZeroMemory(deviceId);
+                    CryptographicOperations.ZeroMemory(deviceRevocationHandle);
+                    CryptographicOperations.ZeroMemory(devicePrekey);
+                    CryptographicOperations.ZeroMemory(pushKey);
+                    CryptographicOperations.ZeroMemory(messageStoreInstanceIdBytes);
+                    if (pendingJournal is not null)
+                    {
+                        CryptographicOperations.ZeroMemory(pendingJournal);
+                    }
                 }
-            }
-            finally
-            {
-                CryptographicOperations.ZeroMemory(deviceSigningKey);
-                CryptographicOperations.ZeroMemory(deviceAgreementKey);
-                CryptographicOperations.ZeroMemory(deviceId);
-                CryptographicOperations.ZeroMemory(deviceRevocationHandle);
-                CryptographicOperations.ZeroMemory(devicePrekey);
-                CryptographicOperations.ZeroMemory(pushKey);
-                CryptographicOperations.ZeroMemory(messageStoreInstanceIdBytes);
-                if (pendingJournal is not null)
-                {
-                    CryptographicOperations.ZeroMemory(pendingJournal);
-                }
-            }
             }
             finally
             {
@@ -571,6 +694,7 @@ public sealed partial class DeepAccountService
                     manifest.Slots
                         .Append(PendingSecureStorageJournalSlot)
                         .Append(DeepAccountStoreContract.DatabaseAccountManifestSlot)
+                        .Append(DeepAccountStoreContract.RetainedRecoveryPhraseSlot)
                         .ToArray(),
                     CancellationToken.None)
                 .ConfigureAwait(false);
@@ -618,30 +742,30 @@ public sealed partial class DeepAccountService
                     "The fixed generation manifest does not match the immutable local identity.");
             }
 
-        // Exact initial-snapshot rehash is required only while a pending journal
-        // proves that creation reconciliation has not finished. Routine mutable state
-        // may diverge from the immutable initial receipt after this journal is removed.
-        await EnsureRequiredSecretsExistAsync(
+            // Exact initial-snapshot rehash is required only while a pending journal
+            // proves that creation reconciliation has not finished. Routine mutable state
+            // may diverge from the immutable initial receipt after this journal is removed.
+            await EnsureRequiredSecretsExistAsync(
+                    current,
+                    manifest.MessageStoreInstanceId,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (pending is not null)
+            {
+                if (!pending.Operation.MatchesIdentity(current))
+                {
+                    throw ResetRequired("Pending creation journal does not match the exact initial snapshot.");
+                }
+                await secureStorage.DeleteBatchAsync([PendingSecureStorageJournalSlot], CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+            return new ReconciledAccountState(
                 current,
                 manifest.MessageStoreInstanceId,
-                cancellationToken)
-            .ConfigureAwait(false);
-        if (pending is not null)
-        {
-            if (!pending.Operation.MatchesIdentity(current))
-            {
-                throw ResetRequired("Pending creation journal does not match the exact initial snapshot.");
-            }
-            await secureStorage.DeleteBatchAsync([PendingSecureStorageJournalSlot], CancellationToken.None)
-                .ConfigureAwait(false);
-        }
-        return new ReconciledAccountState(
-            current,
-            manifest.MessageStoreInstanceId,
-            new DeepAccountReconciledMutationCapability(
-                mutationLease,
-                committedOperation,
-                immutableIdentityCommitment));
+                new DeepAccountReconciledMutationCapability(
+                    mutationLease,
+                    committedOperation,
+                    immutableIdentityCommitment));
         }
         finally
         {
@@ -680,6 +804,18 @@ public sealed partial class DeepAccountService
     private static VerifiedDeepRecoveryPhrase VerifyRecoveryPhraseUtf8(ReadOnlySpan<byte> encoded)
         => DeepRecoveryV1.VerifyCanonicalUtf8(encoded);
 
+    private static void ValidateRetainedRecoveryPhrase(OwnedDeepSecret retained)
+    {
+        try
+        {
+            using var verified = retained.Use(VerifyRecoveryPhraseUtf8);
+        }
+        catch (ArgumentException exception)
+        {
+            throw ResetRequired("The retained recovery phrase is invalid.", exception);
+        }
+    }
+
     private static string[] AccountSlots(DeepSecureStorageSlots slots) =>
     [
         slots.DeviceSigningKey,
@@ -705,6 +841,32 @@ public sealed partial class DeepAccountService
     private delegate bool PublicKeyMatcher(
         ReadOnlySpan<byte> secret,
         ReadOnlyMemory<byte> expectedPublicKey);
+
+    private sealed class RetainedRecoveryPhraseBytes : IDisposable
+    {
+        private byte[]? value;
+
+        private RetainedRecoveryPhraseBytes(byte[] value) => this.value = value;
+
+        internal ReadOnlyMemory<byte> Value => value
+            ?? throw new ObjectDisposedException(nameof(RetainedRecoveryPhraseBytes));
+
+        internal static RetainedRecoveryPhraseBytes CopyFrom(VerifiedDeepRecoveryPhrase phrase)
+        {
+            byte[]? copy = null;
+            phrase.UseCanonicalUtf8(bytes => copy = bytes.ToArray());
+            return new RetainedRecoveryPhraseBytes(copy!);
+        }
+
+        public void Dispose()
+        {
+            var current = Interlocked.Exchange(ref value, null);
+            if (current is not null)
+            {
+                CryptographicOperations.ZeroMemory(current);
+            }
+        }
+    }
 
     private sealed record ReconciledAccountState(
         DeepLocalIdentitySnapshot? Identity,
