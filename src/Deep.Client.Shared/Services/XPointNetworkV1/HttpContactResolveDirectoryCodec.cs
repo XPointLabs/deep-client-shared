@@ -114,8 +114,6 @@ internal static class HttpContactResolveDirectoryCodec
         if ((flags & RequestDirectoryFloorFlag) != 0)
         {
             directoryTreeSize = reader.ReadU64();
-            if (directoryTreeSize == 0)
-                throw new FormatException("The directory LKG tree size must be non-zero.");
             directoryCoreHash = reader.ReadFixed(32, nonZero: true, "directory LKG core hash");
         }
 

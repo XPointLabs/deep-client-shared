@@ -35,6 +35,22 @@ public sealed class HttpContactResolveDirectoryCodecTests
     }
 
     [Fact]
+    public void Request_RoundTripsValidEmptyDirectoryGenesisFloor()
+    {
+        var directoryState = DirectoryState(treeSize: 0, hashMarker: 0x31);
+        var context = new ContactResolveDirectoryFetchContext(
+            B(16, 0x11), directoryState, null);
+        var nonce = B(32, 0x41);
+        var reading = new OnionMonotonicReading(B(16, 0x51), 99);
+
+        var encoded = HttpContactResolveDirectoryCodec.EncodeRequest(context, nonce, reading);
+        var decoded = HttpContactResolveDirectoryCodec.DecodeRequest(encoded);
+
+        Assert.Equal(0UL, decoded.DirectoryTreeSize);
+        Assert.Equal(B(32, 0x31), decoded.DirectoryCoreHash);
+    }
+
+    [Fact]
     public void TargetedCurrentValueRequest_RoundTripsExactAdl1LookupKey()
     {
         var lookupKey = B(32, 0x67);
