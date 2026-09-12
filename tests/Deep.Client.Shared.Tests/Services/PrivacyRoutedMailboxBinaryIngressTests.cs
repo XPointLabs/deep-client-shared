@@ -18,6 +18,20 @@ public sealed class PrivacyRoutedMailboxBinaryIngressTests
     }
 
     [Fact]
+    public void RouteAcceptsExplicitLoopbackCarrierAndBindsRouterIdentity()
+    {
+        var routerId = Enumerable.Repeat((byte)0x41, 32).ToArray();
+
+        var route = new PrivacyMailboxRoute(
+            new Uri("http://127.0.0.1:17891/"),
+            new NeverPathProvider(),
+            routerId);
+
+        Assert.Equal("http://127.0.0.1:17891/", route.EntryOrigin.AbsoluteUri);
+        Assert.Equal(routerId, route.ExpectedEntryRouterId.ToArray());
+    }
+
+    [Fact]
     public async Task MalformedMau2FailsBeforePathSelectionOrNetworkDispatch()
     {
         var provider = new NeverPathProvider();

@@ -209,6 +209,15 @@ public sealed class PrivacyRoutedContactResolverTransport :
                     ContactResolverTransportFailureKind.Permanent,
                     "The verified path provider returned a mismatched ContactResolve attempt.");
             }
+            if (!route.ExpectedEntryRouterId.IsEmpty &&
+                !CryptographicOperations.FixedTimeEquals(
+                    route.ExpectedEntryRouterId.Span,
+                    attempt.EntryRouterId.Span))
+            {
+                throw new ContactResolverTransportException(
+                    ContactResolverTransportFailureKind.Permanent,
+                    "The verified path entry does not match the bound ingress router.");
+            }
             built = await codec.BuildAsync(
                 attempt.Path,
                 attempt.Request,

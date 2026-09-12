@@ -42,31 +42,54 @@ public interface IPrivacyMailboxPathProvider
 
 public sealed class PrivacyMailboxRoute
 {
+    private readonly byte[] expectedEntryRouterId;
+
     public PrivacyMailboxRoute(
         Uri entryOrigin,
         IPrivacyMailboxPathProvider pathProvider)
+        : this(entryOrigin, pathProvider, ReadOnlyMemory<byte>.Empty)
+    {
+    }
+
+    public PrivacyMailboxRoute(
+        Uri entryOrigin,
+        IPrivacyMailboxPathProvider pathProvider,
+        ReadOnlyMemory<byte> expectedEntryRouterId)
     {
         ArgumentNullException.ThrowIfNull(entryOrigin);
         ArgumentNullException.ThrowIfNull(pathProvider);
         if (!entryOrigin.IsAbsoluteUri ||
+            entryOrigin.Scheme != Uri.UriSchemeHttp &&
             entryOrigin.Scheme != Uri.UriSchemeHttps ||
             !string.IsNullOrEmpty(entryOrigin.UserInfo) ||
             entryOrigin.AbsolutePath != "/" ||
             !string.IsNullOrEmpty(entryOrigin.Query) ||
-            !string.IsNullOrEmpty(entryOrigin.Fragment))
+            !string.IsNullOrEmpty(entryOrigin.Fragment) ||
+            entryOrigin.Scheme == Uri.UriSchemeHttp && !entryOrigin.IsLoopback)
         {
             throw new ArgumentException(
-                "A privacy mailbox route requires a clean HTTPS entry origin.",
+                "A privacy mailbox route requires clean HTTPS or an explicit loopback HTTP origin.",
                 nameof(entryOrigin));
+        }
+        if (!expectedEntryRouterId.IsEmpty &&
+            (expectedEntryRouterId.Length != 32 ||
+             expectedEntryRouterId.Span.IndexOfAnyExcept((byte)0) < 0))
+        {
+            throw new ArgumentException(
+                "An expected entry router ID must be empty or exactly 32 non-zero bytes.",
+                nameof(expectedEntryRouterId));
         }
 
         EntryOrigin = entryOrigin;
         PathProvider = pathProvider;
+        this.expectedEntryRouterId = expectedEntryRouterId.ToArray();
     }
 
     public Uri EntryOrigin { get; }
 
     public IPrivacyMailboxPathProvider PathProvider { get; }
+
+    public ReadOnlyMemory<byte> ExpectedEntryRouterId => expectedEntryRouterId.ToArray();
 
     public override string ToString() =>
         $"PrivacyMailboxRoute {{ Entry = {EntryOrigin}, Path = [verified-attempt-provider] }}";

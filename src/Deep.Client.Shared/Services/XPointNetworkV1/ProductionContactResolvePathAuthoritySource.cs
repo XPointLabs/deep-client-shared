@@ -29,7 +29,8 @@ public sealed class ProductionContactResolvePathAuthoritySource :
     IContactResolvePublicationPathAuthoritySource,
     IContactResolvePlacementContextSource,
     IContactResolveClaimPathAuthoritySource,
-    IContactResolvePermanentPathAuthoritySource
+    IContactResolvePermanentPathAuthoritySource,
+    IDisposable
 {
     private readonly XPointNetworkGenesisPin genesisPin;
     private readonly IContactResolveDirectoryArtifactSource artifacts;
@@ -37,6 +38,7 @@ public sealed class ProductionContactResolvePathAuthoritySource :
     private readonly IXPointNetworkStateStore networkStore;
     private readonly XPointNetworkStateClient networkStateClient;
     private readonly ICanonicalContactResolveAuthorityVerifier verifier;
+    private readonly IDisposable? ownedArtifacts;
     private readonly SemaphoreSlim gate = new(1, 1);
     private VerifiedOnionNetworkContext? liveContext;
 
@@ -55,7 +57,8 @@ public sealed class ProductionContactResolvePathAuthoritySource :
             new ProtocolCanonicalContactResolveAuthorityVerifier(
                 new AccountDirectoryClient(directoryStore),
                 new OnionTrustedTimeAuthority(monotonicClock),
-                supportedDirectoryReader))
+                supportedDirectoryReader),
+            ownedArtifacts: null)
     {
     }
 
@@ -64,15 +67,62 @@ public sealed class ProductionContactResolvePathAuthoritySource :
         IContactResolveDirectoryArtifactSource artifacts,
         IAccountDirectoryStateStore directoryStore,
         IXPointNetworkStateStore networkStore,
+        IOnionMonotonicClock monotonicClock,
+        ushort supportedDirectoryReader,
+        bool ownsArtifacts)
+        : this(
+            genesisPin,
+            artifacts,
+            directoryStore,
+            networkStore,
+            new ProtocolCanonicalContactResolveAuthorityVerifier(
+                new AccountDirectoryClient(directoryStore),
+                new OnionTrustedTimeAuthority(monotonicClock),
+                supportedDirectoryReader),
+            ownsArtifacts ? artifacts as IDisposable : null)
+    {
+        if (ownsArtifacts && artifacts is not IDisposable)
+        {
+            throw new ArgumentException(
+                "An owned ContactResolve artifact source must be disposable.",
+                nameof(artifacts));
+        }
+    }
+
+    internal ProductionContactResolvePathAuthoritySource(
+        XPointNetworkGenesisPin genesisPin,
+        IContactResolveDirectoryArtifactSource artifacts,
+        IAccountDirectoryStateStore directoryStore,
+        IXPointNetworkStateStore networkStore,
         ICanonicalContactResolveAuthorityVerifier verifier)
+        : this(
+            genesisPin,
+            artifacts,
+            directoryStore,
+            networkStore,
+            verifier,
+            ownedArtifacts: null)
+    {
+    }
+
+    private ProductionContactResolvePathAuthoritySource(
+        XPointNetworkGenesisPin genesisPin,
+        IContactResolveDirectoryArtifactSource artifacts,
+        IAccountDirectoryStateStore directoryStore,
+        IXPointNetworkStateStore networkStore,
+        ICanonicalContactResolveAuthorityVerifier verifier,
+        IDisposable? ownedArtifacts)
     {
         this.genesisPin = genesisPin ?? throw new ArgumentNullException(nameof(genesisPin));
         this.artifacts = artifacts ?? throw new ArgumentNullException(nameof(artifacts));
         this.directoryStore = directoryStore ?? throw new ArgumentNullException(nameof(directoryStore));
         this.networkStore = networkStore ?? throw new ArgumentNullException(nameof(networkStore));
         this.verifier = verifier ?? throw new ArgumentNullException(nameof(verifier));
+        this.ownedArtifacts = ownedArtifacts;
         networkStateClient = new XPointNetworkStateClient(networkStore);
     }
+
+    public void Dispose() => ownedArtifacts?.Dispose();
 
     public async ValueTask<ContactResolvePathAuthority> GetCurrentAsync(
         Xiq1Request request,
@@ -558,10 +608,7 @@ internal sealed class ProtocolCanonicalContactResolveAuthorityVerifier : ICanoni
         cancellationToken.ThrowIfCancellationRequested();
 
         var forward = artifacts.ForwardCheckpoint;
-        if (protectedNetworkState is not null && livePrevious is null && forward is null)
-            throw new ContactResolvePathException(
-                "network-predecessor-capability-unavailable",
-                "Protected XLK1 exists, but Protocol cannot restore its non-serializable predecessor capability without XNF1/NFP1.");
+        var rehydratingCurrent = protectedNetworkState is not null && livePrevious is null && forward is null;
         if (protectedNetworkState is null && (livePrevious is not null || forward is not null))
             throw new ContactResolvePathException(
                 "network-bootstrap-state-mismatch",
@@ -571,10 +618,18 @@ internal sealed class ProtocolCanonicalContactResolveAuthorityVerifier : ICanoni
                 "network-advance-ambiguous",
                 "Normal successor and forward-checkpoint paths cannot be combined.");
 
-        var authority = XPointNetworkAuthorityVerifier.Verify(
-            genesisPin,
-            artifacts.ExactXna1AuthorityChain,
-            artifacts.ExactDts1PolicyChain);
+        VerifiedXPointNetworkAuthority authority;
+        try
+        {
+            authority = XPointNetworkAuthorityVerifier.Verify(
+                genesisPin,
+                artifacts.ExactXna1AuthorityChain,
+                artifacts.ExactDts1PolicyChain);
+        }
+        catch (Exception exception) when (rehydratingCurrent && exception is not OperationCanceledException)
+        {
+            throw PredecessorUnavailable(exception);
+        }
         if (!CryptographicOperations.FixedTimeEquals(authority.NetworkId.Span, genesisPin.NetworkId.Span))
             throw new ContactResolvePathException("authority-network-mismatch", "Verified XNA1 is outside the pinned network.");
 
@@ -612,17 +667,42 @@ internal sealed class ProtocolCanonicalContactResolveAuthorityVerifier : ICanoni
 
         if (forward is null)
         {
-            var network = await OnionNetworkContextVerifier.VerifyAsync(
-                authority,
-                freshness,
-                artifacts.ExactOrderedXvp1Chain,
-                artifacts.ExactOrderedXnv1Chain,
-                artifacts.ExactOrderedXnh1Chain,
-                artifacts.ExactActiveXnd1,
-                artifacts.ExactOrderedPmt2Chain,
-                livePrevious,
-                trustedTimeAuthority,
-                cancellationToken).ConfigureAwait(false);
+            VerifiedOnionNetworkContext network;
+            if (protectedNetworkState is not null && livePrevious is null)
+            {
+                try
+                {
+                    network = await OnionNetworkContextVerifier.VerifyRehydratedCurrentAsync(
+                        authority,
+                        freshness,
+                        artifacts.ExactOrderedXvp1Chain,
+                        artifacts.ExactOrderedXnv1Chain,
+                        artifacts.ExactOrderedXnh1Chain,
+                        artifacts.ExactActiveXnd1,
+                        artifacts.ExactOrderedPmt2Chain,
+                        protectedNetworkState.ProtectedLkg,
+                        trustedTimeAuthority,
+                        cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException)
+                {
+                    throw PredecessorUnavailable(exception);
+                }
+            }
+            else
+            {
+                network = await OnionNetworkContextVerifier.VerifyAsync(
+                    authority,
+                    freshness,
+                    artifacts.ExactOrderedXvp1Chain,
+                    artifacts.ExactOrderedXnv1Chain,
+                    artifacts.ExactOrderedXnh1Chain,
+                    artifacts.ExactActiveXnd1,
+                    artifacts.ExactOrderedPmt2Chain,
+                    livePrevious,
+                    trustedTimeAuthority,
+                    cancellationToken).ConfigureAwait(false);
+            }
             return Complete(authority, freshness, network, artifacts);
         }
 
@@ -675,4 +755,10 @@ internal sealed class ProtocolCanonicalContactResolveAuthorityVerifier : ICanoni
 
     private static bool Fixed(ReadOnlySpan<byte> left, ReadOnlySpan<byte> right) =>
         left.Length == right.Length && CryptographicOperations.FixedTimeEquals(left, right);
+
+    private static ContactResolvePathException PredecessorUnavailable(Exception inner) =>
+        new(
+            "network-predecessor-capability-unavailable",
+            "Protected XLK1 exists, but the current package cannot restore its exact non-serializable predecessor capability.",
+            inner);
 }

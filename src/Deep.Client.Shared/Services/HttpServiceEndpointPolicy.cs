@@ -7,6 +7,7 @@ using Deep.Client.Shared.Services.ContactV1;
 using Deep.Client.Shared.Services.GroupV1;
 using Deep.Client.Shared.Services.XPointNetworkV1;
 using Deep.Protocol.DeepExtension.PrivacyRouting;
+using Deep.Protocol.XPointNetworkV1;
 
 namespace Deep.Client.Shared.Services;
 
@@ -383,6 +384,51 @@ public sealed class HttpServiceTransportFactory
                 client,
                 options,
                 monotonicClock));
+
+    /// <summary>
+    /// Creates the production ContactResolve authority source as one closed
+    /// composition. The HTTP adapter remains internal and supplies only
+    /// untrusted bytes; this public result can mint capabilities solely after
+    /// verifying the package against the immutable genesis pin and protected
+    /// rollback floors.
+    /// </summary>
+    public ProductionContactResolvePathAuthoritySource
+        CreateProductionContactResolvePathAuthoritySource(
+            string directoryBaseUrl,
+            XPointNetworkGenesisPin genesisPin,
+            Deep.Client.Shared.Persistence.AccountDirectoryV1.IAccountDirectoryStateStore
+                directoryStore,
+            Deep.Client.Shared.Persistence.XPointNetworkV1.IXPointNetworkStateStore
+                networkStore,
+            IOnionMonotonicClock monotonicClock,
+            ushort supportedDirectoryReader = 1,
+            HttpServiceClientOptions? clientOptions = null,
+            int maximumResponseBytes =
+                HttpContactResolveDirectoryCodec.AbsoluteMaximumEnvelopeBytes)
+    {
+        var artifacts = CreateContactResolveDirectoryArtifactSource(
+            new HttpContactResolveDirectoryOptions(
+                directoryBaseUrl,
+                maximumResponseBytes),
+            monotonicClock,
+            clientOptions);
+        try
+        {
+            return new ProductionContactResolvePathAuthoritySource(
+                genesisPin,
+                artifacts,
+                directoryStore,
+                networkStore,
+                monotonicClock,
+                supportedDirectoryReader,
+                ownsArtifacts: true);
+        }
+        catch
+        {
+            artifacts.Dispose();
+            throw;
+        }
+    }
 
     public HttpAvatarProfileTransport CreateAvatar(
         HttpAvatarProfileTransportOptions options,
