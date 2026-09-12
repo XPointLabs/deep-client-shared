@@ -209,6 +209,10 @@ public sealed partial class DeepAccountService
     public async Task DeleteRetainedRecoveryPhraseAsync(
         CancellationToken cancellationToken = default)
     {
+        // Deleting recovery authority is irreversible. First prove that the
+        // verifier-minted DPA1/DRS1/DPD1/DMD1 closure is durably restartable.
+        _ = await EnsureGenesisDeviceActivatedAsync(cancellationToken)
+            .ConfigureAwait(false);
         await ProcessMutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
