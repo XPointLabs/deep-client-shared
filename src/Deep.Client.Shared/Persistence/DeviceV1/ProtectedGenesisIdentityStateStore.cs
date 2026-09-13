@@ -15,9 +15,11 @@ internal sealed class ProtectedGenesisIdentityStateStore
     private const int MaximumArtifactBytes = 16 * 1024;
     private static readonly byte[] AccountMagic = "DGA1"u8.ToArray();
     private static readonly byte[] DirectoryMagic = "DGD1"u8.ToArray();
+    private static readonly byte[] ContactMagic = "DGC1"u8.ToArray();
     private readonly IDeepSecureStorage storage;
     private readonly string accountSlot;
     private readonly string directorySlot;
+    private readonly string contactSlot;
 
     internal ProtectedGenesisIdentityStateStore(
         IDeepSecureStorage storage,
@@ -36,6 +38,7 @@ internal sealed class ProtectedGenesisIdentityStateStore
         var prefix = "deep.store.v1." + Convert.ToHexStringLower(digest) + ".genesis";
         accountSlot = prefix + ".account";
         directorySlot = prefix + ".directory";
+        contactSlot = prefix + ".contact";
         CryptographicOperations.ZeroMemory(scope);
         CryptographicOperations.ZeroMemory(digest);
     }
@@ -94,6 +97,40 @@ internal sealed class ProtectedGenesisIdentityStateStore
         try
         {
             await WriteImmutableAsync(directorySlot, encoded, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(encoded);
+        }
+    }
+
+    internal async Task<ProtectedGenesisContactEvidence?> ReadContactAsync(
+        CancellationToken cancellationToken)
+    {
+        var encoded = await ReadAsync(contactSlot, cancellationToken).ConfigureAwait(false);
+        if (encoded is null) return null;
+        try
+        {
+            return DecodeContact(encoded);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(encoded);
+        }
+    }
+
+    internal async Task WriteContactAsync(
+        ReadOnlyMemory<byte> canonicalDab1,
+        ReadOnlyMemory<byte> canonicalDca1,
+        ReadOnlyMemory<byte> canonicalAdc1,
+        CancellationToken cancellationToken)
+    {
+        var encoded = EncodeContact(
+            canonicalDab1.Span, canonicalDca1.Span, canonicalAdc1.Span);
+        try
+        {
+            await WriteImmutableAsync(contactSlot, encoded, cancellationToken)
                 .ConfigureAwait(false);
         }
         finally
@@ -199,6 +236,26 @@ internal sealed class ProtectedGenesisIdentityStateStore
         return result;
     }
 
+    private static byte[] EncodeContact(
+        ReadOnlySpan<byte> dab,
+        ReadOnlySpan<byte> dca,
+        ReadOnlySpan<byte> adc)
+    {
+        RequireArtifact(dab, nameof(dab));
+        RequireArtifact(dca, nameof(dca));
+        RequireArtifact(adc, nameof(adc));
+        var result = new byte[20 + dab.Length + dca.Length + adc.Length];
+        ContactMagic.CopyTo(result, 0);
+        result[4] = 1;
+        BinaryPrimitives.WriteUInt32BigEndian(result.AsSpan(8), checked((uint)dab.Length));
+        BinaryPrimitives.WriteUInt32BigEndian(result.AsSpan(12), checked((uint)dca.Length));
+        BinaryPrimitives.WriteUInt32BigEndian(result.AsSpan(16), checked((uint)adc.Length));
+        dab.CopyTo(result.AsSpan(20));
+        dca.CopyTo(result.AsSpan(20 + dab.Length));
+        adc.CopyTo(result.AsSpan(20 + dab.Length + dca.Length));
+        return result;
+    }
+
     private static byte[] DecodeDirectory(ReadOnlySpan<byte> encoded)
     {
         if (encoded.Length < 13 || !encoded[..4].SequenceEqual(DirectoryMagic) ||
@@ -208,6 +265,26 @@ internal sealed class ProtectedGenesisIdentityStateStore
         if (length is < 1 or > MaximumArtifactBytes || encoded.Length != 12 + length)
             throw new InvalidDataException("Protected genesis directory evidence has a hostile size.");
         return encoded[12..].ToArray();
+    }
+
+    private static ProtectedGenesisContactEvidence DecodeContact(ReadOnlySpan<byte> encoded)
+    {
+        if (encoded.Length < 23 || !encoded[..4].SequenceEqual(ContactMagic) ||
+            encoded[4] != 1 || encoded.Slice(5, 3).IndexOfAnyExcept((byte)0) >= 0)
+            throw new InvalidDataException("Protected genesis contact evidence is malformed.");
+        var dabLength = checked((int)BinaryPrimitives.ReadUInt32BigEndian(encoded[8..]));
+        var dcaLength = checked((int)BinaryPrimitives.ReadUInt32BigEndian(encoded[12..]));
+        var adcLength = checked((int)BinaryPrimitives.ReadUInt32BigEndian(encoded[16..]));
+        if (dabLength is < 1 or > MaximumArtifactBytes ||
+            dcaLength is < 1 or > MaximumArtifactBytes ||
+            adcLength is < 1 or > MaximumArtifactBytes ||
+            encoded.Length != 20 + dabLength + dcaLength + adcLength)
+            throw new InvalidDataException(
+                "Protected genesis contact evidence has a hostile size.");
+        return new ProtectedGenesisContactEvidence(
+            encoded.Slice(20, dabLength),
+            encoded.Slice(20 + dabLength, dcaLength),
+            encoded.Slice(20 + dabLength + dcaLength, adcLength));
     }
 
     private static void RequireArtifact(ReadOnlySpan<byte> value, string parameterName)
@@ -231,4 +308,25 @@ internal sealed class ProtectedGenesisAccountEvidence
 
     internal ReadOnlyMemory<byte> CanonicalDpa1 => dpa.ToArray();
     internal ReadOnlyMemory<byte> CanonicalDrs1 => drs.ToArray();
+}
+
+internal sealed class ProtectedGenesisContactEvidence
+{
+    private readonly byte[] dab;
+    private readonly byte[] dca;
+    private readonly byte[] adc;
+
+    internal ProtectedGenesisContactEvidence(
+        ReadOnlySpan<byte> dab,
+        ReadOnlySpan<byte> dca,
+        ReadOnlySpan<byte> adc)
+    {
+        this.dab = dab.ToArray();
+        this.dca = dca.ToArray();
+        this.adc = adc.ToArray();
+    }
+
+    internal ReadOnlyMemory<byte> CanonicalDab1 => dab.ToArray();
+    internal ReadOnlyMemory<byte> CanonicalDca1 => dca.ToArray();
+    internal ReadOnlyMemory<byte> CanonicalAdc1 => adc.ToArray();
 }

@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using Deep.Client.Shared.Domain;
 using Deep.Client.Shared.Persistence;
 using Deep.Client.Shared.Persistence.DeviceV1;
+using Deep.Protocol.AccountDirectoryV1;
 using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.DeepNative;
 using Deep.Protocol.Identity;
@@ -16,18 +17,30 @@ public sealed class DeepGenesisDeviceActivation
 {
     internal DeepGenesisDeviceActivation(
         VerifiedDeviceRelative verifiedDevice,
-        Dmd1LineageState currentDirectory)
+        Dmd1LineageState currentDirectory,
+        Dab1LineageState addressBinding,
+        CurrentlyAuthoritativeDca1 contactPublicationAuthorization,
+        VerifiedAccountDirectoryCheckpoint directoryCheckpoint)
     {
         VerifiedDevice = verifiedDevice ?? throw new ArgumentNullException(nameof(verifiedDevice));
         CurrentDirectory = currentDirectory ?? throw new ArgumentNullException(nameof(currentDirectory));
+        AddressBinding = addressBinding ?? throw new ArgumentNullException(nameof(addressBinding));
+        ContactPublicationAuthorization = contactPublicationAuthorization ??
+            throw new ArgumentNullException(nameof(contactPublicationAuthorization));
+        DirectoryCheckpoint = directoryCheckpoint ??
+            throw new ArgumentNullException(nameof(directoryCheckpoint));
     }
 
     public VerifiedDeviceRelative VerifiedDevice { get; }
     public Dmd1LineageState CurrentDirectory { get; }
+    public Dab1LineageState AddressBinding { get; }
+    public CurrentlyAuthoritativeDca1 ContactPublicationAuthorization { get; }
+    public VerifiedAccountDirectoryCheckpoint DirectoryCheckpoint { get; }
 }
 
 public sealed partial class DeepAccountService
 {
+    private const ushort ProductionDeploymentProfileId = 1;
     private const ulong GenesisDeviceLifetimeSeconds = 366UL * 24 * 60 * 60;
     private const ulong GenesisDeviceRetentionSeconds = 2UL * 366 * 24 * 60 * 60;
 
@@ -154,7 +167,65 @@ public sealed partial class DeepAccountService
                         CryptographicOperations.ZeroMemory(canonicalDmd1);
                     }
                 }
-                return new DeepGenesisDeviceActivation(verifiedDevice, directory);
+
+                Dab1LineageState binding;
+                CurrentlyAuthoritativeDca1 contactAuthorization;
+                VerifiedAccountDirectoryCheckpoint directoryCheckpoint;
+                var contactEvidence = await evidenceStore.ReadContactAsync(cancellationToken)
+                    .ConfigureAwait(false);
+                if (contactEvidence is null)
+                {
+                    if (recovery is null)
+                        throw ResetRequired(
+                            "Genesis contact identity evidence is missing after recovery authority was deleted.");
+                    binding = recovery.AuthorGenesisDab1(
+                        closure, ProductionDeploymentProfileId);
+                    contactAuthorization = recovery.AuthorGenesisDca1(
+                        binding, directory, verifiedDevice, now);
+                    directoryCheckpoint = recovery.AuthorGenesisAdc1(
+                        binding, directory, now);
+                    await evidenceStore.WriteContactAsync(
+                            binding.Head.Record.CanonicalBytes,
+                            contactAuthorization.Verified.Record.CanonicalBytes,
+                            AccountDirectoryAdc1Codec.Encode(
+                                directoryCheckpoint.Checkpoint),
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                else
+                {
+                    var did = ApplicationCoreCodec.AuthorDid1(
+                        identity.Account.PermanentId.AddressPublicKey.Span,
+                        identity.Account.PermanentId.ResolverReadCapability.Span);
+                    var parsedDab = ApplicationCoreCodec.DecodeDab1(
+                        contactEvidence.CanonicalDab1.Span);
+                    binding = ApplicationCoreVerifier.StartDab1Lineage(
+                        ApplicationCoreVerifier.VerifyDab1(
+                            parsedDab,
+                            did,
+                            closure,
+                            ProductionDeploymentProfileId)).Next;
+                    var parsedDca = ApplicationCoreCodec.DecodeDca1(
+                        contactEvidence.CanonicalDca1.Span);
+                    contactAuthorization = ApplicationCoreVerifier
+                        .RequireDca1CurrentlyAuthoritative(
+                            ApplicationCoreVerifier.VerifyDca1(
+                                parsedDca, binding.Head, directory.Head),
+                            now);
+                    directoryCheckpoint = AccountDirectoryAdc1Verifier.Verify(
+                        AccountDirectoryAdc1Codec.Decode(
+                            contactEvidence.CanonicalAdc1.Span),
+                        binding.Head,
+                        directory.Head,
+                        [],
+                        supportedReader: 1);
+                }
+                return new DeepGenesisDeviceActivation(
+                    verifiedDevice,
+                    directory,
+                    binding,
+                    contactAuthorization,
+                    directoryCheckpoint);
             }
             catch (Exception exception) when (
                 exception is ArgumentException or CryptographicException or RecordException or InvalidDataException)

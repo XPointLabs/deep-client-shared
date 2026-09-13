@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using Deep.Client.Shared.Persistence;
 using Deep.Client.Shared.Services;
+using Deep.Protocol.AccountDirectoryV1;
 using Deep.Protocol.ApplicationCore;
 
 namespace Deep.Client.Shared.Tests.Services;
@@ -39,7 +40,17 @@ public sealed class DeepGenesisDeviceActivationTests
         Assert.Equal(
             first.CurrentDirectory.Head.Record.RecordHash.ToArray(),
             restored.CurrentDirectory.Head.Record.RecordHash.ToArray());
+        Assert.Equal(
+            first.AddressBinding.Head.Record.RecordHash.ToArray(),
+            restored.AddressBinding.Head.Record.RecordHash.ToArray());
+        Assert.Equal(
+            first.ContactPublicationAuthorization.Verified.Record.RecordHash.ToArray(),
+            restored.ContactPublicationAuthorization.Verified.Record.RecordHash.ToArray());
+        Assert.Equal(
+            AccountDirectoryAdc1Codec.Encode(first.DirectoryCheckpoint.Checkpoint),
+            AccountDirectoryAdc1Codec.Encode(restored.DirectoryCheckpoint.Checkpoint));
         Assert.Equal(1UL, restored.CurrentDirectory.Head.Record.DirectoryGeneration);
+        Assert.Equal(0UL, restored.AddressBinding.Head.Record.BindingGeneration);
         Assert.Equal(
             restored.VerifiedDevice.Certificate.CanonicalHash.ToArray(),
             agreement.ExactDpd1Hash.ToArray());
