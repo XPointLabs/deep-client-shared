@@ -76,6 +76,68 @@ public sealed class DeepDirectMessagingStorageFacade : IAsyncDisposable
         return authority.Matches(requested);
     }
 
+    public ValueTask<DeepDirectMessagingInitiatorClaimStart?>
+        TryBeginInitiatorClaimAsync(
+            ContactResolverReverifiedPeerAuthority? verifiedPeer,
+            LocalDeviceX25519AgreementAuthority? localAgreementAuthority,
+            Dmd1LineageState? exactCurrentDirectory,
+            CancellationToken cancellationToken = default) =>
+        CurrentOwner.TryBeginInitiatorClaimAsync(
+            verifiedPeer,
+            localAgreementAuthority,
+            exactCurrentDirectory,
+            cancellationToken);
+
+    public ValueTask<DeepDirectMessagingInitiatorClaimPreparation?>
+        TryCompleteInitiatorClaimAsync(
+            DeepDirectMessagingInitiatorClaimStart? startedClaim,
+            VerifiedDpk2Offering? verifiedOffering,
+            LocalDeviceX25519AgreementLease? deviceAgreementLease,
+            int maximumMessagesWithoutPqInjection,
+            CancellationToken cancellationToken = default) =>
+        CurrentOwner.TryCompleteInitiatorClaimAsync(
+            startedClaim,
+            verifiedOffering,
+            deviceAgreementLease,
+            maximumMessagesWithoutPqInjection,
+            cancellationToken);
+
+    public ValueTask<DeepDirectMessagingInitiatorCommitResult?>
+        TryCommitInitiatorSessionAsync(
+            DeepDirectMessagingInitiatorClaimPreparation? preparedClaim,
+            VerifiedXpc1PreKeyClaimReceipt? verifiedClaim,
+            ReadOnlyMemory<byte> exactSessionInitDmc2,
+            ReadOnlyMemory<byte> exactFirstApplicationDmc2 = default,
+            CancellationToken cancellationToken = default) =>
+        CurrentOwner.TryCommitInitiatorSessionAsync(
+            preparedClaim,
+            verifiedClaim,
+            exactSessionInitDmc2,
+            exactFirstApplicationDmc2,
+            cancellationToken);
+
+    public ValueTask<ExactDpe2SendSuccessCapability?>
+        TryCommitEstablishedSendAsync(
+            DeepDirectMessagingVerifiedSessionBinding? verifiedSession,
+            ReadOnlyMemory<byte> exactDmc2,
+            ReadOnlyMemory<byte> operationId,
+            CancellationToken cancellationToken = default) =>
+        CurrentOwner.TryCommitEstablishedSendAsync(
+            verifiedSession,
+            exactDmc2,
+            operationId,
+            cancellationToken);
+
+    public ValueTask<ExactDpe2ReceiveSuccessCapability?>
+        TryCommitEstablishedReceiveAsync(
+            DeepDirectMessagingVerifiedSessionBinding? verifiedSession,
+            ReadOnlyMemory<byte> exactDpe2,
+            CancellationToken cancellationToken = default) =>
+        CurrentOwner.TryCommitEstablishedReceiveAsync(
+            verifiedSession,
+            exactDpe2,
+            cancellationToken);
+
     public static void DeleteAccountState(string appDataDirectory) =>
         DeepDirectMessagingStorageOwner.DeleteState(appDataDirectory);
 
@@ -87,6 +149,10 @@ public sealed class DeepDirectMessagingStorageFacade : IAsyncDisposable
             await current.DisposeAsync().ConfigureAwait(false);
         }
     }
+
+    private DeepDirectMessagingStorageOwner CurrentOwner =>
+        Volatile.Read(ref owner) ??
+        throw new ObjectDisposedException(nameof(DeepDirectMessagingStorageFacade));
 }
 
 /// <summary>
@@ -238,7 +304,7 @@ internal sealed class DeepDirectMessagingLocalAuthorityBinding
 /// construction requires a live ContactResolver capability; raw identifiers are
 /// accepted only by the test-only factory.
 /// </summary>
-internal sealed class DeepDirectMessagingVerifiedSessionBinding
+public sealed class DeepDirectMessagingVerifiedSessionBinding
 {
     private readonly byte[] networkId;
     private readonly byte[] remoteAccountId;
@@ -276,15 +342,15 @@ internal sealed class DeepDirectMessagingVerifiedSessionBinding
         RemoteDeviceGeneration = remoteDeviceGeneration;
     }
 
-    internal ReadOnlySpan<byte> NetworkId => networkId;
-    internal ReadOnlySpan<byte> RemoteAccountId => remoteAccountId;
-    internal ulong RemoteAccountGeneration { get; }
-    internal ReadOnlySpan<byte> RemoteDeviceId => remoteDeviceId;
-    internal ulong RemoteDeviceGeneration { get; }
-    internal ReadOnlySpan<byte> ConversationId => conversationId;
-    internal ReadOnlySpan<byte> ExactDph2Id => exactDph2Id;
+    public ReadOnlyMemory<byte> NetworkId => networkId.ToArray();
+    public ReadOnlyMemory<byte> RemoteAccountId => remoteAccountId.ToArray();
+    public ulong RemoteAccountGeneration { get; }
+    public ReadOnlyMemory<byte> RemoteDeviceId => remoteDeviceId.ToArray();
+    public ulong RemoteDeviceGeneration { get; }
+    public ReadOnlyMemory<byte> ConversationId => conversationId.ToArray();
+    public ReadOnlyMemory<byte> ExactDph2Id => exactDph2Id.ToArray();
 
-    internal static DeepDirectMessagingVerifiedSessionBinding FromVerified(
+    public static DeepDirectMessagingVerifiedSessionBinding FromVerified(
         ContactResolverVerifiedCapabilitySet verifiedContact,
         ContactConversationId32 conversationId,
         ReadOnlySpan<byte> remoteDeviceId,
@@ -489,7 +555,7 @@ internal sealed class DeepDirectMessagingInventoryPublication
 /// scope needed by the later privacy-routed XPK1 adapter. It owns all ephemeral
 /// initiator material until completion or disposal.
 /// </summary>
-internal sealed class DeepDirectMessagingInitiatorClaimPreparation : IDisposable
+public sealed class DeepDirectMessagingInitiatorClaimPreparation : IDisposable
 {
     private readonly object ownerToken;
     private readonly byte[] networkId;
@@ -526,13 +592,13 @@ internal sealed class DeepDirectMessagingInitiatorClaimPreparation : IDisposable
     internal ContactResolverReverifiedPeerAuthority VerifiedPeer { get; }
     internal VerifiedDpk2Offering VerifiedOffering { get; }
     internal InitiatorInitialSessionVerifiedScope VerifiedScope { get; }
-    internal ReadOnlyMemory<byte> NetworkId => Copy(networkId);
-    internal ReadOnlyMemory<byte> ClaimOperationId => Copy(operationId);
-    internal ReadOnlyMemory<byte> ResponderAccountId => Copy(responderAccountId);
-    internal ReadOnlyMemory<byte> ResponderDeviceId => Copy(responderDeviceId);
-    internal ReadOnlyMemory<byte> SenderEphemeralCommitment => Copy(senderEphemeralCommitment);
-    internal ReadOnlyMemory<byte> ExactDpk2 => Copy(exactDpk2);
-    internal ReadOnlyMemory<byte> ExactDpk2Hash => Copy(exactDpk2Hash);
+    public ReadOnlyMemory<byte> NetworkId => Copy(networkId);
+    public ReadOnlyMemory<byte> ClaimOperationId => Copy(operationId);
+    public ReadOnlyMemory<byte> ResponderAccountId => Copy(responderAccountId);
+    public ReadOnlyMemory<byte> ResponderDeviceId => Copy(responderDeviceId);
+    public ReadOnlyMemory<byte> SenderEphemeralCommitment => Copy(senderEphemeralCommitment);
+    public ReadOnlyMemory<byte> ExactDpk2 => Copy(exactDpk2);
+    public ReadOnlyMemory<byte> ExactDpk2Hash => Copy(exactDpk2Hash);
 
     internal InitiatorInitialSessionCommitCapability Complete(
         object expectedOwnerToken,
@@ -596,7 +662,7 @@ internal sealed class DeepDirectMessagingInitiatorClaimPreparation : IDisposable
 /// private while exposing only the operation ID and sender commitment required
 /// by the exact XPK1 claim.
 /// </summary>
-internal sealed class DeepDirectMessagingInitiatorClaimStart : IDisposable
+public sealed class DeepDirectMessagingInitiatorClaimStart : IDisposable
 {
     private readonly object ownerToken;
     private readonly byte[] operationId;
@@ -617,8 +683,8 @@ internal sealed class DeepDirectMessagingInitiatorClaimStart : IDisposable
     }
 
     internal ContactResolverReverifiedPeerAuthority VerifiedPeer { get; }
-    internal ReadOnlyMemory<byte> ClaimOperationId => Copy(operationId);
-    internal ReadOnlyMemory<byte> SenderEphemeralCommitment => Copy(senderCommitment);
+    public ReadOnlyMemory<byte> ClaimOperationId => Copy(operationId);
+    public ReadOnlyMemory<byte> SenderEphemeralCommitment => Copy(senderCommitment);
 
     internal InitiatorDph2PreKeyClaim Consume(object expectedOwnerToken)
     {
@@ -653,7 +719,7 @@ internal sealed class DeepDirectMessagingInitiatorClaimStart : IDisposable
     }
 }
 
-internal sealed class DeepDirectMessagingInitiatorCommitResult : IDisposable
+public sealed class DeepDirectMessagingInitiatorCommitResult : IDisposable
 {
     private readonly byte[] stateCommitment;
     private readonly byte[] journalHead;
@@ -663,10 +729,12 @@ internal sealed class DeepDirectMessagingInitiatorCommitResult : IDisposable
 
     internal DeepDirectMessagingInitiatorCommitResult(
         MessagingCryptoV1CommitResult commit,
-        InitiatorInitialSessionDispatchEnvelope dispatch)
+        InitiatorInitialSessionDispatchEnvelope dispatch,
+        DeepDirectMessagingVerifiedSessionBinding session)
     {
         ArgumentNullException.ThrowIfNull(commit);
         ArgumentNullException.ThrowIfNull(dispatch);
+        Session = session ?? throw new ArgumentNullException(nameof(session));
         Disposition = commit.Disposition;
         StateGeneration = commit.StateGeneration;
         JournalGeneration = commit.JournalGeneration;
@@ -680,15 +748,16 @@ internal sealed class DeepDirectMessagingInitiatorCommitResult : IDisposable
     }
 
     internal MessagingCryptoV1CommitDisposition Disposition { get; }
-    internal ulong StateGeneration { get; }
-    internal ReadOnlyMemory<byte> StateCommitment => stateCommitment.ToArray();
-    internal ulong JournalGeneration { get; }
-    internal ReadOnlyMemory<byte> JournalHead => journalHead.ToArray();
-    internal bool ForkLatched { get; }
-    internal bool TerminallyLatched { get; }
-    internal ReadOnlyMemory<byte> ExactDph2 => Value(exactDph2).ToArray();
-    internal ReadOnlyMemory<byte> ClaimOperationId => Value(claimOperationId).ToArray();
-    internal ReadOnlyMemory<byte> FullReplayHash => Value(fullReplayHash).ToArray();
+    public DeepDirectMessagingVerifiedSessionBinding Session { get; }
+    public ulong StateGeneration { get; }
+    public ReadOnlyMemory<byte> StateCommitment => stateCommitment.ToArray();
+    public ulong JournalGeneration { get; }
+    public ReadOnlyMemory<byte> JournalHead => journalHead.ToArray();
+    public bool ForkLatched { get; }
+    public bool TerminallyLatched { get; }
+    public ReadOnlyMemory<byte> ExactDph2 => Value(exactDph2).ToArray();
+    public ReadOnlyMemory<byte> ClaimOperationId => Value(claimOperationId).ToArray();
+    public ReadOnlyMemory<byte> FullReplayHash => Value(fullReplayHash).ToArray();
 
     public void Dispose()
     {
@@ -1150,7 +1219,10 @@ internal sealed class DeepDirectMessagingStorageOwner : IAsyncDisposable
                 using var dispatch = await adapter.ReadPendingDispatchAsync(cancellationToken)
                     .ConfigureAwait(false) ?? throw new CryptographicException(
                     "The committed initiator TRS1 has no exact durable DPH2 dispatch.");
-                return new DeepDirectMessagingInitiatorCommitResult(committed, dispatch);
+                return new DeepDirectMessagingInitiatorCommitResult(
+                    committed,
+                    dispatch,
+                    session);
             }
             finally
             {
@@ -1304,7 +1376,7 @@ internal sealed class DeepDirectMessagingStorageOwner : IAsyncDisposable
             return null;
         }
         if (!CryptographicOperations.FixedTimeEquals(
-                verifiedSession.NetworkId,
+                verifiedSession.NetworkId.Span,
                 localAuthority.NetworkId))
         {
             throw new CryptographicException(
@@ -1376,8 +1448,8 @@ internal sealed class DeepDirectMessagingStorageOwner : IAsyncDisposable
                         localAuthority.AccountGeneration,
                         localAuthority.DeviceId,
                         localAuthority.DeviceGeneration,
-                        verifiedSession.ConversationId,
-                        verifiedSession.ExactDph2Id,
+                        verifiedSession.ConversationId.Span,
+                        verifiedSession.ExactDph2Id.Span,
                         checked((ulong)identity.StoreGeneration));
                     using var options = new MessagingCryptoV1StoreOptions(
                         statePath,
@@ -1519,10 +1591,10 @@ internal sealed class DeepDirectMessagingStorageOwner : IAsyncDisposable
     {
         if (entry.RemoteAccountGeneration != expected.RemoteAccountGeneration ||
             entry.RemoteDeviceGeneration != expected.RemoteDeviceGeneration ||
-            !Fixed(entry.RemoteAccountId.Span, expected.RemoteAccountId) ||
-            !Fixed(entry.RemoteDeviceId.Span, expected.RemoteDeviceId) ||
-            !Fixed(entry.ConversationId.Span, expected.ConversationId) ||
-            !Fixed(entry.ExactDph2Id.Span, expected.ExactDph2Id))
+            !Fixed(entry.RemoteAccountId.Span, expected.RemoteAccountId.Span) ||
+            !Fixed(entry.RemoteDeviceId.Span, expected.RemoteDeviceId.Span) ||
+            !Fixed(entry.ConversationId.Span, expected.ConversationId.Span) ||
+            !Fixed(entry.ExactDph2Id.Span, expected.ExactDph2Id.Span))
         {
             throw new CryptographicException(
                 "The verified direct-message session conflicts with its durable catalog entry.");
@@ -1612,19 +1684,19 @@ internal sealed class DeepDirectMessagingStorageOwner : IAsyncDisposable
         {
             var record = Dph2Codec.Decode(exact);
             canonical = Dph2Codec.Encode(record);
-            if (!Fixed(session.NetworkId, localAuthority.NetworkId) ||
+            if (!Fixed(session.NetworkId.Span, localAuthority.NetworkId) ||
                 !Fixed(relationship.Address.NetworkId.Span, localAuthority.NetworkId) ||
                 !Fixed(relationship.Scope.AccountId.Bytes.Span, localAuthority.AccountId) ||
-                !Fixed(relationship.RemoteAccountId.Span, session.RemoteAccountId) ||
-                !Fixed(relationship.ConversationId.Span, session.ConversationId) ||
+                !Fixed(relationship.RemoteAccountId.Span, session.RemoteAccountId.Span) ||
+                !Fixed(relationship.ConversationId.Span, session.ConversationId.Span) ||
                 !Fixed(record.NetworkId.Span, localAuthority.NetworkId) ||
-                !Fixed(record.InitiatorAccountId.Span, session.RemoteAccountId) ||
-                !Fixed(record.InitiatorDeviceId.Span, session.RemoteDeviceId) ||
+                !Fixed(record.InitiatorAccountId.Span, session.RemoteAccountId.Span) ||
+                !Fixed(record.InitiatorDeviceId.Span, session.RemoteDeviceId.Span) ||
                 record.InitiatorDeviceGeneration != session.RemoteDeviceGeneration ||
                 !Fixed(record.ResponderAccountId.Span, localAuthority.AccountId) ||
                 !Fixed(record.ResponderDeviceId.Span, localAuthority.DeviceId) ||
                 record.ResponderDeviceGeneration != localAuthority.DeviceGeneration ||
-                !Fixed(record.SessionId.Span, session.ExactDph2Id) ||
+                !Fixed(record.SessionId.Span, session.ExactDph2Id.Span) ||
                 !Fixed(canonical, exact))
             {
                 throw new CryptographicException(
