@@ -102,7 +102,7 @@ public sealed class DeepDirectMessagingStorageFacade : IAsyncDisposable
             maximumMessagesWithoutPqInjection,
             cancellationToken);
 
-    public ValueTask<DeepDirectMessagingInitiatorCommitResult?>
+    internal ValueTask<DeepDirectMessagingInitiatorCommitResult?>
         TryCommitInitiatorSessionAsync(
             DeepDirectMessagingInitiatorClaimPreparation? preparedClaim,
             VerifiedXpc1PreKeyClaimReceipt? verifiedClaim,
@@ -114,6 +114,16 @@ public sealed class DeepDirectMessagingStorageFacade : IAsyncDisposable
             verifiedClaim,
             exactSessionInitDmc2,
             exactFirstApplicationDmc2,
+            cancellationToken);
+
+    public ValueTask<DeepDirectMessagingInitiatorCommitResult?>
+        TryCommitInitiatorSessionAsync(
+            DeepDirectMessagingInitiatorClaimPreparation? preparedClaim,
+            VerifiedXpc1PreKeyClaimReceipt? verifiedClaim,
+            CancellationToken cancellationToken = default) =>
+        CurrentOwner.TryCommitInitiatorSessionAsync(
+            preparedClaim,
+            verifiedClaim,
             cancellationToken);
 
     public ValueTask<ExactDpe2SendSuccessCapability?>
@@ -573,12 +583,14 @@ public sealed class DeepDirectMessagingInitiatorClaimPreparation : IDisposable
         ContactResolverReverifiedPeerAuthority verifiedPeer,
         VerifiedDpk2Offering verifiedOffering,
         InitiatorInitialSessionVerifiedScope verifiedScope,
+        VerifiedDmd1 currentDirectory,
         InitiatorDph2ClaimPreparation preparation)
     {
         this.ownerToken = ownerToken ?? throw new ArgumentNullException(nameof(ownerToken));
         VerifiedPeer = verifiedPeer ?? throw new ArgumentNullException(nameof(verifiedPeer));
         VerifiedOffering = verifiedOffering ?? throw new ArgumentNullException(nameof(verifiedOffering));
         VerifiedScope = verifiedScope ?? throw new ArgumentNullException(nameof(verifiedScope));
+        CurrentDirectory = currentDirectory ?? throw new ArgumentNullException(nameof(currentDirectory));
         this.preparation = preparation ?? throw new ArgumentNullException(nameof(preparation));
         networkId = preparation.NetworkId.ToArray();
         operationId = preparation.ClaimOperationId.ToArray();
@@ -592,6 +604,7 @@ public sealed class DeepDirectMessagingInitiatorClaimPreparation : IDisposable
     internal ContactResolverReverifiedPeerAuthority VerifiedPeer { get; }
     internal VerifiedDpk2Offering VerifiedOffering { get; }
     internal InitiatorInitialSessionVerifiedScope VerifiedScope { get; }
+    internal VerifiedDmd1 CurrentDirectory { get; }
     public ReadOnlyMemory<byte> NetworkId => Copy(networkId);
     public ReadOnlyMemory<byte> ClaimOperationId => Copy(operationId);
     public ReadOnlyMemory<byte> ResponderAccountId => Copy(responderAccountId);
@@ -673,16 +686,19 @@ public sealed class DeepDirectMessagingInitiatorClaimStart : IDisposable
     internal DeepDirectMessagingInitiatorClaimStart(
         object ownerToken,
         ContactResolverReverifiedPeerAuthority verifiedPeer,
+        VerifiedDmd1 currentDirectory,
         InitiatorDph2PreKeyClaim claim)
     {
         this.ownerToken = ownerToken ?? throw new ArgumentNullException(nameof(ownerToken));
         VerifiedPeer = verifiedPeer ?? throw new ArgumentNullException(nameof(verifiedPeer));
+        CurrentDirectory = currentDirectory ?? throw new ArgumentNullException(nameof(currentDirectory));
         this.claim = claim ?? throw new ArgumentNullException(nameof(claim));
         operationId = claim.ClaimOperationId.ToArray();
         senderCommitment = claim.SenderEphemeralCommitment.ToArray();
     }
 
     internal ContactResolverReverifiedPeerAuthority VerifiedPeer { get; }
+    internal VerifiedDmd1 CurrentDirectory { get; }
     public ReadOnlyMemory<byte> ClaimOperationId => Copy(operationId);
     public ReadOnlyMemory<byte> SenderEphemeralCommitment => Copy(senderCommitment);
 
@@ -1082,7 +1098,7 @@ internal sealed class DeepDirectMessagingStorageOwner : IAsyncDisposable
             var started = new ManagedInitiatorInitialSessionFactory(1)
                 .BeginClaim(localAgreementAuthority, exactCurrentDirectory);
             return new DeepDirectMessagingInitiatorClaimStart(
-                ownerToken, verifiedPeer, started);
+                ownerToken, verifiedPeer, exactCurrentDirectory.Head, started);
         }
         finally
         {
@@ -1137,6 +1153,7 @@ internal sealed class DeepDirectMessagingStorageOwner : IAsyncDisposable
                     startedClaim.VerifiedPeer,
                     verifiedOffering,
                     scope,
+                    startedClaim.CurrentDirectory,
                     prepared);
                 prepared = null;
                 return result;
@@ -1234,6 +1251,65 @@ internal sealed class DeepDirectMessagingStorageOwner : IAsyncDisposable
             capability?.Dispose();
             preparedClaim.Dispose();
             Zero(exactDph2Id);
+        }
+    }
+
+    internal ValueTask<DeepDirectMessagingInitiatorCommitResult?>
+        TryCommitInitiatorSessionAsync(
+            DeepDirectMessagingInitiatorClaimPreparation? preparedClaim,
+            VerifiedXpc1PreKeyClaimReceipt? verifiedClaim,
+            CancellationToken cancellationToken = default)
+    {
+        if (preparedClaim is null || verifiedClaim is null)
+        {
+            preparedClaim?.Dispose();
+            return ValueTask.FromResult<DeepDirectMessagingInitiatorCommitResult?>(null);
+        }
+
+        byte[]? logicalMessageId = null;
+        byte[]? handshakeNonce = null;
+        byte[]? exactSessionInit = null;
+        try
+        {
+            logicalMessageId = CreateNonzeroKey();
+            handshakeNonce = CreateNonzeroKey();
+            var createdAt = checked(verifiedClaim.ServerTimeUnixSeconds * 1000UL);
+            var expiresAt = checked(createdAt + 3_600_000UL);
+            var payload = ApplicationCoreCodec.CreateSessionInitPayload(
+                handshakeNonce,
+                preparedClaim.CurrentDirectory.Record,
+                SessionInitCapabilities.TextCore |
+                SessionInitCapabilities.DeviceControl |
+                SessionInitCapabilities.AttachmentCodec);
+            var authored = ApplicationCoreCodec.AuthorDmc2(
+                preparedClaim.VerifiedScope.NetworkId,
+                logicalMessageId,
+                preparedClaim.VerifiedScope.ConversationId,
+                localAuthority.AccountId,
+                localAuthority.DeviceId,
+                senderClientSequence: 1,
+                createdAt,
+                expiresAt,
+                Dmc2Flags.None,
+                ReadOnlySpan<byte>.Empty,
+                payload);
+            exactSessionInit = authored.CanonicalBytes.ToArray();
+            return TryCommitInitiatorSessionAsync(
+                preparedClaim,
+                verifiedClaim,
+                exactSessionInit,
+                cancellationToken: cancellationToken);
+        }
+        catch
+        {
+            preparedClaim.Dispose();
+            throw;
+        }
+        finally
+        {
+            Zero(logicalMessageId);
+            Zero(handshakeNonce);
+            Zero(exactSessionInit);
         }
     }
 
