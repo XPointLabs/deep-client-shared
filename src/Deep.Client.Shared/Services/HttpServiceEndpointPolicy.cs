@@ -374,6 +374,40 @@ public sealed class HttpServiceTransportFactory
             clientOptions,
             client => new HttpServiceRequestTransport(client, options, endpointPolicy));
 
+    public AccountDirectoryV1.AccountDirectoryGenesisAdmissionClient
+        CreateAccountDirectoryGenesisAdmissionClient(
+            string directoryBaseUrl,
+            HttpServiceClientOptions? clientOptions = null,
+            TimeSpan requestTimeout = default)
+    {
+        var timeout = requestTimeout == default
+            ? TimeSpan.FromSeconds(30)
+            : requestTimeout;
+        var transport = CreateRequestTransport(
+            new HttpServiceRequestTransportOptions(
+                directoryBaseUrl,
+                [AccountDirectoryV1.AccountDirectoryGenesisAdmissionClient.EndpointPath],
+                Deep.Protocol.AccountDirectoryV1
+                    .AccountDirectoryGenesisAdmissionWireCodec.RequestMediaType,
+                Deep.Protocol.AccountDirectoryV1
+                    .AccountDirectoryGenesisAdmissionWireCodec.ResponseMediaType,
+                Deep.Protocol.AccountDirectoryV1
+                    .AccountDirectoryGenesisAdmissionWireCodec.MaximumRequestLength,
+                Deep.Protocol.AccountDirectoryV1
+                    .AccountDirectoryGenesisAdmissionWireCodec.MaximumResponseLength,
+                timeout),
+            clientOptions);
+        try
+        {
+            return new AccountDirectoryV1.AccountDirectoryGenesisAdmissionClient(transport);
+        }
+        catch
+        {
+            transport.Dispose();
+            throw;
+        }
+    }
+
     internal HttpContactResolveDirectoryArtifactSource CreateContactResolveDirectoryArtifactSource(
         HttpContactResolveDirectoryOptions options,
         IOnionMonotonicClock monotonicClock,

@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using Deep.Client.Shared.Persistence;
 using Deep.Client.Shared.Services;
+using Deep.Client.Shared.Services.AccountDirectoryV1;
 using Deep.Protocol.AccountDirectoryV1;
 using Deep.Protocol.ApplicationCore;
 
@@ -71,6 +72,35 @@ public sealed class DeepGenesisDeviceActivationTests
         var restored = await Service(accountStore, secureStorage)
             .EnsureGenesisDeviceActivatedAsync();
         Assert.Equal(1UL, restored.CurrentDirectory.Head.Record.DirectoryGeneration);
+    }
+
+    [Fact]
+    public async Task GenesisAdmissionRequest_IsDeterministicAndIndependentlyVerifiable()
+    {
+        var accounts = Service(
+            new InMemoryDeepAccountStore(),
+            new InMemoryDeepSecureStorage());
+        await accounts.CreateAsync("Alice");
+        var activation = await accounts.EnsureGenesisDeviceActivatedAsync();
+
+        var first = AccountDirectoryGenesisAdmissionClient.CreateRequest(activation);
+        var second = AccountDirectoryGenesisAdmissionClient.CreateRequest(activation);
+        var exact = AccountDirectoryGenesisAdmissionWireCodec.EncodeRequest(first);
+        var decoded = AccountDirectoryGenesisAdmissionWireCodec.DecodeRequest(exact);
+        var verified = AccountDirectoryGenesisAdmissionVerifier.Verify(
+            decoded.Admission,
+            (ulong)Now.ToUnixTimeSeconds(),
+            deploymentProfileId: 1,
+            supportedReader: 1);
+
+        Assert.Equal(first.OperationId.ToArray(), second.OperationId.ToArray());
+        Assert.False(first.OperationId.Span.SequenceEqual(new byte[32]));
+        Assert.Equal(
+            AccountDirectoryAdc1Codec.Encode(activation.DirectoryCheckpoint.Checkpoint),
+            AccountDirectoryAdc1Codec.Encode(verified.Checkpoint));
+        Assert.Equal(
+            activation.DirectoryCheckpoint.Checkpoint.DirectoryLeafKey.ToArray(),
+            verified.Checkpoint.DirectoryLeafKey.ToArray());
     }
 
     private static DeepAccountService Service(
