@@ -292,10 +292,11 @@ public sealed class ContactAddressPublicationOrchestratorTests
             var locator = Bytes(32, 5);
             var xir = Bytes(32, 6);
             var ciphertext = Bytes(40, marker);
+            var routeClosure = ContactResolverClientOrchestrationTests.RouteClosure();
             const ulong effectiveExpiresAt = 80;
             var bodyHash = Xpu1Codec.ComputeAuthorizedBodyHash(
                 network, operation, view, placement, 10, 20, locator, xir, 0,
-                new byte[32], ciphertext, 0, effectiveExpiresAt);
+                new byte[32], ciphertext, 0, effectiveExpiresAt, routeClosure);
             var witnessRows = new byte[192];
             Bytes(32, 1).CopyTo(witnessRows, 0);
             Bytes(64, 3).CopyTo(witnessRows, 32);
@@ -312,7 +313,7 @@ public sealed class ContactAddressPublicationOrchestratorTests
             ]);
             return Xpu1Codec.Encode(
                 network, operation, view, placement, 10, 20, locator, xir, 0,
-                new byte[32], ciphertext, 0, effectiveExpiresAt, exactXpa1);
+                new byte[32], ciphertext, 0, effectiveExpiresAt, routeClosure, exactXpa1);
         }
     }
 
