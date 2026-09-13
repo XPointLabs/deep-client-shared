@@ -210,6 +210,17 @@ internal sealed class DeepDirectMessagingLocalAuthorityBinding
         Fixed(other.DeviceId, deviceId) &&
         Fixed(other.ExactDpd1Hash, exactDpd1Hash);
 
+    internal bool Matches(LocalDeviceX25519AgreementAuthority other)
+    {
+        ArgumentNullException.ThrowIfNull(other);
+        return other.AccountGeneration == AccountGeneration &&
+            other.DeviceGeneration == DeviceGeneration &&
+            Fixed(other.NetworkId.Span, networkId) &&
+            Fixed(other.AccountId.Span, accountId) &&
+            Fixed(other.DeviceId.Span, deviceId) &&
+            Fixed(other.ExactDpd1Hash.Span, exactDpd1Hash);
+    }
+
     private static void RequireIdentifier(ReadOnlySpan<byte> value, int length, string name)
     {
         if (value.Length != length || value.IndexOfAnyExcept((byte)0) < 0)
@@ -580,6 +591,68 @@ internal sealed class DeepDirectMessagingInitiatorClaimPreparation : IDisposable
     }
 }
 
+/// <summary>
+/// One-use pre-XPK1 owner. It keeps the freshly generated initiator secrets
+/// private while exposing only the operation ID and sender commitment required
+/// by the exact XPK1 claim.
+/// </summary>
+internal sealed class DeepDirectMessagingInitiatorClaimStart : IDisposable
+{
+    private readonly object ownerToken;
+    private readonly byte[] operationId;
+    private readonly byte[] senderCommitment;
+    private InitiatorDph2PreKeyClaim? claim;
+    private int disposed;
+
+    internal DeepDirectMessagingInitiatorClaimStart(
+        object ownerToken,
+        ContactResolverReverifiedPeerAuthority verifiedPeer,
+        InitiatorDph2PreKeyClaim claim)
+    {
+        this.ownerToken = ownerToken ?? throw new ArgumentNullException(nameof(ownerToken));
+        VerifiedPeer = verifiedPeer ?? throw new ArgumentNullException(nameof(verifiedPeer));
+        this.claim = claim ?? throw new ArgumentNullException(nameof(claim));
+        operationId = claim.ClaimOperationId.ToArray();
+        senderCommitment = claim.SenderEphemeralCommitment.ToArray();
+    }
+
+    internal ContactResolverReverifiedPeerAuthority VerifiedPeer { get; }
+    internal ReadOnlyMemory<byte> ClaimOperationId => Copy(operationId);
+    internal ReadOnlyMemory<byte> SenderEphemeralCommitment => Copy(senderCommitment);
+
+    internal InitiatorDph2PreKeyClaim Consume(object expectedOwnerToken)
+    {
+        if (!ReferenceEquals(ownerToken, expectedOwnerToken))
+            throw new CryptographicException("The pre-XPK1 claim belongs to another direct-message owner.");
+        var owned = Interlocked.Exchange(ref claim, null) ??
+            throw new ObjectDisposedException(nameof(DeepDirectMessagingInitiatorClaimStart));
+        DisposePublicValues();
+        return owned;
+    }
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref disposed, 1) != 0)
+            return;
+        Interlocked.Exchange(ref claim, null)?.Dispose();
+        CryptographicOperations.ZeroMemory(operationId);
+        CryptographicOperations.ZeroMemory(senderCommitment);
+    }
+
+    private void DisposePublicValues()
+    {
+        CryptographicOperations.ZeroMemory(operationId);
+        CryptographicOperations.ZeroMemory(senderCommitment);
+        Interlocked.Exchange(ref disposed, 1);
+    }
+
+    private byte[] Copy(byte[] value)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
+        return value.ToArray();
+    }
+}
+
 internal sealed class DeepDirectMessagingInitiatorCommitResult : IDisposable
 {
     private readonly byte[] stateCommitment;
@@ -915,62 +988,102 @@ internal sealed class DeepDirectMessagingStorageOwner : IAsyncDisposable
         }
     }
 
-    internal async ValueTask<DeepDirectMessagingInitiatorClaimPreparation?>
-        TryPrepareInitiatorClaimAsync(
+    internal async ValueTask<DeepDirectMessagingInitiatorClaimStart?>
+        TryBeginInitiatorClaimAsync(
             ContactResolverReverifiedPeerAuthority? verifiedPeer,
+            LocalDeviceX25519AgreementAuthority? localAgreementAuthority,
+            Dmd1LineageState? exactCurrentDirectory,
+            CancellationToken cancellationToken = default)
+    {
+        if (verifiedPeer is null || localAgreementAuthority is null || exactCurrentDirectory is null)
+        {
+            return null;
+        }
+        if (!localAuthority.Matches(localAgreementAuthority) ||
+            !Fixed(verifiedPeer.Bundle.Directory.Record.NetworkId.Span, localAuthority.NetworkId))
+        {
+            throw new CryptographicException(
+                "The pre-XPK1 claim is outside the verified local or remote account authority.");
+        }
+
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            ThrowIfDisposed();
+            var started = new ManagedInitiatorInitialSessionFactory(1)
+                .BeginClaim(localAgreementAuthority, exactCurrentDirectory);
+            return new DeepDirectMessagingInitiatorClaimStart(
+                ownerToken, verifiedPeer, started);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    internal async ValueTask<DeepDirectMessagingInitiatorClaimPreparation?>
+        TryCompleteInitiatorClaimAsync(
+            DeepDirectMessagingInitiatorClaimStart? startedClaim,
             VerifiedDpk2Offering? verifiedOffering,
             LocalDeviceX25519AgreementLease? deviceAgreementLease,
             int maximumMessagesWithoutPqInjection,
             CancellationToken cancellationToken = default)
     {
-        if (verifiedPeer is null || verifiedOffering is null || deviceAgreementLease is null)
+        if (startedClaim is null || verifiedOffering is null || deviceAgreementLease is null)
         {
+            startedClaim?.Dispose();
             deviceAgreementLease?.Dispose();
             return null;
         }
         if (maximumMessagesWithoutPqInjection is < 1 or > 2048)
         {
+            startedClaim.Dispose();
             deviceAgreementLease.Dispose();
             throw new ArgumentOutOfRangeException(nameof(maximumMessagesWithoutPqInjection));
         }
 
-        var gateHeld = false;
-        var transferred = false;
+        InitiatorDph2PreKeyClaim? started = null;
         InitiatorDph2ClaimPreparation? prepared = null;
+        var leaseTransferred = false;
         try
         {
             await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-            gateHeld = true;
-            ThrowIfDisposed();
-            var scope = InitiatorInitialSessionVerifiedScope.FromReverifiedPeer(
-                verifiedPeer,
-                verifiedOffering.ResponderDeviceId.Span);
-            RequireLocalInitiatorLease(deviceAgreementLease);
-            RequireVerifiedOfferingMatchesScope(verifiedOffering, verifiedPeer, scope);
-            var factory = new ManagedInitiatorInitialSessionFactory(
-                maximumMessagesWithoutPqInjection);
-            prepared = factory.PrepareClaim(verifiedOffering, deviceAgreementLease);
-            transferred = true;
-            var result = new DeepDirectMessagingInitiatorClaimPreparation(
-                ownerToken,
-                verifiedPeer,
-                verifiedOffering,
-                scope,
-                prepared);
-            prepared = null;
-            return result;
-        }
-        finally
-        {
-            prepared?.Dispose();
-            if (!transferred)
+            try
             {
-                deviceAgreementLease.Dispose();
+                ThrowIfDisposed();
+                var scope = InitiatorInitialSessionVerifiedScope.FromReverifiedPeer(
+                    startedClaim.VerifiedPeer,
+                    verifiedOffering.ResponderDeviceId.Span);
+                RequireLocalInitiatorLease(deviceAgreementLease);
+                RequireVerifiedOfferingMatchesScope(
+                    verifiedOffering, startedClaim.VerifiedPeer, scope);
+                started = startedClaim.Consume(ownerToken);
+                prepared = new ManagedInitiatorInitialSessionFactory(
+                        maximumMessagesWithoutPqInjection)
+                    .CompleteClaim(started, verifiedOffering, deviceAgreementLease);
+                started = null;
+                leaseTransferred = true;
+                var result = new DeepDirectMessagingInitiatorClaimPreparation(
+                    ownerToken,
+                    startedClaim.VerifiedPeer,
+                    verifiedOffering,
+                    scope,
+                    prepared);
+                prepared = null;
+                return result;
             }
-            if (gateHeld)
+            finally
             {
                 gate.Release();
             }
+        }
+        finally
+        {
+            started?.Dispose();
+            prepared?.Dispose();
+            startedClaim.Dispose();
+            if (!leaseTransferred)
+                deviceAgreementLease.Dispose();
         }
     }
 
