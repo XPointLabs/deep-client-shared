@@ -1217,6 +1217,83 @@ internal sealed class DeepDirectMessagingStorageOwner : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Advances one verified, already activated direct session and commits the
+    /// exact DPE2 send transition before releasing the single-use network
+    /// dispatch capability. Neither raw TRS1 state nor a caller-provided
+    /// persistence authority crosses the account owner boundary.
+    /// </summary>
+    internal async ValueTask<ExactDpe2SendSuccessCapability?>
+        TryCommitEstablishedSendAsync(
+            DeepDirectMessagingVerifiedSessionBinding? verifiedSession,
+            ReadOnlyMemory<byte> exactDmc2,
+            ReadOnlyMemory<byte> operationId,
+            CancellationToken cancellationToken = default)
+    {
+        if (verifiedSession is null)
+        {
+            return null;
+        }
+
+        var opened = await TryOpenSessionAsync(
+                verifiedSession,
+                createIfMissing: false,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (opened is null)
+        {
+            return null;
+        }
+
+        using var lease = await opened.Store
+            .AcquireSendPreparationLeaseAsync(cancellationToken)
+            .ConfigureAwait(false);
+        using var prepared = lease.PrepareSend(
+            exactDmc2.Span,
+            localAuthority.NetworkId,
+            operationId.Span);
+        return await prepared.CommitAsync(
+                new ExactDpe2SqliteDurableTransactionAuthority(opened.Store),
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Opens and durably commits one exact DPE2 against its verified session.
+    /// The returned capability contains authenticated DMC2 only after the
+    /// SQLCipher ratchet/replay/deletion transaction has committed.
+    /// </summary>
+    internal async ValueTask<ExactDpe2ReceiveSuccessCapability?>
+        TryCommitEstablishedReceiveAsync(
+            DeepDirectMessagingVerifiedSessionBinding? verifiedSession,
+            ReadOnlyMemory<byte> exactDpe2,
+            CancellationToken cancellationToken = default)
+    {
+        if (verifiedSession is null)
+        {
+            return null;
+        }
+
+        var opened = await TryOpenSessionAsync(
+                verifiedSession,
+                createIfMissing: false,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (opened is null)
+        {
+            return null;
+        }
+
+        using var lease = await opened.Store
+            .AcquireReceivePreparationLeaseAsync(exactDpe2, cancellationToken)
+            .ConfigureAwait(false);
+        using var prepared = lease.PrepareReceive();
+        return await prepared.CommitAsync(
+                new ExactDpe2SqliteDurableTransactionAuthority(opened.Store),
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
     internal async ValueTask<DeepDirectMessagingSessionStoreBinding?> TryOpenSessionAsync(
         DeepDirectMessagingVerifiedSessionBinding? verifiedSession,
         bool createIfMissing,
