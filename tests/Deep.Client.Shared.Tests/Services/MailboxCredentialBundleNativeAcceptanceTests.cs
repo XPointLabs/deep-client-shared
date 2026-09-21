@@ -433,6 +433,7 @@ public sealed partial class MailboxCredentialBundleImporterTests
         {
             await transport.AcknowledgeOpaqueMailboxInboxAsync(
                 signer,
+                identity.SessionId,
                 entry.ServerHash);
         }
         Assert.Equal(1, ingress.AcknowledgeCalls);
@@ -1379,6 +1380,7 @@ public sealed partial class MailboxCredentialBundleImporterTests
             using var signer = new AcceptanceMailboxSigner(identity);
             await native.AcknowledgeOpaqueMailboxInboxAsync(
                 signer,
+                identity.SessionId,
                 entry.ServerHash);
             Assert.Equal(1, ingress.AcknowledgeCalls);
         }
@@ -1455,7 +1457,8 @@ public sealed partial class MailboxCredentialBundleImporterTests
                 identity, cursor: null, limit: 1)).Entries);
             serverHash = entry.ServerHash;
             await Assert.ThrowsAsync<ClientMailboxTransportException>(() =>
-                first.AcknowledgeOpaqueMailboxInboxAsync(signer, serverHash));
+                first.AcknowledgeOpaqueMailboxInboxAsync(
+                    signer, identity.SessionId, serverHash));
             var ambiguous = Assert.IsType<MailboxAckCorrelationProjection>(
                 await ((IMailboxAckCorrelationProjectionSource)first)
                     .ProjectMailboxAckCorrelationAsync(
@@ -1474,7 +1477,8 @@ public sealed partial class MailboxCredentialBundleImporterTests
             fixture.AndroidOptions with { TimeProvider = clock },
             MailboxInfrastructureOwnership.UserManaged);
         using var restarted = Native(reopened);
-        await restarted.AcknowledgeOpaqueMailboxInboxAsync(signer, serverHash);
+        await restarted.AcknowledgeOpaqueMailboxInboxAsync(
+            signer, identity.SessionId, serverHash);
         var recovered = Assert.IsType<MailboxAckCorrelationProjection>(
             await ((IMailboxAckCorrelationProjectionSource)restarted)
                 .ProjectMailboxAckCorrelationAsync(
@@ -2404,17 +2408,19 @@ public sealed partial class MailboxCredentialBundleImporterTests
 
         public Task<OpaqueMailboxInboxPage> RetrieveOpaqueMailboxInboxAsync(
             IMailboxOperationSigner signer,
+            SessionId account,
             OpaqueMailboxContinuation continuation,
             CancellationToken cancellationToken = default) =>
             inner.RetrieveOpaqueMailboxInboxAsync(
-                signer, continuation, cancellationToken);
+                signer, account, continuation, cancellationToken);
 
         public Task AcknowledgeOpaqueMailboxInboxAsync(
             IMailboxOperationSigner signer,
+            SessionId account,
             string opaqueItemHandle,
             CancellationToken cancellationToken = default) =>
             inner.AcknowledgeOpaqueMailboxInboxAsync(
-                signer, opaqueItemHandle, cancellationToken);
+                signer, account, opaqueItemHandle, cancellationToken);
     }
 
     private sealed class ScriptedCursorIngress(

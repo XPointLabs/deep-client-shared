@@ -92,18 +92,89 @@ approval.
 
 ## Persistence and recovery
 
-The production store is SQLCipher-backed schema v16. Unsupported schemas and
-incorrect keys require explicit reset; there are no migrations or dual
-readers. Mailbox request preparation, replay-counter leasing, outbox attempts,
-durable receipts, traversal cursors, continuation tokens, encrypted inbox rows,
-acknowledgements, expiry quarantine, and coordinator replay evidence use
-atomic transactions and revision checks.
+The retired Session-derived store used SQLCipher schema v16; it is not the
+clean production mailbox store. The current account-scoped `DMB1` SQLCipher
+store is schema generation 2. Unsupported schemas and incorrect keys require
+explicit reset; there are no migrations or dual readers. It retains mailbox
+traversal, encrypted transport inbox rows, and durable transport outbox state.
+Generation 2 adds a separate account-wide semantic DMC2 inbox for initial
+SessionInit/ContactHello and direct messages, edits, reactions, receipts, and
+attachment offers/cancellations.
+It binds one local account generation, exact canonical event bytes, and the
+semantic key `(conversationId, logicalMessageId, authorDeviceId)`. Exact
+cross-session replay is idempotent; changed bytes under the same key create a
+durable fork latch. Group DMC2 kinds cannot enter this direct-only handoff.
+The previous `DMB1` generation-1 database requires an explicit preproduction
+reset.
+
+Bounded authority clients now cover both halves of permanent Contact
+publication. The route client accepts only a verifier-derived XRA1 proposal and
+verifies exact PMS2/XRC1/XSS1. The publication client accepts only a
+device-custody-authored request and independently verifies exact XPA1/XPU1,
+current directory freshness and InviteResolver placement. HTTP success or
+structurally valid records never create a publication capability.
+
+The clean MAUI account owner opens DMB1 with a distinct protected SQLCipher
+key scoped to the account's store instance. It refuses an existing database
+without that key or a retained key without the database, and removes the
+database family on local account reset.
+This lifecycle wiring does not yet run mailbox retrieve or present messages.
 
 An accepted/durable outcome is reconstructed only from persisted canonical
 evidence. A crash before local outcome commit may resend the same MAU2 after
 the bounded retry lease; replica and operation idempotency handle the replay.
 A crash after accepted evidence promotes the same attempt without allocating a
 new counter.
+
+The clean account-owned inbound mailbox bridge reuses the transport's exact
+MEO1/DAO1 validator: current route epoch and blinded IDs, external digest,
+derived operation ID, DAO1 hash and local network must match before the
+protected recipient key opens the DAO1. This returns only an opened DPH2/DPE2;
+it does not stage a session, materialize an inbox event or authorize ACK.
+For an opened initial DPH2, the protected pre-key owner selects only the exact
+public DPK2 hash named by the initiation and checks its local device scope and
+selected-prekey tuple. This read does not reserve or reveal a private pre-key.
+The responder pre-claim path also requires its verified DPK2 offering to equal
+that stored row before it can restore secrets. The caller must still obtain
+current initiator-directory and XPC1 threshold evidence; this is not yet wired
+to MAUI mailbox receive.
+
+The separate clean-break per-session messaging-crypto SQLCipher store is schema
+generation 7. A fresh authenticated DPE2 receive stages its exact DMC2 in the
+same transaction as the ratchet/replay/deletion journal and TRS1 update. After
+restart, the exact operation ID and envelope hash retrieve that pending DMC2;
+an exact ratchet replay itself does not decrypt it again. Responder initial
+DPH2 now stages exact authenticated SessionInit and optional first DMC2 with
+TRS1 in one transaction, binds both event hashes into the initialization
+fingerprint, and recovers them after restart. This is only a
+recoverable E2EE-to-application handoff, not by itself MSG-01 inbox
+materialization or mailbox ACK authority. A verified direct-session owner can
+replay both staged events into the account-wide semantic inbox atomically.
+For ContactHello the owner first binds relationship ID, verified peer DAB1/DMD1
+hashes, the conversation ID derived from the relationship and both accounts,
+and embedded XUR1 network, author device, DPD1 and lifetime. The unsolicited
+responder additionally requires the current initiator checkpoint and verified
+recipient bundle retained by DPH2/XPC1 promotion, then checks the exact safety
+number and XUR1 device signature before opening a conversation store. This
+does not close XUR1 to its PMT2 placement and does not authorize UI
+projection or ACK. The remaining ContactHello state application, stage-retirement and production
+mailbox receive composition are not yet connected. This initial handoff grants
+no ACK. An established direct DPE2 can mint an exact DAO1 ACK receipt only
+through the combined ratchet-commit and durable-materialization factory;
+initial DPH2, group, and unverified
+or forked DMC2 still cannot mint one.
+The relationship-bound responder path still requires pre-existing verified
+contact evidence. For unsolicited first contact, the account-owned Shared
+responder can now defer store selection until authenticated SessionInit and
+ContactHello establish the conversation scope. Final exact replay resolves an
+existing matching protected-catalog entry without reopening prekey secrets.
+This path stages the initial events but applies no contact state and grants no
+ACK. The staged result is exposed through the account-owned MAUI runtime,
+without exporting its internal saga authority. MAUI mailbox receive and the
+ContactHello/inbox transition still need to use it before first-contact receive
+works.
+Existing generation-5 session stores require explicit
+pre-production reset; there is no migration or dual reader.
 
 ## Transport profiles and future ownership
 

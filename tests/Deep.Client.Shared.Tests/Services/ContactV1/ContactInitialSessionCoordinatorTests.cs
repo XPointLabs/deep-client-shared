@@ -10,6 +10,7 @@ using Deep.Client.Shared.Persistence.MessagingCryptoV1;
 using Deep.Client.Shared.Persistence.PreKeyV1;
 using Deep.Client.Shared.Services;
 using Deep.Client.Shared.Services.ContactV1;
+using Deep.Client.Shared.Services.MessagingV1;
 using Deep.Client.Shared.Tests.Persistence.PreKeyV1;
 using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.ContactV1;
@@ -66,6 +67,117 @@ public sealed class ContactInitialSessionCoordinatorTests
 
         Assert.Equal(PreKeyV1InitialSessionSagaDisposition.Initialized, initialized.Disposition);
         Assert.Equal(PreKeyV1InitialSessionSagaDisposition.ExactReplay, replay.Disposition);
+    }
+
+    [Theory]
+    [InlineData((int)Dpk2PrekeyKind.OneTime)]
+    [InlineData((int)Dpk2PrekeyKind.LastResort)]
+    public async Task DeferredStoreResolutionCanRecoverReservationAndFinalReplay(int kindValue)
+    {
+        var kind = (Dpk2PrekeyKind)kindValue;
+        using var fixture = new Fixture(kind, kind == Dpk2PrekeyKind.LastResort ? (ushort)1 : (ushort)0);
+        await fixture.ProvisionAsync();
+        await using var owner = fixture.OpenOwner();
+        await using var sessions = fixture.OpenSessions();
+        var callbacks = 0;
+        var unavailable = await owner.CommitInitialSessionSagaForTestsAsync(
+            fixture.TestClaim(),
+            (session, first, _) =>
+            {
+                callbacks++;
+                Assert.Empty(session.ToArray());
+                Assert.Empty(first.ToArray());
+                return ValueTask.FromResult<SqliteMessagingCryptoV1Store?>(null);
+            },
+            fixture.Trs1(0x62));
+        Assert.Equal(PreKeyV1InitialSessionSagaDisposition.SessionRejected, unavailable.Disposition);
+        Assert.Equal(PreKeyV1ClaimDisposition.Reserved, unavailable.PreKeyDisposition);
+
+        var initialized = await owner.CommitInitialSessionSagaForTestsAsync(
+            fixture.TestClaim(),
+            (session, first, _) =>
+            {
+                callbacks++;
+                Assert.Empty(session.ToArray());
+                Assert.Empty(first.ToArray());
+                return ValueTask.FromResult<SqliteMessagingCryptoV1Store?>(sessions);
+            },
+            fixture.Trs1(0x62));
+        Assert.Equal(PreKeyV1InitialSessionSagaDisposition.Initialized, initialized.Disposition);
+        Assert.Equal(PreKeyV1ClaimDisposition.Consumed, initialized.PreKeyDisposition);
+
+        var replay = await owner.CommitInitialSessionSagaForTestsAsync(
+            fixture.TestClaim(),
+            (session, first, _) =>
+            {
+                callbacks++;
+                Assert.Empty(session.ToArray());
+                Assert.Empty(first.ToArray());
+                return ValueTask.FromResult<SqliteMessagingCryptoV1Store?>(sessions);
+            },
+            fixture.Trs1(0x63));
+        Assert.Equal(PreKeyV1InitialSessionSagaDisposition.ExactReplay, replay.Disposition);
+        Assert.Equal(PreKeyV1ClaimDisposition.ExactFinalReplay, replay.PreKeyDisposition);
+        Assert.Equal(3, callbacks);
+    }
+
+    [Fact]
+    public void UnsolicitedStoreScopeComesFromAuthenticatedContactHello()
+    {
+        using var fixture = new Fixture(Dpk2PrekeyKind.OneTime);
+        var initiation = fixture.Pair().Initiation;
+        var (session, hello, conversation) = InboundContactEvents(fixture);
+        var (wrongSession, wrongHello, _) = InboundContactEvents(fixture, wrongConversation: true);
+        try
+        {
+            var binding = DeepDirectMessagingVerifiedSessionBinding.FromAuthenticatedInbound(
+                initiation, session, hello, fixture.LocalAccount.AccountId.Bytes.Span,
+                fixture.LocalDeviceId, fixture.Dph2.ResponderDeviceGeneration);
+            Assert.Equal(conversation, binding.ConversationId.ToArray());
+            Assert.Equal(fixture.RemoteAccount.AccountId.Bytes.ToArray(),
+                binding.RemoteAccountId.ToArray());
+            Assert.Equal(fixture.Dph2.SessionId.ToArray(), binding.ExactDph2Id.ToArray());
+
+            var catalog = new DeepDirectMessagingSessionCatalogEntry(
+                binding.RemoteAccountId.Span, binding.RemoteAccountGeneration,
+                binding.RemoteDeviceId.Span, binding.RemoteDeviceGeneration,
+                binding.ConversationId.Span, binding.ExactDph2Id.Span);
+            var recovered = DeepDirectMessagingVerifiedSessionBinding.FromCommittedInboundCatalog(
+                initiation, catalog, fixture.LocalAccount.AccountId.Bytes.Span,
+                fixture.LocalDeviceId, fixture.Dph2.ResponderDeviceGeneration);
+            Assert.Equal(binding.ConversationId.ToArray(), recovered.ConversationId.ToArray());
+
+            Assert.Throws<CryptographicException>(() =>
+                DeepDirectMessagingVerifiedSessionBinding.FromAuthenticatedInbound(
+                    initiation, wrongSession, wrongHello,
+                    fixture.LocalAccount.AccountId.Bytes.Span,
+                    fixture.LocalDeviceId, fixture.Dph2.ResponderDeviceGeneration));
+            Assert.Throws<CryptographicException>(() =>
+                DeepDirectMessagingVerifiedSessionBinding.FromAuthenticatedInbound(
+                    initiation, session, session,
+                    fixture.LocalAccount.AccountId.Bytes.Span,
+                    fixture.LocalDeviceId, fixture.Dph2.ResponderDeviceGeneration));
+            Assert.Throws<CryptographicException>(() =>
+                DeepDirectMessagingVerifiedSessionBinding.FromAuthenticatedInbound(
+                    initiation, session, hello,
+                    fixture.LocalAccount.AccountId.Bytes.Span,
+                    Bytes(32, 0xe1), fixture.Dph2.ResponderDeviceGeneration));
+            var foreign = new DeepDirectMessagingSessionCatalogEntry(
+                binding.RemoteAccountId.Span, binding.RemoteAccountGeneration,
+                binding.RemoteDeviceId.Span, binding.RemoteDeviceGeneration,
+                binding.ConversationId.Span, Bytes(32, 0xe1));
+            Assert.Throws<CryptographicException>(() =>
+                DeepDirectMessagingVerifiedSessionBinding.FromCommittedInboundCatalog(
+                    initiation, foreign, fixture.LocalAccount.AccountId.Bytes.Span,
+                    fixture.LocalDeviceId, fixture.Dph2.ResponderDeviceGeneration));
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(session);
+            CryptographicOperations.ZeroMemory(hello);
+            CryptographicOperations.ZeroMemory(wrongSession);
+            CryptographicOperations.ZeroMemory(wrongHello);
+        }
     }
 
     [Fact]
@@ -333,6 +445,8 @@ public sealed class ContactInitialSessionCoordinatorTests
         private Dph2Record BuildDph2() => new(
             NetworkId, RemoteAccount.AccountId.Bytes.Span, RemoteDeviceId, 13,
             ArtifactReference(ArtifactType.Dpd1, 776, Bytes(32, 0x51)),
+            Deep.Protocol.ApplicationCore.ApplicationCoreCodec.AuthorDid1(
+                Bytes(32, 0x4f), Bytes(16, 0x50)).CanonicalBytes.Span,
             LocalAccount.AccountId.Bytes.Span, LocalDeviceId,
             authoring.DeviceGeneration, dpkHash,
             Bytes(32, 0x52), claimReceiptHash, LastResortCounter,
@@ -361,6 +475,87 @@ public sealed class ContactInitialSessionCoordinatorTests
             CryptographicOperations.ZeroMemory(ExactDpk2);
             if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true);
         }
+    }
+
+    private static (byte[] Session, byte[] Hello, byte[] Conversation) InboundContactEvents(
+        Fixture fixture, bool wrongConversation = false)
+    {
+        var relationship = Bytes(32, 0x90);
+        var conversation = ContactConversationId32.Derive(
+            fixture.NetworkId,
+            ContactRelationshipId32.FromBytes(relationship),
+            fixture.LocalAccount.AccountId.Bytes.Span,
+            fixture.RemoteAccount.AccountId.Bytes.Span).ToArray();
+        var eventConversation = wrongConversation ? Bytes(32, 0xe2) : conversation;
+        var directory = ApplicationCoreCodec.AuthorDmd1(
+            fixture.NetworkId, fixture.RemoteAccount.AccountId.Bytes.Span, 1,
+            ApplicationCoreCodec.CreateArtifactReference(
+                (ushort)ArtifactType.Dpa1, 644, Bytes(32, 0x81)),
+            ApplicationCoreCodec.CreateArtifactReference(
+                (ushort)ArtifactType.Drs1, 356, Bytes(32, 0x82)),
+            1, new byte[32],
+            [new DeviceDirectoryEntry(
+                fixture.RemoteDeviceId,
+                ApplicationCoreCodec.CreateArtifactReference(
+                    (ushort)ArtifactType.Dpd1, 776,
+                    fixture.Dph2.InitiatorDpd1Ref.Span[6..]))],
+            1, Bytes(64, 0x83));
+        var session = ApplicationCoreCodec.AuthorDmc2(
+            fixture.NetworkId, Bytes(32, 0x84), eventConversation,
+            fixture.RemoteAccount.AccountId.Bytes.Span, fixture.RemoteDeviceId,
+            1, 1_000, 11_000, Dmc2Flags.None, [],
+            ApplicationCoreCodec.CreateSessionInitPayload(
+                Bytes(32, 0x85), directory,
+                SessionInitCapabilities.TextCore | SessionInitCapabilities.DeviceControl));
+        var xur = Tagged("XUR1", fixture.NetworkId, Bytes(32, 0x86), Bytes(32, 0x87),
+            U64(0), new byte[32], ApplicationReference("PMT2", Bytes(32, 0x88)),
+            Bytes(32, 0x89), Bytes(32, 0x8a), Bytes(32, 0x8b), [0, 7],
+            U64(1), U64(2), fixture.RemoteDeviceId,
+            ApplicationReference("DPD1", fixture.Dph2.InitiatorDpd1Ref.Span[6..]),
+            Bytes(64, 0x8c));
+        var helloPayload = new byte[678];
+        relationship.CopyTo(helloPayload, 0);
+        ApplicationReference("DAB1", Bytes(32, 0x8d)).CopyTo(helloPayload, 32);
+        directory.RecordHash.Span.CopyTo(helloPayload.AsSpan(70));
+        Bytes(32, 0x8e).CopyTo(helloPayload, 102);
+        BinaryPrimitives.WriteUInt16BigEndian(helloPayload.AsSpan(134), 2);
+        BinaryPrimitives.WriteUInt32BigEndian(helloPayload.AsSpan(136), 538);
+        xur.CopyTo(helloPayload, 140);
+        var hello = Tagged("DMC2", fixture.NetworkId, Bytes(32, 0x8f),
+            eventConversation, fixture.RemoteAccount.AccountId.Bytes.ToArray(),
+            fixture.RemoteDeviceId, U64(2), U64(1_001), U64(11_000),
+            [0, 2], new byte[4], [], helloPayload);
+        Assert.Equal(Dmc2ContentKind.ContactHello,
+            ApplicationCoreCodec.DecodeDmc2(hello).ContentKind);
+        return (session.CanonicalBytes.ToArray(), hello, conversation);
+    }
+
+    private static byte[] Tagged(string magic, params byte[][] fields)
+    {
+        var length = checked(12 + fields.Sum(field => checked(8 + field.Length)));
+        var result = new byte[length];
+        Encoding.ASCII.GetBytes(magic).CopyTo(result, 0);
+        BinaryPrimitives.WriteUInt16BigEndian(result.AsSpan(4), 1);
+        BinaryPrimitives.WriteUInt16BigEndian(result.AsSpan(6), 0x0201);
+        BinaryPrimitives.WriteUInt16BigEndian(result.AsSpan(8), checked((ushort)fields.Length));
+        var offset = 12;
+        for (var index = 0; index < fields.Length; index++)
+        {
+            BinaryPrimitives.WriteUInt16BigEndian(result.AsSpan(offset),
+                checked((ushort)(index + 1)));
+            BinaryPrimitives.WriteUInt32BigEndian(result.AsSpan(offset + 4),
+                checked((uint)fields[index].Length));
+            fields[index].CopyTo(result, offset + 8);
+            offset += 8 + fields[index].Length;
+        }
+        return result;
+    }
+
+    private static byte[] U64(ulong value)
+    {
+        var result = new byte[8];
+        BinaryPrimitives.WriteUInt64BigEndian(result, value);
+        return result;
     }
 
     private static DeepAccountService AccountService(IDeepAccountStore store, IDeepSecureStorage storage) =>

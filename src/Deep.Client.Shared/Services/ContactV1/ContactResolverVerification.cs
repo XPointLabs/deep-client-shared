@@ -97,6 +97,8 @@ public sealed class ContactResolverReverifiedPeerAuthority
     public VerifiedContactServicePlacement Placement { get; }
     public VerifiedXis1InviteClaimReceipt? ClaimReceipt { get; }
     public ReadOnlyMemory<byte> PackageHash => packageHash.ToArray();
+    public ReadOnlyMemory<byte> LocatorHash =>
+        ContactCodecHash.OneTimeOrPermanentLocator(Evidence.Address);
 }
 
 /// <summary>

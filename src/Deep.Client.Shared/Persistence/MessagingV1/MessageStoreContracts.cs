@@ -344,38 +344,6 @@ internal sealed class Msg01AuthenticatedDispatchResult
     internal ReadOnlyMemory<byte> AuthenticatedEvidence => authenticatedEvidence.ToArray();
 }
 
-internal interface IMsg01AuthenticatedEvidenceSource
-{
-    Msg01VerifiedSessionAuthority EvidenceAuthority { get; }
-
-    ValueTask<Deep.Client.Shared.Domain.SessionId> GetLocalAccountAsync(
-        CancellationToken cancellationToken);
-
-    ValueTask<DirectoryHeadHash32> ResolveFanoutTargetAsync(
-        Msg01ResolveFanoutTargetRequest request,
-        CancellationToken cancellationToken);
-
-    ValueTask<Msg01PreparedTransportAttempt> PrepareAttemptAsync(
-        Msg01PrepareAttemptRequest request,
-        CancellationToken cancellationToken);
-
-    ValueTask<Msg01AuthenticatedDispatchResult> DispatchPreparedAsync(
-        Msg01DispatchEvidenceRequest request,
-        CancellationToken cancellationToken);
-
-    ValueTask<Msg01AuthenticatedDispatchResult> ReconcilePreparedAsync(
-        Msg01DispatchEvidenceRequest request,
-        CancellationToken cancellationToken);
-
-    ValueTask<Msg01AuthenticatedInboundResult> GetInboundResultAsync(
-        Msg01InboundEvidenceRequest request,
-        CancellationToken cancellationToken);
-
-    ValueTask AcknowledgeReceiptAsync(
-        ReadOnlyMemory<byte> authenticatedReceipt,
-        CancellationToken cancellationToken);
-}
-
 internal sealed class Msg01InboundEvidenceRequest
 {
     private readonly byte[] canonicalEnvelope;

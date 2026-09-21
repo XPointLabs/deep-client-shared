@@ -49,6 +49,38 @@ public sealed class MailboxCredentialGrantSet
     public ReadOnlyMemory<byte> NextGrant => nextGrant.ToArray();
 }
 
+/// <summary>
+/// The clean ContactV1 grant shape. XMG1/XMC1 intentionally returns only the
+/// authenticated current epoch; a client must reacquire on epoch rollover and
+/// must never invent an unsigned next grant.
+/// </summary>
+public sealed class CurrentMailboxCredentialGrants
+{
+    private readonly byte[]? retrieveGrant;
+    private readonly byte[]? depositGrant;
+
+    public CurrentMailboxCredentialGrants(
+        ReadOnlySpan<byte> retrieveGrant = default,
+        ReadOnlySpan<byte> depositGrant = default)
+    {
+        if (retrieveGrant.IsEmpty == depositGrant.IsEmpty)
+            throw new ArgumentException(
+                "Exactly one current mailbox grant role is required.");
+        if (!retrieveGrant.IsEmpty &&
+            retrieveGrant.Length != MailboxAuthenticatedCapabilityLimits.GrantLength ||
+            !depositGrant.IsEmpty &&
+            depositGrant.Length != MailboxAuthenticatedCapabilityLimits.GrantLength)
+            throw new ArgumentException("A current mailbox grant has an invalid length.");
+        this.retrieveGrant = retrieveGrant.IsEmpty ? null : retrieveGrant.ToArray();
+        this.depositGrant = depositGrant.IsEmpty ? null : depositGrant.ToArray();
+    }
+
+    public ReadOnlyMemory<byte> RetrieveGrant =>
+        retrieveGrant?.ToArray() ?? ReadOnlyMemory<byte>.Empty;
+    public ReadOnlyMemory<byte> DepositGrant =>
+        depositGrant?.ToArray() ?? ReadOnlyMemory<byte>.Empty;
+}
+
 public sealed class MailboxCredentialReplicaPair
 {
     private readonly byte[] firstId, firstSigningKey, secondId, secondSigningKey;

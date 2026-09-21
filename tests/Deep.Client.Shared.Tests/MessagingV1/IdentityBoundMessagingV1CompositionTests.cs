@@ -14,7 +14,7 @@ namespace Deep.Client.Shared.Tests.MessagingV1;
 public sealed class IdentityBoundMessagingV1CompositionTests
 {
     [Fact]
-    public void IdentityBoundOwnerAcceptsOnlyExactTransportAccountAlias()
+    public void IdentityBoundOwnerRejectsEverySessionTransportAccount()
     {
         var directory = Path.Combine(
             Path.GetTempPath(), "deep-msg-identity-" + Guid.NewGuid().ToString("N"));
@@ -27,13 +27,11 @@ public sealed class IdentityBoundMessagingV1CompositionTests
                 Path.Combine(directory, "state.db"),
                 new string('K', 64),
                 Msg01VerifiedSessionAuthority.CreateTestEd25519(Bytes(32, 0x21)),
-                scope,
-                alias);
+                scope);
 
-            Assert.NotNull(owner.OpenForAccount(alias));
             var error = Assert.Throws<InvalidOperationException>(() =>
-                owner.OpenForAccount(SessionId.Parse("05" + new string('b', 64))));
-            Assert.Contains("does not prove", error.Message, StringComparison.Ordinal);
+                owner.OpenForAccount(alias));
+            Assert.Contains("cannot access", error.Message, StringComparison.Ordinal);
         }
         finally
         {
@@ -79,8 +77,7 @@ public sealed class IdentityBoundMessagingV1CompositionTests
                     messagingV1Persistence: new MessagingV1PersistenceOptions(
                         Path.Combine(directory, "wrong.msg01"),
                         new string('A', 64),
-                        MessageScope(0x51),
-                        SessionId.Parse("05" + new string('c', 64))),
+                        MessageScope(0x51)),
                     groupV1StateStore: groupStore));
             Assert.Contains("different account generations", wrongIdentity.Message,
                 StringComparison.Ordinal);

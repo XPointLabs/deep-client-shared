@@ -180,6 +180,7 @@ internal static class HttpContactResolveDirectoryCodec
         var xnv = reader.ReadChain(ContactResolveDirectoryArtifacts.MaximumChainArtifacts, "XNV1");
         var xnh = reader.ReadChain(ContactResolveDirectoryArtifacts.MaximumChainArtifacts, "XNH1");
         var xnd = reader.ReadChain(ContactResolveDirectoryArtifacts.MaximumChainArtifacts, "XND1");
+        var pma = reader.ReadArtifact("PMA2");
         var pmt = reader.ReadChain(ContactResolveDirectoryArtifacts.MaximumChainArtifacts, "PMT2");
 
         ContactResolveForwardCheckpointArtifacts? forward = null;
@@ -202,7 +203,7 @@ internal static class HttpContactResolveDirectoryCodec
                     requestCreated.SampleSeconds,
                     responseReceived.SampleSeconds,
                     current.SampleSeconds),
-                xvp, xnv, xnh, xnd, pmt, forward);
+                xvp, xnv, xnh, xnd, pma, pmt, forward);
         }
         catch (ArgumentException exception)
         {
@@ -235,6 +236,7 @@ internal static class HttpContactResolveDirectoryCodec
         WriteChain(stream, artifacts.ExactOrderedXnv1Chain);
         WriteChain(stream, artifacts.ExactOrderedXnh1Chain);
         WriteChain(stream, artifacts.ExactActiveXnd1);
+        WriteArtifact(stream, artifacts.ExactPma2.Span);
         WriteChain(stream, artifacts.ExactOrderedPmt2Chain);
         if (artifacts.ForwardCheckpoint is { } forward)
         {

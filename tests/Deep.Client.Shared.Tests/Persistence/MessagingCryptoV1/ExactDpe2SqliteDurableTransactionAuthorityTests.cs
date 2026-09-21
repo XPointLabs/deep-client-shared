@@ -2,7 +2,10 @@ using System.Buffers.Binary;
 using System.Reflection;
 using System.Reflection.Emit;
 using System.Security.Cryptography;
+using Deep.Client.Shared.Persistence;
 using Deep.Client.Shared.Persistence.MessagingCryptoV1;
+using Deep.Client.Shared.Persistence.MessagingV1;
+using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.MessagingCrypto;
 
 namespace Deep.Client.Shared.Tests.Persistence.MessagingCryptoV1;
@@ -53,12 +56,19 @@ public sealed class ExactDpe2SqliteDurableTransactionAuthorityTests
         await using var store = fixture.Open();
         var genesis = await Initialize(store, prior);
         var authority = new ExactDpe2SqliteDurableTransactionAuthority(store);
+        byte[] expectedDmc2;
         using (var fresh = Plan(fixture.Scope, prior, next, genesis,
                    operation: 0x22, envelope: 0x42, direction: ExactDpe2DurableDirection.Receive))
         {
+            expectedDmc2 = fresh.AuthenticatedDmc2.ToArray();
             var receipt = await authority.CommitAsync(fresh, Completion(fresh));
             Assert.Equal(ExactDpe2DurableCommitDisposition.Committed, receipt.Disposition);
         }
+
+        var staged = await store.ReadPendingInboundDmc2Async(
+            Bytes(0x22), Bytes(0x42));
+        Assert.Equal(expectedDmc2, staged);
+        CryptographicOperations.ZeroMemory(staged!);
 
         var head = (await store.ReadHeadAsync())!;
         using var replay = Plan(fixture.Scope, next, null, head.JournalHead.Span,
@@ -69,6 +79,115 @@ public sealed class ExactDpe2SqliteDurableTransactionAuthorityTests
         var unchanged = (await store.ReadHeadAsync())!;
         Assert.Equal(2UL, unchanged.StateGeneration);
         Assert.Equal(1UL, unchanged.JournalGeneration);
+        staged = await store.ReadPendingInboundDmc2Async(
+            Bytes(0x22), Bytes(0x42));
+        Assert.Equal(expectedDmc2, staged);
+        CryptographicOperations.ZeroMemory(staged!);
+        await Assert.ThrowsAsync<CryptographicException>(async () =>
+            await store.ReadPendingInboundDmc2Async(
+                Bytes(0x22), Bytes(0x43)));
+        CryptographicOperations.ZeroMemory(expectedDmc2);
+    }
+
+    [Fact]
+    public async Task ReceiveStagingSurvivesCrashAfterRatchetCommit()
+    {
+        using var fixture = new Fixture();
+        var prior = Trs1(fixture.Scope, 1, 0x53);
+        var next = Trs1(fixture.Scope, 2, 0x54);
+        byte[] expectedDmc2;
+        await using (var store = fixture.Open())
+        {
+            var genesis = await Initialize(store, prior);
+            using var fresh = Plan(fixture.Scope, prior, next, genesis,
+                operation: 0x2B, envelope: 0x4B,
+                direction: ExactDpe2DurableDirection.Receive);
+            expectedDmc2 = fresh.AuthenticatedDmc2.ToArray();
+            using (MessagingCryptoV1StoreTestHooks.Push(point =>
+                       { if (point == MessagingCryptoV1StoreFailpoint.AfterCommit)
+                               throw new MessagingCryptoV1InjectedCrashException(point); }))
+                await Assert.ThrowsAsync<MessagingCryptoV1InjectedCrashException>(async () =>
+                    await new ExactDpe2SqliteDurableTransactionAuthority(store)
+                        .CommitAsync(fresh, Completion(fresh)));
+        }
+
+        await using var restarted = fixture.Open(allowCreate: false);
+        var recovered = await restarted.ReadPendingInboundDmc2Async(
+            Bytes(0x2B), Bytes(0x4B));
+        Assert.Equal(expectedDmc2, recovered);
+        Assert.Equal(2UL, (await restarted.ReadHeadAsync())!.StateGeneration);
+        CryptographicOperations.ZeroMemory(recovered!);
+        CryptographicOperations.ZeroMemory(expectedDmc2);
+    }
+
+    [Fact]
+    public async Task ReceiveStagingRollsBackWithRatchetBeforeCommit()
+    {
+        using var fixture = new Fixture();
+        var prior = Trs1(fixture.Scope, 1, 0x55);
+        var next = Trs1(fixture.Scope, 2, 0x56);
+        await using (var store = fixture.Open())
+        {
+            var genesis = await Initialize(store, prior);
+            using var fresh = Plan(fixture.Scope, prior, next, genesis,
+                operation: 0x2C, envelope: 0x4C,
+                direction: ExactDpe2DurableDirection.Receive);
+            using (MessagingCryptoV1StoreTestHooks.Push(point =>
+                       { if (point == MessagingCryptoV1StoreFailpoint.AfterJournalInsert)
+                               throw new MessagingCryptoV1InjectedCrashException(point); }))
+                await Assert.ThrowsAsync<MessagingCryptoV1InjectedCrashException>(async () =>
+                    await new ExactDpe2SqliteDurableTransactionAuthority(store)
+                        .CommitAsync(fresh, Completion(fresh)));
+        }
+
+        await using var restarted = fixture.Open(allowCreate: false);
+        Assert.Equal(1UL, (await restarted.ReadHeadAsync())!.StateGeneration);
+        Assert.Null(await restarted.ReadPendingInboundDmc2Async(
+            Bytes(0x2C), Bytes(0x4C)));
+    }
+
+    [Fact]
+    public async Task OnlyCommittedScopedStageCanEnterAccountSemanticInbox()
+    {
+        using var fixture = new Fixture();
+        var prior = Trs1(fixture.Scope, 1, 0x57);
+        var next = Trs1(fixture.Scope, 2, 0x58);
+        await using var ratchet = fixture.Open();
+        var genesis = await Initialize(ratchet, prior);
+        using var receive = Plan(fixture.Scope, prior, next, genesis,
+            operation: 0x2D, envelope: 0x4D,
+            direction: ExactDpe2DurableDirection.Receive);
+        Assert.Equal(ExactDpe2DurableCommitDisposition.Committed,
+            (await new ExactDpe2SqliteDurableTransactionAuthority(ratchet)
+                .CommitAsync(receive, Completion(receive))).Disposition);
+
+        var local = fixture.Scope.AccountId.ToArray();
+        var conversation = fixture.Scope.ConversationId.ToArray();
+        var network = Enumerable.Repeat((byte)0x91, 16).ToArray();
+        using var handoff = Assert.IsType<AuthenticatedDirectDmc2>(
+            await AuthenticatedDirectDmc2.FromCommittedStageAsync(
+                ratchet, Bytes(0x2D), Bytes(0x4D), network,
+                local, fixture.Scope.AccountGeneration, conversation,
+                Bytes(0x93), Bytes(0x94)));
+        await Assert.ThrowsAsync<CryptographicException>(async () =>
+            await AuthenticatedDirectDmc2.FromCommittedStageAsync(
+                ratchet, Bytes(0x2D), Bytes(0x4D), network,
+                Bytes(0xA2), fixture.Scope.AccountGeneration,
+                conversation, Bytes(0x93), Bytes(0x94)));
+
+        var inboxPath = System.IO.Path.ChangeExtension(fixture.Path, ".inbox.db");
+        using var inbox = new SqliteDeepMailboxStore(new(inboxPath, Bytes(0xB2)));
+        Assert.Equal(DirectDmc2InboxDisposition.Materialized,
+            await inbox.MaterializeDirectDmc2Async(handoff));
+        var recovered = await inbox.ReadDirectDmc2Async(
+            local, fixture.Scope.AccountGeneration,
+            handoff.ConversationId, handoff.LogicalMessageId,
+            handoff.AuthorDeviceId);
+        Assert.Equal(handoff.ExactDmc2.ToArray(), recovered);
+        CryptographicOperations.ZeroMemory(recovered!);
+        CryptographicOperations.ZeroMemory(local);
+        CryptographicOperations.ZeroMemory(conversation);
+        CryptographicOperations.ZeroMemory(network);
     }
 
     [Fact]
@@ -208,6 +327,15 @@ public sealed class ExactDpe2SqliteDurableTransactionAuthorityTests
         MessagingCryptoV1Trs1Facts? nextFacts = next is null ? null :
             MessagingCryptoV1Trs1.Validate(next, scope);
         var exactEnvelope = Enumerable.Repeat(envelope, 4_513).ToArray();
+        var staged = direction == ExactDpe2DurableDirection.Receive && next is not null
+            ? ApplicationCoreCodec.AuthorDmc2(
+                Enumerable.Repeat((byte)0x91, 16).ToArray(),
+                Bytes(0x92), scope.ConversationId,
+                Bytes(0x93), Bytes(0x94),
+                1, 1, 0, Dmc2Flags.None, [],
+                ApplicationCoreCodec.CreateMessageCreatePayload("stage"))
+                .CanonicalBytes.ToArray()
+            : Array.Empty<byte>();
         try
         {
             return CreatePlan(
@@ -233,7 +361,8 @@ public sealed class ExactDpe2SqliteDurableTransactionAuthorityTests
                 Bytes(0x85),
                 Array.Empty<byte>(),
                 next is not null,
-                next is not null);
+                next is not null,
+                staged);
         }
         finally
         {
@@ -245,6 +374,7 @@ public sealed class ExactDpe2SqliteDurableTransactionAuthorityTests
                 CryptographicOperations.ZeroMemory(nextFacts.ExactHash);
             }
             CryptographicOperations.ZeroMemory(exactEnvelope);
+            CryptographicOperations.ZeroMemory(staged);
         }
     }
 
@@ -289,7 +419,8 @@ public sealed class ExactDpe2SqliteDurableTransactionAuthorityTests
         ReadOnlySpan<byte> pqFenceMutationCommitment,
         ReadOnlySpan<byte> terminalStateCommitment,
         bool messageKeyDeleted,
-        bool hasStateMutation);
+        bool hasStateMutation,
+        ReadOnlySpan<byte> authenticatedDmc2);
 
     private static byte[] Trs1(MessagingCryptoV1StoreScope scope, ulong generation, byte seed)
     {

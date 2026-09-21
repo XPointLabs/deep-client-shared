@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 using Deep.Protocol.MessagingCrypto;
 using Deep.Protocol.MessagingWire;
+using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.ContactV1;
 using Microsoft.Data.Sqlite;
 
@@ -19,10 +20,11 @@ namespace Deep.Client.Shared.Persistence.MessagingCryptoV1;
 internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
 {
     private const int ApplicationId = 0x4D435231; // MCR1
-    private const int SchemaGeneration = 5;
+    private const int SchemaGeneration = 7;
     // Replay-retention context generation is a cryptographic wire/domain value,
-    // not the physical SQLite schema version. Generation 5 adds the initiator
-    // DPH2 outbox and does not redefine the generation-3 replay set.
+    // not the physical SQLite schema version. Generation 7 additionally stages
+    // authenticated initial-DPH2 events in the initial TRS1 transaction and
+    // does not redefine the generation-3 replay set.
     private const int ReplayRetentionContextGeneration = 3;
     private const string SchemaDdl = """
         CREATE TABLE messaging_crypto_meta(singleton INTEGER PRIMARY KEY CHECK(singleton=1),database_generation BLOB NOT NULL CHECK(length(database_generation)=8),account_id BLOB NOT NULL CHECK(length(account_id)=32),account_generation BLOB NOT NULL CHECK(length(account_generation)=8),local_device_id BLOB NOT NULL CHECK(length(local_device_id)=32),device_generation BLOB NOT NULL CHECK(length(device_generation)=8),conversation_id BLOB NOT NULL CHECK(length(conversation_id)=32),session_id BLOB NOT NULL CHECK(length(session_id)=32));
@@ -30,11 +32,13 @@ internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
         CREATE TABLE ratchet_journal(journal_generation BLOB PRIMARY KEY CHECK(length(journal_generation)=8),operation_id BLOB NOT NULL UNIQUE CHECK(length(operation_id)=32),replay_token BLOB NOT NULL UNIQUE CHECK(length(replay_token)=32),transition_fingerprint BLOB NOT NULL CHECK(length(transition_fingerprint)=32),direction INTEGER NOT NULL CHECK(direction BETWEEN 1 AND 3),prior_generation BLOB NOT NULL CHECK(length(prior_generation)=8),prior_commitment BLOB NOT NULL CHECK(length(prior_commitment)=32),prior_state_hash BLOB NOT NULL CHECK(length(prior_state_hash)=32),next_generation BLOB NOT NULL CHECK(length(next_generation)=8),next_commitment BLOB NOT NULL CHECK(length(next_commitment)=32),next_state_hash BLOB NOT NULL CHECK(length(next_state_hash)=32),envelope_hash BLOB NOT NULL CHECK(length(envelope_hash)=32),prior_journal_head BLOB NOT NULL CHECK(length(prior_journal_head)=32),next_journal_head BLOB NOT NULL CHECK(length(next_journal_head)=32),deletion_manifest_commitment BLOB NOT NULL CHECK(length(deletion_manifest_commitment)=32),message_key_deletion_evidence BLOB NOT NULL CHECK(length(message_key_deletion_evidence)=32),replay_evidence_commitment BLOB NOT NULL CHECK(length(replay_evidence_commitment)=32),pq_fence_mutation_commitment BLOB NULL CHECK(pq_fence_mutation_commitment IS NULL OR length(pq_fence_mutation_commitment)=32),terminal_state_commitment BLOB NULL CHECK(terminal_state_commitment IS NULL OR length(terminal_state_commitment)=32));
         CREATE TABLE ratchet_fork_latch(singleton INTEGER PRIMARY KEY CHECK(singleton=1),collision_kind INTEGER NOT NULL CHECK(collision_kind IN(1,2)),incumbent_fingerprint BLOB NOT NULL CHECK(length(incumbent_fingerprint)=32),conflicting_fingerprint BLOB NOT NULL CHECK(length(conflicting_fingerprint)=32),incumbent_operation_id BLOB NOT NULL CHECK(length(incumbent_operation_id)=32),conflicting_operation_id BLOB NOT NULL CHECK(length(conflicting_operation_id)=32),incumbent_replay_token BLOB NOT NULL CHECK(length(incumbent_replay_token)=32),conflicting_replay_token BLOB NOT NULL CHECK(length(conflicting_replay_token)=32),incumbent_envelope_hash BLOB NOT NULL CHECK(length(incumbent_envelope_hash)=32),conflicting_envelope_hash BLOB NOT NULL CHECK(length(conflicting_envelope_hash)=32),CHECK(incumbent_fingerprint<>conflicting_fingerprint));
         CREATE TABLE initial_prekey_inventory(prekey_kind INTEGER NOT NULL CHECK(prekey_kind IN(1,2)),prekey_id BLOB NOT NULL CHECK(length(prekey_id)=32),opaque_sealed_record BLOB NOT NULL CHECK(length(opaque_sealed_record) BETWEEN 32 AND 2097152),PRIMARY KEY(prekey_kind,prekey_id));
-        CREATE TABLE initial_session_journal(singleton INTEGER PRIMARY KEY CHECK(singleton=1),prekey_source INTEGER NOT NULL CHECK(prekey_source IN(1,2,3)),claim_operation_id BLOB NOT NULL UNIQUE CHECK(length(claim_operation_id)=32),initialization_fingerprint BLOB NOT NULL CHECK(length(initialization_fingerprint)=32),xpc1_full_replay_hash BLOB NOT NULL CHECK(length(xpc1_full_replay_hash)=32),dph2_full_replay_hash BLOB NOT NULL CHECK(length(dph2_full_replay_hash)=32),x25519_prekey_id BLOB NULL UNIQUE CHECK(x25519_prekey_id IS NULL OR length(x25519_prekey_id)=32),mlkem_prekey_id BLOB NOT NULL UNIQUE CHECK(length(mlkem_prekey_id)=32),initial_generation BLOB NOT NULL CHECK(length(initial_generation)=8),initial_commitment BLOB NOT NULL CHECK(length(initial_commitment)=32),initial_state_hash BLOB NOT NULL CHECK(length(initial_state_hash)=32),CHECK((prekey_source=3 AND x25519_prekey_id IS NULL) OR (prekey_source IN(1,2) AND x25519_prekey_id IS NOT NULL)));
+        CREATE TABLE initial_session_journal(singleton INTEGER PRIMARY KEY CHECK(singleton=1),prekey_source INTEGER NOT NULL CHECK(prekey_source IN(1,2,3)),claim_operation_id BLOB NOT NULL UNIQUE CHECK(length(claim_operation_id)=32),initialization_fingerprint BLOB NOT NULL CHECK(length(initialization_fingerprint)=32),xpc1_full_replay_hash BLOB NOT NULL CHECK(length(xpc1_full_replay_hash)=32),dph2_full_replay_hash BLOB NOT NULL CHECK(length(dph2_full_replay_hash)=32),x25519_prekey_id BLOB NULL UNIQUE CHECK(x25519_prekey_id IS NULL OR length(x25519_prekey_id)=32),mlkem_prekey_id BLOB NOT NULL UNIQUE CHECK(length(mlkem_prekey_id)=32),initial_generation BLOB NOT NULL CHECK(length(initial_generation)=8),initial_commitment BLOB NOT NULL CHECK(length(initial_commitment)=32),initial_state_hash BLOB NOT NULL CHECK(length(initial_state_hash)=32),initial_event_count INTEGER NOT NULL CHECK(initial_event_count BETWEEN 0 AND 2),CHECK((prekey_source=3 AND x25519_prekey_id IS NULL) OR (prekey_source IN(1,2) AND x25519_prekey_id IS NOT NULL)));
+        CREATE TABLE pending_initial_dmc2(event_index INTEGER PRIMARY KEY CHECK(event_index IN(1,2)),claim_operation_id BLOB NOT NULL CHECK(length(claim_operation_id)=32),dph2_full_replay_hash BLOB NOT NULL CHECK(length(dph2_full_replay_hash)=32),exact_dmc2 BLOB NOT NULL CHECK(length(exact_dmc2) BETWEEN 282 AND 33082),dmc2_hash BLOB NOT NULL CHECK(length(dmc2_hash)=32),FOREIGN KEY(claim_operation_id) REFERENCES initial_session_journal(claim_operation_id) ON DELETE RESTRICT);
         CREATE TABLE initial_session_fork_latch(singleton INTEGER PRIMARY KEY CHECK(singleton=1),collision_kind INTEGER NOT NULL CHECK(collision_kind IN(1,2,3)),incumbent_fingerprint BLOB NOT NULL CHECK(length(incumbent_fingerprint)=32),conflicting_fingerprint BLOB NOT NULL CHECK(length(conflicting_fingerprint)=32),incumbent_operation_id BLOB NOT NULL CHECK(length(incumbent_operation_id)=32),conflicting_operation_id BLOB NOT NULL CHECK(length(conflicting_operation_id)=32),incumbent_x25519_prekey_id BLOB NULL CHECK(incumbent_x25519_prekey_id IS NULL OR length(incumbent_x25519_prekey_id)=32),conflicting_x25519_prekey_id BLOB NULL CHECK(conflicting_x25519_prekey_id IS NULL OR length(conflicting_x25519_prekey_id)=32),incumbent_mlkem_prekey_id BLOB NOT NULL CHECK(length(incumbent_mlkem_prekey_id)=32),conflicting_mlkem_prekey_id BLOB NOT NULL CHECK(length(conflicting_mlkem_prekey_id)=32),CHECK(incumbent_fingerprint<>conflicting_fingerprint));
         CREATE TABLE initiator_initial_session_outbox(singleton INTEGER PRIMARY KEY CHECK(singleton=1),claim_operation_id BLOB NOT NULL UNIQUE CHECK(length(claim_operation_id)=32),initialization_fingerprint BLOB NOT NULL CHECK(length(initialization_fingerprint)=32),session_id BLOB NOT NULL UNIQUE CHECK(length(session_id)=32),full_dph2_replay_hash BLOB NOT NULL UNIQUE CHECK(length(full_dph2_replay_hash)=32),claim_binding BLOB NOT NULL UNIQUE CHECK(length(claim_binding)=32),exact_dph2 BLOB NOT NULL CHECK(length(exact_dph2) IN(5917,18205,34589)),network_id BLOB NOT NULL CHECK(length(network_id)=16),local_account_id BLOB NOT NULL CHECK(length(local_account_id)=32),local_account_generation BLOB NOT NULL CHECK(length(local_account_generation)=8),local_device_id BLOB NOT NULL CHECK(length(local_device_id)=32),local_device_generation BLOB NOT NULL CHECK(length(local_device_generation)=8),contact_store_generation INTEGER NOT NULL CHECK(contact_store_generation>0),contact_relationship_id BLOB NOT NULL CHECK(length(contact_relationship_id)=32),contact_conversation_id BLOB NOT NULL CHECK(length(contact_conversation_id)=32),contact_evidence_hash BLOB NOT NULL CHECK(length(contact_evidence_hash)=32),peer_package_hash BLOB NOT NULL CHECK(length(peer_package_hash)=32),remote_account_id BLOB NOT NULL CHECK(length(remote_account_id)=32),remote_account_generation BLOB NOT NULL CHECK(length(remote_account_generation)=8),remote_directory_generation BLOB NOT NULL CHECK(length(remote_directory_generation)=8),remote_device_id BLOB NOT NULL CHECK(length(remote_device_id)=32),remote_device_generation BLOB NOT NULL CHECK(length(remote_device_generation)=8),initial_generation BLOB NOT NULL CHECK(length(initial_generation)=8),initial_commitment BLOB NOT NULL CHECK(length(initial_commitment)=32),initial_state_hash BLOB NOT NULL CHECK(length(initial_state_hash)=32));
         CREATE TABLE initiator_initial_session_fork_latch(singleton INTEGER PRIMARY KEY CHECK(singleton=1),incumbent_fingerprint BLOB NOT NULL CHECK(length(incumbent_fingerprint)=32),conflicting_fingerprint BLOB NOT NULL CHECK(length(conflicting_fingerprint)=32),incumbent_operation_id BLOB NOT NULL CHECK(length(incumbent_operation_id)=32),conflicting_operation_id BLOB NOT NULL CHECK(length(conflicting_operation_id)=32),incumbent_session_id BLOB NOT NULL CHECK(length(incumbent_session_id)=32),conflicting_session_id BLOB NOT NULL CHECK(length(conflicting_session_id)=32),incumbent_dph2_hash BLOB NOT NULL CHECK(length(incumbent_dph2_hash)=32),conflicting_dph2_hash BLOB NOT NULL CHECK(length(conflicting_dph2_hash)=32),CHECK(incumbent_fingerprint<>conflicting_fingerprint));
         CREATE TABLE exact_dpe2_plan_journal(journal_generation BLOB PRIMARY KEY CHECK(length(journal_generation)=8),plan_fingerprint BLOB NOT NULL CHECK(length(plan_fingerprint)=32),exact_header_hash BLOB NOT NULL CHECK(length(exact_header_hash)=32),exact_envelope_hash BLOB NOT NULL CHECK(length(exact_envelope_hash)=32),exact_envelope_digest BLOB NOT NULL CHECK(length(exact_envelope_digest)=32),checkpoint_prior_generation BLOB NOT NULL CHECK(length(checkpoint_prior_generation)=8),checkpoint_prior_commitment BLOB NOT NULL CHECK(length(checkpoint_prior_commitment)=32),deduplication_mutation_commitment BLOB NULL CHECK(deduplication_mutation_commitment IS NULL OR length(deduplication_mutation_commitment)=32),has_state_mutation INTEGER NOT NULL CHECK(has_state_mutation=1),FOREIGN KEY(journal_generation) REFERENCES ratchet_journal(journal_generation) ON DELETE RESTRICT);
+        CREATE TABLE pending_inbound_dmc2(operation_id BLOB PRIMARY KEY CHECK(length(operation_id)=32),exact_envelope_hash BLOB NOT NULL UNIQUE CHECK(length(exact_envelope_hash)=32),journal_generation BLOB NOT NULL UNIQUE CHECK(length(journal_generation)=8),exact_dmc2 BLOB NOT NULL CHECK(length(exact_dmc2) BETWEEN 282 AND 33082),dmc2_hash BLOB NOT NULL CHECK(length(dmc2_hash)=32),FOREIGN KEY(journal_generation) REFERENCES exact_dpe2_plan_journal(journal_generation) ON DELETE RESTRICT);
         """;
 
     private static readonly byte[] ExpectedSchemaFingerprint = HashSchemaObjects(ExpectedSchemaObjects());
@@ -301,6 +305,7 @@ internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
             using var current = ReadCurrent(db, transaction);
             using var initial = ReadInitialSession(db, transaction);
             return current is not null && initial is not null && !current.ForkLatched &&
+                ScalarLong(db, "SELECT count(*) FROM pending_initial_dmc2;") == initial.InitialEventCount &&
                 initial.PreKeySource == source &&
                 MessagingCryptoV1Trs1.Fixed(initial.ClaimOperationId, claimOperationId.Span) &&
                 MessagingCryptoV1Trs1.Fixed(initial.Xpc1FullReplayHash, xpc1FullReplayHash.Span) &&
@@ -314,12 +319,39 @@ internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
         finally { gate.Release(); }
     }
 
-    internal async ValueTask<MessagingCryptoV1CommitResult> CommitInitialSessionAsync(
+#if DEEP_TEST_INTERNALS
+    internal ValueTask<MessagingCryptoV1CommitResult> CommitInitialSessionAsync(
         MessagingCryptoV1InitialSessionHandoff handoff,
+        CancellationToken cancellationToken = default) =>
+        CommitInitialSessionCoreAsync(handoff, ReadOnlyMemory<byte>.Empty,
+            ReadOnlyMemory<byte>.Empty, cancellationToken);
+#endif
+
+    internal ValueTask<MessagingCryptoV1CommitResult> CommitInitialSessionAsync(
+        MessagingCryptoV1InitialSessionHandoff handoff,
+        ReadOnlyMemory<byte> authenticatedSessionInitDmc2,
+        ReadOnlyMemory<byte> authenticatedFirstApplicationDmc2,
+        CancellationToken cancellationToken = default)
+    {
+        if (authenticatedSessionInitDmc2.IsEmpty)
+            throw new ArgumentException(
+                "An authenticated DPH2 commit requires exact SessionInit DMC2.",
+                nameof(authenticatedSessionInitDmc2));
+        return CommitInitialSessionCoreAsync(handoff, authenticatedSessionInitDmc2,
+            authenticatedFirstApplicationDmc2, cancellationToken);
+    }
+
+    private async ValueTask<MessagingCryptoV1CommitResult> CommitInitialSessionCoreAsync(
+        MessagingCryptoV1InitialSessionHandoff handoff,
+        ReadOnlyMemory<byte> authenticatedSessionInitDmc2,
+        ReadOnlyMemory<byte> authenticatedFirstApplicationDmc2,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(handoff);
         using var payload = handoff.Consume();
+        var initialEventCount = ValidateInitialEvents(
+            authenticatedSessionInitDmc2.Span,
+            authenticatedFirstApplicationDmc2.Span);
         var facts = MessagingCryptoV1Trs1.Validate(payload.ExactTrs1, scope);
         if (facts.TerminallyLatched)
         {
@@ -327,7 +359,9 @@ internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
             CryptographicOperations.ZeroMemory(facts.ExactHash);
             throw new InvalidOperationException("A verified handshake cannot initialize a terminal TRS1 state.");
         }
-        var fingerprint = ComputeInitializationFingerprint(payload, facts);
+        var fingerprint = ComputeInitializationFingerprint(
+            payload, facts, authenticatedSessionInitDmc2.Span,
+            authenticatedFirstApplicationDmc2.Span);
         var initialHead = ComputeInitialJournalHead(scope);
         var gateHeld = false;
         try
@@ -345,7 +379,11 @@ internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
                     throw new FormatException("Initial-session replay evidence is absent.");
                 if (current.ForkLatched)
                     return Result(MessagingCryptoV1CommitDisposition.AlreadyForkLatched, current);
-                if (InitialSessionMatches(initial, payload, fingerprint, facts))
+                if (InitialSessionMatches(initial, payload, fingerprint, facts) &&
+                    initial.InitialEventCount == initialEventCount &&
+                    InitialEventsMatch(db, transaction, initial,
+                        authenticatedSessionInitDmc2.Span,
+                        authenticatedFirstApplicationDmc2.Span))
                     return Result(MessagingCryptoV1CommitDisposition.ExactReplay, current);
                 var collisionKind = InitialCollisionKind(initial, payload);
                 if (collisionKind != 0)
@@ -373,7 +411,16 @@ internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
             Add(command, "$fingerprint", fingerprint);
             if (command.ExecuteNonQuery() != 1) throw new InvalidOperationException("TRS1 initialization CAS failed.");
             MessagingCryptoV1StoreTestHooks.Hit(MessagingCryptoV1StoreFailpoint.AfterInitialStateInsert);
-            InsertInitialSession(db, transaction, payload, facts, fingerprint);
+            InsertInitialSession(db, transaction, payload, facts, fingerprint,
+                initialEventCount);
+            if (initialEventCount != 0)
+            {
+                InsertInitialEvent(db, transaction, payload, 1,
+                    authenticatedSessionInitDmc2.Span);
+                if (initialEventCount == 2)
+                    InsertInitialEvent(db, transaction, payload, 2,
+                        authenticatedFirstApplicationDmc2.Span);
+            }
             if (payload.PreKeySource == MessagingCryptoV1InitialPreKeySource.LocalAtomicInventory)
             {
                 DeleteInitialPreKey(db, transaction, 1, payload.X25519PreKeyId);
@@ -582,6 +629,8 @@ internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
                         plan, prior, next!, transitionFingerprint!);
                     InsertExactDpe2Journal(db, transaction, journalGeneration, plan,
                         planFingerprint, envelopeDigest);
+                    if (plan.Direction == MessagingCryptoV1Direction.Receive)
+                        InsertPendingInboundDmc2(db, transaction, journalGeneration, plan);
                     MessagingCryptoV1StoreTestHooks.Hit(MessagingCryptoV1StoreFailpoint.AfterJournalInsert);
                     UpdateState(db, transaction, current, journalGeneration, nextJournalHead, plan, next!);
                     MessagingCryptoV1StoreTestHooks.Hit(MessagingCryptoV1StoreFailpoint.AfterStateUpdate);
@@ -621,6 +670,149 @@ internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
                 current.JournalHead.ToArray(), current.ForkLatched, current.TerminallyLatched);
         }
         finally { gate.Release(); }
+    }
+
+    /// <summary>
+    /// Returns an owned exact authenticated DMC2 staged by the same SQLCipher
+    /// transaction as the receive ratchet commit. The caller must zero the
+    /// returned bytes after durable application-inbox materialization.
+    /// </summary>
+    internal async ValueTask<byte[]?> ReadPendingInboundDmc2Async(
+        ReadOnlyMemory<byte> operationId,
+        ReadOnlyMemory<byte> exactEnvelopeHash,
+        CancellationToken cancellationToken = default)
+    {
+        if (operationId.Length != 32 ||
+            operationId.Span.IndexOfAnyExcept((byte)0) < 0)
+            throw new ArgumentException(
+                "The pending DMC2 operation ID must contain 32 nonzero bytes.",
+                nameof(operationId));
+        if (exactEnvelopeHash.Length != 32 ||
+            exactEnvelopeHash.Span.IndexOfAnyExcept((byte)0) < 0)
+            throw new ArgumentException(
+                "The pending DMC2 envelope hash must contain 32 nonzero bytes.",
+                nameof(exactEnvelopeHash));
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            ThrowIfDisposed();
+            using var current = ReadCurrent(GetConnection(), null);
+            if (current is null || current.ForkLatched || current.TerminallyLatched)
+                throw new CryptographicException(
+                    "A pending DMC2 cannot be read outside an active verified ratchet scope.");
+            using var command = GetConnection().CreateCommand();
+            command.CommandText = "SELECT p.exact_envelope_hash,p.exact_dmc2,p.dmc2_hash,j.direction FROM pending_inbound_dmc2 p JOIN ratchet_journal j ON p.journal_generation=j.journal_generation WHERE p.operation_id=$operation;";
+            Add(command, "$operation", operationId.ToArray());
+            using var reader = command.ExecuteReader();
+            if (!reader.Read()) return null;
+            var storedHash = (byte[])reader[0];
+            var exact = (byte[])reader[1];
+            var expectedDmc2Hash = (byte[])reader[2];
+            var actualDmc2Hash = SHA256.HashData(exact);
+            try
+            {
+                var parsed = ApplicationCoreCodec.DecodeDmc2(exact);
+                if (reader.GetInt32(3) != (int)MessagingCryptoV1Direction.Receive ||
+                    !MessagingCryptoV1Trs1.Fixed(
+                        storedHash, exactEnvelopeHash.Span) ||
+                    !MessagingCryptoV1Trs1.Fixed(
+                        expectedDmc2Hash, actualDmc2Hash) ||
+                    !MessagingCryptoV1Trs1.Fixed(
+                        parsed.CanonicalBytes.Span, exact) ||
+                    !MessagingCryptoV1Trs1.Fixed(
+                        parsed.ConversationId.Span, scope.ConversationId) ||
+                    reader.Read())
+                    throw new CryptographicException(
+                        "The pending DMC2 does not bind the exact committed receive.");
+                return exact;
+            }
+            catch
+            {
+                CryptographicOperations.ZeroMemory(exact);
+                throw;
+            }
+            finally { CryptographicOperations.ZeroMemory(actualDmc2Hash); }
+        }
+        finally { gate.Release(); }
+    }
+
+    /// <summary>
+    /// Recovers only the exact DMC2 events staged with the committed responder
+    /// initial TRS1. The caller owns and must zero both returned arrays.
+    /// This read is not a mailbox ACK authority.
+    /// </summary>
+    internal async ValueTask<(byte[] SessionInit, byte[]? FirstApplication)?>
+        ReadPendingInitialDmc2Async(
+            ReadOnlyMemory<byte> claimOperationId,
+            ReadOnlyMemory<byte> dph2FullReplayHash,
+            CancellationToken cancellationToken = default)
+    {
+        MessagingCryptoV1PreparedTransition.Validate32(claimOperationId.Span,
+            nameof(claimOperationId));
+        MessagingCryptoV1PreparedTransition.Validate32(dph2FullReplayHash.Span,
+            nameof(dph2FullReplayHash));
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            ThrowIfDisposed();
+            var db = GetConnection();
+            using var current = ReadCurrent(db, null);
+            using var initial = ReadInitialSession(db, null);
+            if (current is null || initial is null || current.ForkLatched ||
+                current.TerminallyLatched ||
+                !MessagingCryptoV1Trs1.Fixed(initial.ClaimOperationId, claimOperationId.Span) ||
+                !MessagingCryptoV1Trs1.Fixed(initial.Dph2FullReplayHash, dph2FullReplayHash.Span))
+                return null;
+            if (initial.InitialEventCount == 0) return null;
+            var events = new List<byte[]>(2);
+            try
+            {
+                using var command = db.CreateCommand();
+                command.CommandText = "SELECT event_index,exact_dmc2,dmc2_hash FROM pending_initial_dmc2 WHERE claim_operation_id=$operation AND dph2_full_replay_hash=$dph2 ORDER BY event_index;";
+                Add(command, "$operation", initial.ClaimOperationId);
+                Add(command, "$dph2", initial.Dph2FullReplayHash);
+                using var reader = command.ExecuteReader();
+                while (reader.Read())
+                {
+                    var exact = (byte[])reader[1];
+                    events.Add(exact);
+                    var hash = SHA256.HashData(exact);
+                    try
+                    {
+                        if (reader.GetInt32(0) != events.Count ||
+                            !MessagingCryptoV1Trs1.Fixed((byte[])reader[2], hash))
+                            throw new CryptographicException(
+                                "The pending initial DMC2 differs from its committed hash.");
+                    }
+                    finally { CryptographicOperations.ZeroMemory(hash); }
+                }
+                if (events.Count != initial.InitialEventCount ||
+                    ValidateInitialEvents(events[0], events.Count == 2 ? events[1] : []) != events.Count)
+                    throw new CryptographicException(
+                        "The pending initial DMC2 stream is incomplete or invalid.");
+                var result = (events[0], events.Count == 2 ? events[1] : null);
+                events.Clear();
+                return result;
+            }
+            finally
+            {
+                foreach (var exact in events) CryptographicOperations.ZeroMemory(exact);
+            }
+        }
+        finally { gate.Release(); }
+    }
+
+    internal void RequireInboundMaterializationScope(
+        ReadOnlySpan<byte> localAccountId,
+        ulong localAccountGeneration,
+        ReadOnlySpan<byte> conversationId)
+    {
+        ThrowIfDisposed();
+        if (!MessagingCryptoV1Trs1.Fixed(scope.AccountId, localAccountId) ||
+            scope.AccountGeneration != localAccountGeneration ||
+            !MessagingCryptoV1Trs1.Fixed(scope.ConversationId, conversationId))
+            throw new CryptographicException(
+                "The pending DMC2 belongs to another local account or conversation generation.");
     }
 
     internal ValueTask<MessagingCryptoV1PreparationLease> AcquireSendPreparationLeaseAsync(
@@ -773,7 +965,7 @@ internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
         {
             if (!MessagingCryptoV1Trs1.Fixed(ExpectedSchemaFingerprint, actualSchema))
                 throw Failure(MessagingCryptoV1StoreOpenFailure.Corrupt,
-                    "Messaging-crypto DDL differs from the sealed generation-5 schema.");
+                    "Messaging-crypto DDL differs from the sealed generation-7 schema.");
         }
         finally { CryptographicOperations.ZeroMemory(actualSchema); }
 
@@ -797,6 +989,8 @@ internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
         using var current = ReadCurrent(db, null);
         var journalCount = ScalarLong(db, "SELECT count(*) FROM ratchet_journal;");
         var exactDpe2Count = ScalarLong(db, "SELECT count(*) FROM exact_dpe2_plan_journal;");
+        var pendingDmc2Count = ScalarLong(db, "SELECT count(*) FROM pending_inbound_dmc2;");
+        var pendingInitialCount = ScalarLong(db, "SELECT count(*) FROM pending_initial_dmc2;");
         var forkCount = ScalarLong(db, "SELECT count(*) FROM ratchet_fork_latch;");
         var initialCount = ScalarLong(db, "SELECT count(*) FROM initial_session_journal;");
         var initialForkCount = ScalarLong(db, "SELECT count(*) FROM initial_session_fork_latch;");
@@ -810,7 +1004,9 @@ internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
             throw new FormatException("Initial pre-key inventory cardinality is invalid.");
         if (current is null)
         {
-            if (journalCount != 0 || exactDpe2Count != 0 || forkCount != 0 ||
+            if (journalCount != 0 || exactDpe2Count != 0 || pendingDmc2Count != 0 ||
+                pendingInitialCount != 0 ||
+                forkCount != 0 ||
                 initialCount != 0 || initialForkCount != 0 || initiatorCount != 0 ||
                 initiatorForkCount != 0)
                 throw new FormatException("Orphan ratchet evidence exists.");
@@ -818,6 +1014,8 @@ internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
         }
         if (journalCount < 0 || journalCount > MessagingCryptoV1Limits.MaximumJournalEntries ||
             exactDpe2Count < 0 || exactDpe2Count > journalCount ||
+            pendingDmc2Count < 0 || pendingDmc2Count > exactDpe2Count ||
+            pendingInitialCount is < 0 or > 2 ||
             initialCount + initiatorCount != 1 || preKeyCount != 0 ||
             current.JournalGeneration != checked((ulong)journalCount) ||
             (current.ForkLatched
@@ -843,13 +1041,15 @@ internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
         using var initial = ReadInitialSession(db, null);
         using var initiator = ReadInitiatorInitialSession(db, null);
         if (initial is not null)
-            ValidateResponderInitialization(current, initial);
+            ValidateResponderInitialization(db, current, initial);
         else if (initiator is not null)
             ValidateInitiatorInitialization(current, initiator);
         else
             throw new FormatException("Initial-session evidence is absent.");
 
         ValidateJournalChain(db, current);
+        ValidatePendingInitialEvents(db, initial, pendingInitialCount);
+        ValidatePendingInboundDmc2(db, pendingDmc2Count);
         if (initialForkCount == 1)
             ValidateInitialForkLatch(db, current, initial ??
                 throw new FormatException("Responder initial-session evidence is absent."));
@@ -859,13 +1059,101 @@ internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
         else ValidateForkLatch(db, current);
     }
 
-    private static void ValidateResponderInitialization(CurrentRow current, InitialSessionRow initial)
+    private void ValidatePendingInitialEvents(
+        SqliteConnection db,
+        InitialSessionRow? initial,
+        long pendingCount)
+    {
+        if (pendingCount != (initial?.InitialEventCount ?? 0))
+            throw new FormatException("Authenticated initial DMC2 cardinality differs from its initial-session journal.");
+        if (initial is null) return;
+        var events = new List<byte[]>(checked((int)pendingCount));
+        try
+        {
+            using var command = db.CreateCommand();
+            command.CommandText = "SELECT event_index,claim_operation_id,dph2_full_replay_hash,exact_dmc2,dmc2_hash FROM pending_initial_dmc2 ORDER BY event_index;";
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                var exact = (byte[])reader[3];
+                events.Add(exact);
+                var hash = SHA256.HashData(exact);
+                try
+                {
+                    if (reader.GetInt32(0) != events.Count ||
+                        !MessagingCryptoV1Trs1.Fixed((byte[])reader[1], initial.ClaimOperationId) ||
+                        !MessagingCryptoV1Trs1.Fixed((byte[])reader[2], initial.Dph2FullReplayHash) ||
+                        !MessagingCryptoV1Trs1.Fixed((byte[])reader[4], hash))
+                        throw new FormatException("Authenticated initial DMC2 differs from its exact DPH2 journal.");
+                }
+                finally { CryptographicOperations.ZeroMemory(hash); }
+            }
+            if (events.Count != pendingCount ||
+                ValidateInitialEvents(events.Count == 0 ? [] : events[0],
+                    events.Count < 2 ? [] : events[1]) != pendingCount)
+                throw new FormatException("Authenticated initial DMC2 stream is invalid.");
+        }
+        finally
+        {
+            foreach (var exact in events) CryptographicOperations.ZeroMemory(exact);
+        }
+    }
+
+    private void ValidatePendingInboundDmc2(SqliteConnection db, long pendingCount)
+    {
+        var receiveCount = ScalarLong(db,
+            $"SELECT count(*) FROM exact_dpe2_plan_journal e JOIN ratchet_journal j ON e.journal_generation=j.journal_generation WHERE j.direction={(int)MessagingCryptoV1Direction.Receive};");
+        if (pendingCount != receiveCount)
+            throw new FormatException(
+                "Every committed exact DPE2 receive must retain its authenticated DMC2 until inbox materialization.");
+        using var command = db.CreateCommand();
+        command.CommandText = "SELECT p.operation_id,p.exact_envelope_hash,p.exact_dmc2,p.dmc2_hash,j.direction,j.operation_id,j.envelope_hash,e.exact_envelope_hash FROM pending_inbound_dmc2 p LEFT JOIN ratchet_journal j ON p.journal_generation=j.journal_generation LEFT JOIN exact_dpe2_plan_journal e ON p.journal_generation=e.journal_generation;";
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            if (reader.IsDBNull(4) || reader.IsDBNull(5) ||
+                reader.IsDBNull(6) || reader.IsDBNull(7) ||
+                reader.GetInt32(4) != (int)MessagingCryptoV1Direction.Receive)
+                throw new FormatException(
+                    "A pending authenticated DMC2 has no exact receive journal.");
+            var operation = (byte[])reader[0];
+            var envelope = (byte[])reader[1];
+            var exact = (byte[])reader[2];
+            var hash = (byte[])reader[3];
+            var actualHash = SHA256.HashData(exact);
+            try
+            {
+                var parsed = ApplicationCoreCodec.DecodeDmc2(exact);
+                if (!MessagingCryptoV1Trs1.Fixed(operation, (byte[])reader[5]) ||
+                    !MessagingCryptoV1Trs1.Fixed(envelope, (byte[])reader[6]) ||
+                    !MessagingCryptoV1Trs1.Fixed(envelope, (byte[])reader[7]) ||
+                    !MessagingCryptoV1Trs1.Fixed(hash, actualHash) ||
+                    !MessagingCryptoV1Trs1.Fixed(
+                        parsed.CanonicalBytes.Span, exact) ||
+                    !MessagingCryptoV1Trs1.Fixed(
+                        parsed.ConversationId.Span, scope.ConversationId))
+                    throw new FormatException(
+                        "A pending authenticated DMC2 differs from its exact receive journal.");
+            }
+            finally { CryptographicOperations.ZeroMemory(actualHash); }
+        }
+    }
+
+    private static void ValidateResponderInitialization(
+        SqliteConnection db,
+        CurrentRow current,
+        InitialSessionRow initial)
     {
         var facts = new MessagingCryptoV1Trs1Facts(current.InitialGeneration,
             current.InitialCommitment.ToArray(), current.InitialStateHash.ToArray(), false);
+        byte[] sessionHash = initial.InitialEventCount > 0
+            ? ReadInitialEventHash(db, initial.ClaimOperationId, 1) : [];
+        byte[] firstHash = initial.InitialEventCount > 1
+            ? ReadInitialEventHash(db, initial.ClaimOperationId, 2) : [];
         var expected = ComputeInitializationFingerprint(
             initial.PreKeySource, initial.ClaimOperationId, initial.Xpc1FullReplayHash,
-            initial.Dph2FullReplayHash, initial.X25519PreKeyId, initial.MlKemPreKeyId, facts);
+            initial.Dph2FullReplayHash, initial.X25519PreKeyId, initial.MlKemPreKeyId,
+            facts, initial.InitialEventCount, sessionHash, firstHash);
         try
         {
             if (!MessagingCryptoV1Trs1.Fixed(expected, current.InitializationFingerprint) ||
@@ -879,9 +1167,32 @@ internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
         finally
         {
             CryptographicOperations.ZeroMemory(expected);
+            CryptographicOperations.ZeroMemory(sessionHash);
+            CryptographicOperations.ZeroMemory(firstHash);
             CryptographicOperations.ZeroMemory(facts.StateCommitment);
             CryptographicOperations.ZeroMemory(facts.ExactHash);
         }
+    }
+
+    private static byte[] ReadInitialEventHash(
+        SqliteConnection db,
+        ReadOnlySpan<byte> operationId,
+        int index)
+    {
+        using var command = db.CreateCommand();
+        command.CommandText = "SELECT dmc2_hash FROM pending_initial_dmc2 WHERE claim_operation_id=$operation AND event_index=$index;";
+        Add(command, "$operation", operationId.ToArray());
+        Add(command, "$index", index);
+        using var reader = command.ExecuteReader();
+        if (!reader.Read())
+            throw new FormatException("An authenticated initial event hash is missing.");
+        var hash = (byte[])reader[0];
+        if (reader.Read())
+        {
+            CryptographicOperations.ZeroMemory(hash);
+            throw new FormatException("Duplicate authenticated initial event hashes exist.");
+        }
+        return hash;
     }
 
     private void ValidateInitiatorInitialization(
@@ -1241,6 +1552,35 @@ internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
         if (command.ExecuteNonQuery() != 1) throw new InvalidOperationException("Exact DPE2 journal insert failed.");
     }
 
+    private void InsertPendingInboundDmc2(
+        SqliteConnection db,
+        SqliteTransaction transaction,
+        ulong journalGeneration,
+        ExactDpe2ProtocolPlanSnapshot plan)
+    {
+        var parsed = ApplicationCoreCodec.DecodeDmc2(plan.AuthenticatedDmc2);
+        if (!MessagingCryptoV1Trs1.Fixed(
+                parsed.ConversationId.Span, scope.ConversationId))
+            throw new CryptographicException(
+                "The authenticated DMC2 belongs to another conversation.");
+        var hash = SHA256.HashData(plan.AuthenticatedDmc2);
+        try
+        {
+            using var command = db.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = "INSERT INTO pending_inbound_dmc2 VALUES($operation,$envelope,$journal,$dmc2,$hash);";
+            Add(command, "$operation", plan.OperationId);
+            Add(command, "$envelope", plan.ExactEnvelopeHash);
+            Add(command, "$journal", U64(journalGeneration));
+            Add(command, "$dmc2", plan.AuthenticatedDmc2);
+            Add(command, "$hash", hash);
+            if (command.ExecuteNonQuery() != 1)
+                throw new InvalidOperationException(
+                    "The authenticated DMC2 was not staged with its ratchet commit.");
+        }
+        finally { CryptographicOperations.ZeroMemory(hash); }
+    }
+
     private static void UpdateState(
         SqliteConnection db,
         SqliteTransaction transaction,
@@ -1354,6 +1694,20 @@ internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
             throw new CryptographicException("The replay token must bind the exact DPE2 envelope hash.");
         if (plan.Direction == MessagingCryptoV1Direction.Send && !plan.HasStateMutation)
             throw new CryptographicException("A send cannot be committed as a non-mutating replay.");
+        if (plan.Direction == MessagingCryptoV1Direction.Receive && plan.HasStateMutation)
+        {
+            if (plan.AuthenticatedDmc2.Length is < 282 or > 33_082)
+                throw new CryptographicException(
+                    "A fresh receive must stage its authenticated DMC2.");
+            var parsed = ApplicationCoreCodec.DecodeDmc2(plan.AuthenticatedDmc2);
+            if (!MessagingCryptoV1Trs1.Fixed(
+                    parsed.CanonicalBytes.Span, plan.AuthenticatedDmc2))
+                throw new CryptographicException(
+                    "The staged DMC2 is not canonical.");
+        }
+        else if (plan.AuthenticatedDmc2.Length != 0)
+            throw new CryptographicException(
+                "A send or exact replay cannot stage an inbound DMC2.");
         if (plan.HasStateMutation)
         {
             Required32(plan.NextStateCommitment, nameof(plan.NextStateCommitment));
@@ -1532,9 +1886,27 @@ internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
 
     private static byte[] ComputeInitializationFingerprint(
         MessagingCryptoV1InitialSessionHandoff.InitializationPayload payload,
-        MessagingCryptoV1Trs1Facts facts) => ComputeInitializationFingerprint(
-            payload.PreKeySource, payload.ClaimOperationId, payload.Xpc1FullReplayHash, payload.Dph2FullReplayHash,
-            payload.X25519PreKeyId, payload.MlKemPreKeyId, facts);
+        MessagingCryptoV1Trs1Facts facts,
+        ReadOnlySpan<byte> sessionInitDmc2,
+        ReadOnlySpan<byte> firstApplicationDmc2)
+    {
+        byte[] sessionHash = sessionInitDmc2.IsEmpty ? [] : SHA256.HashData(sessionInitDmc2);
+        byte[] firstHash = firstApplicationDmc2.IsEmpty ? [] : SHA256.HashData(firstApplicationDmc2);
+        try
+        {
+            return ComputeInitializationFingerprint(
+                payload.PreKeySource, payload.ClaimOperationId, payload.Xpc1FullReplayHash,
+                payload.Dph2FullReplayHash, payload.X25519PreKeyId,
+                payload.MlKemPreKeyId, facts,
+                sessionInitDmc2.IsEmpty ? 0 : firstApplicationDmc2.IsEmpty ? 1 : 2,
+                sessionHash, firstHash);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(sessionHash);
+            CryptographicOperations.ZeroMemory(firstHash);
+        }
+    }
 
     private static byte[] ComputeInitializationFingerprint(
         MessagingCryptoV1InitialPreKeySource preKeySource,
@@ -1543,14 +1915,20 @@ internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
         ReadOnlySpan<byte> dph2FullReplayHash,
         ReadOnlySpan<byte> x25519PreKeyId,
         ReadOnlySpan<byte> mlKemPreKeyId,
-        MessagingCryptoV1Trs1Facts facts)
+        MessagingCryptoV1Trs1Facts facts,
+        int initialEventCount,
+        ReadOnlySpan<byte> sessionHash,
+        ReadOnlySpan<byte> firstHash)
     {
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        Append(hash, "Deep/Client/MessagingCryptoV1/initialization/v3"u8);
+        Append(hash, "Deep/Client/MessagingCryptoV1/initialization/v4"u8);
         Append(hash, [(byte)preKeySource]); Append(hash, claimOperationId); Append(hash, xpc1FullReplayHash);
         Append(hash, dph2FullReplayHash); Append(hash, x25519PreKeyId);
         Append(hash, mlKemPreKeyId); Append(hash, U64(facts.Generation));
         Append(hash, facts.StateCommitment); Append(hash, facts.ExactHash);
+        Append(hash, [(byte)initialEventCount]);
+        Append(hash, sessionHash);
+        Append(hash, firstHash);
         return hash.GetHashAndReset();
     }
 
@@ -1927,31 +2305,112 @@ internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
         SqliteTransaction transaction,
         MessagingCryptoV1InitialSessionHandoff.InitializationPayload payload,
         MessagingCryptoV1Trs1Facts facts,
-        ReadOnlySpan<byte> fingerprint)
+        ReadOnlySpan<byte> fingerprint,
+        int initialEventCount)
     {
         using var command = db.CreateCommand();
         command.Transaction = transaction;
-        command.CommandText = "INSERT INTO initial_session_journal VALUES(1,$source,$operation,$fingerprint,$xpc1,$dph2,$x25519,$mlkem,$generation,$commitment,$hash);";
+        command.CommandText = "INSERT INTO initial_session_journal VALUES(1,$source,$operation,$fingerprint,$xpc1,$dph2,$x25519,$mlkem,$generation,$commitment,$hash,$eventCount);";
         Add(command, "$source", (int)payload.PreKeySource); Add(command, "$operation", payload.ClaimOperationId); Add(command, "$fingerprint", fingerprint.ToArray());
         Add(command, "$xpc1", payload.Xpc1FullReplayHash); Add(command, "$dph2", payload.Dph2FullReplayHash);
         Add(command, "$x25519", payload.X25519PreKeyId.Length == 0 ? DBNull.Value : payload.X25519PreKeyId); Add(command, "$mlkem", payload.MlKemPreKeyId);
         Add(command, "$generation", U64(facts.Generation)); Add(command, "$commitment", facts.StateCommitment);
         Add(command, "$hash", facts.ExactHash);
+        Add(command, "$eventCount", initialEventCount);
         if (command.ExecuteNonQuery() != 1) throw new InvalidOperationException("Initial-session journal insert failed.");
+    }
+
+    private int ValidateInitialEvents(
+        ReadOnlySpan<byte> sessionInitDmc2,
+        ReadOnlySpan<byte> firstApplicationDmc2)
+    {
+        if (sessionInitDmc2.IsEmpty)
+        {
+            if (!firstApplicationDmc2.IsEmpty)
+                throw new CryptographicException("The first DPH2 event has no SessionInit.");
+            return 0;
+        }
+        var session = ApplicationCoreCodec.DecodeDmc2(sessionInitDmc2);
+        if (session.ContentKind != Dmc2ContentKind.SessionInit ||
+            !MessagingCryptoV1Trs1.Fixed(session.CanonicalBytes.Span, sessionInitDmc2) ||
+            !MessagingCryptoV1Trs1.Fixed(session.ConversationId.Span, scope.ConversationId))
+            throw new CryptographicException("The initial SessionInit is outside the exact session scope.");
+        if (firstApplicationDmc2.IsEmpty) return 1;
+        var first = ApplicationCoreCodec.DecodeDmc2(firstApplicationDmc2);
+        if (first.ContentKind == Dmc2ContentKind.SessionInit ||
+            !MessagingCryptoV1Trs1.Fixed(first.CanonicalBytes.Span, firstApplicationDmc2) ||
+            !MessagingCryptoV1Trs1.Fixed(first.NetworkId.Span, session.NetworkId.Span) ||
+            !MessagingCryptoV1Trs1.Fixed(first.ConversationId.Span, session.ConversationId.Span) ||
+            !MessagingCryptoV1Trs1.Fixed(first.SenderAccountId.Span, session.SenderAccountId.Span) ||
+            !MessagingCryptoV1Trs1.Fixed(first.SenderDeviceId.Span, session.SenderDeviceId.Span) ||
+            MessagingCryptoV1Trs1.Fixed(first.LogicalMessageId.Span, session.LogicalMessageId.Span) ||
+            first.SenderClientSequence <= session.SenderClientSequence ||
+            first.CreatedAtUnixMilliseconds < session.CreatedAtUnixMilliseconds)
+            throw new CryptographicException("The first DPH2 application event is outside SessionInit's stream.");
+        return 2;
+    }
+
+    private static void InsertInitialEvent(
+        SqliteConnection db,
+        SqliteTransaction transaction,
+        MessagingCryptoV1InitialSessionHandoff.InitializationPayload payload,
+        int index,
+        ReadOnlySpan<byte> exactDmc2)
+    {
+        using var command = db.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "INSERT INTO pending_initial_dmc2 VALUES($index,$operation,$dph2,$dmc2,$hash);";
+        Add(command, "$index", index);
+        Add(command, "$operation", payload.ClaimOperationId);
+        Add(command, "$dph2", payload.Dph2FullReplayHash);
+        Add(command, "$dmc2", exactDmc2.ToArray());
+        Add(command, "$hash", SHA256.HashData(exactDmc2));
+        if (command.ExecuteNonQuery() != 1)
+            throw new InvalidOperationException("Authenticated initial DMC2 staging failed.");
+    }
+
+    private static bool InitialEventsMatch(
+        SqliteConnection db,
+        SqliteTransaction transaction,
+        InitialSessionRow initial,
+        ReadOnlySpan<byte> sessionInitDmc2,
+        ReadOnlySpan<byte> firstApplicationDmc2)
+    {
+        using var command = db.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT event_index,dph2_full_replay_hash,exact_dmc2,dmc2_hash FROM pending_initial_dmc2 WHERE claim_operation_id=$operation ORDER BY event_index;";
+        Add(command, "$operation", initial.ClaimOperationId);
+        using var reader = command.ExecuteReader();
+        for (var index = 1; index <= initial.InitialEventCount; index++)
+        {
+            var expected = index == 1 ? sessionInitDmc2 : firstApplicationDmc2;
+            if (!reader.Read()) return false;
+            var expectedHash = SHA256.HashData(expected);
+            try
+            {
+                if (reader.GetInt32(0) != index ||
+                    !MessagingCryptoV1Trs1.Fixed((byte[])reader[1], initial.Dph2FullReplayHash) ||
+                    !MessagingCryptoV1Trs1.Fixed((byte[])reader[2], expected) ||
+                    !MessagingCryptoV1Trs1.Fixed((byte[])reader[3], expectedHash))
+                    return false;
+            }
+            finally { CryptographicOperations.ZeroMemory(expectedHash); }
+        }
+        return !reader.Read();
     }
 
     private static InitialSessionRow? ReadInitialSession(SqliteConnection db, SqliteTransaction? transaction)
     {
         using var command = db.CreateCommand();
         command.Transaction = transaction;
-        command.CommandText = "SELECT prekey_source,claim_operation_id,initialization_fingerprint,xpc1_full_replay_hash,dph2_full_replay_hash,x25519_prekey_id,mlkem_prekey_id,initial_generation,initial_commitment,initial_state_hash FROM initial_session_journal WHERE singleton=1;";
+        command.CommandText = "SELECT prekey_source,claim_operation_id,initialization_fingerprint,xpc1_full_replay_hash,dph2_full_replay_hash,x25519_prekey_id,mlkem_prekey_id,initial_generation,initial_commitment,initial_state_hash,initial_event_count FROM initial_session_journal WHERE singleton=1;";
         using var reader = command.ExecuteReader();
         if (!reader.Read()) return null;
         var source = (MessagingCryptoV1InitialPreKeySource)reader.GetInt32(0);
         if (!Enum.IsDefined(source)) throw new FormatException("Unknown initial pre-key source.");
         var result = new InitialSessionRow(source, (byte[])reader[1], (byte[])reader[2], (byte[])reader[3],
             (byte[])reader[4], reader.IsDBNull(5) ? [] : (byte[])reader[5], (byte[])reader[6], ReadU64((byte[])reader[7]),
-            (byte[])reader[8], (byte[])reader[9]);
+            (byte[])reader[8], (byte[])reader[9], reader.GetInt32(10));
         if (reader.Read()) { result.Dispose(); throw new FormatException("Duplicate initial-session rows exist."); }
         return result;
     }
@@ -2166,7 +2625,8 @@ internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
         byte[] mlKemPreKeyId,
         ulong initialGeneration,
         byte[] initialCommitment,
-        byte[] initialStateHash) : IDisposable
+        byte[] initialStateHash,
+        int initialEventCount) : IDisposable
     {
         internal MessagingCryptoV1InitialPreKeySource PreKeySource { get; } = preKeySource;
         internal byte[] ClaimOperationId { get; } = claimOperationId;
@@ -2178,6 +2638,7 @@ internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
         internal ulong InitialGeneration { get; } = initialGeneration;
         internal byte[] InitialCommitment { get; } = initialCommitment;
         internal byte[] InitialStateHash { get; } = initialStateHash;
+        internal int InitialEventCount { get; } = initialEventCount;
         public void Dispose() => Zero(ClaimOperationId, Fingerprint, Xpc1FullReplayHash,
             Dph2FullReplayHash, X25519PreKeyId, MlKemPreKeyId, InitialCommitment, InitialStateHash);
     }

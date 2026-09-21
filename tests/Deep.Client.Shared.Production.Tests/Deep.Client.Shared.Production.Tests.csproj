@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <EnableDeepTestInternals>true</EnableDeepTestInternals>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+    <ProjectReference Include="..\..\src\Deep.Client.Shared\Deep.Client.Shared.Production.csproj"
+                      AdditionalProperties="EnableDeepTestInternals=true" />
+  </ItemGroup>
+  <ItemGroup>
+    <Using Include="Xunit" />
+    <Compile Include="..\Deep.Client.Shared.Tests\Services\MessagingV1\PrivacyRoutedMessagingTransportTests.cs"
+             Link="MessagingV1\PrivacyRoutedMessagingTransportTests.cs" />
+    <Compile Include="..\Deep.Client.Shared.Tests\Persistence\MessagingCryptoV1\ManagedInitiatorInitialSessionSqliteAdapterTests.cs"
+             Link="MessagingCryptoV1\ManagedInitiatorInitialSessionSqliteAdapterTests.cs" />
+    <Compile Include="..\Deep.Client.Shared.Tests\Persistence\MessagingCryptoV1\SqliteMessagingCryptoV1StoreTests.cs"
+             Link="MessagingCryptoV1\SqliteMessagingCryptoV1StoreTests.cs" />
+    <Compile Include="..\Deep.Client.Shared.Tests\Persistence\MessagingCryptoV1\ExactDpe2SqliteDurableTransactionAuthorityTests.cs"
+             Link="MessagingCryptoV1\ExactDpe2SqliteDurableTransactionAuthorityTests.cs" />
+    <Compile Include="..\Deep.Client.Shared.Tests\Services\ContactV1\ContactInitialSessionCoordinatorTests.cs"
+             Link="ContactV1\ContactInitialSessionCoordinatorTests.cs" />
+    <Compile Include="..\Deep.Client.Shared.Tests\Persistence\PreKeyV1\OpaquePreKeyV1AuthoringFixture.cs"
+             Link="PreKeyV1\OpaquePreKeyV1AuthoringFixture.cs" />
+    <Compile Include="..\Deep.Client.Shared.Tests\Persistence\PreKeyV1\OpaquePreKeyV1StoreSurfaceTests.cs"
+             Link="PreKeyV1\OpaquePreKeyV1StoreSurfaceTests.cs" />
+    <Compile Include="..\Deep.Client.Shared.Tests\Persistence\PreKeyV1\SqlitePreKeyV1SecretOwnerTests.cs"
+             Link="PreKeyV1\SqlitePreKeyV1SecretOwnerTests.cs" />
+    <Compile Include="..\Deep.Client.Shared.Tests\Persistence\PreKeyV1\SqlitePreKeyV1InventoryOwnerTests.cs"
+             Link="PreKeyV1\SqlitePreKeyV1InventoryOwnerTests.cs" />
+    <Compile Include="..\Deep.Client.Shared.Tests\Persistence\SqliteGlobalPoolIsolationCollection.cs"
+             Link="Persistence\SqliteGlobalPoolIsolationCollection.cs" />
+  </ItemGroup>
+</Project>

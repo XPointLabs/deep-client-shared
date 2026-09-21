@@ -141,7 +141,11 @@ public sealed class MailboxAuthenticatedRequestFactory
                 logicalId,
                 [new ScopedMailboxBatchSelector(
                     selector,
+#if DEEP_CLEAN_PRODUCTION
+                    new MailboxWireMessageId(binding.OperationId.Span),
+#else
                     new Domain.MessageId(Convert.ToHexString(binding.OperationId.Span)),
+#endif
                     binding.Operation)],
                 [new ScopedMailboxBatchTarget(selector, binding)],
                 // The authority clock is sampled at each prepare/resume.  A

@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Reflection;
 using System.Security.Cryptography;
+using Deep.Client.Shared.Domain;
 using Deep.Client.Shared.Persistence.MessagingCryptoV1;
 using Deep.Protocol.MessagingCrypto;
 using Deep.Protocol.MessagingWire;
@@ -170,21 +171,27 @@ public sealed class ManagedInitiatorInitialSessionSqliteAdapterTests
         Assert.DoesNotContain("Boolean", forbidden, StringComparison.OrdinalIgnoreCase);
     }
 
-    private sealed class Fixture : IDisposable
+    internal sealed class Fixture : IDisposable
     {
         private readonly string directory = Path.Combine(
             Path.GetTempPath(), "deep-initiator-session", Guid.NewGuid().ToString("N"));
 
-        internal Fixture()
+        internal Fixture(DeepLocalIdentitySnapshot? identity = null)
         {
             Directory.CreateDirectory(directory);
             StatePath = Path.Combine(directory, "initiator.db");
+            NetworkId = identity?.NetworkId.ToArray() ?? Bytes16(0x31);
+            LocalAccountId = identity?.Account.AccountIdentity.AccountId.Bytes.ToArray() ?? Bytes(0xA1);
+            LocalAccountGeneration = identity?.Account.AccountIdentity.AccountGeneration ?? 7;
+            LocalDeviceId = identity?.Device.DeviceId.Bytes.ToArray() ?? Bytes(0xB1);
+            LocalDeviceGeneration = identity?.Device.DeviceGeneration ?? 11;
+            StoreGeneration = checked((ulong)(identity?.StoreGeneration ?? 1));
             Key = Bytes(0x91);
             ExactDph2 = CreateDph2(0x71);
             SessionId = Dph2Codec.Decode(ExactDph2).SessionId.ToArray();
             Scope = new MessagingCryptoV1StoreScope(
                 LocalAccountId, LocalAccountGeneration, LocalDeviceId,
-                LocalDeviceGeneration, ConversationId, SessionId, 1);
+                LocalDeviceGeneration, ConversationId, SessionId, StoreGeneration);
             VerifiedScope = ScopeWith();
             ExactTrs1 = Trs1(Scope, RemoteDeviceId, RemoteDeviceGeneration);
         }
@@ -196,10 +203,12 @@ public sealed class ManagedInitiatorInitialSessionSqliteAdapterTests
         internal byte[] SessionId { get; }
         internal MessagingCryptoV1StoreScope Scope { get; }
         internal InitiatorInitialSessionVerifiedScope VerifiedScope { get; }
-        internal byte[] LocalAccountId { get; } = Bytes(0xA1);
-        internal ulong LocalAccountGeneration => 7;
-        internal byte[] LocalDeviceId { get; } = Bytes(0xB1);
-        internal ulong LocalDeviceGeneration => 11;
+        internal byte[] NetworkId { get; }
+        internal byte[] LocalAccountId { get; }
+        internal ulong LocalAccountGeneration { get; }
+        internal byte[] LocalDeviceId { get; }
+        internal ulong LocalDeviceGeneration { get; }
+        internal ulong StoreGeneration { get; }
         internal byte[] ConversationId { get; } = Bytes(0xC1);
         internal byte[] RemoteAccountId { get; } = Bytes(0xD1);
         internal ulong RemoteAccountGeneration => 13;
@@ -224,7 +233,7 @@ public sealed class ManagedInitiatorInitialSessionSqliteAdapterTests
             ulong? remoteAccountGeneration = null,
             ulong remoteDirectoryGeneration = 19) =>
             InitiatorInitialSessionVerifiedScope.CreateForTests(
-                Bytes16(0x31), LocalAccountId, 2, Bytes(0x41),
+                NetworkId, LocalAccountId, 2, Bytes(0x41),
                 Bytes(conversationSeed), Bytes(0x42), Bytes(0x43),
                 RemoteAccountId, remoteAccountGeneration ?? RemoteAccountGeneration,
                 remoteDirectoryGeneration,
@@ -239,11 +248,14 @@ public sealed class ManagedInitiatorInitialSessionSqliteAdapterTests
             BinaryPrimitives.WriteUInt16BigEndian(dpd1Reference.AsSpan(4), 1);
             Bytes(0x51).CopyTo(dpd1Reference, 6);
             var record = new Dph2Record(
-                Bytes16(0x31),
+                NetworkId,
                 LocalAccountId,
                 LocalDeviceId,
                 localDeviceGeneration ?? LocalDeviceGeneration,
                 dpd1Reference,
+                Deep.Protocol.ApplicationCore.ApplicationCoreCodec.AuthorDid1(
+                    Bytes(0x4f), Enumerable.Repeat((byte)0x50, 16).ToArray())
+                    .CanonicalBytes.Span,
                 RemoteAccountId,
                 RemoteDeviceId,
                 RemoteDeviceGeneration,
@@ -264,7 +276,7 @@ public sealed class ManagedInitiatorInitialSessionSqliteAdapterTests
 
         public void Dispose()
         {
-            Zero(Key, ExactDph2, ExactTrs1, SessionId, LocalAccountId,
+            Zero(Key, ExactDph2, ExactTrs1, SessionId, NetworkId, LocalAccountId,
                 LocalDeviceId, ConversationId, RemoteAccountId, RemoteDeviceId);
             if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true);
         }

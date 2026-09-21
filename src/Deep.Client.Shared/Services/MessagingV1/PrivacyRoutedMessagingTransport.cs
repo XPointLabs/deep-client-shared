@@ -119,7 +119,6 @@ internal sealed class PrivacyRoutedMessagingTransport : IMessagingV1PrivacyTrans
     private static ReadOnlySpan<byte> AckOperationDomain =>
         "Deep/Client/MSG01/mailbox-ack-v1"u8;
     private readonly MessagingV1LocalContext local;
-    private readonly IMailboxOperationSigner signer;
     private readonly IPrivacyRoutedMessagingMailboxClient mailbox;
     private readonly MessagingDao1SealingAuthority sealer;
     private readonly IMessagingDao1OpenAuthority opener;
@@ -127,36 +126,23 @@ internal sealed class PrivacyRoutedMessagingTransport : IMessagingV1PrivacyTrans
 
     internal PrivacyRoutedMessagingTransport(
         MessagingV1LocalContext local,
-        IMailboxOperationSigner signer,
         PrivacyRoutedMessagingMailboxClient mailbox,
         MessagingDao1SealingAuthority sealer,
         ManagedMessagingDao1OpenAuthority opener,
         TimeProvider? timeProvider = null)
-        : this(local, signer, (IPrivacyRoutedMessagingMailboxClient)mailbox,
+        : this(local, (IPrivacyRoutedMessagingMailboxClient)mailbox,
             sealer, opener, timeProvider)
     {
     }
 
-#if DEEP_TEST_INTERNALS
     internal PrivacyRoutedMessagingTransport(
         MessagingV1LocalContext local,
-        IMailboxOperationSigner signer,
         IPrivacyRoutedMessagingMailboxClient mailbox,
         MessagingDao1SealingAuthority sealer,
         IMessagingDao1OpenAuthority opener,
         TimeProvider? timeProvider = null)
-#else
-    private PrivacyRoutedMessagingTransport(
-        MessagingV1LocalContext local,
-        IMailboxOperationSigner signer,
-        IPrivacyRoutedMessagingMailboxClient mailbox,
-        MessagingDao1SealingAuthority sealer,
-        IMessagingDao1OpenAuthority opener,
-        TimeProvider? timeProvider = null)
-#endif
     {
         this.local = local ?? throw new ArgumentNullException(nameof(local));
-        this.signer = signer ?? throw new ArgumentNullException(nameof(signer));
         this.mailbox = mailbox ?? throw new ArgumentNullException(nameof(mailbox));
         this.sealer = sealer ?? throw new ArgumentNullException(nameof(sealer));
         this.opener = opener ?? throw new ArgumentNullException(nameof(opener));
@@ -276,18 +262,19 @@ internal sealed class PrivacyRoutedMessagingTransport : IMessagingV1PrivacyTrans
     }
 
     public async ValueTask<MessagingV1ReceiveBatch> RetrieveAsync(
-        MailboxCredentialSelector selfRetrieveSelector,
+        VerifiedMessagingMailboxAccess selfRetrieveAccess,
         ushort maximumItems,
         CancellationToken cancellationToken = default)
     {
-        ValidateSelfSelector(selfRetrieveSelector);
+        ValidateSelfAccess(selfRetrieveAccess);
+        var selfRetrieveSelector = selfRetrieveAccess.Selector;
         if (maximumItems == 0)
             throw new ArgumentOutOfRangeException(nameof(maximumItems));
         ClientMailboxRetrieveResult retrieved;
         try
         {
             retrieved = await mailbox.RetrieveAsync(
-                local.OutboxScope, signer, selfRetrieveSelector,
+                local.OutboxScope, selfRetrieveAccess.Signer, selfRetrieveSelector,
                 maximumItems, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception exception) when (TryMapDispatch(exception, out var mapped))
@@ -304,15 +291,20 @@ internal sealed class PrivacyRoutedMessagingTransport : IMessagingV1PrivacyTrans
         {
             foreach (var item in durable.OrderBy(static value => value.Cursor))
             {
-                ValidateRetrievedEnvelope(item, route);
+                ValidateRetrievedEnvelope(
+                    item.Envelope, item.Cursor, route, local.NetworkId);
                 using var dao = await opener.OpenAsync(
                     item.Envelope.Ciphertext, cancellationToken).ConfigureAwait(false);
-                ValidateInboundInner(dao.Kind, dao.ExactInner.Span);
+                MessagingV1InboundInnerValidator.Validate(
+                    dao.Kind, dao.ExactInner.Span,
+                    local.NetworkId, local.AccountId, local.DeviceId,
+                    local.DeviceGeneration);
                 opened.Add(new MessagingV1ReceivedDeposit(
                     dao.Kind, dao.Parsed, dao.ExactInner.Span, item));
             }
             return new MessagingV1ReceiveBatch(
-                opened, retrieved.HasMore, retrieved.ContinuationToken.Span);
+                opened, selfRetrieveSelector,
+                retrieved.HasMore, retrieved.ContinuationToken.Span);
         }
         catch
         {
@@ -322,14 +314,18 @@ internal sealed class PrivacyRoutedMessagingTransport : IMessagingV1PrivacyTrans
     }
 
     public async ValueTask AcknowledgeAsync(
-        MailboxCredentialSelector selfRetrieveSelector,
+        VerifiedMessagingMailboxAccess selfRetrieveAccess,
         MessagingV1ReceiveBatch batch,
         IReadOnlyList<MessagingV1InboundCommitReceipt> committed,
         CancellationToken cancellationToken = default)
     {
-        ValidateSelfSelector(selfRetrieveSelector);
+        ValidateSelfAccess(selfRetrieveAccess);
+        var selfRetrieveSelector = selfRetrieveAccess.Selector;
         ArgumentNullException.ThrowIfNull(batch);
         ArgumentNullException.ThrowIfNull(committed);
+        if (!batch.BelongsTo(selfRetrieveSelector))
+            throw new CryptographicException(
+                "The inbound batch belongs to another self-retrieve mailbox scope.");
         if (batch.Items.Count == 0 || committed.Count != batch.Items.Count)
             throw new InvalidOperationException(
                 "Mailbox acknowledgement requires one durable inner commit receipt per retrieved DAO1.");
@@ -356,7 +352,7 @@ internal sealed class PrivacyRoutedMessagingTransport : IMessagingV1PrivacyTrans
             try
             {
                 result = await mailbox.AcknowledgeAsync(
-                    local.OutboxScope, signer, selfRetrieveSelector,
+                    local.OutboxScope, selfRetrieveAccess.Signer, selfRetrieveSelector,
                     operationId, !batch.HasMore, batch.ContinuationToken,
                     acknowledgements, cancellationToken).ConfigureAwait(false);
             }
@@ -422,7 +418,7 @@ internal sealed class PrivacyRoutedMessagingTransport : IMessagingV1PrivacyTrans
             try
             {
                 stored = await mailbox.StoreAsync(
-                    local.OutboxScope, signer, recipient.Selector,
+                    local.OutboxScope, recipient.MailboxAccess.Signer, recipient.Selector,
                     envelope, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception exception) when (TryMapDispatch(exception, out var mapped))
@@ -451,14 +447,14 @@ internal sealed class PrivacyRoutedMessagingTransport : IMessagingV1PrivacyTrans
         }
     }
 
-    private void ValidateRetrievedEnvelope(
-        MailboxRetrievedEnvelope item,
-        ScopedMailboxResolvedRoute route)
+    internal static void ValidateRetrievedEnvelope(
+        MailboxEncryptedEnvelope envelope,
+        ulong cursor,
+        ScopedMailboxResolvedRoute route,
+        ReadOnlySpan<byte> localNetwork)
     {
-        ArgumentNullException.ThrowIfNull(item);
-        ArgumentNullException.ThrowIfNull(item.Envelope);
+        ArgumentNullException.ThrowIfNull(envelope);
         ArgumentNullException.ThrowIfNull(route);
-        var envelope = item.Envelope;
         _ = MailboxClientCodec.EncodeEncryptedEnvelope(envelope);
         var dao1 = ApplicationCoreCodec.DecodeDao1(envelope.Ciphertext.Span);
         var digest = SHA256.HashData(envelope.Ciphertext.Span);
@@ -466,12 +462,13 @@ internal sealed class PrivacyRoutedMessagingTransport : IMessagingV1PrivacyTrans
             dao1.DepositOperationId.Span);
         try
         {
-            if (item.Cursor == 0 ||
+            if (cursor == 0 ||
                 envelope.Epoch != route.Epoch ||
+                envelope.ExpiresAtUnixSeconds > route.ExpiresAtUnixSeconds ||
                 !Fixed(envelope.MailboxId.Bytes.Span, route.MailboxId.Bytes.Span) ||
                 !Fixed(envelope.PlacementId.Bytes.Span, route.PlacementId.Bytes.Span) ||
                 !Fixed(dao1.CanonicalBytes.Span, envelope.Ciphertext.Span) ||
-                !Fixed(dao1.NetworkId.Span, local.NetworkId) ||
+                !Fixed(dao1.NetworkId.Span, localNetwork) ||
                 !Fixed(operationId, envelope.OperationId.Span) ||
                 !Fixed(digest, envelope.DeduplicationDigest.Span))
                 throw new CryptographicException(
@@ -484,43 +481,14 @@ internal sealed class PrivacyRoutedMessagingTransport : IMessagingV1PrivacyTrans
         }
     }
 
-    private void ValidateInboundInner(
-        MessagingV1DepositKind kind,
-        ReadOnlySpan<byte> exactInner)
+    private void ValidateSelfAccess(VerifiedMessagingMailboxAccess access)
     {
-        if (kind == MessagingV1DepositKind.InitialSession)
-        {
-            var record = Dph2Codec.Decode(exactInner);
-            if (!Fixed(record.NetworkId.Span, local.NetworkId) ||
-                !Fixed(record.ResponderAccountId.Span, local.AccountId) ||
-                !Fixed(record.ResponderDeviceId.Span, local.DeviceId) ||
-                record.ResponderDeviceGeneration != local.DeviceGeneration)
-                throw new CryptographicException("Retrieved DPH2 is for another local account/device generation.");
-            return;
-        }
-
-        var dpe2 = Dpe2Codec.Decode(exactInner);
-        if (!Fixed(dpe2.NetworkId.Span, local.NetworkId) ||
-            !Fixed(dpe2.RecipientDeviceId.Span, local.DeviceId))
-            throw new CryptographicException("Retrieved DPE2 is for another local device.");
-    }
-
-    private void ValidateSelfSelector(MailboxCredentialSelector selector)
-    {
-        ArgumentNullException.ThrowIfNull(selector);
-        var holder = signer.GetEd25519PublicKey();
-        try
-        {
-            if (!selector.AccountScope.Equals(local.OutboxScope) ||
-                selector.Kind != MailboxCredentialScopeKind.Self ||
-                !Fixed(selector.SubjectId.Span, holder))
-                throw new CryptographicException(
-                    "MSG-01 retrieve requires this device holder's verified self-retrieve capability.");
-        }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(holder);
-        }
+        ArgumentNullException.ThrowIfNull(access);
+        if (!access.Selector.AccountScope.Equals(local.OutboxScope) ||
+            access.Selector.Kind != MailboxCredentialScopeKind.Self ||
+            access.Domain != MailboxCapabilityDomain.Retrieve)
+            throw new CryptographicException(
+                "MSG-01 retrieve requires a verified self-retrieve mailbox access.");
     }
 
     private static byte[] AckOperationId(

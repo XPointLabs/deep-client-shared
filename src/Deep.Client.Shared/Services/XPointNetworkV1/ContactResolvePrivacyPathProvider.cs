@@ -29,6 +29,7 @@ public sealed class ContactResolvePathAuthority
 
     public VerifiedOnionNetworkContext Network { get; }
     public VerifiedContactServicePlacement Placement { get; }
+    internal VerifiedMailboxAuthorityV2? MailboxAuthority => Canonical?.MailboxAuthority;
     internal CanonicalContactResolveAuthority? Canonical { get; }
 }
 
@@ -71,6 +72,7 @@ public sealed class ContactResolveCanonicalPathRequest
     private readonly byte[] viewHash;
     private readonly byte[] placementHash;
     private readonly byte[] shardKey;
+    private readonly byte[] projectionReference;
 
     private ContactResolveCanonicalPathRequest(
         ReadOnlySpan<byte> exactRequest,
@@ -79,15 +81,19 @@ public sealed class ContactResolveCanonicalPathRequest
         ReadOnlySpan<byte> placementHash,
         ContactServiceRequestKind requestKind,
         ReadOnlySpan<byte> shardKey,
-        ulong expiresAtUnixSeconds)
+        ulong expiresAtUnixSeconds,
+        bool hasExplicitPlacementBinding,
+        ReadOnlySpan<byte> projectionReference)
     {
         this.exactRequest = exactRequest.ToArray();
         this.networkId = networkId.ToArray();
         this.viewHash = viewHash.ToArray();
         this.placementHash = placementHash.ToArray();
         this.shardKey = shardKey.ToArray();
+        this.projectionReference = projectionReference.ToArray();
         RequestKind = requestKind;
         ExpiresAtUnixSeconds = expiresAtUnixSeconds;
+        HasExplicitPlacementBinding = hasExplicitPlacementBinding;
     }
 
     public ReadOnlyMemory<byte> ExactRequest => exactRequest.ToArray();
@@ -97,6 +103,8 @@ public sealed class ContactResolveCanonicalPathRequest
     public ContactServiceRequestKind RequestKind { get; }
     public ReadOnlyMemory<byte> ShardKey => shardKey.ToArray();
     public ulong ExpiresAtUnixSeconds { get; }
+    public bool HasExplicitPlacementBinding { get; }
+    public ReadOnlyMemory<byte> ProjectionReference => projectionReference.ToArray();
 
     public static ContactResolveCanonicalPathRequest Decode(ReadOnlySpan<byte> exactRequest)
     {
@@ -109,6 +117,14 @@ public sealed class ContactResolveCanonicalPathRequest
             return Create(request.CanonicalBytes.Span, request.NetworkId.Span,
                 request.ViewHash.Span, request.PlacementHash.Span,
                 ContactServiceRequestKind.ResolveInvite, request.LocatorHash.Span,
+                request.ExpiresAtUnixSeconds);
+        }
+        if (exactRequest[..4].SequenceEqual("XPU1"u8))
+        {
+            var request = Xpu1Codec.Decode(exactRequest);
+            return Create(request.CanonicalBytes.Span, request.NetworkId.Span,
+                request.ViewHash.Span, request.PlacementHash.Span,
+                ContactServiceRequestKind.PublishInvite, request.LocatorHash.Span,
                 request.ExpiresAtUnixSeconds);
         }
         if (exactRequest[..4].SequenceEqual("XPK1"u8))
@@ -128,9 +144,21 @@ public sealed class ContactResolveCanonicalPathRequest
                     "A bounded XPP1 chunk or commit requires its sealed manifest publication context.");
             return FromBoundedPublication(request, manifest.Manifest.ServiceCapability.Span);
         }
+        if (exactRequest[..4].SequenceEqual("XMG1"u8))
+        {
+            var request = ContactCodec.Decode("XMG1", exactRequest);
+            ContactCodec.VerifyMailboxGrantHolderSignature(request);
+            return CreateProjectionBound(
+                request.CanonicalBytes.Span,
+                request.Field(1).Span,
+                ContactServiceRequestKind.AcquireMailboxGrant,
+                request.Field(3).Span,
+                request.Field(10).Span,
+                request.Field(7).Span);
+        }
         throw new ContactResolvePathException(
             "contact-request-invalid",
-            "Only exact XIQ1, XPK1, or bounded XPP1 records have ContactResolve placement semantics.");
+            "Only exact XPU1, XIQ1, XPK1, XMG1, or bounded XPP1 records have ContactResolve placement semantics.");
     }
 
     public static ContactResolveCanonicalPathRequest FromBoundedPublication(
@@ -171,7 +199,36 @@ public sealed class ContactResolveCanonicalPathRequest
             throw new CryptographicException(
                 "The canonical ContactResolve request has invalid placement facts.");
         return new ContactResolveCanonicalPathRequest(
-            exact, networkId, viewHash, placementHash, kind, shardKey, expiresAt);
+            exact, networkId, viewHash, placementHash, kind, shardKey, expiresAt,
+            hasExplicitPlacementBinding: true,
+            projectionReference: ReadOnlySpan<byte>.Empty);
+    }
+
+    private static ContactResolveCanonicalPathRequest CreateProjectionBound(
+        ReadOnlySpan<byte> exact,
+        ReadOnlySpan<byte> networkId,
+        ContactServiceRequestKind kind,
+        ReadOnlySpan<byte> shardKey,
+        ReadOnlySpan<byte> expiresAt,
+        ReadOnlySpan<byte> projectionReference)
+    {
+        if (exact.Length == 0 || networkId.Length != 16 || shardKey.Length != 32 ||
+            projectionReference.Length != 38 || expiresAt.Length != sizeof(ulong) ||
+            networkId.IndexOfAnyExcept((byte)0) < 0 ||
+            shardKey.IndexOfAnyExcept((byte)0) < 0 ||
+            projectionReference.IndexOfAnyExcept((byte)0) < 0)
+            throw new CryptographicException(
+                "The projection-bound ContactResolve request has invalid placement facts.");
+        return new ContactResolveCanonicalPathRequest(
+            exact,
+            networkId,
+            ReadOnlySpan<byte>.Empty,
+            ReadOnlySpan<byte>.Empty,
+            kind,
+            shardKey,
+            System.Buffers.Binary.BinaryPrimitives.ReadUInt64BigEndian(expiresAt),
+            hasExplicitPlacementBinding: false,
+            projectionReference);
     }
 
     private static bool Fixed(ReadOnlySpan<byte> left, ReadOnlySpan<byte> right) =>
@@ -299,8 +356,11 @@ public sealed class ContactResolvePrivacyPathProvider : IPrivacyMailboxPathProvi
         if (!ReferenceEquals(network, placement.Network))
             throw Fail("placement-context-mismatch", "Contact placement belongs to another verified network context.");
         if (!Fixed(request.NetworkId.Span, network.NetworkId.Span) ||
-            !Fixed(request.ViewHash.Span, placement.ViewHash.Span) ||
-            !Fixed(request.PlacementHash.Span, placement.PlacementHash.Span) ||
+            request.HasExplicitPlacementBinding &&
+                (!Fixed(request.ViewHash.Span, placement.ViewHash.Span) ||
+                 !Fixed(request.PlacementHash.Span, placement.PlacementHash.Span)) ||
+            !request.HasExplicitPlacementBinding &&
+                !network.BindsProjection(request.ProjectionReference) ||
             !placement.Binds(request.RequestKind, request.ShardKey) ||
             request.ExpiresAtUnixSeconds > placement.ValidUntilUnixSeconds)
             throw Fail("placement-request-mismatch",

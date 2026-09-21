@@ -1,0 +1,91 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <DefineConstants>$(DefineConstants);DEEP_CLEAN_PRODUCTION</DefineConstants>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <AssemblyName>Deep.Client.Shared</AssemblyName>
+    <RootNamespace>Deep.Client.Shared</RootNamespace>
+    <BaseOutputPath>bin-production\</BaseOutputPath>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(EnableDeepTestInternals)' == 'true'">
+    <DefineConstants>$(DefineConstants);DEEP_TEST_INTERNALS</DefineConstants>
+    <BaseOutputPath>bin-production-test\</BaseOutputPath>
+    <IntermediateOutputPath>obj-production\$(Configuration)\$(TargetFramework)\test\</IntermediateOutputPath>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\deep-protocol\src\Deep.Protocol\Deep.Protocol.csproj" />
+    <ProjectReference Include="..\..\..\deep-protocol\src\Deep.Protocol.MembershipRoutes\Deep.Protocol.MembershipRoutes.csproj" />
+    <ProjectReference Include="..\..\..\deep-protocol\src\Deep.Protocol.ProfileCarrier\Deep.Protocol.ProfileCarrier.csproj" />
+    <PackageReference Include="Microsoft.Data.Sqlite.Core" Version="10.0.9" />
+    <PackageReference Include="Sodium.Core" Version="1.4.1" />
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlcipher" Version="2.1.11" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="Properties\AssemblyInfo.cs" />
+    <Compile Include="Features\ClientFeatureFlags.cs" />
+    <Compile Include="Domain\Attachments.cs" />
+    <Compile Include="Domain\AccountDirectoryV1\**\*.cs" />
+    <Compile Include="Domain\ContactV1\**\*.cs" />
+    <Compile Include="Domain\DeviceV1\**\*.cs" />
+    <Compile Include="Domain\GroupV1\**\*.cs" />
+    <Compile Include="Domain\MessagingV1\**\*.cs" />
+    <Compile Include="Domain\DeepAccount.cs" />
+    <Compile Include="Domain\MembershipTrust.cs" />
+    <Compile Include="Persistence\AccountDirectoryV1\**\*.cs" />
+    <Compile Include="Persistence\ContactV1\**\*.cs" />
+    <Compile Include="Persistence\ClientMailboxStateRepository.cs" />
+    <Compile Include="Persistence\DeviceV1\**\*.cs" />
+    <Compile Include="Persistence\GroupV1\**\*.cs" />
+    <Compile Include="Persistence\MessagingCryptoV1\**\*.cs" />
+    <Compile Include="Persistence\MessagingV1\**\*.cs" Exclude="Persistence\MessagingV1\Msg01AuthoritativeTransport.cs" />
+    <Compile Include="Persistence\PreKeyV1\**\*.cs" />
+    <Compile Include="Persistence\XPointNetworkV1\**\*.cs" />
+    <Compile Include="Persistence\DeepAccountStoreContracts.cs" />
+    <Compile Include="Persistence\DeepSecureStorage.cs" />
+    <Compile Include="Persistence\InMemoryDeepAccountStore.cs" />
+    <Compile Include="Persistence\JournaledDeepSecureStorage.cs" />
+    <Compile Include="Persistence\LocalStateResetRequiredException.cs" />
+    <Compile Include="Persistence\ScopedMailboxCredentialRepository.cs" />
+    <Compile Include="Persistence\ScopedMailboxCredentialValidator.cs" />
+    <Compile Include="Persistence\SqliteDeepMailboxStore.cs" />
+    <Compile Include="Persistence\SqliteDeepMailboxStore.CurrentCredentials.cs" />
+    <Compile Include="Persistence\SqliteDeepMailboxStore.SemanticInbox.cs" />
+    <Compile Include="Persistence\SqliteSessionStore.Mailbox.cs" />
+    <Compile Include="Persistence\SqliteTransportOutboxRepository.cs" />
+    <Compile Include="Persistence\SqliteDeepAccountStore.cs" />
+    <Compile Include="Persistence\SqliteDeepAccountStoreBootstrap.cs" />
+    <Compile Include="Persistence\SqliteStateFileIdentity.cs" />
+    <Compile Include="Persistence\ScopedMailboxCredentialModels.cs" />
+    <Compile Include="Persistence\TransportOutboxContracts.cs" />
+    <Compile Include="Persistence\TransportOutboxStateMachine.cs" />
+    <Compile Include="Services\AccountDirectoryV1\**\*.cs" />
+    <Compile Include="Services\ContactV1\**\*.cs" />
+    <Compile Include="Services\GroupV1\**\*.cs" />
+    <Compile Include="Services\MessagingV1\**\*.cs" />
+    <Compile Include="Services\XPointNetworkV1\**\*.cs" />
+    <Compile Include="Services\Clock.cs" />
+    <Compile Include="Services\AttachmentFileTransport.cs" />
+    <Compile Include="Services\ClientMailboxAdapter.cs" />
+    <Compile Include="Services\ClientMailboxOperationSingleFlight.cs" />
+    <Compile Include="Services\ClientMailboxRetrieveOutcomeSummary.cs" />
+    <Compile Include="Services\ClientMailboxTransportContracts.cs" />
+    <Compile Include="Services\DeepAccountIdentityOperations.cs" />
+    <Compile Include="Services\DeepAccountMessageStoreScope.cs" />
+    <Compile Include="Services\DeepAccountService.cs" />
+    <Compile Include="Services\DeepGenesisDeviceActivation.cs" />
+    <Compile Include="Services\HttpServiceEndpointPolicy.cs" />
+    <Compile Include="Services\HttpServiceRequestTransport.cs" />
+    <Compile Include="Services\MailboxAuthenticatedRequestFactory.cs" />
+    <Compile Include="Services\MailboxClientDecodePolicyProvider.cs" />
+    <Compile Include="Services\MailboxOperationSigner.cs" />
+    <Compile Include="Services\MailboxCapabilityRevocationSource.cs" />
+    <Compile Include="Services\MailboxRuntimePolicyCoordinator.cs" />
+    <Compile Include="Services\MessagingV1CryptoUnavailableException.cs" />
+    <Compile Include="Services\PrivacyManagedIngressHttpTransport.cs" />
+    <Compile Include="Services\PrivacyRoutedMailboxBinaryIngress.cs" />
+    <Compile Include="Services\RpcCanonicalJson.cs" />
+  </ItemGroup>
+</Project>

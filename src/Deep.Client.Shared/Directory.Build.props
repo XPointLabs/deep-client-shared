@@ -1,0 +1,6 @@
+<Project>
+  <PropertyGroup Condition="'$(MSBuildProjectName)' == 'Deep.Client.Shared.Production'">
+    <BaseIntermediateOutputPath>obj-production\</BaseIntermediateOutputPath>
+    <MSBuildProjectExtensionsPath>obj-production\</MSBuildProjectExtensionsPath>
+  </PropertyGroup>
+</Project>

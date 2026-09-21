@@ -130,6 +130,14 @@ public interface IContactAddressPublicationStore
         ReadOnlyMemory<byte> operationId32,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Returns the highest confirmed publication generation for this exact
+    /// account scope. A conflicting confirmed generation fails closed rather
+    /// than selecting one by storage order.
+    /// </summary>
+    ValueTask<ContactAddressPublicationSnapshot?> ReadLatestConfirmedAsync(
+        CancellationToken cancellationToken = default);
+
     ValueTask<ContactAddressPublicationSnapshot> RecordValidatedResultAsync(
         ReadOnlyMemory<byte> operationId32,
         ReadOnlyMemory<byte> expectedRequestHash32,
@@ -223,4 +231,34 @@ internal static class ContactAddressPublicationPersistenceValidation
 
     internal static bool ExactEquals(ReadOnlySpan<byte> left, ReadOnlySpan<byte> right) =>
         left.Length == right.Length && CryptographicOperations.FixedTimeEquals(left, right);
+
+    internal static ContactAddressPublicationSnapshot? SelectLatestConfirmed(
+        IEnumerable<ContactAddressPublicationSnapshot> values,
+        ContactStoreScope expectedScope)
+    {
+        ContactAddressPublicationSnapshot? latest = null;
+        ulong latestGeneration = 0;
+        var found = false;
+        foreach (var candidateValue in values)
+        {
+            var candidate = Validate(candidateValue, expectedScope);
+            if (candidate.State != ContactAddressPublicationState.Confirmed)
+                continue;
+            var generation = Xpu1Codec.Decode(candidate.ExactXpu1Span).Generation;
+            if (!found || generation > latestGeneration)
+            {
+                latest = candidate;
+                latestGeneration = generation;
+                found = true;
+                continue;
+            }
+            if (generation == latestGeneration && latest is not null &&
+                !ExactEquals(latest.ExactXpu1Span, candidate.ExactXpu1Span))
+            {
+                throw new CryptographicException(
+                    "Conflicting confirmed ContactV1 publications share one generation.");
+            }
+        }
+        return latest?.Copy();
+    }
 }

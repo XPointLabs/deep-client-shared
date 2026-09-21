@@ -23,6 +23,12 @@ internal enum InMemoryScopedMailboxFaultPoint
 public sealed class InMemoryScopedMailboxCredentialRepository :
     IScopedMailboxCredentialRepository
 {
+    public Task InstallCurrentScopedCredentialAsync(
+        ScopedCurrentMailboxCredential credential,
+        VerifiedOfficialMailboxAuthority authority,
+        CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException(
+            "The production current-only mailbox credential requires the durable clean store.");
     private const int MaximumOutboxItems = 4096;
     private const long MaximumOutboxBytes = 256L * 1024 * 1024;
     private readonly object gate = new();

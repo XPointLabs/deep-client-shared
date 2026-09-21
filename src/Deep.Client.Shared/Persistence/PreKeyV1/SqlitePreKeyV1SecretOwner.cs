@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using Deep.Client.Shared.Persistence.MessagingCryptoV1;
+using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.ContactV1;
 using Deep.Protocol.MessagingCrypto;
 using Deep.Protocol.MessagingWire;
@@ -25,6 +26,27 @@ internal sealed record PreKeyV1InitialSessionSagaResult(
     PreKeyV1ClaimDisposition PreKeyDisposition,
     MessagingCryptoV1CommitDisposition? SessionDisposition,
     bool ForkLatched);
+
+#if DEEP_TEST_INTERNALS
+internal delegate ValueTask<SqliteMessagingCryptoV1Store?> InitialSessionStoreResolver(
+    ReadOnlyMemory<byte> exactSessionInitDmc2,
+    ReadOnlyMemory<byte> exactFirstApplicationDmc2,
+    CancellationToken cancellationToken);
+#endif
+
+/// <summary>
+/// Resolves the conversation-scoped store only after authenticated initial
+/// events. Empty events mean a finalized exact replay: recover the existing
+/// store without prekey secrets. This boundary never receives a restored
+/// prekey or handshake secret.
+/// </summary>
+internal interface IInitialSessionStoreResolver
+{
+    ValueTask<SqliteMessagingCryptoV1Store?> ResolveAsync(
+        ReadOnlyMemory<byte> exactSessionInitDmc2,
+        ReadOnlyMemory<byte> exactFirstApplicationDmc2,
+        CancellationToken cancellationToken);
+}
 
 /// <summary>
 /// Account/device-wide SQLCipher authority for DPK2 private material. Session stores
@@ -103,6 +125,66 @@ internal sealed partial class SqlitePreKeyV1SecretOwner : IAsyncDisposable
         Fixed(scope.AccountId, accountId) &&
         Fixed(scope.DeviceId, deviceId) &&
         scope.DeviceGeneration == deviceGeneration;
+
+    /// <summary>
+    /// Selects the exact public DPK2 named by an inbound DPH2 from this
+    /// device's protected inventory. The caller must still verify its device
+    /// signatures against the current directory before claim preview. This
+    /// read neither releases private pre-key material nor reserves inventory.
+    /// </summary>
+    internal async ValueTask<byte[]?> TryReadResponderOfferingAsync(
+        Dph2Record initiation,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(initiation);
+        if (!OwnsResponder(initiation.NetworkId.Span,
+                initiation.ResponderAccountId.Span,
+                initiation.ResponderDeviceId.Span,
+                initiation.ResponderDeviceGeneration))
+            throw new CryptographicException("The DPH2 responder is outside the local pre-key scope.");
+
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            ThrowIfDisposed();
+            var db = GetConnection();
+            using var transaction = db.BeginTransaction(deferred: true);
+            if (IsForkLatched(db, transaction)) return null;
+            using var command = db.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = """
+                SELECT exact_dpk2 FROM one_time_prekeys
+                WHERE exact_dpk2_hash=$hash AND state IN(1,2)
+                UNION ALL
+                SELECT exact_dpk2 FROM last_resort_prekeys
+                WHERE exact_dpk2_hash=$hash AND sealed_secret IS NOT NULL;
+                """;
+            Add(command, "$hash", initiation.ExactDpk2Hash.ToArray());
+            using var reader = command.ExecuteReader();
+            if (!reader.Read()) return null;
+            var exact = (byte[])reader[0];
+            if (reader.Read())
+                throw new FormatException("Duplicate exact DPK2 inventory rows exist.");
+            var offering = Dpk2Codec.Decode(exact);
+            var computedHash = MessagingWireCryptographicInputs.ComputeExactDpk2Hash(offering);
+            try
+            {
+                if (!Fixed(computedHash, initiation.ExactDpk2Hash.Span) ||
+                    !Fixed(Dpk2Codec.Encode(offering), exact) ||
+                    !OwnsResponder(offering.NetworkId.Span,
+                        offering.ResponderAccountId.Span,
+                        offering.ResponderDeviceId.Span,
+                        offering.ResponderDeviceGeneration) ||
+                    !Fixed(scope.Dpd1Reference, offering.ResponderDpd1Ref.Span))
+                    throw new CryptographicException(
+                        "The stored DPK2 differs from the inbound DPH2 or local device scope.");
+                Dph2Codec.ValidateSelection(initiation, offering);
+                return exact;
+            }
+            finally { CryptographicOperations.ZeroMemory(computedHash); }
+        }
+        finally { gate.Release(); }
+    }
 
     /// <summary>
     /// Opaque, single-use bridge into the existing atomic initial-session store.
@@ -271,6 +353,95 @@ internal sealed partial class SqlitePreKeyV1SecretOwner : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Restores a short-lived copy of one exact local DPK2 only for synchronous
+    /// pre-claim AEAD preview. No claim row, inventory state or counter is
+    /// changed. The callback must return only parsed public claim evidence;
+    /// a verified XPC1 is still required before the normal reservation saga.
+    /// </summary>
+    private async ValueTask<TResult?> TryPreviewInitialClaimAsync<TResult>(
+        Dpk2Record selectedOffering,
+        Func<RestoredDpk2PreKeySecretCapability, TResult> preview,
+        CancellationToken cancellationToken = default) where TResult : class
+    {
+        ArgumentNullException.ThrowIfNull(selectedOffering);
+        ArgumentNullException.ThrowIfNull(preview);
+        if (!OwnsResponder(selectedOffering.NetworkId.Span,
+                selectedOffering.ResponderAccountId.Span,
+                selectedOffering.ResponderDeviceId.Span,
+                selectedOffering.ResponderDeviceGeneration) ||
+            !Fixed(scope.Dpd1Reference, selectedOffering.ResponderDpd1Ref.Span))
+            throw new CryptographicException("The preview DPK2 is outside the local device scope.");
+
+        var exact = Dpk2Codec.Encode(selectedOffering);
+        var hash = MessagingWireCryptographicInputs.ComputeExactDpk2Hash(selectedOffering);
+        var entered = false;
+        try
+        {
+            await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            entered = true;
+            ThrowIfDisposed();
+            var db = GetConnection();
+            using var transaction = db.BeginTransaction(deferred: true);
+            if (IsForkLatched(db, transaction)) return null;
+            using var restored = ReadPreviewCapability(db, transaction, selectedOffering, hash, exact);
+            if (restored is null) return null;
+            var result = preview(restored);
+            if (ReferenceEquals(result, restored))
+                throw new InvalidOperationException("A pre-claim preview cannot transfer its restored secret owner.");
+            return result;
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(exact);
+            CryptographicOperations.ZeroMemory(hash);
+            if (entered) gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Returns only AEAD-opened, still-unverified XPK1/XPC1 evidence. This
+    /// read-only path cannot reserve a prekey, create a session, or ACK mail.
+    /// The caller must verify the result with the threshold authority and
+    /// then enter the normal authenticated initial-session saga.
+    /// </summary>
+    internal ValueTask<Dph2InitialClaimPreview?> TryPreviewInitialClaimAsync(
+        Dph2Record initiation,
+        VerifiedDpk2Offering offering,
+        Dmd1LineageState initiatorDirectory,
+        ManagedResponderInitialSessionFactory factory,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(initiation);
+        ArgumentNullException.ThrowIfNull(offering);
+        ArgumentNullException.ThrowIfNull(initiatorDirectory);
+        ArgumentNullException.ThrowIfNull(factory);
+        var selected = Dpk2Codec.Decode(offering.ExactBytes.Span);
+        return TryPreviewInitialClaimAsync(
+            selected,
+            restored => factory.PreviewInitialClaim(
+                initiation, offering, initiatorDirectory, restored),
+            cancellationToken);
+    }
+
+#if DEEP_TEST_INTERNALS
+    internal ValueTask<byte[]?> ReadOnlyPreviewHashForTestsAsync(
+        Dpk2Record selectedOffering,
+        CancellationToken cancellationToken = default) =>
+        TryPreviewInitialClaimAsync(
+            selectedOffering,
+            restored => restored.ExactDpk2Hash.ToArray(),
+            cancellationToken);
+
+    internal ValueTask<object?> RejectReadOnlyPreviewForTestsAsync(
+        Dpk2Record selectedOffering,
+        CancellationToken cancellationToken = default) =>
+        TryPreviewInitialClaimAsync<object>(
+            selectedOffering,
+            _ => throw new InvalidOperationException("preview rejected"),
+            cancellationToken);
+#endif
+
     internal async ValueTask<PreKeyV1InitialSessionSagaResult> CommitInitialSessionSagaAsync(
         VerifiedDevicePreKeyClaimReservation verifiedReservation,
         VerifiedInitialSessionPreKeyClaim verifiedClaim,
@@ -286,7 +457,46 @@ internal sealed partial class SqlitePreKeyV1SecretOwner : IAsyncDisposable
             return await CommitInitialSessionSagaCoreAsync(
                     capability,
                     sessionStore,
-                    restored => factory.CreateExactTrs1(verifiedClaim, restored),
+                    null,
+                    restored =>
+                    {
+                        using var material = factory.CreateAuthenticatedInitialSession(
+                            verifiedClaim, restored);
+                        return (material.ExactTrs1.ToArray(),
+                            material.SessionInitDmc2.ToArray(),
+                            material.FirstApplicationDmc2.ToArray());
+                    },
+                    nameof(factory),
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+    }
+
+    internal async ValueTask<PreKeyV1InitialSessionSagaResult> CommitInitialSessionSagaAsync(
+        VerifiedDevicePreKeyClaimReservation verifiedReservation,
+        VerifiedInitialSessionPreKeyClaim verifiedClaim,
+        IInitialSessionStoreResolver resolveStore,
+        ManagedResponderInitialSessionFactory factory,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(verifiedClaim);
+        ArgumentNullException.ThrowIfNull(resolveStore);
+        ArgumentNullException.ThrowIfNull(factory);
+        using var capability = PreKeyV1ClaimCapability.ConsumeVerified(verifiedReservation);
+        using (factory)
+        {
+            return await CommitInitialSessionSagaCoreAsync(
+                    capability,
+                    null,
+                    resolveStore,
+                    restored =>
+                    {
+                        using var material = factory.CreateAuthenticatedInitialSession(
+                            verifiedClaim, restored);
+                        return (material.ExactTrs1.ToArray(),
+                            material.SessionInitDmc2.ToArray(),
+                            material.FirstApplicationDmc2.ToArray());
+                    },
                     nameof(factory),
                     cancellationToken)
                 .ConfigureAwait(false);
@@ -302,37 +512,75 @@ internal sealed partial class SqlitePreKeyV1SecretOwner : IAsyncDisposable
         CommitInitialSessionSagaCoreAsync(
             capability,
             sessionStore,
-            _ => exactTrs1.ToArray(),
+            null,
+            _ => (exactTrs1.ToArray(), null, null),
             nameof(exactTrs1),
             cancellationToken);
+
+    internal ValueTask<PreKeyV1InitialSessionSagaResult> CommitInitialSessionSagaForTestsAsync(
+        PreKeyV1ClaimCapability capability,
+        InitialSessionStoreResolver resolveStore,
+        ReadOnlyMemory<byte> exactTrs1,
+        CancellationToken cancellationToken = default) =>
+        CommitInitialSessionSagaCoreAsync(
+            capability,
+            null,
+            new TestInitialSessionStoreResolver(resolveStore),
+            _ => (exactTrs1.ToArray(), null, null),
+            nameof(exactTrs1),
+            cancellationToken);
+
+    private sealed class TestInitialSessionStoreResolver(
+        InitialSessionStoreResolver callback) : IInitialSessionStoreResolver
+    {
+        public ValueTask<SqliteMessagingCryptoV1Store?> ResolveAsync(
+            ReadOnlyMemory<byte> exactSessionInitDmc2,
+            ReadOnlyMemory<byte> exactFirstApplicationDmc2,
+            CancellationToken cancellationToken) =>
+            callback(exactSessionInitDmc2, exactFirstApplicationDmc2,
+                cancellationToken);
+    }
 #endif
 
     private async ValueTask<PreKeyV1InitialSessionSagaResult> CommitInitialSessionSagaCoreAsync(
         PreKeyV1ClaimCapability capability,
-        SqliteMessagingCryptoV1Store sessionStore,
-        Func<RestoredDpk2PreKeySecretCapability, byte[]> createExactTrs1,
+        SqliteMessagingCryptoV1Store? sessionStore,
+        IInitialSessionStoreResolver? resolveStore,
+        Func<RestoredDpk2PreKeySecretCapability,
+            (byte[] ExactTrs1, byte[]? SessionInitDmc2, byte[]? FirstApplicationDmc2)> createInitial,
         string sourceName,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(capability);
-        ArgumentNullException.ThrowIfNull(sessionStore);
-        ArgumentNullException.ThrowIfNull(createExactTrs1);
+        ArgumentNullException.ThrowIfNull(createInitial);
+        if ((sessionStore is null) == (resolveStore is null))
+            throw new ArgumentException("Exactly one initial-session store source is required.");
         using var claim = capability.Consume();
-        if (!sessionStore.OwnsSession(claim.SessionId))
+        if (sessionStore is not null && !sessionStore.OwnsSession(claim.SessionId))
             throw new CryptographicException("The verified pre-key claim session does not match the messaging store scope.");
 
         byte[]? exactTrs1 = null;
+        byte[]? sessionInitDmc2 = null;
+        byte[]? firstApplicationDmc2 = null;
         try
         {
             var reserve = await ReserveAndUseAsync(claim, restored =>
             {
-                exactTrs1 = createExactTrs1(restored) ??
+                (exactTrs1, sessionInitDmc2, firstApplicationDmc2) = createInitial(restored);
+                if (exactTrs1 is null)
                     throw new InvalidOperationException("The initial-session factory returned no exact TRS1.");
                 MessagingCryptoV1PreparedTransition.ValidateTrs1(exactTrs1, sourceName);
             }, cancellationToken).ConfigureAwait(false);
 
             if (reserve.Disposition == PreKeyV1ClaimDisposition.ExactFinalReplay)
             {
+                if (sessionStore is null)
+                    sessionStore = await resolveStore!.ResolveAsync(ReadOnlyMemory<byte>.Empty,
+                            ReadOnlyMemory<byte>.Empty, cancellationToken)
+                        .ConfigureAwait(false);
+                if (sessionStore is null || !sessionStore.OwnsSession(claim.SessionId))
+                    return new(PreKeyV1InitialSessionSagaDisposition.SessionRejected,
+                        reserve.Disposition, null, false);
                 var initialSessionHash = await ReadBoundInitialSessionHashAsync(claim, cancellationToken)
                     .ConfigureAwait(false);
                 try
@@ -359,6 +607,14 @@ internal sealed partial class SqlitePreKeyV1SecretOwner : IAsyncDisposable
             if (reserve.Disposition is not (PreKeyV1ClaimDisposition.Reserved or PreKeyV1ClaimDisposition.ExactReservedReplay) || exactTrs1 is null)
                 return new(PreKeyV1InitialSessionSagaDisposition.SessionRejected, reserve.Disposition, null, false);
 
+            if (sessionStore is null)
+                sessionStore = await resolveStore!.ResolveAsync(sessionInitDmc2 ?? [],
+                        firstApplicationDmc2 ?? [], cancellationToken)
+                    .ConfigureAwait(false);
+            if (sessionStore is null || !sessionStore.OwnsSession(claim.SessionId))
+                return new(PreKeyV1InitialSessionSagaDisposition.SessionRejected,
+                    reserve.Disposition, null, false);
+
             var binding = await BindInitialSessionAsync(claim, exactTrs1, cancellationToken).ConfigureAwait(false);
             if (binding is PreKeyV1ClaimDisposition.ForkLatched or PreKeyV1ClaimDisposition.AlreadyForkLatched)
                 return new(PreKeyV1InitialSessionSagaDisposition.ForkLatched, binding, null, true);
@@ -367,7 +623,23 @@ internal sealed partial class SqlitePreKeyV1SecretOwner : IAsyncDisposable
                 claim.Kind, claim.OperationId, claim.Xpc1FullReplayHash, claim.Dph2FullReplayHash,
                 claim.X25519PreKeyId, claim.MlKemPreKeyId, exactTrs1);
             using var handoff = MessagingCryptoV1InitialSessionHandoff.CreateFromDeviceWidePreKeyOwner(permit);
-            var committed = await sessionStore.CommitInitialSessionAsync(handoff, cancellationToken).ConfigureAwait(false);
+            MessagingCryptoV1CommitResult committed;
+            if (sessionInitDmc2 is null)
+            {
+#if DEEP_TEST_INTERNALS
+                committed = await sessionStore.CommitInitialSessionAsync(
+                    handoff, cancellationToken).ConfigureAwait(false);
+#else
+                throw new CryptographicException(
+                    "A production initial session cannot commit without authenticated DMC2.");
+#endif
+            }
+            else
+            {
+                committed = await sessionStore.CommitInitialSessionAsync(
+                    handoff, sessionInitDmc2,
+                    firstApplicationDmc2 ?? [], cancellationToken).ConfigureAwait(false);
+            }
             if (committed.Disposition is not (MessagingCryptoV1CommitDisposition.Initialized or MessagingCryptoV1CommitDisposition.ExactReplay))
                 return new(committed.ForkLatched
                         ? PreKeyV1InitialSessionSagaDisposition.ForkLatched
@@ -391,6 +663,8 @@ internal sealed partial class SqlitePreKeyV1SecretOwner : IAsyncDisposable
         finally
         {
             if (exactTrs1 is not null) CryptographicOperations.ZeroMemory(exactTrs1);
+            if (sessionInitDmc2 is not null) CryptographicOperations.ZeroMemory(sessionInitDmc2);
+            if (firstApplicationDmc2 is not null) CryptographicOperations.ZeroMemory(firstApplicationDmc2);
         }
     }
 
@@ -822,6 +1096,43 @@ internal sealed partial class SqlitePreKeyV1SecretOwner : IAsyncDisposable
             return preKeyProtector.Restore(blob, exact, persistenceScope);
         }
         finally { CryptographicOperations.ZeroMemory(exact); CryptographicOperations.ZeroMemory(sealedSecret); }
+    }
+
+    private RestoredDpk2PreKeySecretCapability? ReadPreviewCapability(
+        SqliteConnection db,
+        SqliteTransaction tx,
+        Dpk2Record selectedOffering,
+        byte[] hash,
+        byte[] expectedExact)
+    {
+        using var command = db.CreateCommand();
+        command.Transaction = tx;
+        command.CommandText = selectedOffering.MlKemKind == Dpk2PrekeyKind.OneTime
+            ? "SELECT exact_dpk2,sealed_secret FROM one_time_prekeys WHERE exact_dpk2_hash=$hash AND state IN(1,2);"
+            : "SELECT exact_dpk2,sealed_secret FROM last_resort_prekeys WHERE exact_dpk2_hash=$hash;";
+        Add(command, "$hash", hash);
+        using var reader = command.ExecuteReader();
+        if (!reader.Read()) return null;
+        var exact = (byte[])reader[0];
+        byte[]? sealedSecret = reader.IsDBNull(1) ? null : (byte[])reader[1];
+        try
+        {
+            if (reader.Read())
+                throw new FormatException("Duplicate pre-key preview rows exist.");
+            if (!Fixed(exact, expectedExact))
+                throw new CryptographicException("The local pre-key preview differs from the exact selected DPK2.");
+            if (sealedSecret is null) return null;
+            var blob = Dpk2PreKeyPersistenceBlob.Decode(sealedSecret);
+            var persistenceScope = new Dpk2PreKeyPersistenceScope(
+                scope.NetworkId, scope.AccountId, scope.AccountGeneration,
+                scope.DeviceId, scope.DeviceGeneration, scope.Dpd1Reference);
+            return preKeyProtector.Restore(blob, exact, persistenceScope);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(exact);
+            if (sealedSecret is not null) CryptographicOperations.ZeroMemory(sealedSecret);
+        }
     }
 
     private static void MarkOneTimeReserved(SqliteConnection db, SqliteTransaction tx, byte[] hash)

@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Reflection;
 using Deep.Client.Shared.Domain;
 using Deep.Client.Shared.Persistence;
 using Deep.Client.Shared.Persistence.MessagingCryptoV1;
@@ -29,7 +30,7 @@ public sealed class PrivacyRoutedMessagingTransportTests
         Assert.Equal(MessagingV1DepositKind.InitialSession, receipt.Kind);
         Assert.Equal(pending.OperationId.ToArray(), receipt.InnerOperationId.ToArray());
         Assert.Equal(dao1.DepositOperationId.ToArray(), receipt.Dao1OperationId.ToArray());
-        Assert.Equal(dao1.DepositOperationId.ToArray(), receipt.LogicalOperationId.ToArray());
+        Assert.Equal(dao1.DepositOperationId.ToArray(), receipt.Dao1OperationId.ToArray());
         Assert.Equal(envelope.OperationId.ToArray(), receipt.MailboxOperationId.ToArray());
         Assert.Equal(MailboxClientLimits.OperationIdLength, envelope.OperationId.Length);
         Assert.Equal(
@@ -39,6 +40,36 @@ public sealed class PrivacyRoutedMessagingTransportTests
         Assert.Equal(fixture.RemoteDevice, receipt.RecipientDeviceId.ToArray());
         Assert.Equal(MailboxReplicaDisposition.Stored, fixture.Mailbox.StoreDisposition);
         Assert.Equal(1UL, receipt.Cursor);
+    }
+
+    [Fact]
+    public async Task InitialSession_StoredDao1OpensForRecipientWithoutPrematureAck()
+    {
+        using var fixture = new Fixture();
+        using var pending = fixture.PendingDph2();
+        var sent = await fixture.Transport.SendInitialSessionAsync(
+            pending, fixture.Recipient, Now + 600);
+        var stored = Assert.Single(fixture.Mailbox.Stored);
+        fixture.Mailbox.Durable.Add(fixture.MailboxEnvelope(stored.Ciphertext.Span, sent.Cursor));
+
+        var remoteSelfSelector = new MailboxCredentialSelector(
+            fixture.Scope, MailboxCredentialScopeKind.Self,
+            Bytes(32, 0xd3), Bytes(32, 0x6f));
+        var remoteSelfAccess = VerifiedMessagingMailboxAccess.CreateForTests(
+            remoteSelfSelector, new FakeSigner(0xd3), MailboxCapabilityDomain.Retrieve);
+        var receiving = new PrivacyRoutedMessagingTransport(
+            fixture.RemoteLocal, fixture.Mailbox, fixture.Sealer, fixture.Opener,
+            new FixedTimeProvider(DateTimeOffset.FromUnixTimeSeconds((long)Now)));
+
+        using var batch = await receiving.RetrieveAsync(remoteSelfAccess, maximumItems: 8);
+        var received = Assert.Single(batch.Items);
+        Assert.Equal(MessagingV1DepositKind.InitialSession, received.Kind);
+        Assert.Equal(pending.ExactDph2.ToArray(), received.ExactInner.ToArray());
+        Assert.Empty(fixture.Mailbox.Acknowledged);
+
+        var committed = MessagingV1InboundCommitReceipt.CreateForTests(received);
+        await receiving.AcknowledgeAsync(remoteSelfAccess, batch, [committed]);
+        Assert.Single(fixture.Mailbox.Acknowledged);
     }
 
     [Fact]
@@ -57,7 +88,7 @@ public sealed class PrivacyRoutedMessagingTransportTests
         var second = await restarted.SendInitialSessionAsync(
             pending2, fixture.Recipient, Now + 600);
 
-        Assert.Equal(first.LogicalOperationId.ToArray(), second.LogicalOperationId.ToArray());
+        Assert.Equal(first.Dao1OperationId.ToArray(), second.Dao1OperationId.ToArray());
         Assert.Equal(first.MailboxOperationId.ToArray(), second.MailboxOperationId.ToArray());
         Assert.Equal(firstDao, fixture.Mailbox.Stored.Last().Ciphertext.ToArray());
         Assert.True(second.ExactReplay);
@@ -155,7 +186,7 @@ public sealed class PrivacyRoutedMessagingTransportTests
         fixture.EnqueueInbound(fixture.ExactInboundDpe2());
 
         using var batch = await fixture.Transport.RetrieveAsync(
-            fixture.SelfSelector, maximumItems: 8);
+            fixture.SelfAccess, maximumItems: 8);
 
         var item = Assert.Single(batch.Items);
         Assert.Equal(MessagingV1DepositKind.EstablishedSession, item.Kind);
@@ -164,10 +195,10 @@ public sealed class PrivacyRoutedMessagingTransportTests
 
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
             fixture.Transport.AcknowledgeAsync(
-                fixture.SelfSelector, batch, [], default).AsTask());
+                fixture.SelfAccess, batch, [], default).AsTask());
         var committed = MessagingV1InboundCommitReceipt.CreateForTests(item);
         await fixture.Transport.AcknowledgeAsync(
-            fixture.SelfSelector, batch, [committed]);
+            fixture.SelfAccess, batch, [committed]);
         Assert.Single(fixture.Mailbox.Acknowledged);
         Assert.Equal(MailboxClientLimits.OperationIdLength,
             Assert.Single(fixture.Mailbox.AckOperationIds).Length);
@@ -182,7 +213,7 @@ public sealed class PrivacyRoutedMessagingTransportTests
             fixture.ExactInboundDpe2(recipient: wrongDevice),
             fixture.RecipientForLocalDevice(wrongDevice));
         await Assert.ThrowsAsync<CryptographicException>(() =>
-            fixture.Transport.RetrieveAsync(fixture.SelfSelector, 8).AsTask());
+            fixture.Transport.RetrieveAsync(fixture.SelfAccess, 8).AsTask());
         Assert.Empty(fixture.Mailbox.Acknowledged);
 
         fixture.Mailbox.Durable.Clear();
@@ -193,7 +224,7 @@ public sealed class PrivacyRoutedMessagingTransportTests
             Envelope = original.Envelope with { OperationId = Bytes(16, 0xee) },
         };
         await Assert.ThrowsAsync<CryptographicException>(() =>
-            fixture.Transport.RetrieveAsync(fixture.SelfSelector, 8).AsTask());
+            fixture.Transport.RetrieveAsync(fixture.SelfAccess, 8).AsTask());
         Assert.Empty(fixture.Mailbox.Acknowledged);
     }
 
@@ -212,7 +243,7 @@ public sealed class PrivacyRoutedMessagingTransportTests
         };
 
         await Assert.ThrowsAsync<CryptographicException>(() =>
-            fixture.Transport.RetrieveAsync(fixture.SelfSelector, 8).AsTask());
+            fixture.Transport.RetrieveAsync(fixture.SelfAccess, 8).AsTask());
 
         Assert.Empty(fixture.Mailbox.Acknowledged);
     }
@@ -227,8 +258,9 @@ public sealed class PrivacyRoutedMessagingTransportTests
             Bytes(32, 0xec),
             Bytes(32, 0x6f));
 
-        await Assert.ThrowsAsync<CryptographicException>(() =>
-            fixture.Transport.RetrieveAsync(wrong, 8).AsTask());
+        Assert.Throws<CryptographicException>(() =>
+            VerifiedMessagingMailboxAccess.CreateForTests(
+                wrong, fixture.SelfSigner, MailboxCapabilityDomain.Retrieve));
 
         Assert.Equal(0, fixture.Mailbox.RetrieveCalls);
     }
@@ -238,7 +270,7 @@ public sealed class PrivacyRoutedMessagingTransportTests
     {
         using var fixture = new Fixture();
         fixture.EnqueueInbound(fixture.ExactInboundDpe2());
-        using var batch = await fixture.Transport.RetrieveAsync(fixture.SelfSelector, 8);
+        using var batch = await fixture.Transport.RetrieveAsync(fixture.SelfAccess, 8);
         var item = Assert.Single(batch.Items);
 
         var otherInner = fixture.ExactInboundDpe2(operation: Bytes(32, 0xa9));
@@ -252,12 +284,57 @@ public sealed class PrivacyRoutedMessagingTransportTests
 
         await Assert.ThrowsAsync<CryptographicException>(() =>
             fixture.Transport.AcknowledgeAsync(
-                fixture.SelfSelector, batch, [wrong], default).AsTask());
+                fixture.SelfAccess, batch, [wrong], default).AsTask());
         Assert.Empty(fixture.Mailbox.Acknowledged);
         Assert.NotNull(item);
     }
 
-    private sealed class Fixture : IDisposable
+    [Fact]
+    public async Task Receive_BatchCannotBeAcknowledgedThroughAnotherSelfMailbox()
+    {
+        using var fixture = new Fixture();
+        fixture.EnqueueInbound(fixture.ExactInboundDpe2());
+        using var batch = await fixture.Transport.RetrieveAsync(fixture.SelfAccess, 8);
+        var committed = MessagingV1InboundCommitReceipt.CreateForTests(
+            Assert.Single(batch.Items));
+        var anotherSelector = new MailboxCredentialSelector(
+            fixture.Scope, MailboxCredentialScopeKind.Self,
+            fixture.SelfSigner.GetEd25519PublicKey(), Bytes(32, 0x70));
+        var anotherAccess = VerifiedMessagingMailboxAccess.CreateForTests(
+            anotherSelector, fixture.SelfSigner, MailboxCapabilityDomain.Retrieve);
+
+        await Assert.ThrowsAsync<CryptographicException>(() =>
+            fixture.Transport.AcknowledgeAsync(
+                anotherAccess, batch, [committed], default).AsTask());
+        Assert.Empty(fixture.Mailbox.Acknowledged);
+    }
+
+    [Fact]
+    public void Receive_RatchetOnlyCommitCannotMintMailboxAckAuthority()
+    {
+        var factories = typeof(MessagingV1InboundCommitReceipt)
+            .GetMethods(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
+            .Where(static method =>
+                method.ReturnType == typeof(MessagingV1InboundCommitReceipt) ||
+                method.ReturnType == typeof(ValueTask<MessagingV1InboundCommitReceipt>))
+            .Select(static method => method.Name)
+            .ToArray();
+
+        Assert.DoesNotContain("FromCommittedDpe2", factories);
+        Assert.DoesNotContain("CommitInitialSessionAsync", factories);
+        Assert.Contains("CreateForTests", factories);
+        Assert.DoesNotContain("FromMaterializedDirectDmc2Async", factories);
+        var materialized = typeof(MessagingV1InboundCommitReceipt).GetMethod(
+            "CommitAndMaterializeDirectDmc2Async",
+            BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(materialized);
+        Assert.Contains(materialized.GetParameters(), parameter =>
+            parameter.ParameterType == typeof(SqliteDeepMailboxStore));
+        Assert.Contains(materialized.GetParameters(), parameter =>
+            parameter.ParameterType == typeof(DeepDirectMessagingStorageFacade));
+    }
+
+    internal sealed class Fixture : IDisposable
     {
         internal readonly byte[] Network = Bytes(16, 0x11);
         internal readonly byte[] LocalAccount = Bytes(32, 0x21);
@@ -268,11 +345,14 @@ public sealed class PrivacyRoutedMessagingTransportTests
         internal readonly byte[] SealingSeed = Bytes(32, 0x42);
         internal readonly OutboxAccountScope Scope = OutboxAccountScope.FromBytes(Bytes(32, 0x51));
         internal readonly FakeMailbox Mailbox = new();
-        internal readonly FakeSigner Signer = new();
+        internal readonly FakeSigner SelfSigner = new(0xd1);
+        internal readonly FakeSigner RecipientSigner = new(0x61);
+        internal readonly FakeSigner LocalDepositSigner = new(0x63);
         internal readonly MessagingV1LocalContext Local;
         internal readonly MessagingV1LocalContext RemoteLocal;
         internal readonly MailboxCredentialSelector RecipientSelector;
         internal readonly MailboxCredentialSelector SelfSelector;
+        internal readonly VerifiedMessagingMailboxAccess SelfAccess;
         internal readonly MailboxCredentialSelector LocalDepositSelector;
         internal readonly VerifiedMessagingRecipientDeposit Recipient;
         internal readonly VerifiedMessagingRecipientDeposit LocalRecipient;
@@ -288,11 +368,15 @@ public sealed class PrivacyRoutedMessagingTransportTests
             RecipientSelector = Selector(MailboxCredentialScopeKind.Peer, 0x61);
             SelfSelector = Selector(MailboxCredentialScopeKind.Self, 0xd1);
             LocalDepositSelector = Selector(MailboxCredentialScopeKind.Peer, 0x63);
+            SelfAccess = VerifiedMessagingMailboxAccess.CreateForTests(
+                SelfSelector, SelfSigner, MailboxCapabilityDomain.Retrieve);
             Recipient = VerifiedMessagingRecipientDeposit.CreateForTests(
-                Scope, RecipientSelector, Network, RemoteAccount, 1, 1,
+                Scope, RecipientSelector, RecipientSigner,
+                Network, RemoteAccount, 1, 1,
                 RemoteDevice, 1, Bytes(32, 0x43), sealingPublic, Now + 3_600);
             LocalRecipient = VerifiedMessagingRecipientDeposit.CreateForTests(
-                Scope, LocalDepositSelector, Network, LocalAccount, 1, 1,
+                Scope, LocalDepositSelector, LocalDepositSigner,
+                Network, LocalAccount, 1, 1,
                 LocalDevice, 1, Bytes(32, 0x43), sealingPublic, Now + 3_600);
             Sealer = new MessagingDao1SealingAuthority(SealingSeed);
             Opener = new ManagedMessagingDao1OpenAuthority(
@@ -302,14 +386,15 @@ public sealed class PrivacyRoutedMessagingTransportTests
 
         internal PrivacyRoutedMessagingTransport CreateTransport(
             MessagingDao1SealingAuthority sealer) => new(
-                Local, Signer, Mailbox, sealer, Opener,
+                Local, Mailbox, sealer, Opener,
                 new FixedTimeProvider(DateTimeOffset.FromUnixTimeSeconds((long)Now)));
 
         internal InitiatorInitialSessionDispatchEnvelope PendingDph2(
-            byte[]? responderDevice = null)
+            byte[]? responderDevice = null,
+            byte[]? responderAccount = null)
         {
             var record = Dph2(
-                LocalAccount, LocalDevice, RemoteAccount,
+                LocalAccount, LocalDevice, responderAccount ?? RemoteAccount,
                 responderDevice ?? RemoteDevice, Bytes(32, 0x71));
             var exact = Dph2Codec.Encode(record);
             return new InitiatorInitialSessionDispatchEnvelope(
@@ -344,14 +429,16 @@ public sealed class PrivacyRoutedMessagingTransportTests
         internal VerifiedMessagingRecipientDeposit RecipientForLocalDevice(
             ReadOnlySpan<byte> deviceId) =>
             VerifiedMessagingRecipientDeposit.CreateForTests(
-                Scope, LocalDepositSelector, Network, LocalAccount, 1, 1,
+                Scope, LocalDepositSelector, LocalDepositSigner,
+                Network, LocalAccount, 1, 1,
                 deviceId, 1, Bytes(32, 0x43), ScalarMult.Base(SealingPrivate),
                 Now + 3_600);
 
         internal VerifiedMessagingRecipientDeposit RemoteRecipient(
             ulong deviceGeneration) =>
             VerifiedMessagingRecipientDeposit.CreateForTests(
-                Scope, RecipientSelector, Network, RemoteAccount, 1, 1,
+                Scope, RecipientSelector, RecipientSigner,
+                Network, RemoteAccount, 1, 1,
                 RemoteDevice, deviceGeneration, Bytes(32, 0x43),
                 ScalarMult.Base(SealingPrivate), Now + 3_600);
 
@@ -388,7 +475,7 @@ public sealed class PrivacyRoutedMessagingTransportTests
         }
     }
 
-    private sealed class FakeMailbox : IPrivacyRoutedMessagingMailboxClient
+    internal sealed class FakeMailbox : IPrivacyRoutedMessagingMailboxClient
     {
         internal readonly List<MailboxEncryptedEnvelope> Stored = [];
         internal readonly List<MailboxRetrievedEnvelope> Durable = [];
@@ -467,16 +554,15 @@ public sealed class PrivacyRoutedMessagingTransportTests
         }
     }
 
-    private sealed class FakeSigner : IMailboxOperationSigner
+    internal sealed class FakeSigner(byte marker) : IMailboxOperationSigner
     {
-        public SessionId SessionId => default;
-        public byte[] GetEd25519PublicKey() => Bytes(32, 0xd1);
+        public byte[] GetEd25519PublicKey() => Bytes(32, marker);
         public byte[] SignMailboxPresentation(
             MailboxAuthenticatedOperation operation,
             ReadOnlySpan<byte> canonicalPresentationSigningBytes) => Bytes(64, 0xd2);
     }
 
-    private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
+    internal sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
     {
         public override DateTimeOffset GetUtcNow() => now;
     }
@@ -492,6 +578,8 @@ public sealed class PrivacyRoutedMessagingTransportTests
             initiatorDevice,
             1,
             Bytes(38, 0x91),
+            Deep.Protocol.ApplicationCore.ApplicationCoreCodec.AuthorDid1(
+                Bytes(32, 0x8f), Bytes(16, 0x90)).CanonicalBytes.Span,
             responderAccount,
             responderDevice,
             1,

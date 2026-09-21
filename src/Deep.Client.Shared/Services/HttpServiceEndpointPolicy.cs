@@ -464,6 +464,7 @@ public sealed class HttpServiceTransportFactory
         }
     }
 
+#if !DEEP_CLEAN_PRODUCTION
     public HttpAvatarProfileTransport CreateAvatar(
         HttpAvatarProfileTransportOptions options,
         HttpServiceClientOptions? clientOptions = null,
@@ -473,8 +474,9 @@ public sealed class HttpServiceTransportFactory
             client => new HttpAvatarProfileTransport(
                 client,
                 options,
-                timeProvider,
-                endpointPolicy));
+                 timeProvider,
+                 endpointPolicy));
+#endif
 
     public HttpAttachmentFileTransport CreateAttachment(
         HttpAttachmentFileTransportOptions options,
@@ -483,13 +485,7 @@ public sealed class HttpServiceTransportFactory
             clientOptions,
             client => new HttpAttachmentFileTransport(client, options, endpointPolicy));
 
-    public HttpPushSubscriptionTransport CreatePush(
-        HttpPushSubscriptionTransportOptions options,
-        HttpServiceClientOptions? clientOptions = null) =>
-        CreateOwned(
-            clientOptions,
-            client => new HttpPushSubscriptionTransport(client, options, endpointPolicy));
-
+#if !DEEP_CLEAN_PRODUCTION
     public HttpCallSignalingTransport CreateCallSignaling(
         HttpCallSignalingTransportOptions options,
         ICallRecoveryPhraseProvider? recoveryPhraseProvider = null,
@@ -505,6 +501,7 @@ public sealed class HttpServiceTransportFactory
                     : recoveryPhraseProvider.GetRecoveryPhraseAsync,
                 timeProvider,
                 endpointPolicy));
+#endif
 
     public PrivacyRoutedMailboxBinaryIngress CreatePrivacyRoutedMailboxIngress(
         PrivacyMailboxRoute primaryRoute,

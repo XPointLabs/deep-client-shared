@@ -347,7 +347,7 @@ public sealed class ProductionContactResolvePathAuthoritySourceTests
             new byte[] { 1 }, new byte[] { 1 }, new byte[] { 1 },
             B(32, 1), B(32, 2), Window(),
             [new byte[] { 1 }], [new byte[] { 1 }], [new byte[] { 1 }],
-            [new byte[] { 1 }], [new byte[] { 1 }]));
+            [new byte[] { 1 }], new byte[] { 1 }, [new byte[] { 1 }]));
     }
 
     private static ProductionContactResolvePathAuthoritySource Source(
@@ -373,7 +373,7 @@ public sealed class ProductionContactResolvePathAuthoritySourceTests
             new byte[] { 3 }, new byte[] { 4 }, new byte[] { 5 },
             B(32, 6), B(32, 7), Window(),
             [new byte[] { 8 }], [xnv ?? new byte[] { 9 }], [new byte[] { 10 }],
-            [new byte[] { 11 }], [new byte[] { 12 }]);
+            [new byte[] { 11 }], new byte[] { 12 }, [new byte[] { 13 }]);
 
     private static ContactResolveDirectoryArtifacts Artifacts(
         IReadOnlyList<ReadOnlyMemory<byte>> xnv) => new(
@@ -382,7 +382,7 @@ public sealed class ProductionContactResolvePathAuthoritySourceTests
             B(32, 6), B(32, 7), Window(),
             [new byte[] { 8 }], xnv,
             Enumerable.Range(0, xnv.Count).Select(_ => (ReadOnlyMemory<byte>)new byte[] { 10 }).ToArray(),
-            [new byte[] { 11 }], [new byte[] { 12 }]);
+            [new byte[] { 11 }], new byte[] { 12 }, [new byte[] { 13 }]);
 
     private static AccountDirectoryMonotonicRequestWindow Window() => new(B(16, 0x31), 1, 2, 3);
 

@@ -19,8 +19,6 @@ public sealed record AuthenticatedInboxBatch(
 /// </summary>
 public interface IMailboxOperationSigner
 {
-    SessionId SessionId { get; }
-
     byte[] GetEd25519PublicKey();
 
     byte[] SignMailboxPresentation(
@@ -329,11 +327,13 @@ public interface IAuthenticatedOpaqueMailboxTransport :
 {
     Task<OpaqueMailboxInboxPage> RetrieveOpaqueMailboxInboxAsync(
         IMailboxOperationSigner signer,
+        SessionId account,
         OpaqueMailboxContinuation continuation,
         CancellationToken cancellationToken = default);
 
     Task AcknowledgeOpaqueMailboxInboxAsync(
         IMailboxOperationSigner signer,
+        SessionId account,
         string opaqueItemHandle,
         CancellationToken cancellationToken = default);
 }
@@ -1283,7 +1283,7 @@ public sealed class E2eeClientTransport :
                 {
                     using var signer = new MailboxOperationSignerLease(identity);
                     await opaqueMailbox.AcknowledgeOpaqueMailboxInboxAsync(
-                        signer, serverHash, cancellationToken).ConfigureAwait(false);
+                        signer, account, serverHash, cancellationToken).ConfigureAwait(false);
                 }
                 var ack = await inboxRepository.AcknowledgeInboxItemAsync(
                     scope,
@@ -1935,8 +1935,6 @@ public sealed class E2eeClientTransport :
         IDisposable
     {
         private SessionIdentityProvider? activeIdentity = identity;
-
-        public SessionId SessionId => GetActiveIdentity().SessionId;
 
         public byte[] GetEd25519PublicKey() => GetActiveIdentity().GetEd25519PublicKey();
 

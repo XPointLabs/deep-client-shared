@@ -1290,7 +1290,6 @@ public sealed class E2eeClientTransportTests
             var prepared = new List<IPreparedMailboxAuthenticatedSend>(targets.Count);
             foreach (var target in targets)
             {
-                Assert.Equal(target.Envelope.Sender, signer.SessionId);
                 lock (gate)
                 {
                     prepareRecipients.Add(target.Envelope.Recipient);

@@ -99,8 +99,6 @@ public sealed class NativeMau2MailboxTransport :
         {
             cancellationToken.ThrowIfCancellationRequested();
             EnsureAuthority(target.Authority);
-            if (target.Envelope.Sender != signer.SessionId)
-                throw new InvalidOperationException("Mailbox target sender does not match the operation signer.");
             var route = await credentials.ReadScopedMailboxRouteAsync(
                 target.Selector, authority, cancellationToken).ConfigureAwait(false);
             var ciphertext = DecodeDpe1(target.Envelope.Body);
@@ -331,7 +329,7 @@ public sealed class NativeMau2MailboxTransport :
             _ = DecodeItemHandle(cursor);
         }
         var page = await RetrieveOpaqueMailboxInboxAsync(
-            signer,
+            signer, identity.SessionId,
             new OpaqueMailboxContinuation(
                 current.AfterCursor, current.ContinuationToken),
             cancellationToken).ConfigureAwait(false);
@@ -382,13 +380,14 @@ public sealed class NativeMau2MailboxTransport :
 
     public async Task<OpaqueMailboxInboxPage> RetrieveOpaqueMailboxInboxAsync(
         IMailboxOperationSigner signer,
+        SessionId account,
         OpaqueMailboxContinuation continuation,
         CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(signer);
         ArgumentNullException.ThrowIfNull(continuation);
-        var selector = RequireSelfSelector(signer.SessionId);
+        var selector = RequireSelfSelector(account);
         var result = await adapter.RetrieveAsync(
             selector.AccountScope, signer, selector,
             RetrievalLimit, cancellationToken).ConfigureAwait(false);
@@ -444,13 +443,14 @@ public sealed class NativeMau2MailboxTransport :
 
     public async Task AcknowledgeOpaqueMailboxInboxAsync(
         IMailboxOperationSigner signer,
+        SessionId account,
         string opaqueItemHandle,
         CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(signer);
         var (cursor, digest) = DecodeItemHandle(opaqueItemHandle);
-        var selector = RequireSelfSelector(signer.SessionId);
+        var selector = RequireSelfSelector(account);
         var traversal = await adapter.ReadTraversalAsync(selector, cancellationToken)
             .ConfigureAwait(false);
         var operationId = OperationId(AckOperationDomain, CursorMaterial(cursor, digest));
@@ -739,7 +739,6 @@ public sealed class NativeMau2MailboxTransport :
         IMailboxOperationSigner, IDisposable
     {
         private SessionIdentityProvider? active = identity;
-        public SessionId SessionId => Current.SessionId;
         public byte[] GetEd25519PublicKey() => Current.GetEd25519PublicKey();
         public byte[] SignMailboxPresentation(
             MailboxAuthenticatedOperation operation,

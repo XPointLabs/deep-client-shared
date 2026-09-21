@@ -8,15 +8,25 @@ namespace Deep.Client.Shared.Persistence;
 /// Mailbox state is part of the single attested local-state database. This
 /// partial contains the normalized mailbox inbox implementation.
 /// </summary>
+#if DEEP_CLEAN_PRODUCTION
+public sealed partial class SqliteDeepMailboxStore :
+#else
 public sealed partial class SqliteSessionStore :
+#endif
     IClientMailboxStateRepository,
     ITerminalRetrieveRetirementRepository
 {
     private readonly Action<ClientMailboxCommitFaultPoint>? commitFault;
 
+#if DEEP_CLEAN_PRODUCTION
+    internal SqliteDeepMailboxStore(
+        SqliteDeepMailboxStoreOptions options,
+        Action<ClientMailboxCommitFaultPoint> commitFault)
+#else
     internal SqliteSessionStore(
         SqliteSessionStoreOptions options,
         Action<ClientMailboxCommitFaultPoint> commitFault)
+#endif
         : this(options)
     {
         this.commitFault = commitFault ??
@@ -1374,6 +1384,9 @@ public sealed partial class SqliteSessionStore :
         try
         {
             connection.Open();
+#if DEEP_CLEAN_PRODUCTION
+            ApplyMailboxEncryptionKey(connection);
+#endif
             Configure(connection);
             return connection;
         }
@@ -1392,6 +1405,9 @@ public sealed partial class SqliteSessionStore :
         try
         {
             await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+#if DEEP_CLEAN_PRODUCTION
+            ApplyMailboxEncryptionKey(connection);
+#endif
             await using var command = connection.CreateCommand();
             command.CommandText = """
                 PRAGMA busy_timeout=5000;

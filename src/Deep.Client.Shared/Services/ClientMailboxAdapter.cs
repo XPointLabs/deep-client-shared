@@ -366,6 +366,45 @@ public sealed class ClientMailboxAdapter
     private readonly IMailboxClientDecodePolicyProvider decodePolicies;
     private readonly TimeProvider timeProvider;
 
+#if DEEP_CLEAN_PRODUCTION
+    internal ClientMailboxAdapter(
+        ClientFeatureFlags flags,
+        ClientMailboxActivation activation,
+        IClientMailboxBinaryIngress ingress,
+        ITransportOutboxRepository outbox,
+        IClientMailboxStateRepository state,
+        ITerminalRetrieveRetirementRepository terminalRetrieveRetirement,
+        IScopedMailboxCredentialRepository credentials,
+        IClientMailboxReceiptVerifier receipts,
+        MailboxAuthenticatedRequestFactory requests,
+        IMailboxClientDecodePolicyProvider decodePolicies,
+        TimeProvider? timeProvider = null)
+    {
+        ArgumentNullException.ThrowIfNull(flags);
+        this.activation = activation ?? throw new ArgumentNullException(nameof(activation));
+        this.ingress = ingress ?? throw new ArgumentNullException(nameof(ingress));
+        this.outbox = outbox ?? throw new ArgumentNullException(nameof(outbox));
+        this.state = state ?? throw new ArgumentNullException(nameof(state));
+        this.terminalRetrieveRetirement = terminalRetrieveRetirement
+            ?? throw new ArgumentNullException(nameof(terminalRetrieveRetirement));
+        ArgumentNullException.ThrowIfNull(credentials);
+        this.receipts = receipts ?? throw new ArgumentNullException(nameof(receipts));
+        this.requests = requests ?? throw new ArgumentNullException(nameof(requests));
+        this.decodePolicies = decodePolicies ?? throw new ArgumentNullException(nameof(decodePolicies));
+        this.timeProvider = timeProvider ?? TimeProvider.System;
+        if (!flags.ClientMailboxAdapterEnabled || !activation.Enabled ||
+            !activation.HasIssuerContext || !activation.IngressConfigured)
+        {
+            throw new InvalidOperationException(
+                "Client mailbox adapter requires its production activation, issuer, placement and ingress.");
+        }
+        if (!requests.Uses(credentials))
+        {
+            throw new InvalidOperationException(
+                "Native mailbox preparation must share the account-scoped credential transaction owner.");
+        }
+    }
+#else
     internal ClientMailboxAdapter(
         ClientFeatureFlags flags,
         ClientMailboxActivation activation,
@@ -401,6 +440,7 @@ public sealed class ClientMailboxAdapter
                 "Native mailbox preparation must share the SQLite local-state transaction.");
         }
     }
+#endif
 
     internal bool Uses(
         IClientMailboxBinaryIngress expectedIngress,

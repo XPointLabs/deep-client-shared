@@ -193,6 +193,7 @@ public sealed class VerifiedOfficialMailboxAuthority
 
     public void ReloadCommittedPolicy() => Revocations.ValidateFreshness();
 
+#if !DEEP_CLEAN_PRODUCTION
     internal bool IsRevokedInStoreTransaction(
         SqliteSessionStore store,
         SqliteConnection connection,
@@ -202,6 +203,7 @@ public sealed class VerifiedOfficialMailboxAuthority
             ? sqlite.IsRevokedInTransaction(
                 store, connection, transaction, query)
             : Revocations.IsRevoked(query);
+#endif
 
     internal bool UsesSharedPolicyCoordinator(
         string canonicalStateIdentity,
@@ -211,7 +213,8 @@ public sealed class VerifiedOfficialMailboxAuthority
     internal MailboxCapabilityIssuerAuthority ResolveIssuer(
         MailboxAuthenticatedGrant grant) => trustedIssuers.FirstOrDefault(
             issuer => issuer.Domain == grant.Domain &&
-                ScopedMailboxCredentialValidator.Fixed(
+                issuer.PublicKey.Length == grant.IssuerPublicKey.Length &&
+                CryptographicOperations.FixedTimeEquals(
                     issuer.PublicKey.Span,
                     grant.IssuerPublicKey.Span)) ??
             throw new InvalidDataException(
@@ -276,14 +279,49 @@ public sealed record ScopedMailboxCredentialGeneration(
                     "Replica pins are unavailable for the requested credential epoch.");
 }
 
+/// <summary>
+/// One exact current-epoch credential acquired through clean XMG1/XMC1. This
+/// is the production ContactV1 shape and deliberately has no synthetic next
+/// epoch or Session-derived identity.
+/// </summary>
+public sealed record ScopedCurrentMailboxCredential(
+    MailboxCredentialSelector Selector,
+    ReadOnlyMemory<byte> Generation,
+    ReadOnlyMemory<byte> HolderPublicKey,
+    ReadOnlyMemory<byte> MailboxId,
+    MailboxCredentialEpoch Current,
+    CurrentMailboxCredentialGrants Grants,
+    MailboxCredentialReplicaPair Replicas);
+
 public sealed record ScopedMailboxBatchTarget(
     MailboxCredentialSelector Selector,
     MailboxAuthenticatedRequestBinding Binding);
 
 public sealed record ScopedMailboxBatchSelector(
     MailboxCredentialSelector Selector,
+#if DEEP_CLEAN_PRODUCTION
+    MailboxWireMessageId WireMessageId,
+#else
     MessageId WireMessageId,
+#endif
     MailboxAuthenticatedOperation Operation);
+
+#if DEEP_CLEAN_PRODUCTION
+public sealed class MailboxWireMessageId
+{
+    public MailboxWireMessageId(ReadOnlySpan<byte> value)
+    {
+        if (value.Length != MailboxClientLimits.OperationIdLength ||
+            value.IndexOfAnyExcept((byte)0) < 0)
+        {
+            throw new ArgumentException("Mailbox wire message ID is invalid.", nameof(value));
+        }
+        Value = Convert.ToHexStringLower(value);
+    }
+
+    public string Value { get; }
+}
+#endif
 
 /// <summary>Opaque route material resolved only from a verified scoped credential.</summary>
 public sealed record ScopedMailboxResolvedRoute(
@@ -380,6 +418,16 @@ public sealed class ScopedMailboxPreparedBatch
 public interface IScopedMailboxCredentialRepository
 {
     /// <summary>
+    /// Installs or atomically replaces the exact current ContactV1 grant for
+    /// one scope. Exact retries are idempotent; a different current epoch must
+    /// advance monotonically.
+    /// </summary>
+    Task InstallCurrentScopedCredentialAsync(
+        ScopedCurrentMailboxCredential credential,
+        VerifiedOfficialMailboxAuthority authority,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Installs an exact self/peer/group credential snapshot atomically.  A retry
     /// is accepted only when every persisted credential byte is identical.
     /// Scope-specific generations, mailbox IDs, grants, and grant serials may
@@ -445,6 +493,7 @@ public interface IScopedMailboxCredentialRepository
         CancellationToken cancellationToken = default);
 }
 
+#if !DEEP_CLEAN_PRODUCTION
 public sealed partial class SqliteSessionStore : IScopedMailboxCredentialRepository
 {
     private const int MaximumProductionPublicationPayloadChars =
@@ -458,6 +507,13 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
         CancellationToken cancellationToken = default)
         => await InstallScopedCredentialBatchAsync([generation], authority, cancellationToken)
             .ConfigureAwait(false);
+
+    public Task InstallCurrentScopedCredentialAsync(
+        ScopedCurrentMailboxCredential credential,
+        VerifiedOfficialMailboxAuthority authority,
+        CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException(
+            "Clean XMG1/XMC1 credentials belong to SqliteDeepMailboxStore.");
 
     public async Task InstallScopedCredentialBatchAsync(
         IReadOnlyList<ScopedMailboxCredentialGeneration> generations,
@@ -3100,3 +3156,4 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
         return System.Buffers.Binary.BinaryPrimitives.ReadUInt64BigEndian(value);
     }
 }
+#endif

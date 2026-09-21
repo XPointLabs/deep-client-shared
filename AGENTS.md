@@ -27,8 +27,12 @@ primitives belong in `deep-protocol`; deployed service behavior belongs in servi
 ## Verify
 
 ```powershell
-dotnet test Deep.Client.Shared.slnx
+dotnet test Deep.Client.Shared.Production.slnx --configuration Release -m:1
 ```
+
+The old `Deep.Client.Shared.slnx` test project is a pre-cutover Session corpus;
+it is not the clean production gate. Do not restore removed runtime types to
+make those tests compile. Migrate relevant coverage into the production tests.
 
 Add focused persistence tests under `tests/Deep.Client.Shared.Tests/Persistence` and service or
 transport tests under `tests/Deep.Client.Shared.Tests/Services` for the corresponding change.

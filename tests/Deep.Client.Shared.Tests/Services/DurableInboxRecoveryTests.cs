@@ -632,10 +632,12 @@ public sealed class DurableInboxRecoveryTests
             IPreparedMailboxAuthenticatedSend preparedSend,
             CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Task<OpaqueMailboxInboxPage> RetrieveOpaqueMailboxInboxAsync(
-            IMailboxOperationSigner signer, OpaqueMailboxContinuation continuation,
+            IMailboxOperationSigner signer, SessionId account,
+            OpaqueMailboxContinuation continuation,
             CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Task AcknowledgeOpaqueMailboxInboxAsync(
-            IMailboxOperationSigner signer, string opaqueItemHandle,
+            IMailboxOperationSigner signer, SessionId account,
+            string opaqueItemHandle,
             CancellationToken cancellationToken = default)
         {
             Interlocked.Increment(ref remoteAckCount);

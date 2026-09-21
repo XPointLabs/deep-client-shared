@@ -8,18 +8,107 @@ using Deep.Client.Shared.Domain.ContactV1;
 using Deep.Client.Shared.Domain.DeviceV1;
 using Deep.Client.Shared.Persistence;
 using Deep.Client.Shared.Persistence.MessagingCryptoV1;
+using Deep.Client.Shared.Persistence.MessagingV1;
 using Deep.Client.Shared.Persistence.PreKeyV1;
 using Deep.Client.Shared.Services;
 using Deep.Client.Shared.Services.ContactV1;
+using Deep.Client.Shared.Services.XPointNetworkV1;
 using Deep.Protocol.ApplicationCore;
+using Deep.Protocol.AccountDirectoryV1;
 using Deep.Protocol.ContactV1;
 using Deep.Protocol.DeepNative;
+using Deep.Protocol.DeepExtension.MailboxCapabilities;
+using Deep.Protocol.DeepExtension.PrivacyRouting;
 using Deep.Protocol.Identity;
 using Deep.Protocol.MessagingCrypto;
 using Deep.Protocol.MessagingWire;
+using Deep.Protocol.XPointNetworkV1;
+using Sodium;
 using Microsoft.Data.Sqlite;
 
 namespace Deep.Client.Shared.Services.MessagingV1;
+
+/// <summary>
+/// Public, key-free request for one durable local DPK2 inventory. All identity,
+/// XPS1, placement, policy and directory facts remain verifier-minted objects;
+/// the caller supplies only the bounded epoch policy and idempotency values.
+/// </summary>
+public sealed class DeepDirectMessagingInventoryRequest
+{
+    private readonly byte[] predecessorXpi1Hash;
+    private readonly byte[] publicationOperationId;
+
+    public DeepDirectMessagingInventoryRequest(
+        Dmd1LineageState currentDirectory,
+        VerifiedContactPreKeyService preKeyService,
+        VerifiedContactServicePlacement placement,
+        ulong inventoryEpoch,
+        ulong notBeforeUnixSeconds,
+        ulong issuedAtUnixSeconds,
+        ulong expiresAtUnixSeconds,
+        ReadOnlySpan<byte> predecessorXpi1Hash,
+        ReadOnlySpan<byte> publicationOperationId,
+        ushort oneTimePreKeyCount,
+        ushort lastResortReuseLimit)
+    {
+        CurrentDirectory = currentDirectory ??
+            throw new ArgumentNullException(nameof(currentDirectory));
+        PreKeyService = preKeyService ??
+            throw new ArgumentNullException(nameof(preKeyService));
+        Placement = placement ?? throw new ArgumentNullException(nameof(placement));
+        if (inventoryEpoch is < 1 or > 14)
+            throw new ArgumentOutOfRangeException(nameof(inventoryEpoch));
+        if (predecessorXpi1Hash.Length != 32 ||
+            (inventoryEpoch == 1) != IsZero(predecessorXpi1Hash))
+        {
+            throw new ArgumentException(
+                "The predecessor XPI1 hash must be ZERO32 exactly for inventory epoch 1.",
+                nameof(predecessorXpi1Hash));
+        }
+        if (publicationOperationId.Length != 32 || IsZero(publicationOperationId))
+        {
+            throw new ArgumentException(
+                "The publication operation ID must be exactly 32 nonzero bytes.",
+                nameof(publicationOperationId));
+        }
+        if (issuedAtUnixSeconds > notBeforeUnixSeconds ||
+            notBeforeUnixSeconds >= expiresAtUnixSeconds ||
+            expiresAtUnixSeconds - notBeforeUnixSeconds > 2_592_000)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(expiresAtUnixSeconds),
+                "Inventory authoring requires issuedAt <= notBefore < expiresAt and at most 30 days.");
+        }
+        if (oneTimePreKeyCount is < 32 or > 4096)
+            throw new ArgumentOutOfRangeException(nameof(oneTimePreKeyCount));
+        if (lastResortReuseLimit is < 1 or > 64)
+            throw new ArgumentOutOfRangeException(nameof(lastResortReuseLimit));
+
+        InventoryEpoch = inventoryEpoch;
+        NotBeforeUnixSeconds = notBeforeUnixSeconds;
+        IssuedAtUnixSeconds = issuedAtUnixSeconds;
+        ExpiresAtUnixSeconds = expiresAtUnixSeconds;
+        this.predecessorXpi1Hash = predecessorXpi1Hash.ToArray();
+        this.publicationOperationId = publicationOperationId.ToArray();
+        OneTimePreKeyCount = oneTimePreKeyCount;
+        LastResortReuseLimit = lastResortReuseLimit;
+    }
+
+    public Dmd1LineageState CurrentDirectory { get; }
+    public VerifiedContactPreKeyService PreKeyService { get; }
+    public VerifiedContactServicePlacement Placement { get; }
+    public ulong InventoryEpoch { get; }
+    public ulong NotBeforeUnixSeconds { get; }
+    public ulong IssuedAtUnixSeconds { get; }
+    public ulong ExpiresAtUnixSeconds { get; }
+    public ReadOnlyMemory<byte> PredecessorXpi1Hash => predecessorXpi1Hash.ToArray();
+    public ReadOnlyMemory<byte> PublicationOperationId => publicationOperationId.ToArray();
+    public ushort OneTimePreKeyCount { get; }
+    public ushort LastResortReuseLimit { get; }
+
+    private static bool IsZero(ReadOnlySpan<byte> value) =>
+        value.IndexOfAnyExcept((byte)0) < 0;
+}
 
 /// <summary>
 /// Opaque account-scoped owner for the durable direct-messaging graph. The host
@@ -76,16 +165,156 @@ public sealed class DeepDirectMessagingStorageFacade : IAsyncDisposable
         return authority.Matches(requested);
     }
 
+    /// <summary>
+    /// Authors and atomically stages one complete XPI1/XPP1 inventory. Private
+    /// pre-key capabilities enter SQLCipher before exact publication bytes are
+    /// returned; the caller never receives key material.
+    /// </summary>
+    public async ValueTask<DeepDirectMessagingInventoryPublication>
+        EnsureInventoryAsync(
+            DeepDirectMessagingInventoryRequest request,
+            CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        cancellationToken.ThrowIfCancellationRequested();
+        var directory = request.CurrentDirectory;
+        var record = directory.Head.Record;
+        var service = request.PreKeyService;
+        var placement = request.Placement;
+        if (directory.ForkLatched ||
+            record.AccountGeneration != authority.AccountGeneration ||
+            !Fixed(record.NetworkId.Span, authority.NetworkId) ||
+            !Fixed(record.DeepAccountId.Span, authority.AccountId) ||
+            !Fixed(service.NetworkId.Span, authority.NetworkId) ||
+            !Fixed(service.DeviceId.Span, authority.DeviceId))
+        {
+            throw new CryptographicException(
+                "The DPK2 inventory request is outside the current local account/device authority.");
+        }
+
+        var device = record.ActiveDevices.SingleOrDefault(candidate =>
+            Fixed(candidate.DeviceId.Span, authority.DeviceId));
+        if (device is null ||
+            !Fixed(device.Dpd1Reference.CanonicalHash.Span, authority.ExactDpd1Hash) ||
+            !Fixed(device.Dpd1Reference.CanonicalBytes.Span, service.Dpd1Reference.Span) ||
+            placement.RequestKind != ContactServiceRequestKind.PublishPreKeyInventory ||
+            placement.ServiceClass != ContactServiceClass.PreKeyClaim ||
+            !placement.Binds(
+                ContactServiceRequestKind.PublishPreKeyInventory,
+                service.ServiceCapability) ||
+            !Fixed(placement.Network.NetworkId.Span, authority.NetworkId) ||
+            placement.PolicyGeneration == 0)
+        {
+            throw new CryptographicException(
+                "The DPK2 inventory request is not bound to the exact current XPS1 placement.");
+        }
+
+        if (request.OneTimePreKeyCount < service.MinimumOneTimeInventory ||
+            request.LastResortReuseLimit > service.LastResortReuseLimit ||
+            request.NotBeforeUnixSeconds < service.IssuedAtUnixSeconds ||
+            request.ExpiresAtUnixSeconds > service.ExpiresAtUnixSeconds ||
+            request.ExpiresAtUnixSeconds > placement.ValidUntilUnixSeconds)
+        {
+            throw new CryptographicException(
+                "The DPK2 inventory policy or lifetime exceeds its XPS1/placement authority.");
+        }
+
+        var dpk2 = new Dpk2AuthoringContext(
+            directory,
+            service.Generation,
+            request.InventoryEpoch,
+            placement.PolicyGeneration,
+            request.NotBeforeUnixSeconds,
+            request.IssuedAtUnixSeconds,
+            request.ExpiresAtUnixSeconds);
+        var context = new PreKeyV1InventoryAuthoringContext(
+            dpk2,
+            service.ServiceCapability.Span,
+            service.Xps1Reference.Span,
+            record.Drs1Reference.CanonicalBytes.Span,
+            request.PredecessorXpi1Hash.Span,
+            request.PublicationOperationId.Span,
+            placement.PlacementHash.Span,
+            request.OneTimePreKeyCount,
+            request.LastResortReuseLimit);
+        return await CurrentOwner.EnsureInventoryAsync(context, cancellationToken)
+            .ConfigureAwait(false) ?? throw new CryptographicException(
+                "The durable DPK2 inventory owner returned no publication.");
+    }
+
+    /// <summary>
+    /// Publishes only an inventory capability returned by this open facade,
+    /// through the exact production ONION transport and current NETCODEC path
+    /// authority, then independently verifies both replica commit receipts.
+    /// </summary>
+    public async ValueTask<VerifiedPreKeyInventoryPublication>
+        PublishInventoryAsync(
+            DeepDirectMessagingInventoryPublication publication,
+            PrivacyRoutedContactResolverTransport transport,
+            ProductionContactResolvePathAuthoritySource pathAuthoritySource,
+            VerifiedContactNetworkAuthority recipientAuthority,
+            VerifiedContactBundleClosure recipientBundle,
+            VerifiedPreKeyInventoryPublication? predecessor = null,
+            CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(publication);
+        ArgumentNullException.ThrowIfNull(transport);
+        ArgumentNullException.ThrowIfNull(pathAuthoritySource);
+        ArgumentNullException.ThrowIfNull(recipientAuthority);
+        ArgumentNullException.ThrowIfNull(recipientBundle);
+        return await PublishInventoryAsync(
+                publication,
+                (IExactContactResolveOnionTransport)transport,
+                (IContactResolvePublicationPathAuthoritySource)pathAuthoritySource,
+                recipientAuthority,
+                recipientBundle,
+                predecessor,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    internal async ValueTask<VerifiedPreKeyInventoryPublication>
+        PublishInventoryAsync(
+            DeepDirectMessagingInventoryPublication publication,
+            IExactContactResolveOnionTransport transport,
+            IContactResolvePublicationPathAuthoritySource pathAuthoritySource,
+            VerifiedContactNetworkAuthority recipientAuthority,
+            VerifiedContactBundleClosure recipientBundle,
+            VerifiedPreKeyInventoryPublication? predecessor = null,
+            CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(publication);
+        ArgumentNullException.ThrowIfNull(transport);
+        ArgumentNullException.ThrowIfNull(pathAuthoritySource);
+        ArgumentNullException.ThrowIfNull(recipientAuthority);
+        ArgumentNullException.ThrowIfNull(recipientBundle);
+        cancellationToken.ThrowIfCancellationRequested();
+        var operation = CurrentOwner.BindInventoryPublication(publication);
+        var verifier = new ProtocolPreKeyV1PublicationVerifier(
+            recipientAuthority,
+            recipientBundle,
+            predecessor);
+        return await PreKeyV1InventoryPublicationDispatcher.PublishAsync(
+                operation,
+                transport,
+                pathAuthoritySource,
+                verifier,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
     public ValueTask<DeepDirectMessagingInitiatorClaimStart?>
         TryBeginInitiatorClaimAsync(
             ContactResolverReverifiedPeerAuthority? verifiedPeer,
             LocalDeviceX25519AgreementAuthority? localAgreementAuthority,
             Dmd1LineageState? exactCurrentDirectory,
+            Dab1LineageState? exactCurrentAddressBinding,
             CancellationToken cancellationToken = default) =>
         CurrentOwner.TryBeginInitiatorClaimAsync(
             verifiedPeer,
             localAgreementAuthority,
             exactCurrentDirectory,
+            exactCurrentAddressBinding,
             cancellationToken);
 
     public ValueTask<DeepDirectMessagingInitiatorClaimPreparation?>
@@ -126,6 +355,36 @@ public sealed class DeepDirectMessagingStorageFacade : IAsyncDisposable
             verifiedClaim,
             cancellationToken);
 
+#if DEEP_CLEAN_PRODUCTION
+    public ValueTask<Dph2InitialClaimPreview?> TryPreviewResponderInitialClaimAsync(
+        Dph2Record initiation,
+        Dmd1LineageState initiatorDirectory,
+        int maximumMessagesWithoutPqInjection,
+        CancellationToken cancellationToken = default) =>
+        CurrentOwner.TryPreviewResponderInitialClaimAsync(
+            initiation, initiatorDirectory,
+            maximumMessagesWithoutPqInjection, cancellationToken);
+
+    /// <summary>
+    /// Commits the initial DPH2 with both mandatory application records:
+    /// SessionInit at sender sequence one and a capability-authored
+    /// ContactHello at sender sequence two. Arbitrary decoded DMC2 bytes are
+    /// not accepted at this production boundary.
+    /// </summary>
+    public ValueTask<DeepDirectMessagingInitiatorCommitResult?>
+        TryCommitInitiatorSessionAsync(
+            DeepDirectMessagingInitiatorClaimPreparation? preparedClaim,
+            VerifiedXpc1PreKeyClaimReceipt? verifiedClaim,
+            AuthoredVerifiedContactHello? contactHello,
+            CancellationToken cancellationToken = default) =>
+        CurrentOwner.TryCommitInitiatorSessionAsync(
+            preparedClaim,
+            verifiedClaim,
+            contactHello,
+            cancellationToken);
+#endif
+
+#if DEEP_CLEAN_PRODUCTION
     public ValueTask<ExactDpe2SendSuccessCapability?>
         TryCommitEstablishedSendAsync(
             DeepDirectMessagingVerifiedSessionBinding? verifiedSession,
@@ -137,6 +396,109 @@ public sealed class DeepDirectMessagingStorageFacade : IAsyncDisposable
             exactDmc2,
             operationId,
             cancellationToken);
+#endif
+
+    public ValueTask<DeepDirectMessagingMetadataSealingPublicKey>
+        PrepareMetadataSealingKeyAsync(
+            VerifiedContactRouteProposalAuthority proposal,
+            CancellationToken cancellationToken = default) =>
+        CurrentOwner.PrepareMetadataSealingKeyAsync(proposal, cancellationToken);
+
+    public ValueTask<DeepDirectMessagingOpenedDeposit> OpenInboundDepositAsync(
+        VerifiedContactRouteClosure currentLocalRoute,
+        ReadOnlyMemory<byte> exactDao1,
+        CancellationToken cancellationToken = default) =>
+        CurrentOwner.OpenInboundDepositAsync(
+            currentLocalRoute, exactDao1, cancellationToken);
+
+#if DEEP_CLEAN_PRODUCTION
+    public ValueTask<DeepDirectMessagingOpenedDeposit> OpenInboundDepositAsync(
+        ParsedContactRouteClosure currentLocalRoute,
+        ReadOnlyMemory<byte> exactDao1,
+        CancellationToken cancellationToken = default) =>
+        CurrentOwner.OpenInboundDepositAsync(
+            currentLocalRoute, exactDao1, cancellationToken);
+#endif
+
+    /// <summary>
+    /// Opens one retrieved MEO1 through exact mailbox-route/DAO1 binding.
+    /// This yields plaintext inner bytes but no session, inbox or ACK authority.
+    /// </summary>
+    public ValueTask<DeepDirectMessagingOpenedDeposit> OpenInboundMailboxEntryAsync(
+        VerifiedContactRouteClosure currentLocalRoute,
+        ScopedMailboxResolvedRoute currentMailboxRoute,
+        ulong cursor,
+        ReadOnlyMemory<byte> exactMeo1,
+        ReadOnlyMemory<byte> externalEnvelopeDigest,
+        MailboxClientDecodePolicy decodePolicy,
+        CancellationToken cancellationToken = default) =>
+        CurrentOwner.OpenInboundMailboxEntryAsync(
+            currentLocalRoute, currentMailboxRoute, cursor, exactMeo1,
+            externalEnvelopeDigest, decodePolicy, cancellationToken);
+
+#if DEEP_CLEAN_PRODUCTION
+    /// <summary>
+    /// Authenticates an initial DPH2 and its encrypted XPK1/XPC1 evidence
+    /// against the current directory head before opening a responder session
+    /// or reserving a local prekey. This does not authorize mailbox ACK.
+    /// </summary>
+    public ValueTask<VerifiedDph2InitialClaim?> TryVerifyResponderInitialClaimAsync(
+        Dph2Record initiation,
+        VerifiedDpk2Offering localOffering,
+        Dmd1LineageState initiatorDirectory,
+        VerifiedAccountDirectoryFreshness initiatorFreshness,
+        VerifiedContactServicePlacement claimPlacement,
+        VerifiedContactNetworkAuthority recipientAuthority,
+        VerifiedContactBundleClosure recipientBundle,
+        OnionTrustedTimeAuthority trustedTimeAuthority,
+        int maximumMessagesWithoutPqInjection,
+        CancellationToken cancellationToken = default) =>
+        CurrentOwner.TryVerifyResponderInitialClaimAsync(
+            initiation, localOffering, initiatorDirectory, initiatorFreshness,
+            claimPlacement, recipientAuthority, recipientBundle,
+            trustedTimeAuthority, maximumMessagesWithoutPqInjection,
+            cancellationToken);
+
+    public ValueTask<VerifiedDph2InitialClaim?> TryVerifyResponderInitialClaimAsync(
+        Dph2Record initiation,
+        Dmd1LineageState initiatorDirectory,
+        VerifiedAccountDirectoryFreshness initiatorFreshness,
+        VerifiedContactServicePlacement claimPlacement,
+        VerifiedContactNetworkAuthority recipientAuthority,
+        VerifiedContactBundleClosure recipientBundle,
+        OnionTrustedTimeAuthority trustedTimeAuthority,
+        int maximumMessagesWithoutPqInjection,
+        CancellationToken cancellationToken = default) =>
+        CurrentOwner.TryVerifyResponderInitialClaimAsync(
+            initiation, initiatorDirectory, initiatorFreshness,
+            claimPlacement, recipientAuthority, recipientBundle,
+            trustedTimeAuthority, maximumMessagesWithoutPqInjection,
+            cancellationToken);
+
+    /// <summary>
+    /// Stages the verified first-contact session after ContactHello endpoint
+    /// checks. It does not materialize a relationship or authorize an ACK.
+    /// </summary>
+    public ValueTask<DeepDirectMessagingUnsolicitedCommitResult?>
+        TryCommitUnsolicitedResponderSessionAsync(
+            VerifiedDph2InitialClaim? verifiedInitial,
+            int maximumMessagesWithoutPqInjection,
+            CancellationToken cancellationToken = default) =>
+        CurrentOwner.TryCommitUnsolicitedResponderSessionAsync(
+            verifiedInitial, maximumMessagesWithoutPqInjection,
+            cancellationToken);
+#endif
+
+#if DEEP_CLEAN_PRODUCTION
+    internal ValueTask<InitiatorInitialSessionDispatchEnvelope?>
+        TryReadPendingInitiatorDispatchAsync(
+            InitiatorInitialSessionVerifiedScope? verifiedPeerScope,
+            ReadOnlyMemory<byte> exactSessionId,
+            CancellationToken cancellationToken = default) =>
+        CurrentOwner.TryReadPendingInitiatorDispatchAsync(
+            verifiedPeerScope,
+            exactSessionId,
+            cancellationToken);
 
     public ValueTask<ExactDpe2ReceiveSuccessCapability?>
         TryCommitEstablishedReceiveAsync(
@@ -147,6 +509,36 @@ public sealed class DeepDirectMessagingStorageFacade : IAsyncDisposable
             verifiedSession,
             exactDpe2,
             cancellationToken);
+
+    internal ValueTask<DirectDmc2InboxDisposition?>
+        TryMaterializeEstablishedReceiveAsync(
+            DeepDirectMessagingVerifiedSessionBinding? verifiedSession,
+            ReadOnlyMemory<byte> exactDpe2,
+            SqliteDeepMailboxStore inbox,
+            CancellationToken cancellationToken = default) =>
+        CurrentOwner.TryMaterializeEstablishedReceiveAsync(
+            verifiedSession, exactDpe2, inbox, cancellationToken);
+
+    internal ValueTask<DirectDmc2InboxDisposition?>
+        TryMaterializeInitialReceiveAsync(
+            DeepDirectMessagingVerifiedSessionBinding? verifiedSession,
+            VerifiedContactBundleEvidence? relationship,
+            VerifiedDph2Initiation? verifiedInitiation,
+            SqliteDeepMailboxStore inbox,
+            CancellationToken cancellationToken = default) =>
+        CurrentOwner.TryMaterializeInitialReceiveAsync(
+            verifiedSession, relationship, verifiedInitiation,
+            inbox, cancellationToken);
+
+    internal ValueTask<DirectDmc2InboxDisposition?>
+        TryMaterializeInitialReceiveAsync(
+            DeepDirectMessagingVerifiedSessionBinding? verifiedSession,
+            VerifiedDph2InitialClaim? verifiedInitial,
+            SqliteDeepMailboxStore inbox,
+            CancellationToken cancellationToken = default) =>
+        CurrentOwner.TryMaterializeInitialReceiveAsync(
+            verifiedSession, verifiedInitial, inbox, cancellationToken);
+#endif
 
     public static void DeleteAccountState(string appDataDirectory) =>
         DeepDirectMessagingStorageOwner.DeleteState(appDataDirectory);
@@ -160,9 +552,82 @@ public sealed class DeepDirectMessagingStorageFacade : IAsyncDisposable
         }
     }
 
+    private static bool Fixed(ReadOnlySpan<byte> left, ReadOnlySpan<byte> right) =>
+        left.Length == right.Length && CryptographicOperations.FixedTimeEquals(left, right);
+
     private DeepDirectMessagingStorageOwner CurrentOwner =>
         Volatile.Read(ref owner) ??
         throw new ObjectDisposedException(nameof(DeepDirectMessagingStorageFacade));
+}
+
+/// <summary>
+/// Public XRA1 authoring inputs only. The private scalar remains in the
+/// account-owned protected store and is never returned to MAUI.
+/// </summary>
+public sealed class DeepDirectMessagingMetadataSealingPublicKey
+{
+    private readonly byte[] keyId;
+    private readonly byte[] x25519PublicKey;
+
+    internal DeepDirectMessagingMetadataSealingPublicKey(
+        MetadataSealingPublicBinding binding)
+    {
+        keyId = binding.KeyId.ToArray();
+        x25519PublicKey = binding.X25519PublicKey.ToArray();
+    }
+
+    public ReadOnlyMemory<byte> KeyId => keyId.ToArray();
+    public ReadOnlyMemory<byte> X25519PublicKey => x25519PublicKey.ToArray();
+}
+
+public enum DeepDirectMessagingInboundKind : byte
+{
+    InitialSession = 1,
+    EstablishedSession = 2,
+}
+
+/// <summary>
+/// Opened canonical DAO1 inner bytes, bound to the current local recipient.
+/// This is not an E2EE commit, materialization proof or mailbox ACK authority.
+/// </summary>
+public sealed class DeepDirectMessagingOpenedDeposit : IDisposable
+{
+    private byte[]? exactInner;
+    private byte[]? dao1Hash;
+
+    internal DeepDirectMessagingOpenedDeposit(
+        MessagingDao1Opened opened,
+        ReadOnlySpan<byte> exactDao1)
+    {
+        Kind = opened.Kind switch
+        {
+            MessagingV1DepositKind.InitialSession =>
+                DeepDirectMessagingInboundKind.InitialSession,
+            MessagingV1DepositKind.EstablishedSession =>
+                DeepDirectMessagingInboundKind.EstablishedSession,
+            _ => throw new CryptographicException("The opened DAO1 kind is unknown."),
+        };
+        exactInner = opened.ExactInner.ToArray();
+        dao1Hash = SHA256.HashData(exactDao1);
+    }
+
+    public DeepDirectMessagingInboundKind Kind { get; }
+    public ReadOnlyMemory<byte> ExactInner =>
+        (Volatile.Read(ref exactInner) ??
+            throw new ObjectDisposedException(nameof(DeepDirectMessagingOpenedDeposit)))
+        .ToArray();
+    public ReadOnlyMemory<byte> ExactDao1Hash =>
+        (Volatile.Read(ref dao1Hash) ??
+            throw new ObjectDisposedException(nameof(DeepDirectMessagingOpenedDeposit)))
+        .ToArray();
+
+    public void Dispose()
+    {
+        var inner = Interlocked.Exchange(ref exactInner, null);
+        var hash = Interlocked.Exchange(ref dao1Hash, null);
+        if (inner is not null) CryptographicOperations.ZeroMemory(inner);
+        if (hash is not null) CryptographicOperations.ZeroMemory(hash);
+    }
 }
 
 /// <summary>
@@ -310,9 +775,10 @@ internal sealed class DeepDirectMessagingLocalAuthorityBinding
 }
 
 /// <summary>
-/// One verified remote device and exact DPH2 session identifier. Production
-/// construction requires a live ContactResolver capability; raw identifiers are
-/// accepted only by the test-only factory.
+/// One verified remote device and exact DPH2 session identifier. Sender-side
+/// production construction uses a ContactResolver capability; unsolicited
+/// responder construction requires authenticated initial DPH2 events. Raw
+/// identifiers are accepted only by the test-only factory.
 /// </summary>
 public sealed class DeepDirectMessagingVerifiedSessionBinding
 {
@@ -416,6 +882,105 @@ public sealed class DeepDirectMessagingVerifiedSessionBinding
             exactDph2Id);
     }
 
+    /// <summary>
+    /// Called only on the events returned by the verified responder factory.
+    /// This establishes a store scope, not contact acceptance or ACK authority.
+    /// An unsolicited initiator has no recipient-side relationship evidence yet.
+    /// </summary>
+    internal static DeepDirectMessagingVerifiedSessionBinding FromAuthenticatedInbound(
+        VerifiedDph2Initiation initiation,
+        ReadOnlySpan<byte> exactSessionInitDmc2,
+        ReadOnlySpan<byte> exactContactHelloDmc2,
+        ReadOnlySpan<byte> localAccountId,
+        ReadOnlySpan<byte> localDeviceId,
+        ulong localDeviceGeneration)
+    {
+        ArgumentNullException.ThrowIfNull(initiation);
+        RequireIdentifier(localAccountId, 32, nameof(localAccountId));
+        RequireIdentifier(localDeviceId, 32, nameof(localDeviceId));
+        var dph2 = Dph2Codec.Decode(initiation.ExactBytes.Span);
+        var session = ApplicationCoreCodec.DecodeDmc2(exactSessionInitDmc2);
+        var hello = ApplicationCoreCodec.DecodeDmc2(exactContactHelloDmc2);
+        if (session.ContentKind != Dmc2ContentKind.SessionInit ||
+            hello.ContentKind != Dmc2ContentKind.ContactHello ||
+            !Fixed(session.CanonicalBytes.Span, exactSessionInitDmc2) ||
+            !Fixed(hello.CanonicalBytes.Span, exactContactHelloDmc2) ||
+            !Fixed(session.NetworkId.Span, dph2.NetworkId.Span) ||
+            !Fixed(hello.NetworkId.Span, dph2.NetworkId.Span) ||
+            !Fixed(session.SenderAccountId.Span, dph2.InitiatorAccountId.Span) ||
+            !Fixed(hello.SenderAccountId.Span, dph2.InitiatorAccountId.Span) ||
+            !Fixed(session.SenderDeviceId.Span, dph2.InitiatorDeviceId.Span) ||
+            !Fixed(hello.SenderDeviceId.Span, dph2.InitiatorDeviceId.Span) ||
+            !Fixed(localAccountId, dph2.ResponderAccountId.Span) ||
+            !Fixed(localDeviceId, dph2.ResponderDeviceId.Span) ||
+            localDeviceGeneration != dph2.ResponderDeviceGeneration ||
+            Fixed(localAccountId, dph2.InitiatorAccountId.Span))
+            throw new CryptographicException(
+                "The authenticated first-contact events differ from DPH2.");
+        var sessionPayload = session.PayloadBytes.Span;
+        var helloPayload = hello.PayloadBytes.Span;
+        var directoryLength = BinaryPrimitives.ReadUInt32BigEndian(sessionPayload.Slice(64, 4));
+        var directory = ApplicationCoreCodec.DecodeDmd1(
+            sessionPayload.Slice(68, checked((int)directoryLength)));
+        var relationshipId = ContactRelationshipId32.FromBytes(helloPayload[..32]);
+        var conversationId = ContactConversationId32.Derive(
+            dph2.NetworkId.Span, relationshipId,
+            localAccountId, dph2.InitiatorAccountId.Span);
+        if (!Fixed(session.ConversationId.Span, conversationId.Span) ||
+            !Fixed(hello.ConversationId.Span, conversationId.Span) ||
+            !Fixed(sessionPayload.Slice(32, 32), directory.RecordHash.Span) ||
+            !Fixed(helloPayload.Slice(70, 32), directory.RecordHash.Span) ||
+            !Fixed(directory.DeepAccountId.Span, dph2.InitiatorAccountId.Span))
+            throw new CryptographicException(
+                "The authenticated first-contact conversation or directory differs from DPH2.");
+        var device = directory.ActiveDevices.SingleOrDefault(candidate =>
+            Fixed(candidate.DeviceId.Span, dph2.InitiatorDeviceId.Span));
+        if (device is null ||
+            !Fixed(device.Dpd1Reference.CanonicalHash.Span,
+                dph2.InitiatorDpd1Ref.Span[6..]))
+            throw new CryptographicException(
+                "The authenticated first-contact device differs from DPH2.");
+        return new DeepDirectMessagingVerifiedSessionBinding(
+            dph2.NetworkId.Span,
+            dph2.InitiatorAccountId.Span,
+            directory.AccountGeneration,
+            dph2.InitiatorDeviceId.Span,
+            dph2.InitiatorDeviceGeneration,
+            conversationId.Span,
+            dph2.SessionId.Span);
+    }
+
+    internal static DeepDirectMessagingVerifiedSessionBinding FromCommittedInboundCatalog(
+        VerifiedDph2Initiation initiation,
+        DeepDirectMessagingSessionCatalogEntry entry,
+        ReadOnlySpan<byte> localAccountId,
+        ReadOnlySpan<byte> localDeviceId,
+        ulong localDeviceGeneration)
+    {
+        ArgumentNullException.ThrowIfNull(initiation);
+        ArgumentNullException.ThrowIfNull(entry);
+        RequireIdentifier(localAccountId, 32, nameof(localAccountId));
+        RequireIdentifier(localDeviceId, 32, nameof(localDeviceId));
+        var dph2 = Dph2Codec.Decode(initiation.ExactBytes.Span);
+        if (!Fixed(localAccountId, dph2.ResponderAccountId.Span) ||
+            !Fixed(localDeviceId, dph2.ResponderDeviceId.Span) ||
+            localDeviceGeneration != dph2.ResponderDeviceGeneration ||
+            !Fixed(entry.ExactDph2Id.Span, dph2.SessionId.Span) ||
+            !Fixed(entry.RemoteAccountId.Span, dph2.InitiatorAccountId.Span) ||
+            !Fixed(entry.RemoteDeviceId.Span, dph2.InitiatorDeviceId.Span) ||
+            entry.RemoteDeviceGeneration != dph2.InitiatorDeviceGeneration)
+            throw new CryptographicException(
+                "The committed inbound session differs from verified DPH2.");
+        return new DeepDirectMessagingVerifiedSessionBinding(
+            dph2.NetworkId.Span,
+            entry.RemoteAccountId.Span,
+            entry.RemoteAccountGeneration,
+            entry.RemoteDeviceId.Span,
+            entry.RemoteDeviceGeneration,
+            entry.ConversationId.Span,
+            dph2.SessionId.Span);
+    }
+
 #if DEEP_TEST_INTERNALS
     internal static DeepDirectMessagingVerifiedSessionBinding CreateForTests(
         ReadOnlySpan<byte> networkId,
@@ -514,8 +1079,10 @@ internal sealed record DeepDirectMessagingSessionStoreBinding(
     DeepDirectMessagingSessionCatalogEntry CatalogEntry,
     SqliteMessagingCryptoV1Store Store);
 
-internal sealed class DeepDirectMessagingInventoryPublication
+public sealed class DeepDirectMessagingInventoryPublication
 {
+    private readonly object ownerToken;
+    private readonly PreKeyV1PublicationRequest publicationRequest;
     private readonly byte[] operationId;
     private readonly byte[] predecessorXpi1Hash;
     private readonly byte[] currentDmd1Hash;
@@ -524,11 +1091,14 @@ internal sealed class DeepDirectMessagingInventoryPublication
     private readonly byte[] exactXpp1;
 
     internal DeepDirectMessagingInventoryPublication(
-        PreKeyV1InventoryStageResult staged)
+        PreKeyV1InventoryStageResult staged,
+        object ownerToken)
     {
         ArgumentNullException.ThrowIfNull(staged);
+        this.ownerToken = ownerToken ?? throw new ArgumentNullException(nameof(ownerToken));
         var publication = staged.Publication ?? throw new CryptographicException(
             "The durable DPK2 inventory result contains no publication request.");
+        publicationRequest = publication;
         if (staged.ForkLatched ||
             staged.Disposition is PreKeyV1InventoryStageDisposition.ForkLatched or
                 PreKeyV1InventoryStageDisposition.AlreadyForkLatched)
@@ -548,16 +1118,25 @@ internal sealed class DeepDirectMessagingInventoryPublication
         exactXpp1 = publication.ExactPublicationRequest.ToArray();
     }
 
-    internal bool IsExactReplay { get; }
-    internal ulong InventoryEpoch { get; }
-    internal ulong ServiceGeneration { get; }
-    internal ulong CurrentDmd1Generation { get; }
-    internal ReadOnlyMemory<byte> OperationId => operationId.ToArray();
-    internal ReadOnlyMemory<byte> PredecessorXpi1Hash => predecessorXpi1Hash.ToArray();
-    internal ReadOnlyMemory<byte> CurrentDmd1Hash => currentDmd1Hash.ToArray();
-    internal ReadOnlyMemory<byte> Xpi1Hash => xpi1Hash.ToArray();
-    internal ReadOnlyMemory<byte> ExactXpi1 => exactXpi1.ToArray();
-    internal ReadOnlyMemory<byte> ExactPublicationRequest => exactXpp1.ToArray();
+    public bool IsExactReplay { get; }
+    public ulong InventoryEpoch { get; }
+    public ulong ServiceGeneration { get; }
+    public ulong CurrentDmd1Generation { get; }
+    public ReadOnlyMemory<byte> OperationId => operationId.ToArray();
+    public ReadOnlyMemory<byte> PredecessorXpi1Hash => predecessorXpi1Hash.ToArray();
+    public ReadOnlyMemory<byte> CurrentDmd1Hash => currentDmd1Hash.ToArray();
+    public ReadOnlyMemory<byte> Xpi1Hash => xpi1Hash.ToArray();
+    public ReadOnlyMemory<byte> ExactXpi1 => exactXpi1.ToArray();
+    public ReadOnlyMemory<byte> ExactPublicationRequest => exactXpp1.ToArray();
+
+    internal PreKeyV1DurablePublicationOperation BindDurableOperation(
+        object expectedOwnerToken)
+    {
+        if (!ReferenceEquals(ownerToken, expectedOwnerToken))
+            throw new CryptographicException(
+                "The DPK2 publication belongs to another direct-message owner.");
+        return new PreKeyV1DurablePublicationOperation(publicationRequest);
+    }
 }
 
 /// <summary>
@@ -797,6 +1376,23 @@ public sealed class DeepDirectMessagingInitiatorCommitResult : IDisposable
 /// one device-wide DPK2 secret store and one independently keyed DPE2 ratchet
 /// store per verified contact/device/session tuple. It performs no network I/O.
 /// </summary>
+public sealed class DeepDirectMessagingUnsolicitedCommitResult
+{
+    internal DeepDirectMessagingUnsolicitedCommitResult(
+        PreKeyV1InitialSessionSagaResult saga,
+        DeepDirectMessagingVerifiedSessionBinding? session)
+    {
+        Saga = saga;
+        Session = session;
+    }
+
+    internal PreKeyV1InitialSessionSagaResult Saga { get; }
+    public bool IsDurablyStaged =>
+        Saga.Disposition is PreKeyV1InitialSessionSagaDisposition.Initialized or
+            PreKeyV1InitialSessionSagaDisposition.ExactReplay;
+    public DeepDirectMessagingVerifiedSessionBinding? Session { get; }
+}
+
 internal sealed class DeepDirectMessagingStorageOwner : IAsyncDisposable
 {
     private const string PreKeyPath = "deep-store-v1/direct-prekeys.dpk2";
@@ -815,6 +1411,7 @@ internal sealed class DeepDirectMessagingStorageOwner : IAsyncDisposable
     private readonly DeepDirectMessagingSessionCatalog catalog;
     private readonly object ownerToken = new();
     private readonly SemaphoreSlim gate = new(1, 1);
+    private readonly SemaphoreSlim responderSagaGate = new(1, 1);
     private readonly Dictionary<string, DeepDirectMessagingSessionStoreBinding> sessions =
         new(StringComparer.Ordinal);
     private int disposed;
@@ -1048,6 +1645,142 @@ internal sealed class DeepDirectMessagingStorageOwner : IAsyncDisposable
     internal bool MatchesAuthority(DeepDirectMessagingLocalAuthorityBinding authority) =>
         localAuthority.Matches(authority);
 
+    internal async ValueTask<DeepDirectMessagingMetadataSealingPublicKey>
+        PrepareMetadataSealingKeyAsync(
+            VerifiedContactRouteProposalAuthority proposal,
+            CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(proposal);
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            ThrowIfDisposed();
+            var current = await accountService.GetLocalIdentityAsync(cancellationToken)
+                .ConfigureAwait(false) ?? throw new CryptographicException(
+                    "Metadata-sealing key authoring requires a current local account.");
+            if (current.StoreGeneration != identity.StoreGeneration ||
+                !localAuthority.Matches(current))
+                throw new CryptographicException(
+                    "The metadata-sealing key owner no longer belongs to the current account generation.");
+            var keys = new ReachabilityMetadataSealingKeyAuthority(secureStorage);
+            var binding = await keys.OpenOrCreateForAuthoringAsync(
+                current, proposal, cancellationToken).ConfigureAwait(false);
+            return new DeepDirectMessagingMetadataSealingPublicKey(binding);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    internal async ValueTask<DeepDirectMessagingOpenedDeposit> OpenInboundDepositAsync(
+        VerifiedContactRouteClosure currentLocalRoute,
+        ReadOnlyMemory<byte> exactDao1,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(currentLocalRoute);
+        if (exactDao1.IsEmpty)
+            throw new ArgumentException("The exact inbound DAO1 is empty.", nameof(exactDao1));
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            ThrowIfDisposed();
+            var current = await accountService.GetLocalIdentityAsync(cancellationToken)
+                .ConfigureAwait(false) ?? throw new CryptographicException(
+                    "Opening an inbound DAO1 requires a current local account.");
+            if (current.StoreGeneration != identity.StoreGeneration ||
+                !localAuthority.Matches(current))
+                throw new CryptographicException(
+                    "The DAO1 opening key no longer belongs to the current account generation.");
+            var keys = new ReachabilityMetadataSealingKeyAuthority(secureStorage);
+            using var opener = await keys.OpenForCurrentRouteAsync(
+                current, currentLocalRoute, cancellationToken).ConfigureAwait(false);
+            using var opened = await opener.OpenAsync(
+                exactDao1, cancellationToken).ConfigureAwait(false);
+            MessagingV1InboundInnerValidator.Validate(
+                opened.Kind, opened.ExactInner.Span,
+                localAuthority.NetworkId, localAuthority.AccountId,
+                localAuthority.DeviceId, localAuthority.DeviceGeneration);
+            return new DeepDirectMessagingOpenedDeposit(opened, exactDao1.Span);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+#if DEEP_CLEAN_PRODUCTION
+    internal async ValueTask<DeepDirectMessagingOpenedDeposit> OpenInboundDepositAsync(
+        ParsedContactRouteClosure currentLocalRoute,
+        ReadOnlyMemory<byte> exactDao1,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(currentLocalRoute);
+        if (exactDao1.IsEmpty)
+            throw new ArgumentException("The exact inbound DAO1 is empty.", nameof(exactDao1));
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            ThrowIfDisposed();
+            var current = await accountService.GetLocalIdentityAsync(cancellationToken)
+                .ConfigureAwait(false) ?? throw new CryptographicException(
+                    "Opening an inbound DAO1 requires a current local account.");
+            if (current.StoreGeneration != identity.StoreGeneration ||
+                !localAuthority.Matches(current))
+                throw new CryptographicException(
+                    "The DAO1 opening key no longer belongs to the current account generation.");
+            var keys = new ReachabilityMetadataSealingKeyAuthority(secureStorage);
+            using var opener = await keys.OpenForCurrentRouteAsync(
+                current, currentLocalRoute, cancellationToken).ConfigureAwait(false);
+            using var opened = await opener.OpenAsync(
+                exactDao1, cancellationToken).ConfigureAwait(false);
+            MessagingV1InboundInnerValidator.Validate(
+                opened.Kind, opened.ExactInner.Span,
+                localAuthority.NetworkId, localAuthority.AccountId,
+                localAuthority.DeviceId, localAuthority.DeviceGeneration);
+            return new DeepDirectMessagingOpenedDeposit(opened, exactDao1.Span);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+#endif
+
+    internal async ValueTask<DeepDirectMessagingOpenedDeposit> OpenInboundMailboxEntryAsync(
+        VerifiedContactRouteClosure currentLocalRoute,
+        ScopedMailboxResolvedRoute currentMailboxRoute,
+        ulong cursor,
+        ReadOnlyMemory<byte> exactMeo1,
+        ReadOnlyMemory<byte> externalEnvelopeDigest,
+        MailboxClientDecodePolicy decodePolicy,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(currentLocalRoute);
+        ArgumentNullException.ThrowIfNull(currentMailboxRoute);
+        ArgumentNullException.ThrowIfNull(decodePolicy);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (cursor == 0 ||
+            exactMeo1.Length is < MailboxClientLimits.EncryptedEnvelopeHeaderLength or
+                > MailboxClientLimits.MaximumEncryptedEnvelopeLength ||
+            externalEnvelopeDigest.Length != MailboxClientLimits.DigestLength ||
+            !Fixed(exactMeo1.Span.Slice(96, MailboxClientLimits.DigestLength),
+                externalEnvelopeDigest.Span))
+            throw new CryptographicException(
+                "The retrieved MEO1 cursor or external digest is invalid.");
+        var envelope = MailboxClientCodec.DecodeEncryptedEnvelope(
+            exactMeo1.Span, decodePolicy);
+        var canonical = MailboxClientCodec.EncodeEncryptedEnvelope(envelope);
+        if (!Fixed(canonical, exactMeo1.Span))
+            throw new CryptographicException(
+                "The retrieved MEO1 is not exact canonical wire.");
+        PrivacyRoutedMessagingTransport.ValidateRetrievedEnvelope(
+            envelope, cursor, currentMailboxRoute, localAuthority.NetworkId);
+        return await OpenInboundDepositAsync(
+                currentLocalRoute, envelope.Ciphertext, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
     internal async ValueTask<DeepDirectMessagingInventoryPublication?>
         EnsureInventoryAsync(
             PreKeyV1InventoryAuthoringContext? authoringContext,
@@ -1065,7 +1798,7 @@ internal sealed class DeepDirectMessagingStorageOwner : IAsyncDisposable
                 "DPK2 inventory requires a current verified local DPD1/DMD1 authority.");
             var staged = await owner.EnsureInventoryAsync(authoringContext, cancellationToken)
                 .ConfigureAwait(false);
-            return new DeepDirectMessagingInventoryPublication(staged);
+            return new DeepDirectMessagingInventoryPublication(staged, ownerToken);
         }
         finally
         {
@@ -1073,14 +1806,24 @@ internal sealed class DeepDirectMessagingStorageOwner : IAsyncDisposable
         }
     }
 
+    internal PreKeyV1DurablePublicationOperation BindInventoryPublication(
+        DeepDirectMessagingInventoryPublication publication)
+    {
+        ArgumentNullException.ThrowIfNull(publication);
+        ThrowIfDisposed();
+        return publication.BindDurableOperation(ownerToken);
+    }
+
     internal async ValueTask<DeepDirectMessagingInitiatorClaimStart?>
         TryBeginInitiatorClaimAsync(
             ContactResolverReverifiedPeerAuthority? verifiedPeer,
             LocalDeviceX25519AgreementAuthority? localAgreementAuthority,
             Dmd1LineageState? exactCurrentDirectory,
+            Dab1LineageState? exactCurrentAddressBinding,
             CancellationToken cancellationToken = default)
     {
-        if (verifiedPeer is null || localAgreementAuthority is null || exactCurrentDirectory is null)
+        if (verifiedPeer is null || localAgreementAuthority is null ||
+            exactCurrentDirectory is null || exactCurrentAddressBinding is null)
         {
             return null;
         }
@@ -1096,7 +1839,10 @@ internal sealed class DeepDirectMessagingStorageOwner : IAsyncDisposable
         {
             ThrowIfDisposed();
             var started = new ManagedInitiatorInitialSessionFactory(1)
-                .BeginClaim(localAgreementAuthority, exactCurrentDirectory);
+                .BeginClaim(
+                    localAgreementAuthority,
+                    exactCurrentDirectory,
+                    exactCurrentAddressBinding);
             return new DeepDirectMessagingInitiatorClaimStart(
                 ownerToken, verifiedPeer, exactCurrentDirectory.Head, started);
         }
@@ -1313,6 +2059,483 @@ internal sealed class DeepDirectMessagingStorageOwner : IAsyncDisposable
         }
     }
 
+#if DEEP_CLEAN_PRODUCTION
+    internal ValueTask<DeepDirectMessagingInitiatorCommitResult?>
+        TryCommitInitiatorSessionAsync(
+            DeepDirectMessagingInitiatorClaimPreparation? preparedClaim,
+            VerifiedXpc1PreKeyClaimReceipt? verifiedClaim,
+            AuthoredVerifiedContactHello? contactHello,
+            CancellationToken cancellationToken = default)
+    {
+        if (preparedClaim is null || verifiedClaim is null || contactHello is null)
+        {
+            preparedClaim?.Dispose();
+            return ValueTask.FromResult<DeepDirectMessagingInitiatorCommitResult?>(null);
+        }
+
+        byte[]? logicalMessageId = null;
+        byte[]? handshakeNonce = null;
+        byte[]? exactSessionInit = null;
+        byte[]? exactContactHello = null;
+        try
+        {
+            var hello = contactHello.Record;
+            if (hello.ContentKind != Dmc2ContentKind.ContactHello ||
+                hello.SenderClientSequence != 2 ||
+                !Fixed(hello.NetworkId.Span, preparedClaim.VerifiedScope.NetworkId) ||
+                !Fixed(hello.ConversationId.Span,
+                    preparedClaim.VerifiedScope.ConversationId) ||
+                !Fixed(hello.SenderAccountId.Span, localAuthority.AccountId) ||
+                !Fixed(hello.SenderDeviceId.Span, localAuthority.DeviceId))
+            {
+                throw new CryptographicException(
+                    "The authored ContactHello differs from the verified initiator scope.");
+            }
+
+            logicalMessageId = CreateNonzeroKey();
+            handshakeNonce = CreateNonzeroKey();
+            var createdAt = checked(verifiedClaim.ServerTimeUnixSeconds * 1000UL);
+            var expiresAt = checked(createdAt + 3_600_000UL);
+            var payload = ApplicationCoreCodec.CreateSessionInitPayload(
+                handshakeNonce,
+                preparedClaim.CurrentDirectory.Record,
+                SessionInitCapabilities.TextCore |
+                SessionInitCapabilities.DeviceControl |
+                SessionInitCapabilities.AttachmentCodec);
+            var authored = ApplicationCoreCodec.AuthorDmc2(
+                preparedClaim.VerifiedScope.NetworkId,
+                logicalMessageId,
+                preparedClaim.VerifiedScope.ConversationId,
+                localAuthority.AccountId,
+                localAuthority.DeviceId,
+                senderClientSequence: 1,
+                createdAt,
+                expiresAt,
+                Dmc2Flags.None,
+                ReadOnlySpan<byte>.Empty,
+                payload);
+            exactSessionInit = authored.CanonicalBytes.ToArray();
+            exactContactHello = contactHello.CanonicalBytes.ToArray();
+            return TryCommitInitiatorSessionAsync(
+                preparedClaim,
+                verifiedClaim,
+                exactSessionInit,
+                exactContactHello,
+                cancellationToken);
+        }
+        catch
+        {
+            preparedClaim.Dispose();
+            throw;
+        }
+        finally
+        {
+            Zero(logicalMessageId);
+            Zero(handshakeNonce);
+            Zero(exactSessionInit);
+            Zero(exactContactHello);
+        }
+    }
+#endif
+
+#if DEEP_CLEAN_PRODUCTION
+    /// <summary>
+    /// Reopens only the exact durable initiator DPH2 for a currently reverified
+    /// ContactV1 peer/device scope. A raw session identifier is a selector, not
+    /// authority; the account owner and the SQLCipher adapter recheck both
+    /// scopes before any bytes are released for a network retry.
+    /// </summary>
+    internal async ValueTask<InitiatorInitialSessionDispatchEnvelope?>
+        TryReadPendingInitiatorDispatchAsync(
+            InitiatorInitialSessionVerifiedScope? verifiedPeerScope,
+            ReadOnlyMemory<byte> exactSessionId,
+            CancellationToken cancellationToken = default)
+    {
+        if (verifiedPeerScope is null)
+            return null;
+        if (!Fixed(verifiedPeerScope.NetworkId, localAuthority.NetworkId) ||
+            !Fixed(verifiedPeerScope.LocalAccountId, localAuthority.AccountId))
+            throw new CryptographicException(
+                "The pending DPH2 peer scope belongs to another local account or network.");
+
+        var session = DeepDirectMessagingVerifiedSessionBinding.FromInitiatorScope(
+            verifiedPeerScope, exactSessionId.Span);
+        var opened = await TryOpenSessionAsync(
+                session, createIfMissing: false, cancellationToken)
+            .ConfigureAwait(false);
+        if (opened is null)
+            return null;
+
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            ThrowIfDisposed();
+            var adapter = new ManagedInitiatorInitialSessionSqliteAdapter(
+                opened.Store, verifiedPeerScope);
+            return await adapter.ReadPendingDispatchAsync(cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Verifies the encrypted claim evidence before any responder session
+    /// store is opened or local prekey row is reserved. The caller must
+    /// supply a verified initiator DMD1 head and fresh account-directory
+    /// proof, which Protocol cross-checks at the current monotonic sample.
+    /// The caller must then commit the
+    /// returned claim through the normal initial-session/inbox saga.
+    /// </summary>
+    internal async ValueTask<VerifiedDph2InitialClaim?> TryVerifyResponderInitialClaimAsync(
+        Dph2Record initiation,
+        VerifiedDpk2Offering localOffering,
+        Dmd1LineageState initiatorDirectory,
+        VerifiedAccountDirectoryFreshness initiatorFreshness,
+        VerifiedContactServicePlacement claimPlacement,
+        VerifiedContactNetworkAuthority recipientAuthority,
+        VerifiedContactBundleClosure recipientBundle,
+        OnionTrustedTimeAuthority trustedTimeAuthority,
+        int maximumMessagesWithoutPqInjection,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(initiation);
+        ArgumentNullException.ThrowIfNull(localOffering);
+        ArgumentNullException.ThrowIfNull(initiatorDirectory);
+        ArgumentNullException.ThrowIfNull(initiatorFreshness);
+        ArgumentNullException.ThrowIfNull(claimPlacement);
+        ArgumentNullException.ThrowIfNull(recipientAuthority);
+        ArgumentNullException.ThrowIfNull(recipientBundle);
+        ArgumentNullException.ThrowIfNull(trustedTimeAuthority);
+        if (maximumMessagesWithoutPqInjection is < 1 or > 2048)
+            throw new ArgumentOutOfRangeException(nameof(maximumMessagesWithoutPqInjection));
+        cancellationToken.ThrowIfCancellationRequested();
+        if (localAuthority.VerifiedDevice is null ||
+            !Fixed(initiation.NetworkId.Span, localAuthority.NetworkId) ||
+            !Fixed(initiation.ResponderAccountId.Span, localAuthority.AccountId) ||
+            !Fixed(initiation.ResponderDeviceId.Span, localAuthority.DeviceId) ||
+            initiation.ResponderDeviceGeneration != localAuthority.DeviceGeneration ||
+            !Fixed(localOffering.NetworkId.Span, localAuthority.NetworkId) ||
+            !Fixed(localOffering.ResponderAccountId.Span, localAuthority.AccountId) ||
+            !Fixed(localOffering.ResponderDeviceId.Span, localAuthority.DeviceId) ||
+            localOffering.ResponderDeviceGeneration != localAuthority.DeviceGeneration)
+            throw new CryptographicException(
+                "The initial DPH2/DPK2 is outside the verified local device scope.");
+
+        // The verified offering must also be the exact, still-owned local
+        // inventory row selected by this DPH2. A remote or stale but correctly
+        // signed DPK2 cannot drive protected pre-claim secret restoration.
+        var storedOffering = await preKeyOwner.TryReadResponderOfferingAsync(
+                initiation, cancellationToken).ConfigureAwait(false);
+        if (storedOffering is null)
+            return null;
+        if (!Fixed(storedOffering, localOffering.ExactBytes.Span))
+            throw new CryptographicException(
+                "The verified DPK2 differs from the current local pre-key inventory.");
+
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            ThrowIfDisposed();
+            using var identityLease = await accountService
+                .OpenCurrentResponderIdentitySecretLeaseAsync(
+                    identity, maximumMessagesWithoutPqInjection, cancellationToken)
+                .ConfigureAwait(false);
+            using var factory = identityLease.OpenFactory();
+            var preview = await preKeyOwner.TryPreviewInitialClaimAsync(
+                    initiation, localOffering, initiatorDirectory, factory,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (preview is null)
+                return null;
+            return await preview.VerifyCurrentAsync(
+                    initiatorFreshness, claimPlacement, recipientAuthority, recipientBundle,
+                    trustedTimeAuthority, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    internal async ValueTask<Dph2InitialClaimPreview?>
+        TryPreviewResponderInitialClaimAsync(
+            Dph2Record initiation,
+            Dmd1LineageState initiatorDirectory,
+            int maximumMessagesWithoutPqInjection,
+            CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(initiation);
+        ArgumentNullException.ThrowIfNull(initiatorDirectory);
+        if (maximumMessagesWithoutPqInjection is < 1 or > 2048)
+            throw new ArgumentOutOfRangeException(
+                nameof(maximumMessagesWithoutPqInjection));
+        if (localAuthority.VerifiedDevice is null ||
+            !Fixed(initiation.NetworkId.Span, localAuthority.NetworkId) ||
+            !Fixed(initiation.ResponderAccountId.Span, localAuthority.AccountId) ||
+            !Fixed(initiation.ResponderDeviceId.Span, localAuthority.DeviceId) ||
+            initiation.ResponderDeviceGeneration != localAuthority.DeviceGeneration)
+            throw new CryptographicException(
+                "The initial DPH2 is outside the verified local device scope.");
+
+        var exactOffering = await preKeyOwner.TryReadResponderOfferingAsync(
+                initiation, cancellationToken)
+            .ConfigureAwait(false);
+        if (exactOffering is null)
+            return null;
+        try
+        {
+            var offering = MessagingWireVerification.VerifyDpk2(
+                exactOffering,
+                new CurrentLocalDpk2VerificationCallbacks(localAuthority));
+            await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                ThrowIfDisposed();
+                using var identityLease = await accountService
+                    .OpenCurrentResponderIdentitySecretLeaseAsync(
+                        identity, maximumMessagesWithoutPqInjection,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                using var factory = identityLease.OpenFactory();
+                return await preKeyOwner.TryPreviewInitialClaimAsync(
+                        initiation, offering, initiatorDirectory, factory,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            finally
+            {
+                gate.Release();
+            }
+        }
+        finally
+        {
+            Zero(exactOffering);
+        }
+    }
+
+    internal async ValueTask<VerifiedDph2InitialClaim?> TryVerifyResponderInitialClaimAsync(
+        Dph2Record initiation,
+        Dmd1LineageState initiatorDirectory,
+        VerifiedAccountDirectoryFreshness initiatorFreshness,
+        VerifiedContactServicePlacement claimPlacement,
+        VerifiedContactNetworkAuthority recipientAuthority,
+        VerifiedContactBundleClosure recipientBundle,
+        OnionTrustedTimeAuthority trustedTimeAuthority,
+        int maximumMessagesWithoutPqInjection,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(initiation);
+        var exactOffering = await preKeyOwner.TryReadResponderOfferingAsync(
+                initiation, cancellationToken)
+            .ConfigureAwait(false);
+        if (exactOffering is null)
+            return null;
+        try
+        {
+            var offering = MessagingWireVerification.VerifyDpk2(
+                exactOffering,
+                new CurrentLocalDpk2VerificationCallbacks(localAuthority));
+            return await TryVerifyResponderInitialClaimAsync(
+                    initiation,
+                    offering,
+                    initiatorDirectory,
+                    initiatorFreshness,
+                    claimPlacement,
+                    recipientAuthority,
+                    recipientBundle,
+                    trustedTimeAuthority,
+                    maximumMessagesWithoutPqInjection,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            Zero(exactOffering);
+        }
+    }
+
+    private sealed class CurrentLocalDpk2VerificationCallbacks(
+        DeepDirectMessagingLocalAuthorityBinding authority)
+        : IDpk2VerificationCallbacks
+    {
+        public Dpk2ResolvedDevice ResolveActiveDevice(Dpk2Record offering)
+        {
+            var verified = authority.VerifiedDevice ??
+                throw new CryptographicException(
+                    "The local DPK2 verifier has no current device capability.");
+            var certificate = verified.Certificate;
+            if (!Fixed(offering.NetworkId.Span, authority.NetworkId) ||
+                !Fixed(offering.ResponderAccountId.Span, authority.AccountId) ||
+                !Fixed(offering.ResponderDeviceId.Span, authority.DeviceId) ||
+                offering.ResponderDeviceGeneration != authority.DeviceGeneration ||
+                !Fixed(offering.ResponderDpd1Ref.Span[6..],
+                    authority.ExactDpd1Hash))
+                throw new CryptographicException(
+                    "The stored DPK2 differs from the current local device authority.");
+            return new Dpk2ResolvedDevice(
+                certificate.DeviceEd25519PublicKey.Span,
+                certificate.DeviceX25519PublicKey.Span);
+        }
+
+        public bool VerifyEd25519(
+            ReadOnlyMemory<byte> publicKey,
+            ReadOnlyMemory<byte> signatureInput,
+            ReadOnlyMemory<byte> signature) =>
+            PublicKeyAuth.VerifyDetached(
+                signature.ToArray(), signatureInput.ToArray(), publicKey.ToArray());
+    }
+
+    /// <summary>
+    /// Commits a verified unsolicited initial session without assuming that a
+    /// relationship or conversation-scoped store existed before ContactHello
+    /// was decrypted. The authenticated first event selects the fresh store;
+    /// an exact finalized replay resolves only an existing protected catalog
+    /// entry. This stages DMC2 but does not apply contact state or grant ACK.
+    /// </summary>
+    internal async ValueTask<DeepDirectMessagingUnsolicitedCommitResult?>
+        TryCommitUnsolicitedResponderSessionAsync(
+            VerifiedDph2InitialClaim? verifiedInitial,
+            int maximumMessagesWithoutPqInjection,
+            CancellationToken cancellationToken = default)
+    {
+        if (verifiedInitial is null) return null;
+        if (maximumMessagesWithoutPqInjection is < 1 or > 2048)
+            throw new ArgumentOutOfRangeException(nameof(maximumMessagesWithoutPqInjection));
+        var claim = verifiedInitial.Claim;
+        var initiation = verifiedInitial.Initiation;
+        var checkpoint = verifiedInitial.InitiatorCheckpoint;
+        var recipientBundle = verifiedInitial.RecipientBundle;
+        if (checkpoint is null || recipientBundle is null)
+            throw new CryptographicException(
+                "An unsolicited responder needs current, verified ContactHello endpoint evidence.");
+        var dph2 = Dph2Codec.Decode(initiation.ExactBytes.Span);
+        if (!Fixed(dph2.NetworkId.Span, localAuthority.NetworkId) ||
+            !Fixed(dph2.ResponderAccountId.Span, localAuthority.AccountId) ||
+            !Fixed(dph2.ResponderDeviceId.Span, localAuthority.DeviceId) ||
+            dph2.ResponderDeviceGeneration != localAuthority.DeviceGeneration ||
+            !preKeyOwner.OwnsResponder(
+                claim.NetworkId.Span, claim.ResponderAccountId.Span,
+                claim.ResponderDeviceId.Span, claim.ResponderDeviceGeneration))
+            throw new CryptographicException(
+                "The unsolicited DPH2 claim is outside the current local responder scope.");
+        if (!Fixed(checkpoint.Binding.Identity.Account.DeepAccountIdHash.Span,
+                dph2.InitiatorAccountId.Span) ||
+            !Fixed(recipientBundle.Binding.Identity.Account.DeepAccountIdHash.Span,
+                localAuthority.AccountId))
+            throw new CryptographicException(
+                "The verified first-contact endpoints differ from DPH2 or the local account.");
+
+        await responderSagaGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            ThrowIfDisposed();
+            using var identityLease = await accountService
+                .OpenCurrentResponderIdentitySecretLeaseAsync(
+                    identity, maximumMessagesWithoutPqInjection, cancellationToken)
+                .ConfigureAwait(false);
+            using var boundClaim = claim.BindForInitialSession(initiation);
+            using var reservation = boundClaim.ConsumeForDevicePreKeyOwner();
+            var resolver = new UnsolicitedInitialSessionStoreResolver(
+                this, initiation, dph2, verifiedInitial);
+            var result = await preKeyOwner.CommitInitialSessionSagaAsync(
+                    reservation,
+                    boundClaim,
+                    resolver,
+                    identityLease.OpenFactory(),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return new DeepDirectMessagingUnsolicitedCommitResult(
+                result,
+                result.Disposition is PreKeyV1InitialSessionSagaDisposition.Initialized or
+                    PreKeyV1InitialSessionSagaDisposition.ExactReplay
+                    ? resolver.Session ?? throw new CryptographicException(
+                        "The committed inbound DPH2 has no verified session scope.")
+                    : null);
+        }
+        finally { responderSagaGate.Release(); }
+    }
+
+    internal sealed class UnsolicitedInitialSessionStoreResolver(
+        DeepDirectMessagingStorageOwner owner,
+        VerifiedDph2Initiation initiation,
+        Dph2Record dph2,
+        VerifiedDph2InitialClaim? endpointEvidence) : IInitialSessionStoreResolver
+    {
+#if DEEP_TEST_INTERNALS
+        internal UnsolicitedInitialSessionStoreResolver(
+            DeepDirectMessagingStorageOwner owner,
+            VerifiedDph2Initiation initiation,
+            Dph2Record dph2)
+            : this(owner, initiation, dph2, null) { }
+#endif
+        internal DeepDirectMessagingVerifiedSessionBinding? Session { get; private set; }
+
+        public async ValueTask<SqliteMessagingCryptoV1Store?> ResolveAsync(
+            ReadOnlyMemory<byte> exactSessionInitDmc2,
+            ReadOnlyMemory<byte> exactFirstApplicationDmc2,
+            CancellationToken cancellationToken)
+        {
+            if (exactSessionInitDmc2.IsEmpty && exactFirstApplicationDmc2.IsEmpty)
+            {
+                var matches = (await owner.ReadCatalogAsync(cancellationToken)
+                        .ConfigureAwait(false))
+                    .Where(entry =>
+                        Fixed(entry.ExactDph2Id.Span, dph2.SessionId.Span) &&
+                        Fixed(entry.RemoteAccountId.Span,
+                            dph2.InitiatorAccountId.Span) &&
+                        Fixed(entry.RemoteDeviceId.Span,
+                            dph2.InitiatorDeviceId.Span))
+                    .ToArray();
+                if (matches.Length == 0) return null;
+                if (matches.Length != 1)
+                    throw new CryptographicException(
+                        "The exact inbound DPH2 has ambiguous session catalog state.");
+                Session = DeepDirectMessagingVerifiedSessionBinding
+                    .FromCommittedInboundCatalog(
+                        initiation, matches[0], owner.localAuthority.AccountId,
+                        owner.localAuthority.DeviceId,
+                        owner.localAuthority.DeviceGeneration);
+                return (await owner.TryOpenSessionAsync(
+                        Session, createIfMissing: false, cancellationToken)
+                    .ConfigureAwait(false))?.Store;
+            }
+
+            if (exactSessionInitDmc2.IsEmpty || exactFirstApplicationDmc2.IsEmpty)
+                throw new CryptographicException(
+                    "An unsolicited DPH2 must authenticate SessionInit and ContactHello.");
+            var checkpoint = endpointEvidence?.InitiatorCheckpoint ??
+                throw new CryptographicException(
+                    "The verified DPH2 lacks a current initiator checkpoint.");
+            var recipient = endpointEvidence.RecipientBundle ??
+                throw new CryptographicException(
+                    "The verified DPH2 lacks recipient publication evidence.");
+            if (!Fixed(recipient.Binding.Identity.Account.DeepAccountIdHash.Span,
+                    owner.localAuthority.AccountId))
+                throw new CryptographicException(
+                    "The verified recipient publication differs from the local account.");
+            var hello = ApplicationCoreCodec.DecodeDmc2(
+                exactFirstApplicationDmc2.Span);
+            ApplicationCoreVerifier.RequireContactHelloEndpointBindings(
+                hello,
+                ApplicationCoreVerifier.StartDab1Lineage(checkpoint.Binding).Next,
+                ApplicationCoreVerifier.StartDmd1Lineage(checkpoint.Directory).Next,
+                ApplicationCoreVerifier.StartDab1Lineage(recipient.Binding).Next);
+            Session = DeepDirectMessagingVerifiedSessionBinding
+                .FromAuthenticatedInbound(
+                    initiation, exactSessionInitDmc2.Span,
+                    exactFirstApplicationDmc2.Span,
+                    owner.localAuthority.AccountId, owner.localAuthority.DeviceId,
+                    owner.localAuthority.DeviceGeneration);
+            return (await owner.TryOpenSessionAsync(
+                    Session, createIfMissing: true, cancellationToken)
+                .ConfigureAwait(false))?.Store;
+        }
+    }
+
     internal async ValueTask<PreKeyV1InitialSessionSagaResult?>
         TryCommitResponderSessionAsync(
             DeepDirectMessagingVerifiedSessionBinding? verifiedSession,
@@ -1441,6 +2664,173 @@ internal sealed class DeepDirectMessagingStorageOwner : IAsyncDisposable
                 cancellationToken)
             .ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// Replays the recoverable DMC2 handoff into the account-wide semantic
+    /// inbox. The exact session envelope and verified peer are checked before
+    /// the protected stage is read. No mailbox ACK is minted here.
+    /// </summary>
+    internal async ValueTask<DirectDmc2InboxDisposition?>
+        TryMaterializeEstablishedReceiveAsync(
+            DeepDirectMessagingVerifiedSessionBinding? verifiedSession,
+            ReadOnlyMemory<byte> exactDpe2,
+            SqliteDeepMailboxStore inbox,
+            CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(inbox);
+        if (verifiedSession is null) return null;
+        var opened = await TryOpenSessionAsync(
+                verifiedSession, createIfMissing: false, cancellationToken)
+            .ConfigureAwait(false);
+        if (opened is null) return null;
+
+        var record = Dpe2Codec.Decode(exactDpe2.Span);
+        var canonical = Dpe2Codec.Encode(record);
+        var envelopeHash = MessagingWireCryptographicInputs.ComputeDpe2FullReplayHash(record);
+        var localNetwork = localAuthority.NetworkId.ToArray();
+        var localAccount = localAuthority.AccountId.ToArray();
+        try
+        {
+            if (!Fixed(canonical, exactDpe2.Span) ||
+                !Fixed(record.NetworkId.Span, localAuthority.NetworkId) ||
+                !Fixed(record.NetworkId.Span, verifiedSession.NetworkId.Span) ||
+                !Fixed(record.SessionId.Span, verifiedSession.ExactDph2Id.Span) ||
+                !Fixed(record.SenderDeviceId.Span, verifiedSession.RemoteDeviceId.Span) ||
+                !Fixed(record.RecipientDeviceId.Span, localAuthority.DeviceId))
+                throw new CryptographicException(
+                    "The direct inbox handoff is outside the verified DPE2 session.");
+
+            using var handoff = await AuthenticatedDirectDmc2.FromCommittedStageAsync(
+                opened.Store,
+                record.OperationId,
+                envelopeHash,
+                localNetwork,
+                localAccount,
+                localAuthority.AccountGeneration,
+                verifiedSession.ConversationId,
+                verifiedSession.RemoteAccountId,
+                verifiedSession.RemoteDeviceId,
+                cancellationToken).ConfigureAwait(false);
+            if (handoff is null) return null;
+            return await inbox.MaterializeDirectDmc2Async(handoff, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            Zero(canonical);
+            Zero(envelopeHash);
+            Zero(localNetwork);
+            Zero(localAccount);
+        }
+    }
+
+    /// <summary>
+    /// Replays the authenticated DPH2 batch staged with the initial TRS1 into
+    /// the account inbox. This does not apply ContactHello relationship state
+    /// and therefore cannot mint a transport ACK by itself.
+    /// </summary>
+    internal async ValueTask<DirectDmc2InboxDisposition?>
+        TryMaterializeInitialReceiveAsync(
+            DeepDirectMessagingVerifiedSessionBinding? verifiedSession,
+            VerifiedContactBundleEvidence? relationship,
+            VerifiedDph2Initiation? verifiedInitiation,
+            SqliteDeepMailboxStore inbox,
+            CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(inbox);
+        if (verifiedSession is null || relationship is null || verifiedInitiation is null)
+            return null;
+        RequireResponderSessionBinding(verifiedSession, relationship, verifiedInitiation);
+        var opened = await TryOpenSessionAsync(
+                verifiedSession, createIfMissing: false, cancellationToken)
+            .ConfigureAwait(false);
+        if (opened is null) return null;
+        var localNetwork = localAuthority.NetworkId.ToArray();
+        var localAccount = localAuthority.AccountId.ToArray();
+        try
+        {
+            using var batch = await AuthenticatedInitialDmc2Batch.FromCommittedStageAsync(
+                opened.Store,
+                verifiedInitiation.ClaimOperationId,
+                verifiedInitiation.FullReplayHash,
+                localNetwork,
+                localAccount,
+                localAuthority.AccountGeneration,
+                verifiedSession.ConversationId,
+                verifiedSession.RemoteAccountId,
+                verifiedSession.RemoteDeviceId,
+                relationship.RelationshipId.ToArray(),
+                relationship.ArtifactHashes[ContactVerifiedArtifactKind.Dab1].ToArray(),
+                relationship.ArtifactHashes[ContactVerifiedArtifactKind.Dmd1].ToArray(),
+                cancellationToken).ConfigureAwait(false);
+            if (batch is null) return null;
+            return await inbox.MaterializeInitialDmc2BatchAsync(batch, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            Zero(localNetwork);
+            Zero(localAccount);
+        }
+    }
+
+    /// <summary>
+    /// Materializes an unsolicited SessionInit + ContactHello only from the
+    /// exact committed DPH2 and its current initiator checkpoint. This stores
+    /// the inbound contact request durably without pretending that a full
+    /// resolver bundle for the initiator already exists.
+    /// </summary>
+    internal async ValueTask<DirectDmc2InboxDisposition?>
+        TryMaterializeInitialReceiveAsync(
+            DeepDirectMessagingVerifiedSessionBinding? verifiedSession,
+            VerifiedDph2InitialClaim? verifiedInitial,
+            SqliteDeepMailboxStore inbox,
+            CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(inbox);
+        if (verifiedSession is null || verifiedInitial is null)
+            return null;
+        var initiation = verifiedInitial.Initiation;
+        var dph2 = Dph2Codec.Decode(initiation.ExactBytes.Span);
+        if (!Fixed(verifiedSession.NetworkId.Span, dph2.NetworkId.Span) ||
+            !Fixed(verifiedSession.ExactDph2Id.Span, dph2.SessionId.Span) ||
+            !Fixed(verifiedSession.RemoteAccountId.Span,
+                dph2.InitiatorAccountId.Span) ||
+            !Fixed(verifiedSession.RemoteDeviceId.Span,
+                dph2.InitiatorDeviceId.Span) ||
+            !Fixed(localAuthority.AccountId, dph2.ResponderAccountId.Span) ||
+            !Fixed(localAuthority.DeviceId, dph2.ResponderDeviceId.Span))
+            throw new CryptographicException(
+                "The unsolicited inbox handoff differs from its verified DPH2 session.");
+        var opened = await TryOpenSessionAsync(
+                verifiedSession, createIfMissing: false, cancellationToken)
+            .ConfigureAwait(false);
+        if (opened is null)
+            return null;
+        var localAccount = localAuthority.AccountId.ToArray();
+        try
+        {
+            using var batch = await AuthenticatedInitialDmc2Batch
+                .FromCommittedVerifiedInitialStageAsync(
+                    opened.Store,
+                    verifiedInitial,
+                    verifiedSession,
+                    localAccount,
+                    localAuthority.AccountGeneration,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (batch is null)
+                return null;
+            return await inbox.MaterializeInitialDmc2BatchAsync(
+                    batch, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            Zero(localAccount);
+        }
+    }
+#endif
 
     internal async ValueTask<DeepDirectMessagingSessionStoreBinding?> TryOpenSessionAsync(
         DeepDirectMessagingVerifiedSessionBinding? verifiedSession,
@@ -1602,21 +2992,29 @@ internal sealed class DeepDirectMessagingStorageOwner : IAsyncDisposable
         {
             return;
         }
-        await gate.WaitAsync().ConfigureAwait(false);
+        await responderSagaGate.WaitAsync().ConfigureAwait(false);
         try
         {
-            foreach (var binding in sessions.Values)
+            await gate.WaitAsync().ConfigureAwait(false);
+            try
             {
-                await binding.Store.DisposeAsync().ConfigureAwait(false);
+                foreach (var binding in sessions.Values)
+                {
+                    await binding.Store.DisposeAsync().ConfigureAwait(false);
+                }
+                sessions.Clear();
+                catalog.Dispose();
+                inventoryOwner?.Dispose();
+                await preKeyOwner.DisposeAsync().ConfigureAwait(false);
             }
-            sessions.Clear();
-            catalog.Dispose();
-            inventoryOwner?.Dispose();
-            await preKeyOwner.DisposeAsync().ConfigureAwait(false);
+            finally
+            {
+                gate.Release();
+            }
         }
         finally
         {
-            gate.Release();
+            responderSagaGate.Release();
         }
     }
 

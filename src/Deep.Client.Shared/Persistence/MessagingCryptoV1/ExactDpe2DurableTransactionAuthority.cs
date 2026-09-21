@@ -92,6 +92,7 @@ internal sealed class ExactDpe2ProtocolPlanSnapshot : IDisposable
             DeduplicationMutationCommitment = Copy(plan.DeduplicationMutationCommitment);
             PqFenceMutationCommitment = Copy(plan.PqFenceMutationCommitment);
             TerminalStateCommitment = Copy(plan.TerminalStateCommitment);
+            AuthenticatedDmc2 = Copy(plan.AuthenticatedDmc2);
         }
         catch
         {
@@ -124,6 +125,7 @@ internal sealed class ExactDpe2ProtocolPlanSnapshot : IDisposable
     internal byte[] DeduplicationMutationCommitment { get; }
     internal byte[] PqFenceMutationCommitment { get; }
     internal byte[] TerminalStateCommitment { get; }
+    internal byte[] AuthenticatedDmc2 { get; }
 
     internal static ExactDpe2ProtocolPlanSnapshot Capture(
         ExactDpe2DurablePersistencePlan plan) => new(plan);

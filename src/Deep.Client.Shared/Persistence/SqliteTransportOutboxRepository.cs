@@ -2,13 +2,23 @@ using Microsoft.Data.Sqlite;
 
 namespace Deep.Client.Shared.Persistence;
 
+#if DEEP_CLEAN_PRODUCTION
+public sealed partial class SqliteDeepMailboxStore
+#else
 public sealed partial class SqliteSessionStore
+#endif
 {
     private readonly Action<TransportOutboxCommitFaultPoint>? _transportOutboxFaultInjector;
 
+#if DEEP_CLEAN_PRODUCTION
+    internal SqliteDeepMailboxStore(
+        SqliteDeepMailboxStoreOptions options,
+        Action<TransportOutboxCommitFaultPoint> outboxFaultInjector)
+#else
     internal SqliteSessionStore(
         SqliteSessionStoreOptions options,
         Action<TransportOutboxCommitFaultPoint> outboxFaultInjector)
+#endif
         : this(options)
     {
         _transportOutboxFaultInjector =

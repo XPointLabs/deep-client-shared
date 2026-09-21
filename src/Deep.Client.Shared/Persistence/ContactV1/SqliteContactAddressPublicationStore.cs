@@ -183,6 +183,39 @@ public sealed class SqliteContactAddressPublicationStore : IContactAddressPublic
         }
     }
 
+    public async ValueTask<ContactAddressPublicationSnapshot?> ReadLatestConfirmedAsync(
+        CancellationToken cancellationToken = default)
+    {
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            ThrowIfDisposed();
+            using var database = Open();
+            using var command = database.CreateCommand();
+            command.CommandText = """
+                SELECT operation_id,request_hash,exact_xpu1,state,attempt_count,last_status,
+                       last_mutation_outcome,last_server_time,retry_after,exact_xpo1
+                FROM address_publication_operations WHERE state=$confirmed;
+                """;
+            command.Parameters.AddWithValue(
+                "$confirmed",
+                (int)ContactAddressPublicationState.Confirmed);
+            using var reader = command.ExecuteReader();
+            var confirmed = new List<ContactAddressPublicationSnapshot>();
+            while (reader.Read())
+            {
+                confirmed.Add(ReadRow(reader));
+            }
+            return ContactAddressPublicationPersistenceValidation.SelectLatestConfirmed(
+                confirmed,
+                Scope);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
     public async ValueTask<ContactAddressPublicationSnapshot> RecordValidatedResultAsync(
         ReadOnlyMemory<byte> operationId32,
         ReadOnlyMemory<byte> expectedRequestHash32,

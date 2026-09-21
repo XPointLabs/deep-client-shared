@@ -11,6 +11,7 @@ internal interface IMailboxRuntimePolicyLease : IDisposable, IAsyncDisposable
 {
 }
 
+#if !DEEP_CLEAN_PRODUCTION
 internal sealed class MailboxRuntimeCommitActivation
 {
     private readonly SqliteMailboxRevocationSource revocations;
@@ -34,6 +35,7 @@ internal sealed class MailboxRuntimeCommitActivation
         publicationLease.Dispose();
     }
 }
+#endif
 
 internal sealed class MailboxRuntimePolicyCoordinator
 {

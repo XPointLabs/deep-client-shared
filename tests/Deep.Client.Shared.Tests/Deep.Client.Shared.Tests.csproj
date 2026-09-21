@@ -37,4 +37,11 @@
     <Using Include="Xunit" />
   </ItemGroup>
 
+  <ItemGroup Condition="'$(FocusedPreKeyTest)' == 'true'">
+    <!-- Diagnostic cohort during the Session-derived test clean break. This
+         does not replace the full release gate or hide its current failure. -->
+    <Compile Remove="**\*.cs" />
+    <Compile Include="Persistence\PreKeyV1\**\*.cs" />
+  </ItemGroup>
+
 </Project>

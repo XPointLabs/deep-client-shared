@@ -60,6 +60,19 @@ public sealed class InMemoryContactAddressPublicationStore : IContactAddressPubl
         }
     }
 
+    public ValueTask<ContactAddressPublicationSnapshot?> ReadLatestConfirmedAsync(
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (gate)
+        {
+            return ValueTask.FromResult(
+                ContactAddressPublicationPersistenceValidation.SelectLatestConfirmed(
+                    operations.Values,
+                    Scope));
+        }
+    }
+
     public ValueTask<ContactAddressPublicationSnapshot> RecordValidatedResultAsync(
         ReadOnlyMemory<byte> operationId32,
         ReadOnlyMemory<byte> expectedRequestHash32,

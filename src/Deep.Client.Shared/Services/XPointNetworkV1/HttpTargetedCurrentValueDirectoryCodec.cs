@@ -32,7 +32,7 @@ internal static class HttpTargetedCurrentValueDirectoryCodec
         "application/vnd.deep.directory-current-value.v1+octet-stream";
 
     private const int ResponseFixedBytes = 2 + 2 + 4 + 16 + 32 + 32 + 16 + 8;
-    private const int ArtifactCount = 8;
+    private const int ArtifactCount = 9;
 
     internal static byte[] EncodeRequest(
         ContactResolveDirectoryFetchContext context,
@@ -149,7 +149,7 @@ internal static class HttpTargetedCurrentValueDirectoryCodec
                     requestCreated.SampleSeconds,
                     responseReceived.SampleSeconds,
                     current.SampleSeconds),
-                [], [artifacts[5]], [artifacts[6]], [], [artifacts[7]], null);
+                [], [artifacts[5]], [artifacts[6]], [], artifacts[7], [artifacts[8]], null);
         }
         catch (ArgumentException exception)
         {
@@ -182,6 +182,7 @@ internal static class HttpTargetedCurrentValueDirectoryCodec
         WriteArtifact(stream, artifacts.ExactAdp1.Span);
         WriteArtifact(stream, artifacts.ExactOrderedXnv1Chain[^1].Span);
         WriteArtifact(stream, artifacts.ExactOrderedXnh1Chain[^1].Span);
+        WriteArtifact(stream, artifacts.ExactPma2.Span);
         WriteArtifact(stream, artifacts.ExactOrderedPmt2Chain[^1].Span);
         var result = stream.ToArray();
         BinaryPrimitives.WriteUInt32BigEndian(result.AsSpan(4), checked((uint)result.Length));

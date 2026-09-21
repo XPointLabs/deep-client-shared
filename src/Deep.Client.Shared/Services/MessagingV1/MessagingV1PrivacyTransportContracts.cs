@@ -2,7 +2,7 @@ using System.Buffers.Binary;
 using System.Security.Cryptography;
 using Deep.Client.Shared.Persistence;
 using Deep.Client.Shared.Persistence.MessagingCryptoV1;
-using Deep.Client.Shared.Persistence.PreKeyV1;
+using Deep.Client.Shared.Persistence.MessagingV1;
 using Deep.Client.Shared.Services.ContactV1;
 using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.ContactV1;
@@ -88,6 +88,99 @@ internal sealed class MessagingV1LocalContext
 }
 
 /// <summary>
+/// One current reachability-scoped mailbox grant together with the only holder
+/// key allowed to present it.  The selector is derived from the grant and exact
+/// route closure; no Session identity or caller-authored alias participates.
+/// </summary>
+internal sealed class VerifiedMessagingMailboxAccess
+{
+    private readonly byte[] exactGrant;
+
+    private VerifiedMessagingMailboxAccess(
+        MailboxCredentialSelector selector,
+        IMailboxOperationSigner signer,
+        MailboxCapabilityDomain domain,
+        ReadOnlySpan<byte> exactGrant)
+    {
+        Selector = selector ?? throw new ArgumentNullException(nameof(selector));
+        Signer = signer ?? throw new ArgumentNullException(nameof(signer));
+        if (domain is not (
+            MailboxCapabilityDomain.Deposit or MailboxCapabilityDomain.Retrieve))
+            throw new ArgumentOutOfRangeException(nameof(domain));
+        if (domain == MailboxCapabilityDomain.Retrieve &&
+            selector.Kind != MailboxCredentialScopeKind.Self ||
+            domain == MailboxCapabilityDomain.Deposit &&
+            selector.Kind == MailboxCredentialScopeKind.Self)
+            throw new CryptographicException(
+                "The mailbox access role does not match its credential scope.");
+        var holder = signer.GetEd25519PublicKey();
+        try
+        {
+            if (holder.Length != 32 || holder.AsSpan().IndexOfAnyExcept((byte)0) < 0 ||
+                !Fixed(holder, selector.SubjectId.Span))
+                throw new CryptographicException(
+                    "The mailbox access selector does not bind its holder key.");
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(holder);
+        }
+        Domain = domain;
+        this.exactGrant = exactGrant.ToArray();
+    }
+
+    internal MailboxCredentialSelector Selector { get; }
+    internal IMailboxOperationSigner Signer { get; }
+    internal MailboxCapabilityDomain Domain { get; }
+    internal ReadOnlyMemory<byte> ExactGrant => exactGrant.ToArray();
+
+    internal static VerifiedMessagingMailboxAccess FromCurrentGrant(
+        OutboxAccountScope accountScope,
+        MailboxCredentialScopeKind kind,
+        VerifiedCurrentMailboxGrant grant,
+        IMailboxOperationSigner signer,
+        ReadOnlySpan<byte> groupMembershipCommitment = default)
+    {
+        ArgumentNullException.ThrowIfNull(accountScope);
+        ArgumentNullException.ThrowIfNull(grant);
+        ArgumentNullException.ThrowIfNull(signer);
+        var expectedDomain = kind == MailboxCredentialScopeKind.Self
+            ? MailboxCapabilityDomain.Retrieve
+            : MailboxCapabilityDomain.Deposit;
+        if (grant.Domain != expectedDomain)
+            throw new CryptographicException(
+                "The current mailbox grant does not authorize this access role.");
+        var routeContext = SHA256.HashData(grant.ExactRouteClosure.Span);
+        try
+        {
+            var selector = new MailboxCredentialSelector(
+                accountScope,
+                kind,
+                grant.HolderPublicKey.Span,
+                routeContext,
+                groupMembershipCommitment);
+            return new VerifiedMessagingMailboxAccess(
+                selector, signer, grant.Domain, grant.ExactGrant.Span);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(routeContext);
+        }
+    }
+
+#if DEEP_TEST_INTERNALS
+    internal static VerifiedMessagingMailboxAccess CreateForTests(
+        MailboxCredentialSelector selector,
+        IMailboxOperationSigner signer,
+        MailboxCapabilityDomain domain) =>
+        new(selector, signer, domain, ReadOnlySpan<byte>.Empty);
+#endif
+
+    private static bool Fixed(ReadOnlySpan<byte> left, ReadOnlySpan<byte> right) =>
+        left.Length == right.Length && CryptographicOperations.FixedTimeEquals(left, right);
+}
+
+/// <summary>
 /// Opaque recipient/deposit authority minted only from the reverified ContactV1
 /// closure and the matching installed peer-deposit mailbox capability.
 /// </summary>
@@ -101,7 +194,7 @@ internal sealed class VerifiedMessagingRecipientDeposit
 
     private VerifiedMessagingRecipientDeposit(
         OutboxAccountScope localOutboxScope,
-        MailboxCredentialSelector selector,
+        VerifiedMessagingMailboxAccess mailboxAccess,
         ReadOnlySpan<byte> networkId,
         ReadOnlySpan<byte> accountId,
         ulong accountGeneration,
@@ -113,14 +206,15 @@ internal sealed class VerifiedMessagingRecipientDeposit
         ulong expiresAtUnixSeconds)
     {
         LocalOutboxScope = localOutboxScope ?? throw new ArgumentNullException(nameof(localOutboxScope));
-        Selector = selector ?? throw new ArgumentNullException(nameof(selector));
+        MailboxAccess = mailboxAccess ?? throw new ArgumentNullException(nameof(mailboxAccess));
         Require(networkId, 16, nameof(networkId));
         Require(accountId, 32, nameof(accountId));
         Require(deviceId, 32, nameof(deviceId));
         Require(sealingKeyId, 32, nameof(sealingKeyId));
         Require(sealingPublicKey, 32, nameof(sealingPublicKey));
-        if (!selector.AccountScope.Equals(localOutboxScope) ||
-            selector.Kind != MailboxCredentialScopeKind.Peer)
+        if (!mailboxAccess.Selector.AccountScope.Equals(localOutboxScope) ||
+            mailboxAccess.Selector.Kind != MailboxCredentialScopeKind.Peer ||
+            mailboxAccess.Domain != MailboxCapabilityDomain.Deposit)
             throw new CryptographicException("The mailbox selector is not the verified peer-deposit capability for this local account.");
         if (accountGeneration == 0 || directoryGeneration == 0 ||
             deviceGeneration == 0 || expiresAtUnixSeconds == 0)
@@ -138,7 +232,8 @@ internal sealed class VerifiedMessagingRecipientDeposit
     }
 
     internal OutboxAccountScope LocalOutboxScope { get; }
-    internal MailboxCredentialSelector Selector { get; }
+    internal VerifiedMessagingMailboxAccess MailboxAccess { get; }
+    internal MailboxCredentialSelector Selector => MailboxAccess.Selector;
     internal ReadOnlySpan<byte> NetworkId => networkId;
     internal ReadOnlySpan<byte> AccountId => accountId;
     internal ulong AccountGeneration { get; }
@@ -152,12 +247,12 @@ internal sealed class VerifiedMessagingRecipientDeposit
     internal static VerifiedMessagingRecipientDeposit FromReverifiedPeer(
         ContactResolverReverifiedPeerAuthority peer,
         OutboxAccountScope localOutboxScope,
-        MailboxCredentialSelector selector,
+        VerifiedMessagingMailboxAccess mailboxAccess,
         ReadOnlySpan<byte> recipientDeviceId)
     {
         ArgumentNullException.ThrowIfNull(peer);
         ArgumentNullException.ThrowIfNull(localOutboxScope);
-        ArgumentNullException.ThrowIfNull(selector);
+        ArgumentNullException.ThrowIfNull(mailboxAccess);
         Require(recipientDeviceId, 32, nameof(recipientDeviceId));
         var selectedDeviceId = recipientDeviceId.ToArray();
 
@@ -168,25 +263,35 @@ internal sealed class VerifiedMessagingRecipientDeposit
             Fixed(candidate.DeviceId.Span, selectedDeviceId));
         var xrr1 = peer.Route.Reachability;
         var xra1 = peer.Route.Authorization;
-        if (!StringComparer.Ordinal.Equals(xrr1.Magic, "XRR1") ||
-            !StringComparer.Ordinal.Equals(xra1.Magic, "XRA1") ||
-            device is null || directoryEntry is null ||
-            !Fixed(xrr1.Field(1).Span, directory.Record.NetworkId.Span) ||
-            !Fixed(xra1.Field(1).Span, directory.Record.NetworkId.Span) ||
-            !Fixed(xra1.Field(14).Span, selectedDeviceId) ||
-            !Fixed(selector.SubjectId.Span, xrr1.Field(10).Span) ||
-            !Fixed(directoryEntry.Dpd1Reference.CanonicalHash.Span,
-                device.Certificate.CanonicalHash.Span))
+        var exactRoute = ContactRouteClosureCodec.Encode(peer.Route);
+        var routeContext = SHA256.HashData(exactRoute);
+        try
         {
-            throw new CryptographicException(
-                "The requested recipient/deposit capability is outside the reverified ContactV1 closure.");
+            if (!StringComparer.Ordinal.Equals(xrr1.Magic, "XRR1") ||
+                !StringComparer.Ordinal.Equals(xra1.Magic, "XRA1") ||
+                device is null || directoryEntry is null ||
+                !Fixed(xrr1.Field(1).Span, directory.Record.NetworkId.Span) ||
+                !Fixed(xra1.Field(1).Span, directory.Record.NetworkId.Span) ||
+                !Fixed(xra1.Field(14).Span, selectedDeviceId) ||
+                !Fixed(mailboxAccess.Selector.IssuerContext.Span, routeContext) ||
+                !Fixed(directoryEntry.Dpd1Reference.CanonicalHash.Span,
+                    device.Certificate.CanonicalHash.Span))
+            {
+                throw new CryptographicException(
+                    "The requested recipient/deposit capability is outside the reverified ContactV1 closure.");
+            }
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(exactRoute);
+            CryptographicOperations.ZeroMemory(routeContext);
         }
 
         var xrrExpiry = U64(xrr1.Field(17).Span, "XRR1 expiry");
         var xraExpiry = U64(xra1.Field(13).Span, "XRA1 expiry");
         return new VerifiedMessagingRecipientDeposit(
             localOutboxScope,
-            selector,
+            mailboxAccess,
             directory.Record.NetworkId.Span,
             directory.Record.DeepAccountId.Span,
             directory.Record.AccountGeneration,
@@ -202,6 +307,7 @@ internal sealed class VerifiedMessagingRecipientDeposit
     internal static VerifiedMessagingRecipientDeposit CreateForTests(
         OutboxAccountScope localOutboxScope,
         MailboxCredentialSelector selector,
+        IMailboxOperationSigner signer,
         ReadOnlySpan<byte> networkId,
         ReadOnlySpan<byte> accountId,
         ulong accountGeneration,
@@ -211,7 +317,10 @@ internal sealed class VerifiedMessagingRecipientDeposit
         ReadOnlySpan<byte> sealingKeyId,
         ReadOnlySpan<byte> sealingPublicKey,
         ulong expiresAtUnixSeconds) => new(
-            localOutboxScope, selector, networkId, accountId, accountGeneration,
+            localOutboxScope,
+            VerifiedMessagingMailboxAccess.CreateForTests(
+                selector, signer, MailboxCapabilityDomain.Deposit),
+            networkId, accountId, accountGeneration,
             directoryGeneration, deviceId, deviceGeneration, sealingKeyId,
             sealingPublicKey, expiresAtUnixSeconds);
 #endif
@@ -238,7 +347,6 @@ internal abstract class MessagingV1DispatchReceipt
     private readonly byte[] innerOperationId;
     private readonly byte[] dao1OperationId;
     private readonly byte[] mailboxOperationId;
-    private readonly byte[] logicalOperationId;
     private readonly byte[] exactDao1Hash;
     private readonly byte[] recipientAccountId;
     private readonly byte[] recipientDeviceId;
@@ -273,9 +381,6 @@ internal abstract class MessagingV1DispatchReceipt
         this.innerOperationId = innerOperationId.ToArray();
         this.dao1OperationId = dao1OperationId.ToArray();
         this.mailboxOperationId = mailboxOperationId.ToArray();
-        // Compatibility alias for the durable DAO1 operation. New code should
-        // use the explicitly typed identifier properties below.
-        logicalOperationId = this.dao1OperationId;
         this.exactDao1Hash = exactDao1Hash.ToArray();
         this.recipientAccountId = recipientAccountId.ToArray();
         this.recipientDeviceId = recipientDeviceId.ToArray();
@@ -290,7 +395,6 @@ internal abstract class MessagingV1DispatchReceipt
     internal ReadOnlyMemory<byte> InnerOperationId => innerOperationId.ToArray();
     internal ReadOnlyMemory<byte> Dao1OperationId => dao1OperationId.ToArray();
     internal ReadOnlyMemory<byte> MailboxOperationId => mailboxOperationId.ToArray();
-    internal ReadOnlyMemory<byte> LogicalOperationId => logicalOperationId.ToArray();
     internal ReadOnlyMemory<byte> ExactDao1Hash => exactDao1Hash.ToArray();
     internal ReadOnlyMemory<byte> RecipientAccountId => recipientAccountId.ToArray();
     internal ReadOnlyMemory<byte> RecipientDeviceId => recipientDeviceId.ToArray();
@@ -461,6 +565,8 @@ internal sealed class MessagingV1ReceivedDeposit : IDisposable
     internal ParsedDao1 Dao1 { get; }
     internal ReadOnlyMemory<byte> ExactInner =>
         (exactInner ?? throw new ObjectDisposedException(nameof(MessagingV1ReceivedDeposit))).ToArray();
+    internal byte[] CopyExactInner() =>
+        (exactInner ?? throw new ObjectDisposedException(nameof(MessagingV1ReceivedDeposit))).ToArray();
     internal MailboxAcknowledgement Acknowledgement => source.ToAcknowledgement();
 
     public void Dispose()
@@ -473,21 +579,36 @@ internal sealed class MessagingV1ReceivedDeposit : IDisposable
 internal sealed class MessagingV1ReceiveBatch : IDisposable
 {
     private readonly byte[] continuationToken;
+    private readonly byte[] mailboxScopeId;
     private int disposed;
 
     internal MessagingV1ReceiveBatch(
         IReadOnlyList<MessagingV1ReceivedDeposit> items,
+        MailboxCredentialSelector selfRetrieveSelector,
         bool hasMore,
         ReadOnlySpan<byte> continuationToken)
     {
         ArgumentNullException.ThrowIfNull(items);
+        ArgumentNullException.ThrowIfNull(selfRetrieveSelector);
+        if (selfRetrieveSelector.Kind != MailboxCredentialScopeKind.Self)
+            throw new CryptographicException(
+                "An inbound batch requires a self-retrieve mailbox scope.");
         Items = items.ToArray();
+        mailboxScopeId = selfRetrieveSelector.ScopeId.ToArray();
         HasMore = hasMore;
         this.continuationToken = continuationToken.ToArray();
     }
 
     internal IReadOnlyList<MessagingV1ReceivedDeposit> Items { get; }
     internal bool HasMore { get; }
+    internal bool BelongsTo(MailboxCredentialSelector selector)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
+        ArgumentNullException.ThrowIfNull(selector);
+        return selector.Kind == MailboxCredentialScopeKind.Self &&
+            CryptographicOperations.FixedTimeEquals(
+                mailboxScopeId, selector.ScopeId.Span);
+    }
     internal ReadOnlyMemory<byte> ContinuationToken
     {
         get
@@ -502,13 +623,15 @@ internal sealed class MessagingV1ReceiveBatch : IDisposable
         if (Interlocked.Exchange(ref disposed, 1) != 0) return;
         foreach (var item in Items) item.Dispose();
         CryptographicOperations.ZeroMemory(continuationToken);
+        CryptographicOperations.ZeroMemory(mailboxScopeId);
     }
 }
 
 /// <summary>
-/// Opaque evidence that the authenticated inner object has already committed
-/// to its ratchet/application store. It cannot be created from a boolean or raw
-/// caller-provided hash.
+/// Opaque evidence that the authenticated inner event has been durably
+/// materialized before its mailbox envelope is acknowledged. A ratchet or
+/// pre-key commit alone is insufficient because it does not persist DMC2 in
+/// the application inbox and may not survive a crash before materialization.
 /// </summary>
 internal sealed class MessagingV1InboundCommitReceipt
 {
@@ -529,90 +652,112 @@ internal sealed class MessagingV1InboundCommitReceipt
         this.innerReplayHash = innerReplayHash.ToArray();
     }
 
-    internal static MessagingV1InboundCommitReceipt FromCommittedDpe2(
-        MessagingV1ReceivedDeposit received,
-        ExactDpe2ReceiveSuccessCapability committed)
+#if DEEP_CLEAN_PRODUCTION
+    /// <summary>
+    /// The only production receipt path for an established direct DPE2.
+    /// It commits the authenticated ratchet receive, replays its protected
+    /// DMC2 stage into the durable account inbox, and only then binds the
+    /// exact opened DAO1 to ACK authority. An exact replay recovers the
+    /// already committed stage without decrypting a second time.
+    /// </summary>
+    internal static async ValueTask<MessagingV1InboundCommitReceipt>
+        CommitAndMaterializeDirectDmc2Async(
+            MessagingV1ReceivedDeposit received,
+            DeepDirectMessagingStorageFacade owner,
+            DeepDirectMessagingVerifiedSessionBinding verifiedSession,
+            SqliteDeepMailboxStore inbox,
+            CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(received);
-        ArgumentNullException.ThrowIfNull(committed);
+        ArgumentNullException.ThrowIfNull(owner);
+        ArgumentNullException.ThrowIfNull(verifiedSession);
+        ArgumentNullException.ThrowIfNull(inbox);
         if (received.Kind != MessagingV1DepositKind.EstablishedSession)
-            throw new CryptographicException("A DPE2 commit capability cannot acknowledge DPH2.");
-        var exact = received.ExactInner.ToArray();
+            throw new CryptographicException(
+                "Only an established direct DPE2 can use this inbox receipt path.");
+        var exact = received.CopyExactInner();
         try
         {
-            var record = Dpe2Codec.Decode(exact);
-            var replayHash = MessagingWireCryptographicInputs.ComputeDpe2FullReplayHash(record);
-            var operationId = committed.OperationId.ToArray();
-            var committedHash = committed.ExactEnvelopeHash.ToArray();
-            try
-            {
-                if (!Fixed(operationId, record.OperationId.Span) ||
-                    !Fixed(committedHash, replayHash))
-                    throw new CryptographicException("The durable DPE2 commit receipt is for another envelope.");
-                return new MessagingV1InboundCommitReceipt(
-                    SHA256.HashData(received.Dao1.CanonicalBytes.Span),
-                    operationId,
-                    replayHash);
-            }
-            finally
-            {
-                CryptographicOperations.ZeroMemory(operationId);
-                CryptographicOperations.ZeroMemory(committedHash);
-                CryptographicOperations.ZeroMemory(replayHash);
-            }
+            using var committed = await owner.TryCommitEstablishedReceiveAsync(
+                    verifiedSession, exact, cancellationToken).ConfigureAwait(false)
+                ?? throw new CryptographicException(
+                    "The verified direct DPE2 session is not available.");
+            if (committed.Outcome is not (
+                    ExactDpe2ReceiveSuccessOutcome.Fresh or
+                    ExactDpe2ReceiveSuccessOutcome.OutOfOrderSkippedKey or
+                    ExactDpe2ReceiveSuccessOutcome.ExactReplay))
+                throw new CryptographicException(
+                    "The direct DPE2 receive did not commit.");
+            if (committed.Outcome != ExactDpe2ReceiveSuccessOutcome.ExactReplay &&
+                !committed.HasAuthenticatedDmc2)
+                throw new CryptographicException(
+                    "The fresh direct DPE2 commit has no authenticated DMC2.");
+            var disposition = await owner.TryMaterializeEstablishedReceiveAsync(
+                    verifiedSession, exact, inbox, cancellationToken)
+                .ConfigureAwait(false);
+            if (disposition is not (DirectDmc2InboxDisposition.Materialized or
+                    DirectDmc2InboxDisposition.ExactReplay))
+                throw new CryptographicException(
+                    "The authenticated direct event is not durably materialized.");
+            return CreateBound(received);
+        }
+        finally { CryptographicOperations.ZeroMemory(exact); }
+    }
+
+    /// <summary>
+    /// Commits and materializes an unsolicited DPH2 only after its encrypted
+    /// SessionInit and ContactHello have been authenticated against the
+    /// current initiator checkpoint. The durable ContactHello inbox entry is
+    /// the pending contact-request state required before mailbox ACK.
+    /// </summary>
+    internal static async ValueTask<MessagingV1InboundCommitReceipt>
+        CommitAndMaterializeInitialSessionAsync(
+            MessagingV1ReceivedDeposit received,
+            DeepDirectMessagingStorageFacade owner,
+            VerifiedDph2InitialClaim verifiedInitial,
+            SqliteDeepMailboxStore inbox,
+            CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(received);
+        ArgumentNullException.ThrowIfNull(owner);
+        ArgumentNullException.ThrowIfNull(verifiedInitial);
+        ArgumentNullException.ThrowIfNull(inbox);
+        if (received.Kind != MessagingV1DepositKind.InitialSession)
+            throw new CryptographicException(
+                "Only an initial DPH2 can use the unsolicited inbox receipt path.");
+        var exact = received.CopyExactInner();
+        try
+        {
+            if (!Fixed(exact, verifiedInitial.Initiation.ExactBytes.Span))
+                throw new CryptographicException(
+                    "The retrieved DPH2 differs from its verified initial claim.");
+            var committed = await owner.TryCommitUnsolicitedResponderSessionAsync(
+                    verifiedInitial,
+                    maximumMessagesWithoutPqInjection: 64,
+                    cancellationToken)
+                .ConfigureAwait(false) ?? throw new CryptographicException(
+                    "The verified unsolicited DPH2 session was not committed.");
+            if (!committed.IsDurablyStaged || committed.Session is null)
+                throw new CryptographicException(
+                    "The unsolicited DPH2 has no durable verified session stage.");
+            var disposition = await owner.TryMaterializeInitialReceiveAsync(
+                    committed.Session,
+                    verifiedInitial,
+                    inbox,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (disposition is not (DirectDmc2InboxDisposition.Materialized or
+                    DirectDmc2InboxDisposition.ExactReplay))
+                throw new CryptographicException(
+                    "The authenticated initial events are not durably materialized.");
+            return CreateBound(received);
         }
         finally
         {
             CryptographicOperations.ZeroMemory(exact);
         }
     }
-
-    /// <summary>
-    /// Verifies and commits an inbound DPH2 through the production ContactV1 /
-    /// device-wide pre-key saga before minting mailbox acknowledgement authority.
-    /// A decoded DPH2, a boolean, or a store result cannot bypass this boundary.
-    /// </summary>
-    internal static async ValueTask<MessagingV1InboundCommitReceipt>
-        CommitInitialSessionAsync(
-        MessagingV1ReceivedDeposit received,
-        ContactInitialSessionCoordinator coordinator,
-        VerifiedXpc1PreKeyClaimReceipt claimReceipt,
-        VerifiedDph2Initiation initiation,
-        CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(received);
-        ArgumentNullException.ThrowIfNull(coordinator);
-        ArgumentNullException.ThrowIfNull(claimReceipt);
-        ArgumentNullException.ThrowIfNull(initiation);
-        if (received.Kind != MessagingV1DepositKind.InitialSession)
-            throw new CryptographicException("An initial-session commit cannot acknowledge DPE2.");
-
-        var receivedExact = received.ExactInner.ToArray();
-        var verifiedExact = initiation.ExactBytes.ToArray();
-        try
-        {
-            if (!Fixed(receivedExact, verifiedExact))
-                throw new CryptographicException(
-                    "The verified DPH2 initiation is for another retrieved DAO1.");
-            var committed = await coordinator.CommitAsync(
-                claimReceipt, initiation, cancellationToken).ConfigureAwait(false);
-            if (committed.ForkLatched ||
-                committed.Disposition is not (
-                    PreKeyV1InitialSessionSagaDisposition.Initialized or
-                    PreKeyV1InitialSessionSagaDisposition.ExactReplay) ||
-                committed.SessionDisposition is not (
-                    MessagingCryptoV1CommitDisposition.Initialized or
-                    MessagingCryptoV1CommitDisposition.ExactReplay))
-                throw new CryptographicException(
-                    "The verified DPH2 did not durably establish an exact local session.");
-            return CreateBound(received);
-        }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(receivedExact);
-            CryptographicOperations.ZeroMemory(verifiedExact);
-        }
-    }
+#endif
 
 #if DEEP_TEST_INTERNALS
     internal static MessagingV1InboundCommitReceipt CreateForTests(
@@ -626,7 +771,7 @@ internal sealed class MessagingV1InboundCommitReceipt
     private static MessagingV1InboundCommitReceipt CreateBound(
         MessagingV1ReceivedDeposit received)
     {
-        var exact = received.ExactInner.ToArray();
+        var exact = received.CopyExactInner();
         try
         {
             if (received.Kind == MessagingV1DepositKind.InitialSession)
@@ -651,7 +796,7 @@ internal sealed class MessagingV1InboundCommitReceipt
 
     internal bool Matches(MessagingV1ReceivedDeposit received)
     {
-        var exact = received.ExactInner.ToArray();
+        var exact = received.CopyExactInner();
         try
         {
             byte[] replayHash;
@@ -710,12 +855,12 @@ internal interface IMessagingV1PrivacyTransport
         CancellationToken cancellationToken = default);
 
     ValueTask<MessagingV1ReceiveBatch> RetrieveAsync(
-        MailboxCredentialSelector selfRetrieveSelector,
+        VerifiedMessagingMailboxAccess selfRetrieveAccess,
         ushort maximumItems,
         CancellationToken cancellationToken = default);
 
     ValueTask AcknowledgeAsync(
-        MailboxCredentialSelector selfRetrieveSelector,
+        VerifiedMessagingMailboxAccess selfRetrieveAccess,
         MessagingV1ReceiveBatch batch,
         IReadOnlyList<MessagingV1InboundCommitReceipt> committed,
         CancellationToken cancellationToken = default);

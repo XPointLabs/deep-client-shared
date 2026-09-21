@@ -13,6 +13,74 @@ namespace Deep.Client.Shared.Tests.Persistence.PreKeyV1;
 [Trait("RequiresApprovedMlKemRuntime", "true")]
 public sealed class SqlitePreKeyV1SecretOwnerTests
 {
+    [Theory]
+    [InlineData(Dpk2PrekeyKind.OneTime)]
+    [InlineData(Dpk2PrekeyKind.LastResort)]
+    public async Task ReadOnlyPreviewDoesNotReserveOrBurnTheExactPrekey(
+        Dpk2PrekeyKind kind)
+    {
+        using var fixture = new Fixture();
+        using var material = fixture.Create(kind, 0x19,
+            reuseLimit: kind == Dpk2PrekeyKind.LastResort ? (ushort)4 : (ushort)0);
+        await using var owner = fixture.Open();
+        Assert.Null(await owner.ReadOnlyPreviewHashForTestsAsync(material.Record));
+        Assert.Equal(PreKeyV1ProvisionDisposition.Provisioned,
+            await owner.ProvisionAsync(fixture.Provision(owner, material)));
+
+        var expected = MessagingWireCryptographicInputs.ComputeExactDpk2Hash(material.Record);
+        try
+        {
+            for (var attempt = 0; attempt < 2; attempt++)
+            {
+                var preview = await owner.ReadOnlyPreviewHashForTestsAsync(material.Record);
+                Assert.Equal(expected, preview);
+                if (preview is not null) CryptographicOperations.ZeroMemory(preview);
+            }
+            await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+                await owner.RejectReadOnlyPreviewForTestsAsync(material.Record));
+            var reserved = await owner.ReserveAndRestoreForTestsAsync(
+                fixture.Claim(material, 0x3a,
+                    kind == Dpk2PrekeyKind.LastResort ? (ushort)1 : (ushort)0));
+            Assert.Equal(PreKeyV1ClaimDisposition.Reserved, reserved.Disposition);
+        }
+        finally { CryptographicOperations.ZeroMemory(expected); }
+    }
+
+    [Theory]
+    [InlineData(Dpk2PrekeyKind.OneTime)]
+    [InlineData(Dpk2PrekeyKind.LastResort)]
+    public async Task InboundDph2SelectsOnlyItsExactLocalPublicOfferingWithoutReservation(
+        Dpk2PrekeyKind kind)
+    {
+        using var fixture = new Fixture();
+        using var material = fixture.Create(kind, 0x29,
+            reuseLimit: kind == Dpk2PrekeyKind.LastResort ? (ushort)2 : (ushort)0);
+        await using var owner = fixture.Open();
+        var initiation = fixture.Initiation(material);
+        Assert.Null(await owner.TryReadResponderOfferingAsync(initiation));
+        await owner.ProvisionAsync(fixture.Provision(owner, material));
+
+        Assert.Equal(material.ExactDpk2,
+            await owner.TryReadResponderOfferingAsync(initiation));
+        Assert.Equal(material.ExactDpk2,
+            await owner.TryReadResponderOfferingAsync(initiation));
+        Assert.Null(await owner.TryReadResponderOfferingAsync(
+            fixture.Initiation(material, Bytes(32, 0x76))));
+        await Assert.ThrowsAsync<MessagingWireFormatException>(async () =>
+            await owner.TryReadResponderOfferingAsync(
+                fixture.Initiation(material, wrongSelectedPrekey: true)));
+        await Assert.ThrowsAsync<CryptographicException>(async () =>
+            await owner.TryReadResponderOfferingAsync(
+                fixture.Initiation(material, responderAccount: Bytes(32, 0x77))));
+
+        var reserved = await owner.ReserveAndRestoreForTestsAsync(
+            fixture.Claim(material, 0x30,
+                kind == Dpk2PrekeyKind.LastResort ? (ushort)1 : (ushort)0));
+        Assert.Equal(PreKeyV1ClaimDisposition.Reserved, reserved.Disposition);
+        Assert.Equal(material.ExactDpk2,
+            await owner.TryReadResponderOfferingAsync(initiation));
+    }
+
     [Fact]
     public async Task StoreIsEncryptedAndExactDeviceGenerationScopeSurvivesRestart()
     {
@@ -535,6 +603,36 @@ public sealed class SqlitePreKeyV1SecretOwnerTests
                     material.Record.MlKemPrekeyId.Span);
             }
             finally { CryptographicOperations.ZeroMemory(hash); }
+        }
+
+        internal Dph2Record Initiation(
+            Material material,
+            byte[]? selectedHash = null,
+            byte[]? responderAccount = null,
+            bool wrongSelectedPrekey = false)
+        {
+            var record = material.Record;
+            var hash = selectedHash ??
+                MessagingWireCryptographicInputs.ComputeExactDpk2Hash(record);
+            var selected = record.MlKemKind == Dpk2PrekeyKind.OneTime
+                ? Dph2SelectedPrekey.OneTime(
+                    record.SignedX25519PrekeyId.Span,
+                    wrongSelectedPrekey ? Bytes(32, 0x78) : record.OneTimeX25519PrekeyId.Span,
+                    record.MlKemPrekeyId.Span)
+                : Dph2SelectedPrekey.LastResort(
+                    record.SignedX25519PrekeyId.Span,
+                    wrongSelectedPrekey ? Bytes(32, 0x78) : record.MlKemPrekeyId.Span);
+            return new Dph2Record(
+                NetworkId, Bytes(32, 0x41), Bytes(32, 0x42), 1,
+                Dpd1Reference,
+                Deep.Protocol.ApplicationCore.ApplicationCoreCodec.AuthorDid1(
+                    Bytes(32, 0x3f), Bytes(16, 0x40)).CanonicalBytes.Span,
+                responderAccount ?? AccountId, DeviceId, 1,
+                hash, Bytes(32, 0x43), Bytes(32, 0x44),
+                record.MlKemKind == Dpk2PrekeyKind.LastResort ? (ushort)1 : (ushort)0,
+                Bytes(32, 0x45), Bytes(32, 0x46), selected,
+                Bytes(1088, 0x47), Bytes(32, 0x48), Bytes(24, 0x49),
+                Dph2InitialCiphertext.Import(Bytes(4112, 0x4a)));
         }
 
         public void Dispose()

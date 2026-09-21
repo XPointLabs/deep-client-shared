@@ -135,6 +135,7 @@ public sealed class ContactResolveDirectoryArtifacts
     private readonly ReadOnlyMemory<byte>[] exactOrderedXnv1Chain;
     private readonly ReadOnlyMemory<byte>[] exactOrderedXnh1Chain;
     private readonly ReadOnlyMemory<byte>[] exactActiveXnd1;
+    private readonly byte[] exactPma2;
     private readonly ReadOnlyMemory<byte>[] exactOrderedPmt2Chain;
 
     public ContactResolveDirectoryArtifacts(
@@ -150,6 +151,7 @@ public sealed class ContactResolveDirectoryArtifacts
         IReadOnlyList<ReadOnlyMemory<byte>> exactOrderedXnv1Chain,
         IReadOnlyList<ReadOnlyMemory<byte>> exactOrderedXnh1Chain,
         IReadOnlyList<ReadOnlyMemory<byte>> exactActiveXnd1,
+        ReadOnlyMemory<byte> exactPma2,
         IReadOnlyList<ReadOnlyMemory<byte>> exactOrderedPmt2Chain,
         ContactResolveForwardCheckpointArtifacts? forwardCheckpoint = null)
     {
@@ -185,6 +187,7 @@ public sealed class ContactResolveDirectoryArtifacts
             + ValidateChain(exactOrderedXnv1Chain, nameof(exactOrderedXnv1Chain), MaximumChainArtifacts)
             + ValidateChain(exactOrderedXnh1Chain, nameof(exactOrderedXnh1Chain), MaximumChainArtifacts)
             + ValidateOptionalChain(exactActiveXnd1, nameof(exactActiveXnd1), MaximumChainArtifacts)
+            + ValidateArtifact(exactPma2, nameof(exactPma2))
             + ValidateChain(exactOrderedPmt2Chain, nameof(exactOrderedPmt2Chain), MaximumChainArtifacts)
             + (forwardCheckpoint?.TotalBytes ?? 0);
         if (total > MaximumPackageBytes)
@@ -213,6 +216,7 @@ public sealed class ContactResolveDirectoryArtifacts
         this.exactOrderedXnh1Chain = CopyChain(exactOrderedXnh1Chain, nameof(exactOrderedXnh1Chain), MaximumChainArtifacts);
         this.exactActiveXnd1 = CopyOptionalChain(
             exactActiveXnd1, nameof(exactActiveXnd1), MaximumChainArtifacts);
+        this.exactPma2 = CopyArtifact(exactPma2, nameof(exactPma2));
         this.exactOrderedPmt2Chain = CopyChain(exactOrderedPmt2Chain, nameof(exactOrderedPmt2Chain), MaximumChainArtifacts);
         if (this.exactOrderedXnv1Chain.Length != this.exactOrderedXnh1Chain.Length)
             throw new ArgumentException("XNV1 and XNH1 chains must contain exact corresponding pairs.");
@@ -232,6 +236,7 @@ public sealed class ContactResolveDirectoryArtifacts
     public IReadOnlyList<ReadOnlyMemory<byte>> ExactOrderedXnv1Chain => Copy(exactOrderedXnv1Chain);
     public IReadOnlyList<ReadOnlyMemory<byte>> ExactOrderedXnh1Chain => Copy(exactOrderedXnh1Chain);
     public IReadOnlyList<ReadOnlyMemory<byte>> ExactActiveXnd1 => Copy(exactActiveXnd1);
+    public ReadOnlyMemory<byte> ExactPma2 => exactPma2.ToArray();
     public IReadOnlyList<ReadOnlyMemory<byte>> ExactOrderedPmt2Chain => Copy(exactOrderedPmt2Chain);
     public ContactResolveForwardCheckpointArtifacts? ForwardCheckpoint { get; }
 

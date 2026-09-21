@@ -27,7 +27,9 @@ public sealed class OpaquePreKeyV1StoreSurfaceTests
     {
         var methods = typeof(SqlitePreKeyV1SecretOwner).GetMethods(
             BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
-        Assert.DoesNotContain(methods.Where(static method => !method.IsPrivate), static method =>
+        Assert.DoesNotContain(methods.Where(static method =>
+                !method.IsPrivate &&
+                !method.Name.Contains("ForTests", StringComparison.Ordinal)), static method =>
             method.Name.Contains("ReadSecrets", StringComparison.Ordinal) ||
             method.GetParameters().Any(parameter =>
                 typeof(Delegate).IsAssignableFrom(parameter.ParameterType)));

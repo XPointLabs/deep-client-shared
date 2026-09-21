@@ -1,4 +1,5 @@
 using System.Collections;
+using System.Buffers.Binary;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using Deep.Client.Shared.Persistence;
@@ -9,6 +10,7 @@ using Deep.Protocol.ContactV1;
 using Deep.Protocol.DeepExtension.MailboxCapabilities;
 using Deep.Protocol.DeepExtension.PrivacyRouting;
 using Deep.Protocol.XPointNetworkV1;
+using Sodium;
 
 namespace Deep.Client.Shared.Tests.XPointNetworkV1;
 
@@ -160,6 +162,50 @@ public sealed class ContactResolvePrivacyPathProviderTests
     }
 
     [Fact]
+    public async Task Xmg1UsesLocatorBoundInviteResolverPlacementAndCurrentProjection()
+    {
+        var network = Network(7, [1, 2, 3, 4]);
+        var locator = B(32, 0x74);
+        var placement = CreatePlacement(
+            network,
+            ContactServiceRequestKind.AcquireMailboxGrant,
+            ContactServiceClass.InviteResolver,
+            network.ProtectedLkg!.ViewCoreReference.Slice(6, 32).Span,
+            B(32, 0x75),
+            locator,
+            7,
+            100,
+            new[] { B(32, 4), B(32, 3) });
+        var holder = PublicKeyAuth.GenerateKeyPair(B(32, 0x41));
+        ReadOnlyMemory<byte>[] fields =
+        [
+            network.NetworkId,
+            B(32, 0x61),
+            locator,
+            B(32, 0x62),
+            holder.PublicKey,
+            new byte[] { 1 },
+            Reference("PMT2", 0x44),
+            B(32, 0x63),
+            U64(1),
+            U64(2),
+            B(32, 0x64),
+            B(64, 0x65),
+        ];
+        var unsigned = ContactCodec.Decode("XMG1", EncodeContactRecord("XMG1", fields));
+        fields[11] = PublicKeyAuth.SignDetached(
+            unsigned.SignatureInput.ToArray(), holder.PrivateKey);
+        var exactXmg1 = EncodeContactRecord("XMG1", fields);
+
+        var attempt = await Provider(
+                network, placement, new InMemoryProtectedEntryGuardStore())
+            .PrepareAsync(OnionOperation.ContactResolve, exactXmg1, default);
+
+        Assert.Equal(exactXmg1, attempt.Request.CanonicalBytes.ToArray());
+        Assert.Equal(OnionOperation.ContactResolve, attempt.Request.Operation);
+    }
+
+    [Fact]
     public async Task MailboxPathProvider_RequiresRouteBindingAndUsesBothExactReplicas()
     {
         var network = Network(7, [1, 2, 3, 4]);
@@ -287,7 +333,9 @@ public sealed class ContactResolvePrivacyPathProviderTests
             Reference("XNV1", (byte)(0x70 + viewGeneration)), viewGeneration, Reference("XNA1", 0x33)));
         var closureType = typeof(VerifiedOnionNetworkContext).Assembly.GetType(
             "Deep.Protocol.XPointNetworkV1.VerifiedOnionNetworkClosure", throwOnError: true)!;
-        Set(network, "<Closure>k__BackingField", RuntimeHelpers.GetUninitializedObject(closureType));
+        var closure = RuntimeHelpers.GetUninitializedObject(closureType);
+        Set(closure, "<PmtArtifactReference>k__BackingField", Reference("PMT2", 0x44));
+        Set(network, "<Closure>k__BackingField", closure);
 
         var nodeType = typeof(VerifiedOnionNetworkContext).Assembly.GetType(
             "Deep.Protocol.DeepExtension.PrivacyRouting.VerifiedNetworkNode", throwOnError: true)!;
@@ -336,6 +384,36 @@ public sealed class ContactResolvePrivacyPathProviderTests
     }
 
     private static byte[] B(int length, byte marker) => Enumerable.Repeat(marker, length).ToArray();
+
+    private static byte[] U64(ulong value)
+    {
+        var result = new byte[8];
+        BinaryPrimitives.WriteUInt64BigEndian(result, value);
+        return result;
+    }
+
+    private static byte[] EncodeContactRecord(
+        string magic,
+        IReadOnlyList<ReadOnlyMemory<byte>> fields)
+    {
+        var length = 12 + fields.Sum(static field => 8 + field.Length);
+        var result = new byte[length];
+        System.Text.Encoding.ASCII.GetBytes(magic).CopyTo(result, 0);
+        BinaryPrimitives.WriteUInt16BigEndian(result.AsSpan(4), 1);
+        BinaryPrimitives.WriteUInt16BigEndian(result.AsSpan(6), 0x0201);
+        BinaryPrimitives.WriteUInt16BigEndian(result.AsSpan(8), checked((ushort)fields.Count));
+        var offset = 12;
+        for (var index = 0; index < fields.Count; index++)
+        {
+            BinaryPrimitives.WriteUInt16BigEndian(result.AsSpan(offset), checked((ushort)(index + 1)));
+            BinaryPrimitives.WriteUInt32BigEndian(
+                result.AsSpan(offset + 4), checked((uint)fields[index].Length));
+            offset += 8;
+            fields[index].Span.CopyTo(result.AsSpan(offset));
+            offset += fields[index].Length;
+        }
+        return result;
+    }
 
     [UnsafeAccessor(UnsafeAccessorKind.Constructor)]
     private static extern VerifiedOnionNetworkContext CreateNetwork(ReadOnlySpan<byte> networkId);

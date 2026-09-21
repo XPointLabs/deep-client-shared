@@ -1,6 +1,5 @@
 using System.Security.Cryptography;
 using System.Text;
-using Deep.Client.Shared.Domain;
 using Deep.Client.Shared.Domain.MessagingV1;
 
 namespace Deep.Client.Shared.Persistence.MessagingV1;
@@ -10,27 +9,17 @@ public sealed class MessagingV1PersistenceOptions
     private readonly string statePath;
     private readonly string sqlCipherKey;
     private readonly MessageStoreScope? identityScope;
-    private readonly SessionId? identityAccountAlias;
 
     public MessagingV1PersistenceOptions(
         string statePath,
         string sqlCipherKey,
-        MessageStoreScope? identityScope = null,
-        SessionId? identityAccountAlias = null)
+        MessageStoreScope? identityScope = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(statePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(sqlCipherKey);
         this.statePath = Path.GetFullPath(statePath);
         this.sqlCipherKey = sqlCipherKey;
         this.identityScope = identityScope is null ? null : CopyScope(identityScope);
-        if (identityScope is null && identityAccountAlias is not null)
-        {
-            throw new ArgumentException(
-                "A legacy transport alias cannot exist without an identity-bound MSG-01 scope.");
-        }
-        this.identityAccountAlias = identityAccountAlias is null
-            ? null
-            : SessionId.Parse(identityAccountAlias.Value.Value);
     }
 
     internal MessageStoreScope? IdentityScope =>
@@ -41,8 +30,7 @@ public sealed class MessagingV1PersistenceOptions
             statePath,
             sqlCipherKey,
             evidenceAuthority,
-            identityScope,
-            identityAccountAlias);
+            identityScope);
 
     private static MessageStoreScope CopyScope(MessageStoreScope scope) =>
         new(
@@ -119,9 +107,7 @@ internal sealed class MessagingV1RuntimeOwner : IDisposable, IAsyncDisposable
     private readonly object sync = new();
     private readonly TaskCompletionSource<bool> disposalCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private SharedMessagingV1Composition? active;
-    private string? activeAccount;
     private MessageStoreScope? activeIdentityScope;
-    private SessionId? activeIdentityAccountAlias;
     private int disposed;
 
     private MessagingV1RuntimeOwner(
@@ -154,9 +140,7 @@ internal sealed class MessagingV1RuntimeOwner : IDisposable, IAsyncDisposable
         }
     }
 
-    internal SharedMessagingV1Composition OpenForIdentity(
-        MessageStoreScope scope,
-        SessionId? transportAccountAlias = null)
+    internal SharedMessagingV1Composition OpenForIdentity(MessageStoreScope scope)
     {
         ArgumentNullException.ThrowIfNull(scope);
         lock (sync)
@@ -169,72 +153,13 @@ internal sealed class MessagingV1RuntimeOwner : IDisposable, IAsyncDisposable
                     throw new InvalidOperationException(
                         "The MSG-01 runtime is already bound to another exact identity scope.");
                 }
-                if (!Equals(activeIdentityAccountAlias, transportAccountAlias))
-                {
-                    throw new InvalidOperationException(
-                        "The MSG-01 runtime is already bound to another transport account alias.");
-                }
                 return active;
             }
 
             active = SharedMessagingV1Composition.OpenPersistent(
                 statePath, encryptionKey, evidenceAuthority, scope);
             activeIdentityScope = CopyScope(scope);
-            activeIdentityAccountAlias = transportAccountAlias is null
-                ? null
-                : SessionId.Parse(transportAccountAlias.Value.Value);
             return active;
-        }
-    }
-
-    internal SharedMessagingV1Composition OpenForAccount(SessionId account)
-    {
-        if (string.IsNullOrWhiteSpace(account.Value))
-        {
-            throw new ArgumentException("A canonical local account is required.", nameof(account));
-        }
-        lock (sync)
-        {
-            ObjectDisposedException.ThrowIf(IsDisposed, this);
-            if (active is not null)
-            {
-                if (activeIdentityScope is not null)
-                {
-                    if (activeIdentityAccountAlias is null
-                        || !activeIdentityAccountAlias.Equals(account))
-                    {
-                        throw new InvalidOperationException(
-                            "The legacy transport account does not prove the active DeepAccount identity.");
-                    }
-                    return active;
-                }
-                if (!string.Equals(activeAccount, account.Value, StringComparison.Ordinal))
-                {
-                    throw new InvalidOperationException(
-                        "The MSG-01 runtime is already bound to another local account.");
-                }
-                return active;
-            }
-
-            var accountId = MessagingAccountId32.FromBytes(Hash("account", account.Value));
-            var instanceId = MessageStoreInstanceId32.FromBytes(Hash("store-instance", account.Value));
-            active = SharedMessagingV1Composition.OpenPersistent(
-                statePath, encryptionKey, evidenceAuthority,
-                new MessageStoreScope(accountId, 1, instanceId));
-            activeAccount = account.Value;
-            return active;
-        }
-    }
-
-    internal SharedMessagingV1Composition? TryGetActiveForAccount(SessionId account)
-    {
-        lock (sync)
-        {
-            return !IsDisposed && ((activeIdentityScope is not null
-                        && activeIdentityAccountAlias?.Equals(account) == true)
-                    || string.Equals(activeAccount, account.Value, StringComparison.Ordinal))
-                ? active
-                : null;
         }
     }
 
@@ -254,8 +179,7 @@ internal sealed class MessagingV1RuntimeOwner : IDisposable, IAsyncDisposable
         string statePath,
         string sqlCipherKey,
         Msg01VerifiedSessionAuthority evidenceAuthority,
-        MessageStoreScope? identityScope = null,
-        SessionId? identityAccountAlias = null)
+        MessageStoreScope? identityScope = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(statePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(sqlCipherKey);
@@ -271,7 +195,7 @@ internal sealed class MessagingV1RuntimeOwner : IDisposable, IAsyncDisposable
             {
                 if (identityScope is not null)
                 {
-                    _ = owner.OpenForIdentity(identityScope, identityAccountAlias);
+                    _ = owner.OpenForIdentity(identityScope);
                 }
                 return owner;
             }
@@ -304,9 +228,7 @@ internal sealed class MessagingV1RuntimeOwner : IDisposable, IAsyncDisposable
                 first = true;
                 owned = active;
                 active = null;
-                activeAccount = null;
                 activeIdentityScope = null;
-                activeIdentityAccountAlias = null;
                 CryptographicOperations.ZeroMemory(encryptionKey);
             }
         }
@@ -324,19 +246,6 @@ internal sealed class MessagingV1RuntimeOwner : IDisposable, IAsyncDisposable
         {
             disposalCompletion.TrySetException(exception);
             throw;
-        }
-    }
-
-    private static byte[] Hash(string domain, string value)
-    {
-        var bytes = Encoding.UTF8.GetBytes($"Deep/MSG-01/{domain}/v1\0{value}");
-        try
-        {
-            return SHA256.HashData(bytes);
-        }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(bytes);
         }
     }
 

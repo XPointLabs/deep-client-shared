@@ -1,12 +1,17 @@
+using System.Buffers.Binary;
 using System.Security.Cryptography;
 using Deep.Client.Shared.Domain.ContactV1;
 using Deep.Client.Shared.Persistence.AccountDirectoryV1;
 using Deep.Client.Shared.Persistence.XPointNetworkV1;
+using Deep.Client.Shared.Services;
 using Deep.Client.Shared.Services.AccountDirectoryV1;
 using Deep.Client.Shared.Services.ContactV1;
 using Deep.Protocol.AccountDirectoryV1;
+using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.ContactV1;
+using Deep.Protocol.DeepNative;
 using Deep.Protocol.DeepExtension.PrivacyRouting;
+using Deep.Protocol.MessagingWire;
 using Deep.Protocol.XPointNetworkV1;
 
 namespace Deep.Client.Shared.Services.XPointNetworkV1;
@@ -42,6 +47,14 @@ public sealed class ProductionContactResolvePathAuthoritySource :
     private readonly IDisposable? ownedArtifacts;
     private readonly SemaphoreSlim gate = new(1, 1);
     private VerifiedOnionNetworkContext? liveContext;
+
+    private sealed record LocalRouteProposalContext(
+        VerifiedContactRouteProposalAuthority Proposal,
+        CanonicalContactResolveAuthority Canonical,
+        VerifiedOnionNetworkContext Network,
+        VerifiedAccountDirectoryCurrentValueClosure CurrentIdentity,
+        VerifiedDevice RecipientDevice,
+        CurrentlyAuthoritativeDca1 RecipientAuthorization);
 
     public ProductionContactResolvePathAuthoritySource(
         XPointNetworkGenesisPin genesisPin,
@@ -209,8 +222,11 @@ public sealed class ProductionContactResolvePathAuthoritySource :
             .ConfigureAwait(false);
         var placement = authority.Placement;
         if (!Fixed(request.NetworkId.Span, authority.Network.NetworkId.Span) ||
-            !Fixed(request.ViewHash.Span, placement.ViewHash.Span) ||
-            !Fixed(request.PlacementHash.Span, placement.PlacementHash.Span) ||
+            request.HasExplicitPlacementBinding &&
+                (!Fixed(request.ViewHash.Span, placement.ViewHash.Span) ||
+                 !Fixed(request.PlacementHash.Span, placement.PlacementHash.Span)) ||
+            !request.HasExplicitPlacementBinding &&
+                !authority.Network.BindsProjection(request.ProjectionReference) ||
             !placement.Binds(request.RequestKind, request.ShardKey) ||
             request.ExpiresAtUnixSeconds > placement.ValidUntilUnixSeconds)
             throw Fail("request-placement-mismatch",
@@ -300,7 +316,8 @@ public sealed class ProductionContactResolvePathAuthoritySource :
                 request.NetworkId, request.LocatorHash, directoryLeafKey,
                 AccountDirectoryAdp1ResultKind.CurrentValue,
                 ContactServiceRequestKind.ResolveInvite,
-                cancellationToken).ConfigureAwait(false);
+                cancellationToken,
+                permanentDeepId.CanonicalBytes).ConfigureAwait(false);
             if (!Fixed(request.NetworkId.Span, resolved.Network.NetworkId.Span)
                 || !Fixed(request.ViewHash.Span, resolved.Placement.ViewHash.Span)
                 || !Fixed(request.PlacementHash.Span, resolved.Placement.PlacementHash.Span)
@@ -329,13 +346,213 @@ public sealed class ProductionContactResolvePathAuthoritySource :
         }
     }
 
+    /// <summary>
+    /// Mints the local route-publication proposal from the exact admitted
+    /// account-directory leaf and current verified XPoint closure. The caller
+    /// cannot substitute raw DCA1, device, ADH1 or network-view bytes.
+    /// </summary>
+    public async ValueTask<VerifiedContactRouteProposalAuthority>
+        MintLocalRouteProposalAsync(
+            DeepGenesisDeviceActivation activation,
+            CancellationToken cancellationToken = default)
+        => (await MintLocalRouteProposalContextAsync(
+                activation, cancellationToken).ConfigureAwait(false)).Proposal;
+
+    private async ValueTask<LocalRouteProposalContext>
+        MintLocalRouteProposalContextAsync(
+            DeepGenesisDeviceActivation activation,
+            CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(activation);
+        var leafKey = activation.DirectoryCheckpoint.Checkpoint.DirectoryLeafKey;
+        var resolved = await MintCurrentAuthorityAsync(
+                activation.VerifiedDevice.Certificate.NetworkId,
+                leafKey,
+                leafKey,
+                AccountDirectoryAdp1ResultKind.CurrentValue,
+                ContactServiceRequestKind.PublishInvite,
+                cancellationToken,
+                activation.AddressBinding.Head.DeepId.CanonicalBytes)
+            .ConfigureAwait(false);
+        var canonical = resolved.Canonical ?? throw Fail(
+            "route-proposal-authority-incomplete",
+            "The local current-value package produced no canonical route authority.");
+        var current = canonical.CurrentValueClosure ?? throw Fail(
+            "route-proposal-current-identity-missing",
+            "The local current-value package did not verify the exact DID1 closure.");
+        var recipient = current.Directory.Head.Identity.ActiveDevices.SingleOrDefault(
+            device => Fixed(
+                device.Certificate.DeviceId.Span,
+                activation.VerifiedDevice.Certificate.DeviceId.Span)) ??
+            throw Fail(
+                "route-proposal-device-missing",
+                "The current directory no longer contains the local publication device.");
+        var authorization = ApplicationCoreVerifier.RequireDca1CurrentlyAuthoritative(
+            ApplicationCoreVerifier.VerifyDca1(
+                ApplicationCoreCodec.DecodeDca1(
+                    activation.ContactPublicationAuthorization.Verified.Record.CanonicalBytes.Span),
+                current.AddressBinding.Head,
+                current.Directory.Head),
+            canonical.DirectoryFreshness.TrustedUpperUnixSeconds);
+        var proposal = await ContactNetworkAuthorityVerifier.VerifyProposalAsync(
+                canonical.Authority,
+                resolved.Network,
+                canonical.DirectoryFreshness,
+                recipient,
+                authorization,
+                canonical.ExactXnv1,
+                canonical.ExactXnh1,
+                canonical.DirectoryFreshness.ExactAdh1,
+                canonical.ExactPmt2,
+                canonical.TrustedTimeAuthority,
+                cancellationToken)
+            .ConfigureAwait(false);
+        return new LocalRouteProposalContext(
+            proposal, canonical, resolved.Network, current,
+            recipient, authorization);
+    }
+
+    /// <summary>
+    /// Re-verifies the exact confirmed local XPU1 route after restart against
+    /// the current XPoint/directory authority. The encrypted DCR1 is opened by
+    /// the account's permanent resolver capability solely to recover the exact
+    /// device-signed XIR1 omitted from the six-record route closure.
+    /// </summary>
+    public async ValueTask<VerifiedContactRouteClosure> RecoverLocalRouteAsync(
+        DeepGenesisDeviceActivation activation,
+        Xpu1Request confirmedPublication,
+        CancellationToken cancellationToken = default)
+        => (await RecoverLocalMessagingRecipientAsync(
+                activation, confirmedPublication, cancellationToken)
+            .ConfigureAwait(false)).Route;
+
+    public async ValueTask<VerifiedLocalMessagingRecipient>
+        RecoverLocalMessagingRecipientAsync(
+            DeepGenesisDeviceActivation activation,
+            Xpu1Request confirmedPublication,
+            CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(activation);
+        ArgumentNullException.ThrowIfNull(confirmedPublication);
+        var context = await MintLocalRouteProposalContextAsync(
+                activation, cancellationToken)
+            .ConfigureAwait(false);
+        var parsed = ContactRouteClosureCodec.Decode(
+            confirmedPublication.ExactRouteClosure.Span);
+        var authority = await ContactNetworkAuthorityVerifier.BindSelectionAsync(
+                context.Proposal,
+                parsed.Selection.CanonicalBytes,
+                cancellationToken)
+            .ConfigureAwait(false);
+        var protectedDcr = confirmedPublication.ObjectCiphertext.ToArray();
+        try
+        {
+            using var resolution = PermanentContactResolutionDerivation.Derive(
+                activation.VerifiedDevice.Certificate.NetworkId.Span,
+                activation.AddressBinding.Head.DeepId);
+            var dcr = Dcr1ObjectProtectionCodec.OpenPermanent(
+                protectedDcr,
+                activation.VerifiedDevice.Certificate.NetworkId.Span,
+                activation.AddressBinding.Head.DeepId,
+                resolution);
+            var bundleRecord = ContactCodec.Decode("DCB1", dcr.Field(2).Span);
+            var descriptor = bundleRecord.Field(14).Span;
+            if (descriptor.Length != 651 ||
+                BinaryPrimitives.ReadUInt32BigEndian(descriptor.Slice(36, 4)) != 611)
+                throw new CryptographicException(
+                    "The confirmed local DCB1 does not contain exact XIR1 framing.");
+            var invite = ContactCodec.Decode("XIR1", descriptor[40..]);
+            var route = ContactCodec.VerifyRouteUpdateClosure(
+                invite,
+                parsed.Reachability,
+                parsed.Authorization,
+                parsed.Route,
+                parsed.Successor,
+                parsed.Projection,
+                parsed.Selection,
+                authority);
+            var bundle = ContactCodec.VerifyDcr1Closure(
+                dcr,
+                context.RecipientAuthorization,
+                context.Canonical.DirectoryFreshness,
+                context.Canonical.CurrentBootId.Span,
+                context.Canonical.CurrentMonotonicSample);
+            return new VerifiedLocalMessagingRecipient(
+                route,
+                bundle,
+                context.Network,
+                context.Canonical.TrustedTimeAuthority);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(protectedDcr);
+        }
+    }
+
+    /// <summary>
+    /// Resolves the current, non-forked sender directory required to verify an
+    /// unsolicited DPH2. The exact DID1 is authenticated by the DPH2 header;
+    /// it supplies both the targeted directory lookup preimage and the bytes
+    /// deliberately omitted by the ADP1 public projection.
+    /// </summary>
+    public async ValueTask<VerifiedInboundInitiatorDirectory>
+        ResolveInboundInitiatorDirectoryAsync(
+            Dph2Record initiation,
+            CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(initiation);
+        var did = Deep.Protocol.ApplicationCore.ApplicationCoreCodec.DecodeDid1(
+            initiation.InitiatorDid1.Span);
+        var lookup = DirectoryLookupKey(
+            initiation.NetworkId.Span, did.CanonicalBytes.Span);
+        try
+        {
+            var resolved = await MintCurrentAuthorityAsync(
+                    initiation.NetworkId,
+                    initiation.InitiatorAccountId,
+                    lookup,
+                    AccountDirectoryAdp1ResultKind.CurrentValue,
+                    ContactServiceRequestKind.ResolveInvite,
+                    cancellationToken,
+                    did.CanonicalBytes)
+                .ConfigureAwait(false);
+            var canonical = resolved.Canonical ?? throw Fail(
+                "inbound-directory-authority-incomplete",
+                "The inbound DPH2 directory lookup produced no current-value authority.");
+            var closure = canonical.CurrentValueClosure ?? throw Fail(
+                "inbound-directory-closure-missing",
+                "The inbound DPH2 directory lookup did not verify its exact DID1 closure.");
+            var head = closure.Directory.Head;
+            var active = head.Record.ActiveDevices.SingleOrDefault(entry =>
+                Fixed(entry.DeviceId.Span, initiation.InitiatorDeviceId.Span));
+            if (!Fixed(head.Record.NetworkId.Span, initiation.NetworkId.Span) ||
+                !Fixed(head.Record.DeepAccountId.Span,
+                    initiation.InitiatorAccountId.Span) ||
+                active is null ||
+                !Fixed(active.Dpd1Reference.CanonicalBytes.Span,
+                    initiation.InitiatorDpd1Ref.Span))
+            {
+                throw Fail(
+                    "inbound-directory-scope-mismatch",
+                    "The current directory does not contain the exact DPH2 initiator device.");
+            }
+            return new VerifiedInboundInitiatorDirectory(
+                closure, canonical.DirectoryFreshness);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(lookup);
+        }
+    }
+
     private async ValueTask<ContactResolvePathAuthority> MintCurrentAuthorityAsync(
         ReadOnlyMemory<byte> expectedNetworkId,
         ReadOnlyMemory<byte> resolverShardKey,
         ReadOnlyMemory<byte> requiredDirectoryLookupKey,
         AccountDirectoryAdp1ResultKind requiredDirectoryResultKind,
         ContactServiceRequestKind requestKind,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        ReadOnlyMemory<byte> exactDid1 = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (!Fixed(expectedNetworkId.Span, genesisPin.NetworkId.Span))
@@ -365,9 +582,13 @@ public sealed class ProductionContactResolvePathAuthoritySource :
             {
                 if (requiredDirectoryResultKind == AccountDirectoryAdp1ResultKind.CurrentValue)
                 {
-                    canonical = await verifier.VerifyCurrentValueAsync(
-                        genesisPin, package, networkState, liveContext, cancellationToken)
-                        .ConfigureAwait(false);
+                    canonical = exactDid1.IsEmpty
+                        ? await verifier.VerifyCurrentValueAsync(
+                            genesisPin, package, networkState, liveContext,
+                            cancellationToken).ConfigureAwait(false)
+                        : await verifier.VerifyCurrentValueWithDidAsync(
+                            genesisPin, package, networkState, liveContext,
+                            exactDid1, cancellationToken).ConfigureAwait(false);
                     network = canonical.Network;
                 }
                 else
@@ -503,6 +724,27 @@ public sealed class ProductionContactResolvePathAuthoritySource :
         }
     }
 
+    private static byte[] DirectoryLookupKey(
+        ReadOnlySpan<byte> networkId,
+        ReadOnlySpan<byte> exactDid1)
+    {
+        if (networkId.Length != 16 || networkId.IndexOfAnyExcept((byte)0) < 0 ||
+            exactDid1.IsEmpty)
+            throw Fail("directory-lookup-invalid",
+                "A directory lookup requires exact network and DID1 bytes.");
+        var preimage = new byte[checked(networkId.Length + exactDid1.Length)];
+        try
+        {
+            networkId.CopyTo(preimage);
+            exactDid1.CopyTo(preimage.AsSpan(networkId.Length));
+            return Sha256Domain("Deep/AccountDirectory/V1/lookup", preimage);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(preimage);
+        }
+    }
+
     private static byte[] Sha256Domain(string domain, ReadOnlySpan<byte> payload)
     {
         var label = System.Text.Encoding.ASCII.GetBytes(domain);
@@ -525,39 +767,112 @@ public sealed class ProductionContactResolvePathAuthoritySource :
         new(code, message, inner);
 }
 
+public sealed class VerifiedLocalMessagingRecipient
+{
+    private readonly VerifiedOnionNetworkContext network;
+
+    internal VerifiedLocalMessagingRecipient(
+        VerifiedContactRouteClosure route,
+        VerifiedContactBundleClosure bundle,
+        VerifiedOnionNetworkContext network,
+        OnionTrustedTimeAuthority trustedTimeAuthority)
+    {
+        Route = route;
+        Bundle = bundle;
+        this.network = network;
+        TrustedTimeAuthority = trustedTimeAuthority;
+    }
+
+    public VerifiedContactRouteClosure Route { get; }
+    public VerifiedContactBundleClosure Bundle { get; }
+    public VerifiedContactNetworkAuthority Authority => Route.Authority;
+    public OnionTrustedTimeAuthority TrustedTimeAuthority { get; }
+
+    public VerifiedContactServicePlacement RequireClaimPlacement(
+        Xpk1Request request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var service = Bundle.GetAuthorizedPreKeyService(Authority);
+        var placement = ContactServicePlacementFactory.Create(
+            network,
+            ContactServiceRequestKind.ClaimPreKey,
+            service.ServiceCapability);
+        if (!CryptographicOperations.FixedTimeEquals(
+                request.NetworkId.Span, service.NetworkId.Span) ||
+            !CryptographicOperations.FixedTimeEquals(
+                request.ServiceCapability.Span, service.ServiceCapability.Span) ||
+            !CryptographicOperations.FixedTimeEquals(
+                request.Dcb1Hash.Span, service.Dcb1Hash.Span) ||
+            !CryptographicOperations.FixedTimeEquals(
+                request.Xps1Hash.Span, service.Xps1Hash.Span) ||
+            !CryptographicOperations.FixedTimeEquals(
+                request.ResponderDeviceId.Span, service.DeviceId.Span) ||
+            !CryptographicOperations.FixedTimeEquals(
+                request.ViewHash.Span, placement.ViewHash.Span) ||
+            !CryptographicOperations.FixedTimeEquals(
+                request.PlacementHash.Span, placement.PlacementHash.Span) ||
+            request.ExpiresAtUnixSeconds > placement.ValidUntilUnixSeconds)
+        {
+            throw new CryptographicException(
+                "The encrypted XPK1 does not bind the current local recipient publication.");
+        }
+        return placement;
+    }
+}
+
+public sealed class VerifiedInboundInitiatorDirectory
+{
+    internal VerifiedInboundInitiatorDirectory(
+        VerifiedAccountDirectoryCurrentValueClosure closure,
+        VerifiedAccountDirectoryFreshness freshness)
+    {
+        Closure = closure;
+        Freshness = freshness;
+    }
+
+    public VerifiedAccountDirectoryCurrentValueClosure Closure { get; }
+    public VerifiedAccountDirectoryFreshness Freshness { get; }
+}
+
 internal sealed class CanonicalContactResolveAuthority
 {
     internal CanonicalContactResolveAuthority(
         VerifiedXPointNetworkAuthority authority,
         VerifiedAccountDirectoryFreshness directoryFreshness,
         VerifiedOnionNetworkContext network,
+        VerifiedMailboxAuthorityV2 mailboxAuthority,
         ReadOnlyMemory<byte> exactXnv1,
         ReadOnlyMemory<byte> exactXnh1,
         ReadOnlyMemory<byte> exactPmt2,
         ReadOnlyMemory<byte> currentBootId,
         ulong currentMonotonicSample,
-        OnionTrustedTimeAuthority trustedTimeAuthority)
+        OnionTrustedTimeAuthority trustedTimeAuthority,
+        VerifiedAccountDirectoryCurrentValueClosure? currentValueClosure = null)
     {
         Authority = authority ?? throw new ArgumentNullException(nameof(authority));
         DirectoryFreshness = directoryFreshness ?? throw new ArgumentNullException(nameof(directoryFreshness));
         Network = network ?? throw new ArgumentNullException(nameof(network));
+        MailboxAuthority = mailboxAuthority ?? throw new ArgumentNullException(nameof(mailboxAuthority));
         ExactXnv1 = exactXnv1.ToArray();
         ExactXnh1 = exactXnh1.ToArray();
         ExactPmt2 = exactPmt2.ToArray();
         CurrentBootId = currentBootId.ToArray();
         CurrentMonotonicSample = currentMonotonicSample;
         TrustedTimeAuthority = trustedTimeAuthority ?? throw new ArgumentNullException(nameof(trustedTimeAuthority));
+        CurrentValueClosure = currentValueClosure;
     }
 
     internal VerifiedXPointNetworkAuthority Authority { get; }
     internal VerifiedAccountDirectoryFreshness DirectoryFreshness { get; }
     internal VerifiedOnionNetworkContext Network { get; }
+    internal VerifiedMailboxAuthorityV2 MailboxAuthority { get; }
     internal ReadOnlyMemory<byte> ExactXnv1 { get; }
     internal ReadOnlyMemory<byte> ExactXnh1 { get; }
     internal ReadOnlyMemory<byte> ExactPmt2 { get; }
     internal ReadOnlyMemory<byte> CurrentBootId { get; }
     internal ulong CurrentMonotonicSample { get; }
     internal OnionTrustedTimeAuthority TrustedTimeAuthority { get; }
+    internal VerifiedAccountDirectoryCurrentValueClosure? CurrentValueClosure { get; }
 }
 
 internal interface ICanonicalContactResolveAuthorityVerifier
@@ -579,6 +894,17 @@ internal interface ICanonicalContactResolveAuthorityVerifier
             new ContactResolvePathException(
                 "claim-authority-producer-unavailable",
                 "The configured canonical verifier cannot mint current-value claim authority."));
+
+    ValueTask<CanonicalContactResolveAuthority> VerifyCurrentValueWithDidAsync(
+        XPointNetworkGenesisPin genesisPin,
+        ContactResolveDirectoryArtifacts artifacts,
+        XPointNetworkStateSnapshot? protectedNetworkState,
+        VerifiedOnionNetworkContext? livePrevious,
+        ReadOnlyMemory<byte> exactDid1,
+        CancellationToken cancellationToken) =>
+        VerifyCurrentValueAsync(
+            genesisPin, artifacts, protectedNetworkState, livePrevious,
+            cancellationToken);
 }
 
 internal sealed class ProtocolCanonicalContactResolveAuthorityVerifier : ICanonicalContactResolveAuthorityVerifier
@@ -620,13 +946,26 @@ internal sealed class ProtocolCanonicalContactResolveAuthorityVerifier : ICanoni
             genesisPin, artifacts, protectedNetworkState, livePrevious,
             AccountDirectoryAdp1ResultKind.CurrentValue, cancellationToken);
 
+    public ValueTask<CanonicalContactResolveAuthority> VerifyCurrentValueWithDidAsync(
+        XPointNetworkGenesisPin genesisPin,
+        ContactResolveDirectoryArtifacts artifacts,
+        XPointNetworkStateSnapshot? protectedNetworkState,
+        VerifiedOnionNetworkContext? livePrevious,
+        ReadOnlyMemory<byte> exactDid1,
+        CancellationToken cancellationToken) =>
+        VerifyCoreAsync(
+            genesisPin, artifacts, protectedNetworkState, livePrevious,
+            AccountDirectoryAdp1ResultKind.CurrentValue, cancellationToken,
+            exactDid1);
+
     private async ValueTask<CanonicalContactResolveAuthority> VerifyCoreAsync(
         XPointNetworkGenesisPin genesisPin,
         ContactResolveDirectoryArtifacts artifacts,
         XPointNetworkStateSnapshot? protectedNetworkState,
         VerifiedOnionNetworkContext? livePrevious,
         AccountDirectoryAdp1ResultKind requiredDirectoryResultKind,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        ReadOnlyMemory<byte> exactDid1 = default)
     {
         ArgumentNullException.ThrowIfNull(genesisPin);
         ArgumentNullException.ThrowIfNull(artifacts);
@@ -665,6 +1004,24 @@ internal sealed class ProtocolCanonicalContactResolveAuthorityVerifier : ICanoni
         if (directoryState is not null)
             directoryLkg = await directoryClient.RestoreProtectedLkgAsync(authority, cancellationToken).ConfigureAwait(false);
 
+        VerifiedAccountDirectoryCheckpoint? currentCheckpoint = null;
+        VerifiedAccountDirectoryCurrentValueClosure? currentValueClosure = null;
+        if (requiredDirectoryResultKind == AccountDirectoryAdp1ResultKind.CurrentValue &&
+            !exactDid1.IsEmpty)
+        {
+            var proof = AccountDirectoryAdp1Codec.Decode(artifacts.ExactAdp1.Span);
+            var current = proof.CurrentValue ?? throw new ContactResolvePathException(
+                "directory-current-value-missing",
+                "The targeted account-directory proof omitted its current value.");
+            currentValueClosure = AccountDirectoryCurrentValueClosureVerifier.Verify(
+                proof,
+                exactDid1.Span,
+                current.Adc1.IssuedAt,
+                deploymentProfileId: 1,
+                supportedDirectoryReader);
+            currentCheckpoint = currentValueClosure.Checkpoint;
+        }
+
         var freshness = AccountDirectoryCurrentProofVerifier.Verify(
             authority,
             artifacts.ExactAdh1,
@@ -674,7 +1031,7 @@ internal sealed class ProtocolCanonicalContactResolveAuthorityVerifier : ICanoni
             artifacts.QueriedDirectoryLeafKey.Span,
             artifacts.MonotonicRequestWindow,
             directoryLkg,
-            currentCheckpoint: null,
+            currentCheckpoint,
             supportedDirectoryReader);
         if (freshness.ResultKind != requiredDirectoryResultKind)
             throw new ContactResolvePathException(
@@ -728,7 +1085,8 @@ internal sealed class ProtocolCanonicalContactResolveAuthorityVerifier : ICanoni
                     trustedTimeAuthority,
                     cancellationToken).ConfigureAwait(false);
             }
-            return Complete(authority, freshness, network, artifacts);
+            return Complete(
+                authority, freshness, network, artifacts, currentValueClosure);
         }
 
         if (artifacts.ExactOrderedXvp1Chain.Count != 1
@@ -759,24 +1117,51 @@ internal sealed class ProtocolCanonicalContactResolveAuthorityVerifier : ICanoni
             artifacts.ExactOrderedPmt2Chain[0],
             trustedTimeAuthority,
             cancellationToken).ConfigureAwait(false);
-        return Complete(authority, freshness, recovered, artifacts);
+        return Complete(
+            authority, freshness, recovered, artifacts, currentValueClosure);
     }
 
     private CanonicalContactResolveAuthority Complete(
         VerifiedXPointNetworkAuthority authority,
         VerifiedAccountDirectoryFreshness freshness,
         VerifiedOnionNetworkContext network,
-        ContactResolveDirectoryArtifacts artifacts) =>
-        new(
+        ContactResolveDirectoryArtifacts artifacts,
+        VerifiedAccountDirectoryCurrentValueClosure? currentValueClosure)
+    {
+        VerifiedMailboxAuthorityV2 mailboxAuthority;
+        try
+        {
+            mailboxAuthority = MailboxAuthorityV2Verifier.Verify(
+                authority,
+                artifacts.ExactPma2.Span,
+                freshness.TrustedLowerUnixSeconds,
+                freshness.TrustedUpperUnixSeconds);
+            if (!mailboxAuthority.BindsProjection(
+                    artifacts.ExactOrderedPmt2Chain[^1].Span))
+                throw new CryptographicException(
+                    "The terminal PMT2 does not bind the current PMA2 authority.");
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            throw new ContactResolvePathException(
+                "mailbox-authority-invalid",
+                "The current ContactResolve package has no valid root-authorized PMA2/PMT2 binding.",
+                exception);
+        }
+
+        return new CanonicalContactResolveAuthority(
             authority,
             freshness,
             network,
+            mailboxAuthority,
             artifacts.ExactOrderedXnv1Chain[^1],
             artifacts.ExactOrderedXnh1Chain[^1],
             artifacts.ExactOrderedPmt2Chain[^1],
             artifacts.MonotonicRequestWindow.BootId,
             artifacts.MonotonicRequestWindow.CurrentSample,
-            trustedTimeAuthority);
+            trustedTimeAuthority,
+            currentValueClosure);
+    }
 
     private static bool Fixed(ReadOnlySpan<byte> left, ReadOnlySpan<byte> right) =>
         left.Length == right.Length && CryptographicOperations.FixedTimeEquals(left, right);

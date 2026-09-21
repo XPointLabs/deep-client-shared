@@ -1,5 +1,7 @@
+using System.Security.Cryptography;
 using Deep.Client.Shared.Domain.ContactV1;
 using Deep.Client.Shared.Persistence.ContactV1;
+using Deep.Client.Shared.Services.XPointNetworkV1;
 using Deep.Protocol.ContactV1;
 
 namespace Deep.Client.Shared.Services.ContactV1;
@@ -75,6 +77,53 @@ public sealed class DirectoryAuthorizedXpu1
 
         return new DirectoryAuthorizedXpu1(accountScope, exactXpu1.Span);
     }
+
+    public static DirectoryAuthorizedXpu1 FromVerified(
+        ContactStoreScope accountScope,
+        AuthoredPermanentAddressPublication publication)
+    {
+        ArgumentNullException.ThrowIfNull(accountScope);
+        ArgumentNullException.ThrowIfNull(publication);
+        var request = publication.Request;
+        if (!CryptographicOperations.FixedTimeEquals(
+                request.NetworkId.Span,
+                publication.Authorization.NetworkId.Span) ||
+            !CryptographicOperations.FixedTimeEquals(
+                publication.RecipientAccountId.Span,
+                accountScope.AccountId.Bytes.Span))
+        {
+            throw new ContactAddressPublicationException(
+                ContactAddressPublicationFailure.AccountScopeMismatch,
+                "The verified XPU1 belongs to another network or Deep account scope.");
+        }
+        return new DirectoryAuthorizedXpu1(
+            accountScope,
+            request.CanonicalBytes.Span);
+    }
+}
+
+internal sealed class PrivacyRoutedContactAddressPublicationTransport(
+    IExactContactResolveOnionTransport transport)
+    : IOpaqueContactAddressPublicationTransport
+{
+    private readonly IExactContactResolveOnionTransport transport = transport ??
+        throw new ArgumentNullException(nameof(transport));
+
+    public async ValueTask<ReadOnlyMemory<byte>> PublishAsync(
+        ReadOnlyMemory<byte> exactXpu1,
+        CancellationToken cancellationToken = default)
+    {
+        var request = ContactResolveCanonicalPathRequest.Decode(exactXpu1.Span);
+        if (request.RequestKind != Deep.Protocol.XPointNetworkV1.ContactServiceRequestKind.PublishInvite)
+            throw new CryptographicException(
+                "The address publication transport accepts only exact XPU1.");
+        var response = await transport.SendExactAsync(
+                request,
+                ReadOnlyMemory<byte>.Empty,
+                cancellationToken)
+            .ConfigureAwait(false);
+        return response.ExactBody.ToArray();
+    }
 }
 
 /// <summary>
@@ -137,6 +186,16 @@ public sealed class ContactAddressPublicationOrchestrator
     {
         this.store = store ?? throw new ArgumentNullException(nameof(store));
         this.transport = transport ?? throw new ArgumentNullException(nameof(transport));
+    }
+
+    public ContactAddressPublicationOrchestrator(
+        IContactAddressPublicationStore store,
+        PrivacyRoutedContactResolverTransport transport)
+        : this(
+            store,
+            new PrivacyRoutedContactAddressPublicationTransport(
+                (IExactContactResolveOnionTransport)transport))
+    {
     }
 
     public async ValueTask<ContactAddressPublicationResult> PublishAsync(

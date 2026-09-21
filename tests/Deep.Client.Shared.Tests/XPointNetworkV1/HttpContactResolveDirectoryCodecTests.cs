@@ -276,10 +276,11 @@ public sealed class HttpContactResolveDirectoryCodecTests
         [B(9, 0x07)],
         [B(10, 0x08)],
         [B(11, 0x09)],
-        [B(12, 0x0a)],
+        B(12, 0x0a),
+        [B(13, 0x0b)],
         withForward
             ? new ContactResolveForwardCheckpointArtifacts(
-                [B(13, 0x0b)], B(14, 0x0c), B(15, 0x0d), B(16, 0x0e))
+                [B(14, 0x0c)], B(15, 0x0d), B(16, 0x0e), B(17, 0x0f))
             : null);
 
     internal static byte[] B(int length, byte marker) => Enumerable.Repeat(marker, length).ToArray();

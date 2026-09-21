@@ -21,7 +21,22 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- Retained only for the not-yet-recomposed legacy runtime; STORE-01 never reads it. -->
+    <!-- Clean break: the Session-derived runtime and its MSG-01 bridge are not
+         part of the current client assembly. Current code binds the store to an
+         exact Deep account/device MessageStoreScope. -->
+    <Compile Remove="Persistence\MessagingV1\Msg01AuthoritativeTransport.cs" />
+    <Compile Remove="Services\MessageNetworkRuntime.cs" />
+    <Compile Remove="Services\MessageService.cs" />
+    <Compile Remove="Services\InboxSyncService.cs" />
+    <Compile Remove="Services\PushSubscriptionTransport.cs" />
+    <Compile Remove="State\ClientRuntime.cs" />
+    <Compile Remove="Persistence\SqliteDeepMailboxStore.cs" />
+    <Compile Remove="obj-production\**\*.cs" />
+    <Compile Remove="bin-production\**\*.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Reference corpus only until its remaining consumers are recomposed. -->
     <EmbeddedResource Include="Resources\Mnemonic\english.txt"
                       LogicalName="Deep.Client.Shared.Resources.Mnemonic.english.txt" />
   </ItemGroup>

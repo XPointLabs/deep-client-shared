@@ -165,21 +165,17 @@ internal sealed class ProtocolPreKeyV1PublicationVerifier :
 {
     private readonly VerifiedContactNetworkAuthority recipientAuthority;
     private readonly VerifiedContactBundleClosure recipientBundle;
-    private readonly OnionTrustedTimeAuthority trustedTimeAuthority;
     private readonly VerifiedPreKeyInventoryPublication? predecessor;
 
     internal ProtocolPreKeyV1PublicationVerifier(
         VerifiedContactNetworkAuthority recipientAuthority,
         VerifiedContactBundleClosure recipientBundle,
-        OnionTrustedTimeAuthority trustedTimeAuthority,
         VerifiedPreKeyInventoryPublication? predecessor)
     {
         this.recipientAuthority = recipientAuthority
             ?? throw new ArgumentNullException(nameof(recipientAuthority));
         this.recipientBundle = recipientBundle
             ?? throw new ArgumentNullException(nameof(recipientBundle));
-        this.trustedTimeAuthority = trustedTimeAuthority
-            ?? throw new ArgumentNullException(nameof(trustedTimeAuthority));
         this.predecessor = predecessor;
     }
 
@@ -192,13 +188,11 @@ internal sealed class ProtocolPreKeyV1PublicationVerifier :
         ArgumentNullException.ThrowIfNull(publication);
         ArgumentNullException.ThrowIfNull(commitReceipts);
         ArgumentNullException.ThrowIfNull(pathAuthority);
-        return PreKeyInventoryPublicationVerifier.VerifyBoundedAsync(
+        return recipientAuthority.VerifyBoundedPreKeyInventoryAsync(
             publication,
             commitReceipts,
             pathAuthority.Placement,
-            recipientAuthority,
             recipientBundle,
-            trustedTimeAuthority,
             predecessor,
             cancellationToken);
     }
@@ -271,42 +265,19 @@ internal sealed class PreKeyV1PublicationReplicaRejectedException : Cryptographi
     internal Xic1BoundedStatus Status { get; }
 }
 
-/// <summary>
-/// Production XPK1 adapter. It dispatches only a revision-bound durable request,
-/// verifies successful XPC1 before persistence, and commits every exact result
-/// through the Protocol-owned immutable journal transition.
-/// </summary>
-internal sealed class PrivacyRoutedPreKeyV1ClientTransport :
-    IPreKeyV1PrivacyRoutedClientTransport
+internal static class PreKeyV1InventoryPublicationDispatcher
 {
-    private readonly SqliteXpk1ClaimJournal journal;
-    private readonly IExactContactResolveOnionTransport onion;
-    private readonly IPreKeyV1ClaimReceiptVerifier receiptVerifier;
-    private readonly IContactResolvePublicationPathAuthoritySource publicationAuthoritySource;
-    private readonly IPreKeyV1PublicationVerifier publicationVerifier;
-
-    internal PrivacyRoutedPreKeyV1ClientTransport(
-        SqliteXpk1ClaimJournal journal,
-        IExactContactResolveOnionTransport onion,
-        IPreKeyV1ClaimReceiptVerifier receiptVerifier,
-        IContactResolvePublicationPathAuthoritySource publicationAuthoritySource,
-        IPreKeyV1PublicationVerifier publicationVerifier)
-    {
-        this.journal = journal ?? throw new ArgumentNullException(nameof(journal));
-        this.onion = onion ?? throw new ArgumentNullException(nameof(onion));
-        this.receiptVerifier = receiptVerifier
-            ?? throw new ArgumentNullException(nameof(receiptVerifier));
-        this.publicationAuthoritySource = publicationAuthoritySource
-            ?? throw new ArgumentNullException(nameof(publicationAuthoritySource));
-        this.publicationVerifier = publicationVerifier
-            ?? throw new ArgumentNullException(nameof(publicationVerifier));
-    }
-
-    public async ValueTask<VerifiedPreKeyInventoryPublication> PublishInventoryAsync(
+    internal static async ValueTask<VerifiedPreKeyInventoryPublication> PublishAsync(
         PreKeyV1DurablePublicationOperation operation,
-        CancellationToken cancellationToken = default)
+        IExactContactResolveOnionTransport onion,
+        IContactResolvePublicationPathAuthoritySource publicationAuthoritySource,
+        IPreKeyV1PublicationVerifier publicationVerifier,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(operation);
+        ArgumentNullException.ThrowIfNull(onion);
+        ArgumentNullException.ThrowIfNull(publicationAuthoritySource);
+        ArgumentNullException.ThrowIfNull(publicationVerifier);
         cancellationToken.ThrowIfCancellationRequested();
         var logical = Xpp1Codec.Decode(operation.ExactXpp1Span);
         var serviceCapability = logical.Manifest.ServiceCapability;
@@ -354,6 +325,100 @@ internal sealed class PrivacyRoutedPreKeyV1ClientTransport :
                 cancellationToken)
             .ConfigureAwait(false);
     }
+
+    private static void ValidatePublicationAuthority(
+        Xpp1Record logical,
+        ContactResolvePathAuthority authority)
+    {
+        ArgumentNullException.ThrowIfNull(authority);
+        var placement = authority.Placement;
+        if (!ReferenceEquals(authority.Network, placement.Network) ||
+            !CryptographicOperations.FixedTimeEquals(
+                logical.NetworkId.Span,
+                authority.Network.NetworkId.Span) ||
+            !CryptographicOperations.FixedTimeEquals(
+                logical.PlacementHash.Span,
+                placement.PlacementHash.Span) ||
+            !placement.Binds(
+                Deep.Protocol.XPointNetworkV1.ContactServiceRequestKind.PublishPreKeyInventory,
+                logical.Manifest.ServiceCapability))
+        {
+            throw new CryptographicException(
+                "The durable XPP1 does not bind its exact current PublishPreKeyInventory placement.");
+        }
+    }
+
+    private static void EnsureAccepted(
+        Xpp1BoundedRequest request,
+        Xic1BoundedReceipt receipt,
+        ReadOnlyMemory<byte> expectedReplicaId)
+    {
+        var accepted = request.Phase switch
+        {
+            Xpp1BoundedPhase.Manifest =>
+                receipt.Status is Xic1BoundedStatus.ManifestStaged or Xic1BoundedStatus.ExactReplay &&
+                receipt.MutationOutcome == Xic1BoundedMutationOutcome.DurablyStaged,
+            Xpp1BoundedPhase.Chunk =>
+                receipt.Status is Xic1BoundedStatus.ChunkStaged or Xic1BoundedStatus.ExactReplay &&
+                receipt.MutationOutcome == Xic1BoundedMutationOutcome.DurablyStaged,
+            Xpp1BoundedPhase.Commit =>
+                receipt.Status is Xic1BoundedStatus.Committed or Xic1BoundedStatus.ExactReplay &&
+                receipt.MutationOutcome == Xic1BoundedMutationOutcome.DurablyActivated,
+            _ => false,
+        };
+        if (!accepted || !CryptographicOperations.FixedTimeEquals(
+                receipt.ReplicaId.Span,
+                expectedReplicaId.Span))
+        {
+            throw new PreKeyV1PublicationReplicaRejectedException(
+                request.Phase,
+                receipt.Status,
+                expectedReplicaId.Span);
+        }
+    }
+}
+
+/// <summary>
+/// Production XPK1 adapter. It dispatches only a revision-bound durable request,
+/// verifies successful XPC1 before persistence, and commits every exact result
+/// through the Protocol-owned immutable journal transition.
+/// </summary>
+internal sealed class PrivacyRoutedPreKeyV1ClientTransport :
+    IPreKeyV1PrivacyRoutedClientTransport
+{
+    private readonly SqliteXpk1ClaimJournal journal;
+    private readonly IExactContactResolveOnionTransport onion;
+    private readonly IPreKeyV1ClaimReceiptVerifier receiptVerifier;
+    private readonly IContactResolvePublicationPathAuthoritySource publicationAuthoritySource;
+    private readonly IPreKeyV1PublicationVerifier publicationVerifier;
+
+    internal PrivacyRoutedPreKeyV1ClientTransport(
+        SqliteXpk1ClaimJournal journal,
+        IExactContactResolveOnionTransport onion,
+        IPreKeyV1ClaimReceiptVerifier receiptVerifier,
+        IContactResolvePublicationPathAuthoritySource publicationAuthoritySource,
+        IPreKeyV1PublicationVerifier publicationVerifier)
+    {
+        this.journal = journal ?? throw new ArgumentNullException(nameof(journal));
+        this.onion = onion ?? throw new ArgumentNullException(nameof(onion));
+        this.receiptVerifier = receiptVerifier
+            ?? throw new ArgumentNullException(nameof(receiptVerifier));
+        this.publicationAuthoritySource = publicationAuthoritySource
+            ?? throw new ArgumentNullException(nameof(publicationAuthoritySource));
+        this.publicationVerifier = publicationVerifier
+            ?? throw new ArgumentNullException(nameof(publicationVerifier));
+    }
+
+    public async ValueTask<VerifiedPreKeyInventoryPublication> PublishInventoryAsync(
+        PreKeyV1DurablePublicationOperation operation,
+        CancellationToken cancellationToken = default)
+        => await PreKeyV1InventoryPublicationDispatcher.PublishAsync(
+                operation,
+                onion,
+                publicationAuthoritySource,
+                publicationVerifier,
+                cancellationToken)
+            .ConfigureAwait(false);
 
     public async ValueTask<VerifiedXpc1PreKeyClaimReceipt> ClaimPreKeyAsync(
         PreKeyV1DurableClaimOperation operation,
