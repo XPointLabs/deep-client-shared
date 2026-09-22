@@ -123,8 +123,10 @@ it opens DPH2/DAO1 or DPE2/DAO1, commits the authenticated inner event, and
 ACKs only when every item in the retrieved batch is durably materialized.
 Established DPE2 selects only an active exact session from the protected
 catalog, including after restart; header selection itself grants no plaintext
-or ACK. A partial batch remains unacknowledged for exact replay. This does not
-yet present message text or run a background receive loop.
+or ACK. A partial batch remains unacknowledged for exact replay. A bounded,
+account- and conversation-scoped read projects only canonical, non-forked
+MessageCreate text from the encrypted semantic inbox for the client UI. This
+does not author outgoing text or run a background receive loop.
 
 An accepted/durable outcome is reconstructed only from persisted canonical
 evidence. A crash before local outcome commit may resend the same MAU2 after

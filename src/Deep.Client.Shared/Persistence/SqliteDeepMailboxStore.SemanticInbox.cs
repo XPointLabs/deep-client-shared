@@ -1,11 +1,17 @@
 #if DEEP_CLEAN_PRODUCTION
 using System.Buffers.Binary;
 using System.Security.Cryptography;
+using System.Text;
 using Deep.Client.Shared.Persistence.MessagingV1;
 using Deep.Protocol.ApplicationCore;
 using Microsoft.Data.Sqlite;
 
 namespace Deep.Client.Shared.Persistence;
+
+public sealed record DirectMessageCreateSnapshot(
+    string Text,
+    bool IsLocalAuthor,
+    DateTimeOffset CreatedAt);
 
 public sealed partial class SqliteDeepMailboxStore
 {
@@ -336,6 +342,117 @@ public sealed partial class SqliteDeepMailboxStore
             {
                 foreach (var value in new[] { local, generation, conversation, logical, device })
                     CryptographicOperations.ZeroMemory(value);
+            }
+        }, cancellationToken);
+    }
+
+    /// <summary>
+    /// Projects only canonical, non-forked authenticated MessageCreate events
+    /// from one owned conversation. The SQLCipher inbox, not a mailbox deposit
+    /// or unverified routing header, is the source of UI text.
+    /// </summary>
+    public Task<IReadOnlyList<DirectMessageCreateSnapshot>> ListDirectMessageCreatesAsync(
+        ReadOnlyMemory<byte> localAccountId,
+        ulong localAccountGeneration,
+        ReadOnlyMemory<byte> conversationId,
+        int maximumItems = 100,
+        CancellationToken cancellationToken = default)
+    {
+        RequireDirectId(localAccountId, nameof(localAccountId));
+        RequireDirectId(conversationId, nameof(conversationId));
+        if (localAccountGeneration == 0)
+            throw new ArgumentOutOfRangeException(nameof(localAccountGeneration));
+        if (maximumItems is < 1 or > 100)
+            throw new ArgumentOutOfRangeException(nameof(maximumItems));
+        return WithReplayConnectionAsync<IReadOnlyList<DirectMessageCreateSnapshot>>(connection =>
+        {
+            var local = localAccountId.ToArray();
+            var generation = new byte[8];
+            BinaryPrimitives.WriteUInt64BigEndian(generation, localAccountGeneration);
+            var conversation = conversationId.ToArray();
+            try
+            {
+                using (var owner = connection.CreateCommand())
+                {
+                    owner.CommandText = "SELECT local_account_id,local_account_generation FROM authenticated_dmc2_inbox_owner WHERE singleton=1;";
+                    using var ownerReader = owner.ExecuteReader();
+                    if (!ownerReader.Read())
+                        return Task.FromResult<IReadOnlyList<DirectMessageCreateSnapshot>>([]);
+                    var storedAccount = (byte[])ownerReader[0];
+                    var storedGeneration = (byte[])ownerReader[1];
+                    try
+                    {
+                        if (!DirectFixed(local, storedAccount) ||
+                            !DirectFixed(generation, storedGeneration) || ownerReader.Read())
+                            throw new CryptographicException(
+                                "The direct inbox belongs to another local account generation.");
+                    }
+                    finally
+                    {
+                        CryptographicOperations.ZeroMemory(storedAccount);
+                        CryptographicOperations.ZeroMemory(storedGeneration);
+                    }
+                }
+
+                using var read = connection.CreateCommand();
+                read.CommandText = "SELECT i.exact_dmc2,i.exact_dmc2_hash,i.logical_message_id,i.author_device_id,i.author_account_id,f.incumbent_hash FROM authenticated_dmc2_inbox i LEFT JOIN authenticated_dmc2_inbox_forks f ON i.conversation_id=f.conversation_id AND i.logical_message_id=f.logical_message_id AND i.author_device_id=f.author_device_id WHERE i.conversation_id=$conversation AND i.content_kind=$kind ORDER BY i.materialized_at DESC,i.logical_message_id DESC LIMIT $limit;";
+                read.Parameters.AddWithValue("$conversation", conversation);
+                read.Parameters.AddWithValue("$kind", (int)Dmc2ContentKind.MessageCreate);
+                read.Parameters.AddWithValue("$limit", maximumItems);
+                using var reader = read.ExecuteReader();
+                var results = new List<DirectMessageCreateSnapshot>();
+                while (reader.Read())
+                {
+                    var exact = (byte[])reader[0];
+                    var hash = (byte[])reader[1];
+                    var logical = (byte[])reader[2];
+                    var device = (byte[])reader[3];
+                    var author = (byte[])reader[4];
+                    var actualHash = SHA256.HashData(exact);
+                    try
+                    {
+                        var parsed = ApplicationCoreCodec.DecodeDmc2(exact);
+                        if (!reader.IsDBNull(5) ||
+                            !DirectFixed(hash, actualHash) ||
+                            !DirectFixed(parsed.CanonicalBytes.Span, exact) ||
+                            !DirectFixed(parsed.ConversationId.Span, conversation) ||
+                            !DirectFixed(parsed.LogicalMessageId.Span, logical) ||
+                            !DirectFixed(parsed.SenderDeviceId.Span, device) ||
+                            !DirectFixed(parsed.SenderAccountId.Span, author) ||
+                            parsed.ContentKind != Dmc2ContentKind.MessageCreate)
+                            throw new CryptographicException(
+                                "A direct message projection is forked or corrupt.");
+                        var payload = parsed.PayloadBytes.ToArray();
+                        try
+                        {
+                            var length = BinaryPrimitives.ReadUInt16BigEndian(payload);
+                            if (payload.Length != length + 2)
+                                throw new CryptographicException(
+                                    "The authenticated text payload length is invalid.");
+                            var text = new UTF8Encoding(false, true).GetString(payload, 2, length);
+                            results.Add(new DirectMessageCreateSnapshot(
+                                text,
+                                DirectFixed(author, local),
+                                DateTimeOffset.FromUnixTimeMilliseconds(
+                                    checked((long)parsed.CreatedAtUnixMilliseconds))));
+                        }
+                        finally { CryptographicOperations.ZeroMemory(payload); }
+                    }
+                    finally
+                    {
+                        foreach (var value in new[] { exact, hash, logical, device,
+                                     author, actualHash })
+                            CryptographicOperations.ZeroMemory(value);
+                    }
+                }
+                results.Reverse();
+                return Task.FromResult<IReadOnlyList<DirectMessageCreateSnapshot>>(results);
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(local);
+                CryptographicOperations.ZeroMemory(generation);
+                CryptographicOperations.ZeroMemory(conversation);
             }
         }, cancellationToken);
     }

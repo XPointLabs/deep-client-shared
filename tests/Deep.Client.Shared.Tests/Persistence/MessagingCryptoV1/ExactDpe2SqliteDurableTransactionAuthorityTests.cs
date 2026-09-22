@@ -260,6 +260,16 @@ public sealed class ExactDpe2SqliteDurableTransactionAuthorityTests
             handoff.AuthorDeviceId);
         Assert.Equal(handoff.ExactDmc2.ToArray(), recovered);
         CryptographicOperations.ZeroMemory(recovered!);
+        var projected = await inbox.ListDirectMessageCreatesAsync(
+            local, fixture.Scope.AccountGeneration, conversation);
+        var message = Assert.Single(projected);
+        Assert.Equal("stage", message.Text);
+        Assert.False(message.IsLocalAuthor);
+        await Assert.ThrowsAsync<CryptographicException>(async () =>
+            await inbox.ListDirectMessageCreatesAsync(
+                Bytes(0xA2), fixture.Scope.AccountGeneration, conversation));
+        Assert.Empty(await inbox.ListDirectMessageCreatesAsync(
+            local, fixture.Scope.AccountGeneration, Bytes(0xA3)));
         CryptographicOperations.ZeroMemory(local);
         CryptographicOperations.ZeroMemory(conversation);
         CryptographicOperations.ZeroMemory(network);
