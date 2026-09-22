@@ -20,10 +20,10 @@ namespace Deep.Client.Shared.Persistence.MessagingCryptoV1;
 internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
 {
     private const int ApplicationId = 0x4D435231; // MCR1
-    private const int SchemaGeneration = 7;
+    private const int SchemaGeneration = 8;
     // Replay-retention context generation is a cryptographic wire/domain value,
-    // not the physical SQLite schema version. Generation 7 additionally stages
-    // authenticated initial-DPH2 events in the initial TRS1 transaction and
+    // not the physical SQLite schema version. Generation 8 additionally stages
+    // outbound ciphertext with the DPE2 ratchet transaction and
     // does not redefine the generation-3 replay set.
     private const int ReplayRetentionContextGeneration = 3;
     private const string SchemaDdl = """
@@ -39,6 +39,7 @@ internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
         CREATE TABLE initiator_initial_session_fork_latch(singleton INTEGER PRIMARY KEY CHECK(singleton=1),incumbent_fingerprint BLOB NOT NULL CHECK(length(incumbent_fingerprint)=32),conflicting_fingerprint BLOB NOT NULL CHECK(length(conflicting_fingerprint)=32),incumbent_operation_id BLOB NOT NULL CHECK(length(incumbent_operation_id)=32),conflicting_operation_id BLOB NOT NULL CHECK(length(conflicting_operation_id)=32),incumbent_session_id BLOB NOT NULL CHECK(length(incumbent_session_id)=32),conflicting_session_id BLOB NOT NULL CHECK(length(conflicting_session_id)=32),incumbent_dph2_hash BLOB NOT NULL CHECK(length(incumbent_dph2_hash)=32),conflicting_dph2_hash BLOB NOT NULL CHECK(length(conflicting_dph2_hash)=32),CHECK(incumbent_fingerprint<>conflicting_fingerprint));
         CREATE TABLE exact_dpe2_plan_journal(journal_generation BLOB PRIMARY KEY CHECK(length(journal_generation)=8),plan_fingerprint BLOB NOT NULL CHECK(length(plan_fingerprint)=32),exact_header_hash BLOB NOT NULL CHECK(length(exact_header_hash)=32),exact_envelope_hash BLOB NOT NULL CHECK(length(exact_envelope_hash)=32),exact_envelope_digest BLOB NOT NULL CHECK(length(exact_envelope_digest)=32),checkpoint_prior_generation BLOB NOT NULL CHECK(length(checkpoint_prior_generation)=8),checkpoint_prior_commitment BLOB NOT NULL CHECK(length(checkpoint_prior_commitment)=32),deduplication_mutation_commitment BLOB NULL CHECK(deduplication_mutation_commitment IS NULL OR length(deduplication_mutation_commitment)=32),has_state_mutation INTEGER NOT NULL CHECK(has_state_mutation=1),FOREIGN KEY(journal_generation) REFERENCES ratchet_journal(journal_generation) ON DELETE RESTRICT);
         CREATE TABLE pending_inbound_dmc2(operation_id BLOB PRIMARY KEY CHECK(length(operation_id)=32),exact_envelope_hash BLOB NOT NULL UNIQUE CHECK(length(exact_envelope_hash)=32),journal_generation BLOB NOT NULL UNIQUE CHECK(length(journal_generation)=8),exact_dmc2 BLOB NOT NULL CHECK(length(exact_dmc2) BETWEEN 282 AND 33082),dmc2_hash BLOB NOT NULL CHECK(length(dmc2_hash)=32),FOREIGN KEY(journal_generation) REFERENCES exact_dpe2_plan_journal(journal_generation) ON DELETE RESTRICT);
+        CREATE TABLE pending_outbound_dpe2(operation_id BLOB PRIMARY KEY CHECK(length(operation_id)=32),exact_envelope_hash BLOB NOT NULL UNIQUE CHECK(length(exact_envelope_hash)=32),journal_generation BLOB NOT NULL UNIQUE CHECK(length(journal_generation)=8),exact_dpe2 BLOB NOT NULL CHECK(length(exact_dpe2) BETWEEN 4513 AND 50705),exact_dpe2_digest BLOB NOT NULL CHECK(length(exact_dpe2_digest)=32),FOREIGN KEY(journal_generation) REFERENCES exact_dpe2_plan_journal(journal_generation) ON DELETE RESTRICT);
         """;
 
     private static readonly byte[] ExpectedSchemaFingerprint = HashSchemaObjects(ExpectedSchemaObjects());
@@ -631,6 +632,9 @@ internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
                         planFingerprint, envelopeDigest);
                     if (plan.Direction == MessagingCryptoV1Direction.Receive)
                         InsertPendingInboundDmc2(db, transaction, journalGeneration, plan);
+                    else
+                        InsertPendingOutboundDpe2(db, transaction, journalGeneration, plan,
+                            envelopeDigest);
                     MessagingCryptoV1StoreTestHooks.Hit(MessagingCryptoV1StoreFailpoint.AfterJournalInsert);
                     UpdateState(db, transaction, current, journalGeneration, nextJournalHead, plan, next!);
                     MessagingCryptoV1StoreTestHooks.Hit(MessagingCryptoV1StoreFailpoint.AfterStateUpdate);
@@ -673,9 +677,61 @@ internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
     }
 
     /// <summary>
-    /// Returns an owned exact authenticated DMC2 staged by the same SQLCipher
-    /// transaction as the receive ratchet commit. The caller must zero the
-    /// returned bytes after durable application-inbox materialization.
+    /// Recovers the exact outbound ciphertext staged with the ratchet advance.
+    /// This is not a dispatch capability: the caller still needs a freshly
+    /// verified recipient route and mailbox authorization.
+    /// </summary>
+    internal async ValueTask<byte[]?> ReadPendingOutboundDpe2Async(
+        ReadOnlyMemory<byte> operationId,
+        ReadOnlyMemory<byte> exactEnvelopeHash,
+        CancellationToken cancellationToken = default)
+    {
+        MessagingCryptoV1PreparedTransition.Validate32(operationId.Span,
+            nameof(operationId));
+        MessagingCryptoV1PreparedTransition.Validate32(exactEnvelopeHash.Span,
+            nameof(exactEnvelopeHash));
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            ThrowIfDisposed();
+            using var current = ReadCurrent(GetConnection(), null);
+            if (current is null || current.ForkLatched || current.TerminallyLatched)
+                throw new CryptographicException(
+                    "An outbound DPE2 cannot be recovered from a latched ratchet scope.");
+            using var command = GetConnection().CreateCommand();
+            command.CommandText = "SELECT p.exact_envelope_hash,p.exact_dpe2,p.exact_dpe2_digest,j.direction,j.operation_id,j.envelope_hash,e.exact_envelope_hash,e.exact_envelope_digest FROM pending_outbound_dpe2 p JOIN ratchet_journal j ON p.journal_generation=j.journal_generation JOIN exact_dpe2_plan_journal e ON p.journal_generation=e.journal_generation WHERE p.operation_id=$operation;";
+            Add(command, "$operation", operationId.ToArray());
+            using var reader = command.ExecuteReader();
+            if (!reader.Read()) return null;
+            var exact = (byte[])reader[1];
+            var digest = SHA256.HashData(exact);
+            try
+            {
+                if (reader.GetInt32(3) != (int)MessagingCryptoV1Direction.Send ||
+                    !MessagingCryptoV1Trs1.Fixed((byte[])reader[0], exactEnvelopeHash.Span) ||
+                    !MessagingCryptoV1Trs1.Fixed((byte[])reader[2], digest) ||
+                    !MessagingCryptoV1Trs1.Fixed((byte[])reader[4], operationId.Span) ||
+                    !MessagingCryptoV1Trs1.Fixed((byte[])reader[5], exactEnvelopeHash.Span) ||
+                    !MessagingCryptoV1Trs1.Fixed((byte[])reader[6], exactEnvelopeHash.Span) ||
+                    !MessagingCryptoV1Trs1.Fixed((byte[])reader[7], digest) || reader.Read())
+                    throw new CryptographicException(
+                        "The pending outbound DPE2 differs from its committed send journal.");
+                return exact;
+            }
+            catch
+            {
+                CryptographicOperations.ZeroMemory(exact);
+                throw;
+            }
+            finally { CryptographicOperations.ZeroMemory(digest); }
+        }
+        finally { gate.Release(); }
+    }
+
+    /// <summary>
+    /// Recovers authenticated DMC2 staged in the same transaction as a receive
+    /// ratchet commit. The caller must zero the returned bytes after durable
+    /// application-inbox materialization.
     /// </summary>
     internal async ValueTask<byte[]?> ReadPendingInboundDmc2Async(
         ReadOnlyMemory<byte> operationId,
@@ -965,7 +1021,7 @@ internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
         {
             if (!MessagingCryptoV1Trs1.Fixed(ExpectedSchemaFingerprint, actualSchema))
                 throw Failure(MessagingCryptoV1StoreOpenFailure.Corrupt,
-                    "Messaging-crypto DDL differs from the sealed generation-7 schema.");
+                    "Messaging-crypto DDL differs from the sealed generation-8 schema.");
         }
         finally { CryptographicOperations.ZeroMemory(actualSchema); }
 
@@ -990,6 +1046,7 @@ internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
         var journalCount = ScalarLong(db, "SELECT count(*) FROM ratchet_journal;");
         var exactDpe2Count = ScalarLong(db, "SELECT count(*) FROM exact_dpe2_plan_journal;");
         var pendingDmc2Count = ScalarLong(db, "SELECT count(*) FROM pending_inbound_dmc2;");
+        var pendingOutboundCount = ScalarLong(db, "SELECT count(*) FROM pending_outbound_dpe2;");
         var pendingInitialCount = ScalarLong(db, "SELECT count(*) FROM pending_initial_dmc2;");
         var forkCount = ScalarLong(db, "SELECT count(*) FROM ratchet_fork_latch;");
         var initialCount = ScalarLong(db, "SELECT count(*) FROM initial_session_journal;");
@@ -1005,6 +1062,7 @@ internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
         if (current is null)
         {
             if (journalCount != 0 || exactDpe2Count != 0 || pendingDmc2Count != 0 ||
+                pendingOutboundCount != 0 ||
                 pendingInitialCount != 0 ||
                 forkCount != 0 ||
                 initialCount != 0 || initialForkCount != 0 || initiatorCount != 0 ||
@@ -1015,6 +1073,7 @@ internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
         if (journalCount < 0 || journalCount > MessagingCryptoV1Limits.MaximumJournalEntries ||
             exactDpe2Count < 0 || exactDpe2Count > journalCount ||
             pendingDmc2Count < 0 || pendingDmc2Count > exactDpe2Count ||
+            pendingOutboundCount < 0 || pendingOutboundCount > exactDpe2Count ||
             pendingInitialCount is < 0 or > 2 ||
             initialCount + initiatorCount != 1 || preKeyCount != 0 ||
             current.JournalGeneration != checked((ulong)journalCount) ||
@@ -1050,6 +1109,7 @@ internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
         ValidateJournalChain(db, current);
         ValidatePendingInitialEvents(db, initial, pendingInitialCount);
         ValidatePendingInboundDmc2(db, pendingDmc2Count);
+        ValidatePendingOutboundDpe2(db, pendingOutboundCount);
         if (initialForkCount == 1)
             ValidateInitialForkLatch(db, current, initial ??
                 throw new FormatException("Responder initial-session evidence is absent."));
@@ -1136,6 +1196,43 @@ internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
                         "A pending authenticated DMC2 differs from its exact receive journal.");
             }
             finally { CryptographicOperations.ZeroMemory(actualHash); }
+        }
+    }
+
+    private static void ValidatePendingOutboundDpe2(SqliteConnection db, long pendingCount)
+    {
+        var sendCount = ScalarLong(db,
+            $"SELECT count(*) FROM exact_dpe2_plan_journal e JOIN ratchet_journal j ON e.journal_generation=j.journal_generation WHERE j.direction={(int)MessagingCryptoV1Direction.Send};");
+        if (pendingCount != sendCount)
+            throw new FormatException(
+                "Every committed exact DPE2 send must retain its exact outbound envelope.");
+        using var command = db.CreateCommand();
+        command.CommandText = "SELECT p.operation_id,p.exact_envelope_hash,p.exact_dpe2,p.exact_dpe2_digest,j.direction,j.operation_id,j.envelope_hash,e.exact_envelope_hash,e.exact_envelope_digest FROM pending_outbound_dpe2 p LEFT JOIN ratchet_journal j ON p.journal_generation=j.journal_generation LEFT JOIN exact_dpe2_plan_journal e ON p.journal_generation=e.journal_generation;";
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            if (reader.IsDBNull(4) || reader.IsDBNull(5) || reader.IsDBNull(6) ||
+                reader.IsDBNull(7) || reader.IsDBNull(8) ||
+                reader.GetInt32(4) != (int)MessagingCryptoV1Direction.Send)
+                throw new FormatException(
+                    "A pending outbound DPE2 has no exact send journal.");
+            var exact = (byte[])reader[2];
+            var digest = SHA256.HashData(exact);
+            try
+            {
+                if (!MessagingCryptoV1Trs1.Fixed((byte[])reader[0], (byte[])reader[5]) ||
+                    !MessagingCryptoV1Trs1.Fixed((byte[])reader[1], (byte[])reader[6]) ||
+                    !MessagingCryptoV1Trs1.Fixed((byte[])reader[1], (byte[])reader[7]) ||
+                    !MessagingCryptoV1Trs1.Fixed((byte[])reader[3], digest) ||
+                    !MessagingCryptoV1Trs1.Fixed((byte[])reader[8], digest))
+                    throw new FormatException(
+                        "A pending outbound DPE2 differs from its exact send journal.");
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(exact);
+                CryptographicOperations.ZeroMemory(digest);
+            }
         }
     }
 
@@ -1579,6 +1676,26 @@ internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
                     "The authenticated DMC2 was not staged with its ratchet commit.");
         }
         finally { CryptographicOperations.ZeroMemory(hash); }
+    }
+
+    private static void InsertPendingOutboundDpe2(
+        SqliteConnection db,
+        SqliteTransaction transaction,
+        ulong journalGeneration,
+        ExactDpe2ProtocolPlanSnapshot plan,
+        byte[] envelopeDigest)
+    {
+        using var command = db.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "INSERT INTO pending_outbound_dpe2 VALUES($operation,$envelope,$journal,$exact,$digest);";
+        Add(command, "$operation", plan.OperationId);
+        Add(command, "$envelope", plan.ExactEnvelopeHash);
+        Add(command, "$journal", U64(journalGeneration));
+        Add(command, "$exact", plan.ExactEnvelope);
+        Add(command, "$digest", envelopeDigest);
+        if (command.ExecuteNonQuery() != 1)
+            throw new InvalidOperationException(
+                "The exact outbound DPE2 was not staged with its ratchet commit.");
     }
 
     private static void UpdateState(

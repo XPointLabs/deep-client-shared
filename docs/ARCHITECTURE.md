@@ -146,7 +146,7 @@ current initiator-directory and XPC1 threshold evidence; this is not yet wired
 to MAUI mailbox receive.
 
 The separate clean-break per-session messaging-crypto SQLCipher store is schema
-generation 7. A fresh authenticated DPE2 receive stages its exact DMC2 in the
+generation 8. A fresh authenticated DPE2 receive stages its exact DMC2 in the
 same transaction as the ratchet/replay/deletion journal and TRS1 update. After
 restart, the exact operation ID and envelope hash retrieve that pending DMC2;
 an exact ratchet replay itself does not decrypt it again. Responder initial
@@ -156,6 +156,11 @@ fingerprint, and recovers them after restart. This is only a
 recoverable E2EE-to-application handoff, not by itself MSG-01 inbox
 materialization or mailbox ACK authority. A verified direct-session owner can
 replay both staged events into the account-wide semantic inbox atomically.
+An exact DPE2 send now stages its outbound ciphertext in that same ratchet
+transaction; a crash after commit cannot lose the only encrypted envelope.
+Recovery requires the exact operation ID and envelope hash and does not itself
+authorize network dispatch. Generation 7 is intentionally rejected rather than
+silently upgraded; physical UAT must use the isolated clean-break app identity.
 For ContactHello the owner first binds relationship ID, verified peer DAB1/DMD1
 hashes, the conversation ID derived from the relationship and both accounts,
 and embedded XUR1 network, author device, DPD1 and lifetime. The unsolicited

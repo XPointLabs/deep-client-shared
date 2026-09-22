@@ -48,6 +48,81 @@ public sealed class ExactDpe2SqliteDurableTransactionAuthorityTests
     }
 
     [Fact]
+    public async Task ExactOutboundCiphertextSurvivesCrashAfterRatchetCommit()
+    {
+        using var fixture = new Fixture();
+        var prior = Trs1(fixture.Scope, 1, 0x35);
+        var next = Trs1(fixture.Scope, 2, 0x36);
+        byte[] exact;
+        await using (var store = fixture.Open())
+        {
+            var genesis = await Initialize(store, prior);
+            using var plan = Plan(fixture.Scope, prior, next, genesis,
+                operation: 0x2D, envelope: 0x4D,
+                direction: ExactDpe2DurableDirection.Send);
+            exact = plan.ExactEnvelope.ToArray();
+            using (MessagingCryptoV1StoreTestHooks.Push(point =>
+                       { if (point == MessagingCryptoV1StoreFailpoint.AfterCommit)
+                               throw new MessagingCryptoV1InjectedCrashException(point); }))
+                await Assert.ThrowsAsync<MessagingCryptoV1InjectedCrashException>(async () =>
+                    await new ExactDpe2SqliteDurableTransactionAuthority(store)
+                        .CommitAsync(plan, Completion(plan)));
+        }
+
+        await using var restarted = fixture.Open(allowCreate: false);
+        var recovered = await restarted.ReadPendingOutboundDpe2Async(
+            Bytes(0x2D), Bytes(0x4D));
+        Assert.Equal(exact, recovered);
+        Assert.Equal(2UL, (await restarted.ReadHeadAsync())!.StateGeneration);
+        CryptographicOperations.ZeroMemory(recovered!);
+        CryptographicOperations.ZeroMemory(exact);
+    }
+
+    [Fact]
+    public async Task OutboundCiphertextRollsBackWithRatchetBeforeCommit()
+    {
+        using var fixture = new Fixture();
+        var prior = Trs1(fixture.Scope, 1, 0x37);
+        var next = Trs1(fixture.Scope, 2, 0x38);
+        await using (var store = fixture.Open())
+        {
+            var genesis = await Initialize(store, prior);
+            using var plan = Plan(fixture.Scope, prior, next, genesis,
+                operation: 0x2E, envelope: 0x4E,
+                direction: ExactDpe2DurableDirection.Send);
+            using (MessagingCryptoV1StoreTestHooks.Push(point =>
+                       { if (point == MessagingCryptoV1StoreFailpoint.AfterJournalInsert)
+                               throw new MessagingCryptoV1InjectedCrashException(point); }))
+                await Assert.ThrowsAsync<MessagingCryptoV1InjectedCrashException>(async () =>
+                    await new ExactDpe2SqliteDurableTransactionAuthority(store)
+                        .CommitAsync(plan, Completion(plan)));
+        }
+
+        await using var restarted = fixture.Open(allowCreate: false);
+        Assert.Equal(1UL, (await restarted.ReadHeadAsync())!.StateGeneration);
+        Assert.Null(await restarted.ReadPendingOutboundDpe2Async(
+            Bytes(0x2E), Bytes(0x4E)));
+    }
+
+    [Fact]
+    public async Task OutboundRecoveryRejectsDifferentEnvelopeHash()
+    {
+        using var fixture = new Fixture();
+        var prior = Trs1(fixture.Scope, 1, 0x39);
+        var next = Trs1(fixture.Scope, 2, 0x3A);
+        await using var store = fixture.Open();
+        var genesis = await Initialize(store, prior);
+        using var plan = Plan(fixture.Scope, prior, next, genesis,
+            operation: 0x2F, envelope: 0x4F,
+            direction: ExactDpe2DurableDirection.Send);
+        Assert.Equal(ExactDpe2DurableCommitDisposition.Committed,
+            (await new ExactDpe2SqliteDurableTransactionAuthority(store)
+                .CommitAsync(plan, Completion(plan))).Disposition);
+        await Assert.ThrowsAsync<CryptographicException>(async () =>
+            await store.ReadPendingOutboundDpe2Async(Bytes(0x2F), Bytes(0x50)));
+    }
+
+    [Fact]
     public async Task AuthenticatedReceiveReplayDoesNotAdvanceRatchet()
     {
         using var fixture = new Fixture();
