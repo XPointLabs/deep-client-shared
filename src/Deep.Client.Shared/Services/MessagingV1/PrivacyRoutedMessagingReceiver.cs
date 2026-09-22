@@ -20,9 +20,9 @@ public enum DeepDirectMessagingInboundEnvelopeKind : byte
     EstablishedSession = 2,
 }
 
-public sealed class DeepDirectMessagingInboundEnvelope
+public sealed class DeepDirectMessagingInboundEnvelope : IDisposable
 {
-    private readonly byte[] exactInner;
+    private byte[]? exactInner;
 
     internal DeepDirectMessagingInboundEnvelope(
         DeepDirectMessagingInboundEnvelopeKind kind,
@@ -33,7 +33,17 @@ public sealed class DeepDirectMessagingInboundEnvelope
     }
 
     public DeepDirectMessagingInboundEnvelopeKind Kind { get; }
-    public ReadOnlyMemory<byte> ExactInner => exactInner.ToArray();
+    public ReadOnlyMemory<byte> ExactInner =>
+        (Volatile.Read(ref exactInner) ??
+            throw new ObjectDisposedException(nameof(DeepDirectMessagingInboundEnvelope)))
+        .ToArray();
+
+    public void Dispose()
+    {
+        var owned = Interlocked.Exchange(ref exactInner, null);
+        if (owned is not null)
+            CryptographicOperations.ZeroMemory(owned);
+    }
 }
 
 public sealed class DeepDirectMessagingInboundBatch : IDisposable
@@ -44,12 +54,27 @@ public sealed class DeepDirectMessagingInboundBatch : IDisposable
     internal DeepDirectMessagingInboundBatch(MessagingV1ReceiveBatch inner)
     {
         this.inner = inner ?? throw new ArgumentNullException(nameof(inner));
-        Items = inner.Items.Select(static item =>
-            new DeepDirectMessagingInboundEnvelope(
-                item.Kind == MessagingV1DepositKind.InitialSession
-                    ? DeepDirectMessagingInboundEnvelopeKind.InitialSession
-                    : DeepDirectMessagingInboundEnvelopeKind.EstablishedSession,
-                item.ExactInner.Span)).ToArray();
+        try
+        {
+            Items = inner.Items.Select(static item =>
+                new DeepDirectMessagingInboundEnvelope(
+                    item.Kind switch
+                    {
+                        MessagingV1DepositKind.InitialSession =>
+                            DeepDirectMessagingInboundEnvelopeKind.InitialSession,
+                        MessagingV1DepositKind.EstablishedSession =>
+                            DeepDirectMessagingInboundEnvelopeKind.EstablishedSession,
+                        _ => throw new CryptographicException(
+                            "The retrieved mailbox item has an unsupported inner kind.")
+                    },
+                    item.ExactInner.Span)).ToArray();
+        }
+        catch
+        {
+            this.inner = null;
+            inner.Dispose();
+            throw;
+        }
     }
 
     public IReadOnlyList<DeepDirectMessagingInboundEnvelope> Items { get; }
@@ -60,7 +85,12 @@ public sealed class DeepDirectMessagingInboundBatch : IDisposable
         Volatile.Read(ref inner) ??
         throw new ObjectDisposedException(nameof(DeepDirectMessagingInboundBatch));
 
-    public void Dispose() => Interlocked.Exchange(ref inner, null)?.Dispose();
+    public void Dispose()
+    {
+        foreach (var item in Items)
+            item.Dispose();
+        Interlocked.Exchange(ref inner, null)?.Dispose();
+    }
 }
 
 public sealed class DeepDirectMessagingInboundCommit
@@ -81,6 +111,12 @@ public sealed class DeepDirectMessagingInboundCommit
     internal bool BelongsTo(DeepDirectMessagingInboundBatch batch) =>
         ReferenceEquals(batchToken, batch.Token);
 }
+
+public sealed record DeepDirectMessagingPollResult(
+    int RetrievedCount,
+    int CommittedCount,
+    bool Acknowledged,
+    bool HasMore);
 
 /// <summary>
 /// Current-only production receive boundary. It retrieves only through the
@@ -257,6 +293,44 @@ public sealed class PrivacyRoutedMessagingReceiver : IDisposable
                 .ConfigureAwait(false));
     }
 
+    /// <summary>
+    /// Processes one bounded self-mailbox batch. A partial batch stays
+    /// unacknowledged so every item can be replayed after a crash or a later
+    /// authority refresh. No caller-supplied commit receipts are accepted.
+    /// </summary>
+    public async ValueTask<DeepDirectMessagingPollResult> PollOnceAsync(
+        ushort maximumItems = 32,
+        CancellationToken cancellationToken = default)
+    {
+        using var batch = await RetrieveAsync(maximumItems, cancellationToken)
+            .ConfigureAwait(false);
+        var committed = new List<DeepDirectMessagingInboundCommit>(batch.Items.Count);
+        for (var index = 0; index < batch.Items.Count; index++)
+        {
+            var receipt = batch.Items[index].Kind switch
+            {
+                DeepDirectMessagingInboundEnvelopeKind.InitialSession =>
+                    await ProcessInitialAsync(batch, index,
+                        cancellationToken: cancellationToken).ConfigureAwait(false),
+                DeepDirectMessagingInboundEnvelopeKind.EstablishedSession =>
+                    await ProcessEstablishedAsync(batch, index, cancellationToken)
+                        .ConfigureAwait(false),
+                _ => throw new CryptographicException(
+                    "The inbound mailbox contains an unsupported envelope kind.")
+            };
+            if (receipt is null)
+                return new DeepDirectMessagingPollResult(
+                    batch.Items.Count, committed.Count, false, batch.HasMore);
+            committed.Add(receipt);
+        }
+        if (committed.Count != 0)
+            await AcknowledgeAsync(batch, committed, cancellationToken)
+                .ConfigureAwait(false);
+        return new DeepDirectMessagingPollResult(
+            batch.Items.Count, committed.Count, committed.Count != 0,
+            batch.HasMore);
+    }
+
     public async ValueTask<DeepDirectMessagingInboundCommit> CommitInitialAsync(
         DeepDirectMessagingInboundBatch batch,
         int index,
@@ -296,6 +370,33 @@ public sealed class PrivacyRoutedMessagingReceiver : IDisposable
             : await CommitInitialAsync(
                     batch, index, verified, cancellationToken)
                 .ConfigureAwait(false);
+    }
+
+    public async ValueTask<DeepDirectMessagingInboundCommit?>
+        ProcessEstablishedAsync(
+            DeepDirectMessagingInboundBatch batch,
+            int index,
+            CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(batch);
+        var current = batch.Current;
+        if ((uint)index >= (uint)current.Items.Count)
+            throw new ArgumentOutOfRangeException(nameof(index));
+        var item = current.Items[index];
+        if (item.Kind != MessagingV1DepositKind.EstablishedSession)
+            throw new CryptographicException(
+                "Only an established DPE2 can use this receive path.");
+        var verifiedSession = await owner.TryResolveEstablishedInboundSessionAsync(
+                item.ExactInner, cancellationToken)
+            .ConfigureAwait(false);
+        if (verifiedSession is null)
+            return null;
+        var receipt = await MessagingV1InboundCommitReceipt
+            .CommitAndMaterializeDirectDmc2Async(
+                item, owner, verifiedSession, inbox, cancellationToken)
+            .ConfigureAwait(false);
+        return new DeepDirectMessagingInboundCommit(batch.Token, index, receipt);
     }
 
     public async ValueTask<VerifiedInboundInitiatorDirectory>

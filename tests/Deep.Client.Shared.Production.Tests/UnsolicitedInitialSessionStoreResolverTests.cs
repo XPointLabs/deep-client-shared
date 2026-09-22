@@ -156,6 +156,75 @@ public sealed class UnsolicitedInitialSessionStoreResolverTests
         }
     }
 
+    [Fact]
+    public async Task EstablishedInboundSelectsOnlyExactActiveLocalSessionAfterRestart()
+    {
+        var root = Path.Combine(Path.GetTempPath(),
+            "deep-established-inbound-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        await using var accountStore = new InMemoryDeepAccountStore();
+        using var secrets = new InMemoryDeepSecureStorage();
+        var network = Bytes(16, 0x11);
+        var accounts = new DeepAccountService(accountStore, secrets,
+            new FrozenClock(DateTimeOffset.FromUnixTimeSeconds(1_900_000_000)), network);
+        try
+        {
+            var identity = (await accounts.CreateAsync("Alice")).Identity;
+            var authority = DeepDirectMessagingLocalAuthorityBinding.CreateForTests(
+                identity, Bytes(32, 0x71));
+            var remoteAccount = Bytes(32, 0x31);
+            var remoteDevice = Bytes(32, 0x32);
+            var localDevice = identity.Device.DeviceId.Bytes.ToArray();
+            var sessionId = Bytes(32, 0x52);
+            var session = DeepDirectMessagingVerifiedSessionBinding.CreateForTests(
+                network, remoteAccount, 1, remoteDevice, 1,
+                ContactConversationId32.FromBytes(Bytes(32, 0x41)), sessionId);
+
+            await using (var first = await DeepDirectMessagingStorageOwner.OpenAsync(
+                             root, secrets, accounts, identity, authority))
+            {
+                Assert.Null(await first.TryResolveEstablishedInboundSessionAsync(
+                    Dpe2(network, sessionId, remoteDevice, localDevice)));
+                Assert.NotNull(await first.TryOpenSessionAsync(session, true));
+            }
+
+            await using (var restarted = await DeepDirectMessagingStorageOwner.OpenAsync(
+                             root, secrets, accounts, identity, authority))
+            {
+                var selected = await restarted.TryResolveEstablishedInboundSessionAsync(
+                    Dpe2(network, sessionId, remoteDevice, localDevice));
+                Assert.NotNull(selected);
+                Assert.Equal(session.ConversationId.ToArray(), selected.ConversationId.ToArray());
+                Assert.Equal(session.RemoteAccountId.ToArray(), selected.RemoteAccountId.ToArray());
+                Assert.Null(await restarted.TryResolveEstablishedInboundSessionAsync(
+                    Dpe2(network, Bytes(32, 0x53), remoteDevice, localDevice)));
+                Assert.Null(await restarted.TryResolveEstablishedInboundSessionAsync(
+                    Dpe2(network, sessionId, Bytes(32, 0x33), localDevice)));
+                await Assert.ThrowsAsync<CryptographicException>(async () =>
+                    await restarted.TryResolveEstablishedInboundSessionAsync(
+                        Dpe2(network, sessionId, remoteDevice, Bytes(32, 0x34))));
+            }
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static byte[] Dpe2(
+        byte[] network,
+        byte[] sessionId,
+        byte[] senderDevice,
+        byte[] recipientDevice)
+    {
+        var header = new Dtr2Record(network, Bytes(32, 0x91), 0,
+            1, 1, 0, 1, 1, Dtr2BraidMessage.None());
+        return Dpe2Codec.Encode(new Dpe2Record(
+            network, sessionId, senderDevice, recipientDevice,
+            Bytes(32, 0x93), header,
+            Dpe2Ciphertext.Import(Bytes(4112, 0x94))));
+    }
+
     private static VerifiedDph2Initiation VerifiedForStoreResolutionOnly(Dph2Record dph2)
     {
         // The resolver is tested after the Protocol verifier boundary. This

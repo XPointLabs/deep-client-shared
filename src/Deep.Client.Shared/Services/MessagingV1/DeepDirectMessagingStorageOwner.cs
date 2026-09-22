@@ -510,6 +510,13 @@ public sealed class DeepDirectMessagingStorageFacade : IAsyncDisposable
             exactDpe2,
             cancellationToken);
 
+    internal ValueTask<DeepDirectMessagingVerifiedSessionBinding?>
+        TryResolveEstablishedInboundSessionAsync(
+            ReadOnlyMemory<byte> exactDpe2,
+            CancellationToken cancellationToken = default) =>
+        CurrentOwner.TryResolveEstablishedInboundSessionAsync(
+            exactDpe2, cancellationToken);
+
     internal ValueTask<DirectDmc2InboxDisposition?>
         TryMaterializeEstablishedReceiveAsync(
             DeepDirectMessagingVerifiedSessionBinding? verifiedSession,
@@ -979,6 +986,30 @@ public sealed class DeepDirectMessagingVerifiedSessionBinding
             entry.RemoteDeviceGeneration,
             entry.ConversationId.Span,
             dph2.SessionId.Span);
+    }
+
+    internal static DeepDirectMessagingVerifiedSessionBinding FromCommittedEstablishedCatalog(
+        Dpe2Record envelope,
+        DeepDirectMessagingSessionCatalogEntry entry,
+        DeepDirectMessagingLocalAuthorityBinding localAuthority)
+    {
+        ArgumentNullException.ThrowIfNull(envelope);
+        ArgumentNullException.ThrowIfNull(entry);
+        ArgumentNullException.ThrowIfNull(localAuthority);
+        if (!Fixed(envelope.NetworkId.Span, localAuthority.NetworkId) ||
+            !Fixed(envelope.RecipientDeviceId.Span, localAuthority.DeviceId) ||
+            !Fixed(envelope.SenderDeviceId.Span, entry.RemoteDeviceId.Span) ||
+            !Fixed(envelope.SessionId.Span, entry.ExactDph2Id.Span))
+            throw new CryptographicException(
+                "The established inbound envelope differs from the committed local session.");
+        return new DeepDirectMessagingVerifiedSessionBinding(
+            localAuthority.NetworkId,
+            entry.RemoteAccountId.Span,
+            entry.RemoteAccountGeneration,
+            entry.RemoteDeviceId.Span,
+            entry.RemoteDeviceGeneration,
+            entry.ConversationId.Span,
+            entry.ExactDph2Id.Span);
     }
 
 #if DEEP_TEST_INTERNALS
@@ -2663,6 +2694,53 @@ internal sealed class DeepDirectMessagingStorageOwner : IAsyncDisposable
                 new ExactDpe2SqliteDurableTransactionAuthority(opened.Store),
                 cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Selects an existing active session from the protected catalog using
+    /// only canonical DPE2 routing fields. This grants no plaintext or ACK;
+    /// the ratchet and inbox commits still authenticate the envelope.
+    /// </summary>
+    internal async ValueTask<DeepDirectMessagingVerifiedSessionBinding?>
+        TryResolveEstablishedInboundSessionAsync(
+            ReadOnlyMemory<byte> exactDpe2,
+            CancellationToken cancellationToken = default)
+    {
+        var envelope = Dpe2Codec.Decode(exactDpe2.Span);
+        var canonical = Dpe2Codec.Encode(envelope);
+        try
+        {
+            if (!Fixed(canonical, exactDpe2.Span) ||
+                !Fixed(envelope.NetworkId.Span, localAuthority.NetworkId) ||
+                !Fixed(envelope.RecipientDeviceId.Span, localAuthority.DeviceId))
+                throw new CryptographicException(
+                    "The established inbound envelope is not canonical or not addressed to this device.");
+            await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                ThrowIfDisposed();
+                var matches = catalog.ReadAll().Where(row =>
+                    row.State == DirectSessionCatalogState.Active &&
+                    Fixed(row.ExactDph2Id, envelope.SessionId.Span) &&
+                    Fixed(row.RemoteDeviceId, envelope.SenderDeviceId.Span))
+                    .Take(2).ToArray();
+                if (matches.Length == 0) return null;
+                if (matches.Length != 1)
+                    throw new CryptographicException(
+                        "The established inbound envelope has ambiguous committed session state.");
+                return DeepDirectMessagingVerifiedSessionBinding
+                    .FromCommittedEstablishedCatalog(
+                        envelope, matches[0].ToEntry(), localAuthority);
+            }
+            finally
+            {
+                gate.Release();
+            }
+        }
+        finally
+        {
+            Zero(canonical);
+        }
     }
 
     /// <summary>

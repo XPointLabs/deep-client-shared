@@ -118,7 +118,13 @@ The clean MAUI account owner opens DMB1 with a distinct protected SQLCipher
 key scoped to the account's store instance. It refuses an existing database
 without that key or a retained key without the database, and removes the
 database family on local account reset.
-This lifecycle wiring does not yet run mailbox retrieve or present messages.
+The account-owned receiver can now run one bounded self-mailbox poll on demand:
+it opens DPH2/DAO1 or DPE2/DAO1, commits the authenticated inner event, and
+ACKs only when every item in the retrieved batch is durably materialized.
+Established DPE2 selects only an active exact session from the protected
+catalog, including after restart; header selection itself grants no plaintext
+or ACK. A partial batch remains unacknowledged for exact replay. This does not
+yet present message text or run a background receive loop.
 
 An accepted/durable outcome is reconstructed only from persisted canonical
 evidence. A crash before local outcome commit may resend the same MAU2 after
@@ -156,10 +162,11 @@ and embedded XUR1 network, author device, DPD1 and lifetime. The unsolicited
 responder additionally requires the current initiator checkpoint and verified
 recipient bundle retained by DPH2/XPC1 promotion, then checks the exact safety
 number and XUR1 device signature before opening a conversation store. This
-does not close XUR1 to its PMT2 placement and does not authorize UI
-projection or ACK. The remaining ContactHello state application, stage-retirement and production
-mailbox receive composition are not yet connected. This initial handoff grants
-no ACK. An established direct DPE2 can mint an exact DAO1 ACK receipt only
+does not close XUR1 to its PMT2 placement or authorize UI projection.
+The account-owned initial receive can commit and materialize the authenticated
+SessionInit/ContactHello before it grants a bound mailbox ACK receipt. Contact
+state projection and protected stage-retirement remain incomplete. An
+established direct DPE2 can mint an exact DAO1 ACK receipt only
 through the combined ratchet-commit and durable-materialization factory;
 initial DPH2, group, and unverified
 or forked DMC2 still cannot mint one.
