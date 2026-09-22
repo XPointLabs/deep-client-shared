@@ -220,23 +220,8 @@ internal sealed class PrivacyRoutedMessagingTransport : IMessagingV1PrivacyTrans
         var exactDpe2 = committed.TakeExactEnvelope();
         try
         {
-            var record = Dpe2Codec.Decode(exactDpe2);
-            var canonical = Dpe2Codec.Encode(record);
-            var replayHash = MessagingWireCryptographicInputs.ComputeDpe2FullReplayHash(record);
-            try
-            {
-                if (!Fixed(canonical, exactDpe2) ||
-                    !Fixed(expectedOperationId, record.OperationId.Span) ||
-                    !Fixed(expectedEnvelopeHash, replayHash) ||
-                    !Fixed(record.SessionId.Span, route.SessionId))
-                    throw new CryptographicException(
-                        "The committed DPE2 capability does not bind the exact activated session envelope.");
-            }
-            finally
-            {
-                CryptographicOperations.ZeroMemory(canonical);
-                CryptographicOperations.ZeroMemory(replayHash);
-            }
+            var record = ValidateEstablishedEnvelope(
+                exactDpe2, expectedOperationId, expectedEnvelopeHash, route);
             using var dispatched = await SendCoreAsync(
                 exactDpe2, MessagingV1DepositKind.EstablishedSession,
                 recipient, expiresAtUnixSeconds, cancellationToken).ConfigureAwait(false);
@@ -258,6 +243,37 @@ internal sealed class PrivacyRoutedMessagingTransport : IMessagingV1PrivacyTrans
             CryptographicOperations.ZeroMemory(expectedOperationId);
             CryptographicOperations.ZeroMemory(expectedEnvelopeHash);
             CryptographicOperations.ZeroMemory(exactDpe2);
+        }
+    }
+
+    internal Dpe2Record ValidateEstablishedEnvelope(
+        ReadOnlySpan<byte> exactDpe2,
+        ReadOnlySpan<byte> expectedOperationId,
+        ReadOnlySpan<byte> expectedEnvelopeHash,
+        VerifiedMessagingEstablishedRoute route)
+    {
+        ArgumentNullException.ThrowIfNull(route);
+        var record = Dpe2Codec.Decode(exactDpe2);
+        var canonical = Dpe2Codec.Encode(record);
+        var replayHash = MessagingWireCryptographicInputs.ComputeDpe2FullReplayHash(record);
+        try
+        {
+            if (!Fixed(canonical, exactDpe2) ||
+                !Fixed(expectedOperationId, record.OperationId.Span) ||
+                !Fixed(expectedEnvelopeHash, replayHash) ||
+                !Fixed(record.SessionId.Span, route.SessionId) ||
+                !Fixed(record.NetworkId.Span, route.Recipient.NetworkId) ||
+                !Fixed(record.NetworkId.Span, local.NetworkId) ||
+                !Fixed(record.SenderDeviceId.Span, local.DeviceId) ||
+                !Fixed(record.RecipientDeviceId.Span, route.Recipient.DeviceId))
+                throw new CryptographicException(
+                    "The committed DPE2 capability does not bind the exact local device and activated recipient route.");
+            return record;
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(canonical);
+            CryptographicOperations.ZeroMemory(replayHash);
         }
     }
 

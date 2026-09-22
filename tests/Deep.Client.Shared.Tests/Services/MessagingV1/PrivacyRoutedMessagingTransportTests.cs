@@ -111,6 +111,39 @@ public sealed class PrivacyRoutedMessagingTransportTests
     }
 
     [Fact]
+    public async Task EstablishedEnvelope_BindsBothDevicesAndNetworkBeforeDispatch()
+    {
+        using var fixture = new Fixture();
+        using var pending = fixture.PendingDph2();
+        var delivered = await fixture.Transport.SendInitialSessionAsync(
+            pending, fixture.Recipient, Now + 600);
+        var route = delivered.Activate(fixture.Recipient);
+
+        Dpe2Record Envelope(byte[] network, byte[] sender, byte[] recipient) => new(
+            network, pending.SessionId.Span, sender, recipient, Bytes(32, 0x82),
+            new Dtr2Record(network, Bytes(32, 0x83), 0, 1, 1, 0, 1, 1,
+                Dtr2BraidMessage.None()),
+            Dpe2Ciphertext.Import(Bytes(4112, 0x84)));
+
+        void Check(Dpe2Record record)
+        {
+            var exact = Dpe2Codec.Encode(record);
+            var hash = MessagingWireCryptographicInputs.ComputeDpe2FullReplayHash(record);
+            fixture.Transport.ValidateEstablishedEnvelope(
+                exact, record.OperationId.Span, hash, route);
+        }
+
+        Check(Envelope(fixture.Network, fixture.LocalDevice, fixture.RemoteDevice));
+        Assert.Throws<CryptographicException>(() =>
+            Check(Envelope(Bytes(16, 0x19), fixture.LocalDevice, fixture.RemoteDevice)));
+        Assert.Throws<CryptographicException>(() =>
+            Check(Envelope(fixture.Network, fixture.RemoteDevice, fixture.RemoteDevice)));
+        Assert.Throws<CryptographicException>(() =>
+            Check(Envelope(fixture.Network, fixture.LocalDevice, fixture.LocalDevice)));
+        Assert.Single(fixture.Mailbox.Stored);
+    }
+
+    [Fact]
     public async Task InitialSession_InvalidMailboxTtlRejectsBeforeMutation()
     {
         using var fixture = new Fixture();
