@@ -23,7 +23,7 @@ public sealed class ProtectedDeepIdV2GenesisContactStoreTests
             recovery, 1_900_000_000, 1);
         var accountId = account.AccountIdentity.AccountId.Bytes.ToArray();
         var issuance = new ProtectedGenesisDeviceIssuancePersistence(
-            storage, network, accountId);
+            storage, network, accountId, GenesisIssuanceStoreNamespace.StoreV2);
         var issued = await Dnp1IdentityAuthoringV1.IssueGenesisDeviceAsync(
             recovery, account, device, issuance, 1_900_000_100,
             1_900_086_500, 1_900_172_900);

@@ -22,10 +22,18 @@ public sealed class ProtectedDeepIdV2GenesisDeviceSecretsStoreTests
             recovery, 1_900_000_000, 1);
         var accountId = account.AccountIdentity.AccountId.Bytes.ToArray();
         var issuance = new ProtectedGenesisDeviceIssuancePersistence(
-            storage, network, accountId);
+            storage, network, accountId, GenesisIssuanceStoreNamespace.StoreV2);
         var issued = await Dnp1IdentityAuthoringV1.IssueGenesisDeviceAsync(
             recovery, account, device, issuance, 1_900_000_100,
             1_900_086_500, 1_900_172_900);
+        var scopeHash = System.Security.Cryptography.SHA256.HashData(
+            network.Concat(accountId).ToArray());
+        var issuanceScope = Convert.ToHexStringLower(scopeHash[..16]);
+        using var v2Profile = await storage.ReadOwnedAsync(
+            $"deep.store.v2.{issuanceScope}.dxp.profile");
+        Assert.NotNull(v2Profile);
+        Assert.Null(await storage.ReadOwnedAsync(
+            $"deep.store.v1.{issuanceScope}.dxp.profile"));
         var verifiedDevice = issued.IssuedDevice?.Verified ??
             throw new InvalidOperationException("Device issuance did not complete.");
         var closure = ApplicationCoreVerifier.CreateIdentityClosure(

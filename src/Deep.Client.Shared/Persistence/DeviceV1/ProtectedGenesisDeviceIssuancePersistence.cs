@@ -6,11 +6,18 @@ using Deep.Protocol.Identity;
 
 namespace Deep.Client.Shared.Persistence.DeviceV1;
 
+internal enum GenesisIssuanceStoreNamespace
+{
+    StoreV1 = 1,
+    StoreV2 = 2
+}
+
 /// <summary>
 /// Add-only, crash-recoverable DXP1 persistence for the single generation-one
 /// device created with a local Deep account. Every phase and nonce reservation is
 /// an immutable protected-storage slot, so a process loss cannot replace the
-/// winning replay tuple or reuse its nonce.
+/// winning replay tuple or reuse its nonce. DXP1 is the device-issuance protocol
+/// generation; the selected V1 or V2 storage namespace is never read as the other.
 /// </summary>
 internal sealed class ProtectedGenesisDeviceIssuancePersistence :
     Dnp1IdentityIssuancePersistence
@@ -31,7 +38,9 @@ internal sealed class ProtectedGenesisDeviceIssuancePersistence :
     internal ProtectedGenesisDeviceIssuancePersistence(
         IDeepSecureStorage storage,
         ReadOnlySpan<byte> networkId,
-        ReadOnlySpan<byte> accountId)
+        ReadOnlySpan<byte> accountId,
+        GenesisIssuanceStoreNamespace storeNamespace =
+            GenesisIssuanceStoreNamespace.StoreV1)
     {
         this.storage = storage ?? throw new ArgumentNullException(nameof(storage));
         if (networkId.Length != 16 || networkId.IndexOfAnyExcept((byte)0) < 0 ||
@@ -43,7 +52,13 @@ internal sealed class ProtectedGenesisDeviceIssuancePersistence :
         this.networkId = networkId.ToArray();
         Span<byte> digest = stackalloc byte[32];
         SHA256.HashData(scope, digest);
-        prefix = $"deep.store.v1.{Convert.ToHexStringLower(digest[..16])}.dxp";
+        var version = storeNamespace switch
+        {
+            GenesisIssuanceStoreNamespace.StoreV1 => 1,
+            GenesisIssuanceStoreNamespace.StoreV2 => 2,
+            _ => throw new ArgumentOutOfRangeException(nameof(storeNamespace))
+        };
+        prefix = $"deep.store.v{version}.{Convert.ToHexStringLower(digest[..16])}.dxp";
         CryptographicOperations.ZeroMemory(scope);
         CryptographicOperations.ZeroMemory(digest);
     }

@@ -155,6 +155,10 @@ The secure-storage contract now has an exact `deep.store.v2.` namespace purge,
 implemented by the in-memory and journaled production adapters. The purge is
 idempotent and leaves V1 and unrelated slots untouched; a new V2 account owner
 must call it during local reset, which is not yet wired.
+DXP1 device issuance persistence now accepts an explicit store-generation
+selection. Existing V1 callers keep the V1 namespace; a DID2 bootstrap selects
+V2 and never reads the V1 profile/nonce/state slots. The focused DID2 fixture
+uses V2 issuance and proves the V1 profile slot remains absent.
 This is only a storage boundary:
 the V2 account schema, atomic creation/restore, namespace purge, MAUI wiring
 and physical device E2E remain open. No V1 contact slot is read as V2.
