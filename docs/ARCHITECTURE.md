@@ -170,6 +170,12 @@ The remaining account-index work must explicitly resume or reset a crash
 between phrase retention, DXP issuance and the two-slot commit. It must not
 invent a new DAB2 when an exact durable/public winner already exists, and must
 not expose a partial account as current.
+An isolated add-only V2 current-account pointer now binds a canonical display
+name, network and account ID only after a fresh verified bootstrap. Reads
+reverify the entire bootstrap; a partial account cannot be published and a
+different name/account cannot replace the winner. This is not yet the MAUI
+account owner: pre-index orphan cleanup, cross-process create serialization,
+new SQL generation and UI composition remain open.
 This is only a storage boundary:
 the V2 account schema, atomic creation/restore, namespace purge, MAUI wiring
 and physical device E2E remain open. No V1 contact slot is read as V2.
