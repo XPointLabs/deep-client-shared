@@ -246,6 +246,47 @@ internal sealed class PrivacyRoutedMessagingTransport : IMessagingV1PrivacyTrans
         }
     }
 
+    internal async ValueTask<MessagingV1EstablishedDeliveryReceipt>
+        SendRecoveredEstablishedAsync(
+            RecoveredDirectSend recovered,
+            VerifiedMessagingEstablishedRoute route,
+            ulong expiresAtUnixSeconds,
+            CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(recovered);
+        ArgumentNullException.ThrowIfNull(route);
+        var expectedOperationId = recovered.OperationId.ToArray();
+        var expectedEnvelopeHash = recovered.EnvelopeHash.ToArray();
+        var exactDpe2 = recovered.TakeExactEnvelope();
+        try
+        {
+            var record = ValidateEstablishedEnvelope(
+                exactDpe2, expectedOperationId, expectedEnvelopeHash, route);
+            using var dispatched = await SendCoreAsync(
+                exactDpe2, MessagingV1DepositKind.EstablishedSession,
+                route.Recipient, expiresAtUnixSeconds, cancellationToken)
+                .ConfigureAwait(false);
+            return new MessagingV1EstablishedDeliveryReceipt(
+                record.OperationId.Span,
+                dispatched.Dao1OperationId,
+                dispatched.MailboxOperationId,
+                dispatched.ExactDao1Hash,
+                route.Recipient.AccountId,
+                route.Recipient.DeviceId,
+                route.Recipient.AccountGeneration,
+                route.Recipient.DeviceGeneration,
+                dispatched.Cursor,
+                dispatched.ExactReplay,
+                dispatched.CoordinatorId);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(expectedOperationId);
+            CryptographicOperations.ZeroMemory(expectedEnvelopeHash);
+            CryptographicOperations.ZeroMemory(exactDpe2);
+        }
+    }
+
     internal Dpe2Record ValidateEstablishedEnvelope(
         ReadOnlySpan<byte> exactDpe2,
         ReadOnlySpan<byte> expectedOperationId,

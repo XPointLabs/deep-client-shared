@@ -73,8 +73,13 @@ public sealed class ExactDpe2SqliteDurableTransactionAuthorityTests
         var recovered = await restarted.ReadPendingOutboundDpe2Async(
             Bytes(0x2D), Bytes(0x4D));
         Assert.Equal(exact, recovered);
+        var recoveredByOperation = await restarted.ReadPendingOutboundDpe2Async(
+            Bytes(0x2D));
+        Assert.Equal(exact, recoveredByOperation);
+        Assert.Null(await restarted.ReadPendingOutboundDpe2Async(Bytes(0x2E)));
         Assert.Equal(2UL, (await restarted.ReadHeadAsync())!.StateGeneration);
         CryptographicOperations.ZeroMemory(recovered!);
+        CryptographicOperations.ZeroMemory(recoveredByOperation!);
         CryptographicOperations.ZeroMemory(exact);
     }
 

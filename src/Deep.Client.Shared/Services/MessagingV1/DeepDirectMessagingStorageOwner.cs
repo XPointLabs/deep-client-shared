@@ -402,6 +402,13 @@ public sealed class DeepDirectMessagingStorageFacade : IAsyncDisposable
         CurrentOwner.TryReadDirectTextAsync(
             verifiedSession, inbox, logicalMessageId, cancellationToken);
 
+    internal ValueTask<RecoveredDirectSend?> TryRecoverEstablishedSendAsync(
+        DeepDirectMessagingVerifiedSessionBinding? verifiedSession,
+        ReadOnlyMemory<byte> operationId,
+        CancellationToken cancellationToken = default) =>
+        CurrentOwner.TryRecoverEstablishedSendAsync(
+            verifiedSession, operationId, cancellationToken);
+
     public ValueTask<ExactDpe2SendSuccessCapability?>
         TryCommitEstablishedSendAsync(
             DeepDirectMessagingVerifiedSessionBinding? verifiedSession,
@@ -2685,6 +2692,44 @@ internal sealed class DeepDirectMessagingStorageOwner : IAsyncDisposable
                 verifiedSession.RemoteDeviceId,
                 cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    internal async ValueTask<RecoveredDirectSend?> TryRecoverEstablishedSendAsync(
+        DeepDirectMessagingVerifiedSessionBinding? verifiedSession,
+        ReadOnlyMemory<byte> operationId,
+        CancellationToken cancellationToken = default)
+    {
+        if (verifiedSession is null) return null;
+        var opened = await TryOpenSessionAsync(
+                verifiedSession, createIfMissing: false, cancellationToken)
+            .ConfigureAwait(false);
+        if (opened is null) return null;
+        var exact = await opened.Store.ReadPendingOutboundDpe2Async(
+                operationId, cancellationToken)
+            .ConfigureAwait(false);
+        if (exact is null) return null;
+        try
+        {
+            var envelope = Dpe2Codec.Decode(exact);
+            var canonical = Dpe2Codec.Encode(envelope);
+            try
+            {
+                if (!Fixed(canonical, exact) ||
+                    !Fixed(envelope.NetworkId.Span, localAuthority.NetworkId) ||
+                    !Fixed(envelope.SessionId.Span, verifiedSession.ExactDph2Id.Span) ||
+                    !Fixed(envelope.SenderDeviceId.Span, localAuthority.DeviceId) ||
+                    !Fixed(envelope.RecipientDeviceId.Span, verifiedSession.RemoteDeviceId.Span) ||
+                    !Fixed(envelope.OperationId.Span, operationId.Span))
+                    throw new CryptographicException(
+                        "The recovered DPE2 differs from its verified direct session.");
+                var hash = MessagingWireCryptographicInputs
+                    .ComputeDpe2FullReplayHash(envelope);
+                try { return new RecoveredDirectSend(exact, operationId.Span, hash); }
+                finally { Zero(hash); }
+            }
+            finally { Zero(canonical); }
+        }
+        finally { Zero(exact); }
     }
 
     /// <summary>

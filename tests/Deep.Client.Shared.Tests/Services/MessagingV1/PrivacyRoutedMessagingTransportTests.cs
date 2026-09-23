@@ -144,6 +144,41 @@ public sealed class PrivacyRoutedMessagingTransportTests
     }
 
     [Fact]
+    public async Task RecoveredEstablishedSendReusesExactDpe2AndRequiresDeliveredRoute()
+    {
+        using var fixture = new Fixture();
+        using var pending = fixture.PendingDph2();
+        var initial = await fixture.Transport.SendInitialSessionAsync(
+            pending, fixture.Recipient, Now + 600);
+        var route = initial.Activate(fixture.Recipient);
+        var record = new Dpe2Record(
+            fixture.Network, pending.SessionId.Span,
+            fixture.LocalDevice, fixture.RemoteDevice, Bytes(32, 0x92),
+            new Dtr2Record(fixture.Network, Bytes(32, 0x93), 0, 1, 1, 0, 1, 1,
+                Dtr2BraidMessage.None()),
+            Dpe2Ciphertext.Import(Bytes(4112, 0x94)));
+        var exact = Dpe2Codec.Encode(record);
+        var hash = MessagingWireCryptographicInputs.ComputeDpe2FullReplayHash(record);
+        try
+        {
+            using var recovered = new RecoveredDirectSend(
+                exact, record.OperationId.Span, hash);
+            var delivered = await fixture.Transport.SendRecoveredEstablishedAsync(
+                recovered, route, Now + 600);
+            Assert.Equal(MessagingV1DepositKind.EstablishedSession, delivered.Kind);
+            Assert.Equal(record.OperationId.ToArray(), delivered.InnerOperationId.ToArray());
+            var stored = fixture.Mailbox.Stored.Last();
+            using var opened = await fixture.Opener.OpenAsync(stored.Ciphertext);
+            Assert.Equal(exact, opened.ExactInner.ToArray());
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(exact);
+            CryptographicOperations.ZeroMemory(hash);
+        }
+    }
+
+    [Fact]
     public async Task InitialSession_InvalidMailboxTtlRejectsBeforeMutation()
     {
         using var fixture = new Fixture();

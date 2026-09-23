@@ -683,6 +683,34 @@ internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
     /// </summary>
     internal async ValueTask<byte[]?> ReadPendingOutboundDpe2Async(
         ReadOnlyMemory<byte> operationId,
+        CancellationToken cancellationToken = default)
+    {
+        MessagingCryptoV1PreparedTransition.Validate32(operationId.Span,
+            nameof(operationId));
+        byte[]? hash;
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            ThrowIfDisposed();
+            using var command = GetConnection().CreateCommand();
+            command.CommandText =
+                "SELECT exact_envelope_hash FROM pending_outbound_dpe2 WHERE operation_id=$operation;";
+            Add(command, "$operation", operationId.ToArray());
+            hash = command.ExecuteScalar() as byte[];
+        }
+        finally { gate.Release(); }
+        if (hash is null) return null;
+        try
+        {
+            return await ReadPendingOutboundDpe2Async(
+                    operationId, hash, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally { CryptographicOperations.ZeroMemory(hash); }
+    }
+
+    internal async ValueTask<byte[]?> ReadPendingOutboundDpe2Async(
+        ReadOnlyMemory<byte> operationId,
         ReadOnlyMemory<byte> exactEnvelopeHash,
         CancellationToken cancellationToken = default)
     {
