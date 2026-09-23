@@ -190,6 +190,24 @@ public sealed class JournaledDeepSecureStorage : IDeepSecureStorage, IDisposable
             },
             cancellationToken);
 
+    public Task PurgeStoreV2NamespaceAsync(CancellationToken cancellationToken = default) =>
+        MutateAsync(
+            values =>
+            {
+                var changed = false;
+                foreach (var slot in values.Keys.Where(static key =>
+                             key.StartsWith("deep.store.v2.", StringComparison.Ordinal)).ToArray())
+                {
+                    if (values.Remove(slot, out var value))
+                    {
+                        CryptographicOperations.ZeroMemory(value);
+                        changed = true;
+                    }
+                }
+                return changed;
+            },
+            cancellationToken);
+
     public void Dispose()
     {
         if (Interlocked.Exchange(ref disposed, 1) != 0)

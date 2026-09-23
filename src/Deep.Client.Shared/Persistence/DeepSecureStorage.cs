@@ -189,6 +189,12 @@ public interface IDeepSecureStorage
     /// the exact <c>deep.store.v1.</c> prefix may be removed.
     /// </summary>
     Task PurgeStoreV1NamespaceAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Atomically and idempotently removes only the incompatible STORE-V2
+    /// namespace. It must not inspect or remove V1 or unrelated slots.
+    /// </summary>
+    Task PurgeStoreV2NamespaceAsync(CancellationToken cancellationToken = default);
 }
 
 public sealed class InMemoryDeepSecureStorage : IDeepSecureStorage, IDisposable
@@ -316,6 +322,24 @@ public sealed class InMemoryDeepSecureStorage : IDeepSecureStorage, IDisposable
             }
         }
 
+        return Task.CompletedTask;
+    }
+
+    public Task PurgeStoreV2NamespaceAsync(CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (gate)
+        {
+            ThrowIfDisposed();
+            cancellationToken.ThrowIfCancellationRequested();
+            foreach (var slot in values.Keys.Where(
+                         static slot => slot.StartsWith("deep.store.v2.", StringComparison.Ordinal)))
+            {
+                if (values.TryRemove(slot, out var value))
+                    CryptographicOperations.ZeroMemory(value);
+            }
+        }
         return Task.CompletedTask;
     }
 

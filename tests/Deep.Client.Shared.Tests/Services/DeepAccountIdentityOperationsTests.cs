@@ -396,6 +396,9 @@ public sealed class DeepAccountIdentityOperationsTests
         public Task PurgeStoreV1NamespaceAsync(CancellationToken cancellationToken = default) =>
             inner.PurgeStoreV1NamespaceAsync(cancellationToken);
 
+        public Task PurgeStoreV2NamespaceAsync(CancellationToken cancellationToken = default) =>
+            inner.PurgeStoreV2NamespaceAsync(cancellationToken);
+
         public void Dispose() => inner.Dispose();
     }
 }

@@ -151,6 +151,10 @@ two-slot bootstrap, then leaves an add-only scoped deletion marker so stale
 writers cannot restore the local phrase. Reads clean up any phrase bytes left
 by a crash between the marker and physical deletion. MAUI settings/reveal,
 account reset and cross-process lifecycle composition remain open.
+The secure-storage contract now has an exact `deep.store.v2.` namespace purge,
+implemented by the in-memory and journaled production adapters. The purge is
+idempotent and leaves V1 and unrelated slots untouched; a new V2 account owner
+must call it during local reset, which is not yet wired.
 This is only a storage boundary:
 the V2 account schema, atomic creation/restore, namespace purge, MAUI wiring
 and physical device E2E remain open. No V1 contact slot is read as V2.

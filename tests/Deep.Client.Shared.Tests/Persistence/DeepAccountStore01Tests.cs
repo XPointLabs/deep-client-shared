@@ -1950,6 +1950,10 @@ public sealed class DeepAccountStore01Tests
         public Task PurgeStoreV1NamespaceAsync(
             CancellationToken cancellationToken = default) =>
             inner.PurgeStoreV1NamespaceAsync(cancellationToken);
+
+        public Task PurgeStoreV2NamespaceAsync(
+            CancellationToken cancellationToken = default) =>
+            inner.PurgeStoreV2NamespaceAsync(cancellationToken);
     }
 
     private sealed class TrackingSecureStorage(IDeepSecureStorage inner) : IDeepSecureStorage
@@ -1986,6 +1990,9 @@ public sealed class DeepAccountStore01Tests
 
         public Task PurgeStoreV1NamespaceAsync(CancellationToken cancellationToken = default) =>
             inner.PurgeStoreV1NamespaceAsync(cancellationToken);
+
+        public Task PurgeStoreV2NamespaceAsync(CancellationToken cancellationToken = default) =>
+            inner.PurgeStoreV2NamespaceAsync(cancellationToken);
     }
 
     private sealed class FailPendingDeleteOnceSecureStorage(IDeepSecureStorage inner) : IDeepSecureStorage
@@ -2023,6 +2030,9 @@ public sealed class DeepAccountStore01Tests
 
         public Task PurgeStoreV1NamespaceAsync(CancellationToken cancellationToken = default) =>
             inner.PurgeStoreV1NamespaceAsync(cancellationToken);
+
+        public Task PurgeStoreV2NamespaceAsync(CancellationToken cancellationToken = default) =>
+            inner.PurgeStoreV2NamespaceAsync(cancellationToken);
     }
 
     private sealed class ReceiptReadFailingStore(IDeepAccountStore inner) : IDeepAccountStore
