@@ -128,11 +128,14 @@ implementation and physical E2E remain required before a release claim.
 
 An isolated V2-only protected genesis-contact slot now accepts already-verified
 DAB2, DCA1 V2 and ADC1 V2 capabilities, checks their shared account/binding/
-directory scope, and add-only persists the exact DMD1/DID2/DAB2/DCA1 V2/ADC1 V2
-bytes. Repeated exact writes are idempotent; a different hedged DAB2 cannot
-replace the winner. A raw read is explicitly untrusted; the separate verified
-read requires an already-reconciled DPA1/DRS1/DPD1 closure and a pinned ML-DSA
-verifier, then checks the exact DID2/DAB2/DMD1/DCA1 V2/ADC1 V2 lineage again.
+directory scope, and add-only persists the exact DPA1/DRS1/DPD1/DMD1/DID2/
+DAB2/DCA1 V2/ADC1 V2 public closure as one record. Repeated exact writes are
+idempotent; a different hedged DAB2 cannot replace the winner. A raw read is
+explicitly untrusted; the separate verified read reconstructs DPA1/DRS1/DPD1
+authority through the protocol's genesis-admission verifier and a pinned
+ML-DSA verifier before returning the exact V2 lineage.
+The focused restore test also disposes the recovery authority and phrase before
+re-verifying the same hedged DAB2, so restoration cannot silently reissue it.
 This is only a storage boundary:
 the V2 account schema, atomic creation/restore, namespace purge, MAUI wiring
 and physical device E2E remain open. No V1 contact slot is read as V2.

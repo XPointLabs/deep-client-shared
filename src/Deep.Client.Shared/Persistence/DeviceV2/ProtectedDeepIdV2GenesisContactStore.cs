@@ -2,19 +2,26 @@ using System.Buffers.Binary;
 using System.Security.Cryptography;
 using Deep.Protocol.AccountDirectoryV1;
 using Deep.Protocol.ApplicationCore;
+using Deep.Protocol.DeepNative;
 
 namespace Deep.Client.Shared.Persistence.DeviceV2;
 
 /// <summary>
-/// Add-only, account-scoped custody for the exact PQ-backed genesis contact
-/// closure. Read returns untrusted bytes: a caller must verify the complete
+/// Add-only, account-scoped custody for the exact PQ-backed genesis public
+/// closure. Raw read returns untrusted bytes; verified read rechecks the entire
 /// DPA1/DRS1/DPD1/DMD1/DID2/DAB2/DCA1 V2/ADC1 V2 lineage after restart.
 /// This V2 namespace has no V1 reader or fallback.
 /// </summary>
 internal sealed class ProtectedDeepIdV2GenesisContactStore
 {
-    private const int HeaderLength = 28;
+    private const int HeaderLength = 40;
+    private const int MaximumDrs1Length = 16_384;
     private const int MaximumDmd1Length = 57_344;
+    private static readonly int MaximumRecordLength = checked(HeaderLength + 644 +
+        MaximumDrs1Length + 776 + MaximumDmd1Length +
+        DeepIdV2Codec.Did2Length + DeepIdV2Codec.Dab2Length +
+        DeepIdV2ContactAuthorizationCodec.CanonicalLength +
+        DeepIdV2AccountDirectoryCodec.CanonicalLength);
     private static readonly byte[] Magic = "DGC2"u8.ToArray();
     private readonly IDeepSecureStorage storage;
     private readonly string slot;
@@ -52,6 +59,7 @@ internal sealed class ProtectedDeepIdV2GenesisContactStore
             checkpoint.Checkpoint.CheckpointGeneration != 0 ||
             checkpoint.Checkpoint.MinimumReader < 2 ||
             checkpoint.RevokedDcaAuthorizationCount != 0 ||
+            binding.Identity.ActiveDevices.Count != 1 ||
             !Fixed(binding.Identity.Account.Certificate.NetworkId.Span, networkId) ||
             !Fixed(binding.Identity.Account.DeepAccountIdHash.Span, accountId) ||
             !Fixed(authorization.Binding.Record.CanonicalBytes.Span,
@@ -64,6 +72,9 @@ internal sealed class ProtectedDeepIdV2GenesisContactStore
                 "Verified DID2 genesis contact closure is cross-sourced or out of scope.");
 
         var encoded = Encode(
+            binding.Identity.Account.Certificate.CanonicalBytes.Span,
+            binding.Identity.Revocations.Snapshot.CanonicalBytes.Span,
+            binding.Identity.ActiveDevices.Single().Certificate.CanonicalBytes.Span,
             checkpoint.Directory.Record.CanonicalBytes.Span,
             binding.DeepId.CanonicalBytes.Span,
             binding.Record.CanonicalBytes.Span,
@@ -105,6 +116,9 @@ internal sealed class ProtectedDeepIdV2GenesisContactStore
         using var owned = await storage.ReadOwnedAsync(slot,
             cancellationToken).ConfigureAwait(false);
         if (owned is null) return null;
+        if (owned.Length < HeaderLength || owned.Length > MaximumRecordLength)
+            throw new InvalidDataException(
+                "Protected DID2 contact record has a hostile size.");
         var encoded = new byte[owned.Length];
         owned.CopyTo(encoded);
         try { return Decode(encoded); }
@@ -112,61 +126,64 @@ internal sealed class ProtectedDeepIdV2GenesisContactStore
     }
 
     internal async ValueTask<VerifiedDeepIdV2GenesisContactEvidence?>
-        ReadVerifiedAsync(VerifiedApplicationIdentityClosure identity,
+        ReadVerifiedAsync(ulong trustedUnixSeconds,
             ushort deploymentProfileId, IDeepMlDsa65Verifier mlDsa65,
             CancellationToken cancellationToken)
     {
-        ArgumentNullException.ThrowIfNull(identity);
         ArgumentNullException.ThrowIfNull(mlDsa65);
-        if (!Fixed(identity.Account.Certificate.NetworkId.Span, networkId) ||
-            !Fixed(identity.Account.DeepAccountIdHash.Span, accountId))
-            throw new CryptographicException(
-                "Restored DID2 authority has a different account scope.");
+        if (trustedUnixSeconds == 0)
+            throw new ArgumentOutOfRangeException(nameof(trustedUnixSeconds));
         var untrusted = await ReadUntrustedAsync(cancellationToken)
             .ConfigureAwait(false);
         if (untrusted is null) return null;
-        var did = DeepIdV2Codec.DecodeDid2(untrusted.ExactDid2.Span);
-        var dab = DeepIdV2Codec.DecodeDab2(untrusted.ExactDab2.Span);
-        var binding = DeepIdV2Verifier.VerifyDab2(dab, did, identity,
-            deploymentProfileId, mlDsa65);
-        if (binding.Record.BindingGeneration != 0) throw new CryptographicException(
-            "Restored DID2 contact binding is not genesis.");
-        var directory = ApplicationCoreVerifier.VerifyDmd1(
-            ApplicationCoreCodec.DecodeDmd1(untrusted.ExactDmd1.Span), identity);
+        var request = new DeepIdV2GenesisAdmissionRequest(
+            untrusted.ExactDpa1.Span, untrusted.ExactDrs1.Span,
+            [untrusted.ExactDpd1], untrusted.ExactDid2.Span,
+            untrusted.ExactDab2.Span, untrusted.ExactDmd1.Span,
+            untrusted.ExactAdc1V2.Span, []);
+        var checkpoint = DeepIdV2GenesisAdmissionVerifier.Verify(request,
+            trustedUnixSeconds, deploymentProfileId, 2, mlDsa65);
+        var binding = checkpoint.Binding;
+        var directory = checkpoint.Directory;
+        if (!Fixed(binding.Identity.Account.Certificate.NetworkId.Span, networkId) ||
+            !Fixed(binding.Identity.Account.DeepAccountIdHash.Span, accountId))
+            throw new CryptographicException(
+                "Restored DID2 authority has a different account scope.");
         var authorization = DeepIdV2ContactAuthorizationCodec.Verify(
             DeepIdV2ContactAuthorizationCodec.Decode(
                 untrusted.ExactDca1V2.Span), binding, directory);
-        var checkpoint = DeepIdV2AccountDirectoryCodec.Verify(
-            DeepIdV2AccountDirectoryCodec.Decode(untrusted.ExactAdc1V2.Span),
-            binding, directory, [], 2);
-        if (checkpoint.Checkpoint.CheckpointGeneration != 0 ||
-            checkpoint.Checkpoint.PredecessorCheckpointHash.Span
-                .IndexOfAnyExcept((byte)0) >= 0)
-            throw new CryptographicException(
-                "Restored DID2 contact checkpoint is not genesis.");
         return new(binding, directory, authorization, checkpoint);
     }
 
-    private static byte[] Encode(ReadOnlySpan<byte> dmd,
+    private static byte[] Encode(ReadOnlySpan<byte> dpa,
+        ReadOnlySpan<byte> drs, ReadOnlySpan<byte> dpd,
+        ReadOnlySpan<byte> dmd,
         ReadOnlySpan<byte> did, ReadOnlySpan<byte> dab,
         ReadOnlySpan<byte> dca, ReadOnlySpan<byte> adc)
     {
-        if (dmd.Length is < 1 or > MaximumDmd1Length ||
+        if (dpa.Length != 644 ||
+            drs.Length is < 1 or > MaximumDrs1Length ||
+            dpd.Length != 776 ||
+            dmd.Length is < 1 or > MaximumDmd1Length ||
             did.Length != DeepIdV2Codec.Did2Length ||
             dab.Length != DeepIdV2Codec.Dab2Length ||
             dca.Length != DeepIdV2ContactAuthorizationCodec.CanonicalLength ||
             adc.Length != DeepIdV2AccountDirectoryCodec.CanonicalLength)
             throw new InvalidDataException("DID2 genesis contact artifact length is invalid.");
-        var result = new byte[checked(HeaderLength + dmd.Length + did.Length +
-            dab.Length + dca.Length + adc.Length)];
+        var result = new byte[checked(HeaderLength + dpa.Length + drs.Length +
+            dpd.Length + dmd.Length + did.Length + dab.Length +
+            dca.Length + adc.Length)];
         Magic.CopyTo(result, 0);
         BinaryPrimitives.WriteUInt16BigEndian(result.AsSpan(4), 2);
-        var lengths = new[] { dmd.Length, did.Length, dab.Length, dca.Length,
-            adc.Length };
+        var lengths = new[] { dpa.Length, drs.Length, dpd.Length, dmd.Length,
+            did.Length, dab.Length, dca.Length, adc.Length };
         for (var index = 0; index < lengths.Length; index++)
             BinaryPrimitives.WriteUInt32BigEndian(result.AsSpan(8 + index * 4),
                 checked((uint)lengths[index]));
         var offset = HeaderLength;
+        dpa.CopyTo(result.AsSpan(offset)); offset += dpa.Length;
+        drs.CopyTo(result.AsSpan(offset)); offset += drs.Length;
+        dpd.CopyTo(result.AsSpan(offset)); offset += dpd.Length;
         dmd.CopyTo(result.AsSpan(offset)); offset += dmd.Length;
         did.CopyTo(result.AsSpan(offset)); offset += did.Length;
         dab.CopyTo(result.AsSpan(offset)); offset += dab.Length;
@@ -183,34 +200,46 @@ internal sealed class ProtectedDeepIdV2GenesisContactStore
             BinaryPrimitives.ReadUInt16BigEndian(encoded[4..]) != 2 ||
             encoded.Slice(6, 2).IndexOfAnyExcept((byte)0) >= 0)
             throw new InvalidDataException("Protected DID2 contact record is malformed.");
-        Span<int> lengths = stackalloc int[5];
+        Span<int> lengths = stackalloc int[8];
         for (var index = 0; index < lengths.Length; index++)
             lengths[index] = checked((int)BinaryPrimitives.ReadUInt32BigEndian(
                 encoded.Slice(8 + index * 4, 4)));
-        if (lengths[0] is < 1 or > MaximumDmd1Length ||
-            lengths[1] != DeepIdV2Codec.Did2Length ||
-            lengths[2] != DeepIdV2Codec.Dab2Length ||
-            lengths[3] != DeepIdV2ContactAuthorizationCodec.CanonicalLength ||
-            lengths[4] != DeepIdV2AccountDirectoryCodec.CanonicalLength ||
+        if (lengths[0] != 644 ||
+            lengths[1] is < 1 or > MaximumDrs1Length ||
+            lengths[2] != 776 ||
+            lengths[3] is < 1 or > MaximumDmd1Length ||
+            lengths[4] != DeepIdV2Codec.Did2Length ||
+            lengths[5] != DeepIdV2Codec.Dab2Length ||
+            lengths[6] != DeepIdV2ContactAuthorizationCodec.CanonicalLength ||
+            lengths[7] != DeepIdV2AccountDirectoryCodec.CanonicalLength ||
             encoded.Length != checked(HeaderLength + lengths.ToArray().Sum()))
             throw new InvalidDataException("Protected DID2 contact record has a hostile size.");
         var offset = HeaderLength;
-        var dmd = encoded.Slice(offset, lengths[0]).ToArray(); offset += lengths[0];
-        var did = encoded.Slice(offset, lengths[1]).ToArray(); offset += lengths[1];
-        var dab = encoded.Slice(offset, lengths[2]).ToArray(); offset += lengths[2];
-        var dca = encoded.Slice(offset, lengths[3]).ToArray(); offset += lengths[3];
-        var adc = encoded.Slice(offset, lengths[4]).ToArray();
+        var dpa = encoded.Slice(offset, lengths[0]).ToArray(); offset += lengths[0];
+        var drs = encoded.Slice(offset, lengths[1]).ToArray(); offset += lengths[1];
+        var dpd = encoded.Slice(offset, lengths[2]).ToArray(); offset += lengths[2];
+        var dmd = encoded.Slice(offset, lengths[3]).ToArray(); offset += lengths[3];
+        var did = encoded.Slice(offset, lengths[4]).ToArray(); offset += lengths[4];
+        var dab = encoded.Slice(offset, lengths[5]).ToArray(); offset += lengths[5];
+        var dca = encoded.Slice(offset, lengths[6]).ToArray(); offset += lengths[6];
+        var adc = encoded.Slice(offset, lengths[7]).ToArray();
         try
         {
+            _ = IdentityCodec.DecodeAccountCertificate(dpa);
+            _ = IdentityCodec.DecodeRevocationSnapshot(drs);
+            _ = IdentityCodec.DecodeDeviceCertificate(dpd);
             _ = ApplicationCoreCodec.DecodeDmd1(dmd);
             _ = DeepIdV2Codec.DecodeDid2(did);
             _ = DeepIdV2Codec.DecodeDab2(dab);
             _ = DeepIdV2ContactAuthorizationCodec.Decode(dca);
             _ = DeepIdV2AccountDirectoryCodec.Decode(adc);
-            return new(dmd, did, dab, dca, adc);
+            return new(dpa, drs, dpd, dmd, did, dab, dca, adc);
         }
         finally
         {
+            CryptographicOperations.ZeroMemory(dpa);
+            CryptographicOperations.ZeroMemory(drs);
+            CryptographicOperations.ZeroMemory(dpd);
             CryptographicOperations.ZeroMemory(dmd);
             CryptographicOperations.ZeroMemory(did);
             CryptographicOperations.ZeroMemory(dab);
@@ -230,16 +259,24 @@ internal sealed record VerifiedDeepIdV2GenesisContactEvidence(
 
 internal sealed class UntrustedDeepIdV2GenesisContactEvidence
 {
+    private readonly byte[] dpa;
+    private readonly byte[] drs;
+    private readonly byte[] dpd;
     private readonly byte[] dmd;
     private readonly byte[] did;
     private readonly byte[] dab;
     private readonly byte[] dca;
     private readonly byte[] adc;
 
-    internal UntrustedDeepIdV2GenesisContactEvidence(ReadOnlySpan<byte> dmd,
+    internal UntrustedDeepIdV2GenesisContactEvidence(ReadOnlySpan<byte> dpa,
+        ReadOnlySpan<byte> drs, ReadOnlySpan<byte> dpd,
+        ReadOnlySpan<byte> dmd,
         ReadOnlySpan<byte> did, ReadOnlySpan<byte> dab,
         ReadOnlySpan<byte> dca, ReadOnlySpan<byte> adc)
     {
+        this.dpa = dpa.ToArray();
+        this.drs = drs.ToArray();
+        this.dpd = dpd.ToArray();
         this.dmd = dmd.ToArray();
         this.did = did.ToArray();
         this.dab = dab.ToArray();
@@ -247,6 +284,9 @@ internal sealed class UntrustedDeepIdV2GenesisContactEvidence
         this.adc = adc.ToArray();
     }
 
+    internal ReadOnlyMemory<byte> ExactDpa1 => dpa.ToArray();
+    internal ReadOnlyMemory<byte> ExactDrs1 => drs.ToArray();
+    internal ReadOnlyMemory<byte> ExactDpd1 => dpd.ToArray();
     internal ReadOnlyMemory<byte> ExactDmd1 => dmd.ToArray();
     internal ReadOnlyMemory<byte> ExactDid2 => did.ToArray();
     internal ReadOnlyMemory<byte> ExactDab2 => dab.ToArray();

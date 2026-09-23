@@ -47,6 +47,12 @@ public sealed class ProtectedDeepIdV2GenesisContactStoreTests
             checkpoint, default);
         var restored = await store.ReadUntrustedAsync(default);
         Assert.NotNull(restored);
+        Assert.Equal(account.CanonicalDpa1.ToArray(),
+            restored.ExactDpa1.ToArray());
+        Assert.Equal(account.CanonicalDrs1.ToArray(),
+            restored.ExactDrs1.ToArray());
+        Assert.Equal(verifiedDevice.Certificate.CanonicalBytes.ToArray(),
+            restored.ExactDpd1.ToArray());
         Assert.Equal(directory.Head.Record.CanonicalBytes.ToArray(),
             restored.ExactDmd1.ToArray());
         Assert.Equal(binding.Head.DeepId.CanonicalBytes.ToArray(),
@@ -58,7 +64,7 @@ public sealed class ProtectedDeepIdV2GenesisContactStoreTests
         Assert.Equal(checkpoint.Checkpoint.CanonicalBytes.ToArray(),
             restored.ExactAdc1V2.ToArray());
         using var verifier = DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess();
-        var verifiedRestore = await store.ReadVerifiedAsync(closure, 1,
+        var verifiedRestore = await store.ReadVerifiedAsync(1_900_000_300, 1,
             verifier, default);
         Assert.NotNull(verifiedRestore);
         Assert.Equal(binding.Head.Record.CanonicalBytes.ToArray(),
@@ -73,9 +79,18 @@ public sealed class ProtectedDeepIdV2GenesisContactStoreTests
         otherNetwork[0] ^= 1;
         Assert.Null(await new ProtectedDeepIdV2GenesisContactStore(storage,
             otherNetwork, accountId).ReadUntrustedAsync(default));
+        using var original = await storage.ReadOwnedAsync(
+            ContactSlot(network, accountId));
+        Assert.NotNull(original);
+        var copiedRecord = new byte[original.Length];
+        original.CopyTo(copiedRecord);
+        using var wrongScopeStorage = new InMemoryDeepSecureStorage();
+        await wrongScopeStorage.WriteBatchAsync(
+            [new DeepSecureStorageWrite(
+                ContactSlot(otherNetwork, accountId), copiedRecord)]);
         await Assert.ThrowsAsync<System.Security.Cryptography.CryptographicException>(
-            () => new ProtectedDeepIdV2GenesisContactStore(storage,
-                otherNetwork, accountId).ReadVerifiedAsync(closure, 1,
+            () => new ProtectedDeepIdV2GenesisContactStore(wrongScopeStorage,
+                otherNetwork, accountId).ReadVerifiedAsync(1_900_000_300, 1,
                 verifier, default).AsTask());
 
         var otherBinding = recovery.AuthorGenesisDab2(phrase, closure, 1);
@@ -90,6 +105,12 @@ public sealed class ProtectedDeepIdV2GenesisContactStoreTests
                 otherAuthorization, otherCheckpoint, default).AsTask());
         Assert.Equal(binding.Head.Record.CanonicalBytes.ToArray(),
             (await store.ReadUntrustedAsync(default))!.ExactDab2.ToArray());
+        recovery.Dispose();
+        phrase.Dispose();
+        var afterAuthorityDeletion = await store.ReadVerifiedAsync(
+            1_900_000_300, 1, verifier, default);
+        Assert.Equal(binding.Head.Record.CanonicalBytes.ToArray(),
+            afterAuthorityDeletion!.Binding.Record.CanonicalBytes.ToArray());
     }
 
     [Fact]
@@ -98,17 +119,19 @@ public sealed class ProtectedDeepIdV2GenesisContactStoreTests
         using var storage = new InMemoryDeepSecureStorage();
         var network = Enumerable.Repeat((byte)1, 16).ToArray();
         var accountId = Enumerable.Repeat((byte)2, 32).ToArray();
-        var scope = network.Concat(accountId).ToArray();
-        var slot = "deep.store.v2." + Convert.ToHexStringLower(
-            System.Security.Cryptography.SHA256.HashData(scope)) +
-            ".genesis-contact";
         await storage.WriteBatchAsync(
-            [new DeepSecureStorageWrite(slot, "DGC1"u8.ToArray())]);
+            [new DeepSecureStorageWrite(ContactSlot(network, accountId),
+                "DGC1"u8.ToArray())]);
         var store = new ProtectedDeepIdV2GenesisContactStore(storage,
             network, accountId);
         await Assert.ThrowsAsync<InvalidDataException>(
             () => store.ReadUntrustedAsync(default).AsTask());
     }
+
+    private static string ContactSlot(byte[] network, byte[] accountId) =>
+        "deep.store.v2." + Convert.ToHexStringLower(
+            System.Security.Cryptography.SHA256.HashData(
+                network.Concat(accountId).ToArray())) + ".genesis-contact";
 
     private static bool SupportedProvider() =>
         OperatingSystem.IsWindows() &&
