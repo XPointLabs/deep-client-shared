@@ -39,6 +39,16 @@ public sealed class ProtectedDeepIdV2GenesisContactStoreTests
             1_900_000_300);
         var store = new ProtectedDeepIdV2GenesisContactStore(storage,
             network, accountId);
+        var phraseStore = new ProtectedDeepIdV2RecoveryPhraseStore(storage,
+            network, accountId);
+        using (var unrelatedPhrase = DeepRecoveryV1.Generate())
+            await Assert.ThrowsAsync<System.Security.Cryptography.CryptographicException>(
+                () => phraseStore.WriteVerifiedAsync(unrelatedPhrase,
+                    default).AsTask());
+        await phraseStore.WriteVerifiedAsync(phrase, default);
+        using (var retained = await phraseStore.ReadVerifiedAsync(default))
+            Assert.Equal(phrase.CanonicalUtf8Length,
+                retained!.CanonicalUtf8Length);
 
         Assert.Null(await store.ReadUntrustedAsync(default));
         await store.WriteVerifiedAsync(binding.Head, authorization,
@@ -110,10 +120,20 @@ public sealed class ProtectedDeepIdV2GenesisContactStoreTests
         await Assert.ThrowsAsync<System.Security.Cryptography.CryptographicException>(
             () => bootstrap.ReadVerifiedAsync(1_900_000_300, 1,
                 verifier, default).AsTask());
+        await Assert.ThrowsAsync<System.Security.Cryptography.CryptographicException>(
+            () => phraseStore.DeleteAfterVerifiedBootstrapAsync(
+                1_900_000_300, 1, verifier, default).AsTask());
         using (var completed = await bootstrap.CommitAsync(device, binding.Head,
             authorization, checkpoint, 1_900_000_300, 1, verifier, default))
             Assert.Equal(binding.Head.Record.CanonicalBytes.ToArray(),
                 completed.PublicEvidence.Binding.Record.CanonicalBytes.ToArray());
+        await phraseStore.DeleteAfterVerifiedBootstrapAsync(
+            1_900_000_300, 1, verifier, default);
+        await phraseStore.DeleteAfterVerifiedBootstrapAsync(
+            1_900_000_300, 1, verifier, default);
+        Assert.Null(await phraseStore.ReadVerifiedAsync(default));
+        await Assert.ThrowsAsync<System.Security.Cryptography.CryptographicException>(
+            () => phraseStore.WriteVerifiedAsync(phrase, default).AsTask());
         using var secretFirstStorage = new InMemoryDeepSecureStorage();
         var secretFirstStore = new ProtectedDeepIdV2GenesisDeviceSecretsStore(
             secretFirstStorage, network, accountId);

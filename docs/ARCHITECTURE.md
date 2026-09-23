@@ -145,6 +145,12 @@ two-slot bootstrap boundary now writes secrets first, writes the public closure
 second and returns local authority only after a full verified read-back.
 Either one-slot partial state fails closed; retry with the same exact inputs
 completes it. It does not itself retain the phrase or implement account UI.
+A separate V2-only protected phrase slot now checks the 24-word phrase against
+the exact account ID. Explicit removal first requires a fresh verified
+two-slot bootstrap, then leaves an add-only scoped deletion marker so stale
+writers cannot restore the local phrase. Reads clean up any phrase bytes left
+by a crash between the marker and physical deletion. MAUI settings/reveal,
+account reset and cross-process lifecycle composition remain open.
 This is only a storage boundary:
 the V2 account schema, atomic creation/restore, namespace purge, MAUI wiring
 and physical device E2E remain open. No V1 contact slot is read as V2.
