@@ -48,7 +48,7 @@ internal sealed class DeepIdV2OfflineGenesisIssuer
             GenesisIssuanceStoreNamespace.StoreV2);
         var issued = await Dnp1IdentityAuthoringV1.IssueGenesisDeviceAsync(
             recovery, account, deviceSecrets, issuance,
-            checked(trustedUnixSeconds + 1),
+            trustedUnixSeconds,
             checked(trustedUnixSeconds + DeviceLifetimeSeconds),
             checked(trustedUnixSeconds + DeviceRetentionSeconds),
             cancellationToken).ConfigureAwait(false);
@@ -60,17 +60,17 @@ internal sealed class DeepIdV2OfflineGenesisIssuer
         var binding = recovery.AuthorGenesisDab2(
             phrase, closure, deploymentProfileId);
         var directory = recovery.AuthorGenesisDmd1(closure,
-            checked(trustedUnixSeconds + 2));
+            trustedUnixSeconds);
         var authorization = recovery.AuthorGenesisDca1V2(binding, directory,
-            verifiedDevice, checked(trustedUnixSeconds + 3));
+            verifiedDevice, trustedUnixSeconds);
         var checkpoint = recovery.AuthorGenesisAdc1V2(binding, directory,
-            checked(trustedUnixSeconds + 3));
+            trustedUnixSeconds);
         await new ProtectedDeepIdV2RecoveryPhraseStore(storage,
             networkId, accountId).WriteVerifiedAsync(phrase, cancellationToken)
             .ConfigureAwait(false);
         var verified = await new ProtectedDeepIdV2GenesisBootstrap(storage,
             networkId, accountId).CommitAsync(deviceSecrets, binding.Head,
-            authorization, checkpoint, checked(trustedUnixSeconds + 3),
+            authorization, checkpoint, trustedUnixSeconds,
             deploymentProfileId, mlDsa65, cancellationToken)
             .ConfigureAwait(false);
         return new(accountId, verified);

@@ -139,8 +139,7 @@ re-verifying the same hedged DAB2, so restoration cannot silently reissue it.
 An adjacent V2-only add-only slot separately protects the four genesis device
 secrets; it writes only against a verified DPD1 and restores only if the derived
 public keys, device ID, revocation handle and account scope still match that
-DPD1. Neither slot reads V1 state. The complete account bootstrap still needs
-V2-only retained-phrase/reset ownership before composition into MAUI. A
+DPD1. Neither slot reads V1 state. A
 two-slot bootstrap boundary now writes secrets first, writes the public closure
 second and returns local authority only after a full verified read-back.
 Either one-slot partial state fails closed; retry with the same exact inputs
@@ -149,12 +148,12 @@ A separate V2-only protected phrase slot now checks the 24-word phrase against
 the exact account ID. Explicit removal first requires a fresh verified
 two-slot bootstrap, then leaves an add-only scoped deletion marker so stale
 writers cannot restore the local phrase. Reads clean up any phrase bytes left
-by a crash between the marker and physical deletion. MAUI settings/reveal,
-account reset and cross-process lifecycle composition remain open.
+by a crash between the marker and physical deletion. MAUI settings/reveal and
+app-level account lifecycle composition remain open.
 The secure-storage contract now has an exact `deep.store.v2.` namespace purge,
 implemented by the in-memory and journaled production adapters. The purge is
-idempotent and leaves V1 and unrelated slots untouched; a new V2 account owner
-must call it during local reset, which is not yet wired.
+idempotent and leaves V1 and unrelated slots untouched. The isolated V2 owner
+uses it during explicit local reset; MAUI reset wiring remains open.
 DXP1 device issuance persistence now accepts an explicit store-generation
 selection. Existing V1 callers keep the V1 namespace; a DID2 bootstrap selects
 V2 and never reads the V1 profile/nonce/state slots. The focused DID2 fixture
@@ -164,21 +163,20 @@ hedged ML-DSA-backed DID2/DAB2, DMD1/DCA1 V2/ADC1 V2, V2 phrase custody,
 V2 DXP journal and verified two-slot bootstrap. Its test creates one account,
 opens the exact same DID2/DAB2 from a new bootstrap instance, deletes the
 phrase, and verifies the same binding again. This is not the release account
-owner: it has no current-account index, SQL generation, display name, reset
-composition, UI, contact transport or physical-device E2E.
-The remaining account-index work must explicitly resume or reset a crash
-between phrase retention, DXP issuance and the two-slot commit. It must not
-invent a new DAB2 when an exact durable/public winner already exists, and must
-not expose a partial account as current.
+owner: it has no SQL generation, UI, contact transport or physical-device E2E.
 An isolated add-only V2 current-account pointer now binds a canonical display
 name, network and account ID only after a fresh verified bootstrap. Reads
 reverify the entire bootstrap; a partial account cannot be published and a
-different name/account cannot replace the winner. This is not yet the MAUI
-account owner: pre-index orphan cleanup, cross-process create serialization,
-new SQL generation and UI composition remain open.
-This is only a storage boundary:
-the V2 account schema, atomic creation/restore, namespace purge, MAUI wiring
-and physical device E2E remain open. No V1 contact slot is read as V2.
+different name/account cannot replace the winner. An isolated protected-state
+owner now acquires an OS file lease, writes creation intent before issuing
+secrets, and publishes the index only after verified bootstrap. A crash before
+publication is exposed as interrupted creation, never silently resumed or
+treated as current. Explicit V2 reset under the same lease purges the entire
+local V2 namespace, then permits a fresh account; a real journaled-store reopen
+test verifies the same DID2/DAB2 and retained phrase after close/reopen.
+This is still not the MAUI account owner: app-private lease-path provisioning,
+new SQL account generation, UI/reset composition, directory/contact/messaging
+cutover and physical E2E remain open. No V1 contact slot is read as V2.
 
 The clean MAUI account owner opens DMB1 with a distinct protected SQLCipher
 key scoped to the account's store instance. It refuses an existing database
