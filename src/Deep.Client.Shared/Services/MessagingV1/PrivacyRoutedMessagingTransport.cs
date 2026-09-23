@@ -246,6 +246,7 @@ internal sealed class PrivacyRoutedMessagingTransport : IMessagingV1PrivacyTrans
         }
     }
 
+#if DEEP_CLEAN_PRODUCTION
     internal async ValueTask<MessagingV1EstablishedDeliveryReceipt>
         SendRecoveredEstablishedAsync(
             RecoveredDirectSend recovered,
@@ -286,6 +287,7 @@ internal sealed class PrivacyRoutedMessagingTransport : IMessagingV1PrivacyTrans
             CryptographicOperations.ZeroMemory(exactDpe2);
         }
     }
+#endif
 
     internal Dpe2Record ValidateEstablishedEnvelope(
         ReadOnlySpan<byte> exactDpe2,
