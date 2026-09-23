@@ -15,7 +15,7 @@ public sealed partial class SqliteDeepMailboxStore :
     IDisposable
 {
     private const int ApplicationId = 0x444D4231; // DMB1
-    private const int SchemaVersion = 3;
+    private const int SchemaVersion = 4;
     private readonly string _connectionString;
     private readonly byte[] encryptionKey;
     private readonly SemaphoreSlim _databaseGate = new(1, 1);
@@ -181,6 +181,24 @@ public sealed partial class SqliteDeepMailboxStore :
                 FOREIGN KEY(conversation_id, logical_message_id, author_device_id)
                     REFERENCES authenticated_dmc2_inbox(conversation_id, logical_message_id, author_device_id)
                     ON DELETE RESTRICT);
+            CREATE TABLE direct_sender_sequences (
+                conversation_id BLOB NOT NULL CHECK(length(conversation_id) = 32),
+                author_device_id BLOB NOT NULL CHECK(length(author_device_id) = 32),
+                next_sequence INTEGER NOT NULL CHECK(next_sequence >= 3),
+                PRIMARY KEY(conversation_id, author_device_id));
+            CREATE TABLE direct_text_outbox (
+                conversation_id BLOB NOT NULL CHECK(length(conversation_id) = 32),
+                logical_message_id BLOB NOT NULL CHECK(length(logical_message_id) = 32),
+                author_device_id BLOB NOT NULL CHECK(length(author_device_id) = 32),
+                recipient_account_id BLOB NOT NULL CHECK(length(recipient_account_id) = 32),
+                recipient_device_id BLOB NOT NULL CHECK(length(recipient_device_id) = 32),
+                sender_sequence INTEGER NOT NULL CHECK(sender_sequence >= 3),
+                operation_id BLOB NOT NULL UNIQUE CHECK(length(operation_id) = 32),
+                exact_dmc2_hash BLOB NOT NULL CHECK(length(exact_dmc2_hash) = 32),
+                exact_dmc2 BLOB NOT NULL CHECK(length(exact_dmc2) BETWEEN 285 AND 16668),
+                created_at INTEGER NOT NULL CHECK(created_at > 0),
+                PRIMARY KEY(conversation_id, logical_message_id, author_device_id),
+                UNIQUE(conversation_id, author_device_id, sender_sequence));
             CREATE TABLE mailbox_credential_scopes (
                 scope_id BLOB NOT NULL PRIMARY KEY CHECK(length(scope_id) = 32),
                 account_scope BLOB NOT NULL CHECK(length(account_scope) = 32),
@@ -333,7 +351,8 @@ public sealed partial class SqliteDeepMailboxStore :
         foreach (var table in new[] {
                      "transport_outbox_items", "transport_outbox_attempts",
                      "authenticated_dmc2_inbox_owner", "authenticated_dmc2_inbox",
-                     "authenticated_dmc2_inbox_forks", "mailbox_credential_scopes",
+                     "authenticated_dmc2_inbox_forks", "direct_sender_sequences",
+                     "direct_text_outbox", "mailbox_credential_scopes",
                      "mailbox_credential_epochs", "mailbox_credential_grants",
                      "mailbox_replay_counters", "mailbox_prepared_batches",
                      "mailbox_prepared_batch_targets" })
@@ -355,17 +374,22 @@ public sealed partial class SqliteDeepMailboxStore :
     {
         using var count = connection.CreateCommand();
         count.Transaction = transaction;
-        count.CommandText = "SELECT (SELECT count(*) FROM authenticated_dmc2_inbox_owner),(SELECT count(*) FROM authenticated_dmc2_inbox),(SELECT count(*) FROM authenticated_dmc2_inbox_forks);";
+        count.CommandText = "SELECT (SELECT count(*) FROM authenticated_dmc2_inbox_owner),(SELECT count(*) FROM authenticated_dmc2_inbox),(SELECT count(*) FROM authenticated_dmc2_inbox_forks),(SELECT count(*) FROM direct_text_outbox),(SELECT count(*) FROM direct_sender_sequences);";
         using (var reader = count.ExecuteReader())
         {
             if (!reader.Read()) throw ResetRequired("Clean direct inbox state is missing.");
             var ownerCount = reader.GetInt64(0);
             var eventCount = reader.GetInt64(1);
             var forkCount = reader.GetInt64(2);
+            var outboundCount = reader.GetInt64(3);
+            var senderCount = reader.GetInt64(4);
             if (ownerCount is < 0 or > 1 ||
                 eventCount is < 0 or > 100_000 ||
                 forkCount < 0 || forkCount > eventCount ||
-                ownerCount == 0 && eventCount != 0)
+                outboundCount is < 0 or > 100_000 ||
+                senderCount is < 0 or > 100_000 ||
+                ownerCount == 0 &&
+                    (eventCount != 0 || outboundCount != 0 || senderCount != 0))
                 throw ResetRequired("Clean direct inbox ownership or cardinality is invalid.");
         }
         using var foreignKeys = connection.CreateCommand();

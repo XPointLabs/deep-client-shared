@@ -385,6 +385,23 @@ public sealed class DeepDirectMessagingStorageFacade : IAsyncDisposable
 #endif
 
 #if DEEP_CLEAN_PRODUCTION
+    public ValueTask<DirectTextOutboxEntry?> TryStageDirectTextAsync(
+        DeepDirectMessagingVerifiedSessionBinding? verifiedSession,
+        SqliteDeepMailboxStore inbox,
+        string text,
+        DateTimeOffset createdAt,
+        CancellationToken cancellationToken = default) =>
+        CurrentOwner.TryStageDirectTextAsync(
+            verifiedSession, inbox, text, createdAt, cancellationToken);
+
+    public ValueTask<DirectTextOutboxEntry?> TryReadDirectTextAsync(
+        DeepDirectMessagingVerifiedSessionBinding? verifiedSession,
+        SqliteDeepMailboxStore inbox,
+        ReadOnlyMemory<byte> logicalMessageId,
+        CancellationToken cancellationToken = default) =>
+        CurrentOwner.TryReadDirectTextAsync(
+            verifiedSession, inbox, logicalMessageId, cancellationToken);
+
     public ValueTask<ExactDpe2SendSuccessCapability?>
         TryCommitEstablishedSendAsync(
             DeepDirectMessagingVerifiedSessionBinding? verifiedSession,
@@ -2617,6 +2634,57 @@ internal sealed class DeepDirectMessagingStorageOwner : IAsyncDisposable
         {
             gate.Release();
         }
+    }
+
+    internal async ValueTask<DirectTextOutboxEntry?> TryStageDirectTextAsync(
+        DeepDirectMessagingVerifiedSessionBinding? verifiedSession,
+        SqliteDeepMailboxStore inbox,
+        string text,
+        DateTimeOffset createdAt,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(inbox);
+        if (verifiedSession is null) return null;
+        var opened = await TryOpenSessionAsync(
+                verifiedSession, createIfMissing: false, cancellationToken)
+            .ConfigureAwait(false);
+        if (opened is null) return null;
+        return await inbox.StageDirectTextAsync(
+                localAuthority.NetworkId.ToArray(),
+                localAuthority.AccountId.ToArray(),
+                localAuthority.AccountGeneration,
+                localAuthority.DeviceId.ToArray(),
+                verifiedSession.ConversationId,
+                verifiedSession.RemoteAccountId,
+                verifiedSession.RemoteDeviceId,
+                text,
+                createdAt,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    internal async ValueTask<DirectTextOutboxEntry?> TryReadDirectTextAsync(
+        DeepDirectMessagingVerifiedSessionBinding? verifiedSession,
+        SqliteDeepMailboxStore inbox,
+        ReadOnlyMemory<byte> logicalMessageId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(inbox);
+        if (verifiedSession is null) return null;
+        var opened = await TryOpenSessionAsync(
+                verifiedSession, createIfMissing: false, cancellationToken)
+            .ConfigureAwait(false);
+        if (opened is null) return null;
+        return await inbox.ReadDirectTextAsync(
+                localAuthority.NetworkId.ToArray(),
+                localAuthority.AccountId.ToArray(),
+                localAuthority.AccountGeneration,
+                verifiedSession.ConversationId,
+                logicalMessageId,
+                verifiedSession.RemoteAccountId,
+                verifiedSession.RemoteDeviceId,
+                cancellationToken)
+            .ConfigureAwait(false);
     }
 
     /// <summary>

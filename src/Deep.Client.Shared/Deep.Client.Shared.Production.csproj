@@ -51,6 +51,7 @@
     <Compile Include="Persistence\ScopedMailboxCredentialRepository.cs" />
     <Compile Include="Persistence\ScopedMailboxCredentialValidator.cs" />
     <Compile Include="Persistence\SqliteDeepMailboxStore.cs" />
+    <Compile Include="Persistence\SqliteDeepMailboxStore.DirectOutbox.cs" />
     <Compile Include="Persistence\SqliteDeepMailboxStore.CurrentCredentials.cs" />
     <Compile Include="Persistence\SqliteDeepMailboxStore.SemanticInbox.cs" />
     <Compile Include="Persistence\SqliteSessionStore.Mailbox.cs" />
