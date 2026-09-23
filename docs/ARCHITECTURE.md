@@ -117,12 +117,14 @@ structurally valid records never create a publication capability.
 The isolated DID2 directory proof client uses only the exact DPQ2/DPP2
 endpoint and bounded media types defined by the master
 `ACCOUNT-DIRECTORY-TRANSPARENCY-V1.md` specification. It requires an already
-verified DAB2-bound ADL1 V2 query, XPoint authority and protected reader-V2
-LKG before network I/O. A fresh nonce and one boot-stable monotonic request
-window bind the response; only the protocol's full PQ-backed verifier can
-return a freshness capability. This client is not yet composed into MAUI and
-does not persist its returned LKG. DID2 account/store cutover and atomic LKG
-commit remain required before any production use or physical release claim.
+verified DAB2-bound ADL1 V2 query, XPoint authority and a store-restored
+protected reader-V2 LKG before network I/O. A fresh nonce and one boot-stable
+monotonic request window bind the response; only the protocol's full PQ-backed
+verifier can return a freshness capability. The HTTP client now withholds that
+capability until an account-scoped protected store durably compare-exchanges
+the exact next LKG. No production V2 store implements this contract yet, and
+the client is not composed into MAUI. DID2 account/store cutover, durable LKG
+implementation and physical E2E remain required before a release claim.
 
 The clean MAUI account owner opens DMB1 with a distinct protected SQLCipher
 key scoped to the account's store instance. It refuses an existing database

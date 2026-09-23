@@ -9,10 +9,27 @@ using Deep.Protocol.XPointNetworkV1;
 namespace Deep.Client.Shared.Services.AccountDirectoryV2;
 
 /// <summary>
+/// Account-scoped, rollback-protected DID2 head custody. Restore must
+/// re-authenticate the persisted exact ADH1 against the verified authority.
+/// Commit is an atomic compare/exchange against expectedHead and must durably
+/// flush the next verified head before returning; conflicts fail closed.
+/// </summary>
+public interface IDeepIdV2DirectoryProtectedLkgStore
+{
+    ValueTask<AccountDirectoryProtectedLkg> RestoreAsync(
+        VerifiedXPointNetworkAuthority authority,
+        CancellationToken cancellationToken);
+
+    ValueTask CommitVerifiedAsync(AccountDirectoryProtectedLkg expectedHead,
+        VerifiedDeepIdV2DirectoryFreshness verified,
+        CancellationToken cancellationToken);
+}
+
+/// <summary>
 /// Bounded DID2-only Registry exchange. Neither a successful HTTP response nor
 /// DPP2 decoding grants authority: only the independent protocol verifier can
-/// return a freshness capability. The caller persists NextProtectedLkg before
-/// using that capability for a later directory operation.
+/// return a freshness capability, and this client releases it only after the
+/// exact next protected head has been durably committed.
 /// </summary>
 public sealed class DeepIdV2DirectoryProofClient : IDisposable
 {
@@ -22,14 +39,18 @@ public sealed class DeepIdV2DirectoryProofClient : IDisposable
     private readonly HttpServiceRequestTransport transport;
     private readonly IOnionMonotonicClock clock;
     private readonly IDeepMlDsa65Verifier mlDsa65;
+    private readonly IDeepIdV2DirectoryProtectedLkgStore protectedLkgStore;
     private int disposed;
 
     public DeepIdV2DirectoryProofClient(HttpServiceRequestTransport transport,
-        IOnionMonotonicClock clock, IDeepMlDsa65Verifier mlDsa65)
+        IOnionMonotonicClock clock, IDeepMlDsa65Verifier mlDsa65,
+        IDeepIdV2DirectoryProtectedLkgStore protectedLkgStore)
     {
         this.transport = transport ?? throw new ArgumentNullException(nameof(transport));
         this.clock = clock ?? throw new ArgumentNullException(nameof(clock));
         this.mlDsa65 = mlDsa65 ?? throw new ArgumentNullException(nameof(mlDsa65));
+        this.protectedLkgStore = protectedLkgStore ??
+            throw new ArgumentNullException(nameof(protectedLkgStore));
     }
 
     public static HttpServiceRequestTransportOptions CreateTransportOptions(
@@ -53,7 +74,6 @@ public sealed class DeepIdV2DirectoryProofClient : IDisposable
         ParsedAdl1V2 lookup,
         VerifiedDab2 binding,
         VerifiedXPointNetworkAuthority authority,
-        AccountDirectoryProtectedLkg protectedLkg,
         ushort deploymentProfileId,
         ushort supportedReader,
         CancellationToken cancellationToken = default)
@@ -62,7 +82,6 @@ public sealed class DeepIdV2DirectoryProofClient : IDisposable
         ArgumentNullException.ThrowIfNull(lookup);
         ArgumentNullException.ThrowIfNull(binding);
         ArgumentNullException.ThrowIfNull(authority);
-        ArgumentNullException.ThrowIfNull(protectedLkg);
         cancellationToken.ThrowIfCancellationRequested();
 
         var query = VerifiedDeepIdV2DirectoryQuery.VerifyBinding(lookup, binding);
@@ -71,6 +90,10 @@ public sealed class DeepIdV2DirectoryProofClient : IDisposable
                 query.NetworkId.Span, authority.NetworkId.Span))
             throw new CryptographicException(
                 "The DID2 lookup and verified network authority differ.");
+        var protectedLkg = await protectedLkgStore.RestoreAsync(authority,
+                cancellationToken).ConfigureAwait(false) ??
+            throw new CryptographicException(
+                "The protected DID2 directory floor is absent.");
         if (protectedLkg.Head.MinimumReader < 2 ||
             protectedLkg.Head.NetworkId.Length != authority.NetworkId.Length ||
             !CryptographicOperations.FixedTimeEquals(
@@ -115,10 +138,13 @@ public sealed class DeepIdV2DirectoryProofClient : IDisposable
                 responseReceived.SampleSeconds, current.SampleSeconds);
             var wire = DeepIdV2DirectoryProofWireCodec.DecodeResponse(
                 response.Body.Span, exactRequest);
-            return DeepIdV2DirectoryCurrentProofVerifier.VerifyGenesis(
+            var verified = DeepIdV2DirectoryCurrentProofVerifier.VerifyGenesis(
                 authority, wire.ExactAdh1, wire.ExactDtt1, wire.ExactAdp1V2,
                 nonce, query, window, protectedLkg, deploymentProfileId,
                 supportedReader, mlDsa65);
+            await protectedLkgStore.CommitVerifiedAsync(protectedLkg,
+                verified, cancellationToken).ConfigureAwait(false);
+            return verified;
         }
         finally
         {
