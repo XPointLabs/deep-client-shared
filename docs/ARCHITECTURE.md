@@ -126,6 +126,17 @@ the exact next LKG. No production V2 store implements this contract yet, and
 the client is not composed into MAUI. DID2 account/store cutover, durable LKG
 implementation and physical E2E remain required before a release claim.
 
+An isolated V2-only protected genesis-contact slot now accepts already-verified
+DAB2, DCA1 V2 and ADC1 V2 capabilities, checks their shared account/binding/
+directory scope, and add-only persists the exact DMD1/DID2/DAB2/DCA1 V2/ADC1 V2
+bytes. Repeated exact writes are idempotent; a different hedged DAB2 cannot
+replace the winner. A raw read is explicitly untrusted; the separate verified
+read requires an already-reconciled DPA1/DRS1/DPD1 closure and a pinned ML-DSA
+verifier, then checks the exact DID2/DAB2/DMD1/DCA1 V2/ADC1 V2 lineage again.
+This is only a storage boundary:
+the V2 account schema, atomic creation/restore, namespace purge, MAUI wiring
+and physical device E2E remain open. No V1 contact slot is read as V2.
+
 The clean MAUI account owner opens DMB1 with a distinct protected SQLCipher
 key scoped to the account's store instance. It refuses an existing database
 without that key or a retained key without the database, and removes the

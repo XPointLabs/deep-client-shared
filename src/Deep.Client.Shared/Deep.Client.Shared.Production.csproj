@@ -38,6 +38,7 @@
     <Compile Include="Persistence\ContactV1\**\*.cs" />
     <Compile Include="Persistence\ClientMailboxStateRepository.cs" />
     <Compile Include="Persistence\DeviceV1\**\*.cs" />
+    <Compile Include="Persistence\DeviceV2\**\*.cs" />
     <Compile Include="Persistence\GroupV1\**\*.cs" />
     <Compile Include="Persistence\MessagingCryptoV1\**\*.cs" />
     <Compile Include="Persistence\MessagingV1\**\*.cs" Exclude="Persistence\MessagingV1\Msg01AuthoritativeTransport.cs" />
