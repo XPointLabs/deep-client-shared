@@ -63,6 +63,7 @@
     <Compile Include="Persistence\TransportOutboxContracts.cs" />
     <Compile Include="Persistence\TransportOutboxStateMachine.cs" />
     <Compile Include="Services\AccountDirectoryV1\**\*.cs" />
+    <Compile Include="Services\AccountDirectoryV2\**\*.cs" />
     <Compile Include="Services\ContactV1\**\*.cs" />
     <Compile Include="Services\GroupV1\**\*.cs" />
     <Compile Include="Services\MessagingV1\**\*.cs" />
