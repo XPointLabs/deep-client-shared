@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Security.Cryptography;
 using System.Text;
+using Deep.Client.Shared.Domain;
 using Deep.Protocol.ApplicationCore;
 
 namespace Deep.Client.Shared.Persistence.DeviceV2;
@@ -13,7 +14,7 @@ internal sealed class ProtectedDeepIdV2CurrentAccountIndex
 {
     private const string Slot = "deep.store.v2.current-account";
     private const int HeaderLength = 56;
-    private const int MaximumNameBytes = 256;
+    private const int MaximumNameBytes = DeepDisplayName.MaxUtf8Bytes;
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
     private readonly IDeepSecureStorage storage;
     private readonly byte[] networkId;
@@ -127,14 +128,7 @@ internal sealed class ProtectedDeepIdV2CurrentAccountIndex
 
     private static string NormalizeName(string displayName)
     {
-        ArgumentNullException.ThrowIfNull(displayName);
-        var normalized = displayName.Trim().Normalize(NormalizationForm.FormC);
-        if (normalized.Length is < 1 or > 64 ||
-            normalized.Any(char.IsControl) ||
-            StrictUtf8.GetByteCount(normalized) > MaximumNameBytes)
-            throw new ArgumentException("The DID2 display name is invalid.",
-                nameof(displayName));
-        return normalized;
+        return DeepDisplayName.Normalize(displayName, nameof(displayName));
     }
 
     private static bool Fixed(ReadOnlySpan<byte> left, ReadOnlySpan<byte> right) =>

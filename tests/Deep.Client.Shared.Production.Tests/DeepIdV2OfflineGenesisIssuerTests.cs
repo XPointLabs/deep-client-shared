@@ -28,6 +28,9 @@ public sealed class DeepIdV2OfflineGenesisIssuerTests
             .CanonicalBytes.ToArray();
         var exactDab2 = created.Verified.PublicEvidence.Binding.Record
             .CanonicalBytes.ToArray();
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => index.PublishVerifiedAsync("Ali\u202Ece", accountId,
+                1_900_000_003, verifier, default).AsTask());
         using (var published = await index.PublishVerifiedAsync(" Alice ",
             accountId, 1_900_000_003, verifier, default))
         {
