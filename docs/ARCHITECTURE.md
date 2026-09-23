@@ -159,6 +159,17 @@ DXP1 device issuance persistence now accepts an explicit store-generation
 selection. Existing V1 callers keep the V1 namespace; a DID2 bootstrap selects
 V2 and never reads the V1 profile/nonce/state slots. The focused DID2 fixture
 uses V2 issuance and proves the V1 profile slot remains absent.
+An isolated offline issuer now composes the protocol's real DPA1/DRS1/DPD1,
+hedged ML-DSA-backed DID2/DAB2, DMD1/DCA1 V2/ADC1 V2, V2 phrase custody,
+V2 DXP journal and verified two-slot bootstrap. Its test creates one account,
+opens the exact same DID2/DAB2 from a new bootstrap instance, deletes the
+phrase, and verifies the same binding again. This is not the release account
+owner: it has no current-account index, SQL generation, display name, reset
+composition, UI, contact transport or physical-device E2E.
+The remaining account-index work must explicitly resume or reset a crash
+between phrase retention, DXP issuance and the two-slot commit. It must not
+invent a new DAB2 when an exact durable/public winner already exists, and must
+not expose a partial account as current.
 This is only a storage boundary:
 the V2 account schema, atomic creation/restore, namespace purge, MAUI wiring
 and physical device E2E remain open. No V1 contact slot is read as V2.
