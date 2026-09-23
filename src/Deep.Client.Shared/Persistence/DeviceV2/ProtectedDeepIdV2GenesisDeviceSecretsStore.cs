@@ -41,7 +41,7 @@ internal sealed class ProtectedDeepIdV2GenesisDeviceSecretsStore
     }
 
     internal async ValueTask WriteVerifiedAsync(
-        OwnedGenesisDeviceSecrets secrets, VerifiedDeviceRelative device,
+        OwnedGenesisDeviceSecrets secrets, VerifiedDevice device,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(secrets);
@@ -88,7 +88,7 @@ internal sealed class ProtectedDeepIdV2GenesisDeviceSecretsStore
     }
 
     internal async ValueTask<OwnedGenesisDeviceSecrets?> ReadVerifiedAsync(
-        VerifiedDeviceRelative device, CancellationToken cancellationToken)
+        VerifiedDevice device, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(device);
         if (!MatchesScope(device))
@@ -125,7 +125,14 @@ internal sealed class ProtectedDeepIdV2GenesisDeviceSecretsStore
         finally { CryptographicOperations.ZeroMemory(encoded); }
     }
 
-    private bool Matches(VerifiedDeviceRelative device,
+    internal async ValueTask<bool> HasRecordAsync(CancellationToken cancellationToken)
+    {
+        using var owned = await storage.ReadOwnedAsync(slot,
+            cancellationToken).ConfigureAwait(false);
+        return owned is not null;
+    }
+
+    private bool Matches(VerifiedDevice device,
         OwnedGenesisDeviceSecrets secrets) =>
         MatchesScope(device) &&
         Fixed(device.Certificate.DeviceId.Span, secrets.DeviceId.Bytes.Span) &&
@@ -136,7 +143,7 @@ internal sealed class ProtectedDeepIdV2GenesisDeviceSecretsStore
         Fixed(device.Certificate.RevocationHandle.Span,
             secrets.RevocationHandle.Bytes.Span);
 
-    private bool MatchesScope(VerifiedDeviceRelative device) =>
+    private bool MatchesScope(VerifiedDevice device) =>
         Fixed(device.Certificate.NetworkId.Span, networkId) &&
         Fixed(device.Certificate.AccountHash.Span, accountId);
 

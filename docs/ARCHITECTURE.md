@@ -140,8 +140,11 @@ An adjacent V2-only add-only slot separately protects the four genesis device
 secrets; it writes only against a verified DPD1 and restores only if the derived
 public keys, device ID, revocation handle and account scope still match that
 DPD1. Neither slot reads V1 state. The complete account bootstrap still needs
-crash reconciliation across these slots and a V2-only retained-phrase/reset
-owner before either is composed into MAUI.
+V2-only retained-phrase/reset ownership before composition into MAUI. A
+two-slot bootstrap boundary now writes secrets first, writes the public closure
+second and returns local authority only after a full verified read-back.
+Either one-slot partial state fails closed; retry with the same exact inputs
+completes it. It does not itself retain the phrase or implement account UI.
 This is only a storage boundary:
 the V2 account schema, atomic creation/restore, namespace purge, MAUI wiring
 and physical device E2E remain open. No V1 contact slot is read as V2.

@@ -1,6 +1,7 @@
 using Deep.Client.Shared.Persistence;
 using Deep.Client.Shared.Persistence.DeviceV1;
 using Deep.Client.Shared.Persistence.DeviceV2;
+using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.Identity;
 
 namespace Deep.Client.Shared.Production.Tests;
@@ -27,20 +28,23 @@ public sealed class ProtectedDeepIdV2GenesisDeviceSecretsStoreTests
             1_900_086_500, 1_900_172_900);
         var verifiedDevice = issued.IssuedDevice?.Verified ??
             throw new InvalidOperationException("Device issuance did not complete.");
+        var closure = ApplicationCoreVerifier.CreateIdentityClosure(
+            verifiedDevice.Identity, [verifiedDevice]);
+        var publicDevice = closure.ActiveDevices.Single();
         var store = new ProtectedDeepIdV2GenesisDeviceSecretsStore(storage,
             network, accountId);
-        Assert.Null(await store.ReadVerifiedAsync(verifiedDevice, default));
+        Assert.Null(await store.ReadVerifiedAsync(publicDevice, default));
         using (var unrelatedDevice = new OwnedGenesisDeviceSecrets())
             await Assert.ThrowsAsync<System.Security.Cryptography.CryptographicException>(
                 () => store.WriteVerifiedAsync(unrelatedDevice,
-                    verifiedDevice, default).AsTask());
-        await store.WriteVerifiedAsync(device, verifiedDevice, default);
-        await store.WriteVerifiedAsync(device, verifiedDevice, default);
+                    publicDevice, default).AsTask());
+        await store.WriteVerifiedAsync(device, publicDevice, default);
+        await store.WriteVerifiedAsync(device, publicDevice, default);
         device.Dispose();
         recovery.Dispose();
         phrase.Dispose();
         using var restored = await store.ReadVerifiedAsync(
-            verifiedDevice, default);
+            publicDevice, default);
         Assert.NotNull(restored);
         Assert.Equal(verifiedDevice.Certificate.DeviceId.ToArray(),
             restored.DeviceId.Bytes.ToArray());
@@ -53,7 +57,7 @@ public sealed class ProtectedDeepIdV2GenesisDeviceSecretsStoreTests
         var wrongScopeStore = new ProtectedDeepIdV2GenesisDeviceSecretsStore(
             storage, network, otherAccountId);
         await Assert.ThrowsAsync<System.Security.Cryptography.CryptographicException>(
-            () => wrongScopeStore.ReadVerifiedAsync(verifiedDevice,
+            () => wrongScopeStore.ReadVerifiedAsync(publicDevice,
                 default).AsTask());
     }
 }

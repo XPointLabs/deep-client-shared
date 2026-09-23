@@ -105,12 +105,36 @@ public sealed class ProtectedDeepIdV2GenesisContactStoreTests
                 otherAuthorization, otherCheckpoint, default).AsTask());
         Assert.Equal(binding.Head.Record.CanonicalBytes.ToArray(),
             (await store.ReadUntrustedAsync(default))!.ExactDab2.ToArray());
+        var bootstrap = new ProtectedDeepIdV2GenesisBootstrap(storage,
+            network, accountId);
+        await Assert.ThrowsAsync<System.Security.Cryptography.CryptographicException>(
+            () => bootstrap.ReadVerifiedAsync(1_900_000_300, 1,
+                verifier, default).AsTask());
+        using (var completed = await bootstrap.CommitAsync(device, binding.Head,
+            authorization, checkpoint, 1_900_000_300, 1, verifier, default))
+            Assert.Equal(binding.Head.Record.CanonicalBytes.ToArray(),
+                completed.PublicEvidence.Binding.Record.CanonicalBytes.ToArray());
+        using var secretFirstStorage = new InMemoryDeepSecureStorage();
+        var secretFirstStore = new ProtectedDeepIdV2GenesisDeviceSecretsStore(
+            secretFirstStorage, network, accountId);
+        await secretFirstStore.WriteVerifiedAsync(device,
+            closure.ActiveDevices.Single(), default);
+        var secretFirstBootstrap = new ProtectedDeepIdV2GenesisBootstrap(
+            secretFirstStorage, network, accountId);
+        await Assert.ThrowsAsync<System.Security.Cryptography.CryptographicException>(
+            () => secretFirstBootstrap.ReadVerifiedAsync(1_900_000_300, 1,
+                verifier, default).AsTask());
+        using (var completed = await secretFirstBootstrap.CommitAsync(device,
+            binding.Head, authorization, checkpoint, 1_900_000_300, 1,
+            verifier, default))
+            Assert.Equal(binding.Head.Record.CanonicalBytes.ToArray(),
+                completed.PublicEvidence.Binding.Record.CanonicalBytes.ToArray());
         recovery.Dispose();
         phrase.Dispose();
-        var afterAuthorityDeletion = await store.ReadVerifiedAsync(
+        using var afterAuthorityDeletion = await bootstrap.ReadVerifiedAsync(
             1_900_000_300, 1, verifier, default);
         Assert.Equal(binding.Head.Record.CanonicalBytes.ToArray(),
-            afterAuthorityDeletion!.Binding.Record.CanonicalBytes.ToArray());
+            afterAuthorityDeletion!.PublicEvidence.Binding.Record.CanonicalBytes.ToArray());
     }
 
     [Fact]
