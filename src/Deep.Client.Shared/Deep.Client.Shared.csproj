@@ -20,6 +20,10 @@
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlcipher" Version="2.1.11" />
   </ItemGroup>
 
+  <ItemGroup Condition="'$(DeepProtocolLocalCutover)' == 'true'">
+    <InternalsVisibleTo Include="Deep.Protocol.Tests" />
+  </ItemGroup>
+
   <ItemGroup>
     <!-- Clean break: the Session-derived runtime and its MSG-01 bridge are not
          part of the current client assembly. Current code binds the store to an
