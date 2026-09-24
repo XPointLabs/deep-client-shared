@@ -88,6 +88,12 @@ public sealed class DeepIdV2DirectoryLkgStoreTests
             Assert.Equal(1UL, advanced.LogGeneration);
             Assert.Equal(successor.ExactAdh1.ToArray(),
                 advanced.ExactAdh1.ToArray());
+            var skipped = authority.CreateEmptySuccessor(
+                authority.CreateEmptySuccessor(advanced));
+            await Assert.ThrowsAsync<CryptographicException>(async () =>
+                await SqliteDeepIdV2AccountGeneration
+                    .CommitDirectoryLkgForTestsAsync(second, advanced,
+                        skipped));
             await SqliteDeepIdV2AccountGeneration.CommitDirectoryLkgForTestsAsync(
                 second, advanced, successor);
             await Assert.ThrowsAsync<CryptographicException>(async () =>

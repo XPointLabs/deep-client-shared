@@ -122,16 +122,20 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             var next = verified.NextProtectedLkg;
             if (!Fixed(verified.NetworkId.Span, binding.NetworkId) ||
                 !Fixed(next.Head.NetworkId.Span, binding.NetworkId) ||
-                !Fixed(verified.ExactAdh1.Span, next.ExactAdh1.Span))
+                !Fixed(verified.ExactAdh1.Span, next.ExactAdh1.Span) ||
+                !Fixed(verified.VerifiedProtectedLkgExactAdh1.Span,
+                    expectedHead.ExactAdh1.Span))
                 throw new CryptographicException(
                     "The verified DID2 directory head is out of scope.");
             await CommitAuthenticatedHeadAsync(expectedHead, next,
+                verified.HasRootAuthorizedForwardLineage,
                 cancellationToken).ConfigureAwait(false);
         }
 
         internal async ValueTask CommitAuthenticatedHeadAsync(
             AccountDirectoryProtectedLkg expectedHead,
             AccountDirectoryProtectedLkg next,
+            bool rootAuthorizedForward,
             CancellationToken cancellationToken)
         {
             if (!Fixed(next.Head.NetworkId.Span, binding.NetworkId) ||
@@ -141,14 +145,15 @@ internal static partial class SqliteDeepIdV2AccountGeneration
                 throw new CryptographicException(
                     "The verified DID2 directory head is out of scope or rolls back.");
             var exactReplay = next.LogGeneration == expectedHead.LogGeneration;
+            var exactSuccessor = expectedHead.LogGeneration != ulong.MaxValue &&
+                next.LogGeneration == expectedHead.LogGeneration + 1 &&
+                Fixed(next.Head.PredecessorAdh1CoreHash.Span,
+                    expectedHead.CoreHash.Span);
             if (exactReplay
                 ? !Fixed(next.ExactAdh1.Span, expectedHead.ExactAdh1.Span)
-                : expectedHead.LogGeneration == ulong.MaxValue ||
-                  next.LogGeneration != expectedHead.LogGeneration + 1 ||
-                  !Fixed(next.Head.PredecessorAdh1CoreHash.Span,
-                      expectedHead.CoreHash.Span))
+                : !exactSuccessor && !rootAuthorizedForward)
                 throw new CryptographicException(
-                    "The verified DID2 directory head is not the exact successor.");
+                    "The verified DID2 directory head has no authenticated successor or root-authorized forward lineage.");
 
             using var held = await accountLease.AcquireAsync(cancellationToken)
                 .ConfigureAwait(false);
@@ -344,7 +349,7 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         AccountDirectoryProtectedLkg next,
         CancellationToken cancellationToken = default) =>
         store is DirectoryLkgStore owned
-            ? owned.CommitAuthenticatedHeadAsync(expectedHead, next,
+            ? owned.CommitAuthenticatedHeadAsync(expectedHead, next, false,
                 cancellationToken)
             : throw new ArgumentException(
                 "The test requires the production DID2 directory LKG store.",
