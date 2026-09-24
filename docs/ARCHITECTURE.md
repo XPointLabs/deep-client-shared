@@ -173,7 +173,10 @@ secrets, and publishes the index only after verified bootstrap. A crash before
 publication is exposed as interrupted creation, never silently resumed or
 treated as current. Explicit V2 reset under the same lease purges the entire
 local V2 namespace, then permits a fresh account; a real journaled-store reopen
-test verifies the same DID2/DAB2 and retained phrase after close/reopen.
+test verifies the same DID2/DAB2 and retained phrase after close/reopen. Phrase
+read and explicit deletion also run under the account lease against a freshly
+verified current account; deletion survives another close/reopen without
+changing DID2/DAB2.
 This is still not the MAUI account owner: app-private lease-path provisioning,
 new SQL account generation, UI/reset composition, directory/contact/messaging
 cutover and physical E2E remain open. No V1 contact slot is read as V2.

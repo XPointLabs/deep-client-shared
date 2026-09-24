@@ -143,10 +143,24 @@ public sealed class ProtectedDeepIdV2AccountOwnerTests
                 Assert.Equal(accountId, current.AccountId.ToArray());
                 Assert.Equal(exactDab2, current.Verified.PublicEvidence.Binding
                     .Record.CanonicalBytes.ToArray());
-                var phraseStore = new ProtectedDeepIdV2RecoveryPhraseStore(
-                    reopened, network, accountId);
-                using var retained = await phraseStore.ReadVerifiedAsync(default);
+                using var retained = await owner.ReadRetainedRecoveryPhraseAsync(
+                    1_900_000_000, verifier, default);
                 Assert.NotNull(retained);
+                await owner.DeleteRetainedRecoveryPhraseAsync(
+                    1_900_000_000, verifier, default);
+                Assert.Null(await owner.ReadRetainedRecoveryPhraseAsync(
+                    1_900_000_000, verifier, default));
+            }
+            using (var reopenedAfterDeletion = new JournaledDeepSecureStorage(
+                       statePath, new TestAeadProtector(key)))
+            {
+                var owner = NewOwner(reopenedAfterDeletion, network, lockPath);
+                using var current = await owner.ReadCurrentAsync(
+                    1_900_000_000, verifier, default);
+                Assert.Equal(exactDab2, current!.Verified.PublicEvidence.Binding
+                    .Record.CanonicalBytes.ToArray());
+                Assert.Null(await owner.ReadRetainedRecoveryPhraseAsync(
+                    1_900_000_000, verifier, default));
             }
         }
         finally

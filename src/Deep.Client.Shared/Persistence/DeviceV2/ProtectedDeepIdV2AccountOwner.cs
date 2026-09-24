@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using Deep.Client.Shared.Domain;
 using Deep.Protocol.ApplicationCore;
+using Deep.Protocol.Identity;
 
 namespace Deep.Client.Shared.Persistence.DeviceV2;
 
@@ -37,12 +38,8 @@ internal sealed class ProtectedDeepIdV2AccountOwner
     {
         using var held = await lease.AcquireAsync(cancellationToken)
             .ConfigureAwait(false);
-        var current = await Index().ReadVerifiedAsync(trustedUnixSeconds,
+        return await ReadCurrentUnderLeaseAsync(trustedUnixSeconds,
             mlDsa65, cancellationToken).ConfigureAwait(false);
-        if (current is not null) return current;
-        if (await HasCreationIntentAsync(cancellationToken).ConfigureAwait(false))
-            throw new DeepIdV2CreationInterruptedException();
-        return null;
     }
 
     internal async ValueTask<VerifiedDeepIdV2CurrentAccount> CreateFreshAsync(
@@ -92,8 +89,58 @@ internal sealed class ProtectedDeepIdV2AccountOwner
             .ConfigureAwait(false);
     }
 
+    internal async ValueTask<VerifiedDeepRecoveryPhrase?>
+        ReadRetainedRecoveryPhraseAsync(ulong trustedUnixSeconds,
+            IDeepMlDsa65Verifier mlDsa65, CancellationToken cancellationToken)
+    {
+        using var held = await lease.AcquireAsync(cancellationToken)
+            .ConfigureAwait(false);
+        using var current = await RequireCurrentUnderLeaseAsync(
+            trustedUnixSeconds, mlDsa65, cancellationToken)
+            .ConfigureAwait(false);
+        return await PhraseStore(current.AccountId.Span)
+            .ReadVerifiedAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    internal async ValueTask DeleteRetainedRecoveryPhraseAsync(
+        ulong trustedUnixSeconds, IDeepMlDsa65Verifier mlDsa65,
+        CancellationToken cancellationToken)
+    {
+        using var held = await lease.AcquireAsync(cancellationToken)
+            .ConfigureAwait(false);
+        using var current = await RequireCurrentUnderLeaseAsync(
+            trustedUnixSeconds, mlDsa65, cancellationToken)
+            .ConfigureAwait(false);
+        await PhraseStore(current.AccountId.Span)
+            .DeleteAfterVerifiedBootstrapAsync(trustedUnixSeconds,
+                deploymentProfileId, mlDsa65, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
     private ProtectedDeepIdV2CurrentAccountIndex Index() =>
         new(storage, networkId, deploymentProfileId);
+
+    private ProtectedDeepIdV2RecoveryPhraseStore PhraseStore(
+        ReadOnlySpan<byte> accountId) => new(storage, networkId, accountId);
+
+    private async ValueTask<VerifiedDeepIdV2CurrentAccount?>
+        ReadCurrentUnderLeaseAsync(ulong trustedUnixSeconds,
+            IDeepMlDsa65Verifier mlDsa65, CancellationToken cancellationToken)
+    {
+        var current = await Index().ReadVerifiedAsync(trustedUnixSeconds,
+            mlDsa65, cancellationToken).ConfigureAwait(false);
+        if (current is not null) return current;
+        if (await HasCreationIntentAsync(cancellationToken).ConfigureAwait(false))
+            throw new DeepIdV2CreationInterruptedException();
+        return null;
+    }
+
+    private async ValueTask<VerifiedDeepIdV2CurrentAccount>
+        RequireCurrentUnderLeaseAsync(ulong trustedUnixSeconds,
+            IDeepMlDsa65Verifier mlDsa65, CancellationToken cancellationToken) =>
+        await ReadCurrentUnderLeaseAsync(trustedUnixSeconds, mlDsa65,
+            cancellationToken).ConfigureAwait(false)
+        ?? throw new InvalidOperationException("No current DID2 account exists.");
 
     private async ValueTask<bool> HasCreationIntentAsync(
         CancellationToken cancellationToken)
