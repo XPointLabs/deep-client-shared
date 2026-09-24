@@ -180,9 +180,21 @@ reopen tests cover both normal creation and a crash before index publication.
 Phrase read and explicit deletion also run under the account lease against a
 freshly verified current account; deletion survives another close/reopen without
 changing DID2/DAB2.
-This is still not the MAUI account owner: app-private lease-path provisioning,
-new SQL account generation, UI/reset composition, directory/contact/messaging
-cutover and physical E2E remain open. No V1 contact slot is read as V2.
+The owner now also creates an incompatible `DSV2` SQLCipher generation before
+publishing the V2 current-account index. A protected V2 key record binds its
+random key and database instance to exact network/account scope; the encrypted
+database atomically initializes account, device and local-profile rows plus
+empty LKG, outbox, inbox and security-event roots. Every current-account read
+revalidates the SQLCipher generation and exact DID2/DAB2/device projection.
+An interrupted pre-index SQL temp file can be recreated from the same verified
+genesis and protected key; a database missing after index publication cannot.
+Explicit local reset removes the exact V2 database family before V2 namespace
+purge. Focused tests cover encrypted bytes, journaled-key reopen, wrong scope,
+wrong generation, corrupted pending state and missing database/key refusal.
+This is not yet the MAUI account owner or a full mutable STORE-01 service:
+app-private path provisioning, in-memory parity, restore-as-new-device,
+directory/contact/messaging cutover and physical E2E remain open. No V1 contact
+slot is read as V2.
 
 The clean MAUI account owner opens DMB1 with a distinct protected SQLCipher
 key scoped to the account's store instance. It refuses an existing database

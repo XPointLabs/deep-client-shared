@@ -38,13 +38,17 @@ public sealed class ProtectedDeepIdV2AccountOwnerTests
             await Assert.ThrowsAsync<InvalidOperationException>(
                 () => nextOwner.CreateFreshAsync("Second", 1_900_000_000,
                     verifier, default).AsTask());
+            File.Delete(lockPath + ".dsv2");
+            await Assert.ThrowsAsync<InvalidOperationException>(
+                () => nextOwner.ReadCurrentAsync(1_900_000_000,
+                    verifier, default).AsTask());
             await nextOwner.ResetExplicitlyAsync(default);
             Assert.Null(await nextOwner.ReadCurrentAsync(1_900_000_000,
                 verifier, default));
             using var v1 = await storage.ReadOwnedAsync("deep.store.v1.keep");
             Assert.NotNull(v1);
         }
-        finally { File.Delete(lockPath); }
+        finally { DeleteOwnerArtifacts(lockPath); }
     }
 
     [Fact]
@@ -87,7 +91,7 @@ public sealed class ProtectedDeepIdV2AccountOwnerTests
                 "Alice", 1_900_000_000, verifier, default);
             Assert.Equal("Alice", created.DisplayName);
         }
-        finally { File.Delete(lockPath); }
+        finally { DeleteOwnerArtifacts(lockPath); }
     }
 
     [Fact]
@@ -134,8 +138,12 @@ public sealed class ProtectedDeepIdV2AccountOwnerTests
                 .ReadCurrentAsync(1_900_000_000, verifier, default);
             Assert.Equal(exactDab2, secondRead!.Verified.PublicEvidence.Binding
                 .Record.CanonicalBytes.ToArray());
+            await restartedOwner.ResetExplicitlyAsync(default);
+            Assert.False(File.Exists(lockPath + ".dsv2"));
+            Assert.Null(await restartedOwner.ReadCurrentAsync(
+                1_900_000_000, verifier, default));
         }
-        finally { File.Delete(lockPath); }
+        finally { DeleteOwnerArtifacts(lockPath); }
     }
 
     [Fact]
@@ -156,7 +164,7 @@ public sealed class ProtectedDeepIdV2AccountOwnerTests
             using var acquired = await second.AcquireAsync(default);
             Assert.NotNull(acquired);
         }
-        finally { File.Delete(lockPath); }
+        finally { DeleteOwnerArtifacts(lockPath); }
     }
 
     [Fact]
@@ -221,8 +229,9 @@ public sealed class ProtectedDeepIdV2AccountOwnerTests
         {
             CryptographicOperations.ZeroMemory(key);
             foreach (var path in new[] { statePath, statePath + ".pending",
-                         statePath + ".backup", statePath + ".lock", lockPath })
+                         statePath + ".backup", statePath + ".lock" })
                 File.Delete(path);
+            DeleteOwnerArtifacts(lockPath);
             Directory.Delete(directory);
         }
     }
@@ -281,15 +290,27 @@ public sealed class ProtectedDeepIdV2AccountOwnerTests
         {
             CryptographicOperations.ZeroMemory(key);
             foreach (var path in new[] { statePath, statePath + ".pending",
-                         statePath + ".backup", statePath + ".lock", lockPath })
+                         statePath + ".backup", statePath + ".lock" })
                 File.Delete(path);
+            DeleteOwnerArtifacts(lockPath);
             Directory.Delete(directory);
         }
     }
 
     private static ProtectedDeepIdV2AccountOwner NewOwner(
         IDeepSecureStorage storage, byte[] network, string lockPath) =>
-        new(storage, new DeepIdV2AccountFileLease(lockPath), network, 1);
+        new(storage, new DeepIdV2AccountFileLease(lockPath),
+            lockPath + ".dsv2", network, 1);
+
+    private static void DeleteOwnerArtifacts(string lockPath)
+    {
+        var sqlPath = lockPath + ".dsv2";
+        foreach (var path in new[] { lockPath, sqlPath, sqlPath + ".pending",
+                     sqlPath + ".bootstrap.lock", sqlPath + "-journal",
+                     sqlPath + "-wal", sqlPath + "-shm",
+                     sqlPath + ".pending-journal" })
+            File.Delete(path);
+    }
 
     private static string NewLockPath() => Path.Combine(Path.GetTempPath(),
         "deep-did2-owner-" + Guid.NewGuid().ToString("N") + ".lock");

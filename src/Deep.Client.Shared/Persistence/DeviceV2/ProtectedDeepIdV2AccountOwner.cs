@@ -22,15 +22,19 @@ internal sealed class ProtectedDeepIdV2AccountOwner
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
     private readonly IDeepSecureStorage storage;
     private readonly DeepIdV2AccountFileLease lease;
+    private readonly string sqlStatePath;
     private readonly byte[] networkId;
     private readonly ushort deploymentProfileId;
 
     internal ProtectedDeepIdV2AccountOwner(IDeepSecureStorage storage,
-        DeepIdV2AccountFileLease lease, ReadOnlySpan<byte> networkId,
+        DeepIdV2AccountFileLease lease, string sqlStatePath,
+        ReadOnlySpan<byte> networkId,
         ushort deploymentProfileId)
     {
         this.storage = storage ?? throw new ArgumentNullException(nameof(storage));
         this.lease = lease ?? throw new ArgumentNullException(nameof(lease));
+        ArgumentException.ThrowIfNullOrWhiteSpace(sqlStatePath);
+        this.sqlStatePath = Path.GetFullPath(sqlStatePath);
         if (networkId.Length != 16 || networkId.IndexOfAnyExcept((byte)0) < 0 ||
             deploymentProfileId == 0)
             throw new ArgumentException("A nonzero DID2 network/profile is required.");
@@ -76,6 +80,9 @@ internal sealed class ProtectedDeepIdV2AccountOwner
                 candidateAccountId, created.AccountId.Span))
             throw new CryptographicException(
                 "The DID2 issuer returned a different candidate account ID.");
+        await SqliteDeepIdV2AccountGeneration.EnsureAsync(sqlStatePath,
+            storage, networkId, created.AccountId, normalized, created.Verified,
+            allowCreate: true, cancellationToken).ConfigureAwait(false);
         return await Index().PublishVerifiedAsync(normalized,
             created.AccountId, trustedUnixSeconds, mlDsa65,
             cancellationToken).ConfigureAwait(false);
@@ -104,6 +111,8 @@ internal sealed class ProtectedDeepIdV2AccountOwner
                 throw new InvalidOperationException(
                     "An unpublished durable DID2/DAB2 winner must be recovered before reset.");
         }
+        SqliteDeepIdV2AccountGeneration.DeleteArtifactsAfterExplicitReset(
+            sqlStatePath);
         await storage.PurgeStoreV2NamespaceAsync(cancellationToken)
             .ConfigureAwait(false);
     }
@@ -148,7 +157,22 @@ internal sealed class ProtectedDeepIdV2AccountOwner
     {
         var current = await Index().ReadVerifiedAsync(trustedUnixSeconds,
             mlDsa65, cancellationToken).ConfigureAwait(false);
-        if (current is not null) return current;
+        if (current is not null)
+        {
+            try
+            {
+                await SqliteDeepIdV2AccountGeneration.EnsureAsync(sqlStatePath,
+                    storage, networkId, current.AccountId, current.DisplayName,
+                    current.Verified, allowCreate: false, cancellationToken)
+                    .ConfigureAwait(false);
+                return current;
+            }
+            catch
+            {
+                current.Dispose();
+                throw;
+            }
+        }
         var name = await ReadCreationIntentAsync(cancellationToken)
             .ConfigureAwait(false);
         var candidate = await ReadCandidateAccountIdAsync(cancellationToken)
@@ -171,6 +195,15 @@ internal sealed class ProtectedDeepIdV2AccountOwner
             cancellationToken).ConfigureAwait(false)
             ?? throw new CryptographicException(
                 "An unpublished durable DID2 winner has no retained recovery phrase.");
+        using var completed = await new ProtectedDeepIdV2GenesisBootstrap(
+            storage, networkId, candidate).ReadVerifiedAsync(
+            trustedUnixSeconds, deploymentProfileId, mlDsa65,
+            cancellationToken).ConfigureAwait(false)
+            ?? throw new CryptographicException(
+                "An unpublished DID2 winner has incomplete bootstrap state.");
+        await SqliteDeepIdV2AccountGeneration.EnsureAsync(sqlStatePath,
+            storage, networkId, candidate, name, completed,
+            allowCreate: true, cancellationToken).ConfigureAwait(false);
         return await Index().PublishVerifiedAsync(name, candidate,
             trustedUnixSeconds, mlDsa65, cancellationToken)
             .ConfigureAwait(false);
