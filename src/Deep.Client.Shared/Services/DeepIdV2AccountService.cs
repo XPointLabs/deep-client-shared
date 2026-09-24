@@ -13,14 +13,18 @@ public sealed class DeepIdV2AccountService
 {
     private readonly ProtectedDeepIdV2AccountOwner owner;
     private readonly IClock clock;
+    private readonly Func<IDeepMlDsa65VerifierLease> verifierFactory;
 
     public DeepIdV2AccountService(IDeepSecureStorage storage,
         string privateDirectory, ReadOnlySpan<byte> networkId,
-        ushort deploymentProfileId, IClock clock)
+        ushort deploymentProfileId, IClock clock,
+        Func<IDeepMlDsa65VerifierLease> verifierFactory)
     {
         ArgumentNullException.ThrowIfNull(storage);
         ArgumentException.ThrowIfNullOrWhiteSpace(privateDirectory);
         this.clock = clock ?? throw new ArgumentNullException(nameof(clock));
+        this.verifierFactory = verifierFactory ??
+            throw new ArgumentNullException(nameof(verifierFactory));
         var directory = Path.GetFullPath(privateDirectory);
         if (!Directory.Exists(directory))
             throw new DirectoryNotFoundException(
@@ -35,8 +39,7 @@ public sealed class DeepIdV2AccountService
     public async Task<DeepIdV2AccountSnapshot?> GetCurrentAsync(
         CancellationToken cancellationToken = default)
     {
-        using var verifier = DeepMlDsa65CandidateVerifierFactory
-            .OpenForCurrentProcess();
+        using var verifier = OpenVerifier();
         using var current = await owner.ReadCurrentAsync(TrustedUnixSeconds(),
             verifier, cancellationToken).ConfigureAwait(false);
         return current is null ? null : Snapshot(current);
@@ -45,8 +48,7 @@ public sealed class DeepIdV2AccountService
     public async Task<DeepIdV2AccountSnapshot> CreateAsync(
         string displayName, CancellationToken cancellationToken = default)
     {
-        using var verifier = DeepMlDsa65CandidateVerifierFactory
-            .OpenForCurrentProcess();
+        using var verifier = OpenVerifier();
         using var current = await owner.CreateFreshAsync(displayName,
             TrustedUnixSeconds(), verifier, cancellationToken)
             .ConfigureAwait(false);
@@ -60,8 +62,7 @@ public sealed class DeepIdV2AccountService
     public async Task<VerifiedDeepRecoveryPhrase?> ReadRetainedRecoveryPhraseAsync(
         CancellationToken cancellationToken = default)
     {
-        using var verifier = DeepMlDsa65CandidateVerifierFactory
-            .OpenForCurrentProcess();
+        using var verifier = OpenVerifier();
         return await owner.ReadRetainedRecoveryPhraseAsync(
             TrustedUnixSeconds(), verifier, cancellationToken)
             .ConfigureAwait(false);
@@ -70,8 +71,7 @@ public sealed class DeepIdV2AccountService
     public async Task DeleteRetainedRecoveryPhraseAsync(
         CancellationToken cancellationToken = default)
     {
-        using var verifier = DeepMlDsa65CandidateVerifierFactory
-            .OpenForCurrentProcess();
+        using var verifier = OpenVerifier();
         await owner.DeleteRetainedRecoveryPhraseAsync(TrustedUnixSeconds(),
             verifier, cancellationToken).ConfigureAwait(false);
     }
@@ -79,6 +79,10 @@ public sealed class DeepIdV2AccountService
     /// <summary>Explicit destructive reset, never an automatic repair path.</summary>
     public Task ResetExplicitlyAsync(CancellationToken cancellationToken = default) =>
         owner.ResetExplicitlyAsync(cancellationToken).AsTask();
+
+    private IDeepMlDsa65VerifierLease OpenVerifier() =>
+        verifierFactory() ?? throw new InvalidOperationException(
+            "The DID2 verifier factory returned no verifier lease.");
 
     private ulong TrustedUnixSeconds()
     {

@@ -1,5 +1,6 @@
 using Deep.Client.Shared.Persistence;
 using Deep.Client.Shared.Services;
+using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.Identity;
 
 namespace Deep.Client.Shared.Production.Tests;
@@ -23,7 +24,8 @@ public sealed class DeepIdV2AccountServiceTests
             var clock = new FrozenClock(
                 DateTimeOffset.FromUnixTimeSeconds(1_900_000_000));
             var first = new DeepIdV2AccountService(storage, directory,
-                network, 1, clock);
+                network, 1, clock,
+                DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess);
             Assert.Null(await first.GetCurrentAsync());
             var created = await first.CreateAsync(" Alice ");
             Assert.Equal("Alice", created.DisplayName);
@@ -40,12 +42,14 @@ public sealed class DeepIdV2AccountServiceTests
             var otherNetwork = network.ToArray();
             otherNetwork[0] ^= 1;
             var wrongScope = new DeepIdV2AccountService(storage, directory,
-                otherNetwork, 1, clock);
+                otherNetwork, 1, clock,
+                DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess);
             await Assert.ThrowsAnyAsync<Exception>(() =>
                 wrongScope.GetCurrentAsync());
 
             var resumed = new DeepIdV2AccountService(storage, directory,
-                network, 1, clock);
+                network, 1, clock,
+                DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess);
             var account = await resumed.GetCurrentAsync();
             Assert.NotNull(account);
             Assert.Equal(created.AccountId.ToArray(), account.AccountId.ToArray());
@@ -55,7 +59,9 @@ public sealed class DeepIdV2AccountServiceTests
 
             await resumed.DeleteRetainedRecoveryPhraseAsync();
             Assert.Null(await new DeepIdV2AccountService(storage, directory,
-                network, 1, clock).ReadRetainedRecoveryPhraseAsync());
+                network, 1, clock,
+                DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess)
+                .ReadRetainedRecoveryPhraseAsync());
             Assert.Equal(created.PermanentId,
                 (await resumed.GetCurrentAsync())!.PermanentId);
 
