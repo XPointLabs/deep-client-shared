@@ -39,6 +39,17 @@ public sealed class DeepIdV2AccountServiceTests
                 DeepPermanentIdV2.ParseCanonical(
                     created.PermanentId.CanonicalText));
             Assert.Equal(32, created.AccountId.Length);
+            byte[] firstDeviceId;
+            byte[] firstAgreementPublicKey;
+            using (var agreement = await first.OpenLocalDeviceAgreementAuthorityAsync())
+            {
+                Assert.Equal(network, agreement.NetworkId.ToArray());
+                Assert.Equal(created.AccountId.ToArray(), agreement.AccountId.ToArray());
+                Assert.Equal(32, agreement.DeviceId.Length);
+                Assert.Equal(32, agreement.AgreementPublicKey.Length);
+                firstDeviceId = agreement.DeviceId.ToArray();
+                firstAgreementPublicKey = agreement.AgreementPublicKey.ToArray();
+            }
             var callerCopy = created.AccountId.ToArray();
             callerCopy.AsSpan().Clear();
             Assert.NotEqual(callerCopy, created.AccountId.ToArray());
@@ -124,11 +135,20 @@ public sealed class DeepIdV2AccountServiceTests
                 (await afterPhraseDeletion.GetCurrentAsync())!.PermanentId);
             Assert.Equal(admission,
                 await afterPhraseDeletion.PrepareGenesisAdmissionAsync());
+            using (var agreement = await afterPhraseDeletion
+                       .OpenLocalDeviceAgreementAuthorityAsync())
+            {
+                Assert.Equal(firstDeviceId, agreement.DeviceId.ToArray());
+                Assert.Equal(firstAgreementPublicKey,
+                    agreement.AgreementPublicKey.ToArray());
+            }
 
             await storage.DeleteBatchAsync(
                 ["deep.store.v2.resolver-read-capability"]);
             await Assert.ThrowsAnyAsync<Exception>(() =>
                 resumed.GetCurrentAsync());
+            await Assert.ThrowsAnyAsync<Exception>(() =>
+                resumed.OpenLocalDeviceAgreementAuthorityAsync());
 
             await resumed.ResetExplicitlyAsync();
             Assert.Null(await resumed.GetCurrentAsync());

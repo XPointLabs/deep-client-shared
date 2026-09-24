@@ -52,6 +52,30 @@ public sealed class DeepIdV2AccountService
         return current is null ? null : Snapshot(current);
     }
 
+    /// <summary>
+    /// Opens only the verified local device's DPH2 agreement capability.
+    /// The caller must dispose it; each use still requires an exact current,
+    /// unforked directory lineage and a purpose-bound one-shot operation.
+    /// No V1 account state or raw private key is returned.
+    /// </summary>
+    public async Task<LocalDeviceX25519AgreementAuthority>
+        OpenLocalDeviceAgreementAuthorityAsync(
+            CancellationToken cancellationToken = default)
+    {
+        using var verifier = OpenVerifier();
+        using var current = await owner.ReadCurrentAsync(TrustedUnixSeconds(),
+            verifier, cancellationToken).ConfigureAwait(false) ??
+            throw new InvalidOperationException(
+                "A verified DID2 account is required for device agreement.");
+        var relativeDevices = current.Verified.PublicEvidence.Binding.Identity
+            .ActiveDeviceRelatives;
+        if (relativeDevices.Count != 1)
+            throw new CryptographicException(
+                "The local DID2 genesis does not have one exact verified device relative.");
+        return current.Verified.DeviceSecrets.CreateAgreementAuthority(
+            relativeDevices[0]);
+    }
+
     public async Task<DeepIdV2AccountSnapshot> CreateAsync(
         string displayName, CancellationToken cancellationToken = default)
     {
