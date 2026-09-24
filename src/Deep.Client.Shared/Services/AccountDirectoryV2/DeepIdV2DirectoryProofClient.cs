@@ -144,6 +144,17 @@ public sealed class DeepIdV2DirectoryProofClient : IDisposable
                 supportedReader, mlDsa65);
             await protectedLkgStore.CommitVerifiedAsync(protectedLkg,
                 verified, cancellationToken).ConfigureAwait(false);
+            // Durable storage can outlive the nonce-bound proof's short
+            // freshness window. Advancing the rollback floor is safe, but a
+            // stale capability must never escape to Contact consumers.
+            var afterCommit = await clock.ReadAsync(cancellationToken)
+                .ConfigureAwait(false) ?? throw new CryptographicException(
+                    "The DID2 monotonic clock returned no post-commit sample.");
+            if (!SameBoot(requestCreated, afterCommit) ||
+                !verified.IsCurrentAtMonotonic(afterCommit.BootId.Span,
+                    afterCommit.SampleSeconds))
+                throw new CryptographicException(
+                    "The DID2 directory proof expired before durable handoff.");
             return verified;
         }
         finally

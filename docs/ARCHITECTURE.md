@@ -122,9 +122,23 @@ protected reader-V2 LKG before network I/O. A fresh nonce and one boot-stable
 monotonic request window bind the response; only the protocol's full PQ-backed
 verifier can return a freshness capability. The HTTP client now withholds that
 capability until an account-scoped protected store durably compare-exchanges
-the exact next LKG. No production V2 store implements this contract yet, and
-the client is not composed into MAUI. DID2 account/store cutover, durable LKG
-implementation and physical E2E remain required before a release claim.
+the exact next LKG. The DID2 account service now opens an account-scoped
+SQLCipher implementation of that LKG contract from its verified current
+account and a separately pinned, signed empty V2 head. A separate protected
+add-only marker per revision pins the exact signed-head hash and SQL revision.
+The next marker is written before each SQL commit, so a missing or rolled-back
+SQL row fails closed; a
+crash between the marker write and SQL commit requires explicit recovery or
+reset rather than silently reopening an older floor. The existing account
+lease serializes reset and compare/exchange; restart re-authenticates the
+exact head against XPoint authority. A post-commit monotonic read prevents an
+expired proof from escaping even when the durable floor advanced. The proof
+client and store are not yet composed into MAUI. Registry issuance,
+Contact/XPK consumers and physical E2E remain required before a release claim.
+This marker scheme detects SQL-only rollback while protected storage remains
+intact; it is not an independent monotonic anchor against a joint rollback of
+both stores. The current journaled secure store is limited to 128 total slots,
+so a scalable independent floor and crash recovery remain release gates.
 
 An isolated V2-only protected genesis-contact slot now accepts already-verified
 DAB2, DCA1 V2 and ADC1 V2 capabilities, checks their shared account/binding/

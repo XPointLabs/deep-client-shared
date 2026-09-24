@@ -2,8 +2,11 @@ using System.Buffers.Binary;
 using System.Security.Cryptography;
 using System.Text;
 using Deep.Client.Shared.Domain;
+using Deep.Client.Shared.Services.AccountDirectoryV2;
+using Deep.Protocol.AccountDirectoryV1;
 using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.Identity;
+using Deep.Protocol.XPointNetworkV1;
 
 namespace Deep.Client.Shared.Persistence.DeviceV2;
 
@@ -50,6 +53,25 @@ internal sealed class ProtectedDeepIdV2AccountOwner
             .ConfigureAwait(false);
         return await ReadCurrentUnderLeaseAsync(trustedUnixSeconds,
             mlDsa65, cancellationToken).ConfigureAwait(false);
+    }
+
+    internal async ValueTask<IDeepIdV2DirectoryProtectedLkgStore>
+        OpenDirectoryLkgStoreAsync(ulong trustedUnixSeconds,
+            IDeepMlDsa65Verifier mlDsa65,
+            VerifiedXPointNetworkAuthority authority,
+            ReadOnlyMemory<byte> exactGenesisAdh1,
+            ReadOnlyMemory<byte> protectedGenesisCoreHash,
+            CancellationToken cancellationToken)
+    {
+        using var held = await lease.AcquireAsync(cancellationToken)
+            .ConfigureAwait(false);
+        using var current = await RequireCurrentUnderLeaseAsync(
+            trustedUnixSeconds, mlDsa65, cancellationToken)
+            .ConfigureAwait(false);
+        return await SqliteDeepIdV2AccountGeneration.OpenDirectoryLkgStoreAsync(
+            storage, lease, sqlStatePath, current, authority,
+            exactGenesisAdh1, protectedGenesisCoreHash, cancellationToken)
+            .ConfigureAwait(false);
     }
 
     internal async ValueTask<VerifiedDeepIdV2CurrentAccount> CreateFreshAsync(

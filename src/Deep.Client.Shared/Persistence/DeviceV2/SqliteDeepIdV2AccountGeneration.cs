@@ -10,7 +10,7 @@ namespace Deep.Client.Shared.Persistence.DeviceV2;
 /// must hold the V2 account lease. This owns only the immutable local account
 /// projection and empty durable roots; it is not yet the MAUI account store.
 /// </summary>
-internal static class SqliteDeepIdV2AccountGeneration
+internal static partial class SqliteDeepIdV2AccountGeneration
 {
     private const string KeySlot = "deep.store.v2.sql-generation";
     private const int KeyRecordLength = 120;
