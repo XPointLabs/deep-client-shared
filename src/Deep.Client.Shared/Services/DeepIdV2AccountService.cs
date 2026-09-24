@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using Deep.Protocol.AccountDirectoryV1;
 using Deep.Client.Shared.Persistence;
 using Deep.Client.Shared.Persistence.DeviceV2;
 using Deep.Client.Shared.Services.AccountDirectoryV2;
@@ -15,6 +17,7 @@ public sealed class DeepIdV2AccountService
 {
     private readonly ProtectedDeepIdV2AccountOwner owner;
     private readonly IClock clock;
+    private readonly ushort deploymentProfileId;
     private readonly Func<IDeepMlDsa65VerifierLease> verifierFactory;
 
     public DeepIdV2AccountService(IDeepSecureStorage storage,
@@ -25,6 +28,7 @@ public sealed class DeepIdV2AccountService
         ArgumentNullException.ThrowIfNull(storage);
         ArgumentException.ThrowIfNullOrWhiteSpace(privateDirectory);
         this.clock = clock ?? throw new ArgumentNullException(nameof(clock));
+        this.deploymentProfileId = deploymentProfileId;
         this.verifierFactory = verifierFactory ??
             throw new ArgumentNullException(nameof(verifierFactory));
         var directory = Path.GetFullPath(privateDirectory);
@@ -42,7 +46,8 @@ public sealed class DeepIdV2AccountService
         CancellationToken cancellationToken = default)
     {
         using var verifier = OpenVerifier();
-        using var current = await owner.ReadCurrentAsync(TrustedUnixSeconds(),
+        var trustedUnixSeconds = TrustedUnixSeconds();
+        using var current = await owner.ReadCurrentAsync(trustedUnixSeconds,
             verifier, cancellationToken).ConfigureAwait(false);
         return current is null ? null : Snapshot(current);
     }
@@ -55,6 +60,40 @@ public sealed class DeepIdV2AccountService
             TrustedUnixSeconds(), verifier, cancellationToken)
             .ConfigureAwait(false);
         return Snapshot(current);
+    }
+
+    /// <summary>
+    /// Re-authors the same public DGA1 V2 admission from the protected exact
+    /// genesis closure on every retry. This is not a Registry acceptance or
+    /// a directory freshness capability.
+    /// </summary>
+    public async Task<byte[]> PrepareGenesisAdmissionAsync(
+        CancellationToken cancellationToken = default)
+    {
+        using var verifier = OpenVerifier();
+        var trustedUnixSeconds = TrustedUnixSeconds();
+        using var current = await owner.ReadCurrentAsync(trustedUnixSeconds,
+            verifier, cancellationToken).ConfigureAwait(false) ??
+            throw new InvalidOperationException(
+                "A verified DID2 account is required for genesis admission.");
+        var evidence = current.Verified.PublicEvidence;
+        var binding = evidence.Binding;
+        var identity = binding.Identity;
+        var request = new DeepIdV2GenesisAdmissionRequest(
+            identity.Account.Certificate.CanonicalBytes.Span,
+            identity.Revocations.Snapshot.CanonicalBytes.Span,
+            identity.ActiveDevices.Select(device => device.Certificate.CanonicalBytes)
+                .ToArray(),
+            binding.DeepId.CanonicalBytes.Span,
+            binding.Record.CanonicalBytes.Span,
+            evidence.Directory.Record.CanonicalBytes.Span,
+            evidence.Checkpoint.Checkpoint.CanonicalBytes.Span, []);
+        _ = DeepIdV2GenesisAdmissionVerifier.Verify(request,
+            trustedUnixSeconds, deploymentProfileId, 2, verifier);
+        var operationId = GenesisOperationId(binding.DeepId.RecordHash.Span,
+            binding.Record.RecordHash.Span);
+        return DeepIdV2GenesisAdmissionWireCodec.EncodeRequest(
+            new DeepIdV2GenesisAdmissionWireRequest(operationId, request));
     }
 
     /// <summary>
@@ -104,6 +143,18 @@ public sealed class DeepIdV2AccountService
     private IDeepMlDsa65VerifierLease OpenVerifier() =>
         verifierFactory() ?? throw new InvalidOperationException(
             "The DID2 verifier factory returned no verifier lease.");
+
+    private static byte[] GenesisOperationId(ReadOnlySpan<byte> did2Hash,
+        ReadOnlySpan<byte> dab2Hash)
+    {
+        ReadOnlySpan<byte> domain =
+            "Deep/Application/V2/genesis-admission-operation"u8;
+        var transcript = new byte[domain.Length + 64];
+        domain.CopyTo(transcript);
+        did2Hash.CopyTo(transcript.AsSpan(domain.Length));
+        dab2Hash.CopyTo(transcript.AsSpan(domain.Length + 32));
+        return SHA256.HashData(transcript);
+    }
 
     private ulong TrustedUnixSeconds()
     {

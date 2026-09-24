@@ -1,6 +1,7 @@
 using Deep.Client.Shared.Persistence;
 using Deep.Client.Shared.Persistence.DeviceV2;
 using Deep.Client.Shared.Services;
+using Deep.Protocol.AccountDirectoryV1;
 using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.Identity;
 
@@ -48,6 +49,12 @@ public sealed class DeepIdV2AccountServiceTests
             Assert.True(DeepIdV2Codec.DecodeDid2(
                 publicGenesis.ExactDid2.Span).MatchesResolverReadCapability(
                     readCapability));
+            var admission = await first.PrepareGenesisAdmissionAsync();
+            var decodedAdmission = DeepIdV2GenesisAdmissionWireCodec
+                .DecodeRequest(admission);
+            Assert.Equal(publicGenesis.ExactDid2.ToArray(),
+                decodedAdmission.Admission.ExactDid2.ToArray());
+            Assert.Equal(-1, admission.AsSpan().IndexOf(readCapability));
             using (var phrase = await first.ReadRetainedRecoveryPhraseAsync())
                 Assert.NotNull(phrase);
 
@@ -81,6 +88,8 @@ public sealed class DeepIdV2AccountServiceTests
                 DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess);
             Assert.Equal(created.PermanentId,
                 (await afterPhraseDeletion.GetCurrentAsync())!.PermanentId);
+            Assert.Equal(admission,
+                await afterPhraseDeletion.PrepareGenesisAdmissionAsync());
 
             await storage.DeleteBatchAsync(
                 ["deep.store.v2.resolver-read-capability"]);
