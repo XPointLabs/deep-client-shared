@@ -29,14 +29,15 @@ internal sealed class DeepIdV2OfflineGenesisIssuer
     }
 
     internal async ValueTask<CreatedDeepIdV2OfflineGenesis> CreateAsync(
-        ulong trustedUnixSeconds, IDeepMlDsa65Verifier mlDsa65,
+        VerifiedDeepRecoveryPhrase phrase, ulong trustedUnixSeconds,
+        IDeepMlDsa65Verifier mlDsa65,
         CancellationToken cancellationToken)
     {
+        ArgumentNullException.ThrowIfNull(phrase);
         ArgumentNullException.ThrowIfNull(mlDsa65);
         if (trustedUnixSeconds == 0)
             throw new ArgumentOutOfRangeException(nameof(trustedUnixSeconds));
         cancellationToken.ThrowIfCancellationRequested();
-        using var phrase = DeepRecoveryV1.Generate();
         using var recovery = DeepRecoveryV1.DeriveAccountCapabilities(
             phrase, networkId, 1);
         using var deviceSecrets = new OwnedGenesisDeviceSecrets();

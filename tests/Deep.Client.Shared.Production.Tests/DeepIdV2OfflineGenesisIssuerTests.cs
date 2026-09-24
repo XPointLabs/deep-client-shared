@@ -21,7 +21,8 @@ public sealed class DeepIdV2OfflineGenesisIssuerTests
             () => index.PublishVerifiedAsync("Alice", Enumerable.Repeat((byte)1,
                 32).ToArray(), 1_900_000_003, verifier, default).AsTask());
         var issuer = new DeepIdV2OfflineGenesisIssuer(storage, network, 1);
-        using var created = await issuer.CreateAsync(1_900_000_000,
+        using var phrase = Deep.Protocol.Identity.DeepRecoveryV1.Generate();
+        using var created = await issuer.CreateAsync(phrase, 1_900_000_000,
             verifier, default);
         var accountId = created.AccountId.ToArray();
         var exactDid2 = created.Verified.PublicEvidence.Binding.DeepId

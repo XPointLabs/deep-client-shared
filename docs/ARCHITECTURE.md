@@ -168,14 +168,17 @@ An isolated add-only V2 current-account pointer now binds a canonical display
 name, network and account ID only after a fresh verified bootstrap. Reads
 reverify the entire bootstrap; a partial account cannot be published and a
 different name/account cannot replace the winner. An isolated protected-state
-owner now acquires an OS file lease, writes creation intent before issuing
-secrets, and publishes the index only after verified bootstrap. A crash before
-publication is exposed as interrupted creation, never silently resumed or
-treated as current. Explicit V2 reset under the same lease purges the entire
-local V2 namespace, then permits a fresh account; a real journaled-store reopen
-test verifies the same DID2/DAB2 and retained phrase after close/reopen. Phrase
-read and explicit deletion also run under the account lease against a freshly
-verified current account; deletion survives another close/reopen without
+owner now acquires an OS file lease and atomically writes normalized-name intent
+and candidate account ID before issuing secrets. It publishes the index only
+after verified bootstrap. If the exact public closure is durable but the index
+write crashes, a fresh owner verifies the complete bootstrap and publishes the
+same DID2/DAB2; reset is refused until that winner is recovered. If no public
+closure exists, interrupted creation stays fail-closed until explicit V2 reset
+under the lease purges the local V2 namespace. A public closure with incomplete
+device secrets also refuses reset; exact repair remains open. Journaled-store
+reopen tests cover both normal creation and a crash before index publication.
+Phrase read and explicit deletion also run under the account lease against a
+freshly verified current account; deletion survives another close/reopen without
 changing DID2/DAB2.
 This is still not the MAUI account owner: app-private lease-path provisioning,
 new SQL account generation, UI/reset composition, directory/contact/messaging

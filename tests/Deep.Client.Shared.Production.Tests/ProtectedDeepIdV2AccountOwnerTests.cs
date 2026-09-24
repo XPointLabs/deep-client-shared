@@ -55,7 +55,8 @@ public sealed class ProtectedDeepIdV2AccountOwnerTests
         try
         {
             using var inner = new InMemoryDeepSecureStorage();
-            var storage = new FailFirstIndexWriteStorage(inner);
+            var storage = new FailFirstSlotWriteStorage(inner,
+                ".genesis-contact");
             var network = Enumerable.Range(1, 16).Select(static value =>
                 (byte)value).ToArray();
             using var verifier = DeepMlDsa65CandidateVerifierFactory
@@ -74,12 +75,65 @@ public sealed class ProtectedDeepIdV2AccountOwnerTests
             using (var pending = await inner.ReadOwnedAsync(
                        "deep.store.v2.creation-intent"))
                 Assert.NotNull(pending);
+            using (var candidate = await inner.ReadOwnedAsync(
+                       "deep.store.v2.creation-candidate"))
+                Assert.NotNull(candidate);
             await restartedOwner.ResetExplicitlyAsync(default);
             Assert.Null(await inner.ReadOwnedAsync(
                 "deep.store.v2.creation-intent"));
+            Assert.Null(await inner.ReadOwnedAsync(
+                "deep.store.v2.creation-candidate"));
             using var created = await restartedOwner.CreateFreshAsync(
                 "Alice", 1_900_000_000, verifier, default);
             Assert.Equal("Alice", created.DisplayName);
+        }
+        finally { File.Delete(lockPath); }
+    }
+
+    [Fact]
+    public async Task IndexWriteCrashResumesExactDurableDab2Winner()
+    {
+        if (!SupportedProvider()) return;
+        var lockPath = NewLockPath();
+        try
+        {
+            using var inner = new InMemoryDeepSecureStorage();
+            var storage = new FailFirstSlotWriteStorage(inner,
+                "current-account");
+            var network = Enumerable.Range(1, 16).Select(static value =>
+                (byte)value).ToArray();
+            using var verifier = DeepMlDsa65CandidateVerifierFactory
+                .OpenForCurrentProcess();
+            var owner = NewOwner(storage, network, lockPath);
+            await Assert.ThrowsAsync<IOException>(
+                () => owner.CreateFreshAsync("Alice", 1_900_000_000,
+                    verifier, default).AsTask());
+            byte[] accountId;
+            using (var candidate = await inner.ReadOwnedAsync(
+                       "deep.store.v2.creation-candidate"))
+            {
+                Assert.NotNull(candidate);
+                accountId = candidate!.Use(value => value[24..].ToArray());
+            }
+            var bootstrap = new ProtectedDeepIdV2GenesisBootstrap(
+                inner, network, accountId);
+            using var before = await bootstrap.ReadVerifiedAsync(
+                1_900_000_000, 1, verifier, default);
+            Assert.NotNull(before);
+            var exactDab2 = before!.PublicEvidence.Binding.Record
+                .CanonicalBytes.ToArray();
+            var restartedOwner = NewOwner(storage, network, lockPath);
+            await Assert.ThrowsAsync<InvalidOperationException>(
+                () => restartedOwner.ResetExplicitlyAsync(default).AsTask());
+            using var resumed = await restartedOwner.ReadCurrentAsync(
+                1_900_000_000, verifier, default);
+            Assert.Equal("Alice", resumed!.DisplayName);
+            Assert.Equal(exactDab2, resumed.Verified.PublicEvidence.Binding
+                .Record.CanonicalBytes.ToArray());
+            using var secondRead = await NewOwner(storage, network, lockPath)
+                .ReadCurrentAsync(1_900_000_000, verifier, default);
+            Assert.Equal(exactDab2, secondRead!.Verified.PublicEvidence.Binding
+                .Record.CanonicalBytes.ToArray());
         }
         finally { File.Delete(lockPath); }
     }
@@ -173,6 +227,66 @@ public sealed class ProtectedDeepIdV2AccountOwnerTests
         }
     }
 
+    [Fact]
+    public async Task JournaledIndexCrashResumesExactWinnerAfterReopen()
+    {
+        if (!SupportedProvider()) return;
+        var directory = Path.Combine(Path.GetTempPath(),
+            "deep-did2-index-crash-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var statePath = Path.Combine(directory, "secure.bin");
+        var lockPath = Path.Combine(directory, "account.lock");
+        var key = RandomNumberGenerator.GetBytes(32);
+        try
+        {
+            var network = Enumerable.Range(1, 16).Select(static value =>
+                (byte)value).ToArray();
+            using var verifier = DeepMlDsa65CandidateVerifierFactory
+                .OpenForCurrentProcess();
+            byte[] exactDab2;
+            using (var first = new JournaledDeepSecureStorage(statePath,
+                       new TestAeadProtector(key)))
+            {
+                var failIndex = new FailFirstSlotWriteStorage(first,
+                    "current-account");
+                var owner = NewOwner(failIndex, network, lockPath);
+                await Assert.ThrowsAsync<IOException>(
+                    () => owner.CreateFreshAsync("Alice", 1_900_000_000,
+                        verifier, default).AsTask());
+                using var candidate = await first.ReadOwnedAsync(
+                    "deep.store.v2.creation-candidate");
+                Assert.NotNull(candidate);
+                var accountId = candidate!.Use(value => value[24..].ToArray());
+                using var durable = await new ProtectedDeepIdV2GenesisBootstrap(
+                    first, network, accountId).ReadVerifiedAsync(
+                    1_900_000_000, 1, verifier, default);
+                Assert.NotNull(durable);
+                exactDab2 = durable!.PublicEvidence.Binding.Record
+                    .CanonicalBytes.ToArray();
+            }
+            using (var reopened = new JournaledDeepSecureStorage(statePath,
+                       new TestAeadProtector(key)))
+            {
+                var owner = NewOwner(reopened, network, lockPath);
+                await Assert.ThrowsAsync<InvalidOperationException>(
+                    () => owner.ResetExplicitlyAsync(default).AsTask());
+                using var current = await owner.ReadCurrentAsync(
+                    1_900_000_000, verifier, default);
+                Assert.Equal("Alice", current!.DisplayName);
+                Assert.Equal(exactDab2, current.Verified.PublicEvidence.Binding
+                    .Record.CanonicalBytes.ToArray());
+            }
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(key);
+            foreach (var path in new[] { statePath, statePath + ".pending",
+                         statePath + ".backup", statePath + ".lock", lockPath })
+                File.Delete(path);
+            Directory.Delete(directory);
+        }
+    }
+
     private static ProtectedDeepIdV2AccountOwner NewOwner(
         IDeepSecureStorage storage, byte[] network, string lockPath) =>
         new(storage, new DeepIdV2AccountFileLease(lockPath), network, 1);
@@ -189,7 +303,8 @@ public sealed class ProtectedDeepIdV2AccountOwnerTests
         System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture ==
             System.Runtime.InteropServices.Architecture.X64;
 
-    private sealed class FailFirstIndexWriteStorage(IDeepSecureStorage inner) :
+    private sealed class FailFirstSlotWriteStorage(
+        IDeepSecureStorage inner, string slotSuffix) :
         IDeepSecureStorage
     {
         private int fail = 1;
@@ -201,8 +316,8 @@ public sealed class ProtectedDeepIdV2AccountOwnerTests
         public Task WriteBatchAsync(IReadOnlyList<DeepSecureStorageWrite> writes,
             CancellationToken cancellationToken = default)
         {
-            if (writes.Any(static item =>
-                    item.Slot == "deep.store.v2.current-account") &&
+            if (writes.Any(item => item.Slot.EndsWith(slotSuffix,
+                    StringComparison.Ordinal)) &&
                 Interlocked.Exchange(ref fail, 0) == 1)
                 throw new IOException("Injected index write failure.");
             return inner.WriteBatchAsync(writes, cancellationToken);
