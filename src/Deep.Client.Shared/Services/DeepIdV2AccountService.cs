@@ -1,0 +1,114 @@
+using Deep.Client.Shared.Persistence;
+using Deep.Client.Shared.Persistence.DeviceV2;
+using Deep.Protocol.ApplicationCore;
+using Deep.Protocol.Identity;
+
+namespace Deep.Client.Shared.Services;
+
+/// <summary>
+/// Network-free DID2 account entry point for a single private device store.
+/// It never reads or migrates the incompatible STORE-V1 namespace.
+/// </summary>
+public sealed class DeepIdV2AccountService
+{
+    private readonly ProtectedDeepIdV2AccountOwner owner;
+    private readonly IClock clock;
+
+    public DeepIdV2AccountService(IDeepSecureStorage storage,
+        string privateDirectory, ReadOnlySpan<byte> networkId,
+        ushort deploymentProfileId, IClock clock)
+    {
+        ArgumentNullException.ThrowIfNull(storage);
+        ArgumentException.ThrowIfNullOrWhiteSpace(privateDirectory);
+        this.clock = clock ?? throw new ArgumentNullException(nameof(clock));
+        var directory = Path.GetFullPath(privateDirectory);
+        if (!Directory.Exists(directory))
+            throw new DirectoryNotFoundException(
+                "The DID2 account requires an existing private directory.");
+        owner = new ProtectedDeepIdV2AccountOwner(storage,
+            new DeepIdV2AccountFileLease(Path.Combine(directory,
+                "deep-store-v2-account.lock")),
+            Path.Combine(directory, "deep-store-v2-account.dsv2"),
+            networkId, deploymentProfileId);
+    }
+
+    public async Task<DeepIdV2AccountSnapshot?> GetCurrentAsync(
+        CancellationToken cancellationToken = default)
+    {
+        using var verifier = DeepMlDsa65CandidateVerifierFactory
+            .OpenForCurrentProcess();
+        using var current = await owner.ReadCurrentAsync(TrustedUnixSeconds(),
+            verifier, cancellationToken).ConfigureAwait(false);
+        return current is null ? null : Snapshot(current);
+    }
+
+    public async Task<DeepIdV2AccountSnapshot> CreateAsync(
+        string displayName, CancellationToken cancellationToken = default)
+    {
+        using var verifier = DeepMlDsa65CandidateVerifierFactory
+            .OpenForCurrentProcess();
+        using var current = await owner.CreateFreshAsync(displayName,
+            TrustedUnixSeconds(), verifier, cancellationToken)
+            .ConfigureAwait(false);
+        return Snapshot(current);
+    }
+
+    /// <summary>
+    /// Caller owns and must dispose the returned phrase. Null means the user
+    /// permanently deleted this device's retained phrase.
+    /// </summary>
+    public async Task<VerifiedDeepRecoveryPhrase?> ReadRetainedRecoveryPhraseAsync(
+        CancellationToken cancellationToken = default)
+    {
+        using var verifier = DeepMlDsa65CandidateVerifierFactory
+            .OpenForCurrentProcess();
+        return await owner.ReadRetainedRecoveryPhraseAsync(
+            TrustedUnixSeconds(), verifier, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    public async Task DeleteRetainedRecoveryPhraseAsync(
+        CancellationToken cancellationToken = default)
+    {
+        using var verifier = DeepMlDsa65CandidateVerifierFactory
+            .OpenForCurrentProcess();
+        await owner.DeleteRetainedRecoveryPhraseAsync(TrustedUnixSeconds(),
+            verifier, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Explicit destructive reset, never an automatic repair path.</summary>
+    public Task ResetExplicitlyAsync(CancellationToken cancellationToken = default) =>
+        owner.ResetExplicitlyAsync(cancellationToken).AsTask();
+
+    private ulong TrustedUnixSeconds()
+    {
+        var seconds = clock.UtcNow.ToUnixTimeSeconds();
+        if (seconds < 0)
+            throw new InvalidOperationException(
+                "The DID2 account clock precedes the Unix epoch.");
+        return checked((ulong)seconds);
+    }
+
+    private static DeepIdV2AccountSnapshot Snapshot(
+        VerifiedDeepIdV2CurrentAccount current) =>
+        new(current.DisplayName, current.AccountId.Span,
+            DeepPermanentIdV2.FromCredential(
+                current.Verified.PublicEvidence.Binding.DeepId));
+}
+
+public sealed class DeepIdV2AccountSnapshot
+{
+    private readonly byte[] accountId;
+
+    internal DeepIdV2AccountSnapshot(string displayName,
+        ReadOnlySpan<byte> accountId, DeepPermanentIdV2 permanentId)
+    {
+        DisplayName = displayName;
+        this.accountId = accountId.ToArray();
+        PermanentId = permanentId;
+    }
+
+    public string DisplayName { get; }
+    public ReadOnlyMemory<byte> AccountId => accountId.ToArray();
+    public DeepPermanentIdV2 PermanentId { get; }
+}

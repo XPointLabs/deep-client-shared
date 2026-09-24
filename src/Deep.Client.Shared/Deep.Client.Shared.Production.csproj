@@ -78,6 +78,7 @@
     <Compile Include="Services\DeepAccountIdentityOperations.cs" />
     <Compile Include="Services\DeepAccountMessageStoreScope.cs" />
     <Compile Include="Services\DeepAccountService.cs" />
+    <Compile Include="Services\DeepIdV2AccountService.cs" />
     <Compile Include="Services\DeepGenesisDeviceActivation.cs" />
     <Compile Include="Services\HttpServiceEndpointPolicy.cs" />
     <Compile Include="Services\HttpServiceRequestTransport.cs" />
