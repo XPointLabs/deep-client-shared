@@ -6,6 +6,7 @@ using System.Text.RegularExpressions;
 using Deep.Client.Shared.Services.ContactV1;
 using Deep.Client.Shared.Services.GroupV1;
 using Deep.Client.Shared.Services.XPointNetworkV1;
+using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.DeepExtension.PrivacyRouting;
 using Deep.Protocol.XPointNetworkV1;
 
@@ -388,6 +389,39 @@ public sealed class HttpServiceTransportFactory
         {
             return new AccountDirectoryV2.DeepIdV2GenesisAdmissionClient(
                 transport);
+        }
+        catch
+        {
+            transport.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Constructs the DID2-only proof client with the same owned HTTPS
+    /// transport policy as genesis admission. The caller retains ownership
+    /// of the monotonic clock, verifier and account-scoped protected floor.
+    /// </summary>
+    public AccountDirectoryV2.DeepIdV2DirectoryProofClient
+        CreateDeepIdV2DirectoryProofClient(
+            string directoryBaseUrl,
+            IOnionMonotonicClock clock,
+            IDeepMlDsa65Verifier verifier,
+            AccountDirectoryV2.IDeepIdV2DirectoryProtectedLkgStore protectedLkgStore,
+            HttpServiceClientOptions? clientOptions = null,
+            TimeSpan requestTimeout = default)
+    {
+        ArgumentNullException.ThrowIfNull(clock);
+        ArgumentNullException.ThrowIfNull(verifier);
+        ArgumentNullException.ThrowIfNull(protectedLkgStore);
+        var transport = CreateRequestTransport(
+            AccountDirectoryV2.DeepIdV2DirectoryProofClient
+                .CreateTransportOptions(directoryBaseUrl, requestTimeout),
+            clientOptions);
+        try
+        {
+            return new AccountDirectoryV2.DeepIdV2DirectoryProofClient(
+                transport, clock, verifier, protectedLkgStore);
         }
         catch
         {

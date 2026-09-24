@@ -3,6 +3,7 @@ using Deep.Client.Shared.Services;
 using Deep.Protocol.AccountDirectoryV1;
 using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.DeepExtension.PrivacyRouting;
+using Deep.Protocol.XPointNetworkV1;
 
 namespace Deep.Client.Shared.Production.Tests;
 
@@ -51,6 +52,44 @@ public sealed class DeepIdV2DirectoryProofClientTests
         Assert.Throws<ArgumentNullException>(() =>
             new DeepIdV2DirectoryProofClient(transport, new FixedClock(),
                 new DenyingVerifier(), null!));
+    }
+
+    [Fact]
+    public void FactoryOwnsProofTransportAndRejectsNonHttpsOrLongTimeout()
+    {
+        var factory = new HttpServiceTransportFactory(
+            HttpServiceEndpointPolicy.Production);
+        var clock = new FixedClock();
+        var verifier = new DenyingVerifier();
+        var floor = new UnusedFloor();
+
+        using var proof = factory.CreateDeepIdV2DirectoryProofClient(
+            "https://registry.example/", clock, verifier, floor);
+        Assert.NotNull(proof);
+        Assert.Throws<ArgumentException>(() =>
+            factory.CreateDeepIdV2DirectoryProofClient(
+                "http://registry.example/", clock, verifier, floor));
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            factory.CreateDeepIdV2DirectoryProofClient(
+                "https://registry.example/", clock, verifier, floor,
+                requestTimeout: TimeSpan.FromSeconds(31)));
+        Assert.Throws<ArgumentNullException>(() =>
+            factory.CreateDeepIdV2DirectoryProofClient(
+                "https://registry.example/", clock, verifier, null!));
+    }
+
+    private sealed class UnusedFloor : IDeepIdV2DirectoryProtectedLkgStore
+    {
+        public ValueTask<AccountDirectoryProtectedLkg> RestoreAsync(
+            VerifiedXPointNetworkAuthority authority,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException("No network request is made.");
+
+        public ValueTask CommitVerifiedAsync(
+            AccountDirectoryProtectedLkg expectedHead,
+            VerifiedDeepIdV2DirectoryFreshness verified,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException("No network request is made.");
     }
 
     private sealed class FixedClock : IOnionMonotonicClock
