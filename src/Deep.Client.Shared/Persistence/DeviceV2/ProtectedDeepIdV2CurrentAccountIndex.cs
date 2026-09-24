@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using Deep.Client.Shared.Domain;
 using Deep.Protocol.ApplicationCore;
+using Deep.Protocol.Identity;
 
 namespace Deep.Client.Shared.Persistence.DeviceV2;
 
@@ -47,6 +48,10 @@ internal sealed class ProtectedDeepIdV2CurrentAccountIndex
             cancellationToken).ConfigureAwait(false)
             ?? throw new CryptographicException(
                 "A partial DID2 genesis cannot become the current account.");
+        _ = await new ProtectedDeepIdV2ResolverCapabilityStore(storage,
+            networkId, accountId.Span).ReadVerifiedAsync(
+            complete.PublicEvidence.Binding.DeepId, cancellationToken)
+            .ConfigureAwait(false);
         var name = StrictUtf8.GetBytes(normalized);
         var encoded = new byte[HeaderLength + name.Length];
         try
@@ -121,7 +126,20 @@ internal sealed class ProtectedDeepIdV2CurrentAccountIndex
                 cancellationToken).ConfigureAwait(false)
                 ?? throw new CryptographicException(
                     "The DID2 account index points to partial genesis state.");
-            return new(name, accountId, complete);
+            try
+            {
+                var permanentId = await new
+                    ProtectedDeepIdV2ResolverCapabilityStore(storage,
+                        networkId, accountId).ReadVerifiedAsync(
+                        complete.PublicEvidence.Binding.DeepId,
+                        cancellationToken).ConfigureAwait(false);
+                return new(name, accountId, complete, permanentId);
+            }
+            catch
+            {
+                complete.Dispose();
+                throw;
+            }
         }
         finally { CryptographicOperations.ZeroMemory(encoded); }
     }
@@ -138,12 +156,14 @@ internal sealed class ProtectedDeepIdV2CurrentAccountIndex
 
 internal sealed class VerifiedDeepIdV2CurrentAccount(
     string displayName, ReadOnlySpan<byte> accountId,
-    VerifiedDeepIdV2LocalGenesis verified) : IDisposable
+    VerifiedDeepIdV2LocalGenesis verified,
+    DeepPermanentIdV2 permanentId) : IDisposable
 {
     private readonly byte[] accountId = accountId.ToArray();
     internal string DisplayName { get; } = displayName;
     internal ReadOnlyMemory<byte> AccountId => accountId.ToArray();
     internal VerifiedDeepIdV2LocalGenesis Verified { get; } = verified;
+    internal DeepPermanentIdV2 PermanentId { get; } = permanentId;
 
     public void Dispose() => Verified.Dispose();
 }

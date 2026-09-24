@@ -117,8 +117,7 @@ public sealed class DeepIdV2AccountService
     private static DeepIdV2AccountSnapshot Snapshot(
         VerifiedDeepIdV2CurrentAccount current) =>
         new(current.DisplayName, current.AccountId.Span,
-            DeepPermanentIdV2.FromCredential(
-                current.Verified.PublicEvidence.Binding.DeepId));
+            current.PermanentId);
 }
 
 public sealed class DeepIdV2AccountSnapshot

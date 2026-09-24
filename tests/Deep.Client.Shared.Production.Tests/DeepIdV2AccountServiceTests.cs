@@ -1,4 +1,5 @@
 using Deep.Client.Shared.Persistence;
+using Deep.Client.Shared.Persistence.DeviceV2;
 using Deep.Client.Shared.Services;
 using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.Identity;
@@ -36,6 +37,17 @@ public sealed class DeepIdV2AccountServiceTests
             var callerCopy = created.AccountId.ToArray();
             callerCopy.AsSpan().Clear();
             Assert.NotEqual(callerCopy, created.AccountId.ToArray());
+            var publicGenesis = await new ProtectedDeepIdV2GenesisContactStore(
+                storage, network, created.AccountId.Span).ReadUntrustedAsync(
+                default);
+            Assert.NotNull(publicGenesis);
+            var readCapability = DeepIdV2Codec.DecodeDeepIdText(
+                created.PermanentId.CanonicalText).ReadCapability;
+            Assert.Equal(-1, publicGenesis!.ExactDid2.Span.IndexOf(
+                readCapability));
+            Assert.True(DeepIdV2Codec.DecodeDid2(
+                publicGenesis.ExactDid2.Span).MatchesResolverReadCapability(
+                    readCapability));
             using (var phrase = await first.ReadRetainedRecoveryPhraseAsync())
                 Assert.NotNull(phrase);
 
@@ -64,6 +76,16 @@ public sealed class DeepIdV2AccountServiceTests
                 .ReadRetainedRecoveryPhraseAsync());
             Assert.Equal(created.PermanentId,
                 (await resumed.GetCurrentAsync())!.PermanentId);
+            var afterPhraseDeletion = new DeepIdV2AccountService(storage,
+                directory, network, 1, clock,
+                DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess);
+            Assert.Equal(created.PermanentId,
+                (await afterPhraseDeletion.GetCurrentAsync())!.PermanentId);
+
+            await storage.DeleteBatchAsync(
+                ["deep.store.v2.resolver-read-capability"]);
+            await Assert.ThrowsAnyAsync<Exception>(() =>
+                resumed.GetCurrentAsync());
 
             await resumed.ResetExplicitlyAsync();
             Assert.Null(await resumed.GetCurrentAsync());

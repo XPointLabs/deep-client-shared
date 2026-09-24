@@ -223,6 +223,16 @@ internal sealed class ProtectedDeepIdV2AccountOwner
             cancellationToken).ConfigureAwait(false)
             ?? throw new CryptographicException(
                 "An unpublished DID2 winner has incomplete bootstrap state.");
+        var restoredAddress = DeepIdV2Root.DerivePermanentIdV2(retained);
+        if (!restoredAddress.MatchesExactCredential(
+                completed.PublicEvidence.Binding.DeepId))
+            throw new CryptographicException(
+                "The retained phrase does not restore the exact DID2 resolver capability.");
+        await new ProtectedDeepIdV2ResolverCapabilityStore(storage,
+            networkId, candidate).WriteVerifiedAsync(
+            completed.PublicEvidence.Binding.DeepId,
+            restoredAddress.ResolverReadCapability,
+            cancellationToken).ConfigureAwait(false);
         await SqliteDeepIdV2AccountGeneration.EnsureAsync(sqlStatePath,
             storage, networkId, candidate, name, completed,
             allowCreate: true, cancellationToken).ConfigureAwait(false);

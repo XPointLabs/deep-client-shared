@@ -39,6 +39,7 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             ValidateRecord(record, network.Span, current.AccountId.Span);
             var binding = AccountBinding.From(current.Verified,
                 current.AccountId.Span, network.Span, current.DisplayName,
+                current.PermanentId.CanonicalText,
                 record.AsSpan(56, 32));
             ValidateDatabase(path, record.AsSpan(88, 32), binding);
             return new DirectoryLkgStore(storage, accountLease, path,

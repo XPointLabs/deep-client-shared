@@ -71,6 +71,10 @@ internal static partial class SqliteDeepIdV2AccountGeneration
                 nameof(displayName)) != displayName)
             throw new ArgumentException("The DID2 SQL display name must be canonical.",
                 nameof(displayName));
+        var permanentId = await new ProtectedDeepIdV2ResolverCapabilityStore(
+            storage, networkId.Span, accountId.Span).ReadVerifiedAsync(
+            genesis.PublicEvidence.Binding.DeepId, cancellationToken)
+            .ConfigureAwait(false);
 
         var path = Path.GetFullPath(statePath);
         var directory = Path.GetDirectoryName(path);
@@ -111,7 +115,8 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             {
                 var instanceId = record.AsSpan(56, 32).ToArray();
                 var binding = AccountBinding.From(genesis, accountId.Span,
-                    networkId.Span, displayName, instanceId);
+                    networkId.Span, displayName, permanentId.CanonicalText,
+                    instanceId);
                 if (!File.Exists(path))
                 {
                     if (!allowCreate)
@@ -401,14 +406,15 @@ internal static partial class SqliteDeepIdV2AccountGeneration
     {
         internal static AccountBinding From(VerifiedDeepIdV2LocalGenesis genesis,
             ReadOnlySpan<byte> accountId, ReadOnlySpan<byte> networkId,
-            string displayName, ReadOnlySpan<byte> instanceId)
+            string displayName, string deepIdText,
+            ReadOnlySpan<byte> instanceId)
         {
             var evidence = genesis.PublicEvidence;
             var device = evidence.Binding.Identity.ActiveDevices.Single();
             return new(networkId.ToArray(), accountId.ToArray(),
                 evidence.Binding.DeepId.RecordHash.ToArray(),
                 evidence.Binding.Record.RecordHash.ToArray(), displayName,
-                evidence.Binding.DeepId.Text,
+                deepIdText,
                 device.Certificate.DeviceId.ToArray(),
                 device.Certificate.CanonicalHash.ToArray(),
                 evidence.Directory.Record.RecordHash.ToArray(),

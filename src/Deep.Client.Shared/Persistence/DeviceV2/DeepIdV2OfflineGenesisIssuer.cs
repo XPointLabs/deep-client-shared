@@ -66,8 +66,16 @@ internal sealed class DeepIdV2OfflineGenesisIssuer
             verifiedDevice, trustedUnixSeconds);
         var checkpoint = recovery.AuthorGenesisAdc1V2(binding, directory,
             trustedUnixSeconds);
+        var address = DeepIdV2Root.DerivePermanentIdV2(phrase);
+        if (!address.MatchesExactCredential(binding.Head.DeepId))
+            throw new System.Security.Cryptography.CryptographicException(
+                "The derived DID2 address does not match the issued root.");
         await new ProtectedDeepIdV2RecoveryPhraseStore(storage,
             networkId, accountId).WriteVerifiedAsync(phrase, cancellationToken)
+            .ConfigureAwait(false);
+        await new ProtectedDeepIdV2ResolverCapabilityStore(storage,
+            networkId, accountId).WriteVerifiedAsync(binding.Head.DeepId,
+            address.ResolverReadCapability, cancellationToken)
             .ConfigureAwait(false);
         var verified = await new ProtectedDeepIdV2GenesisBootstrap(storage,
             networkId, accountId).CommitAsync(deviceSecrets, binding.Head,
