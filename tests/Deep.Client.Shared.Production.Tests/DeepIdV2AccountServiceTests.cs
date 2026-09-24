@@ -160,12 +160,19 @@ public sealed class DeepIdV2AccountServiceTests
                 Assert.NotNull(publicEvidence);
                 var currentDirectory = ApplicationCoreVerifier.StartDmd1Lineage(
                     publicEvidence!.Directory).Next;
-                using var offering = prekeys.AuthorOneTime(new Dpk2AuthoringContext(
+                var context = new Dpk2AuthoringContext(
                     currentDirectory, 1, 1, 1, 1_900_000_000,
-                    1_900_000_000, 1_900_086_400));
-                Assert.Equal(firstDeviceId,
-                    offering.Record.ResponderDeviceId.ToArray());
-                Assert.Equal(32, offering.ExactDpk2Hash.Length);
+                    1_900_000_000, 1_900_086_400);
+                if (OperatingSystem.IsWindows())
+                {
+                    using var offering = prekeys.AuthorOneTime(context);
+                    Assert.Equal(firstDeviceId,
+                        offering.Record.ResponderDeviceId.ToArray());
+                    Assert.Equal(32, offering.ExactDpk2Hash.Length);
+                }
+                else
+                    Assert.Throws<PlatformNotSupportedException>(() =>
+                        prekeys.AuthorOneTime(context));
             }
 
             await storage.DeleteBatchAsync(
