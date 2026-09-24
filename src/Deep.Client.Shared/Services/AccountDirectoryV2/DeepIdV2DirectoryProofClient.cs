@@ -94,12 +94,58 @@ public sealed class DeepIdV2DirectoryProofClient : IDisposable
                 cancellationToken).ConfigureAwait(false) ??
             throw new CryptographicException(
                 "The protected DID2 directory floor is absent.");
-        if (protectedLkg.Head.MinimumReader < 2 ||
-            protectedLkg.Head.NetworkId.Length != authority.NetworkId.Length ||
+        return await FetchGenesisWithFloorAsync(lookup, binding, authority,
+            query, protectedLkg, deploymentProfileId, supportedReader,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Authors the XPoint-only ADL1 from the exact verified DID2 and the
+    /// protected current head. No caller-supplied lookup key or floor enters
+    /// this account-owned path.
+    /// </summary>
+    public async ValueTask<VerifiedDeepIdV2DirectoryFreshness>
+        FetchOwnGenesisAsync(VerifiedDab2 binding,
+            VerifiedXPointNetworkAuthority authority,
+            ushort deploymentProfileId, ushort supportedReader,
+            CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
+        ArgumentNullException.ThrowIfNull(binding);
+        ArgumentNullException.ThrowIfNull(authority);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (binding.Identity.Account.Certificate.NetworkId.Length !=
+                authority.NetworkId.Length ||
             !CryptographicOperations.FixedTimeEquals(
-                protectedLkg.Head.NetworkId.Span, authority.NetworkId.Span))
+                binding.Identity.Account.Certificate.NetworkId.Span,
+                authority.NetworkId.Span))
             throw new CryptographicException(
-                "The DID2 protected directory floor is absent or cross-network.");
+                "The verified DID2 account and network authority differ.");
+        var protectedLkg = await protectedLkgStore.RestoreAsync(authority,
+                cancellationToken).ConfigureAwait(false) ??
+            throw new CryptographicException(
+                "The protected DID2 directory floor is absent.");
+        RequireV2Floor(protectedLkg, authority);
+        var lookup = DeepIdV2AccountDirectoryLookupCodec.Author(binding.DeepId,
+            authority.NetworkId.Span, protectedLkg.LogGeneration,
+            protectedLkg.CoreHash.Span, serviceProfile: 1,
+            new byte[38], new byte[32]);
+        var query = VerifiedDeepIdV2DirectoryQuery.VerifyBinding(lookup,
+            binding);
+        return await FetchGenesisWithFloorAsync(lookup, binding, authority,
+            query, protectedLkg, deploymentProfileId, supportedReader,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private async ValueTask<VerifiedDeepIdV2DirectoryFreshness>
+        FetchGenesisWithFloorAsync(ParsedAdl1V2 lookup, VerifiedDab2 binding,
+            VerifiedXPointNetworkAuthority authority,
+            VerifiedDeepIdV2DirectoryQuery query,
+            AccountDirectoryProtectedLkg protectedLkg,
+            ushort deploymentProfileId, ushort supportedReader,
+            CancellationToken cancellationToken)
+    {
+        RequireV2Floor(protectedLkg, authority);
         if (deploymentProfileId == 0 || supportedReader < 2)
             throw new ArgumentOutOfRangeException(nameof(supportedReader));
 
@@ -162,6 +208,17 @@ public sealed class DeepIdV2DirectoryProofClient : IDisposable
             CryptographicOperations.ZeroMemory(nonce);
             if (encoded is not null) CryptographicOperations.ZeroMemory(encoded);
         }
+    }
+
+    private static void RequireV2Floor(AccountDirectoryProtectedLkg protectedLkg,
+        VerifiedXPointNetworkAuthority authority)
+    {
+        if (protectedLkg.Head.MinimumReader < 2 ||
+            protectedLkg.Head.NetworkId.Length != authority.NetworkId.Length ||
+            !CryptographicOperations.FixedTimeEquals(
+                protectedLkg.Head.NetworkId.Span, authority.NetworkId.Span))
+            throw new CryptographicException(
+                "The DID2 protected directory floor is absent or cross-network.");
     }
 
     public void Dispose()

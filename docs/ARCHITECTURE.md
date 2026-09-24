@@ -135,6 +135,13 @@ exact head against XPoint authority. A post-commit monotonic read prevents an
 expired proof from escaping even when the durable floor advanced. The proof
 client and store are not yet composed into MAUI. Registry issuance,
 Contact/XPK consumers and physical E2E remain required before a release claim.
+For the account-owned genesis path, the proof client derives XPoint-only ADL1
+V2 from the exact verified DID2 and that protected head, never from a caller's
+raw lookup or floor. The bounded V2 admission client accepts DGR1 only as an
+untrusted receipt. `AdmitAndVerifyGenesisAsync` requires the independent
+ADH1/DTT1/ADP1 current-value proof to match the exact local DID2/DAB2/ADC1,
+then rechecks the local account after network I/O. An unavailable or mismatched
+proof leaves admission unconfirmed even if Registry returned HTTP 200.
 This marker scheme detects SQL-only rollback while protected storage remains
 intact; it is not an independent monotonic anchor against a joint rollback of
 both stores. The current journaled secure store is limited to 128 total slots,

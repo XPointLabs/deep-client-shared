@@ -76,6 +76,13 @@ public sealed class DeepIdV2AccountService
             verifier, cancellationToken).ConfigureAwait(false) ??
             throw new InvalidOperationException(
                 "A verified DID2 account is required for genesis admission.");
+        return EncodeGenesisAdmission(current, trustedUnixSeconds, verifier);
+    }
+
+    private byte[] EncodeGenesisAdmission(
+        VerifiedDeepIdV2CurrentAccount current, ulong trustedUnixSeconds,
+        IDeepMlDsa65Verifier verifier)
+    {
         var evidence = current.Verified.PublicEvidence;
         var binding = evidence.Binding;
         var identity = binding.Identity;
@@ -94,6 +101,77 @@ public sealed class DeepIdV2AccountService
             binding.Record.RecordHash.Span);
         return DeepIdV2GenesisAdmissionWireCodec.EncodeRequest(
             new DeepIdV2GenesisAdmissionWireRequest(operationId, request));
+    }
+
+    /// <summary>
+    /// A DGR1 receipt is only an untrusted transport acknowledgement. This
+    /// operation succeeds only after an independent DID2-bound, nonce-fresh
+    /// ADH1/DTT1/ADP1 proof is verified and its rollback floor is committed.
+    /// </summary>
+    public async Task<VerifiedDeepIdV2DirectoryFreshness>
+        AdmitAndVerifyGenesisAsync(
+            DeepIdV2GenesisAdmissionClient admissionClient,
+            DeepIdV2DirectoryProofClient proofClient,
+            VerifiedXPointNetworkAuthority authority,
+            ushort supportedReader = 2,
+            CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(admissionClient);
+        ArgumentNullException.ThrowIfNull(proofClient);
+        ArgumentNullException.ThrowIfNull(authority);
+        byte[] exactDga1;
+        VerifiedDab2 binding;
+        using (var verifier = OpenVerifier())
+        {
+            var trustedUnixSeconds = TrustedUnixSeconds();
+            using var current = await owner.ReadCurrentAsync(trustedUnixSeconds,
+                    verifier, cancellationToken).ConfigureAwait(false) ??
+                throw new InvalidOperationException(
+                    "A verified DID2 account is required for genesis admission.");
+            exactDga1 = EncodeGenesisAdmission(current, trustedUnixSeconds,
+                verifier);
+            binding = current.Verified.PublicEvidence.Binding;
+        }
+        try
+        {
+            var request = DeepIdV2GenesisAdmissionWireCodec.DecodeRequest(
+                exactDga1).Admission;
+            _ = await admissionClient.AdmitAsync(exactDga1, cancellationToken)
+                .ConfigureAwait(false);
+            var verified = await proofClient.FetchOwnGenesisAsync(
+                    binding, authority,
+                    deploymentProfileId, supportedReader, cancellationToken)
+                .ConfigureAwait(false);
+            var checkpoint = verified.CurrentCheckpoint;
+            if (checkpoint is null ||
+                !CryptographicOperations.FixedTimeEquals(
+                    checkpoint.Binding.DeepId.CanonicalBytes.Span,
+                    request.ExactDid2.Span) ||
+                !CryptographicOperations.FixedTimeEquals(
+                    checkpoint.Binding.Record.CanonicalBytes.Span,
+                    request.ExactDab2.Span) ||
+                !CryptographicOperations.FixedTimeEquals(
+                    checkpoint.Checkpoint.CanonicalBytes.Span,
+                    request.ExactAdc1V2.Span))
+                throw new CryptographicException(
+                    "The authenticated DID2 proof does not confirm the exact local genesis admission.");
+            using var finalVerifier = OpenVerifier();
+            using var finalCurrent = await owner.ReadCurrentAsync(
+                    TrustedUnixSeconds(), finalVerifier, cancellationToken)
+                .ConfigureAwait(false) ?? throw new CryptographicException(
+                    "The DID2 account disappeared during directory verification.");
+            var finalBinding = finalCurrent.Verified.PublicEvidence.Binding;
+            if (!CryptographicOperations.FixedTimeEquals(
+                    finalBinding.DeepId.CanonicalBytes.Span,
+                    request.ExactDid2.Span) ||
+                !CryptographicOperations.FixedTimeEquals(
+                    finalBinding.Record.CanonicalBytes.Span,
+                    request.ExactDab2.Span))
+                throw new CryptographicException(
+                    "The local DID2 account changed during directory verification.");
+            return verified;
+        }
+        finally { CryptographicOperations.ZeroMemory(exactDga1); }
     }
 
     /// <summary>

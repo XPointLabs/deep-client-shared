@@ -1,11 +1,14 @@
 using System.Buffers.Binary;
+using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using Deep.Client.Shared.Persistence;
 using Deep.Client.Shared.Persistence.DeviceV2;
 using Deep.Client.Shared.Services;
+using Deep.Client.Shared.Services.AccountDirectoryV2;
 using Deep.Protocol.AccountDirectoryV1;
 using Deep.Protocol.ApplicationCore;
+using Deep.Protocol.DeepExtension.PrivacyRouting;
 using Deep.Protocol.XPointNetworkV1;
 using Sodium;
 
@@ -34,6 +37,44 @@ public sealed class DeepIdV2DirectoryLkgStoreTests
             var initial = await first.RestoreAsync(authority.Verified, default);
             Assert.Equal(0UL, initial.LogGeneration);
             Assert.Equal(authority.ExactHead, initial.ExactAdh1.ToArray());
+
+            using (var admissionTransport = new HttpServiceRequestTransport(
+                       new HttpClient(new AdmissionReceiptHandler(authority.ExactHead)),
+                       DeepIdV2GenesisAdmissionClient.CreateTransportOptions(
+                           "https://registry.example/"),
+                       HttpServiceEndpointPolicy.Production))
+            using (var admission = new DeepIdV2GenesisAdmissionClient(
+                       admissionTransport))
+            {
+                var proofHandler = new UnavailableProofHandler();
+                using var proofTransport = new HttpServiceRequestTransport(
+                    new HttpClient(proofHandler),
+                    DeepIdV2DirectoryProofClient.CreateTransportOptions(
+                        "https://registry.example/"),
+                    HttpServiceEndpointPolicy.Production);
+                using var verifier = DeepMlDsa65CandidateVerifierFactory
+                    .OpenForCurrentProcess();
+                using var proof = new DeepIdV2DirectoryProofClient(
+                    proofTransport, new FixedMonotonicClock(), verifier, first);
+                await Assert.ThrowsAsync<IOException>(async () =>
+                    await account.AdmitAndVerifyGenesisAsync(admission, proof,
+                        authority.Verified));
+                Assert.NotNull(proofHandler.Request);
+                Assert.Equal(initial.LogGeneration,
+                    proofHandler.Request!.Lookup.MinimumAdhGeneration);
+                Assert.Equal(initial.CoreHash.ToArray(),
+                    proofHandler.Request.Lookup.MinimumAdhHash.ToArray());
+                Assert.Equal((ushort)1,
+                    proofHandler.Request.Lookup.ServiceProfile);
+                var expectedDid = DeepIdV2GenesisAdmissionWireCodec.DecodeRequest(
+                    await account.PrepareGenesisAdmissionAsync())
+                    .Admission.ExactDid2;
+                Assert.Equal(expectedDid.ToArray(),
+                    proofHandler.Request.DeepId.CanonicalBytes.ToArray());
+                Assert.Equal(0UL,
+                    (await first.RestoreAsync(authority.Verified, default))
+                    .LogGeneration);
+            }
 
             var reopened = NewAccount(storage, directory, network, clock);
             var second = await reopened.OpenDirectoryLkgStoreAsync(
@@ -149,6 +190,54 @@ public sealed class DeepIdV2DirectoryLkgStoreTests
 
     private static byte[] Bytes(int length, byte value) =>
         Enumerable.Repeat(value, length).ToArray();
+
+    private sealed class AdmissionReceiptHandler(byte[] head) : HttpMessageHandler
+    {
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var exact = await request.Content!.ReadAsByteArrayAsync(
+                cancellationToken);
+            var wire = DeepIdV2GenesisAdmissionWireCodec.DecodeRequest(exact);
+            var checkpoint = DeepIdV2AccountDirectoryCodec.Decode(
+                wire.Admission.ExactAdc1V2.Span);
+            var receipt = DeepIdV2GenesisAdmissionWireCodec.EncodeReceipt(
+                new DeepIdV2GenesisAdmissionReceipt(wire.OperationId.Span,
+                    checkpoint.DirectoryLeafKey.Span, head));
+            var response = new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                RequestMessage = request,
+                Content = new ByteArrayContent(receipt)
+            };
+            response.Content.Headers.ContentType = new(
+                DeepIdV2GenesisAdmissionWireCodec.ResponseMediaType);
+            return response;
+        }
+    }
+
+    private sealed class UnavailableProofHandler : HttpMessageHandler
+    {
+        internal DeepIdV2DirectoryProofWireRequest? Request { get; private set; }
+
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var exact = await request.Content!.ReadAsByteArrayAsync(
+                cancellationToken);
+            Request = DeepIdV2DirectoryProofWireCodec.DecodeRequest(exact);
+            return new HttpResponseMessage(HttpStatusCode.ServiceUnavailable)
+            {
+                RequestMessage = request
+            };
+        }
+    }
+
+    private sealed class FixedMonotonicClock : IOnionMonotonicClock
+    {
+        public ValueTask<OnionMonotonicReading> ReadAsync(
+            CancellationToken cancellationToken) =>
+            ValueTask.FromResult(new OnionMonotonicReading(Bytes(16, 0x41), 5));
+    }
 
     private sealed record SignedV2Genesis(
         VerifiedXPointNetworkAuthority Verified, byte[] ExactHead,
