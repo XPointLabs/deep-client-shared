@@ -6,6 +6,7 @@ using Deep.Client.Shared.Services.AccountDirectoryV2;
 using Deep.Protocol.XPointNetworkV1;
 using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.Identity;
+using Deep.Protocol.MessagingCrypto;
 
 namespace Deep.Client.Shared.Services;
 
@@ -73,6 +74,28 @@ public sealed class DeepIdV2AccountService
             throw new CryptographicException(
                 "The local DID2 genesis does not have one exact verified device relative.");
         return current.Verified.DeviceSecrets.CreateAgreementAuthority(
+            relativeDevices[0]);
+    }
+
+    /// <summary>
+    /// Opens a DPK2 author for the exact verified DID2 genesis device.
+    /// Authoring an offering still requires a caller-supplied current,
+    /// unforked DMD1 lineage; this method grants no publication authority.
+    /// </summary>
+    public async Task<Dpk2AuthoringAuthority> OpenLocalPreKeyAuthoringAuthorityAsync(
+        CancellationToken cancellationToken = default)
+    {
+        using var verifier = OpenVerifier();
+        using var current = await owner.ReadCurrentAsync(TrustedUnixSeconds(),
+            verifier, cancellationToken).ConfigureAwait(false) ??
+            throw new InvalidOperationException(
+                "A verified DID2 account is required for prekey authoring.");
+        var relativeDevices = current.Verified.PublicEvidence.Binding.Identity
+            .ActiveDeviceRelatives;
+        if (relativeDevices.Count != 1)
+            throw new CryptographicException(
+                "The local DID2 genesis does not have one exact verified device relative.");
+        return current.Verified.DeviceSecrets.CreateDpk2AuthoringAuthority(
             relativeDevices[0]);
     }
 

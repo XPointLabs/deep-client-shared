@@ -8,6 +8,7 @@ using Deep.Client.Shared.Services.AccountDirectoryV2;
 using Deep.Protocol.AccountDirectoryV1;
 using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.Identity;
+using Deep.Protocol.MessagingCrypto;
 
 namespace Deep.Client.Shared.Production.Tests;
 
@@ -49,6 +50,11 @@ public sealed class DeepIdV2AccountServiceTests
                 Assert.Equal(32, agreement.AgreementPublicKey.Length);
                 firstDeviceId = agreement.DeviceId.ToArray();
                 firstAgreementPublicKey = agreement.AgreementPublicKey.ToArray();
+            }
+            using (var prekeys = await first.OpenLocalPreKeyAuthoringAuthorityAsync())
+            {
+                Assert.Equal(firstDeviceId, prekeys.DeviceId.ToArray());
+                Assert.Equal<ulong>(1, prekeys.DeviceGeneration);
             }
             var callerCopy = created.AccountId.ToArray();
             callerCopy.AsSpan().Clear();
@@ -142,6 +148,25 @@ public sealed class DeepIdV2AccountServiceTests
                 Assert.Equal(firstAgreementPublicKey,
                     agreement.AgreementPublicKey.ToArray());
             }
+            using (var prekeys = await afterPhraseDeletion
+                       .OpenLocalPreKeyAuthoringAuthorityAsync())
+            {
+                Assert.Equal(firstDeviceId, prekeys.DeviceId.ToArray());
+                using var verifier = DeepMlDsa65CandidateVerifierFactory
+                    .OpenForCurrentProcess();
+                var publicEvidence = await new ProtectedDeepIdV2GenesisContactStore(
+                    storage, network, created.AccountId.Span).ReadVerifiedAsync(
+                    1_900_000_000, 1, verifier, default);
+                Assert.NotNull(publicEvidence);
+                var currentDirectory = ApplicationCoreVerifier.StartDmd1Lineage(
+                    publicEvidence!.Directory).Next;
+                using var offering = prekeys.AuthorOneTime(new Dpk2AuthoringContext(
+                    currentDirectory, 1, 1, 1, 1_900_000_000,
+                    1_900_000_000, 1_900_086_400));
+                Assert.Equal(firstDeviceId,
+                    offering.Record.ResponderDeviceId.ToArray());
+                Assert.Equal(32, offering.ExactDpk2Hash.Length);
+            }
 
             await storage.DeleteBatchAsync(
                 ["deep.store.v2.resolver-read-capability"]);
@@ -149,6 +174,8 @@ public sealed class DeepIdV2AccountServiceTests
                 resumed.GetCurrentAsync());
             await Assert.ThrowsAnyAsync<Exception>(() =>
                 resumed.OpenLocalDeviceAgreementAuthorityAsync());
+            await Assert.ThrowsAnyAsync<Exception>(() =>
+                resumed.OpenLocalPreKeyAuthoringAuthorityAsync());
 
             await resumed.ResetExplicitlyAsync();
             Assert.Null(await resumed.GetCurrentAsync());
