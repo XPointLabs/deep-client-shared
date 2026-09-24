@@ -185,56 +185,37 @@ public sealed class DeepIdV2AccountService
                 exactDga1).Admission;
             _ = await admissionClient.AdmitAsync(exactDga1, cancellationToken)
                 .ConfigureAwait(false);
-            ulong? lastCatchUpGeneration = null;
-            for (var attempt = 0; attempt < 64; attempt++)
-            {
-                var verified = await proofClient.FetchOwnGenesisAsync(
-                        binding, authority,
-                        deploymentProfileId, supportedReader,
-                        cancellationToken).ConfigureAwait(false);
-                var checkpoint = verified.CurrentCheckpoint;
-                if (checkpoint is null)
-                {
-                    // A non-membership result is never released as account
-                    // freshness. It may only advance the protected LKG to a
-                    // signed direct successor before another bounded proof.
-                    if (lastCatchUpGeneration is { } previous &&
-                        verified.NextProtectedLkg.LogGeneration <= previous)
-                        throw new CryptographicException(
-                            "The DID2 directory catch-up did not advance.");
-                    lastCatchUpGeneration =
-                        verified.NextProtectedLkg.LogGeneration;
-                    continue;
-                }
-                if (!CryptographicOperations.FixedTimeEquals(
-                        checkpoint.Binding.DeepId.CanonicalBytes.Span,
-                        request.ExactDid2.Span) ||
-                    !CryptographicOperations.FixedTimeEquals(
-                        checkpoint.Binding.Record.CanonicalBytes.Span,
-                        request.ExactDab2.Span) ||
-                    !CryptographicOperations.FixedTimeEquals(
-                        checkpoint.Checkpoint.CanonicalBytes.Span,
-                        request.ExactAdc1V2.Span))
-                    throw new CryptographicException(
-                        "The authenticated DID2 proof does not confirm the exact local genesis admission.");
-                using var finalVerifier = OpenVerifier();
-                using var finalCurrent = await owner.ReadCurrentAsync(
-                        TrustedUnixSeconds(), finalVerifier, cancellationToken)
-                    .ConfigureAwait(false) ?? throw new CryptographicException(
-                        "The DID2 account disappeared during directory verification.");
-                var finalBinding = finalCurrent.Verified.PublicEvidence.Binding;
-                if (!CryptographicOperations.FixedTimeEquals(
-                        finalBinding.DeepId.CanonicalBytes.Span,
-                        request.ExactDid2.Span) ||
-                    !CryptographicOperations.FixedTimeEquals(
-                        finalBinding.Record.CanonicalBytes.Span,
-                        request.ExactDab2.Span))
-                    throw new CryptographicException(
-                        "The local DID2 account changed during directory verification.");
-                return verified;
-            }
-            throw new CryptographicException(
-                "The DID2 directory catch-up exceeded its bounded successor horizon.");
+            var verified = await proofClient.FetchOwnGenesisAsync(
+                    binding, authority, deploymentProfileId,
+                    supportedReader, cancellationToken).ConfigureAwait(false);
+            var checkpoint = verified.CurrentCheckpoint;
+            if (checkpoint is null ||
+                !CryptographicOperations.FixedTimeEquals(
+                    checkpoint.Binding.DeepId.CanonicalBytes.Span,
+                    request.ExactDid2.Span) ||
+                !CryptographicOperations.FixedTimeEquals(
+                    checkpoint.Binding.Record.CanonicalBytes.Span,
+                    request.ExactDab2.Span) ||
+                !CryptographicOperations.FixedTimeEquals(
+                    checkpoint.Checkpoint.CanonicalBytes.Span,
+                    request.ExactAdc1V2.Span))
+                throw new CryptographicException(
+                    "The authenticated DID2 proof does not confirm the exact local genesis admission.");
+            using var finalVerifier = OpenVerifier();
+            using var finalCurrent = await owner.ReadCurrentAsync(
+                    TrustedUnixSeconds(), finalVerifier, cancellationToken)
+                .ConfigureAwait(false) ?? throw new CryptographicException(
+                    "The DID2 account disappeared during directory verification.");
+            var finalBinding = finalCurrent.Verified.PublicEvidence.Binding;
+            if (!CryptographicOperations.FixedTimeEquals(
+                    finalBinding.DeepId.CanonicalBytes.Span,
+                    request.ExactDid2.Span) ||
+                !CryptographicOperations.FixedTimeEquals(
+                    finalBinding.Record.CanonicalBytes.Span,
+                    request.ExactDab2.Span))
+                throw new CryptographicException(
+                    "The local DID2 account changed during directory verification.");
+            return verified;
         }
         finally { CryptographicOperations.ZeroMemory(exactDga1); }
     }
