@@ -374,6 +374,28 @@ public sealed class HttpServiceTransportFactory
             clientOptions,
             client => new HttpServiceRequestTransport(client, options, endpointPolicy));
 
+    public AccountDirectoryV2.DeepIdV2GenesisAdmissionClient
+        CreateDeepIdV2GenesisAdmissionClient(
+            string directoryBaseUrl,
+            HttpServiceClientOptions? clientOptions = null,
+            TimeSpan requestTimeout = default)
+    {
+        var transport = CreateRequestTransport(
+            AccountDirectoryV2.DeepIdV2GenesisAdmissionClient
+                .CreateTransportOptions(directoryBaseUrl, requestTimeout),
+            clientOptions);
+        try
+        {
+            return new AccountDirectoryV2.DeepIdV2GenesisAdmissionClient(
+                transport);
+        }
+        catch
+        {
+            transport.Dispose();
+            throw;
+        }
+    }
+
     public AccountDirectoryV1.AccountDirectoryGenesisAdmissionClient
         CreateAccountDirectoryGenesisAdmissionClient(
             string directoryBaseUrl,

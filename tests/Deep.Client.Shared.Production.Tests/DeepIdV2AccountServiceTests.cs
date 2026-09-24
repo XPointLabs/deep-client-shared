@@ -1,6 +1,10 @@
+using System.Buffers.Binary;
+using System.Net;
+using System.Net.Http.Headers;
 using Deep.Client.Shared.Persistence;
 using Deep.Client.Shared.Persistence.DeviceV2;
 using Deep.Client.Shared.Services;
+using Deep.Client.Shared.Services.AccountDirectoryV2;
 using Deep.Protocol.AccountDirectoryV1;
 using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.Identity;
@@ -55,6 +59,36 @@ public sealed class DeepIdV2AccountServiceTests
             Assert.Equal(publicGenesis.ExactDid2.ToArray(),
                 decodedAdmission.Admission.ExactDid2.ToArray());
             Assert.Equal(-1, admission.AsSpan().IndexOf(readCapability));
+            var leaf = DeepIdV2AccountDirectoryCodec.Decode(
+                decodedAdmission.Admission.ExactAdc1V2.Span).DirectoryLeafKey;
+            var head = UntrustedHead(network);
+            var receipt = DeepIdV2GenesisAdmissionWireCodec.EncodeReceipt(
+                new DeepIdV2GenesisAdmissionReceipt(
+                    decodedAdmission.OperationId.Span, leaf.Span, head));
+            using (var transport = new HttpServiceRequestTransport(
+                       new HttpClient(new FixedReceiptHandler(receipt)),
+                       DeepIdV2GenesisAdmissionClient.CreateTransportOptions(
+                           "https://registry.example/"),
+                       HttpServiceEndpointPolicy.Production))
+            using (var client = new DeepIdV2GenesisAdmissionClient(transport))
+            {
+                var untrusted = await client.AdmitAsync(admission);
+                Assert.Equal(receipt,
+                    DeepIdV2GenesisAdmissionWireCodec.EncodeReceipt(untrusted));
+            }
+            var wrongOperation = decodedAdmission.OperationId.ToArray();
+            wrongOperation[0] ^= 1;
+            var mismatchedReceipt = DeepIdV2GenesisAdmissionWireCodec.EncodeReceipt(
+                new DeepIdV2GenesisAdmissionReceipt(wrongOperation,
+                    leaf.Span, head));
+            using (var transport = new HttpServiceRequestTransport(
+                       new HttpClient(new FixedReceiptHandler(mismatchedReceipt)),
+                       DeepIdV2GenesisAdmissionClient.CreateTransportOptions(
+                           "https://registry.example/"),
+                       HttpServiceEndpointPolicy.Production))
+            using (var client = new DeepIdV2GenesisAdmissionClient(transport))
+                await Assert.ThrowsAsync<System.Security.Cryptography.CryptographicException>(
+                    async () => await client.AdmitAsync(admission));
             using (var phrase = await first.ReadRetainedRecoveryPhraseAsync())
                 Assert.NotNull(phrase);
 
@@ -117,4 +151,37 @@ public sealed class DeepIdV2AccountServiceTests
         OperatingSystem.IsLinux() &&
         System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture ==
             System.Runtime.InteropServices.Architecture.X64;
+
+    private static byte[] UntrustedHead(ReadOnlySpan<byte> network)
+    {
+        var authorityReference = new byte[38];
+        "XNA1"u8.CopyTo(authorityReference);
+        BinaryPrimitives.WriteUInt16BigEndian(authorityReference.AsSpan(4), 1);
+        authorityReference.AsSpan(6).Fill(9);
+        return AccountDirectoryAdh1Codec.Encode(new AccountDirectoryAdh1(
+            network, 0, new byte[32], 0,
+            AccountDirectoryRfc6962.ComputeEmptyTreeHash(),
+            DeepIdV2DirectorySparseMap.EmptyMapRoot.Span,
+            authorityReference, Enumerable.Repeat((byte)8, 32).ToArray(),
+            1, 3_601, 2,
+            [new AccountDirectoryAdh1WitnessEntry(
+                Enumerable.Repeat((byte)10, 32).ToArray(),
+                Enumerable.Repeat((byte)11, 64).ToArray())]));
+    }
+
+    private sealed class FixedReceiptHandler(byte[] receipt) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                RequestMessage = request,
+                Content = new ByteArrayContent(receipt)
+            };
+            response.Content.Headers.ContentType = new MediaTypeHeaderValue(
+                DeepIdV2GenesisAdmissionWireCodec.ResponseMediaType);
+            return Task.FromResult(response);
+        }
+    }
 }
