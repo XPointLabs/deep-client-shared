@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using Deep.Protocol.AccountDirectoryV1;
 using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.DeepExtension.PrivacyRouting;
+using Deep.Protocol.Identity;
 using Deep.Protocol.MessagingCrypto;
 using Deep.Protocol.XPointNetworkV1;
 
@@ -104,6 +105,27 @@ public sealed class DeepIdV2DirectoryProofClient : IDisposable
     /// DAB2. The authenticated current-value proof must return that same DID2.
     /// A verified non-membership result advances the protected floor but is
     /// never released as a usable contact.
+    /// </summary>
+    public ValueTask<VerifiedDeepIdV2DirectoryFreshness>
+        FetchByContactDescriptorAsync(DeepPermanentIdV2 descriptor,
+            ParsedDid2 exactCredential,
+            VerifiedXPointNetworkAuthority authority,
+            ushort deploymentProfileId, ushort supportedReader,
+            CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(descriptor);
+        ArgumentNullException.ThrowIfNull(exactCredential);
+        if (!descriptor.MatchesExactCredential(exactCredential))
+            throw new CryptographicException(
+                "The compact DID2 contact descriptor does not bind the exact public credential.");
+        return FetchByDid2Async(exactCredential, authority,
+            deploymentProfileId, supportedReader, cancellationToken);
+    }
+
+    /// <summary>
+    /// Resolves an already authenticated exact DID2 credential. Callers that
+    /// start from a compact contact descriptor must use the descriptor-bound
+    /// overload above before treating a result as a contact.
     /// </summary>
     public async ValueTask<VerifiedDeepIdV2DirectoryFreshness>
         FetchByDid2Async(ParsedDid2 requestedDid2,
