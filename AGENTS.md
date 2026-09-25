@@ -32,7 +32,8 @@ dotnet test Deep.Client.Shared.Production.slnx --configuration Release -m:1
 
 The old `Deep.Client.Shared.slnx` test project is a pre-cutover Session corpus;
 it is not the clean production gate. Do not restore removed runtime types to
-make those tests compile. Migrate relevant coverage into the production tests.
+make those tests compile. Move relevant coverage into
+`tests/Deep.Client.Shared.Production.Tests` before deleting the old corpus.
 
-Add focused persistence tests under `tests/Deep.Client.Shared.Tests/Persistence` and service or
-transport tests under `tests/Deep.Client.Shared.Tests/Services` for the corresponding change.
+Add focused persistence, service and transport tests to the production test
+project for the corresponding change.
