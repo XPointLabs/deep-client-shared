@@ -7,6 +7,8 @@ using Deep.Protocol.AccountDirectoryV1;
 using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.Identity;
 using Deep.Protocol.XPointNetworkV1;
+using Deep.Client.Shared.Persistence.DeviceV1;
+using Deep.Client.Shared.Domain.DeviceV1;
 
 namespace Deep.Client.Shared.Persistence.DeviceV2;
 
@@ -74,6 +76,36 @@ internal sealed class ProtectedDeepIdV2AccountOwner
             .ConfigureAwait(false);
     }
 
+    internal async ValueTask<SqliteDeviceStateStore>
+        OpenCurrentDeviceStateStoreAsync(ulong trustedUnixSeconds,
+            IDeepMlDsa65Verifier mlDsa65, CancellationToken cancellationToken)
+    {
+        using var held = await lease.AcquireAsync(cancellationToken)
+            .ConfigureAwait(false);
+        using var current = await RequireCurrentUnderLeaseAsync(
+            trustedUnixSeconds, mlDsa65, cancellationToken)
+            .ConfigureAwait(false);
+        var store = await SqliteDeepIdV2AccountGeneration
+            .OpenCurrentDeviceStateStoreAsync(storage, sqlStatePath, current,
+                cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var committed = await DeepIdV2GenesisDmd1Custody.CommitAsync(
+                current, store, cancellationToken).ConfigureAwait(false);
+            if (committed.Disposition is not (
+                ProtectedCurrentDmd1CommitDisposition.Applied or
+                ProtectedCurrentDmd1CommitDisposition.ExactReplay))
+                throw new CryptographicException(
+                    "The verified DID2 genesis DMD1 cannot be installed in this device state.");
+            return store;
+        }
+        catch
+        {
+            store.Dispose();
+            throw;
+        }
+    }
+
     internal async ValueTask<VerifiedDeepIdV2CurrentAccount> CreateFreshAsync(
         string displayName, ulong trustedUnixSeconds,
         IDeepMlDsa65Verifier mlDsa65, CancellationToken cancellationToken)
@@ -133,6 +165,8 @@ internal sealed class ProtectedDeepIdV2AccountOwner
                 throw new InvalidOperationException(
                     "An unpublished durable DID2/DAB2 winner must be recovered before reset.");
         }
+        SqliteDeepIdV2AccountGeneration.DeleteDeviceStateAfterExplicitReset(
+            sqlStatePath);
         SqliteDeepIdV2AccountGeneration.DeleteArtifactsAfterExplicitReset(
             sqlStatePath);
         await storage.PurgeStoreV2NamespaceAsync(cancellationToken)

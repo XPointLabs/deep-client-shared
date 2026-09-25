@@ -220,11 +220,16 @@ The DID2 account service can now hand its freshly reverified genesis DMD1 to
 the concrete durable current-device store with a deterministic, account-bound
 operation ID. Exact replay after restart is idempotent, a foreign account
 scope fails closed, and retained-phrase deletion does not remove the verified
-public closure. This is only a store commit, not a DPH2 agreement grant:
-the MAUI DID2 owner still has to mount the account-scoped store and require
-its separate one-use authorization transaction before a session starts.
-This is not yet the MAUI account owner or a full mutable STORE-01 service:
-app-private path provisioning, in-memory parity, restore-as-new-device,
+public closure. The service now opens an account-scoped encrypted device-state
+database with a key separated from DSV2, verifies the exact DSV2 account
+projection, and installs that genesis DMD1 while holding the account lease.
+A protected install marker rejects silent recreation if the device-state file
+is lost. Creation installs this state, MAUI remounts it for an existing account
+on startup, and explicit V2 reset deletes its file family. This is only a
+durable store commit, not a DPH2 agreement grant: production callers still
+need the separate one-use authorization transaction before a session starts.
+This is not yet a full mutable STORE-01 service:
+in-memory parity, restore-as-new-device,
 directory/contact/messaging cutover and physical E2E remain open. No V1 contact
 slot is read as V2.
 

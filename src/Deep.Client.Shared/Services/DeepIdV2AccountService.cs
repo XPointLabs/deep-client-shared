@@ -95,23 +95,23 @@ public sealed class DeepIdV2AccountService
             verifier, cancellationToken).ConfigureAwait(false) ??
             throw new InvalidOperationException(
                 "A verified DID2 account is required for device-directory custody.");
-        var directory = current.Verified.PublicEvidence.Directory;
-        var lineage = ApplicationCoreVerifier.StartDmd1Lineage(directory).Next;
-        ReadOnlySpan<byte> domain =
-            "Deep/STORE-V2/install-genesis-DMD1"u8;
-        var operationInput = new byte[domain.Length + 32 + 32];
-        domain.CopyTo(operationInput);
-        current.AccountId.Span.CopyTo(operationInput.AsSpan(domain.Length));
-        directory.Record.RecordHash.Span.CopyTo(
-            operationInput.AsSpan(domain.Length + 32));
-        try
-        {
-            var operationId = DeviceOperationId32.FromBytes(
-                SHA256.HashData(operationInput));
-            return await deviceStore.CommitCurrentDmd1Async(operationId,
-                lineage, cancellationToken).ConfigureAwait(false);
-        }
-        finally { CryptographicOperations.ZeroMemory(operationInput); }
+        return await DeepIdV2GenesisDmd1Custody.CommitAsync(current,
+            deviceStore, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Opens the account-bound encrypted device protocol state and ensures its
+    /// exact DID2 genesis DMD1 is durable. The caller owns the returned store.
+    /// A protected install marker prevents silent recreation after state loss.
+    /// This does not by itself authorize a device agreement operation.
+    /// </summary>
+    public async Task<SqliteDeviceStateStore> OpenCurrentDeviceStateStoreAsync(
+        CancellationToken cancellationToken = default)
+    {
+        using var verifier = OpenVerifier();
+        return await owner.OpenCurrentDeviceStateStoreAsync(
+            TrustedUnixSeconds(), verifier, cancellationToken)
+            .ConfigureAwait(false);
     }
 
     /// <summary>
@@ -141,6 +141,9 @@ public sealed class DeepIdV2AccountService
     {
         using var verifier = OpenVerifier();
         using var current = await owner.CreateFreshAsync(displayName,
+            TrustedUnixSeconds(), verifier, cancellationToken)
+            .ConfigureAwait(false);
+        using var deviceState = await owner.OpenCurrentDeviceStateStoreAsync(
             TrustedUnixSeconds(), verifier, cancellationToken)
             .ConfigureAwait(false);
         return Snapshot(current);

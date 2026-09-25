@@ -18,6 +18,51 @@ namespace Deep.Client.Shared.Production.Tests;
 public sealed class DeepIdV2AccountServiceTests
 {
     [Fact]
+    public async Task CurrentDid2DeviceStateMountsAndDoesNotRecreateLostAgreementLedger()
+    {
+        if (!SupportedProvider()) return;
+        var directory = Path.Combine(Path.GetTempPath(),
+            "deep-did2-device-state-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            using var storage = new InMemoryDeepSecureStorage();
+            var network = Enumerable.Range(1, 16).Select(static value =>
+                (byte)value).ToArray();
+            var clock = new FrozenClock(
+                DateTimeOffset.FromUnixTimeSeconds(1_900_000_000));
+            var accounts = new DeepIdV2AccountService(storage, directory,
+                network, 1, clock,
+                DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess);
+            _ = await accounts.CreateAsync("Alice");
+            using (var mounted = await accounts.OpenCurrentDeviceStateStoreAsync())
+                Assert.NotNull(mounted);
+            await accounts.DeleteRetainedRecoveryPhraseAsync();
+            var resumed = new DeepIdV2AccountService(storage, directory,
+                network, 1, clock,
+                DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess);
+            using (var mounted = await resumed.OpenCurrentDeviceStateStoreAsync())
+                Assert.NotNull(mounted);
+
+            var statePath = Path.Combine(directory,
+                "deep-store-v2-account.dsv2.devices.dvs1");
+            Assert.True(File.Exists(statePath));
+            File.Delete(statePath);
+            await Assert.ThrowsAsync<InvalidDataException>(async () =>
+                await resumed.OpenCurrentDeviceStateStoreAsync());
+            Assert.False(File.Exists(statePath));
+
+            await resumed.ResetExplicitlyAsync();
+            Assert.False(File.Exists(Path.Combine(directory,
+                "deep-store-v2-account.dsv2")));
+            _ = await resumed.CreateAsync("Bob");
+            using var newStore = await resumed.OpenCurrentDeviceStateStoreAsync();
+            Assert.NotNull(newStore);
+        }
+        finally { Directory.Delete(directory, recursive: true); }
+    }
+
+    [Fact]
     public async Task VerifiedDid2GenesisInstallsExactCurrentDmd1AcrossRestart()
     {
         if (!SupportedProvider()) return;
