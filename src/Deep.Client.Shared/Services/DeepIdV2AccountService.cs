@@ -255,6 +255,8 @@ public sealed class DeepIdV2AccountService
                     request.ExactDab2.Span))
                 throw new CryptographicException(
                     "The local DID2 account changed during directory verification.");
+            await proofClient.RequireStillFreshAsync(verified,
+                cancellationToken).ConfigureAwait(false);
             return verified;
         }
         finally { CryptographicOperations.ZeroMemory(exactDga1); }

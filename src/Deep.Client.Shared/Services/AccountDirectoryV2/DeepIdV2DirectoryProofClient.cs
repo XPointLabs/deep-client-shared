@@ -195,6 +195,26 @@ public sealed class DeepIdV2DirectoryProofClient : IDisposable
             cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Rechecks the same nonce-bound proof after a caller's asynchronous local
+    /// account/state validation. The proof may expire while that work runs;
+    /// durable LKG commit alone never extends its authority.
+    /// </summary>
+    internal async ValueTask RequireStillFreshAsync(
+        VerifiedDeepIdV2DirectoryFreshness verified,
+        CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
+        ArgumentNullException.ThrowIfNull(verified);
+        var current = await clock.ReadAsync(cancellationToken)
+            .ConfigureAwait(false) ?? throw new CryptographicException(
+                "The DID2 monotonic clock returned no handoff sample.");
+        if (!verified.IsCurrentAtMonotonic(current.BootId.Span,
+                current.SampleSeconds))
+            throw new CryptographicException(
+                "The DID2 directory proof expired before account handoff.");
+    }
+
     private async ValueTask<VerifiedDeepIdV2DirectoryFreshness>
         FetchGenesisWithFloorAsync(ParsedAdl1V2 lookup, ParsedDid2 requestedDid2,
             VerifiedXPointNetworkAuthority authority,
