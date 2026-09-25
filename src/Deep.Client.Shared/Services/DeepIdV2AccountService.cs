@@ -2,6 +2,8 @@ using System.Security.Cryptography;
 using Deep.Protocol.AccountDirectoryV1;
 using Deep.Client.Shared.Persistence;
 using Deep.Client.Shared.Persistence.DeviceV2;
+using Deep.Client.Shared.Persistence.DeviceV1;
+using Deep.Client.Shared.Domain.DeviceV1;
 using Deep.Client.Shared.Services.AccountDirectoryV2;
 using Deep.Protocol.XPointNetworkV1;
 using Deep.Protocol.ApplicationCore;
@@ -75,6 +77,41 @@ public sealed class DeepIdV2AccountService
                 "The local DID2 genesis does not have one exact verified device relative.");
         return current.Verified.DeviceSecrets.CreateAgreementAuthority(
             relativeDevices[0]);
+    }
+
+    /// <summary>
+    /// Installs the exact, locally verified DID2 genesis DMD1 into the durable
+    /// current-device authority store. A caller cannot supply a DMD1 or a
+    /// lineage state. Success does not authorize a DPH2 operation: that still
+    /// requires the store's separate one-use agreement transaction.
+    /// </summary>
+    public async Task<ProtectedCurrentDmd1CommitResult>
+        CommitOwnGenesisDmd1Async(SqliteDeviceStateStore deviceStore,
+            CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(deviceStore);
+        using var verifier = OpenVerifier();
+        using var current = await owner.ReadCurrentAsync(TrustedUnixSeconds(),
+            verifier, cancellationToken).ConfigureAwait(false) ??
+            throw new InvalidOperationException(
+                "A verified DID2 account is required for device-directory custody.");
+        var directory = current.Verified.PublicEvidence.Directory;
+        var lineage = ApplicationCoreVerifier.StartDmd1Lineage(directory).Next;
+        ReadOnlySpan<byte> domain =
+            "Deep/STORE-V2/install-genesis-DMD1"u8;
+        var operationInput = new byte[domain.Length + 32 + 32];
+        domain.CopyTo(operationInput);
+        current.AccountId.Span.CopyTo(operationInput.AsSpan(domain.Length));
+        directory.Record.RecordHash.Span.CopyTo(
+            operationInput.AsSpan(domain.Length + 32));
+        try
+        {
+            var operationId = DeviceOperationId32.FromBytes(
+                SHA256.HashData(operationInput));
+            return await deviceStore.CommitCurrentDmd1Async(operationId,
+                lineage, cancellationToken).ConfigureAwait(false);
+        }
+        finally { CryptographicOperations.ZeroMemory(operationInput); }
     }
 
     /// <summary>

@@ -1,8 +1,11 @@
 using System.Buffers.Binary;
 using System.Net;
 using System.Net.Http.Headers;
+using System.Security.Cryptography;
 using Deep.Client.Shared.Persistence;
 using Deep.Client.Shared.Persistence.DeviceV2;
+using Deep.Client.Shared.Persistence.DeviceV1;
+using Deep.Client.Shared.Domain.DeviceV1;
 using Deep.Client.Shared.Services;
 using Deep.Client.Shared.Services.AccountDirectoryV2;
 using Deep.Protocol.AccountDirectoryV1;
@@ -14,6 +17,72 @@ namespace Deep.Client.Shared.Production.Tests;
 
 public sealed class DeepIdV2AccountServiceTests
 {
+    [Fact]
+    public async Task VerifiedDid2GenesisInstallsExactCurrentDmd1AcrossRestart()
+    {
+        if (!SupportedProvider()) return;
+        var directory = Path.Combine(Path.GetTempPath(),
+            "deep-did2-dmd1-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            using var storage = new InMemoryDeepSecureStorage();
+            var network = Enumerable.Range(1, 16).Select(static value =>
+                (byte)value).ToArray();
+            var clock = new FrozenClock(
+                DateTimeOffset.FromUnixTimeSeconds(1_900_000_000));
+            var accounts = new DeepIdV2AccountService(storage, directory,
+                network, 1, clock,
+                DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess);
+            var created = await accounts.CreateAsync("Alice");
+            var key = RandomNumberGenerator.GetBytes(32);
+            var instanceId = RandomNumberGenerator.GetBytes(32);
+            var path = Path.Combine(directory, "device-current.dvs1");
+            var options = new SqliteDeviceStateStoreOptions(path, key,
+                DeviceAccountId32.FromBytes(created.AccountId.Span), 1, 1,
+                DeviceOperationId32.FromBytes(instanceId));
+            try
+            {
+                using (var store = new SqliteDeviceStateStore(options))
+                {
+                    Assert.Equal(ProtectedCurrentDmd1CommitDisposition.Applied,
+                        (await accounts.CommitOwnGenesisDmd1Async(store)).Disposition);
+                    Assert.Equal(ProtectedCurrentDmd1CommitDisposition.ExactReplay,
+                        (await accounts.CommitOwnGenesisDmd1Async(store)).Disposition);
+                }
+                await accounts.DeleteRetainedRecoveryPhraseAsync();
+                var resumed = new DeepIdV2AccountService(storage, directory,
+                    network, 1, clock,
+                    DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess);
+                using (var reopened = new SqliteDeviceStateStore(
+                    new SqliteDeviceStateStoreOptions(path, key,
+                        DeviceAccountId32.FromBytes(created.AccountId.Span),
+                        1, 1, DeviceOperationId32.FromBytes(instanceId),
+                        allowCreate: false)))
+                    Assert.Equal(ProtectedCurrentDmd1CommitDisposition.ExactReplay,
+                        (await resumed.CommitOwnGenesisDmd1Async(reopened))
+                        .Disposition);
+                var wrongAccount = created.AccountId.ToArray();
+                wrongAccount[0] ^= 1;
+                using var wrongScope = new SqliteDeviceStateStore(
+                    new SqliteDeviceStateStoreOptions(
+                        Path.Combine(directory, "wrong-scope.dvs1"), key,
+                        DeviceAccountId32.FromBytes(wrongAccount), 1, 1,
+                        DeviceOperationId32.FromBytes(
+                            RandomNumberGenerator.GetBytes(32))));
+                Assert.Equal(ProtectedCurrentDmd1CommitDisposition.Conflict,
+                    (await resumed.CommitOwnGenesisDmd1Async(wrongScope))
+                    .Disposition);
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(key);
+                CryptographicOperations.ZeroMemory(instanceId);
+            }
+        }
+        finally { Directory.Delete(directory, recursive: true); }
+    }
+
     [Fact]
     public async Task PublicServiceCreatesResumesAndDeletesPhraseWithoutV1Fallback()
     {

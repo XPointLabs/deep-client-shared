@@ -216,6 +216,13 @@ genesis and protected key; a database missing after index publication cannot.
 Explicit local reset removes the exact V2 database family before V2 namespace
 purge. Focused tests cover encrypted bytes, journaled-key reopen, wrong scope,
 wrong generation, corrupted pending state and missing database/key refusal.
+The DID2 account service can now hand its freshly reverified genesis DMD1 to
+the concrete durable current-device store with a deterministic, account-bound
+operation ID. Exact replay after restart is idempotent, a foreign account
+scope fails closed, and retained-phrase deletion does not remove the verified
+public closure. This is only a store commit, not a DPH2 agreement grant:
+the MAUI DID2 owner still has to mount the account-scoped store and require
+its separate one-use authorization transaction before a session starts.
 This is not yet the MAUI account owner or a full mutable STORE-01 service:
 app-private path provisioning, in-memory parity, restore-as-new-device,
 directory/contact/messaging cutover and physical E2E remain open. No V1 contact
