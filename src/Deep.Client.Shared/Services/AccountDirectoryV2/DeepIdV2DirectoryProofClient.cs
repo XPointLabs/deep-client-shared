@@ -94,9 +94,45 @@ public sealed class DeepIdV2DirectoryProofClient : IDisposable
                 cancellationToken).ConfigureAwait(false) ??
             throw new CryptographicException(
                 "The protected DID2 directory floor is absent.");
-        return await FetchGenesisWithFloorAsync(lookup, binding, authority,
+        return await FetchGenesisWithFloorAsync(lookup, binding.DeepId, authority,
             query, protectedLkg, deploymentProfileId, supportedReader,
             cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Resolves a peer from an exact DID2, without trusting a caller-supplied
+    /// DAB2. The authenticated current-value proof must return that same DID2.
+    /// A verified non-membership result advances the protected floor but is
+    /// never released as a usable contact.
+    /// </summary>
+    public async ValueTask<VerifiedDeepIdV2DirectoryFreshness>
+        FetchByDid2Async(ParsedDid2 requestedDid2,
+            VerifiedXPointNetworkAuthority authority,
+            ushort deploymentProfileId, ushort supportedReader,
+            CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
+        ArgumentNullException.ThrowIfNull(requestedDid2);
+        ArgumentNullException.ThrowIfNull(authority);
+        cancellationToken.ThrowIfCancellationRequested();
+        var protectedLkg = await protectedLkgStore.RestoreAsync(authority,
+                cancellationToken).ConfigureAwait(false) ??
+            throw new CryptographicException(
+                "The protected DID2 directory floor is absent.");
+        RequireV2Floor(protectedLkg, authority);
+        var lookup = DeepIdV2AccountDirectoryLookupCodec.Author(requestedDid2,
+            authority.NetworkId.Span, protectedLkg.LogGeneration,
+            protectedLkg.CoreHash.Span, serviceProfile: 1,
+            new byte[38], new byte[32]);
+        var query = VerifiedDeepIdV2DirectoryQuery.VerifyDid2(lookup,
+            requestedDid2);
+        var verified = await FetchGenesisWithFloorAsync(lookup, requestedDid2,
+            authority, query, protectedLkg, deploymentProfileId,
+            supportedReader, cancellationToken).ConfigureAwait(false);
+        if (verified.CurrentCheckpoint is null)
+            throw new CryptographicException(
+                "No current authenticated DID2 contact binding exists.");
+        return verified;
     }
 
     /// <summary>
@@ -132,13 +168,13 @@ public sealed class DeepIdV2DirectoryProofClient : IDisposable
             new byte[38], new byte[32]);
         var query = VerifiedDeepIdV2DirectoryQuery.VerifyBinding(lookup,
             binding);
-        return await FetchGenesisWithFloorAsync(lookup, binding, authority,
+        return await FetchGenesisWithFloorAsync(lookup, binding.DeepId, authority,
             query, protectedLkg, deploymentProfileId, supportedReader,
             cancellationToken).ConfigureAwait(false);
     }
 
     private async ValueTask<VerifiedDeepIdV2DirectoryFreshness>
-        FetchGenesisWithFloorAsync(ParsedAdl1V2 lookup, VerifiedDab2 binding,
+        FetchGenesisWithFloorAsync(ParsedAdl1V2 lookup, ParsedDid2 requestedDid2,
             VerifiedXPointNetworkAuthority authority,
             VerifiedDeepIdV2DirectoryQuery query,
             AccountDirectoryProtectedLkg protectedLkg,
@@ -157,7 +193,7 @@ public sealed class DeepIdV2DirectoryProofClient : IDisposable
         try
         {
             encoded = DeepIdV2DirectoryProofWireCodec.EncodeRequest(
-                lookup, binding.DeepId, nonce, requestCreated.BootId.Span,
+                lookup, requestedDid2, nonce, requestCreated.BootId.Span,
                 requestCreated.SampleSeconds);
             var exactRequest = DeepIdV2DirectoryProofWireCodec.DecodeRequest(encoded);
             using var response = await transport.PostAsync(
@@ -184,7 +220,7 @@ public sealed class DeepIdV2DirectoryProofClient : IDisposable
                 responseReceived.SampleSeconds, current.SampleSeconds);
             var wire = DeepIdV2DirectoryProofWireCodec.DecodeResponse(
                 response.Body.Span, exactRequest);
-            var verified = DeepIdV2DirectoryCurrentProofVerifier.VerifyGenesis(
+            var verified = DeepIdV2DirectoryCurrentProofVerifier.VerifyRequestedDid2(
                 authority, wire.ExactAdh1, wire.ExactDtt1, wire.ExactAdp1V2,
                 nonce, query, window, protectedLkg, deploymentProfileId,
                 supportedReader, mlDsa65);
