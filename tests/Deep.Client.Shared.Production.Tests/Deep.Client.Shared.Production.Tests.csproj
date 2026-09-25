@@ -15,16 +15,10 @@
   </ItemGroup>
   <ItemGroup>
     <Using Include="Xunit" />
-    <Compile Include="..\Deep.Client.Shared.Tests\Services\MessagingV1\PrivacyRoutedMessagingTransportTests.cs"
-             Link="MessagingV1\PrivacyRoutedMessagingTransportTests.cs" />
-    <Compile Include="..\Deep.Client.Shared.Tests\Persistence\MessagingCryptoV1\ManagedInitiatorInitialSessionSqliteAdapterTests.cs"
-             Link="MessagingCryptoV1\ManagedInitiatorInitialSessionSqliteAdapterTests.cs" />
     <Compile Include="..\Deep.Client.Shared.Tests\Persistence\MessagingCryptoV1\SqliteMessagingCryptoV1StoreTests.cs"
              Link="MessagingCryptoV1\SqliteMessagingCryptoV1StoreTests.cs" />
     <Compile Include="..\Deep.Client.Shared.Tests\Persistence\MessagingCryptoV1\ExactDpe2SqliteDurableTransactionAuthorityTests.cs"
              Link="MessagingCryptoV1\ExactDpe2SqliteDurableTransactionAuthorityTests.cs" />
-    <Compile Include="..\Deep.Client.Shared.Tests\Services\ContactV1\ContactInitialSessionCoordinatorTests.cs"
-             Link="ContactV1\ContactInitialSessionCoordinatorTests.cs" />
     <Compile Include="..\Deep.Client.Shared.Tests\Persistence\PreKeyV1\OpaquePreKeyV1AuthoringFixture.cs"
              Link="PreKeyV1\OpaquePreKeyV1AuthoringFixture.cs" />
     <Compile Include="..\Deep.Client.Shared.Tests\Persistence\PreKeyV1\OpaquePreKeyV1StoreSurfaceTests.cs"

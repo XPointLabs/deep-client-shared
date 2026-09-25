@@ -490,59 +490,18 @@ public sealed class ProductionContactResolvePathAuthoritySource :
     }
 
     /// <summary>
-    /// Resolves the current, non-forked sender directory required to verify an
-    /// unsolicited DPH2. The exact DID1 is authenticated by the DPH2 header;
-    /// it supplies both the targeted directory lookup preimage and the bytes
-    /// deliberately omitted by the ADP1 public projection.
+    /// Former V1 sender-directory resolver. DID2 DPH2 is rejected here until
+    /// the independently verified V2 sender-directory path replaces it.
     /// </summary>
-    public async ValueTask<VerifiedInboundInitiatorDirectory>
+    public ValueTask<VerifiedInboundInitiatorDirectory>
         ResolveInboundInitiatorDirectoryAsync(
             Dph2Record initiation,
             CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(initiation);
-        var did = Deep.Protocol.ApplicationCore.ApplicationCoreCodec.DecodeDid1(
-            initiation.InitiatorDid1.Span);
-        var lookup = DirectoryLookupKey(
-            initiation.NetworkId.Span, did.CanonicalBytes.Span);
-        try
-        {
-            var resolved = await MintCurrentAuthorityAsync(
-                    initiation.NetworkId,
-                    initiation.InitiatorAccountId,
-                    lookup,
-                    AccountDirectoryAdp1ResultKind.CurrentValue,
-                    ContactServiceRequestKind.ResolveInvite,
-                    cancellationToken,
-                    did.CanonicalBytes)
-                .ConfigureAwait(false);
-            var canonical = resolved.Canonical ?? throw Fail(
-                "inbound-directory-authority-incomplete",
-                "The inbound DPH2 directory lookup produced no current-value authority.");
-            var closure = canonical.CurrentValueClosure ?? throw Fail(
-                "inbound-directory-closure-missing",
-                "The inbound DPH2 directory lookup did not verify its exact DID1 closure.");
-            var head = closure.Directory.Head;
-            var active = head.Record.ActiveDevices.SingleOrDefault(entry =>
-                Fixed(entry.DeviceId.Span, initiation.InitiatorDeviceId.Span));
-            if (!Fixed(head.Record.NetworkId.Span, initiation.NetworkId.Span) ||
-                !Fixed(head.Record.DeepAccountId.Span,
-                    initiation.InitiatorAccountId.Span) ||
-                active is null ||
-                !Fixed(active.Dpd1Reference.CanonicalBytes.Span,
-                    initiation.InitiatorDpd1Ref.Span))
-            {
-                throw Fail(
-                    "inbound-directory-scope-mismatch",
-                    "The current directory does not contain the exact DPH2 initiator device.");
-            }
-            return new VerifiedInboundInitiatorDirectory(
-                closure, canonical.DirectoryFreshness);
-        }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(lookup);
-        }
+        cancellationToken.ThrowIfCancellationRequested();
+        throw new CryptographicException(
+            "The V1 directory resolver cannot authorize a DID2 DPH2 sender.");
     }
 
     private async ValueTask<ContactResolvePathAuthority> MintCurrentAuthorityAsync(

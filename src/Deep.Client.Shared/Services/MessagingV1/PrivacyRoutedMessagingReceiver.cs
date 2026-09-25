@@ -467,14 +467,8 @@ public sealed class PrivacyRoutedMessagingReceiver : IDisposable
         if (preview is null)
             return null;
         var placement = localRecipient.RequireClaimPlacement(preview.Request);
-        return await preview.VerifyCurrentAsync(
-                senderDirectory.Freshness,
-                placement,
-                localRecipient.Authority,
-                localRecipient.Bundle,
-                localRecipient.TrustedTimeAuthority,
-                cancellationToken)
-            .ConfigureAwait(false);
+        throw new CryptographicException(
+            "The V1 sender-directory and contact closure cannot promote DID2 DPH2.");
     }
 
     public async ValueTask AcknowledgeAsync(

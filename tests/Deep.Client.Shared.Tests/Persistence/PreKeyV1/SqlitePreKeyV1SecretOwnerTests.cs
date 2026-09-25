@@ -625,8 +625,9 @@ public sealed class SqlitePreKeyV1SecretOwnerTests
             return new Dph2Record(
                 NetworkId, Bytes(32, 0x41), Bytes(32, 0x42), 1,
                 Dpd1Reference,
-                Deep.Protocol.ApplicationCore.ApplicationCoreCodec.AuthorDid1(
-                    Bytes(32, 0x3f), Bytes(16, 0x40)).CanonicalBytes.Span,
+                Deep.Protocol.ApplicationCore.DeepIdV2Codec.AuthorDid2(
+                    Bytes(32, 0x3f), Bytes(1952, 0x41), Bytes(16, 0x40))
+                    .CanonicalBytes.Span,
                 responderAccount ?? AccountId, DeviceId, 1,
                 hash, Bytes(32, 0x43), Bytes(32, 0x44),
                 record.MlKemKind == Dpk2PrekeyKind.LastResort ? (ushort)1 : (ushort)0,

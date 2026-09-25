@@ -1893,13 +1893,8 @@ internal sealed class DeepDirectMessagingStorageOwner : IAsyncDisposable
         try
         {
             ThrowIfDisposed();
-            var started = new ManagedInitiatorInitialSessionFactory(1)
-                .BeginClaim(
-                    localAgreementAuthority,
-                    exactCurrentDirectory,
-                    exactCurrentAddressBinding);
-            return new DeepDirectMessagingInitiatorClaimStart(
-                ownerToken, verifiedPeer, exactCurrentDirectory.Head, started);
+            throw new CryptographicException(
+                "The V1 contact runtime cannot initiate a DID2 DPH2 session.");
         }
         finally
         {
@@ -2305,10 +2300,8 @@ internal sealed class DeepDirectMessagingStorageOwner : IAsyncDisposable
                 .ConfigureAwait(false);
             if (preview is null)
                 return null;
-            return await preview.VerifyCurrentAsync(
-                    initiatorFreshness, claimPlacement, recipientAuthority, recipientBundle,
-                    trustedTimeAuthority, cancellationToken)
-                .ConfigureAwait(false);
+            throw new CryptographicException(
+                "The V1 contact runtime cannot promote a DID2 DPH2 claim.");
         }
         finally
         {
@@ -2572,22 +2565,8 @@ internal sealed class DeepDirectMessagingStorageOwner : IAsyncDisposable
                     owner.localAuthority.AccountId))
                 throw new CryptographicException(
                     "The verified recipient publication differs from the local account.");
-            var hello = ApplicationCoreCodec.DecodeDmc2(
-                exactFirstApplicationDmc2.Span);
-            ApplicationCoreVerifier.RequireContactHelloEndpointBindings(
-                hello,
-                ApplicationCoreVerifier.StartDab1Lineage(checkpoint.Binding).Next,
-                ApplicationCoreVerifier.StartDmd1Lineage(checkpoint.Directory).Next,
-                ApplicationCoreVerifier.StartDab1Lineage(recipient.Binding).Next);
-            Session = DeepDirectMessagingVerifiedSessionBinding
-                .FromAuthenticatedInbound(
-                    initiation, exactSessionInitDmc2.Span,
-                    exactFirstApplicationDmc2.Span,
-                    owner.localAuthority.AccountId, owner.localAuthority.DeviceId,
-                    owner.localAuthority.DeviceGeneration);
-            return (await owner.TryOpenSessionAsync(
-                    Session, createIfMissing: true, cancellationToken)
-                .ConfigureAwait(false))?.Store;
+            throw new CryptographicException(
+                "The V1 ContactHello cannot bind a DID2 DPH2 session.");
         }
     }
 
