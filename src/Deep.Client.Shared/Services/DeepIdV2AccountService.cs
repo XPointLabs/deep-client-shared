@@ -10,6 +10,8 @@ using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.Identity;
 using Deep.Protocol.MessagingCrypto;
 using Deep.Protocol.MessagingWire;
+using Deep.Protocol.Registry;
+using Sodium;
 
 namespace Deep.Client.Shared.Services;
 
@@ -155,19 +157,23 @@ public sealed class DeepIdV2AccountService
     /// </summary>
     public async Task<InitiatorDph2ClaimPreparation> CompleteOwnDph2ClaimAsync(
         InitiatorDph2PreKeyClaim startedClaim,
-        VerifiedDpk2Offering verifiedOffering,
+        ReadOnlyMemory<byte> exactDpk2,
         DeepIdV2DirectoryProofClient proofClient,
         VerifiedXPointNetworkAuthority networkAuthority,
         VerifiedDeepIdV2DirectoryFreshness currentProof,
+        VerifiedDeepIdV2DirectoryFreshness currentPeerProof,
         ReadOnlyMemory<byte> currentBootId, ulong currentMonotonicSample,
         int maximumMessagesWithoutPqInjection,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(startedClaim);
-        ArgumentNullException.ThrowIfNull(verifiedOffering);
         ArgumentNullException.ThrowIfNull(proofClient);
         await proofClient.RequireStillFreshAsync(currentProof,
             networkAuthority, cancellationToken).ConfigureAwait(false);
+        await proofClient.RequireStillFreshAsync(currentPeerProof,
+            networkAuthority, cancellationToken).ConfigureAwait(false);
+        var verifiedOffering = MessagingWireVerification.VerifyDpk2(
+            exactDpk2.Span, new CurrentDid2PeerDpk2Callbacks(currentPeerProof));
         using var verifier = OpenVerifier();
         using var current = await owner.ReadCurrentAsync(TrustedUnixSeconds(),
             verifier, cancellationToken).ConfigureAwait(false) ??
@@ -185,6 +191,8 @@ public sealed class DeepIdV2AccountService
             cancellationToken).ConfigureAwait(false);
         using var authority = OwnAgreementAuthority(current);
         await proofClient.RequireStillFreshAsync(currentProof,
+            networkAuthority, cancellationToken).ConfigureAwait(false);
+        await proofClient.RequireStillFreshAsync(currentPeerProof,
             networkAuthority, cancellationToken).ConfigureAwait(false);
         var operation = startedClaim.ClaimOperationId;
         var authorized = await ProtectedDeviceAgreementLeaseIssuer
@@ -239,6 +247,70 @@ public sealed class DeepIdV2AccountService
     private static bool Fixed(ReadOnlySpan<byte> left, ReadOnlySpan<byte> right) =>
         left.Length == right.Length &&
         CryptographicOperations.FixedTimeEquals(left, right);
+
+    /// <summary>
+    /// DPK2 signatures alone are insufficient: the exact responder device,
+    /// generation and DMD1 head must be present in a current DID2 proof. The
+    /// later XPC1 receipt still grants the one-time prekey claim separately.
+    /// </summary>
+    private sealed class CurrentDid2PeerDpk2Callbacks(
+        VerifiedDeepIdV2DirectoryFreshness peerProof)
+        : IDpk2VerificationCallbacks
+    {
+        public Dpk2ResolvedDevice ResolveActiveDevice(Dpk2Record offering)
+        {
+            var checkpoint = peerProof.CurrentCheckpoint ??
+                throw new CryptographicException(
+                    "The DID2 peer has no current directory checkpoint.");
+            var identity = checkpoint.Binding.Identity;
+            var directory = checkpoint.Directory.Record;
+            if (peerProof.ResultKind !=
+                    AccountDirectoryAdp1ResultKind.CurrentValue ||
+                !Fixed(offering.NetworkId.Span, peerProof.NetworkId.Span) ||
+                !Fixed(offering.ResponderAccountId.Span,
+                    identity.Account.DeepAccountIdHash.Span) ||
+                !Fixed(directory.NetworkId.Span, peerProof.NetworkId.Span) ||
+                !Fixed(directory.DeepAccountId.Span,
+                    offering.ResponderAccountId.Span) ||
+                offering.DeviceDirectoryGeneration !=
+                    directory.DirectoryGeneration ||
+                !Fixed(offering.DeviceDirectoryHeadHash.Span,
+                    directory.RecordHash.Span) ||
+                offering.IssuedAt < directory.IssuedAtUnixSeconds ||
+                peerProof.TrustedLowerUnixSeconds < offering.NotBefore ||
+                peerProof.TrustedUpperUnixSeconds >= offering.ExpiresAt)
+                throw new CryptographicException(
+                    "DPK2 is outside the exact current DID2 peer directory or validity window.");
+            var entry = directory.ActiveDevices.SingleOrDefault(device =>
+                Fixed(device.DeviceId.Span,
+                    offering.ResponderDeviceId.Span));
+            var device = identity.ActiveDevices.SingleOrDefault(candidate =>
+                Fixed(candidate.Certificate.DeviceId.Span,
+                    offering.ResponderDeviceId.Span));
+            if (entry is null || device is null ||
+                device.Certificate.DeviceGeneration !=
+                    offering.ResponderDeviceGeneration ||
+                !offering.ResponderDpd1Ref.Span[..4].SequenceEqual(
+                    DeepProtocolIdentifiers.MagicBytes.DPD1) ||
+                offering.ResponderDpd1Ref.Span[4] != 0 ||
+                offering.ResponderDpd1Ref.Span[5] != 1 ||
+                !Fixed(offering.ResponderDpd1Ref.Span[6..],
+                    entry.Dpd1Reference.CanonicalHash.Span) ||
+                !Fixed(entry.Dpd1Reference.CanonicalHash.Span,
+                    device.Certificate.CanonicalHash.Span))
+                throw new CryptographicException(
+                    "DPK2 responder is not an exact active DID2 device.");
+            return new Dpk2ResolvedDevice(
+                device.Certificate.DeviceEd25519PublicKey.Span,
+                device.Certificate.DeviceX25519PublicKey.Span);
+        }
+
+        public bool VerifyEd25519(ReadOnlyMemory<byte> publicKey,
+            ReadOnlyMemory<byte> signatureInput,
+            ReadOnlyMemory<byte> signature) =>
+            PublicKeyAuth.VerifyDetached(signature.ToArray(),
+                signatureInput.ToArray(), publicKey.ToArray());
+    }
 
     /// <summary>
     /// Opens a DPK2 author for the exact verified DID2 genesis device.

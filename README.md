@@ -17,12 +17,14 @@ until the exact DID2 sender, V2 contact/prekey publication, authenticated
 ContactHello, durable inbox and ACK path are one verified graph.
 
 The DID2 account service can now begin a DPH2 claim from its own exact
-current DAB2/DMD1 proof and complete it against a verified DPK2 through the
-protected, one-use current-device agreement ledger. Both operations recheck
+current DAB2/DMD1 proof and verify an exact DPK2 against the peer's fresh
+DID2/DMD1 proof before using the protected, one-use device-agreement ledger.
+MAUI cannot supply a callback-minted offering to this path. Both operations recheck
 the proof's nonce window and exact protected directory floor; an older proof
 cannot be reused after another lookup advances that floor. Completion returns
 only Protocol's single-use preparation, not a private key or a delivery
-receipt. MAUI publication/claim transport, session persistence and receive
+receipt. The separately authenticated XPC1 claim remains mandatory before
+the preparation can become a DPH2. MAUI publication/claim transport, session persistence and receive
 composition remain separate release gates.
 
 ## Verify
