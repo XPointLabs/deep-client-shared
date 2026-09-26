@@ -16,6 +16,15 @@ not the retired user-facing Session address. Initial messaging is fail-closed
 until the exact DID2 sender, V2 contact/prekey publication, authenticated
 ContactHello, durable inbox and ACK path are one verified graph.
 
+The DID2 account service can now begin a DPH2 claim from its own exact
+current DAB2/DMD1 proof and complete it against a verified DPK2 through the
+protected, one-use current-device agreement ledger. Both operations recheck
+the proof's nonce window and exact protected directory floor; an older proof
+cannot be reused after another lookup advances that floor. Completion returns
+only Protocol's single-use preparation, not a private key or a delivery
+receipt. MAUI publication/claim transport, session persistence and receive
+composition remain separate release gates.
+
 ## Verify
 
 ```powershell

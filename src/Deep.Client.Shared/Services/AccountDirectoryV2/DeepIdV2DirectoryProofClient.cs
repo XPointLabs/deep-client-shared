@@ -202,10 +202,27 @@ public sealed class DeepIdV2DirectoryProofClient : IDisposable
     /// </summary>
     internal async ValueTask RequireStillFreshAsync(
         VerifiedDeepIdV2DirectoryFreshness verified,
+        VerifiedXPointNetworkAuthority authority,
         CancellationToken cancellationToken)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
         ArgumentNullException.ThrowIfNull(verified);
+        ArgumentNullException.ThrowIfNull(authority);
+        if (!CryptographicOperations.FixedTimeEquals(
+                verified.NetworkId.Span, authority.NetworkId.Span))
+            throw new CryptographicException(
+                "The DID2 proof and network authority differ at handoff.");
+        var protectedHead = await protectedLkgStore.RestoreAsync(authority,
+            cancellationToken).ConfigureAwait(false);
+        if (protectedHead is null ||
+            !CryptographicOperations.FixedTimeEquals(
+                verified.NextProtectedLkg.CoreHash.Span,
+                protectedHead.CoreHash.Span) ||
+            !CryptographicOperations.FixedTimeEquals(
+                verified.NextProtectedLkg.ExactAdh1.Span,
+                protectedHead.ExactAdh1.Span))
+            throw new CryptographicException(
+                "The DID2 proof is older than the protected directory floor.");
         var current = await clock.ReadAsync(cancellationToken)
             .ConfigureAwait(false) ?? throw new CryptographicException(
                 "The DID2 monotonic clock returned no handoff sample.");
