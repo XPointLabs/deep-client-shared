@@ -4,6 +4,7 @@ using Deep.Protocol.ContactV1;
 using Deep.Protocol.DeepExtension.PrivacyRouting;
 using Deep.Protocol.AccountDirectoryV1;
 using Deep.Protocol.ApplicationCore;
+using Deep.Protocol.ContactV2;
 using Deep.Protocol.XPointNetworkV1;
 
 namespace Deep.Client.Shared.Services.XPointNetworkV1;
@@ -179,6 +180,34 @@ public sealed class ContactResolveCanonicalPathRequest
             request.ViewHash.Span, request.PlacementHash.Span,
             ContactServiceRequestKind.PublishPreKeyInventory,
             verifiedServiceCapability, request.ExpiresAtUnixSeconds);
+    }
+
+    public static ContactResolveCanonicalPathRequest FromDid2BoundedPublication(
+        ParsedXpp1V2Fragment fragment,
+        ReadOnlySpan<byte> verifiedServiceCapability,
+        ulong expiresAtUnixSeconds)
+    {
+        ArgumentNullException.ThrowIfNull(fragment);
+        if (verifiedServiceCapability.Length != 32 ||
+            verifiedServiceCapability.IndexOfAnyExcept((byte)0) < 0 ||
+            expiresAtUnixSeconds == 0)
+            throw new ArgumentException(
+                "The DID2 publication requires an exact nonzero service capability and expiry.");
+        if (fragment.Phase == Xpp1V2FragmentPhase.Manifest)
+        {
+            var manifest = DeepIdV2PreKeyManifestCodec.Decode(
+                fragment.Body.Span.Slice(
+                    DeepIdV2BoundedPreKeyPublicationCodec.ManifestSupportLength,
+                    DeepIdV2PreKeyManifestCodec.CanonicalLength));
+            if (!Fixed(manifest.Field(2).Span, verifiedServiceCapability))
+                throw new CryptographicException(
+                    "The DID2 manifest differs from the publication shard key.");
+        }
+        return Create(fragment.CanonicalBytes.Span,
+            fragment.NetworkId.Span, fragment.ViewHash.Span,
+            fragment.PlacementHash.Span,
+            ContactServiceRequestKind.PublishPreKeyInventory,
+            verifiedServiceCapability, expiresAtUnixSeconds);
     }
 
     private static ContactResolveCanonicalPathRequest Create(

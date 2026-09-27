@@ -245,8 +245,12 @@ rollback of the staged file fails closed. Explicit V2 reset removes this file
 family and its protected markers. The account service can read a copy of the
 exact public XPP1 after current-account and protected-tip verification,
 including after restart; it does not release sealed DPK2 secrets. This is
-local custody only: no XPP1 network dispatch, two-replica XIC1 commit, remote
-claim, DPH2 or device E2E is implied.
+local custody only. A separate unmounted DID2 V2 client transport can now
+turn exact public XPP1 plus exact DID2/DCA1/XPS1 support into bounded ONION
+fragments, send each to both current selected exits, and return only after
+the Protocol verifier accepts both XIC1 signatures. The account owner does
+not yet supply that support to this transport, persist its verified pair or
+activate a remote claim; DPH2 and device E2E are not implied.
 This is not yet a full mutable STORE-01 service:
 in-memory parity, restore-as-new-device,
 directory/contact/messaging cutover and physical E2E remain open. No V1 contact
