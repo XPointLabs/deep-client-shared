@@ -317,6 +317,66 @@ public sealed class DeepIdV2AccountServiceTests
                             lastResort.Record), signer));
                     Assert.Throws<MessagingWireFormatException>(() =>
                         Dpk2Codec.Decode(lastResort.ExactDpk2.Span));
+                    var xpsReference = TestReference("XPS1", 0x92);
+                    var drsReference = TestReference("DRS1", 0x93);
+                    var serviceCapability = Enumerable.Repeat((byte)0x91, 32)
+                        .ToArray();
+                    var publicationOperation = Enumerable.Repeat((byte)0x94, 32)
+                        .ToArray();
+                    var placement = Enumerable.Repeat((byte)0x95, 32).ToArray();
+                    Assert.Throws<ArgumentException>(() => prekeys.AuthorInventoryV2(
+                        context, publicEvidence.Binding, serviceCapability,
+                        xpsReference, drsReference, new byte[32],
+                        publicationOperation, placement, 31, 9));
+                    var unrelatedDirectory = Path.Combine(directory,
+                        "unrelated-did2-binding");
+                    Directory.CreateDirectory(unrelatedDirectory);
+                    try
+                    {
+                        using var unrelatedStorage = new InMemoryDeepSecureStorage();
+                        var unrelated = new DeepIdV2AccountService(
+                            unrelatedStorage, unrelatedDirectory, network, 1,
+                            clock, DeepMlDsa65CandidateVerifierFactory
+                                .OpenForCurrentProcess);
+                        var unrelatedAccount = await unrelated.CreateAsync("Other");
+                        var unrelatedPublic = await new
+                            ProtectedDeepIdV2GenesisContactStore(
+                                unrelatedStorage, network,
+                                unrelatedAccount.AccountId.Span)
+                            .ReadVerifiedAsync(1_900_000_000, 1, verifier,
+                                default);
+                        Assert.NotNull(unrelatedPublic);
+                        Assert.Throws<CryptographicException>(() =>
+                            prekeys.AuthorInventoryV2(context,
+                                unrelatedPublic!.Binding, serviceCapability,
+                                xpsReference, drsReference, new byte[32],
+                                publicationOperation, placement, 32, 9));
+                    }
+                    finally { Directory.Delete(unrelatedDirectory, true); }
+                    using (var inventory = prekeys.AuthorInventoryV2(
+                               context, publicEvidence.Binding,
+                               serviceCapability, xpsReference, drsReference,
+                               new byte[32], publicationOperation, placement,
+                               32, 9))
+                    {
+                        var publication = DeepIdV2PreKeyPublicationCodec.Decode(
+                            inventory.ExactXpp1.Span);
+                        Assert.Equal(32, inventory.OneTimeOfferings.Count);
+                        Assert.Equal(32, publication.OneTimeMembers.Count);
+                        Assert.Equal(inventory.ExactXpi1.ToArray(),
+                            publication.Manifest.CanonicalBytes.ToArray());
+                        Assert.Equal(inventory.OneTimeOfferings[0].ExactDpk2.ToArray(),
+                            publication.OneTimeMembers[0].CanonicalBytes.ToArray());
+                        Assert.Equal(inventory.LastResortOffering.ExactDpk2.ToArray(),
+                            publication.LastResortMember.CanonicalBytes.ToArray());
+                        Assert.True(PublicKeyAuth.VerifyDetached(
+                            publication.Manifest.Field(16).ToArray(),
+                            publication.Manifest.SignatureInput.ToArray(), signer));
+                        Assert.ThrowsAny<Exception>(() => Deep.Protocol.ContactV1
+                            .Xpi1Codec.Decode(inventory.ExactXpi1.Span));
+                        Assert.ThrowsAny<Exception>(() => Deep.Protocol.ContactV1
+                            .Xpp1Codec.Decode(inventory.ExactXpp1.Span));
+                    }
                     var scope = new Dpk2PreKeyPersistenceScope(
                         offering.Record.NetworkId.Span,
                         offering.Record.ResponderAccountId.Span,
@@ -376,6 +436,15 @@ public sealed class DeepIdV2AccountServiceTests
         OperatingSystem.IsLinux() &&
         System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture ==
             System.Runtime.InteropServices.Architecture.X64;
+
+    private static byte[] TestReference(string magic, byte hashByte)
+    {
+        var reference = new byte[38];
+        System.Text.Encoding.ASCII.GetBytes(magic).CopyTo(reference, 0);
+        BinaryPrimitives.WriteUInt16BigEndian(reference.AsSpan(4), 1);
+        reference.AsSpan(6).Fill(hashByte);
+        return reference;
+    }
 
     private static byte[] UntrustedHead(ReadOnlySpan<byte> network)
     {
