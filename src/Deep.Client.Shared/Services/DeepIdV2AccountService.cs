@@ -187,9 +187,11 @@ public sealed class DeepIdV2AccountService
             !Fixed(verifiedOffering.NetworkId.Span, startedClaim.NetworkId.Span))
             throw new CryptographicException(
                 "The DPH2 claim or offering belongs to another network.");
+        using var authority = OwnAgreementAuthority(current);
+        startedClaim.RequireCurrentInitiator(authority, directory,
+            currentProof, currentBootId.Span, currentMonotonicSample);
         using var store = await OpenCurrentDeviceStateStoreAsync(
             cancellationToken).ConfigureAwait(false);
-        using var authority = OwnAgreementAuthority(current);
         await proofClient.RequireStillFreshAsync(currentProof,
             networkAuthority, cancellationToken).ConfigureAwait(false);
         await proofClient.RequireStillFreshAsync(currentPeerProof,
