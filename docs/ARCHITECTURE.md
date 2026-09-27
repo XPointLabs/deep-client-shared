@@ -249,13 +249,15 @@ rollback of the staged file fails closed. Explicit V2 reset removes this file
 family and its protected markers. The account service can read a copy of the
 exact public XPP1/DID2/DCA1/XPS1 package after current-account and protected-tip verification,
 including after restart; it does not release sealed DPK2 secrets. This is
-local custody only. A separate unmounted DID2 V2 client transport can now
+local inventory custody only. A DID2 V2 client transport can now
 turn exact public XPP1 plus exact DID2/DCA1/XPS1 support into bounded ONION
 fragments, send each to both current selected exits, and return only after
-the Protocol verifier accepts both XIC1 signatures. The account owner now
-persists the locally authored XPS1 V2 support and can supply it to the
-transport, but does not yet persist the verified XIC1 pair or
-activate a remote claim; DPH2 and device E2E are not implied.
+the Protocol verifier accepts both XIC1 signatures. The account service
+now composes that transport with the protected staged publication and records
+the exact verified XIC1 pair in an add-only account-scoped secure-storage slot.
+Reopen binds the pair to the protected exact XPP1; the stored pair is historical
+evidence, not fresh placement or claim authority. MAUI does not yet mount this
+publisher or activate a remote claim; DPH2 and device E2E are not implied.
 This is PKV2 schema generation 2; generation 1 is intentionally rejected
 without migration and can only be removed by explicit test-account reset.
 This is not yet a full mutable STORE-01 service:

@@ -501,6 +501,52 @@ public sealed class DeepIdV2AccountServiceTests
                             reopenedStaged.ExactXpp1.ToArray());
                         Assert.Equal(staged.ExactXps1.ToArray(),
                             reopenedStaged.ExactXps1.ToArray());
+                        Assert.Null(await resumed.ReadOwnPreKeyCommitPairAsync());
+                        var exactPublication = DeepIdV2PreKeyPublicationCodec
+                            .Decode(staged.ExactXpp1.Span);
+                        var commitTime = new byte[8];
+                        BinaryPrimitives.WriteUInt64BigEndian(commitTime,
+                            1_900_000_001);
+                        ParsedXic1V2 Receipt(byte replica) =>
+                            DeepIdV2PreKeyCommitReceiptCodec.Decode(
+                                DeepIdV2PreKeyCommitReceiptCodec.Encode(
+                                    new ReadOnlyMemory<byte>[]
+                                    {
+                                        exactPublication.NetworkId,
+                                        exactPublication.PublicationOperationId,
+                                        exactPublication.Manifest.ExactHash,
+                                        exactPublication.PlacementHash,
+                                        Enumerable.Repeat(replica, 32).ToArray(),
+                                        commitTime
+                                    }, Enumerable.Repeat((byte)0xa5, 64)
+                                        .ToArray()));
+                        // The transport verifies signatures and live placement;
+                        // this fixture isolates protected crash/replay custody.
+                        var firstReceipt = Receipt(0xa1);
+                        var secondReceipt = Receipt(0xa2);
+                        storage.FailNextCommitWrite = true;
+                        await Assert.ThrowsAsync<IOException>(() =>
+                            afterPhraseDeletion
+                                .RecordPreKeyCommitPairAfterVerificationAsync(
+                                    staged.ExactXpp1, firstReceipt,
+                                    secondReceipt));
+                        Assert.Null(await resumed.ReadOwnPreKeyCommitPairAsync());
+                        await afterPhraseDeletion
+                            .RecordPreKeyCommitPairAfterVerificationAsync(
+                                staged.ExactXpp1, firstReceipt,
+                                secondReceipt);
+                        var committed = await resumed
+                            .ReadOwnPreKeyCommitPairAsync();
+                        Assert.NotNull(committed);
+                        Assert.Equal(firstReceipt.CanonicalBytes.ToArray(),
+                            committed.ExactFirstXic1.ToArray());
+                        Assert.Equal(secondReceipt.CanonicalBytes.ToArray(),
+                            committed.ExactSecondXic1.ToArray());
+                        await resumed.RecordPreKeyCommitPairAfterVerificationAsync(
+                            staged.ExactXpp1, firstReceipt, secondReceipt);
+                        await Assert.ThrowsAsync<CryptographicException>(() =>
+                            resumed.RecordPreKeyCommitPairAfterVerificationAsync(
+                                staged.ExactXpp1, firstReceipt, Receipt(0xa3)));
                     }
                     var ownedPreKeyPath = Path.Combine(directory,
                         "deep-store-v2-account.dsv2.prekeys.pkv2");
@@ -510,6 +556,8 @@ public sealed class DeepIdV2AccountServiceTests
                         resumed.HasOwnStagedPreKeyInventoryAsync());
                     await Assert.ThrowsAsync<InvalidDataException>(() =>
                         resumed.ReadOwnStagedPreKeyPublicationAsync());
+                    await Assert.ThrowsAsync<InvalidDataException>(() =>
+                        resumed.ReadOwnPreKeyCommitPairAsync());
                     var scope = new Dpk2PreKeyPersistenceScope(
                         offering.Record.NetworkId.Span,
                         offering.Record.ResponderAccountId.Span,
@@ -619,6 +667,7 @@ public sealed class DeepIdV2AccountServiceTests
 
         internal bool FailNextTipWrite { get; set; }
         internal bool FailNextInstallAfterWrite { get; set; }
+        internal bool FailNextCommitWrite { get; set; }
 
         public Task<OwnedDeepSecret?> ReadOwnedAsync(string slot,
             CancellationToken cancellationToken = default) =>
@@ -640,6 +689,12 @@ public sealed class DeepIdV2AccountServiceTests
             {
                 FailNextTipWrite = false;
                 throw new IOException("Injected failure after inventory SQL commit.");
+            }
+            if (FailNextCommitWrite && writes.Any(static write => write.Slot ==
+                    "deep.store.v2.prekey-commit-pair-v1"))
+            {
+                FailNextCommitWrite = false;
+                throw new IOException("Injected failure before commit pair custody.");
             }
             await inner.WriteBatchAsync(writes, cancellationToken);
         }

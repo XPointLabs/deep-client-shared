@@ -11,6 +11,7 @@ using Deep.Protocol.XPointNetworkV1;
 using Deep.Client.Shared.Persistence.DeviceV1;
 using Deep.Client.Shared.Domain.DeviceV1;
 using Deep.Protocol.MessagingCrypto;
+using Deep.Protocol.ContactV2;
 
 namespace Deep.Client.Shared.Persistence.DeviceV2;
 
@@ -156,6 +157,36 @@ internal sealed class ProtectedDeepIdV2AccountOwner
             support.Binding.DeepId.CanonicalBytes.Span,
             support.Authorization.Record.CanonicalBytes.Span,
             exact.Value.ExactXps1);
+    }
+
+    internal async ValueTask RecordOwnPreKeyCommitPairAsync(
+        ulong trustedUnixSeconds, IDeepMlDsa65Verifier mlDsa65,
+        ReadOnlyMemory<byte> exactXpp1, ParsedXic1V2 first,
+        ParsedXic1V2 second, CancellationToken cancellationToken)
+    {
+        using var held = await lease.AcquireAsync(cancellationToken)
+            .ConfigureAwait(false);
+        using var current = await RequireCurrentUnderLeaseAsync(
+            trustedUnixSeconds, mlDsa65, cancellationToken)
+            .ConfigureAwait(false);
+        await SqliteDeepIdV2AccountGeneration.RecordPreKeyCommitPairAsync(
+            storage, sqlStatePath, current, exactXpp1, first, second,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    internal async ValueTask<(byte[] First, byte[] Second)?>
+        ReadOwnPreKeyCommitPairAsync(ulong trustedUnixSeconds,
+            IDeepMlDsa65Verifier mlDsa65,
+            CancellationToken cancellationToken)
+    {
+        using var held = await lease.AcquireAsync(cancellationToken)
+            .ConfigureAwait(false);
+        using var current = await RequireCurrentUnderLeaseAsync(
+            trustedUnixSeconds, mlDsa65, cancellationToken)
+            .ConfigureAwait(false);
+        return await SqliteDeepIdV2AccountGeneration.ReadPreKeyCommitPairAsync(
+            storage, sqlStatePath, current, cancellationToken)
+            .ConfigureAwait(false);
     }
 
     internal async ValueTask<VerifiedDeepIdV2CurrentAccount> CreateFreshAsync(

@@ -12,6 +12,9 @@ using Deep.Protocol.Identity;
 using Deep.Protocol.MessagingCrypto;
 using Deep.Protocol.MessagingWire;
 using Deep.Protocol.Registry;
+using Deep.Client.Shared.Services.ContactV1;
+using Deep.Client.Shared.Services.ContactV2;
+using Deep.Client.Shared.Services.XPointNetworkV1;
 
 namespace Deep.Client.Shared.Services;
 
@@ -39,6 +42,24 @@ public sealed class StagedDeepIdV2PreKeyPublication
     public ReadOnlyMemory<byte> ExactDid2 => did.ToArray();
     public ReadOnlyMemory<byte> ExactDca1 => dca.ToArray();
     public ReadOnlyMemory<byte> ExactXps1 => xps.ToArray();
+}
+
+/// <summary>Durable evidence of a two-replica DID2 pre-key publication.
+/// A current placement and claim must still be verified independently.</summary>
+public sealed class DeepIdV2PreKeyCommitSnapshot
+{
+    private readonly byte[] first;
+    private readonly byte[] second;
+
+    internal DeepIdV2PreKeyCommitSnapshot(ReadOnlySpan<byte> first,
+        ReadOnlySpan<byte> second)
+    {
+        this.first = first.ToArray();
+        this.second = second.ToArray();
+    }
+
+    public ReadOnlyMemory<byte> ExactFirstXic1 => first.ToArray();
+    public ReadOnlyMemory<byte> ExactSecondXic1 => second.ToArray();
 }
 
 /// <summary>
@@ -338,6 +359,57 @@ public sealed class DeepIdV2AccountService
         return await owner.ReadOwnStagedPreKeyPublicationAsync(
             TrustedUnixSeconds(), verifier, cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    /// <summary>Publishes the protected exact inventory through both current
+    /// ONION exits and records the verified XIC1 pair before returning.</summary>
+    public async Task<DeepIdV2PreKeyCommitSnapshot>
+        PublishOwnStagedPreKeyInventoryAsync(
+            ProductionContactResolvePathAuthoritySource authoritySource,
+            PrivacyRoutedContactResolverTransport onion,
+            CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(authoritySource);
+        ArgumentNullException.ThrowIfNull(onion);
+        var staged = await ReadOwnStagedPreKeyPublicationAsync(
+            cancellationToken).ConfigureAwait(false) ?? throw new
+            InvalidOperationException("No protected DID2 pre-key inventory is staged.");
+        var pair = await new DeepIdV2PreKeyPublicationTransport(
+            authoritySource, onion).PublishAsync(staged, cancellationToken)
+            .ConfigureAwait(false);
+        await RecordPreKeyCommitPairAfterVerificationAsync(
+            staged.ExactXpp1, pair.First, pair.Second,
+            cancellationToken).ConfigureAwait(false);
+        return new DeepIdV2PreKeyCommitSnapshot(
+            pair.First.CanonicalBytes.Span,
+            pair.Second.CanonicalBytes.Span);
+    }
+
+    // The only production caller is the transport path after VerifyPair.
+    // Kept internal so persistence tests can exercise the crash boundary
+    // independently of network routing and replica signatures.
+    internal async Task RecordPreKeyCommitPairAfterVerificationAsync(
+        ReadOnlyMemory<byte> exactXpp1, ParsedXic1V2 first,
+        ParsedXic1V2 second, CancellationToken cancellationToken = default)
+    {
+        using var verifier = OpenVerifier();
+        await owner.RecordOwnPreKeyCommitPairAsync(TrustedUnixSeconds(),
+            verifier, exactXpp1, first, second,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Reads the protected pair recorded after live two-replica
+    /// verification. This is historical evidence, not current claim authority.</summary>
+    public async Task<DeepIdV2PreKeyCommitSnapshot?>
+        ReadOwnPreKeyCommitPairAsync(
+            CancellationToken cancellationToken = default)
+    {
+        using var verifier = OpenVerifier();
+        var pair = await owner.ReadOwnPreKeyCommitPairAsync(
+            TrustedUnixSeconds(), verifier, cancellationToken)
+            .ConfigureAwait(false);
+        return pair is null ? null : new DeepIdV2PreKeyCommitSnapshot(
+            pair.Value.First, pair.Value.Second);
     }
 
     public async Task<DeepIdV2AccountSnapshot> CreateAsync(

@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Security.Cryptography;
 using Deep.Client.Shared.Persistence.PreKeyV2;
+using Deep.Protocol.ContactV2;
 using Deep.Protocol.MessagingCrypto;
 
 namespace Deep.Client.Shared.Persistence.DeviceV2;
@@ -11,6 +12,10 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         "deep.store.v2.prekey-installed";
     private const string PreKeyInventoryMarkerSlot =
         "deep.store.v2.prekey-inventory-tip";
+    private const string PreKeyCommitMarkerSlot =
+        "deep.store.v2.prekey-commit-pair-v1";
+    private const int PreKeyCommitMarkerLength = 64 +
+        2 * DeepIdV2PreKeyCommitReceiptCodec.CanonicalLength;
 
     internal static string PreKeyStatePath(string accountStatePath) =>
         Path.GetFullPath(accountStatePath) + ".prekeys.pkv2";
@@ -136,6 +141,130 @@ internal static partial class SqliteDeepIdV2AccountGeneration
                 InvalidDataException("The protected DID2 pre-key service is missing."));
         }
         finally { CryptographicOperations.ZeroMemory(opened.ScopeHash); }
+    }
+
+    /// <summary>Records only a pair already authenticated against the live
+    /// placement by the publication transport. The protected add-only slot
+    /// binds the pair to this exact account scope and durable XPP1.</summary>
+    internal static async ValueTask RecordPreKeyCommitPairAsync(
+        IDeepSecureStorage storage, string accountStatePath,
+        VerifiedDeepIdV2CurrentAccount current,
+        ReadOnlyMemory<byte> exactXpp1,
+        ParsedXic1V2 first, ParsedXic1V2 second,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(first);
+        ArgumentNullException.ThrowIfNull(second);
+        var opened = await OpenPreKeyStoreAsync(storage, accountStatePath,
+            current, allowInitialize: false, cancellationToken)
+            .ConfigureAwait(false);
+        await using var store = opened.Store;
+        try
+        {
+            var publicationHash = SHA256.HashData(exactXpp1.Span);
+            var stagedHash = store.ReadStagedPublicationHash();
+            if (stagedHash is null ||
+                !CryptographicOperations.FixedTimeEquals(
+                    stagedHash, publicationHash))
+                throw new CryptographicException(
+                    "The DID2 receipt pair is outside the exact protected inventory.");
+            var publication = DeepIdV2PreKeyPublicationCodec.Decode(
+                exactXpp1.Span);
+            ValidatePreKeyCommitPair(publication, first, second);
+            var marker = new byte[PreKeyCommitMarkerLength];
+            try
+            {
+                opened.ScopeHash.CopyTo(marker, 0);
+                publicationHash.CopyTo(marker, 32);
+                first.CanonicalBytes.Span.CopyTo(marker.AsSpan(64));
+                second.CanonicalBytes.Span.CopyTo(marker.AsSpan(64 +
+                    DeepIdV2PreKeyCommitReceiptCodec.CanonicalLength));
+                using var existing = await storage.ReadOwnedAsync(
+                    PreKeyCommitMarkerSlot, cancellationToken)
+                    .ConfigureAwait(false);
+                if (existing is null)
+                    await storage.WriteBatchAsync(
+                        [new DeepSecureStorageWrite(PreKeyCommitMarkerSlot,
+                            marker)], cancellationToken).ConfigureAwait(false);
+                else if (!existing.Use(value => value.Length == marker.Length &&
+                         CryptographicOperations.FixedTimeEquals(value,
+                             marker)))
+                    throw new CryptographicException(
+                        "A different DID2 pre-key commit pair is already protected.");
+            }
+            finally { CryptographicOperations.ZeroMemory(marker); }
+        }
+        finally { CryptographicOperations.ZeroMemory(opened.ScopeHash); }
+    }
+
+    internal static async ValueTask<(byte[] First, byte[] Second)?>
+        ReadPreKeyCommitPairAsync(IDeepSecureStorage storage,
+            string accountStatePath, VerifiedDeepIdV2CurrentAccount current,
+            CancellationToken cancellationToken)
+    {
+        if (await ReadStagedPreKeyPublicationAsync(storage, accountStatePath,
+                current, cancellationToken).ConfigureAwait(false) is null)
+            return null;
+        var opened = await OpenPreKeyStoreAsync(storage, accountStatePath,
+            current, allowInitialize: false, cancellationToken)
+            .ConfigureAwait(false);
+        await using var store = opened.Store;
+        try
+        {
+            using var protectedPair = await storage.ReadOwnedAsync(
+                PreKeyCommitMarkerSlot, cancellationToken)
+                .ConfigureAwait(false);
+            if (protectedPair is null) return null;
+            var exactXpp1 = store.ReadStagedPublication() ?? throw new
+                InvalidDataException("The committed DID2 inventory is missing.");
+            var publication = DeepIdV2PreKeyPublicationCodec.Decode(exactXpp1);
+            return protectedPair.Use(value =>
+            {
+                var hash = SHA256.HashData(exactXpp1);
+                if (value.Length != PreKeyCommitMarkerLength ||
+                    !CryptographicOperations.FixedTimeEquals(value[..32],
+                        opened.ScopeHash) ||
+                    !CryptographicOperations.FixedTimeEquals(value[32..64],
+                        hash))
+                    throw new CryptographicException(
+                        "The DID2 commit pair differs from its protected inventory.");
+                var first = DeepIdV2PreKeyCommitReceiptCodec.Decode(
+                    value.Slice(64,
+                        DeepIdV2PreKeyCommitReceiptCodec.CanonicalLength));
+                var second = DeepIdV2PreKeyCommitReceiptCodec.Decode(
+                    value.Slice(64 +
+                        DeepIdV2PreKeyCommitReceiptCodec.CanonicalLength,
+                        DeepIdV2PreKeyCommitReceiptCodec.CanonicalLength));
+                ValidatePreKeyCommitPair(publication, first, second);
+                return (first.CanonicalBytes.ToArray(),
+                    second.CanonicalBytes.ToArray());
+            });
+        }
+        finally { CryptographicOperations.ZeroMemory(opened.ScopeHash); }
+    }
+
+    private static void ValidatePreKeyCommitPair(ParsedXpp1V2 publication,
+        ParsedXic1V2 first, ParsedXic1V2 second)
+    {
+        foreach (var receipt in new[] { first, second })
+            if (!receipt.Field(1).Span.SequenceEqual(publication.NetworkId.Span) ||
+                !receipt.Field(2).Span.SequenceEqual(
+                    publication.PublicationOperationId.Span) ||
+                !receipt.Field(3).Span.SequenceEqual(
+                    publication.Manifest.ExactHash.Span) ||
+                !receipt.Field(4).Span.SequenceEqual(
+                    publication.PlacementHash.Span) ||
+                BinaryPrimitives.ReadUInt64BigEndian(receipt.Field(6).Span) <
+                    BinaryPrimitives.ReadUInt64BigEndian(
+                        publication.Manifest.Field(14).Span) ||
+                BinaryPrimitives.ReadUInt64BigEndian(receipt.Field(6).Span) >=
+                    BinaryPrimitives.ReadUInt64BigEndian(
+                        publication.Manifest.Field(15).Span))
+                throw new CryptographicException(
+                    "The DID2 receipt differs from the protected publication.");
+        if (first.Field(5).Span.SequenceEqual(second.Field(5).Span))
+            throw new CryptographicException(
+                "The DID2 commit pair repeats one replica.");
     }
 
     private static async ValueTask<(SqlitePreKeyV2InventoryStore Store,
