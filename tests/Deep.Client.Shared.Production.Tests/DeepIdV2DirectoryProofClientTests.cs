@@ -4,6 +4,7 @@ using Deep.Protocol.AccountDirectoryV1;
 using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.DeepExtension.PrivacyRouting;
 using Deep.Protocol.XPointNetworkV1;
+using System.Runtime.CompilerServices;
 
 namespace Deep.Client.Shared.Production.Tests;
 
@@ -76,6 +77,34 @@ public sealed class DeepIdV2DirectoryProofClientTests
         Assert.Throws<ArgumentNullException>(() =>
             factory.CreateDeepIdV2DirectoryProofClient(
                 "https://registry.example/", clock, verifier, null!));
+    }
+
+    [Theory]
+    [InlineData((ushort)0, (ushort)2, "deploymentProfileId")]
+    [InlineData((ushort)1, (ushort)1, "supportedReader")]
+    public async Task InvalidV2ProfileRejectsBeforeProtectedFloorOrNetwork(
+        ushort deploymentProfileId, ushort supportedReader,
+        string expectedParameter)
+    {
+        using var transport = new HttpServiceRequestTransport(
+            new HttpClient(),
+            DeepIdV2DirectoryProofClient.CreateTransportOptions(
+                "https://registry.example/"),
+            HttpServiceEndpointPolicy.Production);
+        using var proof = new DeepIdV2DirectoryProofClient(transport,
+            new FixedClock(), new DenyingVerifier(), new UnusedFloor());
+        var did2 = DeepIdV2Codec.AuthorDid2(
+            Enumerable.Repeat((byte)0x21, 32).ToArray(),
+            Enumerable.Repeat((byte)0x31, 1952).ToArray(),
+            Enumerable.Repeat((byte)0x41, 16).ToArray());
+        var authority = (VerifiedXPointNetworkAuthority)
+            RuntimeHelpers.GetUninitializedObject(
+                typeof(VerifiedXPointNetworkAuthority));
+
+        var error = await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
+            async () => await proof.FetchByDid2Async(did2, authority,
+                deploymentProfileId, supportedReader));
+        Assert.Equal(expectedParameter, error.ParamName);
     }
 
     private sealed class UnusedFloor : IDeepIdV2DirectoryProtectedLkgStore

@@ -84,6 +84,7 @@ public sealed class DeepIdV2DirectoryProofClient : IDisposable
         ArgumentNullException.ThrowIfNull(binding);
         ArgumentNullException.ThrowIfNull(authority);
         cancellationToken.ThrowIfCancellationRequested();
+        ValidateProfile(deploymentProfileId, supportedReader);
 
         var query = VerifiedDeepIdV2DirectoryQuery.VerifyBinding(lookup, binding);
         if (query.NetworkId.Length != authority.NetworkId.Length ||
@@ -137,6 +138,7 @@ public sealed class DeepIdV2DirectoryProofClient : IDisposable
         ArgumentNullException.ThrowIfNull(requestedDid2);
         ArgumentNullException.ThrowIfNull(authority);
         cancellationToken.ThrowIfCancellationRequested();
+        ValidateProfile(deploymentProfileId, supportedReader);
         var protectedLkg = await protectedLkgStore.RestoreAsync(authority,
                 cancellationToken).ConfigureAwait(false) ??
             throw new CryptographicException(
@@ -172,6 +174,7 @@ public sealed class DeepIdV2DirectoryProofClient : IDisposable
         ArgumentNullException.ThrowIfNull(binding);
         ArgumentNullException.ThrowIfNull(authority);
         cancellationToken.ThrowIfCancellationRequested();
+        ValidateProfile(deploymentProfileId, supportedReader);
         if (binding.Identity.Account.Certificate.NetworkId.Length !=
                 authority.NetworkId.Length ||
             !CryptographicOperations.FixedTimeEquals(
@@ -241,8 +244,7 @@ public sealed class DeepIdV2DirectoryProofClient : IDisposable
             CancellationToken cancellationToken)
     {
         RequireV2Floor(protectedLkg, authority);
-        if (deploymentProfileId == 0 || supportedReader < 2)
-            throw new ArgumentOutOfRangeException(nameof(supportedReader));
+        ValidateProfile(deploymentProfileId, supportedReader);
 
         var requestCreated = await clock.ReadAsync(cancellationToken)
             .ConfigureAwait(false) ?? throw new CryptographicException(
@@ -303,6 +305,15 @@ public sealed class DeepIdV2DirectoryProofClient : IDisposable
             CryptographicOperations.ZeroMemory(nonce);
             if (encoded is not null) CryptographicOperations.ZeroMemory(encoded);
         }
+    }
+
+    private static void ValidateProfile(ushort deploymentProfileId,
+        ushort supportedReader)
+    {
+        if (deploymentProfileId == 0)
+            throw new ArgumentOutOfRangeException(nameof(deploymentProfileId));
+        if (supportedReader < 2)
+            throw new ArgumentOutOfRangeException(nameof(supportedReader));
     }
 
     private static void RequireV2Floor(AccountDirectoryProtectedLkg protectedLkg,

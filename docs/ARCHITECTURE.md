@@ -120,9 +120,10 @@ endpoint and bounded media types defined by the master
 The production HTTP factory owns its HTTPS transport and exposes only the
 bounded DID2 proof endpoint; it rejects non-loopback HTTP origins and timeouts over
 30 seconds. The caller retains ownership of the verifier, monotonic clock and
-account-scoped protected floor. Before network I/O, the proof client requires a
-verified DAB2-bound ADL1 V2 query, XPoint authority and a store-restored
-protected reader-V2 LKG before network I/O. A fresh nonce and one boot-stable
+account-scoped protected floor. The public proof entry points reject an absent
+deployment profile or reader below V2 before protected-state or network access.
+Before network I/O, the proof client requires a verified DAB2-bound ADL1 V2
+query, XPoint authority and a store-restored protected reader-V2 LKG. A fresh nonce and one boot-stable
 monotonic request window bind the response; only the protocol's full PQ-backed
 verifier can return a freshness capability. The HTTP client now withholds that
 capability until an account-scoped protected store durably compare-exchanges
@@ -137,7 +138,8 @@ reset rather than silently reopening an older floor. The existing account
 lease serializes reset and compare/exchange; restart re-authenticates the
 exact head against XPoint authority. A post-commit monotonic read prevents an
 expired proof from escaping even when the durable floor advanced. The proof
-client and store are not yet composed into MAUI. Registry issuance,
+client and store are composed only in the isolated MAUI DID2 diagnostic lane,
+not the production message runtime. Registry issuance,
 Contact/XPK consumers and physical E2E remain required before a release claim.
 For the account-owned genesis path, the proof client derives XPoint-only ADL1
 V2 from the exact verified DID2 and that protected head, never from a caller's
