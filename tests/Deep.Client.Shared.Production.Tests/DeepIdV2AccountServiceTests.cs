@@ -443,6 +443,8 @@ public sealed class DeepIdV2AccountServiceTests
                     }
                     Assert.False(await afterPhraseDeletion
                         .HasOwnStagedPreKeyInventoryAsync());
+                    Assert.Null(await afterPhraseDeletion
+                        .ReadOwnStagedPreKeyPublicationAsync());
                     using (var ownInventory = prekeys.AuthorInventoryV2(
                                context, publicEvidence.Binding,
                                serviceCapability, xpsReference, drsReference,
@@ -461,6 +463,11 @@ public sealed class DeepIdV2AccountServiceTests
                         Assert.True(await resumed.HasOwnStagedPreKeyInventoryAsync());
                         await afterPhraseDeletion.StageOwnInitialPreKeyInventoryAsync(
                             ownInventory);
+                        Assert.Equal(ownInventory.ExactXpp1.ToArray(),
+                            await afterPhraseDeletion
+                                .ReadOwnStagedPreKeyPublicationAsync());
+                        Assert.Equal(ownInventory.ExactXpp1.ToArray(),
+                            await resumed.ReadOwnStagedPreKeyPublicationAsync());
                     }
                     var ownedPreKeyPath = Path.Combine(directory,
                         "deep-store-v2-account.dsv2.prekeys.pkv2");
@@ -468,6 +475,8 @@ public sealed class DeepIdV2AccountServiceTests
                     File.Delete(ownedPreKeyPath);
                     await Assert.ThrowsAsync<InvalidDataException>(() =>
                         resumed.HasOwnStagedPreKeyInventoryAsync());
+                    await Assert.ThrowsAsync<InvalidDataException>(() =>
+                        resumed.ReadOwnStagedPreKeyPublicationAsync());
                     var scope = new Dpk2PreKeyPersistenceScope(
                         offering.Record.NetworkId.Span,
                         offering.Record.ResponderAccountId.Span,

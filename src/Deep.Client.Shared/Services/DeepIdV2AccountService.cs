@@ -298,6 +298,20 @@ public sealed class DeepIdV2AccountService
             .ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Reads the exact public XPP1 bytes only after account verification and
+    /// protected-tip recovery. It never returns DPK2 secret material and does
+    /// not authorize transport dispatch or claim activation by itself.
+    /// </summary>
+    public async Task<byte[]?> ReadOwnStagedPreKeyPublicationAsync(
+        CancellationToken cancellationToken = default)
+    {
+        using var verifier = OpenVerifier();
+        return await owner.ReadOwnStagedPreKeyPublicationAsync(
+            TrustedUnixSeconds(), verifier, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
     public async Task<DeepIdV2AccountSnapshot> CreateAsync(
         string displayName, CancellationToken cancellationToken = default)
     {

@@ -136,6 +136,20 @@ internal sealed class ProtectedDeepIdV2AccountOwner
             .ConfigureAwait(false);
     }
 
+    internal async ValueTask<byte[]?> ReadOwnStagedPreKeyPublicationAsync(
+        ulong trustedUnixSeconds, IDeepMlDsa65Verifier mlDsa65,
+        CancellationToken cancellationToken)
+    {
+        using var held = await lease.AcquireAsync(cancellationToken)
+            .ConfigureAwait(false);
+        using var current = await RequireCurrentUnderLeaseAsync(
+            trustedUnixSeconds, mlDsa65, cancellationToken)
+            .ConfigureAwait(false);
+        return await SqliteDeepIdV2AccountGeneration
+            .ReadStagedPreKeyPublicationAsync(storage, sqlStatePath,
+                current, cancellationToken).ConfigureAwait(false);
+    }
+
     internal async ValueTask<VerifiedDeepIdV2CurrentAccount> CreateFreshAsync(
         string displayName, ulong trustedUnixSeconds,
         IDeepMlDsa65Verifier mlDsa65, CancellationToken cancellationToken)

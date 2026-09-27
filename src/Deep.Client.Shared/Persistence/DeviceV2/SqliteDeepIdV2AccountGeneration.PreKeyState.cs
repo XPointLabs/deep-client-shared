@@ -94,6 +94,45 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         finally { CryptographicOperations.ZeroMemory(opened.ScopeHash); }
     }
 
+    internal static async ValueTask<byte[]?> ReadStagedPreKeyPublicationAsync(
+        IDeepSecureStorage storage, string accountStatePath,
+        VerifiedDeepIdV2CurrentAccount current,
+        CancellationToken cancellationToken)
+    {
+        var path = PreKeyStatePath(accountStatePath);
+        using var installed = await storage.ReadOwnedAsync(
+            PreKeyInstallMarkerSlot, cancellationToken).ConfigureAwait(false);
+        if (installed is null)
+        {
+            if (PreKeyFileFamilyExists(path))
+                throw new InvalidDataException(
+                    "DID2 pre-key state exists without its protected marker.");
+            return null;
+        }
+        var opened = await OpenPreKeyStoreAsync(storage, accountStatePath,
+            current, allowInitialize: false, cancellationToken)
+            .ConfigureAwait(false);
+        await using var store = opened.Store;
+        try
+        {
+            var exact = store.ReadStagedPublication();
+            if (exact is null) return null;
+            using var tip = await storage.ReadOwnedAsync(
+                PreKeyInventoryMarkerSlot, cancellationToken)
+                .ConfigureAwait(false) ?? throw new InvalidDataException(
+                    "The DID2 pre-key publication has no protected tip.");
+            var hash = SHA256.HashData(exact);
+            if (!tip.Use(value => value.Length == 64 &&
+                CryptographicOperations.FixedTimeEquals(value[..32],
+                    opened.ScopeHash) &&
+                CryptographicOperations.FixedTimeEquals(value[32..], hash)))
+                throw new CryptographicException(
+                    "The DID2 pre-key publication differs from its protected tip.");
+            return exact;
+        }
+        finally { CryptographicOperations.ZeroMemory(opened.ScopeHash); }
+    }
+
     private static async ValueTask<(SqlitePreKeyV2InventoryStore Store,
         byte[] ScopeHash)> OpenPreKeyStoreAsync(IDeepSecureStorage storage,
         string accountStatePath, VerifiedDeepIdV2CurrentAccount current,

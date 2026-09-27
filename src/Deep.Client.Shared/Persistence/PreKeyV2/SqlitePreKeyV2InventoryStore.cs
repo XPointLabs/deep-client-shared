@@ -107,6 +107,15 @@ internal sealed class SqlitePreKeyV2InventoryStore : IAsyncDisposable
         return exact is null ? null : SHA256.HashData(exact);
     }
 
+    internal byte[]? ReadStagedPublication()
+    {
+        ThrowIfDisposed();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT exact_xpp1 FROM inventory WHERE singleton=1;";
+        var exact = command.ExecuteScalar() as byte[];
+        return exact?.ToArray();
+    }
+
     internal async Task StageInitialAsync(AuthoredDpk2InventoryV2 inventory,
         Func<CancellationToken, ValueTask>? beforeCommit = null,
         CancellationToken cancellationToken = default)
