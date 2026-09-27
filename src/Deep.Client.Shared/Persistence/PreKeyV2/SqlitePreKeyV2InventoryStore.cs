@@ -17,9 +17,9 @@ namespace Deep.Client.Shared.Persistence.PreKeyV2;
 internal sealed class SqlitePreKeyV2InventoryStore : IAsyncDisposable
 {
     private const int ApplicationId = 0x504B5632; // PKV2
-    private const int SchemaVersion = 1;
+    private const int SchemaVersion = 2;
     private const string CreateOwner = "CREATE TABLE owner(singleton INTEGER PRIMARY KEY CHECK(singleton=1),network_id BLOB NOT NULL CHECK(length(network_id)=16),account_id BLOB NOT NULL CHECK(length(account_id)=32),account_generation INTEGER NOT NULL CHECK(account_generation>0),device_id BLOB NOT NULL CHECK(length(device_id)=32),device_generation INTEGER NOT NULL CHECK(device_generation>0),dpd1_reference BLOB NOT NULL CHECK(length(dpd1_reference)=38),device_signing_key BLOB NOT NULL CHECK(length(device_signing_key)=32))";
-    private const string CreateInventory = "CREATE TABLE inventory(singleton INTEGER PRIMARY KEY CHECK(singleton=1),epoch INTEGER NOT NULL CHECK(epoch BETWEEN 1 AND 14),exact_xpi1 BLOB NOT NULL CHECK(length(exact_xpi1)=560),exact_xpp1 BLOB NOT NULL CHECK(length(exact_xpp1) BETWEEN 67983 AND 8362607))";
+    private const string CreateInventory = "CREATE TABLE inventory(singleton INTEGER PRIMARY KEY CHECK(singleton=1),epoch INTEGER NOT NULL CHECK(epoch BETWEEN 1 AND 14),exact_xps1 BLOB NOT NULL CHECK(length(exact_xps1)=352),exact_xpi1 BLOB NOT NULL CHECK(length(exact_xpi1)=560),exact_xpp1 BLOB NOT NULL CHECK(length(exact_xpp1) BETWEEN 67983 AND 8362607))";
     private const string CreateSecrets = "CREATE TABLE secrets(member_index INTEGER PRIMARY KEY CHECK(member_index BETWEEN 0 AND 4096),exact_dpk2_hash BLOB NOT NULL UNIQUE CHECK(length(exact_dpk2_hash)=32),exact_dpk2 BLOB NOT NULL CHECK(length(exact_dpk2) IN(1973,2037)),sealed_secret BLOB NOT NULL CHECK(length(sealed_secret) BETWEEN 386 AND 4481))";
     private readonly string path;
     private readonly byte[] network;
@@ -116,10 +116,20 @@ internal sealed class SqlitePreKeyV2InventoryStore : IAsyncDisposable
         return exact?.ToArray();
     }
 
-    internal async Task StageInitialAsync(AuthoredDpk2InventoryV2 inventory,
+    internal byte[]? ReadStagedService()
+    {
+        ThrowIfDisposed();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT exact_xps1 FROM inventory WHERE singleton=1;";
+        return (command.ExecuteScalar() as byte[])?.ToArray();
+    }
+
+    internal async Task StageInitialAsync(AuthoredDeepIdV2PreKeyService service,
+        AuthoredDpk2InventoryV2 inventory,
         Func<CancellationToken, ValueTask>? beforeCommit = null,
         CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(service);
         ArgumentNullException.ThrowIfNull(inventory);
         cancellationToken.ThrowIfCancellationRequested();
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -131,7 +141,7 @@ internal sealed class SqlitePreKeyV2InventoryStore : IAsyncDisposable
                     "A DID2 pre-key inventory is already staged.");
             var publication = DeepIdV2PreKeyPublicationCodec.Decode(
                 inventory.ExactXpp1.Span);
-            ValidateInventory(inventory, publication);
+            ValidateInventory(inventory, publication, service.ExactXps1.Span);
             var sealedSecrets = new List<byte[]>(
                 inventory.OneTimeOfferings.Count + 1);
             try
@@ -143,10 +153,11 @@ internal sealed class SqlitePreKeyV2InventoryStore : IAsyncDisposable
                 using (var insert = connection.CreateCommand())
                 {
                     insert.Transaction = transaction;
-                    insert.CommandText = "INSERT INTO inventory VALUES(1,$epoch,$xpi,$xpp);";
+                    insert.CommandText = "INSERT INTO inventory VALUES(1,$epoch,$xps,$xpi,$xpp);";
                     insert.Parameters.AddWithValue("$epoch", checked((long)
                         BinaryPrimitives.ReadUInt64BigEndian(
                             publication.Manifest.Field(7).Span)));
+                    Add(insert, "$xps", service.ExactXps1.ToArray());
                     Add(insert, "$xpi", inventory.ExactXpi1.ToArray());
                     Add(insert, "$xpp", inventory.ExactXpp1.ToArray());
                     insert.ExecuteNonQuery();
@@ -199,7 +210,7 @@ internal sealed class SqlitePreKeyV2InventoryStore : IAsyncDisposable
     }
 
     private void ValidateInventory(AuthoredDpk2InventoryV2 inventory,
-        ParsedXpp1V2 publication)
+        ParsedXpp1V2 publication, ReadOnlySpan<byte> exactXps1)
     {
         if (!publication.NetworkId.Span.SequenceEqual(network) ||
             !publication.Manifest.CanonicalBytes.Span.SequenceEqual(
@@ -212,6 +223,7 @@ internal sealed class SqlitePreKeyV2InventoryStore : IAsyncDisposable
             publication.OneTimeMembers.Count != inventory.OneTimeOfferings.Count)
             throw new CryptographicException(
                 "The DID2 inventory is outside its exact local owner scope.");
+        ValidateService(publication, exactXps1);
         for (var index = 0; index <= publication.OneTimeMembers.Count; index++)
         {
             var member = index < publication.OneTimeMembers.Count
@@ -229,6 +241,32 @@ internal sealed class SqlitePreKeyV2InventoryStore : IAsyncDisposable
                 throw new CryptographicException(
                     "The DID2 inventory contains a foreign pre-key capability.");
         }
+    }
+
+    private void ValidateService(ParsedXpp1V2 publication,
+        ReadOnlySpan<byte> exactXps1)
+    {
+        var service = DeepIdV2PreKeyServiceCodec.Decode(exactXps1);
+        DeepIdV2PreKeyServiceCodec.VerifyDeviceSignature(service, signer);
+        Span<byte> reference = stackalloc byte[38];
+        "XPS1"u8.CopyTo(reference);
+        BinaryPrimitives.WriteUInt16BigEndian(reference[4..], 2);
+        SHA256.HashData(exactXps1, reference[6..]);
+        var manifest = publication.Manifest;
+        if (!service.Field(1).Span.SequenceEqual(network) ||
+            !service.Field(2).Span.SequenceEqual(manifest.Field(2).Span) ||
+            !service.Field(3).Span.SequenceEqual(device) ||
+            !service.Field(4).Span.SequenceEqual(dpd1) ||
+            !service.Field(5).Span.SequenceEqual(manifest.Field(5).Span) ||
+            !reference.SequenceEqual(manifest.Field(6).Span) ||
+            BinaryPrimitives.ReadUInt16BigEndian(service.Field(8).Span) >
+                publication.OneTimeMembers.Count ||
+            BinaryPrimitives.ReadUInt64BigEndian(manifest.Field(14).Span) <
+                BinaryPrimitives.ReadUInt64BigEndian(service.Field(10).Span) ||
+            BinaryPrimitives.ReadUInt64BigEndian(manifest.Field(15).Span) >
+                BinaryPrimitives.ReadUInt64BigEndian(service.Field(11).Span))
+            throw new CryptographicException(
+                "The DID2 inventory does not bind its exact signed XPS1 V2 service.");
     }
 
     private void Create()
@@ -299,15 +337,17 @@ internal sealed class SqlitePreKeyV2InventoryStore : IAsyncDisposable
         long epoch = 0;
         byte[]? exactXpi1 = null;
         byte[]? exactXpp1 = null;
+        byte[]? exactXps1 = null;
         using (var inventory = connection.CreateCommand())
         {
-            inventory.CommandText = "SELECT epoch,exact_xpi1,exact_xpp1 FROM inventory;";
+            inventory.CommandText = "SELECT epoch,exact_xps1,exact_xpi1,exact_xpp1 FROM inventory;";
             using var row = inventory.ExecuteReader();
             if (row.Read())
             {
                 epoch = row.GetInt64(0);
-                exactXpi1 = row.GetFieldValue<byte[]>(1);
-                exactXpp1 = row.GetFieldValue<byte[]>(2);
+                exactXps1 = row.GetFieldValue<byte[]>(1);
+                exactXpi1 = row.GetFieldValue<byte[]>(2);
+                exactXpp1 = row.GetFieldValue<byte[]>(3);
                 if (row.Read())
                     throw new InvalidDataException(
                         "Multiple DID2 pre-key inventories exist.");
@@ -331,6 +371,7 @@ internal sealed class SqlitePreKeyV2InventoryStore : IAsyncDisposable
             epoch != checked((long)BinaryPrimitives.ReadUInt64BigEndian(
                 publication.Manifest.Field(7).Span)))
             throw new CryptographicException("The durable DID2 inventory is invalid.");
+        ValidateService(publication, exactXps1!);
         using var secrets = connection.CreateCommand();
         secrets.CommandText = "SELECT member_index,exact_dpk2_hash,exact_dpk2,sealed_secret FROM secrets ORDER BY member_index;";
         using var reader = secrets.ExecuteReader();

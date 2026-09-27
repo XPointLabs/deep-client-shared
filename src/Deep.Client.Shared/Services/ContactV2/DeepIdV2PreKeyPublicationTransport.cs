@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Security.Cryptography;
 using Deep.Client.Shared.Services.ContactV1;
+using Deep.Client.Shared.Services;
 using Deep.Client.Shared.Services.XPointNetworkV1;
 using Deep.Protocol.ContactV2;
 using Deep.Protocol.XPointNetworkV1;
@@ -19,12 +20,14 @@ internal sealed class DeepIdV2PreKeyPublicationTransport(
     IExactContactResolveOnionTransport onion)
 {
     internal async ValueTask<(ParsedXic1V2 First, ParsedXic1V2 Second)>
-        PublishAsync(ReadOnlyMemory<byte> exactAggregate,
-            ReadOnlyMemory<byte> exactPublisherDid2,
-            ReadOnlyMemory<byte> exactPublisherDca1,
-            ReadOnlyMemory<byte> exactPublisherXps1,
+        PublishAsync(StagedDeepIdV2PreKeyPublication staged,
             CancellationToken cancellationToken)
     {
+        ArgumentNullException.ThrowIfNull(staged);
+        var exactAggregate = staged.ExactXpp1;
+        var exactPublisherDid2 = staged.ExactDid2;
+        var exactPublisherDca1 = staged.ExactDca1;
+        var exactPublisherXps1 = staged.ExactXps1;
         ArgumentNullException.ThrowIfNull(authoritySource);
         ArgumentNullException.ThrowIfNull(onion);
         var publication = DeepIdV2PreKeyPublicationCodec.Decode(

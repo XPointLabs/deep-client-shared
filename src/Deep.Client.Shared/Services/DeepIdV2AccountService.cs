@@ -15,6 +15,32 @@ using Deep.Protocol.Registry;
 
 namespace Deep.Client.Shared.Services;
 
+/// <summary>Exact public bytes released only from a verified DID2 account
+/// and its protected-tip-verified pre-key inventory. No private DPK2 leaves
+/// the account owner.</summary>
+public sealed class StagedDeepIdV2PreKeyPublication
+{
+    private readonly byte[] xpp;
+    private readonly byte[] did;
+    private readonly byte[] dca;
+    private readonly byte[] xps;
+
+    internal StagedDeepIdV2PreKeyPublication(ReadOnlySpan<byte> exactXpp1,
+        ReadOnlySpan<byte> exactDid2, ReadOnlySpan<byte> exactDca1,
+        ReadOnlySpan<byte> exactXps1)
+    {
+        xpp = exactXpp1.ToArray();
+        did = exactDid2.ToArray();
+        dca = exactDca1.ToArray();
+        xps = exactXps1.ToArray();
+    }
+
+    public ReadOnlyMemory<byte> ExactXpp1 => xpp.ToArray();
+    public ReadOnlyMemory<byte> ExactDid2 => did.ToArray();
+    public ReadOnlyMemory<byte> ExactDca1 => dca.ToArray();
+    public ReadOnlyMemory<byte> ExactXps1 => xps.ToArray();
+}
+
 /// <summary>
 /// Network-free DID2 account entry point for a single private device store.
 /// It never reads or migrates the incompatible STORE-V1 namespace.
@@ -280,13 +306,15 @@ public sealed class DeepIdV2AccountService
     /// operation does not publish XPP1 or authorize a remote claim.
     /// </summary>
     public async Task StageOwnInitialPreKeyInventoryAsync(
+        AuthoredDeepIdV2PreKeyService service,
         AuthoredDpk2InventoryV2 inventory,
         CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(service);
         ArgumentNullException.ThrowIfNull(inventory);
         using var verifier = OpenVerifier();
         await owner.StageOwnInitialPreKeyInventoryAsync(TrustedUnixSeconds(),
-            verifier, inventory, cancellationToken).ConfigureAwait(false);
+            verifier, service, inventory, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<bool> HasOwnStagedPreKeyInventoryAsync(
@@ -299,11 +327,11 @@ public sealed class DeepIdV2AccountService
     }
 
     /// <summary>
-    /// Reads the exact public XPP1 bytes only after account verification and
+    /// Reads exact public XPP1 and DID2/DCA1/XPS1 support only after account verification and
     /// protected-tip recovery. It never returns DPK2 secret material and does
     /// not authorize transport dispatch or claim activation by itself.
     /// </summary>
-    public async Task<byte[]?> ReadOwnStagedPreKeyPublicationAsync(
+    public async Task<StagedDeepIdV2PreKeyPublication?> ReadOwnStagedPreKeyPublicationAsync(
         CancellationToken cancellationToken = default)
     {
         using var verifier = OpenVerifier();

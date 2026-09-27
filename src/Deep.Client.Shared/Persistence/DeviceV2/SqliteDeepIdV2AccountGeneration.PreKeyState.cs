@@ -34,9 +34,11 @@ internal static partial class SqliteDeepIdV2AccountGeneration
     internal static async ValueTask StageInitialPreKeyInventoryAsync(
         IDeepSecureStorage storage, string accountStatePath,
         VerifiedDeepIdV2CurrentAccount current,
+        AuthoredDeepIdV2PreKeyService service,
         AuthoredDpk2InventoryV2 inventory,
         CancellationToken cancellationToken)
     {
+        ArgumentNullException.ThrowIfNull(service);
         ArgumentNullException.ThrowIfNull(inventory);
         var opened = await OpenPreKeyStoreAsync(storage, accountStatePath,
             current, allowInitialize: true, cancellationToken)
@@ -48,7 +50,7 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             var stagedHash = store.ReadStagedPublicationHash();
             if (stagedHash is null)
             {
-                await store.StageInitialAsync(inventory,
+                await store.StageInitialAsync(service, inventory,
                     cancellationToken: cancellationToken)
                     .ConfigureAwait(false);
                 stagedHash = store.ReadStagedPublicationHash();
@@ -61,7 +63,9 @@ internal static partial class SqliteDeepIdV2AccountGeneration
                     stagedHash, cancellationToken).ConfigureAwait(false);
             }
             else if (!CryptographicOperations.FixedTimeEquals(
-                         stagedHash, authoredHash))
+                         stagedHash, authoredHash) ||
+                     !store.ReadStagedService()!.AsSpan().SequenceEqual(
+                         service.ExactXps1.Span))
                 throw new CryptographicException(
                     "A different DID2 pre-key inventory was already staged.");
         }
@@ -94,7 +98,7 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         finally { CryptographicOperations.ZeroMemory(opened.ScopeHash); }
     }
 
-    internal static async ValueTask<byte[]?> ReadStagedPreKeyPublicationAsync(
+    internal static async ValueTask<(byte[] ExactXpp1, byte[] ExactXps1)?> ReadStagedPreKeyPublicationAsync(
         IDeepSecureStorage storage, string accountStatePath,
         VerifiedDeepIdV2CurrentAccount current,
         CancellationToken cancellationToken)
@@ -128,7 +132,8 @@ internal static partial class SqliteDeepIdV2AccountGeneration
                 CryptographicOperations.FixedTimeEquals(value[32..], hash)))
                 throw new CryptographicException(
                     "The DID2 pre-key publication differs from its protected tip.");
-            return exact;
+            return (exact, store.ReadStagedService() ?? throw new
+                InvalidDataException("The protected DID2 pre-key service is missing."));
         }
         finally { CryptographicOperations.ZeroMemory(opened.ScopeHash); }
     }

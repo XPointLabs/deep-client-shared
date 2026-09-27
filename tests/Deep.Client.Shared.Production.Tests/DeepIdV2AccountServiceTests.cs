@@ -394,7 +394,7 @@ public sealed class DeepIdV2AccountServiceTests
                             {
                                 Assert.False(store.HasStagedInventory);
                                 await Assert.ThrowsAsync<InvalidOperationException>(() =>
-                                    store.StageInitialAsync(inventory,
+                                    store.StageInitialAsync(service, inventory,
                                         beforeCommit: _ => throw new
                                             InvalidOperationException("test crash before commit")));
                                 Assert.False(store.HasStagedInventory);
@@ -411,10 +411,17 @@ public sealed class DeepIdV2AccountServiceTests
                                 offering.Record.ResponderDpd1Ref.Span, signer,
                                 allowCreate: false))
                             {
-                                await store.StageInitialAsync(retry);
+                                var foreignService = prekeys.AuthorPreKeyServiceV2(
+                                    context, publicEvidence.Binding, 32, 9);
+                                await Assert.ThrowsAnyAsync<Exception>(() =>
+                                    store.StageInitialAsync(foreignService, retry));
+                                Assert.False(store.HasStagedInventory);
+                                await store.StageInitialAsync(service, retry);
                                 Assert.True(store.HasStagedInventory);
+                                Assert.Equal(service.ExactXps1.ToArray(),
+                                    store.ReadStagedService());
                                 await Assert.ThrowsAsync<CryptographicException>(() =>
-                                    store.StageInitialAsync(retry));
+                                    store.StageInitialAsync(service, retry));
                             }
                             await using (var reopened = new SqlitePreKeyV2InventoryStore(
                                 statePath, databaseKey, network, created.AccountId.Span,
@@ -422,7 +429,11 @@ public sealed class DeepIdV2AccountServiceTests
                                     .AccountGeneration, firstDeviceId, 1,
                                 offering.Record.ResponderDpd1Ref.Span, signer,
                                 allowCreate: false))
+                            {
                                 Assert.True(reopened.HasStagedInventory);
+                                Assert.Equal(service.ExactXps1.ToArray(),
+                                    reopened.ReadStagedService());
+                            }
                             var wrongNetwork = network.ToArray();
                             wrongNetwork[0] ^= 1;
                             Assert.Throws<CryptographicException>(() =>
@@ -458,20 +469,33 @@ public sealed class DeepIdV2AccountServiceTests
                         storage.FailNextInstallAfterWrite = true;
                         await Assert.ThrowsAsync<IOException>(() =>
                             afterPhraseDeletion.StageOwnInitialPreKeyInventoryAsync(
-                                ownInventory));
+                                service, ownInventory));
                         Assert.False(await resumed.HasOwnStagedPreKeyInventoryAsync());
                         storage.FailNextTipWrite = true;
                         await Assert.ThrowsAsync<IOException>(() =>
                             afterPhraseDeletion.StageOwnInitialPreKeyInventoryAsync(
-                                ownInventory));
+                                service, ownInventory));
                         Assert.True(await resumed.HasOwnStagedPreKeyInventoryAsync());
                         await afterPhraseDeletion.StageOwnInitialPreKeyInventoryAsync(
-                            ownInventory);
+                            service, ownInventory);
+                        var staged = await afterPhraseDeletion
+                            .ReadOwnStagedPreKeyPublicationAsync();
+                        Assert.NotNull(staged);
                         Assert.Equal(ownInventory.ExactXpp1.ToArray(),
-                            await afterPhraseDeletion
-                                .ReadOwnStagedPreKeyPublicationAsync());
-                        Assert.Equal(ownInventory.ExactXpp1.ToArray(),
-                            await resumed.ReadOwnStagedPreKeyPublicationAsync());
+                            staged.ExactXpp1.ToArray());
+                        Assert.Equal(service.ExactXps1.ToArray(),
+                            staged.ExactXps1.ToArray());
+                        Assert.Equal(publicEvidence.Binding.DeepId.CanonicalBytes.ToArray(),
+                            staged.ExactDid2.ToArray());
+                        Assert.Equal(publicEvidence.Authorization.Record.CanonicalBytes.ToArray(),
+                            staged.ExactDca1.ToArray());
+                        var reopenedStaged = await resumed
+                            .ReadOwnStagedPreKeyPublicationAsync();
+                        Assert.NotNull(reopenedStaged);
+                        Assert.Equal(staged.ExactXpp1.ToArray(),
+                            reopenedStaged.ExactXpp1.ToArray());
+                        Assert.Equal(staged.ExactXps1.ToArray(),
+                            reopenedStaged.ExactXps1.ToArray());
                     }
                     var ownedPreKeyPath = Path.Combine(directory,
                         "deep-store-v2-account.dsv2.prekeys.pkv2");

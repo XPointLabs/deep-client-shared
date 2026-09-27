@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using Deep.Client.Shared.Domain;
 using Deep.Client.Shared.Services.AccountDirectoryV2;
+using Deep.Client.Shared.Services;
 using Deep.Protocol.AccountDirectoryV1;
 using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.Identity;
@@ -109,6 +110,7 @@ internal sealed class ProtectedDeepIdV2AccountOwner
 
     internal async ValueTask StageOwnInitialPreKeyInventoryAsync(
         ulong trustedUnixSeconds, IDeepMlDsa65Verifier mlDsa65,
+        AuthoredDeepIdV2PreKeyService service,
         AuthoredDpk2InventoryV2 inventory,
         CancellationToken cancellationToken)
     {
@@ -118,7 +120,7 @@ internal sealed class ProtectedDeepIdV2AccountOwner
             trustedUnixSeconds, mlDsa65, cancellationToken)
             .ConfigureAwait(false);
         await SqliteDeepIdV2AccountGeneration.StageInitialPreKeyInventoryAsync(
-            storage, sqlStatePath, current, inventory, cancellationToken)
+            storage, sqlStatePath, current, service, inventory, cancellationToken)
             .ConfigureAwait(false);
     }
 
@@ -136,7 +138,7 @@ internal sealed class ProtectedDeepIdV2AccountOwner
             .ConfigureAwait(false);
     }
 
-    internal async ValueTask<byte[]?> ReadOwnStagedPreKeyPublicationAsync(
+    internal async ValueTask<StagedDeepIdV2PreKeyPublication?> ReadOwnStagedPreKeyPublicationAsync(
         ulong trustedUnixSeconds, IDeepMlDsa65Verifier mlDsa65,
         CancellationToken cancellationToken)
     {
@@ -145,9 +147,15 @@ internal sealed class ProtectedDeepIdV2AccountOwner
         using var current = await RequireCurrentUnderLeaseAsync(
             trustedUnixSeconds, mlDsa65, cancellationToken)
             .ConfigureAwait(false);
-        return await SqliteDeepIdV2AccountGeneration
+        var exact = await SqliteDeepIdV2AccountGeneration
             .ReadStagedPreKeyPublicationAsync(storage, sqlStatePath,
                 current, cancellationToken).ConfigureAwait(false);
+        if (exact is null) return null;
+        var support = current.Verified.PublicEvidence;
+        return new StagedDeepIdV2PreKeyPublication(exact.Value.ExactXpp1,
+            support.Binding.DeepId.CanonicalBytes.Span,
+            support.Authorization.Record.CanonicalBytes.Span,
+            exact.Value.ExactXps1);
     }
 
     internal async ValueTask<VerifiedDeepIdV2CurrentAccount> CreateFreshAsync(

@@ -232,7 +232,8 @@ durable store commit, not a DPH2 agreement grant: production callers still
 need the separate one-use authorization transaction before a session starts.
 The same account lease now owns a separate `PKV2` SQLCipher initial-inventory
 generation. `StageOwnInitialPreKeyInventoryAsync` accepts only locally authored
-DID2 V2 XPP1/DPK2 capabilities, seals all private members in one SQL
+DID2 V2 XPS1/XPP1/DPK2 capabilities, verifies the exact signed XPS1 V2
+reference and scope against XPI1, and stores XPS1 with sealed private members in one SQL
 transaction, and adds a protected install marker plus an add-only exact-XPP1
 tip before returning publication eligibility. A crash after SQL commit but
 before the tip is recovered by verifying the complete staged inventory and
@@ -243,15 +244,17 @@ Reopen checks the verified DSV2 projection, derived
 account/device key scope, full SQL/member rows and the protected tip; loss or
 rollback of the staged file fails closed. Explicit V2 reset removes this file
 family and its protected markers. The account service can read a copy of the
-exact public XPP1 after current-account and protected-tip verification,
+exact public XPP1/DID2/DCA1/XPS1 package after current-account and protected-tip verification,
 including after restart; it does not release sealed DPK2 secrets. This is
 local custody only. A separate unmounted DID2 V2 client transport can now
 turn exact public XPP1 plus exact DID2/DCA1/XPS1 support into bounded ONION
 fragments, send each to both current selected exits, and return only after
-the Protocol verifier accepts both XIC1 signatures. The account owner does
-not yet persist the locally authored XPS1 V2 support, supply that support to
-this transport, persist its verified pair or
+the Protocol verifier accepts both XIC1 signatures. The account owner now
+persists the locally authored XPS1 V2 support and can supply it to the
+transport, but does not yet persist the verified XIC1 pair or
 activate a remote claim; DPH2 and device E2E are not implied.
+This is PKV2 schema generation 2; generation 1 is intentionally rejected
+without migration and can only be removed by explicit test-account reset.
 This is not yet a full mutable STORE-01 service:
 in-memory parity, restore-as-new-device,
 directory/contact/messaging cutover and physical E2E remain open. No V1 contact
