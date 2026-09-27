@@ -10,8 +10,11 @@ using Deep.Client.Shared.Services;
 using Deep.Client.Shared.Services.AccountDirectoryV2;
 using Deep.Protocol.AccountDirectoryV1;
 using Deep.Protocol.ApplicationCore;
+using Deep.Protocol.ContactV2;
 using Deep.Protocol.Identity;
 using Deep.Protocol.MessagingCrypto;
+using Deep.Protocol.MessagingWire;
+using Sodium;
 
 namespace Deep.Client.Shared.Production.Tests;
 
@@ -279,14 +282,68 @@ public sealed class DeepIdV2AccountServiceTests
                     1_900_000_000, 1_900_086_400);
                 if (OperatingSystem.IsWindows())
                 {
-                    using var offering = prekeys.AuthorOneTime(context);
+                    using var offering = prekeys.AuthorOneTimeV2(context);
                     Assert.Equal(firstDeviceId,
                         offering.Record.ResponderDeviceId.ToArray());
-                    Assert.Equal(32, offering.ExactDpk2Hash.Length);
+                    var parsed = DeepIdV2Dpk2Codec.Decode(offering.ExactDpk2.Span);
+                    Assert.Equal(offering.ExactDpk2Hash.ToArray(),
+                        parsed.ExactHash.ToArray());
+                    Assert.Throws<MessagingWireFormatException>(() =>
+                        Dpk2Codec.Decode(offering.ExactDpk2.Span));
+                    var signer = publicEvidence.Binding.Identity.ActiveDevices
+                        .Single(device => device.Certificate.DeviceId.Span
+                            .SequenceEqual(firstDeviceId))
+                        .Certificate.DeviceEd25519PublicKey.ToArray();
+                    Assert.True(PublicKeyAuth.VerifyDetached(
+                        offering.Record.SignedX25519PrekeySignature.ToArray(),
+                        DeepIdV2Dpk2Codec.GetX25519SignedPrekeySignatureInput(
+                            offering.Record), signer));
+                    Assert.True(PublicKeyAuth.VerifyDetached(
+                        offering.Record.MlKemPrekeySignature.ToArray(),
+                        DeepIdV2Dpk2Codec.GetMlKemPrekeySignatureInput(
+                            offering.Record), signer));
+                    Assert.True(PublicKeyAuth.VerifyDetached(
+                        offering.Record.BundleSignature.ToArray(),
+                        DeepIdV2Dpk2Codec.GetPrekeyBundleSignatureInput(
+                            offering.Record), signer));
+                    using var lastResort = prekeys.AuthorLastResortV2(
+                        context, reuseLimit: 9);
+                    Assert.Equal(Dpk2PrekeyKind.LastResort,
+                        DeepIdV2Dpk2Codec.Decode(lastResort.ExactDpk2.Span)
+                            .Kind);
+                    Assert.True(PublicKeyAuth.VerifyDetached(
+                        lastResort.Record.BundleSignature.ToArray(),
+                        DeepIdV2Dpk2Codec.GetPrekeyBundleSignatureInput(
+                            lastResort.Record), signer));
+                    Assert.Throws<MessagingWireFormatException>(() =>
+                        Dpk2Codec.Decode(lastResort.ExactDpk2.Span));
+                    var scope = new Dpk2PreKeyPersistenceScope(
+                        offering.Record.NetworkId.Span,
+                        offering.Record.ResponderAccountId.Span,
+                        publicEvidence.Binding.Identity.Account.Certificate
+                            .AccountGeneration,
+                        offering.Record.ResponderDeviceId.Span,
+                        offering.Record.ResponderDeviceGeneration,
+                        offering.Record.ResponderDpd1Ref.Span);
+                    var key = Enumerable.Repeat((byte)0x79, 32).ToArray();
+                    try
+                    {
+                        using var protector = new Dpk2PreKeyPersistenceProtector(key);
+                        var sealedSecret = offering.SealSecretForPersistence(
+                            protector, scope);
+                        using var restored = protector.Restore(sealedSecret,
+                            offering.ExactDpk2, scope);
+                        Assert.Equal(offering.ExactDpk2Hash.ToArray(),
+                            restored.ExactDpk2Hash.ToArray());
+                        Assert.Throws<CryptographicException>(() =>
+                            protector.Restore(sealedSecret,
+                                Dpk2Codec.Encode(offering.Record), scope));
+                    }
+                    finally { CryptographicOperations.ZeroMemory(key); }
                 }
                 else
                     Assert.Throws<PlatformNotSupportedException>(() =>
-                        prekeys.AuthorOneTime(context));
+                        prekeys.AuthorOneTimeV2(context));
             }
 
             await storage.DeleteBatchAsync(
