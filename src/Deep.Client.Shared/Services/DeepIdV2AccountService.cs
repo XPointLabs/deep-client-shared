@@ -273,6 +273,30 @@ public sealed class DeepIdV2AccountService
             relativeDevices[0]);
     }
 
+    /// <summary>
+    /// Seals the complete first DID2 inventory into account-owned SQLCipher
+    /// and records an add-only protected tip before the SQL commit. The
+    /// operation does not publish XPP1 or authorize a remote claim.
+    /// </summary>
+    public async Task StageOwnInitialPreKeyInventoryAsync(
+        AuthoredDpk2InventoryV2 inventory,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(inventory);
+        using var verifier = OpenVerifier();
+        await owner.StageOwnInitialPreKeyInventoryAsync(TrustedUnixSeconds(),
+            verifier, inventory, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<bool> HasOwnStagedPreKeyInventoryAsync(
+        CancellationToken cancellationToken = default)
+    {
+        using var verifier = OpenVerifier();
+        return await owner.HasOwnStagedPreKeyInventoryAsync(
+            TrustedUnixSeconds(), verifier, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
     public async Task<DeepIdV2AccountSnapshot> CreateAsync(
         string displayName, CancellationToken cancellationToken = default)
     {

@@ -230,6 +230,15 @@ is lost. Creation installs this state, MAUI remounts it for an existing account
 on startup, and explicit V2 reset deletes its file family. This is only a
 durable store commit, not a DPH2 agreement grant: production callers still
 need the separate one-use authorization transaction before a session starts.
+The same account lease now owns a separate `PKV2` SQLCipher initial-inventory
+generation. `StageOwnInitialPreKeyInventoryAsync` accepts only locally authored
+DID2 V2 XPP1/DPK2 capabilities, seals all private members in one SQL
+transaction, and adds a protected install marker plus an add-only exact-XPP1
+tip before commit. Reopen checks the verified DSV2 projection, derived
+account/device key scope, full SQL/member rows and the protected tip; loss or
+rollback of the staged file fails closed. Explicit V2 reset removes this file
+family and its protected markers. This is local custody only: no XPP1 network
+dispatch, XIC1 replica commit, remote claim, DPH2 or device E2E is implied.
 This is not yet a full mutable STORE-01 service:
 in-memory parity, restore-as-new-device,
 directory/contact/messaging cutover and physical E2E remain open. No V1 contact

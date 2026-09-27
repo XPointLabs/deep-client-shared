@@ -98,8 +98,17 @@ internal sealed class SqlitePreKeyV2InventoryStore : IAsyncDisposable
         }
     }
 
+    internal byte[]? ReadStagedPublicationHash()
+    {
+        ThrowIfDisposed();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT exact_xpp1 FROM inventory WHERE singleton=1;";
+        var exact = command.ExecuteScalar() as byte[];
+        return exact is null ? null : SHA256.HashData(exact);
+    }
+
     internal async Task StageInitialAsync(AuthoredDpk2InventoryV2 inventory,
-        Action? beforeCommit = null,
+        Func<CancellationToken, ValueTask>? beforeCommit = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(inventory);
@@ -147,7 +156,8 @@ internal sealed class SqlitePreKeyV2InventoryStore : IAsyncDisposable
                     Add(insert, "$sealed", sealedSecrets[index]);
                     insert.ExecuteNonQuery();
                 }
-                beforeCommit?.Invoke();
+                if (beforeCommit is not null)
+                    await beforeCommit(cancellationToken).ConfigureAwait(false);
                 cancellationToken.ThrowIfCancellationRequested();
                 transaction.Commit();
             }

@@ -391,7 +391,7 @@ public sealed class DeepIdV2AccountServiceTests
                                 Assert.False(store.HasStagedInventory);
                                 await Assert.ThrowsAsync<InvalidOperationException>(() =>
                                     store.StageInitialAsync(inventory,
-                                        beforeCommit: () => throw new
+                                        beforeCommit: _ => throw new
                                             InvalidOperationException("test crash before commit")));
                                 Assert.False(store.HasStagedInventory);
                             }
@@ -441,6 +441,27 @@ public sealed class DeepIdV2AccountServiceTests
                         }
                         finally { CryptographicOperations.ZeroMemory(databaseKey); }
                     }
+                    Assert.False(await afterPhraseDeletion
+                        .HasOwnStagedPreKeyInventoryAsync());
+                    using (var ownInventory = prekeys.AuthorInventoryV2(
+                               context, publicEvidence.Binding,
+                               serviceCapability, xpsReference, drsReference,
+                               new byte[32], RandomNumberGenerator.GetBytes(32),
+                               placement, 32, 9))
+                    {
+                        await afterPhraseDeletion.StageOwnInitialPreKeyInventoryAsync(
+                            ownInventory);
+                        Assert.True(await resumed.HasOwnStagedPreKeyInventoryAsync());
+                        await Assert.ThrowsAsync<CryptographicException>(() =>
+                            afterPhraseDeletion.StageOwnInitialPreKeyInventoryAsync(
+                                ownInventory));
+                    }
+                    var ownedPreKeyPath = Path.Combine(directory,
+                        "deep-store-v2-account.dsv2.prekeys.pkv2");
+                    Assert.True(File.Exists(ownedPreKeyPath));
+                    File.Delete(ownedPreKeyPath);
+                    await Assert.ThrowsAsync<InvalidDataException>(() =>
+                        resumed.HasOwnStagedPreKeyInventoryAsync());
                     var scope = new Dpk2PreKeyPersistenceScope(
                         offering.Record.NetworkId.Span,
                         offering.Record.ResponderAccountId.Span,

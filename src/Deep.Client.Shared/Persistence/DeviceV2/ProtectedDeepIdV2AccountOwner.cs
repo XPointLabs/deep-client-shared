@@ -9,6 +9,7 @@ using Deep.Protocol.Identity;
 using Deep.Protocol.XPointNetworkV1;
 using Deep.Client.Shared.Persistence.DeviceV1;
 using Deep.Client.Shared.Domain.DeviceV1;
+using Deep.Protocol.MessagingCrypto;
 
 namespace Deep.Client.Shared.Persistence.DeviceV2;
 
@@ -106,6 +107,35 @@ internal sealed class ProtectedDeepIdV2AccountOwner
         }
     }
 
+    internal async ValueTask StageOwnInitialPreKeyInventoryAsync(
+        ulong trustedUnixSeconds, IDeepMlDsa65Verifier mlDsa65,
+        AuthoredDpk2InventoryV2 inventory,
+        CancellationToken cancellationToken)
+    {
+        using var held = await lease.AcquireAsync(cancellationToken)
+            .ConfigureAwait(false);
+        using var current = await RequireCurrentUnderLeaseAsync(
+            trustedUnixSeconds, mlDsa65, cancellationToken)
+            .ConfigureAwait(false);
+        await SqliteDeepIdV2AccountGeneration.StageInitialPreKeyInventoryAsync(
+            storage, sqlStatePath, current, inventory, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    internal async ValueTask<bool> HasOwnStagedPreKeyInventoryAsync(
+        ulong trustedUnixSeconds, IDeepMlDsa65Verifier mlDsa65,
+        CancellationToken cancellationToken)
+    {
+        using var held = await lease.AcquireAsync(cancellationToken)
+            .ConfigureAwait(false);
+        using var current = await RequireCurrentUnderLeaseAsync(
+            trustedUnixSeconds, mlDsa65, cancellationToken)
+            .ConfigureAwait(false);
+        return await SqliteDeepIdV2AccountGeneration.HasStagedPreKeyInventoryAsync(
+            storage, sqlStatePath, current, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
     internal async ValueTask<VerifiedDeepIdV2CurrentAccount> CreateFreshAsync(
         string displayName, ulong trustedUnixSeconds,
         IDeepMlDsa65Verifier mlDsa65, CancellationToken cancellationToken)
@@ -166,6 +196,8 @@ internal sealed class ProtectedDeepIdV2AccountOwner
                     "An unpublished durable DID2/DAB2 winner must be recovered before reset.");
         }
         SqliteDeepIdV2AccountGeneration.DeleteDeviceStateAfterExplicitReset(
+            sqlStatePath);
+        SqliteDeepIdV2AccountGeneration.DeletePreKeyStateAfterExplicitReset(
             sqlStatePath);
         SqliteDeepIdV2AccountGeneration.DeleteArtifactsAfterExplicitReset(
             sqlStatePath);
