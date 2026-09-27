@@ -320,9 +320,7 @@ public sealed class DeepIdV2AccountServiceTests
                         Dpk2Codec.Decode(lastResort.ExactDpk2.Span));
                     var service = prekeys.AuthorPreKeyServiceV2(context,
                         publicEvidence.Binding, 32, 9);
-                    var xpsReference = service.Xps1Reference.ToArray();
                     var drsReference = TestReference("DRS1", 0x93);
-                    var serviceCapability = service.ServiceCapability.ToArray();
                     DeepIdV2PreKeyServiceCodec.VerifyDeviceSignature(
                         DeepIdV2PreKeyServiceCodec.Decode(service.ExactXps1.Span),
                         signer);
@@ -330,9 +328,16 @@ public sealed class DeepIdV2AccountServiceTests
                         .ToArray();
                     var placement = Enumerable.Repeat((byte)0x95, 32).ToArray();
                     Assert.Throws<ArgumentException>(() => prekeys.AuthorInventoryV2(
-                        context, publicEvidence.Binding, serviceCapability,
-                        xpsReference, drsReference, new byte[32],
+                        context, publicEvidence.Binding, service,
+                        drsReference, new byte[32],
                         publicationOperation, placement, 31, 9));
+                    var stricterService = prekeys.AuthorPreKeyServiceV2(
+                        context, publicEvidence.Binding, 33, 8);
+                    Assert.Throws<CryptographicException>(() =>
+                        prekeys.AuthorInventoryV2(context,
+                            publicEvidence.Binding, stricterService,
+                            drsReference, new byte[32],
+                            publicationOperation, placement, 32, 9));
                     var unrelatedDirectory = Path.Combine(directory,
                         "unrelated-did2-binding");
                     Directory.CreateDirectory(unrelatedDirectory);
@@ -353,14 +358,14 @@ public sealed class DeepIdV2AccountServiceTests
                         Assert.NotNull(unrelatedPublic);
                         Assert.Throws<CryptographicException>(() =>
                             prekeys.AuthorInventoryV2(context,
-                                unrelatedPublic!.Binding, serviceCapability,
-                                xpsReference, drsReference, new byte[32],
+                                unrelatedPublic!.Binding, service,
+                                drsReference, new byte[32],
                                 publicationOperation, placement, 32, 9));
                     }
                     finally { Directory.Delete(unrelatedDirectory, true); }
                     using (var inventory = prekeys.AuthorInventoryV2(
                                context, publicEvidence.Binding,
-                               serviceCapability, xpsReference, drsReference,
+                               service, drsReference,
                                new byte[32], publicationOperation, placement,
                                32, 9))
                     {
@@ -401,7 +406,7 @@ public sealed class DeepIdV2AccountServiceTests
                             }
                             using var retry = prekeys.AuthorInventoryV2(
                                 context, publicEvidence.Binding,
-                                serviceCapability, xpsReference, drsReference,
+                                service, drsReference,
                                 new byte[32], RandomNumberGenerator.GetBytes(32),
                                 placement, 32, 9);
                             await using (var store = new SqlitePreKeyV2InventoryStore(
@@ -462,7 +467,7 @@ public sealed class DeepIdV2AccountServiceTests
                         .ReadOwnStagedPreKeyPublicationAsync());
                     using (var ownInventory = prekeys.AuthorInventoryV2(
                                context, publicEvidence.Binding,
-                               serviceCapability, xpsReference, drsReference,
+                               service, drsReference,
                                new byte[32], RandomNumberGenerator.GetBytes(32),
                                placement, 32, 9))
                     {

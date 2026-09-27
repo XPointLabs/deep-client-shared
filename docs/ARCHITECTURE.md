@@ -231,7 +231,10 @@ on startup, and explicit V2 reset deletes its file family. This is only a
 durable store commit, not a DPH2 agreement grant: production callers still
 need the separate one-use authorization transaction before a session starts.
 The same account lease now owns a separate `PKV2` SQLCipher initial-inventory
-generation. `StageOwnInitialPreKeyInventoryAsync` accepts only locally authored
+generation. The V2 inventory author consumes one signed XPS1 service object;
+it rejects mismatched device, generation, validity or policy before creating
+private offerings, rather than accepting separate raw capability/reference.
+`StageOwnInitialPreKeyInventoryAsync` accepts only locally authored
 DID2 V2 XPS1/XPP1/DPK2 capabilities, verifies the exact signed XPS1 V2
 reference and scope against XPI1, and stores XPS1 with sealed private members in one SQL
 transaction, and adds a protected install marker plus an add-only exact-XPP1
