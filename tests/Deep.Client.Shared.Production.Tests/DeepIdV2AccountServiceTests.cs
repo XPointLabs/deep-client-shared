@@ -5,6 +5,7 @@ using System.Security.Cryptography;
 using Deep.Client.Shared.Persistence;
 using Deep.Client.Shared.Persistence.DeviceV2;
 using Deep.Client.Shared.Persistence.DeviceV1;
+using Deep.Client.Shared.Persistence.PreKeyV2;
 using Deep.Client.Shared.Domain.DeviceV1;
 using Deep.Client.Shared.Services;
 using Deep.Client.Shared.Services.AccountDirectoryV2;
@@ -376,6 +377,69 @@ public sealed class DeepIdV2AccountServiceTests
                             .Xpi1Codec.Decode(inventory.ExactXpi1.Span));
                         Assert.ThrowsAny<Exception>(() => Deep.Protocol.ContactV1
                             .Xpp1Codec.Decode(inventory.ExactXpp1.Span));
+                        var statePath = Path.Combine(directory, "prekeys-v2.pkv2");
+                        var databaseKey = RandomNumberGenerator.GetBytes(32);
+                        try
+                        {
+                            await using (var store = new SqlitePreKeyV2InventoryStore(
+                                statePath, databaseKey, network, created.AccountId.Span,
+                                publicEvidence.Binding.Identity.Account.Certificate
+                                    .AccountGeneration, firstDeviceId, 1,
+                                offering.Record.ResponderDpd1Ref.Span, signer,
+                                allowCreate: true))
+                            {
+                                Assert.False(store.HasStagedInventory);
+                                await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                                    store.StageInitialAsync(inventory,
+                                        beforeCommit: () => throw new
+                                            InvalidOperationException("test crash before commit")));
+                                Assert.False(store.HasStagedInventory);
+                            }
+                            using var retry = prekeys.AuthorInventoryV2(
+                                context, publicEvidence.Binding,
+                                serviceCapability, xpsReference, drsReference,
+                                new byte[32], RandomNumberGenerator.GetBytes(32),
+                                placement, 32, 9);
+                            await using (var store = new SqlitePreKeyV2InventoryStore(
+                                statePath, databaseKey, network, created.AccountId.Span,
+                                publicEvidence.Binding.Identity.Account.Certificate
+                                    .AccountGeneration, firstDeviceId, 1,
+                                offering.Record.ResponderDpd1Ref.Span, signer,
+                                allowCreate: false))
+                            {
+                                await store.StageInitialAsync(retry);
+                                Assert.True(store.HasStagedInventory);
+                                await Assert.ThrowsAsync<CryptographicException>(() =>
+                                    store.StageInitialAsync(retry));
+                            }
+                            await using (var reopened = new SqlitePreKeyV2InventoryStore(
+                                statePath, databaseKey, network, created.AccountId.Span,
+                                publicEvidence.Binding.Identity.Account.Certificate
+                                    .AccountGeneration, firstDeviceId, 1,
+                                offering.Record.ResponderDpd1Ref.Span, signer,
+                                allowCreate: false))
+                                Assert.True(reopened.HasStagedInventory);
+                            var wrongNetwork = network.ToArray();
+                            wrongNetwork[0] ^= 1;
+                            Assert.Throws<CryptographicException>(() =>
+                                new SqlitePreKeyV2InventoryStore(statePath,
+                                    databaseKey, wrongNetwork, created.AccountId.Span,
+                                    1, firstDeviceId, 1,
+                                    offering.Record.ResponderDpd1Ref.Span,
+                                    signer, allowCreate: false));
+                            var wrongKey = RandomNumberGenerator.GetBytes(32);
+                            try
+                            {
+                                Assert.ThrowsAny<Exception>(() =>
+                                    new SqlitePreKeyV2InventoryStore(statePath,
+                                        wrongKey, network, created.AccountId.Span,
+                                        1, firstDeviceId, 1,
+                                        offering.Record.ResponderDpd1Ref.Span,
+                                        signer, allowCreate: false));
+                            }
+                            finally { CryptographicOperations.ZeroMemory(wrongKey); }
+                        }
+                        finally { CryptographicOperations.ZeroMemory(databaseKey); }
                     }
                     var scope = new Dpk2PreKeyPersistenceScope(
                         offering.Record.NetworkId.Span,

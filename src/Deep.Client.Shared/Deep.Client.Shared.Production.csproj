@@ -43,6 +43,7 @@
     <Compile Include="Persistence\MessagingCryptoV1\**\*.cs" />
     <Compile Include="Persistence\MessagingV1\**\*.cs" Exclude="Persistence\MessagingV1\Msg01AuthoritativeTransport.cs" />
     <Compile Include="Persistence\PreKeyV1\**\*.cs" />
+    <Compile Include="Persistence\PreKeyV2\**\*.cs" />
     <Compile Include="Persistence\XPointNetworkV1\**\*.cs" />
     <Compile Include="Persistence\DeepAccountStoreContracts.cs" />
     <Compile Include="Persistence\DeepSecureStorage.cs" />
