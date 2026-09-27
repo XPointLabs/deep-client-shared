@@ -141,7 +141,7 @@ public sealed class DeepIdV2AccountServiceTests
         Directory.CreateDirectory(directory);
         try
         {
-            using var storage = new InMemoryDeepSecureStorage();
+            using var storage = new FaultingDeepSecureStorage();
             await storage.WriteBatchAsync(
                 [new DeepSecureStorageWrite("deep.store.v1.keep", new byte[] { 7 })]);
             var network = Enumerable.Range(1, 16).Select(static value =>
@@ -449,12 +449,18 @@ public sealed class DeepIdV2AccountServiceTests
                                new byte[32], RandomNumberGenerator.GetBytes(32),
                                placement, 32, 9))
                     {
-                        await afterPhraseDeletion.StageOwnInitialPreKeyInventoryAsync(
-                            ownInventory);
-                        Assert.True(await resumed.HasOwnStagedPreKeyInventoryAsync());
-                        await Assert.ThrowsAsync<CryptographicException>(() =>
+                        storage.FailNextInstallAfterWrite = true;
+                        await Assert.ThrowsAsync<IOException>(() =>
                             afterPhraseDeletion.StageOwnInitialPreKeyInventoryAsync(
                                 ownInventory));
+                        Assert.False(await resumed.HasOwnStagedPreKeyInventoryAsync());
+                        storage.FailNextTipWrite = true;
+                        await Assert.ThrowsAsync<IOException>(() =>
+                            afterPhraseDeletion.StageOwnInitialPreKeyInventoryAsync(
+                                ownInventory));
+                        Assert.True(await resumed.HasOwnStagedPreKeyInventoryAsync());
+                        await afterPhraseDeletion.StageOwnInitialPreKeyInventoryAsync(
+                            ownInventory);
                     }
                     var ownedPreKeyPath = Path.Combine(directory,
                         "deep-store-v2-account.dsv2.prekeys.pkv2");
@@ -562,5 +568,52 @@ public sealed class DeepIdV2AccountServiceTests
                 DeepIdV2GenesisAdmissionWireCodec.ResponseMediaType);
             return Task.FromResult(response);
         }
+    }
+
+    private sealed class FaultingDeepSecureStorage : IDeepSecureStorage,
+        IDisposable
+    {
+        private readonly InMemoryDeepSecureStorage inner = new();
+
+        internal bool FailNextTipWrite { get; set; }
+        internal bool FailNextInstallAfterWrite { get; set; }
+
+        public Task<OwnedDeepSecret?> ReadOwnedAsync(string slot,
+            CancellationToken cancellationToken = default) =>
+            inner.ReadOwnedAsync(slot, cancellationToken);
+
+        public async Task WriteBatchAsync(
+            IReadOnlyList<DeepSecureStorageWrite> writes,
+            CancellationToken cancellationToken = default)
+        {
+            if (FailNextInstallAfterWrite && writes.Any(static write =>
+                    write.Slot == "deep.store.v2.prekey-installed"))
+            {
+                FailNextInstallAfterWrite = false;
+                await inner.WriteBatchAsync(writes, cancellationToken);
+                throw new IOException("Injected failure after pre-key install marker.");
+            }
+            if (FailNextTipWrite && writes.Any(static write => write.Slot ==
+                    "deep.store.v2.prekey-inventory-tip"))
+            {
+                FailNextTipWrite = false;
+                throw new IOException("Injected failure after inventory SQL commit.");
+            }
+            await inner.WriteBatchAsync(writes, cancellationToken);
+        }
+
+        public Task DeleteBatchAsync(IReadOnlyList<string> slots,
+            CancellationToken cancellationToken = default) =>
+            inner.DeleteBatchAsync(slots, cancellationToken);
+
+        public Task PurgeStoreV1NamespaceAsync(
+            CancellationToken cancellationToken = default) =>
+            inner.PurgeStoreV1NamespaceAsync(cancellationToken);
+
+        public Task PurgeStoreV2NamespaceAsync(
+            CancellationToken cancellationToken = default) =>
+            inner.PurgeStoreV2NamespaceAsync(cancellationToken);
+
+        public void Dispose() => inner.Dispose();
     }
 }

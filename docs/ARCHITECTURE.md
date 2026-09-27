@@ -234,7 +234,12 @@ The same account lease now owns a separate `PKV2` SQLCipher initial-inventory
 generation. `StageOwnInitialPreKeyInventoryAsync` accepts only locally authored
 DID2 V2 XPP1/DPK2 capabilities, seals all private members in one SQL
 transaction, and adds a protected install marker plus an add-only exact-XPP1
-tip before commit. Reopen checks the verified DSV2 projection, derived
+tip before returning publication eligibility. A crash after SQL commit but
+before the tip is recovered by verifying the complete staged inventory and
+writing the missing tip; a crash before SQL commit leaves no partial rows.
+An install marker with no SQL file and no inventory tip can recreate only an
+empty database, so an interrupted first open does not force account reset.
+Reopen checks the verified DSV2 projection, derived
 account/device key scope, full SQL/member rows and the protected tip; loss or
 rollback of the staged file fails closed. Explicit V2 reset removes this file
 family and its protected markers. This is local custody only: no XPP1 network

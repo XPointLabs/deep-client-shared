@@ -275,7 +275,8 @@ public sealed class DeepIdV2AccountService
 
     /// <summary>
     /// Seals the complete first DID2 inventory into account-owned SQLCipher
-    /// and records an add-only protected tip before the SQL commit. The
+    /// and records an add-only protected tip before returning. An interrupted
+    /// tip is recovered from the exact committed inventory on reopen. The
     /// operation does not publish XPP1 or authorize a remote claim.
     /// </summary>
     public async Task StageOwnInitialPreKeyInventoryAsync(

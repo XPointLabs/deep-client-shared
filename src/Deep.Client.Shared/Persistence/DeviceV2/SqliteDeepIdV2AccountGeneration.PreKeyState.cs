@@ -25,10 +25,11 @@ internal static partial class SqliteDeepIdV2AccountGeneration
     }
 
     /// <summary>
-    /// The caller holds the DID2 account lease. The add-only protected tip is
-    /// installed before SQL commit: interruption can require explicit reset,
-    /// but SQL rollback cannot silently restore unused pre-key capabilities.
-    /// This does not authorize XPP1 dispatch or a remote claim.
+    /// The caller holds the DID2 account lease. SQL commits every secret before
+    /// the add-only protected tip is installed. No caller may dispatch XPP1
+    /// until this method returns; an interrupted tip is completed from the
+    /// verified full SQL transaction on reopen. Once the tip exists, SQL
+    /// rollback is rejected. This does not itself authorize XPP1 dispatch.
     /// </summary>
     internal static async ValueTask StageInitialPreKeyInventoryAsync(
         IDeepSecureStorage storage, string accountStatePath,
@@ -41,26 +42,31 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             current, allowInitialize: true, cancellationToken)
             .ConfigureAwait(false);
         await using var store = opened.Store;
-        var marker = new byte[64];
         try
         {
-            opened.ScopeHash.CopyTo(marker, 0);
-            SHA256.HashData(inventory.ExactXpp1.Span).CopyTo(marker, 32);
-            await store.StageInitialAsync(inventory,
-                token => new ValueTask(storage.WriteBatchAsync(
-                    [new DeepSecureStorageWrite(PreKeyInventoryMarkerSlot,
-                        marker)], token)), cancellationToken)
-                .ConfigureAwait(false);
-            var committedHash = store.ReadStagedPublicationHash();
-            if (committedHash is null ||
-                !CryptographicOperations.FixedTimeEquals(
-                    committedHash, marker.AsSpan(32)))
+            var authoredHash = SHA256.HashData(inventory.ExactXpp1.Span);
+            var stagedHash = store.ReadStagedPublicationHash();
+            if (stagedHash is null)
+            {
+                await store.StageInitialAsync(inventory,
+                    cancellationToken: cancellationToken)
+                    .ConfigureAwait(false);
+                stagedHash = store.ReadStagedPublicationHash();
+                if (stagedHash is null ||
+                    !CryptographicOperations.FixedTimeEquals(
+                        stagedHash, authoredHash))
+                    throw new CryptographicException(
+                        "The durable DID2 pre-key inventory commit differs.");
+                await WritePreKeyTipAsync(storage, opened.ScopeHash,
+                    stagedHash, cancellationToken).ConfigureAwait(false);
+            }
+            else if (!CryptographicOperations.FixedTimeEquals(
+                         stagedHash, authoredHash))
                 throw new CryptographicException(
-                    "The protected DID2 pre-key inventory commit differs.");
+                    "A different DID2 pre-key inventory was already staged.");
         }
         finally
         {
-            CryptographicOperations.ZeroMemory(marker);
             CryptographicOperations.ZeroMemory(opened.ScopeHash);
         }
     }
@@ -167,15 +173,24 @@ internal static partial class SqliteDeepIdV2AccountGeneration
                 throw new CryptographicException(
                     "The DID2 pre-key install marker has a different scope.");
             else if (!File.Exists(statePath))
-                throw new InvalidDataException(
-                    "The protected DID2 pre-key database is missing.");
+            {
+                using var tip = await storage.ReadOwnedAsync(
+                    PreKeyInventoryMarkerSlot, cancellationToken)
+                    .ConfigureAwait(false);
+                if (tip is not null || familyExists)
+                    throw new InvalidDataException(
+                        "The protected DID2 pre-key database is missing after inventory staging.");
+                // There is no publication tip and therefore no releasable
+                // inventory. Recreate only the empty database after an
+                // interrupted initial installation.
+            }
 
             var store = new SqlitePreKeyV2InventoryStore(statePath, key,
                 network, account,
                 identity.Account.Certificate.AccountGeneration,
                 certificate.DeviceId.Span, certificate.DeviceGeneration,
                 dpd1, certificate.DeviceEd25519PublicKey.Span,
-                allowCreate: installed is null);
+                allowCreate: !File.Exists(statePath));
             try
             {
                 using var tip = await storage.ReadOwnedAsync(
@@ -185,8 +200,9 @@ internal static partial class SqliteDeepIdV2AccountGeneration
                 if (tip is null)
                 {
                     if (stagedHash is not null)
-                        throw new CryptographicException(
-                            "The DID2 pre-key SQL tip has no protected marker.");
+                        await WritePreKeyTipAsync(storage, scopeHash,
+                            stagedHash, cancellationToken)
+                            .ConfigureAwait(false);
                 }
                 else if (stagedHash is null ||
                          !tip.Use(value => value.Length == 64 &&
@@ -222,4 +238,24 @@ internal static partial class SqliteDeepIdV2AccountGeneration
     private static bool PreKeyFileFamilyExists(string path) =>
         File.Exists(path) || File.Exists(path + "-journal") ||
         File.Exists(path + "-wal") || File.Exists(path + "-shm");
+
+    private static async ValueTask WritePreKeyTipAsync(
+        IDeepSecureStorage storage, ReadOnlyMemory<byte> scopeHash,
+        ReadOnlyMemory<byte> publicationHash,
+        CancellationToken cancellationToken)
+    {
+        if (scopeHash.Length != 32 || publicationHash.Length != 32)
+            throw new CryptographicException(
+                "The DID2 pre-key tip has an invalid scope or publication.");
+        var marker = new byte[64];
+        try
+        {
+            scopeHash.Span.CopyTo(marker);
+            publicationHash.Span.CopyTo(marker.AsSpan(32));
+            await storage.WriteBatchAsync(
+                [new DeepSecureStorageWrite(PreKeyInventoryMarkerSlot,
+                    marker)], cancellationToken).ConfigureAwait(false);
+        }
+        finally { CryptographicOperations.ZeroMemory(marker); }
+    }
 }
