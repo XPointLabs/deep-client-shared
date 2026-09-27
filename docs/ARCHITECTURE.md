@@ -249,7 +249,8 @@ local custody only. A separate unmounted DID2 V2 client transport can now
 turn exact public XPP1 plus exact DID2/DCA1/XPS1 support into bounded ONION
 fragments, send each to both current selected exits, and return only after
 the Protocol verifier accepts both XIC1 signatures. The account owner does
-not yet supply that support to this transport, persist its verified pair or
+not yet persist the locally authored XPS1 V2 support, supply that support to
+this transport, persist its verified pair or
 activate a remote claim; DPH2 and device E2E are not implied.
 This is not yet a full mutable STORE-01 service:
 in-memory parity, restore-as-new-device,

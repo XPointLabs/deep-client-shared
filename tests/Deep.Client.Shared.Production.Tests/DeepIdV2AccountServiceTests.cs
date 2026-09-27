@@ -318,10 +318,14 @@ public sealed class DeepIdV2AccountServiceTests
                             lastResort.Record), signer));
                     Assert.Throws<MessagingWireFormatException>(() =>
                         Dpk2Codec.Decode(lastResort.ExactDpk2.Span));
-                    var xpsReference = TestReference("XPS1", 0x92);
+                    var service = prekeys.AuthorPreKeyServiceV2(context,
+                        publicEvidence.Binding, 32, 9);
+                    var xpsReference = service.Xps1Reference.ToArray();
                     var drsReference = TestReference("DRS1", 0x93);
-                    var serviceCapability = Enumerable.Repeat((byte)0x91, 32)
-                        .ToArray();
+                    var serviceCapability = service.ServiceCapability.ToArray();
+                    DeepIdV2PreKeyServiceCodec.VerifyDeviceSignature(
+                        DeepIdV2PreKeyServiceCodec.Decode(service.ExactXps1.Span),
+                        signer);
                     var publicationOperation = Enumerable.Repeat((byte)0x94, 32)
                         .ToArray();
                     var placement = Enumerable.Repeat((byte)0x95, 32).ToArray();
