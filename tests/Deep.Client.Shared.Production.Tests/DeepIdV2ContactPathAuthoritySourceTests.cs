@@ -19,20 +19,30 @@ namespace Deep.Client.Shared.Production.Tests;
 public sealed class DeepIdV2ContactPathAuthoritySourceTests
 {
     [Fact]
-    public async Task RealDid2AccountAndSignedNetwork_MintRechecksProofAndRehydratesExactFloor()
+    public async Task RealDid2AccountAndSignedNetwork_VerifyThenMintRechecksProofAndRehydratesExactFloor()
     {
         await using var fixture = await Fixture.CreateAsync();
         var source = fixture.Source();
+        var network = await source.VerifyCurrentNetworkAsync(Fixture.Network);
+        network.EnsureCurrent();
+        Assert.NotNull(await fixture.NetworkStore.ReadAsync(default));
+        Assert.Equal(1, fixture.ProofRequests);
         var first = await source.GetCurrentForPublicationAsync(Fixture.Network, Fixture.Service);
         Assert.True(first.Placement.Binds(ContactServiceRequestKind.PublishPreKeyInventory, Fixture.Service));
         Assert.NotNull(await fixture.NetworkStore.ReadAsync(default));
         var second = await source.GetCurrentForPublicationAsync(Fixture.Network, Fixture.Service);
         Assert.Equal(first.Placement.PlacementHash.ToArray(), second.Placement.PlacementHash.ToArray());
-        Assert.Equal(2, fixture.ProofRequests);
+        Assert.Equal(3, fixture.ProofRequests);
         var reopened = fixture.Source();
+        var restoredNetwork = await reopened.VerifyCurrentNetworkAsync(Fixture.Network);
+        restoredNetwork.EnsureCurrent();
+        Assert.Equal(XPointNetworkProtectedLkgCodec.Encode(
+                Assert.IsType<XPointNetworkProtectedLkg>(network.ProtectedLkg)),
+            XPointNetworkProtectedLkgCodec.Encode(
+                Assert.IsType<XPointNetworkProtectedLkg>(restoredNetwork.ProtectedLkg)));
         var restored = await reopened.GetCurrentForPublicationAsync(Fixture.Network, Fixture.Service);
         Assert.Equal(first.Placement.PlacementHash.ToArray(), restored.Placement.PlacementHash.ToArray());
-        Assert.Equal(3, fixture.ProofRequests);
+        Assert.Equal(5, fixture.ProofRequests);
         Assert.Equal(1UL, (await fixture.NetworkStore.ReadAsync(default))!.Revision);
     }
 
@@ -41,10 +51,10 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
     {
         await using var fixture = await Fixture.CreateAsync();
         var source = fixture.Source();
-        _ = await source.GetCurrentForPublicationAsync(Fixture.Network, Fixture.Service);
+        _ = await source.VerifyCurrentNetworkAsync(Fixture.Network);
         fixture.RejectProof = true;
         await Assert.ThrowsAnyAsync<IOException>(async () =>
-            await source.GetCurrentForPublicationAsync(Fixture.Network, Fixture.Service));
+            await source.VerifyCurrentNetworkAsync(Fixture.Network));
         Assert.Equal(2, fixture.ProofRequests);
         Assert.Equal(1UL, (await fixture.NetworkStore.ReadAsync(default))!.Revision);
         fixture.RejectProof = false;
@@ -58,7 +68,7 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
         await using var fixture = await Fixture.CreateAsync();
         fixture.AlterNode = true;
         await Assert.ThrowsAsync<OnionBoundaryException>(async () =>
-            await fixture.Source().GetCurrentForPublicationAsync(Fixture.Network, Fixture.Service));
+            await fixture.Source().VerifyCurrentNetworkAsync(Fixture.Network));
         Assert.Null(await fixture.NetworkStore.ReadAsync(default));
     }
 
@@ -69,6 +79,14 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
         var source = fixture.Source();
         await Assert.ThrowsAsync<ArgumentException>(async () =>
             await source.GetCurrentForPublicationAsync(Bytes(16, 0x22), Fixture.Service));
+        await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await source.VerifyCurrentNetworkAsync(Bytes(16, 0x22)));
+        await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await source.GetCurrentForPublicationAsync(Fixture.Network, new byte[32]));
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+            await source.VerifyCurrentNetworkAsync(Fixture.Network, cancelled.Token));
         Assert.Equal(0, fixture.ProofRequests);
         _ = await source.GetCurrentForPublicationAsync(Fixture.Network, Fixture.Service);
         var current = (await fixture.NetworkStore.ReadAsync(default))!;
@@ -76,6 +94,8 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
             new(current.Revision + 1, current.ProtectedLkg, true), default);
         await Assert.ThrowsAnyAsync<CryptographicException>(async () =>
             await source.GetCurrentForPublicationAsync(Fixture.Network, Fixture.Service));
+        await Assert.ThrowsAnyAsync<CryptographicException>(async () =>
+            await source.VerifyCurrentNetworkAsync(Fixture.Network));
         Assert.Equal(1, fixture.ProofRequests);
     }
 

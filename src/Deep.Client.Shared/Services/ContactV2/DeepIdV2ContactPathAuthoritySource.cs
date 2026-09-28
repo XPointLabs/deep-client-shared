@@ -60,7 +60,8 @@ public interface IDeepIdV2NetworkClosureArtifactSource
 }
 
 /// <summary>
-/// DID2-only pre-key publication authority. Each mint obtains an independent
+/// DID2-only network verification and pre-key publication authority.
+/// Each mint obtains an independent
 /// nonce-bound proof for the protected local account, verifies NETCODEC from
 /// the pinned root, and durably advances/rechecks network custody before
 /// releasing placement. It cannot resolve DID1 or accept ADP1 V1. Input
@@ -123,71 +124,102 @@ public sealed class DeepIdV2ContactPathAuthoritySource :
         ReadOnlyMemory<byte> networkId, ReadOnlyMemory<byte> serviceCapability,
         CancellationToken cancellationToken = default)
     {
-        if (!Fixed(networkId.Span, genesisPin.NetworkId.Span) ||
-            serviceCapability.Length != 32 ||
+        RequirePinnedNetwork(networkId);
+        if (serviceCapability.Length != 32 ||
             serviceCapability.Span.IndexOfAnyExcept((byte)0) < 0)
             throw new ArgumentException("DID2 publication requires the pinned network and exact service capability.");
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            var before = await networkStore.ReadAsync(cancellationToken).ConfigureAwait(false);
-            if (before?.ForkLatched == true)
-                throw new CryptographicException("Protected network fork latch blocks DID2 publication.");
-            if (liveContext is not null && (before is null ||
-                !Same(before.ProtectedLkg, liveContext.ProtectedLkg)))
-                throw new CryptographicException("Live DID2 network capability differs from protected custody.");
-            var exact = await artifacts.FetchCurrentAsync(networkId,
-                before?.ProtectedLkg, cancellationToken).ConfigureAwait(false) ??
-                throw new CryptographicException("The DID2 signed network closure is absent.");
-            var authority = XPointNetworkAuthorityVerifier.Verify(genesisPin,
-                exact.ExactXna1AuthorityChain, exact.ExactDts1PolicyChain);
-            var fresh = await accounts.FetchOwnCurrentDirectoryProofAsync(proofs,
-                authority, cancellationToken).ConfigureAwait(false);
-            VerifiedOnionNetworkContext verified;
-            try
-            {
-                verified = before is not null && liveContext is null
-                    ? await OnionNetworkContextVerifier.VerifyRehydratedCurrentAsync(authority,
-                        fresh, exact.ExactOrderedXvp1Chain, exact.ExactOrderedXnv1Chain,
-                        exact.ExactOrderedXnh1Chain, exact.ExactActiveXnd1,
-                        exact.ExactOrderedPmt2Chain, before.ProtectedLkg, trustedTime,
-                        cancellationToken).ConfigureAwait(false)
-                    : await OnionNetworkContextVerifier.VerifyAsync(authority, fresh,
-                        exact.ExactOrderedXvp1Chain, exact.ExactOrderedXnv1Chain,
-                        exact.ExactOrderedXnh1Chain, exact.ExactActiveXnd1,
-                        exact.ExactOrderedPmt2Chain, liveContext, trustedTime,
-                        cancellationToken).ConfigureAwait(false);
-            }
-            catch (OnionBoundaryException exception) when (
-                before is not null && exception.Code == "network-fork")
-            {
-                var write = await networkStore.CompareExchangeAsync(before.Revision,
-                    new(checked(before.Revision + 1), before.ProtectedLkg, true),
-                    cancellationToken).ConfigureAwait(false);
-                if (write.Disposition != XPointNetworkStoreWriteDisposition.Applied &&
-                    write.Snapshot?.ForkLatched != true)
-                    throw new IOException("Network custody changed while recording the verified fork.", exception);
-                throw new CryptographicException("A verified network fork blocks DID2 publication.", exception);
-            }
-            verified.EnsureCurrent();
-            var committed = await networkState.ApplyVerifiedNetworkContextAsync(verified,
+            var verified = await VerifyCurrentNetworkCoreAsync(
                 cancellationToken).ConfigureAwait(false);
-            if (committed.Disposition is not (XPointNetworkAdvanceDisposition.Applied or
-                XPointNetworkAdvanceDisposition.Idempotent) ||
-                !Same(committed.Snapshot.ProtectedLkg, verified.ProtectedLkg))
-                throw new CryptographicException("DID2 network custody did not commit the exact verified context.");
-            var after = await networkStore.ReadAsync(cancellationToken).ConfigureAwait(false);
-            if (after is null || after.ForkLatched ||
-                !Same(after.ProtectedLkg, verified.ProtectedLkg))
-                throw new CryptographicException("Committed DID2 network custody could not be reauthenticated.");
-            await proofs.RequireStillFreshAsync(fresh, authority, cancellationToken).ConfigureAwait(false);
-            verified.EnsureCurrent();
             var placement = ContactServicePlacementFactory.Create(verified,
                 ContactServiceRequestKind.PublishPreKeyInventory, serviceCapability);
-            liveContext = verified;
             return new(verified, placement);
         }
         finally { gate.Release(); }
+    }
+
+    /// <summary>Verifies fresh account-bound network authority and commits/rechecks
+    /// its account-owned protected floor, without inventing a service capability
+    /// or selecting publication placement. It grants no message delivery authority.</summary>
+    public async ValueTask<VerifiedOnionNetworkContext> VerifyCurrentNetworkAsync(
+        ReadOnlyMemory<byte> networkId, CancellationToken cancellationToken = default)
+    {
+        RequirePinnedNetwork(networkId);
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await VerifyCurrentNetworkCoreAsync(
+                cancellationToken).ConfigureAwait(false);
+        }
+        finally { gate.Release(); }
+    }
+
+    private void RequirePinnedNetwork(ReadOnlyMemory<byte> networkId)
+    {
+        if (!Fixed(networkId.Span, genesisPin.NetworkId.Span))
+            throw new ArgumentException("DID2 verification requires the pinned network.", nameof(networkId));
+    }
+
+    // The caller holds gate through verification and any placement derivation.
+    private async ValueTask<VerifiedOnionNetworkContext> VerifyCurrentNetworkCoreAsync(
+        CancellationToken cancellationToken)
+    {
+        var before = await networkStore.ReadAsync(cancellationToken).ConfigureAwait(false);
+        if (before?.ForkLatched == true)
+            throw new CryptographicException("Protected network fork latch blocks DID2 publication.");
+        if (liveContext is not null && (before is null ||
+            !Same(before.ProtectedLkg, liveContext.ProtectedLkg)))
+            throw new CryptographicException("Live DID2 network capability differs from protected custody.");
+        var exact = await artifacts.FetchCurrentAsync(genesisPin.NetworkId,
+            before?.ProtectedLkg, cancellationToken).ConfigureAwait(false) ??
+            throw new CryptographicException("The DID2 signed network closure is absent.");
+        var authority = XPointNetworkAuthorityVerifier.Verify(genesisPin,
+            exact.ExactXna1AuthorityChain, exact.ExactDts1PolicyChain);
+        var fresh = await accounts.FetchOwnCurrentDirectoryProofAsync(proofs,
+            authority, cancellationToken).ConfigureAwait(false);
+        VerifiedOnionNetworkContext verified;
+        try
+        {
+            verified = before is not null && liveContext is null
+                ? await OnionNetworkContextVerifier.VerifyRehydratedCurrentAsync(authority,
+                    fresh, exact.ExactOrderedXvp1Chain, exact.ExactOrderedXnv1Chain,
+                    exact.ExactOrderedXnh1Chain, exact.ExactActiveXnd1,
+                    exact.ExactOrderedPmt2Chain, before.ProtectedLkg, trustedTime,
+                    cancellationToken).ConfigureAwait(false)
+                : await OnionNetworkContextVerifier.VerifyAsync(authority, fresh,
+                    exact.ExactOrderedXvp1Chain, exact.ExactOrderedXnv1Chain,
+                    exact.ExactOrderedXnh1Chain, exact.ExactActiveXnd1,
+                    exact.ExactOrderedPmt2Chain, liveContext, trustedTime,
+                    cancellationToken).ConfigureAwait(false);
+        }
+        catch (OnionBoundaryException exception) when (
+            before is not null && exception.Code == "network-fork")
+        {
+            var write = await networkStore.CompareExchangeAsync(before.Revision,
+                new(checked(before.Revision + 1), before.ProtectedLkg, true),
+                cancellationToken).ConfigureAwait(false);
+            if (write.Disposition != XPointNetworkStoreWriteDisposition.Applied &&
+                write.Snapshot?.ForkLatched != true)
+                throw new IOException("Network custody changed while recording the verified fork.", exception);
+            throw new CryptographicException("A verified network fork blocks DID2 publication.", exception);
+        }
+        verified.EnsureCurrent();
+        var committed = await networkState.ApplyVerifiedNetworkContextAsync(verified,
+            cancellationToken).ConfigureAwait(false);
+        if (committed.Disposition is not (XPointNetworkAdvanceDisposition.Applied or
+            XPointNetworkAdvanceDisposition.Idempotent) ||
+            !Same(committed.Snapshot.ProtectedLkg, verified.ProtectedLkg))
+            throw new CryptographicException("DID2 network custody did not commit the exact verified context.");
+        var after = await networkStore.ReadAsync(cancellationToken).ConfigureAwait(false);
+        if (after is null || after.ForkLatched ||
+            !Same(after.ProtectedLkg, verified.ProtectedLkg))
+            throw new CryptographicException("Committed DID2 network custody could not be reauthenticated.");
+        await proofs.RequireStillFreshAsync(fresh, authority, cancellationToken).ConfigureAwait(false);
+        verified.EnsureCurrent();
+        liveContext = verified;
+        return verified;
     }
 
     private static bool Fixed(ReadOnlySpan<byte> left, ReadOnlySpan<byte> right) =>

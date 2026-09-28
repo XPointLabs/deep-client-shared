@@ -264,6 +264,10 @@ local DAB2/DMD1 both before and after the exchange without replaying admission.
 Placement is released only after the independently verified network context
 is committed and reread from `IXPointNetworkStateStore`, with the directory
 proof still fresh. Providers and durable-store lifetimes belong to the caller;
+`VerifyCurrentNetworkAsync` exposes that same verification/custody boundary
+without a service capability or publication placement. The publication method
+holds the same source gate through verification and placement derivation;
+a preceding network check is never substituted for its fresh proof.
 the source never accepts a V1 ADP1 or caller-projected placement. On restart it
 rehydrates only an exact signed closure matching protected current network LKG;
 missing predecessor/checkpoint evidence is an error, not a floor reset.
