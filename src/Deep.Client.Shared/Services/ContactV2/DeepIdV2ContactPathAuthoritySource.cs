@@ -80,6 +80,10 @@ public sealed class DeepIdV2ContactPathAuthoritySource :
     private readonly IOnionMonotonicClock clock;
     private readonly SemaphoreSlim gate = new(1, 1);
     private VerifiedOnionNetworkContext? liveContext;
+    // Full-history distribution is not a successor suffix. Capture the exact
+    // non-secret predecessor while current; later mints may use its signed
+    // lineage even after the prior time capability expires.
+    private byte[]? liveProtectedHistory;
 
     public DeepIdV2ContactPathAuthoritySource(XPointNetworkGenesisPin genesisPin,
         DeepIdV2AccountService accounts, DeepIdV2DirectoryProofClient proofs,
@@ -233,10 +237,16 @@ public sealed class DeepIdV2ContactPathAuthoritySource :
                     exact.ExactOrderedXnh1Chain, exact.ExactActiveXnd1,
                     exact.ExactOrderedPmt2Chain, before.ProtectedLkg, trustedTime,
                     cancellationToken).ConfigureAwait(false)
+                : liveProtectedHistory is not null
+                ? await OnionNetworkContextVerifier.VerifyFromProtectedHistoryAsync(authority, fresh,
+                    exact.ExactOrderedXvp1Chain, exact.ExactOrderedXnv1Chain,
+                    exact.ExactOrderedXnh1Chain, exact.ExactActiveXnd1,
+                    exact.ExactOrderedPmt2Chain, liveProtectedHistory, trustedTime,
+                    cancellationToken).ConfigureAwait(false)
                 : await OnionNetworkContextVerifier.VerifyAsync(authority, fresh,
                     exact.ExactOrderedXvp1Chain, exact.ExactOrderedXnv1Chain,
                     exact.ExactOrderedXnh1Chain, exact.ExactActiveXnd1,
-                    exact.ExactOrderedPmt2Chain, liveContext, trustedTime,
+                    exact.ExactOrderedPmt2Chain, null, trustedTime,
                     cancellationToken).ConfigureAwait(false);
         }
         catch (OnionBoundaryException exception) when (
@@ -251,6 +261,9 @@ public sealed class DeepIdV2ContactPathAuthoritySource :
             throw new CryptographicException("A verified network fork blocks DID2 publication.", exception);
         }
         verified.EnsureCurrent();
+        if (liveProtectedHistory is not null &&
+            !OnionNetworkProtectedHistoryCodec.BindsPredecessor(verified, liveProtectedHistory))
+            throw new CryptographicException("Verified network did not bind the complete protected predecessor.");
         var committed = await networkState.ApplyVerifiedNetworkContextAsync(verified,
             cancellationToken).ConfigureAwait(false);
         if (committed.Disposition is not (XPointNetworkAdvanceDisposition.Applied or
@@ -263,6 +276,7 @@ public sealed class DeepIdV2ContactPathAuthoritySource :
             throw new CryptographicException("Committed DID2 network custody could not be reauthenticated.");
         await proofs.RequireStillFreshAsync(fresh, authority, cancellationToken).ConfigureAwait(false);
         verified.EnsureCurrent();
+        liveProtectedHistory = OnionNetworkProtectedHistoryCodec.Encode(verified);
         liveContext = verified;
         return new(verified, authority, fresh);
     }

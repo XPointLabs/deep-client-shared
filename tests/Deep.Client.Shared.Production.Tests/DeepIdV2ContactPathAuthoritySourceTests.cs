@@ -23,6 +23,26 @@ namespace Deep.Client.Shared.Production.Tests;
 public sealed class DeepIdV2ContactPathAuthoritySourceTests
 {
     [Fact]
+    public async Task FullSignedSuccessorHistory_CanMintRepeatedlyAndReopenWithoutReplayingGenesisAgainstTip()
+    {
+        await using var fixture = await Fixture.CreateAsync(withSuccessor: true);
+        var source = fixture.Source();
+        var network = await source.VerifyCurrentNetworkAsync(Fixture.Network);
+        Assert.Equal(1UL, network.ProtectedLkg!.ViewGeneration);
+        _ = await source.GetCurrentForPublicationAsync(Fixture.Network, Fixture.Service);
+        _ = await source.VerifyCurrentNetworkAsync(Fixture.Network);
+        var reopened = await fixture.Source().VerifyCurrentNetworkAsync(Fixture.Network);
+        Assert.Equal(XPointNetworkProtectedLkgCodec.Encode(network.ProtectedLkg),
+            XPointNetworkProtectedLkgCodec.Encode(reopened.ProtectedLkg!));
+        Assert.Equal(4, fixture.ProofRequests);
+        Assert.Equal(1UL, (await fixture.NetworkStore.ReadAsync(default))!.Revision);
+        fixture.OmitHistoricalPolicy = true;
+        await Assert.ThrowsAsync<OnionBoundaryException>(async () =>
+            await source.VerifyCurrentNetworkAsync(Fixture.Network));
+        Assert.Equal(1UL, (await fixture.NetworkStore.ReadAsync(default))!.Revision);
+    }
+
+    [Fact]
     public async Task InitialInventory_UsesRealCurrentClosureAndPreservesExactRetryAfterReopen()
     {
         // The approved whole ML-KEM asset is currently validated on Windows.
@@ -386,6 +406,7 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
         private readonly IDeepMlDsa65VerifierLease pq = DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess();
         private VerifiedXPointNetworkBootstrap bootstrap = null!;
         private AuthoredXPointNetworkOperationalGenesis operational = null!;
+        private AuthoredXPointNetworkOperationalSuccessor? successor;
         private AuthoredAccountDirectoryHeadMutation genesis = null!;
         private AuthoredAccountDirectoryHeadMutation head = null!;
         private VerifiedAdc1V2 checkpoint = null!;
@@ -397,6 +418,7 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
         internal int ProofRequests { get; private set; }
         internal bool RejectProof { get; set; }
         internal bool AlterNode { get; set; }
+        internal bool OmitHistoricalPolicy { get; set; }
         internal ulong Sample { get; set; } = 100;
         internal DeepIdV2AccountService Accounts => accounts;
         internal DeepIdV2AccountService ReopenAccount() => new(storage, directory, Network, 1,
@@ -446,14 +468,14 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
             finally { CryptographicOperations.ZeroMemory(key); }
         }
 
-        internal static async Task<Fixture> CreateAsync()
+        internal static async Task<Fixture> CreateAsync(bool withSuccessor = false)
         {
             var fixture = new Fixture();
-            try { await fixture.InitializeAsync(); return fixture; }
+            try { await fixture.InitializeAsync(withSuccessor); return fixture; }
             catch { await fixture.DisposeAsync(); throw; }
         }
 
-        private async Task InitializeAsync()
+        private async Task InitializeAsync(bool withSuccessor)
         {
             Directory.CreateDirectory(directory);
             accounts = new(storage, directory, Network, 1,
@@ -489,6 +511,21 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
                 bootstrap.Authority, 990, 1_500, witnesses);
             head = await DeepIdV2DirectoryHeadAuthor.AdvanceAsync(bootstrap.Authority,
                 genesis.ProtectedHead, new([], [], [checkpoint], 990, 1_500, 2), witnesses);
+            if (withSuccessor)
+            {
+                var rollovers = nodes.Select((signer, index) => new XPointNetworkOperationalNodeRollover(
+                    signer, Bytes(32, (byte)(0x40 + index)), Bytes(32, (byte)(0x48 + index)),
+                    ScalarMult.Base(Bytes(32, (byte)(0x50 + index))),
+                    ScalarMult.Base(Bytes(32, (byte)(0x58 + index))))).ToArray();
+                successor = await XPointNetworkOperationalSuccessorAuthor.AuthorAsync(new(
+                    Bytes(32, 0x13), bootstrap, [root], witnesses, rollovers,
+                    operational.ExactXvp1, operational.ExactXnd1, [operational.ExactXnv1],
+                    operational.ExactXnh1, operational.ExactPma2, operational.ExactPmt2,
+                    XPointNetworkOperationalSuccessorAuthor.ComputeXnh1CoreHash(operational.ExactXnh1.Span),
+                    Deep.Protocol.ContactV1.ContactCodec.Decode("PMT2", operational.ExactPmt2.Span).ArtifactHash.Span,
+                    HeadReference(head.CoreHash.Span),
+                    1_070, 1_080, 1_500));
+            }
             var floor = await accounts.OpenDirectoryLkgStoreAsync(bootstrap.Authority,
                 genesis.ExactAdh1, genesis.CoreHash);
             NetworkStore = await accounts.OpenNetworkLkgStoreAsync(bootstrap.GenesisPin);
@@ -507,8 +544,16 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
 
         private DeepIdV2NetworkClosureArtifacts PublicClosure()
         {
-            var descriptors = operational.ExactXnd1.Select(value => (ReadOnlyMemory<byte>)value.ToArray()).ToArray();
+            var descriptors = (successor?.ExactXnd1 ?? operational.ExactXnd1)
+                .Select(value => (ReadOnlyMemory<byte>)value.ToArray()).ToArray();
             if (AlterNode) { var bytes = descriptors[0].ToArray(); bytes[^1] ^= 1; descriptors[0] = bytes; }
+            if (successor is not null)
+                return new DeepIdV2NetworkClosureArtifacts(
+                    [bootstrap.ExactXna1], [bootstrap.ExactDts1],
+                    OmitHistoricalPolicy ? [successor.ExactXvp1] : [operational.ExactXvp1, successor.ExactXvp1],
+                    [operational.ExactXnv1, successor.ExactXnv1],
+                    [operational.ExactXnh1, successor.ExactXnh1], descriptors,
+                    [operational.ExactPmt2, successor.ExactPmt2]);
             return new DeepIdV2NetworkClosureArtifacts(
                 [bootstrap.ExactXna1], [bootstrap.ExactDts1], [operational.ExactXvp1],
                 [operational.ExactXnv1], [operational.ExactXnh1], descriptors, [operational.ExactPmt2]);
@@ -546,7 +591,7 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
                 head.ExactAllTransitions, [checkpoint], query.DirectoryLeafKey.Span, floor);
             var issued = await DeepIdV2DirectoryProofAuthor.IssueGenesisAsync(bootstrap.Authority,
                 new(Network, query.Nonce.Span, query.BootId.Span, query.ClientMonotonicSendSample,
-                    head.ExactAdh1.Span, operational.ExactXnv1.Span, 1_100, 5, 1_100, 1_130,
+                    head.ExactAdh1.Span, (successor?.ExactXnv1 ?? operational.ExactXnv1).Span, 1_100, 5, 1_100, 1_130,
                     AccountDirectoryDtt1IssuanceEpoch.Derive(bootstrap.Authority, 1_100, 5), 2),
                 material, witnesses, 1, pq, cancellationToken);
             var body = DeepIdV2DirectoryProofWireCodec.EncodeResponse(query, issued);
@@ -635,6 +680,14 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
         public void Dispose() => CryptographicOperations.ZeroMemory(key.PrivateKey);
     }
     private static byte[] Bytes(int count, byte value) => Enumerable.Repeat(value, count).ToArray();
+    private static byte[] HeadReference(ReadOnlySpan<byte> coreHash)
+    {
+        var reference = new byte[38];
+        "ADH1"u8.CopyTo(reference);
+        BinaryPrimitives.WriteUInt16BigEndian(reference.AsSpan(4), 1);
+        coreHash.CopyTo(reference.AsSpan(6));
+        return reference;
+    }
     private static byte[] PublicKey(byte marker)
     {
         var seed = Bytes(32, marker); var pair = PublicKeyAuth.GenerateKeyPair(seed);

@@ -339,6 +339,14 @@ latch cannot be cleared by CAS. Explicit account reset purges these markers
 with the V2 namespace and removes the existing account database family.
 The floor is protected local history, never proof of current placement;
 fresh directory/network verification remains mandatory on every mint.
+Repeated live mints now bind full genesis-to-terminal distribution to the
+exact previously verified DNH2 policy/PMT history through the existing
+[DR-0012 boundary](../../docs/survival-program/decisions/DR-0012-protected-network-history.md).
+They do not replay genesis as an incremental successor after the tip or revive
+an expired time capability. Restart still requires the distributed current tip
+to match the durable tuple exactly. Durable client DNH2 custody and advancement
+across a changed tip after restart remain a release prerequisite; the live
+history cache is not a claim that those semantics are complete.
 Reopen binds the pair to the protected exact XPP1; the stored pair is historical
 evidence, not fresh placement or claim authority. MAUI does not yet mount this
 publisher or activate a remote claim; DPH2 and device E2E are not implied.
