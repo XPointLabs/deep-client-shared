@@ -126,7 +126,14 @@ public sealed class HttpServiceRequestTransport : IDisposable
         var requestBody = body.ToArray();
         try
         {
-            using var request = new HttpRequestMessage(HttpMethod.Post, endpoint);
+            // Public binary services negotiate one explicit transport protocol.
+            // Cleartext remains restricted by endpoint policy to local tests;
+            // it is not a fallback after an HTTPS/H2 failure.
+            using var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
+            {
+                Version = endpoint.Scheme == Uri.UriSchemeHttps ? HttpVersion.Version20 : HttpVersion.Version11,
+                VersionPolicy = HttpVersionPolicy.RequestVersionExact
+            };
             request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue(responseMediaType));
             request.Content = new ByteArrayContent(requestBody);
             request.Content.Headers.ContentType = new MediaTypeHeaderValue(requestMediaType)

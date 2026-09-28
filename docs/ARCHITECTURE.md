@@ -33,6 +33,14 @@ or outbox recovery.
 
 ## Deep-native privacy transport
 
+The separate bounded binary Registry/service POST adapter uses exact HTTP/2
+for HTTPS origins, with no HTTP/1 downgrade or retry. Only an explicit local
+cleartext test origin uses exact HTTP/1.1. This does not change canonical
+request/proof bytes or authority verification. Response-body reading remains
+inside the original request deadline: successful headers and a partial body
+cannot produce a proof or extend the timeout. Physical proof/body completion
+must still be verified; transport unit tests are not device evidence.
+
 `PrivacyRoutedMailboxBinaryIngress` seals exact MAU2 through an ordered
 three-hop route:
 
