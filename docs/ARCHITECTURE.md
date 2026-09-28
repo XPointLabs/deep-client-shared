@@ -267,6 +267,17 @@ proof still fresh. Providers and durable-store lifetimes belong to the caller;
 the source never accepts a V1 ADP1 or caller-projected placement. On restart it
 rehydrates only an exact signed closure matching protected current network LKG;
 missing predecessor/checkpoint evidence is an error, not a floor reset.
+`OpenNetworkLkgStoreAsync` now opens that network floor inside the verified
+DID2 account's DSV2 SQLCipher generation, not a pre-cutover standalone store.
+Operations share the process-independent account lease, revalidate the key,
+database instance and immutable account projection, and bind the row to the
+separately pinned genesis authority. An add-only account/instance-scoped
+SecureStorage marker precedes each exact SQL CAS; rollback, missing/corrupt
+rows, repinning and interruption after the marker all fail closed. A fork
+latch cannot be cleared by CAS. Explicit account reset purges these markers
+with the V2 namespace and removes the existing account database family.
+The floor is protected local history, never proof of current placement;
+fresh directory/network verification remains mandatory on every mint.
 Reopen binds the pair to the protected exact XPP1; the stored pair is historical
 evidence, not fresh placement or claim authority. MAUI does not yet mount this
 publisher or activate a remote claim; DPH2 and device E2E are not implied.

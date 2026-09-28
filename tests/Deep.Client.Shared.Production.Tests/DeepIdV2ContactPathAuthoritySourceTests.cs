@@ -12,6 +12,7 @@ using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.DeepExtension.PrivacyRouting;
 using Deep.Protocol.XPointNetworkV1;
 using Sodium;
+using Microsoft.Data.Sqlite;
 
 namespace Deep.Client.Shared.Production.Tests;
 
@@ -104,10 +105,72 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
         Assert.Equal(typeof(DeepIdV2ContactPathAuthoritySource), method.GetParameters()[0].ParameterType);
     }
 
+    [Fact]
+    public async Task AccountNetworkFloor_RejectsSqlRollbackCorruptionDeletionAndRepin()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        _ = await fixture.Source().GetCurrentForPublicationAsync(Fixture.Network, Fixture.Service);
+        var initial = (await fixture.NetworkStore.ReadAsync(default))!;
+        Assert.Equal(XPointNetworkStoreWriteDisposition.Conflict,
+            (await fixture.NetworkStore.CompareExchangeAsync(null, initial, default)).Disposition);
+        await using var connection = await fixture.OpenSqlAsync();
+        byte[] Payload()
+        {
+            using var read = connection.CreateCommand();
+            read.CommandText = "SELECT payload FROM protected_lkg_root WHERE root_kind=3;";
+            return Assert.IsType<byte[]>(read.ExecuteScalar());
+        }
+        void Replace(long revision, byte[] payload)
+        {
+            using var write = connection.CreateCommand();
+            write.CommandText = "UPDATE protected_lkg_root SET revision=$revision,payload=$payload WHERE root_kind=3;";
+            write.Parameters.AddWithValue("$revision", revision);
+            write.Parameters.AddWithValue("$payload", payload);
+            Assert.Equal(1, write.ExecuteNonQuery());
+        }
+        var oldPayload = Payload();
+        var latched = new XPointNetworkStateSnapshot(2, initial.ProtectedLkg, true);
+        Assert.Equal(XPointNetworkStoreWriteDisposition.Applied,
+            (await fixture.NetworkStore.CompareExchangeAsync(1, latched, default)).Disposition);
+        var currentPayload = Payload();
+        await Assert.ThrowsAsync<CryptographicException>(async () =>
+            await fixture.NetworkStore.CompareExchangeAsync(2, new(3, initial.ProtectedLkg, false), default));
+        var reopened = await fixture.ReopenNetworkStoreAsync();
+        Assert.True((await reopened.ReadAsync(default))!.ForkLatched);
+        Replace(1, oldPayload);
+        await Assert.ThrowsAsync<CryptographicException>(async () => await reopened.ReadAsync(default));
+        Replace(2, currentPayload);
+        Assert.True((await reopened.ReadAsync(default))!.ForkLatched);
+        await Assert.ThrowsAsync<CryptographicException>(() => fixture.ReopenNetworkStoreAsync(changedPin: true));
+        Replace(2, [1]);
+        await Assert.ThrowsAsync<InvalidDataException>(async () => await reopened.ReadAsync(default));
+        using (var delete = connection.CreateCommand())
+        {
+            delete.CommandText = "DELETE FROM protected_lkg_root WHERE root_kind=3;";
+            Assert.Equal(1, delete.ExecuteNonQuery());
+        }
+        await Assert.ThrowsAsync<CryptographicException>(async () => await reopened.ReadAsync(default));
+        await Assert.ThrowsAsync<CryptographicException>(() => fixture.ReopenNetworkStoreAsync());
+        await connection.DisposeAsync();
+        await fixture.ResetAccountAsync();
+        await Assert.ThrowsAsync<InvalidDataException>(async () => await reopened.ReadAsync(default));
+    }
+
+    [Fact]
+    public async Task NetworkMarkerCommittedBeforeSqlCrash_RejectsEmptyFloorAndReopen()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        fixture.FailAfterNextNetworkMarker();
+        await Assert.ThrowsAsync<IOException>(async () =>
+            await fixture.Source().GetCurrentForPublicationAsync(Fixture.Network, Fixture.Service));
+        await Assert.ThrowsAsync<CryptographicException>(async () => await fixture.NetworkStore.ReadAsync(default));
+        await Assert.ThrowsAsync<CryptographicException>(() => fixture.ReopenNetworkStoreAsync());
+    }
+
     /// <summary>Real account-owned SQLCipher DID2 state and native ML-DSA;
     /// signed public network ceremony and nonce-bound HTTP proof bytes. The
-    /// HTTP handler and network-floor store are in-memory test adapters, not
-    /// TLS, ONION, physical persistence or device evidence.</summary>
+    /// HTTP/secure-storage adapters are in-memory; directory and network
+    /// floors use real SQLCipher. This is not TLS, ONION or device evidence.</summary>
     private sealed class Fixture : HttpMessageHandler, IAsyncDisposable,
         IDeepIdV2NetworkClosureArtifactSource, IOnionMonotonicClock
     {
@@ -116,7 +179,8 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
         private static readonly byte[] Boot = Bytes(16, 0xf3);
         private readonly string directory = Path.Combine(Path.GetTempPath(),
             "deep-did2-path-" + Guid.NewGuid().ToString("N"));
-        private readonly InMemoryDeepSecureStorage storage = new();
+        private readonly InMemoryDeepSecureStorage innerStorage = new();
+        private readonly NetworkMarkerFaultStorage storage;
         private readonly Signer root = new(0x20);
         private readonly Signer[] witnesses = [new(0x30), new(0x31), new(0x32)];
         private readonly Signer[] nodes = [new(0x70), new(0x71), new(0x72)];
@@ -129,10 +193,40 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
         private DeepIdV2AccountService accounts = null!;
         private DeepIdV2DirectoryProofClient proofs = null!;
         private HttpClient http = null!;
-        internal InMemoryXPointNetworkStateStore NetworkStore { get; } = new();
+        internal IXPointNetworkStateStore NetworkStore { get; private set; } = null!;
         internal int ProofRequests { get; private set; }
         internal bool RejectProof { get; set; }
         internal bool AlterNode { get; set; }
+
+        private Fixture() => storage = new(innerStorage);
+        internal void FailAfterNextNetworkMarker() => storage.FailAfterNetworkMarker = true;
+        internal Task ResetAccountAsync() => accounts.ResetExplicitlyAsync();
+
+        internal async Task<IXPointNetworkStateStore> ReopenNetworkStoreAsync(bool changedPin = false)
+        {
+            var reopened = new DeepIdV2AccountService(storage, directory, Network, 1,
+                new FrozenClock(DateTimeOffset.FromUnixTimeSeconds(1_000)),
+                DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess);
+            var pin = changedPin ? new XPointNetworkGenesisPin(Network, Bytes(32, 0x55)) : bootstrap.GenesisPin;
+            return await reopened.OpenNetworkLkgStoreAsync(pin);
+        }
+
+        internal async Task<SqliteConnection> OpenSqlAsync()
+        {
+            using var record = await storage.ReadOwnedAsync("deep.store.v2.sql-generation");
+            var key = record!.Use(value => value.Slice(88, 32).ToArray());
+            var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+            { DataSource = Path.Combine(directory, "deep-store-v2-account.dsv2"),
+              Mode = SqliteOpenMode.ReadWrite, Pooling = false }.ToString());
+            try
+            {
+                connection.Open();
+                Assert.Equal(SQLitePCL.raw.SQLITE_OK, SQLitePCL.raw.sqlite3_key(connection.Handle, key));
+                return connection;
+            }
+            catch { connection.Dispose(); throw; }
+            finally { CryptographicOperations.ZeroMemory(key); }
+        }
 
         internal static async Task<Fixture> CreateAsync()
         {
@@ -179,6 +273,7 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
                 genesis.ProtectedHead, new([], [], [checkpoint], 990, 1_500, 2), witnesses);
             var floor = await accounts.OpenDirectoryLkgStoreAsync(bootstrap.Authority,
                 genesis.ExactAdh1, genesis.CoreHash);
+            NetworkStore = await accounts.OpenNetworkLkgStoreAsync(bootstrap.GenesisPin);
             http = new(this, disposeHandler: false);
             var transport = new HttpServiceRequestTransport(http,
                 DeepIdV2DirectoryProofClient.CreateTransportOptions("https://registry.example/"),
@@ -236,11 +331,29 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
 
         public ValueTask DisposeAsync()
         {
-            proofs?.Dispose(); http?.Dispose(); pq.Dispose(); storage.Dispose();
+            proofs?.Dispose(); http?.Dispose(); pq.Dispose(); innerStorage.Dispose();
             foreach (var signer in witnesses.Concat(nodes).Append(root)) signer.Dispose();
             if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true);
             Dispose(); return ValueTask.CompletedTask;
         }
+    }
+
+    private sealed class NetworkMarkerFaultStorage(IDeepSecureStorage inner) : IDeepSecureStorage
+    {
+        internal bool FailAfterNetworkMarker { get; set; }
+        public Task<OwnedDeepSecret?> ReadOwnedAsync(string slot, CancellationToken ct = default) => inner.ReadOwnedAsync(slot, ct);
+        public async Task WriteBatchAsync(IReadOnlyList<DeepSecureStorageWrite> writes, CancellationToken ct = default)
+        {
+            await inner.WriteBatchAsync(writes, ct);
+            if (FailAfterNetworkMarker && writes.Any(write => write.Slot.Contains(".network-lkg-floor.", StringComparison.Ordinal)))
+            {
+                FailAfterNetworkMarker = false;
+                throw new IOException("Injected stop after network marker, before SQL commit.");
+            }
+        }
+        public Task DeleteBatchAsync(IReadOnlyList<string> slots, CancellationToken ct = default) => inner.DeleteBatchAsync(slots, ct);
+        public Task PurgeStoreV1NamespaceAsync(CancellationToken ct = default) => inner.PurgeStoreV1NamespaceAsync(ct);
+        public Task PurgeStoreV2NamespaceAsync(CancellationToken ct = default) => inner.PurgeStoreV2NamespaceAsync(ct);
     }
 
     private sealed class Signer : IDisposable, IXPointNetworkBootstrapRootSigner,

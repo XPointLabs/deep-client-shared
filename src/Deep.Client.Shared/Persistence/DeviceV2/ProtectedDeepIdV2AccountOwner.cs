@@ -12,6 +12,7 @@ using Deep.Client.Shared.Persistence.DeviceV1;
 using Deep.Client.Shared.Domain.DeviceV1;
 using Deep.Protocol.MessagingCrypto;
 using Deep.Protocol.ContactV2;
+using Deep.Client.Shared.Persistence.XPointNetworkV1;
 
 namespace Deep.Client.Shared.Persistence.DeviceV2;
 
@@ -77,6 +78,17 @@ internal sealed class ProtectedDeepIdV2AccountOwner
             storage, lease, sqlStatePath, current, authority,
             exactGenesisAdh1, protectedGenesisCoreHash, cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    internal async ValueTask<IXPointNetworkStateStore> OpenNetworkLkgStoreAsync(
+        ulong trustedUnixSeconds, IDeepMlDsa65Verifier mlDsa65,
+        XPointNetworkGenesisPin genesisPin, CancellationToken cancellationToken)
+    {
+        using var held = await lease.AcquireAsync(cancellationToken).ConfigureAwait(false);
+        using var current = await RequireCurrentUnderLeaseAsync(trustedUnixSeconds,
+            mlDsa65, cancellationToken).ConfigureAwait(false);
+        return await SqliteDeepIdV2AccountGeneration.OpenNetworkLkgStoreAsync(
+            storage, lease, sqlStatePath, current, genesisPin, cancellationToken).ConfigureAwait(false);
     }
 
     internal async ValueTask<SqliteDeviceStateStore>

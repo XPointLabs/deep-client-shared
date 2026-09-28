@@ -264,29 +264,8 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             markerPrefix + revision.ToString(
                 System.Globalization.CultureInfo.InvariantCulture);
 
-        private async ValueTask<SqliteConnection> OpenVerifiedAsync(
-            CancellationToken cancellationToken)
-        {
-            using var secret = await storage.ReadOwnedAsync(KeySlot,
-                cancellationToken).ConfigureAwait(false) ??
-                throw new InvalidDataException("The DID2 SQL key record is absent.");
-            var record = secret.Use(static value => value.ToArray());
-            try
-            {
-                ValidateRecord(record, binding.NetworkId, binding.AccountId);
-                if (!Fixed(record.AsSpan(56, 32), binding.InstanceId))
-                    throw new InvalidDataException(
-                        "The DID2 SQL instance changed after LKG-store opening.");
-                ValidateDatabase(path, record.AsSpan(88, 32), binding);
-                var connection = OpenConnection(path, record.AsSpan(88, 32),
-                    create: false);
-                using var durable = connection.CreateCommand();
-                durable.CommandText = "PRAGMA synchronous=FULL; PRAGMA journal_mode=DELETE; PRAGMA secure_delete=ON;";
-                durable.ExecuteNonQuery();
-                return connection;
-            }
-            finally { CryptographicOperations.ZeroMemory(record); }
-        }
+        private ValueTask<SqliteConnection> OpenVerifiedAsync(CancellationToken cancellationToken) =>
+            OpenBoundLkgConnectionAsync(storage, path, binding, cancellationToken);
 
         private static (long Revision, byte[] Payload, byte[] ExactAdh1,
             byte[] CoreHash)? ReadRow(

@@ -15,6 +15,7 @@ using Deep.Protocol.Registry;
 using Deep.Client.Shared.Services.ContactV1;
 using Deep.Client.Shared.Services.ContactV2;
 using Deep.Client.Shared.Services.XPointNetworkV1;
+using Deep.Client.Shared.Persistence.XPointNetworkV1;
 
 namespace Deep.Client.Shared.Services;
 
@@ -589,6 +590,18 @@ public sealed class DeepIdV2AccountService
         return await owner.OpenDirectoryLkgStoreAsync(TrustedUnixSeconds(),
             verifier, authority, exactGenesisAdh1,
             protectedGenesisCoreHash, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Opens the DID2 account-owned network floor. This does not
+    /// authorize current network placement, reset a missing floor, or open
+    /// any pre-cutover store. Every operation rechecks protected custody.</summary>
+    public async Task<IXPointNetworkStateStore> OpenNetworkLkgStoreAsync(
+        XPointNetworkGenesisPin genesisPin, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(genesisPin);
+        using var verifier = OpenVerifier();
+        return await owner.OpenNetworkLkgStoreAsync(TrustedUnixSeconds(), verifier,
+            genesisPin, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
