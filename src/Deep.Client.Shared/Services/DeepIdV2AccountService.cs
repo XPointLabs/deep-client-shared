@@ -389,10 +389,13 @@ public sealed class DeepIdV2AccountService
             var issued = authorization.TrustedLowerUnixSeconds;
             // Conservative initial policy. Later replenishment is a separate
             // generation operation, never silent replacement on a failed send.
+            // ADH1/DTT1 prove that this device is current NOW. Their short
+            // refresh windows are not the lifetime of its signed pre-keys.
+            // Each remote commit/claim must independently fetch fresh proof;
+            // retain the unchanged signed identity/delegation bounds here.
             var expires = Math.Min(checked(issued + 86_400),
                 Math.Min(authorization.Authorization.Record.ExpiresAtUnixSeconds,
-                    Math.Min(fresh.Proof.NextProtectedLkg.Head.ValidUntil,
-                        local.Binding.Identity.ActiveDevices.Single().Certificate.ExpiresAtUnixSeconds)));
+                    local.Binding.Identity.ActiveDevices.Single().Certificate.ExpiresAtUnixSeconds));
             if (expires <= authorization.TrustedUpperUnixSeconds)
                 throw new CryptographicException("Initial inventory cannot cover the authenticated time interval.");
             var context = new Dpk2AuthoringContext(directory, 1, 1, 1, issued, issued, expires);
@@ -463,6 +466,25 @@ public sealed class DeepIdV2AccountService
         var staged = await ReadOwnStagedPreKeyPublicationAsync(
             cancellationToken).ConfigureAwait(false) ?? throw new
             InvalidOperationException("No protected DID2 pre-key inventory is staged.");
+        // A protected exact retry is durable evidence, not live authority.
+        // Reject expired/revoked/changed device support locally before sending
+        // even the manifest, using the same independently refreshed proof as
+        // authoring rather than wall-clock guesses or extending signed bytes.
+        var fresh = await authoritySource.VerifyForOwnPreKeyAuthoringAsync(this,
+            cancellationToken).ConfigureAwait(false);
+        var checkpoint = fresh.Proof.CurrentCheckpoint ?? throw new CryptographicException(
+            "A current DID2 checkpoint is required before pre-key dispatch.");
+        var authorization = DeepIdV2ContactAuthorizationCodec.Verify(
+            DeepIdV2ContactAuthorizationCodec.Decode(staged.ExactDca1.Span),
+            checkpoint.Binding, checkpoint.Directory);
+        var reading = await authoritySource.RecheckOwnPreKeyAuthoringAsync(fresh,
+            cancellationToken).ConfigureAwait(false);
+        var current = DeepIdV2CurrentContactAuthorizationVerifier.Verify(fresh.Proof,
+            authorization, reading.BootId.Span, reading.SampleSeconds);
+        DeepIdV2ReplicaPreKeyInventoryVerifier.VerifyComplete(
+            DeepIdV2Codec.DecodeDid2(staged.ExactDid2.Span), staged.ExactXps1.Span,
+            current, DeepIdV2PreKeyPublicationCodec.Decode(staged.ExactXpp1.Span),
+            reading.BootId.Span, reading.SampleSeconds);
         var pair = await new DeepIdV2PreKeyPublicationTransport(
             authoritySource, new DeepIdV2PublicationOnionTransport(authoritySource, custody))
             .PublishAsync(staged, cancellationToken)

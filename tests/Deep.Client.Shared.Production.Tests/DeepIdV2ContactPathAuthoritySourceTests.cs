@@ -56,6 +56,10 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
             fixture.Accounts, default)).Proof);
         var publication = DeepIdV2PreKeyPublicationCodec.Decode(staged.ExactXpp1.Span);
         Assert.Equal(32, publication.OneTimeMembers.Count);
+        var inventoryExpires = BinaryPrimitives.ReadUInt64BigEndian(publication.Manifest.Field(15).Span);
+        Assert.True(inventoryExpires > 1_500); // Short-lived ADH1 is refreshed, not signed into pre-key lifetime.
+        Assert.True(inventoryExpires <= DeepIdV2ContactAuthorizationCodec.Decode(staged.ExactDca1.Span).ExpiresAtUnixSeconds);
+        Assert.Equal(86_400UL, inventoryExpires - BinaryPrimitives.ReadUInt64BigEndian(publication.Manifest.Field(14).Span));
         var service = DeepIdV2PreKeyServiceCodec.Decode(staged.ExactXps1.Span);
         var placement = await source.GetCurrentForPublicationAsync(Fixture.Network, service.Field(2));
         Assert.Equal(placement.Placement.PlacementHash.ToArray(), publication.PlacementHash.ToArray());
@@ -73,6 +77,25 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
         Assert.Equal(before, fixture.ProofRequests); // Stored retry is not fresh authority.
         await Assert.ThrowsAnyAsync<IOException>(async () =>
             await source.GetCurrentForPublicationAsync(Fixture.Network, service.Field(2)));
+        var custody = await reopened.OpenOwnOnionClientCustodyAsync();
+        await Assert.ThrowsAnyAsync<IOException>(() => reopened.PublishOwnStagedPreKeyInventoryAsync(
+            fixture.Source(reopened), custody)); // Stored retry cannot dispatch without fresh proof.
+    }
+
+    [Fact]
+    public async Task ExpiredProtectedInventoryRejectsLocallyBeforeOnionDispatchWithoutReplacingKeys()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        await using var fixture = await Fixture.CreateAsync();
+        var source = fixture.Source();
+        await fixture.StageExpiredInventoryAsync(source);
+        var exact = (await fixture.Accounts.ReadOwnStagedPreKeyPublicationAsync())!.ExactXpp1.ToArray();
+        var custody = await fixture.Accounts.OpenOwnOnionClientCustodyAsync();
+        await Assert.ThrowsAsync<ApplicationCoreFormatException>(() =>
+            fixture.Accounts.PublishOwnStagedPreKeyInventoryAsync(source, custody));
+        Assert.Equal(exact, (await fixture.Accounts.ReadOwnStagedPreKeyPublicationAsync())!.ExactXpp1.ToArray());
+        Assert.Null(await fixture.Accounts.ReadOwnPreKeyCommitPairAsync());
+        Assert.Null(await custody.Guards.ReadAsync(default)); // No path/entropy reservation or send.
     }
 
     private static async Task AssertRealOnionCustodyAsync(Fixture fixture,
@@ -446,6 +469,24 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
             DeepIdV2ReplicaPreKeyInventoryVerifier.VerifyComplete(checkpoint.Binding.DeepId,
                 staged.ExactXps1.Span, authorization,
                 DeepIdV2PreKeyPublicationCodec.Decode(staged.ExactXpp1.Span), Boot, Sample);
+        }
+
+        internal async Task StageExpiredInventoryAsync(DeepIdV2ContactPathAuthoritySource source)
+        {
+            var fresh = await source.VerifyForOwnPreKeyAuthoringAsync(accounts, default);
+            using var author = await accounts.OpenLocalPreKeyAuthoringAuthorityAsync();
+            var context = new Deep.Protocol.MessagingCrypto.Dpk2AuthoringContext(
+                ApplicationCoreVerifier.StartDmd1Lineage(checkpoint.Directory).Next, 1, 1, 1, 1_000, 1_000, 1_100);
+            var service = author.AuthorPreKeyServiceV2(context, checkpoint.Binding, 32, 1);
+            var placement = ContactServicePlacementFactory.Create(fresh.Network,
+                ContactServiceRequestKind.PublishPreKeyInventory, service.ServiceCapability);
+            var drs = new byte[38];
+            "DRS1"u8.CopyTo(drs);
+            BinaryPrimitives.WriteUInt16BigEndian(drs.AsSpan(4), 1);
+            checkpoint.Binding.Identity.Revocations.Snapshot.CanonicalHash.Span.CopyTo(drs.AsSpan(6));
+            using var inventory = author.AuthorInventoryV2(context, checkpoint.Binding, service, drs,
+                new byte[32], Bytes(32, 0x67), placement.PlacementHash.Span, 32, 1);
+            await accounts.StageOwnInitialPreKeyInventoryAsync(service, inventory);
         }
 
         private Fixture() => storage = new(innerStorage);

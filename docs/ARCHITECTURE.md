@@ -187,6 +187,18 @@ untrusted receipt. `AdmitAndVerifyGenesisAsync` requires the independent
 ADH1/DTT1/ADP1 current-value proof to match the exact local DID2/DAB2/ADC1,
 then rechecks the local account after network I/O. An unavailable or mismatched
 proof leaves admission unconfirmed even if Registry returned HTTP 200.
+The initial account-owned DID2 pre-key author uses its conservative local
+publication policy intersected with signed DCA1/device expiry, not the
+short-lived ADH1 witness expiry. This follows the separate witnessed-freshness
+and signed-publication lifetimes in the normative
+[resolver specification](../../docs/architecture/CONTACT-RESOLVER-V1.md).
+It does not extend an already staged XPS1/XPI1 or replace its exact retry
+operation. Before dispatching even its manifest, the account-owned publisher
+also applies the complete inventory verifier to independently refreshed DID2
+authorization; protected historical staging alone is not live permission.
+A remote commit/claim still requires an independently refreshed
+current proof; expired staged inventories need the separately implemented
+successor lifecycle, not silent key replacement or relaxed verification.
 This marker scheme detects SQL-only rollback while protected storage remains
 intact; it is not an independent monotonic anchor against a joint rollback of
 both stores. The current journaled secure store is limited to 128 total slots,
