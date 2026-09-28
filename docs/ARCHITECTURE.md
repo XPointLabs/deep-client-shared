@@ -255,6 +255,18 @@ fragments, send each to both current selected exits, and return only after
 the Protocol verifier accepts both XIC1 signatures. The account service
 now composes that transport with the protected staged publication and records
 the exact verified XIC1 pair in an add-only account-scoped secure-storage slot.
+Its public entry point takes `DeepIdV2ContactPathAuthoritySource`, not the
+pre-cutover `ProductionContactResolvePathAuthoritySource`. The DID2 source
+accepts bounded raw identity-neutral network records, verifies them from the
+pinned XNA1 root, and obtains a fresh proof through the account-owned
+`FetchOwnCurrentDirectoryProofAsync` path. That path checks the protected
+local DAB2/DMD1 both before and after the exchange without replaying admission.
+Placement is released only after the independently verified network context
+is committed and reread from `IXPointNetworkStateStore`, with the directory
+proof still fresh. Providers and durable-store lifetimes belong to the caller;
+the source never accepts a V1 ADP1 or caller-projected placement. On restart it
+rehydrates only an exact signed closure matching protected current network LKG;
+missing predecessor/checkpoint evidence is an error, not a floor reset.
 Reopen binds the pair to the protected exact XPP1; the stored pair is historical
 evidence, not fresh placement or claim authority. MAUI does not yet mount this
 publisher or activate a remote claim; DPH2 and device E2E are not implied.

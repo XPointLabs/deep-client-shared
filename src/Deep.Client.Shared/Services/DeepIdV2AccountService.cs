@@ -365,7 +365,7 @@ public sealed class DeepIdV2AccountService
     /// ONION exits and records the verified XIC1 pair before returning.</summary>
     public async Task<DeepIdV2PreKeyCommitSnapshot>
         PublishOwnStagedPreKeyInventoryAsync(
-            ProductionContactResolvePathAuthoritySource authoritySource,
+            DeepIdV2ContactPathAuthoritySource authoritySource,
             PrivacyRoutedContactResolverTransport onion,
             CancellationToken cancellationToken = default)
     {
@@ -410,6 +410,40 @@ public sealed class DeepIdV2AccountService
             .ConfigureAwait(false);
         return pair is null ? null : new DeepIdV2PreKeyCommitSnapshot(
             pair.Value.First, pair.Value.Second);
+    }
+
+    /// <summary>Refreshes current DID2 authority without replaying admission.
+    /// The proof must bind the exact protected local DAB2/DMD1 before and
+    /// after the asynchronous exchange; no caller-authored identity is used.</summary>
+    public async Task<VerifiedDeepIdV2DirectoryFreshness> FetchOwnCurrentDirectoryProofAsync(
+        DeepIdV2DirectoryProofClient proofClient, VerifiedXPointNetworkAuthority authority,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(proofClient);
+        ArgumentNullException.ThrowIfNull(authority);
+        using var verifier = OpenVerifier();
+        using var current = await owner.ReadCurrentAsync(TrustedUnixSeconds(), verifier,
+            cancellationToken).ConfigureAwait(false) ?? throw new InvalidOperationException(
+                "A protected DID2 account is required for a current proof.");
+        var local = current.Verified.PublicEvidence;
+        var fresh = await proofClient.FetchOwnGenesisAsync(local.Binding, authority,
+            deploymentProfileId, supportedReader: 2, cancellationToken).ConfigureAwait(false);
+        var checkpoint = fresh.CurrentCheckpoint ?? throw new CryptographicException(
+            "The current DID2 proof has no account checkpoint.");
+        if (!Fixed(checkpoint.Binding.Record.CanonicalBytes.Span, local.Binding.Record.CanonicalBytes.Span) ||
+            !Fixed(checkpoint.Directory.Record.CanonicalBytes.Span, local.Directory.Record.CanonicalBytes.Span))
+            throw new CryptographicException("The current DID2 proof differs from this local account or device directory.");
+        using var finalVerifier = OpenVerifier();
+        using var final = await owner.ReadCurrentAsync(TrustedUnixSeconds(), finalVerifier,
+            cancellationToken).ConfigureAwait(false) ?? throw new CryptographicException(
+                "The protected DID2 account disappeared during the exchange.");
+        if (!Fixed(final.Verified.PublicEvidence.Binding.Record.CanonicalBytes.Span,
+                local.Binding.Record.CanonicalBytes.Span) ||
+            !Fixed(final.Verified.PublicEvidence.Directory.Record.CanonicalBytes.Span,
+                local.Directory.Record.CanonicalBytes.Span))
+            throw new CryptographicException("The protected DID2 account changed during the exchange.");
+        await proofClient.RequireStillFreshAsync(fresh, authority, cancellationToken).ConfigureAwait(false);
+        return fresh;
     }
 
     public async Task<DeepIdV2AccountSnapshot> CreateAsync(
