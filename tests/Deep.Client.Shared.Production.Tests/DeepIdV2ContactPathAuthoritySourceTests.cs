@@ -9,6 +9,7 @@ using Deep.Client.Shared.Services.AccountDirectoryV2;
 using Deep.Client.Shared.Services.ContactV2;
 using Deep.Protocol.AccountDirectoryV1;
 using Deep.Protocol.ApplicationCore;
+using Deep.Protocol.ContactV2;
 using Deep.Protocol.DeepExtension.PrivacyRouting;
 using Deep.Protocol.XPointNetworkV1;
 using Sodium;
@@ -18,6 +19,76 @@ namespace Deep.Client.Shared.Production.Tests;
 
 public sealed class DeepIdV2ContactPathAuthoritySourceTests
 {
+    [Fact]
+    public async Task InitialInventory_UsesRealCurrentClosureAndPreservesExactRetryAfterReopen()
+    {
+        // The approved whole ML-KEM asset is currently validated on Windows.
+        // This fixture is native/SQL evidence, not physical-device evidence.
+        if (!OperatingSystem.IsWindows()) return;
+        await using var fixture = await Fixture.CreateAsync();
+        var source = fixture.Source();
+        var staged = await fixture.Accounts.EnsureOwnInitialPreKeyInventoryAsync(source);
+        Assert.Equal(1, fixture.ProofRequests);
+        fixture.VerifyInventory(staged, (await source.VerifyForOwnPreKeyAuthoringAsync(
+            fixture.Accounts, default)).Proof);
+        var publication = DeepIdV2PreKeyPublicationCodec.Decode(staged.ExactXpp1.Span);
+        Assert.Equal(32, publication.OneTimeMembers.Count);
+        var service = DeepIdV2PreKeyServiceCodec.Decode(staged.ExactXps1.Span);
+        var placement = await source.GetCurrentForPublicationAsync(Fixture.Network, service.Field(2));
+        Assert.Equal(placement.Placement.PlacementHash.ToArray(), publication.PlacementHash.ToArray());
+        Assert.True(await fixture.Accounts.HasOwnStagedPreKeyInventoryAsync());
+        Assert.Null(await fixture.Accounts.ReadOwnPreKeyCommitPairAsync());
+        fixture.RejectProof = true;
+        var before = fixture.ProofRequests;
+        var retry = await fixture.Accounts.EnsureOwnInitialPreKeyInventoryAsync(source);
+        var reopened = fixture.ReopenAccount();
+        var afterRestart = await reopened.EnsureOwnInitialPreKeyInventoryAsync(fixture.Source(reopened));
+        Assert.Equal(staged.ExactXpp1.ToArray(), retry.ExactXpp1.ToArray());
+        Assert.Equal(staged.ExactXpp1.ToArray(), afterRestart.ExactXpp1.ToArray());
+        Assert.Equal(staged.ExactXps1.ToArray(), afterRestart.ExactXps1.ToArray());
+        Assert.Equal(before, fixture.ProofRequests); // Stored retry is not fresh authority.
+        await Assert.ThrowsAnyAsync<IOException>(async () =>
+            await source.GetCurrentForPublicationAsync(Fixture.Network, service.Field(2)));
+    }
+
+    [Fact]
+    public async Task InitialInventory_MissingProofCancellationAndWrongOwnerDoNotStage()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        var source = fixture.Source();
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            fixture.Accounts.EnsureOwnInitialPreKeyInventoryAsync(source, cancelled.Token));
+        Assert.Equal(0, fixture.ProofRequests);
+        await Assert.ThrowsAsync<ArgumentException>(() =>
+            fixture.ReopenAccount().EnsureOwnInitialPreKeyInventoryAsync(source));
+        Assert.Equal(0, fixture.ProofRequests);
+        fixture.RejectProof = true;
+        await Assert.ThrowsAnyAsync<IOException>(() =>
+            fixture.Accounts.EnsureOwnInitialPreKeyInventoryAsync(source));
+        Assert.Equal(1, fixture.ProofRequests);
+        Assert.Null(await fixture.Accounts.ReadOwnStagedPreKeyPublicationAsync());
+    }
+
+    [Fact]
+    public async Task OwnAuthoringAuthority_RejectsExpiredClockAndChangedNetworkCustody()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        var source = fixture.Source();
+        var authoring = await source.VerifyForOwnPreKeyAuthoringAsync(fixture.Accounts, default);
+        fixture.Sample = authoring.Proof.FreshnessDeadlineMonotonicSeconds;
+        await Assert.ThrowsAsync<CryptographicException>(async () =>
+            await source.RecheckOwnPreKeyAuthoringAsync(authoring, default));
+        fixture.Sample = 100;
+        var floor = (await fixture.NetworkStore.ReadAsync(default))!;
+        await fixture.NetworkStore.CompareExchangeAsync(floor.Revision,
+            new(floor.Revision + 1, floor.ProtectedLkg, true), default);
+        await Assert.ThrowsAsync<CryptographicException>(async () =>
+            await source.RecheckOwnPreKeyAuthoringAsync(authoring, default));
+        Assert.Null(await fixture.Accounts.ReadOwnStagedPreKeyPublicationAsync());
+    }
+
     [Fact]
     public async Task RealDid2AccountAndSignedNetwork_VerifyThenMintRechecksProofAndRehydratesExactFloor()
     {
@@ -218,6 +289,23 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
         internal int ProofRequests { get; private set; }
         internal bool RejectProof { get; set; }
         internal bool AlterNode { get; set; }
+        internal ulong Sample { get; set; } = 100;
+        internal DeepIdV2AccountService Accounts => accounts;
+        internal DeepIdV2AccountService ReopenAccount() => new(storage, directory, Network, 1,
+            new FrozenClock(DateTimeOffset.FromUnixTimeSeconds(1_000)),
+            DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess);
+
+        internal void VerifyInventory(StagedDeepIdV2PreKeyPublication staged,
+            VerifiedDeepIdV2DirectoryFreshness fresh)
+        {
+            var dca = DeepIdV2ContactAuthorizationCodec.Verify(
+                DeepIdV2ContactAuthorizationCodec.Decode(staged.ExactDca1.Span),
+                checkpoint.Binding, checkpoint.Directory);
+            var authorization = DeepIdV2CurrentContactAuthorizationVerifier.Verify(fresh, dca, Boot, Sample);
+            DeepIdV2ReplicaPreKeyInventoryVerifier.VerifyComplete(checkpoint.Binding.DeepId,
+                staged.ExactXps1.Span, authorization,
+                DeepIdV2PreKeyPublicationCodec.Decode(staged.ExactXpp1.Span), Boot, Sample);
+        }
 
         private Fixture() => storage = new(innerStorage);
         internal void FailAfterNextNetworkMarker() => storage.FailAfterNetworkMarker = true;
@@ -305,8 +393,8 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
                 HttpServiceEndpointPolicy.Production));
         }
 
-        internal DeepIdV2ContactPathAuthoritySource Source() =>
-            new(bootstrap.GenesisPin, accounts, proofs, closure, NetworkStore, this);
+        internal DeepIdV2ContactPathAuthoritySource Source(DeepIdV2AccountService? account = null) =>
+            new(bootstrap.GenesisPin, account ?? accounts, proofs, closure, NetworkStore, this);
 
         private DeepIdV2NetworkClosureArtifacts PublicClosure()
         {
@@ -363,7 +451,7 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
         public ValueTask<OnionMonotonicReading> ReadAsync(CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            return ValueTask.FromResult(new OnionMonotonicReading(Boot, 100));
+            return ValueTask.FromResult(new OnionMonotonicReading(Boot, Sample));
         }
 
         public ValueTask DisposeAsync()

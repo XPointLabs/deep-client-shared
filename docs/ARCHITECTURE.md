@@ -249,7 +249,24 @@ rollback of the staged file fails closed. Explicit V2 reset removes this file
 family and its protected markers. The account service can read a copy of the
 exact public XPP1/DID2/DCA1/XPS1 package after current-account and protected-tip verification,
 including after restart; it does not release sealed DPK2 secrets. This is
-local inventory custody only. A DID2 V2 client transport can now
+local inventory custody only. Initial publication bytes can now
+be prepared through `EnsureOwnInitialPreKeyInventoryAsync`: the account owner
+obtains a nonce-bound current DID2 proof and verified network closure from its
+own `DeepIdV2ContactPathAuthoritySource`, derives the exact local DMD1/DRS1
+bindings and random service/operation capabilities, authors the complete native
+inventory, independently verifies it through the replica verifier, and seals
+all members before releasing public bytes. The initial local policy uses the
+minimum complete inventory and a single-use last-resort offering; its lifetime
+is capped by the current signed directory head, device certificate and contact
+delegation. Monotonic proof freshness and exact protected network custody are
+rechecked after native authoring and before staging. A retry, including after
+restart or interrupted tip recovery, returns the same protected bytes and
+operation without minting replacement keys; this historical read does not grant
+fresh placement or dispatch authority. Concurrent initial authoring in one
+account service is serialized; competing owners cannot replace an existing
+inventory. Protocol semantics remain owned by
+[`CONTACT-RESOLVER-V1 section 3.3`](../../docs/architecture/CONTACT-RESOLVER-V1.md).
+The DID2 V2 client transport can then
 turn exact public XPP1 plus exact DID2/DCA1/XPS1 support into bounded ONION
 fragments, send each to both current selected exits, and return only after
 the Protocol verifier accepts both XIC1 signatures. The account service

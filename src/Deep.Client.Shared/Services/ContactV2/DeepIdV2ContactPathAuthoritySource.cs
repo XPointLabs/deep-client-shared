@@ -77,6 +77,7 @@ public sealed class DeepIdV2ContactPathAuthoritySource :
     private readonly IXPointNetworkStateStore networkStore;
     private readonly XPointNetworkStateClient networkState;
     private readonly OnionTrustedTimeAuthority trustedTime;
+    private readonly IOnionMonotonicClock clock;
     private readonly SemaphoreSlim gate = new(1, 1);
     private VerifiedOnionNetworkContext? liveContext;
 
@@ -91,7 +92,8 @@ public sealed class DeepIdV2ContactPathAuthoritySource :
         this.artifacts = artifacts ?? throw new ArgumentNullException(nameof(artifacts));
         this.networkStore = networkStore ?? throw new ArgumentNullException(nameof(networkStore));
         networkState = new(networkStore);
-        trustedTime = new(clock ?? throw new ArgumentNullException(nameof(clock)));
+        this.clock = clock ?? throw new ArgumentNullException(nameof(clock));
+        trustedTime = new(this.clock);
     }
 
     public ValueTask<ContactResolvePathAuthority> GetCurrentAsync(Xiq1Request request,
@@ -131,8 +133,8 @@ public sealed class DeepIdV2ContactPathAuthoritySource :
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            var verified = await VerifyCurrentNetworkCoreAsync(
-                cancellationToken).ConfigureAwait(false);
+            var verified = (await VerifyCurrentNetworkCoreAsync(
+                cancellationToken).ConfigureAwait(false)).Network;
             var placement = ContactServicePlacementFactory.Create(verified,
                 ContactServiceRequestKind.PublishPreKeyInventory, serviceCapability);
             return new(verified, placement);
@@ -150,8 +152,8 @@ public sealed class DeepIdV2ContactPathAuthoritySource :
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            return await VerifyCurrentNetworkCoreAsync(
-                cancellationToken).ConfigureAwait(false);
+            return (await VerifyCurrentNetworkCoreAsync(
+                cancellationToken).ConfigureAwait(false)).Network;
         }
         finally { gate.Release(); }
     }
@@ -162,8 +164,51 @@ public sealed class DeepIdV2ContactPathAuthoritySource :
             throw new ArgumentException("DID2 verification requires the pinned network.", nameof(networkId));
     }
 
+    // Only account-owned orchestration receives the proof used to verify the
+    // network. This is not a public caller-mintable authoring capability.
+    internal sealed record OwnPreKeyAuthoringAuthority(
+        VerifiedOnionNetworkContext Network,
+        VerifiedXPointNetworkAuthority Authority,
+        Deep.Protocol.AccountDirectoryV1.VerifiedDeepIdV2DirectoryFreshness Proof);
+
+    internal void RequireAccountOwner(DeepIdV2AccountService account)
+    {
+        if (!ReferenceEquals(accounts, account))
+            throw new ArgumentException("Pre-key authoring requires this source's account owner.", nameof(account));
+    }
+
+    internal async ValueTask<OwnPreKeyAuthoringAuthority> VerifyForOwnPreKeyAuthoringAsync(
+        DeepIdV2AccountService account, CancellationToken cancellationToken)
+    {
+        RequireAccountOwner(account);
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try { return await VerifyCurrentNetworkCoreAsync(cancellationToken).ConfigureAwait(false); }
+        finally { gate.Release(); }
+    }
+
+    internal async ValueTask<OnionMonotonicReading> RecheckOwnPreKeyAuthoringAsync(
+        OwnPreKeyAuthoringAuthority authoring, CancellationToken cancellationToken)
+    {
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await proofs.RequireStillFreshAsync(authoring.Proof, authoring.Authority,
+                cancellationToken).ConfigureAwait(false);
+            var floor = await networkStore.ReadAsync(cancellationToken).ConfigureAwait(false);
+            if (floor is null || floor.ForkLatched ||
+                !Same(floor.ProtectedLkg, authoring.Network.ProtectedLkg))
+                throw new CryptographicException("Pre-key authoring no longer binds protected network custody.");
+            authoring.Network.EnsureCurrent();
+            var reading = await clock.ReadAsync(cancellationToken).ConfigureAwait(false);
+            if (!authoring.Proof.IsCurrentAtMonotonic(reading.BootId.Span, reading.SampleSeconds))
+                throw new CryptographicException("Pre-key authoring directory freshness expired.");
+            return reading;
+        }
+        finally { gate.Release(); }
+    }
+
     // The caller holds gate through verification and any placement derivation.
-    private async ValueTask<VerifiedOnionNetworkContext> VerifyCurrentNetworkCoreAsync(
+    private async ValueTask<OwnPreKeyAuthoringAuthority> VerifyCurrentNetworkCoreAsync(
         CancellationToken cancellationToken)
     {
         var before = await networkStore.ReadAsync(cancellationToken).ConfigureAwait(false);
@@ -219,7 +264,7 @@ public sealed class DeepIdV2ContactPathAuthoritySource :
         await proofs.RequireStillFreshAsync(fresh, authority, cancellationToken).ConfigureAwait(false);
         verified.EnsureCurrent();
         liveContext = verified;
-        return verified;
+        return new(verified, authority, fresh);
     }
 
     private static bool Fixed(ReadOnlySpan<byte> left, ReadOnlySpan<byte> right) =>
