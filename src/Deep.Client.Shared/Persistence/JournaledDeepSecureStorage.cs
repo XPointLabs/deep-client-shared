@@ -143,6 +143,35 @@ public sealed class JournaledDeepSecureStorage : IDeepSecureStorage, IDisposable
         }
     }
 
+    public async Task<bool> CompareExchangeAsync(string slot, ReadOnlyMemory<byte> expected,
+        ReadOnlyMemory<byte> replacement, CancellationToken cancellationToken = default)
+    {
+        ValidateSlot(slot);
+        if (expected.IsEmpty || replacement.IsEmpty || expected.Length > MaximumValueBytes || replacement.Length > MaximumValueBytes)
+            throw new ArgumentException("Secure-storage replacement is outside its byte bound.");
+        var expectedCopy = expected.ToArray();
+        var replacementCopy = replacement.ToArray();
+        var matched = false;
+        try
+        {
+            await MutateAsync(values =>
+            {
+                if (!values.TryGetValue(slot, out var current) ||
+                    !CryptographicOperations.FixedTimeEquals(current, expectedCopy)) return false;
+                values[slot] = replacementCopy;
+                CryptographicOperations.ZeroMemory(current);
+                matched = true;
+                return true;
+            }, cancellationToken).ConfigureAwait(false);
+            return matched;
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(expectedCopy);
+            CryptographicOperations.ZeroMemory(replacementCopy);
+        }
+    }
+
     public async Task DeleteBatchAsync(
         IReadOnlyList<string> slots,
         CancellationToken cancellationToken = default)

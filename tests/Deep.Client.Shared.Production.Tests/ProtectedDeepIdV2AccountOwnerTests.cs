@@ -330,6 +330,10 @@ public sealed class ProtectedDeepIdV2AccountOwnerTests
     {
         private int fail = 1;
 
+        public Task<bool> CompareExchangeAsync(string slot, ReadOnlyMemory<byte> expected,
+            ReadOnlyMemory<byte> replacement, CancellationToken ct = default) =>
+            inner.CompareExchangeAsync(slot, expected, replacement, ct);
+
         public Task<OwnedDeepSecret?> ReadOwnedAsync(string slot,
             CancellationToken cancellationToken = default) =>
             inner.ReadOwnedAsync(slot, cancellationToken);

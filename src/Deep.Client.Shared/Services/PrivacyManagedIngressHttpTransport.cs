@@ -264,7 +264,7 @@ internal sealed class PrivacyManagedIngressHttpTransport :
                 {
                     throw new PrivacyIngressRejectedBeforeForwardException(
                         error.Retryable,
-                        "Privacy ingress rejected the request before forwarding.");
+                        $"Privacy ingress rejected the request before forwarding ({error.ErrorClass}).");
                 }
 
                 throw Unknown("Privacy ingress returned an outcome-unknown error.");

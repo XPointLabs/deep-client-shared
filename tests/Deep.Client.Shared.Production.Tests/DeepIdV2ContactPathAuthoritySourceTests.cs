@@ -90,7 +90,9 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
         var ledger = new CapturingEntropyLedger(custody.Entropy);
         var codec = new PrivacyRoutingCodec(new OnionEntropyAuthority(ledger),
             new OnionKeyAgreementAuthority(new RejectClientReceiveVault()));
-        foreach (var exit in authority.Placement.RankedReplicaNodeIds)
+        // Exercise both rotating marker slots beyond their initial insert.
+        // Two frames alone missed the third-write immutable-slot defect.
+        foreach (var exit in authority.Placement.RankedReplicaNodeIds.Concat(authority.Placement.RankedReplicaNodeIds))
         {
             var prepared = await paths.PrepareExactAsync(OnionOperation.ContactResolve, request, exit, default);
             var entry = OnionEntryTransportFactory.Create(prepared.Attempt.Path);
@@ -295,6 +297,9 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
         var second = Guard(2);
         Assert.Equal(EntryGuardStoreWriteDisposition.Applied,
             (await reopened.Guards.CompareExchangeAsync(1, second, default)).Disposition);
+        for (ulong revision = 3; revision <= 8; revision++)
+            Assert.Equal(EntryGuardStoreWriteDisposition.Applied,
+                (await reopened.Guards.CompareExchangeAsync(revision - 1, Guard(revision), default)).Disposition);
         await using (var connection = await fixture.OpenSqlAsync())
         {
             using var command = connection.CreateCommand();
@@ -308,14 +313,20 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
         await Assert.ThrowsAsync<InvalidDataException>(async () => await custody.Guards.ReadAsync(default));
     }
 
-    [Fact]
-    public async Task OnionGuardMarkerBeforeSqlCrash_RejectsReadAndReopenWithoutEmittingAuthority()
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    [InlineData(5)]
+    public async Task OnionGuardMarkerBeforeSqlCrash_RejectsReadAndReopenWithoutEmittingAuthority(int committed)
     {
         await using var fixture = await Fixture.CreateAsync();
         var custody = await fixture.Accounts.OpenOwnOnionClientCustodyAsync();
+        for (ulong revision = 1; revision <= (ulong)committed; revision++)
+            Assert.Equal(EntryGuardStoreWriteDisposition.Applied,
+                (await custody.Guards.CompareExchangeAsync(revision == 1 ? null : revision - 1, Guard(revision), default)).Disposition);
         fixture.FailAfterNextOnionMarker();
         await Assert.ThrowsAsync<IOException>(async () =>
-            await custody.Guards.CompareExchangeAsync(null, Guard(1), default));
+            await custody.Guards.CompareExchangeAsync(committed == 0 ? null : (ulong)committed, Guard((ulong)committed + 1), default));
         await Assert.ThrowsAsync<CryptographicException>(async () => await custody.Guards.ReadAsync(default));
         await Assert.ThrowsAsync<CryptographicException>(() => fixture.Accounts.OpenOwnOnionClientCustodyAsync());
         Assert.Equal(0, fixture.ProofRequests);
@@ -621,6 +632,17 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
     {
         internal bool FailAfterNetworkMarker { get; set; }
         internal bool FailAfterOnionMarker { get; set; }
+        public async Task<bool> CompareExchangeAsync(string slot, ReadOnlyMemory<byte> expected,
+            ReadOnlyMemory<byte> replacement, CancellationToken ct = default)
+        {
+            var applied = await inner.CompareExchangeAsync(slot, expected, replacement, ct);
+            if (applied && FailAfterOnionMarker && slot.Contains(".onion-custody.", StringComparison.Ordinal))
+            {
+                FailAfterOnionMarker = false;
+                throw new IOException("Injected stop after ONION marker, before SQL commit.");
+            }
+            return applied;
+        }
         public Task<OwnedDeepSecret?> ReadOwnedAsync(string slot, CancellationToken ct = default) => inner.ReadOwnedAsync(slot, ct);
         public async Task WriteBatchAsync(IReadOnlyList<DeepSecureStorageWrite> writes, CancellationToken ct = default)
         {

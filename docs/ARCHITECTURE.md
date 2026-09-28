@@ -102,7 +102,12 @@ host. The entry's address, port and TLS SPKI come from Protocol's verified
 exit-specific path. Registry HTTPS retains platform CA trust.
 
 DSV2 protected roots 4 (guards) and 5 (entropy) use two fixed SecureStorage
-floor slots each. A protected marker is committed before SQL; interrupted,
+floor slots each. A protected marker is committed before SQL. Replacement
+of a reused slot uses exact-value atomic SecureStorage CAS, never
+delete/recreate or an unconditional upsert. Both in-memory and journaled stores
+enforce this operation; the initial write API remains create-only. Repeated
+reservations exercise more than two slot writes and preserve rejection of SQL
+rollback and marker-before-SQL crashes after replacement. Interrupted,
 missing or rolled-back state fails closed and requires explicit account reset,
 not silent regeneration. This detects SQL-only rollback while protected
 storage remains intact, not joint rollback of both stores. Entropy commitments

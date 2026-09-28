@@ -179,6 +179,12 @@ public interface IDeepSecureStorage
         IReadOnlyList<DeepSecureStorageWrite> writes,
         CancellationToken cancellationToken = default);
 
+    /// <summary>Atomically replaces an existing slot only if its exact protected
+    /// value still matches. Missing/conflicting slots return false without mutation;
+    /// this is neither upsert nor delete/recreate.</summary>
+    Task<bool> CompareExchangeAsync(string slot, ReadOnlyMemory<byte> expected,
+        ReadOnlyMemory<byte> replacement, CancellationToken cancellationToken = default);
+
     Task DeleteBatchAsync(
         IReadOnlyList<string> slots,
         CancellationToken cancellationToken = default);
@@ -202,6 +208,25 @@ public sealed class InMemoryDeepSecureStorage : IDeepSecureStorage, IDisposable
     private readonly ConcurrentDictionary<string, byte[]> values = new(StringComparer.Ordinal);
     private readonly object gate = new();
     private int disposed;
+
+    public Task<bool> CompareExchangeAsync(string slot, ReadOnlyMemory<byte> expected,
+        ReadOnlyMemory<byte> replacement, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(slot);
+        if (expected.IsEmpty || replacement.IsEmpty || expected.Length > 1024 * 1024 || replacement.Length > 1024 * 1024)
+            throw new ArgumentException("Secure-storage replacement is outside its byte bound.");
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (gate)
+        {
+            ThrowIfDisposed();
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!values.TryGetValue(slot, out var current) ||
+                !CryptographicOperations.FixedTimeEquals(current, expected.Span)) return Task.FromResult(false);
+            values[slot] = replacement.ToArray();
+            CryptographicOperations.ZeroMemory(current);
+            return Task.FromResult(true);
+        }
+    }
 
     public Task<OwnedDeepSecret?> ReadOwnedAsync(string slot, CancellationToken cancellationToken = default)
     {

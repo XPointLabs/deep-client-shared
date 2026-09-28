@@ -95,9 +95,21 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             var marker = Marker(revision, payload);
             try
             {
-                await storage.WriteBatchAsync([new DeepSecureStorageWrite(
-                    prefix + (revision % 2).ToString(System.Globalization.CultureInfo.InvariantCulture), marker)], ct)
-                    .ConfigureAwait(false);
+                var slot = prefix + (revision % 2).ToString(System.Globalization.CultureInfo.InvariantCulture);
+                if (revision <= 2)
+                    await storage.WriteBatchAsync([new DeepSecureStorageWrite(slot, marker)], ct).ConfigureAwait(false);
+                else
+                {
+                    using var prior = await storage.ReadOwnedAsync(slot, ct).ConfigureAwait(false)
+                        ?? throw new CryptographicException("The protected ONION replacement slot disappeared.");
+                    var expectedMarker = prior.Use(static value => value.ToArray());
+                    try
+                    {
+                        if (!await storage.CompareExchangeAsync(slot, expectedMarker, marker, ct).ConfigureAwait(false))
+                            throw new CryptographicException("The protected ONION replacement slot changed.");
+                    }
+                    finally { CryptographicOperations.ZeroMemory(expectedMarker); }
+                }
             }
             finally { CryptographicOperations.ZeroMemory(marker); }
             using var write = connection.CreateCommand();

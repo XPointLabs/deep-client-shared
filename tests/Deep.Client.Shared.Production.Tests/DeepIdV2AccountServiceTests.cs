@@ -669,6 +669,10 @@ public sealed class DeepIdV2AccountServiceTests
         internal bool FailNextInstallAfterWrite { get; set; }
         internal bool FailNextCommitWrite { get; set; }
 
+        public Task<bool> CompareExchangeAsync(string slot, ReadOnlyMemory<byte> expected,
+            ReadOnlyMemory<byte> replacement, CancellationToken ct = default) =>
+            inner.CompareExchangeAsync(slot, expected, replacement, ct);
+
         public Task<OwnedDeepSecret?> ReadOwnedAsync(string slot,
             CancellationToken cancellationToken = default) =>
             inner.ReadOwnedAsync(slot, cancellationToken);
