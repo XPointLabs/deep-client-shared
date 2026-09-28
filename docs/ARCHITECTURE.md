@@ -308,8 +308,8 @@ bindings and random service/operation capabilities, authors the complete native
 inventory, independently verifies it through the replica verifier, and seals
 all members before releasing public bytes. The initial local policy uses the
 minimum complete inventory and a single-use last-resort offering; its lifetime
-is capped by the current signed directory head, device certificate and contact
-delegation. Monotonic proof freshness and exact protected network custody are
+is bounded by the authoring policy, device certificate and contact delegation,
+not the short-lived renewable directory head. Monotonic proof freshness and exact protected network custody are
 rechecked after native authoring and before staging. A retry, including after
 restart or interrupted tip recovery, returns the same protected bytes and
 operation without minting replacement keys; this historical read does not grant
@@ -323,6 +323,16 @@ fragments, send each to both current selected exits, and return only after
 the Protocol verifier accepts both XIC1 signatures. The account service
 now composes that transport with the protected staged publication and records
 the exact verified XIC1 pair in an add-only account-scoped secure-storage slot.
+Repeated completion, including after reopening the account, obtains fresh
+account-bound proof and verified network authority, validates the complete
+inventory/current DCA1 and reauthenticates both stored XIC1 signatures against
+the current ranked publication placement. It rechecks freshness and protected
+network custody after asynchronous marker reads before returning the exact
+pair without a new ONION dispatch. An invalid or incompatible stored pair
+rejects; it is not replaced or silently retried. This records an already
+completed operation, not present replica availability, inventory retention or
+claim authority. Those require their own current DID2 claim path. No inventory
+expiry, pre-key member or publication operation is changed by completion reuse.
 Its public entry point takes `DeepIdV2ContactPathAuthoritySource`, not the
 pre-cutover `ProductionContactResolvePathAuthoritySource`. The DID2 source
 accepts bounded raw identity-neutral network records, verifies them from the

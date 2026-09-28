@@ -98,6 +98,125 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
         Assert.Null(await custody.Guards.ReadAsync(default)); // No path/entropy reservation or send.
     }
 
+    [Fact]
+    public async Task CompletedPublication_ReopenReauthenticatesExactPairWithoutOnionReservation()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        await using var fixture = await Fixture.CreateAsync();
+        var expected = await fixture.StageAndRecordPairAsync();
+        var reopened = fixture.ReopenAccount();
+        var custody = await reopened.OpenOwnOnionClientCustodyAsync();
+        var before = fixture.ProofRequests;
+        var actual = await reopened.PublishOwnStagedPreKeyInventoryAsync(fixture.Source(reopened), custody);
+        Assert.Equal(before + 1, fixture.ProofRequests); // Fresh proof, not stored-authority reuse.
+        Assert.Equal(expected.ExactFirstXic1.ToArray(), actual.ExactFirstXic1.ToArray());
+        Assert.Equal(expected.ExactSecondXic1.ToArray(), actual.ExactSecondXic1.ToArray());
+        Assert.Null(await custody.Guards.ReadAsync(default)); // No request/path/entropy or network dispatch.
+        var again = await reopened.PublishOwnStagedPreKeyInventoryAsync(fixture.Source(reopened), custody);
+        Assert.Equal(before + 2, fixture.ProofRequests);
+        Assert.Equal(expected.ExactFirstXic1.ToArray(), again.ExactFirstXic1.ToArray());
+        Assert.Null(await custody.Guards.ReadAsync(default));
+    }
+
+    [Fact]
+    public async Task CompletedPublication_DoesNotSubstituteSavedPairForFreshProof()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        await using var fixture = await Fixture.CreateAsync();
+        var expected = await fixture.StageAndRecordPairAsync();
+        var custody = await fixture.Accounts.OpenOwnOnionClientCustodyAsync();
+        fixture.RejectProof = true;
+        await Assert.ThrowsAnyAsync<IOException>(() => fixture.Accounts.PublishOwnStagedPreKeyInventoryAsync(
+            fixture.Source(), custody));
+        Assert.Null(await custody.Guards.ReadAsync(default));
+        Assert.Equal(expected.ExactFirstXic1.ToArray(),
+            (await fixture.Accounts.ReadOwnPreKeyCommitPairAsync())!.ExactFirstXic1.ToArray());
+    }
+
+    [Fact]
+    public async Task CompletedPublication_ExpiredInventoryRemainsExpiredDespiteValidStoredSignatures()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        await using var fixture = await Fixture.CreateAsync();
+        var expected = await fixture.StageAndRecordPairAsync(expiredInventory: true);
+        var staged = (await fixture.Accounts.ReadOwnStagedPreKeyPublicationAsync())!.ExactXpp1.ToArray();
+        var custody = await fixture.Accounts.OpenOwnOnionClientCustodyAsync();
+        await Assert.ThrowsAsync<ApplicationCoreFormatException>(() =>
+            fixture.Accounts.PublishOwnStagedPreKeyInventoryAsync(fixture.Source(), custody));
+        Assert.Null(await custody.Guards.ReadAsync(default));
+        Assert.Equal(staged, (await fixture.Accounts.ReadOwnStagedPreKeyPublicationAsync())!.ExactXpp1.ToArray());
+        Assert.Equal(expected.ExactFirstXic1.ToArray(),
+            (await fixture.Accounts.ReadOwnPreKeyCommitPairAsync())!.ExactFirstXic1.ToArray());
+    }
+
+    [Fact]
+    public async Task CompletedPublication_RejectsAlteredNetworkClosureDespiteValidStoredPair()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        await using var fixture = await Fixture.CreateAsync();
+        _ = await fixture.StageAndRecordPairAsync();
+        var custody = await fixture.Accounts.OpenOwnOnionClientCustodyAsync();
+        fixture.AlterNode = true;
+        await Assert.ThrowsAsync<OnionBoundaryException>(async () =>
+            await fixture.Accounts.PublishOwnStagedPreKeyInventoryAsync(fixture.Source(), custody));
+        Assert.Null(await custody.Guards.ReadAsync(default));
+    }
+
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task CompletedPublication_RejectsBadSignatureOrUnselectedReplicaWithoutRepublishing(
+        bool badSignature, bool unselectedReplica)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        await using var fixture = await Fixture.CreateAsync();
+        var expected = await fixture.StageAndRecordPairAsync(badSignature, unselectedReplica);
+        var custody = await fixture.Accounts.OpenOwnOnionClientCustodyAsync();
+        await Assert.ThrowsAsync<ApplicationCoreFormatException>(() =>
+            fixture.Accounts.PublishOwnStagedPreKeyInventoryAsync(fixture.Source(), custody));
+        Assert.Null(await custody.Guards.ReadAsync(default));
+        Assert.Equal(expected.ExactFirstXic1.ToArray(),
+            (await fixture.Accounts.ReadOwnPreKeyCommitPairAsync())!.ExactFirstXic1.ToArray());
+    }
+
+    [Fact]
+    public async Task CompletedPublication_RechecksFreshnessAfterSuspendedProtectedPairRead()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        await using var fixture = await Fixture.CreateAsync();
+        _ = await fixture.StageAndRecordPairAsync();
+        var custody = await fixture.Accounts.OpenOwnOnionClientCustodyAsync();
+        var injected = false;
+        fixture.AfterNextCommitPairRead(() =>
+        {
+            // The 30-second nonce-response window is not the lifetime of an
+            // already verified current-value capability. Advance past the
+            // actual revocation-freshness TTL, not an assumed 40-second lease.
+            fixture.Sample += AccountDirectoryCurrentProofVerifier.RevocationFreshnessTtlSeconds;
+            injected = true;
+        });
+        await Assert.ThrowsAnyAsync<CryptographicException>(() =>
+            fixture.Accounts.PublishOwnStagedPreKeyInventoryAsync(fixture.Source(), custody));
+        Assert.Null(await custody.Guards.ReadAsync(default));
+        Assert.True(injected);
+    }
+
+    [Fact]
+    public async Task CompletedPublication_RechecksCancellationAfterSuspendedProtectedPairRead()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        await using var fixture = await Fixture.CreateAsync();
+        var expected = await fixture.StageAndRecordPairAsync();
+        var custody = await fixture.Accounts.OpenOwnOnionClientCustodyAsync();
+        using var cancel = new CancellationTokenSource();
+        fixture.AfterNextCommitPairRead(cancel.Cancel);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            fixture.Accounts.PublishOwnStagedPreKeyInventoryAsync(fixture.Source(), custody, cancel.Token));
+        Assert.Null(await custody.Guards.ReadAsync(default));
+        Assert.Equal(expected.ExactFirstXic1.ToArray(),
+            (await fixture.Accounts.ReadOwnPreKeyCommitPairAsync())!.ExactFirstXic1.ToArray());
+    }
+
     private static async Task AssertRealOnionCustodyAsync(Fixture fixture,
         DeepIdV2ContactPathAuthoritySource source, StagedDeepIdV2PreKeyPublication staged,
         ParsedXpp1V2 publication, ContactResolvePathAuthority authority)
@@ -459,6 +578,45 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
             new FrozenClock(DateTimeOffset.FromUnixTimeSeconds(1_000)),
             DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess);
 
+        internal void AfterNextCommitPairRead(Action action) => storage.AfterCommitPairRead = action;
+
+        // Storage-level internal recording deliberately omits transport verification
+        // so negative tests prove the public completion path does not trust a marker.
+        internal async Task<DeepIdV2PreKeyCommitSnapshot> StageAndRecordPairAsync(
+            bool badSignature = false, bool unselectedReplica = false, bool expiredInventory = false)
+        {
+            var source = Source();
+            if (expiredInventory) await StageExpiredInventoryAsync(source);
+            var staged = expiredInventory
+                ? (await accounts.ReadOwnStagedPreKeyPublicationAsync())!
+                : await accounts.EnsureOwnInitialPreKeyInventoryAsync(source);
+            var publication = DeepIdV2PreKeyPublicationCodec.Decode(staged.ExactXpp1.Span);
+            var authority = await source.GetCurrentForPublicationAsync(Network, publication.Manifest.Field(2));
+            var selected = authority.Placement.RankedReplicaNodeIds;
+            var signers = selected.Select(id => nodes.Single(node =>
+                node.SignerId.Span.SequenceEqual(id.Span))).ToArray();
+            if (unselectedReplica)
+                signers[0] = nodes.Single(node => !selected.Any(id => node.SignerId.Span.SequenceEqual(id.Span)));
+            var first = Receipt(signers[0]);
+            var second = Receipt(signers[1]);
+            if (!badSignature && !unselectedReplica)
+                DeepIdV2PreKeyCommitReceiptVerifier.VerifyPair(publication, authority.Placement, first, second);
+            await accounts.RecordPreKeyCommitPairAfterVerificationAsync(staged.ExactXpp1, first, second);
+            return (await accounts.ReadOwnPreKeyCommitPairAsync())!;
+
+            ParsedXic1V2 Receipt(Signer signer)
+            {
+                var time = new byte[8];
+                BinaryPrimitives.WriteUInt64BigEndian(time, Math.Min(1_100UL,
+                    BinaryPrimitives.ReadUInt64BigEndian(publication.Manifest.Field(15).Span) - 1));
+                ReadOnlyMemory<byte>[] fields = [publication.NetworkId, publication.PublicationOperationId,
+                    publication.Manifest.ExactHash, publication.PlacementHash, signer.SignerId, time];
+                var signature = signer.SignCommit(DeepIdV2PreKeyCommitReceiptCodec.CreateSignatureInput(fields));
+                if (badSignature) signature[0] ^= 1;
+                return DeepIdV2PreKeyCommitReceiptCodec.Decode(DeepIdV2PreKeyCommitReceiptCodec.Encode(fields, signature));
+            }
+        }
+
         internal void VerifyInventory(StagedDeepIdV2PreKeyPublication staged,
             VerifiedDeepIdV2DirectoryFreshness fresh)
         {
@@ -671,6 +829,7 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
 
     private sealed class NetworkMarkerFaultStorage(IDeepSecureStorage inner) : IDeepSecureStorage
     {
+        internal Action? AfterCommitPairRead { get; set; }
         internal bool FailAfterNetworkMarker { get; set; }
         internal bool FailAfterOnionMarker { get; set; }
         public async Task<bool> CompareExchangeAsync(string slot, ReadOnlyMemory<byte> expected,
@@ -684,7 +843,16 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
             }
             return applied;
         }
-        public Task<OwnedDeepSecret?> ReadOwnedAsync(string slot, CancellationToken ct = default) => inner.ReadOwnedAsync(slot, ct);
+        public async Task<OwnedDeepSecret?> ReadOwnedAsync(string slot, CancellationToken ct = default)
+        {
+            var value = await inner.ReadOwnedAsync(slot, ct);
+            if (slot == "deep.store.v2.prekey-commit-pair-v1" && AfterCommitPairRead is { } action)
+            {
+                AfterCommitPairRead = null;
+                action();
+            }
+            return value;
+        }
         public async Task WriteBatchAsync(IReadOnlyList<DeepSecureStorageWrite> writes, CancellationToken ct = default)
         {
             await inner.WriteBatchAsync(writes, ct);
@@ -727,6 +895,7 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
             Memory<byte> signature64, CancellationToken ct) => Sign(request.SigningInput, signature64, ct);
         public ValueTask<int> SignAsync(XPointNetworkOperationalSigningRequest request,
             Memory<byte> signature64, CancellationToken ct) => Sign(request.SigningInput, signature64, ct);
+        internal byte[] SignCommit(ReadOnlyMemory<byte> input) => PublicKeyAuth.SignDetached(input.ToArray(), key.PrivateKey);
         private ValueTask<int> Sign(ReadOnlyMemory<byte> input, Memory<byte> destination, CancellationToken ct)
         {
             ct.ThrowIfCancellationRequested();

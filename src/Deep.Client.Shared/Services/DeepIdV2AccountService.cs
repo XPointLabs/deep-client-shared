@@ -450,8 +450,11 @@ public sealed class DeepIdV2AccountService
             .ConfigureAwait(false);
     }
 
-    /// <summary>Publishes the protected exact inventory through both current
-    /// ONION exits and records the verified XIC1 pair before returning.</summary>
+    /// <summary>Completes publication of the protected exact inventory. A
+    /// completed protected pair is reauthenticated against fresh account and
+    /// network authority without dispatch; otherwise both current ONION exits
+    /// must return verified XIC1 before the pair is recorded. Neither result
+    /// grants claim authority or proves present replica availability.</summary>
     public async Task<DeepIdV2PreKeyCommitSnapshot>
         PublishOwnStagedPreKeyInventoryAsync(
             DeepIdV2ContactPathAuthoritySource authoritySource,
@@ -481,10 +484,34 @@ public sealed class DeepIdV2AccountService
             cancellationToken).ConfigureAwait(false);
         var current = DeepIdV2CurrentContactAuthorizationVerifier.Verify(fresh.Proof,
             authorization, reading.BootId.Span, reading.SampleSeconds);
+        var publication = DeepIdV2PreKeyPublicationCodec.Decode(staged.ExactXpp1.Span);
         DeepIdV2ReplicaPreKeyInventoryVerifier.VerifyComplete(
             DeepIdV2Codec.DecodeDid2(staged.ExactDid2.Span), staged.ExactXps1.Span,
-            current, DeepIdV2PreKeyPublicationCodec.Decode(staged.ExactXpp1.Span),
+            current, publication,
             reading.BootId.Span, reading.SampleSeconds);
+        var completed = await ReadOwnPreKeyCommitPairAsync(cancellationToken)
+            .ConfigureAwait(false);
+        if (completed is not null)
+        {
+            // An add-only completion marker is not a cached live capability.
+            // Authenticate its exact signatures, selected replicas and operation
+            // against this fresh placement; never silently republish a bad pair.
+            var placement = ContactServicePlacementFactory.Create(fresh.Network,
+                ContactServiceRequestKind.PublishPreKeyInventory, publication.Manifest.Field(2));
+            DeepIdV2PreKeyCommitReceiptVerifier.VerifyPair(publication, placement,
+                DeepIdV2PreKeyCommitReceiptCodec.Decode(completed.ExactFirstXic1.Span),
+                DeepIdV2PreKeyCommitReceiptCodec.Decode(completed.ExactSecondXic1.Span));
+            // Protected storage reads may suspend; expiry, cancellation, fork
+            // or changed network custody after that read must still reject.
+            reading = await authoritySource.RecheckOwnPreKeyAuthoringAsync(fresh,
+                cancellationToken).ConfigureAwait(false);
+            current = DeepIdV2CurrentContactAuthorizationVerifier.Verify(fresh.Proof,
+                authorization, reading.BootId.Span, reading.SampleSeconds);
+            DeepIdV2ReplicaPreKeyInventoryVerifier.VerifyComplete(
+                DeepIdV2Codec.DecodeDid2(staged.ExactDid2.Span), staged.ExactXps1.Span,
+                current, publication, reading.BootId.Span, reading.SampleSeconds);
+            return completed;
+        }
         var pair = await new DeepIdV2PreKeyPublicationTransport(
             authoritySource, new DeepIdV2PublicationOnionTransport(authoritySource, custody))
             .PublishAsync(staged, cancellationToken)
