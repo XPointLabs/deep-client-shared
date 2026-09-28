@@ -267,6 +267,12 @@ proof still fresh. Providers and durable-store lifetimes belong to the caller;
 the source never accepts a V1 ADP1 or caller-projected placement. On restart it
 rehydrates only an exact signed closure matching protected current network LKG;
 missing predecessor/checkpoint evidence is an error, not a floor reset.
+`HttpDeepIdV2NetworkClosureArtifactSource`, created by the owned HTTP factory,
+now fetches public raw closure bytes without uploading an account or protected
+floor. It enforces endpoint/media/size/timeout and response-network binding;
+it does not replace the verification above or grant permission for direct
+acquisition when signed privacy policy forbids it. Exact envelope ownership is
+[`XPOINT-NETWORK-V1 section 8.1`](../../docs/architecture/XPOINT-NETWORK-V1.md#81-identity-neutral-network-closure-distribution-ncq2ncp2).
 `OpenNetworkLkgStoreAsync` now opens that network floor inside the verified
 DID2 account's DSV2 SQLCipher generation, not a pre-cutover standalone store.
 Operations share the process-independent account lease, revalidate the key,

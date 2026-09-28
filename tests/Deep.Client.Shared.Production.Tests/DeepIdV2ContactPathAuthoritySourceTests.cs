@@ -172,7 +172,7 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
     /// HTTP/secure-storage adapters are in-memory; directory and network
     /// floors use real SQLCipher. This is not TLS, ONION or device evidence.</summary>
     private sealed class Fixture : HttpMessageHandler, IAsyncDisposable,
-        IDeepIdV2NetworkClosureArtifactSource, IOnionMonotonicClock
+        IOnionMonotonicClock
     {
         internal static readonly byte[] Network = Bytes(16, 0x11);
         internal static readonly byte[] Service = Bytes(32, 0x35);
@@ -193,6 +193,7 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
         private DeepIdV2AccountService accounts = null!;
         private DeepIdV2DirectoryProofClient proofs = null!;
         private HttpClient http = null!;
+        private HttpDeepIdV2NetworkClosureArtifactSource closure = null!;
         internal IXPointNetworkStateStore NetworkStore { get; private set; } = null!;
         internal int ProofRequests { get; private set; }
         internal bool RejectProof { get; set; }
@@ -279,25 +280,41 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
                 DeepIdV2DirectoryProofClient.CreateTransportOptions("https://registry.example/"),
                 HttpServiceEndpointPolicy.Production);
             proofs = new(transport, this, pq, floor);
+            closure = new(new HttpServiceRequestTransport(new HttpClient(this, disposeHandler: false),
+                HttpDeepIdV2NetworkClosureArtifactSource.CreateTransportOptions("https://registry.example/"),
+                HttpServiceEndpointPolicy.Production));
         }
 
         internal DeepIdV2ContactPathAuthoritySource Source() =>
-            new(bootstrap.GenesisPin, accounts, proofs, this, NetworkStore, this);
+            new(bootstrap.GenesisPin, accounts, proofs, closure, NetworkStore, this);
 
-        public ValueTask<DeepIdV2NetworkClosureArtifacts> FetchCurrentAsync(ReadOnlyMemory<byte> networkId,
-            XPointNetworkProtectedLkg? protectedFloor, CancellationToken cancellationToken = default)
+        private DeepIdV2NetworkClosureArtifacts PublicClosure()
         {
-            cancellationToken.ThrowIfCancellationRequested();
             var descriptors = operational.ExactXnd1.Select(value => (ReadOnlyMemory<byte>)value.ToArray()).ToArray();
             if (AlterNode) { var bytes = descriptors[0].ToArray(); bytes[^1] ^= 1; descriptors[0] = bytes; }
-            return ValueTask.FromResult(new DeepIdV2NetworkClosureArtifacts(
+            return new DeepIdV2NetworkClosureArtifacts(
                 [bootstrap.ExactXna1], [bootstrap.ExactDts1], [operational.ExactXvp1],
-                [operational.ExactXnv1], [operational.ExactXnh1], descriptors, [operational.ExactPmt2]));
+                [operational.ExactXnv1], [operational.ExactXnh1], descriptors, [operational.ExactPmt2]);
         }
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,
             CancellationToken cancellationToken)
         {
+            if (request.RequestUri!.AbsolutePath == HttpDeepIdV2NetworkClosureArtifactSource.EndpointPath)
+            {
+                var network = XPointNetworkClosureWireCodec.DecodeRequest(
+                    await request.Content!.ReadAsByteArrayAsync(cancellationToken));
+                Assert.Equal(Network, network);
+                var raw = PublicClosure();
+                var encoded = XPointNetworkClosureWireCodec.EncodeResponse(network,
+                    raw.ExactXna1AuthorityChain, raw.ExactDts1PolicyChain,
+                    raw.ExactOrderedXvp1Chain, raw.ExactOrderedXnv1Chain,
+                    raw.ExactOrderedXnh1Chain, raw.ExactActiveXnd1, raw.ExactOrderedPmt2Chain);
+                var distributed = new HttpResponseMessage(HttpStatusCode.OK)
+                { RequestMessage = request, Content = new ByteArrayContent(encoded) };
+                distributed.Content.Headers.ContentType = new(XPointNetworkClosureWireCodec.ResponseMediaType);
+                return distributed;
+            }
             ProofRequests++;
             if (RejectProof) return new(HttpStatusCode.ServiceUnavailable) { RequestMessage = request };
             var query = DeepIdV2DirectoryProofWireCodec.DecodeRequest(
@@ -331,7 +348,7 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
 
         public ValueTask DisposeAsync()
         {
-            proofs?.Dispose(); http?.Dispose(); pq.Dispose(); innerStorage.Dispose();
+            closure?.Dispose(); proofs?.Dispose(); http?.Dispose(); pq.Dispose(); innerStorage.Dispose();
             foreach (var signer in witnesses.Concat(nodes).Append(root)) signer.Dispose();
             if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true);
             Dispose(); return ValueTask.CompletedTask;

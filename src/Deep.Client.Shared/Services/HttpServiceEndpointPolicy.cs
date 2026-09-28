@@ -430,6 +430,19 @@ public sealed class HttpServiceTransportFactory
         }
     }
 
+    /// <summary>Creates only a public raw-closure fetch adapter; no account or route authority.</summary>
+    public ContactV2.HttpDeepIdV2NetworkClosureArtifactSource CreateDeepIdV2NetworkClosureArtifactSource(
+        string registryBaseUrl,
+        HttpServiceClientOptions? clientOptions = null,
+        TimeSpan requestTimeout = default)
+    {
+        var transport = CreateRequestTransport(
+            ContactV2.HttpDeepIdV2NetworkClosureArtifactSource.CreateTransportOptions(
+                registryBaseUrl, requestTimeout), clientOptions);
+        try { return new ContactV2.HttpDeepIdV2NetworkClosureArtifactSource(transport); }
+        catch { transport.Dispose(); throw; }
+    }
+
     public AccountDirectoryV1.AccountDirectoryGenesisAdmissionClient
         CreateAccountDirectoryGenesisAdmissionClient(
             string directoryBaseUrl,
