@@ -1,7 +1,12 @@
 using System.Buffers;
 using System.Net;
 using System.Net.Http.Headers;
+using System.Net.Security;
+using System.Net.Sockets;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using Deep.Protocol.DeepExtension.ManagedIngress;
+using Deep.Protocol.DeepExtension.PrivacyRouting;
 
 namespace Deep.Client.Shared.Services;
 
@@ -41,6 +46,7 @@ internal sealed class PrivacyManagedIngressHttpTransport :
 {
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(30);
     private readonly HttpClient httpClient;
+    private readonly VerifiedOnionEntryTransport? verifiedEntry;
     private int disposed;
 
     internal PrivacyManagedIngressHttpTransport(
@@ -73,6 +79,78 @@ internal sealed class PrivacyManagedIngressHttpTransport :
         ValidateOrigin(httpClient.BaseAddress);
     }
 
+    internal PrivacyManagedIngressHttpTransport(VerifiedOnionEntryTransport entry)
+    {
+        ArgumentNullException.ThrowIfNull(entry);
+        entry.EnsureCurrent();
+        if (entry.Peer.Transport != OnionNextHopTransport.TcpTls)
+            throw new NotSupportedException("The selected entry requires an unavailable authenticated carrier.");
+        var address = entry.Peer.AddressFamily switch
+        {
+            OnionNextHopAddressFamily.IPv4 => new IPAddress(entry.Peer.Address.Span[..4]),
+            OnionNextHopAddressFamily.IPv6 => new IPAddress(entry.Peer.Address.Span),
+            _ => throw new InvalidDataException("The selected entry address family is unsupported.")
+        };
+        var port = entry.Peer.Port;
+        var pin = entry.Peer.SpkiSha256.ToArray();
+        var handler = new SocketsHttpHandler
+        {
+            AllowAutoRedirect = false, UseProxy = false, UseCookies = false,
+            AutomaticDecompression = DecompressionMethods.None,
+            ConnectTimeout = RequestTimeout,
+            ConnectCallback = async (context, ct) =>
+            {
+                entry.EnsureCurrent();
+                if (context.DnsEndPoint.Port != port ||
+                    !IPAddress.TryParse(context.DnsEndPoint.Host, out var requested) || !requested.Equals(address))
+                    throw new InvalidDataException("The ONION entry transport attempted a different endpoint.");
+                var socket = new Socket(address.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
+                try
+                {
+                    await socket.ConnectAsync(new IPEndPoint(address, port), ct).ConfigureAwait(false);
+                    entry.EnsureCurrent();
+                    return new NetworkStream(socket, ownsSocket: true);
+                }
+                catch { socket.Dispose(); throw; }
+            }
+        };
+        handler.SslOptions.RemoteCertificateValidationCallback = (_, certificate, _, errors) =>
+        {
+            try { entry.EnsureCurrent(); return ValidateSignedNodeCertificate(certificate, errors, pin); }
+            catch (OnionBoundaryException) { return false; }
+        };
+        verifiedEntry = entry;
+        httpClient = new HttpClient(handler, disposeHandler: true)
+        {
+            BaseAddress = new UriBuilder(Uri.UriSchemeHttps, address.ToString(), port, "/").Uri,
+            Timeout = Timeout.InfiniteTimeSpan
+        };
+    }
+
+    // Only the typed constructor above can install this policy. Registry/CA
+    // HTTPS retains platform trust; no caller may supply a pin or accept flag.
+    internal static bool ValidateSignedNodeCertificate(X509Certificate? certificate,
+        SslPolicyErrors errors, ReadOnlySpan<byte> expectedSpki)
+    {
+        if (certificate is not X509Certificate2 cert || expectedSpki.Length != 32 ||
+            expectedSpki.IndexOfAnyExcept((byte)0) < 0 ||
+            errors is not (SslPolicyErrors.None or SslPolicyErrors.RemoteCertificateChainErrors)) return false;
+        try
+        {
+            var now = DateTime.UtcNow;
+            if (cert.NotBefore.ToUniversalTime() > now || cert.NotAfter.ToUniversalTime() <= now) return false;
+            var usage = cert.Extensions.OfType<X509EnhancedKeyUsageExtension>().SingleOrDefault();
+            if (usage is not null && !usage.EnhancedKeyUsages.Cast<Oid>().Any(static oid =>
+                oid.Value is "1.3.6.1.5.5.7.3.1" or "2.5.29.37.0")) return false;
+            var keyUsage = cert.Extensions.OfType<X509KeyUsageExtension>().SingleOrDefault();
+            if (keyUsage is not null && (keyUsage.KeyUsages & X509KeyUsageFlags.DigitalSignature) == 0) return false;
+            var observed = SHA256.HashData(cert.PublicKey.ExportSubjectPublicKeyInfo());
+            return CryptographicOperations.FixedTimeEquals(observed, expectedSpki);
+        }
+        catch (Exception exception) when (exception is CryptographicException or InvalidOperationException or ArgumentException)
+        { return false; }
+    }
+
     public void Dispose()
     {
         if (Interlocked.Exchange(ref disposed, 1) == 0)
@@ -87,6 +165,7 @@ internal sealed class PrivacyManagedIngressHttpTransport :
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
         cancellationToken.ThrowIfCancellationRequested();
+        verifiedEntry?.EnsureCurrent();
         ManagedIngressH2Contract.ValidateOpaqueFrame(opaqueFrame.Span);
         var requestBytes = opaqueFrame.ToArray();
         try
@@ -137,6 +216,7 @@ internal sealed class PrivacyManagedIngressHttpTransport :
             using (response)
             {
                 EnsureUnchangedOrigin(request, response);
+                verifiedEntry?.EnsureCurrent();
                 var declaredLength = response.Content.Headers.ContentLength;
                 if (declaredLength is null ||
                     declaredLength < 0 ||

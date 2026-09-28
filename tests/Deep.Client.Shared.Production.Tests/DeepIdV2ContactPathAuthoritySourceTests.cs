@@ -1,4 +1,5 @@
 using System.Net;
+using System.Buffers.Binary;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using System.Runtime.InteropServices;
@@ -7,6 +8,8 @@ using Deep.Client.Shared.Persistence.XPointNetworkV1;
 using Deep.Client.Shared.Services;
 using Deep.Client.Shared.Services.AccountDirectoryV2;
 using Deep.Client.Shared.Services.ContactV2;
+using Deep.Client.Shared.Services.ContactV1;
+using Deep.Client.Shared.Services.XPointNetworkV1;
 using Deep.Protocol.AccountDirectoryV1;
 using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.ContactV2;
@@ -38,6 +41,7 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
         Assert.Equal(placement.Placement.PlacementHash.ToArray(), publication.PlacementHash.ToArray());
         Assert.True(await fixture.Accounts.HasOwnStagedPreKeyInventoryAsync());
         Assert.Null(await fixture.Accounts.ReadOwnPreKeyCommitPairAsync());
+        await AssertRealOnionCustodyAsync(fixture, source, staged, publication, placement);
         fixture.RejectProof = true;
         var before = fixture.ProofRequests;
         var retry = await fixture.Accounts.EnsureOwnInitialPreKeyInventoryAsync(source);
@@ -49,6 +53,58 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
         Assert.Equal(before, fixture.ProofRequests); // Stored retry is not fresh authority.
         await Assert.ThrowsAnyAsync<IOException>(async () =>
             await source.GetCurrentForPublicationAsync(Fixture.Network, service.Field(2)));
+    }
+
+    private static async Task AssertRealOnionCustodyAsync(Fixture fixture,
+        DeepIdV2ContactPathAuthoritySource source, StagedDeepIdV2PreKeyPublication staged,
+        ParsedXpp1V2 publication, ContactResolvePathAuthority authority)
+    {
+        var custody = await fixture.Accounts.OpenOwnOnionClientCustodyAsync();
+        var fragments = DeepIdV2BoundedPreKeyPublicationCodec.CreateSequence(staged.ExactXpp1.Span,
+            authority.Placement.ViewHash.Span, staged.ExactDid2.Span, staged.ExactDca1.Span, staged.ExactXps1.Span);
+        var request = ContactResolveCanonicalPathRequest.FromDid2BoundedPublication(
+            DeepIdV2BoundedPreKeyPublicationCodec.Decode(fragments[0]), publication.Manifest.Field(2).Span,
+            Math.Min(BinaryPrimitives.ReadUInt64BigEndian(publication.Manifest.Field(15).Span),
+                authority.Placement.ValidUntilUnixSeconds));
+        var paths = new ContactResolvePrivacyPathProvider(source, custody.Guards);
+        var ledger = new CapturingEntropyLedger(custody.Entropy);
+        var codec = new PrivacyRoutingCodec(new OnionEntropyAuthority(ledger),
+            new OnionKeyAgreementAuthority(new RejectClientReceiveVault()));
+        foreach (var exit in authority.Placement.RankedReplicaNodeIds)
+        {
+            var prepared = await paths.PrepareExactAsync(OnionOperation.ContactResolve, request, exit, default);
+            var entry = OnionEntryTransportFactory.Create(prepared.Attempt.Path);
+            entry.EnsureCurrent();
+            using var built = await codec.BuildAsync(prepared.Attempt.Path, prepared.Attempt.Request, default);
+            Assert.False(built.Frame.IsEmpty);
+            Assert.NotNull(ledger.LastBatch);
+            Assert.Equal(OnionEntropyCommitOutcome.Duplicate,
+                await custody.Entropy.CommitAsync(ledger.LastBatch!, default));
+        }
+        var reopened = await fixture.ReopenAccount().OpenOwnOnionClientCustodyAsync();
+        Assert.Equal(OnionEntropyCommitOutcome.Duplicate,
+            await reopened.Entropy.CommitAsync(ledger.LastBatch!, default));
+        Assert.Equal(EntryGuardStateCodec.Encode((await custody.Guards.ReadAsync(default))!),
+            EntryGuardStateCodec.Encode((await reopened.Guards.ReadAsync(default))!));
+        // A frame was sealed locally; no network send, XIC1 or device claim.
+    }
+
+    private sealed class CapturingEntropyLedger(IOnionEntropyUniquenessLedger inner) : IOnionEntropyUniquenessLedger
+    {
+        internal OnionEntropyCommitmentBatch? LastBatch { get; private set; }
+        public async ValueTask<OnionEntropyCommitOutcome> CommitAsync(OnionEntropyCommitmentBatch batch, CancellationToken ct)
+        {
+            var result = await inner.CommitAsync(batch, ct);
+            if (result == OnionEntropyCommitOutcome.Committed) LastBatch = batch;
+            return result;
+        }
+    }
+
+    private sealed class RejectClientReceiveVault : IOnionKeyAgreementVault
+    {
+        public ValueTask<byte[]> DeriveX25519SharedSecretAsync(OnionKeyHandle keyHandle,
+            ReadOnlyMemory<byte> peerPublicKey, CancellationToken ct) =>
+            throw new InvalidOperationException("The client must never ask for an XNode receive key.");
     }
 
     [Fact]
@@ -194,7 +250,59 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
         var method = typeof(DeepIdV2AccountService).GetMethod(
             nameof(DeepIdV2AccountService.PublishOwnStagedPreKeyInventoryAsync))!;
         Assert.Equal(typeof(DeepIdV2ContactPathAuthoritySource), method.GetParameters()[0].ParameterType);
+        Assert.Equal(typeof(DeepIdV2OnionClientCustody), method.GetParameters()[1].ParameterType);
+        Assert.Empty(typeof(DeepIdV2OnionClientCustody).GetConstructors());
     }
+
+    [Fact]
+    public async Task OnionGuardCustody_PreservesCasAfterReopenAndRejectsSqlRollbackAndForeignOwner()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        var custody = await fixture.Accounts.OpenOwnOnionClientCustodyAsync();
+        Assert.Null(await custody.Guards.ReadAsync(default));
+        var first = Guard(1);
+        Assert.Equal(EntryGuardStoreWriteDisposition.Applied,
+            (await custody.Guards.CompareExchangeAsync(null, first, default)).Disposition);
+        Assert.Equal(EntryGuardStoreWriteDisposition.Conflict,
+            (await custody.Guards.CompareExchangeAsync(null, first, default)).Disposition);
+        var reopenedAccount = fixture.ReopenAccount();
+        var reopened = await reopenedAccount.OpenOwnOnionClientCustodyAsync();
+        Assert.Equal(EntryGuardStateCodec.Encode(first),
+            EntryGuardStateCodec.Encode((await reopened.Guards.ReadAsync(default))!));
+        await Assert.ThrowsAsync<ArgumentException>(() => reopenedAccount.PublishOwnStagedPreKeyInventoryAsync(
+            fixture.Source(reopenedAccount), custody));
+        Assert.Equal(0, fixture.ProofRequests);
+        var second = Guard(2);
+        Assert.Equal(EntryGuardStoreWriteDisposition.Applied,
+            (await reopened.Guards.CompareExchangeAsync(1, second, default)).Disposition);
+        await using (var connection = await fixture.OpenSqlAsync())
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = "UPDATE protected_lkg_root SET revision=1,payload=$payload WHERE root_kind=4;";
+            command.Parameters.AddWithValue("$payload", EntryGuardStateCodec.Encode(first));
+            Assert.Equal(1, command.ExecuteNonQuery());
+        }
+        await Assert.ThrowsAsync<CryptographicException>(async () => await reopened.Guards.ReadAsync(default));
+        await Assert.ThrowsAsync<CryptographicException>(() => reopenedAccount.OpenOwnOnionClientCustodyAsync());
+        await fixture.ResetAccountAsync();
+        await Assert.ThrowsAsync<InvalidDataException>(async () => await custody.Guards.ReadAsync(default));
+    }
+
+    [Fact]
+    public async Task OnionGuardMarkerBeforeSqlCrash_RejectsReadAndReopenWithoutEmittingAuthority()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        var custody = await fixture.Accounts.OpenOwnOnionClientCustodyAsync();
+        fixture.FailAfterNextOnionMarker();
+        await Assert.ThrowsAsync<IOException>(async () =>
+            await custody.Guards.CompareExchangeAsync(null, Guard(1), default));
+        await Assert.ThrowsAsync<CryptographicException>(async () => await custody.Guards.ReadAsync(default));
+        await Assert.ThrowsAsync<CryptographicException>(() => fixture.Accounts.OpenOwnOnionClientCustodyAsync());
+        Assert.Equal(0, fixture.ProofRequests);
+    }
+
+    private static EntryGuardState Guard(ulong revision) => new(revision, Fixture.Network,
+        1, Bytes(32, 0x21), Bytes(32, 0x22), Bytes(32, 0x23), [Bytes(32, 0x23)]);
 
     [Fact]
     public async Task AccountNetworkFloor_RejectsSqlRollbackCorruptionDeletionAndRepin()
@@ -309,6 +417,7 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
 
         private Fixture() => storage = new(innerStorage);
         internal void FailAfterNextNetworkMarker() => storage.FailAfterNetworkMarker = true;
+        internal void FailAfterNextOnionMarker() => storage.FailAfterOnionMarker = true;
         internal Task ResetAccountAsync() => accounts.ResetExplicitlyAsync();
 
         internal async Task<IXPointNetworkStateStore> ReopenNetworkStoreAsync(bool changedPin = false)
@@ -466,10 +575,16 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
     private sealed class NetworkMarkerFaultStorage(IDeepSecureStorage inner) : IDeepSecureStorage
     {
         internal bool FailAfterNetworkMarker { get; set; }
+        internal bool FailAfterOnionMarker { get; set; }
         public Task<OwnedDeepSecret?> ReadOwnedAsync(string slot, CancellationToken ct = default) => inner.ReadOwnedAsync(slot, ct);
         public async Task WriteBatchAsync(IReadOnlyList<DeepSecureStorageWrite> writes, CancellationToken ct = default)
         {
             await inner.WriteBatchAsync(writes, ct);
+            if (FailAfterOnionMarker && writes.Any(write => write.Slot.Contains(".onion-custody.", StringComparison.Ordinal)))
+            {
+                FailAfterOnionMarker = false;
+                throw new IOException("Injected stop after ONION marker, before SQL commit.");
+            }
             if (FailAfterNetworkMarker && writes.Any(write => write.Slot.Contains(".network-lkg-floor.", StringComparison.Ordinal)))
             {
                 FailAfterNetworkMarker = false;

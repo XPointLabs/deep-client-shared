@@ -169,6 +169,16 @@ public sealed class DeepIdV2AccountService
             .ConfigureAwait(false);
     }
 
+    /// <summary>Opens local account/instance-bound ONION guards and durable
+    /// entropy reservations. This releases no device scalar or network authority.</summary>
+    public async Task<DeepIdV2OnionClientCustody> OpenOwnOnionClientCustodyAsync(
+        CancellationToken cancellationToken = default)
+    {
+        using var verifier = OpenVerifier();
+        return await owner.OpenOnionCustodyAsync(TrustedUnixSeconds(), verifier,
+            this, cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>
     /// Starts the DID2-only pre-XPK1 initiator claim from this protected
     /// account and an independently verified, still-current directory proof.
@@ -442,16 +452,20 @@ public sealed class DeepIdV2AccountService
     public async Task<DeepIdV2PreKeyCommitSnapshot>
         PublishOwnStagedPreKeyInventoryAsync(
             DeepIdV2ContactPathAuthoritySource authoritySource,
-            PrivacyRoutedContactResolverTransport onion,
+            DeepIdV2OnionClientCustody custody,
             CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(authoritySource);
-        ArgumentNullException.ThrowIfNull(onion);
+        ArgumentNullException.ThrowIfNull(custody);
+        authoritySource.RequireAccountOwner(this);
+        if (!ReferenceEquals(custody.Owner, this))
+            throw new ArgumentException("DID2 publication requires this account's ONION custody.", nameof(custody));
         var staged = await ReadOwnStagedPreKeyPublicationAsync(
             cancellationToken).ConfigureAwait(false) ?? throw new
             InvalidOperationException("No protected DID2 pre-key inventory is staged.");
         var pair = await new DeepIdV2PreKeyPublicationTransport(
-            authoritySource, onion).PublishAsync(staged, cancellationToken)
+            authoritySource, new DeepIdV2PublicationOnionTransport(authoritySource, custody))
+            .PublishAsync(staged, cancellationToken)
             .ConfigureAwait(false);
         await RecordPreKeyCommitPairAfterVerificationAsync(
             staged.ExactXpp1, pair.First, pair.Second,

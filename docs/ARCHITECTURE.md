@@ -82,6 +82,32 @@ only reconciliation authority.
 
 ## Signed activation binding
 
+### DID2-only selected-entry publication candidate
+
+The replacement diagnostic publication path follows
+[`DR-0009`](../../docs/survival-program/decisions/DR-0009-did2-selected-entry-transport.md).
+`DeepIdV2AccountService.OpenOwnOnionClientCustodyAsync` opens local guards and
+entropy reservations bound to the verified current DID2 account and DSV2
+database instance. `PublishOwnStagedPreKeyInventoryAsync` accepts only this
+account-owned custody and its DID2 authority source, not a fixed-origin or V1
+host. The entry's address, port and TLS SPKI come from Protocol's verified
+exit-specific path. Registry HTTPS retains platform CA trust.
+
+DSV2 protected roots 4 (guards) and 5 (entropy) use two fixed SecureStorage
+floor slots each. A protected marker is committed before SQL; interrupted,
+missing or rolled-back state fails closed and requires explicit account reset,
+not silent regeneration. This detects SQL-only rollback while protected
+storage remains intact, not joint rollback of both stores. Entropy commitments
+are canonical and never evicted: the 262,144-commitment bound rejects further
+reservations rather than risking reuse. Capacity retirement/recovery remains
+a release gate; no automatic reset or key-epoch retirement is implemented.
+
+Request ephemeral/reply keys remain Protocol-generated one-use material; the
+client never acquires a node receive-key vault. Local frame sealing and native
+SQLCipher tests are not TLS deployment, remote XIC1, masked-carrier or physical
+messaging evidence. MAUI's HTTPS-only physical UAT diagnostic now mounts this
+publisher; no successful live publication or device result is claimed yet.
+
 DEV physical activation accepts an exact Mr. X-signed policy property set. In
 addition to authority, issuer, holder pair, generation, manifest, and
 revocation pins, the policy now binds `privacyRoutesSha256`. Import copies the

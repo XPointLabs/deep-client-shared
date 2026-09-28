@@ -4,6 +4,7 @@ using System.Text;
 using Deep.Client.Shared.Domain;
 using Deep.Client.Shared.Services.AccountDirectoryV2;
 using Deep.Client.Shared.Services;
+using Deep.Client.Shared.Services.ContactV2;
 using Deep.Protocol.AccountDirectoryV1;
 using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.Identity;
@@ -89,6 +90,17 @@ internal sealed class ProtectedDeepIdV2AccountOwner
             mlDsa65, cancellationToken).ConfigureAwait(false);
         return await SqliteDeepIdV2AccountGeneration.OpenNetworkLkgStoreAsync(
             storage, lease, sqlStatePath, current, genesisPin, cancellationToken).ConfigureAwait(false);
+    }
+
+    internal async ValueTask<DeepIdV2OnionClientCustody> OpenOnionCustodyAsync(
+        ulong trustedUnixSeconds, IDeepMlDsa65Verifier mlDsa65,
+        DeepIdV2AccountService account, CancellationToken cancellationToken)
+    {
+        using var held = await lease.AcquireAsync(cancellationToken).ConfigureAwait(false);
+        using var current = await RequireCurrentUnderLeaseAsync(trustedUnixSeconds,
+            mlDsa65, cancellationToken).ConfigureAwait(false);
+        return await SqliteDeepIdV2AccountGeneration.OpenOnionCustodyAsync(storage,
+            lease, sqlStatePath, current, account, cancellationToken).ConfigureAwait(false);
     }
 
     internal async ValueTask<SqliteDeviceStateStore>
