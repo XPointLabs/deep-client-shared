@@ -1,4 +1,9 @@
 <Solution>
+  <Folder Name="/protocol/">
+    <Project Path="../deep-protocol/src/Deep.Protocol/Deep.Protocol.csproj" />
+    <Project Path="../deep-protocol/src/Deep.Protocol.MembershipRoutes/Deep.Protocol.MembershipRoutes.csproj" />
+    <Project Path="../deep-protocol/src/Deep.Protocol.ProfileCarrier/Deep.Protocol.ProfileCarrier.csproj" />
+  </Folder>
   <Folder Name="/src/">
     <Project Path="src/Deep.Client.Shared/Deep.Client.Shared.Production.csproj" />
   </Folder>

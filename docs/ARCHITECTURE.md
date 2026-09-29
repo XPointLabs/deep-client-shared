@@ -31,6 +31,34 @@ The signed-network/SQLCipher/ONION-codec tests are not socket or device E2E.
 Downstream clients must rebuild/repin Protocol and Shared together; no account
 reset is required by this path-only change.
 
+## Account-owned restart-safe network history
+
+The production test solution explicitly lists its three source Protocol
+projects so the solution's selected configuration applies to the complete
+graph. A Release Shared/test build must not silently use Debug Protocol
+dependencies. This changes build configuration mapping, not crypto assertions,
+the test selection, package pins or the production wire.
+
+`DeepIdV2ContactPathAuthoritySource` now consumes the account store's complete
+protected history, not a process-local predecessor cache or tuple-only restart
+fallback. Verification, exact predecessor CAS, SQLCipher projection/history
+commit and durable read-back follow
+[DR-0012 client custody](../../docs/survival-program/decisions/DR-0012-protected-network-history.md#client-account-custody-extension-2026-09-29).
+The source checks the proof's account against the store, and rechecks the exact
+history before releasing authoring authority. Raw `IXPointNetworkStateStore`
+CAS cannot initialize or advance this DID2 store; it only preserves the exact
+floor and can permanently latch a fork. General/V1 stores are not accepted by
+this DID2 authority source.
+
+An initialized account with only the previous projection is incompatible:
+it rejects without rewriting, migration, silent re-key or empty bootstrap.
+Disposable pre-activation QA accounts require explicit application-owned
+reset before this candidate is installed. The schema/account generation,
+network records, signatures, directory floors and registered node keys are
+not migrated. Retaining an expired predecessor enables lineage verification,
+not expired traffic authority. Coordinated restore/deletion of both SQL and
+protected storage is not detectable by this local custody.
+
 ## Native authenticated mailbox
 
 `NativeMau2MailboxTransport` and `ClientMailboxAdapter` are the portable
@@ -361,8 +389,8 @@ proof still fresh. Providers and durable-store lifetimes belong to the caller;
 without a service capability or publication placement. The publication method
 holds the same source gate through verification and placement derivation;
 a preceding network check is never substituted for its fresh proof.
-the source never accepts a V1 ADP1 or caller-projected placement. On restart it
-rehydrates only an exact signed closure matching protected current network LKG;
+The source never accepts a V1 ADP1 or caller-projected placement. On restart it
+uses the complete account-owned protected network history;
 missing predecessor/checkpoint evidence is an error, not a floor reset.
 `HttpDeepIdV2NetworkClosureArtifactSource`, created by the owned HTTP factory,
 now fetches public raw closure bytes without uploading an account or protected
@@ -385,13 +413,15 @@ Repeated live mints now bind full genesis-to-terminal distribution to the
 exact previously verified DNH2 policy/PMT history through the existing
 [DR-0012 boundary](../../docs/survival-program/decisions/DR-0012-protected-network-history.md).
 They do not replay genesis as an incremental successor after the tip or revive
-an expired time capability. Restart still requires the distributed current tip
-to match the durable tuple exactly. Durable client DNH2 custody and advancement
-across a changed tip after restart remain a release prerequisite; the live
-history cache is not a claim that those semantics are complete.
+an expired time capability. The account-owned restart boundary is described in
+[the custody section above](#account-owned-restart-safe-network-history), not
+a process-local cache. Physical advancement across a changed tip still needs
+device evidence.
 Reopen binds the pair to the protected exact XPP1; the stored pair is historical
-evidence, not fresh placement or claim authority. MAUI does not yet mount this
-publisher or activate a remote claim; DPH2 and device E2E are not implied.
+evidence, not fresh placement or claim authority. The isolated MAUI HTTPS lane
+mounts this publisher; its actual device results belong to
+[the owner evidence note](../../deep-client-maui/docs/DID2-HTTPS-DEVICE-2026-09-28.md).
+Remote claim, DPH2 and message device E2E are not implied.
 This is PKV2 schema generation 2; generation 1 is intentionally rejected
 without migration and can only be removed by explicit test-account reset.
 This is not yet a full mutable STORE-01 service:

@@ -730,8 +730,9 @@ public sealed class DeepIdV2AccountService
             protectedGenesisCoreHash, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>Opens the DID2 account-owned network floor. This does not
-    /// authorize current network placement, reset a missing floor, or open
+    /// <summary>Opens the DID2 account-owned network floor and
+    /// complete-history custody. This does not authorize current network
+    /// placement, reset a missing floor, migrate a projection-only store, or open
     /// any pre-cutover store. Every operation rechecks protected custody.</summary>
     public async Task<IXPointNetworkStateStore> OpenNetworkLkgStoreAsync(
         XPointNetworkGenesisPin genesisPin, CancellationToken cancellationToken = default)

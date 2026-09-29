@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using Deep.Client.Shared.Persistence.XPointNetworkV1;
+using Deep.Client.Shared.Persistence.DeviceV2;
 using Deep.Client.Shared.Services.AccountDirectoryV2;
 using Deep.Client.Shared.Services.XPointNetworkV1;
 using Deep.Protocol.ContactV1;
@@ -75,15 +76,10 @@ public sealed class DeepIdV2ContactPathAuthoritySource :
     private readonly DeepIdV2DirectoryProofClient proofs;
     private readonly IDeepIdV2NetworkClosureArtifactSource artifacts;
     private readonly IXPointNetworkStateStore networkStore;
-    private readonly XPointNetworkStateClient networkState;
+    private readonly IDeepIdV2NetworkHistoryStore networkHistory;
     private readonly OnionTrustedTimeAuthority trustedTime;
     private readonly IOnionMonotonicClock clock;
     private readonly SemaphoreSlim gate = new(1, 1);
-    private VerifiedOnionNetworkContext? liveContext;
-    // Full-history distribution is not a successor suffix. Capture the exact
-    // non-secret predecessor while current; later mints may use its signed
-    // lineage even after the prior time capability expires.
-    private byte[]? liveProtectedHistory;
 
     public DeepIdV2ContactPathAuthoritySource(XPointNetworkGenesisPin genesisPin,
         DeepIdV2AccountService accounts, DeepIdV2DirectoryProofClient proofs,
@@ -95,7 +91,8 @@ public sealed class DeepIdV2ContactPathAuthoritySource :
         this.proofs = proofs ?? throw new ArgumentNullException(nameof(proofs));
         this.artifacts = artifacts ?? throw new ArgumentNullException(nameof(artifacts));
         this.networkStore = networkStore ?? throw new ArgumentNullException(nameof(networkStore));
-        networkState = new(networkStore);
+        networkHistory = networkStore as IDeepIdV2NetworkHistoryStore ??
+            throw new ArgumentException("DID2 network authority requires account-owned complete history custody.", nameof(networkStore));
         this.clock = clock ?? throw new ArgumentNullException(nameof(clock));
         trustedTime = new(this.clock);
     }
@@ -228,9 +225,10 @@ public sealed class DeepIdV2ContactPathAuthoritySource :
         {
             await proofs.RequireStillFreshAsync(authoring.Proof, authoring.Authority,
                 cancellationToken).ConfigureAwait(false);
-            var floor = await networkStore.ReadAsync(cancellationToken).ConfigureAwait(false);
-            if (floor is null || floor.ForkLatched ||
-                !Same(floor.ProtectedLkg, authoring.Network.ProtectedLkg))
+            var floor = await networkHistory.ReadHistoryAsync(cancellationToken).ConfigureAwait(false);
+            if (floor is null || floor.Snapshot.ForkLatched ||
+                !Same(floor.Snapshot.ProtectedLkg, authoring.Network.ProtectedLkg) ||
+                !Fixed(floor.ExactHistory.Span, OnionNetworkProtectedHistoryCodec.Encode(authoring.Network)))
                 throw new CryptographicException("Pre-key authoring no longer binds protected network custody.");
             authoring.Network.EnsureCurrent();
             var reading = await clock.ReadAsync(cancellationToken).ConfigureAwait(false);
@@ -245,12 +243,10 @@ public sealed class DeepIdV2ContactPathAuthoritySource :
     private async ValueTask<OwnPreKeyAuthoringAuthority> VerifyCurrentNetworkCoreAsync(
         CancellationToken cancellationToken)
     {
-        var before = await networkStore.ReadAsync(cancellationToken).ConfigureAwait(false);
+        var retained = await networkHistory.ReadHistoryAsync(cancellationToken).ConfigureAwait(false);
+        var before = retained?.Snapshot;
         if (before?.ForkLatched == true)
             throw new CryptographicException("Protected network fork latch blocks DID2 publication.");
-        if (liveContext is not null && (before is null ||
-            !Same(before.ProtectedLkg, liveContext.ProtectedLkg)))
-            throw new CryptographicException("Live DID2 network capability differs from protected custody.");
         var exact = await artifacts.FetchCurrentAsync(genesisPin.NetworkId,
             before?.ProtectedLkg, cancellationToken).ConfigureAwait(false) ??
             throw new CryptographicException("The DID2 signed network closure is absent.");
@@ -258,20 +254,16 @@ public sealed class DeepIdV2ContactPathAuthoritySource :
             exact.ExactXna1AuthorityChain, exact.ExactDts1PolicyChain);
         var fresh = await accounts.FetchOwnCurrentDirectoryProofAsync(proofs,
             authority, cancellationToken).ConfigureAwait(false);
+        networkHistory.RequireAccountScope(fresh.CurrentCheckpoint?.Binding.Record.DeepAccountId ??
+            throw new CryptographicException("DID2 network verification requires this account's current checkpoint."));
         VerifiedOnionNetworkContext verified;
         try
         {
-            verified = before is not null && liveContext is null
-                ? await OnionNetworkContextVerifier.VerifyRehydratedCurrentAsync(authority,
-                    fresh, exact.ExactOrderedXvp1Chain, exact.ExactOrderedXnv1Chain,
-                    exact.ExactOrderedXnh1Chain, exact.ExactActiveXnd1,
-                    exact.ExactOrderedPmt2Chain, before.ProtectedLkg, trustedTime,
-                    cancellationToken).ConfigureAwait(false)
-                : liveProtectedHistory is not null
+            verified = retained is not null
                 ? await OnionNetworkContextVerifier.VerifyFromProtectedHistoryAsync(authority, fresh,
                     exact.ExactOrderedXvp1Chain, exact.ExactOrderedXnv1Chain,
                     exact.ExactOrderedXnh1Chain, exact.ExactActiveXnd1,
-                    exact.ExactOrderedPmt2Chain, liveProtectedHistory, trustedTime,
+                    exact.ExactOrderedPmt2Chain, retained.ExactHistory, trustedTime,
                     cancellationToken).ConfigureAwait(false)
                 : await OnionNetworkContextVerifier.VerifyAsync(authority, fresh,
                     exact.ExactOrderedXvp1Chain, exact.ExactOrderedXnv1Chain,
@@ -291,23 +283,23 @@ public sealed class DeepIdV2ContactPathAuthoritySource :
             throw new CryptographicException("A verified network fork blocks DID2 publication.", exception);
         }
         verified.EnsureCurrent();
-        if (liveProtectedHistory is not null &&
-            !OnionNetworkProtectedHistoryCodec.BindsPredecessor(verified, liveProtectedHistory))
+        if (retained is not null &&
+            (!OnionNetworkProtectedHistoryCodec.BindsPredecessor(verified, retained.ExactHistory) ||
+             !Same(before!.ProtectedLkg, verified.PriorProtectedLkg)))
             throw new CryptographicException("Verified network did not bind the complete protected predecessor.");
-        var committed = await networkState.ApplyVerifiedNetworkContextAsync(verified,
+        var committed = await networkHistory.ApplyVerifiedHistoryAsync(retained, verified,
             cancellationToken).ConfigureAwait(false);
         if (committed.Disposition is not (XPointNetworkAdvanceDisposition.Applied or
             XPointNetworkAdvanceDisposition.Idempotent) ||
             !Same(committed.Snapshot.ProtectedLkg, verified.ProtectedLkg))
             throw new CryptographicException("DID2 network custody did not commit the exact verified context.");
-        var after = await networkStore.ReadAsync(cancellationToken).ConfigureAwait(false);
-        if (after is null || after.ForkLatched ||
-            !Same(after.ProtectedLkg, verified.ProtectedLkg))
+        var after = await networkHistory.ReadHistoryAsync(cancellationToken).ConfigureAwait(false);
+        if (after is null || after.Snapshot.ForkLatched ||
+            !Same(after.Snapshot.ProtectedLkg, verified.ProtectedLkg) ||
+            !Fixed(after.ExactHistory.Span, OnionNetworkProtectedHistoryCodec.Encode(verified)))
             throw new CryptographicException("Committed DID2 network custody could not be reauthenticated.");
         await proofs.RequireStillFreshAsync(fresh, authority, cancellationToken).ConfigureAwait(false);
         verified.EnsureCurrent();
-        liveProtectedHistory = OnionNetworkProtectedHistoryCodec.Encode(verified);
-        liveContext = verified;
         return new(verified, authority, fresh);
     }
 

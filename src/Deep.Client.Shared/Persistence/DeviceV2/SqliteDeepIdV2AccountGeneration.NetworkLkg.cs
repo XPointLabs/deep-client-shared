@@ -1,6 +1,8 @@
 using System.Buffers.Binary;
 using System.Security.Cryptography;
 using Deep.Client.Shared.Persistence.XPointNetworkV1;
+using Deep.Client.Shared.Services.XPointNetworkV1;
+using Deep.Protocol.DeepExtension.PrivacyRouting;
 using Deep.Protocol.XPointNetworkV1;
 using Microsoft.Data.Sqlite;
 
@@ -63,17 +65,27 @@ internal static partial class SqliteDeepIdV2AccountGeneration
     }
 
     // This is protected local state, not network evidence. Only the verified
-    // XPointNetworkStateClient may advance trust; the store enforces custody,
+    // account-owned verified-history method may advance trust; the store enforces custody,
     // exact CAS, monotonic revisions and an irreversible fork latch.
     private sealed class NetworkLkgStore(IDeepSecureStorage storage,
         DeepIdV2AccountFileLease accountLease, string path, AccountBinding binding,
-        byte[] genesisAuthorityHash) : IXPointNetworkStateStore
+        byte[] genesisAuthorityHash) : IXPointNetworkStateStore, IDeepIdV2NetworkHistoryStore
     {
         private const int RootKind = 3;
         private const int PayloadBytes = 305; // header8 | genesis32 | XLK1(265)
+        private const int HistoryRootKind = 7;
+        private const int HistoryHeaderBytes = 68;
+        private const int MinimumHistoryBytes = 16 + 225 + 2;
+        private const int MaximumHistoryBytes = 16 + 225 + 2 * 65_535;
         private readonly string markerPrefix = "deep.store.v2." +
             Convert.ToHexStringLower(SHA256.HashData(
-                binding.NetworkId.Concat(binding.AccountId).ToArray())) + ".network-lkg-floor.";
+            binding.NetworkId.Concat(binding.AccountId).ToArray())) + ".network-lkg-floor.";
+
+        public void RequireAccountScope(ReadOnlyMemory<byte> accountId)
+        {
+            if (!Fixed(accountId.Span, binding.AccountId))
+                throw new CryptographicException("The DID2 network history belongs to another account.");
+        }
 
         public async ValueTask<XPointNetworkStateSnapshot?> ReadAsync(CancellationToken cancellationToken)
         {
@@ -90,6 +102,70 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             await CheckMarkersAsync(row, cancellationToken).ConfigureAwait(false);
             transaction.Commit();
             return row?.Snapshot;
+        }
+
+        public async ValueTask<DeepIdV2NetworkHistorySnapshot?> ReadHistoryAsync(CancellationToken cancellationToken)
+        {
+            using var held = await accountLease.AcquireAsync(cancellationToken).ConfigureAwait(false);
+            using var connection = await OpenBoundLkgConnectionAsync(storage, path, binding,
+                cancellationToken).ConfigureAwait(false);
+            using var transaction = connection.BeginTransaction(deferred: false);
+            var row = ReadRow(connection, transaction);
+            await CheckMarkersAsync(row, cancellationToken).ConfigureAwait(false);
+            transaction.Commit();
+            return row is null ? null : new(row.Snapshot, row.ExactHistory);
+        }
+
+        public async ValueTask<XPointNetworkAdvanceResult> ApplyVerifiedHistoryAsync(
+            DeepIdV2NetworkHistorySnapshot? expected, VerifiedOnionNetworkContext verified,
+            CancellationToken cancellationToken)
+        {
+            ArgumentNullException.ThrowIfNull(verified);
+            verified.EnsureCurrent();
+            var next = verified.ProtectedLkg ?? throw new CryptographicException("Complete network custody is required.");
+            if (!Fixed(next.NetworkId.Span, binding.NetworkId))
+                throw new CryptographicException("The verified DID2 network is out of scope.");
+            var history = OnionNetworkProtectedHistoryCodec.Encode(verified);
+            using var held = await accountLease.AcquireAsync(cancellationToken).ConfigureAwait(false);
+            using var connection = await OpenBoundLkgConnectionAsync(storage, path, binding,
+                cancellationToken).ConfigureAwait(false);
+            using var transaction = connection.BeginTransaction(deferred: false);
+            var row = ReadRow(connection, transaction);
+            await CheckMarkersAsync(row, cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            verified.EnsureCurrent();
+            if (row?.Snapshot.Revision != expected?.Snapshot.Revision ||
+                row is not null && !Fixed(row.ExactHistory, expected!.ExactHistory.Span))
+                throw new IOException("The exact DID2 network predecessor changed before CAS.");
+            if (row?.Snapshot.ForkLatched == true)
+                return new(XPointNetworkAdvanceDisposition.ForkLatched, row.Snapshot);
+            if (row is null)
+            {
+                if (verified.PriorProtectedLkg is not null)
+                    throw new CryptographicException("A successor cannot initialize empty DID2 network custody.");
+            }
+            else
+            {
+                if (verified.PriorProtectedLkg is null ||
+                    !SameFloor(row.Snapshot.ProtectedLkg, verified.PriorProtectedLkg) ||
+                    !OnionNetworkProtectedHistoryCodec.BindsPredecessor(verified, row.ExactHistory))
+                    throw new CryptographicException("The complete verified predecessor differs from DID2 custody.");
+                if (SameFloor(next, row.Snapshot.ProtectedLkg))
+                {
+                    if (!Fixed(history, row.ExactHistory))
+                        throw new CryptographicException("The unchanged DID2 floor has different policy or PMT history.");
+                    verified.EnsureCurrent();
+                    return new(XPointNetworkAdvanceDisposition.Idempotent, row.Snapshot);
+                }
+                if (next.ViewGeneration <= row.Snapshot.ProtectedLkg.ViewGeneration ||
+                    next.HeadTreeSize <= row.Snapshot.ProtectedLkg.HeadTreeSize)
+                    throw new CryptographicException("The complete DID2 network advance is not monotonic.");
+            }
+            var replacement = new XPointNetworkStateSnapshot(
+                row is null ? 1 : checked(row.Snapshot.Revision + 1), next, false);
+            await CommitAsync(connection, transaction, row, replacement, history,
+                verified, cancellationToken).ConfigureAwait(false);
+            return new(XPointNetworkAdvanceDisposition.Applied, replacement);
         }
 
         public async ValueTask<XPointNetworkStoreWriteResult> CompareExchangeAsync(
@@ -111,34 +187,39 @@ internal static partial class SqliteDeepIdV2AccountGeneration
                 return new(XPointNetworkStoreWriteDisposition.Conflict, current);
             if (replacement.Revision != (expectedRevision is null ? 1UL : checked(expectedRevision.Value + 1)))
                 throw new InvalidOperationException("The DID2 network replacement must be the next CAS revision.");
-            if (current is not null)
-            {
-                if (current.ForkLatched && !replacement.ForkLatched)
-                    throw new CryptographicException("The protected DID2 network fork latch cannot be cleared.");
-                var prior = current.ProtectedLkg;
-                var next = replacement.ProtectedLkg;
-                if (next.ViewGeneration < prior.ViewGeneration || next.HeadTreeSize < prior.HeadTreeSize ||
-                    prior.LastForwardCheckpointGeneration.HasValue &&
-                    (!next.LastForwardCheckpointGeneration.HasValue ||
-                     next.LastForwardCheckpointGeneration < prior.LastForwardCheckpointGeneration) ||
-                    next.ViewGeneration == prior.ViewGeneration &&
-                    !Fixed(XPointNetworkProtectedLkgCodec.Encode(next), XPointNetworkProtectedLkgCodec.Encode(prior)))
-                    throw new CryptographicException("The DID2 network floor rolls back or conflicts at the same generation.");
-            }
+            if (current is null || !SameFloor(replacement.ProtectedLkg, current.ProtectedLkg))
+                throw new CryptographicException("Raw LKG CAS cannot initialize or advance DID2 network history.");
+            if (current.ForkLatched && !replacement.ForkLatched)
+                throw new CryptographicException("The protected DID2 network fork latch cannot be cleared.");
+            await CommitAsync(connection, transaction, row, replacement, row!.ExactHistory,
+                null, cancellationToken).ConfigureAwait(false);
+            return new(XPointNetworkStoreWriteDisposition.Applied,
+                new(replacement.Revision, replacement.ProtectedLkg, replacement.ForkLatched));
+        }
+
+        private async ValueTask CommitAsync(SqliteConnection connection, SqliteTransaction transaction,
+            Row? row, XPointNetworkStateSnapshot replacement, byte[] history,
+            VerifiedOnionNetworkContext? verified, CancellationToken cancellationToken)
+        {
             var payload = Encode(replacement);
             var revision = checked((long)replacement.Revision);
             var marker = Marker(revision, payload);
+            var envelope = HistoryEnvelope(revision, history, anchor: false);
+            var anchor = HistoryEnvelope(revision, history, anchor: true);
             // SecureStorage precedes SQL, so a crash cannot silently roll the
             // account back to an older valid SQL backup or an empty floor.
             try
             {
-                await storage.WriteBatchAsync([new DeepSecureStorageWrite(MarkerSlot(revision), marker)],
+                cancellationToken.ThrowIfCancellationRequested();
+                verified?.EnsureCurrent();
+                await storage.WriteBatchAsync([new DeepSecureStorageWrite(MarkerSlot(revision), marker),
+                    new DeepSecureStorageWrite(HistoryAnchorSlot(revision), anchor)],
                     cancellationToken).ConfigureAwait(false);
             }
-            finally { CryptographicOperations.ZeroMemory(marker); }
+            finally { CryptographicOperations.ZeroMemory(marker); CryptographicOperations.ZeroMemory(anchor); }
             using var write = connection.CreateCommand();
             write.Transaction = transaction;
-            write.CommandText = current is null
+            write.CommandText = row is null
                 ? "INSERT INTO protected_lkg_root(root_kind,revision,payload) VALUES($kind,$next,$payload);"
                 : "UPDATE protected_lkg_root SET revision=$next,payload=$payload WHERE root_kind=$kind AND revision=$prior AND payload=$expected;";
             write.Parameters.AddWithValue("$kind", RootKind);
@@ -146,18 +227,41 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             write.Parameters.AddWithValue("$payload", payload);
             if (row is not null)
             {
-                write.Parameters.AddWithValue("$prior", checked((long)current!.Revision));
+                write.Parameters.AddWithValue("$prior", checked((long)row.Snapshot.Revision));
                 write.Parameters.AddWithValue("$expected", row.Payload);
             }
             if (write.ExecuteNonQuery() != 1)
                 throw new CryptographicException("The protected DID2 network CAS did not commit.");
+            using var historyWrite = connection.CreateCommand();
+            historyWrite.Transaction = transaction;
+            historyWrite.CommandText = row is null
+                ? "INSERT INTO protected_lkg_root(root_kind,revision,payload) VALUES($kind,$next,$payload);"
+                : "UPDATE protected_lkg_root SET revision=$next,payload=$payload WHERE root_kind=$kind AND revision=$prior AND payload=$expected;";
+            historyWrite.Parameters.AddWithValue("$kind", HistoryRootKind);
+            historyWrite.Parameters.AddWithValue("$next", revision);
+            historyWrite.Parameters.AddWithValue("$payload", envelope);
+            if (row is not null)
+            {
+                historyWrite.Parameters.AddWithValue("$prior", checked((long)row.Snapshot.Revision));
+                historyWrite.Parameters.AddWithValue("$expected", row.HistoryEnvelope);
+            }
+            if (historyWrite.ExecuteNonQuery() != 1)
+                throw new CryptographicException("The protected DID2 full-history CAS did not commit.");
             transaction.Commit();
-            return new(XPointNetworkStoreWriteDisposition.Applied,
-                new(replacement.Revision, replacement.ProtectedLkg, replacement.ForkLatched));
+            using var recheck = connection.BeginTransaction(deferred: false);
+            var durable = ReadRow(connection, recheck);
+            await CheckMarkersAsync(durable, cancellationToken).ConfigureAwait(false);
+            if (durable is null || durable.Snapshot.Revision != replacement.Revision ||
+                !Fixed(durable.Payload, payload) || !Fixed(durable.HistoryEnvelope, envelope))
+                throw new CryptographicException("The complete DID2 network custody did not durably reread.");
+            recheck.Commit();
+            verified?.EnsureCurrent();
         }
 
-        private sealed record Row(XPointNetworkStateSnapshot Snapshot, byte[] Payload);
-        private Row? ReadRow(SqliteConnection connection, SqliteTransaction transaction)
+        private sealed record ProjectionRow(XPointNetworkStateSnapshot Snapshot, byte[] Payload);
+        private sealed record Row(XPointNetworkStateSnapshot Snapshot, byte[] Payload,
+            byte[] HistoryEnvelope, byte[] ExactHistory);
+        private ProjectionRow? ReadProjectionRow(SqliteConnection connection, SqliteTransaction transaction)
         {
             using var read = connection.CreateCommand();
             read.Transaction = transaction;
@@ -180,11 +284,37 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             return new(new(checked((ulong)revision), floor, payload[5] == 1), payload);
         }
 
+        private Row? ReadRow(SqliteConnection connection, SqliteTransaction transaction)
+        {
+            var projection = ReadProjectionRow(connection, transaction);
+            using var read = connection.CreateCommand();
+            read.Transaction = transaction;
+            read.CommandText = "SELECT revision,length(payload),payload FROM protected_lkg_root WHERE root_kind=$kind;";
+            read.Parameters.AddWithValue("$kind", HistoryRootKind);
+            using var reader = read.ExecuteReader();
+            if (!reader.Read())
+            {
+                if (projection is not null)
+                    throw new InvalidDataException("Initialized DID2 custody requires complete network history; no migration is available.");
+                return null;
+            }
+            if (projection is null || reader.GetInt64(0) != checked((long)projection.Snapshot.Revision) ||
+                reader.GetInt64(1) is < HistoryHeaderBytes + MinimumHistoryBytes or > HistoryHeaderBytes + MaximumHistoryBytes)
+                throw new InvalidDataException("The protected DID2 network history is split or oversized.");
+            var envelope = reader.GetFieldValue<byte[]>(2);
+            var history = envelope.AsSpan(HistoryHeaderBytes).ToArray();
+            var expected = HistoryEnvelope(checked((long)projection.Snapshot.Revision), history, anchor: false);
+            if (!Fixed(envelope, expected) || reader.Read())
+                throw new InvalidDataException("The protected DID2 network history envelope is malformed.");
+            return new(projection.Snapshot, projection.Payload, envelope, history);
+        }
+
         private async ValueTask CheckMarkersAsync(Row? row, CancellationToken cancellationToken)
         {
             var revision = row is null ? 1L : checked((long)row.Snapshot.Revision);
             using var marker = await storage.ReadOwnedAsync(MarkerSlot(revision), cancellationToken).ConfigureAwait(false);
-            if (row is null && marker is not null)
+            using var historyAnchor = await storage.ReadOwnedAsync(HistoryAnchorSlot(revision), cancellationToken).ConfigureAwait(false);
+            if (row is null && (marker is not null || historyAnchor is not null))
                 throw new CryptographicException("The protected DID2 network floor disappeared after initialization.");
             if (row is not null)
             {
@@ -195,11 +325,20 @@ internal static partial class SqliteDeepIdV2AccountGeneration
                         throw new CryptographicException("The protected DID2 network marker is absent or mismatched.");
                 }
                 finally { CryptographicOperations.ZeroMemory(expected); }
+                var expectedAnchor = HistoryEnvelope(revision, row.ExactHistory, anchor: true);
+                try
+                {
+                    if (historyAnchor is null || historyAnchor.Length != expectedAnchor.Length ||
+                        !historyAnchor.Use(value => Fixed(value, expectedAnchor)))
+                        throw new CryptographicException("The protected DID2 full-history anchor is absent or mismatched.");
+                }
+                finally { CryptographicOperations.ZeroMemory(expectedAnchor); }
             }
             if (revision < long.MaxValue)
             {
                 using var future = await storage.ReadOwnedAsync(MarkerSlot(revision + 1), cancellationToken).ConfigureAwait(false);
-                if (future is not null)
+                using var futureHistory = await storage.ReadOwnedAsync(HistoryAnchorSlot(revision + 1), cancellationToken).ConfigureAwait(false);
+                if (future is not null || futureHistory is not null)
                     throw new CryptographicException("The protected DID2 network SQL floor is behind its marker.");
             }
         }
@@ -230,5 +369,30 @@ internal static partial class SqliteDeepIdV2AccountGeneration
 
         private string MarkerSlot(long revision) => markerPrefix +
             revision.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+        private string HistoryAnchorSlot(long revision) => markerPrefix + "history." +
+            Convert.ToHexStringLower(genesisAuthorityHash) + "." +
+            revision.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+        private byte[] HistoryEnvelope(long revision, byte[] history, bool anchor)
+        {
+            if (revision < 1 || history.Length is < MinimumHistoryBytes or > MaximumHistoryBytes)
+                throw new InvalidDataException("The DID2 history envelope is outside its bounds.");
+            var value = new byte[HistoryHeaderBytes + (anchor ? 0 : history.Length)];
+            "DNF2"u8.CopyTo(value);
+            BinaryPrimitives.WriteUInt16BigEndian(value.AsSpan(4), 2);
+            BinaryPrimitives.WriteUInt16BigEndian(value.AsSpan(6), anchor ? (ushort)1 : (ushort)0);
+            BinaryPrimitives.WriteInt64BigEndian(value.AsSpan(8), revision);
+            binding.InstanceId.AsSpan(0, 16).CopyTo(value.AsSpan(16));
+            SHA256.HashData(history).CopyTo(value, 32);
+            // Both kinds retain the same authenticated history length; only
+            // the floor carries the bytes, matching the existing host DNF2.
+            BinaryPrimitives.WriteUInt32BigEndian(value.AsSpan(64), checked((uint)history.Length));
+            if (!anchor) history.CopyTo(value, HistoryHeaderBytes);
+            return value;
+        }
+
+        private static bool SameFloor(XPointNetworkProtectedLkg left, XPointNetworkProtectedLkg right) =>
+            Fixed(XPointNetworkProtectedLkgCodec.Encode(left), XPointNetworkProtectedLkgCodec.Encode(right));
     }
 }

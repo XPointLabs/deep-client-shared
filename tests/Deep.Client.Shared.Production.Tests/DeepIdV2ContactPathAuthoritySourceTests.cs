@@ -4,6 +4,7 @@ using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using System.Runtime.InteropServices;
 using Deep.Client.Shared.Persistence;
+using Deep.Client.Shared.Persistence.DeviceV2;
 using Deep.Client.Shared.Persistence.XPointNetworkV1;
 using Deep.Client.Shared.Services;
 using Deep.Client.Shared.Services.AccountDirectoryV2;
@@ -22,6 +23,148 @@ namespace Deep.Client.Shared.Production.Tests;
 
 public sealed class DeepIdV2ContactPathAuthoritySourceTests
 {
+    [Fact]
+    public async Task DurableHistory_ExactPredecessorCasAndRawProjectionCannotReplaceAuthority()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        var initial = await fixture.Source().VerifyCurrentNetworkAsync(Fixture.Network);
+        var store = Assert.IsAssignableFrom<IDeepIdV2NetworkHistoryStore>(fixture.NetworkStore);
+        var retained = (await store.ReadHistoryAsync(default))!;
+        await fixture.AssertHistoryAnchorEnvelopeAsync(retained.ExactHistory);
+        var altered = retained.ExactHistory.ToArray(); altered[^1] ^= 1;
+        await Assert.ThrowsAsync<IOException>(async () =>
+            await store.ApplyVerifiedHistoryAsync(new(retained.Snapshot, altered), initial, default));
+        await Assert.ThrowsAsync<IOException>(async () => await store.ApplyVerifiedHistoryAsync(null, initial, default));
+        store.RequireAccountScope((await fixture.Accounts.GetCurrentAsync())!.AccountId);
+        Assert.Throws<CryptographicException>(() => store.RequireAccountScope(Bytes(32, 0xaa)));
+        await fixture.AdvanceNetworkAsync();
+        var next = await fixture.Source().VerifyCurrentNetworkAsync(Fixture.Network);
+        await Assert.ThrowsAsync<IOException>(async () => await store.ApplyVerifiedHistoryAsync(retained, next, default));
+        await Assert.ThrowsAsync<CryptographicException>(async () => await fixture.NetworkStore.CompareExchangeAsync(
+            2, new(3, initial.ProtectedLkg!, false), default));
+        Assert.Equal(2UL, (await fixture.NetworkStore.ReadAsync(default))!.Revision);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task DurableHistory_MissingOrCorruptIndependentAnchorCannotReopen(bool corrupt)
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        _ = await fixture.Source().VerifyCurrentNetworkAsync(Fixture.Network);
+        await fixture.DamageHistoryAnchorAsync(corrupt);
+        await Assert.ThrowsAsync<CryptographicException>(async () => await fixture.NetworkStore.ReadAsync(default));
+        await Assert.ThrowsAsync<CryptographicException>(() => fixture.ReopenNetworkStoreAsync());
+    }
+
+    [Fact]
+    public async Task DurableHistory_HostileEnvelopeRejectsWithoutRewrite()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        _ = await fixture.Source().VerifyCurrentNetworkAsync(Fixture.Network);
+        await using var connection = await fixture.OpenSqlAsync();
+        using var read = connection.CreateCommand();
+        read.CommandText = "SELECT payload FROM protected_lkg_root WHERE root_kind=7;";
+        var original = Assert.IsType<byte[]>(read.ExecuteScalar());
+        var unknownVersion = original.ToArray(); unknownVersion[5] = 3;
+        var anchorAsFloor = original.ToArray(); anchorAsFloor[7] = 1;
+        var wrongLength = original.ToArray(); wrongLength[67] ^= 1;
+        byte[][] hostile = [unknownVersion, anchorAsFloor, wrongLength,
+            original[..^1], [.. original, 0], new byte[68 + 16 + 225 + 2 * 65_535 + 1]];
+        using var write = connection.CreateCommand();
+        write.CommandText = "UPDATE protected_lkg_root SET payload=$payload WHERE root_kind=7;";
+        var parameter = write.Parameters.Add("$payload", SqliteType.Blob);
+        foreach (var payload in hostile)
+        {
+            parameter.Value = payload;
+            Assert.Equal(1, write.ExecuteNonQuery());
+            await Assert.ThrowsAsync<InvalidDataException>(async () => await fixture.NetworkStore.ReadAsync(default));
+            Assert.Equal(payload, Assert.IsType<byte[]>(read.ExecuteScalar()));
+        }
+        parameter.Value = original;
+        Assert.Equal(1, write.ExecuteNonQuery());
+        Assert.Equal(1UL, (await fixture.NetworkStore.ReadAsync(default))!.Revision);
+    }
+
+    [Fact]
+    public async Task DurableHistory_RehashedSqlHistoryCannotForgeIndependentAnchor()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        _ = await fixture.Source().VerifyCurrentNetworkAsync(Fixture.Network);
+        await using var connection = await fixture.OpenSqlAsync();
+        using var read = connection.CreateCommand();
+        read.CommandText = "SELECT payload FROM protected_lkg_root WHERE root_kind=7;";
+        var envelope = Assert.IsType<byte[]>(read.ExecuteScalar());
+        envelope[^1] ^= 1;
+        SHA256.HashData(envelope.AsSpan(68)).CopyTo(envelope, 32);
+        using var write = connection.CreateCommand();
+        write.CommandText = "UPDATE protected_lkg_root SET payload=$payload WHERE root_kind=7;";
+        write.Parameters.AddWithValue("$payload", envelope);
+        Assert.Equal(1, write.ExecuteNonQuery());
+        await Assert.ThrowsAsync<CryptographicException>(async () => await fixture.NetworkStore.ReadAsync(default));
+        await Assert.ThrowsAsync<CryptographicException>(() => fixture.ReopenNetworkStoreAsync());
+    }
+
+    [Fact]
+    public async Task DurableHistory_ReopenedAccountAdvancesChangedTipWithExpiredHistoricalKeys()
+    {
+        await using var fixture = await Fixture.CreateAsync(expiringHistory: true);
+        var genesis = await fixture.Source().VerifyCurrentNetworkAsync(Fixture.Network);
+        var store = Assert.IsAssignableFrom<IDeepIdV2NetworkHistoryStore>(fixture.NetworkStore);
+        var retained = (await store.ReadHistoryAsync(default))!;
+        Assert.Equal(0UL, retained.Snapshot.ProtectedLkg.ViewGeneration);
+        Assert.Equal(OnionNetworkProtectedHistoryCodec.Encode(genesis), retained.ExactHistory.ToArray());
+        await fixture.AdvanceNetworkAsync();
+        fixture.ProofTime = 1_100; // Historical view expires at 1,090; no clock rollback.
+        fixture.Sample = 200;
+        var reopenedAccount = fixture.ReopenAccount();
+        fixture.NetworkStore = await fixture.ReopenNetworkStoreAsync();
+        var reopened = fixture.Source(reopenedAccount);
+        var next = await reopened.VerifyCurrentNetworkAsync(Fixture.Network);
+        Assert.Equal(1UL, next.ProtectedLkg!.ViewGeneration);
+        Assert.True(OnionNetworkProtectedHistoryCodec.BindsPredecessor(next, retained.ExactHistory));
+        Assert.Equal(2UL, (await fixture.NetworkStore.ReadAsync(default))!.Revision);
+        var exact = (await ((IDeepIdV2NetworkHistoryStore)fixture.NetworkStore).ReadHistoryAsync(default))!.ExactHistory;
+        _ = await fixture.Source(reopenedAccount).VerifyCurrentNetworkAsync(Fixture.Network);
+        Assert.Equal(2UL, (await fixture.NetworkStore.ReadAsync(default))!.Revision);
+        Assert.Equal(exact.ToArray(), (await ((IDeepIdV2NetworkHistoryStore)fixture.NetworkStore).ReadHistoryAsync(default))!.ExactHistory.ToArray());
+        fixture.OmitHistoricalPolicy = true;
+        await Assert.ThrowsAsync<OnionBoundaryException>(async () =>
+            await fixture.Source(reopenedAccount).VerifyCurrentNetworkAsync(Fixture.Network));
+        Assert.Equal(2UL, (await fixture.NetworkStore.ReadAsync(default))!.Revision);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public async Task DurableHistory_CrashAfterProjectionOrHistoryAnchorFailsClosed(int phase)
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        if (phase == 0) fixture.FailAfterNextNetworkMarker();
+        else fixture.FailAfterNextHistoryAnchor();
+        await Assert.ThrowsAsync<IOException>(async () =>
+            await fixture.Source().VerifyCurrentNetworkAsync(Fixture.Network));
+        await Assert.ThrowsAsync<CryptographicException>(async () =>
+            await fixture.NetworkStore.ReadAsync(default));
+        await Assert.ThrowsAsync<CryptographicException>(() => fixture.ReopenNetworkStoreAsync());
+    }
+
+    [Theory]
+    [InlineData(3)]
+    [InlineData(7)]
+    public async Task DurableHistory_MissingSqlHalfRejectsWithoutRepair(int rootKind)
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        _ = await fixture.Source().VerifyCurrentNetworkAsync(Fixture.Network);
+        await using var connection = await fixture.OpenSqlAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = "DELETE FROM protected_lkg_root WHERE root_kind=$kind;";
+        command.Parameters.AddWithValue("$kind", rootKind);
+        Assert.Equal(1, command.ExecuteNonQuery());
+        await Assert.ThrowsAsync<InvalidDataException>(async () => await fixture.NetworkStore.ReadAsync(default));
+        await Assert.ThrowsAsync<InvalidDataException>(() => fixture.ReopenNetworkStoreAsync());
+    }
+
     [Fact]
     public async Task ClaimPath_UsesFreshAccountProofAndV2OnlyCanonicalPlacement()
     {
@@ -527,40 +670,46 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
         Assert.Equal(XPointNetworkStoreWriteDisposition.Conflict,
             (await fixture.NetworkStore.CompareExchangeAsync(null, initial, default)).Disposition);
         await using var connection = await fixture.OpenSqlAsync();
-        byte[] Payload()
+        byte[] Payload(int kind = 3)
         {
             using var read = connection.CreateCommand();
-            read.CommandText = "SELECT payload FROM protected_lkg_root WHERE root_kind=3;";
+            read.CommandText = "SELECT payload FROM protected_lkg_root WHERE root_kind=$kind;";
+            read.Parameters.AddWithValue("$kind", kind);
             return Assert.IsType<byte[]>(read.ExecuteScalar());
         }
-        void Replace(long revision, byte[] payload)
+        void Replace(long revision, byte[] payload, int kind = 3)
         {
             using var write = connection.CreateCommand();
-            write.CommandText = "UPDATE protected_lkg_root SET revision=$revision,payload=$payload WHERE root_kind=3;";
+            write.CommandText = "UPDATE protected_lkg_root SET revision=$revision,payload=$payload WHERE root_kind=$kind;";
+            write.Parameters.AddWithValue("$kind", kind);
             write.Parameters.AddWithValue("$revision", revision);
             write.Parameters.AddWithValue("$payload", payload);
             Assert.Equal(1, write.ExecuteNonQuery());
         }
         var oldPayload = Payload();
+        var oldHistory = Payload(7);
         var latched = new XPointNetworkStateSnapshot(2, initial.ProtectedLkg, true);
         Assert.Equal(XPointNetworkStoreWriteDisposition.Applied,
             (await fixture.NetworkStore.CompareExchangeAsync(1, latched, default)).Disposition);
         var currentPayload = Payload();
+        var currentHistory = Payload(7);
         await Assert.ThrowsAsync<CryptographicException>(async () =>
             await fixture.NetworkStore.CompareExchangeAsync(2, new(3, initial.ProtectedLkg, false), default));
         var reopened = await fixture.ReopenNetworkStoreAsync();
         Assert.True((await reopened.ReadAsync(default))!.ForkLatched);
         Replace(1, oldPayload);
+        Replace(1, oldHistory, 7); // Restore the whole SQL snapshot, not a split row.
         await Assert.ThrowsAsync<CryptographicException>(async () => await reopened.ReadAsync(default));
         Replace(2, currentPayload);
+        Replace(2, currentHistory, 7);
         Assert.True((await reopened.ReadAsync(default))!.ForkLatched);
         await Assert.ThrowsAsync<CryptographicException>(() => fixture.ReopenNetworkStoreAsync(changedPin: true));
         Replace(2, [1]);
         await Assert.ThrowsAsync<InvalidDataException>(async () => await reopened.ReadAsync(default));
         using (var delete = connection.CreateCommand())
         {
-            delete.CommandText = "DELETE FROM protected_lkg_root WHERE root_kind=3;";
-            Assert.Equal(1, delete.ExecuteNonQuery());
+            delete.CommandText = "DELETE FROM protected_lkg_root WHERE root_kind IN (3,7);";
+            Assert.Equal(2, delete.ExecuteNonQuery());
         }
         await Assert.ThrowsAsync<CryptographicException>(async () => await reopened.ReadAsync(default));
         await Assert.ThrowsAsync<CryptographicException>(() => fixture.ReopenNetworkStoreAsync());
@@ -608,12 +757,13 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
         private DeepIdV2DirectoryProofClient proofs = null!;
         private HttpClient http = null!;
         private HttpDeepIdV2NetworkClosureArtifactSource closure = null!;
-        internal IXPointNetworkStateStore NetworkStore { get; private set; } = null!;
+        internal IXPointNetworkStateStore NetworkStore { get; set; } = null!;
         internal int ProofRequests { get; private set; }
         internal bool RejectProof { get; set; }
         internal bool AlterNode { get; set; }
         internal bool OmitHistoricalPolicy { get; set; }
         internal ulong Sample { get; set; } = 100;
+        internal ulong ProofTime { get; set; } = 1_100;
         internal DeepIdV2AccountService Accounts => accounts;
         internal DeepIdV2AccountService ReopenAccount() => new(storage, directory, Network, 1,
             new FrozenClock(DateTimeOffset.FromUnixTimeSeconds(1_000)),
@@ -690,6 +840,37 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
 
         private Fixture() => storage = new(innerStorage);
         internal void FailAfterNextNetworkMarker() => storage.FailAfterNetworkMarker = true;
+        internal void FailAfterNextHistoryAnchor() => storage.FailAfterHistoryAnchor = true;
+        internal async Task AssertHistoryAnchorEnvelopeAsync(ReadOnlyMemory<byte> history)
+        {
+            using var anchor = await innerStorage.ReadOwnedAsync(Assert.IsType<string>(storage.LastHistoryAnchorSlot));
+            var value = anchor!.Use(bytes => bytes.ToArray());
+            try
+            {
+                Assert.Equal(68, value.Length);
+                Assert.Equal("DNF2"u8.ToArray(), value[..4]);
+                Assert.Equal(2, BinaryPrimitives.ReadUInt16BigEndian(value.AsSpan(4)));
+                Assert.Equal(1, BinaryPrimitives.ReadUInt16BigEndian(value.AsSpan(6)));
+                Assert.Equal((uint)history.Length, BinaryPrimitives.ReadUInt32BigEndian(value.AsSpan(64)));
+                Assert.Equal(SHA256.HashData(history.Span), value[32..64]);
+            }
+            finally { CryptographicOperations.ZeroMemory(value); }
+        }
+        internal async Task DamageHistoryAnchorAsync(bool corrupt)
+        {
+            var slot = Assert.IsType<string>(storage.LastHistoryAnchorSlot);
+            if (!corrupt) { await innerStorage.DeleteBatchAsync([slot]); return; }
+            using var owned = await innerStorage.ReadOwnedAsync(slot);
+            var value = owned!.Use(bytes => bytes.ToArray()); value[^1] ^= 1;
+            try
+            {
+                // Fault injection replaces the immutable slot; production writes
+                // must continue rejecting an already occupied anchor revision.
+                await innerStorage.DeleteBatchAsync([slot]);
+                await innerStorage.WriteBatchAsync([new DeepSecureStorageWrite(slot, value)]);
+            }
+            finally { CryptographicOperations.ZeroMemory(value); }
+        }
         internal void FailAfterNextOnionMarker() => storage.FailAfterOnionMarker = true;
         internal Task ResetAccountAsync() => accounts.ResetExplicitlyAsync();
 
@@ -719,14 +900,14 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
             finally { CryptographicOperations.ZeroMemory(key); }
         }
 
-        internal static async Task<Fixture> CreateAsync(bool withSuccessor = false)
+        internal static async Task<Fixture> CreateAsync(bool withSuccessor = false, bool expiringHistory = false)
         {
             var fixture = new Fixture();
-            try { await fixture.InitializeAsync(withSuccessor); return fixture; }
+            try { await fixture.InitializeAsync(withSuccessor, expiringHistory); return fixture; }
             catch { await fixture.DisposeAsync(); throw; }
         }
 
-        private async Task InitializeAsync(bool withSuccessor)
+        private async Task InitializeAsync(bool withSuccessor, bool expiringHistory)
         {
             Directory.CreateDirectory(directory);
             accounts = new(storage, directory, Network, 1,
@@ -751,10 +932,11 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
                 ScalarMult.Base(Bytes(32, (byte)(0xe8 + index))),
                 Enumerable.Range(0, 5).Select(role => (ReadOnlyMemory<byte>)
                     PublicKey((byte)(0x10 + index * 5 + role))).ToArray())).ToArray();
+            if (expiringHistory) ProofTime = 1_020;
             operational = await XPointNetworkOperationalGenesisAuthor.AuthorAsync(new(
                 Bytes(32, 0x12), bootstrap, [root], witnesses, descriptors, Bytes(32, 0xf1),
                 Bytes(32, 0xf4), Bytes(32, 0xf5), Bytes(32, 0xf6), PublicKey(0x31), PublicKey(0x32),
-                990, 1_000, 1_500, Bytes(32, 0xf2), Boot, 100, 100, 100, 1_100, 5));
+                990, 1_000, expiringHistory ? 1_090UL : 1_500UL, Bytes(32, 0xf2), Boot, 100, 100, 100, ProofTime, 5));
             var admission = DeepIdV2GenesisAdmissionWireCodec.DecodeRequest(
                 await accounts.PrepareGenesisAdmissionAsync()).Admission;
             checkpoint = DeepIdV2GenesisAdmissionVerifier.Verify(admission, 1_000, 1, 2, pq);
@@ -763,20 +945,7 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
             head = await DeepIdV2DirectoryHeadAuthor.AdvanceAsync(bootstrap.Authority,
                 genesis.ProtectedHead, new([], [], [checkpoint], 990, 1_500, 2), witnesses);
             if (withSuccessor)
-            {
-                var rollovers = nodes.Select((signer, index) => new XPointNetworkOperationalNodeRollover(
-                    signer, Bytes(32, (byte)(0x40 + index)), Bytes(32, (byte)(0x48 + index)),
-                    ScalarMult.Base(Bytes(32, (byte)(0x50 + index))),
-                    ScalarMult.Base(Bytes(32, (byte)(0x58 + index))))).ToArray();
-                successor = await XPointNetworkOperationalSuccessorAuthor.AuthorAsync(new(
-                    Bytes(32, 0x13), bootstrap, [root], witnesses, rollovers,
-                    operational.ExactXvp1, operational.ExactXnd1, [operational.ExactXnv1],
-                    operational.ExactXnh1, operational.ExactPma2, operational.ExactPmt2,
-                    XPointNetworkOperationalSuccessorAuthor.ComputeXnh1CoreHash(operational.ExactXnh1.Span),
-                    Deep.Protocol.ContactV1.ContactCodec.Decode("PMT2", operational.ExactPmt2.Span).ArtifactHash.Span,
-                    HeadReference(head.CoreHash.Span),
-                    1_070, 1_080, 1_500));
-            }
+                await AdvanceNetworkAsync();
             var floor = await accounts.OpenDirectoryLkgStoreAsync(bootstrap.Authority,
                 genesis.ExactAdh1, genesis.CoreHash);
             NetworkStore = await accounts.OpenNetworkLkgStoreAsync(bootstrap.GenesisPin);
@@ -788,6 +957,22 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
             closure = new(new HttpServiceRequestTransport(new HttpClient(this, disposeHandler: false),
                 HttpDeepIdV2NetworkClosureArtifactSource.CreateTransportOptions("https://registry.example/"),
                 HttpServiceEndpointPolicy.Production));
+        }
+
+        internal async Task AdvanceNetworkAsync()
+        {
+            Assert.Null(successor);
+            var rollovers = nodes.Select((signer, index) => new XPointNetworkOperationalNodeRollover(
+                signer, Bytes(32, (byte)(0x40 + index)), Bytes(32, (byte)(0x48 + index)),
+                ScalarMult.Base(Bytes(32, (byte)(0x50 + index))),
+                ScalarMult.Base(Bytes(32, (byte)(0x58 + index))))).ToArray();
+            successor = await XPointNetworkOperationalSuccessorAuthor.AuthorAsync(new(
+                Bytes(32, 0x13), bootstrap, [root], witnesses, rollovers,
+                operational.ExactXvp1, operational.ExactXnd1, [operational.ExactXnv1],
+                operational.ExactXnh1, operational.ExactPma2, operational.ExactPmt2,
+                XPointNetworkOperationalSuccessorAuthor.ComputeXnh1CoreHash(operational.ExactXnh1.Span),
+                Deep.Protocol.ContactV1.ContactCodec.Decode("PMT2", operational.ExactPmt2.Span).ArtifactHash.Span,
+                HeadReference(head.CoreHash.Span), 1_070, 1_080, 1_500));
         }
 
         internal DeepIdV2ContactPathAuthoritySource Source(DeepIdV2AccountService? account = null) =>
@@ -842,8 +1027,8 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
                 head.ExactAllTransitions, [checkpoint], query.DirectoryLeafKey.Span, floor);
             var issued = await DeepIdV2DirectoryProofAuthor.IssueGenesisAsync(bootstrap.Authority,
                 new(Network, query.Nonce.Span, query.BootId.Span, query.ClientMonotonicSendSample,
-                    head.ExactAdh1.Span, (successor?.ExactXnv1 ?? operational.ExactXnv1).Span, 1_100, 5, 1_100, 1_130,
-                    AccountDirectoryDtt1IssuanceEpoch.Derive(bootstrap.Authority, 1_100, 5), 2),
+                    head.ExactAdh1.Span, (successor?.ExactXnv1 ?? operational.ExactXnv1).Span, ProofTime, 5, ProofTime, ProofTime + 30,
+                    AccountDirectoryDtt1IssuanceEpoch.Derive(bootstrap.Authority, ProofTime, 5), 2),
                 material, witnesses, 1, pq, cancellationToken);
             var body = DeepIdV2DirectoryProofWireCodec.EncodeResponse(query, issued);
             var response = new HttpResponseMessage(HttpStatusCode.OK)
@@ -872,6 +1057,8 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
     {
         internal Action? AfterCommitPairRead { get; set; }
         internal bool FailAfterNetworkMarker { get; set; }
+        internal bool FailAfterHistoryAnchor { get; set; }
+        internal string? LastHistoryAnchorSlot { get; private set; }
         internal bool FailAfterOnionMarker { get; set; }
         public async Task<bool> CompareExchangeAsync(string slot, ReadOnlyMemory<byte> expected,
             ReadOnlyMemory<byte> replacement, CancellationToken ct = default)
@@ -896,16 +1083,25 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
         }
         public async Task WriteBatchAsync(IReadOnlyList<DeepSecureStorageWrite> writes, CancellationToken ct = default)
         {
+            LastHistoryAnchorSlot = writes.SingleOrDefault(write =>
+                write.Slot.Contains(".network-lkg-floor.history.", StringComparison.Ordinal))?.Slot ?? LastHistoryAnchorSlot;
+            if (FailAfterNetworkMarker && writes.Any(write => write.Slot.Contains(".network-lkg-floor.", StringComparison.Ordinal)))
+            {
+                FailAfterNetworkMarker = false;
+                // Commit only the first projection marker, before the history anchor.
+                await inner.WriteBatchAsync([writes[0]], ct);
+                throw new IOException("Injected stop after network marker, before history anchor and SQL commit.");
+            }
             await inner.WriteBatchAsync(writes, ct);
             if (FailAfterOnionMarker && writes.Any(write => write.Slot.Contains(".onion-custody.", StringComparison.Ordinal)))
             {
                 FailAfterOnionMarker = false;
                 throw new IOException("Injected stop after ONION marker, before SQL commit.");
             }
-            if (FailAfterNetworkMarker && writes.Any(write => write.Slot.Contains(".network-lkg-floor.", StringComparison.Ordinal)))
+            if (FailAfterHistoryAnchor && writes.Any(write => write.Slot.Contains(".network-lkg-floor.history.", StringComparison.Ordinal)))
             {
-                FailAfterNetworkMarker = false;
-                throw new IOException("Injected stop after network marker, before SQL commit.");
+                FailAfterHistoryAnchor = false;
+                throw new IOException("Injected stop after both network anchors, before SQL commit.");
             }
         }
         public Task DeleteBatchAsync(IReadOnlyList<string> slots, CancellationToken ct = default) => inner.DeleteBatchAsync(slots, ct);
