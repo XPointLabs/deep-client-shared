@@ -23,6 +23,47 @@ namespace Deep.Client.Shared.Production.Tests;
 public sealed class DeepIdV2ContactPathAuthoritySourceTests
 {
     [Fact]
+    public async Task ClaimPath_UsesFreshAccountProofAndV2OnlyCanonicalPlacement()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        var source = fixture.Source();
+        var placement = await source.GetCurrentForPreKeyClaimAsync(Fixture.Network, Fixture.Service);
+        var wire = Claim(placement.Placement.ViewHash.Span, placement.Placement.PlacementHash.Span);
+        var request = ContactResolveCanonicalPathRequest.Decode(wire);
+        Assert.Equal(ContactServiceRequestKind.ClaimPreKey, request.RequestKind);
+        Assert.Equal(Fixture.Service, request.ShardKey.ToArray());
+        var current = await source.GetCurrentAsync(request, default);
+        Assert.Equal(2, fixture.ProofRequests);
+        Assert.True(current.Placement.Binds(ContactServiceRequestKind.ClaimPreKey, Fixture.Service));
+        var onion = OnionTerminalPayloadVerifierV1.VerifyRequest(current.Network,
+            OnionOperation.ContactResolve, wire);
+        Assert.Equal(wire, onion.CanonicalBytes.ToArray());
+        var custody = await fixture.Accounts.OpenOwnOnionClientCustodyAsync();
+        var paths = new ContactResolvePrivacyPathProvider(source, custody.Guards);
+        var prepared = await paths.PrepareExactAsync(OnionOperation.ContactResolve, request,
+            current.Placement.RankedReplicaNodeIds[1], default);
+        Assert.Equal(3, fixture.ProofRequests);
+        Assert.Equal(wire, prepared.Attempt.Request.CanonicalBytes.ToArray());
+        var codec = new PrivacyRoutingCodec(new OnionEntropyAuthority(custody.Entropy),
+            new OnionKeyAgreementAuthority(new RejectClientReceiveVault()));
+        using var built = await codec.BuildAsync(prepared.Attempt.Path, prepared.Attempt.Request, default);
+        Assert.False(built.Frame.IsEmpty); // Real codec/entropy, not socket/device delivery.
+
+        var old = wire.ToArray(); BinaryPrimitives.WriteUInt16BigEndian(old.AsSpan(4), 1);
+        Assert.Throws<ApplicationCoreFormatException>(() => ContactResolveCanonicalPathRequest.Decode(old));
+        var wrong = Claim(placement.Placement.ViewHash.Span, Bytes(32, 0xee));
+        await Assert.ThrowsAsync<CryptographicException>(async () =>
+            await source.GetCurrentAsync(ContactResolveCanonicalPathRequest.Decode(wrong), default));
+        fixture.RejectProof = true;
+        await Assert.ThrowsAnyAsync<IOException>(async () => await source.GetCurrentAsync(request, default));
+
+        static byte[] Claim(ReadOnlySpan<byte> view, ReadOnlySpan<byte> placementHash) =>
+            DeepIdV2PreKeyClaimRequestCodec.Encode(Fixture.Network, Bytes(32, 0xb0), view,
+                placementHash, 1_000, 1_200, Fixture.Service, Bytes(32, 0xb1),
+                Bytes(32, 0xb2), Bytes(32, 0xb3), Bytes(32, 0xb4));
+    }
+
+    [Fact]
     public async Task FullSignedSuccessorHistory_CanMintRepeatedlyAndReopenWithoutReplayingGenesisAgainstTip()
     {
         await using var fixture = await Fixture.CreateAsync(withSuccessor: true);

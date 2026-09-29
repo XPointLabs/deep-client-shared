@@ -60,7 +60,7 @@ public interface IDeepIdV2NetworkClosureArtifactSource
 }
 
 /// <summary>
-/// DID2-only network verification and pre-key publication authority.
+/// DID2-only network verification and pre-key publication/claim path authority.
 /// Each mint obtains an independent
 /// nonce-bound proof for the protected local account, verifies NETCODEC from
 /// the pinned root, and durably advances/rechecks network custody before
@@ -109,16 +109,31 @@ public sealed class DeepIdV2ContactPathAuthoritySource :
         ContactResolveCanonicalPathRequest request, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(request);
-        if (request.RequestKind != ContactServiceRequestKind.PublishPreKeyInventory ||
+        if (request.RequestKind is not (ContactServiceRequestKind.PublishPreKeyInventory or
+                ContactServiceRequestKind.ClaimPreKey) ||
             !request.HasExplicitPlacementBinding)
-            throw new NotSupportedException("Only bounded DID2 XPP1 publication is enabled.");
-        var fragment = DeepIdV2BoundedPreKeyPublicationCodec.Decode(request.ExactRequest.Span);
-        if (!Fixed(fragment.NetworkId.Span, request.NetworkId.Span) ||
-            !Fixed(fragment.ViewHash.Span, request.ViewHash.Span) ||
-            !Fixed(fragment.PlacementHash.Span, request.PlacementHash.Span))
-            throw new CryptographicException("The DID2 request and fragment placement differ.");
-        var current = await GetCurrentForPublicationAsync(request.NetworkId,
-            request.ShardKey, cancellationToken).ConfigureAwait(false);
+            throw new NotSupportedException("Only DID2 XPP1 publication and XPK1 claim paths are enabled.");
+        if (request.RequestKind == ContactServiceRequestKind.ClaimPreKey)
+        {
+            var claim = DeepIdV2PreKeyClaimRequestCodec.Decode(request.ExactRequest.Span);
+            if (!Fixed(claim.Field(1).Span, request.NetworkId.Span) ||
+                !Fixed(claim.Field(3).Span, request.ViewHash.Span) ||
+                !Fixed(claim.Field(4).Span, request.PlacementHash.Span) ||
+                !Fixed(claim.Field(16).Span, request.ShardKey.Span) ||
+                System.Buffers.Binary.BinaryPrimitives.ReadUInt64BigEndian(claim.Field(6).Span) !=
+                    request.ExpiresAtUnixSeconds)
+                throw new CryptographicException("The DID2 claim and canonical placement facts differ.");
+        }
+        else
+        {
+            var fragment = DeepIdV2BoundedPreKeyPublicationCodec.Decode(request.ExactRequest.Span);
+            if (!Fixed(fragment.NetworkId.Span, request.NetworkId.Span) ||
+                !Fixed(fragment.ViewHash.Span, request.ViewHash.Span) ||
+                !Fixed(fragment.PlacementHash.Span, request.PlacementHash.Span))
+                throw new CryptographicException("The DID2 request and fragment placement differ.");
+        }
+        var current = await GetCurrentForPlacementAsync(request.NetworkId,
+            request.ShardKey, request.RequestKind, cancellationToken).ConfigureAwait(false);
         if (!Fixed(request.ViewHash.Span, current.Placement.ViewHash.Span) ||
             !Fixed(request.PlacementHash.Span, current.Placement.PlacementHash.Span) ||
             request.ExpiresAtUnixSeconds > current.Placement.ValidUntilUnixSeconds)
@@ -126,21 +141,36 @@ public sealed class DeepIdV2ContactPathAuthoritySource :
         return current;
     }
 
-    public async ValueTask<ContactResolvePathAuthority> GetCurrentForPublicationAsync(
+    public ValueTask<ContactResolvePathAuthority> GetCurrentForPublicationAsync(
         ReadOnlyMemory<byte> networkId, ReadOnlyMemory<byte> serviceCapability,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        GetCurrentForPlacementAsync(networkId, serviceCapability,
+            ContactServiceRequestKind.PublishPreKeyInventory, cancellationToken);
+
+    /// <summary>Obtains a fresh account-owned network proof and derives claim
+    /// placement. This does not verify recipient credentials, consume a key or
+    /// grant messaging/session authority.</summary>
+    public ValueTask<ContactResolvePathAuthority> GetCurrentForPreKeyClaimAsync(
+        ReadOnlyMemory<byte> networkId, ReadOnlyMemory<byte> serviceCapability,
+        CancellationToken cancellationToken = default) =>
+        GetCurrentForPlacementAsync(networkId, serviceCapability,
+            ContactServiceRequestKind.ClaimPreKey, cancellationToken);
+
+    private async ValueTask<ContactResolvePathAuthority> GetCurrentForPlacementAsync(
+        ReadOnlyMemory<byte> networkId, ReadOnlyMemory<byte> serviceCapability,
+        ContactServiceRequestKind kind, CancellationToken cancellationToken)
     {
         RequirePinnedNetwork(networkId);
         if (serviceCapability.Length != 32 ||
             serviceCapability.Span.IndexOfAnyExcept((byte)0) < 0)
-            throw new ArgumentException("DID2 publication requires the pinned network and exact service capability.");
+            throw new ArgumentException("DID2 placement requires the pinned network and exact service capability.");
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             var verified = (await VerifyCurrentNetworkCoreAsync(
                 cancellationToken).ConfigureAwait(false)).Network;
             var placement = ContactServicePlacementFactory.Create(verified,
-                ContactServiceRequestKind.PublishPreKeyInventory, serviceCapability);
+                kind, serviceCapability);
             return new(verified, placement);
         }
         finally { gate.Release(); }

@@ -130,11 +130,11 @@ public sealed class ContactResolveCanonicalPathRequest
         }
         if (exactRequest[..4].SequenceEqual("XPK1"u8))
         {
-            var request = Xpk1Codec.Decode(exactRequest);
-            return Create(request.CanonicalBytes.Span, request.NetworkId.Span,
-                request.ViewHash.Span, request.PlacementHash.Span,
-                ContactServiceRequestKind.ClaimPreKey, request.ServiceCapability.Span,
-                request.ExpiresAtUnixSeconds);
+            var request = DeepIdV2PreKeyClaimRequestCodec.Decode(exactRequest);
+            return Create(request.CanonicalBytes.Span, request.Field(1).Span,
+                request.Field(3).Span, request.Field(4).Span,
+                ContactServiceRequestKind.ClaimPreKey, request.Field(16).Span,
+                System.Buffers.Binary.BinaryPrimitives.ReadUInt64BigEndian(request.Field(6).Span));
         }
         if (exactRequest[..4].SequenceEqual("XPP1"u8))
         {

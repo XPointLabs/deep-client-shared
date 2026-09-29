@@ -16,6 +16,21 @@ membership-route bootstrap, direct replica MAU2 HTTP, or their fallback APIs.
 `StubSessionBackend` is retained only for deterministic unit tests and is
 rejected by release composition.
 
+## DID2 claim path candidate
+
+`ContactResolveCanonicalPathRequest` reads XPK1 only through the Protocol V2
+codec. `DeepIdV2ContactPathAuthoritySource.GetCurrentForPreKeyClaimAsync` obtains
+an independent account-owned proof and derives NETCODEC claim placement; the
+path provider re-verifies it for the exact canonical request. The ONION terminal
+validator accepts only its exact V2 XPC1 pair. No V1 XPK1 fallback remains in
+this path. The new API is path authority only, not recipient authentication,
+claim completion, DPH2 session authority or permission to report delivery.
+Those are separate consumers of the
+[normative claim contract](../../docs/architecture/CONTACT-RESOLVER-V1.md#34-atomic-pre-key-claim-xpk1--xpc1).
+The signed-network/SQLCipher/ONION-codec tests are not socket or device E2E.
+Downstream clients must rebuild/repin Protocol and Shared together; no account
+reset is required by this path-only change.
+
 ## Native authenticated mailbox
 
 `NativeMau2MailboxTransport` and `ClientMailboxAdapter` are the portable
