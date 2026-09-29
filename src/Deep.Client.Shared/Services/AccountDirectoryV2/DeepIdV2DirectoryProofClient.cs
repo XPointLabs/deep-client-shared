@@ -42,6 +42,8 @@ public interface IDeepIdV2DirectoryProtectedLkgStore
     ValueTask CommitVerifiedAsync(AccountDirectoryProtectedLkg expectedHead,
         VerifiedDeepIdV2DirectoryFreshness verified,
         CancellationToken cancellationToken);
+    ValueTask CommitCatchupAsync(VerifiedDeepIdV2DirectoryCatchup verified,
+        CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -56,16 +58,20 @@ public sealed class DeepIdV2DirectoryProofClient : IDisposable
     public static readonly TimeSpan DefaultRequestTimeout = TimeSpan.FromSeconds(30);
 
     private readonly HttpServiceRequestTransport transport;
+    private readonly HttpServiceRequestTransport historyTransport;
+    private readonly SemaphoreSlim fetchGate = new(1, 1);
     private readonly IOnionMonotonicClock clock;
     private readonly IDeepMlDsa65Verifier mlDsa65;
     private readonly IDeepIdV2DirectoryProtectedLkgStore protectedLkgStore;
     private int disposed;
 
     public DeepIdV2DirectoryProofClient(HttpServiceRequestTransport transport,
+        HttpServiceRequestTransport historyTransport,
         IOnionMonotonicClock clock, IDeepMlDsa65Verifier mlDsa65,
         IDeepIdV2DirectoryProtectedLkgStore protectedLkgStore)
     {
         this.transport = transport ?? throw new ArgumentNullException(nameof(transport));
+        this.historyTransport = historyTransport ?? throw new ArgumentNullException(nameof(historyTransport));
         this.clock = clock ?? throw new ArgumentNullException(nameof(clock));
         this.mlDsa65 = mlDsa65 ?? throw new ArgumentNullException(nameof(mlDsa65));
         this.protectedLkgStore = protectedLkgStore ??
@@ -263,6 +269,84 @@ public sealed class DeepIdV2DirectoryProofClient : IDisposable
     {
         RequireV2Floor(protectedLkg, authority);
         ValidateProfile(deploymentProfileId, supportedReader);
+        await fetchGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            // Always re-read after acquiring the account's fetch gate. A prior
+            // caller may already have advanced the floor while this one waited.
+            protectedLkg = await protectedLkgStore.RestoreAsync(authority, cancellationToken).ConfigureAwait(false);
+            RequireV2Floor(protectedLkg, authority);
+            lookup = DeepIdV2AccountDirectoryLookupCodec.Author(requestedDid2,
+                authority.NetworkId.Span, protectedLkg.LogGeneration, protectedLkg.CoreHash.Span,
+                lookup.ServiceProfile, lookup.ExactOhttpXod1CoreReference.Span,
+                lookup.ExactOhttpXod1CoreHash.Span);
+            query = VerifiedDeepIdV2DirectoryQuery.VerifyDid2(lookup, requestedDid2);
+            try
+            {
+                return await FetchCurrentWithFloorAsync(lookup, requestedDid2, authority, query,
+                    protectedLkg, deploymentProfileId, supportedReader, cancellationToken).ConfigureAwait(false);
+            }
+            catch (DeepIdV2DirectoryProofUnavailableException exception) when (
+                exception.StatusCode == HttpStatusCode.ServiceUnavailable)
+            {
+                // A gap and a temporarily unavailable authority both fail closed.
+                // One bounded historical recovery attempt may advance history,
+                // but never release a capability or bypass a 429 admission limit.
+                var prior = protectedLkg;
+                protectedLkg = await CatchupAsync(authority, cancellationToken).ConfigureAwait(false);
+                if (protectedLkg.LogGeneration == prior.LogGeneration) throw;
+                lookup = DeepIdV2AccountDirectoryLookupCodec.Author(requestedDid2,
+                    authority.NetworkId.Span, protectedLkg.LogGeneration, protectedLkg.CoreHash.Span,
+                    lookup.ServiceProfile, lookup.ExactOhttpXod1CoreReference.Span, lookup.ExactOhttpXod1CoreHash.Span);
+                query = VerifiedDeepIdV2DirectoryQuery.VerifyDid2(lookup, requestedDid2);
+                return await FetchCurrentWithFloorAsync(lookup, requestedDid2, authority, query,
+                    protectedLkg, deploymentProfileId, supportedReader, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        finally { fetchGate.Release(); }
+    }
+
+    private async ValueTask<AccountDirectoryProtectedLkg> CatchupAsync(
+        VerifiedXPointNetworkAuthority authority, CancellationToken cancellationToken)
+    {
+        var floor = await protectedLkgStore.RestoreAsync(authority, cancellationToken).ConfigureAwait(false);
+        RequireV2Floor(floor, authority);
+        for (var pageIndex = 0; pageIndex < 16; pageIndex++)
+        {
+            var request = DeepIdV2DirectoryHistoryWireCodec.EncodeRequest(floor);
+            using var response = await historyTransport.PostAsync(
+                "/api/v2/account-directory/history", request, cancellationToken).ConfigureAwait(false);
+            if (response.StatusCode is HttpStatusCode.TooManyRequests or HttpStatusCode.ServiceUnavailable)
+                throw new DeepIdV2DirectoryProofUnavailableException(response.StatusCode, response.RetryAfter);
+            if (response.StatusCode != HttpStatusCode.OK)
+                throw new InvalidDataException("The directory history source was rejected.");
+            var page = DeepIdV2DirectoryHistoryWireCodec.DecodeResponse(response.Body.Span, request);
+            var successors = page.ExactSuccessors;
+            if (successors.Count == 0) return floor;
+            var verified = DeepIdV2DirectoryCatchupVerifier.Verify(authority, floor, successors, page.ConsistencyNodes);
+            await protectedLkgStore.CommitCatchupAsync(verified, cancellationToken).ConfigureAwait(false);
+            floor = await protectedLkgStore.RestoreAsync(authority, cancellationToken).ConfigureAwait(false);
+            if (!CryptographicOperations.FixedTimeEquals(floor.ExactAdh1.Span, verified.ProtectedLkg.ExactAdh1.Span))
+                throw new CryptographicException("Historical floor was not durably committed.");
+            if (successors.Count < 64) return floor;
+        }
+        throw new DeepIdV2DirectoryProofUnavailableException(HttpStatusCode.ServiceUnavailable, TimeSpan.FromSeconds(1));
+    }
+
+    public static HttpServiceRequestTransportOptions CreateHistoryTransportOptions(
+        string registryBaseUrl, TimeSpan requestTimeout = default)
+    {
+        var timeout = CreateTransportOptions(registryBaseUrl, requestTimeout).RequestTimeout;
+        return new(registryBaseUrl, ["/api/v2/account-directory/history"],
+            DeepIdV2DirectoryHistoryWireCodec.RequestMediaType, DeepIdV2DirectoryHistoryWireCodec.ResponseMediaType,
+            DeepIdV2DirectoryHistoryWireCodec.RequestLength, DeepIdV2DirectoryHistoryWireCodec.MaximumResponseLength, timeout);
+    }
+
+    private async ValueTask<VerifiedDeepIdV2DirectoryFreshness> FetchCurrentWithFloorAsync(
+        ParsedAdl1V2 lookup, ParsedDid2 requestedDid2, VerifiedXPointNetworkAuthority authority,
+        VerifiedDeepIdV2DirectoryQuery query, AccountDirectoryProtectedLkg protectedLkg,
+        ushort deploymentProfileId, ushort supportedReader, CancellationToken cancellationToken)
+    {
 
         var requestCreated = await clock.ReadAsync(cancellationToken)
             .ConfigureAwait(false) ?? throw new CryptographicException(
@@ -348,7 +432,10 @@ public sealed class DeepIdV2DirectoryProofClient : IDisposable
     public void Dispose()
     {
         if (Interlocked.Exchange(ref disposed, 1) == 0)
+        {
             transport.Dispose();
+            historyTransport.Dispose();
+        }
     }
 
     private static bool SameBoot(OnionMonotonicReading left,

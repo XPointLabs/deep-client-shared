@@ -54,7 +54,8 @@ public sealed class HttpDeepIdV2NetworkClosureArtifactSourceTests
     {
         using var handler = new DistributionHandler { Unavailable = true };
         using var source = Create(handler);
-        await Assert.ThrowsAsync<IOException>(async () => await source.FetchCurrentAsync(Network, null));
+        await Assert.ThrowsAsync<Deep.Client.Shared.Services.AccountDirectoryV2.DeepIdV2DirectoryProofUnavailableException>(
+            async () => await source.FetchCurrentAsync(Network, null));
         handler.Unavailable = false;
         handler.WrongMedia = true;
         await Assert.ThrowsAsync<HttpServiceRequestTransportException>(async () => await source.FetchCurrentAsync(Network, null));

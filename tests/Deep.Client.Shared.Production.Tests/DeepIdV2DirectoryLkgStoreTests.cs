@@ -55,7 +55,10 @@ public sealed class DeepIdV2DirectoryLkgStoreTests
                 using var verifier = DeepMlDsa65CandidateVerifierFactory
                     .OpenForCurrentProcess();
                 using var proof = new DeepIdV2DirectoryProofClient(
-                    proofTransport, new FixedMonotonicClock(), verifier, first);
+                    proofTransport, new HttpServiceRequestTransport(
+                        new HttpClient(new EmptyHistoryHandler(authority)),
+                        DeepIdV2DirectoryProofClient.CreateHistoryTransportOptions("https://registry.example/"),
+                        HttpServiceEndpointPolicy.Production), new FixedMonotonicClock(), verifier, first);
                 var unavailable = await Assert.ThrowsAsync<DeepIdV2DirectoryProofUnavailableException>(async () =>
                     await account.AdmitAndVerifyGenesisAsync(admission, proof,
                         authority.Verified));
@@ -100,6 +103,17 @@ public sealed class DeepIdV2DirectoryLkgStoreTests
             await Assert.ThrowsAsync<CryptographicException>(async () =>
                 await SqliteDeepIdV2AccountGeneration
                     .CommitDirectoryLkgForTestsAsync(second, restored, successor));
+            var chain = new List<ReadOnlyMemory<byte>>();
+            var end = advanced;
+            for (var index = 0; index < 64; index++)
+            {
+                end = authority.CreateEmptySuccessor(end);
+                chain.Add(end.ExactAdh1);
+            }
+            var caughtUp = DeepIdV2DirectoryCatchupVerifier.Verify(authority.Verified, advanced, chain, default);
+            await second.CommitCatchupAsync(caughtUp, default);
+            Assert.Equal(65UL, (await second.RestoreAsync(authority.Verified, default)).LogGeneration);
+            await Assert.ThrowsAsync<CryptographicException>(async () => await second.CommitCatchupAsync(caughtUp, default));
             var wrongHash = authority.HeadHash.ToArray();
             wrongHash[0] ^= 1;
             await Assert.ThrowsAnyAsync<CryptographicException>(() =>
@@ -151,11 +165,11 @@ public sealed class DeepIdV2DirectoryLkgStoreTests
                     await second.RestoreAsync(authority.Verified, default));
                 using (var restore = connection.CreateCommand())
                 {
-                    restore.CommandText = "UPDATE protected_lkg_root SET revision=2,payload=$current WHERE root_kind=2;";
+                    restore.CommandText = "UPDATE protected_lkg_root SET revision=3,payload=$current WHERE root_kind=2;";
                     restore.Parameters.AddWithValue("$current", advancedPayload);
                     Assert.Equal(1, restore.ExecuteNonQuery());
                 }
-                Assert.Equal(1UL, (await second.RestoreAsync(
+                Assert.Equal(65UL, (await second.RestoreAsync(
                     authority.Verified, default)).LogGeneration);
                 using var mutation = connection.CreateCommand();
                 mutation.CommandText = "UPDATE protected_lkg_root SET payload=x'01' WHERE root_kind=2;";
@@ -222,6 +236,19 @@ public sealed class DeepIdV2DirectoryLkgStoreTests
         }
     }
 
+    private sealed class EmptyHistoryHandler(SignedV2Genesis authority) : HttpMessageHandler
+    {
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var exact = await request.Content!.ReadAsByteArrayAsync(cancellationToken);
+            var genesis = DeepIdV2DirectoryBootstrapVerifier.RestoreGenesis(authority.Verified, authority.ExactHead, authority.HeadHash);
+            var body = DeepIdV2DirectoryHistoryWireCodec.AuthorResponse(authority.Verified, exact, [genesis], []);
+            var response = new HttpResponseMessage(HttpStatusCode.OK) { RequestMessage = request, Content = new ByteArrayContent(body) };
+            response.Content.Headers.ContentType = new(DeepIdV2DirectoryHistoryWireCodec.ResponseMediaType);
+            return response;
+        }
+    }
+
     private sealed class UnavailableProofHandler : HttpMessageHandler
     {
         internal DeepIdV2DirectoryProofWireRequest? Request { get; private set; }
@@ -254,7 +281,7 @@ public sealed class DeepIdV2DirectoryLkgStoreTests
         internal AccountDirectoryProtectedLkg CreateEmptySuccessor(
             AccountDirectoryProtectedLkg predecessor)
         {
-            var (exact, hash) = AuthorHead(Verified, Network, 1,
+            var (exact, hash) = AuthorHead(Verified, Network, checked(predecessor.LogGeneration + 1),
                 predecessor.CoreHash.Span, Witnesses, WitnessIds);
             return AccountDirectoryProtectedLkgFactory.Restore(Verified,
                 exact, hash);

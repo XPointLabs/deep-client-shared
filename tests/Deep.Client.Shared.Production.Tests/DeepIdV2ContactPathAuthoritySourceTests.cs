@@ -953,7 +953,9 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
             var transport = new HttpServiceRequestTransport(http,
                 DeepIdV2DirectoryProofClient.CreateTransportOptions("https://registry.example/"),
                 HttpServiceEndpointPolicy.Production);
-            proofs = new(transport, this, pq, floor);
+            proofs = new(transport, new HttpServiceRequestTransport(new HttpClient(this, disposeHandler: false),
+                DeepIdV2DirectoryProofClient.CreateHistoryTransportOptions("https://registry.example/"),
+                HttpServiceEndpointPolicy.Production), this, pq, floor);
             closure = new(new HttpServiceRequestTransport(new HttpClient(this, disposeHandler: false),
                 HttpDeepIdV2NetworkClosureArtifactSource.CreateTransportOptions("https://registry.example/"),
                 HttpServiceEndpointPolicy.Production));
@@ -1012,6 +1014,17 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
                 { RequestMessage = request, Content = new ByteArrayContent(encoded) };
                 distributed.Content.Headers.ContentType = new(XPointNetworkClosureWireCodec.ResponseMediaType);
                 return distributed;
+            }
+            if (request.RequestUri.AbsolutePath == "/api/v2/account-directory/history")
+            {
+                if (RejectProof) return new(HttpStatusCode.ServiceUnavailable) { RequestMessage = request };
+                var exact = await request.Content!.ReadAsByteArrayAsync(cancellationToken);
+                var encoded = DeepIdV2DirectoryHistoryWireCodec.AuthorResponse(bootstrap.Authority, exact,
+                    [genesis.ProtectedHead, head.ProtectedHead], head.ExactAllTransitions);
+                var historyResponse = new HttpResponseMessage(HttpStatusCode.OK)
+                { RequestMessage = request, Content = new ByteArrayContent(encoded) };
+                historyResponse.Content.Headers.ContentType = new(DeepIdV2DirectoryHistoryWireCodec.ResponseMediaType);
+                return historyResponse;
             }
             ProofRequests++;
             if (RejectProof) return new(HttpStatusCode.ServiceUnavailable) { RequestMessage = request };

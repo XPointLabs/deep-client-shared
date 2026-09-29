@@ -132,10 +132,25 @@ internal static partial class SqliteDeepIdV2AccountGeneration
                 cancellationToken).ConfigureAwait(false);
         }
 
-        internal async ValueTask CommitAuthenticatedHeadAsync(
+        public async ValueTask CommitCatchupAsync(VerifiedDeepIdV2DirectoryCatchup verified,
+            CancellationToken cancellationToken)
+        {
+            ArgumentNullException.ThrowIfNull(verified);
+            if (!Fixed(verified.PriorProtectedLkg.Head.NetworkId.Span, binding.NetworkId))
+                throw new CryptographicException("Historical directory source is out of scope.");
+            await CommitAuthenticatedHeadAsync(verified.PriorProtectedLkg, verified.ProtectedLkg,
+                authenticatedForward: true, cancellationToken).ConfigureAwait(false);
+        }
+
+#if DEEP_TEST_INTERNALS
+        internal ValueTask CommitTestSuccessorAsync(AccountDirectoryProtectedLkg expected,
+            AccountDirectoryProtectedLkg next, CancellationToken cancellationToken) =>
+            CommitAuthenticatedHeadAsync(expected, next, false, cancellationToken);
+#endif
+        private async ValueTask CommitAuthenticatedHeadAsync(
             AccountDirectoryProtectedLkg expectedHead,
             AccountDirectoryProtectedLkg next,
-            bool rootAuthorizedForward,
+            bool authenticatedForward,
             CancellationToken cancellationToken)
         {
             if (!Fixed(next.Head.NetworkId.Span, binding.NetworkId) ||
@@ -151,9 +166,9 @@ internal static partial class SqliteDeepIdV2AccountGeneration
                     expectedHead.CoreHash.Span);
             if (exactReplay
                 ? !Fixed(next.ExactAdh1.Span, expectedHead.ExactAdh1.Span)
-                : !exactSuccessor && !rootAuthorizedForward)
+                : !exactSuccessor && !authenticatedForward)
                 throw new CryptographicException(
-                    "The verified DID2 directory head has no authenticated successor or root-authorized forward lineage.");
+                    "The verified DID2 directory head has no authenticated forward lineage.");
 
             using var held = await accountLease.AcquireAsync(cancellationToken)
                 .ConfigureAwait(false);
@@ -328,7 +343,7 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         AccountDirectoryProtectedLkg next,
         CancellationToken cancellationToken = default) =>
         store is DirectoryLkgStore owned
-            ? owned.CommitAuthenticatedHeadAsync(expectedHead, next, false,
+            ? owned.CommitTestSuccessorAsync(expectedHead, next,
                 cancellationToken)
             : throw new ArgumentException(
                 "The test requires the production DID2 directory LKG store.",

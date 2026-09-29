@@ -66,7 +66,7 @@ public sealed class DeepIdV2DirectoryProofClientTests
                 "https://registry.example/"),
             HttpServiceEndpointPolicy.Production);
         Assert.Throws<ArgumentNullException>(() =>
-            new DeepIdV2DirectoryProofClient(transport, new FixedClock(),
+            new DeepIdV2DirectoryProofClient(transport, transport, new FixedClock(),
                 new DenyingVerifier(), null!));
     }
 
@@ -106,7 +106,7 @@ public sealed class DeepIdV2DirectoryProofClientTests
             DeepIdV2DirectoryProofClient.CreateTransportOptions(
                 "https://registry.example/"),
             HttpServiceEndpointPolicy.Production);
-        using var proof = new DeepIdV2DirectoryProofClient(transport,
+        using var proof = new DeepIdV2DirectoryProofClient(transport, transport,
             new FixedClock(), new DenyingVerifier(), new UnusedFloor());
         var did2 = DeepIdV2Codec.AuthorDid2(
             Enumerable.Repeat((byte)0x21, 32).ToArray(),
@@ -124,6 +124,8 @@ public sealed class DeepIdV2DirectoryProofClientTests
 
     private sealed class UnusedFloor : IDeepIdV2DirectoryProtectedLkgStore
     {
+        public ValueTask CommitCatchupAsync(VerifiedDeepIdV2DirectoryCatchup verified,
+            CancellationToken cancellationToken) => throw new NotSupportedException("No network request is made.");
         public ValueTask<AccountDirectoryProtectedLkg> RestoreAsync(
             VerifiedXPointNetworkAuthority authority,
             CancellationToken cancellationToken) =>

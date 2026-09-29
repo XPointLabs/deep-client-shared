@@ -43,8 +43,10 @@ public sealed class HttpDeepIdV2NetworkClosureArtifactSource :
         var query = XPointNetworkClosureWireCodec.EncodeRequest(networkId.Span);
         using var response = await transport.PostAsync(EndpointPath, query,
             cancellationToken).ConfigureAwait(false);
+        if (response.StatusCode is HttpStatusCode.TooManyRequests or HttpStatusCode.ServiceUnavailable)
+            throw new AccountDirectoryV2.DeepIdV2DirectoryProofUnavailableException(response.StatusCode, response.RetryAfter);
         if (response.StatusCode != HttpStatusCode.OK)
-            throw new IOException("Network closure distribution is unavailable.");
+            throw new InvalidDataException("Network closure distribution rejected the request.");
         var raw = XPointNetworkClosureWireCodec.DecodeResponse(response.Body.Span);
         if (!Fixed(raw.NetworkId.Span, networkId.Span))
             throw new CryptographicException("Network closure distribution scope differs from the request.");

@@ -418,14 +418,18 @@ public sealed class HttpServiceTransportFactory
             AccountDirectoryV2.DeepIdV2DirectoryProofClient
                 .CreateTransportOptions(directoryBaseUrl, requestTimeout),
             clientOptions);
+        HttpServiceRequestTransport? historyTransport = null;
         try
         {
+            historyTransport = CreateRequestTransport(
+                AccountDirectoryV2.DeepIdV2DirectoryProofClient.CreateHistoryTransportOptions(directoryBaseUrl, requestTimeout), clientOptions);
             return new AccountDirectoryV2.DeepIdV2DirectoryProofClient(
-                transport, clock, verifier, protectedLkgStore);
+                transport, historyTransport, clock, verifier, protectedLkgStore);
         }
         catch
         {
             transport.Dispose();
+            historyTransport?.Dispose();
             throw;
         }
     }

@@ -1,5 +1,22 @@
 # Deep Client Shared architecture
 
+## DID2 historical recovery candidate
+
+The proof factory now requires distinct bounded proof and history HTTPS
+transports. On a typed current-proof 503 it can consume up to sixteen
+64-head historical pages, independently verify each page, atomically advance
+the SQLCipher protected floor and read it back before requesting a **new nonce**
+current proof. Historical heads, including expired heads, never authorize
+traffic. A 429 does not trigger history; a corrupt/forked floor never resets to
+genesis. Transport ownership and concurrent calls are serialized.
+
+Source callers must update both factory transports and sealed
+`CommitCatchupAsync` implementations. No incompatible user-store migration,
+account reset or production package publish is implied. The normative owner
+is [DR-0014](../../docs/survival-program/decisions/DR-0014-directory-historical-catchup.md),
+not this consumer note. Shipping MSG composition and physical reconnect remain
+separate unfinished gates.
+
 ## Scope
 
 `Deep.Client.Shared` owns portable domain models, SQLCipher persistence,
