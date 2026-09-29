@@ -35,13 +35,16 @@ public sealed class HttpServiceResponse : IDisposable
 {
     private byte[]? body;
 
-    internal HttpServiceResponse(HttpStatusCode statusCode, byte[] body)
+    internal HttpServiceResponse(HttpStatusCode statusCode, byte[] body, TimeSpan? retryAfter = null)
     {
         StatusCode = statusCode;
+        RetryAfter = retryAfter;
         this.body = body;
     }
 
     public HttpStatusCode StatusCode { get; }
+    /// <summary>Bounded delta-seconds scheduling hint, never trusted time.</summary>
+    public TimeSpan? RetryAfter { get; }
 
     public ReadOnlyMemory<byte> Body => body is { } value
         ? value
@@ -151,7 +154,7 @@ public sealed class HttpServiceRequestTransport : IDisposable
                     timeout.Token).ConfigureAwait(false);
                 EnsureEndpoint(response, endpoint);
                 if (response.StatusCode != HttpStatusCode.OK)
-                    return new HttpServiceResponse(response.StatusCode, []);
+                    return new HttpServiceResponse(response.StatusCode, [], ReadRetryAfter(response));
                 EnsureResponseSizeHeader(response.Content, maximumResponseBytes);
                 EnsureResponseMediaType(response.Content.Headers.ContentType);
                 var responseBody = await ReadBoundedAsync(
@@ -177,6 +180,17 @@ public sealed class HttpServiceRequestTransport : IDisposable
     {
         if (Interlocked.Exchange(ref disposed, 1) == 0)
             httpClient.Dispose();
+    }
+
+    private static TimeSpan? ReadRetryAfter(HttpResponseMessage response)
+    {
+        // Registry emits delta-seconds. HTTP dates must not introduce OS wall
+        // time into this proof transport; invalid hints use caller backoff.
+        if (response.StatusCode is not (HttpStatusCode.TooManyRequests or HttpStatusCode.ServiceUnavailable))
+            return null;
+        var delta = response.Headers.RetryAfter?.Delta;
+        if (delta is not { } value || value <= TimeSpan.Zero) return null;
+        return value > TimeSpan.FromMinutes(5) ? TimeSpan.FromMinutes(5) : value;
     }
 
     private void EnsureResponseMediaType(MediaTypeHeaderValue? contentType)

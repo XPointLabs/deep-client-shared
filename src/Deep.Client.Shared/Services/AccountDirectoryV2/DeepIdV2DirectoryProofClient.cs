@@ -9,6 +9,24 @@ using Deep.Protocol.XPointNetworkV1;
 
 namespace Deep.Client.Shared.Services.AccountDirectoryV2;
 
+/// <summary>Retryable authority failure; scheduling metadata is not proof authority.</summary>
+public sealed class DeepIdV2DirectoryProofUnavailableException : IOException
+{
+    public DeepIdV2DirectoryProofUnavailableException(HttpStatusCode statusCode, TimeSpan? retryAfter)
+        : base("The DID2 directory proof authority is unavailable.")
+    {
+        if (statusCode is not (HttpStatusCode.TooManyRequests or HttpStatusCode.ServiceUnavailable))
+            throw new ArgumentOutOfRangeException(nameof(statusCode));
+        if (retryAfter is { } delay && (delay < TimeSpan.Zero || delay > TimeSpan.FromMinutes(5)))
+            throw new ArgumentOutOfRangeException(nameof(retryAfter));
+        StatusCode = statusCode;
+        RetryAfter = retryAfter;
+    }
+
+    public HttpStatusCode StatusCode { get; }
+    public TimeSpan? RetryAfter { get; }
+}
+
 /// <summary>
 /// Account-scoped, rollback-protected DID2 head custody. Restore must
 /// re-authenticate the persisted exact ADH1 against the verified authority.
@@ -262,7 +280,7 @@ public sealed class DeepIdV2DirectoryProofClient : IDisposable
                 .ConfigureAwait(false);
             if (response.StatusCode is HttpStatusCode.TooManyRequests or
                 HttpStatusCode.ServiceUnavailable)
-                throw new IOException("The DID2 directory proof authority is unavailable.");
+                throw new DeepIdV2DirectoryProofUnavailableException(response.StatusCode, response.RetryAfter);
             if (response.StatusCode != HttpStatusCode.OK)
                 throw new InvalidDataException(
                     "The DID2 directory proof authority rejected the request.");

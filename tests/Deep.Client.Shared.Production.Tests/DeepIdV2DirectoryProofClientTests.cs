@@ -11,6 +11,21 @@ namespace Deep.Client.Shared.Production.Tests;
 public sealed class DeepIdV2DirectoryProofClientTests
 {
     [Fact]
+    public void RetryableProofFailureHasClosedBoundedSchedulingMetadata()
+    {
+        var failure = new DeepIdV2DirectoryProofUnavailableException(
+            System.Net.HttpStatusCode.TooManyRequests, TimeSpan.FromSeconds(10));
+        Assert.IsAssignableFrom<IOException>(failure);
+        Assert.Equal(System.Net.HttpStatusCode.TooManyRequests, failure.StatusCode);
+        Assert.Equal(TimeSpan.FromSeconds(10), failure.RetryAfter);
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            new DeepIdV2DirectoryProofUnavailableException(System.Net.HttpStatusCode.OK, null));
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            new DeepIdV2DirectoryProofUnavailableException(System.Net.HttpStatusCode.ServiceUnavailable,
+                TimeSpan.FromMinutes(6)));
+    }
+
+    [Fact]
     public void TransportOptionsAreV2OnlyBoundedAndSingleEndpoint()
     {
         var options = DeepIdV2DirectoryProofClient.CreateTransportOptions(

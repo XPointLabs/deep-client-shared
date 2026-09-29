@@ -201,7 +201,14 @@ endpoint and bounded media types defined by the master
 `ACCOUNT-DIRECTORY-TRANSPARENCY-V1.md` specification.
 The production HTTP factory owns its HTTPS transport and exposes only the
 bounded DID2 proof endpoint; it rejects non-loopback HTTP origins and timeouts over
-30 seconds. The caller retains ownership of the verifier, monotonic clock and
+30 seconds. A 429/503 raises
+`DeepIdV2DirectoryProofUnavailableException` (an `IOException`) with its status
+and optional `RetryAfter`. The transport retains positive delta-seconds only,
+bounded to five minutes; dates/invalid hints are ignored. This is a scheduling
+hint, not authenticated time or freshness. It does not automatically replay a
+request/nonce, reset accounts or erase a floor. The owning recovery loop uses
+bounded monotonic backoff and generates a new nonce for the next proof attempt.
+The caller retains ownership of the verifier, monotonic clock and
 account-scoped protected floor. The public proof entry points reject an absent
 deployment profile or reader below V2 before protected-state or network access.
 Before network I/O, the proof client requires a verified DAB2-bound ADL1 V2

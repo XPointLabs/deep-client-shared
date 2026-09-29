@@ -56,9 +56,10 @@ public sealed class DeepIdV2DirectoryLkgStoreTests
                     .OpenForCurrentProcess();
                 using var proof = new DeepIdV2DirectoryProofClient(
                     proofTransport, new FixedMonotonicClock(), verifier, first);
-                await Assert.ThrowsAsync<IOException>(async () =>
+                var unavailable = await Assert.ThrowsAsync<DeepIdV2DirectoryProofUnavailableException>(async () =>
                     await account.AdmitAndVerifyGenesisAsync(admission, proof,
                         authority.Verified));
+                Assert.Equal(System.Net.HttpStatusCode.ServiceUnavailable, unavailable.StatusCode);
                 Assert.NotNull(proofHandler.Request);
                 Assert.Equal(initial.LogGeneration,
                     proofHandler.Request!.Lookup.MinimumAdhGeneration);

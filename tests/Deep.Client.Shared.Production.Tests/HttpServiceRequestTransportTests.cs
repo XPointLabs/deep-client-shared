@@ -7,6 +7,34 @@ namespace Deep.Client.Shared.Production.Tests;
 public sealed class HttpServiceRequestTransportTests
 {
     [Theory]
+    [InlineData(429, "12", 12)]
+    [InlineData(503, "3600", 300)]
+    [InlineData(503, "0", 0)]
+    [InlineData(429, "-1", 0)]
+    [InlineData(429, "invalid", 0)]
+    [InlineData(429, "Wed, 21 Oct 2015 07:28:00 GMT", 0)]
+    [InlineData(400, "12", 0)]
+    public async Task UnavailableResponsesPreserveOnlyBoundedDeltaRetryHintWithoutAutomaticRetry(
+        int status, string retryAfter, int expectedSeconds)
+    {
+        var calls = 0;
+        using var handler = new Handler(request =>
+        {
+            calls++;
+            var response = new HttpResponseMessage((HttpStatusCode)status)
+                { RequestMessage = request };
+            response.Headers.TryAddWithoutValidation("Retry-After", retryAfter);
+            return response;
+        });
+        using var transport = Transport(handler, "https://registry.example/");
+        using var result = await transport.PostAsync("/proof", new byte[] { 1, 2 });
+        Assert.Equal((HttpStatusCode)status, result.StatusCode);
+        Assert.Empty(result.Body.ToArray());
+        Assert.Equal(expectedSeconds == 0 ? (TimeSpan?)null : TimeSpan.FromSeconds(expectedSeconds), result.RetryAfter);
+        Assert.Equal(1, calls);
+    }
+
+    [Theory]
     [InlineData("https://registry.example/", 2, 0)]
     [InlineData("http://127.0.0.1:38081/", 1, 1)]
     public async Task BinaryRequestsUseExactProtocolWithoutNegotiationFallback(string origin, int major, int minor)
