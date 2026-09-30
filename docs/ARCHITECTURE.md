@@ -523,10 +523,14 @@ silently upgraded; physical UAT must use the isolated clean-break app identity.
 For ContactHello the owner first binds relationship ID, verified peer DAB1/DMD1
 hashes, the conversation ID derived from the relationship and both accounts,
 and embedded XUR1 network, author device, DPD1 and lifetime. The unsolicited
-responder additionally requires the current initiator checkpoint and verified
-recipient bundle retained by DPH2/XPC1 promotion, then checks the exact safety
-number and XUR1 device signature before opening a conversation store. This
-does not close XUR1 to its PMT2 placement or authorize UI projection.
+responder now receives the non-null V2 initiator checkpoint and recipient
+closure from Protocol's closed current-endpoint promotion, and consumes only
+the fully verified claim's two-lane handoff. Its API clean break is owned by
+[DR-0017](../../docs/survival-program/decisions/DR-0017-did2-initial-claim-promotion.md).
+The old recipient/placement API cannot accept a parsed V2 request. ContactHello
+V2 safety-number/XUR1 endpoint semantics and current account-owned receive
+composition remain unfinished and fail closed before opening a new store.
+This grants neither UI projection nor ACK authority.
 The account-owned initial receive can commit and materialize the authenticated
 SessionInit/ContactHello before it grants a bound mailbox ACK receipt. Contact
 state projection and protected stage-retirement remain incomplete. An

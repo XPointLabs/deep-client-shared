@@ -466,7 +466,8 @@ public sealed class PrivacyRoutedMessagingReceiver : IDisposable
             .ConfigureAwait(false);
         if (preview is null)
             return null;
-        var placement = localRecipient.RequireClaimPlacement(preview.Request);
+        // The retired recipient is V1-bound. Do not project a V2 request
+        // through its placement API or treat that result as DID2 authority.
         throw new CryptographicException(
             "The V1 sender-directory and contact closure cannot promote DID2 DPH2.");
     }

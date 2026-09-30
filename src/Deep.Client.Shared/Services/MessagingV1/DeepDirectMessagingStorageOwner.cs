@@ -2456,23 +2456,20 @@ internal sealed class DeepDirectMessagingStorageOwner : IAsyncDisposable
         var claim = verifiedInitial.Claim;
         var initiation = verifiedInitial.Initiation;
         var checkpoint = verifiedInitial.InitiatorCheckpoint;
-        var recipientBundle = verifiedInitial.RecipientBundle;
-        if (checkpoint is null || recipientBundle is null)
-            throw new CryptographicException(
-                "An unsolicited responder needs current, verified ContactHello endpoint evidence.");
+        var recipientClosure = verifiedInitial.RecipientClosure;
         var dph2 = Dph2Codec.Decode(initiation.ExactBytes.Span);
         if (!Fixed(dph2.NetworkId.Span, localAuthority.NetworkId) ||
             !Fixed(dph2.ResponderAccountId.Span, localAuthority.AccountId) ||
             !Fixed(dph2.ResponderDeviceId.Span, localAuthority.DeviceId) ||
             dph2.ResponderDeviceGeneration != localAuthority.DeviceGeneration ||
             !preKeyOwner.OwnsResponder(
-                claim.NetworkId.Span, claim.ResponderAccountId.Span,
-                claim.ResponderDeviceId.Span, claim.ResponderDeviceGeneration))
+                claim.NetworkId.Span, claim.Offering.ResponderAccountId.Span,
+                claim.Offering.ResponderDeviceId.Span, claim.Offering.ResponderDeviceGeneration))
             throw new CryptographicException(
                 "The unsolicited DPH2 claim is outside the current local responder scope.");
         if (!Fixed(checkpoint.Binding.Identity.Account.DeepAccountIdHash.Span,
                 dph2.InitiatorAccountId.Span) ||
-            !Fixed(recipientBundle.Binding.Identity.Account.DeepAccountIdHash.Span,
+            !Fixed(recipientClosure.Bundle.Field(2).Span,
                 localAuthority.AccountId))
             throw new CryptographicException(
                 "The verified first-contact endpoints differ from DPH2 or the local account.");
@@ -2485,7 +2482,7 @@ internal sealed class DeepDirectMessagingStorageOwner : IAsyncDisposable
                 .OpenCurrentResponderIdentitySecretLeaseAsync(
                     identity, maximumMessagesWithoutPqInjection, cancellationToken)
                 .ConfigureAwait(false);
-            using var boundClaim = claim.BindForInitialSession(initiation);
+            using var boundClaim = verifiedInitial.BindForInitialSession();
             using var reservation = boundClaim.ConsumeForDevicePreKeyOwner();
             var resolver = new UnsolicitedInitialSessionStoreResolver(
                 this, initiation, dph2, verifiedInitial);
@@ -2558,10 +2555,8 @@ internal sealed class DeepDirectMessagingStorageOwner : IAsyncDisposable
             var checkpoint = endpointEvidence?.InitiatorCheckpoint ??
                 throw new CryptographicException(
                     "The verified DPH2 lacks a current initiator checkpoint.");
-            var recipient = endpointEvidence.RecipientBundle ??
-                throw new CryptographicException(
-                    "The verified DPH2 lacks recipient publication evidence.");
-            if (!Fixed(recipient.Binding.Identity.Account.DeepAccountIdHash.Span,
+            var recipient = endpointEvidence.RecipientClosure;
+            if (!Fixed(recipient.Bundle.Field(2).Span,
                     owner.localAuthority.AccountId))
                 throw new CryptographicException(
                     "The verified recipient publication differs from the local account.");
