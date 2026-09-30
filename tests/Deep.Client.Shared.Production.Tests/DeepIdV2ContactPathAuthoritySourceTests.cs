@@ -14,6 +14,7 @@ using Deep.Client.Shared.Services.XPointNetworkV1;
 using Deep.Protocol.AccountDirectoryV1;
 using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.ContactV2;
+using Deep.Protocol.ContactV1;
 using Deep.Protocol.DeepExtension.PrivacyRouting;
 using Deep.Protocol.XPointNetworkV1;
 using Sodium;
@@ -23,6 +24,126 @@ namespace Deep.Client.Shared.Production.Tests;
 
 public sealed class DeepIdV2ContactPathAuthoritySourceTests
 {
+    [Fact]
+    public async Task Did2ClaimTransport_VerifiesBothSignaturesAndReusesExactRequest()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        var (request, authority, publication) = await fixture.CreateClaimAsync();
+        foreach (var replay in new[] { false, true })
+        {
+            var exact = fixture.AuthorClaimResult(request, authority, publication, replay);
+            var onion = new ClaimOnion(authority, exact);
+            var transport = new DeepIdV2PreKeyClaimTransport(new ClaimAuthority(authority), onion);
+            var verified = await transport.ClaimExactAsync(request.CanonicalBytes);
+            Assert.Equal(request.CanonicalBytes.ToArray(), verified.ExactRequest.ToArray());
+            Assert.Equal(exact, verified.ExactResult.ToArray());
+            Assert.Equal(authority.Placement.RankedReplicaNodeIds[0].ToArray(), onion.Exit);
+            Assert.Equal(1, onion.Calls);
+            Assert.Equal(request.CanonicalBytes.ToArray(), onion.Request);
+        }
+    }
+
+    [Fact]
+    public async Task Did2ClaimTransport_RefusalNeverMintsCapabilityOrAutomaticallyRetries()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        var (request, authority, _) = await fixture.CreateClaimAsync();
+        foreach (var (status, retry) in new[] {
+            (Xpc1V2Status.PreKeysUnavailable, 0u),
+            (Xpc1V2Status.Expired, 0u),
+            (Xpc1V2Status.RateLimited, 7u),
+            (Xpc1V2Status.OutcomeUnknown, 1u) })
+        {
+            var body = DeepIdV2PreKeyClaimResultCodec.Encode(request.CanonicalBytes.Span,
+                status, status == Xpc1V2Status.OutcomeUnknown ? Xpc1V2MutationOutcome.OutcomeUnknown :
+                Xpc1V2MutationOutcome.None, 1_100, retry, []);
+            var onion = new ClaimOnion(authority, body);
+            var error = await Assert.ThrowsAsync<DeepIdV2PreKeyClaimUnavailableException>(async () =>
+                await new DeepIdV2PreKeyClaimTransport(new ClaimAuthority(authority), onion)
+                    .ClaimExactAsync(request.CanonicalBytes));
+            Assert.Equal(status, error.Status);
+            Assert.Equal(retry, error.RetryAfterSeconds);
+            Assert.Equal(1, onion.Calls);
+        }
+    }
+
+    [Fact]
+    public async Task Did2ClaimTransport_RejectsSubstitutionBeforeGrant()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        var (request, authority, publication) = await fixture.CreateClaimAsync();
+        foreach (var fault in new[] { "signature", "request", "authority", "placement" })
+        {
+            var body = fixture.AuthorClaimResult(request, authority, publication, false,
+                badSignature: fault == "signature");
+            if (fault == "request")
+            {
+                var changed = DeepIdV2PreKeyClaimRequestCodec.Encode(Fixture.Network,
+                    Bytes(32, 0x84), authority.Placement.ViewHash.Span, authority.Placement.PlacementHash.Span,
+                    1_100, 1_120, publication.Manifest.Field(2).Span, request.Field(17).Span,
+                    request.Field(18).Span, request.Field(19).Span, request.Field(21).Span);
+                body = fixture.AuthorClaimResult(DeepIdV2PreKeyClaimRequestCodec.Decode(changed),
+                    authority, publication, false);
+            }
+            ContactResolvePathAuthority? returned = fault == "authority" ? null : authority;
+            if (fault == "placement") returned = await fixture.Source().GetCurrentForPreKeyClaimAsync(
+                Fixture.Network, Bytes(32, 0x85));
+            var onion = new ClaimOnion(returned, body);
+            Func<Task> claim = async () =>
+                await new DeepIdV2PreKeyClaimTransport(new ClaimAuthority(authority), onion)
+                    .ClaimExactAsync(request.CanonicalBytes);
+            if (fault is "signature" or "request")
+                await Assert.ThrowsAsync<ApplicationCoreFormatException>(claim);
+            else
+                await Assert.ThrowsAsync<CryptographicException>(claim);
+            Assert.Equal(1, onion.Calls);
+        }
+    }
+
+    [Fact]
+    public async Task Did2ClaimTransport_CancelledResponseAndMismatchedInitialPlacementCannotGrant()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        var (request, authority, _) = await fixture.CreateClaimAsync();
+        var other = await fixture.Source().GetCurrentForPreKeyClaimAsync(Fixture.Network, Bytes(32, 0x85));
+        var onion = new ClaimOnion(authority, []);
+        await Assert.ThrowsAnyAsync<CryptographicException>(async () =>
+            await new DeepIdV2PreKeyClaimTransport(new ClaimAuthority(other), onion)
+                .ClaimExactAsync(request.CanonicalBytes));
+        Assert.Equal(0, onion.Calls);
+        using var cancellation = new CancellationTokenSource();
+        onion.AfterSend = cancellation.Cancel;
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+            await new DeepIdV2PreKeyClaimTransport(new ClaimAuthority(authority), onion)
+                .ClaimExactAsync(request.CanonicalBytes, cancellation.Token));
+        Assert.Equal(1, onion.Calls);
+    }
+
+    private sealed class ClaimAuthority(ContactResolvePathAuthority authority) : IContactResolvePathAuthoritySource
+    {
+        public ValueTask<ContactResolvePathAuthority> GetCurrentAsync(Xiq1Request request,
+            CancellationToken cancellationToken) => throw new NotSupportedException();
+        public ValueTask<ContactResolvePathAuthority> GetCurrentAsync(ContactResolveCanonicalPathRequest request,
+            CancellationToken cancellationToken) => ValueTask.FromResult(authority);
+    }
+
+    private sealed class ClaimOnion(ContactResolvePathAuthority? authority, byte[] body) : IExactContactResolveOnionTransport
+    {
+        internal int Calls { get; private set; }
+        internal byte[]? Request { get; private set; }
+        internal byte[]? Exit { get; private set; }
+        internal Action? AfterSend { get; set; }
+        public ValueTask<ExactContactResolveOnionResponse> SendExactAsync(ContactResolveCanonicalPathRequest request,
+            ReadOnlyMemory<byte> requiredExitReplicaId, CancellationToken cancellationToken = default)
+        {
+            Calls++;
+            Request = request.ExactRequest.ToArray();
+            Exit = requiredExitReplicaId.ToArray();
+            AfterSend?.Invoke();
+            return ValueTask.FromResult(new ExactContactResolveOnionResponse(body, authority));
+        }
+    }
+
     [Fact]
     public async Task DurableHistory_ExactPredecessorCasAndRawProjectionCannotReplaceAuthority()
     {
@@ -771,6 +892,53 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
 
         internal void AfterNextCommitPairRead(Action action) => storage.AfterCommitPairRead = action;
 
+        internal async Task<(ParsedXpk1V2 Request, ContactResolvePathAuthority Authority,
+            ParsedXpp1V2 Publication)> CreateClaimAsync()
+        {
+            var source = Source();
+            var staged = await accounts.EnsureOwnInitialPreKeyInventoryAsync(source);
+            var publication = DeepIdV2PreKeyPublicationCodec.Decode(staged.ExactXpp1.Span);
+            var authority = await source.GetCurrentForPreKeyClaimAsync(Network, publication.Manifest.Field(2));
+            var request = DeepIdV2PreKeyClaimRequestCodec.Decode(DeepIdV2PreKeyClaimRequestCodec.Encode(
+                Network, Bytes(32, 0x83), authority.Placement.ViewHash.Span,
+                authority.Placement.PlacementHash.Span, 1_100, 1_120,
+                publication.Manifest.Field(2).Span, Bytes(32, 0x82),
+                publication.Manifest.Field(6).Span[6..], publication.Manifest.Field(3).Span,
+                Bytes(32, 0x81)));
+            return (request, authority, publication);
+        }
+
+        internal byte[] AuthorClaimResult(ParsedXpk1V2 request, ContactResolvePathAuthority authority,
+            ParsedXpp1V2 publication, bool replay, bool badSignature = false)
+        {
+            // Last-resort inclusion avoids a second implementation of the Merkle
+            // proof algorithm. Protocol still checks exact signed inventory membership.
+            var member = publication.LastResortMember;
+            var manifest = publication.Manifest;
+            var signingInput = DeepIdV2PreKeyClaimCommitment.CreateReplicaSignatureInput(
+                request.CanonicalBytes.Span, member.CanonicalBytes.Span, manifest.CanonicalBytes.Span, 1, 1);
+            var selected = authority.Placement.RankedReplicaNodeIds.OrderBy(id => Convert.ToHexString(id.Span)).ToArray();
+            var rows = new byte[193]; rows[0] = 2;
+            for (var index = 0; index < 2; index++)
+            {
+                selected[index].Span.CopyTo(rows.AsSpan(1 + index * 96));
+                nodes.Single(node => node.SignerId.Span.SequenceEqual(selected[index].Span))
+                    .SignCommit(signingInput).CopyTo(rows, 33 + index * 96);
+            }
+            if (badSignature) rows[33] ^= 1;
+            var counter = new byte[2]; BinaryPrimitives.WriteUInt16BigEndian(counter, 1);
+            var generation = new byte[8]; BinaryPrimitives.WriteUInt64BigEndian(generation, 1);
+            var lastIndex = new byte[2]; BinaryPrimitives.WriteUInt16BigEndian(lastIndex, ushort.MaxValue);
+            ReadOnlyMemory<byte>[] payload = [member.CanonicalBytes, new byte[32],
+                DeepIdV2PreKeyClaimCommitment.ComputeReceiptHash(request.CanonicalBytes.Span,
+                    member.CanonicalBytes.Span, manifest.CanonicalBytes.Span, 1, 1),
+                manifest.Field(12), manifest.Field(13), manifest.Field(5), manifest.Field(15),
+                counter, generation, rows, manifest.CanonicalBytes, lastIndex, ReadOnlyMemory<byte>.Empty];
+            return DeepIdV2PreKeyClaimResultCodec.Encode(request.CanonicalBytes.Span,
+                replay ? Xpc1V2Status.Replay : Xpc1V2Status.Claimed,
+                Xpc1V2MutationOutcome.DurablyCommitted, 1_100, 0, payload);
+        }
+
         // Storage-level internal recording deliberately omits transport verification
         // so negative tests prove the public completion path does not trust a marker.
         internal async Task<DeepIdV2PreKeyCommitSnapshot> StageAndRecordPairAsync(
@@ -888,8 +1056,11 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
             using var record = await storage.ReadOwnedAsync("deep.store.v2.sql-generation");
             var key = record!.Use(value => value.Slice(88, 32).ToArray());
             var connection = new SqliteConnection(new SqliteConnectionStringBuilder
-            { DataSource = Path.Combine(directory, "deep-store-v2-account.dsv2"),
-              Mode = SqliteOpenMode.ReadWrite, Pooling = false }.ToString());
+            {
+                DataSource = Path.Combine(directory, "deep-store-v2-account.dsv2"),
+                Mode = SqliteOpenMode.ReadWrite,
+                Pooling = false
+            }.ToString());
             try
             {
                 connection.Open();
