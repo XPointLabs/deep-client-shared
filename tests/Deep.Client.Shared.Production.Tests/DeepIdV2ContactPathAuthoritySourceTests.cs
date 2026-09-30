@@ -96,14 +96,39 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
     }
 
     [Fact]
+    public async Task Did2ClaimCustody_RequestOnlyAndMalformedSnapshotsRejectWithoutRepair()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        var custody = await fixture.Accounts.OpenOwnClaimRequestCustodyAsync();
+        await custody.ReserveAsync(JournalRequest(0x61), default);
+        var original = await fixture.ReadClaimSnapshotAsync();
+        var oldGeneration = original.ToArray(); oldGeneration[0] = 2;
+        var badFlag = original.ToArray(); badFlag[1] = 2;
+        var emptyCount = original.ToArray(); emptyCount.AsSpan(2, 4).Clear();
+        var hugeCount = original.ToArray(); hugeCount.AsSpan(2, 4).Fill(0xff);
+        var wrongLength = original.ToArray(); BinaryPrimitives.WriteUInt32BigEndian(wrongLength.AsSpan(444), 1);
+        var truncatedResult = original.ToArray(); BinaryPrimitives.WriteUInt32BigEndian(truncatedResult.AsSpan(444), 4096);
+        byte[][] hostile = [oldGeneration, badFlag, emptyCount, hugeCount,
+            wrongLength, truncatedResult, original[..^1], [.. original, 0]];
+        foreach (var payload in hostile)
+        {
+            await fixture.ReplaceClaimSnapshotForParserTestAsync(payload);
+            await Assert.ThrowsAsync<InvalidDataException>(() => fixture.ReopenAccount().OpenOwnClaimRequestCustodyAsync());
+            Assert.Equal(payload, await fixture.ReadClaimSnapshotAsync());
+        }
+        await fixture.ReplaceClaimSnapshotForParserTestAsync(original);
+        Assert.Equal(JournalRequest(0x61), (await custody.FindAsync(Bytes(32, 0x61), default))!.Value.ToArray());
+    }
+
+    [Fact]
     [Trait("RequiresApprovedMlKemRuntime", "true")]
     public async Task Did2ClaimTransport_VerifiesBothSignaturesAndReusesExactRequest()
     {
         await using var fixture = await Fixture.CreateAsync();
         var custody = await fixture.Accounts.OpenOwnClaimRequestCustodyAsync();
-        var (request, authority, publication) = await fixture.CreateClaimAsync();
         foreach (var replay in new[] { false, true })
         {
+            var (request, authority, publication) = await fixture.CreateClaimAsync(replay ? (byte)0x84 : (byte)0x83);
             var exact = fixture.AuthorClaimResult(request, authority, publication, replay);
             var onion = new ClaimOnion(authority, exact);
             onion.BeforeSend = async () => Assert.Equal(request.CanonicalBytes.ToArray(),
@@ -115,7 +140,98 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
             Assert.Equal(authority.Placement.RankedReplicaNodeIds[0].ToArray(), onion.Exit);
             Assert.Equal(1, onion.Calls);
             Assert.Equal(request.CanonicalBytes.ToArray(), onion.Request);
+            Assert.Equal(exact, (await custody.FindResultAsync(request.Field(2), default))!.Value.ToArray());
+
+            var reopened = await fixture.ReopenAccount().OpenOwnClaimRequestCustodyAsync();
+            // No second claim selection or response re-encoding on owner restart.
+            var retryOnion = new ClaimOnion(authority, []);
+            var recovered = await new DeepIdV2PreKeyClaimTransport(new ClaimAuthority(authority), retryOnion, reopened)
+                .ClaimExactAsync(request.CanonicalBytes);
+            Assert.Equal(exact, recovered.ExactResult.ToArray());
+            Assert.Equal(0, retryOnion.Calls);
+            var copy = (await reopened.FindResultAsync(request.Field(2), default))!.Value.ToArray();
+            copy[^1] ^= 1;
+            Assert.Equal(exact, (await reopened.FindResultAsync(request.Field(2), default))!.Value.ToArray());
+            var other = await fixture.Source().GetCurrentForPreKeyClaimAsync(Fixture.Network, Bytes(32, 0x85));
+            await Assert.ThrowsAsync<CryptographicException>(async () =>
+                await new DeepIdV2PreKeyClaimTransport(new ClaimAuthority(other), retryOnion, reopened)
+                    .ClaimExactAsync(request.CanonicalBytes));
+            Assert.Equal(0, retryOnion.Calls); // Retention does not bypass current placement.
         }
+    }
+
+    [Fact]
+    [Trait("RequiresApprovedMlKemRuntime", "true")]
+    public async Task Did2ClaimCustody_ExactResultCasRequiresReservationAndRejectsChangedWireAfterRestart()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        var custody = await fixture.Accounts.OpenOwnClaimRequestCustodyAsync();
+        var (request, authority, publication) = await fixture.CreateClaimAsync();
+        var exact = fixture.AuthorClaimResult(request, authority, publication, false);
+        var verified = DeepIdV2PreKeyClaimReplicaSignatureVerifier.Verify(request,
+            DeepIdV2PreKeyClaimResultCodec.Decode(exact, request.CanonicalBytes.Span), authority.Placement);
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await custody.RecordVerifiedResultAsync(verified, default));
+        await custody.ReserveAsync(request.CanonicalBytes, default);
+        Assert.Null(await custody.FindResultAsync(request.Field(2), default));
+        var reservedOnly = await fixture.ReadClaimSnapshotAsync();
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+            await custody.RecordVerifiedResultAsync(verified, cancelled.Token));
+        Assert.Null(await custody.FindResultAsync(request.Field(2), default));
+        var retained = await Task.WhenAll(custody.RecordVerifiedResultAsync(verified, default).AsTask(),
+            custody.RecordVerifiedResultAsync(verified, default).AsTask());
+        Assert.All(retained, value => Assert.Equal(exact, value.ToArray()));
+        var reopened = await fixture.ReopenAccount().OpenOwnClaimRequestCustodyAsync();
+        Assert.Equal(exact, (await reopened.FindResultAsync(request.Field(2), default))!.Value.ToArray());
+        await using (var sql = await fixture.OpenSqlAsync())
+        {
+            using var read = sql.CreateCommand();
+            read.CommandText = "SELECT payload FROM protected_lkg_root WHERE root_kind=8;";
+            var winner = Assert.IsType<byte[]>(read.ExecuteScalar());
+            using var write = sql.CreateCommand();
+            write.CommandText = "UPDATE protected_lkg_root SET revision=$revision,payload=$payload WHERE root_kind=8;";
+            write.Parameters.AddWithValue("$revision", 1);
+            write.Parameters.AddWithValue("$payload", reservedOnly);
+            Assert.Equal(1, write.ExecuteNonQuery());
+            await Assert.ThrowsAsync<CryptographicException>(() => fixture.ReopenAccount().OpenOwnClaimRequestCustodyAsync());
+            write.Parameters["$revision"].Value = 2;
+            write.Parameters["$payload"].Value = winner;
+            Assert.Equal(1, write.ExecuteNonQuery());
+        }
+        // Same signed tuple, different whole wire (Claimed -> Replay) is not
+        // an exact local result replay and cannot silently replace the winner.
+        var changed = fixture.AuthorClaimResult(request, authority, publication, true);
+        var changedVerified = DeepIdV2PreKeyClaimReplicaSignatureVerifier.Verify(request,
+            DeepIdV2PreKeyClaimResultCodec.Decode(changed, request.CanonicalBytes.Span), authority.Placement);
+        await Assert.ThrowsAsync<CryptographicException>(async () =>
+            await reopened.RecordVerifiedResultAsync(changedVerified, default));
+        var forked = await fixture.ReopenAccount().OpenOwnClaimRequestCustodyAsync();
+        await Assert.ThrowsAsync<CryptographicException>(async () =>
+            await forked.FindResultAsync(request.Field(2), default));
+        await Assert.ThrowsAsync<CryptographicException>(async () =>
+            await forked.ReserveAsync(request.CanonicalBytes, default));
+    }
+
+    [Fact]
+    [Trait("RequiresApprovedMlKemRuntime", "true")]
+    public async Task Did2ClaimTransport_ResultFloorInterruptionCannotReleaseSuccess()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        var custody = await fixture.Accounts.OpenOwnClaimRequestCustodyAsync();
+        var (request, authority, publication) = await fixture.CreateClaimAsync();
+        var exact = fixture.AuthorClaimResult(request, authority, publication, false);
+        var onion = new ClaimOnion(authority, exact) { AfterSend = fixture.FailAfterNextOnionMarker };
+        await Assert.ThrowsAsync<IOException>(async () =>
+            await new DeepIdV2PreKeyClaimTransport(new ClaimAuthority(authority), onion, custody)
+                .ClaimExactAsync(request.CanonicalBytes));
+        Assert.Equal(1, onion.Calls);
+        await Assert.ThrowsAsync<CryptographicException>(() => fixture.ReopenAccount().OpenOwnClaimRequestCustodyAsync());
+        await Assert.ThrowsAsync<CryptographicException>(async () =>
+            await new DeepIdV2PreKeyClaimTransport(new ClaimAuthority(authority), onion, custody)
+                .ClaimExactAsync(request.CanonicalBytes));
+        Assert.Equal(1, onion.Calls);
     }
 
     [Fact]
@@ -141,6 +257,7 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
             Assert.Equal(status, error.Status);
             Assert.Equal(retry, error.RetryAfterSeconds);
             Assert.Equal(1, onion.Calls);
+            Assert.Null(await custody.FindResultAsync(request.Field(2), default));
         }
     }
 
@@ -176,6 +293,7 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
             else
                 await Assert.ThrowsAsync<CryptographicException>(claim);
             Assert.Equal(1, onion.Calls);
+            Assert.Null(await custody.FindResultAsync(request.Field(2), default));
         }
     }
 
@@ -986,14 +1104,14 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
         internal void AfterNextCommitPairRead(Action action) => storage.AfterCommitPairRead = action;
 
         internal async Task<(ParsedXpk1V2 Request, ContactResolvePathAuthority Authority,
-            ParsedXpp1V2 Publication)> CreateClaimAsync()
+            ParsedXpp1V2 Publication)> CreateClaimAsync(byte operation = 0x83)
         {
             var source = Source();
             var staged = await accounts.EnsureOwnInitialPreKeyInventoryAsync(source);
             var publication = DeepIdV2PreKeyPublicationCodec.Decode(staged.ExactXpp1.Span);
             var authority = await source.GetCurrentForPreKeyClaimAsync(Network, publication.Manifest.Field(2));
             var request = DeepIdV2PreKeyClaimRequestCodec.Decode(DeepIdV2PreKeyClaimRequestCodec.Encode(
-                Network, Bytes(32, 0x83), authority.Placement.ViewHash.Span,
+                Network, Bytes(32, operation), authority.Placement.ViewHash.Span,
                 authority.Placement.PlacementHash.Span, 1_100, 1_120,
                 publication.Manifest.Field(2).Span, Bytes(32, 0x82),
                 publication.Manifest.Field(6).Span[6..], publication.Manifest.Field(3).Span,
@@ -1134,6 +1252,36 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
         }
         internal void FailAfterNextOnionMarker() => storage.FailAfterOnionMarker = true;
         internal Task ResetAccountAsync() => accounts.ResetExplicitlyAsync();
+
+        internal async Task<byte[]> ReadClaimSnapshotAsync()
+        {
+            await using var sql = await OpenSqlAsync();
+            using var read = sql.CreateCommand();
+            read.CommandText = "SELECT payload FROM protected_lkg_root WHERE root_kind=8;";
+            return Assert.IsType<byte[]>(read.ExecuteScalar());
+        }
+
+        internal async Task ReplaceClaimSnapshotForParserTestAsync(byte[] payload)
+        {
+            // Fixture owner deliberately changes both SQL and its protected
+            // hash to reach the local format parser, not the rollback guard.
+            // Production has no raw snapshot/floor replacement entry point.
+            await using var sql = await OpenSqlAsync();
+            using var write = sql.CreateCommand();
+            write.CommandText = "UPDATE protected_lkg_root SET payload=$payload WHERE root_kind=8;";
+            write.Parameters.AddWithValue("$payload", payload);
+            Assert.Equal(1, write.ExecuteNonQuery());
+            var slot = Assert.IsType<string>(storage.LastClaimFloorSlot);
+            using var owned = await innerStorage.ReadOwnedAsync(slot);
+            var marker = owned!.Use(bytes => bytes.ToArray());
+            try
+            {
+                SHA256.HashData(payload).CopyTo(marker, 44);
+                await innerStorage.DeleteBatchAsync([slot]);
+                await innerStorage.WriteBatchAsync([new DeepSecureStorageWrite(slot, marker)]);
+            }
+            finally { CryptographicOperations.ZeroMemory(marker); }
+        }
 
         internal async Task<IXPointNetworkStateStore> ReopenNetworkStoreAsync(bool changedPin = false)
         {
@@ -1337,10 +1485,14 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
         internal bool FailAfterHistoryAnchor { get; set; }
         internal string? LastHistoryAnchorSlot { get; private set; }
         internal bool FailAfterOnionMarker { get; set; }
+        internal string? LastClaimFloorSlot { get; private set; }
         public async Task<bool> CompareExchangeAsync(string slot, ReadOnlyMemory<byte> expected,
             ReadOnlyMemory<byte> replacement, CancellationToken ct = default)
         {
             var applied = await inner.CompareExchangeAsync(slot, expected, replacement, ct);
+            if (applied && replacement.Length == 80 &&
+                BinaryPrimitives.ReadInt32BigEndian(replacement.Span[76..]) == 8)
+                LastClaimFloorSlot = slot;
             if (applied && FailAfterOnionMarker && slot.Contains(".onion-custody.", StringComparison.Ordinal))
             {
                 FailAfterOnionMarker = false;
@@ -1370,6 +1522,8 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
                 throw new IOException("Injected stop after network marker, before history anchor and SQL commit.");
             }
             await inner.WriteBatchAsync(writes, ct);
+            LastClaimFloorSlot = writes.SingleOrDefault(write => write.Value.Length == 80 &&
+                BinaryPrimitives.ReadInt32BigEndian(write.Value.Span[76..]) == 8)?.Slot ?? LastClaimFloorSlot;
             if (FailAfterOnionMarker && writes.Any(write => write.Slot.Contains(".onion-custody.", StringComparison.Ordinal)))
             {
                 FailAfterOnionMarker = false;

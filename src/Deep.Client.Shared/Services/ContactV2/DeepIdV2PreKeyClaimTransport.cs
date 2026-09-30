@@ -10,7 +10,9 @@ namespace Deep.Client.Shared.Services.ContactV2;
 /// <summary>One exact DID2 claim attempt through the selected ONION exit.
 /// A result proves both replica signatures and inventory inclusion, not peer
 /// freshness, contact acceptance, session persistence or message delivery.
-/// The account-owned journal retains the exact request before dispatch/retry.</summary>
+/// The account-owned journal retains the exact request before dispatch/retry
+/// and verified result before it can escape. Retained bytes are reverified,
+/// never treated as fresh recipient or durable replica storage authority.</summary>
 internal sealed class DeepIdV2PreKeyClaimTransport(
     IContactResolvePathAuthoritySource authoritySource,
     IExactContactResolveOnionTransport onion,
@@ -32,6 +34,15 @@ internal sealed class DeepIdV2PreKeyClaimTransport(
         cancellationToken.ThrowIfCancellationRequested();
         RequirePlacement(authority, request);
         var placement = authority.Placement;
+        var priorResult = await custody.FindResultAsync(request.Field(2), cancellationToken)
+            .ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (priorResult is { } exactPrior)
+        {
+            RequirePlacement(authority, request);
+            return DeepIdV2PreKeyClaimReplicaSignatureVerifier.Verify(request,
+                DeepIdV2PreKeyClaimResultCodec.Decode(exactPrior.Span, request.CanonicalBytes.Span), placement);
+        }
         // The fixed coordinator completes both durable replica operations.
         // There is no second independent claim or generated retry operation.
         var response = await onion.SendExactAsync(canonical,
@@ -44,7 +55,11 @@ internal sealed class DeepIdV2PreKeyClaimTransport(
         if (result.Status is not (Xpc1V2Status.Claimed or Xpc1V2Status.Replay))
             throw new DeepIdV2PreKeyClaimUnavailableException(result.Status,
                 BinaryPrimitives.ReadUInt32BigEndian(result.Field(7).Span));
-        return DeepIdV2PreKeyClaimReplicaSignatureVerifier.Verify(request, result, placement);
+        var verified = DeepIdV2PreKeyClaimReplicaSignatureVerifier.Verify(request, result, placement);
+        await custody.RecordVerifiedResultAsync(verified, cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        RequirePlacement(authority, request);
+        return verified;
     }
 
     private static void RequirePlacement(ContactResolvePathAuthority? authority,

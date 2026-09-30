@@ -45,22 +45,37 @@ claim completion, DPH2 session authority or permission to report delivery.
 Those are separate consumers of the
 [normative claim contract](../../docs/architecture/CONTACT-RESOLVER-V1.md#34-atomic-pre-key-claim-xpk1--xpc1).
 The signed-network/SQLCipher/ONION-codec tests are not socket or device E2E.
-Downstream clients must rebuild/repin Protocol and Shared together; no account
-reset is required by this path-only change.
+Downstream clients must rebuild/repin Protocol and Shared together. The path
+API itself does not reset accounts; the local claim journal clean-break impact
+is specified below.
 
 The internal `DeepIdV2PreKeyClaimTransport` now requires account-owned
 `DeepIdV2ClaimRequestCustody` and reserves the exact request before even requesting
-path authority. DSV2 root kind 8 stores the version-2, bounded operation-sorted
-request snapshot and irreversible local fork flag. It reuses the existing
+path authority. DSV2 root kind 8 stores the version-3, bounded operation-sorted
+exact request/optional padded result snapshot and irreversible local fork flag. It reuses the existing
 account/device/database-instance-bound two-slot floor mechanism; floor writes
 precede SQL commit and no secure-storage slot is allocated per request. Exact
-replay and lookup survive owner reopen; substitution under the same operation
-fork-latches this journal. Capacity is 1,024 retained requests, with fail-closed
-refusal at capacity rather than implicit eviction or reset. Explicit account
+replay and lookup survive owner reopen; request or whole-result substitution
+under the same operation fork-latches this journal. Capacity is 1,024 retained
+requests, with the byte bound calculated to accommodate the largest closed
+XPC1 bucket for every reservation. Capacity cannot be exhausted only after
+dispatch because space for its result was omitted. At the request limit the
+store refuses new operations, rather than evicting or resetting. Explicit account
 reset purges these scoped slots through the existing V2 namespace boundary.
 
-This is request reservation only, not a verified XPC1 receipt store, recipient
-authorization, durable DPH2 preparation or session state. In particular,
+Successful XPC1 is recorded only through Protocol's selected-replica signature
+capability, after both signatures and inclusion have passed, before the result
+escapes the transport. Refusals, malformed responses and cancellation before
+verification do not become successful result records. After owner reopen the
+transport rechecks current placement and both signatures over the retained
+pair without a second network claim. A first observed `Replay` result can be
+retained; once retained, no different status/time/padding wire may replace it.
+Request-only version-2 snapshots are rejected with no migration or dual reader;
+affected isolated QA accounts require explicit reset. Node keys, network genesis
+and floors are not reset by this local change.
+
+This is exact request/result custody, not current-recipient authorization,
+independent replica storage evidence, durable DPH2 preparation or session state. In particular,
 initiator ephemeral/ratchet secret persistence and recovery, logical contact
 intent binding, authenticated completion and shipping MSG composition remain
 open. A lost response can repeat the retained request; this component does not
@@ -530,7 +545,7 @@ the fully verified claim's two-lane handoff. Its API clean break is owned by
 Protocol's only sender completion is now the current V2 asynchronous contract
 in [DR-0018](../../docs/survival-program/decisions/DR-0018-did2-initiator-completion.md).
 The old Shared V1 orchestration cannot call or adapt it and fails before a
-session store opens. Account-owned V2 pending preparation/result custody and
+session store opens. Account-owned V2 pending secret preparation and
 shipping sender composition are still required; this is not UI activation.
 The old recipient/placement API cannot accept a parsed V2 request. ContactHello
 V2 safety-number/XUR1 endpoint semantics and current account-owned receive
