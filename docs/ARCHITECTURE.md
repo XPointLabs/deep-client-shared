@@ -527,6 +527,11 @@ responder now receives the non-null V2 initiator checkpoint and recipient
 closure from Protocol's closed current-endpoint promotion, and consumes only
 the fully verified claim's two-lane handoff. Its API clean break is owned by
 [DR-0017](../../docs/survival-program/decisions/DR-0017-did2-initial-claim-promotion.md).
+Protocol's only sender completion is now the current V2 asynchronous contract
+in [DR-0018](../../docs/survival-program/decisions/DR-0018-did2-initiator-completion.md).
+The old Shared V1 orchestration cannot call or adapt it and fails before a
+session store opens. Account-owned V2 pending preparation/result custody and
+shipping sender composition are still required; this is not UI activation.
 The old recipient/placement API cannot accept a parsed V2 request. ContactHello
 V2 safety-number/XUR1 endpoint semantics and current account-owned receive
 composition remain unfinished and fail closed before opening a new store.

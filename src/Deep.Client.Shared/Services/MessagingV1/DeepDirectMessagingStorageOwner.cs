@@ -1247,34 +1247,6 @@ public sealed class DeepDirectMessagingInitiatorClaimPreparation : IDisposable
     public ReadOnlyMemory<byte> ExactDpk2 => Copy(exactDpk2);
     public ReadOnlyMemory<byte> ExactDpk2Hash => Copy(exactDpk2Hash);
 
-    internal InitiatorInitialSessionCommitCapability Complete(
-        object expectedOwnerToken,
-        VerifiedXpc1PreKeyClaimReceipt verifiedClaim,
-        ReadOnlySpan<byte> exactSessionInitDmc2,
-        ReadOnlySpan<byte> exactFirstApplicationDmc2)
-    {
-        ArgumentNullException.ThrowIfNull(verifiedClaim);
-        if (!ReferenceEquals(ownerToken, expectedOwnerToken))
-        {
-            throw new CryptographicException(
-                "The DPH2 preparation belongs to another direct-message owner.");
-        }
-        var owned = Interlocked.Exchange(ref preparation, null) ??
-            throw new ObjectDisposedException(nameof(DeepDirectMessagingInitiatorClaimPreparation));
-        try
-        {
-            return owned.Complete(
-                verifiedClaim,
-                exactSessionInitDmc2,
-                exactFirstApplicationDmc2);
-        }
-        finally
-        {
-            owned.Dispose();
-            DisposePublicValues();
-        }
-    }
-
     public void Dispose()
     {
         if (Interlocked.Exchange(ref disposed, 1) != 0)
@@ -1969,7 +1941,7 @@ internal sealed class DeepDirectMessagingStorageOwner : IAsyncDisposable
         }
     }
 
-    internal async ValueTask<DeepDirectMessagingInitiatorCommitResult?>
+    internal ValueTask<DeepDirectMessagingInitiatorCommitResult?>
         TryCommitInitiatorSessionAsync(
             DeepDirectMessagingInitiatorClaimPreparation? preparedClaim,
             VerifiedXpc1PreKeyClaimReceipt? verifiedClaim,
@@ -1977,77 +1949,12 @@ internal sealed class DeepDirectMessagingStorageOwner : IAsyncDisposable
             ReadOnlyMemory<byte> exactFirstApplicationDmc2 = default,
             CancellationToken cancellationToken = default)
     {
-        if (preparedClaim is null || verifiedClaim is null)
-        {
-            preparedClaim?.Dispose();
-            return null;
-        }
-        InitiatorInitialSessionCommitCapability? capability = null;
-        byte[]? exactDph2Id = null;
-        try
-        {
-            ThrowIfDisposed();
-            capability = preparedClaim.Complete(
-                ownerToken,
-                verifiedClaim,
-                exactSessionInitDmc2.Span,
-                exactFirstApplicationDmc2.Span);
-            exactDph2Id = capability.SessionId.ToArray();
-            var session = DeepDirectMessagingVerifiedSessionBinding.FromInitiatorScope(
-                preparedClaim.VerifiedScope,
-                exactDph2Id);
-            var opened = await TryOpenSessionAsync(
-                    session,
-                    createIfMissing: true,
-                    cancellationToken)
-                .ConfigureAwait(false) ?? throw new CryptographicException(
-                    "The verified initiator DPH2 session store was not opened.");
-
-            await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-            try
-            {
-                ThrowIfDisposed();
-                var catalogKey = session.ComputeCatalogKey(localAuthority);
-                try
-                {
-                    var keyText = Convert.ToHexStringLower(catalogKey);
-                    if (!sessions.TryGetValue(keyText, out var current) ||
-                        !ReferenceEquals(current.Store, opened.Store))
-                    {
-                        throw new CryptographicException(
-                            "The initiator session store lost its account-owner binding.");
-                    }
-                }
-                finally
-                {
-                    CryptographicOperations.ZeroMemory(catalogKey);
-                }
-
-                var adapter = new ManagedInitiatorInitialSessionSqliteAdapter(
-                    opened.Store,
-                    preparedClaim.VerifiedScope);
-                var committed = await adapter.CommitAsync(capability, cancellationToken)
-                    .ConfigureAwait(false);
-                capability = null;
-                using var dispatch = await adapter.ReadPendingDispatchAsync(cancellationToken)
-                    .ConfigureAwait(false) ?? throw new CryptographicException(
-                    "The committed initiator TRS1 has no exact durable DPH2 dispatch.");
-                return new DeepDirectMessagingInitiatorCommitResult(
-                    committed,
-                    dispatch,
-                    session);
-            }
-            finally
-            {
-                gate.Release();
-            }
-        }
-        finally
-        {
-            capability?.Dispose();
-            preparedClaim.Dispose();
-            Zero(exactDph2Id);
-        }
+        preparedClaim?.Dispose();
+        cancellationToken.ThrowIfCancellationRequested();
+        return ValueTask.FromException<DeepDirectMessagingInitiatorCommitResult?>(
+            new CryptographicException(
+                "The retired V1 initiator composition cannot complete a DID2 session. " +
+                "Current V2 claim, proof and protected pending custody are required."));
     }
 
     internal ValueTask<DeepDirectMessagingInitiatorCommitResult?>
