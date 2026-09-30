@@ -25,6 +25,7 @@ namespace Deep.Client.Shared.Production.Tests;
 public sealed class DeepIdV2ContactPathAuthoritySourceTests
 {
     [Fact]
+    [Trait("RequiresApprovedMlKemRuntime", "true")]
     public async Task Did2ClaimTransport_VerifiesBothSignaturesAndReusesExactRequest()
     {
         await using var fixture = await Fixture.CreateAsync();
@@ -44,6 +45,7 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
     }
 
     [Fact]
+    [Trait("RequiresApprovedMlKemRuntime", "true")]
     public async Task Did2ClaimTransport_RefusalNeverMintsCapabilityOrAutomaticallyRetries()
     {
         await using var fixture = await Fixture.CreateAsync();
@@ -68,6 +70,7 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
     }
 
     [Fact]
+    [Trait("RequiresApprovedMlKemRuntime", "true")]
     public async Task Did2ClaimTransport_RejectsSubstitutionBeforeGrant()
     {
         await using var fixture = await Fixture.CreateAsync();
@@ -101,6 +104,7 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
     }
 
     [Fact]
+    [Trait("RequiresApprovedMlKemRuntime", "true")]
     public async Task Did2ClaimTransport_CancelledResponseAndMismatchedInitialPlacementCannotGrant()
     {
         await using var fixture = await Fixture.CreateAsync();
