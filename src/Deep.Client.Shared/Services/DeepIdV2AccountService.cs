@@ -179,6 +179,14 @@ public sealed class DeepIdV2AccountService
             this, cancellationToken).ConfigureAwait(false);
     }
 
+    internal async Task<DeepIdV2ClaimRequestCustody> OpenOwnClaimRequestCustodyAsync(
+        CancellationToken cancellationToken = default)
+    {
+        using var verifier = OpenVerifier();
+        return await owner.OpenClaimRequestCustodyAsync(TrustedUnixSeconds(),
+            verifier, cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>
     /// Starts the DID2-only pre-XPK1 initiator claim from this protected
     /// account and an independently verified, still-current directory proof.

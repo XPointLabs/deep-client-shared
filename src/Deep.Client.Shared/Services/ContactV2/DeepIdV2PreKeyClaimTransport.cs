@@ -10,18 +10,22 @@ namespace Deep.Client.Shared.Services.ContactV2;
 /// <summary>One exact DID2 claim attempt through the selected ONION exit.
 /// A result proves both replica signatures and inventory inclusion, not peer
 /// freshness, contact acceptance, session persistence or message delivery.
-/// The caller must durably retain its exact request before dispatch/retry.</summary>
+/// The account-owned journal retains the exact request before dispatch/retry.</summary>
 internal sealed class DeepIdV2PreKeyClaimTransport(
     IContactResolvePathAuthoritySource authoritySource,
-    IExactContactResolveOnionTransport onion)
+    IExactContactResolveOnionTransport onion,
+    DeepIdV2ClaimRequestCustody custody)
 {
     internal async ValueTask<VerifiedXpc1V2ReplicaSignatures> ClaimExactAsync(
         ReadOnlyMemory<byte> exactRequest, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(authoritySource);
         ArgumentNullException.ThrowIfNull(onion);
+        ArgumentNullException.ThrowIfNull(custody);
         cancellationToken.ThrowIfCancellationRequested();
-        var request = DeepIdV2PreKeyClaimRequestCodec.Decode(exactRequest.Span);
+        var retained = await custody.ReserveAsync(exactRequest, cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        var request = DeepIdV2PreKeyClaimRequestCodec.Decode(retained.Span);
         var canonical = ContactResolveCanonicalPathRequest.Decode(request.CanonicalBytes.Span);
         var authority = await authoritySource.GetCurrentAsync(canonical, cancellationToken)
             .ConfigureAwait(false);

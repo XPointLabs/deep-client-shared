@@ -48,6 +48,24 @@ The signed-network/SQLCipher/ONION-codec tests are not socket or device E2E.
 Downstream clients must rebuild/repin Protocol and Shared together; no account
 reset is required by this path-only change.
 
+The internal `DeepIdV2PreKeyClaimTransport` now requires account-owned
+`DeepIdV2ClaimRequestCustody` and reserves the exact request before even requesting
+path authority. DSV2 root kind 8 stores the version-2, bounded operation-sorted
+request snapshot and irreversible local fork flag. It reuses the existing
+account/device/database-instance-bound two-slot floor mechanism; floor writes
+precede SQL commit and no secure-storage slot is allocated per request. Exact
+replay and lookup survive owner reopen; substitution under the same operation
+fork-latches this journal. Capacity is 1,024 retained requests, with fail-closed
+refusal at capacity rather than implicit eviction or reset. Explicit account
+reset purges these scoped slots through the existing V2 namespace boundary.
+
+This is request reservation only, not a verified XPC1 receipt store, recipient
+authorization, durable DPH2 preparation or session state. In particular,
+initiator ephemeral/ratchet secret persistence and recovery, logical contact
+intent binding, authenticated completion and shipping MSG composition remain
+open. A lost response can repeat the retained request; this component does not
+claim that an interrupted initial session can already be fully resumed.
+
 ## Account-owned restart-safe network history
 
 The production test solution explicitly lists its three source Protocol

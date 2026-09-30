@@ -103,6 +103,16 @@ internal sealed class ProtectedDeepIdV2AccountOwner
             lease, sqlStatePath, current, account, cancellationToken).ConfigureAwait(false);
     }
 
+    internal async ValueTask<DeepIdV2ClaimRequestCustody> OpenClaimRequestCustodyAsync(
+        ulong trustedUnixSeconds, IDeepMlDsa65Verifier mlDsa65, CancellationToken cancellationToken)
+    {
+        using var held = await lease.AcquireAsync(cancellationToken).ConfigureAwait(false);
+        using var current = await RequireCurrentUnderLeaseAsync(trustedUnixSeconds,
+            mlDsa65, cancellationToken).ConfigureAwait(false);
+        return await SqliteDeepIdV2AccountGeneration.OpenClaimRequestCustodyAsync(storage,
+            lease, sqlStatePath, current, cancellationToken).ConfigureAwait(false);
+    }
+
     internal async ValueTask<SqliteDeviceStateStore>
         OpenCurrentDeviceStateStoreAsync(ulong trustedUnixSeconds,
             IDeepMlDsa65Verifier mlDsa65, CancellationToken cancellationToken)

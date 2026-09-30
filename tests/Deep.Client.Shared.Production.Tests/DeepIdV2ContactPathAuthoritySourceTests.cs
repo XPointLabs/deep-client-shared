@@ -24,17 +24,91 @@ namespace Deep.Client.Shared.Production.Tests;
 
 public sealed class DeepIdV2ContactPathAuthoritySourceTests
 {
+    private static byte[] JournalRequest(byte operation, byte bundle = 0x51, byte[]? network = null) =>
+        DeepIdV2PreKeyClaimRequestCodec.Encode(network ?? Fixture.Network, Bytes(32, operation),
+            Bytes(32, 0x21), Bytes(32, 0x22), 1_100, 1_120, Fixture.Service,
+            Bytes(32, bundle), Bytes(32, 0x52), Bytes(32, 0x53), Bytes(32, 0x54));
+
+    [Fact]
+    public async Task Did2ClaimCustody_ConcurrentExactReplayAndRestartRetainOnlyOriginalRequests()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        var custody = await fixture.Accounts.OpenOwnClaimRequestCustodyAsync();
+        var first = JournalRequest(0x61);
+        var second = JournalRequest(0x62);
+        Assert.Null(await custody.FindAsync(Bytes(32, 0x61), default));
+        var writes = await Task.WhenAll(custody.ReserveAsync(first, default).AsTask(),
+            custody.ReserveAsync(first, default).AsTask(), custody.ReserveAsync(second, default).AsTask());
+        Assert.Equal(first, writes[0].ToArray());
+        Assert.Equal(first, writes[1].ToArray());
+        Assert.Equal(second, writes[2].ToArray());
+        first[^1] ^= 1; // Returned/request buffers do not own the SQL winner.
+        var reopened = await fixture.ReopenAccount().OpenOwnClaimRequestCustodyAsync();
+        Assert.Equal(JournalRequest(0x61), (await reopened.FindAsync(Bytes(32, 0x61), default))!.Value.ToArray());
+        Assert.Equal(second, (await reopened.FindAsync(Bytes(32, 0x62), default))!.Value.ToArray());
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+            await reopened.ReserveAsync(JournalRequest(0x63), cancelled.Token));
+        await Assert.ThrowsAsync<InvalidDataException>(async () => await reopened.ReserveAsync(second[..^1], default));
+        await Assert.ThrowsAsync<CryptographicException>(async () =>
+            await reopened.ReserveAsync(JournalRequest(0x63, network: Bytes(16, 0x12)), default));
+        Assert.Null(await reopened.FindAsync(Bytes(32, 0x63), default));
+        Assert.Equal(0, fixture.ProofRequests);
+    }
+
+    [Fact]
+    public async Task Did2ClaimCustody_RequestSubstitutionLatchesAcrossOwnerRestart()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        var custody = await fixture.Accounts.OpenOwnClaimRequestCustodyAsync();
+        await custody.ReserveAsync(JournalRequest(0x61), default);
+        await Assert.ThrowsAsync<CryptographicException>(async () =>
+            await custody.ReserveAsync(JournalRequest(0x61, bundle: 0x55), default));
+        var reopened = await fixture.ReopenAccount().OpenOwnClaimRequestCustodyAsync();
+        await Assert.ThrowsAsync<CryptographicException>(async () =>
+            await reopened.FindAsync(Bytes(32, 0x61), default));
+        await Assert.ThrowsAsync<CryptographicException>(async () =>
+            await reopened.ReserveAsync(JournalRequest(0x62), default));
+        Assert.Equal(0, fixture.ProofRequests);
+    }
+
+    [Fact]
+    public async Task Did2ClaimCustody_SqlRollbackCannotReopen()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        var custody = await fixture.Accounts.OpenOwnClaimRequestCustodyAsync();
+        await custody.ReserveAsync(JournalRequest(0x61), default);
+        await using var connection = await fixture.OpenSqlAsync();
+        using var read = connection.CreateCommand();
+        read.CommandText = "SELECT payload FROM protected_lkg_root WHERE root_kind=8;";
+        var oldPayload = Assert.IsType<byte[]>(read.ExecuteScalar());
+        await custody.ReserveAsync(JournalRequest(0x62), default);
+        using var write = connection.CreateCommand();
+        write.CommandText = "UPDATE protected_lkg_root SET revision=1,payload=$old WHERE root_kind=8;";
+        write.Parameters.AddWithValue("$old", oldPayload);
+        Assert.Equal(1, write.ExecuteNonQuery());
+        await Assert.ThrowsAsync<CryptographicException>(async () =>
+            await custody.FindAsync(Bytes(32, 0x61), default));
+        await Assert.ThrowsAsync<CryptographicException>(() =>
+            fixture.ReopenAccount().OpenOwnClaimRequestCustodyAsync());
+        Assert.Equal(0, fixture.ProofRequests);
+    }
+
     [Fact]
     [Trait("RequiresApprovedMlKemRuntime", "true")]
     public async Task Did2ClaimTransport_VerifiesBothSignaturesAndReusesExactRequest()
     {
         await using var fixture = await Fixture.CreateAsync();
+        var custody = await fixture.Accounts.OpenOwnClaimRequestCustodyAsync();
         var (request, authority, publication) = await fixture.CreateClaimAsync();
         foreach (var replay in new[] { false, true })
         {
             var exact = fixture.AuthorClaimResult(request, authority, publication, replay);
             var onion = new ClaimOnion(authority, exact);
-            var transport = new DeepIdV2PreKeyClaimTransport(new ClaimAuthority(authority), onion);
+            onion.BeforeSend = async () => Assert.Equal(request.CanonicalBytes.ToArray(),
+                (await custody.FindAsync(request.Field(2), default))!.Value.ToArray());
+            var transport = new DeepIdV2PreKeyClaimTransport(new ClaimAuthority(authority), onion, custody);
             var verified = await transport.ClaimExactAsync(request.CanonicalBytes);
             Assert.Equal(request.CanonicalBytes.ToArray(), verified.ExactRequest.ToArray());
             Assert.Equal(exact, verified.ExactResult.ToArray());
@@ -49,6 +123,7 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
     public async Task Did2ClaimTransport_RefusalNeverMintsCapabilityOrAutomaticallyRetries()
     {
         await using var fixture = await Fixture.CreateAsync();
+        var custody = await fixture.Accounts.OpenOwnClaimRequestCustodyAsync();
         var (request, authority, _) = await fixture.CreateClaimAsync();
         foreach (var (status, retry) in new[] {
             (Xpc1V2Status.PreKeysUnavailable, 0u),
@@ -61,7 +136,7 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
                 Xpc1V2MutationOutcome.None, 1_100, retry, []);
             var onion = new ClaimOnion(authority, body);
             var error = await Assert.ThrowsAsync<DeepIdV2PreKeyClaimUnavailableException>(async () =>
-                await new DeepIdV2PreKeyClaimTransport(new ClaimAuthority(authority), onion)
+                await new DeepIdV2PreKeyClaimTransport(new ClaimAuthority(authority), onion, custody)
                     .ClaimExactAsync(request.CanonicalBytes));
             Assert.Equal(status, error.Status);
             Assert.Equal(retry, error.RetryAfterSeconds);
@@ -74,6 +149,7 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
     public async Task Did2ClaimTransport_RejectsSubstitutionBeforeGrant()
     {
         await using var fixture = await Fixture.CreateAsync();
+        var custody = await fixture.Accounts.OpenOwnClaimRequestCustodyAsync();
         var (request, authority, publication) = await fixture.CreateClaimAsync();
         foreach (var fault in new[] { "signature", "request", "authority", "placement" })
         {
@@ -93,7 +169,7 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
                 Fixture.Network, Bytes(32, 0x85));
             var onion = new ClaimOnion(returned, body);
             Func<Task> claim = async () =>
-                await new DeepIdV2PreKeyClaimTransport(new ClaimAuthority(authority), onion)
+                await new DeepIdV2PreKeyClaimTransport(new ClaimAuthority(authority), onion, custody)
                     .ClaimExactAsync(request.CanonicalBytes);
             if (fault is "signature" or "request")
                 await Assert.ThrowsAsync<ApplicationCoreFormatException>(claim);
@@ -108,19 +184,30 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
     public async Task Did2ClaimTransport_CancelledResponseAndMismatchedInitialPlacementCannotGrant()
     {
         await using var fixture = await Fixture.CreateAsync();
+        var custody = await fixture.Accounts.OpenOwnClaimRequestCustodyAsync();
         var (request, authority, _) = await fixture.CreateClaimAsync();
         var other = await fixture.Source().GetCurrentForPreKeyClaimAsync(Fixture.Network, Bytes(32, 0x85));
         var onion = new ClaimOnion(authority, []);
         await Assert.ThrowsAnyAsync<CryptographicException>(async () =>
-            await new DeepIdV2PreKeyClaimTransport(new ClaimAuthority(other), onion)
+            await new DeepIdV2PreKeyClaimTransport(new ClaimAuthority(other), onion, custody)
                 .ClaimExactAsync(request.CanonicalBytes));
         Assert.Equal(0, onion.Calls);
         using var cancellation = new CancellationTokenSource();
         onion.AfterSend = cancellation.Cancel;
         await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
-            await new DeepIdV2PreKeyClaimTransport(new ClaimAuthority(authority), onion)
+            await new DeepIdV2PreKeyClaimTransport(new ClaimAuthority(authority), onion, custody)
                 .ClaimExactAsync(request.CanonicalBytes, cancellation.Token));
         Assert.Equal(1, onion.Calls);
+        fixture.FailAfterNextOnionMarker();
+        var next = DeepIdV2PreKeyClaimRequestCodec.Encode(Fixture.Network,
+            Bytes(32, 0x86), request.Field(3).Span, request.Field(4).Span,
+            1_100, 1_120, request.Field(16).Span, request.Field(17).Span,
+            request.Field(18).Span, request.Field(19).Span, request.Field(21).Span);
+        await Assert.ThrowsAsync<IOException>(async () =>
+            await new DeepIdV2PreKeyClaimTransport(new ClaimAuthority(authority), onion, custody)
+                .ClaimExactAsync(next));
+        Assert.Equal(1, onion.Calls); // No dispatch after a floor-before-SQL interruption.
+        await Assert.ThrowsAsync<CryptographicException>(() => fixture.Accounts.OpenOwnClaimRequestCustodyAsync());
     }
 
     private sealed class ClaimAuthority(ContactResolvePathAuthority authority) : IContactResolvePathAuthoritySource
@@ -137,14 +224,16 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
         internal byte[]? Request { get; private set; }
         internal byte[]? Exit { get; private set; }
         internal Action? AfterSend { get; set; }
-        public ValueTask<ExactContactResolveOnionResponse> SendExactAsync(ContactResolveCanonicalPathRequest request,
+        internal Func<Task>? BeforeSend { get; set; }
+        public async ValueTask<ExactContactResolveOnionResponse> SendExactAsync(ContactResolveCanonicalPathRequest request,
             ReadOnlyMemory<byte> requiredExitReplicaId, CancellationToken cancellationToken = default)
         {
+            if (BeforeSend is not null) await BeforeSend();
             Calls++;
             Request = request.ExactRequest.ToArray();
             Exit = requiredExitReplicaId.ToArray();
             AfterSend?.Invoke();
-            return ValueTask.FromResult(new ExactContactResolveOnionResponse(body, authority));
+            return new ExactContactResolveOnionResponse(body, authority);
         }
     }
 
