@@ -194,6 +194,21 @@ internal sealed class LocalDeviceAgreementBinding
             authority.AgreementPublicKey.Span);
     }
 
+    // Restores metadata only from a custody-authenticated completed record.
+    // This grants no private operation or Protocol authority.
+    internal static LocalDeviceAgreementBinding FromCompletedRecord(
+        CurrentDmd1Evidence directory, Deep.Protocol.MessagingWire.Dph2Record record)
+    {
+        if (!record.NetworkId.Span.SequenceEqual(directory.NetworkId.Span) ||
+            !record.InitiatorAccountId.Span.SequenceEqual(directory.AccountId.Span) ||
+            !directory.Devices.Any(device => device.DeviceId.Span.SequenceEqual(record.InitiatorDeviceId.Span) &&
+                device.Dpd1Hash.Span.SequenceEqual(record.InitiatorDpd1Ref.Span[6..])))
+            throw new InvalidDataException("The completed device agreement has a different directory scope.");
+        return new(record.NetworkId.Span, record.InitiatorAccountId.Span, directory.AccountGeneration,
+            record.InitiatorDeviceId.Span, record.InitiatorDeviceGeneration,
+            record.InitiatorDpd1Ref.Span[6..], record.InitiatorDeviceAgreementPublicKey.Span);
+    }
+
 #if DEEP_TEST_INTERNALS
     internal static LocalDeviceAgreementBinding ForTesting(
         ReadOnlySpan<byte> networkId,

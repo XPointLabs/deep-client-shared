@@ -28,6 +28,12 @@ internal static class MessagingCryptoV1Trs1
         MessagingCryptoV1StoreScope scope)
     {
         ArgumentNullException.ThrowIfNull(scope);
+        return ValidateDeviceBinding(encoded, scope.SessionId, scope.LocalDeviceId, scope.DeviceGeneration);
+    }
+
+    internal static MessagingCryptoV1Trs1Facts ValidateDeviceBinding(ReadOnlySpan<byte> encoded,
+        ReadOnlySpan<byte> expectedSession, ReadOnlySpan<byte> expectedLocalDevice, ulong expectedDeviceGeneration)
+    {
         if (encoded.Length < MinimumSize || encoded.Length > MessagingCryptoV1Limits.MaximumTrs1Bytes)
             throw new FormatException("TRS1 is outside the closed 2 MiB persistence bound.");
         if (!encoded[..4].SequenceEqual("TRS1"u8) || encoded[4] != 1 ||
@@ -38,8 +44,8 @@ internal static class MessagingCryptoV1Trs1
         var session = encoded.Slice(PrefixSize, 32);
         var localDevice = encoded.Slice(PrefixSize + 96, 32);
         var localDeviceGeneration = BinaryPrimitives.ReadUInt64BigEndian(encoded[(PrefixSize + 128)..]);
-        if (!Fixed(session, scope.SessionId) || !Fixed(localDevice, scope.LocalDeviceId) ||
-            localDeviceGeneration != scope.DeviceGeneration)
+        if (!Fixed(session, expectedSession) || !Fixed(localDevice, expectedLocalDevice) ||
+            localDeviceGeneration != expectedDeviceGeneration)
             throw new MessagingCryptoV1StoreOpenException(
                 MessagingCryptoV1StoreOpenFailure.ScopeMismatch,
                 "TRS1 session or local-device binding differs from the store scope.");

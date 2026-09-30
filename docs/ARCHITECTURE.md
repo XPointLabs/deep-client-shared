@@ -479,6 +479,34 @@ evidence, not fresh placement or claim authority. The isolated MAUI HTTPS lane
 mounts this publisher; its actual device results belong to
 [the owner evidence note](../../deep-client-maui/docs/DID2-HTTPS-DEVICE-2026-09-28.md).
 Remote claim, DPH2 and message device E2E are not implied.
+
+The pre-XPK1 initiator entry point now requires a stable logical intent and
+protected-time authority as well as the independently current proof. Its
+candidate account owner initializes a protected intent journal atomically
+with the SQL instance key and commits the opaque Protocol state before
+returning a restored capability. Retry/restart keeps the same operation and
+commitment. An absent journal requires explicit isolated local reset, not
+repair or an old-format reader. Format and custody semantics have one owner:
+[DR-0019](../../docs/survival-program/decisions/DR-0019-did2-preclaim-secret-persistence.md).
+The closed initial-session candidate now replaces the burn-then-return
+preparation API. It owns preclaim restoration, private one-shot agreement,
+Protocol completion and protected-pending/SQL/stable publication under the
+account lease. Its device schema is generation 4 with no previous reader;
+missing checkpoints or stable-history rollback require explicit QA reset.
+Only ciphertext/identifiers escape, not TRS1 or a private lease. The sole
+normative local contract is
+[DR-0020](../../docs/survival-program/decisions/DR-0020-did2-atomic-device-initial-session.md).
+This candidate does not yet connect the shipping messaging caller. Focused
+structural custody coverage passes nine cases, including exact pending
+roll-forward before/after SQL commit and rejection of stable rollback or
+substituted burn. One real DID2/signed-proof/claim fixture passes approved
+native completion, exact restart and all three commit crash boundaries
+(6m49s, loopback recipient/HTTP fixture, not physical evidence). The final
+complete Release batch gate runs in hosted CI against the fixed candidate SHA.
+Additional preclaim coverage verifies structural snapshot
+boundaries and a real DID2 fixture's restart, interrupted protected commit
+return, cancellation and refusal of missing proof/journal. This is isolated
+integration evidence, not physical delivery; final batch gates remain pending.
 This is PKV2 schema generation 2; generation 1 is intentionally rejected
 without migration and can only be removed by explicit test-account reset.
 This is not yet a full mutable STORE-01 service:

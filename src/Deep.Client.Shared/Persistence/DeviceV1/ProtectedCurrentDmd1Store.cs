@@ -88,6 +88,7 @@ public sealed partial class SqliteDeviceStateStore
             await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
             entered = true;
             ThrowIfDisposed();
+            await ReconcileInitialSessionsUnderGateAsync(cancellationToken).ConfigureAwait(false);
             var db = GetConnection();
             await using var transaction = db.BeginTransaction(deferred: false);
             var fingerprint = ProtectedCurrentDmd1Validation.FingerprintInstall(evidence);
@@ -144,6 +145,7 @@ public sealed partial class SqliteDeviceStateStore
             await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
             entered = true;
             ThrowIfDisposed();
+            await ReconcileInitialSessionsUnderGateAsync(cancellationToken).ConfigureAwait(false);
             var db = GetConnection();
             await using var transaction = db.BeginTransaction(deferred: false);
             var current = ReadSnapshot(db, transaction);

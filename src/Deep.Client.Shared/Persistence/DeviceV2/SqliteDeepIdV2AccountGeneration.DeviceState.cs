@@ -82,7 +82,10 @@ internal static partial class SqliteDeepIdV2AccountGeneration
                     throw new InvalidDataException(
                         "DID2 device state exists without its protected marker.");
                 await storage.WriteBatchAsync(
-                    [new DeepSecureStorageWrite(DeviceStateMarkerSlot, marker)],
+                    [new DeepSecureStorageWrite(DeviceStateMarkerSlot, marker),
+                     new DeepSecureStorageWrite(DeviceInitialSessionCheckpoint.Slot,
+                         DeviceInitialSessionCheckpoint.Stable(storeId,
+                             current.AccountId.Span, network.Span, 0, new byte[32]))],
                     cancellationToken).ConfigureAwait(false);
             }
             else if (!installed.Use(value => value.Length == marker.Length &&
@@ -93,7 +96,7 @@ internal static partial class SqliteDeepIdV2AccountGeneration
                 throw new InvalidDataException(
                     "The protected DID2 device-state database is missing.");
 
-            return new SqliteDeviceStateStore(
+            var store = new SqliteDeviceStateStore(
                 new SqliteDeviceStateStoreOptions(devicePath, deviceKey,
                     DeviceAccountId32.FromBytes(current.AccountId.Span),
                     current.Verified.PublicEvidence.Binding.Identity.Account
@@ -101,6 +104,13 @@ internal static partial class SqliteDeepIdV2AccountGeneration
                     databaseGeneration: 1,
                     DeviceOperationId32.FromBytes(storeId),
                     allowCreate: installed is null));
+            try
+            {
+                await store.OpenInitialSessionCustodyAsync(storage, network,
+                    cancellationToken).ConfigureAwait(false);
+                return store;
+            }
+            catch { store.Dispose(); throw; }
         }
         finally
         {

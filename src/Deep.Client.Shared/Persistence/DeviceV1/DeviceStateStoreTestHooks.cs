@@ -9,7 +9,10 @@ internal enum DeviceStateStoreFailpoint
     AfterChildReplacement = 3,
     BeforeDedupInsert = 4,
     BeforeCommit = 5,
-    BeforeAgreementAuthorizationCommit = 6
+    BeforeAgreementAuthorizationCommit = 6,
+    AfterInitialSessionPendingCheckpoint = 7,
+    AfterInitialSessionSqlCommit = 8,
+    AfterInitialSessionStableCheckpoint = 9
 }
 
 internal sealed class DeviceStateStoreInjectedCrashException : Exception

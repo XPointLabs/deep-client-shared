@@ -107,9 +107,22 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         {
             ValidateRecord(record, networkId.Span, accountId.Span);
             if (existing is null)
+            {
+                var emptyClaims = ProtectedDph2PreClaimJournal.Empty(networkId.Span,
+                    accountId.Span, record.AsSpan(56, 32));
                 await storage.WriteBatchAsync(
-                    [new DeepSecureStorageWrite(KeySlot, record)],
+                    [new DeepSecureStorageWrite(KeySlot, record),
+                     new DeepSecureStorageWrite(ProtectedDph2PreClaimJournal.Slot, emptyClaims)],
                     cancellationToken).ConfigureAwait(false);
+            }
+            // Initialized atomically with the instance key before publication.
+            // An older/missing journal requires explicit QA reset, never repair.
+            using var claims = await storage.ReadOwnedAsync(ProtectedDph2PreClaimJournal.Slot,
+                cancellationToken).ConfigureAwait(false) ??
+                throw new InvalidDataException("The protected preclaim journal is absent; explicit local reset is required.");
+            var instanceForClaims = record.AsSpan(56, 32).ToArray();
+            _ = claims.Use(value => ProtectedDph2PreClaimJournal.Decode(value,
+                networkId.Span, accountId.Span, instanceForClaims));
             var key = record.AsSpan(88, 32).ToArray();
             try
             {

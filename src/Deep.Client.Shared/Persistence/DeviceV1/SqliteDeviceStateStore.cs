@@ -48,7 +48,7 @@ public sealed class SqliteDeviceStateStoreOptions
 public sealed partial class SqliteDeviceStateStore : IDeviceStateStore, IProtectedCurrentDmd1Store, IDisposable
 {
     private const int ApplicationId = 0x44565331; // DVS1
-    private const int SchemaGeneration = 3;
+    private const int SchemaGeneration = 4;
     // This is a sealed, clean-break schema.  It is deliberately kept as one canonical input for
     // creation and for the cryptographic sqlite_master contract checked on every open.
     private const string SchemaDdl = """
@@ -63,6 +63,7 @@ public sealed partial class SqliteDeviceStateStore : IDeviceStateStore, IProtect
         CREATE TABLE protected_current_dmd1(singleton INTEGER PRIMARY KEY CHECK(singleton=1), canonical_dmd1 BLOB NOT NULL CHECK(length(canonical_dmd1) BETWEEN 426 AND 1476), drs_revision BLOB NOT NULL CHECK(length(drs_revision)=8));
         CREATE TABLE device_agreement_authorizations(operation_id BLOB PRIMARY KEY CHECK(length(operation_id)=32), fingerprint TEXT NOT NULL CHECK(length(fingerprint)=64 AND fingerprint NOT GLOB '*[^0-9A-F]*'), directory_generation BLOB NOT NULL CHECK(length(directory_generation)=8), directory_hash BLOB NOT NULL CHECK(length(directory_hash)=32), account_id BLOB NOT NULL CHECK(length(account_id)=32), account_generation BLOB NOT NULL CHECK(length(account_generation)=8), device_id BLOB NOT NULL CHECK(length(device_id)=32), device_generation BLOB NOT NULL CHECK(length(device_generation)=8), dpd1_hash BLOB NOT NULL CHECK(length(dpd1_hash)=32), purpose INTEGER NOT NULL CHECK(purpose BETWEEN 1 AND 2), operation_binding BLOB NOT NULL CHECK(length(operation_binding)=32), peer_public_key BLOB NOT NULL CHECK(length(peer_public_key)=32));
         CREATE INDEX device_sagas_phase ON device_sagas(phase);
+        CREATE TABLE device_initial_sessions(operation_id BLOB PRIMARY KEY CHECK(length(operation_id)=32), logical_intent_id BLOB NOT NULL UNIQUE CHECK(length(logical_intent_id)=32), sequence INTEGER NOT NULL UNIQUE CHECK(sequence BETWEEN 1 AND 128), predecessor_hash BLOB NOT NULL CHECK(length(predecessor_hash)=32), record_hash BLOB NOT NULL CHECK(length(record_hash)=32), payload BLOB NOT NULL CHECK(length(payload) BETWEEN 180 AND 198264));
         CREATE INDEX device_repairs_status ON device_repairs(status);
         """;
     private static readonly byte[] ExpectedSchemaFingerprint = HashSchemaObjects(ExpectedSchemaObjects());
@@ -138,6 +139,7 @@ public sealed partial class SqliteDeviceStateStore : IDeviceStateStore, IProtect
         {
             await gate.WaitAsync(cancellationToken).ConfigureAwait(false); entered = true;
             ThrowIfDisposed(); DeviceStateStoreTestHooks.Hit(DeviceStateStoreFailpoint.AfterGateAcquired);
+            await ReconcileInitialSessionsUnderGateAsync(cancellationToken).ConfigureAwait(false);
             var snapshot = ReadSnapshot(GetConnection(), null);
             if (snapshot is not null) ValidateSnapshotSemantics(snapshot);
             return new DeviceStoreReadResult(snapshot);
@@ -157,6 +159,7 @@ public sealed partial class SqliteDeviceStateStore : IDeviceStateStore, IProtect
         {
             await gate.WaitAsync(cancellationToken).ConfigureAwait(false); entered = true;
             ThrowIfDisposed(); DeviceStateStoreTestHooks.Hit(DeviceStateStoreFailpoint.AfterGateAcquired);
+            await ReconcileInitialSessionsUnderGateAsync(cancellationToken).ConfigureAwait(false);
             var db = GetConnection();
             await using var transaction = db.BeginTransaction(deferred: false);
             var fingerprint = plan.Fingerprint();

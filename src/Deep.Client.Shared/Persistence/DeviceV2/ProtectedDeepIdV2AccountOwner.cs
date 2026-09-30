@@ -12,6 +12,7 @@ using Deep.Protocol.XPointNetworkV1;
 using Deep.Client.Shared.Persistence.DeviceV1;
 using Deep.Client.Shared.Domain.DeviceV1;
 using Deep.Protocol.MessagingCrypto;
+using Deep.Protocol.MessagingWire;
 using Deep.Protocol.ContactV2;
 using Deep.Client.Shared.Persistence.XPointNetworkV1;
 
@@ -111,6 +112,51 @@ internal sealed class ProtectedDeepIdV2AccountOwner
             mlDsa65, cancellationToken).ConfigureAwait(false);
         return await SqliteDeepIdV2AccountGeneration.OpenClaimRequestCustodyAsync(storage,
             lease, sqlStatePath, current, cancellationToken).ConfigureAwait(false);
+    }
+
+    internal async ValueTask<InitiatorDph2PreKeyClaim> BeginOrRestorePreClaimAsync(
+        ulong trustedUnixSeconds, IDeepMlDsa65Verifier mlDsa65,
+        ReadOnlyMemory<byte> logicalIntent, VerifiedDeepIdV2DirectoryFreshness currentProof,
+        ReadOnlyMemory<byte> currentBootId, ulong currentMonotonicSample,
+        Deep.Protocol.DeepExtension.PrivacyRouting.OnionTrustedTimeAuthority trustedTime,
+        int maximumMessagesWithoutPqInjection, CancellationToken cancellationToken)
+    {
+        using var held = await lease.AcquireAsync(cancellationToken).ConfigureAwait(false);
+        using var current = await RequireCurrentUnderLeaseAsync(trustedUnixSeconds,
+            mlDsa65, cancellationToken).ConfigureAwait(false);
+        return await SqliteDeepIdV2AccountGeneration.BeginOrRestorePreClaimUnderLeaseAsync(
+            storage, current, logicalIntent, currentProof, currentBootId, currentMonotonicSample, trustedTime,
+            maximumMessagesWithoutPqInjection, cancellationToken).ConfigureAwait(false);
+    }
+
+    internal async ValueTask<DeepIdV2InitialSessionCommit> CommitInitialSessionAsync(
+        ulong trustedUnixSeconds, IDeepMlDsa65Verifier mlDsa65,
+        ReadOnlyMemory<byte> logicalIntent, VerifiedDpk2Offering offering,
+        VerifiedDeepIdV2DirectoryFreshness currentProof, ReadOnlyMemory<byte> currentBootId,
+        ulong currentMonotonicSample, VerifiedXpc1V2PreKeyClaimReceipt claim,
+        Deep.Protocol.DeepExtension.PrivacyRouting.OnionTrustedTimeAuthority trustedTime,
+        ReadOnlyMemory<byte> sessionInit, ReadOnlyMemory<byte> firstEvent,
+        int maximumMessagesWithoutPqInjection, CancellationToken cancellationToken)
+    {
+        using var held = await lease.AcquireAsync(cancellationToken).ConfigureAwait(false);
+        using var current = await RequireCurrentUnderLeaseAsync(trustedUnixSeconds,
+            mlDsa65, cancellationToken).ConfigureAwait(false);
+        var directory = DeepIdV2AccountService.RequireOwnCurrentDirectory(current, currentProof,
+            currentBootId.Span, currentMonotonicSample);
+        using var authority = DeepIdV2AccountService.OwnAgreementAuthority(current);
+        using var store = await SqliteDeepIdV2AccountGeneration.OpenCurrentDeviceStateStoreAsync(
+            storage, sqlStatePath, current, cancellationToken).ConfigureAwait(false);
+        var committed = await DeepIdV2GenesisDmd1Custody.CommitAsync(current, store,
+            cancellationToken).ConfigureAwait(false);
+        if (committed.Disposition is not (ProtectedCurrentDmd1CommitDisposition.Applied or
+            ProtectedCurrentDmd1CommitDisposition.ExactReplay))
+            throw new CryptographicException("The DID2 current device directory cannot authorize initial-session custody.");
+        using var started = await SqliteDeepIdV2AccountGeneration.BeginOrRestorePreClaimUnderLeaseAsync(
+            storage, current, logicalIntent, currentProof, currentBootId, currentMonotonicSample,
+            trustedTime, maximumMessagesWithoutPqInjection, cancellationToken).ConfigureAwait(false);
+        return await store.CommitInitialSessionAsync(logicalIntent, started, offering, directory,
+            authority, claim, currentProof, trustedTime, sessionInit, firstEvent,
+            maximumMessagesWithoutPqInjection, cancellationToken).ConfigureAwait(false);
     }
 
     internal async ValueTask<SqliteDeviceStateStore>

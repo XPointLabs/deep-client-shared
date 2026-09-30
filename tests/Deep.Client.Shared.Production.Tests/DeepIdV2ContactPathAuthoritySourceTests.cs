@@ -5,6 +5,7 @@ using System.Security.Cryptography;
 using System.Runtime.InteropServices;
 using Deep.Client.Shared.Persistence;
 using Deep.Client.Shared.Persistence.DeviceV2;
+using Deep.Client.Shared.Persistence.DeviceV1;
 using Deep.Client.Shared.Persistence.XPointNetworkV1;
 using Deep.Client.Shared.Services;
 using Deep.Client.Shared.Services.AccountDirectoryV2;
@@ -16,6 +17,7 @@ using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.ContactV2;
 using Deep.Protocol.ContactV1;
 using Deep.Protocol.DeepExtension.PrivacyRouting;
+using Deep.Protocol.MessagingCrypto;
 using Deep.Protocol.XPointNetworkV1;
 using Sodium;
 using Microsoft.Data.Sqlite;
@@ -24,6 +26,71 @@ namespace Deep.Client.Shared.Production.Tests;
 
 public sealed class DeepIdV2ContactPathAuthoritySourceTests
 {
+    [Fact]
+    [Trait("RequiresApprovedMlKemRuntime", "true")]
+    public async Task Did2InitialSession_NativeCompletionAndExactRestartAfterEveryCommitBoundary()
+    {
+        // Real local DID2, signed network/proof/claim and approved native
+        // providers. Loopback recipient/HTTP fixture, NOT physical E2E.
+        await using var fixture = await Fixture.CreateAsync();
+        var complete = await fixture.PrepareNativeInitialCompletion(Bytes(32, 0x94));
+        using var first = await complete(fixture.Accounts);
+        var exact = first.ExactDph2.ToArray(); var session = first.SessionId.ToArray();
+        using var reopened = await complete(fixture.ReopenAccount());
+        Assert.Equal(exact, reopened.ExactDph2.ToArray()); Assert.Equal(session, reopened.SessionId.ToArray());
+        foreach (var point in new[] { DeviceStateStoreFailpoint.AfterInitialSessionPendingCheckpoint,
+            DeviceStateStoreFailpoint.AfterInitialSessionSqlCommit, DeviceStateStoreFailpoint.AfterInitialSessionStableCheckpoint })
+        {
+            var retry = await fixture.PrepareNativeInitialCompletion(Bytes(32, checked((byte)(0x94 + (int)point))));
+            using (DeviceStateStoreTestHooks.Push(hit => { if (hit == point) throw new DeviceStateStoreInjectedCrashException(hit); }))
+                await Assert.ThrowsAsync<DeviceStateStoreInjectedCrashException>(() => retry(fixture.Accounts));
+            using var recovered = await retry(fixture.ReopenAccount());
+            using var same = await retry(fixture.ReopenAccount());
+            Assert.Equal(recovered.ExactDph2.ToArray(), same.ExactDph2.ToArray());
+            Assert.NotEqual(exact, recovered.ExactDph2.ToArray());
+        }
+    }
+
+    [Fact]
+    public async Task Did2PreClaim_ProtectedIntentRestoresExactOperationAfterRestartAndInterruptedReturn()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        var intent = Bytes(32, 0x91);
+        using var first = await fixture.BeginPreClaimAsync(intent);
+        var operation = first.ClaimOperationId.ToArray();
+        var commitment = first.SenderEphemeralCommitment.ToArray();
+        var snapshot = await fixture.ReadPreClaimSnapshotAsync();
+        using var reopened = await fixture.BeginPreClaimAsync(intent, fixture.ReopenAccount());
+        Assert.Equal(operation, reopened.ClaimOperationId.ToArray());
+        Assert.Equal(commitment, reopened.SenderEphemeralCommitment.ToArray());
+        Assert.Equal(snapshot, await fixture.ReadPreClaimSnapshotAsync());
+
+        var interruptedIntent = Bytes(32, 0x92);
+        fixture.AfterNextPreClaimCommit(() => throw new IOException("Injected stop after protected preclaim commit."));
+        await Assert.ThrowsAsync<IOException>(() => fixture.BeginPreClaimAsync(interruptedIntent));
+        var committed = await fixture.ReadPreClaimSnapshotAsync();
+        using var recovered = await fixture.BeginPreClaimAsync(interruptedIntent, fixture.ReopenAccount());
+        Assert.NotEqual(operation, recovered.ClaimOperationId.ToArray());
+        Assert.Equal(committed, await fixture.ReadPreClaimSnapshotAsync());
+
+        using var cancellation = new CancellationTokenSource();
+        var cancelledIntent = Bytes(32, 0x93);
+        fixture.AfterNextPreClaimCommit(cancellation.Cancel);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => fixture.BeginPreClaimAsync(cancelledIntent,
+            cancellationToken: cancellation.Token));
+        var cancelledSnapshot = await fixture.ReadPreClaimSnapshotAsync();
+        using var afterCancellation = await fixture.BeginPreClaimAsync(cancelledIntent);
+        Assert.Equal(cancelledSnapshot, await fixture.ReadPreClaimSnapshotAsync());
+
+        fixture.RejectProof = true;
+        await Assert.ThrowsAsync<DeepIdV2DirectoryProofUnavailableException>(() => fixture.BeginPreClaimAsync(intent));
+        Assert.Equal(cancelledSnapshot, await fixture.ReadPreClaimSnapshotAsync());
+        fixture.RejectProof = false;
+        await fixture.RemovePreClaimSnapshotAsync();
+        await Assert.ThrowsAsync<InvalidDataException>(() => fixture.ReopenAccount().GetCurrentAsync());
+        Assert.Null(await fixture.ReadPreClaimSnapshotOrNullAsync()); // No silent recreation.
+    }
+
     private static byte[] JournalRequest(byte operation, byte bundle = 0x51, byte[]? network = null) =>
         DeepIdV2PreKeyClaimRequestCodec.Encode(network ?? Fixture.Network, Bytes(32, operation),
             Bytes(32, 0x21), Bytes(32, 0x22), 1_100, 1_120, Fixture.Service,
@@ -1102,6 +1169,137 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
             DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess);
 
         internal void AfterNextCommitPairRead(Action action) => storage.AfterCommitPairRead = action;
+        internal void AfterNextPreClaimCommit(Action action) => storage.AfterPreClaimCommit = action;
+        internal async Task<InitiatorDph2PreKeyClaim> BeginPreClaimAsync(byte[] intent,
+            DeepIdV2AccountService? owner = null, CancellationToken cancellationToken = default)
+        {
+            owner ??= accounts;
+            var authoring = await Source(owner).VerifyForOwnPreKeyAuthoringAsync(owner, cancellationToken);
+            return await owner.BeginOwnDph2ClaimAsync(intent, proofs, authoring.Authority,
+                authoring.Proof, Boot, Sample, new OnionTrustedTimeAuthority(this), 32, cancellationToken);
+        }
+        internal async Task<byte[]?> ReadPreClaimSnapshotOrNullAsync()
+        {
+            using var value = await innerStorage.ReadOwnedAsync(ProtectedDph2PreClaimJournal.Slot);
+            return value?.Use(bytes => bytes.ToArray());
+        }
+        internal async Task<byte[]> ReadPreClaimSnapshotAsync() =>
+            await ReadPreClaimSnapshotOrNullAsync() ?? throw new InvalidDataException("Fixture snapshot absent.");
+        internal Task RemovePreClaimSnapshotAsync() => innerStorage.DeleteBatchAsync([ProtectedDph2PreClaimJournal.Slot]);
+
+        internal async Task<Func<DeepIdV2AccountService, Task<DeepIdV2InitialSessionCommit>>>
+            PrepareNativeInitialCompletion(byte[] intent)
+        {
+            var source = Source(); var staged = await accounts.EnsureOwnInitialPreKeyInventoryAsync(source);
+            var current = await source.VerifyForOwnPreKeyAuthoringAsync(accounts, default);
+            var publication = DeepIdV2PreKeyPublicationCodec.Decode(staged.ExactXpp1.Span);
+            var authorization = DeepIdV2ContactAuthorizationCodec.Verify(
+                DeepIdV2ContactAuthorizationCodec.Decode(staged.ExactDca1.Span), checkpoint.Binding, checkpoint.Directory);
+            var recipient = DeepIdV2CurrentContactAuthorizationVerifier.Verify(current.Proof, authorization, Boot, Sample);
+            using var secrets = await new ProtectedDeepIdV2GenesisDeviceSecretsStore(storage, Network,
+                checkpoint.Directory.Record.DeepAccountId.Span).ReadVerifiedAsync(
+                checkpoint.Binding.Identity.ActiveDevices.Single(), default);
+            using var owned = secrets!.ExportOwnedPersistenceCopy();
+            var seed = new byte[32]; var agreement = new byte[32]; var device = new byte[32]; var handle = new byte[32];
+            byte[]? privateKey = null;
+            ParsedDcr1V2 resolver;
+            try
+            {
+                owned.CopyTo(seed, agreement, device, handle);
+                privateKey = PublicKeyAuth.GenerateKeyPair(seed).PrivateKey;
+                resolver = NativeRecipientClosure(staged, privateKey);
+            }
+            finally
+            {
+                foreach (var secret in new[] { seed, agreement, device, handle, privateKey })
+                    if (secret is not null) CryptographicOperations.ZeroMemory(secret);
+            }
+            using var started = await BeginPreClaimAsync(intent);
+            var path = await source.GetCurrentForPreKeyClaimAsync(Network, publication.Manifest.Field(2));
+            var issued = BinaryPrimitives.ReadUInt64BigEndian(publication.Manifest.Field(14).Span);
+            var request = DeepIdV2PreKeyClaimRequestCodec.Decode(DeepIdV2PreKeyClaimRequestCodec.Encode(
+                Network, started.ClaimOperationId.Span, path.Placement.ViewHash.Span, path.Placement.PlacementHash.Span,
+                issued, 1_120, publication.Manifest.Field(2).Span, resolver.Bundle.ObjectHash.Span,
+                publication.Manifest.Field(6).Span[6..], publication.Manifest.Field(3).Span, started.SenderEphemeralCommitment.Span));
+            var result = DeepIdV2PreKeyClaimResultCodec.Decode(AuthorClaimResult(request, path, publication, false), request.CanonicalBytes.Span);
+            var time = new OnionTrustedTimeAuthority(this);
+            var claim = await DeepIdV2PreKeyClaimReceiptVerifier.VerifyAsync(request, result, path.Placement, recipient, resolver, time, default);
+            var dmd = checkpoint.Directory.Record; var conversation = Bytes(32, 0xa4);
+            var init = ApplicationCoreCodec.AuthorDmc2(Network, Bytes(32, 0xa5), conversation, dmd.DeepAccountId.Span,
+                dmd.ActiveDevices[0].DeviceId.Span, 1, 1_100_000, 1_120_000, Dmc2Flags.None, [],
+                ApplicationCoreCodec.CreateSessionInitPayload(Bytes(32, 0xa6), dmd,
+                    SessionInitCapabilities.TextCore | SessionInitCapabilities.DeviceControl));
+            var first = ApplicationCoreCodec.AuthorDmc2(Network, Bytes(32, 0xa7), conversation, dmd.DeepAccountId.Span,
+                dmd.ActiveDevices[0].DeviceId.Span, 2, 1_100_001, 0, Dmc2Flags.None, [],
+                ApplicationCoreCodec.CreateMessageCreatePayload("native initial custody"));
+            return account => account.CommitOwnDph2InitialSessionAsync(intent, publication.LastResortMember.CanonicalBytes,
+                proofs, current.Authority, current.Proof, current.Proof, Boot, Sample, claim, time,
+                init.CanonicalBytes, first.CanonicalBytes, 32);
+        }
+
+        // Exact V2 fixture framing, not a shipping authoring API or publication
+        // authority. Every output is checked by the real closed Protocol codecs.
+        private ParsedDcr1V2 NativeRecipientClosure(StagedDeepIdV2PreKeyPublication staged, byte[] signingKey)
+        {
+            var dmd = checkpoint.Directory.Record; var identity = checkpoint.Binding.Identity;
+            var device = identity.ActiveDevices.Single().Certificate;
+            var dca = DeepIdV2ContactAuthorizationCodec.Decode(staged.ExactDca1.Span);
+            var xps = DeepIdV2PreKeyServiceCodec.Decode(staged.ExactXps1.Span);
+            var issued = xps.Field(10); var expiry = xps.Field(11);
+            ReadOnlyMemory<byte>[] inviteFields = [Network, Bytes(32, 0xb1), U64(0), new byte[32],
+                Ref("PMT2"u8, 1, Bytes(32, 0xb2)), Bytes(32, 0xb3), Bytes(32, 0xb4), Bytes(32, 0xb5),
+                new byte[] { 1 }, new byte[4], U16(1), Bytes(32, 0xb6), issued, expiry,
+                Ref("DPD1"u8, 1, device.CanonicalHash.Span), Ref("DCA1"u8, 2, dca.RecordHash.Span),
+                Bytes(64, 0xb7), Ref("XRA1"u8, 1, Bytes(32, 0xb8))];
+            var unsignedInvite = DeepIdV2InviteRendezvousCodec.Decode(V2Record("XIR1"u8, inviteFields));
+            inviteFields[16] = PublicKeyAuth.SignDetached(unsignedInvite.SignatureInput.ToArray(), signingKey);
+            var invite = DeepIdV2InviteRendezvousCodec.Decode(V2Record("XIR1"u8, inviteFields));
+            var descriptor = new byte[651]; U16(1).CopyTo(descriptor, 0); U16(1).CopyTo(descriptor, 2);
+            invite.ObjectHash.Span.CopyTo(descriptor.AsSpan(4)); BinaryPrimitives.WriteUInt32BigEndian(descriptor.AsSpan(36), 611);
+            invite.CanonicalBytes.Span.CopyTo(descriptor.AsSpan(40));
+            var services = new byte[357]; services[0] = 1; BinaryPrimitives.WriteUInt32BigEndian(services.AsSpan(1), 352);
+            staged.ExactXps1.Span.CopyTo(services.AsSpan(5));
+            var lookup = DeepIdV2AccountDirectoryLookupCodec.Author(checkpoint.Binding.DeepId, Network, 0,
+                genesis.CoreHash.Span, 1, new byte[38], new byte[32]);
+            ReadOnlyMemory<byte>[] fields = [Network, dmd.DeepAccountId, identity.Account.Certificate.CanonicalBytes,
+                Ref("DRS1"u8, 1, identity.Revocations.Snapshot.CanonicalHash.Span), dmd.CanonicalBytes,
+                staged.ExactDca1, Bytes(32, 0xb9), U64(0), new byte[32], device.DeviceId,
+                new byte[] { 1 }, services, new byte[] { 1 }, descriptor, ReadOnlyMemory<byte>.Empty,
+                new byte[] { 0, 0, 0, 1 }, issued, expiry, Bytes(64, 0xba), lookup.CanonicalBytes,
+                U64(0).Concat(genesis.CoreHash.ToArray()).ToArray(), checkpoint.Binding.DeepId.RecordHash,
+                checkpoint.Binding.DeepId.CanonicalBytes, checkpoint.Binding.Record.CanonicalBytes];
+            var unsigned = DeepIdV2ContactBundleCodec.Decode(V2Record("DCB1"u8, fields));
+            fields[18] = PublicKeyAuth.SignDetached(unsigned.SignatureInput.ToArray(), signingKey);
+            var bundle = DeepIdV2ContactBundleCodec.Decode(V2Record("DCB1"u8, fields));
+            byte[] Support(ushort kind, ReadOnlySpan<byte> exact)
+            {
+                var bytes = new byte[6 + exact.Length]; BinaryPrimitives.WriteUInt16BigEndian(bytes, kind);
+                BinaryPrimitives.WriteUInt32BigEndian(bytes.AsSpan(2), checked((uint)exact.Length)); exact.CopyTo(bytes.AsSpan(6)); return bytes;
+            }
+            var support = Support(1, identity.Revocations.Snapshot.CanonicalBytes.Span)
+                .Concat(Support(2, device.CanonicalBytes.Span)).ToArray();
+            return DeepIdV2ResolverClosureCodec.Decode(V2Record("DCR1"u8, [Network, bundle.CanonicalBytes, U16(2), support]));
+        }
+
+        private static byte[] U64(ulong value) { var bytes = new byte[8]; BinaryPrimitives.WriteUInt64BigEndian(bytes, value); return bytes; }
+        private static byte[] U16(ushort value) { var bytes = new byte[2]; BinaryPrimitives.WriteUInt16BigEndian(bytes, value); return bytes; }
+        private static byte[] Ref(ReadOnlySpan<byte> magic, ushort version, ReadOnlySpan<byte> hash)
+        {
+            var bytes = new byte[38]; magic.CopyTo(bytes); BinaryPrimitives.WriteUInt16BigEndian(bytes.AsSpan(4), version); hash.CopyTo(bytes.AsSpan(6)); return bytes;
+        }
+        private static byte[] V2Record(ReadOnlySpan<byte> magic, IReadOnlyList<ReadOnlyMemory<byte>> fields)
+        {
+            var bytes = new byte[12 + fields.Sum(field => 8 + field.Length)]; magic.CopyTo(bytes);
+            BinaryPrimitives.WriteUInt16BigEndian(bytes.AsSpan(4), 2); BinaryPrimitives.WriteUInt16BigEndian(bytes.AsSpan(6), DeepIdV2Codec.Suite);
+            BinaryPrimitives.WriteUInt16BigEndian(bytes.AsSpan(8), checked((ushort)fields.Count)); var offset = 12;
+            for (var index = 0; index < fields.Count; index++)
+            {
+                BinaryPrimitives.WriteUInt16BigEndian(bytes.AsSpan(offset), checked((ushort)(index + 1)));
+                BinaryPrimitives.WriteUInt32BigEndian(bytes.AsSpan(offset + 4), checked((uint)fields[index].Length));
+                fields[index].Span.CopyTo(bytes.AsSpan(offset + 8)); offset += 8 + fields[index].Length;
+            }
+            return bytes;
+        }
 
         internal async Task<(ParsedXpk1V2 Request, ContactResolvePathAuthority Authority,
             ParsedXpp1V2 Publication)> CreateClaimAsync(byte operation = 0x83)
@@ -1480,6 +1678,7 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
 
     private sealed class NetworkMarkerFaultStorage(IDeepSecureStorage inner) : IDeepSecureStorage
     {
+        internal Action? AfterPreClaimCommit { get; set; }
         internal Action? AfterCommitPairRead { get; set; }
         internal bool FailAfterNetworkMarker { get; set; }
         internal bool FailAfterHistoryAnchor { get; set; }
@@ -1490,6 +1689,11 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
             ReadOnlyMemory<byte> replacement, CancellationToken ct = default)
         {
             var applied = await inner.CompareExchangeAsync(slot, expected, replacement, ct);
+            if (applied && slot == ProtectedDph2PreClaimJournal.Slot && AfterPreClaimCommit is { } afterPreClaim)
+            {
+                AfterPreClaimCommit = null;
+                afterPreClaim();
+            }
             if (applied && replacement.Length == 80 &&
                 BinaryPrimitives.ReadInt32BigEndian(replacement.Span[76..]) == 8)
                 LastClaimFloorSlot = slot;

@@ -188,103 +188,104 @@ public sealed class DeepIdV2AccountService
     }
 
     /// <summary>
-    /// Starts the DID2-only pre-XPK1 initiator claim from this protected
-    /// account and an independently verified, still-current directory proof.
+    /// Starts or restores the same DID2-only pre-XPK1 claim for an exact stable
+    /// logical intent. Secret state is protected before return; current proof
+    /// and protected time remain required independently after restart.
     /// No private agreement operation is spent until an exact DPK2 is known.
     /// </summary>
     public async Task<InitiatorDph2PreKeyClaim> BeginOwnDph2ClaimAsync(
+        ReadOnlyMemory<byte> logicalIntentId,
         DeepIdV2DirectoryProofClient proofClient,
         VerifiedXPointNetworkAuthority networkAuthority,
         VerifiedDeepIdV2DirectoryFreshness currentProof,
         ReadOnlyMemory<byte> currentBootId, ulong currentMonotonicSample,
+        Deep.Protocol.DeepExtension.PrivacyRouting.OnionTrustedTimeAuthority trustedTimeAuthority,
         int maximumMessagesWithoutPqInjection,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(proofClient);
+        ArgumentNullException.ThrowIfNull(trustedTimeAuthority);
+        ProtectedDph2PreClaimJournal.RequireIntent(logicalIntentId.Span);
+        var ownedIntent = logicalIntentId.ToArray();
+        var ownedBoot = currentBootId.ToArray();
+        if (maximumMessagesWithoutPqInjection is < 1 or > 2048)
+            throw new ArgumentOutOfRangeException(nameof(maximumMessagesWithoutPqInjection));
         await proofClient.RequireStillFreshAsync(currentProof,
             networkAuthority, cancellationToken).ConfigureAwait(false);
         using var verifier = OpenVerifier();
-        using var current = await owner.ReadCurrentAsync(TrustedUnixSeconds(),
-            verifier, cancellationToken).ConfigureAwait(false) ??
-            throw new InvalidOperationException(
-                "A verified DID2 account is required for DPH2 initiation.");
-        var directory = RequireOwnCurrentDirectory(current, currentProof,
-            currentBootId.Span, currentMonotonicSample);
-        await proofClient.RequireStillFreshAsync(currentProof,
-            networkAuthority, cancellationToken).ConfigureAwait(false);
-        using var authority = OwnAgreementAuthority(current);
-        return new ManagedInitiatorInitialSessionFactory(
-            maximumMessagesWithoutPqInjection).BeginClaim(
-                authority, directory, currentProof, currentBootId.Span,
-                currentMonotonicSample);
+        var claim = await owner.BeginOrRestorePreClaimAsync(TrustedUnixSeconds(), verifier,
+            ownedIntent, currentProof, ownedBoot, currentMonotonicSample, trustedTimeAuthority,
+            maximumMessagesWithoutPqInjection, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await proofClient.RequireStillFreshAsync(currentProof,
+                networkAuthority, cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            return claim;
+        }
+        catch { claim.Dispose(); throw; }
     }
 
     /// <summary>
-    /// Burns the exact claim operation in the protected current-DMD1 store and
-    /// consumes its one-shot DH lease inside Protocol. Neither the scalar nor
-    /// the lease is returned to MAUI. The resulting preparation is still not
-    /// a sent DPH2, an accepted contact or a delivery acknowledgement.
+    /// Completes and durably retains one exact initial session before return.
+    /// Retries recover the same ciphertext/ratchet; no lease or preparation
+    /// escapes between the agreement burn and protected completion.
+    /// This is local custody, not delivery, contact acceptance or ACK.
     /// </summary>
-    public async Task<InitiatorDph2ClaimPreparation> CompleteOwnDph2ClaimAsync(
-        InitiatorDph2PreKeyClaim startedClaim,
+    public async Task<DeepIdV2InitialSessionCommit> CommitOwnDph2InitialSessionAsync(
+        ReadOnlyMemory<byte> logicalIntentId,
         ReadOnlyMemory<byte> exactDpk2,
         DeepIdV2DirectoryProofClient proofClient,
         VerifiedXPointNetworkAuthority networkAuthority,
         VerifiedDeepIdV2DirectoryFreshness currentProof,
         VerifiedDeepIdV2DirectoryFreshness currentPeerProof,
         ReadOnlyMemory<byte> currentBootId, ulong currentMonotonicSample,
+        VerifiedXpc1V2PreKeyClaimReceipt verifiedClaim,
+        Deep.Protocol.DeepExtension.PrivacyRouting.OnionTrustedTimeAuthority trustedTimeAuthority,
+        ReadOnlyMemory<byte> sessionInit, ReadOnlyMemory<byte> firstEvent,
         int maximumMessagesWithoutPqInjection,
         CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(startedClaim);
         ArgumentNullException.ThrowIfNull(proofClient);
-        await proofClient.RequireStillFreshAsync(currentProof,
-            networkAuthority, cancellationToken).ConfigureAwait(false);
-        await proofClient.RequireStillFreshAsync(currentPeerProof,
-            networkAuthority, cancellationToken).ConfigureAwait(false);
-        var verifiedOffering = DeepIdV2Dpk2PreClaimVerifier.Verify(
-            exactDpk2.Span, currentPeerProof, currentBootId.Span,
-            currentMonotonicSample);
-        using var verifier = OpenVerifier();
-        using var current = await owner.ReadCurrentAsync(TrustedUnixSeconds(),
-            verifier, cancellationToken).ConfigureAwait(false) ??
-            throw new InvalidOperationException(
-                "A verified DID2 account is required for DPH2 completion.");
-        var directory = RequireOwnCurrentDirectory(current, currentProof,
-            currentBootId.Span, currentMonotonicSample);
-        if (!Fixed(startedClaim.NetworkId.Span,
-                current.Verified.PublicEvidence.Binding.Identity.Account
-                    .Certificate.NetworkId.Span) ||
-            !Fixed(verifiedOffering.NetworkId.Span, startedClaim.NetworkId.Span))
-            throw new CryptographicException(
-                "The DPH2 claim or offering belongs to another network.");
-        using var authority = OwnAgreementAuthority(current);
-        startedClaim.RequireCurrentInitiator(authority, directory,
-            currentProof, currentBootId.Span, currentMonotonicSample);
-        using var store = await OpenCurrentDeviceStateStoreAsync(
-            cancellationToken).ConfigureAwait(false);
-        await proofClient.RequireStillFreshAsync(currentProof,
-            networkAuthority, cancellationToken).ConfigureAwait(false);
-        await proofClient.RequireStillFreshAsync(currentPeerProof,
-            networkAuthority, cancellationToken).ConfigureAwait(false);
-        var operation = startedClaim.ClaimOperationId;
-        var authorized = await ProtectedDeviceAgreementLeaseIssuer
-            .AuthorizeAndRedeemAsync(store,
-                DeviceOperationId32.FromBytes(operation.Span), directory,
-                authority, LocalDeviceX25519AgreementPurpose.Dph2InitiatorDh1,
-                operation, verifiedOffering.InitiatorAgreementPeerPublicKey,
-                cancellationToken).ConfigureAwait(false);
-        if (authorized.Disposition != ProtectedDeviceAgreementDisposition.Granted ||
-            authorized.Lease is null)
-            throw new CryptographicException(
-                "The protected DID2 device agreement was not authorized.");
-        using var lease = authorized.Lease;
-        return new ManagedInitiatorInitialSessionFactory(
-            maximumMessagesWithoutPqInjection).CompleteClaim(
-                startedClaim, verifiedOffering, lease);
+        ArgumentNullException.ThrowIfNull(verifiedClaim);
+        ArgumentNullException.ThrowIfNull(trustedTimeAuthority);
+        ProtectedDph2PreClaimJournal.RequireIntent(logicalIntentId.Span);
+        if (maximumMessagesWithoutPqInjection is < 1 or > 2048)
+            throw new ArgumentOutOfRangeException(nameof(maximumMessagesWithoutPqInjection));
+        if (sessionInit.IsEmpty || sessionInit.Length > 32768 || firstEvent.Length > 32768)
+            throw new ArgumentException("Initial events exceed the closed local completion bound.");
+        var intent = logicalIntentId.ToArray(); var boot = currentBootId.ToArray();
+        var initial = sessionInit.ToArray(); var first = firstEvent.ToArray();
+        DeepIdV2InitialSessionCommit? completed = null;
+        try
+        {
+            var verifiedOffering = DeepIdV2Dpk2PreClaimVerifier.Verify(
+                exactDpk2.Span, currentPeerProof, boot, currentMonotonicSample);
+            await proofClient.RequireStillFreshAsync(currentProof,
+                networkAuthority, cancellationToken).ConfigureAwait(false);
+            await proofClient.RequireStillFreshAsync(currentPeerProof,
+                networkAuthority, cancellationToken).ConfigureAwait(false);
+            using var verifier = OpenVerifier();
+            completed = await owner.CommitInitialSessionAsync(TrustedUnixSeconds(), verifier,
+                intent, verifiedOffering, currentProof, boot, currentMonotonicSample,
+                verifiedClaim, trustedTimeAuthority, initial, first,
+                maximumMessagesWithoutPqInjection, cancellationToken).ConfigureAwait(false);
+            await proofClient.RequireStillFreshAsync(currentProof,
+                networkAuthority, cancellationToken).ConfigureAwait(false);
+            await proofClient.RequireStillFreshAsync(currentPeerProof,
+                networkAuthority, cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            var result = completed; completed = null; return result;
+        }
+        finally
+        {
+            completed?.Dispose();
+            CryptographicOperations.ZeroMemory(initial);
+            CryptographicOperations.ZeroMemory(first);
+        }
     }
 
-    private static Dmd1LineageState RequireOwnCurrentDirectory(
+    internal static Dmd1LineageState RequireOwnCurrentDirectory(
         VerifiedDeepIdV2CurrentAccount current,
         VerifiedDeepIdV2DirectoryFreshness proof,
         ReadOnlySpan<byte> currentBootId, ulong currentMonotonicSample)
@@ -305,7 +306,7 @@ public sealed class DeepIdV2AccountService
         return ApplicationCoreVerifier.StartDmd1Lineage(local.Directory).Next;
     }
 
-    private static LocalDeviceX25519AgreementAuthority OwnAgreementAuthority(
+    internal static LocalDeviceX25519AgreementAuthority OwnAgreementAuthority(
         VerifiedDeepIdV2CurrentAccount current)
     {
         var relatives = current.Verified.PublicEvidence.Binding.Identity
