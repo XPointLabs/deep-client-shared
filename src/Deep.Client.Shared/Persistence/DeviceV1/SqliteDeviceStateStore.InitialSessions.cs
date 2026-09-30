@@ -85,6 +85,8 @@ public sealed partial class SqliteDeviceStateStore
                     !DeviceInitialSessionCheckpoint.Fixed(prior.ClaimOperationId.Span, operation.Span) ||
                     !DeviceInitialSessionCheckpoint.Fixed(prior.ExactClaimReplayHash.Span, claim.ExactReplayHash.Span))
                 { prior.Dispose(); throw new CryptographicException("The durable initial-session intent was substituted."); }
+                try { _ = prior.RequireInitialConversation(initial, first); }
+                catch { prior.Dispose(); throw; }
                 return prior; // Never consumes/reissues a spent lease or re-encrypts DPH2.
             }
             if (ReadOperation(db, transaction, operation) is not null)
@@ -108,6 +110,7 @@ public sealed partial class SqliteDeviceStateStore
                     initial, first, ct).ConfigureAwait(false);
                 completed = DeepIdV2InitialSessionCommit.Capture(capability, evidence, fingerprint,
                     claim.ExactReplayHash.Span, eventHash, intent, peer.Span);
+                _ = completed.RequireInitialConversation(initial, first);
                 RequireInitialSessionScope(completed);
                 pending = DeviceInitialSessionCheckpoint.Pending(storeInstanceId.Span, accountId.Span, network,
                     stable, completed.CanonicalSpan);

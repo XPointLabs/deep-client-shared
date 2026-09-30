@@ -575,6 +575,11 @@ in [DR-0018](../../docs/survival-program/decisions/DR-0018-did2-initiator-comple
 The old Shared V1 orchestration cannot call or adapt it and fails before a
 session store opens. Account-owned V2 pending secret preparation and
 shipping sender composition are still required; this is not UI activation.
+The closed DID2 initial-session result now checks its TRS1 local directory
+against retained custody and derives conversation metadata only by rechecking
+the exact hash-bound initial events. This is the projection prerequisite in
+[DR-0020](../../docs/survival-program/decisions/DR-0020-did2-atomic-device-initial-session.md),
+not a V1 contact-scope adapter or a completed messaging-store projection.
 The old recipient/placement API cannot accept a parsed V2 request. ContactHello
 V2 safety-number/XUR1 endpoint semantics and current account-owned receive
 composition remain unfinished and fail closed before opening a new store.

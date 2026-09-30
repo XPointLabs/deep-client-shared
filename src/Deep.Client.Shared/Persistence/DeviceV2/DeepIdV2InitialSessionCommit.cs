@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Runtime.InteropServices;
 using Deep.Client.Shared.Domain.DeviceV1;
 using Deep.Client.Shared.Persistence.MessagingCryptoV1;
+using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.MessagingCrypto;
 using Deep.Protocol.MessagingWire;
 
@@ -61,10 +62,56 @@ public sealed class DeepIdV2InitialSessionCommit : IDisposable
                 Record.InitiatorDeviceId.Span, Record.InitiatorDeviceGeneration);
             MessagingCryptoV1Trs1.RequireResponderContactBinding(ExactTrsSpan, Record.ResponderDeviceId.Span,
                 Record.ResponderDeviceGeneration);
+            MessagingCryptoV1Trs1.RequireLocalDirectoryBinding(ExactTrsSpan, Directory.DirectoryHash.Span);
             if (facts.Generation != 1 || facts.TerminallyLatched)
                 throw new CryptographicException("The initial ratchet is not an active first generation.");
         }
         catch { Dispose(); throw; }
+    }
+
+    // A conversation is not present in the public DPH2/TRS1 header. Derive
+    // it only from the exact events authenticated by this custody record,
+    // never from a caller-supplied messaging-store scope. No payload escapes.
+    internal byte[] RequireInitialConversation(ReadOnlySpan<byte> exactInit, ReadOnlySpan<byte> exactFirst)
+    {
+        if (exactInit.IsEmpty || exactInit.Length > 32768 || exactFirst.Length > 32768)
+            throw new InvalidDataException("The retained initial events exceed their custody bound.");
+        var hash = DeviceInitialSessionCheckpoint.EventHash(exactInit, exactFirst);
+        try
+        {
+            if (!DeviceInitialSessionCheckpoint.Fixed(hash, EventHashSpan))
+                throw new CryptographicException("The initial events differ from their durable completion.");
+        }
+        finally { CryptographicOperations.ZeroMemory(hash); }
+
+        var init = ApplicationCoreCodec.DecodeDmc2(exactInit);
+        if (init.ContentKind != Dmc2ContentKind.SessionInit ||
+            !DeviceInitialSessionCheckpoint.Fixed(init.NetworkId.Span, Record.NetworkId.Span) ||
+            !DeviceInitialSessionCheckpoint.Fixed(init.SenderAccountId.Span, Record.InitiatorAccountId.Span) ||
+            !DeviceInitialSessionCheckpoint.Fixed(init.SenderDeviceId.Span, Record.InitiatorDeviceId.Span))
+            throw new CryptographicException("The initial conversation differs from its retained device authority.");
+
+        // DecodeDmc2 has already checked the canonical SessionInit grammar,
+        // directory hash and embedded sender entry; close over our exact DMD1.
+        var payload = init.PayloadBytes;
+        if (payload.Length != Directory.Canonical.Length + 72 ||
+            !DeviceInitialSessionCheckpoint.Fixed(payload.Span.Slice(32, 32), Directory.DirectoryHash.Span) ||
+            !DeviceInitialSessionCheckpoint.Fixed(payload.Span.Slice(68, Directory.Canonical.Length), Directory.Canonical.Span))
+            throw new CryptographicException("The initial conversation contains a different retained directory.");
+        if (!exactFirst.IsEmpty)
+        {
+            var first = ApplicationCoreCodec.DecodeDmc2(exactFirst);
+            if (first.ContentKind == Dmc2ContentKind.SessionInit ||
+                !DeviceInitialSessionCheckpoint.Fixed(first.NetworkId.Span, init.NetworkId.Span) ||
+                !DeviceInitialSessionCheckpoint.Fixed(first.SenderAccountId.Span, init.SenderAccountId.Span) ||
+                !DeviceInitialSessionCheckpoint.Fixed(first.SenderDeviceId.Span, init.SenderDeviceId.Span) ||
+                !DeviceInitialSessionCheckpoint.Fixed(first.ConversationId.Span, init.ConversationId.Span) ||
+                DeviceInitialSessionCheckpoint.Fixed(first.LogicalMessageId.Span, init.LogicalMessageId.Span) ||
+                first.SenderClientSequence <= init.SenderClientSequence ||
+                first.CreatedAtUnixMilliseconds < init.CreatedAtUnixMilliseconds)
+                throw new CryptographicException("The retained first event belongs to a different conversation stream.");
+        }
+        return init.ConversationId.ToArray();
     }
 
     internal static DeepIdV2InitialSessionCommit Capture(InitiatorInitialSessionCommitCapability capability,

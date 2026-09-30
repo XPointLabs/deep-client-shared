@@ -68,9 +68,49 @@ public sealed class DeviceInitialSessionCustodyTests
         Assert.Throws<MessagingCryptoV1StoreOpenException>(() => DeepIdV2InitialSessionCommit.RestoreCustody(mixedDevice));
         var changedPeer = fixture.Payload(); changedPeer[fixture.TrsOffset + 180] ^= 1;
         Assert.Throws<FormatException>(() => DeepIdV2InitialSessionCommit.RestoreCustody(changedPeer));
+        var changedDirectory = fixture.Payload(); changedDirectory[fixture.TrsOffset + 148] ^= 1;
+        var trs = changedDirectory.AsSpan(fixture.TrsOffset);
+        MessagingCryptoV1Trs1.Sha256Domain("Deep/LocalState/V1/triple-ratchet-state-checksum", trs[..^32]).CopyTo(trs[^32..]);
+        Assert.Throws<CryptographicException>(() => DeepIdV2InitialSessionCommit.RestoreCustody(changedDirectory));
         owned.Dispose(); Assert.Throws<ObjectDisposedException>(() => owned.ExactDph2);
         Assert.Empty(typeof(DeepIdV2InitialSessionCommit).GetConstructors());
         Assert.DoesNotContain(typeof(DeepIdV2InitialSessionCommit).GetProperties(), property => property.Name.Contains("Trs"));
+    }
+
+    [Fact]
+    public void ConversationComesOnlyFromExactRetainedInitialEvents()
+    {
+        using var fixture = new Fixture();
+        var init = fixture.InitialEvent(); var first = fixture.FirstEvent();
+        using var owned = DeepIdV2InitialSessionCommit.RestoreCustody(fixture.Payload(init, first));
+        Assert.Equal(Bytes(32, 40), owned.RequireInitialConversation(init, first));
+        var returned = owned.RequireInitialConversation(init, first); returned[0] ^= 1;
+        Assert.Equal(Bytes(32, 40), owned.RequireInitialConversation(init, first));
+        using var reopened = DeepIdV2InitialSessionCommit.RestoreCustody(owned.CanonicalSpan);
+        Assert.Equal(Bytes(32, 40), reopened.RequireInitialConversation(init, first));
+        Assert.Throws<CryptographicException>(() => reopened.RequireInitialConversation(init, fixture.FirstEvent(conversation: 41)));
+        Assert.Throws<CryptographicException>(() => reopened.RequireInitialConversation(first, init));
+        Assert.Throws<InvalidDataException>(() => reopened.RequireInitialConversation(new byte[32769], first));
+        using var noFirst = DeepIdV2InitialSessionCommit.RestoreCustody(fixture.Payload(init, []));
+        Assert.Equal(Bytes(32, 40), noFirst.RequireInitialConversation(init, []));
+        reopened.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => reopened.RequireInitialConversation(init, first));
+    }
+
+    [Theory]
+    [InlineData(41, 2, 10, 2, 100001, 42)] // different conversation
+    [InlineData(40, 3, 10, 2, 100001, 42)] // different account
+    [InlineData(40, 2, 11, 2, 100001, 42)] // different device
+    [InlineData(40, 2, 10, 1, 100001, 42)] // non-advancing sequence
+    [InlineData(40, 2, 10, 2, 99999, 42)]  // earlier event time
+    [InlineData(40, 2, 10, 2, 100001, 39)] // reused logical ID
+    public void RehashedButInconsistentFirstEventCannotMintConversation(byte conversation, byte account,
+        byte device, ulong sequence, ulong created, byte logical)
+    {
+        using var fixture = new Fixture(); var init = fixture.InitialEvent();
+        var first = fixture.FirstEvent(conversation, account, device, sequence, created, logical);
+        using var owned = DeepIdV2InitialSessionCommit.RestoreCustody(fixture.Payload(init, first));
+        Assert.Throws<CryptographicException>(() => owned.RequireInitialConversation(init, first));
     }
 
     [Theory]
@@ -180,7 +220,16 @@ public sealed class DeviceInitialSessionCustodyTests
                 DeviceInitialSessionCheckpoint.Stable(Instance, Account, Network, 0, new byte[32]), Instance, Account, Network);
             return DeviceInitialSessionCheckpoint.Pending(Instance, Account, Network, empty, Payload());
         }
-        internal byte[] Payload()
+        internal byte[] InitialEvent() => ApplicationCoreCodec.AuthorDmc2(Network, Bytes(32, 39), Bytes(32, 40),
+            Account, device, 1, 100000, 120000, Dmc2Flags.None, [],
+            ApplicationCoreCodec.CreateSessionInitPayload(Bytes(32, 38), dmd,
+                SessionInitCapabilities.TextCore | SessionInitCapabilities.DeviceControl)).CanonicalBytes.ToArray();
+        internal byte[] FirstEvent(byte conversation = 40, byte senderAccount = 2, byte senderDevice = 10,
+            ulong sequence = 2, ulong created = 100001, byte logical = 42) =>
+            ApplicationCoreCodec.AuthorDmc2(Network, Bytes(32, logical), Bytes(32, conversation),
+                Bytes(32, senderAccount), Bytes(32, senderDevice), sequence, created, 0, Dmc2Flags.None, [],
+                ApplicationCoreCodec.CreateMessageCreatePayload("structural initial context")).CanonicalBytes.ToArray();
+        internal byte[] Payload(byte[]? init = null, byte[]? first = null)
         {
             var evidence = CurrentDmd1Evidence.RestoreProtected(false, dmd.CanonicalBytes.Span, 1);
             var binding = LocalDeviceAgreementBinding.FromCompletedRecord(evidence, dph);
@@ -191,7 +240,9 @@ public sealed class DeviceInitialSessionCustodyTests
             BinaryPrimitives.WriteUInt16BigEndian(payload.AsSpan(2), checked((ushort)dmd.CanonicalBytes.Length));
             BinaryPrimitives.WriteUInt64BigEndian(payload.AsSpan(4), 1);
             Convert.FromHexString(fingerprint).CopyTo(payload, 12);
-            Bytes(32, 33).CopyTo(payload, 44); Bytes(32, 34).CopyTo(payload, 76); Bytes(32, 35).CopyTo(payload, 108);
+            Bytes(32, 33).CopyTo(payload, 44);
+            (init is null ? Bytes(32, 34) : DeviceInitialSessionCheckpoint.EventHash(init, first ?? [])).CopyTo(payload, 76);
+            Bytes(32, 35).CopyTo(payload, 108);
             BinaryPrimitives.WriteUInt32BigEndian(payload.AsSpan(140), checked((uint)dphBytes.Length));
             BinaryPrimitives.WriteUInt32BigEndian(payload.AsSpan(144), checked((uint)trs.Length)); peer.CopyTo(payload, 148);
             dmd.CanonicalBytes.Span.CopyTo(payload.AsSpan(180)); dphBytes.CopyTo(payload, 180 + dmd.CanonicalBytes.Length);
@@ -204,6 +255,7 @@ public sealed class DeviceInitialSessionCustodyTests
             BinaryPrimitives.WriteUInt32BigEndian(trs.AsSpan(8), 601);
             dph.SessionId.Span.CopyTo(trs.AsSpan(12)); device.CopyTo(trs, 108);
             BinaryPrimitives.WriteUInt64BigEndian(trs.AsSpan(140), 1);
+            dmd.RecordHash.Span.CopyTo(trs.AsSpan(148));
             dph.ResponderDeviceId.Span.CopyTo(trs.AsSpan(180)); BinaryPrimitives.WriteUInt64BigEndian(trs.AsSpan(212), 1);
             BinaryPrimitives.WriteUInt64BigEndian(trs.AsSpan(252), 1);
             BinaryPrimitives.WriteUInt32BigEndian(trs.AsSpan(528), 1); trs[536] = 1; trs.AsSpan(537, 32).Fill(36);
