@@ -114,7 +114,11 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                         DeepIdentityCrypto.DeriveX25519PublicKey(scalar), authorization.TrustedLowerUnixSeconds, expiry,
                         source.RendezvousTrustedTime, ct).ConfigureAwait(false);
                     entry = ProtectedDid2ContactRouteJournal.Entry.Proposal(intent.Span, configuration, scalar, keyId, nonce,
-                        exactDca, xra, networkId, current.AccountId.Span);
+                        exactDca, xra, new ContactRouteAuthorityWireRequest(networkId, nonce,
+                            authorization.Freshness.QueriedDirectoryLeafKey.Span,
+                            authorization.Freshness.NextProtectedLkg.LogGeneration,
+                            authorization.Freshness.NextProtectedLkg.CoreHash.Span, exactDca.Span, xra.CanonicalBytes.Span),
+                        networkId, current.AccountId.Span);
                     state.Entries.Add(name, entry);
                     await RecheckRouteFreshnessAsync(current, source, fresh, held, first, ct).ConfigureAwait(false);
                     var adopted = await SaveRouteJournalAsync(state, snapshot, current.AccountId, instance, ct).ConfigureAwait(false);
@@ -127,6 +131,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             }
             if (!entry.Matches(configuration) || !FixedRoute(entry.Record(0).Span, exactDca.Span))
                 throw new CryptographicException("A retained route intent cannot change configuration or delegation.");
+            var pendingRequest = ContactRouteAuthorityWireCodec.DecodeRequest(entry.Record(12).Span);
+            Did2ContactRouteRequestCustody.RequireCurrent(pendingRequest, authorization, fresh.Network);
             if (entry.Phase == 1)
             {
                 await RecheckRouteFreshnessAsync(current, source, fresh, held, first, ct).ConfigureAwait(false);
@@ -140,8 +146,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 var custody = await SqliteDeepIdV2AccountGeneration.OpenBorrowedOnionCustodyAsync(storage, lease,
                     sqlStatePath, current, source.AccountOwner, held, budget.Token).ConfigureAwait(false);
                 var dispatch = new Did2OwnedContactTransportContext(custody, fresh.Network, held);
-                var response = await thresholdSource.FetchAsync(entry.RequestNonce, authorization, fresh.Network,
-                    fresh.Authority, entry.Record(1), source.RendezvousTrustedTime, dispatch, budget.Token).AsTask()
+                var response = await thresholdSource.FetchAsync(pendingRequest,
+                    authorization, fresh.Network, fresh.Authority, source.RendezvousTrustedTime, dispatch, budget.Token).AsTask()
                     .WaitAsync(budget.Token).ConfigureAwait(false) ?? throw new CryptographicException("The route threshold response is absent.");
                 await RecheckRouteFreshnessAsync(current, source, fresh, held, first, ct).ConfigureAwait(false);
                 await DeepIdV2ContactRouteVerifier.VerifyThresholdAsync(authorization, fresh.Network, fresh.Authority,

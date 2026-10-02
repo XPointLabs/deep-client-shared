@@ -13,23 +13,22 @@ internal sealed class Did2ContactCoordinationOnionSource(DeepIdV2ContactPathAuth
     IDid2ContactRouteThresholdSource, IDid2ContactPublicationSource
 {
     public async ValueTask<ParsedDeepIdV2RouteThreshold> FetchAsync(
-        ReadOnlyMemory<byte> durableNonce32, DeepIdV2CurrentContactAuthorization authorization,
+        ContactRouteAuthorityWireRequest exactPendingRequest, DeepIdV2CurrentContactAuthorization authorization,
         VerifiedOnionNetworkContext network, VerifiedXPointNetworkAuthority authority,
-        ReadOnlyMemory<byte> exactXra1, OnionTrustedTimeAuthority trustedTime,
+        OnionTrustedTimeAuthority trustedTime,
         Did2OwnedContactTransportContext operation, CancellationToken cancellationToken)
     {
         operation.RequireActive();
+        ArgumentNullException.ThrowIfNull(exactPendingRequest);
         if (!ReferenceEquals(network, operation.Network) || !ReferenceEquals(trustedTime, source.RendezvousTrustedTime) ||
             !CryptographicOperations.FixedTimeEquals(authority.NetworkId.Span, network.NetworkId.Span))
             throw new CryptographicException("Coordination differs from the owned current network.");
-        var floor = authorization.Freshness.NextProtectedLkg;
-        var request = new ContactRouteAuthorityWireRequest(network.NetworkId.Span,
-            durableNonce32.Span, authorization.Freshness.QueriedDirectoryLeafKey.Span,
-            floor.LogGeneration, floor.CoreHash.Span,
-            authorization.Authorization.Record.CanonicalBytes.Span, exactXra1.Span);
+        Did2ContactRouteRequestCustody.RequireCurrent(exactPendingRequest, authorization, network);
+        // A saved replay minimum is not current authority. Never rewrite the
+        // exact nonce-bound request with the fresh proof's newer directory floor.
         var body = await SendAsync(ContactCoordinationTarget.Route,
-            ContactRouteAuthorityWireCodec.EncodeRequest(request), operation, cancellationToken).ConfigureAwait(false);
-        var parsed = ContactRouteAuthorityWireCodec.DecodeResponse(request, body.Span);
+            ContactRouteAuthorityWireCodec.EncodeRequest(exactPendingRequest), operation, cancellationToken).ConfigureAwait(false);
+        var parsed = ContactRouteAuthorityWireCodec.DecodeResponse(exactPendingRequest, body.Span);
         return new(parsed.ExactPms2.Span, parsed.ExactXrc1.Span, parsed.ExactXss1.Span);
     }
 

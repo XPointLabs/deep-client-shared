@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using Deep.Protocol.ContactV1;
 using Deep.Protocol.ContactV2;
 using Deep.Protocol.DeepExtension.PrivacyRouting;
 using Deep.Protocol.XPointNetworkV1;
@@ -23,8 +25,25 @@ internal sealed class Did2ContactRouteConfiguration
 // Return values are untrusted parsed bytes; Protocol independently verifies them.
 internal interface IDid2ContactRouteThresholdSource
 {
-    ValueTask<ParsedDeepIdV2RouteThreshold> FetchAsync(ReadOnlyMemory<byte> durableNonce32,
+    ValueTask<ParsedDeepIdV2RouteThreshold> FetchAsync(ContactRouteAuthorityWireRequest exactPendingRequest,
         DeepIdV2CurrentContactAuthorization authorization, VerifiedOnionNetworkContext network,
-        VerifiedXPointNetworkAuthority authority, ReadOnlyMemory<byte> exactXra1,
+        VerifiedXPointNetworkAuthority authority,
         OnionTrustedTimeAuthority trustedTime, Did2OwnedContactTransportContext operation, CancellationToken cancellationToken);
+}
+
+internal static class Did2ContactRouteRequestCustody
+{
+    internal static void RequireCurrent(ContactRouteAuthorityWireRequest request,
+        DeepIdV2CurrentContactAuthorization authorization, VerifiedOnionNetworkContext network)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var floor = authorization.Freshness.NextProtectedLkg;
+        if (!CryptographicOperations.FixedTimeEquals(request.NetworkId.Span, network.NetworkId.Span) ||
+            !CryptographicOperations.FixedTimeEquals(request.ExactDca1.Span, authorization.Authorization.Record.CanonicalBytes.Span) ||
+            !CryptographicOperations.FixedTimeEquals(request.DirectoryLookupKey.Span, authorization.Freshness.QueriedDirectoryLeafKey.Span) ||
+            request.MinimumAdh1Generation > floor.LogGeneration ||
+            request.MinimumAdh1Generation == floor.LogGeneration &&
+                !CryptographicOperations.FixedTimeEquals(request.MinimumAdh1CoreHash.Span, floor.CoreHash.Span))
+            throw new CryptographicException("The retained coordination request differs from current owned authority.");
+    }
 }

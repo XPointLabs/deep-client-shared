@@ -57,6 +57,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 var entry = state.Entries[Convert.ToHexString(intent)];
                 Assert.Equal((byte)7, entry.Phase);
                 Assert.Equal(committed.ExactXpo1.ToArray(), entry.Record(11).ToArray());
+                Assert.Equal(Assert.Single(threshold.Requests), entry.Record(12).ToArray());
             }
             var before = await RouteSnapshot();
             var publications = publication.Calls; var dispatches = replica.Calls;

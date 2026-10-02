@@ -30,7 +30,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     [Fact]
     public void Did2OwnedRoute_ByteBudgetMatchesProtectedStoreAndRejectsOversizeBeforeEntries()
     {
-        Assert.Equal(431_954, ProtectedDid2ContactRouteJournal.MaximumEntryBytes);
+        Assert.Equal(433_109, ProtectedDid2ContactRouteJournal.MaximumEntryBytes);
         Assert.Equal(DeepSecureStorageRegistration.MaximumValueBytes, ProtectedDid2ContactRouteJournal.MaximumBytes);
         var reservation = 4 + ProtectedDid2ContactRouteJournal.MaximumEntryBytes;
         Assert.True(ProtectedDid2ContactRouteJournal.HeaderBytes + 2 * reservation <= ProtectedDid2ContactRouteJournal.MaximumBytes);
@@ -55,6 +55,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     [InlineData(4)]
     [InlineData(5)]
     [InlineData(6)]
+    [InlineData(7)]
     public void Did2OwnedRoute_EmptyJournalRejectsHostileHeaderBeforeEntries(int mode)
     {
         var network = Bytes(16, 0x11); var account = Bytes(32, 0x12); var instance = Bytes(32, 0x13);
@@ -66,6 +67,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         if (mode == 4) bytes[60] ^= 1;
         if (mode == 5) bytes = bytes.Append((byte)0).ToArray();
         if (mode == 6) bytes[0] = 3;
+        if (mode == 7) bytes[0] = 4;
         Assert.Throws<InvalidDataException>(() => ProtectedDid2ContactRouteJournal.Decode(bytes, network, account, instance));
     }
 
@@ -180,22 +182,31 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         internal bool CorruptResponse { get; set; }
         internal bool StableProposal { get; private set; } = true;
         internal bool StableNonce { get; private set; } = true;
-        private byte[]? proposal, nonce;
+        internal bool StableRequest { get; private set; } = true;
+        internal bool LoseNextResponse { get; set; }
+        internal List<byte[]> Requests { get; } = [];
+        internal List<ulong> CurrentHeadGenerations { get; } = [];
+        private byte[]? proposal, nonce, pendingRequest;
         private ParsedDeepIdV2RouteThreshold? winner;
-        public async ValueTask<ParsedDeepIdV2RouteThreshold> FetchAsync(ReadOnlyMemory<byte> durableNonce32,
+        public async ValueTask<ParsedDeepIdV2RouteThreshold> FetchAsync(ContactRouteAuthorityWireRequest exactPendingRequest,
             DeepIdV2CurrentContactAuthorization authorization, VerifiedOnionNetworkContext network,
-            VerifiedXPointNetworkAuthority authority, ReadOnlyMemory<byte> exactXra1,
+            VerifiedXPointNetworkAuthority authority,
             OnionTrustedTimeAuthority trustedTime, Did2OwnedContactTransportContext operation, CancellationToken ct)
         {
             Calls++;
+            var exactXra1 = exactPendingRequest.ExactXra1;
+            var durableNonce32 = exactPendingRequest.RequestNonce;
+            var encodedRequest = ContactRouteAuthorityWireCodec.EncodeRequest(exactPendingRequest);
+            Requests.Add(encodedRequest);
+            CurrentHeadGenerations.Add(authorization.Freshness.NextProtectedLkg.LogGeneration);
+            StableRequest &= pendingRequest is null || CryptographicOperations.FixedTimeEquals(pendingRequest, encodedRequest);
+            pendingRequest ??= encodedRequest.ToArray();
+            if (!StableRequest) throw new CryptographicException("Fixture permanent journal rejects changed request under nonce.");
             if (ProbeHeldCustody)
             {
                 operation.RequireActive();
-                var floor = authorization.Freshness.NextProtectedLkg;
                 var exact = ContactCoordinationOnionCodec.EncodeRequest(ContactCoordinationTarget.Route,
-                    ContactRouteAuthorityWireCodec.EncodeRequest(new(network.NetworkId.Span, durableNonce32.Span,
-                        authorization.Freshness.QueriedDirectoryLeafKey.Span, floor.LogGeneration, floor.CoreHash.Span,
-                        authorization.Authorization.Record.CanonicalBytes.Span, exactXra1.Span)));
+                    encodedRequest);
                 var request = Deep.Client.Shared.Services.XPointNetworkV1.ContactResolveCanonicalPathRequest.Decode(exact);
                 var placement = ContactServicePlacementFactory.Create(operation.Network, request.RequestKind, request.ShardKey);
                 var paths = new Deep.Client.Shared.Services.XPointNetworkV1.ContactResolvePrivacyPathProvider(
@@ -219,6 +230,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             winner ??= await DeepIdV2ContactRouteAuthor.AuthorThresholdAsync(authorization, network, authority, exactXra1,
                 fixture.CreateRouteWitnesses(), BinaryPrimitives.ReadUInt64BigEndian(xra.Field(12).Span),
                 BinaryPrimitives.ReadUInt64BigEndian(xra.Field(13).Span), trustedTime, ct);
+            if (LoseNextResponse)
+            { LoseNextResponse = false; throw new IOException("Injected threshold response loss after retaining exact signed winner."); }
             if (!CorruptResponse) return winner;
             var broken = winner.LiveRoute.CanonicalBytes.ToArray(); broken[^1] ^= 1;
             return new(winner.Selection.CanonicalBytes.Span, broken, winner.Successor.CanonicalBytes.Span);
@@ -227,6 +240,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         {
             if (proposal is not null) CryptographicOperations.ZeroMemory(proposal);
             if (nonce is not null) CryptographicOperations.ZeroMemory(nonce);
+            if (pendingRequest is not null) CryptographicOperations.ZeroMemory(pendingRequest);
+            foreach (var request in Requests) CryptographicOperations.ZeroMemory(request);
         }
     }
     private sealed partial class Fixture

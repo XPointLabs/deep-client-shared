@@ -289,8 +289,8 @@ capability-encrypted genesis object following
 Phase 4 is CAS-adopted and read back under the account lease before return.
 Lost response/reopen retains exact bundle, signature, nonce and ciphertext;
 changed profile or descriptor under the same intent rejects. The mandatory
-route journal now accepts version 4 only under
-[DR-0040](../../docs/survival-program/decisions/DR-0040-did2-owned-publication-commit.md);
+route journal now accepts version 5 only under
+[DR-0073](../../docs/survival-program/decisions/DR-0073-did2-exact-route-request-custody.md);
 old disposable QA accounts require an
 explicit local reset, never migration or lazy repair. No node identity/network
 genesis reset is implied. SQL account/application shapes are unchanged.
@@ -314,6 +314,14 @@ The unused Shared DID1 `ContactRouteAuthorityClient` and its options-only tests
 are removed; no direct HTTP compatibility facade remains in the Shared assembly.
 The account-owned DR-0034 route owner still independently verifies every
 threshold response and commits exact proposal/threshold/completion before release.
+The entire pending threshold request, including its original directory minimum,
+is committed/read back before dispatch and retained in every later phase. Reopen
+uses a fresh independent proof but does not rewrite nonce-bound request bytes.
+Signed head-only renewal with response loss is covered by the real account
+fixture; it does not prove live PostgreSQL or physical expiry renewal.
+DR42 still rejects old-head threshold adoption/completion after response loss;
+the exact request/winner remains pending without remint. That separate retained-
+issuance completion gate is not closed by fixing request replay.
 Its real server integration lane uses TestServer plus native account custody;
 shipping XPoint/OHTTP authority coordination and publication are not activated
 by that evidence. Test-only friend access for the cross-repository boundary is

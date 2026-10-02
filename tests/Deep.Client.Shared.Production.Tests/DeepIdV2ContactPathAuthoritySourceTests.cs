@@ -2929,7 +2929,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 if (RejectProof) return new(HttpStatusCode.ServiceUnavailable) { RequestMessage = request };
                 var exact = await request.Content!.ReadAsByteArrayAsync(cancellationToken);
                 var encoded = DeepIdV2DirectoryHistoryWireCodec.AuthorResponse(bootstrap.Authority, exact,
-                    [genesis.ProtectedHead, head.ProtectedHead], head.ExactAllTransitions);
+                    RouteRequestHistoryHeads(), head.ExactAllTransitions);
                 var historyResponse = new HttpResponseMessage(HttpStatusCode.OK)
                 { RequestMessage = request, Content = new ByteArrayContent(encoded) };
                 historyResponse.Content.Headers.ContentType = new(DeepIdV2DirectoryHistoryWireCodec.ResponseMediaType);
@@ -2943,7 +2943,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             var floor = query.Lookup.MinimumAdhGeneration switch
             {
                 0 => genesis.ProtectedHead,
-                1 => head.ProtectedHead,
+                1 => routeRequestPriorHead?.ProtectedHead ?? head.ProtectedHead,
+                2 when routeRequestPriorHead is not null => head.ProtectedHead,
                 _ => throw new CryptographicException("Unknown test directory floor.")
             };
             var material = DeepIdV2DirectoryProofMaterialAuthor.Create(head.ProtectedHead,
