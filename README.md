@@ -1,5 +1,11 @@
 # Deep Client Shared
 
+Publication successor coordination and the protected route-journal clean break
+follow [DR79](../docs/survival-program/decisions/DR-0079-did2-publication-issuer-successor.md).
+Clients retain publisher-bound prior receipts; server verification receives no
+resolver-read capability. Older isolated QA journals require explicit reset,
+not automatic migration. Matched issuer/peer repin and physical E2E remain open.
+
 Portable .NET account, protocol-custody, persistence and service code for the
 Windows and Android Deep clients. The MAUI app references
 `src/Deep.Client.Shared/Deep.Client.Shared.Production.csproj`.

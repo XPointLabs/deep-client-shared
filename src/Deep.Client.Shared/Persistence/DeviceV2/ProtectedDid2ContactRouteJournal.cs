@@ -13,12 +13,12 @@ internal static class ProtectedDid2ContactRouteJournal
 {
     internal const string Slot = "deep.store.v2.contact-route-journal";
     internal const int HeaderBytes = 92, PrefixBytes = 170, MaximumIntents = 128;
-    internal const byte Version = 7;
-    internal const int MaximumEntryBytes = 461_123;
+    internal const byte Version = 8;
+    internal const int MaximumEntryBytes = 477_511;
     // Matches the journaled production secure-store per-slot limit. Pending
     // routes reserve enough space for phase 7 before a threshold callback.
     internal const int MaximumBytes = DeepSecureStorageRegistration.MaximumValueBytes;
-    private static readonly int[] Limits = [473, 550, 3476, 4012, 3523, 611, 23295, 65535, 65575, 155210, 93092, 16384, ContactRouteAuthorityWireCodec.MaximumRequestBytes, ContactRouteAuthorityWireCodec.MaximumIssuanceAdh1Bytes];
+    private static readonly int[] Limits = [473, 550, 3476, 4012, 3523, 611, 23295, 65535, 65575, ContactPublicationAuthorityWireCodec.MaximumRequestBytes, 93092, 16384, ContactRouteAuthorityWireCodec.MaximumRequestBytes, ContactRouteAuthorityWireCodec.MaximumIssuanceAdh1Bytes];
 
     internal sealed class State : IDisposable
     {

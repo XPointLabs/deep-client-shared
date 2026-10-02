@@ -25,7 +25,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     [Fact]
     public void Did2PublicationSuccessors_HistoricalFactsAreClosedNotDispatchAuthority()
     {
-        foreach (var type in new[] { typeof(VerifiedDeepIdV2ContactObjectPredecessor), typeof(VerifiedDeepIdV2PublicationPredecessor) })
+        foreach (var type in new[] { typeof(VerifiedDeepIdV2ContactObjectPredecessor), typeof(VerifiedDeepIdV2PublicationPredecessor), typeof(VerifiedDeepIdV2PublicationIssuerPredecessor) })
         {
             Assert.Empty(type.GetConstructors());
             Assert.DoesNotContain(type.GetMethods(), value => value.Name is "EnsureCurrentAsync" or "SignAsync" or "DispatchAsync");
@@ -83,6 +83,9 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                     var priorPublication = await DeepIdV2PublicationCommitVerifier.VerifyPredecessorAsync(recipient, current.Network,
                         current.Authority, priorObject, publication.WireRequest, authorized.ExactXpu1, result, time);
                     Assert.Equal(generation - 1, priorPublication.Generation);
+                    var issuerPredecessor = await DeepIdV2PublicationCommitVerifier.VerifyIssuerPredecessorAsync(recipient,
+                        current.Network, current.Authority, publication.WireRequest, authorized.ExactXpu1, result, time);
+                    Assert.Equal(priorPublication.Generation, issuerPredecessor.Generation);
 
                     if (mode == 1 && generation == 1)
                     {
@@ -92,6 +95,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                         var badResult = PublicationResult(route, authorized.ExactXpu1, corruptReceipt: true);
                         await RequireRouteRejectionAsync(async () => await DeepIdV2PublicationCommitVerifier.VerifyPredecessorAsync(recipient,
                             current.Network, current.Authority, priorObject, publication.WireRequest, authorized.ExactXpu1, badResult, time));
+                        await RequireRouteRejectionAsync(async () => await DeepIdV2PublicationCommitVerifier.VerifyIssuerPredecessorAsync(recipient,
+                            current.Network, current.Authority, publication.WireRequest, authorized.ExactXpu1, badResult, time));
                         var mutableDcr = contact.Closure.CanonicalBytes.ToArray(); var mutableCipher = contact.ProtectedDcr1.ToArray();
                         var mutableCapability = capability.ToArray();
                         var copying = new OnionTrustedTimeAuthority(new CallbackRendezvousClock(() =>
@@ -110,6 +115,9 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                         { neverReads++; return new(Boot, Sample); }));
                         await RequireRouteRejectionAsync(async () => await DeepIdV2PublicationCommitVerifier.VerifyPredecessorAsync(recipient,
                             current.Network, current.Authority, priorObject, publication.WireRequest, new byte[93_033], result, never));
+                        Assert.Equal(0, neverReads);
+                        await RequireRouteRejectionAsync(async () => await DeepIdV2PublicationCommitVerifier.VerifyIssuerPredecessorAsync(recipient,
+                            current.Network, current.Authority, publication.WireRequest, authorized.ExactXpu1, new byte[16_385], never));
                         Assert.Equal(0, neverReads);
                         var forgedPublisher = ContactPublicationAuthorityWireCodec.EncodeRequest(publication.WireRequest);
                         forgedPublisher[^1] ^= 1;
@@ -147,6 +155,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                     Assert.Equal(priorObject.CiphertextHash.ToArray(), nextPublication.WireRequest.PredecessorObjectHash.ToArray());
                     Assert.NotEqual(nextContact.Closure.Bundle.Field(9).ToArray(), nextPublication.WireRequest.PredecessorObjectHash.ToArray());
                     Assert.Equal(publication.WireRequest.OwnerRetrieveCapability.ToArray(), nextPublication.WireRequest.OwnerRetrieveCapability.ToArray());
+                    Assert.Equal(result.ToArray(), nextPublication.WireRequest.ExactPriorXpo1.ToArray());
+                    await DeepIdV2PublicationAuthorityAuthor.VerifyIssuerSuccessorRequestAsync(nextRoute, nextPublication.WireRequest, issuerPredecessor);
 
                     if (mode == 2 && generation == 1)
                     {
@@ -155,15 +165,56 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                         await Assert.ThrowsAsync<CryptographicException>(async () => await DeepIdV2PublicationAuthorityAuthor.AuthorGenesisRequestAsync(
                             nextRoute, nextContact, device!, Bytes(32, 0xa1), Bytes(32, 0xa2), Bytes(32, 0xa3)));
                         var untouched = witnesses.Select(value => new PublicationWitness(value)).ToArray();
+                        var exact = ContactPublicationAuthorityWireCodec.EncodeRequest(nextPublication.WireRequest);
+                        var priorOffset = exact.Length - 64 - nextPublication.WireRequest.ExactPriorXpo1.Length - 4;
+                        foreach (var mutation in new[] { "v2", "prior-size", "missing-prior", "truncated", "trailing", "padding" })
+                        {
+                            var invalidWire = exact.ToArray();
+                            if (mutation == "v2") invalidWire[1] = 2;
+                            if (mutation == "prior-size") BinaryPrimitives.WriteUInt32BigEndian(invalidWire.AsSpan(priorOffset), 16_385);
+                            if (mutation == "missing-prior")
+                            {
+                                invalidWire = [.. exact.AsSpan(0, priorOffset), 0, 0, 0, 0, .. exact.AsSpan(exact.Length - 64)];
+                                BinaryPrimitives.WriteUInt32BigEndian(invalidWire.AsSpan(4), checked((uint)invalidWire.Length));
+                            }
+                            if (mutation == "truncated") invalidWire = invalidWire[..^1];
+                            if (mutation == "trailing") invalidWire = [.. invalidWire, 0];
+                            if (mutation == "padding") invalidWire[^65] ^= 1;
+                            Assert.ThrowsAny<Exception>(() => ContactPublicationAuthorityWireCodec.DecodeRequest(invalidWire));
+                        }
+                        Assert.ThrowsAny<Exception>(() => new ContactPublicationAuthorityWireRequest(
+                            publication.WireRequest.NetworkId.Span, publication.WireRequest.RequestNonce.Span,
+                            publication.WireRequest.DirectoryLookupKey.Span, publication.WireRequest.MinimumAdh1Generation,
+                            publication.WireRequest.MinimumAdh1CoreHash.Span, publication.WireRequest.ExactDca1.Span,
+                            publication.WireRequest.ExactDcr1.Span, publication.WireRequest.ExactRouteClosure.Span,
+                            publication.WireRequest.OperationId.Span, 0, new byte[32], publication.WireRequest.ObjectCiphertext.Span,
+                            publication.WireRequest.IssuedAtUnixSeconds, publication.WireRequest.ExpiresAtUnixSeconds,
+                            publication.WireRequest.EffectiveExpiresAtUnixSeconds, publication.WireRequest.OwnerRetrieveCapability.Span,
+                            publication.WireRequest.PublisherSignature.Span, result.AsSpan()));
+                        var substitutedReceipts = nextPublication.WireRequest.ExactPriorXpo1.ToArray();
+                        // Canonical zero padding is unchanged; a receipt signature
+                        // substitution parses but invalidates the full publisher signature.
+                        var receiptCursor = 12;
+                        while (BinaryPrimitives.ReadUInt16BigEndian(substitutedReceipts.AsSpan(receiptCursor)) != 19)
+                            receiptCursor += 8 + checked((int)BinaryPrimitives.ReadUInt32BigEndian(substitutedReceipts.AsSpan(receiptCursor + 4)));
+                        exact[priorOffset + 4 + receiptCursor + 8 + 192] ^= 1;
+                        Assert.NotEqual(ContactPublicationAuthorityWireCodec.CreatePublisherSigningInput(nextPublication.WireRequest),
+                            ContactPublicationAuthorityWireCodec.CreatePublisherSigningInput(ContactPublicationAuthorityWireCodec.DecodeRequest(exact)));
+                        await Assert.ThrowsAsync<CryptographicException>(async () => await DeepIdV2PublicationAuthorityAuthor.AuthorIssuerThresholdSuccessorAsync(
+                            nextRoute, ContactPublicationAuthorityWireCodec.DecodeRequest(exact), issuerPredecessor, untouched));
+                        Assert.All(untouched, signer => Assert.Equal(0, signer.Calls));
                         await Assert.ThrowsAsync<CryptographicException>(async () => await DeepIdV2PublicationAuthorityAuthor.AuthorThresholdAsync(
                             nextRoute, nextPublication.WireRequest, untouched));
                         Assert.All(untouched, signer => Assert.Equal(0, signer.Calls));
+                        Assert.ThrowsAny<Exception>(() => UntrustedPublicationCopy(nextPublication.WireRequest, nextContact.Closure.Bundle.Field(9), null));
                         foreach (var invalid in new[] {
-                            UntrustedPublicationCopy(nextPublication.WireRequest, nextContact.Closure.Bundle.Field(9), null),
                             UntrustedPublicationCopy(nextPublication.WireRequest, null, Bytes(32, 0xa9)) })
                         {
                             await Assert.ThrowsAsync<CryptographicException>(async () => await DeepIdV2PublicationAuthorityAuthor.AuthorThresholdSuccessorAsync(
                                 nextRoute, invalid, priorPublication, untouched));
+                            Assert.All(untouched, signer => Assert.Equal(0, signer.Calls));
+                            await Assert.ThrowsAsync<CryptographicException>(async () => await DeepIdV2PublicationAuthorityAuthor.AuthorIssuerThresholdSuccessorAsync(
+                                nextRoute, invalid, issuerPredecessor, untouched));
                             Assert.All(untouched, signer => Assert.Equal(0, signer.Calls));
                         }
                         await Assert.ThrowsAsync<CryptographicException>(async () => await DeepIdV2PublicationAuthorityAuthor.AuthorSuccessorRequestAsync(
@@ -206,6 +257,14 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                             Assert.Equal(1, delayed.Calls);
                         }
                         finally { Sample = saved; } // Fixture fault cleanup only.
+                        var issuerDelayed = new PublicationWitness(witnesses[0], () => Sample = current.Proof.FreshnessDeadlineMonotonicSeconds);
+                        try
+                        {
+                            await RequireRouteRejectionAsync(async () => await DeepIdV2PublicationAuthorityAuthor.AuthorIssuerThresholdSuccessorAsync(
+                                nextRoute, nextPublication.WireRequest, issuerPredecessor, [issuerDelayed, new PublicationWitness(witnesses[1])]));
+                            Assert.Equal(1, issuerDelayed.Calls);
+                        }
+                        finally { Sample = saved; } // Fixture fault cleanup only.
                         using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
                         await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await DeepIdV2PublicationCommitVerifier.VerifyPredecessorAsync(
                             recipient, current.Network, current.Authority, priorObject, publication.WireRequest,
@@ -217,6 +276,11 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                     }
                     var nextAuthorized = await DeepIdV2PublicationAuthorityAuthor.AuthorThresholdSuccessorAsync(nextRoute,
                         nextPublication.WireRequest, priorPublication, PublicationWitnesses());
+                    var issuerAuthorized = await DeepIdV2PublicationAuthorityAuthor.AuthorIssuerThresholdSuccessorAsync(nextRoute,
+                        nextPublication.WireRequest, issuerPredecessor, PublicationWitnesses());
+                    Assert.Equal(nextAuthorized.ExactXpu1.ToArray(), issuerAuthorized.ExactXpu1.ToArray());
+                    Assert.Equal(nextAuthorized.ExactXpu1.ToArray(), (await DeepIdV2PublicationAuthorityAuthor.VerifyIssuerSuccessorResponseAsync(
+                        nextRoute, nextPublication.WireRequest, issuerPredecessor, issuerAuthorized.ExactXpu1)).ExactXpu1.ToArray());
                     var response = await nextPublication.VerifyResponseAsync(nextAuthorized.ExactXpu1);
                     Assert.Equal(nextAuthorized.ExactXpu1.ToArray(), response.ExactXpu1.ToArray());
                     var nextResult = PublicationResult(nextRoute, nextAuthorized.ExactXpu1);
@@ -234,7 +298,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                         original.OperationId.Span, original.Generation, (predecessorHash ?? original.PredecessorObjectHash).Span,
                         original.ObjectCiphertext.Span, original.IssuedAtUnixSeconds, original.ExpiresAtUnixSeconds,
                         original.EffectiveExpiresAtUnixSeconds, (ownerCapability ?? original.OwnerRetrieveCapability).Span,
-                        original.PublisherSignature.Span);
+                        original.PublisherSignature.Span, original.ExactPriorXpo1.Span);
             }
             finally { CryptographicOperations.ZeroMemory(capability); }
         }

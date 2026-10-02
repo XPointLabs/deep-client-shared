@@ -29,7 +29,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         fixture.ProofTime += 60; fixture.Sample += 60;
         try
         {
-            var backend = new RenewalBackend(fixture, (await fixture.Accounts.GetCurrentAsync())!.PermanentId.ResolverReadCapability);
+            var backend = new RenewalBackend(fixture);
             await Assert.ThrowsAnyAsync<CryptographicException>(async () => await fixture.Accounts.EnsureOwnPermanentContactPublishedAsync(
                 fixture.Source(), backend, backend, backend));
             Assert.Equal(0, backend.RouteCalls); Assert.Equal(0, backend.PublicationCalls); Assert.Equal(0, backend.ReplicaCalls);
@@ -86,7 +86,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             await SeedShortPermanentProposalAsync();
             var address = (await accounts.GetCurrentAsync())!.PermanentId;
             var plan = await accounts.ReadOwnPermanentContactPlanAsync(); var name = Convert.ToHexString(plan.Intent.Span);
-            var backend = new RenewalBackend(this, address.ResolverReadCapability);
+            var backend = new RenewalBackend(this);
             var genesisCommit = await EnsureAsync();
             Assert.Equal(0UL, genesisCommit.Generation);
             byte[] priorBytes, priorLocator;
@@ -224,7 +224,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 
     // Real PQ/device/witness/node crypto and protected SQL; in-process durable
     // winners and synthetic signed replica results, NOT live Registry/device evidence.
-    private sealed class RenewalBackend(Fixture fixture, ReadOnlyMemory<byte> capability)
+    private sealed class RenewalBackend(Fixture fixture)
         : IDid2ContactRouteThresholdSource, IDid2ContactPublicationSource, IDid2ContactReplicaPublicationTransport
     {
         internal int RouteCalls, PublicationCalls, ReplicaCalls, RouteSignings, PublicationSignings;
@@ -279,15 +279,11 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 else
                 {
                     using var state = await fixture.RouteState(); var prior = Assert.Single(state.Entries.Values, entry => entry.Phase == 7);
-                    var priorRoute = await DeepIdV2ContactRouteVerifier.VerifyPredecessorAsync(authorization, network, authority,
-                        prior.Record(5), prior.Record(6), time, ct);
-                    var priorObject = await DeepIdV2ContactObjectAuthor.VerifyPredecessorAsync(authorization, network, authority,
-                        priorRoute, prior.Record(7), prior.Record(8), capability, time, ct);
                     var priorRequest = ContactPublicationAuthorityWireCodec.DecodeRequest(prior.Record(9).Span);
                     var priorResponse = ContactPublicationAuthorityWireCodec.DecodeResponse(priorRequest, prior.Record(10).Span);
-                    var predecessor = await DeepIdV2PublicationCommitVerifier.VerifyPredecessorAsync(authorization, network, authority,
-                        priorObject, priorRequest, priorResponse.ExactXpu1, prior.Record(11), time, ct);
-                    authorized = await DeepIdV2PublicationAuthorityAuthor.AuthorThresholdSuccessorAsync(route, request, predecessor, fixture.PublicationWitnesses(), ct);
+                    var predecessor = await DeepIdV2PublicationCommitVerifier.VerifyIssuerPredecessorAsync(authorization, network, authority,
+                        priorRequest, priorResponse.ExactXpu1, request.ExactPriorXpo1, time, ct);
+                    authorized = await DeepIdV2PublicationAuthorityAuthor.AuthorIssuerThresholdSuccessorAsync(route, request, predecessor, fixture.PublicationWitnesses(), ct);
                 }
                 publicationWinners.Add(request.Generation, winner = ContactPublicationAuthorityWireCodec.EncodeResponse(request,
                     new(request.NetworkId.Span, request.RequestNonce.Span, authorized.ExactXpu1.Span))); PublicationSignings++;
