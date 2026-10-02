@@ -2940,13 +2940,9 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             if (RejectProof) return new(HttpStatusCode.ServiceUnavailable) { RequestMessage = request };
             var query = DeepIdV2DirectoryProofWireCodec.DecodeRequest(
                 await request.Content!.ReadAsByteArrayAsync(cancellationToken));
-            var floor = query.Lookup.MinimumAdhGeneration switch
-            {
-                0 => genesis.ProtectedHead,
-                1 => routeRequestPriorHead?.ProtectedHead ?? head.ProtectedHead,
-                2 when routeRequestPriorHead is not null => head.ProtectedHead,
-                _ => throw new CryptographicException("Unknown test directory floor.")
-            };
+            var floor = RouteRequestHistoryHeads().SingleOrDefault(value =>
+                value.LogGeneration == query.Lookup.MinimumAdhGeneration) ??
+                throw new CryptographicException("Unknown test directory floor.");
             var material = DeepIdV2DirectoryProofMaterialAuthor.Create(head.ProtectedHead,
                 head.ExactAllTransitions, peerCheckpoint is null ? [checkpoint] : [checkpoint, peerCheckpoint], query.DirectoryLeafKey.Span, floor);
             var proofTime = CurrentProofTime;

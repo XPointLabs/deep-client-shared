@@ -34,7 +34,9 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     private sealed partial class Fixture
     {
         private AuthoredAccountDirectoryHeadMutation? routeRequestPriorHead;
-        private AccountDirectoryProtectedLkg[] RouteRequestHistoryHeads() => routeRequestPriorHead is null
+        private AccountDirectoryProtectedLkg[] RouteRequestHistoryHeads() => retainedIssuanceHistory is not null
+            ? retainedIssuanceHistory.Values.OrderBy(value => value.LogGeneration).ToArray()
+            : routeRequestPriorHead is null
             ? [genesis.ProtectedHead, head.ProtectedHead]
             : [genesis.ProtectedHead, routeRequestPriorHead.ProtectedHead, head.ProtectedHead];
 

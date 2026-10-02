@@ -40,6 +40,17 @@ clock faults fail closed; mutable inputs/witness arrays are snapshotted before
 callbacks. These Protocol candidates still do not mutate the Shared journal or
 activate private production issuance/publication/device recovery.
 
+## Retained issuance candidate verification (2026-10-03)
+
+[DR-0074](../../docs/survival-program/decisions/DR-0074-did2-retained-threshold-issuance-evidence.md)
+adds the closed Protocol completion/object boundary for an exact signed winner
+after independent directory advancement. The real account fixture checks signed
+issuance-head authentication, intermediate-head recovery, successor completion,
+exact encrypted object restoration and fresh XPA authoring. Publisher minimum
+and current XPA witness head are verified separately. This does not insert new
+evidence into the protected journal: private response/custody and actual owned
+reopen remain pending, as do physical contacts/messages/assets/groups.
+
 ## Retired identity consumer cutover (2026-10-02)
 
 [DR-0069](../../docs/survival-program/decisions/DR-0069-did2-retired-identity-surface-removal.md)
