@@ -32,9 +32,9 @@ public sealed class DeepIdV2NetworkClosureArtifacts
         // Preflight every chain and the total before making owned copies.
         var total = 0L;
         foreach (var value in values)
-            total = checked(total + ContactResolveDirectoryArtifacts.ValidateChain(
-                value, nameof(values), ContactResolveDirectoryArtifacts.MaximumChainArtifacts));
-        if (total > ContactResolveDirectoryArtifacts.MaximumPackageBytes ||
+            total = checked(total + DeepIdV2NetworkClosureBounds.ValidateChain(
+                value, nameof(values), DeepIdV2NetworkClosureBounds.MaximumChainArtifacts));
+        if (total > DeepIdV2NetworkClosureBounds.MaximumPackageBytes ||
             exactOrderedXnv1Chain.Count != exactOrderedXnh1Chain.Count)
             throw new ArgumentException("The DID2 network closure is oversized or incomplete.");
         chains = values.Select(value => value.Select(artifact =>

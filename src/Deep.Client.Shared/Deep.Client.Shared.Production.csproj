@@ -82,9 +82,6 @@
     <Compile Include="Services\ClientMailboxOperationSingleFlight.cs" />
     <Compile Include="Services\ClientMailboxRetrieveOutcomeSummary.cs" />
     <Compile Include="Services\ClientMailboxTransportContracts.cs" />
-    <Compile Include="Services\DeepAccountIdentityOperations.cs" />
-    <Compile Include="Services\DeepAccountMessageStoreScope.cs" />
-    <Compile Include="Services\DeepAccountService.cs" />
     <Compile Include="Services\DeepIdV2AccountService.cs" />
     <Compile Include="Services\DeepIdV2AccountService.ContactRendezvous.cs" />
     <Compile Include="Services\DeepIdV2AccountService.ContactRoute.cs" />
@@ -102,7 +99,6 @@
     <Compile Include="Services\DeepIdV2AccountService.InitialClaimPreview.cs" />
     <Compile Include="Services\DeepIdV2AccountService.ReceiverSessions.cs" />
     <Compile Include="Services\DeepIdV2AccountService.Messaging.cs" />
-    <Compile Include="Services\DeepGenesisDeviceActivation.cs" />
     <Compile Include="Services\HttpServiceEndpointPolicy.cs" />
     <Compile Include="Services\HttpServiceRequestTransport.cs" />
     <Compile Include="Services\MailboxAuthenticatedRequestFactory.cs" />

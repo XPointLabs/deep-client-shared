@@ -28,14 +28,6 @@ public sealed class MailboxPrivacyPathProvider :
     private readonly PrivacyMailboxRouteSelection routeSelection;
     private readonly Func<byte[]> newSalt;
 
-    public MailboxPrivacyPathProvider(
-        ProductionContactResolvePathAuthoritySource authoritySource,
-        IProtectedEntryGuardStore guardStore,
-        PrivacyMailboxRouteSelection routeSelection)
-        : this(authoritySource, guardStore, routeSelection, CreateSalt)
-    {
-    }
-
     internal MailboxPrivacyPathProvider(
         IMailboxPrivacyNetworkAuthoritySource authoritySource,
         IProtectedEntryGuardStore guardStore,

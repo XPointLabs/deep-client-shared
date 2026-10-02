@@ -1894,6 +1894,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         private VerifiedXPointNetworkBootstrap bootstrap = null!;
         private AuthoredXPointNetworkOperationalGenesis operational = null!;
         private AuthoredXPointNetworkOperationalSuccessor? successor;
+        private OwnedPublicationReplica? nativeHelloPublicationReplica;
         private AuthoredAccountDirectoryHeadMutation genesis = null!;
         private AuthoredAccountDirectoryHeadMutation head = null!;
         private VerifiedAdc1V2 checkpoint = null!;
@@ -2161,8 +2162,17 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 config, threshold, profile);
             var recipientRoute = await recipientAccount.EnsureOwnContactRouteAsync(publicationIntent, recipientSource, config, threshold);
             var publicationSource = new OwnedPublicationSource(this, recipientRoute);
-            var publicationReplica = new OwnedPublicationReplica(this, recipientRoute);
-            _ = await recipientAccount.EnsureOwnPermanentContactPublishedAsync(recipientSource, threshold, publicationSource, publicationReplica);
+            // This represents one durable replica service across retries. A
+            // reopened committed owner correctly does not dispatch again; its
+            // previously observed exact publication must remain at the replica.
+            var alreadyPublished = nativeHelloPublicationReplica is not null;
+            var publicationReplica = nativeHelloPublicationReplica ??= new OwnedPublicationReplica(this, recipientRoute);
+            var priorCalls = publicationReplica.Calls;
+            var committedPublication = await recipientAccount.EnsureOwnPermanentContactPublishedAsync(
+                recipientSource, threshold, publicationSource, publicationReplica);
+            Assert.Equal(committedPublication.RequestHash.ToArray(),
+                Xpu1Codec.Decode(publicationReplica.ExactPublication.Span).RequestHash.ToArray());
+            if (alreadyPublished) Assert.Equal(priorCalls, publicationReplica.Calls);
             _ = await EnsurePrivateReplyPublicationAsync(accounts);
             var address = (await recipientAccount.GetCurrentAsync())!.PermanentId;
             var resolved = await accounts.ResolvePermanentContactAsync(address, senderSource,
@@ -2790,10 +2800,10 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 Enumerable.Range(0, 5).Select(role => (ReadOnlyMemory<byte>)
                     PublicKey((byte)(0x10 + index * 5 + role))).ToArray())).ToArray();
             if (expiringHistory) ProofTime = 1_020;
-            operational = await XPointNetworkOperationalGenesisAuthor.AuthorAsync(new(
+            var pendingOperational = await XPointNetworkOperationalGenesisAuthor.AuthorNetworkCandidateAsync(new(
                 Bytes(32, 0x12), bootstrap, [root], witnesses, descriptors, Bytes(32, 0xf1),
-                Bytes(32, 0xf4), Bytes(32, 0xf5), Bytes(32, 0xf6), PublicKey(0x31), PublicKey(0x32),
-                990, 1_000, expiringHistory ? 1_090UL : windowExpiry, Bytes(32, 0xf2), Boot, 100, 100, 100, ProofTime, 5));
+                Bytes(32, 0xf5), Bytes(32, 0xf6), PublicKey(0x31), PublicKey(0x32),
+                990, 1_000, expiringHistory ? 1_090UL : windowExpiry));
             var admission = DeepIdV2GenesisAdmissionWireCodec.DecodeRequest(
                 await accounts.PrepareGenesisAdmissionAsync()).Admission;
             checkpoint = DeepIdV2GenesisAdmissionVerifier.Verify(admission, 1_000, 1, 2, pq);
@@ -2810,6 +2820,25 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 bootstrap.Authority, 990, windowExpiry, witnesses);
             head = await DeepIdV2DirectoryHeadAuthor.AdvanceAsync(bootstrap.Authority,
                 genesis.ProtectedHead, new([], [], peerCheckpoint is null ? [checkpoint] : [checkpoint, peerCheckpoint], 990, windowExpiry, 2), witnesses);
+            // DR-0070: topology is authored only after independently verifying
+            // a genuine DID2 proof against the signed candidate network view.
+            var material = DeepIdV2DirectoryProofMaterialAuthor.Create(head.ProtectedHead,
+                head.ExactAllTransitions, peerCheckpoint is null ? [checkpoint] : [checkpoint, peerCheckpoint],
+                checkpoint.Checkpoint.DirectoryLeafKey.Span, genesis.ProtectedHead);
+            var nonce = Bytes(32, 0xf2);
+            var issued = await DeepIdV2DirectoryProofAuthor.IssueGenesisAsync(bootstrap.Authority,
+                new(Network, nonce, Boot, Sample, head.ExactAdh1.Span, pendingOperational.ExactXnv1.Span,
+                    ProofTime, 5, ProofTime, ProofTime + 30,
+                    AccountDirectoryDtt1IssuanceEpoch.Derive(bootstrap.Authority, ProofTime, 5), 2),
+                material, witnesses, 1, pq);
+            var lookup = DeepIdV2AccountDirectoryLookupCodec.Author(checkpoint.Binding.DeepId, Network,
+                genesis.ProtectedHead.LogGeneration, genesis.CoreHash.Span, 1, new byte[38], new byte[32]);
+            var freshness = DeepIdV2DirectoryCurrentProofVerifier.VerifyRequestedDid2(bootstrap.Authority,
+                issued.ExactAdh1, issued.ExactDtt1, issued.ExactAdp1V2, nonce,
+                VerifiedDeepIdV2DirectoryQuery.VerifyDid2(lookup, checkpoint.Binding.DeepId),
+                new(Boot, Sample, Sample, Sample), genesis.ProtectedHead, 1, 2, pq);
+            operational = await XPointNetworkOperationalGenesisAuthor.CompleteDid2Async(
+                pendingOperational, freshness, new OnionTrustedTimeAuthority(this));
             if (withSuccessor)
                 await AdvanceNetworkAsync();
             var floor = await accounts.OpenDirectoryLkgStoreAsync(bootstrap.Authority,

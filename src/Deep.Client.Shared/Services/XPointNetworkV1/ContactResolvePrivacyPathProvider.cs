@@ -14,24 +14,13 @@ public sealed class ContactResolvePathAuthority
     public ContactResolvePathAuthority(
         VerifiedOnionNetworkContext network,
         VerifiedContactServicePlacement placement)
-        : this(network, placement, canonical: null)
-    {
-    }
-
-    internal ContactResolvePathAuthority(
-        VerifiedOnionNetworkContext network,
-        VerifiedContactServicePlacement placement,
-        CanonicalContactResolveAuthority? canonical)
     {
         Network = network ?? throw new ArgumentNullException(nameof(network));
         Placement = placement ?? throw new ArgumentNullException(nameof(placement));
-        Canonical = canonical;
     }
 
     public VerifiedOnionNetworkContext Network { get; }
     public VerifiedContactServicePlacement Placement { get; }
-    internal VerifiedMailboxAuthorityV2? MailboxAuthority => Canonical?.MailboxAuthority;
-    internal CanonicalContactResolveAuthority? Canonical { get; }
 }
 
 /// <summary>
@@ -144,15 +133,6 @@ public sealed class ContactResolveCanonicalPathRequest
                 ContactServiceRequestKind.ClaimPreKey, request.Field(16).Span,
                 System.Buffers.Binary.BinaryPrimitives.ReadUInt64BigEndian(request.Field(6).Span));
         }
-        if (exactRequest[..4].SequenceEqual("XPP1"u8))
-        {
-            var request = Xpp1BoundedCodec.Decode(exactRequest);
-            if (request is not Xpp1ManifestRequest manifest)
-                throw new ContactResolvePathException(
-                    "xpp1-publication-context-required",
-                    "A bounded XPP1 chunk or commit requires its sealed manifest publication context.");
-            return FromBoundedPublication(request, manifest.Manifest.ServiceCapability.Span);
-        }
         if (exactRequest[..4].SequenceEqual("XMG1"u8))
         {
             var request = ContactCodec.Decode("XMG1", exactRequest);
@@ -167,27 +147,7 @@ public sealed class ContactResolveCanonicalPathRequest
         }
         throw new ContactResolvePathException(
             "contact-request-invalid",
-            "Only exact XCA2, XPU1, XIQ1, XPK1, XMG1, or bounded XPP1 records have ContactResolve placement semantics.");
-    }
-
-    public static ContactResolveCanonicalPathRequest FromBoundedPublication(
-        Xpp1BoundedRequest request,
-        ReadOnlySpan<byte> verifiedServiceCapability)
-    {
-        ArgumentNullException.ThrowIfNull(request);
-        if (verifiedServiceCapability.Length != 32 ||
-            verifiedServiceCapability.IndexOfAnyExcept((byte)0) < 0)
-            throw new ArgumentException(
-                "The bounded publication service capability must be nonzero 32 bytes.",
-                nameof(verifiedServiceCapability));
-        if (request is Xpp1ManifestRequest manifest &&
-            !Fixed(manifest.Manifest.ServiceCapability.Span, verifiedServiceCapability))
-            throw new CryptographicException(
-                "The bounded XPP1 manifest differs from the sealed publication shard key.");
-        return Create(request.CanonicalBytes.Span, request.NetworkId.Span,
-            request.ViewHash.Span, request.PlacementHash.Span,
-            ContactServiceRequestKind.PublishPreKeyInventory,
-            verifiedServiceCapability, request.ExpiresAtUnixSeconds);
+            "Only exact XCA2, XPU1, XIQ1, XPK1 or XMG1 can be decoded without an owned DID2 publication context.");
     }
 
     public static ContactResolveCanonicalPathRequest FromDid2BoundedPublication(
@@ -270,60 +230,6 @@ public sealed class ContactResolveCanonicalPathRequest
 
     private static bool Fixed(ReadOnlySpan<byte> left, ReadOnlySpan<byte> right) =>
         left.Length == right.Length && CryptographicOperations.FixedTimeEquals(left, right);
-}
-
-internal interface IContactResolveClaimPathAuthoritySource
-{
-    ValueTask<ContactResolveCurrentValuePathAuthority> GetCurrentForOneTimeClaimAsync(
-        Xiq1Request request,
-        ReadOnlyMemory<byte> directoryLookupKey,
-        CancellationToken cancellationToken);
-}
-
-internal interface IContactResolvePermanentPathAuthoritySource
-{
-    ValueTask<ContactResolveCurrentValuePathAuthority> GetCurrentForPermanentResolveAsync(
-        Xiq1Request request,
-        ParsedDid1 permanentDeepId,
-        CancellationToken cancellationToken);
-}
-
-internal sealed class ContactResolveCurrentValuePathAuthority
-{
-    internal ContactResolveCurrentValuePathAuthority(
-        VerifiedXPointNetworkAuthority authority,
-        VerifiedAccountDirectoryFreshness directoryFreshness,
-        VerifiedOnionNetworkContext network,
-        VerifiedContactServicePlacement placement,
-        ReadOnlyMemory<byte> exactXnv1,
-        ReadOnlyMemory<byte> exactXnh1,
-        ReadOnlyMemory<byte> exactPmt2,
-        ReadOnlyMemory<byte> currentBootId,
-        ulong currentMonotonicSample,
-        OnionTrustedTimeAuthority trustedTimeAuthority)
-    {
-        Authority = authority ?? throw new ArgumentNullException(nameof(authority));
-        DirectoryFreshness = directoryFreshness ?? throw new ArgumentNullException(nameof(directoryFreshness));
-        Network = network ?? throw new ArgumentNullException(nameof(network));
-        Placement = placement ?? throw new ArgumentNullException(nameof(placement));
-        ExactXnv1 = exactXnv1.ToArray();
-        ExactXnh1 = exactXnh1.ToArray();
-        ExactPmt2 = exactPmt2.ToArray();
-        CurrentBootId = currentBootId.ToArray();
-        CurrentMonotonicSample = currentMonotonicSample;
-        TrustedTimeAuthority = trustedTimeAuthority ?? throw new ArgumentNullException(nameof(trustedTimeAuthority));
-    }
-
-    internal VerifiedXPointNetworkAuthority Authority { get; }
-    internal VerifiedAccountDirectoryFreshness DirectoryFreshness { get; }
-    internal VerifiedOnionNetworkContext Network { get; }
-    internal VerifiedContactServicePlacement Placement { get; }
-    internal ReadOnlyMemory<byte> ExactXnv1 { get; }
-    internal ReadOnlyMemory<byte> ExactXnh1 { get; }
-    internal ReadOnlyMemory<byte> ExactPmt2 { get; }
-    internal ReadOnlyMemory<byte> CurrentBootId { get; }
-    internal ulong CurrentMonotonicSample { get; }
-    internal OnionTrustedTimeAuthority TrustedTimeAuthority { get; }
 }
 
 public sealed class ContactResolvePathException : CryptographicException

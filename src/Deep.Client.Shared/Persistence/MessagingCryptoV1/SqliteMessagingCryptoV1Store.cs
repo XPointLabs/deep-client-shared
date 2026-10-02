@@ -20,7 +20,7 @@ namespace Deep.Client.Shared.Persistence.MessagingCryptoV1;
 internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
 {
     private const int ApplicationId = 0x4D435231; // MCR1
-    private const int SchemaGeneration = 8;
+    private const int SchemaGeneration = 9;
     // Replay-retention context generation is a cryptographic wire/domain value,
     // not the physical SQLite schema version. Generation 8 additionally stages
     // outbound ciphertext with the DPE2 ratchet transaction and
@@ -35,8 +35,6 @@ internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
         CREATE TABLE initial_session_journal(singleton INTEGER PRIMARY KEY CHECK(singleton=1),prekey_source INTEGER NOT NULL CHECK(prekey_source IN(1,2,3)),claim_operation_id BLOB NOT NULL UNIQUE CHECK(length(claim_operation_id)=32),initialization_fingerprint BLOB NOT NULL CHECK(length(initialization_fingerprint)=32),xpc1_full_replay_hash BLOB NOT NULL CHECK(length(xpc1_full_replay_hash)=32),dph2_full_replay_hash BLOB NOT NULL CHECK(length(dph2_full_replay_hash)=32),x25519_prekey_id BLOB NULL UNIQUE CHECK(x25519_prekey_id IS NULL OR length(x25519_prekey_id)=32),mlkem_prekey_id BLOB NOT NULL UNIQUE CHECK(length(mlkem_prekey_id)=32),initial_generation BLOB NOT NULL CHECK(length(initial_generation)=8),initial_commitment BLOB NOT NULL CHECK(length(initial_commitment)=32),initial_state_hash BLOB NOT NULL CHECK(length(initial_state_hash)=32),initial_event_count INTEGER NOT NULL CHECK(initial_event_count BETWEEN 0 AND 2),CHECK((prekey_source=3 AND x25519_prekey_id IS NULL) OR (prekey_source IN(1,2) AND x25519_prekey_id IS NOT NULL)));
         CREATE TABLE pending_initial_dmc2(event_index INTEGER PRIMARY KEY CHECK(event_index IN(1,2)),claim_operation_id BLOB NOT NULL CHECK(length(claim_operation_id)=32),dph2_full_replay_hash BLOB NOT NULL CHECK(length(dph2_full_replay_hash)=32),exact_dmc2 BLOB NOT NULL CHECK(length(exact_dmc2) BETWEEN 282 AND 33082),dmc2_hash BLOB NOT NULL CHECK(length(dmc2_hash)=32),FOREIGN KEY(claim_operation_id) REFERENCES initial_session_journal(claim_operation_id) ON DELETE RESTRICT);
         CREATE TABLE initial_session_fork_latch(singleton INTEGER PRIMARY KEY CHECK(singleton=1),collision_kind INTEGER NOT NULL CHECK(collision_kind IN(1,2,3)),incumbent_fingerprint BLOB NOT NULL CHECK(length(incumbent_fingerprint)=32),conflicting_fingerprint BLOB NOT NULL CHECK(length(conflicting_fingerprint)=32),incumbent_operation_id BLOB NOT NULL CHECK(length(incumbent_operation_id)=32),conflicting_operation_id BLOB NOT NULL CHECK(length(conflicting_operation_id)=32),incumbent_x25519_prekey_id BLOB NULL CHECK(incumbent_x25519_prekey_id IS NULL OR length(incumbent_x25519_prekey_id)=32),conflicting_x25519_prekey_id BLOB NULL CHECK(conflicting_x25519_prekey_id IS NULL OR length(conflicting_x25519_prekey_id)=32),incumbent_mlkem_prekey_id BLOB NOT NULL CHECK(length(incumbent_mlkem_prekey_id)=32),conflicting_mlkem_prekey_id BLOB NOT NULL CHECK(length(conflicting_mlkem_prekey_id)=32),CHECK(incumbent_fingerprint<>conflicting_fingerprint));
-        CREATE TABLE initiator_initial_session_outbox(singleton INTEGER PRIMARY KEY CHECK(singleton=1),claim_operation_id BLOB NOT NULL UNIQUE CHECK(length(claim_operation_id)=32),initialization_fingerprint BLOB NOT NULL CHECK(length(initialization_fingerprint)=32),session_id BLOB NOT NULL UNIQUE CHECK(length(session_id)=32),full_dph2_replay_hash BLOB NOT NULL UNIQUE CHECK(length(full_dph2_replay_hash)=32),claim_binding BLOB NOT NULL UNIQUE CHECK(length(claim_binding)=32),exact_dph2 BLOB NOT NULL CHECK(length(exact_dph2) IN(7977,20265,36649)),network_id BLOB NOT NULL CHECK(length(network_id)=16),local_account_id BLOB NOT NULL CHECK(length(local_account_id)=32),local_account_generation BLOB NOT NULL CHECK(length(local_account_generation)=8),local_device_id BLOB NOT NULL CHECK(length(local_device_id)=32),local_device_generation BLOB NOT NULL CHECK(length(local_device_generation)=8),contact_store_generation INTEGER NOT NULL CHECK(contact_store_generation>0),contact_relationship_id BLOB NOT NULL CHECK(length(contact_relationship_id)=32),contact_conversation_id BLOB NOT NULL CHECK(length(contact_conversation_id)=32),contact_evidence_hash BLOB NOT NULL CHECK(length(contact_evidence_hash)=32),peer_package_hash BLOB NOT NULL CHECK(length(peer_package_hash)=32),remote_account_id BLOB NOT NULL CHECK(length(remote_account_id)=32),remote_account_generation BLOB NOT NULL CHECK(length(remote_account_generation)=8),remote_directory_generation BLOB NOT NULL CHECK(length(remote_directory_generation)=8),remote_device_id BLOB NOT NULL CHECK(length(remote_device_id)=32),remote_device_generation BLOB NOT NULL CHECK(length(remote_device_generation)=8),initial_generation BLOB NOT NULL CHECK(length(initial_generation)=8),initial_commitment BLOB NOT NULL CHECK(length(initial_commitment)=32),initial_state_hash BLOB NOT NULL CHECK(length(initial_state_hash)=32));
-        CREATE TABLE initiator_initial_session_fork_latch(singleton INTEGER PRIMARY KEY CHECK(singleton=1),incumbent_fingerprint BLOB NOT NULL CHECK(length(incumbent_fingerprint)=32),conflicting_fingerprint BLOB NOT NULL CHECK(length(conflicting_fingerprint)=32),incumbent_operation_id BLOB NOT NULL CHECK(length(incumbent_operation_id)=32),conflicting_operation_id BLOB NOT NULL CHECK(length(conflicting_operation_id)=32),incumbent_session_id BLOB NOT NULL CHECK(length(incumbent_session_id)=32),conflicting_session_id BLOB NOT NULL CHECK(length(conflicting_session_id)=32),incumbent_dph2_hash BLOB NOT NULL CHECK(length(incumbent_dph2_hash)=32),conflicting_dph2_hash BLOB NOT NULL CHECK(length(conflicting_dph2_hash)=32),CHECK(incumbent_fingerprint<>conflicting_fingerprint));
         CREATE TABLE exact_dpe2_plan_journal(journal_generation BLOB PRIMARY KEY CHECK(length(journal_generation)=8),plan_fingerprint BLOB NOT NULL CHECK(length(plan_fingerprint)=32),exact_header_hash BLOB NOT NULL CHECK(length(exact_header_hash)=32),exact_envelope_hash BLOB NOT NULL CHECK(length(exact_envelope_hash)=32),exact_envelope_digest BLOB NOT NULL CHECK(length(exact_envelope_digest)=32),checkpoint_prior_generation BLOB NOT NULL CHECK(length(checkpoint_prior_generation)=8),checkpoint_prior_commitment BLOB NOT NULL CHECK(length(checkpoint_prior_commitment)=32),deduplication_mutation_commitment BLOB NULL CHECK(deduplication_mutation_commitment IS NULL OR length(deduplication_mutation_commitment)=32),has_state_mutation INTEGER NOT NULL CHECK(has_state_mutation=1),FOREIGN KEY(journal_generation) REFERENCES ratchet_journal(journal_generation) ON DELETE RESTRICT);
         CREATE TABLE pending_inbound_dmc2(operation_id BLOB PRIMARY KEY CHECK(length(operation_id)=32),exact_envelope_hash BLOB NOT NULL UNIQUE CHECK(length(exact_envelope_hash)=32),journal_generation BLOB NOT NULL UNIQUE CHECK(length(journal_generation)=8),exact_dmc2 BLOB NOT NULL CHECK(length(exact_dmc2) BETWEEN 282 AND 33082),dmc2_hash BLOB NOT NULL CHECK(length(dmc2_hash)=32),FOREIGN KEY(journal_generation) REFERENCES exact_dpe2_plan_journal(journal_generation) ON DELETE RESTRICT);
         CREATE TABLE pending_outbound_dpe2(operation_id BLOB PRIMARY KEY CHECK(length(operation_id)=32),exact_envelope_hash BLOB NOT NULL UNIQUE CHECK(length(exact_envelope_hash)=32),journal_generation BLOB NOT NULL UNIQUE CHECK(length(journal_generation)=8),exact_dpe2 BLOB NOT NULL CHECK(length(exact_dpe2) BETWEEN 4513 AND 50705),exact_dpe2_digest BLOB NOT NULL CHECK(length(exact_dpe2_digest)=32),FOREIGN KEY(journal_generation) REFERENCES exact_dpe2_plan_journal(journal_generation) ON DELETE RESTRICT);
@@ -128,15 +126,6 @@ internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
         MessagingCryptoV1Trs1.Fixed(scope.ConversationId, conversationId) &&
         MessagingCryptoV1Trs1.Fixed(scope.SessionId, sessionId);
 
-    internal void RequireInitiatorScope(InitiatorInitialSessionVerifiedScope verifiedScope)
-    {
-        ArgumentNullException.ThrowIfNull(verifiedScope);
-        RequireInitiatorScopeValues(
-            verifiedScope.LocalAccountId,
-            verifiedScope.ConversationId,
-            scope.SessionId);
-    }
-
     internal void RequireInitiatorScopeValues(
         ReadOnlySpan<byte> localAccountId,
         ReadOnlySpan<byte> conversationId,
@@ -161,125 +150,6 @@ internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
             scope.DeviceGeneration != localDeviceGeneration)
             throw new CryptographicException(
                 "The initiator DPH2 local-device generation is outside this store scope.");
-    }
-
-    internal async ValueTask<MessagingCryptoV1CommitResult> CommitInitiatorInitialSessionAsync(
-        InitiatorInitialSessionProtocolSnapshot snapshot,
-        CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(snapshot);
-        RequireInitiatorScopeValues(
-            snapshot.LocalAccountId, snapshot.ConversationId, snapshot.SessionId);
-        var facts = MessagingCryptoV1Trs1.Validate(snapshot.ExactTrs1, scope);
-        if (facts.TerminallyLatched)
-        {
-            CryptographicOperations.ZeroMemory(facts.StateCommitment);
-            CryptographicOperations.ZeroMemory(facts.ExactHash);
-            throw new CryptographicException("An initiator handshake cannot initialize a terminal TRS1 state.");
-        }
-        var fingerprint = ComputeInitiatorInitializationFingerprint(snapshot, facts);
-        var initialHead = ComputeInitialJournalHead(scope);
-        var gateHeld = false;
-        try
-        {
-            await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-            gateHeld = true;
-            ThrowIfDisposed();
-            MessagingCryptoV1StoreTestHooks.Hit(
-                MessagingCryptoV1StoreFailpoint.BeforeInitiatorInitialTransaction);
-            var db = GetConnection();
-            using var transaction = db.BeginTransaction(deferred: false);
-            using var current = ReadCurrent(db, transaction);
-            if (current is not null)
-            {
-                using var incumbent = ReadInitiatorInitialSession(db, transaction);
-                if (current.ForkLatched)
-                    return Result(MessagingCryptoV1CommitDisposition.AlreadyForkLatched, current);
-                if (incumbent is null)
-                    return Result(MessagingCryptoV1CommitDisposition.CasConflict, current);
-                if (InitiatorInitialSessionMatches(incumbent, snapshot, fingerprint, facts))
-                    return Result(MessagingCryptoV1CommitDisposition.ExactReplay, current);
-                return LatchInitiatorInitialFork(
-                    db, transaction, current, incumbent, snapshot, fingerprint);
-            }
-
-            using var responderInitial = ReadInitialSession(db, transaction);
-            if (responderInitial is not null ||
-                ScalarLong(db, "SELECT count(*) FROM initial_prekey_inventory;") != 0)
-                throw new CryptographicException(
-                    "Responder pre-key state cannot initialize an initiator session store.");
-
-            using (var command = db.CreateCommand())
-            {
-                command.Transaction = transaction;
-                command.CommandText = "INSERT INTO ratchet_state VALUES(1,$generation,$commitment,$hash,$trs1,$journalGeneration,$journalHead,0,0,$operation,$fingerprint,$generation,$commitment,$hash);";
-                Add(command, "$generation", U64(facts.Generation));
-                Add(command, "$commitment", facts.StateCommitment);
-                Add(command, "$hash", facts.ExactHash);
-                Add(command, "$trs1", snapshot.ExactTrs1);
-                Add(command, "$journalGeneration", U64(0));
-                Add(command, "$journalHead", initialHead);
-                Add(command, "$operation", snapshot.ClaimOperationId);
-                Add(command, "$fingerprint", fingerprint);
-                if (command.ExecuteNonQuery() != 1)
-                    throw new InvalidOperationException("Initiator TRS1 initialization CAS failed.");
-            }
-            MessagingCryptoV1StoreTestHooks.Hit(
-                MessagingCryptoV1StoreFailpoint.AfterInitiatorInitialStateInsert);
-            InsertInitiatorInitialSession(db, transaction, snapshot, facts, fingerprint);
-            MessagingCryptoV1StoreTestHooks.Hit(
-                MessagingCryptoV1StoreFailpoint.AfterInitiatorInitialOutboxInsert);
-            MessagingCryptoV1StoreTestHooks.Hit(
-                MessagingCryptoV1StoreFailpoint.BeforeInitiatorInitialCommit);
-            transaction.Commit();
-            MessagingCryptoV1StoreTestHooks.Hit(
-                MessagingCryptoV1StoreFailpoint.AfterInitiatorInitialCommit);
-            return new MessagingCryptoV1CommitResult(
-                MessagingCryptoV1CommitDisposition.Initialized,
-                facts.Generation,
-                facts.StateCommitment.ToArray(),
-                0,
-                initialHead.ToArray(),
-                false,
-                false);
-        }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(facts.StateCommitment);
-            CryptographicOperations.ZeroMemory(facts.ExactHash);
-            CryptographicOperations.ZeroMemory(fingerprint);
-            CryptographicOperations.ZeroMemory(initialHead);
-            if (gateHeld) gate.Release();
-        }
-    }
-
-    internal async ValueTask<InitiatorInitialSessionDispatchEnvelope?>
-        ReadInitiatorInitialSessionDispatchAsync(
-            InitiatorInitialSessionVerifiedScope verifiedScope,
-            CancellationToken cancellationToken = default)
-    {
-        RequireInitiatorScope(verifiedScope);
-        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
-        {
-            ThrowIfDisposed();
-            var db = GetConnection();
-            using var transaction = db.BeginTransaction(deferred: true);
-            using var current = ReadCurrent(db, transaction);
-            using var row = ReadInitiatorInitialSession(db, transaction);
-            if (current is null || row is null) return null;
-            if (current.ForkLatched)
-                throw new CryptographicException(
-                    "The initiator session is fork-latched and cannot be dispatched.");
-            if (!InitiatorScopeMatches(row, verifiedScope) ||
-                !MessagingCryptoV1Trs1.Fixed(current.InitializationFingerprint, row.Fingerprint) ||
-                !MessagingCryptoV1Trs1.Fixed(current.InitializationOperationId, row.ClaimOperationId))
-                throw new CryptographicException(
-                    "The durable initiator DPH2 belongs to another verified contact generation.");
-            return new InitiatorInitialSessionDispatchEnvelope(
-                row.ExactDph2, row.ClaimOperationId, row.SessionId, row.FullDph2ReplayHash);
-        }
-        finally { gate.Release(); }
     }
 
     internal async ValueTask<bool> HasExactDeviceWideInitialSessionAsync(
@@ -1079,8 +949,6 @@ internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
         var forkCount = ScalarLong(db, "SELECT count(*) FROM ratchet_fork_latch;");
         var initialCount = ScalarLong(db, "SELECT count(*) FROM initial_session_journal;");
         var initialForkCount = ScalarLong(db, "SELECT count(*) FROM initial_session_fork_latch;");
-        var initiatorCount = ScalarLong(db, "SELECT count(*) FROM initiator_initial_session_outbox;");
-        var initiatorForkCount = ScalarLong(db, "SELECT count(*) FROM initiator_initial_session_fork_latch;");
         var preKeyCount = ScalarLong(db, "SELECT count(*) FROM initial_prekey_inventory;");
         var x25519PreKeyCount = ScalarLong(db, "SELECT count(*) FROM initial_prekey_inventory WHERE prekey_kind=1;");
         var mlKemPreKeyCount = ScalarLong(db, "SELECT count(*) FROM initial_prekey_inventory WHERE prekey_kind=2;");
@@ -1093,8 +961,7 @@ internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
                 pendingOutboundCount != 0 ||
                 pendingInitialCount != 0 ||
                 forkCount != 0 ||
-                initialCount != 0 || initialForkCount != 0 || initiatorCount != 0 ||
-                initiatorForkCount != 0)
+                initialCount != 0 || initialForkCount != 0)
                 throw new FormatException("Orphan ratchet evidence exists.");
             return;
         }
@@ -1103,11 +970,11 @@ internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
             pendingDmc2Count < 0 || pendingDmc2Count > exactDpe2Count ||
             pendingOutboundCount < 0 || pendingOutboundCount > exactDpe2Count ||
             pendingInitialCount is < 0 or > 2 ||
-            initialCount + initiatorCount != 1 || preKeyCount != 0 ||
+            initialCount != 1 || preKeyCount != 0 ||
             current.JournalGeneration != checked((ulong)journalCount) ||
             (current.ForkLatched
-                ? forkCount + initialForkCount + initiatorForkCount != 1
-                : forkCount + initialForkCount + initiatorForkCount != 0))
+                ? forkCount + initialForkCount != 1
+                : forkCount + initialForkCount != 0))
             throw new FormatException("Ratchet journal/fork cardinality is inconsistent.");
 
         var facts = MessagingCryptoV1Trs1.Validate(current.ExactTrs1, scope);
@@ -1126,11 +993,8 @@ internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
         }
 
         using var initial = ReadInitialSession(db, null);
-        using var initiator = ReadInitiatorInitialSession(db, null);
         if (initial is not null)
             ValidateResponderInitialization(db, current, initial);
-        else if (initiator is not null)
-            ValidateInitiatorInitialization(current, initiator);
         else
             throw new FormatException("Initial-session evidence is absent.");
 
@@ -1141,9 +1005,6 @@ internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
         if (initialForkCount == 1)
             ValidateInitialForkLatch(db, current, initial ??
                 throw new FormatException("Responder initial-session evidence is absent."));
-        else if (initiatorForkCount == 1)
-            ValidateInitiatorForkLatch(db, current, initiator ??
-                throw new FormatException("Initiator initial-session evidence is absent."));
         else ValidateForkLatch(db, current);
     }
 
@@ -1320,51 +1181,6 @@ internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
         return hash;
     }
 
-    private void ValidateInitiatorInitialization(
-        CurrentRow current,
-        InitiatorInitialSessionRow initiator)
-    {
-        var record = Dph2Codec.Decode(initiator.ExactDph2);
-        var canonical = Dph2Codec.Encode(record);
-        var replay = MessagingWireCryptographicInputs.ComputeDph2FullReplayHash(record);
-        var claim = MessagingWireCryptographicInputs.ComputeDph2ClaimBinding(record);
-        var facts = new MessagingCryptoV1Trs1Facts(current.InitialGeneration,
-            current.InitialCommitment.ToArray(), current.InitialStateHash.ToArray(), false);
-        var expected = ComputeInitiatorInitializationFingerprint(initiator, facts);
-        try
-        {
-            if (!MessagingCryptoV1Trs1.Fixed(canonical, initiator.ExactDph2) ||
-                !MessagingCryptoV1Trs1.Fixed(initiator.LocalAccountId, scope.AccountId) ||
-                initiator.LocalAccountGeneration != scope.AccountGeneration ||
-                !MessagingCryptoV1Trs1.Fixed(initiator.LocalDeviceId, scope.LocalDeviceId) ||
-                initiator.LocalDeviceGeneration != scope.DeviceGeneration ||
-                !MessagingCryptoV1Trs1.Fixed(initiator.ConversationId, scope.ConversationId) ||
-                !MessagingCryptoV1Trs1.Fixed(initiator.SessionId, scope.SessionId) ||
-                !MessagingCryptoV1Trs1.Fixed(record.SessionId.Span, initiator.SessionId) ||
-                !MessagingCryptoV1Trs1.Fixed(record.NetworkId.Span, initiator.NetworkId) ||
-                !MessagingCryptoV1Trs1.Fixed(record.InitiatorAccountId.Span, initiator.LocalAccountId) ||
-                !MessagingCryptoV1Trs1.Fixed(record.InitiatorDeviceId.Span, initiator.LocalDeviceId) ||
-                record.InitiatorDeviceGeneration != initiator.LocalDeviceGeneration ||
-                !MessagingCryptoV1Trs1.Fixed(record.ResponderAccountId.Span, initiator.RemoteAccountId) ||
-                !MessagingCryptoV1Trs1.Fixed(record.ResponderDeviceId.Span, initiator.RemoteDeviceId) ||
-                record.ResponderDeviceGeneration != initiator.RemoteDeviceGeneration ||
-                !MessagingCryptoV1Trs1.Fixed(record.ClaimOperationId.Span, initiator.ClaimOperationId) ||
-                !MessagingCryptoV1Trs1.Fixed(replay, initiator.FullDph2ReplayHash) ||
-                !MessagingCryptoV1Trs1.Fixed(claim, initiator.ClaimBinding) ||
-                !MessagingCryptoV1Trs1.Fixed(expected, current.InitializationFingerprint) ||
-                !MessagingCryptoV1Trs1.Fixed(expected, initiator.Fingerprint) ||
-                !MessagingCryptoV1Trs1.Fixed(current.InitializationOperationId, initiator.ClaimOperationId) ||
-                current.InitialGeneration != initiator.InitialGeneration ||
-                !MessagingCryptoV1Trs1.Fixed(current.InitialCommitment, initiator.InitialCommitment) ||
-                !MessagingCryptoV1Trs1.Fixed(current.InitialStateHash, initiator.InitialStateHash))
-                throw new FormatException("TRS1 initiator initialization evidence is corrupt.");
-        }
-        finally
-        {
-            Zero(canonical, replay, claim, expected, facts.StateCommitment, facts.ExactHash);
-        }
-    }
-
     private static void ValidateInitialForkLatch(
         SqliteConnection db,
         CurrentRow current,
@@ -1392,40 +1208,6 @@ internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
                 throw new FormatException("Initial-session fork evidence is invalid.");
         }
         finally { Zero(incumbentFingerprint, conflictingFingerprint, incumbentOperation, incumbentX25519, incumbentMlKem); }
-    }
-
-    private static void ValidateInitiatorForkLatch(
-        SqliteConnection db,
-        CurrentRow current,
-        InitiatorInitialSessionRow initiator)
-    {
-        if (!current.ForkLatched)
-            throw new FormatException("Orphan initiator initial-session fork evidence exists.");
-        using var command = db.CreateCommand();
-        command.CommandText = "SELECT incumbent_fingerprint,conflicting_fingerprint,incumbent_operation_id,incumbent_session_id,incumbent_dph2_hash FROM initiator_initial_session_fork_latch WHERE singleton=1;";
-        using var reader = command.ExecuteReader();
-        if (!reader.Read())
-            throw new FormatException("Initiator initial-session fork evidence is absent.");
-        var incumbentFingerprint = (byte[])reader[0];
-        var conflictingFingerprint = (byte[])reader[1];
-        var incumbentOperation = (byte[])reader[2];
-        var incumbentSession = (byte[])reader[3];
-        var incumbentDph2Hash = (byte[])reader[4];
-        try
-        {
-            if (reader.Read() ||
-                MessagingCryptoV1Trs1.Fixed(incumbentFingerprint, conflictingFingerprint) ||
-                !MessagingCryptoV1Trs1.Fixed(incumbentFingerprint, initiator.Fingerprint) ||
-                !MessagingCryptoV1Trs1.Fixed(incumbentOperation, initiator.ClaimOperationId) ||
-                !MessagingCryptoV1Trs1.Fixed(incumbentSession, initiator.SessionId) ||
-                !MessagingCryptoV1Trs1.Fixed(incumbentDph2Hash, initiator.FullDph2ReplayHash))
-                throw new FormatException("Initiator initial-session fork evidence is invalid.");
-        }
-        finally
-        {
-            Zero(incumbentFingerprint, conflictingFingerprint, incumbentOperation,
-                incumbentSession, incumbentDph2Hash);
-        }
     }
 
     private static void ValidateForkLatch(SqliteConnection db, CurrentRow current)
@@ -2077,101 +1859,6 @@ internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
         return hash.GetHashAndReset();
     }
 
-    private byte[] ComputeInitiatorInitializationFingerprint(
-        InitiatorInitialSessionProtocolSnapshot snapshot,
-        MessagingCryptoV1Trs1Facts facts)
-    {
-        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        Append(hash, "Deep/Client/MessagingCryptoV1/initiator-initialization/v1"u8);
-        Append(hash, snapshot.NetworkId);
-        Append(hash, scope.AccountId);
-        Append(hash, U64(scope.AccountGeneration));
-        Append(hash, scope.LocalDeviceId);
-        Append(hash, U64(scope.DeviceGeneration));
-        Append(hash, U64(checked((ulong)snapshot.ContactStoreGeneration)));
-        Append(hash, snapshot.RelationshipId);
-        Append(hash, snapshot.ConversationId);
-        Append(hash, snapshot.ContactEvidenceHash);
-        Append(hash, snapshot.PeerPackageHash);
-        Append(hash, snapshot.RemoteAccountId);
-        Append(hash, U64(snapshot.RemoteAccountGeneration));
-        Append(hash, U64(snapshot.RemoteDirectoryGeneration));
-        Append(hash, snapshot.RemoteDeviceId);
-        Append(hash, U64(snapshot.RemoteDeviceGeneration));
-        Append(hash, snapshot.ClaimOperationId);
-        Append(hash, snapshot.SessionId);
-        Append(hash, snapshot.FullDph2ReplayHash);
-        Append(hash, snapshot.ClaimBinding);
-        Append(hash, snapshot.ExactDph2);
-        Append(hash, U64(facts.Generation));
-        Append(hash, facts.StateCommitment);
-        Append(hash, facts.ExactHash);
-        return hash.GetHashAndReset();
-    }
-
-    private static byte[] ComputeInitiatorInitializationFingerprint(
-        InitiatorInitialSessionRow row,
-        MessagingCryptoV1Trs1Facts facts)
-    {
-        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        Append(hash, "Deep/Client/MessagingCryptoV1/initiator-initialization/v1"u8);
-        Append(hash, row.NetworkId);
-        Append(hash, row.LocalAccountId);
-        Append(hash, U64(row.LocalAccountGeneration));
-        Append(hash, row.LocalDeviceId);
-        Append(hash, U64(row.LocalDeviceGeneration));
-        Append(hash, U64(checked((ulong)row.ContactStoreGeneration)));
-        Append(hash, row.RelationshipId);
-        Append(hash, row.ConversationId);
-        Append(hash, row.ContactEvidenceHash);
-        Append(hash, row.PeerPackageHash);
-        Append(hash, row.RemoteAccountId);
-        Append(hash, U64(row.RemoteAccountGeneration));
-        Append(hash, U64(row.RemoteDirectoryGeneration));
-        Append(hash, row.RemoteDeviceId);
-        Append(hash, U64(row.RemoteDeviceGeneration));
-        Append(hash, row.ClaimOperationId);
-        Append(hash, row.SessionId);
-        Append(hash, row.FullDph2ReplayHash);
-        Append(hash, row.ClaimBinding);
-        Append(hash, row.ExactDph2);
-        Append(hash, U64(facts.Generation));
-        Append(hash, facts.StateCommitment);
-        Append(hash, facts.ExactHash);
-        return hash.GetHashAndReset();
-    }
-
-    private static bool InitiatorInitialSessionMatches(
-        InitiatorInitialSessionRow incumbent,
-        InitiatorInitialSessionProtocolSnapshot candidate,
-        ReadOnlySpan<byte> fingerprint,
-        MessagingCryptoV1Trs1Facts facts) =>
-        MessagingCryptoV1Trs1.Fixed(incumbent.Fingerprint, fingerprint) &&
-        MessagingCryptoV1Trs1.Fixed(incumbent.ClaimOperationId, candidate.ClaimOperationId) &&
-        MessagingCryptoV1Trs1.Fixed(incumbent.SessionId, candidate.SessionId) &&
-        MessagingCryptoV1Trs1.Fixed(incumbent.FullDph2ReplayHash, candidate.FullDph2ReplayHash) &&
-        MessagingCryptoV1Trs1.Fixed(incumbent.ClaimBinding, candidate.ClaimBinding) &&
-        MessagingCryptoV1Trs1.Fixed(incumbent.ExactDph2, candidate.ExactDph2) &&
-        incumbent.InitialGeneration == facts.Generation &&
-        MessagingCryptoV1Trs1.Fixed(incumbent.InitialCommitment, facts.StateCommitment) &&
-        MessagingCryptoV1Trs1.Fixed(incumbent.InitialStateHash, facts.ExactHash);
-
-    private static bool InitiatorScopeMatches(
-        InitiatorInitialSessionRow row,
-        InitiatorInitialSessionVerifiedScope scope) =>
-        MessagingCryptoV1Trs1.Fixed(row.NetworkId, scope.NetworkId) &&
-        MessagingCryptoV1Trs1.Fixed(row.LocalAccountId, scope.LocalAccountId) &&
-        row.ContactStoreGeneration == scope.ContactStoreGeneration &&
-        MessagingCryptoV1Trs1.Fixed(row.RelationshipId, scope.RelationshipId) &&
-        MessagingCryptoV1Trs1.Fixed(row.ConversationId, scope.ConversationId) &&
-        MessagingCryptoV1Trs1.Fixed(row.ContactEvidenceHash, scope.ContactEvidenceHash) &&
-        MessagingCryptoV1Trs1.Fixed(row.PeerPackageHash, scope.PeerPackageHash) &&
-        MessagingCryptoV1Trs1.Fixed(row.RemoteAccountId, scope.RemoteAccountId) &&
-        row.RemoteAccountGeneration == scope.RemoteAccountGeneration &&
-        row.RemoteDirectoryGeneration == scope.RemoteDirectoryGeneration &&
-        MessagingCryptoV1Trs1.Fixed(row.RemoteDeviceId, scope.RemoteDeviceId) &&
-        row.RemoteDeviceGeneration == scope.RemoteDeviceGeneration;
-
     private static bool InitialSessionMatches(
         InitialSessionRow incumbent,
         MessagingCryptoV1InitialSessionHandoff.InitializationPayload payload,
@@ -2322,127 +2009,6 @@ internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
         Add(command, "$kind", kind); Add(command, "$id", preKeyId.ToArray());
         if (command.ExecuteNonQuery() != 1)
             throw new CryptographicException("A mandatory one-time pre-key was not consumed exactly once.");
-    }
-
-    private void InsertInitiatorInitialSession(
-        SqliteConnection db,
-        SqliteTransaction transaction,
-        InitiatorInitialSessionProtocolSnapshot snapshot,
-        MessagingCryptoV1Trs1Facts facts,
-        ReadOnlySpan<byte> fingerprint)
-    {
-        using var command = db.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = """
-            INSERT INTO initiator_initial_session_outbox VALUES(
-                1,$operation,$fingerprint,$session,$replay,$claim,$dph2,$network,
-                $localAccount,$localAccountGeneration,$localDevice,$localDeviceGeneration,
-                $contactStoreGeneration,$relationship,$conversation,$contactEvidence,$peerPackage,
-                $remoteAccount,$remoteAccountGeneration,$remoteDirectoryGeneration,
-                $remoteDevice,$remoteDeviceGeneration,$initialGeneration,$initialCommitment,$initialHash);
-            """;
-        Add(command, "$operation", snapshot.ClaimOperationId);
-        Add(command, "$fingerprint", fingerprint.ToArray());
-        Add(command, "$session", snapshot.SessionId);
-        Add(command, "$replay", snapshot.FullDph2ReplayHash);
-        Add(command, "$claim", snapshot.ClaimBinding);
-        Add(command, "$dph2", snapshot.ExactDph2);
-        Add(command, "$network", snapshot.NetworkId);
-        Add(command, "$localAccount", scope.AccountId.ToArray());
-        Add(command, "$localAccountGeneration", U64(scope.AccountGeneration));
-        Add(command, "$localDevice", scope.LocalDeviceId.ToArray());
-        Add(command, "$localDeviceGeneration", U64(scope.DeviceGeneration));
-        Add(command, "$contactStoreGeneration", snapshot.ContactStoreGeneration);
-        Add(command, "$relationship", snapshot.RelationshipId);
-        Add(command, "$conversation", snapshot.ConversationId);
-        Add(command, "$contactEvidence", snapshot.ContactEvidenceHash);
-        Add(command, "$peerPackage", snapshot.PeerPackageHash);
-        Add(command, "$remoteAccount", snapshot.RemoteAccountId);
-        Add(command, "$remoteAccountGeneration", U64(snapshot.RemoteAccountGeneration));
-        Add(command, "$remoteDirectoryGeneration", U64(snapshot.RemoteDirectoryGeneration));
-        Add(command, "$remoteDevice", snapshot.RemoteDeviceId);
-        Add(command, "$remoteDeviceGeneration", U64(snapshot.RemoteDeviceGeneration));
-        Add(command, "$initialGeneration", U64(facts.Generation));
-        Add(command, "$initialCommitment", facts.StateCommitment);
-        Add(command, "$initialHash", facts.ExactHash);
-        if (command.ExecuteNonQuery() != 1)
-            throw new InvalidOperationException("Initiator initial-session outbox insert failed.");
-    }
-
-    private static InitiatorInitialSessionRow? ReadInitiatorInitialSession(
-        SqliteConnection db,
-        SqliteTransaction? transaction)
-    {
-        using var command = db.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = """
-            SELECT claim_operation_id,initialization_fingerprint,session_id,
-                   full_dph2_replay_hash,claim_binding,exact_dph2,network_id,
-                   local_account_id,local_account_generation,local_device_id,
-                   local_device_generation,contact_store_generation,
-                   contact_relationship_id,contact_conversation_id,contact_evidence_hash,
-                   peer_package_hash,remote_account_id,remote_account_generation,
-                   remote_directory_generation,remote_device_id,remote_device_generation,
-                   initial_generation,initial_commitment,initial_state_hash
-              FROM initiator_initial_session_outbox WHERE singleton=1;
-            """;
-        using var reader = command.ExecuteReader();
-        if (!reader.Read()) return null;
-        var result = new InitiatorInitialSessionRow(
-            (byte[])reader[0], (byte[])reader[1], (byte[])reader[2], (byte[])reader[3],
-            (byte[])reader[4], (byte[])reader[5], (byte[])reader[6], (byte[])reader[7],
-            ReadU64((byte[])reader[8]), (byte[])reader[9], ReadU64((byte[])reader[10]),
-            reader.GetInt32(11), (byte[])reader[12], (byte[])reader[13], (byte[])reader[14],
-            (byte[])reader[15], (byte[])reader[16], ReadU64((byte[])reader[17]),
-            ReadU64((byte[])reader[18]), (byte[])reader[19], ReadU64((byte[])reader[20]),
-            ReadU64((byte[])reader[21]), (byte[])reader[22], (byte[])reader[23]);
-        if (reader.Read())
-        {
-            result.Dispose();
-            throw new FormatException("Duplicate initiator initial-session rows exist.");
-        }
-        return result;
-    }
-
-    private static MessagingCryptoV1CommitResult LatchInitiatorInitialFork(
-        SqliteConnection db,
-        SqliteTransaction transaction,
-        CurrentRow current,
-        InitiatorInitialSessionRow incumbent,
-        InitiatorInitialSessionProtocolSnapshot conflicting,
-        ReadOnlySpan<byte> conflictingFingerprint)
-    {
-        using (var command = db.CreateCommand())
-        {
-            command.Transaction = transaction;
-            command.CommandText = "INSERT INTO initiator_initial_session_fork_latch VALUES(1,$incumbentFingerprint,$conflictingFingerprint,$incumbentOperation,$conflictingOperation,$incumbentSession,$conflictingSession,$incumbentDph2,$conflictingDph2);";
-            Add(command, "$incumbentFingerprint", incumbent.Fingerprint);
-            Add(command, "$conflictingFingerprint", conflictingFingerprint.ToArray());
-            Add(command, "$incumbentOperation", incumbent.ClaimOperationId);
-            Add(command, "$conflictingOperation", conflicting.ClaimOperationId);
-            Add(command, "$incumbentSession", incumbent.SessionId);
-            Add(command, "$conflictingSession", conflicting.SessionId);
-            Add(command, "$incumbentDph2", incumbent.FullDph2ReplayHash);
-            Add(command, "$conflictingDph2", conflicting.FullDph2ReplayHash);
-            if (command.ExecuteNonQuery() != 1)
-                throw new InvalidOperationException("Initiator initial-session fork insert failed.");
-        }
-        using (var update = db.CreateCommand())
-        {
-            update.Transaction = transaction;
-            update.CommandText = "UPDATE ratchet_state SET fork_latched=1 WHERE singleton=1 AND fork_latched=0;";
-            if (update.ExecuteNonQuery() != 1)
-                throw new InvalidOperationException("Initiator initial-session fork latch CAS failed.");
-        }
-        transaction.Commit();
-        return new MessagingCryptoV1CommitResult(
-            MessagingCryptoV1CommitDisposition.ForkLatched,
-            current.Generation,
-            current.StateCommitment.ToArray(),
-            current.JournalGeneration,
-            current.JournalHead.ToArray(),
-            true,
-            current.TerminallyLatched);
     }
 
     private static void InsertInitialSession(
@@ -2786,64 +2352,6 @@ internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
         internal int InitialEventCount { get; } = initialEventCount;
         public void Dispose() => Zero(ClaimOperationId, Fingerprint, Xpc1FullReplayHash,
             Dph2FullReplayHash, X25519PreKeyId, MlKemPreKeyId, InitialCommitment, InitialStateHash);
-    }
-
-    private sealed class InitiatorInitialSessionRow(
-        byte[] claimOperationId,
-        byte[] fingerprint,
-        byte[] sessionId,
-        byte[] fullDph2ReplayHash,
-        byte[] claimBinding,
-        byte[] exactDph2,
-        byte[] networkId,
-        byte[] localAccountId,
-        ulong localAccountGeneration,
-        byte[] localDeviceId,
-        ulong localDeviceGeneration,
-        int contactStoreGeneration,
-        byte[] relationshipId,
-        byte[] conversationId,
-        byte[] contactEvidenceHash,
-        byte[] peerPackageHash,
-        byte[] remoteAccountId,
-        ulong remoteAccountGeneration,
-        ulong remoteDirectoryGeneration,
-        byte[] remoteDeviceId,
-        ulong remoteDeviceGeneration,
-        ulong initialGeneration,
-        byte[] initialCommitment,
-        byte[] initialStateHash) : IDisposable
-    {
-        internal byte[] ClaimOperationId { get; } = claimOperationId;
-        internal byte[] Fingerprint { get; } = fingerprint;
-        internal byte[] SessionId { get; } = sessionId;
-        internal byte[] FullDph2ReplayHash { get; } = fullDph2ReplayHash;
-        internal byte[] ClaimBinding { get; } = claimBinding;
-        internal byte[] ExactDph2 { get; } = exactDph2;
-        internal byte[] NetworkId { get; } = networkId;
-        internal byte[] LocalAccountId { get; } = localAccountId;
-        internal ulong LocalAccountGeneration { get; } = localAccountGeneration;
-        internal byte[] LocalDeviceId { get; } = localDeviceId;
-        internal ulong LocalDeviceGeneration { get; } = localDeviceGeneration;
-        internal int ContactStoreGeneration { get; } = contactStoreGeneration;
-        internal byte[] RelationshipId { get; } = relationshipId;
-        internal byte[] ConversationId { get; } = conversationId;
-        internal byte[] ContactEvidenceHash { get; } = contactEvidenceHash;
-        internal byte[] PeerPackageHash { get; } = peerPackageHash;
-        internal byte[] RemoteAccountId { get; } = remoteAccountId;
-        internal ulong RemoteAccountGeneration { get; } = remoteAccountGeneration;
-        internal ulong RemoteDirectoryGeneration { get; } = remoteDirectoryGeneration;
-        internal byte[] RemoteDeviceId { get; } = remoteDeviceId;
-        internal ulong RemoteDeviceGeneration { get; } = remoteDeviceGeneration;
-        internal ulong InitialGeneration { get; } = initialGeneration;
-        internal byte[] InitialCommitment { get; } = initialCommitment;
-        internal byte[] InitialStateHash { get; } = initialStateHash;
-
-        public void Dispose() => Zero(
-            ClaimOperationId, Fingerprint, SessionId, FullDph2ReplayHash,
-            ClaimBinding, ExactDph2, NetworkId, LocalAccountId, LocalDeviceId,
-            RelationshipId, ConversationId, ContactEvidenceHash, PeerPackageHash,
-            RemoteAccountId, RemoteDeviceId, InitialCommitment, InitialStateHash);
     }
 
     private sealed class JournalRow : IDisposable

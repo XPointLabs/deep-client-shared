@@ -31,7 +31,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         private int mailboxPolicyFault;
         private IReadOnlyList<ReadOnlyMemory<byte>> MailboxPolicies()
         {
-            var exact = operational.ExactPma2.ToArray();
+            var exact = (successor?.ExactPma2 ?? operational.ExactPma2).ToArray();
             if (mailboxPolicyFault == 1) exact[^1] ^= 1;
             if (mailboxPolicyFault == 2) exact[FieldOffset(exact, 5)] ^= 1;
             return mailboxPolicyFault == 3 ? [exact, exact.ToArray()] : [exact];

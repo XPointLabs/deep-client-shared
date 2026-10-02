@@ -1,5 +1,35 @@
 # Deep Client Shared architecture
 
+## Retired identity consumer cutover (2026-10-02)
+
+[DR-0069](../../docs/survival-program/decisions/DR-0069-did2-retired-identity-surface-removal.md)
+removes the former account, directory, resolver, direct-message and group owners
+from source rather than restoring V1 verifier types or hiding them behind a new
+compile exclusion. Current DID2 ownership and neutral routing/crypto contracts
+remain; a namespace containing `V1` is not itself a retired wire capability.
+The separate retired initiator outbox, recovery reader and fork table are gone.
+The retained ratchet SQLCipher store now requires schema generation **9**;
+generation 8 requires explicit reset, with no migration or dual reader.
+Account-owned DID2 initial-session custody is not replaced by a caller scope.
+The initial semantic inbox batch has only the account-owned DID2 minting path;
+the former raw caller-scope factory and DAB1-only Hello fixture are removed.
+Neutral ratchet atomicity/CAS/restart tests remain; initial business behavior is
+verified through the genuine owned Hello/Accept/mailbox recovery fixture.
+
+[DR-0070](../../docs/survival-program/decisions/DR-0070-did2-operational-genesis-proof-order.md)
+also applies to the connected native test fixture: it authors the signed network
+candidate, independently verifies a genuine DID2 directory proof, then completes
+the topology under the fixture's current monotonic clock. That fixture is not
+socket TLS, physical device, remote attachment or current group evidence.
+MAUI consumers, final package/API gates and deployment remain separate work.
+The current source checkpoint passes 53 focused ratchet/exact-DPE2/retired-surface
+and genuine native receiver recovery cases, without skipped tests. Local custody
+and two history regressions also passed 48 focused cases. The connected native
+mailbox recovery scenario passed individually in a diagnostic batch that was
+not green overall until its obsolete test paths were removed; it is not physical
+delivery evidence. Windows and DID2 UI-core compiler checks passed independently.
+The full required release gate is still deferred until the linked slice is complete.
+
 ## Durable ordinary command retry (2026-10-02)
 
 [DR-0067](../../docs/survival-program/decisions/DR-0067-did2-ordinary-store-completion-and-ui-retry.md)

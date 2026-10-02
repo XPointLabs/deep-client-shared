@@ -436,7 +436,7 @@ public sealed class ExactDpe2SqliteDurableTransactionAuthorityTests
                 Enumerable.Repeat((byte)0x91, 16).ToArray(),
                 Bytes(0x92), scope.ConversationId,
                 Bytes(0x93), Bytes(0x94),
-                1, 1, 0, Dmc2Flags.None, [],
+                3, 1, 0, Dmc2Flags.None, [],
                 ApplicationCoreCodec.CreateMessageCreatePayload("stage"))
                 .CanonicalBytes.ToArray()
             : Array.Empty<byte>();

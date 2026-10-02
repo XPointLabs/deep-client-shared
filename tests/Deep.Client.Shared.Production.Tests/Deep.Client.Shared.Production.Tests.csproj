@@ -25,8 +25,6 @@
              Link="PreKeyV1\OpaquePreKeyV1StoreSurfaceTests.cs" />
     <Compile Include="..\Deep.Client.Shared.Tests\Persistence\PreKeyV1\SqlitePreKeyV1SecretOwnerTests.cs"
              Link="PreKeyV1\SqlitePreKeyV1SecretOwnerTests.cs" />
-    <Compile Include="..\Deep.Client.Shared.Tests\Persistence\PreKeyV1\SqlitePreKeyV1InventoryOwnerTests.cs"
-             Link="PreKeyV1\SqlitePreKeyV1InventoryOwnerTests.cs" />
     <Compile Include="..\Deep.Client.Shared.Tests\Persistence\SqliteGlobalPoolIsolationCollection.cs"
              Link="Persistence\SqliteGlobalPoolIsolationCollection.cs" />
   </ItemGroup>
