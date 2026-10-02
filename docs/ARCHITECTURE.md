@@ -30,6 +30,16 @@ the protected route journal by this author; no threshold callback or publication
 is authorized. Shared pending/CAS/restart adoption and connected renewal remain
 the next implementation, not physical Android recovery evidence.
 
+[DR-0072](../../docs/survival-program/decisions/DR-0072-did2-route-renewal-lineage.md)
+now supplies the subsequent route-artifact phases. The real account fixture
+advances to expired route time, authenticates only a historical predecessor,
+authors/completes its current successor and verifies it through the ordinary
+route verifier, then advances the lineage again. Prior route currentness still
+rejects. Forged history, wrong/gapped lineage, wrong custody, cancellation and
+clock faults fail closed; mutable inputs/witness arrays are snapshotted before
+callbacks. These Protocol candidates still do not mutate the Shared journal or
+activate private production issuance/publication/device recovery.
+
 ## Retired identity consumer cutover (2026-10-02)
 
 [DR-0069](../../docs/survival-program/decisions/DR-0069-did2-retired-identity-surface-removal.md)
