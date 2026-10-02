@@ -629,6 +629,14 @@ untrusted receipt. `AdmitAndVerifyGenesisAsync` requires the independent
 ADH1/DTT1/ADP1 current-value proof to match the exact local DID2/DAB2/ADC1,
 then rechecks the local account after network I/O. An unavailable or mismatched
 proof leaves admission unconfirmed even if Registry returned HTTP 200.
+Public HTTPS client composition can explicitly set `HttpServiceClientOptions.UseSystemProxy`
+to honor the platform's configured proxy (including a system-proxy VPN).
+The default remains direct-only; an owned connect callback and this option
+cannot be combined. Platform origin validation, online revocation, exact H2,
+byte/deadline limits and signature verification remain unchanged. A rejected
+proxy tunnel does not transmit the binary request body, retry directly or
+downgrade HTTP. The independently selected/pinned ONION entry connector remains
+direct-only and is not affected by this public Registry option.
 The initial account-owned DID2 pre-key author uses its conservative local
 publication policy intersected with signed DCA1/device expiry, not the
 short-lived ADH1 witness expiry. This follows the separate witnessed-freshness

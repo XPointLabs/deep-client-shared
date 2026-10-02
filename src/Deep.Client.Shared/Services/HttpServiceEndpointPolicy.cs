@@ -286,7 +286,8 @@ public sealed record HttpServiceClientOptions(
     TimeSpan ConnectTimeout = default,
     TimeSpan PooledConnectionIdleTimeout = default,
     TimeSpan PooledConnectionLifetime = default,
-    string? UserAgent = null);
+    string? UserAgent = null,
+    bool UseSystemProxy = false);
 
 internal sealed record HttpServiceNetworkHooks(
     Func<SocketsHttpConnectionContext, CancellationToken, ValueTask<Stream>>? ConnectCallback = null,
@@ -788,6 +789,11 @@ public sealed class HttpServiceTransportFactory
         HttpServiceNetworkHooks? networkHooks)
     {
         options ??= new HttpServiceClientOptions();
+        // Explicitly selected carrier connections must not be silently routed
+        // through the platform proxy or reinterpret its tunnel destination.
+        if (options.UseSystemProxy && networkHooks?.ConnectCallback is not null)
+            throw new ArgumentException(
+                "System proxy routing cannot be combined with an owned connect callback.", nameof(options));
         var connectTimeout = options.ConnectTimeout == default
             ? TimeSpan.FromSeconds(10)
             : options.ConnectTimeout;
@@ -830,7 +836,10 @@ public sealed class HttpServiceTransportFactory
         handler.AutomaticDecompression = System.Net.DecompressionMethods.None;
         handler.AllowAutoRedirect = false;
         handler.UseCookies = false;
-        handler.UseProxy = false;
+        // Opt-in public service composition may honor the user's OS proxy.
+        // Proxy stays null (platform choice); TLS still authenticates the origin.
+        // A proxy failure never triggers a direct retry or HTTP downgrade.
+        handler.UseProxy = options.UseSystemProxy;
 
         return handler;
     }
