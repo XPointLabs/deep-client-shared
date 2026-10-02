@@ -47,9 +47,13 @@ adds the closed Protocol completion/object boundary for an exact signed winner
 after independent directory advancement. The real account fixture checks signed
 issuance-head authentication, intermediate-head recovery, successor completion,
 exact encrypted object restoration and fresh XPA authoring. Publisher minimum
-and current XPA witness head are verified separately. This does not insert new
-evidence into the protected journal: private response/custody and actual owned
-reopen remain pending, as do physical contacts/messages/assets/groups.
+and current XPA witness head are verified separately.
+[DR-0075](../../docs/survival-program/decisions/DR-0075-did2-issued-head-response-custody.md)
+connects the complete private response to verified protected custody and owned
+reopen. Lost response and post-adoption crash tests recover after real directory
+advancement, then author/publish on the actual issuance head with fresh authority.
+These in-process signature/SQLCipher checks do not establish matched deployment
+or physical contacts/messages/assets/groups. Expiry successors remain pending.
 
 ## Retired identity consumer cutover (2026-10-02)
 
@@ -300,8 +304,9 @@ capability-encrypted genesis object following
 Phase 4 is CAS-adopted and read back under the account lease before return.
 Lost response/reopen retains exact bundle, signature, nonce and ciphertext;
 changed profile or descriptor under the same intent rejects. The mandatory
-route journal now accepts version 5 only under
-[DR-0073](../../docs/survival-program/decisions/DR-0073-did2-exact-route-request-custody.md);
+route journal accepts only the current generation under
+[DR-0075](../../docs/survival-program/decisions/DR-0075-did2-issued-head-response-custody.md),
+retaining DR73's unchanged complete request and the authenticated issuance head;
 old disposable QA accounts require an
 explicit local reset, never migration or lazy repair. No node identity/network
 genesis reset is implied. SQL account/application shapes are unchanged.

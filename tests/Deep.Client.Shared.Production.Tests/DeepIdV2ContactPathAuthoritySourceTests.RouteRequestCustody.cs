@@ -70,41 +70,21 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             Assert.Equal(2UL, head.ProtectedHead.LogGeneration);
             try
             {
-                if (loseResponse)
-                {
-                    // DR42 still disallows completing old-head threshold
-                    // issuance. Do not waive it just because nonce replay is
-                    // now exact; connected retained issuance is a separate gate.
-                    var rejected = await Assert.ThrowsAsync<CryptographicException>(() =>
-                        EnsureRoute(intent, configuration, remote, reopen: true));
-                    Assert.Equal("The threshold route has stale or substituted current directory/network references.", rejected.Message);
-                }
-                else
-                {
-                    var completed = await EnsureRoute(intent, configuration, remote, reopen: true);
-                    await completed.EnsureCurrentAsync();
-                }
+                var completed = await EnsureRoute(intent, configuration, remote, reopen: true);
+                await completed.EnsureCurrentAsync();
                 Assert.True(remote.StableRequest); Assert.True(remote.StableProposal); Assert.True(remote.StableNonce);
                 Assert.Equal(loseResponse ? 2 : 1, remote.Calls);
                 Assert.All(remote.Requests, exact => Assert.Equal(pending, exact));
                 Assert.Equal(2UL, remote.CurrentHeadGenerations[^1]);
                 if (loseResponse) Assert.Equal(1UL, remote.CurrentHeadGenerations[0]);
                 using var after = await RouteState();
-                Assert.Equal(loseResponse ? (byte)1 : (byte)3, Assert.Single(after.Entries).Value.Phase);
+                Assert.Equal((byte)3, Assert.Single(after.Entries).Value.Phase);
                 Assert.Equal(pending, Assert.Single(after.Entries).Value.Record(12).ToArray());
+                Assert.Equal(remote.WinnerHead.ToArray(), Assert.Single(after.Entries).Value.Record(13).ToArray());
                 Assert.Equal(accountBefore, (await ReopenAccount().GetCurrentAsync())!.PermanentId.CanonicalText);
                 var calls = remote.Calls;
-                if (loseResponse)
-                {
-                    await Assert.ThrowsAsync<CryptographicException>(() => EnsureRoute(intent, configuration, remote, reopen: true));
-                    Assert.Equal(calls + 1, remote.Calls);
-                    Assert.True(remote.StableRequest);
-                }
-                else
-                {
-                    await EnsureRoute(intent, configuration, remote, reopen: true);
-                    Assert.Equal(calls, remote.Calls);
-                }
+                await EnsureRoute(intent, configuration, remote, reopen: true);
+                Assert.Equal(calls, remote.Calls);
             }
             finally { CryptographicOperations.ZeroMemory(pending); }
         }

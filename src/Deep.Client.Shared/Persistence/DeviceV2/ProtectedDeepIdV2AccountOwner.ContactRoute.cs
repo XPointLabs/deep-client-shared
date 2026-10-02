@@ -37,6 +37,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var checkpoint = fresh.Proof.CurrentCheckpoint!;
             var dca = DeepIdV2ContactAuthorizationCodec.Verify(DeepIdV2ContactAuthorizationCodec.Decode(entry.Record(0).Span), checkpoint.Binding, checkpoint.Directory);
             var authorization = DeepIdV2CurrentContactAuthorizationVerifier.Verify(fresh.Proof, dca, first.BootId.Span, first.SampleSeconds);
+            var issuance = await VerifyRetainedRouteIssuanceAsync(entry, authorization, fresh, source, ct).ConfigureAwait(false);
             var route = await DeepIdV2ContactRouteVerifier.VerifyAsync(authorization, fresh.Network, fresh.Authority,
                 entry.Record(5), entry.Record(6), source.RendezvousTrustedTime, ct).ConfigureAwait(false);
             var permanent = await new ProtectedDeepIdV2ResolverCapabilityStore(storage, networkId, current.AccountId.Span)
@@ -45,7 +46,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             if (entry.Phase == 3)
             {
                 var service = DeepIdV2PreKeyServiceCodec.Decode(staged.ExactXps1.Span);
-                var candidate = await DeepIdV2ContactObjectAuthor.AuthorGenesisAsync(route, current.Verified.DeviceSecrets,
+                var candidate = await DeepIdV2ContactObjectAuthor.AuthorRetainedGenesisAsync(route, issuance, current.Verified.DeviceSecrets,
                     [service], profileName, capability, ct).ConfigureAwait(false);
                 await RecheckRouteFreshnessAsync(current, source, fresh, held, first, ct).ConfigureAwait(false);
                 var nextEntry = entry.WithContactObject(candidate, networkId, current.AccountId.Span);
@@ -150,10 +151,15 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     authorization, fresh.Network, fresh.Authority, source.RendezvousTrustedTime, dispatch, budget.Token).AsTask()
                     .WaitAsync(budget.Token).ConfigureAwait(false) ?? throw new CryptographicException("The route threshold response is absent.");
                 await RecheckRouteFreshnessAsync(current, source, fresh, held, first, ct).ConfigureAwait(false);
-                await DeepIdV2ContactRouteVerifier.VerifyThresholdAsync(authorization, fresh.Network, fresh.Authority,
-                    entry.Record(1), response, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
+                // Bind response nonce/network before treating parsed records as
+                // candidates. Only the closed Protocol verifier authenticates.
+                _ = ContactRouteAuthorityWireCodec.EncodeResponse(pendingRequest, response);
+                var verified = await DeepIdV2ContactRouteVerifier.VerifyRetainedThresholdAsync(authorization,
+                    fresh.Network, fresh.Authority, pendingRequest,
+                    new(response.ExactPms2.Span, response.ExactXrc1.Span, response.ExactXss1.Span),
+                    response.ExactIssuanceAdh1, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
                 await RecheckRouteFreshnessAsync(current, source, fresh, held, first, ct).ConfigureAwait(false);
-                var candidate = entry.WithThreshold(response, networkId, current.AccountId.Span);
+                var candidate = entry.WithThreshold(verified, networkId, current.AccountId.Span);
                 state.Entries[name] = candidate; entry.Dispose(); entry = candidate;
                 var adopted = await SaveRouteJournalAsync(state, snapshot, current.AccountId, instance, ct).ConfigureAwait(false);
                 CryptographicOperations.ZeroMemory(snapshot); snapshot = adopted;
@@ -161,12 +167,12 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 Did2ContactRouteTestHooks.Hit(Did2ContactRouteFailpoint.AfterThreshold);
 #endif
             }
+            var issuance = await VerifyRetainedRouteIssuanceAsync(entry, authorization, fresh, source, ct).ConfigureAwait(false);
             if (entry.Phase == 2)
             {
                 await RecheckRouteFreshnessAsync(current, source, fresh, held, first, ct).ConfigureAwait(false);
-                var threshold = new ParsedDeepIdV2RouteThreshold(entry.Record(2).Span, entry.Record(3).Span, entry.Record(4).Span);
-                var completed = await DeepIdV2ContactRouteAuthor.CompleteGenesisAsync(authorization, fresh.Network, fresh.Authority,
-                    current.Verified.DeviceSecrets, entry.Record(1), threshold, configuration.MinimumReader,
+                var completed = await DeepIdV2ContactRouteAuthor.CompleteRetainedGenesisAsync(authorization, fresh.Network, fresh.Authority,
+                    current.Verified.DeviceSecrets, issuance, configuration.MinimumReader,
                     source.RendezvousTrustedTime, ct).ConfigureAwait(false);
                 await RecheckRouteFreshnessAsync(current, source, fresh, held, first, ct).ConfigureAwait(false);
                 var candidate = entry.WithCompletion(completed, networkId, current.AccountId.Span);
@@ -184,6 +190,18 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             return result;
         }
         finally { CryptographicOperations.ZeroMemory(instance); if (snapshot is not null) CryptographicOperations.ZeroMemory(snapshot); }
+    }
+
+    private static ValueTask<VerifiedDeepIdV2ContactRouteIssuance> VerifyRetainedRouteIssuanceAsync(
+        ProtectedDid2ContactRouteJournal.Entry entry, DeepIdV2CurrentContactAuthorization authorization,
+        DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh,
+        DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
+    {
+        var request = ContactRouteAuthorityWireCodec.DecodeRequest(entry.Record(12).Span);
+        Did2ContactRouteRequestCustody.RequireCurrent(request, authorization, fresh.Network);
+        return DeepIdV2ContactRouteVerifier.VerifyRetainedThresholdAsync(authorization, fresh.Network,
+            fresh.Authority, request, new(entry.Record(2).Span, entry.Record(3).Span, entry.Record(4).Span),
+            entry.Record(13), source.RendezvousTrustedTime, ct);
     }
 
     private static async Task<OnionMonotonicReading> RecheckRouteFreshnessAsync(VerifiedDeepIdV2CurrentAccount current,

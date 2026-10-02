@@ -25,7 +25,7 @@ internal sealed class Did2ContactRouteConfiguration
 // Return values are untrusted parsed bytes; Protocol independently verifies them.
 internal interface IDid2ContactRouteThresholdSource
 {
-    ValueTask<ParsedDeepIdV2RouteThreshold> FetchAsync(ContactRouteAuthorityWireRequest exactPendingRequest,
+    ValueTask<ContactRouteAuthorityWireResponse> FetchAsync(ContactRouteAuthorityWireRequest exactPendingRequest,
         DeepIdV2CurrentContactAuthorization authorization, VerifiedOnionNetworkContext network,
         VerifiedXPointNetworkAuthority authority,
         OnionTrustedTimeAuthority trustedTime, Did2OwnedContactTransportContext operation, CancellationToken cancellationToken);

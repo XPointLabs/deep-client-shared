@@ -12,7 +12,7 @@ namespace Deep.Client.Shared.Services.ContactV2;
 internal sealed class Did2ContactCoordinationOnionSource(DeepIdV2ContactPathAuthoritySource source) :
     IDid2ContactRouteThresholdSource, IDid2ContactPublicationSource
 {
-    public async ValueTask<ParsedDeepIdV2RouteThreshold> FetchAsync(
+    public async ValueTask<ContactRouteAuthorityWireResponse> FetchAsync(
         ContactRouteAuthorityWireRequest exactPendingRequest, DeepIdV2CurrentContactAuthorization authorization,
         VerifiedOnionNetworkContext network, VerifiedXPointNetworkAuthority authority,
         OnionTrustedTimeAuthority trustedTime,
@@ -28,8 +28,7 @@ internal sealed class Did2ContactCoordinationOnionSource(DeepIdV2ContactPathAuth
         // exact nonce-bound request with the fresh proof's newer directory floor.
         var body = await SendAsync(ContactCoordinationTarget.Route,
             ContactRouteAuthorityWireCodec.EncodeRequest(exactPendingRequest), operation, cancellationToken).ConfigureAwait(false);
-        var parsed = ContactRouteAuthorityWireCodec.DecodeResponse(exactPendingRequest, body.Span);
-        return new(parsed.ExactPms2.Span, parsed.ExactXrc1.Span, parsed.ExactXss1.Span);
+        return ContactRouteAuthorityWireCodec.DecodeResponse(exactPendingRequest, body.Span);
     }
 
     public ValueTask<ReadOnlyMemory<byte>> FetchAsync(

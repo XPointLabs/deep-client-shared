@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Security.Cryptography;
+using Deep.Protocol.AccountDirectoryV1;
 using Deep.Client.Shared.Services.ContactV2;
 using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.ContactV1;
@@ -12,12 +13,12 @@ internal static class ProtectedDid2ContactRouteJournal
 {
     internal const string Slot = "deep.store.v2.contact-route-journal";
     internal const int HeaderBytes = 92, PrefixBytes = 170, MaximumIntents = 128;
-    internal const byte Version = 5;
-    internal const int MaximumEntryBytes = 433_109;
+    internal const byte Version = 6;
+    internal const int MaximumEntryBytes = 437_209;
     // Matches the journaled production secure-store per-slot limit. Pending
     // routes reserve enough space for phase 7 before a threshold callback.
     internal const int MaximumBytes = DeepSecureStorageRegistration.MaximumValueBytes;
-    private static readonly int[] Limits = [473, 550, 3476, 4012, 3523, 611, 23295, 65535, 65575, 155210, 93092, 16384, ContactRouteAuthorityWireCodec.RequestBytes];
+    private static readonly int[] Limits = [473, 550, 3476, 4012, 3523, 611, 23295, 65535, 65575, 155210, 93092, 16384, ContactRouteAuthorityWireCodec.RequestBytes, ContactRouteAuthorityWireCodec.MaximumIssuanceAdh1Bytes];
 
     internal sealed class State : IDisposable
     {
@@ -54,27 +55,31 @@ internal static class ProtectedDid2ContactRouteJournal
                 BinaryPrimitives.WriteUInt16BigEndian(prefix.AsSpan(40), configuration.MinimumReader);
                 configuration.AntiSpamHash.Span.CopyTo(prefix.AsSpan(42)); scalar.CopyTo(prefix.AsSpan(74));
                 keyId.CopyTo(prefix.AsSpan(106)); nonce.CopyTo(prefix.AsSpan(138));
-                return Build(prefix, [exactDca, xra.CanonicalBytes, default, default, default, default, default, default, default, default, default, default, encoded], network, account);
+                return Build(prefix, [exactDca, xra.CanonicalBytes, default, default, default, default, default, default, default, default, default, default, encoded, default], network, account);
             }
             finally { CryptographicOperations.ZeroMemory(prefix); CryptographicOperations.ZeroMemory(encoded); }
         }
-        internal Entry WithThreshold(ParsedDeepIdV2RouteThreshold threshold, ReadOnlySpan<byte> network, ReadOnlySpan<byte> account)
+        internal Entry WithThreshold(VerifiedDeepIdV2ContactRouteIssuance issuance, ReadOnlySpan<byte> network, ReadOnlySpan<byte> account)
         {
             if (Phase != 1) throw new InvalidOperationException("A threshold can only adopt its retained proposal.");
+            var exactRequest = ContactRouteAuthorityWireCodec.EncodeRequest(issuance.Request);
+            if (!Fixed(exactRequest, Record(12).Span))
+                throw new CryptographicException("Verified issuance differs from the exact protected request.");
+            var threshold = issuance.Threshold;
             return Next(2, [Record(0), Record(1), threshold.Selection.CanonicalBytes,
-                threshold.LiveRoute.CanonicalBytes, threshold.Successor.CanonicalBytes, default, default, default, default, default, default, default, Record(12)], network, account);
+                threshold.LiveRoute.CanonicalBytes, threshold.Successor.CanonicalBytes, default, default, default, default, default, default, default, Record(12), issuance.ExactIssuanceAdh1], network, account);
         }
         internal Entry WithCompletion(VerifiedDeepIdV2ContactRouteClosure route, ReadOnlySpan<byte> network, ReadOnlySpan<byte> account)
         {
             if (Phase != 2) throw new InvalidOperationException("Completion requires retained threshold custody.");
             return Next(3, [Record(0), Record(1), Record(2), Record(3), Record(4),
-                route.ExactXir1V2, route.ExactRouteClosure, default, default, default, default, default, Record(12)], network, account);
+                route.ExactXir1V2, route.ExactRouteClosure, default, default, default, default, default, Record(12), Record(13)], network, account);
         }
         internal Entry WithContactObject(AuthoredDeepIdV2ContactObject candidate, ReadOnlySpan<byte> network, ReadOnlySpan<byte> account)
         {
             if (Phase != 3) throw new InvalidOperationException("Contact object adoption requires completed route custody.");
             return Next(4, [Record(0), Record(1), Record(2), Record(3), Record(4), Record(5), Record(6),
-                candidate.Closure.CanonicalBytes, candidate.ProtectedDcr1, default, default, default, Record(12)], network, account);
+                candidate.Closure.CanonicalBytes, candidate.ProtectedDcr1, default, default, default, Record(12), Record(13)], network, account);
         }
 
         internal Entry WithPublicationRequest(ContactPublicationAuthorityWireRequest request, ReadOnlySpan<byte> network, ReadOnlySpan<byte> account)
@@ -84,7 +89,7 @@ internal static class ProtectedDid2ContactRouteJournal
             try
             {
                 return Next(5, [Record(0), Record(1), Record(2), Record(3), Record(4), Record(5), Record(6),
-                    Record(7), Record(8), encoded, default, default, Record(12)], network, account);
+                    Record(7), Record(8), encoded, default, default, Record(12), Record(13)], network, account);
             }
             finally { CryptographicOperations.ZeroMemory(encoded); }
         }
@@ -92,14 +97,14 @@ internal static class ProtectedDid2ContactRouteJournal
         {
             if (Phase != 5) throw new InvalidOperationException("Publication response requires exact pending request custody.");
             return Next(6, [Record(0), Record(1), Record(2), Record(3), Record(4), Record(5), Record(6),
-                Record(7), Record(8), Record(9), exactResponse, default, Record(12)], network, account);
+                Record(7), Record(8), Record(9), exactResponse, default, Record(12), Record(13)], network, account);
         }
 
         internal Entry WithPublicationCommit(VerifiedDeepIdV2PublicationCommit result, ReadOnlySpan<byte> network, ReadOnlySpan<byte> account)
         {
             if (Phase != 6) throw new InvalidOperationException("Publication commit requires exact threshold response custody.");
             return Next(7, [Record(0), Record(1), Record(2), Record(3), Record(4), Record(5), Record(6),
-                Record(7), Record(8), Record(9), Record(10), result.ExactXpo1, Record(12)], network, account);
+                Record(7), Record(8), Record(9), Record(10), result.ExactXpo1, Record(12), Record(13)], network, account);
         }
 
         private Entry Next(byte phase, ReadOnlyMemory<byte>[] values, ReadOnlySpan<byte> network, ReadOnlySpan<byte> account)
@@ -132,7 +137,7 @@ internal static class ProtectedDid2ContactRouteJournal
         }
         internal static Entry Decode(ReadOnlySpan<byte> bytes, ReadOnlySpan<byte> network, ReadOnlySpan<byte> account)
         {
-            if (bytes.Length is < PrefixBytes + 52 + 473 + 550 + ContactRouteAuthorityWireCodec.RequestBytes or > MaximumEntryBytes || bytes[32] is < 1 or > 7 ||
+            if (bytes.Length is < PrefixBytes + 56 + 473 + 550 + ContactRouteAuthorityWireCodec.RequestBytes or > MaximumEntryBytes || bytes[32] is < 1 or > 7 ||
                 bytes.Slice(33, 3).IndexOfAnyExcept((byte)0) >= 0 ||
                 BinaryPrimitives.ReadUInt32BigEndian(bytes[36..]) is < 1 or > 65_535 ||
                 BinaryPrimitives.ReadUInt16BigEndian(bytes[40..]) is < 1 or > 256)
@@ -144,7 +149,7 @@ internal static class ProtectedDid2ContactRouteJournal
                 if (bytes.Length - offset < 4) throw new InvalidDataException("Protected route framing is truncated.");
                 var size = BinaryPrimitives.ReadUInt32BigEndian(bytes[offset..]); offset += 4;
                 if (size > Limits[index] || size > bytes.Length - offset ||
-                    (index == 12 || index < 2 || phase >= 2 && index < 5 || phase >= 3 && index < 7 || phase >= 4 && index < 9 || phase >= 5 && index < 10 || phase >= 6 && index < 11 || phase == 7) != (size != 0))
+                    (index == 12 || index == 13 && phase >= 2 || index < 2 || phase >= 2 && index < 5 || phase >= 3 && index < 7 || phase >= 4 && index < 9 || phase >= 5 && index < 10 || phase >= 6 && index < 11 || phase == 7) != (size != 0))
                     throw new InvalidDataException("Protected route phase/record size differs.");
                 slices[index] = (offset, checked((int)size)); offset += checked((int)size);
             }
@@ -165,6 +170,9 @@ internal static class ProtectedDid2ContactRouteJournal
                 throw new CryptographicException("Protected route request differs from its exact owned proposal.");
             if (phase >= 2)
             {
+                var issuanceHead = AccountDirectoryAdh1Codec.Decode(Slice(bytes, slices[13]));
+                if (!Fixed(issuanceHead.NetworkId.Span, network))
+                    throw new CryptographicException("Protected issuance head belongs to another network.");
                 var threshold = new ParsedDeepIdV2RouteThreshold(Slice(bytes, slices[2]), Slice(bytes, slices[3]), Slice(bytes, slices[4]));
                 if (!Fixed(threshold.Selection.Field(1).Span, network) || !Fixed(threshold.LiveRoute.Field(1).Span, network) ||
                     !Fixed(threshold.Successor.Field(1).Span, network) ||

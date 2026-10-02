@@ -30,7 +30,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     [Fact]
     public void Did2OwnedRoute_ByteBudgetMatchesProtectedStoreAndRejectsOversizeBeforeEntries()
     {
-        Assert.Equal(433_109, ProtectedDid2ContactRouteJournal.MaximumEntryBytes);
+        Assert.Equal(437_209, ProtectedDid2ContactRouteJournal.MaximumEntryBytes);
         Assert.Equal(DeepSecureStorageRegistration.MaximumValueBytes, ProtectedDid2ContactRouteJournal.MaximumBytes);
         var reservation = 4 + ProtectedDid2ContactRouteJournal.MaximumEntryBytes;
         Assert.True(ProtectedDid2ContactRouteJournal.HeaderBytes + 2 * reservation <= ProtectedDid2ContactRouteJournal.MaximumBytes);
@@ -56,6 +56,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     [InlineData(5)]
     [InlineData(6)]
     [InlineData(7)]
+    [InlineData(8)]
     public void Did2OwnedRoute_EmptyJournalRejectsHostileHeaderBeforeEntries(int mode)
     {
         var network = Bytes(16, 0x11); var account = Bytes(32, 0x12); var instance = Bytes(32, 0x13);
@@ -68,6 +69,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         if (mode == 5) bytes = bytes.Append((byte)0).ToArray();
         if (mode == 6) bytes[0] = 3;
         if (mode == 7) bytes[0] = 4;
+        if (mode == 8) bytes[0] = 5;
         Assert.Throws<InvalidDataException>(() => ProtectedDid2ContactRouteJournal.Decode(bytes, network, account, instance));
     }
 
@@ -187,8 +189,11 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         internal List<byte[]> Requests { get; } = [];
         internal List<ulong> CurrentHeadGenerations { get; } = [];
         private byte[]? proposal, nonce, pendingRequest;
-        private ParsedDeepIdV2RouteThreshold? winner;
-        public async ValueTask<ParsedDeepIdV2RouteThreshold> FetchAsync(ContactRouteAuthorityWireRequest exactPendingRequest,
+        private ContactRouteAuthorityWireResponse? winner;
+        internal ReadOnlyMemory<byte> WinnerHead => winner?.ExactIssuanceAdh1 ?? ReadOnlyMemory<byte>.Empty;
+        internal bool CorruptIssuanceHead { get; set; }
+        internal bool WrongResponseNonce { get; set; }
+        public async ValueTask<ContactRouteAuthorityWireResponse> FetchAsync(ContactRouteAuthorityWireRequest exactPendingRequest,
             DeepIdV2CurrentContactAuthorization authorization, VerifiedOnionNetworkContext network,
             VerifiedXPointNetworkAuthority authority,
             OnionTrustedTimeAuthority trustedTime, Did2OwnedContactTransportContext operation, CancellationToken ct)
@@ -227,14 +232,22 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             StableNonce &= nonce is null || CryptographicOperations.FixedTimeEquals(nonce, durableNonce32.Span);
             proposal ??= exactXra1.ToArray(); nonce ??= durableNonce32.ToArray();
             var xra = ContactCodec.Decode("XRA1", exactXra1.Span);
-            winner ??= await DeepIdV2ContactRouteAuthor.AuthorThresholdAsync(authorization, network, authority, exactXra1,
-                fixture.CreateRouteWitnesses(), BinaryPrimitives.ReadUInt64BigEndian(xra.Field(12).Span),
-                BinaryPrimitives.ReadUInt64BigEndian(xra.Field(13).Span), trustedTime, ct);
+            if (winner is null)
+            {
+                var threshold = await DeepIdV2ContactRouteAuthor.AuthorThresholdAsync(authorization, network, authority, exactXra1,
+                    fixture.CreateRouteWitnesses(), authorization.TrustedLowerUnixSeconds,
+                    BinaryPrimitives.ReadUInt64BigEndian(xra.Field(13).Span), trustedTime, ct);
+                winner = new(exactPendingRequest.NetworkId.Span, durableNonce32.Span, threshold.Selection.CanonicalBytes.Span,
+                    threshold.LiveRoute.CanonicalBytes.Span, threshold.Successor.CanonicalBytes.Span,
+                    authorization.Freshness.ExactAdh1.Span);
+            }
             if (LoseNextResponse)
             { LoseNextResponse = false; throw new IOException("Injected threshold response loss after retaining exact signed winner."); }
-            if (!CorruptResponse) return winner;
-            var broken = winner.LiveRoute.CanonicalBytes.ToArray(); broken[^1] ^= 1;
-            return new(winner.Selection.CanonicalBytes.Span, broken, winner.Successor.CanonicalBytes.Span);
+            if (!CorruptResponse && !CorruptIssuanceHead && !WrongResponseNonce) return winner;
+            var broken = winner.ExactXrc1.ToArray(); if (CorruptResponse) broken[^1] ^= 1;
+            var head = winner.ExactIssuanceAdh1.ToArray(); if (CorruptIssuanceHead) head[^1] ^= 1;
+            var returnedNonce = winner.RequestNonce.ToArray(); if (WrongResponseNonce) returnedNonce[0] ^= 1;
+            return new(winner.NetworkId.Span, returnedNonce, winner.ExactPms2.Span, broken, winner.ExactXss1.Span, head);
         }
         public void Dispose()
         {
