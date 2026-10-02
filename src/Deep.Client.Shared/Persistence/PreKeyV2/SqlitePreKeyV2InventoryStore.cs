@@ -10,14 +10,15 @@ namespace Deep.Client.Shared.Persistence.PreKeyV2;
 
 /// <summary>
 /// First-generation DID2-only SQLCipher custody for a locally authored V2
-/// inventory. It deliberately has no network publish or secret-release API.
+/// inventory. It has no network publish or raw secret-release API. The account
+/// owner may restore an opaque read-only preview copy after protected-tip checks.
 /// The account owner must add a protected rollback floor before exposing any
 /// staged XPP1 to transport.
 /// </summary>
-internal sealed class SqlitePreKeyV2InventoryStore : IAsyncDisposable
+internal sealed partial class SqlitePreKeyV2InventoryStore : IAsyncDisposable
 {
     private const int ApplicationId = 0x504B5632; // PKV2
-    private const int SchemaVersion = 2;
+    private const int SchemaVersion = 4;
     private const string CreateOwner = "CREATE TABLE owner(singleton INTEGER PRIMARY KEY CHECK(singleton=1),network_id BLOB NOT NULL CHECK(length(network_id)=16),account_id BLOB NOT NULL CHECK(length(account_id)=32),account_generation INTEGER NOT NULL CHECK(account_generation>0),device_id BLOB NOT NULL CHECK(length(device_id)=32),device_generation INTEGER NOT NULL CHECK(device_generation>0),dpd1_reference BLOB NOT NULL CHECK(length(dpd1_reference)=38),device_signing_key BLOB NOT NULL CHECK(length(device_signing_key)=32))";
     private const string CreateInventory = "CREATE TABLE inventory(singleton INTEGER PRIMARY KEY CHECK(singleton=1),epoch INTEGER NOT NULL CHECK(epoch BETWEEN 1 AND 14),exact_xps1 BLOB NOT NULL CHECK(length(exact_xps1)=352),exact_xpi1 BLOB NOT NULL CHECK(length(exact_xpi1)=560),exact_xpp1 BLOB NOT NULL CHECK(length(exact_xpp1) BETWEEN 67983 AND 8362607))";
     private const string CreateSecrets = "CREATE TABLE secrets(member_index INTEGER PRIMARY KEY CHECK(member_index BETWEEN 0 AND 4096),exact_dpk2_hash BLOB NOT NULL UNIQUE CHECK(length(exact_dpk2_hash)=32),exact_dpk2 BLOB NOT NULL CHECK(length(exact_dpk2) IN(1973,2037)),sealed_secret BLOB NOT NULL CHECK(length(sealed_secret) BETWEEN 386 AND 4481))";
@@ -274,7 +275,7 @@ internal sealed class SqlitePreKeyV2InventoryStore : IAsyncDisposable
         using var transaction = connection.BeginTransaction(deferred: false);
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
-        command.CommandText = $"PRAGMA application_id={ApplicationId}; PRAGMA user_version={SchemaVersion}; {CreateOwner}; {CreateInventory}; {CreateSecrets};";
+        command.CommandText = $"PRAGMA application_id={ApplicationId}; PRAGMA user_version={SchemaVersion}; {CreateOwner}; {CreateInventory}; {CreateSecrets}; {CreateReceiverSessions}; {CreateReceiverState};";
         command.ExecuteNonQuery();
         command.CommandText = "INSERT INTO owner VALUES(1,$network,$account,$accountGeneration,$device,$deviceGeneration,$dpd1,$signer);";
         Add(command, "$network", network);
@@ -305,7 +306,7 @@ internal sealed class SqlitePreKeyV2InventoryStore : IAsyncDisposable
             schema.CommandText = "SELECT name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY name;";
             using var reader = schema.ExecuteReader();
             var expected = new[] { ("inventory", CreateInventory),
-                ("owner", CreateOwner), ("secrets", CreateSecrets) };
+                ("owner", CreateOwner), ("receiver_initial_state", CreateReceiverState), ("receiver_sessions", CreateReceiverSessions), ("secrets", CreateSecrets) };
             foreach (var item in expected)
                 if (!reader.Read() || reader.GetString(0) != item.Item1 ||
                     reader.GetString(1) != item.Item2)
@@ -332,8 +333,9 @@ internal sealed class SqlitePreKeyV2InventoryStore : IAsyncDisposable
         ValidateStagedRows();
     }
 
-    private void ValidateStagedRows()
+    private void ValidateStagedRows(bool restoreSecrets = false)
     {
+        using var receiverLedger = ReadReceiverLedger();
         long epoch = 0;
         byte[]? exactXpi1 = null;
         byte[]? exactXpp1 = null;
@@ -357,7 +359,7 @@ internal sealed class SqlitePreKeyV2InventoryStore : IAsyncDisposable
         {
             using var count = connection.CreateCommand();
             count.CommandText = "SELECT COUNT(*) FROM secrets;";
-            if (Convert.ToInt32(count.ExecuteScalar()) != 0)
+            if (Convert.ToInt32(count.ExecuteScalar()) != 0 || receiverLedger.Sequence != 0)
                 throw new InvalidDataException("DID2 pre-key secrets have no inventory.");
             return;
         }
@@ -372,6 +374,7 @@ internal sealed class SqlitePreKeyV2InventoryStore : IAsyncDisposable
                 publication.Manifest.Field(7).Span)))
             throw new CryptographicException("The durable DID2 inventory is invalid.");
         ValidateService(publication, exactXps1!);
+        RequireInventorySessionBinding(receiverLedger, publication);
         using var secrets = connection.CreateCommand();
         secrets.CommandText = "SELECT member_index,exact_dpk2_hash,exact_dpk2,sealed_secret FROM secrets ORDER BY member_index;";
         using var reader = secrets.ExecuteReader();
@@ -380,6 +383,9 @@ internal sealed class SqlitePreKeyV2InventoryStore : IAsyncDisposable
             var member = index < publication.OneTimeMembers.Count
                 ? publication.OneTimeMembers[index]
                 : publication.LastResortMember;
+            var uses = receiverLedger.Entries.Count(entry => Fixed(entry.Commit.Record.ExactDpk2Hash.Span, member.ExactHash.Span));
+            if (IsReceiverPreKeyExhausted(member.Kind, member.ReuseLimit, uses))
+                continue; // The matching authenticated ledger explains this exact deletion.
             if (!reader.Read() || reader.GetInt32(0) != index ||
                 !reader.GetFieldValue<byte[]>(1).AsSpan()
                     .SequenceEqual(member.ExactHash.Span) ||
@@ -393,10 +399,13 @@ internal sealed class SqlitePreKeyV2InventoryStore : IAsyncDisposable
                     "The durable DID2 pre-key member is invalid.");
             var blob = Dpk2PreKeyPersistenceBlob.Decode(
                 reader.GetFieldValue<byte[]>(3));
-            using var restored = protector.Restore(blob,
-                member.CanonicalBytes, new Dpk2PreKeyPersistenceScope(
-                    network, account, accountGeneration, device,
-                    deviceGeneration, dpd1));
+            if (restoreSecrets)
+            {
+                using var restored = protector.Restore(blob,
+                    member.CanonicalBytes, new Dpk2PreKeyPersistenceScope(
+                        network, account, accountGeneration, device,
+                        deviceGeneration, dpd1));
+            }
         }
         if (reader.Read())
             throw new InvalidDataException("The DID2 pre-key inventory has extra secrets.");
@@ -438,7 +447,7 @@ internal sealed class SqlitePreKeyV2InventoryStore : IAsyncDisposable
             using var configure = connection.CreateCommand();
             configure.CommandText = create
                 ? "PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON; PRAGMA journal_mode=DELETE;"
-                : "PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;";
+                : "PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;";
             configure.ExecuteNonQuery();
             return connection;
         }

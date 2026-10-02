@@ -2,12 +2,20 @@ using System.Buffers.Binary;
 using System.Security.Cryptography;
 using Deep.Client.Shared.Services.ContactV2;
 using Deep.Protocol.ContactV2;
+using Deep.Protocol.DeepExtension.PrivacyRouting;
+using Deep.Protocol.MessagingCrypto;
+using Deep.Protocol.XPointNetworkV1;
 
 namespace Deep.Client.Shared.Persistence.DeviceV2;
 
 internal static partial class SqliteDeepIdV2AccountGeneration
 {
     internal static async ValueTask<DeepIdV2ClaimRequestCustody> OpenClaimRequestCustodyAsync(
+        IDeepSecureStorage storage, DeepIdV2AccountFileLease accountLease, string statePath,
+        VerifiedDeepIdV2CurrentAccount current, CancellationToken ct)
+        => new(await OpenClaimRequestStoreUnderLeaseAsync(storage, accountLease, statePath, current, ct).ConfigureAwait(false));
+
+    private static async ValueTask<ClaimRequestStore> OpenClaimRequestStoreUnderLeaseAsync(
         IDeepSecureStorage storage, DeepIdV2AccountFileLease accountLease, string statePath,
         VerifiedDeepIdV2CurrentAccount current, CancellationToken ct)
     {
@@ -24,14 +32,79 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             // Reuse the existing account/instance-bound two-slot floor protocol,
             // not a V1 journal, an unprotected database or one OS slot per claim.
             var root = new OnionCustodyRoot(storage, accountLease, statePath, binding, 8,
-                ClaimRequestStore.MaximumPayloadBytes);
+                ClaimRequestStore.MaximumPayloadBytes, null);
             var store = new ClaimRequestStore(root);
             var row = await root.ReadUnderLeaseAsync(ct).ConfigureAwait(false);
             if (row is not null) store.Decode(row.Payload);
-            return new(store);
+            return store;
         }
         finally { CryptographicOperations.ZeroMemory(record); }
     }
+
+    internal static async ValueTask<ParsedXpk1V2> ReserveResolvedContactClaimUnderLeaseAsync(
+        IDeepSecureStorage storage, DeepIdV2AccountFileLease lease, string statePath,
+        VerifiedDeepIdV2CurrentAccount current, InitiatorDph2PreKeyClaim started,
+        VerifiedDeepIdV2PermanentContactResolveClosure contact, VerifiedOnionNetworkContext network,
+        DeepIdV2ContactRouteTimeWindow time, DeepIdV2CurrentContactAuthorization own,
+        HeldDeepIdV2AccountLease held, CancellationToken ct)
+    {
+        using var borrow = held.BorrowFor(lease);
+        var store = await OpenClaimRequestStoreUnderLeaseAsync(storage, lease, statePath, current, ct).ConfigureAwait(false);
+        var request = await store.GetOrReserveResolvedUnderLeaseAsync(started, contact, network, time, own, held, ct).ConfigureAwait(false);
+        held.RequireActive(); return request;
+    }
+
+    // All inputs are closed capabilities from the held account's current proof,
+    // route and protected preclaim. This helper neither dispatches nor promotes.
+    internal static void RequireResolvedContactClaimCurrent(ParsedXpk1V2 request,
+        InitiatorDph2PreKeyClaim started, VerifiedDeepIdV2PermanentContactResolveClosure contact,
+        VerifiedOnionNetworkContext network, DeepIdV2ContactRouteTimeWindow time,
+        DeepIdV2CurrentContactAuthorization own)
+    {
+        var service = PublisherClaimService(contact);
+        var placement = ContactServicePlacementFactory.Create(network,
+            ContactServiceRequestKind.ClaimPreKey, service.Field(2));
+        var lower = Math.Min(time.LowerUnixSeconds, own.TrustedLowerUnixSeconds);
+        var upper = Math.Max(time.UpperUnixSeconds, own.TrustedUpperUnixSeconds);
+        var expiry = BinaryPrimitives.ReadUInt64BigEndian(request.Field(6).Span);
+        var issued = BinaryPrimitives.ReadUInt64BigEndian(request.Field(5).Span);
+        network.EnsureCurrent();
+        if (!ReferenceEquals(network, contact.Route.Network) ||
+            !Fixed(request.Field(1).Span, network.NetworkId.Span) ||
+            !Fixed(request.Field(2).Span, started.ClaimOperationId.Span) ||
+            !Fixed(request.Field(21).Span, started.SenderEphemeralCommitment.Span) ||
+            !Fixed(request.Field(3).Span, placement.ViewHash.Span) ||
+            !Fixed(request.Field(4).Span, placement.PlacementHash.Span) ||
+            !Fixed(request.Field(16).Span, service.Field(2).Span) ||
+            !Fixed(request.Field(17).Span, contact.Contact.Bundle.ObjectHash.Span) ||
+            !Fixed(request.Field(18).Span, SHA256.HashData(service.CanonicalBytes.Span)) ||
+            !Fixed(request.Field(19).Span, service.Field(3).Span) ||
+            lower > upper || issued > lower || upper >= expiry || expiry - issued > 120 ||
+            contact.Candidate.Request.IssuedAtUnixSeconds > lower || contact.Candidate.Request.ExpiresAtUnixSeconds <= upper ||
+            expiry > ClaimMaximumExpiry(contact, service, placement) ||
+            BinaryPrimitives.ReadUInt64BigEndian(service.Field(10).Span) > lower ||
+            BinaryPrimitives.ReadUInt64BigEndian(contact.Contact.Bundle.Field(17).Span) > lower ||
+            own.Authorization.Record.NotBeforeUnixSeconds > lower || own.Authorization.Record.ExpiresAtUnixSeconds <= upper)
+            throw new CryptographicException("The retained owned claim no longer binds current contact, preclaim, placement and time.");
+    }
+
+    private static ParsedXps1V2 PublisherClaimService(VerifiedDeepIdV2PermanentContactResolveClosure contact)
+    {
+        var bundle = contact.Contact.Bundle;
+        var list = bundle.Field(12);
+        for (var index = 0; index < list.Span[0]; index++)
+        {
+            var service = DeepIdV2PreKeyServiceCodec.Decode(list.Span.Slice(5 + 356 * index, 352));
+            if (Fixed(service.Field(3).Span, bundle.Field(10).Span)) return service;
+        }
+        throw new CryptographicException("The resolved DID2 publisher has no exact signed prekey service.");
+    }
+
+    private static ulong ClaimMaximumExpiry(VerifiedDeepIdV2PermanentContactResolveClosure contact,
+        ParsedXps1V2 service, VerifiedContactServicePlacement placement) =>
+        Math.Min(placement.ValidUntilUnixSeconds, Math.Min(contact.Authorization.Authorization.Record.ExpiresAtUnixSeconds,
+            Math.Min(BinaryPrimitives.ReadUInt64BigEndian(contact.Contact.Bundle.Field(18).Span),
+                BinaryPrimitives.ReadUInt64BigEndian(service.Field(11).Span))));
 
     private sealed class ClaimRequestStore(OnionCustodyRoot root) : IDeepIdV2ClaimRequestCustodyStore
     {
@@ -39,6 +112,46 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         // Every accepted reservation has space for the largest closed XPC1
         // bucket. Public-byte capacity cannot be exhausted only after claim.
         internal const int MaximumPayloadBytes = HeaderBytes + MaximumRequests * (RequestBytes + 4 + 16384);
+
+        internal async ValueTask<ParsedXpk1V2> GetOrReserveResolvedUnderLeaseAsync(
+            InitiatorDph2PreKeyClaim started, VerifiedDeepIdV2PermanentContactResolveClosure contact,
+            VerifiedOnionNetworkContext network, DeepIdV2ContactRouteTimeWindow time,
+            DeepIdV2CurrentContactAuthorization own, HeldDeepIdV2AccountLease held, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            var row = await root.ReadUnderLeaseAsync(ct).ConfigureAwait(false);
+            var state = row is null ? new State(false, new(StringComparer.Ordinal)) : Decode(row.Payload);
+            RequireUnforked(state);
+            var id = Convert.ToHexString(started.ClaimOperationId.Span);
+            if (state.Requests.TryGetValue(id, out var prior))
+            {
+                var retained = Validate(prior.Request.ToArray());
+                RequireResolvedContactClaimCurrent(retained, started, contact, network, time, own);
+                return retained;
+            }
+            if (state.Requests.Count >= MaximumRequests)
+                throw new IOException("The DID2 claim reservation journal is full.");
+            var service = PublisherClaimService(contact);
+            var placement = ContactServicePlacementFactory.Create(network,
+                ContactServiceRequestKind.ClaimPreKey, service.Field(2));
+            var issued = Math.Min(time.LowerUnixSeconds, own.TrustedLowerUnixSeconds);
+            var expiry = Math.Min(checked(issued + 120), ClaimMaximumExpiry(contact, service, placement));
+            var request = Validate(DeepIdV2PreKeyClaimRequestCodec.Encode(network.NetworkId.Span,
+                started.ClaimOperationId.Span, placement.ViewHash.Span, placement.PlacementHash.Span, issued, expiry,
+                service.Field(2).Span, contact.Contact.Bundle.ObjectHash.Span, SHA256.HashData(service.CanonicalBytes.Span),
+                service.Field(3).Span, started.SenderEphemeralCommitment.Span));
+            RequireResolvedContactClaimCurrent(request, started, contact, network, time, own);
+            state.Requests.Add(id, new(request.CanonicalBytes.ToArray(), null));
+            if (!await root.CompareExchangeUnderLeaseAsync(row, Encode(state), held, ct).ConfigureAwait(false))
+                throw new IOException("Owned claim reservation changed under the account lease.");
+            var committed = await root.ReadUnderLeaseAsync(ct).ConfigureAwait(false) ??
+                throw new CryptographicException("Owned claim reservation disappeared before release.");
+            var readback = Decode(committed.Payload); RequireUnforked(readback);
+            if (!readback.Requests.TryGetValue(id, out var exact) || !Fixed(exact.Request, request.CanonicalBytes.Span))
+                throw new CryptographicException("Owned claim reservation readback differs.");
+            ct.ThrowIfCancellationRequested(); held.RequireActive();
+            return Validate(exact.Request.ToArray());
+        }
 
         public async ValueTask<ReadOnlyMemory<byte>> ReserveAsync(ReadOnlyMemory<byte> exactRequest,
             CancellationToken ct)

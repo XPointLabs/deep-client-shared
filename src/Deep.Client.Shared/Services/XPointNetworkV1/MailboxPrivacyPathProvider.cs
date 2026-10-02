@@ -67,6 +67,36 @@ public sealed class MailboxPrivacyPathProvider :
     {
         cancellationToken.ThrowIfCancellationRequested();
         ArgumentNullException.ThrowIfNull(route);
+        if (exactCanonicalRequest.Length > MailboxAuthenticatedClientRequestCodec.HeaderLength +
+            MailboxAuthenticatedCapabilityLimits.PresentationLength + MailboxClientLimits.MaximumPageBytes)
+            throw Fail(ClientMailboxTransportFailure.PayloadTooLarge, false, "The mailbox request exceeds its canonical bound.");
+        var owned = exactCanonicalRequest.ToArray();
+        try
+        {
+            return await PrepareOwnedOnRouteAsync(operation, owned, route,
+                cancellationToken).ConfigureAwait(false);
+        }
+        finally { CryptographicOperations.ZeroMemory(owned); }
+    }
+
+    private async ValueTask<PrivacyMailboxOnionAttempt> PrepareOwnedOnRouteAsync(
+        OnionOperation operation,
+        ReadOnlyMemory<byte> exactCanonicalRequest,
+        ScopedMailboxResolvedRoute route,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ArgumentNullException.ThrowIfNull(route);
+        // Scoped routes expose ReadOnlyMemory, not immutable backing buffers.
+        // Retain bounded owned copies before the first network await.
+        if (route.PlacementCommitment.Length != 32 || route.MembershipCommitment.Length != 32 ||
+            route.Epoch == 0 || route.ExpiresAtUnixSeconds == 0)
+            throw Fail(ClientMailboxTransportFailure.ProtocolViolation, false, "The scoped mailbox route is malformed.");
+        route = new(route.Epoch, route.ExpiresAtUnixSeconds,
+            new(route.MailboxId.Bytes.Span), new(route.PlacementId.Bytes.Span),
+            route.PlacementCommitment.ToArray(), route.MembershipCommitment.ToArray(),
+            new(route.Replicas.FirstId.Span, route.Replicas.FirstSigningKey.Span,
+                route.Replicas.SecondId.Span, route.Replicas.SecondSigningKey.Span));
         if (operation is not (
                 OnionOperation.Store or
                 OnionOperation.Retrieve or
@@ -78,6 +108,7 @@ public sealed class MailboxPrivacyPathProvider :
                 "Mailbox path selection accepts only Store, Retrieve, or Acknowledge.");
         }
 
+        ValidateRouteRequest(operation, exactCanonicalRequest.Span, route);
         var expectedPlacementCommitment = MailboxPlacementCommitment.Compute(route.PlacementId);
         try
         {
@@ -99,6 +130,11 @@ public sealed class MailboxPrivacyPathProvider :
                 cancellationToken)
             .ConfigureAwait(false);
         network.EnsureCurrent();
+        var requestNetwork = MailboxAuthenticatedClientRequestCodec.Decode(exactCanonicalRequest.Span)
+            .Presentation.Grant.NetworkId;
+        if (!Fixed(requestNetwork.Span, network.NetworkId.Span))
+            throw Fail(ClientMailboxTransportFailure.ProtocolViolation, false,
+                "The mailbox grant belongs to another verified network.");
 
         VerifiedCanonicalOnionRequest verifiedRequest;
         try
@@ -164,6 +200,49 @@ public sealed class MailboxPrivacyPathProvider :
         }
 
         throw new IOException("Protected mailbox entry-guard state remained contended.");
+    }
+
+    // Structural route equality is an additional dispatch boundary, not a
+    // substitute for the adapter's issuer/holder and durable credential checks.
+    internal static void ValidateRouteRequest(OnionOperation operation,
+        ReadOnlySpan<byte> exact, ScopedMailboxResolvedRoute route)
+    {
+        ArgumentNullException.ThrowIfNull(route);
+        MailboxAuthenticatedClientRequest request;
+        try { request = MailboxAuthenticatedClientRequestCodec.Decode(exact); }
+        catch (Exception error) when (error is ArgumentException or OverflowException or
+            MailboxClientException or MailboxAuthenticatedCapabilityException)
+        { throw Fail(ClientMailboxTransportFailure.MalformedRequest, false, "The mailbox route request is malformed.", error); }
+        var expected = operation switch
+        {
+            OnionOperation.Store => MailboxAuthenticatedOperation.Store,
+            OnionOperation.Retrieve => MailboxAuthenticatedOperation.Retrieve,
+            OnionOperation.Acknowledge => MailboxAuthenticatedOperation.Ack,
+            _ => throw Fail(ClientMailboxTransportFailure.ProtocolViolation, false, "Unsupported mailbox operation.")
+        };
+        var grant = request.Presentation.Grant;
+        if (request.Binding.Operation != expected || request.Presentation.Operation != expected ||
+            grant.Epoch != route.Epoch || grant.ExpiresAtUnixSeconds != route.ExpiresAtUnixSeconds ||
+            !Fixed(grant.PlacementCommitment.Span, route.PlacementCommitment.Span) ||
+            !Fixed(grant.MembershipCommitment.Span, route.MembershipCommitment.Span))
+            throw Fail(ClientMailboxTransportFailure.ProtocolViolation, false, "The MAU2 grant differs from its scoped credential route.");
+        (ulong epoch, BlindedMailboxId mailbox, BlindedPlacementId placement) = expected switch
+        {
+            MailboxAuthenticatedOperation.Store => Store(),
+            MailboxAuthenticatedOperation.Retrieve => Retrieve(),
+            MailboxAuthenticatedOperation.Ack => Ack(),
+            _ => throw new InvalidOperationException()
+        };
+        if (epoch != route.Epoch || !Fixed(mailbox.Bytes.Span, route.MailboxId.Bytes.Span) ||
+            !Fixed(placement.Bytes.Span, route.PlacementId.Bytes.Span))
+            throw Fail(ClientMailboxTransportFailure.ProtocolViolation, false, "The MAU2 body differs from its scoped credential route.");
+
+        (ulong, BlindedMailboxId, BlindedPlacementId) Store()
+        { var body = MailboxAuthenticatedRequestTranscript.DecodeStoreBody(request.Binding.CanonicalRequest.Span); return (body.Epoch, body.MailboxId, body.PlacementId); }
+        (ulong, BlindedMailboxId, BlindedPlacementId) Retrieve()
+        { var body = MailboxAuthenticatedRequestTranscript.DecodeRetrieveBody(request.Binding.CanonicalRequest.Span); return (body.Epoch, body.MailboxId, body.PlacementId); }
+        (ulong, BlindedMailboxId, BlindedPlacementId) Ack()
+        { var body = MailboxAuthenticatedRequestTranscript.DecodeAckBody(request.Binding.CanonicalRequest.Span); return (body.Epoch, body.MailboxId, body.PlacementId); }
     }
 
     private EntryGuardState Reconcile(

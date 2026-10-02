@@ -385,6 +385,7 @@ internal static partial class SqliteDeepIdV2AccountGeneration
                                  value[32..], stagedHash)))
                     throw new CryptographicException(
                         "The protected DID2 pre-key inventory tip differs.");
+                await store.ReconcileReceiverSessionsAsync(storage, record.AsMemory(56, 32), cancellationToken).ConfigureAwait(false);
                 return (store, scopeHash);
             }
             catch

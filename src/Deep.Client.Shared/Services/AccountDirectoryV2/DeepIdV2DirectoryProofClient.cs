@@ -1,5 +1,6 @@
 using System.Net;
 using System.Security.Cryptography;
+using Deep.Client.Shared.Persistence.DeviceV2;
 using Deep.Protocol.AccountDirectoryV1;
 using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.DeepExtension.PrivacyRouting;
@@ -241,6 +242,31 @@ public sealed class DeepIdV2DirectoryProofClient : IDisposable
                 "The DID2 proof and network authority differ at handoff.");
         var protectedHead = await protectedLkgStore.RestoreAsync(authority,
             cancellationToken).ConfigureAwait(false);
+        await RequireHeadAndClockAsync(verified, protectedHead, cancellationToken).ConfigureAwait(false);
+    }
+
+    internal async ValueTask RequirePairStillFreshUnderLeaseAsync(VerifiedDeepIdV2DirectoryFreshness own,
+        VerifiedDeepIdV2DirectoryFreshness peer,
+        VerifiedXPointNetworkAuthority authority, HeldDeepIdV2AccountLease held, CancellationToken ct)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
+        ArgumentNullException.ThrowIfNull(own); ArgumentNullException.ThrowIfNull(peer);
+        ArgumentNullException.ThrowIfNull(authority); ArgumentNullException.ThrowIfNull(held);
+        held.RequireActive();
+        if (!CryptographicOperations.FixedTimeEquals(own.NetworkId.Span, authority.NetworkId.Span) ||
+            !CryptographicOperations.FixedTimeEquals(peer.NetworkId.Span, authority.NetworkId.Span))
+            throw new CryptographicException("The DID2 proof and network authority differ at held handoff.");
+        if (protectedLkgStore is not IDeepIdV2DirectoryProtectedLeaseRead reader)
+            throw new NotSupportedException("Held-account freshness requires the owned readonly directory backend.");
+        var protectedHead = await reader.ReadExistingUnderLeaseAsync(authority, held, ct).ConfigureAwait(false);
+        await RequireHeadAndClockAsync(own, protectedHead, ct).ConfigureAwait(false);
+        await RequireHeadAndClockAsync(peer, protectedHead, ct).ConfigureAwait(false);
+        held.RequireActive();
+    }
+
+    private async ValueTask RequireHeadAndClockAsync(VerifiedDeepIdV2DirectoryFreshness verified,
+        AccountDirectoryProtectedLkg protectedHead, CancellationToken cancellationToken)
+    {
         if (protectedHead is null ||
             !CryptographicOperations.FixedTimeEquals(
                 verified.NextProtectedLkg.CoreHash.Span,
@@ -314,8 +340,9 @@ public sealed class DeepIdV2DirectoryProofClient : IDisposable
         for (var pageIndex = 0; pageIndex < 16; pageIndex++)
         {
             var request = DeepIdV2DirectoryHistoryWireCodec.EncodeRequest(floor);
-            using var response = await historyTransport.PostAsync(
-                "/api/v2/account-directory/history", request, cancellationToken).ConfigureAwait(false);
+            using var response = await AwaitBoundedResponseAsync(historyTransport.PostAsync(
+                "/api/v2/account-directory/history", request, cancellationToken).AsTask(), cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
             if (response.StatusCode is HttpStatusCode.TooManyRequests or HttpStatusCode.ServiceUnavailable)
                 throw new DeepIdV2DirectoryProofUnavailableException(response.StatusCode, response.RetryAfter);
             if (response.StatusCode != HttpStatusCode.OK)
@@ -359,9 +386,9 @@ public sealed class DeepIdV2DirectoryProofClient : IDisposable
                 lookup, requestedDid2, nonce, requestCreated.BootId.Span,
                 requestCreated.SampleSeconds);
             var exactRequest = DeepIdV2DirectoryProofWireCodec.DecodeRequest(encoded);
-            using var response = await transport.PostAsync(
-                    EndpointPath, encoded, cancellationToken)
-                .ConfigureAwait(false);
+            using var response = await AwaitBoundedResponseAsync(transport.PostAsync(
+                    EndpointPath, encoded, cancellationToken).AsTask(), cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
             if (response.StatusCode is HttpStatusCode.TooManyRequests or
                 HttpStatusCode.ServiceUnavailable)
                 throw new DeepIdV2DirectoryProofUnavailableException(response.StatusCode, response.RetryAfter);
@@ -406,6 +433,23 @@ public sealed class DeepIdV2DirectoryProofClient : IDisposable
         {
             CryptographicOperations.ZeroMemory(nonce);
             if (encoded is not null) CryptographicOperations.ZeroMemory(encoded);
+        }
+    }
+
+    // Bound only the untrusted transport task, not a background proof/floor mutation.
+    // A late response is wiped; it never re-enters verification or commit.
+    internal static async Task<HttpServiceResponse> AwaitBoundedResponseAsync(
+        Task<HttpServiceResponse> pending, CancellationToken ct)
+    {
+        try { return await pending.WaitAsync(ct).ConfigureAwait(false); }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            _ = pending.ContinueWith(static completed =>
+            {
+                if (completed.Status == TaskStatus.RanToCompletion) completed.Result.Dispose();
+                else if (completed.IsFaulted) _ = completed.Exception;
+            }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+            throw;
         }
     }
 

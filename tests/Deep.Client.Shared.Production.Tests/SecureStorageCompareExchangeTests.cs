@@ -53,6 +53,75 @@ public sealed class SecureStorageCompareExchangeTests
         Assert.True(after!.Use(value => value.SequenceEqual(expected)));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RegistrationIsAtomicInsertOnlyAndRejectsEveryConflictWithoutPartialMutation(bool journaled)
+    {
+        using var fixture = new Fixture(journaled); var store = fixture.Store;
+        var insertions = new DeepSecureStorageWrite[] { new("floor-a", new byte[] { 10 }), new("floor-b", new byte[] { 11 }) };
+        Assert.False(await store.CompareExchangeAndInsertAsync("catalog", new byte[] { 1 }, new byte[] { 2 }, insertions));
+        await store.WriteBatchAsync([new("catalog", new byte[] { 1 }), new("foreign", new byte[] { 9 })]);
+        Assert.False(await store.CompareExchangeAndInsertAsync("catalog", new byte[] { 2 }, new byte[] { 3 }, insertions));
+        using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => store.CompareExchangeAndInsertAsync("catalog", new byte[] { 1 }, new byte[] { 2 }, insertions, cancelled.Token));
+        using (var missing = await store.ReadOwnedAsync("floor-a")) Assert.Null(missing);
+        Assert.True(await store.CompareExchangeAndInsertAsync("catalog", new byte[] { 1 }, new byte[] { 2 }, insertions));
+        Assert.False(await store.CompareExchangeAndInsertAsync("catalog", new byte[] { 2 }, new byte[] { 3 },
+            [new("floor-a", new byte[] { 12 }), new("floor-c", new byte[] { 13 })]));
+        using (var missing = await store.ReadOwnedAsync("floor-c")) Assert.Null(missing);
+        await Assert.ThrowsAsync<ArgumentException>(() => store.CompareExchangeAndInsertAsync("catalog", new byte[] { 2 }, new byte[] { 3 }, [new("catalog", new byte[] { 4 })]));
+        await Assert.ThrowsAsync<ArgumentException>(() => store.CompareExchangeAndInsertAsync("catalog", new byte[] { 2 }, new byte[] { 3 }, [new("repeat", new byte[] { 4 }), new("repeat", new byte[] { 5 })]));
+        await Assert.ThrowsAsync<ArgumentException>(() => store.CompareExchangeAndInsertAsync("catalog", new byte[] { 2 }, new byte[] { 3 }, [new(new string('x', 513), new byte[] { 4 })]));
+        await Assert.ThrowsAsync<ArgumentException>(() => store.CompareExchangeAndInsertAsync("catalog", new byte[] { 2 }, new byte[] { 3 }, [new("oversized", new byte[1024 * 1024 + 1])]));
+        using var current = await store.ReadOwnedAsync("catalog"); Assert.Equal(2, current!.Use(value => value[0]));
+        using var foreign = await store.ReadOwnedAsync("foreign"); Assert.Equal(9, foreign!.Use(value => value[0]));
+        using var floorA = await store.ReadOwnedAsync("floor-a"); Assert.Equal(10, floorA!.Use(value => value[0]));
+        using var floorB = await store.ReadOwnedAsync("floor-b"); Assert.Equal(11, floorB!.Use(value => value[0]));
+        if (journaled)
+        {
+            using var reopened = fixture.OpenJournaled();
+            using var persisted = await reopened.ReadOwnedAsync("floor-b"); Assert.Equal(11, persisted!.Use(value => value[0]));
+        }
+    }
+
+    [Fact]
+    public async Task IndependentRegistrationHasOneCompleteWinnerAndProtectionFailureCannotPublishHalfInventory()
+    {
+        using var fixture = new Fixture(true); using var second = fixture.OpenJournaled();
+        await fixture.Store.WriteBatchAsync([new("catalog", new byte[] { 1 })]);
+        var outcomes = await Task.WhenAll(
+            fixture.Store.CompareExchangeAndInsertAsync("catalog", new byte[] { 1 }, new byte[] { 2 }, [new("floor-a", new byte[] { 2 })]),
+            second.CompareExchangeAndInsertAsync("catalog", new byte[] { 1 }, new byte[] { 3 }, [new("floor-b", new byte[] { 3 })]));
+        Assert.Single(outcomes, value => value);
+        using var before = await second.ReadOwnedAsync("catalog"); var expected = before!.Use(value => value.ToArray());
+        using var winner = await second.ReadOwnedAsync(outcomes[0] ? "floor-a" : "floor-b"); Assert.Equal(expected[0], winner!.Use(value => value[0]));
+        using var loser = await second.ReadOwnedAsync(outcomes[0] ? "floor-b" : "floor-a"); Assert.Null(loser);
+        fixture.Protector.FailProtect = true;
+        await Assert.ThrowsAsync<IOException>(() => fixture.Store.CompareExchangeAndInsertAsync("catalog", expected, new byte[] { 4 }, [new("floor-failed", new byte[] { 4 })]));
+        using var after = await second.ReadOwnedAsync("catalog"); Assert.True(after!.Use(value => value.SequenceEqual(expected)));
+        using var absent = await second.ReadOwnedAsync("floor-failed"); Assert.Null(absent);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task InventoryAccommodates512FloorsAndOne18PartPayloadButHardCapRejectsAtomically(bool journaled)
+    {
+        using var fixture = new Fixture(journaled); var store = fixture.Store;
+        var inventory = Enumerable.Range(0, 1024).Select(index => new DeepSecureStorageWrite("slot-" + index, new byte[] { 1 })).ToArray();
+        await store.WriteBatchAsync(inventory);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => store.CompareExchangeAndInsertAsync("slot-0", new byte[] { 1 }, new byte[] { 2 }, [new("overflow", new byte[] { 3 })]));
+        using var original = await store.ReadOwnedAsync("slot-0"); Assert.Equal(1, original!.Use(value => value[0]));
+        using var absent = await store.ReadOwnedAsync("overflow"); Assert.Null(absent);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => store.WriteBatchAsync([new("another-overflow", new byte[] { 4 })]));
+        if (journaled)
+        {
+            using var reopened = fixture.OpenJournaled();
+            using var last = await reopened.ReadOwnedAsync("slot-1023"); Assert.Equal(1, last!.Use(value => value[0]));
+        }
+    }
+
     private sealed class Fixture : IDisposable
     {
         private readonly string root = Path.Combine(Path.GetTempPath(), "deep-storage-cas-tests", Guid.NewGuid().ToString("N"));

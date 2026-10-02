@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using Deep.Client.Shared.Services.ContactV1;
 using Deep.Client.Shared.Services.XPointNetworkV1;
 using Deep.Protocol.DeepExtension.PrivacyRouting;
+using Deep.Protocol.XPointNetworkV1;
 
 namespace Deep.Client.Shared.Services.ContactV2;
 
@@ -12,11 +13,13 @@ internal sealed class DeepIdV2PublicationOnionTransport : IExactContactResolveOn
 {
     private readonly ContactResolvePrivacyPathProvider paths;
     private readonly PrivacyRoutingCodec codec;
+    private readonly DeepIdV2OnionClientCustody custody;
 
     internal DeepIdV2PublicationOnionTransport(DeepIdV2ContactPathAuthoritySource source,
         DeepIdV2OnionClientCustody custody)
     {
         source.RequireAccountOwner(custody.Owner);
+        this.custody = custody;
         paths = new(source, custody.Guards);
         codec = new(new OnionEntropyAuthority(custody.Entropy),
             new OnionKeyAgreementAuthority(new NoClientReceiveVault()));
@@ -28,11 +31,40 @@ internal sealed class DeepIdV2PublicationOnionTransport : IExactContactResolveOn
     {
         var prepared = await paths.PrepareExactAsync(OnionOperation.ContactResolve,
             request, requiredExitReplicaId, cancellationToken).ConfigureAwait(false);
+        return await SendPreparedAsync(prepared, null, cancellationToken).ConfigureAwait(false);
+    }
+
+    internal async ValueTask<ExactContactResolveOnionResponse> SendOwnedExactAsync(
+        ContactResolveCanonicalPathRequest request, ReadOnlyMemory<byte> requiredExitReplicaId,
+        Did2OwnedContactTransportContext operation, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        operation.RequireActive();
+        if (!ReferenceEquals(custody, operation.Custody))
+            throw new CryptographicException("The owned transport belongs to another custody loan.");
+        var placement = ContactServicePlacementFactory.Create(operation.Network,
+            request.RequestKind, request.ShardKey);
+        var authority = new ContactResolvePathAuthority(operation.Network, placement);
+        var prepared = await paths.PrepareWithAuthorityAsync(OnionOperation.ContactResolve,
+            request, requiredExitReplicaId, authority, cancellationToken).ConfigureAwait(false);
+        operation.RequireActive();
+        var result = await SendPreparedAsync(prepared, operation, cancellationToken).ConfigureAwait(false);
+        operation.RequireActive();
+        cancellationToken.ThrowIfCancellationRequested();
+        return result;
+    }
+
+    private async ValueTask<ExactContactResolveOnionResponse> SendPreparedAsync(
+        ContactResolvePreparedPath prepared, Did2OwnedContactTransportContext? ownedOperation, CancellationToken cancellationToken)
+    {
         var entry = OnionEntryTransportFactory.Create(prepared.Attempt.Path);
         using var transport = new PrivacyManagedIngressHttpTransport(entry);
         using var built = await codec.BuildAsync(prepared.Attempt.Path, prepared.Attempt.Request,
             cancellationToken).ConfigureAwait(false);
+        ownedOperation?.RequireActive();
+        cancellationToken.ThrowIfCancellationRequested();
         var response = await transport.ForwardAsync(built.Frame, cancellationToken).ConfigureAwait(false);
+        ownedOperation?.RequireActive();
         PrivacyRoutingOpenedResponse opened;
         try { opened = await codec.OpenResponseAsync(response, built.ReplyContext, cancellationToken).ConfigureAwait(false); }
         catch (Exception error) when (error is CryptographicException or OnionBoundaryException)
@@ -41,6 +73,8 @@ internal sealed class DeepIdV2PublicationOnionTransport : IExactContactResolveOn
             opened.Result.Kind != OnionTerminalResultKind.Success)
             throw new ClientMailboxDispatchOutcomeUnknownException("The DID2 ONION publication has no successful authenticated terminal result.");
         entry.EnsureCurrent();
+        ownedOperation?.RequireActive();
+        cancellationToken.ThrowIfCancellationRequested();
         return new(opened.Result.Body, prepared.Authority);
     }
 

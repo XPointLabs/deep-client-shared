@@ -8,6 +8,72 @@ namespace Deep.Client.Shared.Production.Tests;
 public sealed class ProtectedDeepIdV2AccountOwnerTests
 {
     [Fact]
+    public async Task Did2ApplicationRegistrationInitializesRecoversEmptyAndNeverRecreatesLostSql()
+    {
+        if (!SupportedProvider()) return;
+        var lockPath = NewLockPath();
+        try
+        {
+            using var storage = new InMemoryDeepSecureStorage();
+            var network = Enumerable.Range(1, 16).Select(value => (byte)value).ToArray();
+            using var verifier = DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess();
+            var owner = NewOwner(storage, network, lockPath);
+            using var created = await owner.CreateFreshAsync("Application QA", 1_900_000_000, verifier, default);
+            var path = lockPath + ".dsv2";
+            var appPath = path + ".application.dmb1";
+            var lease = new DeepIdV2AccountFileLease(lockPath);
+            async Task<byte[]> Marker()
+            {
+                using var marker = await storage.ReadOwnedAsync(SqliteDeepIdV2AccountGeneration.ApplicationStateSlot);
+                return marker!.Use(bytes => bytes.ToArray());
+            }
+            var registered = await Marker(); Assert.Equal(116, registered.Length); Assert.Equal((byte)3, registered[0]); Assert.Equal((byte)1, registered[1]);
+            Assert.False(File.Exists(appPath));
+            using (var held = await lease.AcquireAsync(default))
+            using (var application = await SqliteDeepIdV2AccountGeneration.OpenApplicationUnderLeaseAsync(
+                storage, path, created, held, default)) application.RequireInitializedEmpty();
+            var initialized = await Marker(); Assert.Equal((byte)2, initialized[1]);
+            var retiredRegistration = initialized.ToArray(); retiredRegistration[0] = 2;
+            var databaseDigest = SHA256.HashData(File.ReadAllBytes(appPath));
+            Assert.True(await storage.CompareExchangeAsync(SqliteDeepIdV2AccountGeneration.ApplicationStateSlot, initialized, retiredRegistration));
+            using (var held = await lease.AcquireAsync(default))
+                await Assert.ThrowsAsync<InvalidDataException>(() => SqliteDeepIdV2AccountGeneration.OpenApplicationUnderLeaseAsync(storage, path, created, held, default));
+            Assert.Equal(databaseDigest, SHA256.HashData(File.ReadAllBytes(appPath)));
+            Assert.Equal(retiredRegistration, await Marker());
+            Assert.True(await storage.CompareExchangeAsync(SqliteDeepIdV2AccountGeneration.ApplicationStateSlot, retiredRegistration, initialized));
+            CryptographicOperations.ZeroMemory(retiredRegistration);
+            // An interrupted marker commit can leave exactly empty initialized SQL.
+            Assert.True(await storage.CompareExchangeAsync(SqliteDeepIdV2AccountGeneration.ApplicationStateSlot,
+                initialized, registered));
+            using (var held = await lease.AcquireAsync(default))
+            using (var recovered = await SqliteDeepIdV2AccountGeneration.OpenApplicationUnderLeaseAsync(
+                storage, path, created, held, default)) recovered.RequireInitializedEmpty();
+            Assert.Equal(initialized, await Marker());
+            foreach (var offset in new[] { 0, 1, 2, 4, 52, 84 })
+            {
+                var invalid = initialized.ToArray(); invalid[offset] ^= 0x80;
+                Assert.True(await storage.CompareExchangeAsync(SqliteDeepIdV2AccountGeneration.ApplicationStateSlot,
+                    initialized, invalid));
+                using (var held = await lease.AcquireAsync(default))
+                    await Assert.ThrowsAsync<InvalidDataException>(() => SqliteDeepIdV2AccountGeneration.OpenApplicationUnderLeaseAsync(
+                        storage, path, created, held, default));
+                Assert.True(await storage.CompareExchangeAsync(SqliteDeepIdV2AccountGeneration.ApplicationStateSlot,
+                    invalid, initialized));
+                CryptographicOperations.ZeroMemory(invalid);
+            }
+            File.Delete(appPath);
+            using (var held = await lease.AcquireAsync(default))
+                await Assert.ThrowsAsync<LocalStateResetRequiredException>(() => SqliteDeepIdV2AccountGeneration.OpenApplicationUnderLeaseAsync(
+                    storage, path, created, held, default));
+            Assert.False(File.Exists(appPath)); Assert.Equal(initialized, await Marker());
+            await owner.ResetExplicitlyAsync(default);
+            Assert.Null(await storage.ReadOwnedAsync(SqliteDeepIdV2AccountGeneration.ApplicationStateSlot));
+            CryptographicOperations.ZeroMemory(registered); CryptographicOperations.ZeroMemory(initialized);
+        }
+        finally { DeleteOwnerArtifacts(lockPath); }
+    }
+
+    [Fact]
     public async Task CreateReadAndExplicitResetNeverTouchV1()
     {
         if (!SupportedProvider()) return;
@@ -168,6 +234,39 @@ public sealed class ProtectedDeepIdV2AccountOwnerTests
     }
 
     [Fact]
+    public async Task HeldReadBorrowRetainsActualLockAndRejectsWrongOrDisposedOwner()
+    {
+        var lockPath = NewLockPath();
+        var otherPath = NewLockPath();
+        try
+        {
+            var first = new DeepIdV2AccountFileLease(lockPath);
+            var same = new DeepIdV2AccountFileLease(lockPath);
+            var other = new DeepIdV2AccountFileLease(otherPath);
+            using var held = await first.AcquireAsync(default);
+            held.RequireOwner(same);
+            Assert.Throws<CryptographicException>(() => held.BorrowFor(other));
+            using var borrow = held.BorrowFor(same);
+            held.Dispose();
+            Assert.Throws<ObjectDisposedException>(() => held.RequireActive());
+            Assert.Throws<ObjectDisposedException>(() => held.RequireOwner(same));
+            Assert.Throws<ObjectDisposedException>(() => held.BorrowFor(same));
+            using (var cancelled = new CancellationTokenSource(TimeSpan.FromMilliseconds(200)))
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                    () => same.AcquireAsync(cancelled.Token).AsTask());
+            borrow.Dispose();
+            borrow.Dispose(); // A duplicate release cannot close a later owner's lock.
+            using var next = await same.AcquireAsync(default);
+            next.RequireOwner(first);
+            held.Dispose();
+            using var stillCancelled = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                () => first.AcquireAsync(stillCancelled.Token).AsTask());
+        }
+        finally { DeleteOwnerArtifacts(lockPath); DeleteOwnerArtifacts(otherPath); }
+    }
+
+    [Fact]
     public async Task JournaledStoreReopensExactCurrentAccountAfterProcessBoundary()
     {
         if (!SupportedProvider()) return;
@@ -308,7 +407,9 @@ public sealed class ProtectedDeepIdV2AccountOwnerTests
         foreach (var path in new[] { lockPath, sqlPath, sqlPath + ".pending",
                      sqlPath + ".bootstrap.lock", sqlPath + "-journal",
                      sqlPath + "-wal", sqlPath + "-shm",
-                     sqlPath + ".pending-journal" })
+                     sqlPath + ".pending-journal", sqlPath + ".application.dmb1",
+                     sqlPath + ".application.dmb1-journal", sqlPath + ".application.dmb1-wal",
+                     sqlPath + ".application.dmb1-shm" })
             File.Delete(path);
     }
 
@@ -333,6 +434,10 @@ public sealed class ProtectedDeepIdV2AccountOwnerTests
         public Task<bool> CompareExchangeAsync(string slot, ReadOnlyMemory<byte> expected,
             ReadOnlyMemory<byte> replacement, CancellationToken ct = default) =>
             inner.CompareExchangeAsync(slot, expected, replacement, ct);
+
+        public Task<bool> CompareExchangeAndInsertAsync(string slot, ReadOnlyMemory<byte> expected,
+            ReadOnlyMemory<byte> replacement, IReadOnlyList<DeepSecureStorageWrite> insertions,
+            CancellationToken ct = default) => inner.CompareExchangeAndInsertAsync(slot, expected, replacement, insertions, ct);
 
         public Task<OwnedDeepSecret?> ReadOwnedAsync(string slot,
             CancellationToken cancellationToken = default) =>

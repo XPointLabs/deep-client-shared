@@ -15,7 +15,8 @@ public sealed partial class SqliteDeepMailboxStore :
     IDisposable
 {
     private const int ApplicationId = 0x444D4231; // DMB1
-    private const int SchemaVersion = 4;
+    private const int SchemaVersion = 7;
+    private readonly bool allowCreate;
     private readonly string _connectionString;
     private readonly byte[] encryptionKey;
     private readonly SemaphoreSlim _databaseGate = new(1, 1);
@@ -23,8 +24,14 @@ public sealed partial class SqliteDeepMailboxStore :
 
     static SqliteDeepMailboxStore() => SQLitePCL.Batteries_V2.Init();
 
-    public SqliteDeepMailboxStore(SqliteDeepMailboxStoreOptions options)
+    public SqliteDeepMailboxStore(SqliteDeepMailboxStoreOptions options) : this(options, true) { }
+
+    internal static SqliteDeepMailboxStore OpenExisting(SqliteDeepMailboxStoreOptions options) =>
+        new(options, false);
+
+    private SqliteDeepMailboxStore(SqliteDeepMailboxStoreOptions options, bool allowCreate)
     {
+        this.allowCreate = allowCreate;
         ArgumentNullException.ThrowIfNull(options);
         if (string.IsNullOrWhiteSpace(options.StatePath))
             throw new ArgumentException("State path is required.", nameof(options));
@@ -34,6 +41,8 @@ public sealed partial class SqliteDeepMailboxStore :
                 "A nonzero 32-byte SQLCipher key is required.", nameof(options));
 
         var path = Path.GetFullPath(options.StatePath);
+        if (!allowCreate && !File.Exists(path))
+            throw ResetRequired("Registered application state is missing.");
         var directory = Path.GetDirectoryName(path);
         if (!string.IsNullOrWhiteSpace(directory)) Directory.CreateDirectory(directory);
         if (!File.Exists(path) &&
@@ -46,7 +55,7 @@ public sealed partial class SqliteDeepMailboxStore :
         _connectionString = new SqliteConnectionStringBuilder
         {
             DataSource = path,
-            Mode = SqliteOpenMode.ReadWriteCreate,
+            Mode = allowCreate ? SqliteOpenMode.ReadWriteCreate : SqliteOpenMode.ReadWrite,
             Cache = SqliteCacheMode.Private,
             Pooling = false,
             ForeignKeys = true
@@ -75,6 +84,8 @@ public sealed partial class SqliteDeepMailboxStore :
             var version = ReadPragma(connection, transaction, "user_version");
             if (applicationId == 0 && version == 0)
             {
+                if (!allowCreate)
+                    throw ResetRequired("Registered application state is uninitialized.");
                 CreateSchema(connection, transaction);
             }
             else if (applicationId != ApplicationId || version != SchemaVersion)
@@ -166,6 +177,7 @@ public sealed partial class SqliteDeepMailboxStore :
                 logical_message_id BLOB NOT NULL CHECK(length(logical_message_id) = 32),
                 author_device_id BLOB NOT NULL CHECK(length(author_device_id) = 32),
                 author_account_id BLOB NOT NULL CHECK(length(author_account_id) = 32),
+                sender_sequence BLOB NOT NULL CHECK(length(sender_sequence) = 8),
                 content_kind INTEGER NOT NULL,
                 exact_dmc2_hash BLOB NOT NULL CHECK(length(exact_dmc2_hash) = 32),
                 exact_dmc2 BLOB NOT NULL CHECK(length(exact_dmc2) BETWEEN 282 AND 33082),
@@ -199,6 +211,16 @@ public sealed partial class SqliteDeepMailboxStore :
                 created_at INTEGER NOT NULL CHECK(created_at > 0),
                 PRIMARY KEY(conversation_id, logical_message_id, author_device_id),
                 UNIQUE(conversation_id, author_device_id, sender_sequence));
+            CREATE TABLE local_attachment_objects (
+                operation_id BLOB PRIMARY KEY NOT NULL CHECK(length(operation_id)=32),
+                object_id BLOB NOT NULL UNIQUE CHECK(length(object_id)=32),
+                exact_manifest BLOB NOT NULL CHECK(length(exact_manifest) BETWEEN 310 AND 4653));
+            CREATE TABLE local_attachment_chunks (
+                operation_id BLOB NOT NULL CHECK(length(operation_id)=32),
+                chunk_index INTEGER NOT NULL CHECK(chunk_index BETWEEN 0 AND 99),
+                ciphertext BLOB NOT NULL CHECK(length(ciphertext) BETWEEN 17 AND 262160),
+                PRIMARY KEY(operation_id,chunk_index),
+                FOREIGN KEY(operation_id) REFERENCES local_attachment_objects(operation_id) ON DELETE CASCADE);
             CREATE TABLE mailbox_credential_scopes (
                 scope_id BLOB NOT NULL PRIMARY KEY CHECK(length(scope_id) = 32),
                 account_scope BLOB NOT NULL CHECK(length(account_scope) = 32),
@@ -283,6 +305,8 @@ public sealed partial class SqliteDeepMailboxStore :
                 ON transport_outbox_items(account_scope, state, not_before, expires_at, created_at);
             CREATE INDEX idx_transport_outbox_expiry
                 ON transport_outbox_items(account_scope, expires_at, state);
+            CREATE INDEX idx_authenticated_dmc2_authored_position
+                ON authenticated_dmc2_inbox(conversation_id, author_account_id, author_device_id, sender_sequence);
             """;
         command.ExecuteNonQuery();
         using var mark = connection.CreateCommand();
@@ -313,10 +337,36 @@ public sealed partial class SqliteDeepMailboxStore :
 
     private void ApplyMailboxEncryptionKey(SqliteConnection connection)
     {
-        var result = SQLitePCL.raw.sqlite3_key(connection.Handle, encryptionKey);
-        if (result != SQLitePCL.raw.SQLITE_OK)
-            throw new SqliteException("SQLCipher rejected the mailbox key.", result);
+        // DR66: this API accepts a random/pseudorandom binary 256-bit key,
+        // never a human password. Keep native raw-key syntax out of strings/SQL.
+        var encoded = new byte[67];
+        encoded[0] = (byte)'x'; encoded[1] = encoded[66] = (byte)'\'';
+        ReadOnlySpan<byte> alphabet = "0123456789abcdef"u8;
+        for (var index = 0; index < encryptionKey.Length; index++)
+        {
+            encoded[2 + index * 2] = alphabet[encryptionKey[index] >> 4];
+            encoded[3 + index * 2] = alphabet[encryptionKey[index] & 15];
+        }
+        try
+        {
+            var result = SQLitePCL.raw.sqlite3_key(connection.Handle, encoded);
+            if (result != SQLitePCL.raw.SQLITE_OK)
+                throw new SqliteException("SQLCipher rejected the mailbox key.", result);
+        }
+        finally { CryptographicOperations.ZeroMemory(encoded); }
     }
+
+#if DEEP_TEST_INTERNALS
+    internal Task<(int Synchronous, int SecureDelete, string JournalMode)> ReadConnectionPolicyForTestsAsync()
+        => WithReplayConnectionAsync(connection =>
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = "PRAGMA synchronous;"; var sync = Convert.ToInt32(command.ExecuteScalar());
+            command.CommandText = "PRAGMA secure_delete;"; var secure = Convert.ToInt32(command.ExecuteScalar());
+            command.CommandText = "PRAGMA journal_mode;"; var mode = Convert.ToString(command.ExecuteScalar())!;
+            return Task.FromResult((sync, secure, mode));
+        }, default);
+#endif
 
     private static void ValidateCipher(SqliteConnection connection)
     {
@@ -348,24 +398,57 @@ public sealed partial class SqliteDeepMailboxStore :
         SqliteConnection connection,
         SqliteTransaction? transaction)
     {
-        foreach (var table in new[] {
-                     "transport_outbox_items", "transport_outbox_attempts",
-                     "authenticated_dmc2_inbox_owner", "authenticated_dmc2_inbox",
-                     "authenticated_dmc2_inbox_forks", "direct_sender_sequences",
-                     "direct_text_outbox", "mailbox_credential_scopes",
-                     "mailbox_credential_epochs", "mailbox_credential_grants",
-                     "mailbox_replay_counters", "mailbox_prepared_batches",
-                     "mailbox_prepared_batch_targets" })
+        var actual = ReadSchemaObjects(connection, transaction);
+        if (!actual.SequenceEqual(ExpectedSchema.Value, StringComparer.Ordinal))
+            throw ResetRequired("Clean application schema differs from the current exact generation.");
+    }
+
+    // Only trusted DDL is evaluated here; this database contains no user data or keys.
+    private static readonly Lazy<string[]> ExpectedSchema = new(() =>
+    {
+        using var connection = new SqliteConnection("Data Source=:memory:;Pooling=False");
+        connection.Open();
+        using var transaction = connection.BeginTransaction();
+        CreateSchema(connection, transaction);
+        return ReadSchemaObjects(connection, transaction);
+    });
+
+    internal void RequireInitializedEmpty()
+    {
+        using var connection = Open();
+        using var transaction = connection.BeginTransaction(deferred: false);
+        ValidateTransportOutboxSchema(connection, transaction);
+        using var tables = connection.CreateCommand();
+        tables.Transaction = transaction;
+        tables.CommandText = "SELECT name FROM sqlite_schema WHERE type='table' AND substr(name,1,7)<>'sqlite_' ORDER BY name;";
+        var names = new List<string>();
+        using (var reader = tables.ExecuteReader())
+            while (reader.Read()) names.Add(reader.GetString(0));
+        foreach (var name in names)
         {
-            using var command = connection.CreateCommand();
-            command.Transaction = transaction;
-            command.CommandText =
-                "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name=$name;";
-            command.Parameters.AddWithValue("$name", table);
-            if (Convert.ToInt32(command.ExecuteScalar(),
-                    System.Globalization.CultureInfo.InvariantCulture) != 1)
-                throw ResetRequired("Clean mailbox outbox schema is incomplete.");
+            using var count = connection.CreateCommand(); count.Transaction = transaction;
+            count.CommandText = "SELECT count(*) FROM \"" + name.Replace("\"", "\"\"", StringComparison.Ordinal) + "\";";
+            if (Convert.ToInt64(count.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture) != 0)
+                throw ResetRequired("Uninitialized application registration has nonempty SQL state.");
         }
+        transaction.Commit();
+    }
+
+    private static string[] ReadSchemaObjects(SqliteConnection connection, SqliteTransaction? transaction)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT type,length(name),name,length(sql),sql FROM sqlite_schema WHERE substr(name,1,7)<>'sqlite_' ORDER BY type,name LIMIT 65;";
+        using var reader = command.ExecuteReader();
+        var result = new List<string>();
+        while (reader.Read())
+        {
+            if (result.Count == 64 || reader.IsDBNull(3) ||
+                reader.GetInt64(1) is < 1 or > 128 || reader.GetInt64(3) is < 1 or > 16384)
+                throw ResetRequired("Clean application schema has unknown objects.");
+            result.Add(string.Concat(reader.GetString(0), "\0", reader.GetString(2), "\0", reader.GetString(4)));
+        }
+        return result.ToArray();
     }
 
     private static void ValidateDirectInboxState(
@@ -374,7 +457,7 @@ public sealed partial class SqliteDeepMailboxStore :
     {
         using var count = connection.CreateCommand();
         count.Transaction = transaction;
-        count.CommandText = "SELECT (SELECT count(*) FROM authenticated_dmc2_inbox_owner),(SELECT count(*) FROM authenticated_dmc2_inbox),(SELECT count(*) FROM authenticated_dmc2_inbox_forks),(SELECT count(*) FROM direct_text_outbox),(SELECT count(*) FROM direct_sender_sequences);";
+        count.CommandText = "SELECT (SELECT count(*) FROM authenticated_dmc2_inbox_owner),(SELECT count(*) FROM authenticated_dmc2_inbox),(SELECT count(*) FROM authenticated_dmc2_inbox_forks),(SELECT count(*) FROM direct_text_outbox),(SELECT count(*) FROM direct_sender_sequences),(SELECT count(*) FROM local_attachment_objects),(SELECT count(*) FROM local_attachment_chunks);";
         using (var reader = count.ExecuteReader())
         {
             if (!reader.Read()) throw ResetRequired("Clean direct inbox state is missing.");
@@ -383,13 +466,14 @@ public sealed partial class SqliteDeepMailboxStore :
             var forkCount = reader.GetInt64(2);
             var outboundCount = reader.GetInt64(3);
             var senderCount = reader.GetInt64(4);
+            var assetCount = reader.GetInt64(5); var chunkCount = reader.GetInt64(6);
             if (ownerCount is < 0 or > 1 ||
                 eventCount is < 0 or > 100_000 ||
                 forkCount < 0 || forkCount > eventCount ||
                 outboundCount is < 0 or > 100_000 ||
-                senderCount is < 0 or > 100_000 ||
+                senderCount is < 0 or > 100_000 || assetCount is < 0 or > 129 || chunkCount is < 0 or > 12_900 ||
                 ownerCount == 0 &&
-                    (eventCount != 0 || outboundCount != 0 || senderCount != 0))
+                    (eventCount != 0 || outboundCount != 0 || senderCount != 0 || assetCount != 0 || chunkCount != 0))
                 throw ResetRequired("Clean direct inbox ownership or cardinality is invalid.");
         }
         using var foreignKeys = connection.CreateCommand();

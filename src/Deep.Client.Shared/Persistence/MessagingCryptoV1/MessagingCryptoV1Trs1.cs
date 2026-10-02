@@ -95,6 +95,16 @@ internal static class MessagingCryptoV1Trs1
             throw new CryptographicException("TRS1 local directory differs from retained initial-session custody.");
     }
 
+    internal static void RequireRemoteDirectoryBinding(ReadOnlySpan<byte> encoded, ReadOnlySpan<byte> directoryHash)
+    {
+        if (directoryHash.Length != 32 || directoryHash.IndexOfAnyExcept((byte)0) < 0)
+            throw new ArgumentException("The retained remote directory hash must be nonzero.", nameof(directoryHash));
+        if (encoded.Length < PrefixSize + BindingSize)
+            throw new FormatException("TRS1 is truncated before its directional directory binding.");
+        if (!Fixed(encoded.Slice(PrefixSize + 208, 32), directoryHash))
+            throw new CryptographicException("TRS1 remote directory differs from retained initial-session custody.");
+    }
+
     internal static void RequireResponderContactBinding(
         ReadOnlySpan<byte> encoded,
         ReadOnlySpan<byte> remoteDeviceId,

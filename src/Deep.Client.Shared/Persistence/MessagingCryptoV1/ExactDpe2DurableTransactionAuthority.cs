@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using Deep.Protocol.MessagingCrypto;
 
@@ -51,8 +52,9 @@ internal sealed class ExactDpe2SqliteDurableTransactionAuthority(
 }
 
 /// <summary>
-/// Short-lived owned copy of a protocol plan. Every field is copied exactly
-/// once from the public defensive-copy surface and zeroed after the store call.
+/// Short-lived owned capture of a protocol plan. Every fresh public defensive
+/// copy is adopted directly and zeroed after the store call, without leaving
+/// a second untracked private-TRS/plaintext copy for GC.
 /// </summary>
 internal sealed class ExactDpe2ProtocolPlanSnapshot : IDisposable
 {
@@ -141,7 +143,13 @@ internal sealed class ExactDpe2ProtocolPlanSnapshot : IDisposable
 
     private byte[] Copy(ReadOnlyMemory<byte> source)
     {
-        var result = source.ToArray();
+        if (source.IsEmpty) return [];
+        // ExactDpe2DurablePersistencePlan.Copy returns a fresh full array for
+        // every getter. Fail closed if that ownership contract ever changes.
+        if (!MemoryMarshal.TryGetArray(source, out var segment) || segment.Array is null ||
+            segment.Offset != 0 || segment.Count != segment.Array.Length)
+            throw new CryptographicException("The exact DPE2 plan defensive-copy ownership differs.");
+        var result = segment.Array;
         owned.Add(result);
         return result;
     }

@@ -414,7 +414,7 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
                 throw MapTerminalFailure(terminal);
             }
 
-            ValidateCanonicalResponse(terminal.Body.Span, operation);
+            ValidateCanonicalResponse(terminal.Body.Span, operation, decodePolicies);
             PublishRouteSelection(
                 ReferenceEquals(route, primaryRoute)
                     ? PrivacyMailboxRouteSelection.Primary
@@ -440,7 +440,7 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
         }
     }
 
-    private static ReadOnlyMemory<byte> ValidateCanonicalMau2(
+    internal static ReadOnlyMemory<byte> ValidateCanonicalMau2(
         ReadOnlySpan<byte> canonicalMau2,
         MailboxAuthenticatedOperation expectedOperation)
     {
@@ -482,9 +482,10 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
         }
     }
 
-    private void ValidateCanonicalResponse(
+    internal static void ValidateCanonicalResponse(
         ReadOnlySpan<byte> response,
-        OnionOperation operation)
+        OnionOperation operation,
+        IMailboxClientDecodePolicyProvider decodePolicies)
     {
         byte[] roundTrip;
         try
@@ -572,7 +573,7 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
             "Privacy ingress rejected the request before forwarding.",
             exception);
 
-    private static Exception MapTerminalFailure(
+    internal static Exception MapTerminalFailure(
         VerifiedOnionTerminalResult terminal)
     {
         var code = terminal.FailureCode ?? throw new ClientMailboxDispatchOutcomeUnknownException(

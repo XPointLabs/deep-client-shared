@@ -575,7 +575,82 @@ public sealed class ClientMailboxAdapter
             "Mailbox retrieve route changed repeatedly before durable preparation.");
     }
 
-    private static byte[] RetrieveOperationId(
+    // The DID2 owner persists exact protected preparation before entering here.
+    // No signer or implicit request regeneration crosses this dispatch boundary.
+    internal async Task<ClientMailboxRetrieveResult> DispatchPreparedRetrieveAsync(
+        OutboxAccountScope outboxScope, MailboxCredentialSelector selector,
+        MailboxAuthenticatedRequestFrame prepared, CancellationToken cancellationToken = default) =>
+        await DispatchRetrieveAsync(outboxScope, selector, prepared, cancellationToken, allowPollRollover: false).ConfigureAwait(false) ??
+        throw new CryptographicException("Protected Retrieve no longer matches its exact traversal; no silent rollover is allowed.");
+
+    internal Task<ClientMailboxAckResult> DispatchPreparedAcknowledgementAsync(
+        OutboxAccountScope outboxScope, MailboxCredentialSelector selector,
+        MailboxAuthenticatedRequestFrame prepared, CancellationToken cancellationToken = default) =>
+        DispatchAcknowledgeAsync(outboxScope, selector, prepared, cancellationToken);
+
+    // Owner-only recovery input is the exact protected captured page, not a
+    // callback success flag. Independently verify actual SQL before finishing
+    // the interrupted page-commit/outcome-journal interval without another fetch.
+    internal async Task<ClientMailboxRetrieveResult> ResumeCapturedRetrieveAsync(
+        OutboxAccountScope outboxScope, MailboxCredentialSelector selector,
+        MailboxAuthenticatedRequestFrame prepared, ReadOnlyMemory<byte> capturedPage,
+        ClientMailboxTraversal originalTraversal, CancellationToken ct)
+    {
+        var authenticated = DecodeRequest(prepared, MailboxAuthenticatedOperation.Retrieve);
+        var request = MailboxAuthenticatedRequestTranscript.DecodeRetrieveBody(authenticated.Binding.CanonicalRequest.Span);
+        var page = MailboxClientCodec.DecodeRetrievePage(capturedPage.Span, decodePolicies.GetCurrent());
+        if (page.Epoch != request.Epoch || !FixedEquals(page.OperationId.Span, request.OperationId.Span) ||
+            page.Items.Count > request.MaximumItems || page.Items.Any(item => item.Cursor <= request.AfterCursor ||
+                !FixedEquals(item.Envelope.MailboxId.Bytes.Span, request.MailboxId.Bytes.Span) ||
+                !FixedEquals(item.Envelope.PlacementId.Bytes.Span, request.PlacementId.Bytes.Span)))
+            throw new CryptographicException("Captured page differs from its exact Retrieve.");
+        var route = await requests.ReadRouteAsync(selector, ct).ConfigureAwait(false);
+        if (!FixedEquals(RetrieveOperationId(route, originalTraversal), request.OperationId.Span) ||
+            originalTraversal.AfterCursor != request.AfterCursor || !FixedEquals(originalTraversal.ContinuationToken, request.ContinuationToken.Span))
+            throw new CryptographicException("Captured Retrieve differs from the original protected traversal.");
+        var scope = activation.ScopeFor(request.MailboxId, request.Epoch);
+        var actual = await state.ReadTraversalAsync(scope, ct).ConfigureAwait(false);
+        if (actual.PollGeneration != checked(originalTraversal.PollGeneration + 1) ||
+            actual.AfterCursor != (page.HasMore ? page.NextCursor : 0) ||
+            !FixedEquals(actual.ContinuationToken, page.HasMore ? page.ContinuationToken.Span : []))
+            throw new CryptographicException("Captured page has no exact committed SQL traversal.");
+        var inbox = await state.ReadDurableInboxAsync(scope, ct).ConfigureAwait(false);
+        foreach (var item in page.Items)
+        {
+            var retained = inbox.SingleOrDefault(value => value.Cursor == item.Cursor);
+            if (retained is null || !FixedEquals(MailboxClientCodec.EncodeEncryptedEnvelope(retained.Envelope), MailboxClientCodec.EncodeEncryptedEnvelope(item.Envelope)))
+                throw new CryptographicException("Captured page has no exact durable SQL inbox row.");
+        }
+        await using var policy = await requests.AcquireDispatchPolicyAsync(ct).ConfigureAwait(false);
+        requests.ReloadCommittedPolicy();
+        _ = await ResolveDispatchRouteAsync(selector, request.Epoch, request.MailboxId, request.PlacementId,
+            MailboxAuthenticatedOperation.Retrieve, ct).ConfigureAwait(false);
+        var logical = OutboxLogicalId.FromBytes(request.OperationId.Span);
+        var exact = prepared.GetCanonicalMau2Copy();
+        try
+        {
+            var snapshot = await ReadExactOutboxAsync(outboxScope, logical, OutboxDedupMaterial.FromBytes(authenticated.Binding.RequestDigest.Span), exact, ct).ConfigureAwait(false);
+            var evidence = ClientMailboxRetrieveOutcomeSummary.Encode(request, page, capturedPage.Span);
+            if (snapshot.State is TransportOutboxState.Accepted or TransportOutboxState.Durable)
+            {
+                var completed = snapshot.Attempts.Single(value => value.State ==
+                    (snapshot.State == TransportOutboxState.Accepted ? TransportOutboxAttemptState.Accepted : TransportOutboxAttemptState.Durable));
+                if (!FixedEquals(completed.GetEvidenceCopy(), evidence)) throw new CryptographicException("Captured Retrieve outcome differs from SQL evidence.");
+                if (snapshot.State == TransportOutboxState.Accepted) await PromoteAcceptedAsync(outboxScope, logical, snapshot, completed, evidence, ct).ConfigureAwait(false);
+            }
+            else
+            {
+                if (snapshot.State != TransportOutboxState.Attempted || snapshot.Attempts.Count == 0 ||
+                    snapshot.Attempts.Any(value => value.State != TransportOutboxAttemptState.Attempted || value.GetEvidenceCopy().Length != 0))
+                    throw new CryptographicException("Captured Retrieve has no actual interrupted transport attempt.");
+                await RecordOutcomeAsync(outboxScope, logical, snapshot.Attempts[^1].AttemptId, evidence, MailboxAuthenticatedOperation.Retrieve, ct).ConfigureAwait(false);
+            }
+            return new(actual.AfterCursor, page.HasMore, actual.GetContinuationTokenCopy(), page.Items);
+        }
+        finally { CryptographicOperations.ZeroMemory(exact); }
+    }
+
+    internal static byte[] RetrieveOperationId(
         ScopedMailboxResolvedRoute route,
         ClientMailboxTraversal traversal) =>
         RetrieveOperationId(
@@ -970,7 +1045,8 @@ public sealed class ClientMailboxAdapter
         OutboxAccountScope outboxScope,
         MailboxCredentialSelector selector,
         MailboxAuthenticatedRequestFrame authenticatedRequest,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool allowPollRollover = true)
     {
         ArgumentNullException.ThrowIfNull(authenticatedRequest);
         var canonicalMau2 = authenticatedRequest.GetCanonicalMau2Copy();
@@ -1052,6 +1128,8 @@ public sealed class ClientMailboxAdapter
         if (outboxSnapshot.Attempts.Count >=
             TransportOutboxLimits.MaxAttemptsPerItem)
         {
+            if (!allowPollRollover)
+                throw new InvalidOperationException("Protected Retrieve exhausted its exact retry budget; traversal cannot silently advance.");
             _ = await state.AdvanceRetrievePollAsync(
                 scope,
                 traversal,
@@ -1110,6 +1188,9 @@ public sealed class ClientMailboxAdapter
             page,
             cancellationToken)
             .ConfigureAwait(false);
+#if DEEP_TEST_INTERNALS
+        ClientMailboxRetrieveTestHooks.Hit(ClientMailboxRetrieveFailpoint.AfterPageCommit);
+#endif
         var summaryEvidence = ClientMailboxRetrieveOutcomeSummary.Encode(
             request,
             page,
@@ -1794,3 +1875,16 @@ public sealed class ClientMailboxAdapter
         }
     }
 }
+
+#if DEEP_TEST_INTERNALS
+internal enum ClientMailboxRetrieveFailpoint { AfterPageCommit }
+internal static class ClientMailboxRetrieveTestHooks
+{
+    private static readonly AsyncLocal<Action<ClientMailboxRetrieveFailpoint>?> Current = new();
+    internal static IDisposable Push(Action<ClientMailboxRetrieveFailpoint> action)
+    { var previous = Current.Value; Current.Value = action; return new Reset(previous); }
+    internal static void Hit(ClientMailboxRetrieveFailpoint point) => Current.Value?.Invoke(point);
+    private sealed class Reset(Action<ClientMailboxRetrieveFailpoint>? previous) : IDisposable
+    { public void Dispose() => Current.Value = previous; }
+}
+#endif

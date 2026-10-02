@@ -78,28 +78,7 @@ public sealed class DirectoryAuthorizedXpu1
         return new DirectoryAuthorizedXpu1(accountScope, exactXpu1.Span);
     }
 
-    public static DirectoryAuthorizedXpu1 FromVerified(
-        ContactStoreScope accountScope,
-        AuthoredPermanentAddressPublication publication)
-    {
-        ArgumentNullException.ThrowIfNull(accountScope);
-        ArgumentNullException.ThrowIfNull(publication);
-        var request = publication.Request;
-        if (!CryptographicOperations.FixedTimeEquals(
-                request.NetworkId.Span,
-                publication.Authorization.NetworkId.Span) ||
-            !CryptographicOperations.FixedTimeEquals(
-                publication.RecipientAccountId.Span,
-                accountScope.AccountId.Bytes.Span))
-        {
-            throw new ContactAddressPublicationException(
-                ContactAddressPublicationFailure.AccountScopeMismatch,
-                "The verified XPU1 belongs to another network or Deep account scope.");
-        }
-        return new DirectoryAuthorizedXpu1(
-            accountScope,
-            request.CanonicalBytes.Span);
-    }
+
 }
 
 internal sealed class PrivacyRoutedContactAddressPublicationTransport(

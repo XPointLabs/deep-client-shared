@@ -1,185 +1,70 @@
 using System.Buffers.Binary;
 using System.Security.Cryptography;
-using System.Text;
-using Deep.Client.Shared.Domain;
 using Deep.Client.Shared.Persistence;
 using Deep.Protocol.ContactV1;
+using Deep.Protocol.ContactV2;
 using Deep.Protocol.DeepExtension.MailboxCapabilities;
 using Sodium;
 
 namespace Deep.Client.Shared.Services.ContactV1;
 
-/// <summary>
-/// Owns random mailbox holder keys in the current Deep account secure-storage
-/// namespace. A key is scoped to one account generation, locator, exact
-/// reachability route and grant role; no account/device/recovery key is reused.
-/// </summary>
-public sealed class ReachabilityMailboxHolderAuthority
+/// <summary>Narrow DID2 route-bound holder signer. No public key creation,
+/// seed/storage access or legacy identity owner; durable account custody must
+/// be supplied by the account owner before this internal factory is used.</summary>
+public static class ReachabilityMailboxHolderAuthority
 {
-    private static ReadOnlySpan<byte> SlotDomain =>
-        "Deep/Client/ContactV1/mailbox-holder-slot/v1"u8;
-    private static readonly SemaphoreSlim MutationGate = new(1, 1);
-    private readonly IDeepSecureStorage secureStorage;
-
-    public ReachabilityMailboxHolderAuthority(IDeepSecureStorage secureStorage)
+    internal static ReachabilityMailboxHolderSigner OpenRetained(
+        VerifiedDeepIdV2ContactRouteClosure route, ReadOnlyMemory<byte> locatorHash,
+        ReadOnlyMemory<byte> roleCapability, MailboxCapabilityDomain domain,
+        ReadOnlySpan<byte> retainedSeed)
     {
-        this.secureStorage = secureStorage ??
-            throw new ArgumentNullException(nameof(secureStorage));
+        ArgumentNullException.ThrowIfNull(route);
+        if (retainedSeed.Length != 32 || retainedSeed.IndexOfAnyExcept((byte)0) < 0)
+            throw new CryptographicException("An exact nonzero retained holder seed is required.");
+        var binding = BoundScope.Create(route, locatorHash, roleCapability, domain);
+        try { return new(binding, retainedSeed); }
+        catch { binding.Dispose(); throw; }
     }
 
-    public async ValueTask<ReachabilityMailboxHolderSigner> OpenOrCreateAsync(
-        DeepLocalIdentitySnapshot identity,
-        VerifiedContactRouteClosure route,
-        ReadOnlyMemory<byte> locatorHash,
-        MailboxCapabilityDomain domain,
-        CancellationToken cancellationToken = default)
+    internal sealed class BoundScope : IDisposable
     {
-        var binding = BoundScope.Create(identity, route, locatorHash, domain);
-        await MutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
+        private BoundScope(VerifiedDeepIdV2ContactRouteClosure route,
+            ReadOnlySpan<byte> locator, ReadOnlySpan<byte> capability, MailboxCapabilityDomain domain)
         {
-            using var stored = await secureStorage.ReadOwnedAsync(
-                    binding.Slot,
-                    cancellationToken)
-                .ConfigureAwait(false);
-            byte[] seed;
-            if (stored is null)
-            {
-                seed = RandomNumberGenerator.GetBytes(32);
-                try
-                {
-                    await secureStorage.WriteBatchAsync(
-                            [new DeepSecureStorageWrite(binding.Slot, seed)],
-                            cancellationToken)
-                        .ConfigureAwait(false);
-                }
-                catch
-                {
-                    CryptographicOperations.ZeroMemory(seed);
-                    throw;
-                }
-            }
-            else
-            {
-                if (stored.Length != 32)
-                    throw new CryptographicException(
-                        "The protected reachability mailbox holder seed is malformed.");
-                seed = new byte[32];
-                stored.CopyTo(seed);
-            }
-            try
-            {
-                return new ReachabilityMailboxHolderSigner(binding, seed);
-            }
-            finally
-            {
-                CryptographicOperations.ZeroMemory(seed);
-            }
-        }
-        finally
-        {
-            MutationGate.Release();
-        }
-    }
-
-    public async Task DeleteAsync(
-        DeepLocalIdentitySnapshot identity,
-        VerifiedContactRouteClosure route,
-        ReadOnlyMemory<byte> locatorHash,
-        MailboxCapabilityDomain domain,
-        CancellationToken cancellationToken = default)
-    {
-        var binding = BoundScope.Create(identity, route, locatorHash, domain);
-        await MutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
-        {
-            await secureStorage.DeleteBatchAsync([binding.Slot], cancellationToken)
-                .ConfigureAwait(false);
-        }
-        finally
-        {
-            MutationGate.Release();
-        }
-    }
-
-    internal sealed class BoundScope
-    {
-        private BoundScope(
-            string slot,
-            ReadOnlySpan<byte> networkId,
-            ReadOnlySpan<byte> locatorHash,
-            ReadOnlySpan<byte> pmt2Reference,
-            ReadOnlySpan<byte> pms2Hash,
-            MailboxCapabilityDomain domain)
-        {
-            Slot = slot;
-            NetworkId = networkId.ToArray();
-            LocatorHash = locatorHash.ToArray();
-            Pmt2Reference = pmt2Reference.ToArray();
-            Pms2Hash = pms2Hash.ToArray();
+            Route = route;
+            NetworkId = route.Network.NetworkId.ToArray();
+            LocatorHash = locator.ToArray(); RoleCapability = capability.ToArray();
+            Pmt2Reference = ContactCodec.ArtifactReference("PMT2", route.Route.Projection).CanonicalBytes.ToArray();
+            Pms2Hash = route.Route.Selection.ArtifactHash.ToArray();
+            PlacementCommitment = MailboxPlacementCommitment.Compute(new BlindedPlacementId(route.Route.Reachability.Field(10).Span));
+            Epoch = BinaryPrimitives.ReadUInt64BigEndian(route.Route.Selection.Field(4).Span);
             Domain = domain;
         }
-
-        internal string Slot { get; }
+        internal VerifiedDeepIdV2ContactRouteClosure Route { get; }
         internal byte[] NetworkId { get; }
         internal byte[] LocatorHash { get; }
+        internal byte[] RoleCapability { get; }
         internal byte[] Pmt2Reference { get; }
         internal byte[] Pms2Hash { get; }
+        internal byte[] PlacementCommitment { get; }
+        internal ulong Epoch { get; }
         internal MailboxCapabilityDomain Domain { get; }
-
-        internal static BoundScope Create(
-            DeepLocalIdentitySnapshot identity,
-            VerifiedContactRouteClosure route,
-            ReadOnlyMemory<byte> locatorHash,
-            MailboxCapabilityDomain domain)
+        internal static BoundScope Create(VerifiedDeepIdV2ContactRouteClosure route,
+            ReadOnlyMemory<byte> locator, ReadOnlyMemory<byte> capability, MailboxCapabilityDomain domain)
         {
-            ArgumentNullException.ThrowIfNull(identity);
-            ArgumentNullException.ThrowIfNull(route);
-            if (domain is not (
-                MailboxCapabilityDomain.Deposit or
-                MailboxCapabilityDomain.Retrieve))
+            if (domain is not (MailboxCapabilityDomain.Deposit or MailboxCapabilityDomain.Retrieve))
                 throw new ArgumentOutOfRangeException(nameof(domain));
-            if (locatorHash.Length != 32 ||
-                locatorHash.Span.IndexOfAnyExcept((byte)0) < 0)
-                throw new ArgumentException(
-                    "A non-zero 32-byte ContactResolve locator is required.",
-                    nameof(locatorHash));
-            var network = route.Reachability.Field(1);
-            if (!identity.Account.AccountIdentity.NetworkId.Matches(network.Span))
-                throw new CryptographicException(
-                    "The reachability route belongs to another Deep network.");
-            var pmt2Reference = ContactCodec.ArtifactReference(
-                "PMT2", route.Projection).CanonicalBytes;
-            var pms2Hash = route.Selection.ArtifactHash;
-            var accountId = identity.Account.AccountIdentity.AccountId.Bytes;
-            var generation = identity.Account.AccountIdentity.AccountGeneration;
-            using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-            hash.AppendData(SlotDomain);
-            hash.AppendData(network.Span);
-            hash.AppendData(accountId.Span);
-            Span<byte> scalar = stackalloc byte[8];
-            BinaryPrimitives.WriteUInt64BigEndian(scalar, generation);
-            hash.AppendData(scalar);
-            hash.AppendData(locatorHash.Span);
-            hash.AppendData(route.Reachability.ArtifactHash.Span);
-            hash.AppendData([(byte)domain]);
-            var digest = hash.GetHashAndReset();
-            try
-            {
-                return new BoundScope(
-                    "deep.store.v1.mailbox-holder." +
-                        Convert.ToHexStringLower(digest),
-                    network.Span,
-                    locatorHash.Span,
-                    pmt2Reference.Span,
-                    pms2Hash.Span,
-                    domain);
-            }
-            finally
-            {
-                CryptographicOperations.ZeroMemory(digest);
-            }
+            if (locator.Length != 32 || locator.Span.IndexOfAnyExcept((byte)0) < 0 ||
+                capability.Length != 32 || capability.Span.IndexOfAnyExcept((byte)0) < 0)
+                throw new ArgumentException("Exact nonzero holder locator/capability scope is required.");
+            var deposit = route.Route.Reachability.Field(10);
+            var matchesDeposit = CryptographicOperations.FixedTimeEquals(capability.Span, deposit.Span);
+            if (domain == MailboxCapabilityDomain.Deposit && !matchesDeposit ||
+                domain == MailboxCapabilityDomain.Retrieve && matchesDeposit)
+                throw new CryptographicException("The holder role/capability differs from its DID2 route.");
+            return new(route, locator.Span, capability.Span, domain);
         }
+        public void Dispose() => CryptographicOperations.ZeroMemory(RoleCapability);
     }
 
     public sealed class ReachabilityMailboxHolderSigner :
@@ -214,7 +99,8 @@ public sealed class ReachabilityMailboxHolderAuthority
             }
         }
 
-        public ReadOnlyMemory<byte> Ed25519PublicKey => publicKey.ToArray();
+        public ReadOnlyMemory<byte> Ed25519PublicKey
+        { get { ObjectDisposedException.ThrowIf(seed is null, this); return publicKey.ToArray(); } }
 
         public byte[] GetEd25519PublicKey()
         {
@@ -233,11 +119,12 @@ public sealed class ReachabilityMailboxHolderAuthority
                     "The XMG1 signature destination is too short.",
                     nameof(signature64));
             ValidateXmg1SigningInput(exactSigningInput.Span);
+            await binding.Route.EnsureCurrentAsync(cancellationToken).ConfigureAwait(false);
             var signature = Sign(exactSigningInput.Span);
             try
             {
                 signature.CopyTo(signature64);
-                await Task.CompletedTask.ConfigureAwait(false);
+                await binding.Route.EnsureCurrentAsync(cancellationToken).ConfigureAwait(false);
                 return signature.Length;
             }
             finally
@@ -259,6 +146,7 @@ public sealed class ReachabilityMailboxHolderAuthority
             var current = Interlocked.Exchange(ref seed, null);
             if (current is not null)
                 CryptographicOperations.ZeroMemory(current);
+            binding.Dispose();
         }
 
         private byte[] Sign(ReadOnlySpan<byte> input)
@@ -333,6 +221,8 @@ public sealed class ReachabilityMailboxHolderAuthority
                 : MailboxCapabilityDomain.Retrieve;
             if (binding.Domain != expectedDomain ||
                 grant.Domain != expectedDomain ||
+                grant.Epoch != binding.Epoch ||
+                !Fixed(grant.PlacementCommitment.Span, binding.PlacementCommitment) ||
                 !Fixed(grant.NetworkId.Span, binding.NetworkId) ||
                 !Fixed(grant.HolderPublicKey.Span, publicKey))
                 throw new CryptographicException(
@@ -378,6 +268,7 @@ public sealed class ReachabilityMailboxHolderAuthority
                 var field = projection.Slice(offset, Xmg1ProjectionLengths[index]);
                 if (index == 0 && !Fixed(field, binding.NetworkId) ||
                     index == 2 && !Fixed(field, binding.LocatorHash) ||
+                    index == 3 && !Fixed(field, binding.RoleCapability) ||
                     index == 4 && !Fixed(field, publicKey) ||
                     index == 5 && field[0] != (byte)binding.Domain ||
                     index == 6 && !Fixed(field, binding.Pmt2Reference) ||

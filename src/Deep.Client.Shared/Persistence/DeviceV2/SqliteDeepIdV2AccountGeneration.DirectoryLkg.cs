@@ -51,7 +51,7 @@ internal static partial class SqliteDeepIdV2AccountGeneration
     private sealed class DirectoryLkgStore(
         IDeepSecureStorage storage, DeepIdV2AccountFileLease accountLease,
         string path, AccountBinding binding, AccountDirectoryProtectedLkg genesis)
-        : IDeepIdV2DirectoryProtectedLkgStore
+        : IDeepIdV2DirectoryProtectedLkgStore, IDeepIdV2DirectoryProtectedLeaseRead
     {
         private const int DirectoryRootKind = 2;
         private readonly string markerPrefix = "deep.store.v2." +
@@ -69,6 +69,24 @@ internal static partial class SqliteDeepIdV2AccountGeneration
                     "The DID2 directory authority belongs to another network.");
             using var held = await accountLease.AcquireAsync(cancellationToken)
                 .ConfigureAwait(false);
+            return await RestoreUnderLeaseAsync(authority, allowGenesis: true, cancellationToken).ConfigureAwait(false);
+        }
+
+        public async ValueTask<AccountDirectoryProtectedLkg> ReadExistingUnderLeaseAsync(
+            VerifiedXPointNetworkAuthority authority, HeldDeepIdV2AccountLease held, CancellationToken ct)
+        {
+            ArgumentNullException.ThrowIfNull(held);
+            using var borrow = held.BorrowFor(accountLease);
+            var result = await RestoreUnderLeaseAsync(authority, allowGenesis: false, ct).ConfigureAwait(false);
+            held.RequireOwner(accountLease); return result;
+        }
+
+        private async ValueTask<AccountDirectoryProtectedLkg> RestoreUnderLeaseAsync(
+            VerifiedXPointNetworkAuthority authority, bool allowGenesis, CancellationToken cancellationToken)
+        {
+            ArgumentNullException.ThrowIfNull(authority);
+            if (!Fixed(authority.NetworkId.Span, binding.NetworkId))
+                throw new CryptographicException("The DID2 directory authority belongs to another network.");
             using var connection = await OpenVerifiedAsync(cancellationToken)
                 .ConfigureAwait(false);
             using var transaction = connection.BeginTransaction(deferred: false);
@@ -77,6 +95,7 @@ internal static partial class SqliteDeepIdV2AccountGeneration
                 .ConfigureAwait(false);
             if (row is null)
             {
+                if (!allowGenesis) throw new CryptographicException("The protected DID2 directory floor is absent; readonly handoff cannot provision it.");
                 if (marked)
                     throw new CryptographicException(
                         "The protected DID2 directory floor disappeared after provisioning.");

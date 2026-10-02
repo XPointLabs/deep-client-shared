@@ -24,7 +24,7 @@ namespace Deep.Client.Shared.Persistence.DeviceV2;
 /// process-independent lease. Only a fully verified durable genesis winner
 /// may be resumed and promoted after an interrupted index publication.
 /// </summary>
-internal sealed class ProtectedDeepIdV2AccountOwner
+internal sealed partial class ProtectedDeepIdV2AccountOwner
 {
     private const string CreationIntentSlot = "deep.store.v2.creation-intent";
     private const string CreationCandidateSlot = "deep.store.v2.creation-candidate";
@@ -121,11 +121,18 @@ internal sealed class ProtectedDeepIdV2AccountOwner
         Deep.Protocol.DeepExtension.PrivacyRouting.OnionTrustedTimeAuthority trustedTime,
         int maximumMessagesWithoutPqInjection, CancellationToken cancellationToken)
     {
+        ProtectedDph2PreClaimJournal.RequireIntent(logicalIntent.Span);
+        var ownedIntent = logicalIntent.ToArray();
         using var held = await lease.AcquireAsync(cancellationToken).ConfigureAwait(false);
         using var current = await RequireCurrentUnderLeaseAsync(trustedUnixSeconds,
             mlDsa65, cancellationToken).ConfigureAwait(false);
+        _ = DeepIdV2AccountService.RequireOwnCurrentDirectory(current, currentProof, currentBootId.Span, currentMonotonicSample);
+        using var completedStore = await SqliteDeepIdV2AccountGeneration.OpenCurrentDeviceStateStoreAsync(
+            storage, sqlStatePath, current, cancellationToken).ConfigureAwait(false);
+        if (await completedStore.HasCompletedInitialSessionAsync(ownedIntent, cancellationToken).ConfigureAwait(false))
+            throw new InvalidOperationException("This intent is already completed; retry exact initial-session custody, not preclaim secrets.");
         return await SqliteDeepIdV2AccountGeneration.BeginOrRestorePreClaimUnderLeaseAsync(
-            storage, current, logicalIntent, currentProof, currentBootId, currentMonotonicSample, trustedTime,
+            storage, current, ownedIntent, currentProof, currentBootId, currentMonotonicSample, trustedTime,
             maximumMessagesWithoutPqInjection, cancellationToken).ConfigureAwait(false);
     }
 
@@ -151,12 +158,32 @@ internal sealed class ProtectedDeepIdV2AccountOwner
         if (committed.Disposition is not (ProtectedCurrentDmd1CommitDisposition.Applied or
             ProtectedCurrentDmd1CommitDisposition.ExactReplay))
             throw new CryptographicException("The DID2 current device directory cannot authorize initial-session custody.");
+        var prior = await store.FindCompletedInitialSessionAsync(logicalIntent, offering, directory, authority,
+            claim, sessionInit, firstEvent, cancellationToken).ConfigureAwait(false);
+        if (prior is not null) return prior;
         using var started = await SqliteDeepIdV2AccountGeneration.BeginOrRestorePreClaimUnderLeaseAsync(
             storage, current, logicalIntent, currentProof, currentBootId, currentMonotonicSample,
             trustedTime, maximumMessagesWithoutPqInjection, cancellationToken).ConfigureAwait(false);
         return await store.CommitInitialSessionAsync(logicalIntent, started, offering, directory,
             authority, claim, currentProof, trustedTime, sessionInit, firstEvent,
             maximumMessagesWithoutPqInjection, cancellationToken).ConfigureAwait(false);
+    }
+
+    internal async Task<Did2InitialKeyRetirementReceipt> RetireInitialMessagingKeysAsync(
+        ulong trustedUnixSeconds, IDeepMlDsa65Verifier mlDsa65, Did2InitialStateTransfer transfer, CancellationToken ct)
+    {
+        using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
+        using var current = await RequireCurrentUnderLeaseAsync(trustedUnixSeconds, mlDsa65, ct).ConfigureAwait(false);
+        if (!Did2InitialStateTransfer.Fixed(transfer.Scope.LocalAccount, current.AccountId.Span) ||
+            !Did2InitialStateTransfer.Fixed(transfer.Scope.Network, networkId))
+            throw new CryptographicException("Initial retirement belongs to another account owner.");
+        if (transfer.Scope.IsInitiator)
+        {
+            using var store = await SqliteDeepIdV2AccountGeneration.OpenCurrentDeviceStateStoreAsync(storage,
+                sqlStatePath, current, ct).ConfigureAwait(false);
+            return await store.RetireInitialKeysUnderLeaseAsync(transfer, ct).ConfigureAwait(false);
+        }
+        return await SqliteDeepIdV2AccountGeneration.RetireReceiverUnderLeaseAsync(storage, sqlStatePath, current, transfer, ct).ConfigureAwait(false);
     }
 
     internal async ValueTask<SqliteDeviceStateStore>
@@ -328,6 +355,8 @@ internal sealed class ProtectedDeepIdV2AccountOwner
                 throw new InvalidOperationException(
                     "An unpublished durable DID2/DAB2 winner must be recovered before reset.");
         }
+        SqliteDeepIdV2AccountGeneration.DeleteMessagingAfterExplicitReset(sqlStatePath);
+        SqliteDeepIdV2AccountGeneration.DeleteApplicationAfterExplicitReset(sqlStatePath);
         SqliteDeepIdV2AccountGeneration.DeleteDeviceStateAfterExplicitReset(
             sqlStatePath);
         SqliteDeepIdV2AccountGeneration.DeletePreKeyStateAfterExplicitReset(
@@ -386,6 +415,8 @@ internal sealed class ProtectedDeepIdV2AccountOwner
                     storage, networkId, current.AccountId, current.DisplayName,
                     current.Verified, allowCreate: false, cancellationToken)
                     .ConfigureAwait(false);
+                await SqliteDeepIdV2AccountGeneration.ReconcilePendingReceiverUnderLeaseAsync(storage, sqlStatePath,
+                    current, cancellationToken).ConfigureAwait(false);
                 return current;
             }
             catch

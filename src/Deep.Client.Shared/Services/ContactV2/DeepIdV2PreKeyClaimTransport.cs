@@ -45,8 +45,10 @@ internal sealed class DeepIdV2PreKeyClaimTransport(
         }
         // The fixed coordinator completes both durable replica operations.
         // There is no second independent claim or generated retry operation.
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        budget.CancelAfter(TimeSpan.FromSeconds(30));
         var response = await onion.SendExactAsync(canonical,
-            placement.RankedReplicaNodeIds[0], cancellationToken).ConfigureAwait(false);
+            placement.RankedReplicaNodeIds[0], budget.Token).AsTask().WaitAsync(budget.Token).ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
         RequirePlacement(response.PathAuthority, request);
         authority.Network.EnsureCurrent();

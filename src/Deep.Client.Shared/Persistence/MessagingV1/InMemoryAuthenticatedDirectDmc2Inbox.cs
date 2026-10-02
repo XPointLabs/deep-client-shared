@@ -10,15 +10,25 @@ internal sealed class InMemoryAuthenticatedDirectDmc2Inbox : IDisposable
     private readonly object gate = new();
     private readonly Dictionary<string, byte[]> events = new(StringComparer.Ordinal);
     private readonly HashSet<string> forks = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> authoredPositions = new(StringComparer.Ordinal);
     private byte[]? localAccountId;
     private ulong localAccountGeneration;
     private bool disposed;
 
     internal Task<DirectDmc2InboxDisposition> MaterializeDirectDmc2Async(
-        AuthenticatedDirectDmc2 handoff,
-        CancellationToken cancellationToken = default)
+        AuthenticatedDirectDmc2 handoff, CancellationToken cancellationToken = default) =>
+        MaterializeAuthenticatedDmc2Async(handoff, cancellationToken);
+
+    internal Task<DirectDmc2InboxDisposition> MaterializeContactAcceptAsync(
+        AuthenticatedContactAcceptDmc2 handoff, CancellationToken cancellationToken = default) =>
+        MaterializeAuthenticatedDmc2Async(handoff, cancellationToken);
+
+    private Task<DirectDmc2InboxDisposition> MaterializeAuthenticatedDmc2Async(
+        IAuthenticatedDmc2InboxEvent handoff, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(handoff);
+        if (handoff is not AuthenticatedDirectDmc2 and not AuthenticatedContactAcceptDmc2)
+            throw new CryptographicException("Only closed authenticated event handoffs can materialize.");
         cancellationToken.ThrowIfCancellationRequested();
         lock (gate)
         {
@@ -34,6 +44,17 @@ internal sealed class InMemoryAuthenticatedDirectDmc2Inbox : IDisposable
                 var exact = handoff.ExactDmc2.ToArray();
                 try
                 {
+                    var position = Position(ApplicationCoreCodec.DecodeDmc2(exact));
+                    if (authoredPositions.TryGetValue(position, out var positionKey))
+                    {
+                        if (forks.Contains(positionKey))
+                            return Task.FromResult(DirectDmc2InboxDisposition.ForkLatched);
+                        if (Fixed(events[positionKey], exact))
+                            return Task.FromResult(DirectDmc2InboxDisposition.ExactReplay);
+                        cancellationToken.ThrowIfCancellationRequested();
+                        forks.Add(positionKey);
+                        return Task.FromResult(DirectDmc2InboxDisposition.ForkLatched);
+                    }
                     if (events.TryGetValue(key, out var incumbent))
                     {
                         if (Fixed(incumbent, exact))
@@ -48,6 +69,7 @@ internal sealed class InMemoryAuthenticatedDirectDmc2Inbox : IDisposable
                     cancellationToken.ThrowIfCancellationRequested();
                     BindOwner(local, handoff.LocalAccountGeneration);
                     events.Add(key, exact.ToArray());
+                    authoredPositions.Add(position, key);
                     return Task.FromResult(DirectDmc2InboxDisposition.Materialized);
                 }
                 finally { CryptographicOperations.ZeroMemory(exact); }
@@ -74,7 +96,7 @@ internal sealed class InMemoryAuthenticatedDirectDmc2Inbox : IDisposable
             {
                 ThrowIfDisposed();
                 CheckOwner(local, batch.LocalAccountGeneration);
-                var newItems = new List<(string Key, byte[] Exact)>(exacts.Count);
+                var newItems = new List<(string Key, string Position, byte[] Exact)>(exacts.Count);
                 foreach (var exact in exacts)
                 {
                     var parsed = ApplicationCoreCodec.DecodeDmc2(exact);
@@ -85,6 +107,16 @@ internal sealed class InMemoryAuthenticatedDirectDmc2Inbox : IDisposable
                         parsed.LogicalMessageId.Span, parsed.SenderDeviceId.Span);
                     if (forks.Contains(key))
                         return Task.FromResult(DirectDmc2InboxDisposition.ForkLatched);
+                    var position = Position(parsed);
+                    if (authoredPositions.TryGetValue(position, out var positionKey))
+                    {
+                        if (forks.Contains(positionKey))
+                            return Task.FromResult(DirectDmc2InboxDisposition.ForkLatched);
+                        if (Fixed(events[positionKey], exact)) continue;
+                        cancellationToken.ThrowIfCancellationRequested();
+                        forks.Add(positionKey);
+                        return Task.FromResult(DirectDmc2InboxDisposition.ForkLatched);
+                    }
                     if (events.TryGetValue(key, out var incumbent))
                     {
                         if (Fixed(incumbent, exact)) continue;
@@ -93,13 +125,17 @@ internal sealed class InMemoryAuthenticatedDirectDmc2Inbox : IDisposable
                         forks.Add(key);
                         return Task.FromResult(DirectDmc2InboxDisposition.ForkLatched);
                     }
-                    newItems.Add((key, exact));
+                    newItems.Add((key, position, exact));
                 }
                 if (events.Count + newItems.Count > MaximumEvents)
                     return Task.FromResult(DirectDmc2InboxDisposition.CapacityExceeded);
                 cancellationToken.ThrowIfCancellationRequested();
                 BindOwner(local, batch.LocalAccountGeneration);
-                foreach (var item in newItems) events.Add(item.Key, item.Exact.ToArray());
+                foreach (var item in newItems)
+                {
+                    events.Add(item.Key, item.Exact.ToArray());
+                    authoredPositions.Add(item.Position, item.Key);
+                }
                 return Task.FromResult(newItems.Count == 0
                     ? DirectDmc2InboxDisposition.ExactReplay
                     : DirectDmc2InboxDisposition.Materialized);
@@ -152,6 +188,7 @@ internal sealed class InMemoryAuthenticatedDirectDmc2Inbox : IDisposable
                 CryptographicOperations.ZeroMemory(value);
             events.Clear();
             forks.Clear();
+            authoredPositions.Clear();
         }
     }
 
@@ -183,6 +220,12 @@ internal sealed class InMemoryAuthenticatedDirectDmc2Inbox : IDisposable
 
     private static bool Fixed(ReadOnlySpan<byte> left, ReadOnlySpan<byte> right) =>
         left.Length == right.Length && CryptographicOperations.FixedTimeEquals(left, right);
+
+    private static string Position(ParsedDmc2 parsed) =>
+        string.Concat(Convert.ToHexString(parsed.ConversationId.Span), ":",
+            Convert.ToHexString(parsed.SenderAccountId.Span), ":",
+            Convert.ToHexString(parsed.SenderDeviceId.Span), ":",
+            parsed.SenderClientSequence.ToString(System.Globalization.CultureInfo.InvariantCulture));
 
     private static void ValidateId(ReadOnlyMemory<byte> value, string name)
     {

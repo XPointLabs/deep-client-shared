@@ -185,6 +185,13 @@ public interface IDeepSecureStorage
     Task<bool> CompareExchangeAsync(string slot, ReadOnlyMemory<byte> expected,
         ReadOnlyMemory<byte> replacement, CancellationToken cancellationToken = default);
 
+    /// <summary>Atomically replaces an exact existing value and inserts all new
+    /// slots. A missing/conflicting predecessor or existing insertion returns false
+    /// without mutation. Not upsert; never emulate with separate writes.</summary>
+    Task<bool> CompareExchangeAndInsertAsync(string slot, ReadOnlyMemory<byte> expected,
+        ReadOnlyMemory<byte> replacement, IReadOnlyList<DeepSecureStorageWrite> insertions,
+        CancellationToken cancellationToken = default);
+
     Task DeleteBatchAsync(
         IReadOnlyList<string> slots,
         CancellationToken cancellationToken = default);
@@ -209,10 +216,32 @@ public sealed class InMemoryDeepSecureStorage : IDeepSecureStorage, IDisposable
     private readonly object gate = new();
     private int disposed;
 
+    public Task<bool> CompareExchangeAndInsertAsync(string slot, ReadOnlyMemory<byte> expected,
+        ReadOnlyMemory<byte> replacement, IReadOnlyList<DeepSecureStorageWrite> insertions,
+        CancellationToken cancellationToken = default)
+    {
+        using var batch = new DeepSecureStorageRegistration(slot, expected, replacement, insertions);
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (gate)
+        {
+            ThrowIfDisposed(); cancellationToken.ThrowIfCancellationRequested();
+            if (!values.TryGetValue(slot, out var current) ||
+                !CryptographicOperations.FixedTimeEquals(current, batch.Expected) ||
+                batch.Insertions.Keys.Any(values.ContainsKey)) return Task.FromResult(false);
+            batch.ValidateCapacity(values);
+            // Allocate the complete successor before altering the authoritative map.
+            var successor = batch.CopySuccessor();
+            values[slot] = successor[slot];
+            foreach (var pair in successor) if (pair.Key != slot) values[pair.Key] = pair.Value;
+            CryptographicOperations.ZeroMemory(current);
+            return Task.FromResult(true);
+        }
+    }
+
     public Task<bool> CompareExchangeAsync(string slot, ReadOnlyMemory<byte> expected,
         ReadOnlyMemory<byte> replacement, CancellationToken cancellationToken = default)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(slot);
+        DeepSecureStorageRegistration.ValidateSlot(slot);
         if (expected.IsEmpty || replacement.IsEmpty || expected.Length > 1024 * 1024 || replacement.Length > 1024 * 1024)
             throw new ArgumentException("Secure-storage replacement is outside its byte bound.");
         cancellationToken.ThrowIfCancellationRequested();
@@ -222,7 +251,11 @@ public sealed class InMemoryDeepSecureStorage : IDeepSecureStorage, IDisposable
             cancellationToken.ThrowIfCancellationRequested();
             if (!values.TryGetValue(slot, out var current) ||
                 !CryptographicOperations.FixedTimeEquals(current, expected.Span)) return Task.FromResult(false);
-            values[slot] = replacement.ToArray();
+            var copy = replacement.ToArray();
+            try { DeepSecureStorageRegistration.ValidateInventory(values.Where(pair => pair.Key != slot)
+                .Append(new KeyValuePair<string, byte[]>(slot, copy))); }
+            catch { CryptographicOperations.ZeroMemory(copy); throw; }
+            values[slot] = copy;
             CryptographicOperations.ZeroMemory(current);
             return Task.FromResult(true);
         }
@@ -231,7 +264,7 @@ public sealed class InMemoryDeepSecureStorage : IDeepSecureStorage, IDisposable
     public Task<OwnedDeepSecret?> ReadOwnedAsync(string slot, CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
-        ArgumentException.ThrowIfNullOrWhiteSpace(slot);
+        DeepSecureStorageRegistration.ValidateSlot(slot);
         cancellationToken.ThrowIfCancellationRequested();
         lock (gate)
         {
@@ -249,7 +282,8 @@ public sealed class InMemoryDeepSecureStorage : IDeepSecureStorage, IDisposable
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(writes);
         cancellationToken.ThrowIfCancellationRequested();
-        if (writes.Count == 0
+        _ = DeepSecureStorageRegistration.ValidateWrites(writes);
+        if (writes.Count == 0 || writes.Count > DeepSecureStorageRegistration.MaximumEntries
             || writes.Select(static item => item.Slot).Distinct(StringComparer.Ordinal).Count() != writes.Count
             || writes.Any(static item => string.IsNullOrWhiteSpace(item.Slot) || item.Value.IsEmpty))
         {
@@ -274,6 +308,8 @@ public sealed class InMemoryDeepSecureStorage : IDeepSecureStorage, IDisposable
                         throw new InvalidOperationException("Secure-storage slot already exists.");
                     }
                 }
+
+                DeepSecureStorageRegistration.ValidateInventory(values.Concat(copies));
 
                 foreach (var item in copies)
                 {

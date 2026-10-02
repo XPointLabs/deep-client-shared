@@ -11,6 +11,23 @@ namespace Deep.Client.Shared.Production.Tests;
 public sealed class DeepIdV2DirectoryProofClientTests
 {
     [Fact]
+    public async Task IgnoredTransportCancellationReturnsAndWipesLateResponseWithoutVerifyingIt()
+    {
+        var pending = new TaskCompletionSource<HttpServiceResponse>();
+        using var cancel = new CancellationTokenSource();
+        var bounded = DeepIdV2DirectoryProofClient.AwaitBoundedResponseAsync(pending.Task, cancel.Token);
+        cancel.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => bounded.WaitAsync(TimeSpan.FromSeconds(2)));
+        var body = new byte[] { 0x71, 0x72 };
+        var response = new HttpServiceResponse(System.Net.HttpStatusCode.OK, body);
+        pending.SetResult(response);
+        // The registered cleanup continuation runs synchronously on SetResult.
+        await pending.Task;
+        Assert.All(body, value => Assert.Equal((byte)0, value));
+        Assert.Throws<ObjectDisposedException>(() => _ = response.Body);
+    }
+
+    [Fact]
     public void RetryableProofFailureHasClosedBoundedSchedulingMetadata()
     {
         var failure = new DeepIdV2DirectoryProofUnavailableException(

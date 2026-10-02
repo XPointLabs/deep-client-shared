@@ -1413,6 +1413,7 @@ public sealed partial class SqliteSessionStore :
                 PRAGMA busy_timeout=5000;
                 PRAGMA journal_mode=WAL;
                 PRAGMA synchronous=FULL;
+                PRAGMA secure_delete=ON;
                 """;
             await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             return connection;
@@ -1431,6 +1432,7 @@ public sealed partial class SqliteSessionStore :
             PRAGMA busy_timeout=5000;
             PRAGMA journal_mode=WAL;
             PRAGMA synchronous=FULL;
+            PRAGMA secure_delete=ON;
             """;
         command.ExecuteNonQuery();
     }

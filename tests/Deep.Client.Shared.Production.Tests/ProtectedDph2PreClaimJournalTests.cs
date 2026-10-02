@@ -28,7 +28,7 @@ public sealed class ProtectedDph2PreClaimJournalTests
         Assert.Equal(blob.CanonicalBytes.ToArray(), Assert.Single(reopened.Claims).Value.CanonicalBytes.ToArray());
         encoded[^1] ^= 1;
         Assert.Equal(blob.CanonicalBytes.ToArray(), Assert.Single(reopened.Claims).Value.CanonicalBytes.ToArray());
-        Assert.Equal(ProtectedDph2PreClaimJournal.HeaderBytes + 32 + 2552, encoded.Length);
+        Assert.Equal(ProtectedDph2PreClaimJournal.HeaderBytes + ProtectedDph2PreClaimJournal.EntryHeaderBytes + 2552, encoded.Length);
         Assert.True(ProtectedDph2PreClaimJournal.MaximumBytes < 1024 * 1024);
     }
 
@@ -66,18 +66,44 @@ public sealed class ProtectedDph2PreClaimJournalTests
         var exact = ProtectedDph2PreClaimJournal.Encode(new(129, claims), Network, Account, Instance);
         Assert.Equal(ProtectedDph2PreClaimJournal.MaximumBytes, exact.Length);
         Assert.Equal(128, ProtectedDph2PreClaimJournal.Decode(exact, Network, Account, Instance).Claims.Count);
-        var entryBytes = 32 + 2552; var header = ProtectedDph2PreClaimJournal.HeaderBytes;
+        var entryBytes = ProtectedDph2PreClaimJournal.EntryHeaderBytes + 2552; var header = ProtectedDph2PreClaimJournal.HeaderBytes;
         var duplicate = exact.ToArray(); duplicate.AsSpan(header, 32).CopyTo(duplicate.AsSpan(header + entryBytes, 32));
         Assert.Throws<InvalidDataException>(() => ProtectedDph2PreClaimJournal.Decode(duplicate, Network, Account, Instance));
         var unsorted = exact.ToArray();
         exact.AsSpan(header + entryBytes, entryBytes).CopyTo(unsorted.AsSpan(header, entryBytes));
         exact.AsSpan(header, entryBytes).CopyTo(unsorted.AsSpan(header + entryBytes, entryBytes));
         Assert.Throws<InvalidDataException>(() => ProtectedDph2PreClaimJournal.Decode(unsorted, Network, Account, Instance));
-        var malformed = exact.ToArray(); malformed[header + 32] ^= 1;
+        var malformed = exact.ToArray(); malformed[header + ProtectedDph2PreClaimJournal.EntryHeaderBytes] ^= 1;
         Assert.Throws<System.Security.Cryptography.CryptographicException>(() =>
             ProtectedDph2PreClaimJournal.Decode(malformed, Network, Account, Instance));
         var another = Enumerable.Repeat((byte)255, 32).ToArray(); claims.Add(Convert.ToHexString(another), StructuralBlob(another));
         Assert.Throws<InvalidDataException>(() => ProtectedDph2PreClaimJournal.Encode(new(130, claims), Network, Account, Instance));
+    }
+
+    [Fact]
+    public void RetiredIntentIsKeyFreeBoundAndCannotReappearAsLiveOrChangeRevision()
+    {
+        var intent = Enumerable.Repeat((byte)4, 32).ToArray(); var name = Convert.ToHexString(intent);
+        var blob = StructuralBlob(intent); var digest = System.Security.Cryptography.SHA256.HashData(blob.CanonicalBytes.Span);
+        var basis = Enumerable.Repeat((byte)8, 32).ToArray(); var scope = Enumerable.Repeat((byte)9, 32).ToArray();
+        var state = new ProtectedDph2PreClaimJournal.State(3, new(StringComparer.Ordinal));
+        state.Retired.Add(name, new(digest, basis, scope));
+        var exact = ProtectedDph2PreClaimJournal.Encode(state, Network, Account, Instance);
+        Assert.Equal(92 + 136, exact.Length);
+        var reopened = ProtectedDph2PreClaimJournal.Decode(exact, Network, Account, Instance);
+        Assert.Empty(reopened.Claims); Assert.Equal(1, reopened.Count);
+        Assert.Equal(digest, Assert.Single(reopened.Retired).Value.BlobHash);
+        Assert.Equal(basis, reopened.Retired[name].SourceBasis); Assert.Equal(scope, reopened.Retired[name].MutableScope);
+        Assert.Throws<InvalidDataException>(() => ProtectedDph2PreClaimJournal.Encode(state with { Revision = 2 }, Network, Account, Instance));
+        state.Claims.Add(name, blob);
+        Assert.Throws<InvalidDataException>(() => ProtectedDph2PreClaimJournal.Encode(state with { Revision = 4 }, Network, Account, Instance));
+        foreach (var offset in new[] { 92 + 32, 92 + 33, 92 + 132 })
+        {
+            var changed = exact.ToArray(); changed[offset] ^= 1;
+            Assert.Throws<InvalidDataException>(() => ProtectedDph2PreClaimJournal.Decode(changed, Network, Account, Instance));
+        }
+        var old = exact.ToArray(); old[0] = 1;
+        Assert.Throws<System.Security.Cryptography.CryptographicException>(() => ProtectedDph2PreClaimJournal.Decode(old, Network, Account, Instance));
     }
 
     private static InitiatorDph2PreKeyClaimPersistenceBlob StructuralBlob(byte[] intent)

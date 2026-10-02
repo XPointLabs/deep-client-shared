@@ -84,15 +84,13 @@ public sealed class HttpServiceEndpointPolicyTests
     }
 
     [Fact]
-    public void ProductionFactory_ConstructsAllFourTransportsWithHttpsOrigins()
+    public void ProductionFactory_ConstructsRemainingServiceTransportsWithHttpsOrigins()
     {
         var factory = new HttpServiceTransportFactory(
             HttpServiceEndpointPolicy.Production);
 
         Assert.NotNull(factory.CreateAvatar(
             new HttpAvatarProfileTransportOptions("https://192.168.1.44:41821/")));
-        Assert.True(factory.CreateAttachment(
-            new HttpAttachmentFileTransportOptions("https://192.168.1.44:41821/")).IsEnabled);
         Assert.True(factory.CreatePush(
             new HttpPushSubscriptionTransportOptions("https://192.168.1.44:41822/")).IsEnabled);
         Assert.NotNull(factory.CreateCallSignaling(
@@ -184,16 +182,6 @@ public sealed class HttpServiceEndpointPolicyTests
         var path = pattern.Replace("{0}", "operation", StringComparison.Ordinal);
         var recipientTemplate = pattern.Replace("{0}", "{recipient}", StringComparison.Ordinal);
         var sessionTemplate = pattern.Replace("{0}", "{sessionId}", StringComparison.Ordinal);
-        var fileTemplate = pattern.Replace("{0}", "{fileId}", StringComparison.Ordinal);
-
-        Assert.Throws<ArgumentException>(() => new HttpAttachmentFileTransport(
-            new HttpClient(),
-            new HttpAttachmentFileTransportOptions("https://file.example/", UploadPath: path)));
-        Assert.Throws<ArgumentException>(() => new HttpAttachmentFileTransport(
-            new HttpClient(),
-            new HttpAttachmentFileTransportOptions(
-                "https://file.example/",
-                DownloadPathFormat: fileTemplate)));
         Assert.Throws<ArgumentException>(() => new HttpAvatarProfileTransport(
             new HttpClient(),
             new HttpAvatarProfileTransportOptions(
@@ -259,7 +247,6 @@ public sealed class HttpServiceEndpointPolicyTests
         Type[] transportTypes =
         [
             typeof(HttpAvatarProfileTransport),
-            typeof(HttpAttachmentFileTransport),
             typeof(HttpPushSubscriptionTransport),
             typeof(HttpCallSignalingTransport),
             typeof(HttpServiceRequestTransport),

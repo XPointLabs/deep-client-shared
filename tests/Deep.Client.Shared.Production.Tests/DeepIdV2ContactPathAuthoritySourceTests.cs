@@ -6,11 +6,13 @@ using System.Runtime.InteropServices;
 using Deep.Client.Shared.Persistence;
 using Deep.Client.Shared.Persistence.DeviceV2;
 using Deep.Client.Shared.Persistence.DeviceV1;
+using Deep.Client.Shared.Persistence.PreKeyV2;
 using Deep.Client.Shared.Persistence.XPointNetworkV1;
 using Deep.Client.Shared.Services;
 using Deep.Client.Shared.Services.AccountDirectoryV2;
 using Deep.Client.Shared.Services.ContactV2;
 using Deep.Client.Shared.Services.ContactV1;
+using Deep.Client.Shared.Services.AttachmentV1;
 using Deep.Client.Shared.Services.XPointNetworkV1;
 using Deep.Protocol.AccountDirectoryV1;
 using Deep.Protocol.ApplicationCore;
@@ -18,14 +20,691 @@ using Deep.Protocol.ContactV2;
 using Deep.Protocol.ContactV1;
 using Deep.Protocol.DeepExtension.PrivacyRouting;
 using Deep.Protocol.MessagingCrypto;
+using Deep.Protocol.MessagingWire;
 using Deep.Protocol.XPointNetworkV1;
 using Sodium;
 using Microsoft.Data.Sqlite;
 
 namespace Deep.Client.Shared.Production.Tests;
 
-public sealed class DeepIdV2ContactPathAuthoritySourceTests
+public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 {
+    [Fact]
+    public async Task Did2MailboxPaths_SignedNetworkBothReplicasSelectOwnTlsEntryAndReserveFrames()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        var source = fixture.Source();
+        var network = await source.VerifyCurrentNetworkAsync(Fixture.Network);
+        var snapshot = OnionPathCandidateSnapshotFactory.Create(network);
+        var candidates = snapshot.Candidates.OrderBy(candidate => Convert.ToHexString(candidate.NodeId.Span), StringComparer.Ordinal).ToArray();
+        Assert.Equal(3, candidates.Length);
+        var custody = await fixture.Accounts.OpenOwnOnionClientCustodyAsync();
+        var guards = new EntryGuardState(1, Fixture.Network, snapshot.ViewGeneration, snapshot.ViewHash.Span,
+            Bytes(32, 0xa1), candidates[0].NodeId.Span, candidates.Select(candidate => candidate.NodeId));
+        Assert.Equal(EntryGuardStoreWriteDisposition.Applied,
+            (await custody.Guards.CompareExchangeAsync(null, guards, default)).Disposition);
+        var placement = new Deep.Protocol.DeepExtension.MailboxCapabilities.BlindedPlacementId(Bytes(32, 0xa2));
+        var route = new ScopedMailboxResolvedRoute(1, 1400,
+            new(Bytes(32, 0xa3)), placement,
+            Deep.Protocol.DeepExtension.MailboxCapabilities.MailboxPlacementCommitment.Compute(placement),
+            Bytes(32, 0xa4), new(candidates[0].NodeId.Span,
+                network.ResolveNodeIdentityPublicKey(candidates[0].NodeId).Span,
+                candidates[1].NodeId.Span, network.ResolveNodeIdentityPublicKey(candidates[1].NodeId).Span));
+        var codec = new PrivacyRoutingCodec(new OnionEntropyAuthority(custody.Entropy),
+            new OnionKeyAgreementAuthority(new RejectClientReceiveVault()));
+        // Synthetic MAU2 grants exercise structural/path selection only.
+        // They are not issued credentials; no socket, adapter receipt or ACK is claimed.
+        foreach (var operation in new[] { OnionOperation.Store, OnionOperation.Retrieve, OnionOperation.Acknowledge })
+        {
+            var exact = Did2MailboxRouteBindingTests.Request(operation, route, Fixture.Network);
+            var entries = new List<byte[]>();
+            foreach (var selection in new[] { PrivacyMailboxRouteSelection.Primary, PrivacyMailboxRouteSelection.Fallback })
+            {
+                var paths = source.CreateOwnMailboxPaths(custody, selection);
+                var attempt = await paths.PrepareOnRouteAsync(operation, exact, route, default);
+                Assert.Equal(exact, attempt.Request.CanonicalBytes.ToArray());
+                var entry = OnionEntryTransportFactory.Create(attempt.Path);
+                entry.EnsureCurrent();
+                var exit = selection == PrivacyMailboxRouteSelection.Primary ? candidates[0].NodeId : candidates[1].NodeId;
+                Assert.False(entry.Peer.NodeId.Span.SequenceEqual(exit.Span));
+                entries.Add(entry.Peer.NodeId.ToArray());
+                using var frame = await codec.BuildAsync(attempt.Path, attempt.Request, default);
+                Assert.True(frame.Frame.Length > exact.Length);
+            }
+            Assert.False(entries[0].AsSpan().SequenceEqual(entries[1]));
+        }
+        Assert.Equal(7, fixture.ProofRequests); // initial + each of six independent attempts
+        Assert.Equal(1UL, (await custody.Guards.ReadAsync(default))!.Revision);
+        // Use the already verifier-minted context to isolate caller-memory
+        // mutation across the authority await, not to fake network authority.
+        var mutable = Did2MailboxRouteBindingTests.Request(OnionOperation.Retrieve, route, Fixture.Network);
+        var original = mutable.ToArray();
+        var commitment = route.PlacementCommitment.ToArray();
+        var mutator = new MutatingMailboxNetwork(network, () =>
+        {
+            Array.Clear(mutable);
+            Assert.True(MemoryMarshal.TryGetArray(route.PlacementCommitment, out var exposed));
+            exposed.AsSpan().Clear();
+            Assert.True(MemoryMarshal.TryGetArray(route.MembershipCommitment, out exposed));
+            exposed.AsSpan().Clear();
+        });
+        var isolated = new MailboxPrivacyPathProvider(mutator, custody.Guards,
+            PrivacyMailboxRouteSelection.Primary, () => throw new InvalidOperationException("Retained guards must not reseed."));
+        var captured = await isolated.PrepareOnRouteAsync(OnionOperation.Retrieve, mutable, route, default);
+        Assert.Equal(original, captured.Request.CanonicalBytes.ToArray());
+        Assert.Equal(commitment, mutator.Commitment);
+    }
+
+    private sealed class MutatingMailboxNetwork(VerifiedOnionNetworkContext network, Action mutate)
+        : IMailboxPrivacyNetworkAuthoritySource
+    {
+        internal byte[]? Commitment { get; private set; }
+        public async ValueTask<VerifiedOnionNetworkContext> GetCurrentForMailboxAsync(
+            ReadOnlyMemory<byte> commitment, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            await Task.Yield();
+            mutate();
+            Commitment = commitment.ToArray();
+            return network;
+        }
+    }
+
+    [Fact]
+    public async Task Did2MailboxNetwork_UsesFreshOwnedProofAndRejectsAlteredNetworkWithoutFloorRewrite()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        var source = fixture.Source();
+        var mailbox = Assert.IsAssignableFrom<IMailboxPrivacyNetworkAuthoritySource>(source);
+        foreach (var malformed in new[] { Array.Empty<byte>(), new byte[32], new byte[31], new byte[33] })
+            await Assert.ThrowsAsync<ArgumentException>(async () => await mailbox.GetCurrentForMailboxAsync(malformed, default));
+        Assert.Equal(0, fixture.ProofRequests);
+        var first = await mailbox.GetCurrentForMailboxAsync(Bytes(32, 0x91), default);
+        first.EnsureCurrent();
+        Assert.Equal(Fixture.Network, first.NetworkId.ToArray());
+        var floor = (await fixture.NetworkStore.ReadAsync(default))!;
+        Assert.Equal(1, fixture.ProofRequests);
+        var second = await mailbox.GetCurrentForMailboxAsync(Bytes(32, 0x92), default);
+        second.EnsureCurrent();
+        Assert.Equal(2, fixture.ProofRequests); // no cached current-proof authority
+        Assert.Equal(floor.Revision, (await fixture.NetworkStore.ReadAsync(default))!.Revision);
+        fixture.AlterNode = true;
+        await Assert.ThrowsAsync<OnionBoundaryException>(async () => await mailbox.GetCurrentForMailboxAsync(Bytes(32, 0x93), default));
+        Assert.Equal(floor.Revision, (await fixture.NetworkStore.ReadAsync(default))!.Revision);
+    }
+
+    [Fact]
+    public async Task Did2MailboxTransport_UnscopedAndForeignCustodyRejectBeforeNetworkOrEntropy()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        var source = fixture.Source();
+        var custody = await fixture.Accounts.OpenOwnOnionClientCustodyAsync();
+        var foreign = await fixture.ReopenAccount().OpenOwnOnionClientCustodyAsync();
+        Assert.Throws<ArgumentException>(() => source.CreateOwnMailboxPaths(foreign, PrivacyMailboxRouteSelection.Primary));
+        var ingress = new DeepIdV2MailboxOnionTransport(source, custody,
+            PrivacyMailboxRouteSelection.Primary, new NoMailboxDecodePolicy());
+        foreach (var send in new Func<Task<ReadOnlyMemory<byte>>>[]
+        {
+            () => ingress.StoreAsync(ReadOnlyMemory<byte>.Empty),
+            () => ingress.RetrieveAsync(ReadOnlyMemory<byte>.Empty),
+            () => ingress.AcknowledgeAsync(ReadOnlyMemory<byte>.Empty)
+        })
+        {
+            var failure = await Assert.ThrowsAsync<ClientMailboxTransportException>(send);
+            Assert.Equal(ClientMailboxTransportFailure.ProtocolViolation, failure.Failure);
+            Assert.False(failure.Retryable);
+        }
+        Assert.Equal(0, fixture.ProofRequests);
+        Assert.Null(await custody.Guards.ReadAsync(default));
+        using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => ingress.RetrieveAsync(ReadOnlyMemory<byte>.Empty, cancelled.Token));
+        Assert.Empty(typeof(DeepIdV2MailboxOnionTransport).GetConstructors());
+    }
+
+    private sealed class NoMailboxDecodePolicy : IMailboxClientDecodePolicyProvider
+    {
+        public Deep.Protocol.DeepExtension.MailboxCapabilities.MailboxClientDecodePolicy GetCurrent() =>
+            throw new InvalidOperationException("Unscoped dispatch must not read response policy.");
+    }
+
+    [Fact]
+    [Trait("RequiresApprovedMlKemRuntime", "true")]
+    public async Task Did2ContactOwner_ExplicitAcceptanceExactRetryPeerReceiveAndReply()
+    {
+        await using var fixture = await Fixture.CreateAsync(withPeer: true);
+        var (complete, hello, init, _, _) = await fixture.PrepareNativeHelloCompletion(Bytes(32, 0xc1));
+        byte[] dph;
+        using (var sent = await complete(fixture.Accounts)) dph = sent.ExactDph2.ToArray();
+        using (var received = await fixture.CompleteReceiver(dph))
+            Assert.True(received.ExactHelloSpan.SequenceEqual(hello.CanonicalBytes.Span));
+        var sender = await fixture.EnsureSenderMessaging(init, hello);
+        var receiver = await fixture.EnsureReceiverMessaging(dph);
+        Assert.Equal(Did2ContactAcceptanceState.IncomingRequest, await fixture.ReadOwnedContactState(receiver));
+        await Assert.ThrowsAsync<CryptographicException>(() => fixture.PrepareOwnedContactAccept(sender, Bytes(32, 0xc2)));
+        byte[] accepted, operation;
+        using (var draft = await fixture.PrepareOwnedContactAccept(receiver, Bytes(32, 0xc2)))
+        { accepted = draft.ExactDmc2.ToArray(); operation = draft.Operation.ToArray(); }
+        using (var retry = await fixture.PrepareOwnedContactAccept(receiver, Bytes(32, 0xc3)))
+        { Assert.Equal(accepted, retry.ExactDmc2.ToArray()); Assert.Equal(operation, retry.Operation.ToArray()); }
+        Assert.Equal(3UL, ApplicationCoreCodec.DecodeDmc2(accepted).SenderClientSequence);
+        byte[] ciphertext;
+        var interrupted = false;
+        using (DirectDmc2InboxTestHooks.Push(point =>
+        { if (point == DirectDmc2InboxFaultPoint.AfterCommit) { interrupted = true; throw new IOException("Injected committed ContactAccept response loss."); } }))
+            await Assert.ThrowsAsync<IOException>(() => fixture.SendOwnedMessage(receiver, operation, ApplicationCoreCodec.DecodeDmc2(accepted)));
+        Assert.True(interrupted);
+        var committed = await fixture.ReadMessagingFloor(receiver);
+        using (var sent = await fixture.SendOwnedMessage(receiver, operation, ApplicationCoreCodec.DecodeDmc2(accepted)))
+            ciphertext = sent.ExactEnvelope.ToArray();
+        Assert.Equal(committed.Exact.ToArray(), (await fixture.ReadMessagingFloor(receiver)).Exact.ToArray());
+        using (var received = await fixture.ReceiveOwnedMessage(sender, ciphertext))
+        using (var plain = received.OwnAuthenticatedDmc2())
+            Assert.True(plain.Use(bytes => bytes.SequenceEqual(accepted)));
+        var peerFloor = await fixture.ReadMessagingFloor(sender);
+        using (var replay = await fixture.ReceiveOwnedMessage(sender, ciphertext))
+            Assert.Equal(2, replay.Direction);
+        Assert.Equal(peerFloor.Exact.ToArray(), (await fixture.ReadMessagingFloor(sender)).Exact.ToArray());
+        Assert.Equal(Did2ContactAcceptanceState.LocalAcceptanceRetained, await fixture.ReadOwnedContactState(receiver));
+        Assert.Equal(Did2ContactAcceptanceState.PeerAcceptanceRetained, await fixture.ReadOwnedContactState(sender));
+        var lostText = false;
+        using (Did2TextOutboxTestHooks.Push(point =>
+        { if (point == Did2TextOutboxFailpoint.AfterSql) { lostText = true; throw new IOException("Injected owned text SQL response loss."); } }))
+            await Assert.ThrowsAsync<IOException>(() => fixture.PrepareOwnedText(receiver, Bytes(32, 0xc5), "reply after explicit contact acceptance"));
+        Assert.True(lostText);
+        ParsedDmc2 reply;
+        using (var draft = await fixture.PrepareOwnedText(receiver, Bytes(32, 0xc5), "reply after explicit contact acceptance"))
+        { Assert.Equal(4UL, draft.SenderSequence); reply = ApplicationCoreCodec.DecodeDmc2(draft.ExactDmc2.Span); }
+        using (var retry = await fixture.PrepareOwnedText(receiver, Bytes(32, 0xc5), "reply after explicit contact acceptance"))
+            Assert.Equal(reply.CanonicalBytes.ToArray(), retry.ExactDmc2.ToArray());
+        await Assert.ThrowsAsync<CryptographicException>(() => fixture.PrepareOwnedText(receiver, Bytes(32, 0xc5), "changed command"));
+        using (var sent = await fixture.SendOwnedMessage(receiver, Bytes(32, 0xc5), reply))
+            ciphertext = sent.ExactEnvelope.ToArray();
+        using (var received = await fixture.ReceiveOwnedMessage(sender, ciphertext))
+        using (var plain = received.OwnAuthenticatedDmc2())
+            Assert.True(plain.Use(bytes => bytes.SequenceEqual(reply.CanonicalBytes.Span)));
+        var history = await fixture.ListOwnedMessages(sender);
+        Assert.Single(history); Assert.Equal("reply after explicit contact acceptance", history[0].Text);
+        Assert.False(history[0].IsLocalAuthor);
+        foreach (var bytes in new[] { dph, accepted, operation, ciphertext }) CryptographicOperations.ZeroMemory(bytes);
+    }
+
+    [Fact]
+    [Trait("RequiresApprovedMlKemRuntime", "true")]
+    public async Task Did2MessagingOwner_RefreshesOwnedPeerAfterTtlWithoutImportingOrMutatingRatchet()
+    {
+        // Real owned account/seed/catalog and signed proofs; synthetic Registry/time,
+        // not live-clock, socket or physical device evidence.
+        await using var fixture = await Fixture.CreateAsync(withPeer: true);
+        var (complete, hello, init, _, _) = await fixture.PrepareNativeHelloCompletion(Bytes(32, 0xba));
+        using (var sent = await complete(fixture.Accounts)) Assert.NotEmpty(sent.ExactDph2.ToArray());
+        var sender = await fixture.EnsureSenderMessaging(init, hello);
+        var before = await fixture.ReadMessagingFloor(sender);
+        var first = await fixture.RefreshOwnedMessaging(sender);
+        var requests = fixture.ProofRequests;
+        fixture.Sample = Math.Max(first.Own.Proof.FreshnessDeadlineMonotonicSeconds, first.Peer.FreshnessDeadlineMonotonicSeconds);
+        var reading = await fixture.ReadAsync(default);
+        Assert.False(first.Peer.IsCurrentAtMonotonic(reading.BootId.Span, fixture.Sample));
+        var refreshed = await fixture.RefreshOwnedMessaging(sender);
+        Assert.True(fixture.ProofRequests >= requests + 2);
+        Assert.Equal(first.Peer.CurrentCheckpoint!.Binding.DeepId.CanonicalBytes.ToArray(),
+            refreshed.Peer.CurrentCheckpoint!.Binding.DeepId.CanonicalBytes.ToArray());
+        Assert.True(refreshed.Peer.IsCurrentAtMonotonic(reading.BootId.Span, fixture.Sample));
+        Assert.Equal(before.Exact.ToArray(), (await fixture.ReadMessagingFloor(sender)).Exact.ToArray());
+        await fixture.DropPeerBootstrap(sender);
+        requests = fixture.ProofRequests;
+        await Assert.ThrowsAsync<InvalidDataException>(() => fixture.RefreshOwnedMessaging(sender));
+        Assert.Equal(requests, fixture.ProofRequests);
+        Assert.Equal(before.Exact.ToArray(), (await fixture.ReadMessagingFloor(sender)).Exact.ToArray());
+    }
+
+    [Fact]
+    [Trait("RequiresApprovedMlKemRuntime", "true")]
+    public async Task Did2MessagingOwner_OrdinarySendReceiveReopenGapAndExactReplay()
+    {
+        await using var fixture = await Fixture.CreateAsync(withPeer: true);
+        var (complete, hello, init, _, _) = await fixture.PrepareNativeHelloCompletion(Bytes(32, 0xbe));
+        byte[] dph;
+        using (var sent = await complete(fixture.Accounts)) dph = sent.ExactDph2.ToArray();
+        using (var received = await fixture.CompleteReceiver(dph))
+            Assert.True(received.ExactHelloSpan.SequenceEqual(hello.CanonicalBytes.Span));
+        var sender = await fixture.EnsureSenderMessaging(init, hello);
+        var receiver = await fixture.EnsureReceiverMessaging(dph);
+        using (var acceptance = await fixture.PrepareOwnedContactAccept(receiver, Bytes(32, 0xf0)))
+        using (var sentAccept = await fixture.SendOwnedMessage(receiver, acceptance.Operation.ToArray(), ApplicationCoreCodec.DecodeDmc2(acceptance.ExactDmc2)))
+        using (var receivedAccept = await fixture.ReceiveOwnedMessage(sender, sentAccept.ExactEnvelope.ToArray())) { }
+        async Task<ParsedDmc2> Text(Did2MessagingSessionScope scope, byte operation, string value)
+        {
+            using var draft = await fixture.PrepareOwnedText(scope, Bytes(32, operation), value);
+            return ApplicationCoreCodec.DecodeDmc2(draft.ExactDmc2.Span);
+        }
+        var senderBase = await fixture.ReadMessagingFloor(sender);
+        var receiverBase = await fixture.ReadMessagingFloor(receiver);
+        var first = await Text(sender, 0xe1, "Owned DID2 text 📨");
+        var second = await Text(sender, 0xe2, "Owned DID2 reordered text");
+        byte[] cipher1, cipher2;
+        var lostSend = false;
+        using (Did2MessagingCommitTestHooks.Push(point =>
+        { if (point == Did2MessagingCommitFailpoint.AfterSql) { lostSend = true; throw new IOException("Injected lost DID2 send response."); } }))
+            await Assert.ThrowsAsync<IOException>(() => fixture.SendOwnedMessage(sender, Bytes(32, 0xe1), first));
+        Assert.True(lostSend);
+        var pendingSend = await fixture.ReadMessagingFloor(sender);
+        Assert.Equal((byte)2, pendingSend.Phase); Assert.Equal(senderBase.Ordinal + 1, pendingSend.Ordinal);
+        using (var send1 = await fixture.SendOwnedMessage(sender, Bytes(32, 0xe1), first)) cipher1 = send1.ExactEnvelope.ToArray();
+        using (var send2 = await fixture.SendOwnedMessage(sender, Bytes(32, 0xe2), second)) cipher2 = send2.ExactEnvelope.ToArray();
+        var senderFloor = await fixture.ReadMessagingFloor(sender);
+        using (var retry = await fixture.SendOwnedMessage(sender, Bytes(32, 0xe1), first)) Assert.Equal(cipher1, retry.ExactEnvelope.ToArray());
+        Assert.Equal(senderFloor.Exact.ToArray(), (await fixture.ReadMessagingFloor(sender)).Exact.ToArray());
+        async Task Receive(Did2MessagingSessionScope scope, byte[] cipher, ParsedDmc2 expected)
+        {
+            using var row = await fixture.ReceiveOwnedMessage(scope, cipher);
+            Assert.Equal(2, row.Direction);
+            using var plain = row.OwnAuthenticatedDmc2();
+            Assert.True(plain.Use(bytes => bytes.SequenceEqual(expected.CanonicalBytes.Span)));
+        }
+        var interruptedReceive = false;
+        using (Did2MessagingCommitTestHooks.Push(point =>
+        { if (point == Did2MessagingCommitFailpoint.AfterPending) { interruptedReceive = true; throw new IOException("Injected pending DID2 receive interruption."); } }))
+            await Assert.ThrowsAsync<IOException>(() => fixture.ReceiveOwnedMessage(receiver, cipher2));
+        Assert.True(interruptedReceive);
+        Assert.Equal((byte)2, (await fixture.ReadMessagingFloor(receiver)).Phase);
+        await Receive(receiver, cipher2, second);
+        await Receive(receiver, cipher1, first);
+        var receiverFloor = await fixture.ReadMessagingFloor(receiver);
+        Assert.Equal(receiverBase.RatchetGeneration + 2, receiverFloor.RatchetGeneration); Assert.Equal(receiverBase.Ordinal + 2, receiverFloor.Ordinal);
+        await Receive(receiver, cipher1, first);
+        Assert.Equal(receiverFloor.Exact.ToArray(), (await fixture.ReadMessagingFloor(receiver)).Exact.ToArray());
+        var tampered = cipher1.ToArray(); tampered[^1] ^= 1;
+        await Assert.ThrowsAsync<CryptographicException>(() => fixture.ReceiveOwnedMessage(receiver, tampered));
+        await Assert.ThrowsAsync<CryptographicException>(() => fixture.ReceiveOwnedMessage(sender, cipher1));
+        Assert.Equal(receiverFloor.Exact.ToArray(), (await fixture.ReadMessagingFloor(receiver)).Exact.ToArray());
+        var reply = await Text(receiver, 0xe3, "Owned DID2 reply"); byte[] replyCipher;
+        using (var sentReply = await fixture.SendOwnedMessage(receiver, Bytes(32, 0xe3), reply)) replyCipher = sentReply.ExactEnvelope.ToArray();
+        await Receive(sender, replyCipher, reply);
+        var before = await fixture.ReadMessagingFloor(sender);
+        await Receive(sender, replyCipher, reply);
+        Assert.Equal(before.Exact.ToArray(), (await fixture.ReadMessagingFloor(sender)).Exact.ToArray());
+        var senderHistory = await fixture.ListOwnedMessages(sender);
+        var receiverHistory = await fixture.ListOwnedMessages(receiver);
+        Assert.Equal(3, senderHistory.Count); Assert.Equal(3, receiverHistory.Count);
+        Assert.Equal(new[] { "Owned DID2 text 📨", "Owned DID2 reordered text", "Owned DID2 reply" }.Order(),
+            senderHistory.Select(message => message.Text).Order());
+        Assert.Equal(senderHistory.Select(message => message.Text).Order(), receiverHistory.Select(message => message.Text).Order());
+        Assert.Equal(2, senderHistory.Count(message => message.IsLocalAuthor));
+        Assert.Single(receiverHistory, message => message.IsLocalAuthor);
+        // Caller substitution is not a protected authored text command and
+        // cannot authorize destructive latching or consume a ratchet position.
+        await Assert.ThrowsAsync<CryptographicException>(() => fixture.SendOwnedMessage(sender, Bytes(32, 0xe1), second));
+        var latched = await fixture.ReadMessagingFloor(sender);
+        Assert.Equal(before.Exact.ToArray(), latched.Exact.ToArray());
+        using (var retainedSend = await fixture.SendOwnedMessage(sender, Bytes(32, 0xe1), first)) Assert.Equal(cipher1, retainedSend.ExactEnvelope.ToArray());
+        // Same actual account/session/counter, not a raw DAM1 send bypass.
+        // Cipher chunks are copied locally only: this does not test BLOB-01.
+        var assetOperation = Bytes(32, 0xe4); var offerOperation = Bytes(32, 0xe5);
+        var fileBytes = System.Text.Encoding.UTF8.GetBytes("Owned DID2 attachment integrity 📨");
+        using var asset = await fixture.PrepareOwnedAsset(sender, assetOperation, fileBytes, "document.txt", "text/plain", 1_400);
+        using var draftOffer = await fixture.PrepareOwnedAttachmentOffer(sender, offerOperation, assetOperation);
+        var offer = ApplicationCoreCodec.DecodeDmc2(draftOffer.ExactDmc2.Span);
+        var offered = Assert.IsType<AttachmentOfferDmc2Payload>(offer.ParsedPayload);
+        try
+        {
+            Assert.Equal(second.SenderClientSequence + 1, offer.SenderClientSequence);
+            using var retainedManifest = asset.OwnManifest();
+            Assert.True(retainedManifest.Use(bytes => bytes.SequenceEqual(offered.Manifest.CanonicalBytes.Span)));
+            byte[] cipherOffer;
+            using (var sent = await fixture.SendOwnedMessage(sender, offerOperation, offer)) cipherOffer = sent.ExactEnvelope.ToArray();
+            using (var replay = await fixture.SendOwnedMessage(sender, offerOperation, offer)) Assert.Equal(cipherOffer, replay.ExactEnvelope.ToArray());
+            using (var received = await fixture.ReceiveOwnedMessage(receiver, cipherOffer))
+            using (var plain = received.OwnAuthenticatedDmc2())
+            {
+                var openedOffer = plain.Use(bytes => ApplicationCoreCodec.DecodeDmc2(bytes));
+                using var openedManifest = Assert.IsType<AttachmentOfferDmc2Payload>(openedOffer.ParsedPayload).Manifest;
+                Assert.Equal(offered.Manifest.CanonicalBytes.ToArray(), openedManifest.CanonicalBytes.ToArray());
+                var cipherChunk = asset.CopyCiphertext(0); var recoveredFile = AttachmentChunkCipher.Decrypt(openedManifest, 0, cipherChunk);
+                try { Assert.Equal(fileBytes, recoveredFile); }
+                finally { CryptographicOperations.ZeroMemory(cipherChunk); CryptographicOperations.ZeroMemory(recoveredFile); }
+            }
+            var afterOffer = await fixture.ReadMessagingFloor(receiver);
+            using (var replay = await fixture.ReceiveOwnedMessage(receiver, cipherOffer)) { }
+            Assert.Equal(afterOffer.Exact.ToArray(), (await fixture.ReadMessagingFloor(receiver)).Exact.ToArray());
+            var followup = await Text(sender, 0xe6, "Owned DID2 text after attachment");
+            Assert.Equal(offer.SenderClientSequence + 1, followup.SenderClientSequence);
+            using var followupSend = await fixture.SendOwnedMessage(sender, Bytes(32, 0xe6), followup);
+            await Receive(receiver, followupSend.ExactEnvelope.ToArray(), followup);
+            // A text operation cannot be substituted with an offer, and a
+            // shorter-lived adopted asset cannot gain current offer authority.
+            await Assert.ThrowsAsync<CryptographicException>(() => fixture.PrepareOwnedAttachmentOffer(sender, Bytes(32, 0xe1), assetOperation));
+            using var expired = await fixture.PrepareOwnedAsset(sender, Bytes(32, 0xe7), fileBytes, "expired.txt", "text/plain", 1_001);
+            await Assert.ThrowsAsync<CryptographicException>(() => fixture.PrepareOwnedAttachmentOffer(sender, Bytes(32, 0xe8), Bytes(32, 0xe7)));
+            CryptographicOperations.ZeroMemory(cipherOffer);
+        }
+        finally { offered.Manifest.Dispose(); CryptographicOperations.ZeroMemory(fileBytes); }
+    }
+
+    [Fact]
+    [Trait("RequiresApprovedMlKemRuntime", "true")]
+    public async Task Did2MessagingOwner_ImportsRetiresAndResumesWithoutInitialKeys()
+    {
+        await using var fixture = await Fixture.CreateAsync(withPeer: true);
+        var intent = Bytes(32, 0xad);
+        var (complete, hello, init, _, _) = await fixture.PrepareNativeHelloCompletion(intent);
+        byte[] exact;
+        using (var sent = await complete(fixture.Accounts)) exact = sent.ExactDph2.ToArray();
+        using (var received = await fixture.CompleteReceiver(exact))
+            Assert.True(received.ExactHelloSpan.SequenceEqual(hello.CanonicalBytes.Span));
+        foreach (var point in new[] { InitialKeyRetirementFailpoint.AfterPending, InitialKeyRetirementFailpoint.AfterPreclaim,
+            InitialKeyRetirementFailpoint.AfterSourceDelete, InitialKeyRetirementFailpoint.AfterStable })
+        {
+            var hit = false;
+            using (InitialKeyRetirementTestHooks.Push(actual =>
+                { if (actual == point) { hit = true; throw new IOException("Injected owner retirement interruption."); } }))
+                await Assert.ThrowsAsync<IOException>(() => fixture.EnsureSenderMessaging(init, hello));
+            Assert.True(hit);
+        }
+        var sender = await fixture.EnsureSenderMessaging(init, hello);
+        Assert.True(sender.IsInitiator);
+        var senderFloor = await fixture.ReadMessagingFloor(sender);
+        Assert.Equal((byte)1, senderFloor.Status); Assert.Equal(2UL, senderFloor.Ordinal);
+        Assert.Equal(sender.Exact.ToArray(), (await fixture.EnsureSenderMessaging(init, hello)).Exact.ToArray());
+        Assert.Equal(senderFloor.Exact.ToArray(), (await fixture.ReadMessagingFloor(sender)).Exact.ToArray());
+        await Assert.ThrowsAnyAsync<CryptographicException>(() => fixture.EnsureSenderMessaging(hello, init));
+        foreach (var point in new[] { InitialKeyRetirementFailpoint.AfterPending,
+            InitialKeyRetirementFailpoint.AfterSourceDelete, InitialKeyRetirementFailpoint.AfterStable })
+        {
+            var hit = false;
+            using (InitialKeyRetirementTestHooks.Push(actual =>
+                { if (actual == point) { hit = true; throw new IOException("Injected owner retirement interruption."); } }))
+                await Assert.ThrowsAsync<IOException>(() => fixture.EnsureReceiverMessaging(exact));
+            Assert.True(hit);
+        }
+        var receiver = await fixture.EnsureReceiverMessaging(exact);
+        Assert.False(receiver.IsInitiator);
+        var receiverFloor = await fixture.ReadMessagingFloor(receiver);
+        Assert.Equal((byte)1, receiverFloor.Status); Assert.Equal(2UL, receiverFloor.Ordinal);
+        Assert.Equal(receiver.Exact.ToArray(), (await fixture.EnsureReceiverMessaging(exact)).Exact.ToArray());
+        Assert.Equal(receiverFloor.Exact.ToArray(), (await fixture.ReadMessagingFloor(receiver)).Exact.ToArray());
+        Assert.Equal(sender.Session.ToArray(), receiver.Session.ToArray());
+        Assert.Equal(sender.Conversation.ToArray(), receiver.Conversation.ToArray());
+        using var senderMetadata = await complete(fixture.ReopenAccount());
+        Assert.False(senderMetadata.HasInitialState);
+        using var receiverMetadata = await fixture.FindReceiver(exact, reopen: true);
+        Assert.NotNull(receiverMetadata); Assert.False(receiverMetadata.HasInitialState);
+    }
+
+    [Fact]
+    [Trait("RequiresApprovedMlKemRuntime", "true")]
+    public async Task Did2ContactHelloVertical_TwoOwnedAccountsNativeCompletionExactRestart()
+    {
+        // Two independently created PQ accounts, real account custody and
+        // signed proofs/claims, approved native providers. NOT device E2E.
+        await using var fixture = await Fixture.CreateAsync(withPeer: true);
+        var (complete, hello, init, preview, prepare) = await fixture.PrepareNativeHelloCompletion(Bytes(32, 0x91));
+        using var first = await complete(fixture.Accounts);
+        var ciphertext = first.ExactDph2.ToArray();
+        Assert.Equal(hello.ConversationId.ToArray(), first.RequireInitialConversation(init.CanonicalBytes.Span, hello.CanonicalBytes.Span));
+        using var retry = await complete(fixture.ReopenAccount());
+        Assert.Equal(ciphertext, retry.ExactDph2.ToArray());
+        Assert.Equal(first.SessionId.ToArray(), retry.SessionId.ToArray());
+        var opened = await preview(ciphertext);
+        Assert.Equal(Dph2Codec.Decode(ciphertext).ClaimOperationId.ToArray(), opened.Request.Field(2).ToArray());
+        var openedAgain = await preview(retry.ExactDph2);
+        Assert.Equal(opened.Request.CanonicalBytes.ToArray(), openedAgain.Request.CanonicalBytes.ToArray());
+        Assert.Equal(opened.Result.WireBytes.ToArray(), openedAgain.Result.WireBytes.ToArray());
+        var tampered = ciphertext.ToArray(); tampered[^1] ^= 1;
+        await Assert.ThrowsAnyAsync<CryptographicException>(() => preview(tampered));
+        using var prepared = await prepare(opened);
+        Assert.Equal(first.SessionId.ToArray(), prepared.SessionId.ToArray());
+        Assert.Equal(first.ClaimOperationId.ToArray(), prepared.ClaimOperationId.ToArray());
+        using var payload = prepared.ConsumeForAtomicStore();
+        Assert.Throws<InvalidOperationException>(() => prepared.ConsumeForAtomicStore());
+        var recoveredInit = payload.SessionInitDmc2.ToArray();
+        var recoveredHello = payload.FirstApplicationDmc2.ToArray();
+        var recoveredTrs = payload.ExactTrs1.ToArray();
+        try
+        {
+            Assert.Equal(init.CanonicalBytes.ToArray(), recoveredInit);
+            Assert.Equal(hello.CanonicalBytes.ToArray(), recoveredHello);
+            Assert.Equal(first.SessionId.ToArray(), payload.Reservation.SessionId.ToArray());
+            Assert.Equal(first.ExactClaimReplayHash.ToArray(), payload.Reservation.Xpc1FullReplayHash.ToArray());
+            Assert.NotEmpty(recoveredTrs);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(recoveredInit); CryptographicOperations.ZeroMemory(recoveredHello);
+            CryptographicOperations.ZeroMemory(recoveredTrs);
+        }
+        payload.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => payload.ExactTrs1);
+        var substituted = hello.CanonicalBytes.ToArray(); substituted[^1] ^= 1;
+        Assert.Throws<CryptographicException>(() => retry.RequireInitialConversation(init.CanonicalBytes.Span, substituted));
+        using var received = await fixture.CompleteReceiver(ciphertext);
+        Assert.Equal(first.SessionId.ToArray(), received.SessionId.ToArray());
+        Assert.Equal(hello.ConversationId.ToArray(), received.ConversationId.ToArray());
+        Assert.True(received.ExactInitSpan.SequenceEqual(init.CanonicalBytes.Span));
+        Assert.True(received.ExactHelloSpan.SequenceEqual(hello.CanonicalBytes.Span));
+        var afterReceiveRequests = fixture.ProofRequests;
+        using var receivedAgain = await fixture.FindReceiver(ciphertext, reopen: true);
+        Assert.NotNull(receivedAgain);
+        Assert.True(received.CanonicalSpan.SequenceEqual(receivedAgain.CanonicalSpan));
+        Assert.Equal(afterReceiveRequests, fixture.ProofRequests); // Historical exact replay needs no new claim/proof.
+    }
+
+    [Fact]
+    [Trait("RequiresApprovedMlKemRuntime", "true")]
+    public async Task Did2ReceiverCustody_OneTimeConsumptionAndRecoveryAtEveryCommitBoundary()
+    {
+        await using var fixture = await Fixture.CreateAsync(withPeer: true);
+        var index = 0;
+        foreach (var point in new[] { ResponderInitialSessionFailpoint.AfterPending,
+            ResponderInitialSessionFailpoint.AfterSqlCommit, ResponderInitialSessionFailpoint.AfterStable })
+        {
+            var (complete, hello, init, _, _) = await fixture.PrepareNativeHelloCompletion(
+                Bytes(32, checked((byte)(0xa1 + index))), oneTimeIndex: index);
+            using var sent = await complete(fixture.Accounts);
+            var exact = sent.ExactDph2.ToArray();
+            Assert.Equal(Dpk2PrekeyKind.OneTime, Dph2Codec.Decode(exact).SelectedPrekey.Kind);
+            using (ResponderInitialSessionTestHooks.Push(hit =>
+                { if (hit == point) throw new IOException("Injected receiver commit boundary interruption."); }))
+                await Assert.ThrowsAsync<IOException>(() => fixture.CompleteReceiver(exact));
+            var proofRequests = fixture.ProofRequests;
+            using var recovered = await fixture.FindReceiver(exact, reopen: true);
+            Assert.NotNull(recovered);
+            Assert.Equal(sent.SessionId.ToArray(), recovered.SessionId.ToArray());
+            Assert.True(recovered.ExactInitSpan.SequenceEqual(init.CanonicalBytes.Span));
+            Assert.True(recovered.ExactHelloSpan.SequenceEqual(hello.CanonicalBytes.Span));
+            Assert.Equal(proofRequests, fixture.ProofRequests);
+            using var replay = await fixture.CompleteReceiver(exact);
+            Assert.True(recovered.CanonicalSpan.SequenceEqual(replay.CanonicalSpan));
+            Assert.Equal(proofRequests, fixture.ProofRequests);
+            await fixture.AssertReceiverSqlAsync(index + 1, exact);
+            index++;
+        }
+        // A SQL rollback cannot reopen any consumed secret or grant history.
+        await fixture.RollBackReceiverSqlAsync();
+        await Assert.ThrowsAsync<CryptographicException>(() => fixture.AccountsForPeer().HasOwnStagedPreKeyInventoryAsync());
+    }
+
+    [Fact]
+    [Trait("RequiresApprovedMlKemRuntime", "true")]
+    public async Task Did2ReceiverCustody_LastResortSignedLimitDeletionAndExactRestart()
+    {
+        await using var fixture = await Fixture.CreateAsync(withPeer: true);
+        var (complete, hello, init, _, _) = await fixture.PrepareNativeHelloCompletion(Bytes(32, 0xaf));
+        using var sent = await complete(fixture.Accounts);
+        var exact = sent.ExactDph2.ToArray();
+        Assert.Equal(Dpk2PrekeyKind.LastResort, Dph2Codec.Decode(exact).SelectedPrekey.Kind);
+        using var received = await fixture.CompleteReceiver(exact);
+        Assert.True(received.ExactInitSpan.SequenceEqual(init.CanonicalBytes.Span));
+        Assert.True(received.ExactHelloSpan.SequenceEqual(hello.CanonicalBytes.Span));
+        await fixture.AssertReceiverSqlAsync(1, exact); // The signed local LR limit is1, not64.
+        var proofs = fixture.ProofRequests;
+        using var replay = await fixture.FindReceiver(exact, reopen: true);
+        Assert.NotNull(replay); Assert.True(received.CanonicalSpan.SequenceEqual(replay.CanonicalSpan));
+        Assert.Equal(proofs, fixture.ProofRequests);
+        var changed = exact.ToArray(); changed[^1] ^= 1;
+        await Assert.ThrowsAsync<CryptographicException>(() => fixture.FindReceiver(changed, reopen: true));
+        var (senderSeed, receiverSeed) = await fixture.CreateMessagingSeeds(sent, received, init, hello);
+        using (senderSeed)
+        using (receiverSeed)
+        {
+            Assert.True(senderSeed.IsInitiator); Assert.False(receiverSeed.IsInitiator);
+            Assert.True(senderSeed.ConversationId.Span.SequenceEqual(receiverSeed.ConversationId.Span));
+            Assert.True(senderSeed.RelationshipId.Span.SequenceEqual(receiverSeed.RelationshipId.Span));
+            Assert.True(senderSeed.LocalDirectory.RecordHash.Span.SequenceEqual(receiverSeed.RemoteDirectory.RecordHash.Span));
+            Assert.True(senderSeed.RemoteDirectory.RecordHash.Span.SequenceEqual(receiverSeed.LocalDirectory.RecordHash.Span));
+            Assert.True(senderSeed.ExactTrs.SequenceEqual(sent.ExactTrsSpan));
+            Assert.True(receiverSeed.ExactTrs.SequenceEqual(received.ExactTrsSpan));
+            Assert.True(senderSeed.ExactSessionInit.SequenceEqual(init.CanonicalBytes.Span));
+            Assert.True(receiverSeed.ExactContactHello.SequenceEqual(hello.CanonicalBytes.Span));
+            await AssertNativeMessagingIsolation(senderSeed, receiverSeed, hello, fixture);
+        }
+        Assert.Throws<ObjectDisposedException>(() => senderSeed.ExactTrs.Length);
+        Assert.Throws<ObjectDisposedException>(() => receiverSeed.ExactTrs.Length);
+        await Assert.ThrowsAsync<CryptographicException>(() => fixture.CreateMessagingSeeds(sent, received, hello, init));
+        var sample = fixture.Sample;
+        try
+        {
+            fixture.Sample = checked(sample + 1_000);
+            await Assert.ThrowsAnyAsync<CryptographicException>(() => fixture.CreateMessagingSeeds(sent, received, init, hello));
+        }
+        finally { fixture.Sample = sample; }
+        using var completedRetry = await complete(fixture.Accounts);
+        Assert.True(sent.CanonicalSpan.SequenceEqual(completedRetry.CanonicalSpan));
+        Assert.False(completedRetry.HasInitialState);
+        Assert.Throws<InvalidOperationException>(() => completedRetry.ExactTrsSpan.ToArray());
+        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.BeginPreClaimAsync(Bytes(32, 0xaf)));
+        using var retiredReceiver = await fixture.FindReceiver(exact, reopen: true);
+        Assert.NotNull(retiredReceiver); Assert.False(retiredReceiver.HasInitialState);
+    }
+
+    // Native production crypto over DID2-owned initial states. The authority
+    // here is deliberately test-only memory, not a shipping/durable E2E claim.
+    private static async Task AssertNativeMessagingIsolation(OwnedInitialMessagingSeed senderSeed,
+        OwnedInitialMessagingSeed receiverSeed, ParsedDmc2 hello, Fixture fixture)
+    {
+        var senderStorage = await fixture.RegisterMessagingStorage(senderSeed);
+        using var sender = new Did2NativeMessagingIsolation(senderSeed, senderStorage.Storage, senderStorage.Reopen, fixture.RetireInitialKeys);
+        var receiverStorage = await fixture.RegisterMessagingStorage(receiverSeed);
+        using var receiver = new Did2NativeMessagingIsolation(receiverSeed, receiverStorage.Storage, receiverStorage.Reopen, fixture.RetireInitialKeys);
+        ParsedDmc2 Text(OwnedInitialMessagingSeed seed, byte id, ulong sequence, string text) =>
+            ApplicationCoreCodec.AuthorDmc2(seed.Initiation.NetworkId.Span, Bytes(32, id), seed.ConversationId.Span,
+                seed.LocalDirectory.DeepAccountId.Span,
+                seed.IsInitiator ? seed.Initiation.InitiatorDeviceId.Span : seed.Initiation.ResponderDeviceId.Span,
+                sequence, hello.CreatedAtUnixMilliseconds + sequence, 0, Dmc2Flags.None, [],
+                ApplicationCoreCodec.CreateMessageCreatePayload(text));
+        var first = Text(senderSeed, 0xd1, 3, "DID2 Windows → Android: текст и emoji 📨");
+        var second = Text(senderSeed, 0xd2, 4, "DID2 out-of-order second message");
+        var firstCipher = await sender.Send(first, Bytes(32, 0xe1));
+        var secondCipher = await sender.Send(second, Bytes(32, 0xe2));
+        var senderGeneration = sender.Generation;
+        Assert.Equal(firstCipher, await sender.Send(first, Bytes(32, 0xe1)));
+        Assert.Equal(senderGeneration, sender.Generation);
+        await Assert.ThrowsAsync<CryptographicException>(() => sender.Send(second, Bytes(32, 0xe1)));
+        Assert.Equal(senderGeneration, sender.Generation);
+        using (var openedSecond = await receiver.Receive(secondCipher))
+        {
+            var exact = openedSecond.TakeAuthenticatedDmc2();
+            try { Assert.Equal(second.CanonicalBytes.ToArray(), exact); }
+            finally { CryptographicOperations.ZeroMemory(exact); }
+        }
+        using (var openedFirst = await receiver.Receive(firstCipher))
+        {
+            Assert.Equal(ExactDpe2ReceiveSuccessOutcome.OutOfOrderSkippedKey, openedFirst.Outcome);
+            var exact = openedFirst.TakeAuthenticatedDmc2();
+            try { Assert.Equal(first.CanonicalBytes.ToArray(), exact); }
+            finally { CryptographicOperations.ZeroMemory(exact); }
+        }
+        var priorGeneration = receiver.Generation;
+        using (var replay = await receiver.Receive(firstCipher))
+        {
+            Assert.Equal(ExactDpe2ReceiveSuccessOutcome.ExactReplay, replay.Outcome);
+            Assert.False(replay.HasAuthenticatedDmc2);
+            Assert.Equal(priorGeneration, receiver.Generation);
+        }
+        var tampered = firstCipher.ToArray(); tampered[^1] ^= 1;
+        await Assert.ThrowsAnyAsync<CryptographicException>(() => receiver.Receive(tampered));
+        Assert.Equal(priorGeneration, receiver.Generation);
+        var reply = Text(receiverSeed, 0xd3, 1, "DID2 Android → Windows: reply");
+        var replyCipher = await receiver.Send(reply, Bytes(32, 0xe3));
+        using var openedReply = await sender.Receive(replyCipher);
+        var replyExact = openedReply.TakeAuthenticatedDmc2();
+        try { Assert.Equal(reply.CanonicalBytes.ToArray(), replyExact); }
+        finally { CryptographicOperations.ZeroMemory(replyExact); }
+        // Crypto custody must not force group/different semantic events into
+        // the initial direct-contact conversation. This is NOT a verified
+        // group membership/materialization test; that remains MSG's boundary.
+        var otherConversation = ApplicationCoreCodec.AuthorDmc2(senderSeed.Initiation.NetworkId.Span,
+            Bytes(32, 0xd4), Bytes(32, 0xd5), senderSeed.LocalDirectory.DeepAccountId.Span,
+            senderSeed.Initiation.InitiatorDeviceId.Span, 5, hello.CreatedAtUnixMilliseconds + 5,
+            0, Dmc2Flags.None, [], ApplicationCoreCodec.CreateMessageCreatePayload("Separate semantic conversation"));
+        var otherCipher = await sender.Send(otherConversation, Bytes(32, 0xe4));
+        using var otherOpened = await receiver.Receive(otherCipher);
+        var otherExact = otherOpened.TakeAuthenticatedDmc2();
+        try { Assert.Equal(otherConversation.CanonicalBytes.ToArray(), otherExact); }
+        finally { CryptographicOperations.ZeroMemory(otherExact); }
+    }
+
+    [Fact]
+    public async Task Did2RendezvousCustody_ExactRestartLostCommitAndHostileSnapshot()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        var intent = Bytes(32, 0xec);
+        fixture.AfterNextRendezvousCommit(() => throw new IOException("Injected lost protected commit response."));
+        await Assert.ThrowsAsync<IOException>(() => fixture.EnsureRendezvous(intent));
+        var committed = await fixture.ReadRendezvousSnapshot();
+        Assert.Equal(ProtectedContactRendezvousJournal.HeaderBytes + ProtectedContactRendezvousJournal.EntryBytes, committed.Length);
+        var recovered = await fixture.EnsureRendezvous(intent, fixture.ReopenAccount());
+        Assert.Equal(committed.AsSpan(ProtectedContactRendezvousJournal.HeaderBytes + 64).ToArray(), recovered.ExactXur1.ToArray());
+        Assert.Equal(committed, await fixture.ReadRendezvousSnapshot());
+        var again = await fixture.EnsureRendezvous(intent);
+        Assert.Equal(recovered.ExactXur1.ToArray(), again.ExactXur1.ToArray());
+
+        var account = committed.AsSpan(28, 32).ToArray();
+        var instance = committed.AsSpan(60, 32).ToArray();
+        using (var parsed = ProtectedContactRendezvousJournal.Decode(committed, Fixture.Network, account, instance))
+            Assert.Equal(committed, ProtectedContactRendezvousJournal.Encode(parsed, Fixture.Network, account, instance));
+        foreach (var offset in new[] { 0, 1, 3, 11, 12, 28, 60, ProtectedContactRendezvousJournal.HeaderBytes + 33,
+            ProtectedContactRendezvousJournal.HeaderBytes + 64 })
+        {
+            var changed = committed.ToArray(); changed[offset] ^= 1;
+            void DecodeChanged()
+            {
+                using var rejected = ProtectedContactRendezvousJournal.Decode(changed, Fixture.Network, account, instance);
+            }
+            if (offset == ProtectedContactRendezvousJournal.HeaderBytes + 33)
+                Assert.Throws<CryptographicException>(DecodeChanged);
+            else if (offset == ProtectedContactRendezvousJournal.HeaderBytes + 64)
+                Assert.Throws<ContactFormatException>(DecodeChanged);
+            else Assert.Throws<InvalidDataException>(DecodeChanged);
+        }
+        Assert.Throws<InvalidDataException>(() =>
+        {
+            using var rejected = ProtectedContactRendezvousJournal.Decode(committed.AsSpan(0, committed.Length - 1), Fixture.Network, account, instance);
+        });
+        var proofRequests = fixture.ProofRequests;
+        var differentOwner = fixture.ReopenAccount();
+        await Assert.ThrowsAsync<ArgumentException>(() => differentOwner.EnsureOwnContactRendezvousAsync(intent, fixture.Source()));
+        Assert.Equal(proofRequests, fixture.ProofRequests);
+        await fixture.RemoveRendezvousSnapshot();
+        await Assert.ThrowsAsync<InvalidDataException>(() => fixture.Accounts.GetCurrentAsync());
+        await fixture.ResetAccountAsync();
+        Assert.Null(await fixture.Accounts.GetCurrentAsync());
+    }
+
+    [Fact]
+    public async Task Did2OwnedRendezvous_RealAccountNetworkSignsAndRejectsClockAndKeySubstitution()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        var (authored, network) = await fixture.AuthorRendezvous();
+        Assert.True(network.BindsProjection(authored.Record.Field(6)));
+        Assert.Equal(Bytes(32, 0xe1), authored.Record.Field(8).ToArray());
+        Assert.Equal(ScalarMult.Base(Bytes(32, 0xe2)), authored.Record.Field(9).ToArray());
+        Assert.Equal(538, authored.ExactXur1.Length);
+        Assert.Equal(new byte[32], authored.Record.Field(5).ToArray());
+        foreach (var mode in new[] { 1, 2, 3, 4, 5, 7, 8 })
+            await Assert.ThrowsAnyAsync<CryptographicException>(() => fixture.AuthorRendezvous(mode));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => fixture.AuthorRendezvous(6));
+    }
+
     [Fact]
     [Trait("RequiresApprovedMlKemRuntime", "true")]
     public async Task Did2InitialSession_NativeCompletionAndExactRestartAfterEveryCommitBoundary()
@@ -401,6 +1080,17 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
             CancellationToken cancellationToken) => throw new NotSupportedException();
         public ValueTask<ContactResolvePathAuthority> GetCurrentAsync(ContactResolveCanonicalPathRequest request,
             CancellationToken cancellationToken) => ValueTask.FromResult(authority);
+    }
+
+    private sealed class IgnoringCancellationClaimOnion(CancellationTokenSource cancellation) : IExactContactResolveOnionTransport
+    {
+        internal int Calls { get; private set; }
+        public ValueTask<ExactContactResolveOnionResponse> SendExactAsync(ContactResolveCanonicalPathRequest request,
+            ReadOnlyMemory<byte> requiredExitReplicaId, CancellationToken ct = default)
+        {
+            Calls++; cancellation.Cancel();
+            return new(new TaskCompletionSource<ExactContactResolveOnionResponse>(TaskCreationOptions.RunContinuationsAsynchronously).Task);
+        }
     }
 
     private sealed class ClaimOnion(ContactResolvePathAuthority? authority, byte[] body) : IExactContactResolveOnionTransport
@@ -978,17 +1668,21 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
     {
         var value = new byte[] { 1 };
         ReadOnlyMemory<byte>[] one = [value];
-        var closure = new DeepIdV2NetworkClosureArtifacts(one, one, one, one, one, one, one);
+        var closure = new DeepIdV2NetworkClosureArtifacts(one, one, one, one, one, one, one, one);
         value[0] = 2;
         Assert.Equal((byte)1, closure.ExactOrderedXnv1Chain[0].Span[0]);
+        Assert.Equal((byte)1, closure.ExactOrderedPma2Chain[0].Span[0]);
+        Assert.True(MemoryMarshal.TryGetArray(closure.ExactOrderedPma2Chain[0], out var mailboxCopy));
+        mailboxCopy.Array![mailboxCopy.Offset] = 9;
+        Assert.Equal((byte)1, closure.ExactOrderedPma2Chain[0].Span[0]);
         Assert.True(MemoryMarshal.TryGetArray(closure.ExactOrderedXnv1Chain[0], out var exported));
         exported.Array![exported.Offset] = 3;
         Assert.Equal((byte)1, closure.ExactOrderedXnv1Chain[0].Span[0]);
         var tooMany = Enumerable.Repeat<ReadOnlyMemory<byte>>(value, 4097).ToArray();
         Assert.Throws<ArgumentException>(() =>
-            new DeepIdV2NetworkClosureArtifacts(one, one, one, tooMany, tooMany, one, one));
+            new DeepIdV2NetworkClosureArtifacts(one, one, one, tooMany, tooMany, one, one, one));
         Assert.Throws<ArgumentException>(() =>
-            new DeepIdV2NetworkClosureArtifacts(one, one, one, [value, value], one, one, one));
+            new DeepIdV2NetworkClosureArtifacts(one, one, one, [value, value], one, one, one, one));
     }
 
     [Fact]
@@ -1132,7 +1826,7 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
     /// signed public network ceremony and nonce-bound HTTP proof bytes. The
     /// HTTP/secure-storage adapters are in-memory; directory and network
     /// floors use real SQLCipher. This is not TLS, ONION or device evidence.</summary>
-    private sealed class Fixture : HttpMessageHandler, IAsyncDisposable,
+    private sealed partial class Fixture : HttpMessageHandler, IAsyncDisposable,
         IOnionMonotonicClock
     {
         internal static readonly byte[] Network = Bytes(16, 0x11);
@@ -1141,6 +1835,57 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
         private readonly string directory = Path.Combine(Path.GetTempPath(),
             "deep-did2-path-" + Guid.NewGuid().ToString("N"));
         private readonly InMemoryDeepSecureStorage innerStorage = new();
+        private readonly InMemoryDeepSecureStorage peerStorage = new();
+        private DeepIdV2AccountService? peerAccounts;
+        private VerifiedAdc1V2? peerCheckpoint;
+        private IXPointNetworkStateStore? peerNetworkStore;
+        private DeepIdV2DirectoryProofClient? peerProofs;
+        private Func<ReadOnlyMemory<byte>, Task<DeepIdV2InitialContactSessionCommit>>? receiverCompletion;
+        private Func<DeepIdV2InitialSessionCommit, DeepIdV2InitialContactSessionCommit, ParsedDmc2, ParsedDmc2,
+            Task<(OwnedInitialMessagingSeed Sender, OwnedInitialMessagingSeed Receiver)>>? messagingSeeds;
+        private Func<ParsedDmc2, ParsedDmc2, Task<Did2MessagingSessionScope>>? ensureSenderMessaging;
+        private Func<ReadOnlyMemory<byte>, Task<Did2MessagingSessionScope>>? ensureReceiverMessaging;
+        private Func<Did2MessagingSessionScope, ReadOnlyMemory<byte>, ParsedDmc2, Task<OwnedDid2MessagingPersistedEvent>>? sendOwnedMessage;
+        private Func<Did2MessagingSessionScope, ReadOnlyMemory<byte>, Task<OwnedDid2MessagingPersistedEvent>>? receiveOwnedMessage;
+        private Func<Did2MessagingSessionScope, Task<IReadOnlyList<DirectMessageCreateSnapshot>>>? listOwnedMessages;
+        private Func<Did2MessagingSessionScope, ReadOnlyMemory<byte>, Task<OwnedDid2ContactAcceptDraft>>? prepareOwnedContactAccept;
+        private Func<Did2MessagingSessionScope, Task<Did2ContactAcceptanceState>>? readOwnedContactState;
+        private Func<Did2MessagingSessionScope, Task<DeepIdV2ContactPathAuthoritySource.MessagingEndpointAuthority>>? refreshOwnedMessaging;
+        internal Task<DeepIdV2ContactPathAuthoritySource.MessagingEndpointAuthority> RefreshOwnedMessaging(Did2MessagingSessionScope scope) =>
+            (refreshOwnedMessaging ?? throw new InvalidOperationException("Owned endpoint refresh is absent."))(scope);
+        internal Task DropPeerBootstrap(Did2MessagingSessionScope scope) =>
+            (scope.IsInitiator ? (IDeepSecureStorage)storage : peerStorage).DeleteBatchAsync([ProtectedDid2MessagingPeerBootstrap.Slot(scope)]);
+        private Func<Did2MessagingSessionScope, ReadOnlyMemory<byte>, string, Task<DirectTextOutboxEntry>>? prepareOwnedText;
+        private Func<Did2MessagingSessionScope, ReadOnlyMemory<byte>, ReadOnlyMemory<byte>, Task<DirectTextOutboxEntry>>? prepareOwnedAttachmentOffer;
+        private Func<Did2MessagingSessionScope, ReadOnlyMemory<byte>, byte[], string, string, ulong, Task<OwnedAttachmentPreparation>>? prepareOwnedAsset;
+        internal Task<OwnedAttachmentPreparation> PrepareOwnedAsset(Did2MessagingSessionScope scope, ReadOnlyMemory<byte> operation,
+            byte[] bytes, string filename, string mediaType, ulong expiry) =>
+            (prepareOwnedAsset ?? throw new InvalidOperationException("Owned asset preparation is absent."))(scope, operation, bytes, filename, mediaType, expiry);
+        internal Task<DirectTextOutboxEntry> PrepareOwnedAttachmentOffer(Did2MessagingSessionScope scope, ReadOnlyMemory<byte> operation,
+            ReadOnlyMemory<byte> assetOperation) =>
+            (prepareOwnedAttachmentOffer ?? throw new InvalidOperationException("Owned offer preparation is absent."))(scope, operation, assetOperation);
+        internal Task<DirectTextOutboxEntry> PrepareOwnedText(Did2MessagingSessionScope scope, ReadOnlyMemory<byte> op, string text) =>
+            (prepareOwnedText ?? throw new InvalidOperationException("Owned text command is absent."))(scope, op, text);
+        internal Task<OwnedDid2ContactAcceptDraft> PrepareOwnedContactAccept(Did2MessagingSessionScope scope, ReadOnlyMemory<byte> op) =>
+            (prepareOwnedContactAccept ?? throw new InvalidOperationException("Owned acceptance command is absent."))(scope, op);
+        internal Task<Did2ContactAcceptanceState> ReadOwnedContactState(Did2MessagingSessionScope scope) =>
+            (readOwnedContactState ?? throw new InvalidOperationException("Owned contact state read is absent."))(scope);
+        internal Task<IReadOnlyList<DirectMessageCreateSnapshot>> ListOwnedMessages(Did2MessagingSessionScope scope) =>
+            (listOwnedMessages ?? throw new InvalidOperationException("Owned inbox read closure is absent."))(scope);
+        internal Task<OwnedDid2MessagingPersistedEvent> SendOwnedMessage(Did2MessagingSessionScope scope, ReadOnlyMemory<byte> op, ParsedDmc2 message) =>
+            (sendOwnedMessage ?? throw new InvalidOperationException("Owned send closure is absent."))(scope, op, message);
+        internal Task<OwnedDid2MessagingPersistedEvent> ReceiveOwnedMessage(Did2MessagingSessionScope scope, ReadOnlyMemory<byte> envelope) =>
+            (receiveOwnedMessage ?? throw new InvalidOperationException("Owned receive closure is absent."))(scope, envelope);
+        internal Task<Did2MessagingSessionScope> EnsureSenderMessaging(ParsedDmc2 initial, ParsedDmc2 hello) =>
+            (ensureSenderMessaging ?? throw new InvalidOperationException("Owner messaging closure is absent."))(initial, hello);
+        internal Task<Did2MessagingSessionScope> EnsureReceiverMessaging(ReadOnlyMemory<byte> exact) =>
+            (ensureReceiverMessaging ?? throw new InvalidOperationException("Owner messaging closure is absent."))(exact);
+        internal Task<Did2MessagingFloor> ReadMessagingFloor(Did2MessagingSessionScope scope) =>
+            new Did2MessagingProtectedCheckpoint(scope.IsInitiator ? (IDeepSecureStorage)storage : peerStorage, scope).ReadAsync(default);
+
+        internal Task<(OwnedInitialMessagingSeed Sender, OwnedInitialMessagingSeed Receiver)> CreateMessagingSeeds(
+            DeepIdV2InitialSessionCommit sent, DeepIdV2InitialContactSessionCommit received, ParsedDmc2 init, ParsedDmc2 hello) =>
+            (messagingSeeds ?? throw new InvalidOperationException("Messaging seed closure has not been prepared."))(sent, received, init, hello);
         private readonly NetworkMarkerFaultStorage storage;
         private readonly Signer root = new(0x20);
         private readonly Signer[] witnesses = [new(0x30), new(0x31), new(0x32)];
@@ -1167,9 +1912,125 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
         internal DeepIdV2AccountService ReopenAccount() => new(storage, directory, Network, 1,
             new FrozenClock(DateTimeOffset.FromUnixTimeSeconds(1_000)),
             DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess);
+        internal Task<DeepIdV2InitialContactSessionCommit> CompleteReceiver(ReadOnlyMemory<byte> exact) =>
+            (receiverCompletion ?? throw new InvalidOperationException("Receiver closure has not been prepared."))(exact);
+        internal async Task<Did2InitialKeyRetirementReceipt> RetireInitialKeys(Did2InitialStateTransfer transfer)
+        {
+            var sender = transfer.Scope.IsInitiator;
+            var preclaimBefore = sender ? await ReadPreClaimSnapshotAsync() : null;
+            byte[]? receiverState = null;
+            if (!sender)
+            {
+                await using var observer = await OpenPeerPreKeySqlAsync();
+                using var read = observer.CreateCommand(); read.CommandText = "SELECT exact_state FROM receiver_initial_state WHERE ordinal=1;";
+                receiverState = (byte[])read.ExecuteScalar()!;
+            }
+            var stateDirectory = sender ? directory : Path.Combine(directory, "peer");
+            var secure = sender ? (IDeepSecureStorage)storage : peerStorage;
+            ProtectedDeepIdV2AccountOwner ReopenOwner() => new(secure,
+                new DeepIdV2AccountFileLease(Path.Combine(stateDirectory, "deep-store-v2-account.lock")),
+                Path.Combine(stateDirectory, "deep-store-v2-account.dsv2"), Network, 1);
+            // Resume after every meaningful deletion crash boundary, including
+            // protected stable already written. No key is restored for retry.
+            var points = sender ? new[] { InitialKeyRetirementFailpoint.AfterPending, InitialKeyRetirementFailpoint.AfterPreclaim,
+                InitialKeyRetirementFailpoint.AfterSourceDelete, InitialKeyRetirementFailpoint.AfterStable } :
+                new[] { InitialKeyRetirementFailpoint.AfterPending, InitialKeyRetirementFailpoint.AfterSourceDelete, InitialKeyRetirementFailpoint.AfterStable };
+            foreach (var point in points)
+            {
+                var hit = false;
+                using (InitialKeyRetirementTestHooks.Push(actual =>
+                { if (actual == point) { hit = true; throw new IOException("Injected initial retirement stop."); } }))
+                    await Assert.ThrowsAsync<IOException>(() => ReopenOwner().RetireInitialMessagingKeysAsync(1_000, pq, transfer, default));
+                Assert.True(hit);
+            }
+            var receipt = await ReopenOwner().RetireInitialMessagingKeysAsync(1_000, pq, transfer, default);
+            Assert.Equal(receipt.ExactEntry.ToArray(), (await ReopenOwner().RetireInitialMessagingKeysAsync(1_000, pq, transfer, default)).ExactEntry.ToArray());
+            if (sender)
+            {
+                using var journal = await innerStorage.ReadOwnedAsync(ProtectedDph2PreClaimJournal.Slot);
+                var decoded = journal!.Use(value => ProtectedDph2PreClaimJournal.Decode(value, Network, transfer.Scope.LocalAccount, transfer.Scope.Instance));
+                Assert.Empty(decoded.Claims); Assert.Single(decoded.Retired);
+                var tombstone = journal.Use(static value => value.ToArray());
+                try
+                {
+                    Assert.True(await innerStorage.CompareExchangeAsync(ProtectedDph2PreClaimJournal.Slot, tombstone, preclaimBefore!));
+                    await Assert.ThrowsAsync<CryptographicException>(() => ReopenAccount().GetCurrentAsync());
+                }
+                finally
+                {
+                    // Test fault-injection cleanup, NOT runtime recovery/repair.
+                    Assert.True(await innerStorage.CompareExchangeAsync(ProtectedDph2PreClaimJournal.Slot, preclaimBefore!, tombstone));
+                    CryptographicOperations.ZeroMemory(tombstone); CryptographicOperations.ZeroMemory(preclaimBefore!);
+                }
+            }
+            else
+            {
+                try
+                {
+                    await using (var observer = await OpenPeerPreKeySqlAsync())
+                    {
+                        using var insert = observer.CreateCommand(); insert.CommandText = "INSERT INTO receiver_initial_state VALUES(1,$state);";
+                        insert.Parameters.AddWithValue("$state", receiverState!); Assert.Equal(1, insert.ExecuteNonQuery());
+                    }
+                    await Assert.ThrowsAsync<CryptographicException>(() => AccountsForPeer().HasOwnStagedPreKeyInventoryAsync());
+                }
+                finally
+                {
+                    await using var observer = await OpenPeerPreKeySqlAsync();
+                    using var deletion = observer.CreateCommand(); deletion.CommandText = "DELETE FROM receiver_initial_state WHERE ordinal=1;";
+                    Assert.Equal(1, deletion.ExecuteNonQuery()); CryptographicOperations.ZeroMemory(receiverState!);
+                }
+            }
+            return receipt;
+        }
+        internal DeepIdV2AccountService AccountsForPeer() => peerAccounts!;
+        internal async Task<(OwnedDid2MessagingStorage Storage, Func<Task<OwnedDid2MessagingStorage>> Reopen)>
+            RegisterMessagingStorage(OwnedInitialMessagingSeed seed)
+        {
+            var sender = seed.IsInitiator;
+            var secure = sender ? (IDeepSecureStorage)storage : peerStorage;
+            var stateDirectory = sender ? directory : Path.Combine(directory, "peer");
+            var path = Path.Combine(stateDirectory, "deep-store-v2-account.dsv2");
+            var accountLease = new DeepIdV2AccountFileLease(Path.Combine(stateDirectory, "deep-store-v2-account.lock"));
+            var account = seed.LocalDirectory.DeepAccountId.ToArray();
+            Did2MessagingSessionScope scope;
+            using (var held = await accountLease.AcquireAsync(default))
+            {
+                var instance = await SqliteDeepIdV2AccountGeneration.ReadAccountInstanceUnderLeaseAsync(secure, Network, account, default);
+                Assert.True(instance.AsSpan().SequenceEqual(seed.Instance));
+                scope = await new ProtectedDid2MessagingSessionCatalog(secure, Network, account, instance).RegisterAsync(seed, default);
+                var again = await new ProtectedDid2MessagingSessionCatalog(secure, Network, account, instance).RegisterAsync(seed, default);
+                Assert.True(scope.Exact.SequenceEqual(again.Exact));
+            }
+            async Task<OwnedDid2MessagingStorage> Open()
+            {
+                var owner = new ProtectedDeepIdV2AccountOwner(secure, accountLease, path, Network, 1);
+                using var current = await owner.ReadCurrentAsync(1_000, pq, default) ?? throw new InvalidDataException("Fixture account is absent.");
+                using var held = await accountLease.AcquireAsync(default);
+                return await SqliteDeepIdV2AccountGeneration.OpenOwnedMessagingUnderLeaseAsync(secure, path, current, scope, default);
+            }
+            return (await Open(), Open);
+        }
+        internal Task<DeepIdV2InitialContactSessionCommit?> FindReceiver(ReadOnlyMemory<byte> exact, bool reopen = false) =>
+            (reopen ? new DeepIdV2AccountService(peerStorage, Path.Combine(directory, "peer"), Network, 1,
+                new FrozenClock(DateTimeOffset.FromUnixTimeSeconds(1_000)), DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess)
+                : peerAccounts!).FindOwnInitialContactSessionAsync(exact);
 
         internal void AfterNextCommitPairRead(Action action) => storage.AfterCommitPairRead = action;
         internal void AfterNextPreClaimCommit(Action action) => storage.AfterPreClaimCommit = action;
+        internal void AfterNextRendezvousCommit(Action action) => storage.AfterRendezvousCommit = action;
+        internal Task<VerifiedDeepIdV2ContactUpdateRendezvous> EnsureRendezvous(byte[] intent,
+            DeepIdV2AccountService? owner = null)
+        {
+            owner ??= accounts;
+            return owner.EnsureOwnContactRendezvousAsync(intent, Source(owner));
+        }
+        internal async Task<byte[]> ReadRendezvousSnapshot()
+        {
+            using var value = await innerStorage.ReadOwnedAsync(ProtectedContactRendezvousJournal.Slot);
+            return value?.Use(bytes => bytes.ToArray()) ?? throw new InvalidDataException("Fixture snapshot absent.");
+        }
+        internal Task RemoveRendezvousSnapshot() => innerStorage.DeleteBatchAsync([ProtectedContactRendezvousJournal.Slot]);
         internal async Task<InitiatorDph2PreKeyClaim> BeginPreClaimAsync(byte[] intent,
             DeepIdV2AccountService? owner = null, CancellationToken cancellationToken = default)
         {
@@ -1186,6 +2047,44 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
         internal async Task<byte[]> ReadPreClaimSnapshotAsync() =>
             await ReadPreClaimSnapshotOrNullAsync() ?? throw new InvalidDataException("Fixture snapshot absent.");
         internal Task RemovePreClaimSnapshotAsync() => innerStorage.DeleteBatchAsync([ProtectedDph2PreClaimJournal.Slot]);
+
+        internal async Task<(VerifiedDeepIdV2ContactUpdateRendezvous, VerifiedOnionNetworkContext)>
+            AuthorRendezvous(int mode = 0)
+        {
+            var current = await Source().VerifyForOwnPreKeyAuthoringAsync(accounts, default);
+            using var retained = await new ProtectedDeepIdV2GenesisDeviceSecretsStore(storage, Network,
+                checkpoint.Directory.Record.DeepAccountId.Span).ReadVerifiedAsync(
+                    checkpoint.Binding.Identity.ActiveDevices.Single(), default);
+            using var unrelated = mode == 1 ? new Deep.Protocol.Identity.OwnedGenesisDeviceSecrets() : null;
+            var keyId = Bytes(32, 0xe1); var publicKey = ScalarMult.Base(Bytes(32, 0xe2));
+            if (mode == 2) publicKey = checkpoint.Binding.Identity.ActiveDevices.Single().Certificate.DeviceX25519PublicKey.ToArray();
+            if (mode == 8) { publicKey = new byte[32]; publicKey[0] = 1; }
+            var proof = mode == 7 ? (await Source().VerifyForOwnPreKeyAuthoringAsync(accounts, default)).Proof : current.Proof;
+            using var canceled = new CancellationTokenSource();
+            var reads = 0;
+            var clock = new CallbackRendezvousClock(() =>
+            {
+                var first = reads++ == 0;
+                if (mode == 0) { keyId[0] ^= 1; publicKey[0] ^= 1; }
+                if (mode == 6) canceled.Cancel();
+                return new OnionMonotonicReading(mode == 4 && !first ? Bytes(16, 0xf4) : Boot,
+                    mode == 3 && first ? Sample + 1 : mode == 5 && !first ? current.Proof.FreshnessDeadlineMonotonicSeconds : Sample);
+            });
+            var result = await DeepIdV2ContactUpdateRendezvousAuthor.AuthorGenesisAsync(proof,
+                current.Network, unrelated ?? retained!, keyId, publicKey,
+                current.Proof.TrustedLowerUnixSeconds, checked(current.Proof.TrustedUpperUnixSeconds + 10),
+                new OnionTrustedTimeAuthority(clock), canceled.Token);
+            return (result, current.Network);
+        }
+
+        private sealed class CallbackRendezvousClock(Func<OnionMonotonicReading> read) : IOnionMonotonicClock
+        {
+            public ValueTask<OnionMonotonicReading> ReadAsync(CancellationToken cancellationToken)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                return ValueTask.FromResult(read());
+            }
+        }
 
         internal async Task<Func<DeepIdV2AccountService, Task<DeepIdV2InitialSessionCommit>>>
             PrepareNativeInitialCompletion(byte[] intent)
@@ -1237,10 +2136,265 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
                 init.CanonicalBytes, first.CanonicalBytes, 32);
         }
 
+        internal async Task<(Func<DeepIdV2AccountService, Task<DeepIdV2InitialSessionCommit>> Complete,
+            ParsedDmc2 Hello, ParsedDmc2 Init,
+            Func<ReadOnlyMemory<byte>, Task<Dph2InitialClaimPreview>> Preview,
+            Func<Dph2InitialClaimPreview, Task<ResponderInitialSessionCommitCapability>> Prepare)> PrepareNativeHelloCompletion(byte[] intent, int oneTimeIndex = -1, bool verifyDraftRecovery = false)
+        {
+            var recipientAccount = peerAccounts ?? throw new InvalidOperationException("Peer fixture is required.");
+            var recipientCheckpoint = peerCheckpoint!;
+            var senderSource = Source(); var recipientSource = Source(recipientAccount);
+            var staged = await recipientAccount.EnsureOwnInitialPreKeyInventoryAsync(recipientSource);
+            var recipientCurrent = await recipientSource.VerifyForOwnPreKeyAuthoringAsync(recipientAccount, default);
+            var publication = DeepIdV2PreKeyPublicationCodec.Decode(staged.ExactXpp1.Span);
+            var authorization = DeepIdV2ContactAuthorizationCodec.Verify(
+                DeepIdV2ContactAuthorizationCodec.Decode(staged.ExactDca1.Span), recipientCheckpoint.Binding, recipientCheckpoint.Directory);
+            var recipient = DeepIdV2CurrentContactAuthorizationVerifier.Verify(recipientCurrent.Proof, authorization, Boot, Sample);
+            // Start at the actual owned contact publisher/read boundary, not
+            // a manually framed DCR with unverified random route references.
+            using var threshold = new OwnedRouteThreshold(this);
+            var plan = await recipientAccount.ReadOwnPermanentContactPlanAsync();
+            var publicationIntent = plan.Intent.ToArray();
+            var profile = plan.Profile;
+            var config = Did2OwnedPermanentContactPlan.Configuration();
+            var publishedContact = await recipientAccount.EnsureOwnContactObjectAsync(publicationIntent, recipientSource,
+                config, threshold, profile);
+            var recipientRoute = await recipientAccount.EnsureOwnContactRouteAsync(publicationIntent, recipientSource, config, threshold);
+            var publicationSource = new OwnedPublicationSource(this, recipientRoute);
+            var publicationReplica = new OwnedPublicationReplica(this, recipientRoute);
+            _ = await recipientAccount.EnsureOwnPermanentContactPublishedAsync(recipientSource, threshold, publicationSource, publicationReplica);
+            _ = await EnsurePrivateReplyPublicationAsync(accounts);
+            var address = (await recipientAccount.GetCurrentAsync())!.PermanentId;
+            var resolved = await accounts.ResolvePermanentContactAsync(address, senderSource,
+                new SyntheticPermanentRead(this, senderSource, publicationReplica.ExactPublication));
+            nativeMessagingContact = resolved;
+            nativeMessagingPublication = publicationReplica.ExactPublication;
+            var resolver = resolved.Contact;
+            Assert.Equal(publishedContact.Closure.CanonicalBytes.ToArray(), resolver.CanonicalBytes.ToArray());
+            recipient = resolved.Authorization;
+            if (verifyDraftRecovery)
+            {
+                using var preclaimBefore = await storage.ReadOwnedAsync(ProtectedDph2PreClaimJournal.Slot);
+                await Assert.ThrowsAsync<InvalidOperationException>(() => accounts.PrepareOwnPermanentContactClaimAsync(intent, resolved, senderSource, 32));
+                using var preclaimAfter = await storage.ReadOwnedAsync(ProtectedDph2PreClaimJournal.Slot);
+                Assert.Equal(preclaimBefore!.Use(bytes => bytes.ToArray()), preclaimAfter!.Use(bytes => bytes.ToArray()));
+            }
+            // Author through the actual owner before claim consumption. Own
+            // the caller intent before its first asynchronous proof lookup.
+            var draftIntent = intent.ToArray(); var intentMutated = false;
+            OnNextDirectoryProof = () => { draftIntent.AsSpan().Clear(); intentMutated = true; };
+            if (verifyDraftRecovery)
+            {
+                storage.FailAfterContactDraftCommit = true;
+                await Assert.ThrowsAsync<IOException>(() => accounts.PrepareOwnInitialContactDraftAsync(draftIntent, resolved, senderSource));
+            }
+            using var draft = await accounts.PrepareOwnInitialContactDraftAsync(verifyDraftRecovery ? intent : draftIntent, resolved, senderSource);
+            Assert.True(intentMutated); Assert.True(draftIntent.All(value => value == 0));
+            var init = ApplicationCoreCodec.DecodeDmc2(draft.ExactInit);
+            var hello = ApplicationCoreCodec.DecodeDmc2(draft.ExactHello);
+            if (verifyDraftRecovery) await CheckInitialDraftRootAsync(intent, init, hello, resolved, senderSource);
+            var reopenedDraftAccount = ReopenAccount();
+            using (var retryDraft = await reopenedDraftAccount.PrepareOwnInitialContactDraftAsync(intent, resolved, Source(reopenedDraftAccount)))
+            {
+                Assert.Equal(draft.ExactInit.ToArray(), retryDraft.ExactInit.ToArray());
+                Assert.Equal(draft.ExactHello.ToArray(), retryDraft.ExactHello.ToArray());
+            }
+            // Production orchestration chooses the verified publisher service,
+            // protected operation/ephemeral commitment and authoritative time.
+            // The test no longer constructs XPK from the staged inventory.
+            var request = await accounts.PrepareOwnPermanentContactClaimAsync(intent, resolved, senderSource, 32);
+            var retainedRequest = await accounts.PrepareOwnPermanentContactClaimAsync(intent, resolved, senderSource, 32);
+            Assert.Equal(request.CanonicalBytes.ToArray(), retainedRequest.CanonicalBytes.ToArray());
+            using var started = await BeginPreClaimAsync(intent);
+            var path = await senderSource.GetCurrentForPreKeyClaimAsync(Network, publication.Manifest.Field(2));
+            Assert.Equal(started.ClaimOperationId.ToArray(), request.Field(2).ToArray());
+            Assert.Equal(started.SenderEphemeralCommitment.ToArray(), request.Field(21).ToArray());
+            Assert.Equal(publication.Manifest.Field(6).Span[6..].ToArray(), request.Field(18).ToArray());
+            var exactResult = AuthorClaimResult(request, path, publication, false, oneTimeIndex: oneTimeIndex);
+            var custody = await accounts.OpenOwnClaimRequestCustodyAsync();
+            using (var cancelledDispatch = new CancellationTokenSource())
+            {
+                var ignoringToken = new IgnoringCancellationClaimOnion(cancelledDispatch);
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+                    await new DeepIdV2PreKeyClaimTransport(senderSource, ignoringToken, custody)
+                        .ClaimExactAsync(request.CanonicalBytes, cancelledDispatch.Token));
+                Assert.Equal(1, ignoringToken.Calls);
+                Assert.Null(await custody.FindResultAsync(request.Field(2), default));
+            }
+            var claimTransport = new DeepIdV2PreKeyClaimTransport(senderSource, new ClaimOnion(path, exactResult), custody);
+            var verifiedResult = await claimTransport.ClaimExactAsync(request.CanonicalBytes);
+            var result = DeepIdV2PreKeyClaimResultCodec.Decode(verifiedResult.ExactResult.Span, request.CanonicalBytes.Span);
+            var time = new OnionTrustedTimeAuthority(this);
+            var clockReads = 0;
+            var reversingClock = new CallbackRendezvousClock(() => new(Boot,
+                ++clockReads == 1 ? Sample + 1 : Sample));
+            await Assert.ThrowsAsync<CryptographicException>(async () =>
+                await DeepIdV2PreKeyClaimReceiptVerifier.VerifyAsync(request, result, path.Placement,
+                    recipient, resolver, new(reversingClock)));
+            Assert.Equal(2, clockReads);
+            var claim = await DeepIdV2PreKeyClaimReceiptVerifier.VerifyAsync(request, result, path.Placement, recipient, resolver, time);
+            var current = await senderSource.VerifyForOwnPreKeyAuthoringAsync(accounts, default);
+            Assert.True(8 + 438 + 16384 + 1 + 4 + init.CanonicalBytes.Length + 4 + hello.CanonicalBytes.Length <= 32764,
+                "The actual three-node contact with its private reply route must fit the unchanged initial bucket.");
+            receiverCompletion = async exact =>
+            {
+                var retained = await recipientAccount.FindOwnInitialContactSessionAsync(exact);
+                if (retained is not null) return retained;
+                var opened = await recipientAccount.PreviewOwnDph2InitialClaimAsync(exact, current.Proof, recipientSource, 32);
+                var promoted = await opened.VerifyCurrentAsync(path.Placement, recipient, resolver, current.Proof, time);
+                return await recipientAccount.CommitOwnInitialContactSessionAsync(promoted, current.Proof, recipientSource, 32);
+            };
+            messagingSeeds = async (sent, received, exactInit, exactHello) =>
+            {
+                var senderLease = new DeepIdV2AccountFileLease(Path.Combine(directory, "deep-store-v2-account.lock"));
+                var receiverLease = new DeepIdV2AccountFileLease(Path.Combine(directory, "peer", "deep-store-v2-account.lock"));
+                OwnedInitialMessagingSeed senderSeed;
+                // The real file lock has its own 30-second acquisition bound.
+                // Allow cold SQLCipher verification on ARM64 to finish; nested
+                // acquisition still fails, rather than being excused by this budget.
+                using var bounded = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+                using (var held = await senderLease.AcquireAsync(bounded.Token))
+                {
+                    var senderInstance = await SqliteDeepIdV2AccountGeneration.ReadAccountInstanceUnderLeaseAsync(storage,
+                        Network, sent.Record.InitiatorAccountId, bounded.Token);
+                    senderSeed = await OwnedInitialMessagingSeed.FromSenderAsync(sent, exactInit.CanonicalBytes,
+                        exactHello.CanonicalBytes, senderInstance, current, recipientCurrent.Proof, senderSource, held, bounded.Token);
+                }
+                try
+                {
+                    using var held = await receiverLease.AcquireAsync(bounded.Token);
+                    var receiverInstance = await SqliteDeepIdV2AccountGeneration.ReadAccountInstanceUnderLeaseAsync(peerStorage,
+                        Network, received.Record.ResponderAccountId, bounded.Token);
+                    var receiverSeed = await OwnedInitialMessagingSeed.FromReceiverAsync(received, receiverInstance,
+                        recipientCurrent, current.Proof, recipientSource, held, bounded.Token);
+                    return (senderSeed, receiverSeed);
+                }
+                catch { senderSeed.Dispose(); throw; }
+            };
+            ensureSenderMessaging = async (initial, contact) =>
+            {
+                using var bounded = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+                return await accounts.EnsureOwnSenderMessagingAsync(intent, initial.CanonicalBytes,
+                    contact.CanonicalBytes, recipientCurrent.Proof, senderSource, bounded.Token);
+            };
+            ensureReceiverMessaging = async exact =>
+            {
+                using var bounded = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+                return await recipientAccount.EnsureOwnReceiverMessagingAsync(exact, current.Proof, recipientSource, bounded.Token);
+            };
+            // Recreate the service and source every ordinary operation. No
+            // cached TRS/replay map or test transaction authority participates.
+            (DeepIdV2AccountService Account, DeepIdV2ContactPathAuthoritySource Source)
+                ReopenMessaging(Did2MessagingSessionScope scope)
+            {
+                var reopened = scope.IsInitiator ? ReopenAccount() : new DeepIdV2AccountService(peerStorage,
+                    Path.Combine(directory, "peer"), Network, 1, new FrozenClock(DateTimeOffset.FromUnixTimeSeconds(1_000)),
+                    DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess);
+                return (reopened, new DeepIdV2ContactPathAuthoritySource(bootstrap.GenesisPin, reopened,
+                    scope.IsInitiator ? proofs : peerProofs!, closure, scope.IsInitiator ? NetworkStore : peerNetworkStore!, this));
+            }
+            refreshOwnedMessaging = async scope =>
+            {
+                var reopened = ReopenMessaging(scope);
+                using var bounded = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+                return await reopened.Source.VerifyForOwnMessagingAsync(reopened.Account, scope, bounded.Token);
+            };
+            sendOwnedMessage = async (scope, op, message) =>
+            {
+                var reopened = ReopenMessaging(scope);
+                using var bounded = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+                return await reopened.Account.SendOwnMessagingAsync(scope, op, message.CanonicalBytes,
+                    reopened.Source, bounded.Token);
+            };
+            prepareOwnedText = async (scope, op, text) =>
+            {
+                var reopened = ReopenMessaging(scope);
+                using var bounded = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+                return await reopened.Account.PrepareOwnDirectTextAsync(scope, op, text, reopened.Source, bounded.Token);
+            };
+            prepareOwnedAsset = async (scope, op, bytes, filename, mediaType, expiry) =>
+            {
+                var reopened = ReopenMessaging(scope);
+                using var bounded = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+                using var input = new MemoryStream(bytes, writable: false);
+                return await reopened.Account.PrepareOwnAttachmentAsync(op, input, bytes.Length, filename, mediaType, expiry, bounded.Token);
+            };
+            prepareOwnedAttachmentOffer = async (scope, op, asset) =>
+            {
+                var reopened = ReopenMessaging(scope);
+                using var bounded = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+                return await reopened.Account.PrepareOwnDirectAttachmentOfferAsync(scope, op, asset, reopened.Source, bounded.Token);
+            };
+            receiveOwnedMessage = async (scope, exact) =>
+            {
+                var reopened = ReopenMessaging(scope);
+                using var bounded = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+                return await reopened.Account.ReceiveOwnMessagingEnvelopeAsync(exact, reopened.Source, bounded.Token);
+            };
+            listOwnedMessages = async scope =>
+            {
+                var reopened = ReopenMessaging(scope);
+                using var bounded = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+                return await reopened.Account.ListOwnMessagingMessagesAsync(scope, reopened.Source, bounded.Token);
+            };
+            prepareOwnedContactAccept = async (scope, op) =>
+            {
+                var reopened = ReopenMessaging(scope);
+                using var bounded = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+                return await reopened.Account.PrepareOwnContactAcceptAsync(scope, op, reopened.Source, bounded.Token);
+            };
+            readOwnedContactState = async scope =>
+            {
+                var reopened = ReopenMessaging(scope);
+                using var bounded = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+                return await reopened.Account.ReadOwnContactAcceptanceAsync(scope, reopened.Source, bounded.Token);
+            };
+            return (account => account.CompleteOwnInitialContactAsync(intent, resolved, Source(account),
+                new ClaimOnion(path, exactResult)), hello, init,
+                exact => recipientAccount.PreviewOwnDph2InitialClaimAsync(exact, current.Proof, recipientSource, 32),
+                async preview =>
+                {
+                    var promoted = await preview.VerifyCurrentAsync(path.Placement, recipient, resolver, current.Proof, time);
+                    await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+                        await preview.VerifyCurrentAsync(path.Placement, recipient, resolver, current.Proof, time));
+                    var freshRecipient = await recipientSource.VerifyForOwnPreKeyAuthoringAsync(recipientAccount, default);
+                    var reading = await recipientSource.RecheckOwnPreKeyAuthoringAsync(freshRecipient, default);
+                    var peerDirectory = Path.Combine(directory, "peer");
+                    var lease = new DeepIdV2AccountFileLease(Path.Combine(peerDirectory, "deep-store-v2-account.lock"));
+                    var statePath = Path.Combine(peerDirectory, "deep-store-v2-account.dsv2");
+                    var owner = new ProtectedDeepIdV2AccountOwner(peerStorage, lease, statePath, Network, 1);
+                    using var ownedRecipient = await owner.ReadCurrentAsync(1_000, pq, default) ?? throw new InvalidOperationException();
+                    using var held = await lease.AcquireAsync(default);
+                    await Assert.ThrowsAnyAsync<CryptographicException>(async () =>
+                        await SqliteDeepIdV2AccountGeneration.PrepareInitialSessionUnderLeaseAsync(peerStorage,
+                            statePath, ownedRecipient, promoted, freshRecipient with { Proof = current.Proof },
+                            current.Proof, reading, time, 32, default));
+                    var priorSample = Sample;
+                    try
+                    {
+                        Sample = checked(priorSample + 1_000);
+                        await Assert.ThrowsAnyAsync<CryptographicException>(async () =>
+                            await SqliteDeepIdV2AccountGeneration.PrepareInitialSessionUnderLeaseAsync(peerStorage,
+                                statePath, ownedRecipient, promoted, freshRecipient, current.Proof, reading, time, 32, default));
+                    }
+                    finally { Sample = priorSample; }
+                    using var canceled = new CancellationTokenSource(); canceled.Cancel();
+                    await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+                        await SqliteDeepIdV2AccountGeneration.PrepareInitialSessionUnderLeaseAsync(peerStorage,
+                            statePath, ownedRecipient, promoted, freshRecipient, current.Proof, reading, time, 32, canceled.Token));
+                    // Isolated preparation evidence only: no atomic responder
+                    // transaction/inbox/ACK is claimed by this fixture.
+                    return await SqliteDeepIdV2AccountGeneration.PrepareInitialSessionUnderLeaseAsync(peerStorage,
+                        statePath, ownedRecipient, promoted, freshRecipient, current.Proof, reading, time, 32, default);
+                });
+        }
+
         // Exact V2 fixture framing, not a shipping authoring API or publication
         // authority. Every output is checked by the real closed Protocol codecs.
-        private ParsedDcr1V2 NativeRecipientClosure(StagedDeepIdV2PreKeyPublication staged, byte[] signingKey)
+        private ParsedDcr1V2 NativeRecipientClosure(StagedDeepIdV2PreKeyPublication staged, byte[] signingKey,
+            VerifiedAdc1V2? selectedCheckpoint = null)
         {
+            var checkpoint = selectedCheckpoint ?? this.checkpoint;
             var dmd = checkpoint.Directory.Record; var identity = checkpoint.Binding.Identity;
             var device = identity.ActiveDevices.Single().Certificate;
             var dca = DeepIdV2ContactAuthorizationCodec.Decode(staged.ExactDca1.Span);
@@ -1318,14 +2472,13 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
         }
 
         internal byte[] AuthorClaimResult(ParsedXpk1V2 request, ContactResolvePathAuthority authority,
-            ParsedXpp1V2 publication, bool replay, bool badSignature = false)
+            ParsedXpp1V2 publication, bool replay, bool badSignature = false, int oneTimeIndex = -1)
         {
-            // Last-resort inclusion avoids a second implementation of the Merkle
-            // proof algorithm. Protocol still checks exact signed inventory membership.
-            var member = publication.LastResortMember;
+            var member = oneTimeIndex >= 0 ? publication.OneTimeMembers[oneTimeIndex] : publication.LastResortMember;
+            var useCounter = checked((ushort)(oneTimeIndex >= 0 ? 0 : 1));
             var manifest = publication.Manifest;
             var signingInput = DeepIdV2PreKeyClaimCommitment.CreateReplicaSignatureInput(
-                request.CanonicalBytes.Span, member.CanonicalBytes.Span, manifest.CanonicalBytes.Span, 1, 1);
+                request.CanonicalBytes.Span, member.CanonicalBytes.Span, manifest.CanonicalBytes.Span, 1, useCounter);
             var selected = authority.Placement.RankedReplicaNodeIds.OrderBy(id => Convert.ToHexString(id.Span)).ToArray();
             var rows = new byte[193]; rows[0] = 2;
             for (var index = 0; index < 2; index++)
@@ -1335,17 +2488,54 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
                     .SignCommit(signingInput).CopyTo(rows, 33 + index * 96);
             }
             if (badSignature) rows[33] ^= 1;
-            var counter = new byte[2]; BinaryPrimitives.WriteUInt16BigEndian(counter, 1);
+            var counter = new byte[2]; BinaryPrimitives.WriteUInt16BigEndian(counter, useCounter);
             var generation = new byte[8]; BinaryPrimitives.WriteUInt64BigEndian(generation, 1);
-            var lastIndex = new byte[2]; BinaryPrimitives.WriteUInt16BigEndian(lastIndex, ushort.MaxValue);
-            ReadOnlyMemory<byte>[] payload = [member.CanonicalBytes, new byte[32],
+            var lastIndex = new byte[2]; BinaryPrimitives.WriteUInt16BigEndian(lastIndex,
+                oneTimeIndex >= 0 ? checked((ushort)oneTimeIndex) : ushort.MaxValue);
+            var inclusion = oneTimeIndex >= 0 ? OneTimeProof(publication, oneTimeIndex) : [];
+            ReadOnlyMemory<byte>[] payload = [member.CanonicalBytes,
+                oneTimeIndex >= 0 ? member.OneTimePrekeyId : new byte[32],
                 DeepIdV2PreKeyClaimCommitment.ComputeReceiptHash(request.CanonicalBytes.Span,
-                    member.CanonicalBytes.Span, manifest.CanonicalBytes.Span, 1, 1),
+                    member.CanonicalBytes.Span, manifest.CanonicalBytes.Span, 1, useCounter),
                 manifest.Field(12), manifest.Field(13), manifest.Field(5), manifest.Field(15),
-                counter, generation, rows, manifest.CanonicalBytes, lastIndex, ReadOnlyMemory<byte>.Empty];
+                counter, generation, rows, manifest.CanonicalBytes, lastIndex, inclusion];
             return DeepIdV2PreKeyClaimResultCodec.Encode(request.CanonicalBytes.Span,
                 replay ? Xpc1V2Status.Replay : Xpc1V2Status.Claimed,
                 Xpc1V2MutationOutcome.DurablyCommitted, 1_100, 0, payload);
+        }
+
+        // Independent fixture oracle for the fixed 32-member test inventory;
+        // production receipt verification checks its exact root and path.
+        private static byte[] OneTimeProof(ParsedXpp1V2 publication, int position)
+        {
+            Assert.Equal(32, publication.OneTimeMembers.Count);
+            var level = publication.OneTimeMembers.Select((member, index) =>
+            {
+                var leaf = new byte[34]; BinaryPrimitives.WriteUInt16BigEndian(leaf, checked((ushort)index));
+                member.ExactHash.Span.CopyTo(leaf.AsSpan(2));
+                return FixtureHash("Deep/ContactResolver/V2/prekey-inventory-leaf", leaf);
+            }).ToArray();
+            var proof = new byte[160];
+            for (var depth = 0; depth < 5; depth++)
+            {
+                level[position ^ 1].CopyTo(proof, depth * 32);
+                var next = new byte[level.Length / 2][];
+                for (var index = 0; index < next.Length; index++)
+                {
+                    var pair = new byte[64]; level[index * 2].CopyTo(pair, 0); level[index * 2 + 1].CopyTo(pair, 32);
+                    next[index] = FixtureHash("Deep/ContactResolver/V2/prekey-inventory-node", pair);
+                }
+                level = next; position /= 2;
+            }
+            Assert.Equal(publication.Manifest.Field(10).ToArray(), level[0]);
+            return proof;
+        }
+        private static byte[] FixtureHash(string domain, byte[] value)
+        {
+            using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            hash.AppendData(System.Text.Encoding.ASCII.GetBytes(domain)); hash.AppendData([0]);
+            var length = new byte[4]; BinaryPrimitives.WriteUInt32BigEndian(length, checked((uint)value.Length));
+            hash.AppendData(length); hash.AppendData(value); return hash.GetHashAndReset();
         }
 
         // Storage-level internal recording deliberately omits transport verification
@@ -1490,35 +2680,92 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
             return await reopened.OpenNetworkLkgStoreAsync(pin);
         }
 
-        internal async Task<SqliteConnection> OpenSqlAsync()
+        internal async Task AssertReceiverSqlAsync(int count, byte[] exact)
         {
-            using var record = await storage.ReadOwnedAsync("deep.store.v2.sql-generation");
-            var key = record!.Use(value => value.Slice(88, 32).ToArray());
+            await using var sql = await OpenPeerPreKeySqlAsync();
+            using var read = sql.CreateCommand();
+            read.CommandText = "SELECT COUNT(*) FROM receiver_sessions;";
+            Assert.Equal(count, Convert.ToInt32(read.ExecuteScalar()));
+            read.CommandText = "SELECT COUNT(*) FROM secrets;";
+            Assert.Equal(33 - count, Convert.ToInt32(read.ExecuteScalar()));
+            read.CommandText = "SELECT COUNT(*) FROM secrets WHERE exact_dpk2_hash=$hash;";
+            read.Parameters.AddWithValue("$hash", Dph2Codec.Decode(exact).ExactDpk2Hash.ToArray());
+            Assert.Equal(0, Convert.ToInt32(read.ExecuteScalar()));
+            using var protectedTip = await peerStorage.ReadOwnedAsync(ResponderInitialSessionCheckpoint.Slot);
+            using var rootRecord = await peerStorage.ReadOwnedAsync("deep.store.v2.sql-generation");
+            var instance = rootRecord!.Use(value => value.Slice(56, 32).ToArray());
+            var tip = protectedTip!.Use(value => value.ToArray());
+            using var parsed = ResponderInitialSessionCheckpoint.Decode(tip, instance,
+                peerCheckpoint!.Binding.Record.DeepAccountId.Span, Network);
+            Assert.Equal((byte)1, parsed.Phase); Assert.Equal(checked((ulong)count), parsed.Sequence);
+        }
+
+        internal async Task RollBackReceiverSqlAsync()
+        {
+            await using var sql = await OpenPeerPreKeySqlAsync();
+            using var transaction = sql.BeginTransaction();
+            using var write = sql.CreateCommand();
+            write.Transaction = transaction;
+            write.CommandText = "DELETE FROM receiver_initial_state WHERE ordinal=(SELECT MAX(ordinal) FROM receiver_sessions);";
+            Assert.Equal(1, write.ExecuteNonQuery());
+            write.CommandText = "DELETE FROM receiver_sessions WHERE ordinal=(SELECT MAX(ordinal) FROM receiver_sessions);";
+            Assert.Equal(1, write.ExecuteNonQuery());
+            transaction.Commit();
+        }
+
+        private async Task<SqliteConnection> OpenPeerPreKeySqlAsync()
+        {
+            using var rootRecord = await peerStorage.ReadOwnedAsync("deep.store.v2.sql-generation");
+            var record = rootRecord!.Use(value => value.ToArray());
+            byte[]? key = null;
+            var certificate = peerCheckpoint!.Binding.Identity.ActiveDevices.Single().Certificate;
+            // Test-only observer: same specified account/instance-bound PKV2 key.
+            var transcript = new List<byte>("Deep/STORE-V2/prekey-state-key"u8.ToArray());
+            transcript.AddRange(Network); transcript.AddRange(peerCheckpoint.Binding.Record.DeepAccountId.ToArray());
+            transcript.AddRange(U64(peerCheckpoint.Binding.Identity.Account.Certificate.AccountGeneration));
+            transcript.AddRange(certificate.DeviceId.ToArray()); transcript.AddRange(U64(certificate.DeviceGeneration));
+            transcript.AddRange(Ref("DPD1"u8, 1, certificate.CanonicalHash.Span));
+            transcript.AddRange(record.AsSpan(56, 32).ToArray());
             var connection = new SqliteConnection(new SqliteConnectionStringBuilder
             {
-                DataSource = Path.Combine(directory, "deep-store-v2-account.dsv2"),
-                Mode = SqliteOpenMode.ReadWrite,
-                Pooling = false
+                DataSource = Path.Combine(directory, "peer", "deep-store-v2-account.dsv2.prekeys.pkv2"),
+                Mode = SqliteOpenMode.ReadWrite, Pooling = false
             }.ToString());
             try
             {
+                key = HMACSHA256.HashData(record.AsSpan(88, 32), transcript.ToArray());
                 connection.Open();
                 Assert.Equal(SQLitePCL.raw.SQLITE_OK, SQLitePCL.raw.sqlite3_key(connection.Handle, key));
                 return connection;
             }
             catch { connection.Dispose(); throw; }
+            finally { CryptographicOperations.ZeroMemory(record); if (key is not null) CryptographicOperations.ZeroMemory(key); }
+        }
+
+        internal async Task<SqliteConnection> OpenSqlAsync()
+        {
+            using var record = await storage.ReadOwnedAsync("deep.store.v2.sql-generation");
+            var key = record!.Use(value => value.Slice(88, 32).ToArray());
+            try { return SqliteDeepIdV2AccountGeneration.OpenAccountConnectionForTests(Path.Combine(directory, "deep-store-v2-account.dsv2"), key, create: false); }
             finally { CryptographicOperations.ZeroMemory(key); }
         }
 
-        internal static async Task<Fixture> CreateAsync(bool withSuccessor = false, bool expiringHistory = false)
+        internal static async Task<Fixture> CreateAsync(bool withSuccessor = false, bool expiringHistory = false, bool withPeer = false,
+            bool longMailboxWindow = false)
         {
             var fixture = new Fixture();
-            try { await fixture.InitializeAsync(withSuccessor, expiringHistory); return fixture; }
+            try { await fixture.InitializeAsync(withSuccessor, expiringHistory, withPeer, longMailboxWindow); return fixture; }
             catch { await fixture.DisposeAsync(); throw; }
         }
 
-        private async Task InitializeAsync(bool withSuccessor, bool expiringHistory)
+        private async Task InitializeAsync(bool withSuccessor, bool expiringHistory, bool withPeer, bool longMailboxWindow)
         {
+            if (longMailboxWindow && (withSuccessor || expiringHistory))
+                throw new ArgumentException("The moving mailbox clock has a separate fixture window.");
+            // Cold native/SQLCipher recovery takes longer than the short 500s
+            // static-fixture view. Author a genuinely longer signed view/head,
+            // still within the root interval; never suppress expiry validation.
+            var windowExpiry = longMailboxWindow ? 6_000UL : 1_500UL;
             Directory.CreateDirectory(directory);
             accounts = new(storage, directory, Network, 1,
                 new FrozenClock(DateTimeOffset.FromUnixTimeSeconds(1_000)),
@@ -1546,19 +2793,29 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
             operational = await XPointNetworkOperationalGenesisAuthor.AuthorAsync(new(
                 Bytes(32, 0x12), bootstrap, [root], witnesses, descriptors, Bytes(32, 0xf1),
                 Bytes(32, 0xf4), Bytes(32, 0xf5), Bytes(32, 0xf6), PublicKey(0x31), PublicKey(0x32),
-                990, 1_000, expiringHistory ? 1_090UL : 1_500UL, Bytes(32, 0xf2), Boot, 100, 100, 100, ProofTime, 5));
+                990, 1_000, expiringHistory ? 1_090UL : windowExpiry, Bytes(32, 0xf2), Boot, 100, 100, 100, ProofTime, 5));
             var admission = DeepIdV2GenesisAdmissionWireCodec.DecodeRequest(
                 await accounts.PrepareGenesisAdmissionAsync()).Admission;
             checkpoint = DeepIdV2GenesisAdmissionVerifier.Verify(admission, 1_000, 1, 2, pq);
+            if (withPeer)
+            {
+                var peerDirectory = Path.Combine(directory, "peer"); Directory.CreateDirectory(peerDirectory);
+                peerAccounts = new(peerStorage, peerDirectory, Network, 1,
+                    new FrozenClock(DateTimeOffset.FromUnixTimeSeconds(1_000)), DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess);
+                await peerAccounts.CreateAsync("Independent DID2 peer");
+                var peerAdmission = DeepIdV2GenesisAdmissionWireCodec.DecodeRequest(await peerAccounts.PrepareGenesisAdmissionAsync()).Admission;
+                peerCheckpoint = DeepIdV2GenesisAdmissionVerifier.Verify(peerAdmission, 1_000, 1, 2, pq);
+            }
             genesis = await DeepIdV2DirectoryHeadAuthor.AuthorGenesisAsync(
-                bootstrap.Authority, 990, 1_500, witnesses);
+                bootstrap.Authority, 990, windowExpiry, witnesses);
             head = await DeepIdV2DirectoryHeadAuthor.AdvanceAsync(bootstrap.Authority,
-                genesis.ProtectedHead, new([], [], [checkpoint], 990, 1_500, 2), witnesses);
+                genesis.ProtectedHead, new([], [], peerCheckpoint is null ? [checkpoint] : [checkpoint, peerCheckpoint], 990, windowExpiry, 2), witnesses);
             if (withSuccessor)
                 await AdvanceNetworkAsync();
             var floor = await accounts.OpenDirectoryLkgStoreAsync(bootstrap.Authority,
                 genesis.ExactAdh1, genesis.CoreHash);
             NetworkStore = await accounts.OpenNetworkLkgStoreAsync(bootstrap.GenesisPin);
+            if (peerAccounts is not null) peerNetworkStore = await peerAccounts.OpenNetworkLkgStoreAsync(bootstrap.GenesisPin);
             http = new(this, disposeHandler: false);
             var transport = new HttpServiceRequestTransport(http,
                 DeepIdV2DirectoryProofClient.CreateTransportOptions("https://registry.example/"),
@@ -1566,6 +2823,15 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
             proofs = new(transport, new HttpServiceRequestTransport(new HttpClient(this, disposeHandler: false),
                 DeepIdV2DirectoryProofClient.CreateHistoryTransportOptions("https://registry.example/"),
                 HttpServiceEndpointPolicy.Production), this, pq, floor);
+            if (peerAccounts is not null)
+            {
+                var peerFloor = await peerAccounts.OpenDirectoryLkgStoreAsync(bootstrap.Authority, genesis.ExactAdh1, genesis.CoreHash);
+                peerProofs = new(new HttpServiceRequestTransport(new HttpClient(this, disposeHandler: false),
+                    DeepIdV2DirectoryProofClient.CreateTransportOptions("https://registry.example/"), HttpServiceEndpointPolicy.Production),
+                    new HttpServiceRequestTransport(new HttpClient(this, disposeHandler: false),
+                    DeepIdV2DirectoryProofClient.CreateHistoryTransportOptions("https://registry.example/"), HttpServiceEndpointPolicy.Production),
+                    this, pq, peerFloor);
+            }
             closure = new(new HttpServiceRequestTransport(new HttpClient(this, disposeHandler: false),
                 HttpDeepIdV2NetworkClosureArtifactSource.CreateTransportOptions("https://registry.example/"),
                 HttpServiceEndpointPolicy.Production));
@@ -1588,7 +2854,9 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
         }
 
         internal DeepIdV2ContactPathAuthoritySource Source(DeepIdV2AccountService? account = null) =>
-            new(bootstrap.GenesisPin, account ?? accounts, proofs, closure, NetworkStore, this);
+            new(bootstrap.GenesisPin, account ?? accounts,
+                ReferenceEquals(account, peerAccounts) && peerAccounts is not null ? peerProofs! : proofs, closure,
+                ReferenceEquals(account, peerAccounts) && peerAccounts is not null ? peerNetworkStore! : NetworkStore, this);
 
         private DeepIdV2NetworkClosureArtifacts PublicClosure()
         {
@@ -1601,10 +2869,11 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
                     OmitHistoricalPolicy ? [successor.ExactXvp1] : [operational.ExactXvp1, successor.ExactXvp1],
                     [operational.ExactXnv1, successor.ExactXnv1],
                     [operational.ExactXnh1, successor.ExactXnh1], descriptors,
-                    [operational.ExactPmt2, successor.ExactPmt2]);
+                    [operational.ExactPmt2, successor.ExactPmt2], MailboxPolicies());
             return new DeepIdV2NetworkClosureArtifacts(
                 [bootstrap.ExactXna1], [bootstrap.ExactDts1], [operational.ExactXvp1],
-                [operational.ExactXnv1], [operational.ExactXnh1], descriptors, [operational.ExactPmt2]);
+                [operational.ExactXnv1], [operational.ExactXnh1], descriptors, [operational.ExactPmt2],
+                MailboxPolicies());
         }
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,
@@ -1619,7 +2888,8 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
                 var encoded = XPointNetworkClosureWireCodec.EncodeResponse(network,
                     raw.ExactXna1AuthorityChain, raw.ExactDts1PolicyChain,
                     raw.ExactOrderedXvp1Chain, raw.ExactOrderedXnv1Chain,
-                    raw.ExactOrderedXnh1Chain, raw.ExactActiveXnd1, raw.ExactOrderedPmt2Chain);
+                    raw.ExactOrderedXnh1Chain, raw.ExactActiveXnd1, raw.ExactOrderedPmt2Chain,
+                    raw.ExactOrderedPma2Chain);
                 var distributed = new HttpResponseMessage(HttpStatusCode.OK)
                 { RequestMessage = request, Content = new ByteArrayContent(encoded) };
                 distributed.Content.Headers.ContentType = new(XPointNetworkClosureWireCodec.ResponseMediaType);
@@ -1637,6 +2907,7 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
                 return historyResponse;
             }
             ProofRequests++;
+            var observer = OnNextDirectoryProof; OnNextDirectoryProof = null; observer?.Invoke();
             if (RejectProof) return new(HttpStatusCode.ServiceUnavailable) { RequestMessage = request };
             var query = DeepIdV2DirectoryProofWireCodec.DecodeRequest(
                 await request.Content!.ReadAsByteArrayAsync(cancellationToken));
@@ -1647,11 +2918,12 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
                 _ => throw new CryptographicException("Unknown test directory floor.")
             };
             var material = DeepIdV2DirectoryProofMaterialAuthor.Create(head.ProtectedHead,
-                head.ExactAllTransitions, [checkpoint], query.DirectoryLeafKey.Span, floor);
+                head.ExactAllTransitions, peerCheckpoint is null ? [checkpoint] : [checkpoint, peerCheckpoint], query.DirectoryLeafKey.Span, floor);
+            var proofTime = CurrentProofTime;
             var issued = await DeepIdV2DirectoryProofAuthor.IssueGenesisAsync(bootstrap.Authority,
                 new(Network, query.Nonce.Span, query.BootId.Span, query.ClientMonotonicSendSample,
-                    head.ExactAdh1.Span, (successor?.ExactXnv1 ?? operational.ExactXnv1).Span, ProofTime, 5, ProofTime, ProofTime + 30,
-                    AccountDirectoryDtt1IssuanceEpoch.Derive(bootstrap.Authority, ProofTime, 5), 2),
+                    head.ExactAdh1.Span, (successor?.ExactXnv1 ?? operational.ExactXnv1).Span, proofTime, 5, proofTime, proofTime + 30,
+                    AccountDirectoryDtt1IssuanceEpoch.Derive(bootstrap.Authority, proofTime, 5), 2),
                 material, witnesses, 1, pq, cancellationToken);
             var body = DeepIdV2DirectoryProofWireCodec.EncodeResponse(query, issued);
             var response = new HttpResponseMessage(HttpStatusCode.OK)
@@ -1664,12 +2936,13 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
         public ValueTask<OnionMonotonicReading> ReadAsync(CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            return ValueTask.FromResult(new OnionMonotonicReading(Boot, Sample));
+            return ValueTask.FromResult(new OnionMonotonicReading(Boot, checked(Sample + MailboxElapsedSeconds)));
         }
 
         public ValueTask DisposeAsync()
         {
-            closure?.Dispose(); proofs?.Dispose(); http?.Dispose(); pq.Dispose(); innerStorage.Dispose();
+            if (mailboxSqlBeforePreparation is not null) CryptographicOperations.ZeroMemory(mailboxSqlBeforePreparation);
+            closure?.Dispose(); proofs?.Dispose(); peerProofs?.Dispose(); http?.Dispose(); pq.Dispose(); innerStorage.Dispose(); peerStorage.Dispose();
             foreach (var signer in witnesses.Concat(nodes).Append(root)) signer.Dispose();
             if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true);
             Dispose(); return ValueTask.CompletedTask;
@@ -1678,8 +2951,13 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
 
     private sealed class NetworkMarkerFaultStorage(IDeepSecureStorage inner) : IDeepSecureStorage
     {
+        public Task<bool> CompareExchangeAndInsertAsync(string slot, ReadOnlyMemory<byte> expected,
+            ReadOnlyMemory<byte> replacement, IReadOnlyList<DeepSecureStorageWrite> insertions,
+            CancellationToken ct = default) => inner.CompareExchangeAndInsertAsync(slot, expected, replacement, insertions, ct);
         internal Action? AfterPreClaimCommit { get; set; }
+        internal Action? AfterRendezvousCommit { get; set; }
         internal Action? AfterCommitPairRead { get; set; }
+        internal bool FailAfterContactDraftCommit { get; set; }
         internal bool FailAfterNetworkMarker { get; set; }
         internal bool FailAfterHistoryAnchor { get; set; }
         internal string? LastHistoryAnchorSlot { get; private set; }
@@ -1689,6 +2967,16 @@ public sealed class DeepIdV2ContactPathAuthoritySourceTests
             ReadOnlyMemory<byte> replacement, CancellationToken ct = default)
         {
             var applied = await inner.CompareExchangeAsync(slot, expected, replacement, ct);
+            if (applied && slot == ProtectedDid2ContactStartJournal.Slot && FailAfterContactDraftCommit)
+            {
+                FailAfterContactDraftCommit = false;
+                throw new IOException("Injected stop after durable contact draft CAS, before release.");
+            }
+            if (applied && slot == ProtectedContactRendezvousJournal.Slot && AfterRendezvousCommit is { } afterRendezvous)
+            {
+                AfterRendezvousCommit = null;
+                afterRendezvous();
+            }
             if (applied && slot == ProtectedDph2PreClaimJournal.Slot && AfterPreClaimCommit is { } afterPreClaim)
             {
                 AfterPreClaimCommit = null;

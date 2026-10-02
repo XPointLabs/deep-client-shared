@@ -22,6 +22,71 @@ namespace Deep.Client.Shared.Production.Tests;
 public sealed class DeepIdV2AccountServiceTests
 {
     [Fact]
+    public async Task OwnedAttachmentsRetainExactChunksAcrossAdoptionCrashesAndRestart()
+    {
+        Assert.True(SupportedProvider());
+        var directory = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "deep-did2-local-attachments-" + Guid.NewGuid().ToString("N")));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            using var storage = new InMemoryDeepSecureStorage();
+            var network = Enumerable.Range(1, 16).Select(i => (byte)i).ToArray();
+            var clock = new FrozenClock(DateTimeOffset.FromUnixTimeSeconds(1_900_000_000));
+            DeepIdV2AccountService Open() => new(storage, directory, network, 1, clock, DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess);
+            var accounts = Open(); _ = await accounts.CreateAsync("Attachment QA");
+            var plaintext = Enumerable.Range(0, 262145).Select(i => (byte)i).ToArray();
+            foreach (var point in Enum.GetValues<Did2AttachmentFailpoint>())
+            {
+                var op = Enumerable.Repeat((byte)(31 + (int)point), 32).ToArray(); var hit = false;
+                using (Did2AttachmentTestHooks.Push(actual => { if (actual == point) { hit = true; throw new IOException("Injected lost local attachment response."); } }))
+                    await Assert.ThrowsAsync<IOException>(() => accounts.PrepareOwnAttachmentAsync(op, new MemoryStream(plaintext), plaintext.Length,
+                        "photo.png", "image/png", 2_000_000_000, default));
+                Assert.True(hit); accounts = Open();
+                if (point != Did2AttachmentFailpoint.AfterSqlBeforePending)
+                {
+                    // Recovery does not need the picker URI or plaintext.
+                    using var recovered = await accounts.ReadOwnAttachmentAsync(op, default);
+                    Assert.Equal(2, recovered.ChunkCount);
+                }
+                using var first = await accounts.PrepareOwnAttachmentAsync(op, new MemoryStream(plaintext), plaintext.Length,
+                    "photo.png", "image/png", 2_000_000_000, default);
+                using var manifest = first.OwnManifest(); var exact = manifest.Use(bytes => bytes.ToArray());
+                try
+                {
+                    using var parsed = ApplicationCoreCodec.DecodeDam1(exact); var offset = 0;
+                    for (uint i = 0; i < first.ChunkCount; i++)
+                    {
+                        var cipher = first.CopyCiphertext(i); var plain = AttachmentChunkCipher.Decrypt(parsed, i, cipher);
+                        try { Assert.Equal(plaintext.AsSpan(offset, plain.Length).ToArray(), plain); offset += plain.Length; }
+                        finally { CryptographicOperations.ZeroMemory(cipher); CryptographicOperations.ZeroMemory(plain); }
+                    }
+                    Assert.Equal(plaintext.Length, offset);
+                    accounts = Open(); using var second = await accounts.ReadOwnAttachmentAsync(op, default);
+                    using var secondManifest = second.OwnManifest(); Assert.True(secondManifest.Use(bytes => bytes.SequenceEqual(exact)));
+                    for (uint i = 0; i < first.ChunkCount; i++) Assert.Equal(first.CopyCiphertext(i), second.CopyCiphertext(i));
+                    var changed = plaintext.ToArray(); changed[^1] ^= 1;
+                    await Assert.ThrowsAsync<CryptographicException>(() => accounts.PrepareOwnAttachmentAsync(op, new MemoryStream(changed), changed.Length,
+                        "photo.png", "image/png", 2_000_000_000, default));
+                    using var after = await accounts.ReadOwnAttachmentAsync(op, default); using var afterManifest = after.OwnManifest();
+                    Assert.True(afterManifest.Use(bytes => bytes.SequenceEqual(exact)));
+                    CryptographicOperations.ZeroMemory(changed);
+                }
+                finally { CryptographicOperations.ZeroMemory(exact); }
+            }
+            var path = Path.Combine(directory, "deep-store-v2-account.dsv2.application.dmb1"); Assert.True(File.Exists(path)); File.Delete(path);
+            await Assert.ThrowsAsync<LocalStateResetRequiredException>(() => Open().ReadOwnAttachmentAsync(Enumerable.Repeat((byte)31, 32).ToArray(), default));
+            Assert.False(File.Exists(path)); CryptographicOperations.ZeroMemory(plaintext);
+        }
+        finally
+        {
+            Assert.StartsWith(Path.GetFullPath(Path.GetTempPath()), directory, StringComparison.OrdinalIgnoreCase);
+            Assert.StartsWith("deep-did2-local-attachments-", Path.GetFileName(directory), StringComparison.Ordinal);
+            Assert.Equal(0, (int)(File.GetAttributes(directory) & FileAttributes.ReparsePoint));
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task CurrentDid2DeviceStateMountsAndDoesNotRecreateLostAgreementLedger()
     {
         if (!SupportedProvider()) return;
@@ -672,6 +737,10 @@ public sealed class DeepIdV2AccountServiceTests
         public Task<bool> CompareExchangeAsync(string slot, ReadOnlyMemory<byte> expected,
             ReadOnlyMemory<byte> replacement, CancellationToken ct = default) =>
             inner.CompareExchangeAsync(slot, expected, replacement, ct);
+
+        public Task<bool> CompareExchangeAndInsertAsync(string slot, ReadOnlyMemory<byte> expected,
+            ReadOnlyMemory<byte> replacement, IReadOnlyList<DeepSecureStorageWrite> insertions,
+            CancellationToken ct = default) => inner.CompareExchangeAndInsertAsync(slot, expected, replacement, insertions, ct);
 
         public Task<OwnedDeepSecret?> ReadOwnedAsync(string slot,
             CancellationToken cancellationToken = default) =>

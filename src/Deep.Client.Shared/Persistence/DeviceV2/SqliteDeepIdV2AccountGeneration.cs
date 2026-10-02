@@ -15,11 +15,11 @@ internal static partial class SqliteDeepIdV2AccountGeneration
     private const string KeySlot = "deep.store.v2.sql-generation";
     private const int KeyRecordLength = 120;
     private const int ApplicationId = 0x44535632; // DSV2
-    private const int SchemaVersion = 2;
+    private const int SchemaVersion = 3;
     private const string AccountTable = "CREATE TABLE local_account (singleton INTEGER PRIMARY KEY CHECK(singleton=1), network_id BLOB NOT NULL CHECK(length(network_id)=16), account_id BLOB NOT NULL CHECK(length(account_id)=32), did2_hash BLOB NOT NULL CHECK(length(did2_hash)=32), dab2_hash BLOB NOT NULL CHECK(length(dab2_hash)=32), deep_id_text TEXT NOT NULL);";
     private const string DeviceTable = "CREATE TABLE local_device (singleton INTEGER PRIMARY KEY CHECK(singleton=1), device_id BLOB NOT NULL CHECK(length(device_id)=32), dpd1_hash BLOB NOT NULL CHECK(length(dpd1_hash)=32), dmd1_hash BLOB NOT NULL CHECK(length(dmd1_hash)=32));";
     private const string ProfileTable = "CREATE TABLE local_profile (singleton INTEGER PRIMARY KEY CHECK(singleton=1), display_name TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision>=1));";
-    private const string IdentityTable = "CREATE TABLE store_identity (singleton INTEGER PRIMARY KEY CHECK(singleton=1), database_instance_id BLOB NOT NULL CHECK(length(database_instance_id)=32), cipher_generation INTEGER NOT NULL CHECK(cipher_generation=2));";
+    private const string IdentityTable = "CREATE TABLE store_identity (singleton INTEGER PRIMARY KEY CHECK(singleton=1), database_instance_id BLOB NOT NULL CHECK(length(database_instance_id)=32), cipher_generation INTEGER NOT NULL CHECK(cipher_generation=3));";
     private const string LkgTable = "CREATE TABLE protected_lkg_root (root_kind INTEGER PRIMARY KEY, revision INTEGER NOT NULL, payload BLOB NOT NULL);";
     private const string OutboxTable = "CREATE TABLE outbox_root (root_kind INTEGER PRIMARY KEY, revision INTEGER NOT NULL, payload BLOB NOT NULL);";
     private const string InboxTable = "CREATE TABLE inbox_root (root_kind INTEGER PRIMARY KEY, revision INTEGER NOT NULL, payload BLOB NOT NULL);";
@@ -110,19 +110,119 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             {
                 var emptyClaims = ProtectedDph2PreClaimJournal.Empty(networkId.Span,
                     accountId.Span, record.AsSpan(56, 32));
-                await storage.WriteBatchAsync(
-                    [new DeepSecureStorageWrite(KeySlot, record),
-                     new DeepSecureStorageWrite(ProtectedDph2PreClaimJournal.Slot, emptyClaims)],
-                    cancellationToken).ConfigureAwait(false);
+                var emptyRendezvous = ProtectedContactRendezvousJournal.Empty(networkId.Span,
+                    accountId.Span, record.AsSpan(56, 32));
+                var emptyReceiver = ResponderInitialSessionCheckpoint.Stable(record.AsSpan(56, 32),
+                    accountId.Span, networkId.Span, 0, new byte[32]);
+                var emptyRetirements = ProtectedInitialKeyRetirementJournal.Empty(networkId.Span,
+                    accountId.Span, record.AsSpan(56, 32));
+                var emptyMessaging = ProtectedDid2MessagingSessionCatalog.Empty(networkId.Span,
+                    accountId.Span, record.AsSpan(56, 32));
+                var applicationRegistration = NewApplicationRegistration(record);
+                var emptyContactAccepts = ProtectedDid2ContactAcceptJournal.Empty(networkId.Span, accountId.Span, record.AsSpan(56, 32));
+                var emptyContactStarts = ProtectedDid2ContactStartJournal.Empty(networkId.Span, accountId.Span, record.AsSpan(56, 32));
+                var emptyText = ProtectedDid2DirectTextJournal.Empty(networkId.Span, accountId.Span, record.AsSpan(56, 32));
+                var emptyAttachments = ProtectedDid2AttachmentJournal.Empty(networkId.Span, accountId.Span, record.AsSpan(56, 32));
+                var emptyRoutes = ProtectedDid2ContactRouteJournal.Empty(networkId.Span, accountId.Span, record.AsSpan(56, 32));
+                var emptyGrants = ProtectedDid2MailboxGrantJournal.Empty(networkId.Span, accountId.Span, record.AsSpan(56, 32));
+                var emptyMailboxSends = ProtectedDid2MailboxSendJournal.Empty(networkId.Span, accountId.Span, record.AsSpan(56, 32));
+                var emptyMailboxReads = ProtectedDid2MailboxReadJournal.Empty(networkId.Span, accountId.Span, record.AsSpan(56, 32));
+                try
+                {
+                    await storage.WriteBatchAsync(
+                        [new DeepSecureStorageWrite(KeySlot, record),
+                         new DeepSecureStorageWrite(ProtectedDph2PreClaimJournal.Slot, emptyClaims),
+                         new DeepSecureStorageWrite(ProtectedContactRendezvousJournal.Slot, emptyRendezvous),
+                         new DeepSecureStorageWrite(ResponderInitialSessionCheckpoint.Slot, emptyReceiver),
+                         new DeepSecureStorageWrite(ProtectedInitialKeyRetirementJournal.Slot, emptyRetirements),
+                         new DeepSecureStorageWrite(ProtectedDid2MessagingSessionCatalog.Slot, emptyMessaging),
+                         new DeepSecureStorageWrite(ApplicationStateSlot, applicationRegistration),
+                         new DeepSecureStorageWrite(ProtectedDid2ContactAcceptJournal.Slot, emptyContactAccepts),
+                         new DeepSecureStorageWrite(ProtectedDid2ContactStartJournal.Slot, emptyContactStarts),
+                         new DeepSecureStorageWrite(ProtectedDid2DirectTextJournal.Slot, emptyText),
+                         new DeepSecureStorageWrite(ProtectedDid2AttachmentJournal.Slot, emptyAttachments),
+                         new DeepSecureStorageWrite(ProtectedDid2ContactRouteJournal.Slot, emptyRoutes),
+                         new DeepSecureStorageWrite(ProtectedDid2MailboxGrantJournal.Slot, emptyGrants),
+                         new DeepSecureStorageWrite(ProtectedDid2MailboxSendJournal.Slot, emptyMailboxSends),
+                         new DeepSecureStorageWrite(ProtectedDid2MailboxReadJournal.Slot, emptyMailboxReads)],
+                        cancellationToken).ConfigureAwait(false);
+                }
+                finally
+                {
+                    CryptographicOperations.ZeroMemory(emptyClaims);
+                    CryptographicOperations.ZeroMemory(emptyRendezvous);
+                    CryptographicOperations.ZeroMemory(emptyReceiver);
+                    CryptographicOperations.ZeroMemory(emptyRetirements);
+                    CryptographicOperations.ZeroMemory(emptyMessaging);
+                    CryptographicOperations.ZeroMemory(applicationRegistration);
+                    CryptographicOperations.ZeroMemory(emptyContactAccepts);
+                    CryptographicOperations.ZeroMemory(emptyContactStarts);
+                    CryptographicOperations.ZeroMemory(emptyText);
+                    CryptographicOperations.ZeroMemory(emptyAttachments);
+                    CryptographicOperations.ZeroMemory(emptyRoutes);
+                    CryptographicOperations.ZeroMemory(emptyGrants);
+                    CryptographicOperations.ZeroMemory(emptyMailboxSends);
+                    CryptographicOperations.ZeroMemory(emptyMailboxReads);
+                }
             }
             // Initialized atomically with the instance key before publication.
             // An older/missing journal requires explicit QA reset, never repair.
+            using var application = await storage.ReadOwnedAsync(ApplicationStateSlot, cancellationToken)
+                .ConfigureAwait(false) ?? throw new InvalidDataException(
+                    "The protected application registration is absent; explicit local reset is required.");
+            application.Use(value => { ValidateApplicationRegistration(value, record); return true; });
+            using var contactAccepts = await storage.ReadOwnedAsync(ProtectedDid2ContactAcceptJournal.Slot, cancellationToken)
+                .ConfigureAwait(false) ?? throw new InvalidDataException("The protected contact acceptance journal is absent; explicit reset is required.");
+            using var contactAcceptState = contactAccepts.Use(value => ProtectedDid2ContactAcceptJournal.Decode(
+                value, networkId.Span, accountId.Span, record.AsSpan(56, 32)));
+            using var contactStarts = await storage.ReadOwnedAsync(ProtectedDid2ContactStartJournal.Slot, cancellationToken)
+                .ConfigureAwait(false) ?? throw new InvalidDataException("The protected initial contact draft journal is absent; explicit reset is required.");
+            using var contactStartState = contactStarts.Use(value => ProtectedDid2ContactStartJournal.Decode(
+                value, networkId.Span, accountId.Span, record.AsSpan(56, 32)));
+            using var text = await storage.ReadOwnedAsync(ProtectedDid2DirectTextJournal.Slot, cancellationToken)
+                .ConfigureAwait(false) ?? throw new InvalidDataException("Protected direct text command custody is absent; explicit reset is required.");
+            using var textState = text.Use(value => ProtectedDid2DirectTextJournal.Decode(
+                value, networkId.Span, accountId.Span, record.AsSpan(56, 32)));
+            using var attachments = await storage.ReadOwnedAsync(ProtectedDid2AttachmentJournal.Slot, cancellationToken)
+                .ConfigureAwait(false) ?? throw new InvalidDataException("Protected attachment custody is absent; explicit reset is required.");
+            using var attachmentState = attachments.Use(value => ProtectedDid2AttachmentJournal.Decode(
+                value, networkId.Span, accountId.Span, record.AsSpan(56, 32)));
+            using var routes = await storage.ReadOwnedAsync(ProtectedDid2ContactRouteJournal.Slot, cancellationToken)
+                .ConfigureAwait(false) ?? throw new InvalidDataException("Protected route custody is absent; explicit local reset is required.");
+            using var routeState = routes.Use(value => ProtectedDid2ContactRouteJournal.Decode(
+                value, networkId.Span, accountId.Span, record.AsSpan(56, 32)));
+            using var grants = await storage.ReadOwnedAsync(ProtectedDid2MailboxGrantJournal.Slot, cancellationToken)
+                .ConfigureAwait(false) ?? throw new InvalidDataException("Protected mailbox holder custody is absent; explicit local reset is required.");
+            using var grantState = grants.Use(value => ProtectedDid2MailboxGrantJournal.Decode(
+                value, networkId.Span, accountId.Span, record.AsSpan(56, 32)));
+            using var mailboxSends = await storage.ReadOwnedAsync(ProtectedDid2MailboxSendJournal.Slot, cancellationToken)
+                .ConfigureAwait(false) ?? throw new InvalidDataException("Protected mailbox send custody is absent; explicit local reset is required.");
+            using var mailboxSendState = mailboxSends.Use(value => ProtectedDid2MailboxSendJournal.Decode(
+                value, networkId.Span, accountId.Span, record.AsSpan(56, 32)));
+            using var mailboxReads = await storage.ReadOwnedAsync(ProtectedDid2MailboxReadJournal.Slot, cancellationToken)
+                .ConfigureAwait(false) ?? throw new InvalidDataException("Protected mailbox read custody is absent; explicit local reset is required.");
+            using var mailboxReadState = mailboxReads.Use(value => ProtectedDid2MailboxReadJournal.Decode(
+                value, networkId.Span, accountId.Span, record.AsSpan(56, 32)));
             using var claims = await storage.ReadOwnedAsync(ProtectedDph2PreClaimJournal.Slot,
                 cancellationToken).ConfigureAwait(false) ??
                 throw new InvalidDataException("The protected preclaim journal is absent; explicit local reset is required.");
             var instanceForClaims = record.AsSpan(56, 32).ToArray();
-            _ = claims.Use(value => ProtectedDph2PreClaimJournal.Decode(value,
+            var claimsState = claims.Use(value => ProtectedDph2PreClaimJournal.Decode(value,
                 networkId.Span, accountId.Span, instanceForClaims));
+            using var rendezvous = await storage.ReadOwnedAsync(ProtectedContactRendezvousJournal.Slot,
+                cancellationToken).ConfigureAwait(false) ?? throw new InvalidDataException(
+                    "The protected rendezvous journal is absent; explicit local reset is required.");
+            using var rendezvousState = rendezvous.Use(value => ProtectedContactRendezvousJournal.Decode(value,
+                networkId.Span, accountId.Span, instanceForClaims));
+            using var receiver = await storage.ReadOwnedAsync(ResponderInitialSessionCheckpoint.Slot,
+                cancellationToken).ConfigureAwait(false) ?? throw new InvalidDataException(
+                    "The protected initial receiver checkpoint is absent; explicit local reset is required.");
+            using var receiverState = receiver.Use(value => ResponderInitialSessionCheckpoint.Decode(value,
+                instanceForClaims, accountId.Span, networkId.Span));
+            var retirements = await ProtectedInitialKeyRetirementJournal.ReadAsync(storage, networkId, accountId, cancellationToken).ConfigureAwait(false);
+            retirements.RequirePreclaimState(claimsState);
+            using var messaging = await new ProtectedDid2MessagingSessionCatalog(storage,
+                networkId.Span, accountId.Span, instanceForClaims).ReadAsync(cancellationToken).ConfigureAwait(false);
             var key = record.AsSpan(88, 32).ToArray();
             try
             {
@@ -177,11 +277,23 @@ internal static partial class SqliteDeepIdV2AccountGeneration
     {
         var result = new byte[KeyRecordLength];
         "DSK2"u8.CopyTo(result);
-        BinaryPrimitives.WriteUInt16BigEndian(result.AsSpan(4), 2);
+        BinaryPrimitives.WriteUInt16BigEndian(result.AsSpan(4), 3);
         networkId.CopyTo(result.AsSpan(8));
         accountId.CopyTo(result.AsSpan(24));
         RandomNumberGenerator.Fill(result.AsSpan(56, 64));
         return result;
+    }
+
+    internal static async Task<byte[]> ReadAccountInstanceUnderLeaseAsync(IDeepSecureStorage storage,
+        ReadOnlyMemory<byte> network, ReadOnlyMemory<byte> account, CancellationToken ct)
+    {
+        using var owner = await storage.ReadOwnedAsync(KeySlot, ct).ConfigureAwait(false) ??
+            throw new InvalidDataException("The DID2 SQL key record is absent.");
+        return owner.Use(record =>
+        {
+            ValidateRecord(record, network.Span, account.Span);
+            return record.Slice(56, 32).ToArray();
+        });
     }
 
     private static void ValidateRecord(ReadOnlySpan<byte> record,
@@ -189,7 +301,7 @@ internal static partial class SqliteDeepIdV2AccountGeneration
     {
         if (record.Length != KeyRecordLength ||
             !record[..4].SequenceEqual("DSK2"u8) ||
-            BinaryPrimitives.ReadUInt16BigEndian(record[4..]) != 2 ||
+            BinaryPrimitives.ReadUInt16BigEndian(record[4..]) != 3 ||
             record.Slice(6, 2).IndexOfAnyExcept((byte)0) >= 0 ||
             !CryptographicOperations.FixedTimeEquals(record.Slice(8, 16), networkId) ||
             !CryptographicOperations.FixedTimeEquals(record.Slice(24, 32), accountId) ||
@@ -270,7 +382,7 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         profile.ExecuteNonQuery();
         using var identity = connection.CreateCommand();
         identity.Transaction = transaction;
-        identity.CommandText = "INSERT INTO store_identity VALUES(1,$instance,2);";
+        identity.CommandText = "INSERT INTO store_identity VALUES(1,$instance,3);";
         identity.Parameters.AddWithValue("$instance", binding.InstanceId);
         identity.ExecuteNonQuery();
     }
@@ -281,6 +393,11 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         if (new FileInfo(path).Length == 0)
             throw new InvalidDataException("The DID2 SQL database is empty.");
         using var connection = OpenConnection(path, key, create: false);
+        ValidateDatabaseConnection(connection, binding);
+    }
+
+    private static void ValidateDatabaseConnection(SqliteConnection connection, AccountBinding binding)
+    {
         using (var cipher = connection.CreateCommand())
         {
             cipher.CommandText = "PRAGMA cipher_version;";
@@ -332,7 +449,7 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             [binding.DisplayName, 1L]);
         VerifyRow(connection, "store_identity",
             "SELECT database_instance_id,cipher_generation FROM store_identity WHERE singleton=1;",
-            [binding.InstanceId, 2L]);
+            [binding.InstanceId, 3L]);
     }
 
     private static void VerifyRow(SqliteConnection connection, string table,
@@ -370,6 +487,33 @@ internal static partial class SqliteDeepIdV2AccountGeneration
 
     private static SqliteConnection OpenConnection(string path,
         ReadOnlySpan<byte> key, bool create)
+        => OpenRandomKeyConnection(path, key, create);
+
+    // These account/session keys are independently random, not human passwords.
+    // DR60 changes only DSV2 to generation3; DMS2 remains generation2. Keep the
+    // supported native raw-key encoding in wipeable buffers, never SQL/string.
+    private static SqliteConnection OpenMessagingConnection(string path,
+        ReadOnlySpan<byte> key, bool create) => OpenRandomKeyConnection(path, key, create);
+
+    private static SqliteConnection OpenRandomKeyConnection(string path,
+        ReadOnlySpan<byte> key, bool create)
+    {
+        if (key.Length != 32 || key.IndexOfAnyExcept((byte)0) < 0)
+            throw new CryptographicException("The owned database requires its exact nonzero random 256-bit key.");
+        Span<byte> encoded = stackalloc byte[67];
+        encoded[0] = (byte)'x'; encoded[1] = encoded[66] = (byte)'\'';
+        ReadOnlySpan<byte> alphabet = "0123456789abcdef"u8;
+        for (var index = 0; index < key.Length; index++)
+        {
+            encoded[2 + index * 2] = alphabet[key[index] >> 4];
+            encoded[3 + index * 2] = alphabet[key[index] & 15];
+        }
+        try { return OpenConnectionCore(path, encoded, create); }
+        finally { CryptographicOperations.ZeroMemory(encoded); }
+    }
+
+    private static SqliteConnection OpenConnectionCore(string path,
+        ReadOnlySpan<byte> key, bool create)
     {
         var builder = new SqliteConnectionStringBuilder
         {
@@ -399,10 +543,16 @@ internal static partial class SqliteDeepIdV2AccountGeneration
                         "SQLCipher 4 is required before DID2 database creation.");
             }
             using var configure = connection.CreateCommand();
-            configure.CommandText = create
-                ? "PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON; PRAGMA journal_mode=DELETE;"
-                : "PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;";
+            // These are connection settings, not durable schema defaults.
+            // Reopening must not silently weaken a deletion/commit boundary.
+            configure.CommandText = "PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON; PRAGMA journal_mode=DELETE;";
             configure.ExecuteNonQuery();
+            // sqlite3_key and connection PRAGMAs can succeed before the first
+            // encrypted page is read. Force that authentication here; wrong
+            // keys/modes must not look like a successfully opened connection.
+            using var authenticate = connection.CreateCommand();
+            authenticate.CommandText = "SELECT count(*) FROM sqlite_schema;";
+            _ = authenticate.ExecuteScalar();
             return connection;
         }
         catch
@@ -411,6 +561,31 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             throw;
         }
     }
+
+#if DEEP_TEST_INTERNALS
+    internal static SqliteConnection OpenAccountConnectionForTests(string path, ReadOnlySpan<byte> key, bool create) =>
+        OpenConnection(path, key, create);
+
+    internal static SqliteConnection OpenMessagingConnectionForTests(string path, ReadOnlySpan<byte> key, bool create) =>
+        OpenMessagingConnection(path, key, create);
+
+    // Exercises the actual connection factory without provisioning a costly
+    // PQ account. This creates only a test-local encrypted probe table.
+    internal static (int Synchronous, int SecureDelete, string JournalMode)
+        ReadConnectionPolicyForTests(string path, ReadOnlySpan<byte> key, bool create)
+    {
+        using var connection = OpenConnection(path, key, create);
+        if (create)
+        {
+            using var initialize = connection.CreateCommand();
+            initialize.CommandText = "CREATE TABLE connection_policy_probe(singleton INTEGER PRIMARY KEY);";
+            initialize.ExecuteNonQuery();
+        }
+        using var journal = connection.CreateCommand(); journal.CommandText = "PRAGMA journal_mode;";
+        return (Pragma(connection, "synchronous"), Pragma(connection, "secure_delete"),
+            Convert.ToString(journal.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture)!);
+    }
+#endif
 
     private sealed record AccountBinding(byte[] NetworkId, byte[] AccountId,
         byte[] Did2Hash, byte[] Dab2Hash, string DisplayName,

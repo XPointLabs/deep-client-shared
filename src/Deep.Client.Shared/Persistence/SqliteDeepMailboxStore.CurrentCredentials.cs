@@ -50,6 +50,9 @@ public sealed partial class SqliteDeepMailboxStore
             await using var connection = await OpenAsync(cancellationToken)
                 .ConfigureAwait(false);
             await using var transaction = connection.BeginTransaction(deferred: false);
+            // Gate/connection/transaction waits must not turn an expired
+            // owner-held policy into permission for a durable installation.
+            ValidateCurrentCredential(credential, authority);
             var existing = ReadCurrentIdentity(
                 connection, transaction, credential.Selector.ScopeId.Span);
             if (existing is not null)
@@ -61,6 +64,7 @@ public sealed partial class SqliteDeepMailboxStore
                 {
                     EnsureExactCurrentCredential(
                         connection, transaction, credential, authority);
+                    authority.Validate();
                     await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
                     return;
                 }
@@ -70,6 +74,7 @@ public sealed partial class SqliteDeepMailboxStore
 
             InsertCurrentCredential(
                 connection, transaction, credential, authority);
+            authority.Validate();
             cancellationToken.ThrowIfCancellationRequested();
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         }

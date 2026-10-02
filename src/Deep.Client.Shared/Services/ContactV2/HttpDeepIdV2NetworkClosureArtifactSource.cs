@@ -52,7 +52,7 @@ public sealed class HttpDeepIdV2NetworkClosureArtifactSource :
             throw new CryptographicException("Network closure distribution scope differs from the request.");
         return new(raw.ExactAuthorityChain, raw.ExactTimePolicyChain,
             raw.ExactNetworkPolicyChain, raw.ExactViewChain, raw.ExactHeadChain,
-            raw.ExactActiveNodeDescriptors, raw.ExactPlacementTopologyChain);
+            raw.ExactActiveNodeDescriptors, raw.ExactPlacementTopologyChain, raw.ExactMailboxAuthorityChain);
     }
 
     public void Dispose() => transport.Dispose();

@@ -1,6 +1,8 @@
 using System.Security.Cryptography;
 using Deep.Client.Shared.Persistence.MessagingCryptoV1;
 using Deep.Protocol.ApplicationCore;
+using System.Buffers.Binary;
+using Deep.Client.Shared.Persistence.DeviceV2;
 
 namespace Deep.Client.Shared.Persistence.MessagingV1;
 
@@ -9,7 +11,7 @@ namespace Deep.Client.Shared.Persistence.MessagingV1;
 /// requires the verified local and remote session scope; canonical bytes alone
 /// are not proof of E2EE authentication. This type never grants mailbox ACK.
 /// </summary>
-internal sealed class AuthenticatedDirectDmc2 : IDisposable
+internal sealed class AuthenticatedDirectDmc2 : IDisposable, IAuthenticatedDmc2InboxEvent
 {
     private readonly byte[] exactDmc2;
     private readonly byte[] localAccountId;
@@ -49,7 +51,7 @@ internal sealed class AuthenticatedDirectDmc2 : IDisposable
                 !Fixed(parsed.ConversationId.Span, expectedConversationId) ||
                 !Fixed(parsed.SenderAccountId.Span, expectedAuthorAccountId) ||
                 !Fixed(parsed.SenderDeviceId.Span, expectedAuthorDeviceId) ||
-                !IsDirectKind(parsed.ContentKind))
+                !IsDirectKind(parsed.ContentKind) || parsed.SenderClientSequence < 3)
                 throw new CryptographicException(
                     "The authenticated DMC2 is not a direct event in the verified session scope.");
 
@@ -64,7 +66,11 @@ internal sealed class AuthenticatedDirectDmc2 : IDisposable
             this.exactEnvelopeHash = exactEnvelopeHash.ToArray();
             ContentKind = parsed.ContentKind;
         }
-        finally { CryptographicOperations.ZeroMemory(canonical); }
+        finally
+        {
+            if (parsed.ParsedPayload is AttachmentOfferDmc2Payload offer) offer.Manifest.Dispose();
+            CryptographicOperations.ZeroMemory(canonical);
+        }
     }
 
     internal ulong LocalAccountGeneration { get; }
@@ -77,6 +83,39 @@ internal sealed class AuthenticatedDirectDmc2 : IDisposable
     internal ReadOnlyMemory<byte> AuthorDeviceId => Copy(authorDeviceId);
     internal ReadOnlyMemory<byte> OperationId => Copy(operationId);
     internal ReadOnlyMemory<byte> ExactEnvelopeHash => Copy(exactEnvelopeHash);
+    ReadOnlyMemory<byte> IAuthenticatedDmc2InboxEvent.ExactDmc2 => ExactDmc2;
+    ReadOnlyMemory<byte> IAuthenticatedDmc2InboxEvent.LocalAccountId => LocalAccountId;
+    ulong IAuthenticatedDmc2InboxEvent.LocalAccountGeneration => LocalAccountGeneration;
+    ReadOnlyMemory<byte> IAuthenticatedDmc2InboxEvent.ConversationId => ConversationId;
+    ReadOnlyMemory<byte> IAuthenticatedDmc2InboxEvent.LogicalMessageId => LogicalMessageId;
+    ReadOnlyMemory<byte> IAuthenticatedDmc2InboxEvent.AuthorAccountId => AuthorAccountId;
+    ReadOnlyMemory<byte> IAuthenticatedDmc2InboxEvent.AuthorDeviceId => AuthorDeviceId;
+    Dmc2ContentKind IAuthenticatedDmc2InboxEvent.ContentKind => ContentKind;
+
+    internal static AuthenticatedDirectDmc2 FromOwnedDid2Commit(
+        OwnedDid2MessagingStorage opened, Did2MessagingFloor floor,
+        ReadOnlySpan<byte> operation, ReadOnlySpan<byte> localSendDmc2)
+    {
+        var scope = opened.Scope;
+        using var retained = opened.Sql.ReadVerifiedOperation(floor, operation) ??
+            throw new CryptographicException("DID2 semantic handoff has no actual committed event.");
+        var send = retained.Direction == 1;
+        using var owned = send ? new OwnedDeepSecret(localSendDmc2) : retained.OwnAuthenticatedDmc2();
+        var op = operation.ToArray();
+        try
+        {
+            return owned.Use(exact =>
+            {
+                if (!Fixed(SHA256.HashData(exact), retained.EventHash))
+                    throw new CryptographicException("DID2 semantic handoff differs from the committed event hash.");
+                return new AuthenticatedDirectDmc2(exact, scope.Network, scope.LocalAccount,
+                    BinaryPrimitives.ReadUInt64BigEndian(scope.Exact[84..]), scope.Conversation,
+                    send ? scope.LocalAccount : scope.RemoteAccount,
+                    send ? scope.LocalDevice : scope.RemoteDevice, op, retained.EnvelopeHash);
+            });
+        }
+        finally { CryptographicOperations.ZeroMemory(op); }
+    }
 
     internal static async ValueTask<AuthenticatedDirectDmc2?> FromCommittedStageAsync(
         SqliteMessagingCryptoV1Store store,

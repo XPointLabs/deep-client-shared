@@ -180,8 +180,9 @@ public sealed class SqliteDeepIdV2AccountGenerationTests
         }
     }
 
-    [Fact]
-    public async Task WrongSqlGenerationIsRejectedWithoutMutation()
+    [Theory]
+    [InlineData(1)] [InlineData(2)]
+    public async Task WrongSqlGenerationIsRejectedWithoutMutation(int wrongVersion)
     {
         if (!SupportedProvider()) return;
         var directory = NewDirectory();
@@ -208,18 +209,9 @@ public sealed class SqliteDeepIdV2AccountGenerationTests
             try
             {
                 SQLitePCL.Batteries_V2.Init();
-                using var connection = new SqliteConnection(
-                    new SqliteConnectionStringBuilder
-                    {
-                        DataSource = sqlPath,
-                        Mode = SqliteOpenMode.ReadWrite,
-                        Pooling = false
-                    }.ToString());
-                connection.Open();
-                Assert.Equal(SQLitePCL.raw.SQLITE_OK,
-                    SQLitePCL.raw.sqlite3_key(connection.Handle, key));
+                using var connection = SqliteDeepIdV2AccountGeneration.OpenAccountConnectionForTests(sqlPath, key, create: false);
                 using var command = connection.CreateCommand();
-                command.CommandText = "PRAGMA user_version=1;";
+                command.CommandText = $"PRAGMA user_version={wrongVersion};";
                 command.ExecuteNonQuery();
             }
             finally { CryptographicOperations.ZeroMemory(key); }

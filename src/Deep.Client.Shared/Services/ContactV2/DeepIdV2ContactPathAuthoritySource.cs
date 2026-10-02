@@ -23,11 +23,12 @@ public sealed class DeepIdV2NetworkClosureArtifacts
         IReadOnlyList<ReadOnlyMemory<byte>> exactOrderedXnv1Chain,
         IReadOnlyList<ReadOnlyMemory<byte>> exactOrderedXnh1Chain,
         IReadOnlyList<ReadOnlyMemory<byte>> exactActiveXnd1,
-        IReadOnlyList<ReadOnlyMemory<byte>> exactOrderedPmt2Chain)
+        IReadOnlyList<ReadOnlyMemory<byte>> exactOrderedPmt2Chain,
+        IReadOnlyList<ReadOnlyMemory<byte>> exactOrderedPma2Chain)
     {
         IReadOnlyList<ReadOnlyMemory<byte>>[] values = [exactXna1AuthorityChain,
             exactDts1PolicyChain, exactOrderedXvp1Chain, exactOrderedXnv1Chain,
-            exactOrderedXnh1Chain, exactActiveXnd1, exactOrderedPmt2Chain];
+            exactOrderedXnh1Chain, exactActiveXnd1, exactOrderedPmt2Chain, exactOrderedPma2Chain];
         // Preflight every chain and the total before making owned copies.
         var total = 0L;
         foreach (var value in values)
@@ -47,6 +48,7 @@ public sealed class DeepIdV2NetworkClosureArtifacts
     public IReadOnlyList<ReadOnlyMemory<byte>> ExactOrderedXnh1Chain => Copy(4);
     public IReadOnlyList<ReadOnlyMemory<byte>> ExactActiveXnd1 => Copy(5);
     public IReadOnlyList<ReadOnlyMemory<byte>> ExactOrderedPmt2Chain => Copy(6);
+    public IReadOnlyList<ReadOnlyMemory<byte>> ExactOrderedPma2Chain => Copy(7);
     private IReadOnlyList<ReadOnlyMemory<byte>> Copy(int index) => chains[index]
         .Select(static value => (ReadOnlyMemory<byte>)value.ToArray()).ToArray();
 }
@@ -61,15 +63,16 @@ public interface IDeepIdV2NetworkClosureArtifactSource
 }
 
 /// <summary>
-/// DID2-only network verification and pre-key publication/claim path authority.
+/// DID2-only network verification and pre-key publication/claim/mailbox path authority.
 /// Each mint obtains an independent
 /// nonce-bound proof for the protected local account, verifies NETCODEC from
 /// the pinned root, and durably advances/rechecks network custody before
 /// releasing placement. It cannot resolve DID1 or accept ADP1 V1. Input
 /// providers, proof-client lifetime and durable stores remain caller-owned.
 /// </summary>
-public sealed class DeepIdV2ContactPathAuthoritySource :
-    IContactResolvePathAuthoritySource, IContactResolvePublicationPathAuthoritySource
+public sealed partial class DeepIdV2ContactPathAuthoritySource :
+    IContactResolvePathAuthoritySource, IContactResolvePublicationPathAuthoritySource,
+    IMailboxPrivacyNetworkAuthoritySource
 {
     private readonly XPointNetworkGenesisPin genesisPin;
     private readonly DeepIdV2AccountService accounts;
@@ -80,6 +83,84 @@ public sealed class DeepIdV2ContactPathAuthoritySource :
     private readonly OnionTrustedTimeAuthority trustedTime;
     private readonly IOnionMonotonicClock clock;
     private readonly SemaphoreSlim gate = new(1, 1);
+
+    internal OnionTrustedTimeAuthority RendezvousTrustedTime => trustedTime;
+    internal DeepIdV2AccountService AccountOwner => accounts;
+
+    internal MailboxPrivacyPathProvider CreateOwnMailboxPaths(
+        DeepIdV2OnionClientCustody custody, PrivacyMailboxRouteSelection selection)
+    {
+        ArgumentNullException.ThrowIfNull(custody);
+        RequireAccountOwner(custody.Owner);
+        return new(this, custody.Guards, selection, CreateMailboxGuardSalt);
+    }
+
+    internal MailboxPrivacyPathProvider CreateOwnHeldMailboxPaths(
+        Did2OwnedMailboxTransportContext dispatch, PrivacyMailboxRouteSelection selection)
+    {
+        ArgumentNullException.ThrowIfNull(dispatch);
+        RequireAccountOwner(dispatch.Custody.Owner);
+        if (!ReferenceEquals(dispatch.Source, this))
+            throw new ArgumentException("Held mailbox path belongs to another actual source.", nameof(dispatch));
+        return new(dispatch, dispatch.Custody.Guards, selection, CreateMailboxGuardSalt);
+    }
+
+    async ValueTask<VerifiedOnionNetworkContext>
+        IMailboxPrivacyNetworkAuthoritySource.GetCurrentForMailboxAsync(
+            ReadOnlyMemory<byte> placementCommitment, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (placementCommitment.Length != 32 ||
+            placementCommitment.Span.IndexOfAnyExcept((byte)0) < 0)
+            throw new ArgumentException("Mailbox network refresh requires an exact non-zero placement commitment.",
+                nameof(placementCommitment));
+        // A commitment is not a directory leaf or a holder/account identifier.
+        // Always obtain the independent proof for this source's actual owner.
+        return await VerifyCurrentNetworkAsync(genesisPin.NetworkId, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static byte[] CreateMailboxGuardSalt()
+    {
+        var salt = new byte[32];
+        do RandomNumberGenerator.Fill(salt);
+        while (salt.AsSpan().IndexOfAnyExcept((byte)0) < 0);
+        return salt;
+    }
+
+    internal async ValueTask RecheckInitialClaimInitiatorAsync(
+        Deep.Protocol.AccountDirectoryV1.VerifiedDeepIdV2DirectoryFreshness initiator,
+        OwnPreKeyAuthoringAuthority own, CancellationToken cancellationToken)
+    {
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            RequirePinnedNetwork(initiator.NetworkId);
+            await proofs.RequireStillFreshAsync(initiator, own.Authority, cancellationToken).ConfigureAwait(false);
+        }
+        finally { gate.Release(); }
+    }
+
+    // No source/fetch gate here: their normal holders can wait for this same
+    // account lease. These calls only read immutable source-owned custody.
+    internal async ValueTask<OnionMonotonicReading> RecheckEndpointPairUnderLeaseAsync(
+        OwnPreKeyAuthoringAuthority authoring, Deep.Protocol.AccountDirectoryV1.VerifiedDeepIdV2DirectoryFreshness peer,
+        HeldDeepIdV2AccountLease held, CancellationToken ct)
+    {
+        held.RequireActive(); RequirePinnedNetwork(peer.NetworkId);
+        await proofs.RequirePairStillFreshUnderLeaseAsync(authoring.Proof, peer, authoring.Authority, held, ct).ConfigureAwait(false);
+        if (networkHistory is not IDeepIdV2NetworkHistoryLeaseRead reader)
+            throw new NotSupportedException("Held-account freshness requires the owned readonly network backend.");
+        var floor = await reader.ReadHistoryUnderLeaseAsync(held, ct).ConfigureAwait(false);
+        if (floor is null || floor.Snapshot.ForkLatched || !Same(floor.Snapshot.ProtectedLkg, authoring.Network.ProtectedLkg) ||
+            !Fixed(floor.ExactHistory.Span, OnionNetworkProtectedHistoryCodec.Encode(authoring.Network)))
+            throw new CryptographicException("Held pre-key authoring no longer binds protected network custody.");
+        authoring.Network.EnsureCurrent();
+        var reading = await clock.ReadAsync(ct).ConfigureAwait(false) ?? throw new CryptographicException("Held freshness has no monotonic sample.");
+        if (!authoring.Proof.IsCurrentAtMonotonic(reading.BootId.Span, reading.SampleSeconds) ||
+            !peer.IsCurrentAtMonotonic(reading.BootId.Span, reading.SampleSeconds))
+            throw new CryptographicException("Held authoring directory freshness expired.");
+        held.RequireActive(); return reading;
+    }
 
     public DeepIdV2ContactPathAuthoritySource(XPointNetworkGenesisPin genesisPin,
         DeepIdV2AccountService accounts, DeepIdV2DirectoryProofClient proofs,
@@ -98,18 +179,20 @@ public sealed class DeepIdV2ContactPathAuthoritySource :
     }
 
     public ValueTask<ContactResolvePathAuthority> GetCurrentAsync(Xiq1Request request,
-        CancellationToken cancellationToken) =>
-        ValueTask.FromException<ContactResolvePathAuthority>(new NotSupportedException(
-            "DID2 publication authority does not authorize invite or legacy contact requests."));
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        return GetCurrentAsync(ContactResolveCanonicalPathRequest.Decode(request.CanonicalBytes.Span), cancellationToken);
+    }
 
     public async ValueTask<ContactResolvePathAuthority> GetCurrentAsync(
         ContactResolveCanonicalPathRequest request, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(request);
         if (request.RequestKind is not (ContactServiceRequestKind.PublishPreKeyInventory or
-                ContactServiceRequestKind.ClaimPreKey) ||
+                ContactServiceRequestKind.ClaimPreKey or ContactServiceRequestKind.ResolveInvite) ||
             !request.HasExplicitPlacementBinding)
-            throw new NotSupportedException("Only DID2 XPP1 publication and XPK1 claim paths are enabled.");
+            throw new NotSupportedException("Only DID2 pre-key and neutral permanent read paths are enabled.");
         if (request.RequestKind == ContactServiceRequestKind.ClaimPreKey)
         {
             var claim = DeepIdV2PreKeyClaimRequestCodec.Decode(request.ExactRequest.Span);
@@ -121,13 +204,19 @@ public sealed class DeepIdV2ContactPathAuthoritySource :
                     request.ExpiresAtUnixSeconds)
                 throw new CryptographicException("The DID2 claim and canonical placement facts differ.");
         }
-        else
+        else if (request.RequestKind == ContactServiceRequestKind.PublishPreKeyInventory)
         {
             var fragment = DeepIdV2BoundedPreKeyPublicationCodec.Decode(request.ExactRequest.Span);
             if (!Fixed(fragment.NetworkId.Span, request.NetworkId.Span) ||
                 !Fixed(fragment.ViewHash.Span, request.ViewHash.Span) ||
                 !Fixed(fragment.PlacementHash.Span, request.PlacementHash.Span))
                 throw new CryptographicException("The DID2 request and fragment placement differ.");
+        }
+        else
+        {
+            var query = Xiq1Codec.Decode(request.ExactRequest.Span);
+            if (query.RequestedGeneration != 0 || query.AntiSpamTokenType != Xiq1AntiSpamTokenType.None)
+                throw new NotSupportedException("Only non-consuming DID2 genesis permanent reads are enabled.");
         }
         var current = await GetCurrentForPlacementAsync(request.NetworkId,
             request.ShardKey, request.RequestKind, cancellationToken).ConfigureAwait(false);
@@ -200,12 +289,70 @@ public sealed class DeepIdV2ContactPathAuthoritySource :
     internal sealed record OwnPreKeyAuthoringAuthority(
         VerifiedOnionNetworkContext Network,
         VerifiedXPointNetworkAuthority Authority,
-        Deep.Protocol.AccountDirectoryV1.VerifiedDeepIdV2DirectoryFreshness Proof);
+        Deep.Protocol.AccountDirectoryV1.VerifiedDeepIdV2DirectoryFreshness Proof,
+        VerifiedMailboxAuthorityV2 MailboxAuthority);
+
+    internal sealed record MessagingEndpointAuthority(OwnPreKeyAuthoringAuthority Own,
+        Deep.Protocol.AccountDirectoryV1.VerifiedDeepIdV2DirectoryFreshness Peer);
+
+    internal async ValueTask<MessagingEndpointAuthority> VerifyForOwnMessagingAsync(
+        DeepIdV2AccountService account, Did2MessagingSessionScope scope, CancellationToken ct)
+    {
+        RequireAccountOwner(account); ArgumentNullException.ThrowIfNull(scope);
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        budget.CancelAfter(TimeSpan.FromSeconds(30));
+        var token = budget.Token;
+        // No network fetch occurs while this short account-owned read holds its lease.
+        var did = await account.ReadOwnMessagingPeerCredentialAsync(scope, token).ConfigureAwait(false);
+        await gate.WaitAsync(token).ConfigureAwait(false);
+        try
+        {
+            var own = await VerifyCurrentNetworkCoreAsync(token).ConfigureAwait(false);
+            var peer = await proofs.FetchByDid2Async(did, own.Authority, account.DeploymentProfileId,
+                supportedReader: 2, token).ConfigureAwait(false);
+            ProtectedDid2MessagingPeerBootstrap.RequireProof(did, peer);
+            await proofs.RequireStillFreshAsync(peer, own.Authority, token).ConfigureAwait(false);
+            await proofs.RequireStillFreshAsync(own.Proof, own.Authority, token).ConfigureAwait(false);
+            var floor = await networkHistory.ReadHistoryAsync(token).ConfigureAwait(false);
+            if (floor is null || floor.Snapshot.ForkLatched || !Same(floor.Snapshot.ProtectedLkg, own.Network.ProtectedLkg) ||
+                !Fixed(floor.ExactHistory.Span, OnionNetworkProtectedHistoryCodec.Encode(own.Network)))
+                throw new CryptographicException("Refreshed messaging endpoints no longer bind owned network custody.");
+            own.Network.EnsureCurrent();
+            var reading = await clock.ReadAsync(token).ConfigureAwait(false) ??
+                throw new CryptographicException("Refreshed messaging endpoints have no protected clock sample.");
+            OwnedInitialMessagingSeed.RequireFreshScope(scope, own.Proof, peer, reading);
+            token.ThrowIfCancellationRequested(); return new(own, peer);
+        }
+        finally { gate.Release(); }
+    }
 
     internal void RequireAccountOwner(DeepIdV2AccountService account)
     {
         if (!ReferenceEquals(accounts, account))
             throw new ArgumentException("Pre-key authoring requires this source's account owner.", nameof(account));
+    }
+
+    internal async ValueTask<MessagingEndpointAuthority> VerifyForIncomingInitialAsync(
+        DeepIdV2AccountService account, Deep.Protocol.MessagingWire.Dph2Record incoming, CancellationToken ct)
+    {
+        RequireAccountOwner(account); RequirePinnedNetwork(incoming.NetworkId);
+        // Parsed identity is a query candidate, never incoming authentication.
+        var did = Deep.Protocol.ApplicationCore.DeepIdV2Codec.DecodeDid2(incoming.InitiatorDid2.Span);
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        budget.CancelAfter(TimeSpan.FromSeconds(30));
+        await gate.WaitAsync(budget.Token).ConfigureAwait(false);
+        try
+        {
+            var own = await VerifyCurrentNetworkCoreAsync(budget.Token).ConfigureAwait(false);
+            var peer = await proofs.FetchByDid2Async(did, own.Authority, account.DeploymentProfileId,
+                supportedReader: 2, budget.Token).ConfigureAwait(false);
+            ProtectedDid2MessagingPeerBootstrap.RequireProof(did, peer);
+            await proofs.RequireStillFreshAsync(peer, own.Authority, budget.Token).ConfigureAwait(false);
+            await proofs.RequireStillFreshAsync(own.Proof, own.Authority, budget.Token).ConfigureAwait(false);
+            own.Network.EnsureCurrent(); budget.Token.ThrowIfCancellationRequested();
+            return new(own, peer);
+        }
+        finally { gate.Release(); }
     }
 
     internal async ValueTask<OwnPreKeyAuthoringAuthority> VerifyForOwnPreKeyAuthoringAsync(
@@ -239,6 +386,34 @@ public sealed class DeepIdV2ContactPathAuthoritySource :
         finally { gate.Release(); }
     }
 
+    internal sealed record PermanentContactAuthority(
+        OwnPreKeyAuthoringAuthority Own, VerifiedDeepIdV2PermanentContactResolveClosure Contact);
+
+    internal async ValueTask<PermanentContactAuthority> VerifyPermanentContactAsync(
+        ParsedDeepIdV2PermanentContactCandidate candidate, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(candidate);
+        RequirePinnedNetwork(candidate.Request.NetworkId);
+        await gate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            var own = await VerifyCurrentNetworkCoreAsync(ct).ConfigureAwait(false);
+            var peer = await accounts.FetchContactPeerProofAsync(candidate, proofs, own.Authority, ct).ConfigureAwait(false);
+            var contact = await DeepIdV2PermanentContactResolveVerifier.VerifyAsync(candidate,
+                peer, own.Network, own.Authority, trustedTime, ct).ConfigureAwait(false);
+            await proofs.RequireStillFreshAsync(peer, own.Authority, ct).ConfigureAwait(false);
+            await proofs.RequireStillFreshAsync(own.Proof, own.Authority, ct).ConfigureAwait(false);
+            var floor = await networkHistory.ReadHistoryAsync(ct).ConfigureAwait(false);
+            if (floor is null || floor.Snapshot.ForkLatched ||
+                !Same(floor.Snapshot.ProtectedLkg, own.Network.ProtectedLkg) ||
+                !Fixed(floor.ExactHistory.Span, OnionNetworkProtectedHistoryCodec.Encode(own.Network)))
+                throw new CryptographicException("Permanent resolve no longer binds owned network custody.");
+            await contact.Route.EnsureCurrentAsync(ct).ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested(); return new(own, contact);
+        }
+        finally { gate.Release(); }
+    }
+
     // The caller holds gate through verification and any placement derivation.
     private async ValueTask<OwnPreKeyAuthoringAuthority> VerifyCurrentNetworkCoreAsync(
         CancellationToken cancellationToken)
@@ -248,7 +423,7 @@ public sealed class DeepIdV2ContactPathAuthoritySource :
         if (before?.ForkLatched == true)
             throw new CryptographicException("Protected network fork latch blocks DID2 publication.");
         var exact = await artifacts.FetchCurrentAsync(genesisPin.NetworkId,
-            before?.ProtectedLkg, cancellationToken).ConfigureAwait(false) ??
+            before?.ProtectedLkg, cancellationToken).AsTask().WaitAsync(cancellationToken).ConfigureAwait(false) ??
             throw new CryptographicException("The DID2 signed network closure is absent.");
         var authority = XPointNetworkAuthorityVerifier.Verify(genesisPin,
             exact.ExactXna1AuthorityChain, exact.ExactDts1PolicyChain);
@@ -283,6 +458,8 @@ public sealed class DeepIdV2ContactPathAuthoritySource :
             throw new CryptographicException("A verified network fork blocks DID2 publication.", exception);
         }
         verified.EnsureCurrent();
+        var mailboxAuthority = await VerifyMailboxAuthorityAsync(exact, verified, authority, fresh,
+            cancellationToken).ConfigureAwait(false);
         if (retained is not null &&
             (!OnionNetworkProtectedHistoryCodec.BindsPredecessor(verified, retained.ExactHistory) ||
              !Same(before!.ProtectedLkg, verified.PriorProtectedLkg)))
@@ -300,7 +477,48 @@ public sealed class DeepIdV2ContactPathAuthoritySource :
             throw new CryptographicException("Committed DID2 network custody could not be reauthenticated.");
         await proofs.RequireStillFreshAsync(fresh, authority, cancellationToken).ConfigureAwait(false);
         verified.EnsureCurrent();
-        return new(verified, authority, fresh);
+        mailboxAuthority = await VerifyMailboxAuthorityAsync(exact, verified, authority, fresh,
+            cancellationToken).ConfigureAwait(false);
+        return new(verified, authority, fresh, mailboxAuthority);
+    }
+
+    private async ValueTask<VerifiedMailboxAuthorityV2> VerifyMailboxAuthorityAsync(
+        DeepIdV2NetworkClosureArtifacts exact, VerifiedOnionNetworkContext network,
+        VerifiedXPointNetworkAuthority authority,
+        Deep.Protocol.AccountDirectoryV1.VerifiedDeepIdV2DirectoryFreshness proof, CancellationToken ct)
+    {
+        var projection = ContactCodec.Decode("PMT2", exact.ExactOrderedPmt2Chain[^1].Span);
+        if (!network.BindsProjection(ContactCodec.ArtifactReference("PMT2", projection).CanonicalBytes))
+            throw new CryptographicException("Mailbox policy requires the exact current verified projection.");
+        ContactRecord? selected = null;
+        foreach (var value in exact.ExactOrderedPma2Chain)
+        {
+            var candidate = ContactCodec.Decode("PMA2", value.Span);
+            // The PMT2 canonical decoder has already checked the complete
+            // typed PMA2 CoreRef header. Compare its core, never invent a ref.
+            if (!Fixed(candidate.CoreHash.Span, projection.Field(4).Span[6..])) continue;
+            if (selected is not null)
+                throw new CryptographicException("Mailbox policy distribution contains ambiguous current authority.");
+            selected = candidate;
+        }
+        if (selected is null)
+            throw new CryptographicException("The current signed mailbox issuer policy is absent.");
+        var reading = await clock.ReadAsync(ct).ConfigureAwait(false) ??
+            throw new CryptographicException("Mailbox issuer verification has no actual monotonic clock sample.");
+        if (!proof.IsCurrentAtMonotonic(reading.BootId.Span, reading.SampleSeconds))
+            throw new CryptographicException("Mailbox issuer verification requires this account's current authenticated time.");
+        ulong lower, upper;
+        try
+        {
+            var elapsed = checked(reading.SampleSeconds - proof.MonotonicSample);
+            lower = checked(proof.TrustedLowerUnixSeconds + elapsed);
+            upper = checked(proof.TrustedUpperUnixSeconds + elapsed);
+        }
+        catch (OverflowException error) { throw new CryptographicException("Mailbox policy time projection overflowed.", error); }
+        var result = MailboxAuthorityV2Verifier.Verify(authority, selected.CanonicalBytes.Span, lower, upper);
+        if (!result.BindsProjection(projection.CanonicalBytes.Span))
+            throw new CryptographicException("Mailbox issuer policy differs from the current verified projection.");
+        network.EnsureCurrent(); ct.ThrowIfCancellationRequested(); return result;
     }
 
     private static bool Fixed(ReadOnlySpan<byte> left, ReadOnlySpan<byte> right) =>

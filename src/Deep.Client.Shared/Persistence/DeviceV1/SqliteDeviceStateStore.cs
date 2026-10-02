@@ -48,7 +48,7 @@ public sealed class SqliteDeviceStateStoreOptions
 public sealed partial class SqliteDeviceStateStore : IDeviceStateStore, IProtectedCurrentDmd1Store, IDisposable
 {
     private const int ApplicationId = 0x44565331; // DVS1
-    private const int SchemaGeneration = 4;
+    private const int SchemaGeneration = 5;
     // This is a sealed, clean-break schema.  It is deliberately kept as one canonical input for
     // creation and for the cryptographic sqlite_master contract checked on every open.
     private const string SchemaDdl = """
@@ -63,7 +63,8 @@ public sealed partial class SqliteDeviceStateStore : IDeviceStateStore, IProtect
         CREATE TABLE protected_current_dmd1(singleton INTEGER PRIMARY KEY CHECK(singleton=1), canonical_dmd1 BLOB NOT NULL CHECK(length(canonical_dmd1) BETWEEN 426 AND 1476), drs_revision BLOB NOT NULL CHECK(length(drs_revision)=8));
         CREATE TABLE device_agreement_authorizations(operation_id BLOB PRIMARY KEY CHECK(length(operation_id)=32), fingerprint TEXT NOT NULL CHECK(length(fingerprint)=64 AND fingerprint NOT GLOB '*[^0-9A-F]*'), directory_generation BLOB NOT NULL CHECK(length(directory_generation)=8), directory_hash BLOB NOT NULL CHECK(length(directory_hash)=32), account_id BLOB NOT NULL CHECK(length(account_id)=32), account_generation BLOB NOT NULL CHECK(length(account_generation)=8), device_id BLOB NOT NULL CHECK(length(device_id)=32), device_generation BLOB NOT NULL CHECK(length(device_generation)=8), dpd1_hash BLOB NOT NULL CHECK(length(dpd1_hash)=32), purpose INTEGER NOT NULL CHECK(purpose BETWEEN 1 AND 2), operation_binding BLOB NOT NULL CHECK(length(operation_binding)=32), peer_public_key BLOB NOT NULL CHECK(length(peer_public_key)=32));
         CREATE INDEX device_sagas_phase ON device_sagas(phase);
-        CREATE TABLE device_initial_sessions(operation_id BLOB PRIMARY KEY CHECK(length(operation_id)=32), logical_intent_id BLOB NOT NULL UNIQUE CHECK(length(logical_intent_id)=32), sequence INTEGER NOT NULL UNIQUE CHECK(sequence BETWEEN 1 AND 128), predecessor_hash BLOB NOT NULL CHECK(length(predecessor_hash)=32), record_hash BLOB NOT NULL CHECK(length(record_hash)=32), payload BLOB NOT NULL CHECK(length(payload) BETWEEN 180 AND 198264));
+        CREATE TABLE device_initial_sessions(operation_id BLOB PRIMARY KEY CHECK(length(operation_id)=32), logical_intent_id BLOB NOT NULL UNIQUE CHECK(length(logical_intent_id)=32), sequence INTEGER NOT NULL UNIQUE CHECK(sequence BETWEEN 1 AND 128), predecessor_hash BLOB NOT NULL CHECK(length(predecessor_hash)=32), record_hash BLOB NOT NULL CHECK(length(record_hash)=32), payload BLOB NOT NULL CHECK(length(payload) BETWEEN 212 AND 67224));
+        CREATE TABLE device_initial_state(sequence INTEGER PRIMARY KEY REFERENCES device_initial_sessions(sequence), exact_state BLOB NOT NULL CHECK(length(exact_state) BETWEEN 1 AND 131072));
         CREATE INDEX device_repairs_status ON device_repairs(status);
         """;
     private static readonly byte[] ExpectedSchemaFingerprint = HashSchemaObjects(ExpectedSchemaObjects());
@@ -218,7 +219,7 @@ public sealed partial class SqliteDeviceStateStore : IDeviceStateStore, IProtect
         {
             db.Open(); var rc = SQLitePCL.raw.sqlite3_key(db.Handle, key);
             if (rc != SQLitePCL.raw.SQLITE_OK) throw new SqliteException("SQLCipher rejected the key.", rc);
-            Execute(db, null, "PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA secure_delete=ON; PRAGMA synchronous=FULL;");
+            Execute(db, null, "PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA secure_delete=ON; PRAGMA synchronous=FULL; PRAGMA journal_mode=DELETE;");
             return db;
         }
         catch { db.Dispose(); throw; }
@@ -226,7 +227,7 @@ public sealed partial class SqliteDeviceStateStore : IDeviceStateStore, IProtect
 
     private void Create(SqliteConnection db)
     {
-        Execute(db, null, $"PRAGMA application_id={ApplicationId}; PRAGMA user_version={SchemaGeneration}; PRAGMA journal_mode=WAL;");
+        Execute(db, null, $"PRAGMA application_id={ApplicationId}; PRAGMA user_version={SchemaGeneration}; PRAGMA journal_mode=DELETE;");
         Execute(db, null, SchemaDdl);
         using var command = db.CreateCommand();
         command.CommandText = "INSERT INTO device_store_meta VALUES(1,$dg,$sid,$aid,$ag);";

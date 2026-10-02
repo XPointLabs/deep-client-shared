@@ -551,13 +551,6 @@ public sealed class HttpServiceTransportFactory
                  endpointPolicy));
 #endif
 
-    public HttpAttachmentFileTransport CreateAttachment(
-        HttpAttachmentFileTransportOptions options,
-        HttpServiceClientOptions? clientOptions = null) =>
-        CreateOwned(
-            clientOptions,
-            client => new HttpAttachmentFileTransport(client, options, endpointPolicy));
-
 #if !DEEP_CLEAN_PRODUCTION
     public HttpCallSignalingTransport CreateCallSignaling(
         HttpCallSignalingTransportOptions options,

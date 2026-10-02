@@ -70,11 +70,12 @@ public sealed class DeepIdV2PreKeyCommitSnapshot
 /// is network-free; network operations require independently verified authority.
 /// It never reads or migrates the incompatible STORE-V1 namespace.
 /// </summary>
-public sealed class DeepIdV2AccountService
+public sealed partial class DeepIdV2AccountService
 {
     private readonly ProtectedDeepIdV2AccountOwner owner;
     private readonly IClock clock;
     private readonly ushort deploymentProfileId;
+    internal ushort DeploymentProfileId => deploymentProfileId;
     private readonly Func<IDeepMlDsa65VerifierLease> verifierFactory;
     private readonly SemaphoreSlim initialPreKeyGate = new(1, 1);
 
@@ -259,6 +260,13 @@ public sealed class DeepIdV2AccountService
         DeepIdV2InitialSessionCommit? completed = null;
         try
         {
+            // A first-contact event cannot enter durable completion through
+            // the generic event path with retired/mismatched endpoint data.
+            // Bound bytes are owned above; parsing never mints acceptance/ACK.
+            var firstMessage = first.Length == 0 ? null : ApplicationCoreCodec.DecodeDmc2(first);
+            if (firstMessage?.ContentKind == Dmc2ContentKind.ContactHello)
+                await ApplicationCoreVerifier.RequireContactHelloEndpointBindingsAsync(firstMessage,
+                    currentProof, currentPeerProof, trustedTimeAuthority, cancellationToken).ConfigureAwait(false);
             var verifiedOffering = DeepIdV2Dpk2PreClaimVerifier.Verify(
                 exactDpk2.Span, currentPeerProof, boot, currentMonotonicSample);
             await proofClient.RequireStillFreshAsync(currentProof,
@@ -275,6 +283,9 @@ public sealed class DeepIdV2AccountService
             await proofClient.RequireStillFreshAsync(currentPeerProof,
                 networkAuthority, cancellationToken).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
+            if (firstMessage?.ContentKind == Dmc2ContentKind.ContactHello)
+                await ApplicationCoreVerifier.RequireContactHelloEndpointBindingsAsync(firstMessage,
+                    currentProof, currentPeerProof, trustedTimeAuthority, cancellationToken).ConfigureAwait(false);
             var result = completed; completed = null; return result;
         }
         finally

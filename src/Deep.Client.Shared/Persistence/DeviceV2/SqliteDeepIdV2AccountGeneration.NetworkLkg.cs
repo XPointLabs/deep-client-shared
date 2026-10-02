@@ -50,10 +50,15 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             ValidateRecord(record, binding.NetworkId, binding.AccountId);
             if (!Fixed(record.AsSpan(56, 32), binding.InstanceId))
                 throw new InvalidDataException("The DID2 SQL instance changed after LKG-store opening.");
-            ValidateDatabase(path, record.AsSpan(88, 32), binding);
+            if (new FileInfo(path).Length == 0)
+                throw new InvalidDataException("The DID2 SQL database is empty.");
             var connection = OpenConnection(path, record.AsSpan(88, 32), create: false);
             try
             {
+                // Verify and consume one actual connection, rather than opening
+                // a separate password-keyed connection solely for validation.
+                // All integrity/schema/account/device/instance checks remain.
+                ValidateDatabaseConnection(connection, binding);
                 using var durable = connection.CreateCommand();
                 durable.CommandText = "PRAGMA synchronous=FULL; PRAGMA journal_mode=DELETE; PRAGMA secure_delete=ON;";
                 durable.ExecuteNonQuery();
@@ -69,7 +74,7 @@ internal static partial class SqliteDeepIdV2AccountGeneration
     // exact CAS, monotonic revisions and an irreversible fork latch.
     private sealed class NetworkLkgStore(IDeepSecureStorage storage,
         DeepIdV2AccountFileLease accountLease, string path, AccountBinding binding,
-        byte[] genesisAuthorityHash) : IXPointNetworkStateStore, IDeepIdV2NetworkHistoryStore
+        byte[] genesisAuthorityHash) : IXPointNetworkStateStore, IDeepIdV2NetworkHistoryStore, IDeepIdV2NetworkHistoryLeaseRead
     {
         private const int RootKind = 3;
         private const int PayloadBytes = 305; // header8 | genesis32 | XLK1(265)
@@ -107,12 +112,20 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         public async ValueTask<DeepIdV2NetworkHistorySnapshot?> ReadHistoryAsync(CancellationToken cancellationToken)
         {
             using var held = await accountLease.AcquireAsync(cancellationToken).ConfigureAwait(false);
+            return await ReadHistoryUnderLeaseAsync(held, cancellationToken).ConfigureAwait(false);
+        }
+
+        public async ValueTask<DeepIdV2NetworkHistorySnapshot?> ReadHistoryUnderLeaseAsync(HeldDeepIdV2AccountLease held, CancellationToken cancellationToken)
+        {
+            ArgumentNullException.ThrowIfNull(held);
+            using var borrow = held.BorrowFor(accountLease);
             using var connection = await OpenBoundLkgConnectionAsync(storage, path, binding,
                 cancellationToken).ConfigureAwait(false);
             using var transaction = connection.BeginTransaction(deferred: false);
             var row = ReadRow(connection, transaction);
             await CheckMarkersAsync(row, cancellationToken).ConfigureAwait(false);
             transaction.Commit();
+            held.RequireOwner(accountLease);
             return row is null ? null : new(row.Snapshot, row.ExactHistory);
         }
 

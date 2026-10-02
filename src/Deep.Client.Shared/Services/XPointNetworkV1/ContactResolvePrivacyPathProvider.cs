@@ -112,6 +112,14 @@ public sealed class ContactResolveCanonicalPathRequest
         if (exactRequest.Length < 4)
             throw new ContactResolvePathException(
                 "contact-request-invalid", "The canonical ContactResolve request is truncated.");
+        if (exactRequest[..4].SequenceEqual("XCA2"u8))
+        {
+            var request = ContactCoordinationOnionCodec.DecodeRequest(exactRequest);
+            var expiry = new byte[8];
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt64BigEndian(expiry, request.ExpiresAtUnixSeconds);
+            return CreateProjectionBound(request.CanonicalBytes.Span, request.NetworkId.Span,
+                ContactServiceRequestKind.CoordinateContact, request.GatewayShard.Span, expiry, request.ProjectionReference.Span);
+        }
         if (exactRequest[..4].SequenceEqual("XIQ1"u8))
         {
             var request = Xiq1Codec.Decode(exactRequest);
@@ -159,7 +167,7 @@ public sealed class ContactResolveCanonicalPathRequest
         }
         throw new ContactResolvePathException(
             "contact-request-invalid",
-            "Only exact XPU1, XIQ1, XPK1, XMG1, or bounded XPP1 records have ContactResolve placement semantics.");
+            "Only exact XCA2, XPU1, XIQ1, XPK1, XMG1, or bounded XPP1 records have ContactResolve placement semantics.");
     }
 
     public static ContactResolveCanonicalPathRequest FromBoundedPublication(
@@ -379,6 +387,17 @@ public sealed class ContactResolvePrivacyPathProvider : IPrivacyMailboxPathProvi
 
         var authority = await authoritySource.GetCurrentAsync(request, cancellationToken).ConfigureAwait(false)
             ?? throw Fail("authority-unavailable", "The Contact path authority returned no current capabilities.");
+        return await PrepareWithAuthorityAsync(operation, request, requiredExitReplicaId, authority, cancellationToken).ConfigureAwait(false);
+    }
+
+    internal async ValueTask<ContactResolvePreparedPath> PrepareWithAuthorityAsync(
+        OnionOperation operation, ContactResolveCanonicalPathRequest request,
+        ReadOnlyMemory<byte> requiredExitReplicaId, ContactResolvePathAuthority authority, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (operation != OnionOperation.ContactResolve)
+            throw Fail("operation-invalid", "This path provider accepts only ContactResolve.");
+        ArgumentNullException.ThrowIfNull(request); ArgumentNullException.ThrowIfNull(authority);
         var network = authority.Network;
         var placement = authority.Placement;
         network.EnsureCurrent();

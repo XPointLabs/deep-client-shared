@@ -1,6 +1,4 @@
-using System.Buffers.Binary;
 using System.Security.Cryptography;
-using System.Text;
 
 namespace Deep.Client.Shared.Domain.ContactV1;
 
@@ -80,21 +78,8 @@ public sealed class ContactConversationId32 : ContactIdentifier32
         if (accountA32.SequenceEqual(accountB32))
             throw new ArgumentException("A contact conversation requires two distinct accounts.", nameof(accountB32));
 
-        var first = accountA32.SequenceCompareTo(accountB32) < 0 ? accountA32 : accountB32;
-        var second = accountA32.SequenceCompareTo(accountB32) < 0 ? accountB32 : accountA32;
-        Span<byte> material = stackalloc byte[112];
-        networkId16.CopyTo(material);
-        relationshipId.Span.CopyTo(material[16..]);
-        first.CopyTo(material[48..]);
-        second.CopyTo(material[80..]);
-
-        var label = Encoding.ASCII.GetBytes(DerivationDomain);
-        var preimage = new byte[label.Length + 5 + material.Length];
-        label.CopyTo(preimage, 0);
-        BinaryPrimitives.WriteUInt32BigEndian(
-            preimage.AsSpan(label.Length + 1, 4), checked((uint)material.Length));
-        material.CopyTo(preimage.AsSpan(label.Length + 5));
-        return new ContactConversationId32(SHA256.HashData(preimage));
+        return new ContactConversationId32(Deep.Protocol.ApplicationCore.ApplicationCoreVerifier
+            .ComputeContactConversationId(networkId16, relationshipId.Span, accountA32, accountB32));
     }
 
     private static void RequireNonzero(ReadOnlySpan<byte> value, int length, string name)

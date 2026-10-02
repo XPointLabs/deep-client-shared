@@ -13,6 +13,29 @@ public sealed record DirectMessageCreateSnapshot(
     bool IsLocalAuthor,
     DateTimeOffset CreatedAt);
 
+// Key-free history metadata, never active/cancel/download authority.
+internal sealed class DirectAttachmentOfferSnapshot
+{
+    private readonly byte[] logical, device, objectId;
+    internal DirectAttachmentOfferSnapshot(ParsedDmc2 message, bool local)
+    {
+        var manifest = ((AttachmentOfferDmc2Payload)message.ParsedPayload).Manifest;
+        logical = message.LogicalMessageId.ToArray(); device = message.SenderDeviceId.ToArray(); objectId = manifest.ObjectId.ToArray();
+        Filename = manifest.Filename; MediaType = manifest.MediaType; PlaintextBytes = manifest.TotalPlaintextBytes;
+        IsLocalAuthor = local; CreatedAt = DateTimeOffset.FromUnixTimeMilliseconds(checked((long)message.CreatedAtUnixMilliseconds));
+        ExpiresAtUnixSeconds = manifest.ExpiresAtUnixSeconds;
+    }
+    internal ReadOnlyMemory<byte> LogicalId => logical.ToArray();
+    internal ReadOnlyMemory<byte> AuthorDeviceId => device.ToArray();
+    internal ReadOnlyMemory<byte> ObjectId => objectId.ToArray();
+    internal string Filename { get; }
+    internal string MediaType { get; }
+    internal ulong PlaintextBytes { get; }
+    internal bool IsLocalAuthor { get; }
+    internal DateTimeOffset CreatedAt { get; }
+    internal ulong ExpiresAtUnixSeconds { get; }
+}
+
 public sealed partial class SqliteDeepMailboxStore
 {
     private const long MaximumDirectInboxEvents = 100_000;
@@ -25,9 +48,18 @@ public sealed partial class SqliteDeepMailboxStore
     /// </summary>
     internal Task<DirectDmc2InboxDisposition> MaterializeDirectDmc2Async(
         AuthenticatedDirectDmc2 handoff,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) => MaterializeAuthenticatedDmc2Async(handoff, cancellationToken);
+
+    internal Task<DirectDmc2InboxDisposition> MaterializeContactAcceptAsync(
+        AuthenticatedContactAcceptDmc2 handoff,
+        CancellationToken cancellationToken = default) => MaterializeAuthenticatedDmc2Async(handoff, cancellationToken);
+
+    private Task<DirectDmc2InboxDisposition> MaterializeAuthenticatedDmc2Async(
+        IAuthenticatedDmc2InboxEvent handoff, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(handoff);
+        if (handoff is not AuthenticatedDirectDmc2 and not AuthenticatedContactAcceptDmc2)
+            throw new CryptographicException("Only closed authenticated event handoffs can materialize.");
         return WithReplayConnectionAsync(connection =>
         {
             var local = handoff.LocalAccountId.ToArray();
@@ -43,6 +75,10 @@ public sealed partial class SqliteDeepMailboxStore
             {
                 using var transaction = connection.BeginTransaction(deferred: false);
                 BindDirectInboxOwner(connection, transaction, local, generation);
+                using var authored = new InitialInboxEvent(exact);
+                var positionResult = CheckAuthoredPosition(connection, transaction, authored, cancellationToken);
+                if (positionResult is not null)
+                    return Task.FromResult(positionResult.Value);
 
                 using var fork = connection.CreateCommand();
                 fork.Transaction = transaction;
@@ -56,13 +92,19 @@ public sealed partial class SqliteDeepMailboxStore
                 using (var read = connection.CreateCommand())
                 {
                     read.Transaction = transaction;
-                    read.CommandText = "SELECT exact_dmc2,exact_dmc2_hash FROM authenticated_dmc2_inbox WHERE conversation_id=$conversation AND logical_message_id=$logical AND author_device_id=$device;";
+                    read.CommandText = "SELECT exact_dmc2,exact_dmc2_hash,author_account_id,content_kind,sender_sequence FROM authenticated_dmc2_inbox WHERE conversation_id=$conversation AND logical_message_id=$logical AND author_device_id=$device;";
                     AddDirectKey(read, conversation, logical, authorDevice);
                     using var reader = read.ExecuteReader();
                     if (reader.Read())
                     {
                         incumbent = (byte[])reader[0];
                         incumbentHash = (byte[])reader[1];
+                        try { RequireStoredSemanticMetadata(reader, incumbent, incumbentHash, conversation, logical, authorDevice); }
+                        catch
+                        {
+                            CryptographicOperations.ZeroMemory(incumbent); CryptographicOperations.ZeroMemory(incumbentHash);
+                            incumbent = null; incumbentHash = null; throw;
+                        }
                     }
                 }
 
@@ -100,9 +142,10 @@ public sealed partial class SqliteDeepMailboxStore
 
                 using var insert = connection.CreateCommand();
                 insert.Transaction = transaction;
-                insert.CommandText = "INSERT INTO authenticated_dmc2_inbox VALUES($conversation,$logical,$device,$account,$kind,$hash,$exact,$at);";
+                insert.CommandText = "INSERT INTO authenticated_dmc2_inbox VALUES($conversation,$logical,$device,$account,$sequence,$kind,$hash,$exact,$at);";
                 AddDirectKey(insert, conversation, logical, authorDevice);
                 insert.Parameters.AddWithValue("$account", authorAccount);
+                insert.Parameters.AddWithValue("$sequence", authored.SenderSequence);
                 insert.Parameters.AddWithValue("$kind", (int)handoff.ContentKind);
                 insert.Parameters.AddWithValue("$hash", hash);
                 insert.Parameters.AddWithValue("$exact", exact);
@@ -110,6 +153,13 @@ public sealed partial class SqliteDeepMailboxStore
                 cancellationToken.ThrowIfCancellationRequested();
                 if (insert.ExecuteNonQuery() != 1)
                     throw new CryptographicException("Direct inbox materialization was not durable.");
+                if (handoff.ContentKind == Dmc2ContentKind.ContactAccept && DirectFixed(local, authorAccount))
+                {
+                    using var reserve = connection.CreateCommand(); reserve.Transaction = transaction;
+                    reserve.CommandText = "INSERT INTO direct_sender_sequences VALUES($conversation,$device,4) ON CONFLICT(conversation_id,author_device_id) DO UPDATE SET next_sequence=max(next_sequence,4);";
+                    reserve.Parameters.AddWithValue("$conversation", conversation); reserve.Parameters.AddWithValue("$device", authorDevice);
+                    if (reserve.ExecuteNonQuery() != 1) throw new CryptographicException("Local acceptance sequence was not durably reserved.");
+                }
 #if DEEP_TEST_INTERNALS
                 DirectDmc2InboxTestHooks.Hit(DirectDmc2InboxFaultPoint.BeforeCommit);
 #endif
@@ -157,6 +207,10 @@ public sealed partial class SqliteDeepMailboxStore
                 var newEvents = new List<InitialInboxEvent>(events.Count);
                 foreach (var item in events)
                 {
+                    var positionResult = CheckAuthoredPosition(connection, transaction, item, cancellationToken);
+                    if (positionResult == DirectDmc2InboxDisposition.ForkLatched)
+                        return Task.FromResult(positionResult.Value);
+                    if (positionResult == DirectDmc2InboxDisposition.ExactReplay) continue;
                     using var fork = connection.CreateCommand();
                     fork.Transaction = transaction;
                     fork.CommandText = "SELECT count(*) FROM authenticated_dmc2_inbox_forks WHERE conversation_id=$conversation AND logical_message_id=$logical AND author_device_id=$device;";
@@ -166,7 +220,7 @@ public sealed partial class SqliteDeepMailboxStore
 
                     using var read = connection.CreateCommand();
                     read.Transaction = transaction;
-                    read.CommandText = "SELECT exact_dmc2,exact_dmc2_hash FROM authenticated_dmc2_inbox WHERE conversation_id=$conversation AND logical_message_id=$logical AND author_device_id=$device;";
+                    read.CommandText = "SELECT exact_dmc2,exact_dmc2_hash,author_account_id,content_kind,sender_sequence FROM authenticated_dmc2_inbox WHERE conversation_id=$conversation AND logical_message_id=$logical AND author_device_id=$device;";
                     AddDirectKey(read, item.ConversationId, item.LogicalMessageId, item.AuthorDeviceId);
                     using var reader = read.ExecuteReader();
                     if (!reader.Read())
@@ -178,6 +232,7 @@ public sealed partial class SqliteDeepMailboxStore
                     var incumbentHash = (byte[])reader[1];
                     try
                     {
+                        RequireStoredSemanticMetadata(reader, incumbent, incumbentHash, item.ConversationId, item.LogicalMessageId, item.AuthorDeviceId);
                         if (reader.Read())
                             throw new CryptographicException("Duplicate initial inbox event rows exist.");
                         if (DirectFixed(incumbentHash, item.Hash) &&
@@ -213,9 +268,10 @@ public sealed partial class SqliteDeepMailboxStore
                 {
                     using var insert = connection.CreateCommand();
                     insert.Transaction = transaction;
-                    insert.CommandText = "INSERT INTO authenticated_dmc2_inbox VALUES($conversation,$logical,$device,$account,$kind,$hash,$exact,$at);";
+                    insert.CommandText = "INSERT INTO authenticated_dmc2_inbox VALUES($conversation,$logical,$device,$account,$sequence,$kind,$hash,$exact,$at);";
                     AddDirectKey(insert, item.ConversationId, item.LogicalMessageId, item.AuthorDeviceId);
                     insert.Parameters.AddWithValue("$account", item.AuthorAccountId);
+                    insert.Parameters.AddWithValue("$sequence", item.SenderSequence);
                     insert.Parameters.AddWithValue("$kind", (int)item.ContentKind);
                     insert.Parameters.AddWithValue("$hash", item.Hash);
                     insert.Parameters.AddWithValue("$exact", item.ExactDmc2);
@@ -292,7 +348,7 @@ public sealed partial class SqliteDeepMailboxStore
                     }
                 }
                 using var read = connection.CreateCommand();
-                read.CommandText = "SELECT i.exact_dmc2,i.exact_dmc2_hash,f.incumbent_hash,i.author_account_id,i.content_kind FROM authenticated_dmc2_inbox i LEFT JOIN authenticated_dmc2_inbox_forks f ON i.conversation_id=f.conversation_id AND i.logical_message_id=f.logical_message_id AND i.author_device_id=f.author_device_id WHERE i.conversation_id=$conversation AND i.logical_message_id=$logical AND i.author_device_id=$device;";
+                read.CommandText = "SELECT i.exact_dmc2,i.exact_dmc2_hash,f.incumbent_hash,i.author_account_id,i.content_kind,i.sender_sequence FROM authenticated_dmc2_inbox i LEFT JOIN authenticated_dmc2_inbox_forks f ON i.conversation_id=f.conversation_id AND i.logical_message_id=f.logical_message_id AND i.author_device_id=f.author_device_id WHERE i.conversation_id=$conversation AND i.logical_message_id=$logical AND i.author_device_id=$device;";
                 AddDirectKey(read, conversation, logical, device);
                 using var eventReader = read.ExecuteReader();
                 if (!eventReader.Read()) return Task.FromResult<byte[]?>(null);
@@ -316,12 +372,14 @@ public sealed partial class SqliteDeepMailboxStore
                             !DirectFixed(parsed.SenderAccountId.Span, storedAuthor) ||
                             !DirectFixed(canonical, exact) ||
                             !IsAccountInboxKind(parsed.ContentKind) ||
-                            eventReader.GetInt32(4) != (int)parsed.ContentKind)
+                            eventReader.GetInt32(4) != (int)parsed.ContentKind ||
+                            !SequenceMatches((byte[])eventReader[5], parsed.SenderClientSequence))
                             throw new CryptographicException(
                                 "The direct inbox event differs from its semantic key.");
                     }
                     finally
                     {
+                        if (parsed.ParsedPayload is AttachmentOfferDmc2Payload offer) offer.Manifest.Dispose();
                         CryptographicOperations.ZeroMemory(storedAuthor);
                         CryptographicOperations.ZeroMemory(canonical);
                     }
@@ -357,6 +415,20 @@ public sealed partial class SqliteDeepMailboxStore
         ReadOnlyMemory<byte> conversationId,
         int maximumItems = 100,
         CancellationToken cancellationToken = default)
+        => ListDirectCanonicalHistoryAsync(localAccountId, localAccountGeneration, conversationId,
+            Dmc2ContentKind.MessageCreate, maximumItems, static (message, local) => new DirectMessageCreateSnapshot(
+                ((MessageCreateDmc2Payload)message.ParsedPayload).Text, local,
+                DateTimeOffset.FromUnixTimeMilliseconds(checked((long)message.CreatedAtUnixMilliseconds))), cancellationToken);
+
+    internal Task<IReadOnlyList<DirectAttachmentOfferSnapshot>> ListDirectAttachmentOffersAsync(
+        ReadOnlyMemory<byte> localAccountId, ulong localAccountGeneration, ReadOnlyMemory<byte> conversationId,
+        int maximumItems = 100, CancellationToken cancellationToken = default)
+        => ListDirectCanonicalHistoryAsync(localAccountId, localAccountGeneration, conversationId,
+            Dmc2ContentKind.AttachmentOffer, maximumItems, static (message, local) => new DirectAttachmentOfferSnapshot(message, local), cancellationToken);
+
+    private Task<IReadOnlyList<T>> ListDirectCanonicalHistoryAsync<T>(ReadOnlyMemory<byte> localAccountId,
+        ulong localAccountGeneration, ReadOnlyMemory<byte> conversationId, Dmc2ContentKind kind, int maximumItems,
+        Func<ParsedDmc2, bool, T> project, CancellationToken cancellationToken)
     {
         RequireDirectId(localAccountId, nameof(localAccountId));
         RequireDirectId(conversationId, nameof(conversationId));
@@ -364,7 +436,7 @@ public sealed partial class SqliteDeepMailboxStore
             throw new ArgumentOutOfRangeException(nameof(localAccountGeneration));
         if (maximumItems is < 1 or > 100)
             throw new ArgumentOutOfRangeException(nameof(maximumItems));
-        return WithReplayConnectionAsync<IReadOnlyList<DirectMessageCreateSnapshot>>(connection =>
+        return WithReplayConnectionAsync<IReadOnlyList<T>>(connection =>
         {
             var local = localAccountId.ToArray();
             var generation = new byte[8];
@@ -377,7 +449,7 @@ public sealed partial class SqliteDeepMailboxStore
                     owner.CommandText = "SELECT local_account_id,local_account_generation FROM authenticated_dmc2_inbox_owner WHERE singleton=1;";
                     using var ownerReader = owner.ExecuteReader();
                     if (!ownerReader.Read())
-                        return Task.FromResult<IReadOnlyList<DirectMessageCreateSnapshot>>([]);
+                        return Task.FromResult<IReadOnlyList<T>>([]);
                     var storedAccount = (byte[])ownerReader[0];
                     var storedGeneration = (byte[])ownerReader[1];
                     try
@@ -395,23 +467,27 @@ public sealed partial class SqliteDeepMailboxStore
                 }
 
                 using var read = connection.CreateCommand();
-                read.CommandText = "SELECT i.exact_dmc2,i.exact_dmc2_hash,i.logical_message_id,i.author_device_id,i.author_account_id,f.incumbent_hash FROM authenticated_dmc2_inbox i LEFT JOIN authenticated_dmc2_inbox_forks f ON i.conversation_id=f.conversation_id AND i.logical_message_id=f.logical_message_id AND i.author_device_id=f.author_device_id WHERE i.conversation_id=$conversation AND i.content_kind=$kind ORDER BY i.materialized_at DESC,i.logical_message_id DESC LIMIT $limit;";
+                read.CommandText = "SELECT i.exact_dmc2,i.exact_dmc2_hash,i.logical_message_id,i.author_device_id,i.author_account_id,f.incumbent_hash,i.sender_sequence,length(i.exact_dmc2),typeof(i.exact_dmc2) FROM authenticated_dmc2_inbox i LEFT JOIN authenticated_dmc2_inbox_forks f ON i.conversation_id=f.conversation_id AND i.logical_message_id=f.logical_message_id AND i.author_device_id=f.author_device_id WHERE i.conversation_id=$conversation AND i.content_kind=$kind ORDER BY i.materialized_at DESC,i.logical_message_id DESC LIMIT $limit;";
                 read.Parameters.AddWithValue("$conversation", conversation);
-                read.Parameters.AddWithValue("$kind", (int)Dmc2ContentKind.MessageCreate);
+                read.Parameters.AddWithValue("$kind", (int)kind);
                 read.Parameters.AddWithValue("$limit", maximumItems);
                 using var reader = read.ExecuteReader();
-                var results = new List<DirectMessageCreateSnapshot>();
+                var results = new List<T>();
                 while (reader.Read())
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (reader.GetString(8) != "blob" || reader.GetInt64(7) is < 285 or > DeviceV2.ProtectedDid2DirectTextJournal.MaximumEventBytes)
+                        throw new CryptographicException("A direct history payload exceeds its closed bound.");
                     var exact = (byte[])reader[0];
                     var hash = (byte[])reader[1];
                     var logical = (byte[])reader[2];
                     var device = (byte[])reader[3];
                     var author = (byte[])reader[4];
                     var actualHash = SHA256.HashData(exact);
+                    ParsedDmc2? parsed = null;
                     try
                     {
-                        var parsed = ApplicationCoreCodec.DecodeDmc2(exact);
+                        parsed = ApplicationCoreCodec.DecodeDmc2(exact);
                         if (!reader.IsDBNull(5) ||
                             !DirectFixed(hash, actualHash) ||
                             !DirectFixed(parsed.CanonicalBytes.Span, exact) ||
@@ -419,34 +495,23 @@ public sealed partial class SqliteDeepMailboxStore
                             !DirectFixed(parsed.LogicalMessageId.Span, logical) ||
                             !DirectFixed(parsed.SenderDeviceId.Span, device) ||
                             !DirectFixed(parsed.SenderAccountId.Span, author) ||
-                            parsed.ContentKind != Dmc2ContentKind.MessageCreate)
+                            parsed.ContentKind != kind ||
+                            parsed.SenderClientSequence < 3 ||
+                            !SequenceMatches((byte[])reader[6], parsed.SenderClientSequence))
                             throw new CryptographicException(
                                 "A direct message projection is forked or corrupt.");
-                        var payload = parsed.PayloadBytes.ToArray();
-                        try
-                        {
-                            var length = BinaryPrimitives.ReadUInt16BigEndian(payload);
-                            if (payload.Length != length + 2)
-                                throw new CryptographicException(
-                                    "The authenticated text payload length is invalid.");
-                            var text = new UTF8Encoding(false, true).GetString(payload, 2, length);
-                            results.Add(new DirectMessageCreateSnapshot(
-                                text,
-                                DirectFixed(author, local),
-                                DateTimeOffset.FromUnixTimeMilliseconds(
-                                    checked((long)parsed.CreatedAtUnixMilliseconds))));
-                        }
-                        finally { CryptographicOperations.ZeroMemory(payload); }
+                        results.Add(project(parsed, DirectFixed(author, local)));
                     }
                     finally
                     {
+                        if (parsed?.ParsedPayload is AttachmentOfferDmc2Payload offer) offer.Manifest.Dispose();
                         foreach (var value in new[] { exact, hash, logical, device,
                                      author, actualHash })
                             CryptographicOperations.ZeroMemory(value);
                     }
                 }
                 results.Reverse();
-                return Task.FromResult<IReadOnlyList<DirectMessageCreateSnapshot>>(results);
+                return Task.FromResult<IReadOnlyList<T>>(results);
             }
             finally
             {
@@ -506,12 +571,103 @@ public sealed partial class SqliteDeepMailboxStore
         command.Parameters.AddWithValue("$device", authorDevice);
     }
 
+    private static bool SequenceMatches(byte[] stored, ulong expected)
+    {
+        try { return stored.Length == 8 && BinaryPrimitives.ReadUInt64BigEndian(stored) == expected; }
+        finally { CryptographicOperations.ZeroMemory(stored); }
+    }
+
+    private static void RequireStoredSemanticMetadata(SqliteDataReader reader, byte[] exact, byte[] hash,
+        byte[] conversation, byte[] logical, byte[] device)
+    {
+        var author = (byte[])reader[2]; var sequence = (byte[])reader[4];
+        var actualHash = SHA256.HashData(exact);
+        ParsedDmc2? parsed = null;
+        try
+        {
+            parsed = ApplicationCoreCodec.DecodeDmc2(exact);
+            if (!DirectFixed(actualHash, hash) || !DirectFixed(parsed.CanonicalBytes.Span, exact) ||
+                !DirectFixed(parsed.ConversationId.Span, conversation) || !DirectFixed(parsed.LogicalMessageId.Span, logical) ||
+                !DirectFixed(parsed.SenderDeviceId.Span, device) || !DirectFixed(parsed.SenderAccountId.Span, author) ||
+                reader.GetInt32(3) != (int)parsed.ContentKind || !IsAccountInboxKind(parsed.ContentKind) ||
+                sequence.Length != 8 || BinaryPrimitives.ReadUInt64BigEndian(sequence) != parsed.SenderClientSequence)
+                throw new CryptographicException("The retained event differs from its semantic metadata.");
+        }
+        finally
+        {
+            if (parsed?.ParsedPayload is AttachmentOfferDmc2Payload offer) offer.Manifest.Dispose();
+            CryptographicOperations.ZeroMemory(author); CryptographicOperations.ZeroMemory(sequence);
+            CryptographicOperations.ZeroMemory(actualHash);
+        }
+    }
+
+    private static DirectDmc2InboxDisposition? CheckAuthoredPosition(
+        SqliteConnection connection, SqliteTransaction transaction,
+        InitialInboxEvent candidate, CancellationToken cancellationToken)
+    {
+        using var read = connection.CreateCommand();
+        read.Transaction = transaction;
+        read.CommandText = "SELECT i.logical_message_id,i.exact_dmc2_hash,i.exact_dmc2,f.incumbent_hash,i.content_kind FROM authenticated_dmc2_inbox i LEFT JOIN authenticated_dmc2_inbox_forks f ON i.conversation_id=f.conversation_id AND i.logical_message_id=f.logical_message_id AND i.author_device_id=f.author_device_id WHERE i.conversation_id=$conversation AND i.author_account_id=$account AND i.author_device_id=$device AND i.sender_sequence=$sequence;";
+        read.Parameters.AddWithValue("$conversation", candidate.ConversationId);
+        read.Parameters.AddWithValue("$account", candidate.AuthorAccountId);
+        read.Parameters.AddWithValue("$device", candidate.AuthorDeviceId);
+        read.Parameters.AddWithValue("$sequence", candidate.SenderSequence);
+        using var reader = read.ExecuteReader();
+        if (!reader.Read()) return null;
+        var logical = (byte[])reader[0];
+        var hash = (byte[])reader[1];
+        var exact = (byte[])reader[2];
+        ParsedDmc2? parsed = null;
+        try
+        {
+            parsed = ApplicationCoreCodec.DecodeDmc2(exact);
+            var actualHash = SHA256.HashData(exact);
+            try
+            {
+                if (!DirectFixed(actualHash, hash) || !DirectFixed(parsed.CanonicalBytes.Span, exact) ||
+                    !DirectFixed(parsed.ConversationId.Span, candidate.ConversationId) ||
+                    !DirectFixed(parsed.LogicalMessageId.Span, logical) ||
+                    !DirectFixed(parsed.SenderAccountId.Span, candidate.AuthorAccountId) ||
+                    !DirectFixed(parsed.SenderDeviceId.Span, candidate.AuthorDeviceId) ||
+                    reader.GetInt32(4) != (int)parsed.ContentKind ||
+                    parsed.SenderClientSequence != BinaryPrimitives.ReadUInt64BigEndian(candidate.SenderSequence) ||
+                    !IsAccountInboxKind(parsed.ContentKind))
+                    throw new CryptographicException("The incumbent authored position is corrupt.");
+            }
+            finally { CryptographicOperations.ZeroMemory(actualHash); }
+            var forked = !reader.IsDBNull(3);
+            if (reader.Read()) throw ResetRequired("An authored inbox position has duplicate rows.");
+            if (forked) return DirectDmc2InboxDisposition.ForkLatched;
+            if (DirectFixed(exact, candidate.ExactDmc2) && DirectFixed(hash, candidate.Hash))
+                return DirectDmc2InboxDisposition.ExactReplay;
+            reader.Close();
+            using var latch = connection.CreateCommand();
+            latch.Transaction = transaction;
+            latch.CommandText = "INSERT INTO authenticated_dmc2_inbox_forks VALUES($conversation,$logical,$device,$incumbent,$conflicting);";
+            AddDirectKey(latch, candidate.ConversationId, logical, candidate.AuthorDeviceId);
+            latch.Parameters.AddWithValue("$incumbent", hash);
+            latch.Parameters.AddWithValue("$conflicting", candidate.Hash);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (latch.ExecuteNonQuery() != 1)
+                throw new CryptographicException("The authored-position fork was not durable.");
+            transaction.Commit();
+            return DirectDmc2InboxDisposition.ForkLatched;
+        }
+        finally
+        {
+            if (parsed?.ParsedPayload is AttachmentOfferDmc2Payload offer) offer.Manifest.Dispose();
+            CryptographicOperations.ZeroMemory(logical);
+            CryptographicOperations.ZeroMemory(hash);
+            CryptographicOperations.ZeroMemory(exact);
+        }
+    }
+
     private static bool DirectFixed(ReadOnlySpan<byte> left, ReadOnlySpan<byte> right) =>
         left.Length == right.Length &&
         CryptographicOperations.FixedTimeEquals(left, right);
 
     private static bool IsAccountInboxKind(Dmc2ContentKind kind) =>
-        kind == Dmc2ContentKind.SessionInit ||
+        kind is Dmc2ContentKind.SessionInit or Dmc2ContentKind.ContactAccept ||
         AuthenticatedInitialDmc2Batch.IsSupportedInitialApplicationKind(kind);
 
     private sealed class InitialInboxEvent : IDisposable
@@ -519,16 +675,22 @@ public sealed partial class SqliteDeepMailboxStore
         internal InitialInboxEvent(ReadOnlySpan<byte> exact)
         {
             var parsed = ApplicationCoreCodec.DecodeDmc2(exact);
-            if (!IsAccountInboxKind(parsed.ContentKind) ||
-                !DirectFixed(parsed.CanonicalBytes.Span, exact))
-                throw new CryptographicException("The initial inbox event is not canonical or supported.");
-            ExactDmc2 = exact.ToArray();
-            Hash = SHA256.HashData(exact);
-            ConversationId = parsed.ConversationId.ToArray();
-            LogicalMessageId = parsed.LogicalMessageId.ToArray();
-            AuthorDeviceId = parsed.SenderDeviceId.ToArray();
-            AuthorAccountId = parsed.SenderAccountId.ToArray();
-            ContentKind = parsed.ContentKind;
+            try
+            {
+                if (!IsAccountInboxKind(parsed.ContentKind) ||
+                    !DirectFixed(parsed.CanonicalBytes.Span, exact))
+                    throw new CryptographicException("The initial inbox event is not canonical or supported.");
+                ExactDmc2 = exact.ToArray();
+                Hash = SHA256.HashData(exact);
+                ConversationId = parsed.ConversationId.ToArray();
+                LogicalMessageId = parsed.LogicalMessageId.ToArray();
+                AuthorDeviceId = parsed.SenderDeviceId.ToArray();
+                AuthorAccountId = parsed.SenderAccountId.ToArray();
+                ContentKind = parsed.ContentKind;
+                SenderSequence = new byte[8];
+                BinaryPrimitives.WriteUInt64BigEndian(SenderSequence, parsed.SenderClientSequence);
+            }
+            finally { if (parsed.ParsedPayload is AttachmentOfferDmc2Payload offer) offer.Manifest.Dispose(); }
         }
 
         internal byte[] ExactDmc2 { get; }
@@ -538,11 +700,12 @@ public sealed partial class SqliteDeepMailboxStore
         internal byte[] AuthorDeviceId { get; }
         internal byte[] AuthorAccountId { get; }
         internal Dmc2ContentKind ContentKind { get; }
+        internal byte[] SenderSequence { get; }
 
         public void Dispose()
         {
             foreach (var value in new[] { ExactDmc2, Hash, ConversationId,
-                         LogicalMessageId, AuthorDeviceId, AuthorAccountId })
+                         LogicalMessageId, AuthorDeviceId, AuthorAccountId, SenderSequence })
                 CryptographicOperations.ZeroMemory(value);
         }
     }

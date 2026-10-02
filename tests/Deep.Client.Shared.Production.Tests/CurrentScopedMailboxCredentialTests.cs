@@ -1,7 +1,9 @@
 using System.Security.Cryptography;
 using Deep.Client.Shared.Persistence;
 using Deep.Client.Shared.Services;
+using Deep.Client.Shared.Services.XPointNetworkV1;
 using Deep.Protocol.DeepExtension.MailboxCapabilities;
+using Deep.Protocol.DeepExtension.PrivacyRouting;
 using Sodium;
 
 namespace Deep.Client.Shared.Production.Tests;
@@ -28,6 +30,8 @@ public sealed class CurrentScopedMailboxCredentialTests
                 fixture.Signer,
                 fixture.Authority);
             exact = Assert.Single(prepared.Frames).GetCanonicalMau2Copy();
+            var route = await store.ReadScopedMailboxRouteAsync(fixture.Selector, fixture.Authority);
+            MailboxPrivacyPathProvider.ValidateRouteRequest(OnionOperation.Retrieve, exact, route);
         }
 
         using (var store = fixture.Open())

@@ -34,9 +34,31 @@ public sealed class DeepIdV2DirectoryLkgStoreTests
             _ = await account.CreateAsync("Alice");
             var first = await account.OpenDirectoryLkgStoreAsync(
                 authority.Verified, authority.ExactHead, authority.HeadHash);
+            var readOnly = Assert.IsAssignableFrom<IDeepIdV2DirectoryProtectedLeaseRead>(first);
+            var accountLease = new DeepIdV2AccountFileLease(Path.Combine(directory, "deep-store-v2-account.lock"));
+            using (var held = await accountLease.AcquireAsync(default))
+            {
+                // Under-lease freshness cannot provision a missing root. A
+                // normal restore below remains the sole genesis initializer.
+                await Assert.ThrowsAsync<CryptographicException>(async () =>
+                    await readOnly.ReadExistingUnderLeaseAsync(authority.Verified, held, default));
+            }
             var initial = await first.RestoreAsync(authority.Verified, default);
             Assert.Equal(0UL, initial.LogGeneration);
             Assert.Equal(authority.ExactHead, initial.ExactAdh1.ToArray());
+            using (var held = await accountLease.AcquireAsync(default))
+            {
+                Assert.Equal(initial.ExactAdh1.ToArray(),
+                    (await readOnly.ReadExistingUnderLeaseAsync(authority.Verified, held, default)).ExactAdh1.ToArray());
+                held.Dispose();
+                await Assert.ThrowsAsync<ObjectDisposedException>(async () =>
+                    await readOnly.ReadExistingUnderLeaseAsync(authority.Verified, held, default));
+            }
+            var foreignLease = new DeepIdV2AccountFileLease(Path.Combine(directory, "foreign.lock"));
+            using (var foreignHeld = await foreignLease.AcquireAsync(default))
+                await Assert.ThrowsAsync<CryptographicException>(async () =>
+                    await readOnly.ReadExistingUnderLeaseAsync(authority.Verified, foreignHeld, default));
+            File.Delete(foreignLease.ExactPath);
 
             using (var admissionTransport = new HttpServiceRequestTransport(
                        new HttpClient(new AdmissionReceiptHandler(authority.ExactHead)),

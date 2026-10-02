@@ -13,16 +13,19 @@ namespace Deep.Client.Shared.Persistence.DeviceV2;
 /// Only ciphertext/identifiers are public; ratchet state stays inside Shared.</summary>
 public sealed class DeepIdV2InitialSessionCommit : IDisposable
 {
-    internal const int HeaderBytes = 180, MaximumDphBytes = 65536, MaximumInitialTrsBytes = 131072;
-    internal const int MaximumPayloadBytes = HeaderBytes + 1476 + MaximumDphBytes + MaximumInitialTrsBytes;
-    private byte[]? payload;
-    private readonly int dphOffset, dphLength, trsOffset, trsLength;
+    internal const int HeaderBytes = 212, MaximumDphBytes = 65536, MaximumInitialTrsBytes = 131072;
+    internal const int MaximumPayloadBytes = HeaderBytes + 1476 + MaximumDphBytes;
+    internal const int MaximumPendingBytes = MaximumPayloadBytes + MaximumInitialTrsBytes;
+    private byte[]? payload, initialState;
+    private readonly int dphOffset, dphLength;
     internal readonly CurrentDmd1Evidence Directory;
     internal readonly LocalDeviceAgreementBinding Device;
     internal readonly Dph2Record Record;
     internal string Fingerprint => Convert.ToHexString(Bytes.Slice(12, 32));
     internal ReadOnlySpan<byte> CanonicalSpan => Bytes;
-    internal ReadOnlySpan<byte> ExactTrsSpan => Bytes.Slice(trsOffset, trsLength);
+    internal ReadOnlySpan<byte> ExactTrsSpan { get { _ = Bytes; return initialState is { Length: > 0 } state ? state : throw new InvalidOperationException("Initial sender keys have been transferred and retired."); } }
+    internal bool HasInitialState { get { _ = Bytes; return initialState is { Length: > 0 }; } }
+    internal ReadOnlySpan<byte> InitialStateHashSpan => Bytes.Slice(180, 32);
     internal ReadOnlySpan<byte> EventHashSpan => Bytes.Slice(76, 32);
     internal ReadOnlySpan<byte> IntentSpan => Bytes.Slice(108, 32);
     internal ReadOnlySpan<byte> AgreementPeerSpan => Bytes.Slice(148, 32);
@@ -32,33 +35,35 @@ public sealed class DeepIdV2InitialSessionCommit : IDisposable
     public ReadOnlyMemory<byte> ExactClaimReplayHash => Bytes.Slice(44, 32).ToArray();
     private ReadOnlySpan<byte> Bytes => payload ?? throw new ObjectDisposedException(GetType().Name);
 
-    private DeepIdV2InitialSessionCommit(byte[] owned)
+    private DeepIdV2InitialSessionCommit(byte[] owned, byte[]? state = null)
     {
-        payload = owned;
+        payload = owned; initialState = state;
         try
         {
-            if (owned.Length < HeaderBytes || owned.Length > MaximumPayloadBytes || owned[0] != 1 || owned[1] != 0)
+            if (owned.Length < HeaderBytes || owned.Length > MaximumPayloadBytes || owned[0] != 2 || owned[1] != 0)
                 throw new InvalidDataException("The completed initial-session record has no closed local shape.");
             var dmdLength = BinaryPrimitives.ReadUInt16BigEndian(owned.AsSpan(2, 2));
             var drs = BinaryPrimitives.ReadUInt64BigEndian(owned.AsSpan(4, 8));
             var dph = BinaryPrimitives.ReadUInt32BigEndian(owned.AsSpan(140, 4));
             var trs = BinaryPrimitives.ReadUInt32BigEndian(owned.AsSpan(144, 4));
             if (dmdLength is < 426 or > 1476 || dph is 0 or > MaximumDphBytes ||
-                trs is 0 or > MaximumInitialTrsBytes || owned.Length != (long)HeaderBytes + dmdLength + dph + trs)
+                trs is 0 or > MaximumInitialTrsBytes || owned.Length != (long)HeaderBytes + dmdLength + dph)
                 throw new InvalidDataException("The completed initial-session lengths are invalid.");
-            foreach (var offset in new[] { 12, 44, 76, 108, 148 })
+            foreach (var offset in new[] { 12, 44, 76, 108, 148, 180 })
                 if (owned.AsSpan(offset, 32).IndexOfAnyExcept((byte)0) < 0)
                     throw new InvalidDataException("The completed initial-session binding is zero.");
             Directory = CurrentDmd1Evidence.RestoreProtected(false, owned.AsSpan(HeaderBytes, dmdLength), drs);
             dphOffset = HeaderBytes + dmdLength; dphLength = checked((int)dph);
-            trsOffset = dphOffset + dphLength; trsLength = checked((int)trs);
             Record = Dph2Codec.Decode(owned.AsSpan(dphOffset, dphLength));
             Device = LocalDeviceAgreementBinding.FromCompletedRecord(Directory, Record);
             var expected = DeviceV1.ProtectedCurrentDmd1Validation.FingerprintAgreement(Directory, Device,
                 Deep.Protocol.Identity.LocalDeviceX25519AgreementPurpose.Dph2InitiatorDh1,
                 Record.ClaimOperationId.Span, AgreementPeerSpan);
             if (Fingerprint != expected) throw new CryptographicException("The completed agreement fingerprint differs.");
-            var facts = MessagingCryptoV1Trs1.ValidateDeviceBinding(ExactTrsSpan, Record.SessionId.Span,
+            if (!HasInitialState) return; // Key-free historical metadata grants no initial seed.
+            if (state!.Length != trs || !DeviceInitialSessionCheckpoint.Fixed(SHA256.HashData(state), InitialStateHashSpan))
+                throw new CryptographicException("The live sender state differs from its immutable commitment.");
+            var facts = MessagingCryptoV1Trs1.ValidateDeviceBinding(state, Record.SessionId.Span,
                 Record.InitiatorDeviceId.Span, Record.InitiatorDeviceGeneration);
             MessagingCryptoV1Trs1.RequireResponderContactBinding(ExactTrsSpan, Record.ResponderDeviceId.Span,
                 Record.ResponderDeviceGeneration);
@@ -129,7 +134,7 @@ public sealed class DeepIdV2InitialSessionCommit : IDisposable
         byte[]? result = null;
         try
         {
-            result = new byte[HeaderBytes + directory.Canonical.Length + dph.Length + trs.Length]; result[0] = 1;
+            result = new byte[HeaderBytes + directory.Canonical.Length + dph.Length]; result[0] = 2;
             BinaryPrimitives.WriteUInt16BigEndian(result.AsSpan(2, 2), checked((ushort)directory.Canonical.Length));
             BinaryPrimitives.WriteUInt64BigEndian(result.AsSpan(4, 8), directory.DrsRevision);
             Convert.FromHexString(fingerprint).CopyTo(result, 12);
@@ -137,10 +142,12 @@ public sealed class DeepIdV2InitialSessionCommit : IDisposable
             agreementPeer.CopyTo(result.AsSpan(148));
             BinaryPrimitives.WriteUInt32BigEndian(result.AsSpan(140, 4), checked((uint)dph.Length));
             BinaryPrimitives.WriteUInt32BigEndian(result.AsSpan(144, 4), checked((uint)trs.Length));
+            SHA256.HashData(trs.Span).CopyTo(result.AsSpan(180));
             directory.Canonical.Span.CopyTo(result.AsSpan(HeaderBytes));
             dph.Span.CopyTo(result.AsSpan(HeaderBytes + directory.Canonical.Length));
-            trs.Span.CopyTo(result.AsSpan(HeaderBytes + directory.Canonical.Length + dph.Length));
-            var commit = new DeepIdV2InitialSessionCommit(result); result = null; return commit;
+            if (!MemoryMarshal.TryGetArray(trs, out var state) || state.Array is null || state.Offset != 0 || state.Count != state.Array.Length)
+                throw new InvalidOperationException("The owned initial TRS accessor changed its ownership contract.");
+            var commit = new DeepIdV2InitialSessionCommit(result, state.Array); result = null; trs = default; return commit;
         }
         finally
         {
@@ -152,7 +159,27 @@ public sealed class DeepIdV2InitialSessionCommit : IDisposable
 
     // Only called after authenticating the exact checkpoint/hash-chain owner;
     // never a public raw-byte parser or a Protocol capability constructor.
-    internal static DeepIdV2InitialSessionCommit RestoreCustody(ReadOnlySpan<byte> exact) => new(exact.ToArray());
+    internal static DeepIdV2InitialSessionCommit RestoreCustody(ReadOnlySpan<byte> exact, ReadOnlySpan<byte> state = default) =>
+        new(exact.ToArray(), state.IsEmpty ? null : state.ToArray());
+    internal byte[] SerializePending()
+    {
+        var state = ExactTrsSpan; var result = new byte[Bytes.Length + state.Length];
+        Bytes.CopyTo(result); state.CopyTo(result.AsSpan(Bytes.Length)); return result;
+    }
+    internal static int PendingMetadataLength(ReadOnlySpan<byte> pending)
+    {
+        if (pending.Length < HeaderBytes || pending.Length > MaximumPendingBytes || pending[0] != 2)
+            throw new InvalidDataException("Sender pending custody has a different closed generation.");
+        var dmd = BinaryPrimitives.ReadUInt16BigEndian(pending[2..]);
+        var dph = BinaryPrimitives.ReadUInt32BigEndian(pending[140..]); var trs = BinaryPrimitives.ReadUInt32BigEndian(pending[144..]);
+        var metadata = (long)HeaderBytes + dmd + dph;
+        if (dmd is < 426 or > 1476 || dph is 0 or > MaximumDphBytes || trs is 0 or > MaximumInitialTrsBytes ||
+            pending.Length != metadata + trs || !DeviceInitialSessionCheckpoint.Fixed(SHA256.HashData(pending[checked((int)metadata)..]), pending.Slice(180, 32)))
+            throw new InvalidDataException("Sender pending custody lengths or state digest differ.");
+        return checked((int)metadata);
+    }
+    internal static DeepIdV2InitialSessionCommit RestorePending(ReadOnlySpan<byte> exact)
+    { var metadata = PendingMetadataLength(exact); return RestoreCustody(exact[..metadata], exact[metadata..]); }
     public void Dispose()
     {
         DisposeCore();
@@ -163,5 +190,7 @@ public sealed class DeepIdV2InitialSessionCommit : IDisposable
     {
         var value = Interlocked.Exchange(ref payload, null);
         if (value is not null) CryptographicOperations.ZeroMemory(value);
+        var state = Interlocked.Exchange(ref initialState, null);
+        if (state is not null) CryptographicOperations.ZeroMemory(state);
     }
 }

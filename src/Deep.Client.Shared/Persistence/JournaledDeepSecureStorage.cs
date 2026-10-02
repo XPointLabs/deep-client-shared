@@ -27,7 +27,7 @@ public sealed class JournaledDeepSecureStorage : IDeepSecureStorage, IDisposable
 {
     private const ushort FormatVersion = 1;
     private const int HeaderSize = 8;
-    private const int MaximumEntries = 128;
+    private const int MaximumEntries = DeepSecureStorageRegistration.MaximumEntries;
     private const int MaximumSlotBytes = 512;
     private const int MaximumValueBytes = 1024 * 1024;
     private const int MaximumPlaintextBytes = 8 * 1024 * 1024;
@@ -91,6 +91,7 @@ public sealed class JournaledDeepSecureStorage : IDeepSecureStorage, IDisposable
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(writes);
+        _ = DeepSecureStorageRegistration.ValidateWrites(writes);
         if (writes.Count == 0 || writes.Count > MaximumEntries)
         {
             throw new ArgumentException("Secure-storage batch is empty or too large.", nameof(writes));
@@ -103,10 +104,11 @@ public sealed class JournaledDeepSecureStorage : IDeepSecureStorage, IDisposable
             {
                 ValidateSlot(write.Slot);
                 if (write.Value.IsEmpty || write.Value.Length > MaximumValueBytes
-                    || !additions.TryAdd(write.Slot, write.Value.ToArray()))
+                    || additions.ContainsKey(write.Slot))
                 {
                     throw new ArgumentException("Secure-storage batch is malformed.", nameof(writes));
                 }
+                additions.Add(write.Slot, write.Value.ToArray());
             }
 
             await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -170,6 +172,28 @@ public sealed class JournaledDeepSecureStorage : IDeepSecureStorage, IDisposable
             CryptographicOperations.ZeroMemory(expectedCopy);
             CryptographicOperations.ZeroMemory(replacementCopy);
         }
+    }
+
+    public async Task<bool> CompareExchangeAndInsertAsync(string slot, ReadOnlyMemory<byte> expected,
+        ReadOnlyMemory<byte> replacement, IReadOnlyList<DeepSecureStorageWrite> insertions,
+        CancellationToken cancellationToken = default)
+    {
+        using var batch = new DeepSecureStorageRegistration(slot, expected, replacement, insertions);
+        var matched = false;
+        await MutateAsync(values =>
+        {
+            if (!values.TryGetValue(slot, out var current) ||
+                !CryptographicOperations.FixedTimeEquals(current, batch.Expected) ||
+                batch.Insertions.Keys.Any(values.ContainsKey)) return false;
+            batch.ValidateCapacity(values);
+            var successor = batch.CopySuccessor();
+            values[slot] = successor[slot];
+            foreach (var item in successor) if (item.Key != slot) values.Add(item.Key, item.Value);
+            CryptographicOperations.ZeroMemory(current);
+            matched = true;
+            return true;
+        }, cancellationToken).ConfigureAwait(false);
+        return matched;
     }
 
     public async Task DeleteBatchAsync(
@@ -281,6 +305,9 @@ public sealed class JournaledDeepSecureStorage : IDeepSecureStorage, IDisposable
             return new Dictionary<string, byte[]>(StringComparer.Ordinal);
         }
 
+        var fileLength = new FileInfo(statePath).Length;
+        if (fileLength is <= 0 or > MaximumPlaintextBytes * 2)
+            throw new CryptographicException("Protected secure-storage aggregate has an invalid size.");
         var protectedBytes = File.ReadAllBytes(statePath);
         byte[]? plaintext = null;
         try

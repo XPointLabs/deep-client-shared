@@ -6,6 +6,9 @@ using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.ContactV1;
 using Deep.Protocol.MessagingCrypto;
 using Deep.Protocol.MessagingWire;
+using Deep.Client.Shared.Persistence.DeviceV2;
+using Deep.Client.Shared.Services.ContactV2;
+using Deep.Protocol.AccountDirectoryV1;
 
 namespace Deep.Client.Shared.Persistence.MessagingV1;
 
@@ -20,6 +23,68 @@ internal sealed class AuthenticatedInitialDmc2Batch : IDisposable
     private readonly byte[] localAccountId;
     private readonly byte[] conversationId;
     private int disposed;
+
+    // Independent DID2 construction: no V1 scope, identity conversion or source-key reopening.
+    private AuthenticatedInitialDmc2Batch(byte[] initial, byte[] hello, Did2MessagingSessionScope scope)
+    {
+        var init = ApplicationCoreCodec.DecodeDmc2(initial);
+        var first = ApplicationCoreCodec.DecodeDmc2(hello);
+        var author = scope.IsInitiator ? scope.LocalAccount : scope.RemoteAccount;
+        var device = scope.IsInitiator ? scope.LocalDevice : scope.RemoteDevice;
+        var directory = scope.IsInitiator ? scope.LocalDirectory : scope.RemoteDirectory;
+        if (!Fixed(init.CanonicalBytes.Span, initial) || !Fixed(first.CanonicalBytes.Span, hello) ||
+            !MatchesScope(init, scope.Network, scope.Conversation, author, device) ||
+            !MatchesScope(first, scope.Network, scope.Conversation, author, device) ||
+            init.ParsedPayload is not SessionInitDmc2Payload session ||
+            first.ParsedPayload is not ContactHelloDmc2Payload contact ||
+            init.SenderClientSequence != 1 || first.SenderClientSequence != 2 ||
+            first.CreatedAtUnixMilliseconds < init.CreatedAtUnixMilliseconds ||
+            Fixed(init.LogicalMessageId.Span, first.LogicalMessageId.Span) ||
+            !Fixed(session.SenderDirectory.RecordHash.Span, directory) ||
+            !Fixed(contact.InitiatorDmd1Hash.Span, directory) ||
+            !Fixed(contact.RelationshipId.Span, scope.Relationship) ||
+            !Fixed(scope.Conversation, ApplicationCoreVerifier.ComputeContactConversationId(scope.Network,
+                scope.Relationship, scope.LocalAccount, scope.RemoteAccount)))
+            throw new CryptographicException("The retained initial batch differs from the owned DID2 semantic scope.");
+        sessionInit = initial.ToArray(); firstApplication = hello.ToArray();
+        localAccountId = scope.LocalAccount.ToArray(); conversationId = scope.Conversation.ToArray();
+        LocalAccountGeneration = BinaryPrimitives.ReadUInt64BigEndian(scope.Exact[84..]);
+    }
+
+    internal static async Task<AuthenticatedInitialDmc2Batch> FromOwnedDid2Async(
+        OwnedDid2MessagingStorage opened, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own,
+        VerifiedDeepIdV2DirectoryFreshness peer, DeepIdV2ContactPathAuthoritySource source,
+        HeldDeepIdV2AccountLease held, CancellationToken ct)
+    {
+        held.RequireActive();
+        var scope = opened.Scope;
+        var first = await source.RecheckEndpointPairUnderLeaseAsync(own, peer, held, ct).ConfigureAwait(false);
+        OwnedInitialMessagingSeed.RequireFreshScope(scope, own.Proof, peer, first);
+        var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
+        var retained = opened.Sql.ReadVerifiedActiveInitialEvents(floor);
+        AuthenticatedInitialDmc2Batch? batch = null;
+        try
+        {
+            await ApplicationCoreVerifier.RequireContactHelloEndpointBindingsAsync(
+                ApplicationCoreCodec.DecodeDmc2(retained.Hello), scope.IsInitiator ? own.Proof : peer,
+                scope.IsInitiator ? peer : own.Proof, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
+            var hello = (ContactHelloDmc2Payload)ApplicationCoreCodec.DecodeDmc2(retained.Hello).ParsedPayload;
+            _ = await Deep.Protocol.ContactV2.DeepIdV2ContactMailboxRouteVerifier.VerifyAsync(hello.MailboxRoute,
+                scope.IsInitiator ? own.Proof : peer, own.Network, own.Authority, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
+            batch = new(retained.SessionInit, retained.Hello, scope);
+            var final = await source.RecheckEndpointPairUnderLeaseAsync(own, peer, held, ct).ConfigureAwait(false);
+            if (!Fixed(first.BootId.Span, final.BootId.Span) || final.SampleSeconds < first.SampleSeconds)
+                throw new CryptographicException("Initial application handoff crossed a clock discontinuity.");
+            OwnedInitialMessagingSeed.RequireFreshScope(scope, own.Proof, peer, final);
+            ct.ThrowIfCancellationRequested(); held.RequireActive();
+            var result = batch; batch = null; return result;
+        }
+        finally
+        {
+            batch?.Dispose(); CryptographicOperations.ZeroMemory(retained.SessionInit);
+            CryptographicOperations.ZeroMemory(retained.Hello);
+        }
+    }
 
     private AuthenticatedInitialDmc2Batch(
         ReadOnlySpan<byte> exactSessionInit,
@@ -233,7 +298,7 @@ internal sealed class AuthenticatedInitialDmc2Batch : IDisposable
         // Both payloads have already passed the canonical DMC2 codec. Read only
         // their frozen kind-specific fields; CONTACT-CODEC emission is inactive
         // and this check must not create a second authoring path.
-        if (hello.Length != 678 || session.Length < 72 ||
+        if (hello.Length is < ApplicationCoreCodec.MinimumContactControlPayloadBytes or > ApplicationCoreCodec.MaximumContactControlPayloadBytes || session.Length < 72 ||
             !Fixed(hello[..32], relationship) ||
             !Fixed(hello.Slice(38, 32), dab1Hash) ||
             !Fixed(hello.Slice(70, 32), dmd1Hash) ||

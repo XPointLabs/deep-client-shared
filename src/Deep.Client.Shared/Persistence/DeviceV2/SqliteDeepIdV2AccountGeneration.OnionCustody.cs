@@ -14,6 +14,22 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         IDeepSecureStorage storage, DeepIdV2AccountFileLease accountLease,
         string statePath, VerifiedDeepIdV2CurrentAccount current,
         DeepIdV2AccountService owner, CancellationToken cancellationToken)
+        => await OpenOnionCustodyCoreAsync(storage, accountLease, statePath, current, owner, null, cancellationToken).ConfigureAwait(false);
+
+    internal static async ValueTask<DeepIdV2OnionClientCustody> OpenBorrowedOnionCustodyAsync(
+        IDeepSecureStorage storage, DeepIdV2AccountFileLease accountLease, string statePath,
+        VerifiedDeepIdV2CurrentAccount current, DeepIdV2AccountService owner,
+        HeldDeepIdV2AccountLease held, CancellationToken cancellationToken)
+    {
+        using var borrow = held.BorrowFor(accountLease);
+        var result = await OpenOnionCustodyCoreAsync(storage, accountLease, statePath, current, owner, held, cancellationToken).ConfigureAwait(false);
+        held.RequireActive(); cancellationToken.ThrowIfCancellationRequested(); return result;
+    }
+
+    private static async ValueTask<DeepIdV2OnionClientCustody> OpenOnionCustodyCoreAsync(
+        IDeepSecureStorage storage, DeepIdV2AccountFileLease accountLease, string statePath,
+        VerifiedDeepIdV2CurrentAccount current, DeepIdV2AccountService owner,
+        HeldDeepIdV2AccountLease? borrowed, CancellationToken cancellationToken)
     {
         using var secret = await storage.ReadOwnedAsync(KeySlot, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidDataException("The DID2 SQL key record is absent.");
@@ -25,9 +41,9 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             var binding = AccountBinding.From(current.Verified, current.AccountId.Span,
                 network.Span, current.DisplayName, current.PermanentId.CanonicalText, record.AsSpan(56, 32));
             var guards = new OnionGuardStore(new OnionCustodyRoot(storage, accountLease,
-                statePath, binding, 4, 232));
+                statePath, binding, 4, 232, borrowed));
             var entropy = new OnionEntropyLedger(new OnionCustodyRoot(storage, accountLease,
-                statePath, binding, 5, 8 + OnionEntropyLedger.MaximumCommitments * 32));
+                statePath, binding, 5, 8 + OnionEntropyLedger.MaximumCommitments * 32, borrowed));
             // The caller holds the account lease. Do not recursively acquire it.
             var guard = await guards.Root.ReadUnderLeaseAsync(cancellationToken).ConfigureAwait(false);
             if (guard is not null) guards.Decode(guard);
@@ -51,13 +67,15 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         private readonly int kind, maximumPayload;
         private readonly byte[] scope;
         private readonly string prefix;
+        private readonly HeldDeepIdV2AccountLease? borrowed;
         internal ReadOnlyMemory<byte> NetworkId => binding.NetworkId;
 
         internal OnionCustodyRoot(IDeepSecureStorage storage, DeepIdV2AccountFileLease lease,
-            string path, AccountBinding binding, int kind, int maximumPayload)
+            string path, AccountBinding binding, int kind, int maximumPayload, HeldDeepIdV2AccountLease? borrowed)
         {
             this.storage = storage; this.lease = lease; this.path = Path.GetFullPath(path);
             this.binding = binding; this.kind = kind; this.maximumPayload = maximumPayload;
+            this.borrowed = borrowed;
             scope = SHA256.HashData("Deep/STORE-V2/onion-custody"u8.ToArray()
                 .Concat(binding.NetworkId).Concat(binding.AccountId).Concat(binding.DeviceId)
                 .Concat(binding.InstanceId).Append(checked((byte)kind)).ToArray());
@@ -75,6 +93,12 @@ internal static partial class SqliteDeepIdV2AccountGeneration
 
         internal async ValueTask<OnionCustodyRow?> ReadAsync(CancellationToken ct)
         {
+            if (borrowed is not null)
+            {
+                using var borrow = borrowed.BorrowFor(lease);
+                var result = await ReadUnderLeaseAsync(ct).ConfigureAwait(false);
+                borrowed.RequireActive(); ct.ThrowIfCancellationRequested(); return result;
+            }
             using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
             return await ReadUnderLeaseAsync(ct).ConfigureAwait(false);
         }
@@ -82,9 +106,21 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         internal async ValueTask<bool> CompareExchangeAsync(OnionCustodyRow? expected,
             byte[] payload, CancellationToken ct)
         {
+            if (borrowed is not null)
+            {
+                var result = await CompareExchangeUnderLeaseAsync(expected, payload, borrowed, ct).ConfigureAwait(false);
+                borrowed.RequireActive(); ct.ThrowIfCancellationRequested(); return result;
+            }
+            using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
+            return await CompareExchangeUnderLeaseAsync(expected, payload, held, ct).ConfigureAwait(false);
+        }
+
+        internal async ValueTask<bool> CompareExchangeUnderLeaseAsync(OnionCustodyRow? expected,
+            byte[] payload, HeldDeepIdV2AccountLease held, CancellationToken ct)
+        {
+            using var borrow = held.BorrowFor(lease);
             if (payload.Length is < 1 || payload.Length > maximumPayload)
                 throw new InvalidDataException("The DID2 ONION custody payload is outside its closed bound.");
-            using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
             using var connection = await OpenBoundLkgConnectionAsync(storage, path, binding, ct).ConfigureAwait(false);
             using var transaction = connection.BeginTransaction(deferred: false);
             var current = ReadRow(connection, transaction);
@@ -128,6 +164,7 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             if (write.ExecuteNonQuery() != 1)
                 throw new CryptographicException("The DID2 ONION custody CAS did not commit.");
             ct.ThrowIfCancellationRequested();
+            held.RequireActive();
             transaction.Commit();
             return true;
         }

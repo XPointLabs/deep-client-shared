@@ -1,5 +1,254 @@
 # Deep Client Shared architecture
 
+## Durable ordinary command retry (2026-10-02)
+
+[DR-0067](../../docs/survival-program/decisions/DR-0067-did2-ordinary-store-completion-and-ui-retry.md)
+extends the existing ordinary journal with protected verified Store completion.
+The owner advances only after the real adapter and final guards; initial/Accept
+commands do not enter that ordinary phase. Local retry snapshots read actual
+account/instance/catalog and verify the whole SQL mirror once in one transaction,
+not one database reopen per command. They return original text/operation only;
+no route, ciphertext, key or public completion input. Completion is historical
+mailbox storage, not peer delivery. UI performs explicit reconciliation, never
+automatic resend or replacement on unknown outcome. Old isolated QA instances
+require explicit reset; physical and final batch gates remain separate.
+Native connected unknown-Store and before/after-completion crash/reopen tests
+passed with the existing deadlines and original exact request; see
+[SPRINT-HISTORY](../../docs/SPRINT-HISTORY.md). No device claim follows from this.
+
+## Application/mailbox random-key generation (2026-10-02)
+
+[DR-0066](../../docs/survival-program/decisions/DR-0066-did2-application-sqlcipher-random-key.md)
+changes only DMB1 to raw random-key interpretation, SQL generation7 and the
+mandatory application registration (subsequently advanced by DR-0067). Initialization stays
+atomic with the account; generation6/password mode/registration1 require
+explicit isolated QA reset. No migration or relaxed ACK fence/deadline.
+The existing FULL/secure-delete/WAL connection policy remains unchanged;
+the account/session DELETE policy is not copied to the application store.
+
+
+## Owned contact application commands (2026-10-02)
+
+[DR-0065](../../docs/survival-program/decisions/DR-0065-did2-contact-application-command-boundary.md)
+exposes the existing owned draft/completion/import/retirement and mailbox engine
+through StartContact, AcceptContact, SendText, ListConversations and ListMessages.
+Conversation handles have only internally constructed protected-catalog metadata;
+they grant no freshness, acceptance, transport or ACK authority. Every command
+rechecks the current account instance and independent endpoints. Text authoring
+requires actual authenticated acceptance before allocating an outbox event.
+Local start-operation metadata enables original-intent reconciliation, not trust.
+
+The connected native vertical now calls these business commands and verifies
+actual reverse Accept and subsequent text receive, semantic interruption, exact
+retry after lost ACK and empty next poll. Exact evidence belongs to
+[SPRINT-HISTORY](../../docs/SPRINT-HISTORY.md). The signed in-process fixture is
+not socket/device, remote BLOB or governed-group evidence. Full API/graph review,
+consumer repins and live/device activation remain open.
+
+
+## Current mailbox issuer and grant evidence
+
+[DR-0052](../../docs/survival-program/decisions/DR-0052-did2-mailbox-authority-distribution.md)
+requires the complete raw network bundle, including public mailbox issuer
+authority. The account source selects it only through the NETCODEC-verified
+current projection and verifies root signatures and actual projected proof
+time before network advancement and before releasing its internal context.
+Protocol verifies exact grant results directly against the current DID2 route.
+[DR-0053](../../docs/survival-program/decisions/DR-0053-did2-mailbox-grant-restart-custody.md)
+connects the account owner's mandatory protected holder/request/winner journal
+and internal selected-entry grant transport. Seed/request custody is read back
+before callbacks; pending retries retain exact bytes, while a persisted winner
+is independently reverified without reissuing. Missing custody requires explicit
+QA reset, not lazy repair. Owned Retrieve uses only the protected, verified
+phase-7 own publication capability and rechecks exact publication custody under
+the held lease; it never accepts a public-resolve or caller secret. Deposit and
+Retrieve have independent holder keys.
+[DR-0055](../../docs/survival-program/decisions/DR-0055-did2-owned-mailbox-credential-installation.md)
+connects that read-back winner to current-only SQL credential installation under
+the same account lease. Interrupted installation resumes without new issuance;
+same-epoch changed SQL material rejects. No signer/runtime authority is exported.
+Live private issuer activation and actual credential dispatch/use still remain
+gates; installing verified bytes does not deliver messages.
+No V1 identity owner is restored for this composition.
+
+## Owned mailbox sender entry
+
+[DR-0056](../../docs/survival-program/decisions/DR-0056-did2-owned-mailbox-message-dispatch.md)
+owns the connected local dispatch/custody contract. The internal
+`DeliverOwnMessagingAsync` reads the actual committed outgoing operation, obtains
+the protected grant and prepares exact MAU2 with an owner-private loan; it never
+accepts caller ciphertext or keys. The mandatory protected send root is created
+atomically with the account instance; an older disposable QA instance requires
+explicit reset, not lazy initialization. Repeated sends keep original bytes and
+time bounds. Missing/changed prepared SQL rejects. Selected-entry dispatch stays
+gated on connected interruption/restart tests, matched live activation and device
+evidence; durable mailbox receipt is not recipient consent or semantic ACK.
+
+Initial contact Store follows
+[DR-0059](../../docs/survival-program/decisions/DR-0059-did2-owned-initial-mailbox-dispatch.md).
+The owner derives its scope from the actual retired sender source and protected
+catalog; it must not dispatch caller-supplied DPH2 or use an ordinary-send fallback.
+The connected local initial Store/receipt/Hello/ACK plus text Store/Retrieve
+recovery checkpoint has passed; see the exact current evidence in
+[SPRINT-HISTORY](../../docs/SPRINT-HISTORY.md). This is not live/device delivery.
+The initial preview uses Protocol's committed-recipient factory under
+[DR-0061](../../docs/survival-program/decisions/DR-0061-did2-committed-claim-recipient-verification.md),
+not its current initiator factory. A delayed committed allocation still requires
+current endpoint/inventory/placement authority and durable atomic key consumption.
+
+## Owned permanent-contact client entry
+
+Ordinary incoming dispatch follows
+[DR-0057](../../docs/survival-program/decisions/DR-0057-did2-owned-incoming-session-selection.md).
+`ReceiveOwnMessagingEnvelopeAsync` copies/decodes DPE2, finds the initialized
+key-free scope from the actual protected account catalog, releases the lookup
+lease, independently refreshes both endpoints, then calls the existing owned
+ratchet/SQL/semantic materialization path. Unknown sessions do not create stores
+or authorize ACK. The scoped low-level receive API remains an internal engine
+boundary, not the shipping incoming dispatcher. Mailbox/initial/device closure
+remains gated on connected tests and deployment.
+
+Platform composition may call `SynchronizeOwnMailboxAsync(source, cancellationToken)`
+for one bounded page. Only the actual account-bound source is public input;
+grant/terminal fixture overloads remain internal. The sealed read-only result
+reports processed envelopes (including replay/contact events), tombstones and
+`HasMore`, not plaintext or ACK authority. The platform owns scheduling and
+must not report those counts as new messages or as proven physical peer delivery.
+
+Owned mailbox polling follows
+[DR-0058](../../docs/survival-program/decisions/DR-0058-did2-owned-mailbox-retrieve-and-ack.md).
+`SynchronizeOwnMailboxAsync` obtains own evidence outside the lease, derives the
+recipient mailbox from the verified own publication and retains the exact page
+before SQL mutation. ACK reconstructs semantic handoffs from actual committed
+native receive rows; it does not trust a successful callback or supplied cursor
+list. Its required protected read root is initialized with the account; older QA
+accounts need explicit reset. The initial consumer independently refreshes the
+parsed initiator DID2, then verifies the actual own published closure and composes
+atomic receiver commit/import and authenticated initial materialization. ACK
+rereads source/catalog/active mutable custody, not a successful callback.
+Connected fault/reopen and initial-consumer evidence are pending; this internal
+entry does not yet activate the MAUI receive loop, initial sender or group paths.
+
+[DR-0051](../../docs/survival-program/decisions/DR-0051-owned-permanent-contact-client-entry.md)
+exposes publication with only the actual account-bound network source. The
+protected owner derives a restart-stable local intent from its instance and
+verified display name, internally composes DR49 carriers and requires the
+existing durable two-replica commit. A changed account-instance/name plan cannot
+release a completed result. The public resolver accepts only the address and
+account-bound source; caller-selected transports remain internal. Neither entry
+exports keys or permits a direct Registry/legacy fallback. Durable commit and
+verified read are not contact acceptance, mailbox grants or message delivery.
+
+## DID2 owned private coordination carrier
+
+[DR-0049](../../docs/survival-program/decisions/DR-0049-did2-three-hop-coordination-carrier.md)
+owns the wire and gateway binding. Internal owned route/publication sources use
+the existing selected-entry ONION transport with an actual account-held custody
+loan, not direct Registry HTTP or recursive proof acquisition. Guards and entropy
+still commit protected floors and exact SQL state; disposed/foreign loans reject.
+The parent independently rechecks current proofs and authenticates threshold or
+replica results before durable adoption. Internal adapters alone do not expose
+shipping UI publication or certify TLS/socket/device delivery.
+
+## DID2 permanent read boundary
+
+Following [DR-0041](../../docs/survival-program/decisions/DR-0041-did2-permanent-contact-resolution.md),
+internal `ResolvePermanentContactAsync` authors a read from the owned current
+authorization under the account lease, performs one bounded selected-coordinator
+attempt, opens a descriptor-bound parsed candidate and independently fetches its
+current peer proof. The account-bound source verifies current network/directory
+floors; the owner rechecks both endpoint proofs and network custody under the
+account lease before returning the closed read result. No persisted trust flag,
+prekey inventory, acceptance/session/message or automatic fallback is created.
+The existing exact ONION transport can carry the neutral read; no bare Registry
+resolver or DID1 credential bridge is added. Old inactive resolver/recipient
+consumers still require removal, and network/expiry route renewal plus shipping UI,
+remote transport and physical devices remain gates. SQL2/application6 and node
+keys are unchanged.
+Following [DR-0042](../../docs/survival-program/decisions/DR-0042-did2-route-directory-issuance-anchor.md),
+retained object/phase-7 custody uses a signed issuance anchor plus independent
+current proof/floors. Unrelated account admission does not trigger republishing;
+new issuance and fresh dispatch are not authorized by historical bytes.
+The exact prekey claim transport now bounds its one coordinator attempt to
+30 seconds and observes cancellation even if the adapter ignores its token
+([DR-0043](../../docs/survival-program/decisions/DR-0043-did2-claim-current-network-and-clock.md)).
+Request custody remains before dispatch and verified result custody before
+return. Current recipient/placement authority and monotonic receipt use remain
+separate Protocol checks; no automatic new operation or claim follows failure.
+Under [DR-0045](../../docs/survival-program/decisions/DR-0045-did2-owned-resolved-contact-claim.md),
+internal `PrepareOwnPermanentContactClaimAsync` re-verifies the original read
+candidate and both endpoint/floor authorities before restoring its protected
+preclaim intent. Under one account lease it derives the exact publisher XPS1
+from the verified DCB and atomically restores/reserves XPK bytes with their
+original timestamps. The held-floor/clock and complete validity interval are
+rechecked after SQL readback. An expired or changed reservation rejects without
+reminting; completed intents recover existing session custody, not a new claim.
+This prepares local request custody only; result promotion, composed initial
+events and authenticated remote/device delivery remain separate gates.
+Following [DR-0046](../../docs/survival-program/decisions/DR-0046-did2-owned-attachment-offer.md),
+the owned ordinary-event journal also accepts AttachmentOffer, never a parallel
+counter. `PrepareOwnDirectAttachmentOfferAsync` selects a stable protected asset
+by its operation, verifies SQL/chunks and derives the exact DAM1 payload under
+the account lease. The send boundary independently requires both stable draft
+and asset custody plus current expiry; raw caller offers do not pass. Text/offer
+operation substitutions reject. Local ownership/SQL tests do not establish blob
+upload/download, receiver lifecycle, groups or physical device integrity.
+The internal bounded `ListOwnMessagingAttachmentOffersAsync` returns key-free
+history metadata after the usual current endpoint/session/floor checks. Its
+shared canonical SQL reader checks BLOB type/length before allocation, exact
+hash/scope/sequence and absence of a fork, then disposes parsed DAM1. History
+entries do not grant current cancel/download authority; blob consumers must
+independently reconcile that lifecycle.
+Under [DR-0047](../../docs/survival-program/decisions/DR-0047-did2-owned-peer-refresh.md),
+the verified seed's original public DID2 is inserted atomically with catalog and
+floor registration into mandatory immutable protected metadata. Registered scopes
+never reconstruct a missing credential from old proofs. Ordinary contact state,
+accept, text/offer, send/receive and history service methods no longer take a
+caller-held peer proof: the account-bound source independently refreshes own/NET
+and the exact protected peer credential before entering the operation lease.
+The existing held account/session/device/DMD/floor gates remain authoritative.
+Changed heads reject pending verified successor composition. Structural evidence
+does not establish real-clock TTL or physical delivery; shipping remains gated.
+
+## DID2 owned contact-object boundary
+
+The internal `EnsureOwnContactObjectAsync` composes current owned device,
+retained prekey descriptor and the exact completed route into a signed and
+capability-encrypted genesis object following
+[DR-0037](../../docs/survival-program/decisions/DR-0037-did2-owned-contact-object.md).
+Phase 4 is CAS-adopted and read back under the account lease before return.
+Lost response/reopen retains exact bundle, signature, nonce and ciphertext;
+changed profile or descriptor under the same intent rejects. The mandatory
+route journal now accepts version 4 only under
+[DR-0040](../../docs/survival-program/decisions/DR-0040-did2-owned-publication-commit.md);
+old disposable QA accounts require an
+explicit local reset, never migration or lazy repair. No node identity/network
+genesis reset is implied. SQL account/application shapes are unchanged.
+Protected phases 5/6 retain the complete DID2 publisher request and verified
+threshold response, with exact CAS/read-back before callback/return. The slot
+remains bounded to 1 MiB and reserves a complete phase-7 entry before callbacks.
+`EnsureOwnContactPublicationCommitAsync` verifies both selected-node receipts,
+rechecks dispatch authority/account/floors, then CAS/readbacks exact XPO in
+phase 7 before return. Reopen independently verifies that historical result
+without threshold or replica callbacks; it never renews expired dispatch
+authority. Node opaque durability and account custody have distinct tests.
+This remains a candidate: shipping private coordination, replica publication,
+holder/grants, shipping UI and physical Windows/Android are not activated.
+
+## DID2 route-coordination boundary
+
+The Registry candidate's V2 threshold endpoint, actual ADA2/external-floor
+validation and permanent PostgreSQL exact replay follow
+[DR-0036](../../docs/survival-program/decisions/DR-0036-did2-route-threshold-coordination.md).
+The unused Shared DID1 `ContactRouteAuthorityClient` and its options-only tests
+are removed; no direct HTTP compatibility facade remains in the Shared assembly.
+The account-owned DR-0034 route owner still independently verifies every
+threshold response and commits exact proposal/threshold/completion before release.
+Its real server integration lane uses TestServer plus native account custody;
+shipping XPoint/OHTTP authority coordination and publication are not activated
+by that evidence. Test-only friend access for the cross-repository boundary is
+compiled only with `DEEP_TEST_INTERNALS`, never in the production assembly.
+
 ## DID2 historical recovery candidate
 
 The proof factory now requires distinct bounded proof and history HTTPS
@@ -18,6 +267,48 @@ not this consumer note. Shipping MSG composition and physical reconnect remain
 separate unfinished gates.
 
 ## Scope
+
+The DID2 account service now exposes `EnsureOwnContactRendezvousAsync` for a
+stable intent and its account-owned path source. It persists independent
+metadata custody and exact signed XUR1 before return and recovers the same
+winner after a lost protected commit response or restart. The mandatory
+protected journal is initialized with the SQL instance; older/missing local
+state requires explicit isolated QA reset, not a migration. Raw metadata
+scalars never leave the account owner. The exact local layout/security contract
+is owned by [DR-0023](../../docs/survival-program/decisions/DR-0023-did2-owned-rendezvous-author.md).
+This is issuer/time custody, not route/publication, accepted contact, inbox or
+ACK. Protocol is also the sole conversation-ID hash implementation under
+[DR-0022](../../docs/survival-program/decisions/DR-0022-did2-contact-control-events.md);
+the Shared identifier wrapper delegates to it.
+
+`PreviewOwnDph2InitialClaimAsync` uses the exact account-bound source and
+protected-tip-verified local inventory to open only unverified XPK1/XPC1
+prefix evidence with opaque keys. It owns ciphertext before awaits, rechecks
+both current DID2 proofs and continuous protected time, and makes no inventory
+mutation. Missing or inconsistent custody is rejected, never repaired by the
+preview. The bounded API belongs to
+[DR-0024](../../docs/survival-program/decisions/DR-0024-did2-owned-initial-claim-preview.md).
+Current claim promotion, atomic responder completion, message projection and
+physical delivery remain separate requirements; preview does not grant ACK.
+
+The internal account-generation prerequisite can also restore the same exact
+DPK2 under the account lease for Protocol's owned responder preparation
+([DR-0025](../../docs/survival-program/decisions/DR-0025-did2-owned-responder-preparation.md)).
+Only its closed atomic-store capability leaves that helper; no public Shared
+prepare-to-UI API exists. The caller must retain the lease through the later
+exact replay and reservation/session transaction. The atomic continuation is
+now implemented by `CommitOwnInitialContactSessionAsync` under
+[DR-0026](../../docs/survival-program/decisions/DR-0026-did2-atomic-responder-custody.md).
+It requires the closed promoted claim and independently current own/peer
+proofs, retains initial ratchet/events and consumes the selected prekey before
+returning a closed stable custody result. `FindOwnInitialContactSessionAsync`
+checks protected history first and recovers exact ciphertext replay without
+restoring a spent prekey or acquiring new network proofs. A mandatory protected
+checkpoint permits exact pending roll-forward, not rollback or regeneration.
+Missing checkpoint or retired PKV2 schema requires explicit QA account reset.
+Message/contact projection, network shipping composition and ACK remain gated.
+Isolated preparation fixtures
+immediately consume/dispose the capability and do not claim durable receive.
 
 `Deep.Client.Shared` owns portable domain models, SQLCipher persistence,
 durable mailbox state machines, E2EE orchestration, and transport interfaces.
@@ -226,7 +517,7 @@ approval.
 
 The retired Session-derived store used SQLCipher schema v16; it is not the
 clean production mailbox store. The current account-scoped `DMB1` SQLCipher
-store is schema generation 2. Unsupported schemas and incorrect keys require
+store is schema generation 7 under DR-0066. Unsupported schemas and incorrect keys require
 explicit reset; there are no migrations or dual readers. It retains mailbox
 traversal, encrypted transport inbox rows, and durable transport outbox state.
 Generation 2 adds a separate account-wide semantic DMC2 inbox for initial
@@ -239,12 +530,12 @@ durable fork latch. Group DMC2 kinds cannot enter this direct-only handoff.
 The previous `DMB1` generation-1 database requires an explicit preproduction
 reset.
 
-Bounded authority clients now cover both halves of permanent Contact
-publication. The route client accepts only a verifier-derived XRA1 proposal and
-verifies exact PMS2/XRC1/XSS1. The publication client accepts only a
-device-custody-authored request and independently verifies exact XPA1/XPU1,
-current directory freshness and InviteResolver placement. HTTP success or
-structurally valid records never create a publication capability.
+Retired DID1 route/publication HTTP clients are removed. The internal DID2
+account owner verifies exact route and publication threshold records against
+current directory freshness and NETCODEC placement, retaining its exact pending
+request before coordination. Shipping XPoint/OHTTP sources are still required;
+TestServer callbacks do not activate a direct Registry fallback. HTTP success
+or structural parsing never proves replica publication or delivery.
 
 The isolated DID2 directory proof client uses only the exact DPQ2/DPP2
 endpoint and bounded media types defined by the master
@@ -359,7 +650,10 @@ Phrase read and explicit deletion also run under the account lease against a
 freshly verified current account; deletion survives another close/reopen without
 changing DID2/DAB2.
 The owner now also creates an incompatible `DSV2` SQLCipher generation before
-publishing the V2 current-account index. A protected V2 key record binds its
+publishing the V2 current-account index. Its generation3 random-key encoding
+and mandatory old-account refusal follow
+[DR-0060](../../docs/survival-program/decisions/DR-0060-did2-account-random-sqlcipher-key.md).
+A protected key record binds its
 random key and database instance to exact network/account scope; the encrypted
 database atomically initializes account, device and local-profile rows plus
 empty LKG, outbox, inbox and security-event roots. Every current-account read
@@ -507,26 +801,20 @@ Additional preclaim coverage verifies structural snapshot
 boundaries and a real DID2 fixture's restart, interrupted protected commit
 return, cancellation and refusal of missing proof/journal. This is isolated
 integration evidence, not physical delivery; final batch gates remain pending.
-This is PKV2 schema generation 2; generation 1 is intentionally rejected
+This is PKV2 schema generation 3 under DR-0026; previous generations are rejected
 without migration and can only be removed by explicit test-account reset.
 This is not yet a full mutable STORE-01 service:
 in-memory parity, restore-as-new-device,
 directory/contact/messaging cutover and physical E2E remain open. No V1 contact
 slot is read as V2.
 
-The clean MAUI account owner opens DMB1 with a distinct protected SQLCipher
-key scoped to the account's store instance. It refuses an existing database
-without that key or a retained key without the database, and removes the
-database family on local account reset.
-The account-owned receiver can now run one bounded self-mailbox poll on demand:
-it opens DPH2/DAO1 or DPE2/DAO1, commits the authenticated inner event, and
-ACKs only when every item in the retrieved batch is durably materialized.
-Established DPE2 selects only an active exact session from the protected
-catalog, including after restart; header selection itself grants no plaintext
-or ACK. A partial batch remains unacknowledged for exact replay. A bounded,
-account- and conversation-scoped read projects only canonical, non-forked
-MessageCreate text from the encrypted semantic inbox for the client UI. This
-does not author outgoing text or run a background receive loop.
+The DID2 Shared account owner now owns application SQL through
+[DR-0028](../../docs/survival-program/decisions/DR-0028-did2-application-event-handoff.md).
+MAUI does not yet compose this new application owner or DID2 mailbox polling.
+Earlier mailbox/ACK/UI claims from the removed account composition are not
+evidence for the current client. The current internal owner projects canonical,
+non-forked direct text only after current endpoint and retirement checks;
+this is not contact consent, transport delivery or ACK authority.
 
 An accepted/durable outcome is reconstructed only from persisted canonical
 evidence. A crash before local outcome commit may resend the same MAU2 after
@@ -547,26 +835,12 @@ that stored row before it can restore secrets. The caller must still obtain
 current initiator-directory and XPC1 threshold evidence; this is not yet wired
 to MAUI mailbox receive.
 
-The separate clean-break per-session messaging-crypto SQLCipher store is schema
-generation 8. A fresh authenticated DPE2 receive stages its exact DMC2 in the
-same transaction as the ratchet/replay/deletion journal and TRS1 update. After
-restart, the exact operation ID and envelope hash retrieve that pending DMC2;
-an exact ratchet replay itself does not decrypt it again. Responder initial
-DPH2 now stages exact authenticated SessionInit and optional first DMC2 with
-TRS1 in one transaction, binds both event hashes into the initialization
-fingerprint, and recovers them after restart. This is only a
-recoverable E2EE-to-application handoff, not by itself MSG-01 inbox
-materialization or mailbox ACK authority. A verified direct-session owner can
-replay both staged events into the account-wide semantic inbox atomically.
-An exact DPE2 send now stages its outbound ciphertext in that same ratchet
-transaction; a crash after commit cannot lose the only encrypted envelope.
-Recovery requires the exact operation ID and envelope hash and does not itself
-authorize network dispatch. Generation 7 is intentionally rejected rather than
-silently upgraded; physical UAT must use the isolated clean-break app identity.
-For ContactHello the owner first binds relationship ID, verified peer DAB1/DMD1
-hashes, the conversation ID derived from the relationship and both accounts,
-and embedded XUR1 network, author device, DPD1 and lifetime. The unsolicited
-responder now receives the non-null V2 initiator checkpoint and recipient
+The current per-session messaging owner is the DID2 DR-0027 implementation
+described below, not the previous per-session crypto-store generation. No
+conversion of its V1 scope/key/catalog is permitted. Current DID2 Hello
+validation binds relationship, exact current DID2 endpoints, conversation and
+signed rendezvous under DR-0022. The unsolicited responder receives the
+non-null V2 initiator checkpoint and recipient
 closure from Protocol's closed current-endpoint promotion, and consumes only
 the fully verified claim's two-lane handoff. Its API clean break is owned by
 [DR-0017](../../docs/survival-program/decisions/DR-0017-did2-initial-claim-promotion.md).
@@ -580,31 +854,125 @@ against retained custody and derives conversation metadata only by rechecking
 the exact hash-bound initial events. This is the projection prerequisite in
 [DR-0020](../../docs/survival-program/decisions/DR-0020-did2-atomic-device-initial-session.md),
 not a V1 contact-scope adapter or a completed messaging-store projection.
-The old recipient/placement API cannot accept a parsed V2 request. ContactHello
-V2 safety-number/XUR1 endpoint semantics and current account-owned receive
-composition remain unfinished and fail closed before opening a new store.
-This grants neither UI projection nor ACK authority.
-The account-owned initial receive can commit and materialize the authenticated
-SessionInit/ContactHello before it grants a bound mailbox ACK receipt. Contact
-state projection and protected stage-retirement remain incomplete. An
-established direct DPE2 can mint an exact DAO1 ACK receipt only
-through the combined ratchet-commit and durable-materialization factory;
-initial DPH2, group, and unverified
-or forked DMC2 still cannot mint one.
-The relationship-bound responder path still requires pre-existing verified
-contact evidence. For unsolicited first contact, the account-owned Shared
-responder can now defer store selection until authenticated SessionInit and
-ContactHello establish the conversation scope. Final exact replay resolves an
-existing matching protected-catalog entry without reopening prekey secrets.
-This path stages the initial events but applies no contact state and grants no
-ACK. The staged result is exposed through the account-owned MAUI runtime,
-without exporting its internal saga authority. MAUI mailbox receive and the
-ContactHello/inbox transition still need to use it before first-contact receive
-works.
-Existing generation-5 session stores require explicit
-pre-production reset; there is no migration or dual reader.
+The old recipient/placement API cannot accept a parsed V2 request. The account
+initial-completion entry point now applies the current DID2 Hello endpoint
+boundary before completion and rechecks it before returning retained custody,
+under [DR-0022](../../docs/survival-program/decisions/DR-0022-did2-contact-control-events.md).
+This checks metadata, not contact publication/route or inbox/ACK authority.
+Current account-owned crypto receive and intermediate application retention
+are implemented, but durable contact consent and protected semantic/stage
+retirement remain unfinished. The current DID2 path does not mint mailbox ACK
+receipts from retention alone. MAUI first-contact receive, current transport
+composition and group membership consumers remain release gates. Unsupported
+local generations require explicit pre-production reset, with no migration,
+old Session scope adapter or dual reader.
 
 ## Transport profiles and future ownership
+
+The DID2-only internal `OwnedInitialMessagingSeed` consumes closed sender or
+receiver custody and rechecks independently current endpoint authority through
+the account-owned source. Its owned buffers are wiped on failure/disposal.
+The ownership/deletion contract is
+[DR-0027](../../docs/survival-program/decisions/DR-0027-did2-messaging-session-ownership.md).
+It is not a durable mutable store, retirement authorization or dispatch/ACK
+capability. Ordinary messages cannot activate until durable initial-state
+transfer and deletion of obsolete handshake secrets are verified.
+The internal DR-0027 components now capture closed seed/Protocol mutations,
+stage bounded protected parts, persist only the latest TRS1 in a dedicated
+SQLCipher journal, and coordinate exact pending/cleanup recovery. Account-owned
+catalog/key registration now uses atomic CAS-and-insert with an empty floor;
+the derived per-session SQL path supports exact interrupted initialization and
+rejects missing phase2 SQL rather than reimporting old state. Account-level reopen
+checks authenticated sender/receiver source history and completed retirement
+before active state release. Shipping MSG/platform composition and verified
+rollover remain gated.
+The unpublished DMS2 diagnostic schema1 is replaced by schema2's supported
+SQLCipher raw-key encoding for the independent random catalog key, as frozen
+in DR-0027. Temporary encoded key buffers are wiped; no secret SQL/hex string
+is constructed. Account/source databases are unchanged, and no password-keyed
+DMS2 compatibility reader or migration is provided.
+Operation read-back verifies the complete SQL/floor binding and owns retained
+DPE2/receive-DMC2 buffers. Restart retry uses journal data, not process-local
+replay memory; read-back alone grants no semantic or transport receipt.
+The DID2 account service now composes initial-to-mutable import under one
+actual account lease. It reads authenticated source custody itself, consults
+the protected catalog before any seed capture, imports only an exact empty
+session, retires source keys and activates using the closed deletion receipt.
+Seed/source copies are disposed before activation; imported/active retry does
+not require erased initial TRS. Held-lease freshness readers authenticate the
+same protected network/directory data without recursively acquiring the lease
+or source/fetch gates, and cannot provision absent floors. This internal
+composition returns key-free scope metadata, not MSG/dispatch/ACK authority.
+Its recovery integration test is separate from physical device evidence.
+Ordinary DID2 sends/receives now have a private single-use account-owned
+Protocol transaction authority, not the isolated fixture's replay map or
+synthetic retention digest. It authenticates current scope/source retirement
+under the actual lease, derives replay/retention from verified SQL, commits
+sealed transitions and independently reads the retained event before release.
+Exact send retry returns original ciphertext; receive replay recovers staged
+DMC2 without advancing state. Changed owned local send content uses a closed
+durable latch and erases the live TRS; unauthenticated remote tamper rejects
+without authorizing deletion. Owner copies of prior TRS are disposed before
+durable commit. Local formats and capacity policy remain solely in DR-0027.
+The account owner now applies verified retained initial events atomically and
+hands actual committed ordinary direct events into its independently keyed
+application SQL, without a V1 scope adapter. Exact replay preserves one semantic
+row; conflicting logical IDs at the same authenticated authored position latch
+the incumbent and cannot enter history together. SQL and in-memory behavior
+agree. Current-generation schema objects/DDL are exact; initialized missing SQL
+is never recreated. Required protected registration precedes account publication;
+account-owned reads recheck endpoints and source retirement before projecting
+non-forked text. Local bytes/key derivation/initialization policy are owned solely
+by [DR-0028](../../docs/survival-program/decisions/DR-0028-did2-application-event-handoff.md).
+Explicit local contact acceptance is now retained in account-owned protected
+custody and materialized only from the actual committed DPE2 plus retained Hello
+and current endpoint closure. The local authored position is reserved atomically;
+exact replay is idempotent and a same-position conflict remains latched.
+Local/peer acceptance views recheck actual send/receive custody, not just SQL
+metadata. Formats and retry policy are solely owned by
+[DR-0029](../../docs/survival-program/decisions/DR-0029-did2-contact-accept-custody.md).
+Retained acceptance is not Active, dispatch/delivery or ACK authority.
+Ordinary text commands now originate only from the account owner, using a
+protected pending/stable journal and exact SQL mirror. It generates the logical
+ID and sequence once, recovers the exact pending draft, and rejects missing
+stable rows, counter rollback/advance or changed recipient/content. Responder
+text requires actual retained acceptance and its existing counter. Raw text
+and other uncomposed event kinds cannot enter account send merely because the
+codec accepts them. Local format, capacity, reset and retry policy are owned by
+[DR-0030](../../docs/survival-program/decisions/DR-0030-did2-owned-direct-text-outbox.md).
+This is local queued-text custody, not transport acceptance or delivery.
+Protected semantic rollback checkpoints, typed-event counter extension, MAUI composition and physical
+contacts/files/images/groups evidence remain open.
+Source custody now separates key-free metadata from the deletable initial TRS, and
+the account-owned retirement journal covers source keys and sealed preclaim
+copies. Exact completed retry precedes preclaim restore; retired intents keep
+key-free tombstones. Activation accepts only the closed stable retirement
+receipt, never parsed control metadata. The local source generations require
+explicit QA reset, not migration; exact formats remain solely in DR-0027.
+The narrow DID2 fixture checks bidirectional DPE2 text, skipped-key delivery
+and replay against real SQLCipher with an in-memory protected adapter and
+account-owned source retirement/activation, including crash recovery and
+key-free exact retry. This validates isolated crypto/storage/source mechanics,
+not shipping MSG/platform composition, active contact reachability, group membership,
+blob transport or physical delivery. Ordinary crypto custody does not force
+every event into the initial direct conversation; semantic/group authority must
+validate that separately before materialization or ACK.
+
+The attachment candidate now uses Protocol's frozen section-16 chunk cipher,
+not the retired `/file`/DEEPATT2 production path. Shared owns exact-length stream
+preparation, fresh object scope and independently disposable manifest custody;
+the prepared ciphertext is immutable across retries/copies. The actual account
+owner now adopts it into its SQLCipher application store using a protected
+pending/stable asset journal. Recovery retains exact manifest/chunks without
+the picker URI or plaintext; changed-input retry and registered SQL loss or
+ciphertext substitution reject without reencrypting the adopted object.
+Local bytes/reset/lifecycle policy is solely owned by
+[DR-0031](../../docs/survival-program/decisions/DR-0031-did2-local-attachment-custody.md).
+This custody grants no blob route, upload receipt or runtime activation. Masked
+transport padding/resume, typed offer/cancel and MAUI images remain BLOB-01 gates.
+The old HTTP reader/author/options/factory and its positive attachment tests
+have now been removed. `IAttachmentFileTransport` retains only the UI file-I/O
+boundary with explicit unavailable behavior; it cannot activate the blob path.
 
 `MailboxDeliveryPolicy` keeps protocol and infrastructure ownership
 orthogonal. `AuthenticatedMau2` may be `OfficialManaged` or `UserManaged`;
@@ -627,6 +995,87 @@ policy or make Registry, PMA1, billing or Mr. X implicit dependencies of these
 portable contracts.
 
 ## Other portable boundaries
+
+The internal `DeepIdV2MailboxOnionTransport` now derives a fresh DID2 network
+context through the actual account-owned source for each scoped MAU2 attempt.
+It reuses the identity-neutral mailbox codecs and path selector, binds the
+request to its credential route before refresh, and derives TLS facts only
+after selecting the exact three-hop path. Account-owned guards and entropy
+are mandatory; foreign custody, unscoped calls and route substitution reject
+before dispatch. The composition contract is owned by
+[DR-0032](../../docs/survival-program/decisions/DR-0032-did2-mailbox-selected-entry.md).
+No DID1 proof/source adapter or static ingress is introduced. This internal
+carrier has no shipping caller yet: durable DID2 route adoption/publication,
+protected random reachability-scoped holder, XMG1/XMC1 grants, adapter receipt
+and semantic ACK remain independent prerequisites. Codec/path/SQL tests do
+not establish socket, masked carrier or Windows/Android delivery.
+
+Protocol's direct current-DID2 route verifier and three-phase genesis author
+follow [DR-0033](../../docs/survival-program/decisions/DR-0033-did2-current-mailbox-route.md).
+The narrow Shared fixture uses an actual SQLCipher account, nonce-bound current
+proofs, retained owned device and real threshold signatures. This verifies the
+Protocol boundary, not a durable route owner, publication, mailbox issuer,
+transport callback or a shipping client feature. Shared must retain exact
+metadata/route custody and recheck its protected account/network floors before
+any publication or message dispatch; parsed records cannot substitute for it.
+
+The internal `EnsureOwnContactRouteAsync` now composes that Protocol author
+under actual held account/directory/network custody following
+[DR-0034](../../docs/survival-program/decisions/DR-0034-did2-owned-route-custody.md).
+The protected route journal is initialized atomically with a new account
+instance; old instances missing it need explicit QA reset, not repair/migration.
+Account/application table shapes remain unchanged; their current storage
+generations are governed by DR-0060/DR-0066. Proposal,
+threshold and completion are separately adopted with CAS and exact readback;
+immutable configuration, delegation, scalar/key ID and coordination nonce are
+retained for retry. Advertisement and threshold are independently verified
+before callbacks/adoption. Secret-bearing temporary copies are zeroed.
+The threshold source is internal and bounded to a 30-second wait, not a
+shipping Registry endpoint. Route custody does not mint publication, holder,
+grant, contact acceptance, semantic ACK, blob/group or device delivery evidence.
+
+The old caller-owned DID1 mailbox acquisition client is removed under
+[DR-0035](../../docs/survival-program/decisions/DR-0035-did2-mailbox-grant-request.md).
+`VerifiedCurrentMailboxGrant`/replica models retain only neutral credential
+bindings; they do not mint an issued grant. Protocol authors XMG1 directly from
+current DID2 route/time and a captured holder key. Shipping requires a new
+account-owned holder/request journal, exact retry before transport, live
+publication, the DR52 verifier and durable XMC1
+installation. The old identity/V1-storage holder owner is removed too; its
+narrow signer has only an internal DID2 route/capability-bound factory, with
+no public seed/storage/create/delete surface and no shipping custody producer.
+It rejects wrong role capability/locator/PMT/PMS for XMG1 and wrong
+network/holder/role/placement/epoch for MCP2; these scope checks do not authenticate
+an issuer or topology and cannot replace the account owner.
+Do not trust an arbitrary nonzero membership commitment as authenticated topology.
+
+The internal `ReadOwnPrivateContactMailboxRouteAsync` drafts private reply
+metadata only from the actual phase-7 own publication under the account lease
+and final protected readback. It exposes no resolver-read, owner-retrieve,
+metadata-scalar or holder capability. Its normative boundary is
+[DR-0062](../../docs/survival-program/decisions/DR-0062-did2-private-contact-mailbox-route.md).
+Independent current-peer verification is not authenticated event origin or
+dispatch. [DR-0063](../../docs/survival-program/decisions/DR-0063-did2-contact-reply-route-embedding.md)
+replaces Hello/Accept with mandatory private-route embedding and version2-only
+variable acceptance custody. Ordinary owned Store reads only actual retained
+authenticated Hello (responder) or peer Accept with native receive-custody
+readback (initiator), then independently verifies its current peer route.
+Permanent resolution remains initial bootstrap only; missing peer acceptance
+retains the pending send without a resolver fallback. Connected reverse
+Store/Retrieve/ACK, lifecycle renewal, shipping commands and physical device
+verification remain activation gates. Old isolated QA state requires reset.
+
+[DR-0064](../../docs/survival-program/decisions/DR-0064-did2-owned-initial-contact-draft.md)
+connects the initial author to mandatory protected draft custody. The account
+owns Init/Hello and the private package, checks the unchanged worst-case bucket
+before rendezvous/claim mutation, and returns the exact persisted winner on
+retry. Claim preparation refuses a missing draft. The connected internal
+`CompleteOwnInitialContactAsync` uses only the source's proof client/clock and
+actual retained claim; completed/retired sender sources are read back before
+any new claim attempt. No raw-event UI contract or claim retry regeneration is
+introduced. The root is initialized atomically with the instance key; explicit
+isolated QA reset is required for older accounts. Public shipping composition,
+complete graph/API review and physical device activation remain gated.
 
 Attachments, push, call signaling, profile carrier verification, notification
 planning, and platform-service interfaces remain separate from mailbox privacy

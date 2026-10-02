@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Reflection;
 using System.Reflection.Emit;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using Deep.Client.Shared.Persistence;
 using Deep.Client.Shared.Persistence.MessagingCryptoV1;
@@ -389,9 +390,22 @@ public sealed class ExactDpe2SqliteDurableTransactionAuthorityTests
             completion.Complete(ExactDpe2DurableCommitDisposition.CasConflict).Disposition);
         Assert.Equal(0UL, (await store.ReadHeadAsync())!.JournalGeneration);
 
+        var originalCopy = plan.PriorTrs1;
         var snapshot = ExactDpe2ProtocolPlanSnapshot.Capture(plan);
-        snapshot.Dispose();
-        Assert.True(snapshot.IsClearedForTesting);
+        try
+        {
+            Assert.True(originalCopy.Span.SequenceEqual(snapshot.PriorTrs1));
+            snapshot.Dispose();
+            Assert.True(snapshot.IsClearedForTesting);
+            var unchangedPlan = plan.PriorTrs1;
+            try { Assert.True(originalCopy.Span.SequenceEqual(unchangedPlan.Span)); }
+            finally { CryptographicOperations.ZeroMemory(MemoryMarshal.AsMemory(unchangedPlan).Span); }
+        }
+        finally
+        {
+            snapshot.Dispose();
+            CryptographicOperations.ZeroMemory(MemoryMarshal.AsMemory(originalCopy).Span);
+        }
     }
 
     private static async Task<byte[]> Initialize(SqliteMessagingCryptoV1Store store, byte[] state)

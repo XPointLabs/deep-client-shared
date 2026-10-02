@@ -24,7 +24,7 @@ public sealed class DeviceInitialSessionCustodyTests
     {
         var empty = DeviceInitialSessionCheckpoint.Stable(Instance, Account, Network, 0, new byte[32]);
         using var stable = DeviceInitialSessionCheckpoint.Decode(empty, Instance, Account, Network);
-        var payload = Bytes(180, 7);
+        using var fixture = new Fixture(); var payload = fixture.PendingPayload();
         var pending = DeviceInitialSessionCheckpoint.Pending(Instance, Account, Network, stable, payload);
         using var decoded = DeviceInitialSessionCheckpoint.Decode(pending, Instance, Account, Network);
         Assert.Equal(2, decoded.Phase); Assert.Equal(1UL, decoded.Sequence); Assert.Equal(payload, decoded.Payload);
@@ -51,7 +51,7 @@ public sealed class DeviceInitialSessionCustodyTests
     public void CompletedRowIsBoundedOwnedAndRejectsMixedDeviceState()
     {
         using var fixture = new Fixture(); var exact = fixture.Payload();
-        using var owned = DeepIdV2InitialSessionCommit.RestoreCustody(exact);
+        using var owned = DeepIdV2InitialSessionCommit.RestoreCustody(exact, fixture.State());
         var original = owned.ExactDph2.ToArray(); exact[^1] ^= 1;
         Assert.Equal(original, owned.ExactDph2.ToArray());
         foreach (var offset in new[] { 0, 1 })
@@ -64,14 +64,20 @@ public sealed class DeviceInitialSessionCustodyTests
             var changed = fixture.Payload(); changed[offset] ^= 1;
             Assert.Throws<CryptographicException>(() => DeepIdV2InitialSessionCommit.RestoreCustody(changed));
         }
-        var mixedDevice = fixture.Payload(); mixedDevice[fixture.TrsOffset + 108] ^= 1;
-        Assert.Throws<MessagingCryptoV1StoreOpenException>(() => DeepIdV2InitialSessionCommit.RestoreCustody(mixedDevice));
-        var changedPeer = fixture.Payload(); changedPeer[fixture.TrsOffset + 180] ^= 1;
-        Assert.Throws<FormatException>(() => DeepIdV2InitialSessionCommit.RestoreCustody(changedPeer));
-        var changedDirectory = fixture.Payload(); changedDirectory[fixture.TrsOffset + 148] ^= 1;
-        var trs = changedDirectory.AsSpan(fixture.TrsOffset);
+        var mixedDevice = fixture.State(); mixedDevice[108] ^= 1;
+        var mixedMetadata = fixture.Payload(); SHA256.HashData(mixedDevice).CopyTo(mixedMetadata, 180);
+        Assert.Throws<MessagingCryptoV1StoreOpenException>(() => DeepIdV2InitialSessionCommit.RestoreCustody(mixedMetadata, mixedDevice));
+        var changedPeer = fixture.State(); changedPeer[180] ^= 1;
+        var peerMetadata = fixture.Payload(); SHA256.HashData(changedPeer).CopyTo(peerMetadata, 180);
+        Assert.Throws<FormatException>(() => DeepIdV2InitialSessionCommit.RestoreCustody(peerMetadata, changedPeer));
+        var changedDirectory = fixture.State(); changedDirectory[148] ^= 1;
+        var trs = changedDirectory.AsSpan();
         MessagingCryptoV1Trs1.Sha256Domain("Deep/LocalState/V1/triple-ratchet-state-checksum", trs[..^32]).CopyTo(trs[^32..]);
-        Assert.Throws<CryptographicException>(() => DeepIdV2InitialSessionCommit.RestoreCustody(changedDirectory));
+        var directoryMetadata = fixture.Payload(); SHA256.HashData(trs).CopyTo(directoryMetadata, 180);
+        Assert.Throws<CryptographicException>(() => DeepIdV2InitialSessionCommit.RestoreCustody(directoryMetadata, changedDirectory));
+        Assert.Throws<CryptographicException>(() => DeepIdV2InitialSessionCommit.RestoreCustody(fixture.Payload(), changedDirectory));
+        using var retired = DeepIdV2InitialSessionCommit.RestoreCustody(fixture.Payload());
+        Assert.False(retired.HasInitialState); Assert.Throws<InvalidOperationException>(() => retired.ExactTrsSpan.ToArray());
         owned.Dispose(); Assert.Throws<ObjectDisposedException>(() => owned.ExactDph2);
         Assert.Empty(typeof(DeepIdV2InitialSessionCommit).GetConstructors());
         Assert.DoesNotContain(typeof(DeepIdV2InitialSessionCommit).GetProperties(), property => property.Name.Contains("Trs"));
@@ -119,7 +125,11 @@ public sealed class DeviceInitialSessionCustodyTests
     public async Task PendingRecoversExactResultBeforeOrAfterSqlCommit(bool failStabilization)
     {
         using var fixture = new Fixture();
-        using (var store = fixture.Open()) await fixture.Initialize(store);
+        using (var store = fixture.Open())
+        {
+            await fixture.Initialize(store);
+            Assert.False(await store.HasCompletedInitialSessionAsync(Bytes(32, 35), default));
+        }
         var pending = fixture.Pending();
         Assert.True(await fixture.Storage.CompareExchangeAsync(DeviceInitialSessionCheckpoint.Slot,
             await fixture.ReadCheckpoint(), pending));
@@ -132,7 +142,12 @@ public sealed class DeviceInitialSessionCustodyTests
         }
         // The failed stabilization left SQL committed, pending protected.
         // Reopen accepts only that exact result; never runs a handshake.
-        using (var reopened = fixture.Open()) await reopened.OpenInitialSessionCustodyAsync(fixture.Storage, Network, default);
+        using (var reopened = fixture.Open())
+        {
+            await reopened.OpenInitialSessionCustodyAsync(fixture.Storage, Network, default);
+            Assert.True(await reopened.HasCompletedInitialSessionAsync(Bytes(32, 35), default));
+            Assert.False(await reopened.HasCompletedInitialSessionAsync(Bytes(32, 36), default));
+        }
         Assert.Equal(fixture.Payload(), fixture.ReadPayload());
         Assert.Equal(1L, fixture.Count("device_initial_sessions"));
         Assert.Equal(1L, fixture.Count("device_agreement_authorizations"));
@@ -142,7 +157,8 @@ public sealed class DeviceInitialSessionCustodyTests
     }
 
     [Theory]
-    [InlineData("DELETE FROM device_initial_sessions;")]
+    [InlineData("DELETE FROM device_initial_state; DELETE FROM device_initial_sessions;")]
+    [InlineData("DELETE FROM device_initial_state;")]
     [InlineData("DELETE FROM device_operation_dedup WHERE operation_id IN (SELECT operation_id FROM device_initial_sessions);")]
     [InlineData("UPDATE device_agreement_authorizations SET purpose=2;")]
     [InlineData("UPDATE device_agreement_authorizations SET peer_public_key=zeroblob(32);")]
@@ -186,7 +202,6 @@ public sealed class DeviceInitialSessionCustodyTests
         private readonly ParsedDmd1 dmd;
         private readonly Dph2Record dph;
         internal FaultStorage Storage { get; } = new();
-        internal int TrsOffset => 180 + dmd.CanonicalBytes.Length + Dph2Codec.Encode(dph).Length;
         internal Fixture()
         {
             Directory.CreateDirectory(directory);
@@ -205,8 +220,13 @@ public sealed class DeviceInitialSessionCustodyTests
             DeviceAccountId32.FromBytes(Account), 1, 1, DeviceOperationId32.FromBytes(Instance)));
         internal async Task Initialize(SqliteDeviceStateStore store)
         {
+            var keyRecord = new byte[120]; "DSK2"u8.CopyTo(keyRecord);
+            BinaryPrimitives.WriteUInt16BigEndian(keyRecord.AsSpan(4), 3);
+            Network.CopyTo(keyRecord, 8); Account.CopyTo(keyRecord, 24); Instance.CopyTo(keyRecord, 56); key.CopyTo(keyRecord, 88);
             await Storage.WriteBatchAsync([new(DeviceInitialSessionCheckpoint.Slot,
-                DeviceInitialSessionCheckpoint.Stable(Instance, Account, Network, 0, new byte[32]))]);
+                DeviceInitialSessionCheckpoint.Stable(Instance, Account, Network, 0, new byte[32])),
+                new("deep.store.v2.sql-generation", keyRecord),
+                new(ProtectedInitialKeyRetirementJournal.Slot, ProtectedInitialKeyRetirementJournal.Empty(Network, Account, Instance))]);
             await store.OpenInitialSessionCustodyAsync(Storage, Network, default);
             var evidence = CurrentDmd1Evidence.ForTesting(false, dmd.CanonicalBytes.Span, Network, Account, 1, 1,
                 dmd.RecordHash.Span, new byte[32], 1, Bytes(32, 14),
@@ -218,8 +238,9 @@ public sealed class DeviceInitialSessionCustodyTests
         {
             using var empty = DeviceInitialSessionCheckpoint.Decode(
                 DeviceInitialSessionCheckpoint.Stable(Instance, Account, Network, 0, new byte[32]), Instance, Account, Network);
-            return DeviceInitialSessionCheckpoint.Pending(Instance, Account, Network, empty, Payload());
+            return DeviceInitialSessionCheckpoint.Pending(Instance, Account, Network, empty, PendingPayload());
         }
+        internal byte[] PendingPayload() => Payload().Concat(State()).ToArray();
         internal byte[] InitialEvent() => ApplicationCoreCodec.AuthorDmc2(Network, Bytes(32, 39), Bytes(32, 40),
             Account, device, 1, 100000, 120000, Dmc2Flags.None, [],
             ApplicationCoreCodec.CreateSessionInitPayload(Bytes(32, 38), dmd,
@@ -236,7 +257,7 @@ public sealed class DeviceInitialSessionCustodyTests
             var fingerprint = ProtectedCurrentDmd1Validation.FingerprintAgreement(evidence, binding,
                 LocalDeviceX25519AgreementPurpose.Dph2InitiatorDh1, dph.ClaimOperationId.Span, peer);
             var dphBytes = Dph2Codec.Encode(dph); var trs = Trs();
-            var payload = new byte[180 + dmd.CanonicalBytes.Length + dphBytes.Length + trs.Length]; payload[0] = 1;
+            var payload = new byte[212 + dmd.CanonicalBytes.Length + dphBytes.Length]; payload[0] = 2;
             BinaryPrimitives.WriteUInt16BigEndian(payload.AsSpan(2), checked((ushort)dmd.CanonicalBytes.Length));
             BinaryPrimitives.WriteUInt64BigEndian(payload.AsSpan(4), 1);
             Convert.FromHexString(fingerprint).CopyTo(payload, 12);
@@ -245,9 +266,11 @@ public sealed class DeviceInitialSessionCustodyTests
             Bytes(32, 35).CopyTo(payload, 108);
             BinaryPrimitives.WriteUInt32BigEndian(payload.AsSpan(140), checked((uint)dphBytes.Length));
             BinaryPrimitives.WriteUInt32BigEndian(payload.AsSpan(144), checked((uint)trs.Length)); peer.CopyTo(payload, 148);
-            dmd.CanonicalBytes.Span.CopyTo(payload.AsSpan(180)); dphBytes.CopyTo(payload, 180 + dmd.CanonicalBytes.Length);
-            trs.CopyTo(payload, TrsOffset); CryptographicOperations.ZeroMemory(trs); return payload;
+            SHA256.HashData(trs).CopyTo(payload, 180);
+            dmd.CanonicalBytes.Span.CopyTo(payload.AsSpan(212)); dphBytes.CopyTo(payload, 212 + dmd.CanonicalBytes.Length);
+            CryptographicOperations.ZeroMemory(trs); return payload;
         }
+        internal byte[] State() => Trs();
         private byte[] Trs()
         {
             var trs = new byte[601]; "TRS1"u8.CopyTo(trs); trs[4] = 1;
@@ -275,6 +298,9 @@ public sealed class DeviceInitialSessionCustodyTests
     }
     private sealed class FaultStorage : IDeepSecureStorage
     {
+        public Task<bool> CompareExchangeAndInsertAsync(string slot, ReadOnlyMemory<byte> expected,
+            ReadOnlyMemory<byte> replacement, IReadOnlyList<DeepSecureStorageWrite> insertions,
+            CancellationToken ct = default) => inner.CompareExchangeAndInsertAsync(slot, expected, replacement, insertions, ct);
         private readonly InMemoryDeepSecureStorage inner = new();
         internal bool FailNextStabilize;
         public Task<OwnedDeepSecret?> ReadOwnedAsync(string slot, CancellationToken cancellationToken = default) => inner.ReadOwnedAsync(slot, cancellationToken);
