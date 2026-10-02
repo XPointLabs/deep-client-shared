@@ -21,6 +21,15 @@ is not physical delivery or an expired-intent renewal implementation; the latter
 remains governed by
 [DR-0051](../../docs/survival-program/decisions/DR-0051-owned-permanent-contact-client-entry.md).
 
+[DR-0071](../../docs/survival-program/decisions/DR-0071-did2-reachability-advertisement-successor.md)
+adds only Protocol's owned-device XRA1 successor author. The genuine protected
+account fixture exercises expired signed predecessor input, exact lineage and
+immutable caller snapshots, strict rejection of the old live proposal, hostile
+input/key bounds and discontinuous/stale clocks. No successor is inserted into
+the protected route journal by this author; no threshold callback or publication
+is authorized. Shared pending/CAS/restart adoption and connected renewal remain
+the next implementation, not physical Android recovery evidence.
+
 ## Retired identity consumer cutover (2026-10-02)
 
 [DR-0069](../../docs/survival-program/decisions/DR-0069-did2-retired-identity-surface-removal.md)
