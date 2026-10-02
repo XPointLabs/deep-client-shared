@@ -1077,6 +1077,15 @@ introduced. The root is initialized atomically with the instance key; explicit
 isolated QA reset is required for older accounts. Public shipping composition,
 complete graph/API review and physical device activation remain gated.
 
+The internal `ReadOwnAttachmentPlaintextAsync` performs the existing actual-owner
+DR31 SQL/protected readback before reconstructing a local adopted file. It uses
+the frozen chunk cipher, validates complete geometry and the protected plaintext
+digest, and returns independently disposable content only after all chunks pass.
+No partially verified prefix reaches a file sink or renderer. It changes no
+schema, wire or public transport contract. This is a local asset operation, not
+an incoming-offer download permission, BLOB route, remote receipt or device result.
+Masked remote storage/resume and shipping picker/preview composition remain open.
+
 Attachments, push, call signaling, profile carrier verification, notification
 planning, and platform-service interfaces remain separate from mailbox privacy
 routing. The former Session group transport was removed. Group state, routes,

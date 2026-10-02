@@ -47,6 +47,8 @@ public sealed class DeepIdV2AccountServiceTests
                     // Recovery does not need the picker URI or plaintext.
                     using var recovered = await accounts.ReadOwnAttachmentAsync(op, default);
                     Assert.Equal(2, recovered.ChunkCount);
+                    using var recoveredContents = await accounts.ReadOwnAttachmentPlaintextAsync(op, default);
+                    Assert.True(recoveredContents.Use(bytes => bytes.SequenceEqual(plaintext)));
                 }
                 using var first = await accounts.PrepareOwnAttachmentAsync(op, new MemoryStream(plaintext), plaintext.Length,
                     "photo.png", "image/png", 2_000_000_000, default);
@@ -64,6 +66,8 @@ public sealed class DeepIdV2AccountServiceTests
                     accounts = Open(); using var second = await accounts.ReadOwnAttachmentAsync(op, default);
                     using var secondManifest = second.OwnManifest(); Assert.True(secondManifest.Use(bytes => bytes.SequenceEqual(exact)));
                     for (uint i = 0; i < first.ChunkCount; i++) Assert.Equal(first.CopyCiphertext(i), second.CopyCiphertext(i));
+                    using var completeContents = await accounts.ReadOwnAttachmentPlaintextAsync(op, default);
+                    Assert.True(completeContents.Use(bytes => bytes.SequenceEqual(plaintext)));
                     var changed = plaintext.ToArray(); changed[^1] ^= 1;
                     await Assert.ThrowsAsync<CryptographicException>(() => accounts.PrepareOwnAttachmentAsync(op, new MemoryStream(changed), changed.Length,
                         "photo.png", "image/png", 2_000_000_000, default));
@@ -75,6 +79,7 @@ public sealed class DeepIdV2AccountServiceTests
             }
             var path = Path.Combine(directory, "deep-store-v2-account.dsv2.application.dmb1"); Assert.True(File.Exists(path)); File.Delete(path);
             await Assert.ThrowsAsync<LocalStateResetRequiredException>(() => Open().ReadOwnAttachmentAsync(Enumerable.Repeat((byte)31, 32).ToArray(), default));
+            await Assert.ThrowsAsync<LocalStateResetRequiredException>(() => Open().ReadOwnAttachmentPlaintextAsync(Enumerable.Repeat((byte)31, 32).ToArray(), default));
             Assert.False(File.Exists(path)); CryptographicOperations.ZeroMemory(plaintext);
         }
         finally

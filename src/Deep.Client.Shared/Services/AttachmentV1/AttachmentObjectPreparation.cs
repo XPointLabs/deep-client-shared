@@ -23,6 +23,54 @@ internal sealed class OwnedAttachmentPreparation : IDisposable
         if (index >= ciphertext.Length) throw new ArgumentOutOfRangeException(nameof(index));
         return ciphertext[index].ToArray();
     }
+    // Local adopted assets only. Do not stream a partially verified prefix to
+    // a renderer/file sink, or mistake this for remote download authority.
+    internal OwnedDeepSecret MaterializePlaintext(CancellationToken ct)
+    {
+        RequireAlive(); ct.ThrowIfCancellationRequested();
+        using var exact = OwnManifest();
+        using var parsed = exact.Use(bytes => ApplicationCoreCodec.DecodeDam1(bytes));
+        if (ciphertext.Length != parsed.ChunkCount || plaintextHash.Length != 32)
+            throw new CryptographicException("Attachment custody disagrees with its complete object geometry.");
+        // DecodeDam1 bounds total length before this allocation. Only one
+        // plaintext chunk and one disposable ciphertext copy exist per step.
+        var plaintext = new byte[checked((int)parsed.TotalPlaintextBytes)];
+        byte[] digest = [];
+        try
+        {
+            var offset = 0;
+            for (uint index = 0; index < parsed.ChunkCount; index++)
+            {
+                ct.ThrowIfCancellationRequested();
+                var cipher = CopyCiphertext(index); byte[] chunk = [];
+                try
+                {
+                    chunk = AttachmentChunkCipher.Decrypt(parsed, index, cipher);
+                    ct.ThrowIfCancellationRequested();
+                    chunk.CopyTo(plaintext, offset); offset = checked(offset + chunk.Length);
+                }
+                finally
+                {
+                    CryptographicOperations.ZeroMemory(cipher);
+                    CryptographicOperations.ZeroMemory(chunk);
+                }
+            }
+            if (offset != plaintext.Length)
+                throw new CryptographicException("Attachment materialization has an incomplete object.");
+            digest = SHA256.HashData(plaintext);
+            RequireAlive(); ct.ThrowIfCancellationRequested();
+            if (!CryptographicOperations.FixedTimeEquals(digest, plaintextHash))
+                throw new CryptographicException("Attachment plaintext differs from its protected adoption digest.");
+            var result = new OwnedDeepSecret(plaintext);
+            try { RequireAlive(); ct.ThrowIfCancellationRequested(); return result; }
+            catch { result.Dispose(); throw; }
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(plaintext);
+            CryptographicOperations.ZeroMemory(digest);
+        }
+    }
     private void RequireAlive() => ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
     public void Dispose()
     {

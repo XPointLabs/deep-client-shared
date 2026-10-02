@@ -11,6 +11,30 @@ namespace Deep.Client.Shared.Production.Tests;
 public sealed class Did2AttachmentCustodyTests
 {
     [Fact]
+    public async Task StableSqlCipherAssetMaterializesExactPlaintextAfterColdReopen()
+    {
+        using var fixture = new Fixture(); using var state = new ProtectedDid2AttachmentJournal.State();
+        using var prepared = await Prepare(); var op = B(32, 2);
+        using (var store = new SqliteDeepMailboxStore(new(fixture.Path, fixture.Key)))
+        {
+            using var empty = await Read(store, state, []);
+            await store.InsertAttachmentCandidateAsync(op, prepared, default);
+            using var manifest = prepared.OwnManifest(); var exact = manifest.Use(bytes => bytes.ToArray());
+            try
+            {
+                using var pending = ProtectedDid2AttachmentJournal.Entry.Prepare(op, exact, prepared.PlaintextHash);
+                state.Entries.Add(Convert.ToHexString(op), pending.Stabilize());
+            }
+            finally { CryptographicOperations.ZeroMemory(exact); }
+        }
+        prepared.Dispose();
+        using var reopened = new SqliteDeepMailboxStore(new(fixture.Path, fixture.Key));
+        using var recovered = await Read(reopened, state, op); Assert.NotNull(recovered);
+        using var plaintext = recovered!.MaterializePlaintext(default);
+        Assert.True(plaintext.Use(bytes => bytes.SequenceEqual(new byte[] { 1, 2, 3 })));
+    }
+
+    [Fact]
     public async Task JournalRejectsUnknownShapeForeignScopeDuplicatesAndDisposal()
     {
         using var prepared = await Prepare(); using var owner = prepared.OwnManifest();
