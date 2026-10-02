@@ -127,7 +127,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                         witnesses.Select(value => new RouteWitness(value)).ToArray(), nextExpiry, time);
                     var request = new ContactRouteAuthorityWireRequest(Network, Bytes(32, (byte)(0xc0 + generation)),
                         current.Proof.QueriedDirectoryLeafKey.Span, current.Proof.NextProtectedLkg.LogGeneration,
-                        current.Proof.NextProtectedLkg.CoreHash.Span, staged.ExactDca1.Span, nextAdvertisement.CanonicalBytes.Span);
+                        current.Proof.NextProtectedLkg.CoreHash.Span, staged.ExactDca1.Span, nextAdvertisement.CanonicalBytes.Span,
+                        priorRoute.ExactXir1V2.Span, priorRoute.ExactRouteClosure.Span);
                     var issuance = await DeepIdV2ContactRouteVerifier.VerifyRetainedThresholdAsync(recipient, current.Network,
                         current.Authority, request, nextThreshold, current.Proof.ExactAdh1, time);
                     var nextRoute = await DeepIdV2ContactRouteAuthor.CompleteSuccessorAsync(recipient, current.Network,

@@ -30,7 +30,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     [Fact]
     public void Did2OwnedRoute_ByteBudgetMatchesProtectedStoreAndRejectsOversizeBeforeEntries()
     {
-        Assert.Equal(437_209, ProtectedDid2ContactRouteJournal.MaximumEntryBytes);
+        Assert.Equal(461_123, ProtectedDid2ContactRouteJournal.MaximumEntryBytes);
         Assert.Equal(DeepSecureStorageRegistration.MaximumValueBytes, ProtectedDid2ContactRouteJournal.MaximumBytes);
         var reservation = 4 + ProtectedDid2ContactRouteJournal.MaximumEntryBytes;
         Assert.True(ProtectedDid2ContactRouteJournal.HeaderBytes + 2 * reservation <= ProtectedDid2ContactRouteJournal.MaximumBytes);
@@ -57,6 +57,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     [InlineData(6)]
     [InlineData(7)]
     [InlineData(8)]
+    [InlineData(9)]
     public void Did2OwnedRoute_EmptyJournalRejectsHostileHeaderBeforeEntries(int mode)
     {
         var network = Bytes(16, 0x11); var account = Bytes(32, 0x12); var instance = Bytes(32, 0x13);
@@ -70,6 +71,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         if (mode == 6) bytes[0] = 3;
         if (mode == 7) bytes[0] = 4;
         if (mode == 8) bytes[0] = 5;
+        if (mode == 9) bytes[0] = 6;
         Assert.Throws<InvalidDataException>(() => ProtectedDid2ContactRouteJournal.Decode(bytes, network, account, instance));
     }
 

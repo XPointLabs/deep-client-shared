@@ -105,7 +105,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             if (mode == 2) damaged[body + 601 + 549] ^= 1; // changed exact proposal
             if (mode == 3) BinaryPrimitives.WriteUInt64BigEndian(damaged.AsSpan(body + 88), 2); // future minimum
             if (mode == 4) damaged[body + 96] ^= 1; // same-generation fork
-            if (mode == 5) BinaryPrimitives.WriteUInt32BigEndian(damaged.AsSpan(offset), ContactRouteAuthorityWireCodec.RequestBytes + 1);
+            if (mode == 5) BinaryPrimitives.WriteUInt32BigEndian(damaged.AsSpan(offset), ContactRouteAuthorityWireCodec.MaximumRequestBytes + 1);
             try
             {
                 Assert.True(await innerStorage.CompareExchangeAsync(ProtectedDid2ContactRouteJournal.Slot, good, damaged));

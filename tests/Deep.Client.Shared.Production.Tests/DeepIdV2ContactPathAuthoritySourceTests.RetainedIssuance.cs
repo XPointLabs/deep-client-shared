@@ -171,8 +171,38 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                     witnesses.Select(value => new RouteWitness(value)).ToArray(), expiry + 20, time);
                 var nextRequest = new ContactRouteAuthorityWireRequest(Network, Bytes(32, 0xa4), current.Proof.QueriedDirectoryLeafKey.Span,
                     current.Proof.NextProtectedLkg.LogGeneration, current.Proof.NextProtectedLkg.CoreHash.Span,
-                    staged.ExactDca1.Span, nextXra.CanonicalBytes.Span);
+                    staged.ExactDca1.Span, nextXra.CanonicalBytes.Span, predecessor.ExactXir1V2.Span, predecessor.ExactRouteClosure.Span);
                 var nextAdh = current.Proof.ExactAdh1;
+                var exactRequest = ContactRouteAuthorityWireCodec.EncodeRequest(nextRequest);
+                var parsedRequest = ContactRouteAuthorityWireCodec.DecodeRequest(exactRequest);
+                Assert.True(parsedRequest.HasPredecessor);
+                Assert.Equal(exactRequest, ContactRouteAuthorityWireCodec.EncodeRequest(parsedRequest));
+                Assert.Equal(predecessor.ExactXir1V2.ToArray(), parsedRequest.ExactPredecessorXir1V2.ToArray());
+                Assert.Equal(predecessor.ExactRouteClosure.ToArray(), parsedRequest.ExactPredecessorRouteClosure.ToArray());
+                var mutableInvite = predecessor.ExactXir1V2.ToArray(); var mutableRoute = predecessor.ExactRouteClosure.ToArray();
+                var ownedRequest = new ContactRouteAuthorityWireRequest(Network, nextRequest.RequestNonce.Span,
+                    nextRequest.DirectoryLookupKey.Span, nextRequest.MinimumAdh1Generation, nextRequest.MinimumAdh1CoreHash.Span,
+                    nextRequest.ExactDca1.Span, nextRequest.ExactXra1.Span, mutableInvite, mutableRoute);
+                Array.Clear(mutableInvite); Array.Clear(mutableRoute);
+                Assert.Equal(exactRequest, ContactRouteAuthorityWireCodec.EncodeRequest(ownedRequest));
+                Assert.Throws<ArgumentException>(() => new ContactRouteAuthorityWireRequest(Network, nextRequest.RequestNonce.Span,
+                    nextRequest.DirectoryLookupKey.Span, nextRequest.MinimumAdh1Generation, nextRequest.MinimumAdh1CoreHash.Span,
+                    nextRequest.ExactDca1.Span, nextRequest.ExactXra1.Span));
+                foreach (var mutation in new[] { "v2", "truncated", "trailing", "hostile", "one-sided", "network", "genesis" })
+                {
+                    var damaged = exactRequest.ToArray();
+                    if (mutation == "v2") BinaryPrimitives.WriteUInt16BigEndian(damaged, 2);
+                    if (mutation == "truncated") damaged = damaged[..^1];
+                    if (mutation == "trailing") damaged = damaged.Append((byte)0).ToArray();
+                    if (mutation == "hostile") BinaryPrimitives.WriteUInt32BigEndian(damaged.AsSpan(ContactRouteAuthorityWireCodec.RequestPrefixBytes), uint.MaxValue);
+                    if (mutation == "one-sided") damaged = [.. damaged[..ContactRouteAuthorityWireCodec.RequestPrefixBytes], 0, 0, 0, 0,
+                        .. damaged[(ContactRouteAuthorityWireCodec.RequestPrefixBytes + 4 + DeepIdV2InviteRendezvousCodec.CanonicalLength)..]];
+                    if (mutation == "network") damaged[ContactRouteAuthorityWireCodec.RequestPrefixBytes + 4 + 20] ^= 1;
+                    if (mutation == "genesis") { damaged.AsSpan(685, 8).Clear(); damaged.AsSpan(701, 32).Clear(); }
+                    BinaryPrimitives.WriteUInt32BigEndian(damaged.AsSpan(4), checked((uint)damaged.Length));
+                    var error = Record.Exception(() => ContactRouteAuthorityWireCodec.DecodeRequest(damaged));
+                    Assert.True(error is FormatException or ArgumentException or CryptographicException, mutation);
+                }
                 await Advance();
                 var advanced = await source.VerifyForOwnPreKeyAuthoringAsync(accounts, default);
                 var nextRecipient = DeepIdV2CurrentContactAuthorizationVerifier.Verify(advanced.Proof, dca, Boot, Sample);
@@ -183,6 +213,14 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 var successor = await DeepIdV2ContactRouteAuthor.CompleteRetainedSuccessorAsync(nextRecipient,
                     advanced.Network, advanced.Authority, secrets!, predecessor, nextIssuance, 2, time);
                 await successor.EnsureCurrentAsync();
+                var wrongPredecessor = await DeepIdV2ContactRouteVerifier.VerifyPredecessorAsync(nextRecipient,
+                    advanced.Network, advanced.Authority, successor.ExactXir1V2, successor.ExactRouteClosure, time);
+                var mismatchReads = 0;
+                var mismatchClock = new OnionTrustedTimeAuthority(new CallbackRendezvousClock(() =>
+                { mismatchReads++; return new(Boot, Sample); }));
+                await Assert.ThrowsAsync<CryptographicException>(async () => await DeepIdV2ContactRouteAuthor.CompleteRetainedSuccessorAsync(
+                    nextRecipient, advanced.Network, advanced.Authority, secrets!, wrongPredecessor, nextIssuance, 2, mismatchClock));
+                Assert.Equal(0, mismatchReads);
                 Assert.Equal(1UL, BinaryPrimitives.ReadUInt64BigEndian(successor.Invite.Field(3).Span));
                 Assert.Equal(route.Invite.ObjectHash.ToArray(), successor.Invite.Field(4).ToArray());
                 Assert.Equal(route.Route.Route.CoreHash.ToArray(), successor.Route.Route.Field(4).ToArray());

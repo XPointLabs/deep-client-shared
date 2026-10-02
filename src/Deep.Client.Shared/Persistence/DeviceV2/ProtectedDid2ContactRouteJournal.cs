@@ -13,12 +13,12 @@ internal static class ProtectedDid2ContactRouteJournal
 {
     internal const string Slot = "deep.store.v2.contact-route-journal";
     internal const int HeaderBytes = 92, PrefixBytes = 170, MaximumIntents = 128;
-    internal const byte Version = 6;
-    internal const int MaximumEntryBytes = 437_209;
+    internal const byte Version = 7;
+    internal const int MaximumEntryBytes = 461_123;
     // Matches the journaled production secure-store per-slot limit. Pending
     // routes reserve enough space for phase 7 before a threshold callback.
     internal const int MaximumBytes = DeepSecureStorageRegistration.MaximumValueBytes;
-    private static readonly int[] Limits = [473, 550, 3476, 4012, 3523, 611, 23295, 65535, 65575, 155210, 93092, 16384, ContactRouteAuthorityWireCodec.RequestBytes, ContactRouteAuthorityWireCodec.MaximumIssuanceAdh1Bytes];
+    private static readonly int[] Limits = [473, 550, 3476, 4012, 3523, 611, 23295, 65535, 65575, 155210, 93092, 16384, ContactRouteAuthorityWireCodec.MaximumRequestBytes, ContactRouteAuthorityWireCodec.MaximumIssuanceAdh1Bytes];
 
     internal sealed class State : IDisposable
     {
@@ -137,7 +137,7 @@ internal static class ProtectedDid2ContactRouteJournal
         }
         internal static Entry Decode(ReadOnlySpan<byte> bytes, ReadOnlySpan<byte> network, ReadOnlySpan<byte> account)
         {
-            if (bytes.Length is < PrefixBytes + 56 + 473 + 550 + ContactRouteAuthorityWireCodec.RequestBytes or > MaximumEntryBytes || bytes[32] is < 1 or > 7 ||
+            if (bytes.Length is < PrefixBytes + 56 + 473 + 550 + ContactRouteAuthorityWireCodec.MinimumRequestBytes or > MaximumEntryBytes || bytes[32] is < 1 or > 7 ||
                 bytes.Slice(33, 3).IndexOfAnyExcept((byte)0) >= 0 ||
                 BinaryPrimitives.ReadUInt32BigEndian(bytes[36..]) is < 1 or > 65_535 ||
                 BinaryPrimitives.ReadUInt16BigEndian(bytes[40..]) is < 1 or > 256)

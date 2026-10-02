@@ -53,7 +53,11 @@ connects the complete private response to verified protected custody and owned
 reopen. Lost response and post-adoption crash tests recover after real directory
 advancement, then author/publish on the actual issuance head with fresh authority.
 These in-process signature/SQLCipher checks do not establish matched deployment
-or physical contacts/messages/assets/groups. Expiry successors remain pending.
+or physical contacts/messages/assets/groups. The predecessor-aware request and
+current-only route journal follow
+[DR-0077](../../docs/survival-program/decisions/DR-0077-did2-route-successor-coordination.md).
+Protected current/pending successor adoption remains pending; the schema change
+alone does not make retained expiry recover automatically.
 
 ## Retired identity consumer cutover (2026-10-02)
 
@@ -305,7 +309,7 @@ Phase 4 is CAS-adopted and read back under the account lease before return.
 Lost response/reopen retains exact bundle, signature, nonce and ciphertext;
 changed profile or descriptor under the same intent rejects. The mandatory
 route journal accepts only the current generation under
-[DR-0075](../../docs/survival-program/decisions/DR-0075-did2-issued-head-response-custody.md),
+[DR-0077](../../docs/survival-program/decisions/DR-0077-did2-route-successor-coordination.md),
 retaining DR73's unchanged complete request and the authenticated issuance head;
 old disposable QA accounts require an
 explicit local reset, never migration or lazy repair. No node identity/network
