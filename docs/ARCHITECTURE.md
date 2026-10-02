@@ -1,5 +1,17 @@
 # Deep Client Shared architecture
 
+## Typed DID2 genesis admission availability (2026-10-02)
+
+The bounded DGA1 client throws `DeepIdV2GenesisAdmissionUnavailableException`
+for an actual 429/503 response, preserving its closed status and transport-bounded
+delta-seconds `RetryAfter`. This `IOException` subtype is not a DGR1 receipt,
+proof, trusted clock or permission to retry. Other status/crypto/transport errors
+remain independently rejected. The client sends once and does not replace
+operation IDs, reset identity/floors or consume a server response body as evidence
+on failure. Display consumers can distinguish admission availability from proof
+availability and stream IO without inspecting private messages. Wire, TLS/H2,
+byte limits, request deadline and reconnect scheduling are unchanged.
+
 ## Exact expired XRA1 rejection (2026-10-02)
 
 The genuine DID2 route fixture checks Protocol's closed `XRA1 / Expiry`

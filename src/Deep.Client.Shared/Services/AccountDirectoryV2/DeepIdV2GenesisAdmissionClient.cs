@@ -5,6 +5,24 @@ using Deep.Protocol.ApplicationCore;
 
 namespace Deep.Client.Shared.Services.AccountDirectoryV2;
 
+/// <summary>Admission availability metadata, never an admission receipt or proof.</summary>
+public sealed class DeepIdV2GenesisAdmissionUnavailableException : IOException
+{
+    public DeepIdV2GenesisAdmissionUnavailableException(HttpStatusCode statusCode, TimeSpan? retryAfter)
+        : base("The DID2 genesis admission authority is unavailable.")
+    {
+        if (statusCode is not (HttpStatusCode.TooManyRequests or HttpStatusCode.ServiceUnavailable))
+            throw new ArgumentOutOfRangeException(nameof(statusCode));
+        if (retryAfter is { } delay && (delay < TimeSpan.Zero || delay > TimeSpan.FromMinutes(5)))
+            throw new ArgumentOutOfRangeException(nameof(retryAfter));
+        StatusCode = statusCode;
+        RetryAfter = retryAfter;
+    }
+
+    public HttpStatusCode StatusCode { get; }
+    public TimeSpan? RetryAfter { get; }
+}
+
 /// <summary>
 /// Bounded DID2-only first-admission exchange. A DGR1 response is untrusted
 /// transport evidence; consumers must obtain an independently verified,
@@ -59,7 +77,7 @@ public sealed class DeepIdV2GenesisAdmissionClient : IDisposable
                 "The DID2 directory rejected a conflicting genesis admission.");
         if (response.StatusCode is HttpStatusCode.TooManyRequests or
             HttpStatusCode.ServiceUnavailable)
-            throw new IOException("The DID2 directory is temporarily unavailable.");
+            throw new DeepIdV2GenesisAdmissionUnavailableException(response.StatusCode, response.RetryAfter);
         if (response.StatusCode != HttpStatusCode.OK)
             throw new InvalidDataException(
                 "The DID2 directory rejected the genesis admission.");
