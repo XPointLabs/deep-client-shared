@@ -104,11 +104,12 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         }
     }
 
-    private sealed class PublicationWitness(Signer signer) : IXpa1PublicationAuthorizationWitnessSigner
+    private sealed class PublicationWitness(Signer signer, Action? afterSign = null) : IXpa1PublicationAuthorizationWitnessSigner
     {
+        internal int Calls { get; private set; }
         public ReadOnlyMemory<byte> WitnessId => signer.WitnessId;
         public ValueTask<ReadOnlyMemory<byte>> SignXpa1Async(ReadOnlyMemory<byte> input, CancellationToken ct)
-        { ct.ThrowIfCancellationRequested(); return ValueTask.FromResult<ReadOnlyMemory<byte>>(signer.SignCommit(input)); }
+        { ct.ThrowIfCancellationRequested(); Calls++; var signed = signer.SignCommit(input); afterSign?.Invoke(); return ValueTask.FromResult<ReadOnlyMemory<byte>>(signed); }
     }
 
     private sealed partial class Fixture
@@ -117,6 +118,34 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             witnesses.Select(signer => (IXpa1PublicationAuthorizationWitnessSigner)new PublicationWitness(signer)).ToArray();
         internal byte[] PublicationReceipt(ReadOnlyMemory<byte> id, ReadOnlyMemory<byte> input) =>
             nodes.Single(node => node.SignerId.Span.SequenceEqual(id.Span)).SignCommit(input);
+
+        internal byte[] PublicationResult(VerifiedDeepIdV2ContactRouteClosure route, ReadOnlyMemory<byte> exactXpu1,
+            bool corruptReceipt = false)
+        {
+            var request = Xpu1Codec.Decode(exactXpu1.Span);
+            var placement = ContactServicePlacementFactory.Create(route.Network, ContactServiceRequestKind.PublishInvite, request.LocatorHash);
+            var generation = new byte[8]; BinaryPrimitives.WriteUInt64BigEndian(generation, checked(request.Generation + 1));
+            var tuple = request.RequestHash.ToArray().Concat(request.ObjectCiphertextHash.ToArray()).Concat(generation).ToArray();
+            // Independently encode the frozen neutral receipt transcript.
+            var label = System.Text.Encoding.ASCII.GetBytes("Deep/ContactResolver/V1/publish-commit");
+            var input = new byte[label.Length + 7 + tuple.Length];
+            label.CopyTo(input, 0);
+            BinaryPrimitives.WriteUInt16BigEndian(input.AsSpan(label.Length + 1), 0x0201);
+            BinaryPrimitives.WriteUInt32BigEndian(input.AsSpan(label.Length + 3), checked((uint)tuple.Length));
+            tuple.CopyTo(input, label.Length + 7);
+            var rows = new byte[193]; rows[0] = 2;
+            var ids = placement.RankedReplicaNodeIds.OrderBy(id => Convert.ToHexString(id.Span), StringComparer.Ordinal).ToArray();
+            for (var i = 0; i < 2; i++)
+            {
+                ids[i].Span.CopyTo(rows.AsSpan(1 + i * 96));
+                PublicationReceipt(ids[i], input).CopyTo(rows, 33 + i * 96);
+            }
+            if (corruptReceipt) rows[^1] ^= 1;
+            var ownGeneration = new byte[8]; BinaryPrimitives.WriteUInt64BigEndian(ownGeneration, request.Generation);
+            return Xpo1Codec.Encode(exactXpu1.Span, Xpo1Status.Committed,
+                ContactServiceMutationOutcome.DurablyCommitted, 1_100, 0, ContactServicePaddingClass.Bytes1024,
+                [ownGeneration, request.ObjectCiphertextHash, generation, rows]);
+        }
     }
 
     private sealed class OwnedPublicationReplica(Fixture fixture, VerifiedDeepIdV2ContactRouteClosure route)
@@ -134,30 +163,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             StableRequest &= exactRequest is null || exactRequest.AsSpan().SequenceEqual(exactXpu1.Span);
             exactRequest ??= exactXpu1.ToArray();
             if (LoseResponse) throw new IOException("Injected publication response loss.");
-            var request = Xpu1Codec.Decode(exactXpu1.Span);
-            var placement = ContactServicePlacementFactory.Create(route.Network, ContactServiceRequestKind.PublishInvite, request.LocatorHash);
-            var generation = new byte[8]; BinaryPrimitives.WriteUInt64BigEndian(generation, 1);
-            var tuple = request.RequestHash.ToArray().Concat(request.ObjectCiphertextHash.ToArray()).Concat(generation).ToArray();
-            // Independently encode the frozen neutral receipt transcript; do
-            // not expose Protocol internals or a new generic signing API.
-            var label = System.Text.Encoding.ASCII.GetBytes("Deep/ContactResolver/V1/publish-commit");
-            var input = new byte[label.Length + 7 + tuple.Length];
-            label.CopyTo(input, 0);
-            BinaryPrimitives.WriteUInt16BigEndian(input.AsSpan(label.Length + 1), 0x0201);
-            BinaryPrimitives.WriteUInt32BigEndian(input.AsSpan(label.Length + 3), checked((uint)tuple.Length));
-            tuple.CopyTo(input, label.Length + 7);
-            var rows = new byte[193]; rows[0] = 2;
-            var ids = placement.RankedReplicaNodeIds.OrderBy(id => Convert.ToHexString(id.Span), StringComparer.Ordinal).ToArray();
-            for (var i = 0; i < 2; i++)
-            {
-                ids[i].Span.CopyTo(rows.AsSpan(1 + i * 96));
-                fixture.PublicationReceipt(ids[i], input).CopyTo(rows, 33 + i * 96);
-            }
-            if (CorruptReceipt) rows[^1] ^= 1;
-            var ownGeneration = new byte[8]; BinaryPrimitives.WriteUInt64BigEndian(ownGeneration, request.Generation);
-            var response = Xpo1Codec.Encode(exactXpu1.Span, Xpo1Status.Committed,
-                ContactServiceMutationOutcome.DurablyCommitted, 1_100, 0, ContactServicePaddingClass.Bytes1024,
-                [ownGeneration, request.ObjectCiphertextHash, generation, rows]);
+            var response = fixture.PublicationResult(route, exactXpu1, CorruptReceipt);
             return Task.FromResult<ReadOnlyMemory<byte>>(response);
         }
     }
