@@ -107,6 +107,15 @@ internal static class ProtectedDid2ContactRouteJournal
                 Record(7), Record(8), Record(9), Record(10), result.ExactXpo1, Record(12), Record(13)], network, account);
         }
 
+        internal Entry RebindCommittedIntent(ReadOnlySpan<byte> intent, ReadOnlySpan<byte> network, ReadOnlySpan<byte> account)
+        {
+            if (Phase != 7) throw new InvalidOperationException("Only a verified completed renewal can replace current custody.");
+            Required32(intent);
+            var bytes = exact.ToArray();
+            try { intent.CopyTo(bytes); return Decode(bytes, network, account); }
+            finally { CryptographicOperations.ZeroMemory(bytes); }
+        }
+
         private Entry Next(byte phase, ReadOnlyMemory<byte>[] values, ReadOnlySpan<byte> network, ReadOnlySpan<byte> account)
         {
             var prefix = exact.AsSpan(0, PrefixBytes).ToArray();
@@ -197,7 +206,8 @@ internal static class ProtectedDid2ContactRouteJournal
                 if (!Fixed(closure.Bundle.Field(6).Span, Slice(bytes, slices[0])) ||
                     !Fixed(closure.Bundle.Field(14).Span[40..], Slice(bytes, slices[5])) ||
                     !Fixed(closure.Bundle.Field(1).Span, network) || !Fixed(closure.Bundle.Field(2).Span, account) ||
-                    BinaryPrimitives.ReadUInt64BigEndian(closure.Bundle.Field(8).Span) != 0 ||
+                    BinaryPrimitives.ReadUInt64BigEndian(closure.Bundle.Field(8).Span) !=
+                        BinaryPrimitives.ReadUInt64BigEndian(DeepIdV2InviteRendezvousCodec.Decode(Slice(bytes, slices[5])).Field(3).Span) ||
                     BinaryPrimitives.ReadUInt32BigEndian(closure.Bundle.Field(16).Span) != 9 ||
                     slices[8].Length != slices[7].Length + 40)
                     throw new CryptographicException("Protected contact object differs from its exact route/delegation custody.");

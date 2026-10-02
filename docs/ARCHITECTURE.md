@@ -56,8 +56,27 @@ These in-process signature/SQLCipher checks do not establish matched deployment
 or physical contacts/messages/assets/groups. The predecessor-aware request and
 current-only route journal follow
 [DR-0077](../../docs/survival-program/decisions/DR-0077-did2-route-successor-coordination.md).
-Protected current/pending successor adoption remains pending; the schema change
-alone does not make retained expiry recover automatically.
+The schema change alone does not make retained expiry recover automatically.
+
+## Protected committed/pending renewal (2026-10-03)
+
+[DR-0078](../../docs/survival-program/decisions/DR-0078-did2-owned-publication-renewal.md)
+connects the account-owned permanent-contact entry to route/object/publication
+successors under one actual account lease. The fully committed predecessor stays
+unchanged while exact pending phases advance. Only verified two-replica success
+replaces it in one whole-slot CAS with independent readback. No public intent,
+secret, time or signing callback is added; the existing journal generation and
+wire bounds remain current-only. Reopen after promotion restores the persisted
+winner without another threshold/publication/replica callback.
+
+The native regression uses a genuinely signed short genesis proposal, actual
+SQLCipher custody, current independently signed proof and device/witness/node
+signatures. It exercises response loss, every adopted phase, hostile history,
+late proof expiry, bad receipts and lost promotion reply. Its signed in-process
+replica results are not remote durability or physical device evidence. Expired
+incomplete proposals are retained and rejected, not silently reminted. Registry
+publication predecessor verification/generation reservation, service/PMT rollover,
+matched deployment and physical contacts/text/assets/groups remain release gates.
 
 ## Retired identity consumer cutover (2026-10-02)
 

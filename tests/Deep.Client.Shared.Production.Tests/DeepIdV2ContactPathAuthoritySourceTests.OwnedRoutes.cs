@@ -159,12 +159,12 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             var account = reopen ? ReopenAccount() : accounts;
             return account.EnsureOwnContactRouteAsync(intent, Source(account), config, threshold);
         }
-        private async Task<byte[]> RouteSnapshot()
+        internal async Task<byte[]> RouteSnapshot()
         {
             using var value = await innerStorage.ReadOwnedAsync(ProtectedDid2ContactRouteJournal.Slot);
             return value!.Use(bytes => bytes.ToArray());
         }
-        private async Task<ProtectedDid2ContactRouteJournal.State> RouteState()
+        internal async Task<ProtectedDid2ContactRouteJournal.State> RouteState()
         {
             var bytes = await RouteSnapshot();
             using var record = await innerStorage.ReadOwnedAsync("deep.store.v2.sql-generation");

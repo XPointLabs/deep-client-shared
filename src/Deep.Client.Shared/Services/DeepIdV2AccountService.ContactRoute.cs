@@ -25,7 +25,13 @@ public sealed partial class DeepIdV2AccountService
     {
         ArgumentNullException.ThrowIfNull(source); source.RequireAccountOwner(this);
         var plan = await ReadOwnPermanentContactPlanAsync(ct).ConfigureAwait(false);
-        var committed = await EnsureOwnContactPublicationCommitAsync(plan.Intent, source,
+        var staged = await EnsureOwnInitialPreKeyInventoryAsync(source, ct).ConfigureAwait(false);
+        var fresh = await source.VerifyForOwnPreKeyAuthoringAsync(this, ct).ConfigureAwait(false);
+        VerifiedDeepIdV2PublicationCommit? committed;
+        using (var verifier = OpenVerifier())
+            committed = await owner.TryRenewPermanentContactAsync(TrustedUnixSeconds(), verifier, plan,
+                source, fresh, staged, threshold, publication, transport, ct).ConfigureAwait(false);
+        committed ??= await EnsureOwnContactPublicationCommitAsync(plan.Intent, source,
             Did2OwnedPermanentContactPlan.Configuration(), threshold, plan.Profile, publication, transport, ct, plan).ConfigureAwait(false);
         var after = await ReadOwnPermanentContactPlanAsync(ct).ConfigureAwait(false);
         if (!plan.Matches(after))
