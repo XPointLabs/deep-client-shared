@@ -1,5 +1,17 @@
 # Deep Client Shared architecture
 
+## DID2 contact ingress failure certainty (2026-10-03)
+
+The owned publication/coordination ONION transport maps only the existing typed
+`PrivacyIngressRejectedBeforeForwardException` to the existing neutral
+`ClientMailboxTransportException` dependency-unavailable category. It preserves
+the original retryability and cause, sends once, and provides no automatic
+retry, route fallback or identity adapter. Generic IO, cancellation and unknown
+completion are propagated unchanged; they cannot become a before-forward
+rejection. Focused transport stubs prove mapping/no replay, not actual ingress
+or physical delivery. The physical checkpoint is
+[recorded separately](../../docs/DID2-PRODUCTION-DEVICE-CHECKPOINT-2026-10-03.md).
+
 ## Typed DID2 genesis admission availability (2026-10-02)
 
 The bounded DGA1 client throws `DeepIdV2GenesisAdmissionUnavailableException`

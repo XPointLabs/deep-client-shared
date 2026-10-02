@@ -63,7 +63,7 @@ internal sealed class DeepIdV2PublicationOnionTransport : IExactContactResolveOn
             cancellationToken).ConfigureAwait(false);
         ownedOperation?.RequireActive();
         cancellationToken.ThrowIfCancellationRequested();
-        var response = await transport.ForwardAsync(built.Frame, cancellationToken).ConfigureAwait(false);
+        var response = await ForwardOnceAsync(transport, built.Frame, cancellationToken).ConfigureAwait(false);
         ownedOperation?.RequireActive();
         PrivacyRoutingOpenedResponse opened;
         try { opened = await codec.OpenResponseAsync(response, built.ReplyContext, cancellationToken).ConfigureAwait(false); }
@@ -76,6 +76,21 @@ internal sealed class DeepIdV2PublicationOnionTransport : IExactContactResolveOn
         ownedOperation?.RequireActive();
         cancellationToken.ThrowIfCancellationRequested();
         return new(opened.Result.Body, prepared.Authority);
+    }
+
+    internal static async Task<ReadOnlyMemory<byte>> ForwardOnceAsync(
+        IPrivacyManagedIngressTransport transport, ReadOnlyMemory<byte> frame,
+        CancellationToken ct)
+    {
+        try { return await transport.ForwardAsync(frame, ct).ConfigureAwait(false); }
+        catch (PrivacyIngressRejectedBeforeForwardException error)
+        {
+            // Preserve the existing ingress certainty, rather than losing it
+            // as an untyped IOException. No route fallback/retry is performed.
+            throw new ClientMailboxTransportException(
+                ClientMailboxTransportFailure.DependencyUnavailable, error.Retryable,
+                "The selected DID2 contact ingress rejected the request before forwarding.", error);
+        }
     }
 
     private sealed class NoClientReceiveVault : IOnionKeyAgreementVault
