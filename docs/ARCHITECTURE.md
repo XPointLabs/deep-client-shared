@@ -1,5 +1,14 @@
 # Deep Client Shared architecture
 
+## Exact expired XRA1 rejection (2026-10-02)
+
+The genuine DID2 route fixture checks Protocol's closed `XRA1 / Expiry`
+failure with still-current account/network evidence before any threshold signer
+callback. The exact proposal remains unchanged. This focused native regression
+is not physical delivery or an expired-intent renewal implementation; the latter
+remains governed by
+[DR-0051](../../docs/survival-program/decisions/DR-0051-owned-permanent-contact-client-entry.md).
+
 ## Retired identity consumer cutover (2026-10-02)
 
 [DR-0069](../../docs/survival-program/decisions/DR-0069-did2-retired-identity-surface-removal.md)

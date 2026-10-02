@@ -133,6 +133,18 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             await Assert.ThrowsAsync<CryptographicException>(async () => await DeepIdV2ContactRouteAuthor.AuthorThresholdAsync(
                 recipient, current.Network, current.Authority, xra.CanonicalBytes, [bad, new RouteWitness(witnesses[1])], issued, expiry, time));
             Assert.Equal(1, bad.Calls);
+            // Fresh DID2/network evidence cannot extend an expired exact XRA1.
+            // The closed error is emitted before any threshold signing callback;
+            // the proposal bytes remain untouched, rather than being reminted.
+            var exactProposal = xra.CanonicalBytes.ToArray();
+            var expiryClock = new CallbackRendezvousClock(() => new(Boot, checked(Sample + 20)));
+            var expirySigners = witnesses.Select(w => new RouteWitness(w)).ToArray();
+            var expired = await Assert.ThrowsAsync<CryptographicException>(async () =>
+                await DeepIdV2ContactRouteAuthor.AuthorThresholdAsync(recipient, current.Network,
+                    current.Authority, xra.CanonicalBytes, expirySigners, issued, expiry, new(expiryClock)));
+            Assert.Equal("DID2 route time coverage failed (XRA1; Expiry).", expired.Message);
+            Assert.All(expirySigners, signer => Assert.Equal(0, signer.Calls));
+            Assert.Equal(exactProposal, xra.CanonicalBytes.ToArray());
             var delayed = new RouteWitness(witnesses[0], afterSign: () => Sample = second.Proof.FreshnessDeadlineMonotonicSeconds);
             var switchedBoot = new CallbackRendezvousClock(() => new(Bytes(16, 0xf4), Sample));
             var never = new RouteWitness(witnesses[0]);
