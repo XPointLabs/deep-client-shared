@@ -271,6 +271,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         internal bool ExactRetry { get; private set; } = true;
         internal Did2OwnedContactTransportContext? Dispatch { get; private set; }
         internal bool BuiltHeldFrame { get; private set; }
+        internal Func<Task>? BeforeReturn { get; set; }
         private byte[]? requestBytes, responseBytes;
         public async ValueTask<ReadOnlyMemory<byte>> AcquireAsync(AuthoredMailboxGrantRequest request,
             VerifiedDeepIdV2ContactRouteClosure route, Did2OwnedContactTransportContext dispatch, CancellationToken ct)
@@ -310,6 +311,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             }
             if (LoseResponse) throw new IOException("Injected lost private grant response.");
             var response = responseBytes.ToArray(); if (CorruptResponse) response[^1] ^= 1;
+            if (BeforeReturn is not null) await BeforeReturn();
             return response;
         }
     }

@@ -116,6 +116,20 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             envelopeBytes = await ReadOwnedMailboxEnvelopeUnderLeaseAsync(current, scope, opened, op, initialIntent, ct).ConfigureAwait(false);
             var locator = privateContact?.LocatorHash ?? contact.Contact.Candidate.Request.LocatorHash;
             var capability = route.Route.Reachability.Field(10);
+            // Acquiring a grant persists holder custody and can cause remote
+            // issuance. Reject absent/full or changed attempt custody first.
+            instance = await SqliteDeepIdV2AccountGeneration.ReadAccountInstanceUnderLeaseAsync(storage, networkId, current.AccountId, ct).ConfigureAwait(false);
+            var routeHash = SHA256.HashData(route.ExactRouteClosure.Span);
+            using (var root = await storage.ReadOwnedAsync(ProtectedDid2MailboxSendJournal.Slot, ct).ConfigureAwait(false) ?? throw new InvalidDataException("Protected send custody is absent; explicit reset is required."))
+                snapshot = root.Use(bytes => bytes.ToArray());
+            using var sends = ProtectedDid2MailboxSendJournal.Decode(snapshot, networkId, current.AccountId.Span, instance);
+            var name = Convert.ToHexString(ProtectedDid2MailboxSendJournal.Key(scope.Hash, op));
+            sends.Entries.TryGetValue(name, out var entry);
+            if (entry is null && sends.Entries.Count >= ProtectedDid2MailboxSendJournal.MaximumEntries)
+                throw new IOException("Resume the pending protected mailbox request or perform verified rollover.");
+            if (entry is not null && (!FixedRoute(entry.RouteHash, routeHash) ||
+                !FixedRoute(entry.EnvelopeHash, SHA256.HashData(envelopeBytes))))
+                throw new CryptographicException("An exact owned send cannot acquire a replacement route or ciphertext.");
             async Task Recheck(CancellationToken token)
             {
                 await RequireFinalMessagingFreshnessAsync(current, scope, fresh, peer, source, held, first, token).ConfigureAwait(false);
@@ -133,11 +147,11 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     if (!FixedRoute(retained, envelopeBytes)) throw new CryptographicException("The committed send changed during dispatch.");
                 }
                 finally { CryptographicOperations.ZeroMemory(retained); }
+                await RequireExactProtectedMailboxRootAsync(ProtectedDid2MailboxSendJournal.Slot, snapshot, token).ConfigureAwait(false);
             }
             var winner = await AcquireMailboxGrantUnderLeaseAsync(current, held, source, fresh, route, locator,
                 capability, MailboxCapabilityDomain.Deposit, Recheck, grants, ct).ConfigureAwait(false);
-            instance = await SqliteDeepIdV2AccountGeneration.ReadAccountInstanceUnderLeaseAsync(storage, networkId, current.AccountId, ct).ConfigureAwait(false);
-            var routeHash = SHA256.HashData(route.ExactRouteClosure.Span); var grantHash = SHA256.HashData(winner.ExactGrant.Span);
+            var grantHash = SHA256.HashData(winner.ExactGrant.Span);
             using (var root = await storage.ReadOwnedAsync(ProtectedDid2MailboxGrantJournal.Slot, ct).ConfigureAwait(false) ?? throw new InvalidDataException("Protected grant custody disappeared."))
                 grantRoot = root.Use(bytes => bytes.ToArray());
             using var grantState = ProtectedDid2MailboxGrantJournal.Decode(grantRoot, networkId, current.AccountId.Span, instance);
@@ -147,13 +161,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 throw new CryptographicException("Dispatch has no exact protected grant winner.");
             using var loan = await OpenMailboxWinnerUnderLeaseAsync(current, held, route, winner, locator, capability,
                 retainedGrant, source, fresh, Recheck, ct).ConfigureAwait(false);
-            using (var root = await storage.ReadOwnedAsync(ProtectedDid2MailboxSendJournal.Slot, ct).ConfigureAwait(false) ?? throw new InvalidDataException("Protected send custody is absent; explicit reset is required."))
-                snapshot = root.Use(bytes => bytes.ToArray());
-            using var sends = ProtectedDid2MailboxSendJournal.Decode(snapshot, networkId, current.AccountId.Span, instance);
-            var name = Convert.ToHexString(ProtectedDid2MailboxSendJournal.Key(scope.Hash, op));
-            sends.Entries.TryGetValue(name, out var entry);
-            if (entry is null && (sends.Entries.Count >= ProtectedDid2MailboxSendJournal.MaximumEntries ||
-                sends.Entries.Values.Any(value => !value.Prepared && FixedRoute(value.GrantHash, grantHash))))
+            if (entry is null && sends.Entries.Values.Any(value => !value.Prepared && FixedRoute(value.GrantHash, grantHash)))
                 throw new IOException("Resume the pending protected mailbox request or perform verified rollover.");
             var created = entry?.Created ?? loan.Authority.NowUnixSeconds;
             var expiry = entry?.Expires ?? Math.Min(loan.Grant.ExpiresAtUnixSeconds, checked(created + MailboxClientLimits.MaximumTtlSeconds));

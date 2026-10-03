@@ -152,17 +152,11 @@ public sealed class DeepIdV2DirectoryLkgStoreTests
             try
             {
                 SQLitePCL.Batteries_V2.Init();
-                using var connection = new Microsoft.Data.Sqlite.SqliteConnection(
-                    new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
-                    {
-                        DataSource = Path.Combine(directory,
-                            "deep-store-v2-account.dsv2"),
-                        Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadWrite,
-                        Pooling = false
-                    }.ToString());
-                connection.Open();
-                Assert.Equal(SQLitePCL.raw.SQLITE_OK,
-                    SQLitePCL.raw.sqlite3_key(connection.Handle, key));
+                // DR60: the current account database uses the raw random-key
+                // mode. Authenticate an actual page via the current factory
+                // before injecting rollback/corruption into this test database.
+                using var connection = SqliteDeepIdV2AccountGeneration.OpenAccountConnectionForTests(
+                    Path.Combine(directory, "deep-store-v2-account.dsv2"), key, create: false);
                 byte[] advancedPayload;
                 using (var read = connection.CreateCommand())
                 {

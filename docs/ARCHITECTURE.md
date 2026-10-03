@@ -47,6 +47,15 @@ facades, the historical test solution or a shipping group/media graph.
 
 ## Selection-bound current mailbox consumer (2026-10-03)
 
+Owned Store now checks the mandatory send root, capacity for a new operation
+and an existing operation's route/ciphertext commitments before acquiring a
+grant. The held continuation rechecks that same root across issuance callbacks;
+a changed root leaves the request pending instead of adopting a winner. This
+is an ordering correction under DR-0056/0081, not renewal or compaction. It
+preserves the current journal format, replay counters and late exact-MAU checks.
+Coverage and remaining lifecycle gates are recorded in the
+[send preflight checkpoint](testing/s01-send-preflight-2026-10-03.md).
+
 [DR-0081](../../docs/survival-program/decisions/DR-0081-did2-mailbox-selection-grant-clean-break.md)
 is the single normative owner of the replacement wire contract. The production
 consumer now accepts only XMC2/MCG3/MCP3/MAU3. The retained holder checks the
