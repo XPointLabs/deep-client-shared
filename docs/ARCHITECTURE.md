@@ -65,6 +65,15 @@ grant and durable counter. Installation requires exactly two selected replicas,
 not a prefix of a larger selection; node IDs and descriptor receipt keys remain
 distinct. These local facts do not authorize a node or establish delivery.
 
+The current path provider preserves that authenticated PMS2 order through
+owned installation and SQL read-back. Under
+[DR-0086](../../docs/survival-program/decisions/DR-0086-current-mailbox-store-order.md),
+Store uses the first ranked replica even for a fallback attempt; Retrieve/ACK
+still support either replica. This changes no wire, guard policy, receipt quorum
+or exact retry bytes. Native writer enforcement and shipping activation remain
+separate gates; the local path evidence is recorded in the
+[writer checkpoint](testing/s03-mailbox-writer-2026-10-04.md).
+
 DMB1 schema8 and grant/send custody version2 reject older local state, including
 an empty old journal, without migration, repair, floor reset or key/nonce remint.
 The existing SQLCipher random key, durable policies, CAS/read-back, pending

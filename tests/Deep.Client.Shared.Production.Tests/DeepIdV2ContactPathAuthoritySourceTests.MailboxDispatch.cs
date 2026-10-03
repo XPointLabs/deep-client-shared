@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using Deep.Client.Shared.Persistence;
 using Deep.Client.Shared.Persistence.DeviceV2;
+using Deep.Client.Shared.Persistence.XPointNetworkV1;
 using Deep.Client.Shared.Services;
 using Deep.Client.Shared.Services.ContactV2;
 using Deep.Client.Shared.Services.XPointNetworkV1;
@@ -410,11 +411,29 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 Assert.Equal(SHA256.HashData(envelope.Ciphertext.Span), entry.EnvelopeHash.ToArray());
                 Assert.Equal(SHA256.HashData(request.Span), entry.MauHash.ToArray()); Assert.Equal(decoded.Presentation.ReplayCounter, entry.Counter);
             }
-            var paths = context!.Source.CreateOwnHeldMailboxPaths(context, PrivacyMailboxRouteSelection.Primary);
-            var attempt = await paths.PrepareOnRouteAsync(OnionOperation.Store, request, route, ct);
+            // This is the real installed signed PMS2 pair, not a fabricated
+            // credential. Prefer the writer as guard in this disposable test
+            // so a wrong fallback exit changes the observable entry.
+            var network = await context!.GetCurrentForMailboxAsync(route.PlacementCommitment, ct);
+            var snapshot = OnionPathCandidateSnapshotFactory.Create(network);
+            var guards = await context.Custody.Guards.ReadAsync(ct);
+            var next = new EntryGuardState(checked((guards?.Revision ?? 0) + 1), network.NetworkId.Span,
+                snapshot.ViewGeneration, snapshot.ViewHash.Span, guards is null ? Bytes(32, 0xa1) : guards.LocalSalt.Span,
+                route.Replicas.FirstId.Span, snapshot.Candidates.Select(candidate => candidate.NodeId));
+            Assert.Equal(EntryGuardStoreWriteDisposition.Applied,
+                (await context.Custody.Guards.CompareExchangeAsync(guards?.Revision, next, ct)).Disposition);
             var codec = new PrivacyRoutingCodec(new OnionEntropyAuthority(context.Custody.Entropy), new OnionKeyAgreementAuthority(new RejectClientReceiveVault()));
-            using (var built = await codec.BuildAsync(attempt.Path, attempt.Request, ct))
+            byte[]? firstEntry = null;
+            foreach (var selection in new[] { PrivacyMailboxRouteSelection.Primary, PrivacyMailboxRouteSelection.Fallback })
+            {
+                var paths = context.Source.CreateOwnHeldMailboxPaths(context, selection);
+                var attempt = await paths.PrepareOnRouteAsync(OnionOperation.Store, request, route, ct);
+                var entry = OnionEntryTransportFactory.Create(attempt.Path);
+                Assert.False(entry.Peer.NodeId.Span.SequenceEqual(route.Replicas.FirstId.Span));
+                if (firstEntry is null) firstEntry = entry.Peer.NodeId.ToArray(); else Assert.Equal(firstEntry, entry.Peer.NodeId.ToArray());
+                using var built = await codec.BuildAsync(attempt.Path, attempt.Request, ct);
                 Assert.True(built.Frame.Length > request.Length);
+            }
             BuiltHeldFrame = true;
             await context.RequireCurrentAsync(ct);
             if (durableResponse is not null)

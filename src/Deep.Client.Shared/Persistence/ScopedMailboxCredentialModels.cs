@@ -81,6 +81,9 @@ public sealed class CurrentMailboxCredentialGrants
         depositGrant?.ToArray() ?? ReadOnlyMemory<byte>.Empty;
 }
 
+/// <summary>Ordered descriptor facts. Current owned installation supplies the
+/// exact authenticated PMS2 order; the first node owns Store. This value alone
+/// is not verified route or dispatch authority.</summary>
 public sealed class MailboxCredentialReplicaPair
 {
     private readonly byte[] firstId, firstSigningKey, secondId, secondSigningKey;

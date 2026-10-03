@@ -36,11 +36,13 @@ public sealed class CurrentScopedMailboxCredentialTests
                 fixture.Credential.Grants.RetrieveGrant.Span).SelectionInput.ToArray(),
                 decoded.Presentation.Grant.SelectionInput.ToArray());
             var route = await store.ReadScopedMailboxRouteAsync(fixture.Selector, fixture.Authority);
+            AssertReplicaOrder(route);
             MailboxPrivacyPathProvider.ValidateRouteRequest(OnionOperation.Retrieve, exact, route);
         }
 
         using (var store = fixture.Open())
         {
+            AssertReplicaOrder(await store.ReadScopedMailboxRouteAsync(fixture.Selector, fixture.Authority));
             var resumed = await store.TryResumeScopedMailboxBatchAsync(
                 fixture.ResumeRequest,
                 fixture.Signer,
@@ -55,6 +57,14 @@ public sealed class CurrentScopedMailboxCredentialTests
                 store.InstallCurrentScopedCredentialAsync(
                     fixture.CreateCredential(epoch: 6, marker: 0x70),
                     fixture.Authority));
+        }
+
+        void AssertReplicaOrder(ScopedMailboxResolvedRoute route)
+        {
+            Assert.Equal(fixture.Credential.Replicas.FirstId.ToArray(), route.Replicas.FirstId.ToArray());
+            Assert.Equal(fixture.Credential.Replicas.FirstSigningKey.ToArray(), route.Replicas.FirstSigningKey.ToArray());
+            Assert.Equal(fixture.Credential.Replicas.SecondId.ToArray(), route.Replicas.SecondId.ToArray());
+            Assert.Equal(fixture.Credential.Replicas.SecondSigningKey.ToArray(), route.Replicas.SecondSigningKey.ToArray());
         }
     }
 

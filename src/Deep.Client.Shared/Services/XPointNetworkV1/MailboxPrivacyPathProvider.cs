@@ -147,7 +147,10 @@ public sealed class MailboxPrivacyPathProvider :
         }
 
         var candidates = OnionPathCandidateSnapshotFactory.Create(network);
-        var requiredExit = routeSelection == PrivacyMailboxRouteSelection.Primary
+        // Current credential custody preserves authenticated PMS2 rank order.
+        // Store retries cannot select the other coordinator: that would split
+        // the durable cursor/prefix owner. Retrieve and ACK still use either.
+        var requiredExit = operation == OnionOperation.Store || routeSelection == PrivacyMailboxRouteSelection.Primary
             ? route.Replicas.FirstId
             : route.Replicas.SecondId;
         for (var attempt = 0; attempt < MaximumCasAttempts; attempt++)

@@ -29,8 +29,10 @@ namespace Deep.Client.Shared.Production.Tests;
 
 public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 {
-    [Fact]
-    public async Task Did2MailboxPaths_SignedNetworkBothReplicasSelectOwnTlsEntryAndReserveFrames()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Did2MailboxPaths_StoreKeepsRankedWriterWhileReadsUseEitherReplica(bool reverseRank)
     {
         await using var fixture = await Fixture.CreateAsync();
         var source = fixture.Source();
@@ -44,12 +46,14 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         Assert.Equal(EntryGuardStoreWriteDisposition.Applied,
             (await custody.Guards.CompareExchangeAsync(null, guards, default)).Disposition);
         var placement = new Deep.Protocol.DeepExtension.MailboxCapabilities.BlindedPlacementId(Bytes(32, 0xa2));
+        var first = candidates[reverseRank ? 1 : 0].NodeId;
+        var second = candidates[reverseRank ? 0 : 1].NodeId;
         var route = new ScopedMailboxResolvedRoute(1, 1400,
             new(Bytes(32, 0xa3)), placement,
             Deep.Protocol.DeepExtension.MailboxCapabilities.MailboxPlacementCommitment.Compute(placement),
-            Bytes(32, 0xa4), new(candidates[0].NodeId.Span,
-                network.ResolveNodeIdentityPublicKey(candidates[0].NodeId).Span,
-                candidates[1].NodeId.Span, network.ResolveNodeIdentityPublicKey(candidates[1].NodeId).Span));
+            Bytes(32, 0xa4), new(first.Span,
+                network.ResolveNodeIdentityPublicKey(first).Span,
+                second.Span, network.ResolveNodeIdentityPublicKey(second).Span));
         var codec = new PrivacyRoutingCodec(new OnionEntropyAuthority(custody.Entropy),
             new OnionKeyAgreementAuthority(new RejectClientReceiveVault()));
         // Synthetic MAU3 grants exercise structural/path selection only.
@@ -65,13 +69,15 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 Assert.Equal(exact, attempt.Request.CanonicalBytes.ToArray());
                 var entry = OnionEntryTransportFactory.Create(attempt.Path);
                 entry.EnsureCurrent();
-                var exit = selection == PrivacyMailboxRouteSelection.Primary ? candidates[0].NodeId : candidates[1].NodeId;
+                var exit = operation == OnionOperation.Store || selection == PrivacyMailboxRouteSelection.Primary ? first : second;
                 Assert.False(entry.Peer.NodeId.Span.SequenceEqual(exit.Span));
+                if (!exit.Span.SequenceEqual(candidates[0].NodeId.Span))
+                    Assert.Equal(candidates[0].NodeId.ToArray(), entry.Peer.NodeId.ToArray());
                 entries.Add(entry.Peer.NodeId.ToArray());
                 using var frame = await codec.BuildAsync(attempt.Path, attempt.Request, default);
                 Assert.True(frame.Frame.Length > exact.Length);
             }
-            Assert.False(entries[0].AsSpan().SequenceEqual(entries[1]));
+            Assert.Equal(operation == OnionOperation.Store, entries[0].AsSpan().SequenceEqual(entries[1]));
         }
         Assert.Equal(7, fixture.ProofRequests); // initial + each of six independent attempts
         Assert.Equal(1UL, (await custody.Guards.ReadAsync(default))!.Revision);
