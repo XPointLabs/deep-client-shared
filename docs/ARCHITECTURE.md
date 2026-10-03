@@ -1,5 +1,50 @@
 # Deep Client Shared architecture
 
+## Current composition baseline — 2026-10-03
+
+The MAUI application consumes
+[`Deep.Client.Shared.Production.csproj`](../src/Deep.Client.Shared/Deep.Client.Shared.Production.csproj).
+Its explicit compile list, rather than all files in this repository, defines
+the current assembly. The project directly references the three production
+Protocol source projects. This validates a source composition; actual package,
+API, resource and downstream pin qualification is a separate gate. Historically
+named namespaces may contain current neutral primitives without restoring a
+retired identity or application owner.
+
+The [workspace audit](../../docs/architecture/ARCHITECTURE-AUDIT-2026-10-03.md) records the
+cross-repository assessment. The
+[implementation plan](../../docs/architecture/IMPLEMENTATION-PLAN-V1.md)
+owns the sequence and acceptance gates. Dated notes below record individual
+increments and their evidence at that time; they are not parallel development
+plans or proof of current service activation.
+
+| Boundary | Current implementation and limit |
+| --- | --- |
+| Contact and direct text | Owned resolve/claim, initial session transfer, explicit acceptance, ordinary text authoring and mailbox dispatch are connected through `DeepIdV2AccountService`. |
+| Durable delivery state | Protected exact-request retry, SQLCipher state, semantic inbox materialization and verified mailbox tombstone ACK exist. Store completion is storage evidence, not recipient AppAck or Read. |
+| AppAck and Read events | Not connected to the current DID2 authoring and semantic consumer allowlists. |
+| Scheduling | Synchronization processes one bounded page. The current consumer has no automatic message outbox drain/inbox scheduler; MAUI's network reconnect only restores its diagnostic proof/publication path. |
+| Offline use | Current conversation/history methods request fresh endpoint authority; local authenticated history and offline command queueing still need their own boundary. |
+| Long-running custody | Send and grant journals have finite capacity without a connected retirement/compaction lifecycle; an existing grant winner is reverified, without an expired-winner replacement path for the same scope. |
+| Route renewal | Committed-predecessor renewal and protected pending phases exist. Incomplete-proposal expiry, grant/route rollover and service/topology changes are not a complete recovery lifecycle. |
+| Attachments | Local encrypted asset custody and typed offers exist. No public DID2 remote upload/download workflow is composed. |
+| Governed groups | Protocol and portable components do not constitute a current DID2 application send/receive/ACK composition. |
+
+The actual public business boundary is
+[`DeepIdV2AccountService.ContactApplication`](../src/Deep.Client.Shared/Services/DeepIdV2AccountService.ContactApplication.cs),
+with bounded receive in
+[`DeepIdV2AccountService.MailboxReceive`](../src/Deep.Client.Shared/Services/DeepIdV2AccountService.MailboxReceive.cs).
+The owned message authoring and ACK consumers deliberately reject event kinds
+whose application owner is absent. Adding a codec or restoring an excluded
+facade cannot complete that boundary.
+
+Native account/ratchet/SQLCipher fixtures and signed in-process mailbox results
+exercise real local custody but do not establish remote service durability,
+physical Android/Windows delivery or Release composition. MAUI currently exposes
+the connected messaging runtime only in its non-Release HTTPS diagnostic. None of
+the earlier generic runtime descriptions below activates excluded Session
+facades, the historical test solution or a shipping group/media graph.
+
 ## Selection-bound current mailbox consumer (2026-10-03)
 
 [DR-0081](../../docs/survival-program/decisions/DR-0081-did2-mailbox-selection-grant-clean-break.md)
