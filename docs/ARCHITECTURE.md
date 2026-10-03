@@ -1,5 +1,25 @@
 # Deep Client Shared architecture
 
+## Selection-bound current mailbox consumer (2026-10-03)
+
+[DR-0081](../../docs/survival-program/decisions/DR-0081-did2-mailbox-selection-grant-clean-break.md)
+is the single normative owner of the replacement wire contract. The production
+consumer now accepts only XMC2/MCG3/MCP3/MAU3. The retained holder checks the
+signed selector against its exact PMS2 in addition to role, epoch, placement,
+network and holder. The owner-private operation signer fences the full exact
+grant and durable counter. Installation requires exactly two selected replicas,
+not a prefix of a larger selection; node IDs and descriptor receipt keys remain
+distinct. These local facts do not authorize a node or establish delivery.
+
+DMB1 schema8 and grant/send custody version2 reject older local state, including
+an empty old journal, without migration, repair, floor reset or key/nonce remint.
+The existing SQLCipher random key, durable policies, CAS/read-back, pending
+unknown-outcome and semantic ACK fences remain unchanged. Explicit isolated QA
+reset is required when installing this incompatible generation. PMA2 profile2
+and a matching signed PMT2 successor, issuer/node/peer consumer repin and actual
+Windows/Android delivery are still rollout gates. Prior candidate descriptions
+below are not permission to activate retired framing or Session-based facades.
+
 ## DID2 contact ingress failure certainty (2026-10-03)
 
 The owned publication/coordination ONION transport maps only the existing typed
@@ -196,7 +216,7 @@ No V1 identity owner is restored for this composition.
 [DR-0056](../../docs/survival-program/decisions/DR-0056-did2-owned-mailbox-message-dispatch.md)
 owns the connected local dispatch/custody contract. The internal
 `DeliverOwnMessagingAsync` reads the actual committed outgoing operation, obtains
-the protected grant and prepares exact MAU2 with an owner-private loan; it never
+the protected grant and prepares exact MAU3 with an owner-private loan; it never
 accepts caller ciphertext or keys. The mandatory protected send root is created
 atomically with the account instance; an older disposable QA instance requires
 explicit reset, not lazy initialization. Repeated sends keep original bytes and
@@ -444,14 +464,11 @@ durable mailbox state machines, E2EE orchestration, and transport interfaces.
 MAUI composition and platform TLS/secure-storage integration live in
 `deep-client-maui`; exact wire codecs and cryptography live in `deep-protocol`.
 
-The currently implemented transport path is Deep-native authenticated MAU2.
-Its Session-derived static-key E2EE and revision-only group model are
-pre-production evidence and must be replaced by the clean-break `DPE2/DMC2`
-ratchet and `DeepSmallGroupV1` before any public release. The assembly no
-longer contains Session storage, Session RPC, JSON/base64 onion routing,
-membership-route bootstrap, direct replica MAU2 HTTP, or their fallback APIs.
-`StubSessionBackend` is retained only for deterministic unit tests and is
-rejected by release composition.
+The current production mailbox source uses Deep-native authenticated MAU3
+and the account-owned DID2 `DPE2/DMC2` graph. The excluded Session-derived
+facades and old test project are not release evidence or shipping composition.
+The new mailbox issuer/node/peer rollout and governed group device cycle remain
+unqualified; source compilation does not establish a working production client.
 
 ## DID2 claim path candidate
 
@@ -531,17 +548,19 @@ protected storage is not detectable by this local custody.
 
 ## Native authenticated mailbox
 
-`NativeMau2MailboxTransport` and `ClientMailboxAdapter` are the portable
-Store/Retrieve/Acknowledge boundary. `MailboxAuthenticatedRequestFactory`
-creates the only signed canonical MAU2 carrier. Every request is persisted in
+The account-owned DID2 mailbox continuation and `ClientMailboxAdapter` are the
+production Store/Retrieve/Acknowledge boundary. `NativeMau2MailboxTransport`
+is an excluded retired facade, not an adapter for the new generation.
+`MailboxAuthenticatedRequestFactory` creates the signed canonical MAU3 carrier.
+Every request is persisted in
 the durable transport outbox before network I/O; retries reuse the byte-exact
-MAU2, including its replay counter. MQR3, MRP1, and MAR1 responses are decoded,
+MAU3, including its replay counter. MQR3, MRP1, and MAR1 responses are decoded,
 bound to the exact request and credential route, and committed monotonically.
 
 The pinned mailbox placement still contains exactly two distinct replicas and
 their Ed25519 receipt-verification keys. Storage durability remains the
 existing two-replica quorum. Privacy routing changes only the outer transport,
-not MAU2 bytes, credential selection, receipt verification, inbox traversal,
+not MAU3 bytes, credential selection, receipt verification, inbox traversal,
 or outbox recovery.
 
 ## Deep-native privacy transport
@@ -554,7 +573,7 @@ inside the original request deadline: successful headers and a partial body
 cannot produce a proof or extend the timeout. Physical proof/body completion
 must still be verified; transport unit tests are not device evidence.
 
-`PrivacyRoutedMailboxBinaryIngress` seals exact MAU2 through an ordered
+`PrivacyRoutedMailboxBinaryIngress` seals exact MAU3 through an ordered
 three-hop route:
 
 ```text
@@ -569,7 +588,7 @@ best-effort liveness, not an independent failure domain. Full six-router
 disjointness is a later topology capability and is not a v1 release claim.
 
 The protocol-owned `BuildForCanonicalMailboxRequest` derives a
-domain-separated operation binding from exact MAU2 and generates a fresh CSPRNG
+domain-separated operation binding from exact MAU3 and generates a fresh CSPRNG
 attempt ID, hop replay IDs, ephemeral hop keys, and end-to-end reply key. The
 mailbox exit returns XPR1 inside authenticated XRS1. A success XPR1 carries the
 canonical mailbox response; a closed failure code maps to a sanitized
@@ -646,7 +665,7 @@ approval.
 
 The retired Session-derived store used SQLCipher schema v16; it is not the
 clean production mailbox store. The current account-scoped `DMB1` SQLCipher
-store is schema generation 7 under DR-0066. Unsupported schemas and incorrect keys require
+store is schema generation8 under DR-0081, retaining DR-0066's random-key interpretation. Unsupported schemas and incorrect keys require
 explicit reset; there are no migrations or dual readers. It retains mailbox
 traversal, encrypted transport inbox rows, and durable transport outbox state.
 Generation 2 adds a separate account-wide semantic DMC2 inbox for initial
@@ -954,7 +973,7 @@ non-forked direct text only after current endpoint and retirement checks;
 this is not contact consent, transport delivery or ACK authority.
 
 An accepted/durable outcome is reconstructed only from persisted canonical
-evidence. A crash before local outcome commit may resend the same MAU2 after
+evidence. A crash before local outcome commit may resend the same MAU3 after
 the bounded retry lease; replica and operation idempotency handle the replay.
 A crash after accepted evidence promotes the same attempt without allocating a
 new counter.
@@ -1134,7 +1153,7 @@ portable contracts.
 ## Other portable boundaries
 
 The internal `DeepIdV2MailboxOnionTransport` now derives a fresh DID2 network
-context through the actual account-owned source for each scoped MAU2 attempt.
+context through the actual account-owned source for each scoped MAU3 attempt.
 It reuses the identity-neutral mailbox codecs and path selector, binds the
 request to its credential route before refresh, and derives TLS facts only
 after selecting the exact three-hop path. Account-owned guards and entropy
@@ -1143,7 +1162,7 @@ before dispatch. The composition contract is owned by
 [DR-0032](../../docs/survival-program/decisions/DR-0032-did2-mailbox-selected-entry.md).
 No DID1 proof/source adapter or static ingress is introduced. This internal
 carrier has no shipping caller yet: durable DID2 route adoption/publication,
-protected random reachability-scoped holder, XMG1/XMC1 grants, adapter receipt
+protected random reachability-scoped holder, XMG1/XMC2 grants, adapter receipt
 and semantic ACK remain independent prerequisites. Codec/path/SQL tests do
 not establish socket, masked carrier or Windows/Android delivery.
 
@@ -1177,12 +1196,12 @@ The old caller-owned DID1 mailbox acquisition client is removed under
 bindings; they do not mint an issued grant. Protocol authors XMG1 directly from
 current DID2 route/time and a captured holder key. Shipping requires a new
 account-owned holder/request journal, exact retry before transport, live
-publication, the DR52 verifier and durable XMC1
+publication, the DR81 verifier and durable XMC2
 installation. The old identity/V1-storage holder owner is removed too; its
 narrow signer has only an internal DID2 route/capability-bound factory, with
 no public seed/storage/create/delete surface and no shipping custody producer.
 It rejects wrong role capability/locator/PMT/PMS for XMG1 and wrong
-network/holder/role/placement/epoch for MCP2; these scope checks do not authenticate
+network/holder/role/placement/epoch/selector for MCP3; these scope checks do not authenticate
 an issuer or topology and cannot replace the account owner.
 Do not trust an arbitrary nonzero membership commitment as authenticated topology.
 

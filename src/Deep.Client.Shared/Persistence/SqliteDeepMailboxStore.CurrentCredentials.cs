@@ -7,7 +7,7 @@ using Microsoft.Data.Sqlite;
 namespace Deep.Client.Shared.Persistence;
 
 /// <summary>
-/// Durable clean-break current-epoch mailbox credentials. ContactV1 XMC1 does
+/// Durable clean-break current-epoch mailbox credentials. ContactV1 XMC2 does
 /// not issue a speculative next grant, so rollover is an authenticated replace
 /// after a fresh acquisition rather than a fabricated current/next bundle.
 /// </summary>
@@ -211,7 +211,7 @@ public sealed partial class SqliteDeepMailboxStore
                 var frame = ScopedMailboxCredentialValidator.Sign(
                     target.Binding, signer, resolved.Grant!,
                     resolved.Counter, resolved.HolderKey);
-                var canonical = frame.GetCanonicalMau2Copy();
+                var canonical = frame.GetCanonicalMau3Copy();
                 var logicalId = OutboxLogicalId.FromBytes(
                     target.Binding.OperationId.Span);
                 var prepared = TransportOutboxPreparedItem.Create(
@@ -293,7 +293,7 @@ public sealed partial class SqliteDeepMailboxStore
             var targets = resumed.Frames.Select((frame, index) =>
             {
                 var decoded = MailboxAuthenticatedClientRequestCodec.Decode(
-                    frame.GetCanonicalMau2Copy());
+                    frame.GetCanonicalMau3Copy());
                 if (decoded.Binding.Operation != request.Selectors[index].Operation)
                     throw new InvalidDataException(
                         "Mailbox prepared batch operation catalog is corrupt.");
@@ -313,7 +313,7 @@ public sealed partial class SqliteDeepMailboxStore
     }
 
     private static NotSupportedException PairCredentialsUnavailable() => new(
-        "The clean mailbox store accepts only exact current XMG1/XMC1 credentials.");
+        "The clean mailbox store accepts only exact current XMG1/XMC2 credentials.");
 
     private static void ValidateCurrentCredential(
         ScopedCurrentMailboxCredential value,
@@ -329,7 +329,7 @@ public sealed partial class SqliteDeepMailboxStore
             !NonzeroCurrent(value.HolderPublicKey.Span, 32) ||
             !NonzeroCurrent(value.MailboxId.Span, 32) ||
             authority.NowUnixSeconds < value.Current.NotBeforeUnixSeconds ||
-            authority.NowUnixSeconds > value.Current.ExpiresAtUnixSeconds ||
+            authority.NowUnixSeconds >= value.Current.ExpiresAtUnixSeconds ||
             !FixedCurrent(
                 value.Current.PlacementCommitment.Span,
                 MailboxPlacementCommitment.Compute(
@@ -609,7 +609,7 @@ public sealed partial class SqliteDeepMailboxStore
         if (!FixedCurrent((byte[])reader.GetValue(0), selector.AccountScope.Value) ||
             !FixedCurrent((byte[])reader.GetValue(1), authority.NetworkId.Span) ||
             !FixedCurrent((byte[])reader.GetValue(2), authority.PolicyFingerprint.Span) ||
-            authority.NowUnixSeconds < notBefore || authority.NowUnixSeconds > expires ||
+            authority.NowUnixSeconds < notBefore || authority.NowUnixSeconds >= expires ||
             selector.Kind == MailboxCredentialScopeKind.Group &&
                 (reader.IsDBNull(5) ||
                  !FixedCurrent((byte[])reader.GetValue(5), selector.GroupMembershipCommitment.Span)) ||
@@ -703,7 +703,7 @@ public sealed partial class SqliteDeepMailboxStore
                 authority, target.Binding, allocateCounter: false);
             var frame = resumed.Frames[ordinal];
             var decoded = MailboxAuthenticatedClientRequestCodec.Decode(
-                frame.GetCanonicalMau2Copy());
+                frame.GetCanonicalMau3Copy());
             var persistedGrant = MailboxAuthenticatedCapabilityCodec.EncodeGrant(
                 decoded.Presentation.Grant);
             var currentGrant = MailboxAuthenticatedCapabilityCodec.EncodeGrant(

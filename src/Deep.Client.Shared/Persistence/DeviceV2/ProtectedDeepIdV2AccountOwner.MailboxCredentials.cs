@@ -53,12 +53,12 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             // PMS names mailbox replicas, not the two ResolveInvite stores which
             // attested private capability lookup for issuance.
             var ids = route.Route.Selection.Field(6);
-            if (ids.Length < 64 || ids.Length % 32 != 0)
+            if (ids.Length != 64)
                 throw new CryptographicException("Owned mailbox installation has no exact replica pair.");
             var first = ids[..32]; var second = ids.Slice(32, 32);
             var verified = new VerifiedCurrentMailboxGrant(
                 ContactCodec.Decode("XMG1", winner.ExactXmg1.Span),
-                ContactCodec.Decode("XMC1", winner.ExactXmc1.Span), grant, route.Route,
+                ContactCodec.Decode("XMC2", winner.ExactXmc2.Span), grant, route.Route,
                 [new(first.Span, route.Network.ResolveNodeIdentityPublicKey(first).Span),
              new(second.Span, route.Network.ResolveNodeIdentityPublicKey(second).Span)], authority);
             holder = ReachabilityMailboxHolderAuthority.OpenRetained(route, locator,
@@ -136,9 +136,11 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 var exact = MailboxAuthenticatedCapabilityCodec.EncodeGrant(owner.Grant);
                 try
                 {
-                    if (input.Length != tag + 344 || !FixedRoute(input.Slice(tag + 72, 272), exact) ||
+                    if (input.Length != tag + MailboxAuthenticatedCapabilityLimits.PresentationLength -
+                        MailboxAuthenticatedCapabilityLimits.SignatureLength ||
+                        !FixedRoute(input.Slice(tag + 72, MailboxAuthenticatedCapabilityLimits.GrantLength), exact) ||
                         BinaryPrimitives.ReadUInt64BigEndian(input.Slice(tag + 24)) < owner.MinimumCounter)
-                        throw new CryptographicException("Owned MCP2 signing differs from the protected exact grant/counter floor.");
+                        throw new CryptographicException("Owned MCP3 signing differs from the protected exact grant/counter floor.");
                     return owner.holder.SignMailboxPresentation(operation, input);
                 }
                 finally { CryptographicOperations.ZeroMemory(exact); }

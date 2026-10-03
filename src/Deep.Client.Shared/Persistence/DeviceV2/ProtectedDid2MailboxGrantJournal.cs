@@ -10,7 +10,9 @@ namespace Deep.Client.Shared.Persistence.DeviceV2;
 internal static class ProtectedDid2MailboxGrantJournal
 {
     internal const string Slot = "deep.store.v2.mailbox-grant-journal";
-    internal const int HeaderBytes = 92, EntryBytes = 1013, MaximumEntries = 128;
+    // Version 2 admits only selector-bound XMC2/MCG3 custody, including empty state.
+    private const byte Version = 2;
+    internal const int HeaderBytes = 92, EntryBytes = 1045, MaximumEntries = 128;
     internal const int MaximumBytes = HeaderBytes + MaximumEntries * EntryBytes;
     private const int RequestOffset = 100, ResponseOffset = RequestOffset + 435;
 
@@ -50,23 +52,23 @@ internal static class ProtectedDid2MailboxGrantJournal
         catch { CryptographicOperations.ZeroMemory(entry); throw; }
     }
 
-    internal static byte[] WithWinner(ReadOnlySpan<byte> pending, ReadOnlySpan<byte> exactXmc1,
+    internal static byte[] WithWinner(ReadOnlySpan<byte> pending, ReadOnlySpan<byte> exactXmc2,
         ReadOnlySpan<byte> network)
     {
         RequireEntry(pending, network);
-        if (pending[96] != 1 || exactXmc1.Length != 478)
+        if (pending[96] != 1 || exactXmc2.Length != 510)
             throw new InvalidDataException("Only a pending grant may adopt one exact success.");
         var entry = pending.ToArray();
         try
         {
-            entry[96] = 2; exactXmc1.CopyTo(entry.AsSpan(ResponseOffset));
+            entry[96] = 2; exactXmc2.CopyTo(entry.AsSpan(ResponseOffset));
             RequireEntry(entry, network); return entry;
         }
         catch { CryptographicOperations.ZeroMemory(entry); throw; }
     }
 
     internal static ReadOnlyMemory<byte> Request(byte[] entry) => entry.AsMemory(RequestOffset, 435);
-    internal static ReadOnlyMemory<byte> Response(byte[] entry) => entry.AsMemory(ResponseOffset, 478);
+    internal static ReadOnlyMemory<byte> Response(byte[] entry) => entry.AsMemory(ResponseOffset, 510);
     internal static ReadOnlySpan<byte> Seed(byte[] entry) => entry.AsSpan(32, 32);
     internal static bool HasWinner(byte[] entry) => entry[96] == 2;
 
@@ -77,7 +79,7 @@ internal static class ProtectedDid2MailboxGrantJournal
         ReadOnlySpan<byte> account, ReadOnlySpan<byte> instance)
     {
         RequireScope(network, account, instance);
-        if (exact.Length < HeaderBytes || exact.Length > MaximumBytes || exact[0] != 1 || exact[1] != 0 ||
+        if (exact.Length < HeaderBytes || exact.Length > MaximumBytes || exact[0] != Version || exact[1] != 0 ||
             !Fixed(exact.Slice(12, 16), network) || !Fixed(exact.Slice(28, 32), account) || !Fixed(exact.Slice(60, 32), instance))
             throw new InvalidDataException("Mailbox holder custody is incompatible or has a foreign account instance.");
         var count = BinaryPrimitives.ReadUInt16BigEndian(exact.Slice(2, 2));
@@ -113,7 +115,7 @@ internal static class ProtectedDid2MailboxGrantJournal
             if (Convert.ToHexString(pair.Value.AsSpan(0, 32)) != pair.Key)
                 throw new InvalidDataException("Mailbox holder scope name differs from its exact entry.");
         }
-        var exact = new byte[HeaderBytes + state.Entries.Count * EntryBytes]; exact[0] = 1;
+        var exact = new byte[HeaderBytes + state.Entries.Count * EntryBytes]; exact[0] = Version;
         BinaryPrimitives.WriteUInt16BigEndian(exact.AsSpan(2, 2), checked((ushort)state.Entries.Count));
         BinaryPrimitives.WriteUInt64BigEndian(exact.AsSpan(4, 8), state.Revision);
         network.CopyTo(exact.AsSpan(12)); account.CopyTo(exact.AsSpan(28)); instance.CopyTo(exact.AsSpan(60));
@@ -144,14 +146,14 @@ internal static class ProtectedDid2MailboxGrantJournal
             finally { CryptographicOperations.ZeroMemory(pair.PrivateKey); }
         }
         finally { CryptographicOperations.ZeroMemory(seed); }
-        var response = entry.Slice(ResponseOffset, 478);
+        var response = entry.Slice(ResponseOffset, 510);
         if (entry[96] == 1)
         {
             if (response.IndexOfAnyExcept((byte)0) >= 0) throw new InvalidDataException("Pending mailbox custody contains a winner.");
         }
         else
         {
-            var result = ContactCodec.Decode("XMC1", response);
+            var result = ContactCodec.Decode("XMC2", response);
             ContactCodec.ValidateMailboxGrantResultBinding(request, result);
             if (BinaryPrimitives.ReadUInt16BigEndian(result.Field(3).Span) != 1 || !Fixed(result.Field(7).Span, entry.Slice(64, 32)))
                 throw new CryptographicException("Mailbox custody winner differs from its exact route.");

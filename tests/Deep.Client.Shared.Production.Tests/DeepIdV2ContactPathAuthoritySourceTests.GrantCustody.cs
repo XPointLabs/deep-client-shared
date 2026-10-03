@@ -35,7 +35,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     {
         var network = Bytes(16, 0x11); var account = Bytes(32, 0x12); var instance = Bytes(32, 0x13);
         var exact = ProtectedDid2MailboxGrantJournal.Empty(network, account, instance);
-        if (fault == 0) exact[0] = 2;
+        if (fault == 0) exact[0] = 1; // Retired custody rejects even when empty.
         if (fault == 1) exact[1] = 1;
         if (fault == 2) BinaryPrimitives.WriteUInt16BigEndian(exact.AsSpan(2), 129);
         if (fault == 3) exact[11] = 0;
@@ -123,7 +123,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 var entry = Assert.Single(winner.Entries).Value;
                 Assert.True(ProtectedDid2MailboxGrantJournal.HasWinner(entry));
                 Assert.Equal(verified.ExactXmg1.ToArray(), ProtectedDid2MailboxGrantJournal.Request(entry).ToArray());
-                Assert.Equal(verified.ExactXmc1.ToArray(), ProtectedDid2MailboxGrantJournal.Response(entry).ToArray());
+                Assert.Equal(verified.ExactXmc2.ToArray(), ProtectedDid2MailboxGrantJournal.Response(entry).ToArray());
                 // A corrupted seed, winner, phase or reserved byte is not repaired.
                 foreach (var offset in new[] { 32, 96, 97, 100 + 435 + 32 })
                 {
@@ -140,7 +140,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             reader = ReopenGrantReader(); source = GrantReaderSource(reader);
             var reopened = await reader.AcquirePermanentContactDepositGrantAsync(resolved, source, transport);
             Assert.Equal(verified.ExactXmg1.ToArray(), reopened.ExactXmg1.ToArray());
-            Assert.Equal(verified.ExactXmc1.ToArray(), reopened.ExactXmc1.ToArray());
+            Assert.Equal(verified.ExactXmc2.ToArray(), reopened.ExactXmc2.ToArray());
             await AssertInstalledGrantSqlAsync(reopened, own: false);
             Assert.Equal(3, transport.Calls); // Retained winner makes no issuer callback.
             Assert.False(await reader.HasOwnStagedPreKeyInventoryAsync()); // Not a session/acceptance/ACK.
@@ -170,12 +170,12 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             {
                 var entry = Assert.Single(winner.Entries).Value;
                 Assert.Equal(3UL, winner.Revision); Assert.True(ProtectedDid2MailboxGrantJournal.HasWinner(entry));
-                Assert.Equal(retrieved.ExactXmc1.ToArray(), ProtectedDid2MailboxGrantJournal.Response(entry).ToArray());
+                Assert.Equal(retrieved.ExactXmc2.ToArray(), ProtectedDid2MailboxGrantJournal.Response(entry).ToArray());
             }
             ownerReopened = ReopenAccount();
             var retrieveAgain = await ownerReopened.AcquireOwnPermanentContactRetrieveGrantAsync(Source(ownerReopened), retrieval);
             Assert.Equal(retrieved.ExactXmg1.ToArray(), retrieveAgain.ExactXmg1.ToArray());
-            Assert.Equal(retrieved.ExactXmc1.ToArray(), retrieveAgain.ExactXmc1.ToArray());
+            Assert.Equal(retrieved.ExactXmc2.ToArray(), retrieveAgain.ExactXmc2.ToArray());
             Assert.Equal(2, retrieval.Calls);
             await AssertInstalledGrantSqlAsync(retrieveAgain, own: true);
             await peerStorage.DeleteBatchAsync([ProtectedDid2MailboxGrantJournal.Slot]);
@@ -256,7 +256,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             var issuer = new FixtureMailboxIssuer(retrieve ? (byte)0x32 : (byte)0x31);
             var exact = (await authorized.AuthorSuccessAsync(issuer, ct)).ToArray();
             Assert.Equal(1, issuer.Calls);
-            Assert.Equal(request.Record.Field(10).ToArray(), ContactCodec.Decode("XMC1", exact).Field(6).ToArray());
+            Assert.Equal(request.Record.Field(10).ToArray(), ContactCodec.Decode("XMC2", exact).Field(6).ToArray());
             return exact;
         }
     }

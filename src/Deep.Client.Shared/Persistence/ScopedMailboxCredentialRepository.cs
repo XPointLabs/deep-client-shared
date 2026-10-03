@@ -280,7 +280,7 @@ public sealed record ScopedMailboxCredentialGeneration(
 }
 
 /// <summary>
-/// One exact current-epoch credential acquired through clean XMG1/XMC1. This
+/// One exact current-epoch credential acquired through clean XMG1/XMC2. This
 /// is the production ContactV1 shape and deliberately has no synthetic next
 /// epoch or Session-derived identity.
 /// </summary>
@@ -513,7 +513,7 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
         VerifiedOfficialMailboxAuthority authority,
         CancellationToken cancellationToken = default) =>
         throw new NotSupportedException(
-            "Clean XMG1/XMC1 credentials belong to SqliteDeepMailboxStore.");
+            "Clean XMG1/XMC2 credentials belong to SqliteDeepMailboxStore.");
 
     public async Task InstallScopedCredentialBatchAsync(
         IReadOnlyList<ScopedMailboxCredentialGeneration> generations,
@@ -1996,7 +1996,7 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
                 {
                     var logical = request.Selectors[ordinal];
                     var decoded = MailboxAuthenticatedClientRequestCodec.Decode(
-                        resumed.Frames[ordinal].GetCanonicalMau2Copy());
+                        resumed.Frames[ordinal].GetCanonicalMau3Copy());
                     var target = new ScopedMailboxBatchTarget(
                         logical.Selector, decoded.Binding);
                     var resolved = ResolveForPrepare(
@@ -2043,7 +2043,7 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
                     connection, transaction, target, signer, authority,
                     allocateCounter: true);
                 var frame = SignResolved(target.Binding, signer, resolved);
-                var canonical = frame.GetCanonicalMau2Copy();
+                var canonical = frame.GetCanonicalMau3Copy();
                 var logicalId = OutboxLogicalId.FromBytes(
                     target.Binding.OperationId.Span);
                 var prepared = TransportOutboxPreparedItem.Create(
@@ -2136,7 +2136,7 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
                 var logical = request.Selectors[ordinal];
                 var frame = resumed.Frames[ordinal];
                 var decoded = MailboxAuthenticatedClientRequestCodec.Decode(
-                    frame.GetCanonicalMau2Copy());
+                    frame.GetCanonicalMau3Copy());
                 if (decoded.Binding.Operation != logical.Operation)
                 {
                     throw new InvalidDataException(
@@ -2362,7 +2362,7 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
         IMailboxOperationSigner signer)
     {
         var decoded = MailboxAuthenticatedClientRequestCodec.Decode(
-            frame.GetCanonicalMau2Copy());
+            frame.GetCanonicalMau3Copy());
         var persistedGrant = MailboxAuthenticatedCapabilityCodec.EncodeGrant(
             decoded.Presentation.Grant);
         var currentGrant = MailboxAuthenticatedCapabilityCodec.EncodeGrant(

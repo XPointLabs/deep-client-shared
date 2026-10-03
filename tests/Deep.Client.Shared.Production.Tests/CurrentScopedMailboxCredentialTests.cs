@@ -11,7 +11,7 @@ namespace Deep.Client.Shared.Production.Tests;
 public sealed class CurrentScopedMailboxCredentialTests
 {
     [Fact]
-    public async Task CurrentGrantSurvivesRestartAndPreparedMau2ResumesExactly()
+    public async Task CurrentGrantSurvivesRestartAndPreparedMau3ResumesExactly()
     {
         using var fixture = new Fixture();
         using (var store = fixture.Open())
@@ -29,7 +29,12 @@ public sealed class CurrentScopedMailboxCredentialTests
                 fixture.PrepareRequest,
                 fixture.Signer,
                 fixture.Authority);
-            exact = Assert.Single(prepared.Frames).GetCanonicalMau2Copy();
+            exact = Assert.Single(prepared.Frames).GetCanonicalMau3Copy();
+            Assert.Equal("MAU3"u8.ToArray(), exact[..4]);
+            var decoded = MailboxAuthenticatedClientRequestCodec.Decode(exact);
+            Assert.Equal(MailboxAuthenticatedCapabilityCodec.DecodeGrant(
+                fixture.Credential.Grants.RetrieveGrant.Span).SelectionInput.ToArray(),
+                decoded.Presentation.Grant.SelectionInput.ToArray());
             var route = await store.ReadScopedMailboxRouteAsync(fixture.Selector, fixture.Authority);
             MailboxPrivacyPathProvider.ValidateRouteRequest(OnionOperation.Retrieve, exact, route);
         }
@@ -43,7 +48,7 @@ public sealed class CurrentScopedMailboxCredentialTests
             Assert.NotNull(resumed);
             Assert.Equal(
                 exact,
-                Assert.Single(resumed!.Frames).GetCanonicalMau2Copy());
+                Assert.Single(resumed!.Frames).GetCanonicalMau3Copy());
             await store.InstallCurrentScopedCredentialAsync(
                 fixture.Credential, fixture.Authority);
             await Assert.ThrowsAsync<InvalidOperationException>(() =>
@@ -51,6 +56,29 @@ public sealed class CurrentScopedMailboxCredentialTests
                     fixture.CreateCredential(epoch: 6, marker: 0x70),
                     fixture.Authority));
         }
+    }
+
+    [Theory]
+    [InlineData(1200L)]
+    [InlineData(1201L)]
+    public async Task ExactGrantExpiryRejectsInstallationPreparationAndResumeWithoutReplacingState(long seconds)
+    {
+        using var fixture = new Fixture();
+        using var store = fixture.Open();
+        await store.InstallCurrentScopedCredentialAsync(fixture.Credential, fixture.Authority);
+        var prepared = await store.PrepareScopedMailboxBatchAsync(fixture.PrepareRequest, fixture.Signer, fixture.Authority);
+        var exact = Assert.Single(prepared.Frames).GetCanonicalMau3Copy();
+        fixture.Clock.Seconds = seconds;
+        await Assert.ThrowsAsync<InvalidDataException>(() => store.InstallCurrentScopedCredentialAsync(
+            fixture.Credential, fixture.Authority));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => store.ReadScopedMailboxRouteAsync(fixture.Selector, fixture.Authority));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => store.PrepareScopedMailboxBatchAsync(
+            fixture.PrepareRequest, fixture.Signer, fixture.Authority));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => store.TryResumeScopedMailboxBatchAsync(
+            fixture.ResumeRequest, fixture.Signer, fixture.Authority));
+        fixture.Clock.Seconds = 1050; // Synthetic clock fault cleanup, not runtime renewal.
+        var resumed = await store.TryResumeScopedMailboxBatchAsync(fixture.ResumeRequest, fixture.Signer, fixture.Authority);
+        Assert.Equal(exact, Assert.Single(resumed!.Frames).GetCanonicalMau3Copy());
     }
 
     private sealed class Fixture : IDisposable
@@ -154,6 +182,7 @@ public sealed class CurrentScopedMailboxCredentialTests
                 OverlapUntilUnixSeconds = 0,
                 PlacementCommitment = value.PlacementCommitment,
                 MembershipCommitment = value.MembershipCommitment,
+                SelectionInput = Bytes(32, unchecked((byte)(marker + 4))),
                 IssuerPublicKey = crypto.GetPublicKey(issuerSeed),
                 HolderPublicKey = crypto.GetPublicKey(holderSeed),
                 IssuerSignature = new byte[64]
@@ -213,7 +242,7 @@ public sealed class CurrentScopedMailboxCredentialTests
 
     internal sealed class FixedTimeProvider(long seconds) : TimeProvider
     {
-        internal long Seconds { get; } = seconds;
+        internal long Seconds { get; set; } = seconds;
         public override DateTimeOffset GetUtcNow() =>
             DateTimeOffset.FromUnixTimeSeconds(Seconds);
     }

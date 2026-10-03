@@ -41,7 +41,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             using var grantState = ProtectedDid2MailboxGrantJournal.Decode(grantRoot, networkId, current.AccountId.Span, instance);
             var grantName = Convert.ToHexString(ProtectedDid2MailboxGrantJournal.Scope(routeHash, publication.Locator.Span, (byte)MailboxCapabilityDomain.Retrieve));
             if (!grantState.Entries.TryGetValue(grantName, out var retained) || !ProtectedDid2MailboxGrantJournal.HasWinner(retained) ||
-                !FixedRoute(ProtectedDid2MailboxGrantJournal.Response(retained).Span, winner.ExactXmc1.Span))
+                !FixedRoute(ProtectedDid2MailboxGrantJournal.Response(retained).Span, winner.ExactXmc2.Span))
                 throw new CryptographicException("Mailbox read has no exact protected Retrieve winner.");
             using var loan = await OpenMailboxWinnerUnderLeaseAsync(current, held, publication.Route, winner, publication.Locator,
                 publication.Capability, retained, source, fresh, publication.RecheckAsync, ct).ConfigureAwait(false);
@@ -88,7 +88,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 prepared = await new MailboxAuthenticatedRequestFactory(loan.Store, loan.Authority).CreateRetrieveAsync(
                     loan.Selector.AccountScope, loan.Selector, loan.Signer, loan.Route, request.OperationId, request.AfterCursor,
                     request.MaximumItems, request.ContinuationToken, ct).ConfigureAwait(false);
-                exact = prepared.GetCanonicalMau2Copy(); cycle.AdoptPrepared(exact, ack: false);
+                exact = prepared.GetCanonicalMau3Copy(); cycle.AdoptPrepared(exact, ack: false);
                 if (cycle.RetrieveCounter < loan.MinimumCounter) throw new CryptographicException("SQL read replay counter rolled back behind protected custody.");
                 state.Counters[Convert.ToHexString(grantHash)] = cycle.RetrieveCounter; state.Phase = 2;
                 await Save().ConfigureAwait(false);

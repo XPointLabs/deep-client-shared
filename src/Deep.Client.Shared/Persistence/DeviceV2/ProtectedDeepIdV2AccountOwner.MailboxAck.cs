@@ -80,7 +80,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 loan.MinimumCounter = state.MinimumCounter(cycle.Grant);
                 prepared = await new MailboxAuthenticatedRequestFactory(loan.Store, loan.Authority).CreateAckAsync(loan.Selector.AccountScope,
                     loan.Selector, loan.Signer, body.OperationId, body.IsFinalPage, body.ContinuationToken, body.Acknowledgements, ct).ConfigureAwait(false);
-                exact = prepared.GetCanonicalMau2Copy(); cycle.AdoptPrepared(exact, ack: true);
+                exact = prepared.GetCanonicalMau3Copy(); cycle.AdoptPrepared(exact, ack: true);
                 if (cycle.AckCounter < loan.MinimumCounter) throw new CryptographicException("SQL ACK replay counter rolled back behind protected custody.");
                 state.Counters[Convert.ToHexString(cycle.Grant)] = cycle.AckCounter; state.Phase = 6; await Save(ct).ConfigureAwait(false);
             }

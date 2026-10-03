@@ -36,6 +36,7 @@ public static class ReachabilityMailboxHolderAuthority
             LocatorHash = locator.ToArray(); RoleCapability = capability.ToArray();
             Pmt2Reference = ContactCodec.ArtifactReference("PMT2", route.Route.Projection).CanonicalBytes.ToArray();
             Pms2Hash = route.Route.Selection.ArtifactHash.ToArray();
+            SelectionInput = route.Route.Selection.Field(3).ToArray();
             PlacementCommitment = MailboxPlacementCommitment.Compute(new BlindedPlacementId(route.Route.Reachability.Field(10).Span));
             Epoch = BinaryPrimitives.ReadUInt64BigEndian(route.Route.Selection.Field(4).Span);
             Domain = domain;
@@ -46,6 +47,7 @@ public static class ReachabilityMailboxHolderAuthority
         internal byte[] RoleCapability { get; }
         internal byte[] Pmt2Reference { get; }
         internal byte[] Pms2Hash { get; }
+        internal byte[] SelectionInput { get; }
         internal byte[] PlacementCommitment { get; }
         internal ulong Epoch { get; }
         internal MailboxCapabilityDomain Domain { get; }
@@ -137,7 +139,7 @@ public static class ReachabilityMailboxHolderAuthority
             MailboxAuthenticatedOperation operation,
             ReadOnlySpan<byte> canonicalPresentationSigningBytes)
         {
-            ValidateMcp2SigningInput(operation, canonicalPresentationSigningBytes);
+            ValidateMcp3SigningInput(operation, canonicalPresentationSigningBytes);
             return Sign(canonicalPresentationSigningBytes);
         }
 
@@ -172,15 +174,15 @@ public static class ReachabilityMailboxHolderAuthority
             }
         }
 
-        private void ValidateMcp2SigningInput(
+        private void ValidateMcp3SigningInput(
             MailboxAuthenticatedOperation operation,
             ReadOnlySpan<byte> input)
         {
             var tag = operation switch
             {
-                MailboxAuthenticatedOperation.Store => "DEEP-MCP2-STR\0\0\0"u8,
-                MailboxAuthenticatedOperation.Retrieve => "DEEP-MCP2-GET\0\0\0"u8,
-                MailboxAuthenticatedOperation.Ack => "DEEP-MCP2-ACK\0\0\0"u8,
+                MailboxAuthenticatedOperation.Store => "DEEP-MCP3-STR\0\0\0"u8,
+                MailboxAuthenticatedOperation.Retrieve => "DEEP-MCP3-GET\0\0\0"u8,
+                MailboxAuthenticatedOperation.Ack => "DEEP-MCP3-ACK\0\0\0"u8,
                 _ => throw new ArgumentOutOfRangeException(nameof(operation)),
             };
             const int unsignedPresentationLength =
@@ -189,18 +191,18 @@ public static class ReachabilityMailboxHolderAuthority
             if (input.Length != tag.Length + unsignedPresentationLength ||
                 !CryptographicOperations.FixedTimeEquals(input[..tag.Length], tag))
                 throw new CryptographicException(
-                    "The holder key accepts only exact domain-separated MCP2 signing input.");
+                    "The holder key accepts only exact domain-separated MCP3 signing input.");
 
             var unsigned = input[tag.Length..];
-            if (!unsigned[..4].SequenceEqual("MCP2"u8) ||
-                unsigned[4] != 2 ||
+            if (!unsigned[..4].SequenceEqual("MCP3"u8) ||
+                unsigned[4] != 3 ||
                 unsigned[5] != (byte)operation ||
                 unsigned.Slice(6, 2).IndexOfAnyExcept((byte)0) >= 0 ||
                 BinaryPrimitives.ReadUInt16BigEndian(unsigned.Slice(64, 2)) !=
                     MailboxAuthenticatedCapabilityLimits.GrantLength ||
                 unsigned.Slice(66, 6).IndexOfAnyExcept((byte)0) >= 0)
                 throw new CryptographicException(
-                    "The MCP2 signing input is not canonical.");
+                    "The MCP3 signing input is not canonical.");
 
             MailboxAuthenticatedGrant grant;
             try
@@ -213,7 +215,7 @@ public static class ReachabilityMailboxHolderAuthority
             catch (MailboxAuthenticatedCapabilityException exception)
             {
                 throw new CryptographicException(
-                    "The MCP2 signing input contains an invalid MCG2 grant.",
+                    "The MCP3 signing input contains an invalid MCG3 grant.",
                     exception);
             }
             var expectedDomain = operation == MailboxAuthenticatedOperation.Store
@@ -222,11 +224,12 @@ public static class ReachabilityMailboxHolderAuthority
             if (binding.Domain != expectedDomain ||
                 grant.Domain != expectedDomain ||
                 grant.Epoch != binding.Epoch ||
+                !Fixed(grant.SelectionInput.Span, binding.SelectionInput) ||
                 !Fixed(grant.PlacementCommitment.Span, binding.PlacementCommitment) ||
                 !Fixed(grant.NetworkId.Span, binding.NetworkId) ||
                 !Fixed(grant.HolderPublicKey.Span, publicKey))
                 throw new CryptographicException(
-                    "The MCP2 grant differs from the protected reachability holder scope.");
+                    "The MCP3 grant differs from the protected reachability holder scope.");
         }
 
         private void ValidateXmg1SigningInput(ReadOnlySpan<byte> input)

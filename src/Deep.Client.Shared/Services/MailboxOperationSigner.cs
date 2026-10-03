@@ -2,7 +2,7 @@
 namespace Deep.Client.Shared.Services;
 
 /// <summary>
-/// Per-operation mailbox signing authority. It exposes only the exact MCP2
+/// Per-operation mailbox signing authority. It exposes only the exact MCP3
 /// presentation operation and never exposes a generic signer or private key.
 /// </summary>
 public interface IMailboxOperationSigner

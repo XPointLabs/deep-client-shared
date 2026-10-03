@@ -37,6 +37,37 @@ public sealed class Did2MailboxRouteBindingTests
     }
 
     [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    [InlineData(5)]
+    public async Task RetiredOrCrossFedFramingRejectsBeforeNetworkGuardsAndEntropy(int fault)
+    {
+        var route = Route();
+        var exact = Request(OnionOperation.Retrieve, route);
+        switch (fault)
+        {
+            case 0: "MAU2"u8.CopyTo(exact); break;
+            case 1: exact[4] = 2; break;
+            case 2: "MCP2"u8.CopyTo(exact.AsSpan(16)); break;
+            case 3: exact[16 + 4] = 2; break;
+            case 4: "MCG2"u8.CopyTo(exact.AsSpan(16 + 72)); break;
+            case 5: exact[16 + 72 + 4] = 2; break;
+        }
+        var source = new NeverAuthority();
+        var guards = new InMemoryProtectedEntryGuardStore();
+        var provider = new MailboxPrivacyPathProvider(source, guards,
+            PrivacyMailboxRouteSelection.Primary, () => throw new InvalidOperationException("No entropy for retired frames."));
+        var failure = await Assert.ThrowsAsync<ClientMailboxTransportException>(() =>
+            provider.PrepareOnRouteAsync(OnionOperation.Retrieve, exact, route, default).AsTask());
+        Assert.Equal(ClientMailboxTransportFailure.MalformedRequest, failure.Failure);
+        Assert.Equal(0, source.Calls);
+        Assert.Null(await guards.ReadAsync(default));
+    }
+
+    [Theory]
     [InlineData(OnionOperation.Store)]
     [InlineData(OnionOperation.Retrieve)]
     [InlineData(OnionOperation.Acknowledge)]
@@ -110,6 +141,7 @@ public sealed class Did2MailboxRouteBindingTests
                     Generation = 1, Serial = B(16, 25), NotBeforeUnixSeconds = 1,
                     ExpiresAtUnixSeconds = route.ExpiresAtUnixSeconds, OverlapUntilUnixSeconds = 0,
                     PlacementCommitment = route.PlacementCommitment, MembershipCommitment = route.MembershipCommitment,
+                    SelectionInput = B(32, 29),
                     IssuerPublicKey = B(32, 26), HolderPublicKey = B(32, 27), IssuerSignature = B(64, 28)
                 }
             }

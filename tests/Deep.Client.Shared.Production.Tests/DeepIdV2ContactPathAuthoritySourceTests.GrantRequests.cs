@@ -96,7 +96,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             ReachabilityMailboxHolderAuthority.ReachabilityMailboxHolderSigner holder,
             VerifiedDeepIdV2ContactRouteClosure route, DeepIdV2ContactRouteTimeWindow window)
         {
-            // Scope-only synthetic MCG2, deliberately NOT issuer/topology evidence.
+            // Scope-only synthetic MCG3, deliberately NOT issuer/topology evidence.
             var grant = new MailboxAuthenticatedGrant
             {
                 Domain = MailboxCapabilityDomain.Deposit, Lifecycle = MailboxCapabilityLifecycle.Active,
@@ -105,6 +105,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 ExpiresAtUnixSeconds = window.UpperUnixSeconds + 5, OverlapUntilUnixSeconds = 0,
                 PlacementCommitment = MailboxPlacementCommitment.Compute(new BlindedPlacementId(route.Route.Reachability.Field(10).Span)),
                 MembershipCommitment = Bytes(32, 0x92), IssuerPublicKey = Bytes(32, 0x93),
+                SelectionInput = route.Route.Selection.Field(3),
                 HolderPublicKey = holder.Ed25519PublicKey, IssuerSignature = Bytes(64, 0x94)
             };
             var presentation = new MailboxAuthenticatedPresentation
@@ -116,7 +117,12 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             var signature = holder.SignMailboxPresentation(presentation.Operation, input);
             try { Assert.True(PublicKeyAuth.VerifyDetached(signature, input, holder.Ed25519PublicKey.ToArray())); }
             finally { CryptographicOperations.ZeroMemory(signature); }
+            var oldLabel = input.ToArray(); "DEEP-MCP2-STR\0\0\0"u8.CopyTo(oldLabel);
+            Assert.Throws<CryptographicException>(() => holder.SignMailboxPresentation(presentation.Operation, oldLabel));
+            var oldVersion = input.ToArray(); oldVersion[16 + 4] = 2;
+            Assert.Throws<CryptographicException>(() => holder.SignMailboxPresentation(presentation.Operation, oldVersion));
             foreach (var bad in new[] { grant with { Epoch = grant.Epoch + 1 },
+                grant with { SelectionInput = Bytes(32, 0x9b) },
                 grant with { PlacementCommitment = Bytes(32, 0x98) }, grant with { NetworkId = Bytes(16, 0x99) },
                 grant with { HolderPublicKey = Bytes(32, 0x9a) } })
             {

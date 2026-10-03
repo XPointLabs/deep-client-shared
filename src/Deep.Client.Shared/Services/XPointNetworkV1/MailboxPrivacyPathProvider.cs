@@ -142,7 +142,7 @@ public sealed class MailboxPrivacyPathProvider :
             throw Fail(
                 ClientMailboxTransportFailure.MalformedRequest,
                 retryable: false,
-                "The exact MAU2 request could not be promoted to a verified mailbox onion request.",
+                "The exact MAU3 request could not be promoted to a verified mailbox onion request.",
                 exception);
         }
 
@@ -217,7 +217,7 @@ public sealed class MailboxPrivacyPathProvider :
             grant.Epoch != route.Epoch || grant.ExpiresAtUnixSeconds != route.ExpiresAtUnixSeconds ||
             !Fixed(grant.PlacementCommitment.Span, route.PlacementCommitment.Span) ||
             !Fixed(grant.MembershipCommitment.Span, route.MembershipCommitment.Span))
-            throw Fail(ClientMailboxTransportFailure.ProtocolViolation, false, "The MAU2 grant differs from its scoped credential route.");
+            throw Fail(ClientMailboxTransportFailure.ProtocolViolation, false, "The MAU3 grant differs from its scoped credential route.");
         (ulong epoch, BlindedMailboxId mailbox, BlindedPlacementId placement) = expected switch
         {
             MailboxAuthenticatedOperation.Store => Store(),
@@ -227,7 +227,7 @@ public sealed class MailboxPrivacyPathProvider :
         };
         if (epoch != route.Epoch || !Fixed(mailbox.Bytes.Span, route.MailboxId.Bytes.Span) ||
             !Fixed(placement.Bytes.Span, route.PlacementId.Bytes.Span))
-            throw Fail(ClientMailboxTransportFailure.ProtocolViolation, false, "The MAU2 body differs from its scoped credential route.");
+            throw Fail(ClientMailboxTransportFailure.ProtocolViolation, false, "The MAU3 body differs from its scoped credential route.");
 
         (ulong, BlindedMailboxId, BlindedPlacementId) Store()
         { var body = MailboxAuthenticatedRequestTranscript.DecodeStoreBody(request.Binding.CanonicalRequest.Span); return (body.Epoch, body.MailboxId, body.PlacementId); }

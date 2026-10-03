@@ -106,7 +106,7 @@ public sealed class PrivacyMailboxRoute
 }
 
 /// <summary>
-/// Wraps exact canonical MAU2 in a three-hop Deep-native privacy frame. A best-effort fallback
+/// Wraps exact canonical MAU3 in a three-hop Deep-native privacy frame. A best-effort fallback
 /// attempt is allowed only when the primary ingress proves that forwarding never started. There is no
 /// direct mailbox HTTPS fallback. Every response is opened with the per-attempt reply context
 /// before the existing mailbox adapter verifies and journals its canonical durable evidence.
@@ -185,63 +185,63 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
     }
 
     public Task<ReadOnlyMemory<byte>> StoreAsync(
-        ReadOnlyMemory<byte> canonicalMau2,
+        ReadOnlyMemory<byte> canonicalMau3,
         CancellationToken cancellationToken = default) =>
         SendAsync(
-            canonicalMau2,
+            canonicalMau3,
             MailboxAuthenticatedOperation.Store,
             OnionOperation.Store,
             routeBinding: null,
             cancellationToken);
 
     public Task<ReadOnlyMemory<byte>> RetrieveAsync(
-        ReadOnlyMemory<byte> canonicalMau2,
+        ReadOnlyMemory<byte> canonicalMau3,
         CancellationToken cancellationToken = default) =>
         SendAsync(
-            canonicalMau2,
+            canonicalMau3,
             MailboxAuthenticatedOperation.Retrieve,
             OnionOperation.Retrieve,
             routeBinding: null,
             cancellationToken);
 
     public Task<ReadOnlyMemory<byte>> AcknowledgeAsync(
-        ReadOnlyMemory<byte> canonicalMau2,
+        ReadOnlyMemory<byte> canonicalMau3,
         CancellationToken cancellationToken = default) =>
         SendAsync(
-            canonicalMau2,
+            canonicalMau3,
             MailboxAuthenticatedOperation.Ack,
             OnionOperation.Acknowledge,
             routeBinding: null,
             cancellationToken);
 
     Task<ReadOnlyMemory<byte>> IRouteBoundClientMailboxBinaryIngress.StoreOnRouteAsync(
-        ReadOnlyMemory<byte> canonicalMau2,
+        ReadOnlyMemory<byte> canonicalMau3,
         ScopedMailboxResolvedRoute route,
         CancellationToken cancellationToken) =>
         SendAsync(
-            canonicalMau2,
+            canonicalMau3,
             MailboxAuthenticatedOperation.Store,
             OnionOperation.Store,
             route,
             cancellationToken);
 
     Task<ReadOnlyMemory<byte>> IRouteBoundClientMailboxBinaryIngress.RetrieveOnRouteAsync(
-        ReadOnlyMemory<byte> canonicalMau2,
+        ReadOnlyMemory<byte> canonicalMau3,
         ScopedMailboxResolvedRoute route,
         CancellationToken cancellationToken) =>
         SendAsync(
-            canonicalMau2,
+            canonicalMau3,
             MailboxAuthenticatedOperation.Retrieve,
             OnionOperation.Retrieve,
             route,
             cancellationToken);
 
     Task<ReadOnlyMemory<byte>> IRouteBoundClientMailboxBinaryIngress.AcknowledgeOnRouteAsync(
-        ReadOnlyMemory<byte> canonicalMau2,
+        ReadOnlyMemory<byte> canonicalMau3,
         ScopedMailboxResolvedRoute route,
         CancellationToken cancellationToken) =>
         SendAsync(
-            canonicalMau2,
+            canonicalMau3,
             MailboxAuthenticatedOperation.Ack,
             OnionOperation.Acknowledge,
             route,
@@ -262,17 +262,17 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
     }
 
     private async Task<ReadOnlyMemory<byte>> SendAsync(
-        ReadOnlyMemory<byte> canonicalMau2,
-        MailboxAuthenticatedOperation expectedMau2Operation,
+        ReadOnlyMemory<byte> canonicalMau3,
+        MailboxAuthenticatedOperation expectedMau3Operation,
         OnionOperation privacyOperation,
         ScopedMailboxResolvedRoute? routeBinding,
         CancellationToken cancellationToken)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
         cancellationToken.ThrowIfCancellationRequested();
-        _ = ValidateCanonicalMau2(
-            canonicalMau2.Span,
-            expectedMau2Operation);
+        _ = ValidateCanonicalMau3(
+            canonicalMau3.Span,
+            expectedMau3Operation);
         if (routeBinding is null)
         {
             throw new ClientMailboxTransportException(
@@ -287,7 +287,7 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
                 primaryRoute,
                 primary,
                 privacyOperation,
-                canonicalMau2,
+                canonicalMau3,
                 routeBinding,
                 cancellationToken).ConfigureAwait(false);
             return response;
@@ -302,7 +302,7 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
                     fallbackRoute,
                     fallback,
                     privacyOperation,
-                    canonicalMau2,
+                    canonicalMau3,
                     routeBinding,
                     cancellationToken).ConfigureAwait(false);
                 return response;
@@ -338,7 +338,7 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
         PrivacyMailboxRoute route,
         IPrivacyManagedIngressTransport transport,
         OnionOperation operation,
-        ReadOnlyMemory<byte> canonicalMau2,
+        ReadOnlyMemory<byte> canonicalMau3,
         ScopedMailboxResolvedRoute routeBinding,
         CancellationToken cancellationToken)
     {
@@ -353,7 +353,7 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
             }
             var attempt = await routeBoundProvider.PrepareOnRouteAsync(
                     operation,
-                    canonicalMau2,
+                    canonicalMau3,
                     routeBinding,
                     cancellationToken)
                 .ConfigureAwait(false);
@@ -361,7 +361,7 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
                 attempt.Request.Operation != operation ||
                 !CryptographicOperations.FixedTimeEquals(
                     attempt.Request.CanonicalBytes.Span,
-                    canonicalMau2.Span))
+                    canonicalMau3.Span))
             {
                 throw new ClientMailboxTransportException(
                     ClientMailboxTransportFailure.ProtocolViolation,
@@ -440,15 +440,15 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
         }
     }
 
-    internal static ReadOnlyMemory<byte> ValidateCanonicalMau2(
-        ReadOnlySpan<byte> canonicalMau2,
+    internal static ReadOnlyMemory<byte> ValidateCanonicalMau3(
+        ReadOnlySpan<byte> canonicalMau3,
         MailboxAuthenticatedOperation expectedOperation)
     {
         MailboxAuthenticatedClientRequest request;
         byte[] roundTrip;
         try
         {
-            request = MailboxAuthenticatedClientRequestCodec.Decode(canonicalMau2);
+            request = MailboxAuthenticatedClientRequestCodec.Decode(canonicalMau3);
             roundTrip = MailboxAuthenticatedClientRequestCodec.Encode(request);
         }
         catch (Exception exception) when (
@@ -458,7 +458,7 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
             throw new ClientMailboxTransportException(
                 ClientMailboxTransportFailure.MalformedRequest,
                 retryable: false,
-                "Privacy ingress rejected malformed MAU2.",
+                "Privacy ingress rejected malformed MAU3.",
                 exception);
         }
 
@@ -466,12 +466,12 @@ public sealed class PrivacyRoutedMailboxBinaryIngress :
         {
             if (request.Binding.Operation != expectedOperation ||
                 request.Presentation.Operation != expectedOperation ||
-                !CryptographicOperations.FixedTimeEquals(roundTrip, canonicalMau2))
+                !CryptographicOperations.FixedTimeEquals(roundTrip, canonicalMau3))
             {
                 throw new ClientMailboxTransportException(
                     ClientMailboxTransportFailure.MalformedRequest,
                     retryable: false,
-                    "Privacy ingress rejected a non-canonical or mismatched MAU2 operation.");
+                    "Privacy ingress rejected a non-canonical or mismatched MAU3 operation.");
             }
 
             return request.Presentation.Grant.NetworkId.ToArray();

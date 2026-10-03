@@ -9,32 +9,32 @@ namespace Deep.Client.Shared.Services;
 public interface IClientMailboxBinaryIngress
 {
     Task<ReadOnlyMemory<byte>> StoreAsync(
-        ReadOnlyMemory<byte> canonicalMau2,
+        ReadOnlyMemory<byte> canonicalMau3,
         CancellationToken cancellationToken = default);
 
     Task<ReadOnlyMemory<byte>> RetrieveAsync(
-        ReadOnlyMemory<byte> canonicalMau2,
+        ReadOnlyMemory<byte> canonicalMau3,
         CancellationToken cancellationToken = default);
 
     Task<ReadOnlyMemory<byte>> AcknowledgeAsync(
-        ReadOnlyMemory<byte> canonicalMau2,
+        ReadOnlyMemory<byte> canonicalMau3,
         CancellationToken cancellationToken = default);
 }
 
 internal interface IRouteBoundClientMailboxBinaryIngress
 {
     Task<ReadOnlyMemory<byte>> StoreOnRouteAsync(
-        ReadOnlyMemory<byte> canonicalMau2,
+        ReadOnlyMemory<byte> canonicalMau3,
         ScopedMailboxResolvedRoute route,
         CancellationToken cancellationToken);
 
     Task<ReadOnlyMemory<byte>> RetrieveOnRouteAsync(
-        ReadOnlyMemory<byte> canonicalMau2,
+        ReadOnlyMemory<byte> canonicalMau3,
         ScopedMailboxResolvedRoute route,
         CancellationToken cancellationToken);
 
     Task<ReadOnlyMemory<byte>> AcknowledgeOnRouteAsync(
-        ReadOnlyMemory<byte> canonicalMau2,
+        ReadOnlyMemory<byte> canonicalMau3,
         ScopedMailboxResolvedRoute route,
         CancellationToken cancellationToken);
 }
@@ -626,7 +626,7 @@ public sealed class ClientMailboxAdapter
         _ = await ResolveDispatchRouteAsync(selector, request.Epoch, request.MailboxId, request.PlacementId,
             MailboxAuthenticatedOperation.Retrieve, ct).ConfigureAwait(false);
         var logical = OutboxLogicalId.FromBytes(request.OperationId.Span);
-        var exact = prepared.GetCanonicalMau2Copy();
+        var exact = prepared.GetCanonicalMau3Copy();
         try
         {
             var snapshot = await ReadExactOutboxAsync(outboxScope, logical, OutboxDedupMaterial.FromBytes(authenticated.Binding.RequestDigest.Span), exact, ct).ConfigureAwait(false);
@@ -797,7 +797,7 @@ public sealed class ClientMailboxAdapter
     {
         ArgumentNullException.ThrowIfNull(outboxScope);
         ArgumentNullException.ThrowIfNull(authenticatedRequest);
-        var encoded = authenticatedRequest.GetCanonicalMau2Copy();
+        var encoded = authenticatedRequest.GetCanonicalMau3Copy();
         var request = DecodeRequest(
             authenticatedRequest,
             MailboxAuthenticatedOperation.Store);
@@ -1049,7 +1049,7 @@ public sealed class ClientMailboxAdapter
         bool allowPollRollover = true)
     {
         ArgumentNullException.ThrowIfNull(authenticatedRequest);
-        var canonicalMau2 = authenticatedRequest.GetCanonicalMau2Copy();
+        var canonicalMau3 = authenticatedRequest.GetCanonicalMau3Copy();
         var authenticated = DecodeRequest(
             authenticatedRequest,
             MailboxAuthenticatedOperation.Retrieve);
@@ -1062,7 +1062,7 @@ public sealed class ClientMailboxAdapter
             outboxScope,
             logicalId,
             dedup,
-            canonicalMau2,
+            canonicalMau3,
             cancellationToken).ConfigureAwait(false);
         var scope = activation.ScopeFor(request.MailboxId, request.Epoch);
         await ReconcileExpiredAsync(scope, cancellationToken).ConfigureAwait(false);
@@ -1153,7 +1153,7 @@ public sealed class ClientMailboxAdapter
             cancellationToken).ConfigureAwait(false);
         var response = await DispatchIngressAsync(
                 MailboxAuthenticatedOperation.Retrieve,
-                canonicalMau2,
+                canonicalMau3,
                 route.Resolved,
                 cancellationToken)
             .ConfigureAwait(false);
@@ -1216,7 +1216,7 @@ public sealed class ClientMailboxAdapter
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(authenticatedRequest);
-        var canonicalMau2 = authenticatedRequest.GetCanonicalMau2Copy();
+        var canonicalMau3 = authenticatedRequest.GetCanonicalMau3Copy();
         var authenticated = DecodeRequest(
             authenticatedRequest,
             MailboxAuthenticatedOperation.Ack);
@@ -1229,7 +1229,7 @@ public sealed class ClientMailboxAdapter
             outboxScope,
             logicalId,
             dedup,
-            canonicalMau2,
+            canonicalMau3,
             cancellationToken).ConfigureAwait(false);
         var scope = activation.ScopeFor(request.MailboxId, request.Epoch);
         await ReconcileExpiredAsync(scope, cancellationToken).ConfigureAwait(false);
@@ -1310,7 +1310,7 @@ public sealed class ClientMailboxAdapter
                 cancellationToken).ConfigureAwait(false);
             var recoveredResponse = await DispatchIngressAsync(
                     MailboxAuthenticatedOperation.Ack,
-                    canonicalMau2,
+                    canonicalMau3,
                     route.Resolved,
                     cancellationToken)
                 .ConfigureAwait(false);
@@ -1371,7 +1371,7 @@ public sealed class ClientMailboxAdapter
             cancellationToken).ConfigureAwait(false);
         var response = await DispatchIngressAsync(
                 MailboxAuthenticatedOperation.Ack,
-                canonicalMau2,
+                canonicalMau3,
                 route.Resolved,
                 cancellationToken)
             .ConfigureAwait(false);
@@ -1433,7 +1433,7 @@ public sealed class ClientMailboxAdapter
 
     private Task<ReadOnlyMemory<byte>> DispatchIngressAsync(
         MailboxAuthenticatedOperation operation,
-        ReadOnlyMemory<byte> canonicalMau2,
+        ReadOnlyMemory<byte> canonicalMau3,
         ScopedMailboxResolvedRoute route,
         CancellationToken cancellationToken)
     {
@@ -1442,11 +1442,11 @@ public sealed class ClientMailboxAdapter
             return operation switch
             {
                 MailboxAuthenticatedOperation.Store =>
-                    routeBound.StoreOnRouteAsync(canonicalMau2, route, cancellationToken),
+                    routeBound.StoreOnRouteAsync(canonicalMau3, route, cancellationToken),
                 MailboxAuthenticatedOperation.Retrieve =>
-                    routeBound.RetrieveOnRouteAsync(canonicalMau2, route, cancellationToken),
+                    routeBound.RetrieveOnRouteAsync(canonicalMau3, route, cancellationToken),
                 MailboxAuthenticatedOperation.Ack =>
-                    routeBound.AcknowledgeOnRouteAsync(canonicalMau2, route, cancellationToken),
+                    routeBound.AcknowledgeOnRouteAsync(canonicalMau3, route, cancellationToken),
                 _ => throw new ArgumentOutOfRangeException(nameof(operation))
             };
         }
@@ -1454,11 +1454,11 @@ public sealed class ClientMailboxAdapter
         return operation switch
         {
             MailboxAuthenticatedOperation.Store =>
-                ingress.StoreAsync(canonicalMau2, cancellationToken),
+                ingress.StoreAsync(canonicalMau3, cancellationToken),
             MailboxAuthenticatedOperation.Retrieve =>
-                ingress.RetrieveAsync(canonicalMau2, cancellationToken),
+                ingress.RetrieveAsync(canonicalMau3, cancellationToken),
             MailboxAuthenticatedOperation.Ack =>
-                ingress.AcknowledgeAsync(canonicalMau2, cancellationToken),
+                ingress.AcknowledgeAsync(canonicalMau3, cancellationToken),
             _ => throw new ArgumentOutOfRangeException(nameof(operation))
         };
     }
@@ -1627,7 +1627,7 @@ public sealed class ClientMailboxAdapter
     {
         ArgumentNullException.ThrowIfNull(create);
         var frame = await create().ConfigureAwait(false);
-        var canonical = frame.GetCanonicalMau2Copy();
+        var canonical = frame.GetCanonicalMau3Copy();
         var decoded = DecodeRequest(frame, expectedOperation);
         if (decoded.Binding.Operation != expectedOperation)
         {
@@ -1669,7 +1669,7 @@ public sealed class ClientMailboxAdapter
                 expected.CanonicalRequest.Span))
         {
             throw new InvalidOperationException(
-                "Mailbox operation id conflicts with the durable MAU2 request.");
+                "Mailbox operation id conflicts with the durable MAU3 request.");
         }
     }
 
@@ -1840,13 +1840,13 @@ public sealed class ClientMailboxAdapter
                 nameof(frame));
         }
 
-        var canonical = frame.GetCanonicalMau2Copy();
+        var canonical = frame.GetCanonicalMau3Copy();
         var decoded = MailboxAuthenticatedClientRequestCodec.Decode(canonical);
         if (decoded.Binding.Operation != expectedOperation ||
             decoded.Presentation.Operation != expectedOperation)
         {
             throw new InvalidDataException(
-                "MAU2 operation does not match the adapter entry point.");
+                "MAU3 operation does not match the adapter entry point.");
         }
 
         return decoded;
@@ -1857,7 +1857,7 @@ public sealed class ClientMailboxAdapter
         IMailboxOperationSigner signer)
     {
         var decoded = MailboxAuthenticatedClientRequestCodec.Decode(
-            frame.GetCanonicalMau2Copy());
+            frame.GetCanonicalMau3Copy());
         var publicKey = signer.GetEd25519PublicKey();
         try
         {
@@ -1866,7 +1866,7 @@ public sealed class ClientMailboxAdapter
                     decoded.Presentation.Grant.HolderPublicKey.Span))
             {
                 throw new InvalidOperationException(
-                    "Mailbox recovery signer does not match the persisted MAU2 holder.");
+                    "Mailbox recovery signer does not match the persisted MAU3 holder.");
             }
         }
         finally

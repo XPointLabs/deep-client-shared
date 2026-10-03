@@ -218,14 +218,14 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 var dispatch = new Did2OwnedContactTransportContext(custody, fresh.Network, held);
                 var returned = await transport.AcquireAsync(request, route, dispatch, deadline.Token).AsTask()
                     .WaitAsync(deadline.Token).ConfigureAwait(false);
-                if (returned.Length != 478) throw new InvalidDataException("Mailbox success exceeds its exact bound.");
+                if (returned.Length != 510) throw new InvalidDataException("Mailbox success exceeds its exact bound.");
                 var response = returned.ToArray();
                 try
                 {
                     var verified = await DeepIdV2MailboxGrantResultVerifier.VerifySuccessAsync(route, request,
                         response, fresh.MailboxAuthority.ExactPma2, deadline.Token).ConfigureAwait(false);
                     await recheck(deadline.Token).ConfigureAwait(false);
-                    var next = ProtectedDid2MailboxGrantJournal.WithWinner(entry, verified.ExactXmc1.Span, networkId);
+                    var next = ProtectedDid2MailboxGrantJournal.WithWinner(entry, verified.ExactXmc2.Span, networkId);
                     state.Entries[name] = next; CryptographicOperations.ZeroMemory(entry); entry = next;
                     state.Revision = checked(state.Revision + 1);
                     var adopted = await SaveMailboxGrantJournalAsync(state, snapshot, current.AccountId, instance, deadline.Token).ConfigureAwait(false);

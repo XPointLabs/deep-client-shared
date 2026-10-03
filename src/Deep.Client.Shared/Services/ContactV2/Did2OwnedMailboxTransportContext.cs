@@ -46,7 +46,7 @@ internal sealed class Did2OwnedMailboxTransportContext : IMailboxPrivacyNetworkA
         var reading = await Source.RecheckEndpointPairUnderLeaseAsync(fresh, fresh.Proof, held, ct).ConfigureAwait(false);
         _ = DeepIdV2AccountService.RequireOwnCurrentDirectory(account, fresh.Proof, reading.BootId.Span, reading.SampleSeconds);
         _ = await DeepIdV2MailboxGrantResultVerifier.VerifyRetainedSuccessAsync(route,
-            grant.ExactXmg1, grant.ExactXmc1, fresh.MailboxAuthority.ExactPma2, ct).ConfigureAwait(false);
+            grant.ExactXmg1, grant.ExactXmc2, fresh.MailboxAuthority.ExactPma2, ct).ConfigureAwait(false);
         await grant.EnsureCurrentAsync(ct).ConfigureAwait(false);
         if (Stopwatch.GetElapsedTime(started) >= TimeSpan.FromSeconds(30))
             throw new CryptographicException("Held mailbox transport expired during its authority check.");

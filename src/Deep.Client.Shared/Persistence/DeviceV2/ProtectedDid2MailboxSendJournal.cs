@@ -8,6 +8,7 @@ namespace Deep.Client.Shared.Persistence.DeviceV2;
 internal static class ProtectedDid2MailboxSendJournal
 {
     internal const string Slot = "deep.store.v2.mailbox-send-journal";
+    private const byte Version = 2;
     internal const int HeaderBytes = 92, EntryBytes = 304, MaximumEntries = 512;
     internal const int MaximumBytes = HeaderBytes + EntryBytes * MaximumEntries;
 
@@ -63,7 +64,7 @@ internal static class ProtectedDid2MailboxSendJournal
         internal Entry WithPrepared(ReadOnlySpan<byte> exactMau, ulong counter)
         {
             if (Prepared || counter == 0 || exactMau.IsEmpty || exactMau.Length > 70_000)
-                throw new InvalidDataException("Only one bounded pending request can adopt a prepared MAU2.");
+                throw new InvalidDataException("Only one bounded pending request can adopt a prepared MAU3.");
             var next = Exact.ToArray();
             try
             {
@@ -105,7 +106,7 @@ internal static class ProtectedDid2MailboxSendJournal
         ReadOnlySpan<byte> account, ReadOnlySpan<byte> instance)
     {
         RequireScope(network, account, instance);
-        if (exact.Length is < HeaderBytes or > MaximumBytes || exact[0] != 1 || exact[1] != 0 ||
+        if (exact.Length is < HeaderBytes or > MaximumBytes || exact[0] != Version || exact[1] != 0 ||
             !Fixed(exact.Slice(12, 16), network) || !Fixed(exact.Slice(28, 32), account) || !Fixed(exact.Slice(60, 32), instance))
             throw new InvalidDataException("Protected mailbox send custody is absent, foreign or unsupported.");
         var count = BinaryPrimitives.ReadUInt16BigEndian(exact.Slice(2)); var revision = U64(exact.Slice(4));
@@ -139,7 +140,7 @@ internal static class ProtectedDid2MailboxSendJournal
         RequireScope(network, account, instance);
         if (state.Entries.Count > MaximumEntries || state.Revision < (ulong)state.Entries.Count + 1)
             throw new InvalidDataException("Protected mailbox send capacity/revision is inconsistent.");
-        var exact = new byte[HeaderBytes + state.Entries.Count * EntryBytes]; exact[0] = 1;
+        var exact = new byte[HeaderBytes + state.Entries.Count * EntryBytes]; exact[0] = Version;
         BinaryPrimitives.WriteUInt16BigEndian(exact.AsSpan(2), checked((ushort)state.Entries.Count));
         BinaryPrimitives.WriteUInt64BigEndian(exact.AsSpan(4), state.Revision);
         network.CopyTo(exact.AsSpan(12)); account.CopyTo(exact.AsSpan(28)); instance.CopyTo(exact.AsSpan(60));

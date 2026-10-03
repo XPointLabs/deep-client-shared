@@ -1,5 +1,13 @@
 # Deep Client Shared
 
+The current mailbox source contract follows
+[DR81](../docs/survival-program/decisions/DR-0081-did2-mailbox-selection-grant-clean-break.md):
+MCG3/MCP3/MAU3 and XMC2 only, with the signed PMS2 selection input checked by
+the owned holder. DMB1 schema8 and protected grant/send journal version2 reject
+older local state explicitly, including empty old journals; no migration or
+automatic remint is provided. The new source is not yet a matched production
+rollout or physical delivery qualification.
+
 Publication successor coordination and the protected route-journal clean break
 follow [DR79](../docs/survival-program/decisions/DR-0079-did2-publication-issuer-successor.md).
 Clients retain publisher-bound prior receipts; server verification receives no

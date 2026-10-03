@@ -73,6 +73,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 ExpiresAtUnixSeconds = window.UpperUnixSeconds + 10, OverlapUntilUnixSeconds = 0,
                 PlacementCommitment = MailboxPlacementCommitment.Compute(new BlindedPlacementId(route.Route.Reachability.Field(10).Span)),
                 MembershipCommitment = SHA256.HashData(route.Route.Projection.CanonicalBytes.Span),
+                SelectionInput = route.Route.Selection.Field(3),
                 IssuerPublicKey = PublicKey(issuerMarker), HolderPublicKey = authored.HolderPublicKey,
                 IssuerSignature = new byte[64],
             };
@@ -87,7 +88,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             Assert.Equal(MailboxCapabilityDomain.Deposit, verified.Domain);
             Assert.Equal(SHA256.HashData(route.Route.Projection.CanonicalBytes.Span), verified.MembershipCommitment.ToArray());
             Assert.Empty(typeof(VerifiedDeepIdV2MailboxGrant).GetConstructors());
-            Assert.Equal(response.CanonicalBytes.ToArray(), verified.ExactXmc1.ToArray());
+            Assert.Equal(response.CanonicalBytes.ToArray(), verified.ExactXmc2.ToArray());
             var restoredRequest = await DeepIdV2MailboxGrantRequestAuthor.RestoreDepositAsync(route,
                 request.LocatorHash, request.HolderPublicKey, request.ExactXmg1);
             Assert.Equal(request.ExactXmg1.ToArray(), restoredRequest.ExactXmg1.ToArray());
@@ -162,7 +163,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 FieldOffset(response.CanonicalBytes.ToArray(), 5), FieldOffset(response.CanonicalBytes.ToArray(), 7),
                 FieldOffset(response.CanonicalBytes.ToArray(), 8) + 24, // epoch
                 FieldOffset(response.CanonicalBytes.ToArray(), 8) + 176, // holder
-                FieldOffset(response.CanonicalBytes.ToArray(), 8) + 208 }) // issuer signature
+                FieldOffset(response.CanonicalBytes.ToArray(), 8) + 208, // signed selector
+                FieldOffset(response.CanonicalBytes.ToArray(), 8) + 240 }) // issuer signature
             {
                 var changed = response.CanonicalBytes.ToArray(); changed[offset] ^= 1;
                 await RequireRouteRejectionAsync(async () => await DeepIdV2MailboxGrantResultVerifier.VerifySuccessAsync(
@@ -188,7 +190,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 route.NetworkAuthority, route.ExactXir1V2, route.ExactRouteClosure, new(capturingClock));
             mutableResult = response.CanonicalBytes.ToArray(); mutablePma = operational.ExactPma2.ToArray();
             var captured = await DeepIdV2MailboxGrantResultVerifier.VerifySuccessAsync(capturingRoute, request, mutableResult, mutablePma);
-            Assert.Equal(response.CanonicalBytes.ToArray(), captured.ExactXmc1.ToArray());
+            Assert.Equal(response.CanonicalBytes.ToArray(), captured.ExactXmc2.ToArray());
             Assert.Equal(operational.ExactPma2.ToArray(), captured.ExactPma2.ToArray());
 
             var reads = 0; var inject = false;

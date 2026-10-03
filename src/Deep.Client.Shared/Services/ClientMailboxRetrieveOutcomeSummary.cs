@@ -150,7 +150,7 @@ internal sealed class ClientMailboxRetrieveOutcomeSummary
                   !token.IsEmpty))
         {
             throw new InvalidDataException(
-                "Retrieve outcome summary equivocated from persisted MAU2.");
+                "Retrieve outcome summary equivocated from persisted MAU3.");
         }
 
         return new ClientMailboxRetrieveOutcomeSummary(

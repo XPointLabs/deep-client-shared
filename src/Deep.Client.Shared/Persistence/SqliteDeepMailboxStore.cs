@@ -15,7 +15,7 @@ public sealed partial class SqliteDeepMailboxStore :
     IDisposable
 {
     private const int ApplicationId = 0x444D4231; // DMB1
-    private const int SchemaVersion = 7;
+    private const int SchemaVersion = 8;
     private readonly bool allowCreate;
     private readonly string _connectionString;
     private readonly byte[] encryptionKey;

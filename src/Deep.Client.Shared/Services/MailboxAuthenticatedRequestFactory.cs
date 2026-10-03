@@ -4,7 +4,7 @@ using Deep.Protocol.DeepExtension.MailboxCapabilities;
 namespace Deep.Client.Shared.Services;
 
 /// <summary>
-/// The native-cloud MAU2 preparation boundary. It never leases credentials
+/// The native-cloud MAU3 preparation boundary. It never leases credentials
 /// independently: every frame is prepared with its durable outbox row in the
 /// scoped repository transaction.
 /// </summary>
@@ -173,10 +173,10 @@ public sealed class MailboxAuthenticatedRequestFactory
 
 public sealed class MailboxAuthenticatedRequestFrame
 {
-    private readonly byte[] canonicalMau2;
-    internal MailboxAuthenticatedRequestFrame(MailboxAuthenticatedOperation operation, ReadOnlySpan<byte> canonicalMau2)
-    { Operation = operation; this.canonicalMau2 = canonicalMau2.ToArray(); }
+    private readonly byte[] canonicalMau3;
+    internal MailboxAuthenticatedRequestFrame(MailboxAuthenticatedOperation operation, ReadOnlySpan<byte> canonicalMau3)
+    { Operation = operation; this.canonicalMau3 = canonicalMau3.ToArray(); }
     public MailboxAuthenticatedOperation Operation { get; }
-    public byte[] GetCanonicalMau2Copy() => canonicalMau2.ToArray();
+    public byte[] GetCanonicalMau3Copy() => canonicalMau3.ToArray();
     public override string ToString() => "[strict-mailbox-authenticated-request]";
 }

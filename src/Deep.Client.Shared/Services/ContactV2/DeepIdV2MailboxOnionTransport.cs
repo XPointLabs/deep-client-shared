@@ -66,7 +66,7 @@ internal sealed class DeepIdV2MailboxOnionTransport :
         var exact = request.ToArray();
         try
         {
-            _ = PrivacyRoutedMailboxBinaryIngress.ValidateCanonicalMau2(exact, mailboxOperation);
+            _ = PrivacyRoutedMailboxBinaryIngress.ValidateCanonicalMau3(exact, mailboxOperation);
             var attempt = await paths.PrepareOnRouteAsync(operation, exact, route, ct).ConfigureAwait(false);
             var entry = OnionEntryTransportFactory.Create(attempt.Path);
             using var transport = new PrivacyManagedIngressHttpTransport(entry);

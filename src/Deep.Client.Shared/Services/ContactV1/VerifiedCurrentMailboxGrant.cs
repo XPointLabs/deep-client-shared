@@ -44,7 +44,7 @@ public sealed class VerifiedCurrentMailboxReplica
 }
 
 /// <summary>
-/// A single current-epoch MCG2 returned by exact XMG1/XMC1. This is deliberately
+/// A single current-epoch MCG3 returned by exact XMG1/XMC2. This is deliberately
 /// not the legacy current/next JSON bundle and carries no Session-derived ID.
 /// </summary>
 public sealed class VerifiedCurrentMailboxGrant
@@ -52,7 +52,7 @@ public sealed class VerifiedCurrentMailboxGrant
     private static ReadOnlySpan<byte> AccountScopeDomain =>
         "deep.mailbox.account-scope.v1"u8;
     private readonly byte[] exactXmg1;
-    private readonly byte[] exactXmc1;
+    private readonly byte[] exactXmc2;
     private readonly byte[] exactGrant;
     private readonly byte[] exactRouteClosure;
     private readonly byte[] mailboxId;
@@ -72,7 +72,7 @@ public sealed class VerifiedCurrentMailboxGrant
         VerifiedOfficialMailboxAuthority runtimeAuthority)
     {
         exactXmg1 = request.CanonicalBytes.ToArray();
-        exactXmc1 = result.CanonicalBytes.ToArray();
+        exactXmc2 = result.CanonicalBytes.ToArray();
         exactGrant = MailboxAuthenticatedCapabilityCodec.EncodeGrant(grant);
         exactRouteClosure = route.ExactBytes.ToArray();
         mailboxId = route.Reachability.Field(2).ToArray();
@@ -89,9 +89,13 @@ public sealed class VerifiedCurrentMailboxGrant
                 placementCommitment,
                 MailboxPlacementCommitment.Compute(
                     new BlindedPlacementId(placementId))) ||
-            this.replicas.Length is < 2 or > 5)
+            this.replicas.Length != 2)
             throw new CryptographicException(
                 "The verified current mailbox grant route is malformed.");
+        ContactCodec.ValidateMailboxGrantResultBinding(request, result);
+        ContactCodec.ValidateMailboxGrantResultRouteBinding(result, route);
+        if (!CryptographicOperations.FixedTimeEquals(result.Field(8).Span, exactGrant))
+            throw new CryptographicException("The installed grant differs from its exact verified result.");
         Domain = grant.Domain;
         Epoch = grant.Epoch;
         Generation = grant.Generation;
@@ -105,7 +109,7 @@ public sealed class VerifiedCurrentMailboxGrant
     public ulong NotBeforeUnixSeconds { get; }
     public ulong ExpiresAtUnixSeconds { get; }
     public ReadOnlyMemory<byte> ExactXmg1 => exactXmg1.ToArray();
-    public ReadOnlyMemory<byte> ExactXmc1 => exactXmc1.ToArray();
+    public ReadOnlyMemory<byte> ExactXmc2 => exactXmc2.ToArray();
     public ReadOnlyMemory<byte> ExactGrant => exactGrant.ToArray();
     public ReadOnlyMemory<byte> ExactRouteClosure => exactRouteClosure.ToArray();
     public BlindedMailboxId MailboxId => new(mailboxId);
@@ -117,7 +121,7 @@ public sealed class VerifiedCurrentMailboxGrant
         Array.AsReadOnly(replicas.ToArray());
 
     /// <summary>
-    /// Atomically installs this exact verified XMC1 result into the clean
+    /// Atomically installs this exact verified XMC2 result into the clean
     /// mailbox store. Its authenticated PMA2 policy cannot be substituted by
     /// the caller.
     /// </summary>

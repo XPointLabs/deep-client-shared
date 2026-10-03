@@ -20,7 +20,7 @@ internal static class MailboxRandomKeyTestEncoding
 public sealed class SqliteDeepMailboxRandomKeyTests
 {
     [Fact]
-    public async Task CurrentRawKeyReopensEncryptedSchemaSevenAndPreservesDurablePolicy()
+    public async Task CurrentRawKeyReopensEncryptedSchemaEightAndPreservesDurablePolicy()
     {
         using var fixture = new Fixture();
         using (var store = new SqliteDeepMailboxStore(new(fixture.Path, fixture.Key)))
@@ -30,7 +30,7 @@ public sealed class SqliteDeepMailboxRandomKeyTests
         }
         Assert.False(File.ReadAllBytes(fixture.Path).AsSpan(0, 16).SequenceEqual("SQLite format 3\0"u8));
         using (var db = fixture.Open(raw: true))
-        { using var read = db.CreateCommand(); read.CommandText = "PRAGMA user_version;"; Assert.Equal(7L, read.ExecuteScalar()); }
+        { using var read = db.CreateCommand(); read.CommandText = "PRAGMA user_version;"; Assert.Equal(8L, read.ExecuteScalar()); }
         using (SqliteDeepMailboxStore.OpenExisting(new(fixture.Path, fixture.Key))) { }
         var digest = SHA256.HashData(File.ReadAllBytes(fixture.Path));
         using (var wrongMode = fixture.Open(raw: false))
@@ -38,19 +38,21 @@ public sealed class SqliteDeepMailboxRandomKeyTests
         Assert.Equal(digest, SHA256.HashData(File.ReadAllBytes(fixture.Path)));
     }
 
-    [Fact]
-    public void RetiredPasswordModeAndRetiredRawSchemaRejectWithoutRepairOrMutation()
+    [Theory]
+    [InlineData(6)]
+    [InlineData(7)]
+    public void RetiredPasswordModeAndRetiredRawSchemaRejectWithoutRepairOrMutation(int retiredVersion)
     {
         using var fixture = new Fixture();
         using (var old = fixture.Open(raw: false))
-        { using var write = old.CreateCommand(); write.CommandText = "CREATE TABLE negative_probe(value INTEGER); PRAGMA user_version=6;"; write.ExecuteNonQuery(); }
+        { using var write = old.CreateCommand(); write.CommandText = $"CREATE TABLE negative_probe(value INTEGER); PRAGMA user_version={retiredVersion};"; write.ExecuteNonQuery(); }
         var oldDigest = SHA256.HashData(File.ReadAllBytes(fixture.Path));
         Assert.Throws<LocalStateResetRequiredException>(() => SqliteDeepMailboxStore.OpenExisting(new(fixture.Path, fixture.Key)));
         Assert.Equal(oldDigest, SHA256.HashData(File.ReadAllBytes(fixture.Path)));
         using var rawFixture = new Fixture();
         using (new SqliteDeepMailboxStore(new(rawFixture.Path, rawFixture.Key))) { }
         using (var old = rawFixture.Open(raw: true))
-        { using var write = old.CreateCommand(); write.CommandText = "PRAGMA user_version=6;"; write.ExecuteNonQuery(); }
+        { using var write = old.CreateCommand(); write.CommandText = $"PRAGMA user_version={retiredVersion};"; write.ExecuteNonQuery(); }
         var schemaDigest = SHA256.HashData(File.ReadAllBytes(rawFixture.Path));
         Assert.Throws<LocalStateResetRequiredException>(() => SqliteDeepMailboxStore.OpenExisting(new(rawFixture.Path, rawFixture.Key)));
         Assert.Equal(schemaDigest, SHA256.HashData(File.ReadAllBytes(rawFixture.Path)));

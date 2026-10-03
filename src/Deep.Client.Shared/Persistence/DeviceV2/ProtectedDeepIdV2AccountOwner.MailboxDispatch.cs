@@ -143,7 +143,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             using var grantState = ProtectedDid2MailboxGrantJournal.Decode(grantRoot, networkId, current.AccountId.Span, instance);
             var grantName = Convert.ToHexString(ProtectedDid2MailboxGrantJournal.Scope(routeHash, locator.Span, (byte)MailboxCapabilityDomain.Deposit));
             if (!grantState.Entries.TryGetValue(grantName, out var retainedGrant) || !ProtectedDid2MailboxGrantJournal.HasWinner(retainedGrant) ||
-                !FixedRoute(ProtectedDid2MailboxGrantJournal.Response(retainedGrant).Span, winner.ExactXmc1.Span))
+                !FixedRoute(ProtectedDid2MailboxGrantJournal.Response(retainedGrant).Span, winner.ExactXmc2.Span))
                 throw new CryptographicException("Dispatch has no exact protected grant winner.");
             using var loan = await OpenMailboxWinnerUnderLeaseAsync(current, held, route, winner, locator, capability,
                 retainedGrant, source, fresh, Recheck, ct).ConfigureAwait(false);
@@ -185,7 +185,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 var existing = await loan.Store.ReadTransportOutboxAsync(loan.Selector.AccountScope,
                     OutboxLogicalId.FromBytes(envelope.OperationId.Span), ct).ConfigureAwait(false);
                 if (entry.Prepared && existing is not { Result: TransportOutboxReadResult.Found, Item: not null })
-                    throw new CryptographicException("Prepared protected MAU2 has no SQL request; regeneration is forbidden.");
+                    throw new CryptographicException("Prepared protected MAU3 has no SQL request; regeneration is forbidden.");
                 if (!entry.Prepared && existing.Item is { State: not TransportOutboxState.Prepared })
                     throw new CryptographicException("An uncommitted protected request cannot have a dispatched SQL attempt.");
                 var factory = new MailboxAuthenticatedRequestFactory(loan.Store, loan.Authority);
@@ -196,7 +196,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
 #if DEEP_TEST_INTERNALS
                 Did2MailboxSendTestHooks.Hit(Did2MailboxSendFailpoint.AfterSql);
 #endif
-                exactMau = prepared.GetCanonicalMau2Copy();
+                exactMau = prepared.GetCanonicalMau3Copy();
                 var parsed = MailboxAuthenticatedClientRequestCodec.Decode(exactMau);
                 RequireMailboxPreparedSend(entry, parsed, exactMau, winner);
                 if (!entry.Prepared)
@@ -335,7 +335,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             !FixedRoute(MailboxAuthenticatedCapabilityCodec.EncodeGrant(request.Presentation.Grant), winner.ExactGrant.Span) ||
             !PublicKeyAuth.VerifyDetached(request.Presentation.HolderSignature.ToArray(), signing, request.Presentation.Grant.HolderPublicKey.ToArray()) ||
             entry.Prepared && (request.Presentation.ReplayCounter != entry.Counter || !FixedRoute(SHA256.HashData(exact), entry.MauHash)))
-            throw new CryptographicException("Prepared MAU2 differs from the exact protected message/grant/counter.");
+            throw new CryptographicException("Prepared MAU3 differs from the exact protected message/grant/counter.");
     }
 
     private async Task<byte[]> SaveMailboxSendJournalAsync(ProtectedDid2MailboxSendJournal.State state, byte[] expected,

@@ -52,7 +52,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 candidates[1].NodeId.Span, network.ResolveNodeIdentityPublicKey(candidates[1].NodeId).Span));
         var codec = new PrivacyRoutingCodec(new OnionEntropyAuthority(custody.Entropy),
             new OnionKeyAgreementAuthority(new RejectClientReceiveVault()));
-        // Synthetic MAU2 grants exercise structural/path selection only.
+        // Synthetic MAU3 grants exercise structural/path selection only.
         // They are not issued credentials; no socket, adapter receipt or ACK is claimed.
         foreach (var operation in new[] { OnionOperation.Store, OnionOperation.Retrieve, OnionOperation.Acknowledge })
         {

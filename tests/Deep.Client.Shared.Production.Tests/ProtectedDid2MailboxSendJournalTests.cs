@@ -26,7 +26,7 @@ public sealed class ProtectedDid2MailboxSendJournalTests
         var exact = ProtectedDid2MailboxSendJournal.Empty(Network, Account, Instance);
         switch (fault)
         {
-            case 0: exact[0] = 2; break;
+            case 0: exact[0] = 1; break; // Retired MAU2 custody, even if empty.
             case 1: exact[1] = 1; break;
             case 2: BinaryPrimitives.WriteUInt16BigEndian(exact.AsSpan(2), 513); break;
             case 3: exact[11] = 0; break;

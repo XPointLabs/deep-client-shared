@@ -23,9 +23,9 @@ internal sealed class Did2MailboxGrantOnionTransport(DeepIdV2ContactPathAuthorit
         await route.EnsureCurrentAsync(ct).ConfigureAwait(false);
         var response = await new DeepIdV2PublicationOnionTransport(source, dispatch.Custody)
             .SendOwnedExactAsync(exact, ReadOnlyMemory<byte>.Empty, dispatch, ct).ConfigureAwait(false);
-        if (response.ExactBody.Length != 478)
+        if (response.ExactBody.Length != 510)
             throw new CryptographicException("Mailbox acquisition did not return an exact success envelope.");
-        var result = ContactCodec.Decode("XMC1", response.ExactBody.Span);
+        var result = ContactCodec.Decode("XMC2", response.ExactBody.Span);
         ContactCodec.ValidateMailboxGrantResultBinding(request.Record, result);
         // Authentication of an ONION reply is not PMA2/root/issuer authority.
         // The owning parent independently verifies and persists the winner.
