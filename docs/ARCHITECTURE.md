@@ -25,7 +25,7 @@ plans or proof of current service activation.
 | AppAck and Read events | Not connected to the current DID2 authoring and semantic consumer allowlists. |
 | Scheduling | Synchronization processes one bounded page. The current consumer has no automatic message outbox drain/inbox scheduler; MAUI's network reconnect only restores its diagnostic proof/publication path. |
 | Offline use | Current conversation/history methods request fresh endpoint authority; local authenticated history and offline command queueing still need their own boundary. |
-| Long-running custody | Send and grant journals have finite capacity without a connected retirement/compaction lifecycle; an existing grant winner is reverified, without an expired-winner replacement path for the same scope. |
+| Long-running custody | Send and grant journals have finite capacity without a connected retirement/compaction lifecycle; an existing grant winner is reverified, without an expired-winner replacement path for the same scope. Client semantic transition tables are accepted in [DR-0084](../../docs/survival-program/decisions/DR-0084-owned-delivery-settlement-and-retirement.md); local format/API and runtime remain open. |
 | Route renewal | Committed-predecessor renewal and protected pending phases exist. Incomplete-proposal expiry, grant/route rollover and service/topology changes are not a complete recovery lifecycle. |
 | Attachments | Local encrypted asset custody and typed offers exist. No public DID2 remote upload/download workflow is composed. |
 | Governed groups | Protocol and portable components do not constitute a current DID2 application send/receive/ACK composition. |

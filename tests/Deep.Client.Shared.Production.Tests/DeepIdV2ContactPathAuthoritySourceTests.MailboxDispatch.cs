@@ -53,6 +53,42 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 
     [Fact]
     [Trait("RequiresApprovedMlKemRuntime", "true")]
+    public async Task Did2OwnedMailboxSend_FullWorkingJournalStillReconcilesExactUnknownAttempt()
+    {
+        await using var fixture = await Fixture.CreateAsync(withPeer: true);
+        var (complete, hello, init, _, _) = await fixture.PrepareNativeHelloCompletion(Bytes(32, 0xad));
+        using var initial = await complete(fixture.Accounts);
+        using (var received = await fixture.CompleteReceiver(initial.ExactDph2.ToArray())) { }
+        var sender = await fixture.EnsureSenderMessaging(init, hello);
+        var receiver = await fixture.EnsureReceiverMessaging(initial.ExactDph2.ToArray());
+        using (var accept = await fixture.PrepareOwnedContactAccept(receiver, Bytes(32, 0xae)))
+        using (var sent = await fixture.SendOwnedMessage(receiver, accept.Operation.ToArray(), ApplicationCoreCodec.DecodeDmc2(accept.ExactDmc2)))
+        using (var received = await fixture.ReceiveOwnedMessage(sender, sent.ExactEnvelope.ToArray())) { }
+        var operation = Bytes(32, 0xaf);
+        using var text = await fixture.PrepareOwnedText(sender, operation, "Reconcile before working-set retirement");
+        using var committed = await fixture.SendOwnedMessage(sender, operation, ApplicationCoreCodec.DecodeDmc2(text.ExactDmc2.Span));
+        var grants = new OwnedGrantTransport(fixture, ownerOnPrimary: true);
+        var transport = new OwnedStoreFixture(fixture, sender, operation, committed.ExactEnvelope.ToArray()) { LoseReply = true };
+        await Assert.ThrowsAsync<ClientMailboxDispatchOutcomeUnknownException>(() => fixture.DeliverNativeMessage(sender, operation, grants, transport));
+        Assert.Equal(1, transport.Calls); Assert.Equal(1, grants.Calls);
+        var originalRequest = transport.ExactRequest!.ToArray();
+        var expectedRoot = await fixture.FillMailboxWorkingSetAroundPreparedAttempt(sender, committed.ExactEnvelope.ToArray());
+        fixture.Sample += 40; fixture.ProofTime += 40; transport.LoseReply = false;
+        var settled = await fixture.DeliverNativeMessage(sender, operation, grants, transport);
+        Assert.Equal(1UL, settled.Cursor); Assert.Equal(2, transport.Calls); Assert.Equal(1, grants.Calls);
+        Assert.Equal(originalRequest, transport.ExactRequest);
+        Assert.Empty(await fixture.ListNativePendingText());
+        using var retained = await fixture.ReadMailboxSends();
+        Assert.Equal(ProtectedDid2MailboxSendJournal.MaximumEntries, retained.Entries.Count);
+        var exact = ProtectedDid2MailboxSendJournal.Encode(retained, sender.Network, sender.LocalAccount, sender.Instance);
+        try { Assert.Equal(expectedRoot, SHA256.HashData(exact)); }
+        finally { CryptographicOperations.ZeroMemory(exact); CryptographicOperations.ZeroMemory(originalRequest); }
+        // Full working-set occupancy is staged local metadata, NOT 512 signed
+        // grants/deliveries, compaction, renewal or physical endpoint evidence.
+    }
+
+    [Fact]
+    [Trait("RequiresApprovedMlKemRuntime", "true")]
     public async Task Did2OwnedMailboxSend_CommittedTextFaultsExactReopenLostReplyAndDurableReceipt()
     {
         // Real account/PQ/ratchet/SQLCipher/owner and signed receipts. In-process
@@ -282,6 +318,33 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 CryptographicOperations.ZeroMemory(retainedCipher);
             }
         }
+        internal async Task<byte[]> FillMailboxWorkingSetAroundPreparedAttempt(Did2MessagingSessionScope scope, ReadOnlyMemory<byte> cipher)
+        {
+            using var root = await innerStorage.ReadOwnedAsync(ProtectedDid2MailboxSendJournal.Slot) ?? throw new InvalidOperationException();
+            var snapshot = root.Use(bytes => bytes.ToArray()); byte[] next = [];
+            try
+            {
+                using var state = ProtectedDid2MailboxSendJournal.Decode(snapshot, scope.Network, scope.LocalAccount, scope.Instance);
+                var real = Assert.Single(state.Entries).Value; Assert.True(real.Prepared);
+                var routeHash = real.RouteHash.ToArray();
+                for (var index = 0; state.Entries.Count < ProtectedDid2MailboxSendJournal.MaximumEntries; index++)
+                {
+                    var operation = SHA256.HashData(BitConverter.GetBytes(index));
+                    var entry = ProtectedDid2MailboxSendJournal.Entry.Pending(scope, operation, operation, routeHash, new()
+                    {
+                        Epoch = 1, MailboxId = new(Bytes(32, 0x16)), PlacementId = new(Bytes(32, 0x17)),
+                        OperationId = operation.AsMemory(0, 16), DeduplicationDigest = SHA256.HashData(cipher.Span),
+                        CreatedAtUnixSeconds = 1000, ExpiresAtUnixSeconds = 1200, Ciphertext = cipher
+                    });
+                    state.Entries.Add(entry.Name, entry); state.Revision++;
+                }
+                next = ProtectedDid2MailboxSendJournal.Encode(state, scope.Network, scope.LocalAccount, scope.Instance);
+                Assert.True(await innerStorage.CompareExchangeAsync(ProtectedDid2MailboxSendJournal.Slot, snapshot, next));
+                return SHA256.HashData(next);
+            }
+            finally { CryptographicOperations.ZeroMemory(snapshot); CryptographicOperations.ZeroMemory(next); }
+        }
+
         private string MailboxSqlFixturePath()
         {
             var parent = Path.GetFullPath(directory) + Path.DirectorySeparatorChar;
