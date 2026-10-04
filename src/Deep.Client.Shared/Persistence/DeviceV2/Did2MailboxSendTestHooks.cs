@@ -1,6 +1,6 @@
 #if DEEP_TEST_INTERNALS
 namespace Deep.Client.Shared.Persistence.DeviceV2;
-internal enum Did2MailboxSendFailpoint { BeforeSql, AfterSql, BeforeDispatch, BeforeOrdinaryCompletion, AfterOrdinaryCompletion }
+internal enum Did2MailboxSendFailpoint { BeforeSql, AfterSql, BeforePreparedRoot, AfterPreparedRoot, BeforeDispatch, BeforeOrdinaryCompletion, AfterOrdinaryCompletion }
 internal static class Did2MailboxSendTestHooks
 {
     private static readonly AsyncLocal<Action<Did2MailboxSendFailpoint>?> Current = new();

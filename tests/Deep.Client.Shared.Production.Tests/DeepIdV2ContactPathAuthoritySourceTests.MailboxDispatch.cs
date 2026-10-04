@@ -18,6 +18,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     [InlineData(0)] // Full journal, new operation.
     [InlineData(1)] // Existing operation, different retained route.
     [InlineData(2)] // Existing operation, different retained ciphertext.
+    [InlineData(3)] // Floors are full even though no working entries remain.
     [Trait("RequiresApprovedMlKemRuntime", "true")]
     public async Task Did2OwnedMailboxSend_RejectsUnavailableOrChangedCustodyBeforeGrantAcquisition(int fault)
     {
@@ -41,11 +42,11 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         var transport = new OwnedStoreFixture(fixture, sender, operation, committed.ExactEnvelope.ToArray());
         var error = await Record.ExceptionAsync(() => fixture.DeliverNativeMessage(sender, operation, grants, transport));
         Assert.Equal(0, grants.Calls); Assert.Equal(0, transport.Calls);
-        if (fault == 0) Assert.IsType<IOException>(error); else Assert.IsType<CryptographicException>(error);
+        if (fault is 0 or 3) Assert.IsType<IOException>(error); else Assert.IsType<CryptographicException>(error);
         using var retainedGrants = await fixture.ReadPeerGrantsAsync(own: true);
         Assert.Empty(retainedGrants.Entries); Assert.Equal(1UL, retainedGrants.Revision);
         using var retainedSends = await fixture.ReadMailboxSends();
-        Assert.Equal(fault == 0 ? ProtectedDid2MailboxSendJournal.MaximumEntries : 1, retainedSends.Entries.Count);
+        Assert.Equal(fault == 0 ? ProtectedDid2MailboxSendJournal.MaximumEntries : fault == 3 ? 0 : 1, retainedSends.Entries.Count);
         var retainedExact = ProtectedDid2MailboxSendJournal.Encode(retainedSends, sender.Network, sender.LocalAccount, sender.Instance);
         try { Assert.Equal(expectedJournalHash, SHA256.HashData(retainedExact)); }
         finally { CryptographicOperations.ZeroMemory(retainedExact); }
@@ -130,7 +131,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         { Assert.Empty(changed.Entries); Assert.Equal(2UL, changed.Revision); }
         await fixture.RestoreMailboxSendRoot(originalSendRoot);
         CryptographicOperations.ZeroMemory(originalSendRoot); grants.BeforeReturn = null;
-        foreach (var point in new[] { Did2MailboxSendFailpoint.BeforeSql, Did2MailboxSendFailpoint.AfterSql, Did2MailboxSendFailpoint.BeforeDispatch })
+        foreach (var point in new[] { Did2MailboxSendFailpoint.BeforeSql, Did2MailboxSendFailpoint.AfterSql,
+            Did2MailboxSendFailpoint.BeforePreparedRoot, Did2MailboxSendFailpoint.AfterPreparedRoot, Did2MailboxSendFailpoint.BeforeDispatch })
         {
             var callerOperation = operation.ToArray();
             var mutatedDuringRefresh = false;
@@ -148,7 +150,9 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             CryptographicOperations.ZeroMemory(callerOperation);
             Assert.Equal(0, transport.Calls);
             using var state = await fixture.ReadMailboxSends();
-            Assert.Equal(point == Did2MailboxSendFailpoint.BeforeDispatch, Assert.Single(state.Entries).Value.Prepared);
+            var expectedPrepared = point is Did2MailboxSendFailpoint.AfterPreparedRoot or Did2MailboxSendFailpoint.BeforeDispatch;
+            Assert.Equal(expectedPrepared, Assert.Single(state.Entries).Value.Prepared);
+            Assert.Equal(expectedPrepared ? 1UL : 0UL, Assert.Single(state.Floors).Value.HighestCounter);
             Assert.Equal(operation, Assert.Single(await fixture.ListNativePendingText()).LogicalOperation.ToArray());
         }
         // BeforeDispatch has already durably reserved its retry lease even
@@ -208,6 +212,45 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         CryptographicOperations.ZeroMemory(initial); CryptographicOperations.ZeroMemory(cipher);
     }
 
+    [Fact]
+    [Trait("RequiresApprovedMlKemRuntime", "true")]
+    public async Task Did2OwnedMailboxSend_RemovedWorkingCommitmentCannotSignRolledBackCounter()
+    {
+        await using var fixture = await Fixture.CreateAsync(withPeer: true);
+        var (complete, hello, init, _, _) = await fixture.PrepareNativeHelloCompletion(Bytes(32, 0xad));
+        using var initial = await complete(fixture.Accounts);
+        using (var received = await fixture.CompleteReceiver(initial.ExactDph2.ToArray())) { }
+        var sender = await fixture.EnsureSenderMessaging(init, hello);
+        var receiver = await fixture.EnsureReceiverMessaging(initial.ExactDph2.ToArray());
+        using (var accept = await fixture.PrepareOwnedContactAccept(receiver, Bytes(32, 0xae)))
+        using (var sent = await fixture.SendOwnedMessage(receiver, accept.Operation.ToArray(), ApplicationCoreCodec.DecodeDmc2(accept.ExactDmc2)))
+        using (var received = await fixture.ReceiveOwnedMessage(sender, sent.ExactEnvelope.ToArray())) { }
+        var operation = Bytes(32, 0xaf);
+        using var text = await fixture.PrepareOwnedText(sender, operation, "Independent counter floor");
+        using var committed = await fixture.SendOwnedMessage(sender, operation, ApplicationCoreCodec.DecodeDmc2(text.ExactDmc2.Span));
+        var grants = new OwnedGrantTransport(fixture, ownerOnPrimary: true);
+        var transport = new OwnedStoreFixture(fixture, sender, operation, committed.ExactEnvelope.ToArray()) { LoseReply = true };
+        using (Did2MailboxSendTestHooks.Push(point =>
+        { if (point == Did2MailboxSendFailpoint.BeforeSql) fixture.CaptureMailboxSqlBeforePreparation(); }))
+            await Assert.ThrowsAsync<ClientMailboxDispatchOutcomeUnknownException>(() => fixture.DeliverNativeMessage(sender, operation, grants, transport));
+        Assert.Equal(1, grants.Calls); Assert.Equal(1, transport.Calls);
+        await fixture.RemoveMailboxWorkingEntryPreservingFloor(sender, operation);
+        fixture.RollBackMailboxSqlBeforePreparation(); fixture.Sample += 40; fixture.ProofTime += 40;
+        var enteredSigningPreparation = false;
+        using (Did2MailboxSendTestHooks.Push(point =>
+        { if (point == Did2MailboxSendFailpoint.BeforeSql) enteredSigningPreparation = true; }))
+        {
+            var error = await Assert.ThrowsAsync<CryptographicException>(() => fixture.DeliverNativeMessage(sender, operation, grants, transport));
+            Assert.Equal("Owned MCP3 signing differs from the protected exact grant/counter floor.", error.Message);
+        }
+        Assert.True(enteredSigningPreparation); Assert.Equal(1, grants.Calls); Assert.Equal(1, transport.Calls);
+        using var reopened = await fixture.ReadMailboxSends();
+        Assert.Equal(1UL, Assert.Single(reopened.Floors).Value.HighestCounter);
+        Assert.False(Assert.Single(reopened.Entries).Value.Prepared);
+        // This deliberately incomplete cleanup plus encrypted SQL rollback is
+        // a corruption fixture, NOT a production compaction/settlement API.
+    }
+
     private sealed partial class Fixture
     {
         private VerifiedDeepIdV2PermanentContactResolveClosure? nativeMessagingContact;
@@ -256,6 +299,22 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             finally { CryptographicOperations.ZeroMemory(owner); }
         }
         internal Task DeleteMailboxSendRoot() => innerStorage.DeleteBatchAsync([ProtectedDid2MailboxSendJournal.Slot]);
+        internal async Task RemoveMailboxWorkingEntryPreservingFloor(Did2MessagingSessionScope scope, byte[] operation)
+        {
+            using var root = await innerStorage.ReadOwnedAsync(ProtectedDid2MailboxSendJournal.Slot) ?? throw new InvalidOperationException();
+            var snapshot = root.Use(bytes => bytes.ToArray()); byte[] next = [];
+            try
+            {
+                using var state = ProtectedDid2MailboxSendJournal.Decode(snapshot, scope.Network, scope.LocalAccount, scope.Instance);
+                var name = Convert.ToHexString(ProtectedDid2MailboxSendJournal.Key(scope.Hash, operation));
+                var entry = Assert.Single(state.Entries).Value; Assert.Equal(name, entry.Name);
+                Assert.Equal(2UL, state.MinimumCounter(entry.GrantHash));
+                entry.Dispose(); state.Entries.Clear(); state.Revision++;
+                next = ProtectedDid2MailboxSendJournal.Encode(state, scope.Network, scope.LocalAccount, scope.Instance);
+                Assert.True(await innerStorage.CompareExchangeAsync(ProtectedDid2MailboxSendJournal.Slot, snapshot, next));
+            }
+            finally { CryptographicOperations.ZeroMemory(snapshot); CryptographicOperations.ZeroMemory(next); }
+        }
         internal async Task<byte[]> AdvanceEmptyMailboxSendRevision()
         {
             using var key = await innerStorage.ReadOwnedAsync("deep.store.v2.sql-generation") ?? throw new InvalidOperationException();
@@ -296,9 +355,11 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             if (fault == 1) routeHash[0] ^= 1;
             var retainedCipher = cipher.ToArray();
             if (fault == 2) retainedCipher[0] ^= 1;
-            for (var index = 0; index < (fault == 0 ? ProtectedDid2MailboxSendJournal.MaximumEntries : 1); index++)
+            for (var index = 0; index < (fault is 0 or 3 ? ProtectedDid2MailboxSendJournal.MaximumEntries : 1); index++)
             {
-                var operation = fault == 0 ? SHA256.HashData(BitConverter.GetBytes(index)) : requestedOperation;
+                var operation = fault is 0 or 3 ? SHA256.HashData(BitConverter.GetBytes(index)) : requestedOperation;
+                state.EnrollScope(operation, operation);
+                if (fault == 3) { state.Revision++; continue; }
                 var entry = ProtectedDid2MailboxSendJournal.Entry.Pending(scope, operation, operation, routeHash, new()
                 {
                     Epoch = 1, MailboxId = new(Bytes(32, 0x16)), PlacementId = new(Bytes(32, 0x17)),
@@ -331,6 +392,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 for (var index = 0; state.Entries.Count < ProtectedDid2MailboxSendJournal.MaximumEntries; index++)
                 {
                     var operation = SHA256.HashData(BitConverter.GetBytes(index));
+                    state.EnrollScope(operation, operation);
                     var entry = ProtectedDid2MailboxSendJournal.Entry.Pending(scope, operation, operation, routeHash, new()
                     {
                         Epoch = 1, MailboxId = new(Bytes(32, 0x16)), PlacementId = new(Bytes(32, 0x17)),

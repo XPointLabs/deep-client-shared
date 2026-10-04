@@ -5,6 +5,7 @@ using Deep.Client.Shared.Features;
 using Deep.Client.Shared.Services;
 using Deep.Client.Shared.Services.ContactV2;
 using Deep.Protocol.ApplicationCore;
+using Deep.Protocol.ContactV1;
 using Deep.Protocol.ContactV2;
 using Deep.Protocol.AccountDirectoryV1;
 using Deep.Client.Shared.Persistence.MessagingV1;
@@ -130,6 +131,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             if (entry is not null && (!FixedRoute(entry.RouteHash, routeHash) ||
                 !FixedRoute(entry.EnvelopeHash, SHA256.HashData(envelopeBytes))))
                 throw new CryptographicException("An exact owned send cannot acquire a replacement route or ciphertext.");
+            await RequireMailboxSendFloorCapacityUnderLeaseAsync(sends, routeHash, locator, current, instance, held, ct).ConfigureAwait(false);
             async Task Recheck(CancellationToken token)
             {
                 await RequireFinalMessagingFreshnessAsync(current, scope, fresh, peer, source, held, first, token).ConfigureAwait(false);
@@ -182,6 +184,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 using var candidate = ProtectedDid2MailboxSendJournal.Entry.Pending(scope, op, grantHash, routeHash, envelope);
                 if (entry is null)
                 {
+                    sends.EnrollGrant(loan.Grant);
                     entry = ProtectedDid2MailboxSendJournal.Entry.Decode(candidate.Exact); sends.Entries.Add(name, entry);
                     sends.Revision = checked(sends.Revision + 1);
                     var adopted = await SaveMailboxSendJournalAsync(sends, snapshot, current, instance, held, ct).ConfigureAwait(false);
@@ -189,6 +192,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 }
                 else if (!FixedRoute(entry.Exact[..256], candidate.Exact[..256]))
                     throw new CryptographicException("Mailbox retry changed its protected message, grant, route or original lifetime.");
+                sends.RequireGrant(loan.Grant);
                 loan.MinimumCounter = sends.MinimumCounter(grantHash);
                 var existing = await loan.Store.ReadTransportOutboxAsync(loan.Selector.AccountScope,
                     OutboxLogicalId.FromBytes(envelope.OperationId.Span), ct).ConfigureAwait(false);
@@ -212,9 +216,16 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     if (parsed.Presentation.ReplayCounter < loan.MinimumCounter)
                         throw new CryptographicException("Mailbox SQL replay counter rolled back behind protected custody.");
                     var next = entry.WithPrepared(exactMau, parsed.Presentation.ReplayCounter);
+                    sends.AdvanceCounter(grantHash, parsed.Presentation.ReplayCounter);
                     sends.Entries[name] = next; entry.Dispose(); entry = next; sends.Revision = checked(sends.Revision + 1);
+#if DEEP_TEST_INTERNALS
+                    Did2MailboxSendTestHooks.Hit(Did2MailboxSendFailpoint.BeforePreparedRoot);
+#endif
                     var adopted = await SaveMailboxSendJournalAsync(sends, snapshot, current, instance, held, ct).ConfigureAwait(false);
                     CryptographicOperations.ZeroMemory(snapshot); snapshot = adopted;
+#if DEEP_TEST_INTERNALS
+                    Did2MailboxSendTestHooks.Hit(Did2MailboxSendFailpoint.AfterPreparedRoot);
+#endif
                 }
                 await Recheck(ct).ConfigureAwait(false);
                 await RequireExactProtectedMailboxRootAsync(ProtectedDid2MailboxGrantJournal.Slot, grantRoot, ct).ConfigureAwait(false);
@@ -283,6 +294,27 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             finally { CryptographicOperations.ZeroMemory(ciphertext); }
         }
         finally { foreach (var value in new[] { op, snapshot, grantRoot, instance, exactMau, envelopeBytes }) CryptographicOperations.ZeroMemory(value); }
+    }
+
+    // Capacity is checked before grant acquisition can enroll a holder or call
+    // the issuer. A structural protected winner is only a capacity hint here;
+    // the normal acquisition, signature, freshness and exact-grant checks still
+    // run independently. A reader cannot enroll/repair an absent counter floor.
+    private async Task RequireMailboxSendFloorCapacityUnderLeaseAsync(ProtectedDid2MailboxSendJournal.State sends,
+        byte[] routeHash, ReadOnlyMemory<byte> locator, VerifiedDeepIdV2CurrentAccount current,
+        byte[] instance, HeldDeepIdV2AccountLease held, CancellationToken ct)
+    {
+        if (sends.Floors.Count < ProtectedDid2MailboxSendJournal.MaximumFloors) return;
+        held.RequireActive();
+        using var root = await storage.ReadOwnedAsync(ProtectedDid2MailboxGrantJournal.Slot, ct).ConfigureAwait(false) ??
+            throw new InvalidDataException("Protected grant custody is absent during replay-floor preflight.");
+        using var state = root.Use(bytes => ProtectedDid2MailboxGrantJournal.Decode(bytes, networkId, current.AccountId.Span, instance));
+        var name = Convert.ToHexString(ProtectedDid2MailboxGrantJournal.Scope(routeHash, locator.Span, (byte)MailboxCapabilityDomain.Deposit));
+        if (!state.Entries.TryGetValue(name, out var winner) || !ProtectedDid2MailboxGrantJournal.HasWinner(winner))
+            throw new IOException("Protected mailbox replay floors are full; issuance cannot start.");
+        var response = ContactCodec.Decode("XMC2", ProtectedDid2MailboxGrantJournal.Response(winner).Span);
+        sends.RequireGrant(MailboxAuthenticatedCapabilityCodec.DecodeGrant(response.Field(8).Span));
+        ct.ThrowIfCancellationRequested(); held.RequireActive();
     }
 
     private async Task<VerifiedDeepIdV2ContactMailboxRoute> ReadAuthenticatedPeerMailboxRouteUnderLeaseAsync(

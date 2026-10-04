@@ -1,5 +1,40 @@
 # Deep Client Shared architecture
 
+## Owned Store counter floor format
+
+[DR-0092](../../docs/survival-program/decisions/DR-0092-did2-owned-mailbox-counter-floors.md)
+implements the counter part of the existing
+[settlement contract](../../docs/architecture/TRANSPORT-NEUTRAL-MESSAGING.md#843-compaction-and-boundedness).
+This is the sole repo-owned local format/API mapping, not a new network record.
+
+The existing `deep.store.v2.mailbox-send-journal` slot has only one reader:
+version3. The header is96 bytes: version at0; zero reserved byte at1; big-endian
+entry count at2; revision at4; network16 at12; account32 at28; instance32 at60;
+floor count at92 and two zero reserved bytes at94. Ordered floor records follow
+the header, then the existing ordered304-byte working commitments. Each floor
+is `Protocol replay namespace32 | exact grant SHA-25632 | highest counter8`.
+Both collections are independently bounded by the existing512-entry budget;
+revision is at least one more than either collection's count. Floors allow zero
+only before SQL preparation, reject the exhausted counter, and require unique
+namespace/grant bindings. Every working entry has its enrolled floor; a prepared
+counter never exceeds it. No scope identity or maximum counter is reconstructed
+from remaining working entries. Total size is bounded by these exact counts.
+
+The actual account owner enrolls the independently verified grant namespace
+with a new pending commitment before signing, requires the same exact enrollment
+for retries, and atomically adopts prepared MAU/counter and higher floor through
+the existing protected CAS/read-back. Full floor custody is checked before issuer
+acquisition; only a matching retained winner can proceed at capacity. SQL stays
+an independent exact-request owner, not authority to lower the protected floor.
+Missing, foreign, malformed or previous-format custody fails closed, including
+an empty previous root. There is no migration, lazy enrollment by a reader,
+extra journal or local clock permission. This requires matching client builds
+and explicit isolated-QA reset, not an automatic reset of installed accounts.
+
+This change does not delete working records, retire floors, renew grants,
+implement a sustained-message soak or complete the object/route horizon.
+Required compaction and terminal/dedup consumers remain open under S01/S04.
+
 ## Current contact publication custody
 
 The single current contact-route journal follows
@@ -36,7 +71,7 @@ plans or proof of current service activation.
 | AppAck and Read events | Not connected to the current DID2 authoring and semantic consumer allowlists. |
 | Scheduling | Synchronization processes one bounded page. The current consumer has no automatic message outbox drain/inbox scheduler; MAUI's network reconnect only restores its diagnostic proof/publication path. |
 | Offline use | Current conversation/history methods request fresh endpoint authority; local authenticated history and offline command queueing still need their own boundary. |
-| Long-running custody | Send and grant journals have finite capacity without a connected retirement/compaction lifecycle; an existing grant winner is reverified, without an expired-winner replacement path for the same scope. Client semantic transition tables are accepted in [DR-0084](../../docs/survival-program/decisions/DR-0084-owned-delivery-settlement-and-retirement.md); local format/API and runtime remain open. |
+| Long-running custody | Independent protected Store counter floors are implemented under [DR-0092](../../docs/survival-program/decisions/DR-0092-did2-owned-mailbox-counter-floors.md), including exact retry and pre-issuer capacity checks. Send and grant journals still lack connected retirement/compaction; expired-winner replacement, authored-sequence/terminal metadata and the remaining local formats/runtime are open under [DR-0084](../../docs/survival-program/decisions/DR-0084-owned-delivery-settlement-and-retirement.md). |
 | Route renewal | Committed-predecessor renewal and protected pending phases exist. Incomplete-proposal expiry, grant/route rollover and service/topology changes are not a complete recovery lifecycle. |
 | Attachments | Local encrypted asset custody and typed offers exist. No public DID2 remote upload/download workflow is composed. |
 | Governed groups | Protocol and portable components do not constitute a current DID2 application send/receive/ACK composition. |
