@@ -52,12 +52,15 @@ not socket or device evidence.
 MAUI full Clean95/0/0 and smoke119/0/0 complete exit0; builds use warnings as
 errors. The normal Windows ARM64 Debug build completes with zero warnings/errors.
 It does not compile the opt-in HTTPS adapter or qualify a shipping artifact.
-Full Shared production solution is running on this unchanged source; the prior
-564-pass matrix predates this batch and cannot qualify it.
+The unfiltered Shared production solution completes exit0 on source
+`42aee0d8358d552f43bee256e0fb52cc1ab45e3b`: **564 passed /0 failed /0 skipped**,
+33m21s. All production test source rebuilds under warnings-as-errors. The prior
+564-pass matrix predates this batch; only the new receipt qualifies local history.
 
 | Receipt (repository-relative) | SHA-256 |
 | --- | --- |
 | Shared `artifacts/s07-local-history/focused-final/nikit_SURFACE-LT_2026-10-04_20_36_22_net10.0.trx` | `b300b13fbe27cd46a4eefa09282e7e5d048483857e68ff82d3a47910fbf40eac` |
+| Shared full `artifacts/s07-local-history/full-final/nikit_SURFACE-LT_2026-10-04_20_43_56_net10.0.trx` | `c2f1264389f4f4c85da733a5e8f836c68f4013322d2acd816a217f6acfb04d25` |
 | MAUI initial full `artifacts/s07-local-history/ui-full/nikit_SURFACE-LT_2026-10-04_20_35_02_net10.0.trx` | `b70c3359b15411d4ac72bd9c7a3e268fcd2047ce483c4800d4cb730f61d9b281` |
 | MAUI regression before fix `artifacts/s07-local-history/reentrant-before/nikit_SURFACE-LT_2026-10-04_20_39_50_net10.0.trx` | `d5de2d3fa80379e19de37c80c43cd8203ab3e1a4fe71133d26aef25757d03ff0` |
 | MAUI final full `artifacts/s07-local-history/ui-final-full/nikit_SURFACE-LT_2026-10-04_20_40_49_net10.0.trx` | `22c59fa65bb1e5e7ec99d8a4692ab72099b1ec6c52099a3c99c2f714f9620687` |
