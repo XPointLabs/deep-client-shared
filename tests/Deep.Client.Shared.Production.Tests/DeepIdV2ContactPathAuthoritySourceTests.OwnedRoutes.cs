@@ -30,14 +30,14 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     [Fact]
     public void Did2OwnedRoute_ByteBudgetMatchesProtectedStoreAndRejectsOversizeBeforeEntries()
     {
-        Assert.Equal(477_511, ProtectedDid2ContactRouteJournal.MaximumEntryBytes);
-        Assert.Equal(8, ProtectedDid2ContactRouteJournal.Version);
+        Assert.Equal(477_527, ProtectedDid2ContactRouteJournal.MaximumEntryBytes);
+        Assert.Equal(9, ProtectedDid2ContactRouteJournal.Version);
         Assert.Equal(DeepSecureStorageRegistration.MaximumValueBytes, ProtectedDid2ContactRouteJournal.MaximumBytes);
         var reservation = 4 + ProtectedDid2ContactRouteJournal.MaximumEntryBytes;
         Assert.True(ProtectedDid2ContactRouteJournal.HeaderBytes + 2 * reservation <= ProtectedDid2ContactRouteJournal.MaximumBytes);
         Assert.True(ProtectedDid2ContactRouteJournal.HeaderBytes + 3 * reservation > ProtectedDid2ContactRouteJournal.MaximumBytes);
         var network = Bytes(16, 0x11); var account = Bytes(32, 0x12); var instance = Bytes(32, 0x13);
-        var retired = ProtectedDid2ContactRouteJournal.Empty(network, account, instance); retired[0] = 7;
+        var retired = ProtectedDid2ContactRouteJournal.Empty(network, account, instance); retired[0] = 8;
         Assert.Throws<InvalidDataException>(() => ProtectedDid2ContactRouteJournal.Decode(retired, network, account, instance));
         var oversize = new byte[ProtectedDid2ContactRouteJournal.MaximumBytes + 1];
         Assert.Throws<InvalidDataException>(() => ProtectedDid2ContactRouteJournal.Decode(oversize, network, account, instance));

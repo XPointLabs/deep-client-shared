@@ -1,5 +1,15 @@
 # Deep Client Shared architecture
 
+## Current contact publication custody
+
+The reusable contact-route journal follows
+[DR-0089](../../docs/survival-program/decisions/DR-0089-did2-one-time-publication-coordination.md):
+current-only journal9, unchanged fourteen slots, request maximum171614 and
+complete entry maximum477527. Older isolated QA roots require explicit reset;
+there is no migration, lazy repair or key/nonce remint. This budget repin does
+not add a secret one-time slot or enable one-time export/dispatch. That owned
+pending/winner lifecycle and shipping composition remain unfinished.
+
 ## Current composition baseline — 2026-10-03
 
 The MAUI application consumes

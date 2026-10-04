@@ -13,8 +13,8 @@ internal static class ProtectedDid2ContactRouteJournal
 {
     internal const string Slot = "deep.store.v2.contact-route-journal";
     internal const int HeaderBytes = 92, PrefixBytes = 170, MaximumIntents = 128;
-    internal const byte Version = 8;
-    internal const int MaximumEntryBytes = 477_511;
+    internal const byte Version = 9;
+    internal const int MaximumEntryBytes = 477_527;
     // Matches the journaled production secure-store per-slot limit. Pending
     // routes reserve enough space for phase 7 before a threshold callback.
     internal const int MaximumBytes = DeepSecureStorageRegistration.MaximumValueBytes;
