@@ -56,7 +56,8 @@ dotnet test tests/XNode.IntegrationTests/XNode.IntegrationTests.csproj -p:DeepPr
 
 Final Shared source warnings-as-errors build terminal0, zero warnings/errors.
 Final owned selection **5/5**, terminal0/no skips; downstream Node **94/94**,
-terminal0/no skips. Full Shared is **pending**, not the old547 result.
+terminal0/no skips. Full Shared **552/552**, terminal0/no skips,39m39s,
+on the same final source; this replaces the old547 evidence for this slice.
 Full Protocol terminal1: **2080 pass /1 fail /12 skips**, including the new
 closed API surface test. The sole failure remains the actual package witness
 rejecting retired MCG2 assembly bytes; source production graph still rejects
@@ -71,7 +72,8 @@ production crypto/device evidence; this contact slice does not provision those
 inputs or enable native assets.
 Root documentation174, CONTACT/crypto/ONION consistency and governance
 ClassificationOnly pass, without package or final release claims.
-Final scoped scan passes27 selected source/docs/TRX files; strict UTF-8 checks
+Final scoped scan passes28 selected source/docs/TRX files, including the full
+Shared receipt; strict UTF-8 checks
 pass8 changed Markdown files and263 existing local Markdown paths. These counts
 cover documentation and secret hygiene, not release qualification.
 
@@ -88,6 +90,8 @@ Sanitized ignored evidence SHA256:
 
 - Shared5 `artifacts/s00-one-time-custody/final-five/nikit_SURFACE-LT_2026-10-04_14_11_32_net10.0.trx`:
   `f329c8e4cdb4aa613d3d4fbb708a3d649810ca7e9ce7c2685e9ab8e0e29e151d`.
+- Shared full552 `artifacts/s00-one-time-custody/full/nikit_SURFACE-LT_2026-10-04_14_12_12_net10.0.trx`:
+  `df43848e1184c41d7e4d74ec412e6ae8b6b9e6f9de4be9b40f7bf058fc78c1b8`.
 - Protocol routes131 `../deep-protocol/artifacts/s00-one-time-custody/full/nikit_SURFACE-LT_2026-10-04_14_11_22_net10.0.trx`:
   `47b08d0a2f537af613f63acc63749e3ea67cc8f63f89fb0401685905558c65b0`.
 - Protocol carrier105 `../deep-protocol/artifacts/s00-one-time-custody/full/nikit_SURFACE-LT_2026-10-04_14_11_22_net10.0[1].trx`:
