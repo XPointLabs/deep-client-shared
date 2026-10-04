@@ -62,8 +62,9 @@ skips remain unqualified as recorded in the
 
 Shared owner/format selection **32/32**, exit0, no skips,12m54s:25 structural
 cases and7 actual account-owner cases. This uses the final floor implementation
-before the metadata-only registry repin. Final full Shared is running on rebuilt
-dependencies; previous552 is not its result.
+before the metadata-only registry repin. Final full Shared completes exit0 on
+rebuilt dependencies: **564 passed /0 failed /0 skipped**,43m57s. This is portable
+owner integration, not physical delivery or shipping client qualification.
 
 Strict registry passes44 artifacts/244 magics/10 suites/5 carriers/4 profiles/
 11 retired aliases. Earlier drift came from the already accepted DR91 root docs:
@@ -76,10 +77,12 @@ Unchanged XNode host builds against the new Protocol source with exit0 and zero
 warnings/errors; this is downstream compilation, not a new Node full run.
 Root public documentation gate passes174 checks. The precommit scoped secret
 scan passes23 selected source/docs/TRX files, including Node reproduction receipts;
-it does not yet include a final full Shared receipt.
+the subsequent current-Program scoped scan also includes the terminal full
+Shared receipt and passes; no scanner rule is weakened.
 
 | Sanitized local receipt | SHA-256 |
 | --- | --- |
+| Shared full564 `artifacts/s01-owned-counter-floors/full-final/nikit_SURFACE-LT_2026-10-04_17_57_58_net10.0.trx` | `66c5b82ec8b57ee3e499b1e3e01f125f3b2fef489de484295a86a1b020632b23` |
 | Shared `artifacts/s01-owned-counter-floors/focused/nikit_SURFACE-LT_2026-10-04_17_28_42_net10.0.trx` | `7f047eb983ff2186fcab7a0b764d51c00d4bfcfdeea891239816f69178987516` |
 | Protocol `artifacts/s01-owned-counter-floors/final-signed-namespace/nikit_SURFACE-LT_2026-10-04_17_57_27_net10.0.trx` | `d4ec9ee8b39ccc9a030d81945d9ce47950b12cd89941d56870d7909cd5d7505c` |
 | Protocol core1851/1/12 `artifacts/s01-owned-counter-floors/full-final/nikit_SURFACE-LT_2026-10-04_17_57_47_net10.0.trx` | `b7d0fe5ddc88396d727c549315017f61f5502abf4d1e79ae871f5b02067c1d51` |
