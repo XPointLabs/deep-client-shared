@@ -63,8 +63,17 @@ rejecting retired MCG2 assembly bytes; source production graph still rejects
 MAU2 in the retired PMA1 consumer. Neither gate is excluded or weakened.
 Protocol restore/build terminal0 and zero-warning build. Evidence ownership
 classifies exact314/package219/final95 but maps0, so it is not package-complete.
+The twelve Protocol skips are unchanged explicit separate-evidence lanes:
+six native wrapper cases require their dedicated Windows harness, five managed
+Braid cases lack the reviewed native candidate, and one authenticated predecessor
+capture case lacks explicit operator inputs. They are not passed tests or
+production crypto/device evidence; this contact slice does not provision those
+inputs or enable native assets.
 Root documentation174, CONTACT/crypto/ONION consistency and governance
 ClassificationOnly pass, without package or final release claims.
+Final scoped scan passes27 selected source/docs/TRX files; strict UTF-8 checks
+pass8 changed Markdown files and263 existing local Markdown paths. These counts
+cover documentation and secret hygiene, not release qualification.
 
 Earlier focused attempts found only test expectation/build harness issues:
 wrong namespace and span crossing an await in the new test; exact format versus
