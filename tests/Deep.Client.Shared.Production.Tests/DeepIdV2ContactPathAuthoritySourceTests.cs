@@ -2994,11 +2994,19 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         internal bool FailAfterHistoryAnchor { get; set; }
         internal string? LastHistoryAnchorSlot { get; private set; }
         internal bool FailAfterOnionMarker { get; set; }
+        internal byte? FailRouteReadbackPhase { get; set; }
+        private bool failNextRouteReadback;
         internal string? LastClaimFloorSlot { get; private set; }
         public async Task<bool> CompareExchangeAsync(string slot, ReadOnlyMemory<byte> expected,
             ReadOnlyMemory<byte> replacement, CancellationToken ct = default)
         {
             var applied = await inner.CompareExchangeAsync(slot, expected, replacement, ct);
+            if (applied && slot == ProtectedDid2ContactRouteJournal.Slot && FailRouteReadbackPhase is { } phase &&
+                replacement.Length > ProtectedDid2ContactRouteJournal.HeaderBytes + 4 + 32 &&
+                replacement.Span[ProtectedDid2ContactRouteJournal.HeaderBytes + 4 + 32] == phase)
+            {
+                FailRouteReadbackPhase = null; failNextRouteReadback = true;
+            }
             if (applied && slot == ProtectedDid2ContactStartJournal.Slot && FailAfterContactDraftCommit)
             {
                 FailAfterContactDraftCommit = false;
@@ -3027,6 +3035,11 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         public async Task<OwnedDeepSecret?> ReadOwnedAsync(string slot, CancellationToken ct = default)
         {
             var value = await inner.ReadOwnedAsync(slot, ct);
+            if (slot == ProtectedDid2ContactRouteJournal.Slot && failNextRouteReadback)
+            {
+                failNextRouteReadback = false; value?.Dispose();
+                throw new IOException("Injected failure reading back exact committed route custody.");
+            }
             if (slot == "deep.store.v2.prekey-commit-pair-v1" && AfterCommitPairRead is { } action)
             {
                 AfterCommitPairRead = null;

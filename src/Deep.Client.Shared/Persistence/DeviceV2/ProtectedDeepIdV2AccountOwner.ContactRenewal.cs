@@ -35,7 +35,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var currentName = Convert.ToHexString(plan.Intent.Span);
             if (!state.Entries.TryGetValue(currentName, out var prior) || prior.Phase != 7) return null;
             var configuration = Did2OwnedPermanentContactPlan.Configuration();
-            if (!prior.Matches(configuration) || !FixedRoute(prior.Record(0).Span, staged.ExactDca1.Span))
+            if (prior.Kind != 1 || !prior.Matches(configuration) || !FixedRoute(prior.Record(0).Span, staged.ExactDca1.Span))
                 throw new CryptographicException("Permanent-contact renewal changed protected configuration or delegation.");
             var checkpoint = fresh.Proof.CurrentCheckpoint!;
             var dca = DeepIdV2ContactAuthorizationCodec.Verify(DeepIdV2ContactAuthorizationCodec.Decode(prior.Record(0).Span),

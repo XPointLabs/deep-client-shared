@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Security.Cryptography;
+using System.Runtime.InteropServices;
 using Deep.Protocol.AccountDirectoryV1;
 using Deep.Client.Shared.Services.ContactV2;
 using Deep.Protocol.ApplicationCore;
@@ -13,12 +14,12 @@ internal static class ProtectedDid2ContactRouteJournal
 {
     internal const string Slot = "deep.store.v2.contact-route-journal";
     internal const int HeaderBytes = 92, PrefixBytes = 170, MaximumIntents = 128;
-    internal const byte Version = 9;
-    internal const int MaximumEntryBytes = 477_527;
+    internal const byte Version = 10;
+    internal const int MaximumEntryBytes = 477_756;
     // Matches the journaled production secure-store per-slot limit. Pending
     // routes reserve enough space for phase 7 before a threshold callback.
     internal const int MaximumBytes = DeepSecureStorageRegistration.MaximumValueBytes;
-    private static readonly int[] Limits = [473, 550, 3476, 4012, 3523, 611, 23295, 65535, 65575, ContactPublicationAuthorityWireCodec.MaximumRequestBytes, 93092, 16384, ContactRouteAuthorityWireCodec.MaximumRequestBytes, ContactRouteAuthorityWireCodec.MaximumIssuanceAdh1Bytes];
+    private static readonly int[] Limits = [473, 550, 3476, 4012, 3523, 611, 23295, 65535, 65575, ContactPublicationAuthorityWireCodec.MaximumRequestBytes, 93092, 16384, ContactRouteAuthorityWireCodec.MaximumRequestBytes, ContactRouteAuthorityWireCodec.MaximumIssuanceAdh1Bytes, 225];
 
     internal sealed class State : IDisposable
     {
@@ -32,9 +33,20 @@ internal static class ProtectedDid2ContactRouteJournal
         private readonly (int Start, int Length)[] records;
         private Entry(byte[] exact, (int, int)[] records) { this.exact = exact; this.records = records; }
         internal byte Phase => exact[32];
+        internal byte Kind => exact[33];
+        internal int InvitationLength => records[14].Length;
         internal int ReservedBytes => Phase < 7 ? MaximumEntryBytes : exact.Length;
         internal ReadOnlySpan<byte> Exact => exact;
-        internal ReadOnlyMemory<byte> Record(int index) => exact.AsMemory(records[index].Start, records[index].Length).ToArray();
+        internal ReadOnlyMemory<byte> Record(int index)
+        {
+            if (index == 14) throw new InvalidOperationException("Use owned invitation copies with explicit disposal.");
+            return exact.AsMemory(records[index].Start, records[index].Length).ToArray();
+        }
+        internal byte[] CopyOneTimeInvitation()
+        {
+            if (Kind != 2 || Phase < 4) throw new InvalidOperationException("Owned one-time invitation custody is absent.");
+            return exact.AsSpan(records[14].Start, records[14].Length).ToArray();
+        }
         internal bool Matches(Did2ContactRouteConfiguration configuration) =>
             BinaryPrimitives.ReadUInt32BigEndian(exact.AsSpan(36)) == configuration.Quota &&
             BinaryPrimitives.ReadUInt16BigEndian(exact.AsSpan(40)) == configuration.MinimumReader &&
@@ -43,19 +55,31 @@ internal static class ProtectedDid2ContactRouteJournal
         internal static Entry Proposal(ReadOnlySpan<byte> intent, Did2ContactRouteConfiguration configuration,
             ReadOnlySpan<byte> scalar, ReadOnlySpan<byte> keyId, ReadOnlySpan<byte> nonce,
             ReadOnlyMemory<byte> exactDca, ContactRecord xra, ContactRouteAuthorityWireRequest request,
-            ReadOnlySpan<byte> network, ReadOnlySpan<byte> account)
+            ReadOnlySpan<byte> network, ReadOnlySpan<byte> account) =>
+            ProposalCore(intent, configuration, scalar, keyId, nonce, exactDca, xra, request, network, account, 1);
+
+        internal static Entry OneTimeProposal(ReadOnlySpan<byte> intent, Did2ContactRouteConfiguration configuration,
+            ReadOnlySpan<byte> scalar, ReadOnlySpan<byte> keyId, ReadOnlySpan<byte> nonce,
+            ReadOnlyMemory<byte> exactDca, ContactRecord xra, ContactRouteAuthorityWireRequest request,
+            ReadOnlySpan<byte> network, ReadOnlySpan<byte> account) =>
+            ProposalCore(intent, configuration, scalar, keyId, nonce, exactDca, xra, request, network, account, 2);
+
+        private static Entry ProposalCore(ReadOnlySpan<byte> intent, Did2ContactRouteConfiguration configuration,
+            ReadOnlySpan<byte> scalar, ReadOnlySpan<byte> keyId, ReadOnlySpan<byte> nonce,
+            ReadOnlyMemory<byte> exactDca, ContactRecord xra, ContactRouteAuthorityWireRequest request,
+            ReadOnlySpan<byte> network, ReadOnlySpan<byte> account, byte kind)
         {
             var prefix = new byte[PrefixBytes];
             var encoded = ContactRouteAuthorityWireCodec.EncodeRequest(request);
             try
             {
                 Required32(intent); Required32(scalar); Required32(keyId); Required32(nonce);
-                intent.CopyTo(prefix); prefix[32] = 1;
+                intent.CopyTo(prefix); prefix[32] = 1; prefix[33] = kind;
                 BinaryPrimitives.WriteUInt32BigEndian(prefix.AsSpan(36), configuration.Quota);
                 BinaryPrimitives.WriteUInt16BigEndian(prefix.AsSpan(40), configuration.MinimumReader);
                 configuration.AntiSpamHash.Span.CopyTo(prefix.AsSpan(42)); scalar.CopyTo(prefix.AsSpan(74));
                 keyId.CopyTo(prefix.AsSpan(106)); nonce.CopyTo(prefix.AsSpan(138));
-                return Build(prefix, [exactDca, xra.CanonicalBytes, default, default, default, default, default, default, default, default, default, default, encoded, default], network, account);
+                return Build(prefix, [exactDca, xra.CanonicalBytes, default, default, default, default, default, default, default, default, default, default, encoded, default, default], network, account);
             }
             finally { CryptographicOperations.ZeroMemory(prefix); CryptographicOperations.ZeroMemory(encoded); }
         }
@@ -77,9 +101,23 @@ internal static class ProtectedDid2ContactRouteJournal
         }
         internal Entry WithContactObject(AuthoredDeepIdV2ContactObject candidate, ReadOnlySpan<byte> network, ReadOnlySpan<byte> account)
         {
-            if (Phase != 3) throw new InvalidOperationException("Contact object adoption requires completed route custody.");
+            if (Phase != 3 || Kind != 1) throw new InvalidOperationException("Reusable object adoption requires completed reusable route custody.");
             return Next(4, [Record(0), Record(1), Record(2), Record(3), Record(4), Record(5), Record(6),
                 candidate.Closure.CanonicalBytes, candidate.ProtectedDcr1, default, default, default, Record(12), Record(13)], network, account);
+        }
+
+        internal Entry WithOneTimeContactObject(AuthoredDeepIdV2OneTimeContactObject candidate,
+            ReadOnlySpan<byte> network, ReadOnlySpan<byte> account)
+        {
+            if (Phase != 3 || Kind != 2) throw new InvalidOperationException("One-time object adoption requires completed one-time route custody.");
+            var invitation = candidate.ExactInvitation;
+            try
+            {
+                return Next(4, [Record(0), Record(1), Record(2), Record(3), Record(4), Record(5), Record(6),
+                    candidate.Closure.CanonicalBytes, candidate.ProtectedDcr1, default, default, default,
+                    Record(12), Record(13), invitation], network, account);
+            }
+            finally { CryptographicOperations.ZeroMemory(MemoryMarshal.AsMemory(invitation).Span); }
         }
 
         internal Entry WithPublicationRequest(ContactPublicationAuthorityWireRequest request, ReadOnlySpan<byte> network, ReadOnlySpan<byte> account)
@@ -109,7 +147,7 @@ internal static class ProtectedDid2ContactRouteJournal
 
         internal Entry RebindCommittedIntent(ReadOnlySpan<byte> intent, ReadOnlySpan<byte> network, ReadOnlySpan<byte> account)
         {
-            if (Phase != 7) throw new InvalidOperationException("Only a verified completed renewal can replace current custody.");
+            if (Phase != 7 || Kind != 1) throw new InvalidOperationException("Only a verified completed reusable renewal can replace current custody.");
             Required32(intent);
             var bytes = exact.ToArray();
             try { intent.CopyTo(bytes); return Decode(bytes, network, account); }
@@ -119,8 +157,21 @@ internal static class ProtectedDid2ContactRouteJournal
         private Entry Next(byte phase, ReadOnlyMemory<byte>[] values, ReadOnlySpan<byte> network, ReadOnlySpan<byte> account)
         {
             var prefix = exact.AsSpan(0, PrefixBytes).ToArray();
-            try { prefix[32] = phase; return Build(prefix, values, network, account); }
-            finally { CryptographicOperations.ZeroMemory(prefix); }
+            byte[]? invitation = null;
+            try
+            {
+                if (values.Length == Limits.Length - 1)
+                {
+                    invitation = exact.AsSpan(records[14].Start, records[14].Length).ToArray();
+                    values = [.. values, invitation];
+                }
+                prefix[32] = phase; return Build(prefix, values, network, account);
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(prefix);
+                if (invitation is not null) CryptographicOperations.ZeroMemory(invitation);
+            }
         }
         private static Entry Build(byte[] prefix, ReadOnlyMemory<byte>[] values, ReadOnlySpan<byte> network, ReadOnlySpan<byte> account)
         {
@@ -146,24 +197,27 @@ internal static class ProtectedDid2ContactRouteJournal
         }
         internal static Entry Decode(ReadOnlySpan<byte> bytes, ReadOnlySpan<byte> network, ReadOnlySpan<byte> account)
         {
-            if (bytes.Length is < PrefixBytes + 56 + 473 + 550 + ContactRouteAuthorityWireCodec.MinimumRequestBytes or > MaximumEntryBytes || bytes[32] is < 1 or > 7 ||
-                bytes.Slice(33, 3).IndexOfAnyExcept((byte)0) >= 0 ||
+            if (bytes.Length is < PrefixBytes + 60 + 473 + 550 + ContactRouteAuthorityWireCodec.MinimumRequestBytes or > MaximumEntryBytes || bytes[32] is < 1 or > 7 ||
+                bytes[33] is < 1 or > 2 || bytes.Slice(34, 2).IndexOfAnyExcept((byte)0) >= 0 ||
                 BinaryPrimitives.ReadUInt32BigEndian(bytes[36..]) is < 1 or > 65_535 ||
                 BinaryPrimitives.ReadUInt16BigEndian(bytes[40..]) is < 1 or > 256)
                 throw new InvalidDataException("A protected route phase/configuration is incompatible.");
             foreach (var start in new[] { 0, 42, 74, 106, 138 }) Required32(bytes.Slice(start, 32));
-            var slices = new (int Start, int Length)[Limits.Length]; var offset = PrefixBytes; var phase = bytes[32];
+            var slices = new (int Start, int Length)[Limits.Length]; var offset = PrefixBytes; var phase = bytes[32]; var kind = bytes[33];
             for (var index = 0; index < slices.Length; index++)
             {
                 if (bytes.Length - offset < 4) throw new InvalidDataException("Protected route framing is truncated.");
                 var size = BinaryPrimitives.ReadUInt32BigEndian(bytes[offset..]); offset += 4;
                 if (size > Limits[index] || size > bytes.Length - offset ||
-                    (index == 12 || index == 13 && phase >= 2 || index < 2 || phase >= 2 && index < 5 || phase >= 3 && index < 7 || phase >= 4 && index < 9 || phase >= 5 && index < 10 || phase >= 6 && index < 11 || phase == 7) != (size != 0))
+                    (index == 14 ? kind == 2 && phase >= 4 :
+                    index == 12 || index == 13 && phase >= 2 || index < 2 || phase >= 2 && index < 5 || phase >= 3 && index < 7 || phase >= 4 && index < 9 || phase >= 5 && index < 10 || phase >= 6 && index < 11 || phase == 7) != (size != 0))
                     throw new InvalidDataException("Protected route phase/record size differs.");
                 slices[index] = (offset, checked((int)size)); offset += checked((int)size);
             }
             if (offset != bytes.Length) throw new InvalidDataException("Protected route has trailing bytes.");
             var dca = DeepIdV2ContactAuthorizationCodec.Decode(Slice(bytes, slices[0]));
+            if ((dca.AllowedInviteKindMask & kind) == 0)
+                throw new CryptographicException("Protected route kind is not authorized by its exact delegation.");
             var xra = ContactCodec.Decode("XRA1", Slice(bytes, slices[1]));
             if (!Fixed(dca.NetworkId.Span, network) || !Fixed(dca.DeepAccountId.Span, account) ||
                 !Fixed(xra.Field(1).Span, network) || !Fixed(xra.Field(14).Span, dca.PublisherDeviceId.Span) ||
@@ -172,6 +226,8 @@ internal static class ProtectedDid2ContactRouteJournal
                 !DeepIdentityCrypto.X25519PublicKeyMatchesPrivateScalar(bytes.Slice(74, 32), xra.Field(11).Span))
                 throw new CryptographicException("Protected route configuration/key custody differs from its exact proposal.");
             var thresholdRequest = ContactRouteAuthorityWireCodec.DecodeRequest(Slice(bytes, slices[12]));
+            if (kind == 2 && thresholdRequest.HasPredecessor)
+                throw new CryptographicException("One-time custody cannot adopt a predecessor.");
             if (!Fixed(thresholdRequest.NetworkId.Span, network) ||
                 !Fixed(thresholdRequest.RequestNonce.Span, bytes.Slice(138, 32)) ||
                 !Fixed(thresholdRequest.ExactDca1.Span, Slice(bytes, slices[0])) ||
@@ -192,7 +248,10 @@ internal static class ProtectedDid2ContactRouteJournal
             {
                 var invite = DeepIdV2InviteRendezvousCodec.Decode(Slice(bytes, slices[5]));
                 var closure = ContactRouteClosureCodec.Decode(Slice(bytes, slices[6]));
-                if (!Fixed(invite.Field(1).Span, network) ||
+                if (invite.Field(9).Span[0] != kind ||
+                    BinaryPrimitives.ReadUInt32BigEndian(invite.Field(10).Span) != (kind == 1 ? 0u : 1u) ||
+                    kind == 2 && BinaryPrimitives.ReadUInt64BigEndian(invite.Field(3).Span) != 0 ||
+                    !Fixed(invite.Field(1).Span, network) ||
                     !Fixed(invite.Field(16).Span[6..], dca.RecordHash.Span) ||
                     !Fixed(closure.Authorization.CanonicalBytes.Span, Slice(bytes, slices[1])) ||
                     !Fixed(closure.Selection.CanonicalBytes.Span, Slice(bytes, slices[2])) ||
@@ -208,15 +267,27 @@ internal static class ProtectedDid2ContactRouteJournal
                     !Fixed(closure.Bundle.Field(1).Span, network) || !Fixed(closure.Bundle.Field(2).Span, account) ||
                     BinaryPrimitives.ReadUInt64BigEndian(closure.Bundle.Field(8).Span) !=
                         BinaryPrimitives.ReadUInt64BigEndian(DeepIdV2InviteRendezvousCodec.Decode(Slice(bytes, slices[5])).Field(3).Span) ||
-                    BinaryPrimitives.ReadUInt32BigEndian(closure.Bundle.Field(16).Span) != 9 ||
+                    BinaryPrimitives.ReadUInt32BigEndian(closure.Bundle.Field(16).Span) != (kind == 1 ? 9u : 10u) ||
+                    kind == 2 && BinaryPrimitives.ReadUInt64BigEndian(closure.Bundle.Field(8).Span) != 0 ||
                     slices[8].Length != slices[7].Length + 40)
                     throw new CryptographicException("Protected contact object differs from its exact route/delegation custody.");
+                if (kind == 2)
+                {
+                    if (slices[14].Length != 225) throw new InvalidDataException("Protected invitation length is not exact.");
+                    var invitation = ContactCodec.Decode("DIA1", Slice(bytes, slices[14]));
+                    if (!Fixed(invitation.Field(1).Span, network) ||
+                        !Fixed(invitation.Field(7).Span, SHA256.HashData(closure.Bundle.CanonicalBytes.Span)) ||
+                        !Fixed(invitation.Field(8).Span, closure.Bundle.Field(18).Span))
+                        throw new CryptographicException("Protected invitation differs from its exact object scope.");
+                }
             }
 
             if (phase >= 5)
             {
                 var request = ContactPublicationAuthorityWireCodec.DecodeRequest(Slice(bytes, slices[9]));
+                var expectedLocator = kind == 2 ? ContactCodec.Decode("DIA1", Slice(bytes, slices[14])).Field(5) : new byte[16];
                 if (!Fixed(request.ExactDca1.Span, Slice(bytes, slices[0])) ||
+                    !Fixed(request.OneTimeLocator.Span, expectedLocator.Span) ||
                     !Fixed(request.ExactDcr1.Span, Slice(bytes, slices[7])) ||
                     !Fixed(request.ObjectCiphertext.Span, Slice(bytes, slices[8])) ||
                     !Fixed(request.ExactRouteClosure.Span, Slice(bytes, slices[6])))

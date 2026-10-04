@@ -6,6 +6,47 @@ namespace Deep.Client.Shared.Services;
 
 public sealed partial class DeepIdV2AccountService
 {
+    // Internal connected owner path. UI/QR export remains gated by installed evidence.
+    internal async Task<AuthoredDeepIdV2OneTimeContactObject> EnsureOwnOneTimeContactObjectAsync(
+        ReadOnlyMemory<byte> logicalIntent32, DeepIdV2ContactPathAuthoritySource source,
+        Did2ContactRouteConfiguration configuration, IDid2ContactRouteThresholdSource thresholdSource,
+        string profileName, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(source); ArgumentNullException.ThrowIfNull(configuration);
+        ArgumentNullException.ThrowIfNull(thresholdSource); source.RequireAccountOwner(this);
+        ProtectedDph2PreClaimJournal.RequireIntent(logicalIntent32.Span);
+        var intent = logicalIntent32.ToArray();
+        var profile = Domain.DeepDisplayName.Normalize(profileName, nameof(profileName));
+        if (System.Text.Encoding.UTF8.GetByteCount(profile) > 128)
+            throw new ArgumentException("Contact profile exceeds its UTF-8 bound.", nameof(profileName));
+        var staged = await EnsureOwnInitialPreKeyInventoryAsync(source, ct).ConfigureAwait(false);
+        var fresh = await source.VerifyForOwnPreKeyAuthoringAsync(this, ct).ConfigureAwait(false);
+        using (var verifier = OpenVerifier())
+            _ = await owner.EnsureOneTimeContactRouteAsync(TrustedUnixSeconds(), verifier, intent, source,
+                fresh, staged.ExactDca1, configuration, thresholdSource, ct).ConfigureAwait(false);
+        fresh = await source.VerifyForOwnPreKeyAuthoringAsync(this, ct).ConfigureAwait(false);
+        using var objectVerifier = OpenVerifier();
+        return await owner.EnsureOneTimeContactObjectAsync(TrustedUnixSeconds(), objectVerifier, intent,
+            source, fresh, staged, configuration, profile, ct).ConfigureAwait(false);
+    }
+
+    internal async Task<VerifiedDeepIdV2PublicationCommit> EnsureOwnOneTimeContactPublicationCommitAsync(
+        ReadOnlyMemory<byte> logicalIntent32, DeepIdV2ContactPathAuthoritySource source,
+        Did2ContactRouteConfiguration configuration, IDid2ContactRouteThresholdSource thresholdSource,
+        string profileName, IDid2ContactPublicationSource publicationSource,
+        IDid2ContactReplicaPublicationTransport transport, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(publicationSource); ArgumentNullException.ThrowIfNull(transport);
+        ProtectedDph2PreClaimJournal.RequireIntent(logicalIntent32.Span);
+        var intent = logicalIntent32.ToArray();
+        using var owned = await EnsureOwnOneTimeContactObjectAsync(intent, source, configuration, thresholdSource,
+            profileName, ct).ConfigureAwait(false);
+        var fresh = await source.VerifyForOwnPreKeyAuthoringAsync(this, ct).ConfigureAwait(false);
+        using var verifier = OpenVerifier();
+        return await owner.EnsureOneTimeContactPublicationCommitAsync(TrustedUnixSeconds(), verifier, intent,
+            source, fresh, configuration, publicationSource, transport, ct).ConfigureAwait(false);
+    }
+
     /// <summary>Publishes this account's permanent contact through the selected
     /// three-hop carrier. Restart resumes protected exact custody. The result
     /// proves a durable commit, not contact acceptance or message permission.</summary>

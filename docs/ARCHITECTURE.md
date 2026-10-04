@@ -2,13 +2,14 @@
 
 ## Current contact publication custody
 
-The reusable contact-route journal follows
-[DR-0089](../../docs/survival-program/decisions/DR-0089-did2-one-time-publication-coordination.md):
-current-only journal9, unchanged fourteen slots, request maximum171614 and
-complete entry maximum477527. Older isolated QA roots require explicit reset;
-there is no migration, lazy repair or key/nonce remint. This budget repin does
-not add a secret one-time slot or enable one-time export/dispatch. That owned
-pending/winner lifecycle and shipping composition remain unfinished.
+The single current contact-route journal follows
+[DR-0091](../../docs/survival-program/decisions/DR-0091-did2-owned-one-time-custody.md).
+The typed internal one-time owner retains exact secret invitation and ciphertext
+before publication, reopens through independent AEAD/current-proof verification,
+and adopts exact threshold/two-replica winners. Reusable methods reject one-time
+custody. Older isolated QA roots require explicit reset; there is no migration,
+dual reader, lazy repair or key/nonce remint. Shipping/UI export, current installed
+packages and full physical evidence remain separate unfinished requirements.
 
 ## Current composition baseline — 2026-10-03
 

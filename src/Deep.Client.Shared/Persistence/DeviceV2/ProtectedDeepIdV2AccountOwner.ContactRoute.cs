@@ -18,11 +18,33 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         StagedDeepIdV2PreKeyPublication staged, Did2ContactRouteConfiguration configuration, string profileName, CancellationToken ct,
         Did2OwnedPermanentContactPlan? bootstrap = null)
     {
+        var result = await EnsureContactObjectCoreAsync(trustedUnixSeconds, verifier, intent, source,
+            fresh, staged, configuration, profileName, ct, bootstrap, 1).ConfigureAwait(false);
+        return result.Reusable ?? throw new InvalidOperationException("Reusable contact custody is absent.");
+    }
+
+    internal async Task<AuthoredDeepIdV2OneTimeContactObject> EnsureOneTimeContactObjectAsync(
+        ulong trustedUnixSeconds, IDeepMlDsa65Verifier verifier, ReadOnlyMemory<byte> intent,
+        DeepIdV2ContactPathAuthoritySource source, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh,
+        StagedDeepIdV2PreKeyPublication staged, Did2ContactRouteConfiguration configuration, string profileName, CancellationToken ct)
+    {
+        var result = await EnsureContactObjectCoreAsync(trustedUnixSeconds, verifier, intent, source,
+            fresh, staged, configuration, profileName, ct, null, 2).ConfigureAwait(false);
+        return result.OneTime ?? throw new InvalidOperationException("One-time contact custody is absent.");
+    }
+
+    private async Task<(AuthoredDeepIdV2ContactObject? Reusable, AuthoredDeepIdV2OneTimeContactObject? OneTime)> EnsureContactObjectCoreAsync(
+        ulong trustedUnixSeconds, IDeepMlDsa65Verifier verifier, ReadOnlyMemory<byte> intent,
+        DeepIdV2ContactPathAuthoritySource source, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh,
+        StagedDeepIdV2PreKeyPublication staged, Did2ContactRouteConfiguration configuration, string profileName, CancellationToken ct,
+        Did2OwnedPermanentContactPlan? bootstrap, byte kind)
+    {
         using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
         using var current = await RequireCurrentUnderLeaseAsync(trustedUnixSeconds, verifier, ct).ConfigureAwait(false);
         var first = await RecheckRouteFreshnessAsync(current, source, fresh, held, null, ct).ConfigureAwait(false);
         var instance = await SqliteDeepIdV2AccountGeneration.ReadAccountInstanceUnderLeaseAsync(storage, networkId, current.AccountId, ct).ConfigureAwait(false);
-        byte[]? snapshot = null; byte[]? capability = null;
+        byte[]? snapshot = null; byte[]? capability = null; byte[]? invitation = null;
+        AuthoredDeepIdV2OneTimeContactObject? restoredOneTime = null;
         try
         {
             RequirePermanentContactPlan(bootstrap, current, instance, intent.Span);
@@ -31,7 +53,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             snapshot = owned.Use(bytes => bytes.ToArray());
             using var state = ProtectedDid2ContactRouteJournal.Decode(snapshot, networkId, current.AccountId.Span, instance);
             var name = Convert.ToHexString(intent.Span);
-            if (!state.Entries.TryGetValue(name, out var entry) || entry.Phase < 3 || !entry.Matches(configuration) ||
+            if (!state.Entries.TryGetValue(name, out var entry) || entry.Kind != kind || entry.Phase < 3 || !entry.Matches(configuration) ||
                 !FixedRoute(entry.Record(0).Span, staged.ExactDca1.Span))
                 throw new CryptographicException("Contact object requires the exact retained completed route.");
             var checkpoint = fresh.Proof.CurrentCheckpoint!;
@@ -40,16 +62,30 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var issuance = await VerifyRetainedRouteIssuanceAsync(entry, authorization, fresh, source, ct).ConfigureAwait(false);
             var route = await DeepIdV2ContactRouteVerifier.VerifyAsync(authorization, fresh.Network, fresh.Authority,
                 entry.Record(5), entry.Record(6), source.RendezvousTrustedTime, ct).ConfigureAwait(false);
-            var permanent = await new ProtectedDeepIdV2ResolverCapabilityStore(storage, networkId, current.AccountId.Span)
+            if (kind == 1)
+            {
+                var permanent = await new ProtectedDeepIdV2ResolverCapabilityStore(storage, networkId, current.AccountId.Span)
                 .ReadVerifiedAsync(checkpoint.Binding.DeepId, ct).ConfigureAwait(false);
-            capability = permanent.ResolverReadCapability.ToArray();
+                capability = permanent.ResolverReadCapability.ToArray();
+            }
             if (entry.Phase == 3)
             {
                 var service = DeepIdV2PreKeyServiceCodec.Decode(staged.ExactXps1.Span);
-                var candidate = await DeepIdV2ContactObjectAuthor.AuthorRetainedGenesisAsync(route, issuance, current.Verified.DeviceSecrets,
-                    [service], profileName, capability, ct).ConfigureAwait(false);
-                await RecheckRouteFreshnessAsync(current, source, fresh, held, first, ct).ConfigureAwait(false);
-                var nextEntry = entry.WithContactObject(candidate, networkId, current.AccountId.Span);
+                ProtectedDid2ContactRouteJournal.Entry nextEntry;
+                if (kind == 1)
+                {
+                    var candidate = await DeepIdV2ContactObjectAuthor.AuthorRetainedGenesisAsync(route, issuance, current.Verified.DeviceSecrets,
+                        [service], profileName, capability!, ct).ConfigureAwait(false);
+                    await RecheckRouteFreshnessAsync(current, source, fresh, held, first, ct).ConfigureAwait(false);
+                    nextEntry = entry.WithContactObject(candidate, networkId, current.AccountId.Span);
+                }
+                else
+                {
+                    using var candidate = await DeepIdV2ContactObjectAuthor.AuthorRetainedOneTimeGenesisAsync(route, issuance,
+                        current.Verified.DeviceSecrets, [service], profileName, ct).ConfigureAwait(false);
+                    await RecheckRouteFreshnessAsync(current, source, fresh, held, first, ct).ConfigureAwait(false);
+                    nextEntry = entry.WithOneTimeContactObject(candidate, networkId, current.AccountId.Span);
+                }
                 state.Entries[name] = nextEntry; entry.Dispose(); entry = nextEntry;
                 var adopted = await SaveRouteJournalAsync(state, snapshot, current.AccountId, instance, ct).ConfigureAwait(false);
                 CryptographicOperations.ZeroMemory(snapshot); snapshot = adopted;
@@ -57,21 +93,33 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 Did2ContactRouteTestHooks.Hit(Did2ContactRouteFailpoint.AfterContactObject);
 #endif
             }
-            var result = await DeepIdV2ContactObjectAuthor.RestoreAsync(route, entry.Record(7), entry.Record(8), capability, ct).ConfigureAwait(false);
+            AuthoredDeepIdV2ContactObject? result = null;
+            if (kind == 1)
+                result = await DeepIdV2ContactObjectAuthor.RestoreAsync(route, entry.Record(7), entry.Record(8), capability!, ct).ConfigureAwait(false);
+            else
+            {
+                invitation = entry.CopyOneTimeInvitation();
+                restoredOneTime = await DeepIdV2ContactObjectAuthor.RestoreOneTimeAsync(route, entry.Record(7), invitation,
+                    entry.Record(8), ct).ConfigureAwait(false);
+            }
+            var closure = result?.Closure ?? restoredOneTime!.Closure;
             // Signed profile and service are fixed under the logical intent.
             var expectedName = System.Text.Encoding.UTF8.GetBytes(profileName);
-            var serviceList = result.Closure.Bundle.Field(12).Span;
-            if (!FixedRoute(result.Closure.Bundle.Field(15).Span, expectedName) || serviceList.Length != 357 ||
+            var serviceList = closure.Bundle.Field(12).Span;
+            if (!FixedRoute(closure.Bundle.Field(15).Span, expectedName) || serviceList.Length != 357 ||
                 !FixedRoute(serviceList[5..], staged.ExactXps1.Span))
                 throw new CryptographicException("A retained contact object cannot change profile or prekey descriptor.");
             await RecheckRouteFreshnessAsync(current, source, fresh, held, first, ct).ConfigureAwait(false);
-            ct.ThrowIfCancellationRequested(); held.RequireActive(); return result;
+            ct.ThrowIfCancellationRequested(); held.RequireActive();
+            var returned = (result, restoredOneTime); restoredOneTime = null; return returned;
         }
         finally
         {
             CryptographicOperations.ZeroMemory(instance);
             if (snapshot is not null) CryptographicOperations.ZeroMemory(snapshot);
             if (capability is not null) CryptographicOperations.ZeroMemory(capability);
+            if (invitation is not null) CryptographicOperations.ZeroMemory(invitation);
+            restoredOneTime?.Dispose();
         }
     }
 
@@ -80,7 +128,24 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         DeepIdV2ContactPathAuthoritySource source, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh,
         ReadOnlyMemory<byte> exactDca, Did2ContactRouteConfiguration configuration,
         IDid2ContactRouteThresholdSource thresholdSource, CancellationToken ct,
-        Did2OwnedPermanentContactPlan? bootstrap = null)
+        Did2OwnedPermanentContactPlan? bootstrap = null) =>
+        await EnsureContactRouteCoreAsync(trustedUnixSeconds, verifier, intent, source, fresh, exactDca,
+            configuration, thresholdSource, ct, bootstrap, 1).ConfigureAwait(false);
+
+    internal Task<VerifiedDeepIdV2ContactRouteClosure> EnsureOneTimeContactRouteAsync(
+        ulong trustedUnixSeconds, IDeepMlDsa65Verifier verifier, ReadOnlyMemory<byte> intent,
+        DeepIdV2ContactPathAuthoritySource source, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh,
+        ReadOnlyMemory<byte> exactDca, Did2ContactRouteConfiguration configuration,
+        IDid2ContactRouteThresholdSource thresholdSource, CancellationToken ct) =>
+        EnsureContactRouteCoreAsync(trustedUnixSeconds, verifier, intent, source, fresh, exactDca,
+            configuration, thresholdSource, ct, null, 2);
+
+    private async Task<VerifiedDeepIdV2ContactRouteClosure> EnsureContactRouteCoreAsync(
+        ulong trustedUnixSeconds, IDeepMlDsa65Verifier verifier, ReadOnlyMemory<byte> intent,
+        DeepIdV2ContactPathAuthoritySource source, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh,
+        ReadOnlyMemory<byte> exactDca, Did2ContactRouteConfiguration configuration,
+        IDid2ContactRouteThresholdSource thresholdSource, CancellationToken ct,
+        Did2OwnedPermanentContactPlan? bootstrap, byte kind)
     {
         using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
         using var current = await RequireCurrentUnderLeaseAsync(trustedUnixSeconds, verifier, ct).ConfigureAwait(false);
@@ -100,6 +165,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var dca = DeepIdV2ContactAuthorizationCodec.Verify(DeepIdV2ContactAuthorizationCodec.Decode(exactDca.Span),
                 checkpoint.Binding, checkpoint.Directory);
             var authorization = DeepIdV2CurrentContactAuthorizationVerifier.Verify(fresh.Proof, dca, first.BootId.Span, first.SampleSeconds);
+            if ((dca.Record.AllowedInviteKindMask & kind) == 0)
+                throw new CryptographicException("Owned route kind is not authorized by its exact delegation.");
             if (!state.Entries.TryGetValue(name, out var entry))
             {
                 if (state.Entries.Count >= ProtectedDid2ContactRouteJournal.MaximumIntents)
@@ -114,12 +181,14 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                         current.Verified.DeviceSecrets, configuration.Quota, configuration.AntiSpamHash, keyId,
                         DeepIdentityCrypto.DeriveX25519PublicKey(scalar), authorization.TrustedLowerUnixSeconds, expiry,
                         source.RendezvousTrustedTime, ct).ConfigureAwait(false);
-                    entry = ProtectedDid2ContactRouteJournal.Entry.Proposal(intent.Span, configuration, scalar, keyId, nonce,
-                        exactDca, xra, new ContactRouteAuthorityWireRequest(networkId, nonce,
+                    var request = new ContactRouteAuthorityWireRequest(networkId, nonce,
                             authorization.Freshness.QueriedDirectoryLeafKey.Span,
                             authorization.Freshness.NextProtectedLkg.LogGeneration,
-                            authorization.Freshness.NextProtectedLkg.CoreHash.Span, exactDca.Span, xra.CanonicalBytes.Span),
-                        networkId, current.AccountId.Span);
+                            authorization.Freshness.NextProtectedLkg.CoreHash.Span, exactDca.Span, xra.CanonicalBytes.Span);
+                    entry = kind == 1 ? ProtectedDid2ContactRouteJournal.Entry.Proposal(intent.Span, configuration,
+                        scalar, keyId, nonce, exactDca, xra, request, networkId, current.AccountId.Span) :
+                        ProtectedDid2ContactRouteJournal.Entry.OneTimeProposal(intent.Span, configuration,
+                        scalar, keyId, nonce, exactDca, xra, request, networkId, current.AccountId.Span);
                     state.Entries.Add(name, entry);
                     await RecheckRouteFreshnessAsync(current, source, fresh, held, first, ct).ConfigureAwait(false);
                     var adopted = await SaveRouteJournalAsync(state, snapshot, current.AccountId, instance, ct).ConfigureAwait(false);
@@ -130,7 +199,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 }
                 finally { CryptographicOperations.ZeroMemory(scalar); CryptographicOperations.ZeroMemory(keyId); CryptographicOperations.ZeroMemory(nonce); }
             }
-            if (!entry.Matches(configuration) || !FixedRoute(entry.Record(0).Span, exactDca.Span))
+            if (entry.Kind != kind || !entry.Matches(configuration) || !FixedRoute(entry.Record(0).Span, exactDca.Span))
                 throw new CryptographicException("A retained route intent cannot change configuration or delegation.");
             var pendingRequest = ContactRouteAuthorityWireCodec.DecodeRequest(entry.Record(12).Span);
             Did2ContactRouteRequestCustody.RequireCurrent(pendingRequest, authorization, fresh.Network);
@@ -171,7 +240,10 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             if (entry.Phase == 2)
             {
                 await RecheckRouteFreshnessAsync(current, source, fresh, held, first, ct).ConfigureAwait(false);
-                var completed = await DeepIdV2ContactRouteAuthor.CompleteRetainedGenesisAsync(authorization, fresh.Network, fresh.Authority,
+                var completed = kind == 1 ? await DeepIdV2ContactRouteAuthor.CompleteRetainedGenesisAsync(authorization, fresh.Network, fresh.Authority,
+                    current.Verified.DeviceSecrets, issuance, configuration.MinimumReader,
+                    source.RendezvousTrustedTime, ct).ConfigureAwait(false) :
+                    await DeepIdV2ContactRouteAuthor.CompleteRetainedOneTimeGenesisAsync(authorization, fresh.Network, fresh.Authority,
                     current.Verified.DeviceSecrets, issuance, configuration.MinimumReader,
                     source.RendezvousTrustedTime, ct).ConfigureAwait(false);
                 await RecheckRouteFreshnessAsync(current, source, fresh, held, first, ct).ConfigureAwait(false);

@@ -31,19 +31,32 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         return result.Commit ?? throw new InvalidOperationException("Publication commit is absent.");
     }
 
+    internal async Task<VerifiedDeepIdV2PublicationCommit> EnsureOneTimeContactPublicationCommitAsync(
+        ulong trustedUnixSeconds, IDeepMlDsa65Verifier verifier, ReadOnlyMemory<byte> intent,
+        DeepIdV2ContactPathAuthoritySource source, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh,
+        Did2ContactRouteConfiguration configuration, IDid2ContactPublicationSource publicationSource,
+        IDid2ContactReplicaPublicationTransport transport, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(transport);
+        var result = await EnsureContactPublicationCoreAsync(trustedUnixSeconds, verifier, intent, source,
+            fresh, configuration, publicationSource, transport, ct, null, 2).ConfigureAwait(false);
+        return result.Commit ?? throw new InvalidOperationException("One-time publication commit is absent.");
+    }
+
     private async Task<(VerifiedDeepIdV2PublicationAuthorization? Authorization, VerifiedDeepIdV2PublicationCommit? Commit)>
         EnsureContactPublicationCoreAsync(
         ulong trustedUnixSeconds, IDeepMlDsa65Verifier verifier, ReadOnlyMemory<byte> intent,
         DeepIdV2ContactPathAuthoritySource source, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh,
         Did2ContactRouteConfiguration configuration, IDid2ContactPublicationSource publicationSource,
         IDid2ContactReplicaPublicationTransport? transport, CancellationToken ct,
-        Did2OwnedPermanentContactPlan? bootstrap = null)
+        Did2OwnedPermanentContactPlan? bootstrap = null, byte kind = 1)
     {
         using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
         using var current = await RequireCurrentUnderLeaseAsync(trustedUnixSeconds, verifier, ct).ConfigureAwait(false);
         var first = await RecheckRouteFreshnessAsync(current, source, fresh, held, null, ct).ConfigureAwait(false);
         var instance = await SqliteDeepIdV2AccountGeneration.ReadAccountInstanceUnderLeaseAsync(storage, networkId, current.AccountId, ct).ConfigureAwait(false);
-        byte[]? snapshot = null; byte[]? capability = null;
+        byte[]? snapshot = null; byte[]? capability = null; byte[]? invitation = null;
+        AuthoredDeepIdV2OneTimeContactObject? oneTime = null;
         try
         {
             RequirePermanentContactPlan(bootstrap, current, instance, intent.Span);
@@ -52,7 +65,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             snapshot = owned.Use(bytes => bytes.ToArray());
             using var state = ProtectedDid2ContactRouteJournal.Decode(snapshot, networkId, current.AccountId.Span, instance);
             var name = Convert.ToHexString(intent.Span);
-            if (!state.Entries.TryGetValue(name, out var entry) || entry.Phase < 4 || !entry.Matches(configuration))
+            if (!state.Entries.TryGetValue(name, out var entry) || entry.Kind != kind || entry.Phase < 4 || !entry.Matches(configuration))
                 throw new CryptographicException("Publication requires exact retained contact object custody.");
             var checkpoint = fresh.Proof.CurrentCheckpoint!;
             var dca = DeepIdV2ContactAuthorizationCodec.Verify(DeepIdV2ContactAuthorizationCodec.Decode(entry.Record(0).Span), checkpoint.Binding, checkpoint.Directory);
@@ -60,17 +73,29 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             _ = await VerifyRetainedRouteIssuanceAsync(entry, authorization, fresh, source, ct).ConfigureAwait(false);
             var route = await DeepIdV2ContactRouteVerifier.VerifyAsync(authorization, fresh.Network, fresh.Authority,
                 entry.Record(5), entry.Record(6), source.RendezvousTrustedTime, ct).ConfigureAwait(false);
-            var permanent = await new ProtectedDeepIdV2ResolverCapabilityStore(storage, networkId, current.AccountId.Span)
+            AuthoredDeepIdV2ContactObject? contact = null;
+            if (kind == 1)
+            {
+                var permanent = await new ProtectedDeepIdV2ResolverCapabilityStore(storage, networkId, current.AccountId.Span)
                 .ReadVerifiedAsync(checkpoint.Binding.DeepId, ct).ConfigureAwait(false);
-            capability = permanent.ResolverReadCapability.ToArray();
-            var contact = await DeepIdV2ContactObjectAuthor.RestoreAsync(route, entry.Record(7), entry.Record(8), capability, ct).ConfigureAwait(false);
+                capability = permanent.ResolverReadCapability.ToArray();
+                contact = await DeepIdV2ContactObjectAuthor.RestoreAsync(route, entry.Record(7), entry.Record(8), capability, ct).ConfigureAwait(false);
+            }
+            else
+            {
+                invitation = entry.CopyOneTimeInvitation();
+                oneTime = await DeepIdV2ContactObjectAuthor.RestoreOneTimeAsync(route, entry.Record(7), invitation,
+                    entry.Record(8), ct).ConfigureAwait(false);
+            }
             if (entry.Phase == 4)
             {
                 var nonce = RandomNumberGenerator.GetBytes(32); var operation = RandomNumberGenerator.GetBytes(32);
                 var retrieve = RandomNumberGenerator.GetBytes(32);
                 try
                 {
-                    var candidate = await DeepIdV2PublicationAuthorityAuthor.AuthorGenesisRequestAsync(route, contact,
+                    var candidate = kind == 1 ? await DeepIdV2PublicationAuthorityAuthor.AuthorGenesisRequestAsync(route, contact!,
+                        current.Verified.DeviceSecrets, nonce, operation, retrieve, ct).ConfigureAwait(false) :
+                        await DeepIdV2PublicationAuthorityAuthor.AuthorOneTimeGenesisRequestAsync(route, oneTime!,
                         current.Verified.DeviceSecrets, nonce, operation, retrieve, ct).ConfigureAwait(false);
                     await RecheckRouteFreshnessAsync(current, source, fresh, held, first, ct).ConfigureAwait(false);
                     var next = entry.WithPublicationRequest(candidate.WireRequest, networkId, current.AccountId.Span);
@@ -135,7 +160,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 var response = returned.ToArray();
                 try
                 {
-                    var committed = await DeepIdV2PublicationCommitVerifier.VerifyCommittedAsync(route, contact,
+                    var committed = kind == 1 ? await DeepIdV2PublicationCommitVerifier.VerifyCommittedAsync(route, contact!,
+                        request, winner.ExactXpu1, response, deadline.Token).ConfigureAwait(false) :
+                        await DeepIdV2PublicationCommitVerifier.VerifyOneTimeCommittedAsync(route, oneTime!,
                         request, winner.ExactXpu1, response, deadline.Token).ConfigureAwait(false);
                     // A late callback cannot persist/return success after its dispatch
                     // permission expires, the floor changes, or the account resets.
@@ -151,7 +178,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             }
             // Always independently verify the exact persisted/read-back winner;
             // phase 7 invokes neither threshold nor replica publication again.
-            var result = await DeepIdV2PublicationCommitVerifier.VerifyCommittedAsync(route, contact,
+            var result = kind == 1 ? await DeepIdV2PublicationCommitVerifier.VerifyCommittedAsync(route, contact!,
+                request, winner.ExactXpu1, entry.Record(11), ct).ConfigureAwait(false) :
+                await DeepIdV2PublicationCommitVerifier.VerifyOneTimeCommittedAsync(route, oneTime!,
                 request, winner.ExactXpu1, entry.Record(11), ct).ConfigureAwait(false);
             await RecheckRouteFreshnessAsync(current, source, fresh, held, first, ct).ConfigureAwait(false);
             ct.ThrowIfCancellationRequested(); held.RequireActive(); return (null, result);
@@ -161,6 +190,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             CryptographicOperations.ZeroMemory(instance);
             if (snapshot is not null) CryptographicOperations.ZeroMemory(snapshot);
             if (capability is not null) CryptographicOperations.ZeroMemory(capability);
+            if (invitation is not null) CryptographicOperations.ZeroMemory(invitation);
+            oneTime?.Dispose();
         }
     }
 }

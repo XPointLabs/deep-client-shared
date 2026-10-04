@@ -86,7 +86,9 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             Assert.Equal(identity, (await ReopenAccount().GetCurrentAsync())!.PermanentId.CanonicalText);
             // Even terminal state must authenticate retained evidence before
             // returning a capability or invoking coordination/replica callbacks.
-            var good = await RouteSnapshot(); var damaged = good.ToArray(); damaged[^1] ^= 1;
+            // Record14 is the current empty secret slot for this reusable entry.
+            // Corrupt the actual retained issuance signature, not that LP32 trailer.
+            var good = await RouteSnapshot(); var damaged = good.ToArray(); damaged[^5] ^= 1;
             try
             {
                 Assert.True(await innerStorage.CompareExchangeAsync(ProtectedDid2ContactRouteJournal.Slot, good, damaged));
