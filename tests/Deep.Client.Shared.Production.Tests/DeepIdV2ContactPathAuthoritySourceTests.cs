@@ -2351,7 +2351,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             {
                 var reopened = ReopenMessaging(scope);
                 using var bounded = new CancellationTokenSource(TimeSpan.FromMinutes(3));
-                return await reopened.Account.ListOwnMessagingMessagesAsync(scope, reopened.Source, bounded.Token);
+                return await reopened.Account.ListOwnMessagingMessagesAsync(scope, bounded.Token);
             };
             prepareOwnedContactAccept = async (scope, op) =>
             {

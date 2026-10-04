@@ -88,24 +88,4 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         }
         finally { CryptographicOperations.ZeroMemory(instance); CryptographicOperations.ZeroMemory(snapshot); }
     }
-    internal async Task<IReadOnlyList<Did2MessagingSessionScope>> ReadInitializedConversationScopesAsync(
-        ulong unixSeconds, IDeepMlDsa65Verifier verifier, CancellationToken ct)
-    {
-        using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
-        using var current = await RequireCurrentUnderLeaseAsync(unixSeconds, verifier, ct).ConfigureAwait(false);
-        var instance = await SqliteDeepIdV2AccountGeneration.ReadAccountInstanceUnderLeaseAsync(storage, networkId, current.AccountId, ct).ConfigureAwait(false);
-        try
-        {
-            using var catalog = await new ProtectedDid2MessagingSessionCatalog(storage, networkId, current.AccountId.Span, instance).ReadAsync(ct).ConfigureAwait(false);
-            var result = new List<Did2MessagingSessionScope>(catalog.Count);
-            for (var index = 0; index < catalog.Count; index++)
-                if (catalog.Phase(index) == 2) result.Add(catalog.Scope(index));
-            using var readback = await storage.ReadOwnedAsync(ProtectedDid2MessagingSessionCatalog.Slot, ct).ConfigureAwait(false) ??
-                throw new CryptographicException("The owned conversation catalog disappeared during projection.");
-            if (!readback.Use(bytes => Did2MessagingSessionScope.Fixed(bytes, catalog.Exact.Span)))
-                throw new CryptographicException("The owned conversation catalog changed during projection.");
-            ct.ThrowIfCancellationRequested(); held.RequireActive(); return result.AsReadOnly();
-        }
-        finally { CryptographicOperations.ZeroMemory(instance); }
-    }
 }

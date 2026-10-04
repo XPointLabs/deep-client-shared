@@ -12,38 +12,29 @@ namespace Deep.Client.Shared.Persistence.DeviceV2;
 internal sealed partial class ProtectedDeepIdV2AccountOwner
 {
     internal async Task<IReadOnlyList<DirectAttachmentOfferSnapshot>> ListMessagingAttachmentOffersAsync(
-        ulong trustedUnixSeconds, IDeepMlDsa65Verifier verifier, Did2MessagingSessionScope scope,
-        DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own,
-        VerifiedDeepIdV2DirectoryFreshness peer, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
+        ulong trustedUnixSeconds, IDeepMlDsa65Verifier verifier, Did2MessagingSessionScope scope, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(scope);
         using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
         using var current = await RequireCurrentUnderLeaseAsync(trustedUnixSeconds, verifier, ct).ConfigureAwait(false);
-        var first = await RequireMessagingFreshnessAsync(current, own, peer, source, held, ct).ConfigureAwait(false);
-        OwnedInitialMessagingSeed.RequireFreshScope(scope, own.Proof, peer, first);
-        using var opened = await SqliteDeepIdV2AccountGeneration.OpenOwnedMessagingUnderLeaseAsync(storage, sqlStatePath, current, scope, ct).ConfigureAwait(false);
+        using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, ct).ConfigureAwait(false);
         if ((await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false)).Status != 1)
             throw new InvalidDataException("An inactive session cannot project attachment history.");
         using var application = await SqliteDeepIdV2AccountGeneration.OpenApplicationUnderLeaseAsync(storage, sqlStatePath, current, held, ct).ConfigureAwait(false);
         var entries = await application.ListDirectAttachmentOffersAsync(current.AccountId,
             System.Buffers.Binary.BinaryPrimitives.ReadUInt64BigEndian(scope.Exact[84..]), scope.Conversation.ToArray(),
             cancellationToken: ct).ConfigureAwait(false);
-        await RequireFinalMessagingFreshnessAsync(current, scope, own, peer, source, held, first, ct).ConfigureAwait(false);
+        ct.ThrowIfCancellationRequested(); held.RequireActive();
         return entries;
     }
 
     internal async Task<IReadOnlyList<DirectMessageCreateSnapshot>> ListMessagingMessagesAsync(
-        ulong trustedUnixSeconds, IDeepMlDsa65Verifier verifier, Did2MessagingSessionScope scope,
-        DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own,
-        VerifiedDeepIdV2DirectoryFreshness peer, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
+        ulong trustedUnixSeconds, IDeepMlDsa65Verifier verifier, Did2MessagingSessionScope scope, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(scope);
         using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
         using var current = await RequireCurrentUnderLeaseAsync(trustedUnixSeconds, verifier, ct).ConfigureAwait(false);
-        var first = await RequireMessagingFreshnessAsync(current, own, peer, source, held, ct).ConfigureAwait(false);
-        OwnedInitialMessagingSeed.RequireFreshScope(scope, own.Proof, peer, first);
-        using var opened = await SqliteDeepIdV2AccountGeneration.OpenOwnedMessagingUnderLeaseAsync(
-            storage, sqlStatePath, current, scope, ct).ConfigureAwait(false);
+        using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, ct).ConfigureAwait(false);
         var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
         if (floor.Status != 1) throw new InvalidDataException("A latched or unactivated session grants no application projection.");
         using var application = await SqliteDeepIdV2AccountGeneration.OpenApplicationUnderLeaseAsync(
@@ -51,7 +42,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         var messages = await application.ListDirectMessageCreatesAsync(current.AccountId,
             System.Buffers.Binary.BinaryPrimitives.ReadUInt64BigEndian(scope.Exact[84..]),
             scope.Conversation.ToArray(), cancellationToken: ct).ConfigureAwait(false);
-        await RequireFinalMessagingFreshnessAsync(current, scope, own, peer, source, held, first, ct).ConfigureAwait(false);
+        ct.ThrowIfCancellationRequested(); held.RequireActive();
         return messages;
     }
 

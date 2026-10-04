@@ -41,25 +41,19 @@ public sealed partial class DeepIdV2AccountService
     }
 
     internal async Task<IReadOnlyList<DirectAttachmentOfferSnapshot>> ListOwnMessagingAttachmentOffersAsync(
-        Did2MessagingSessionScope scope,
-        DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
+        Did2MessagingSessionScope scope, CancellationToken ct)
     {
-        ArgumentNullException.ThrowIfNull(scope); ArgumentNullException.ThrowIfNull(source);
-        source.RequireAccountOwner(this);
-        var pair = await source.VerifyForOwnMessagingAsync(this, scope, ct).ConfigureAwait(false);
+        ArgumentNullException.ThrowIfNull(scope);
         using var verifier = OpenVerifier();
-        return await owner.ListMessagingAttachmentOffersAsync(TrustedUnixSeconds(), verifier, scope, pair.Own, pair.Peer, source, ct).ConfigureAwait(false);
+        return await owner.ListMessagingAttachmentOffersAsync(TrustedUnixSeconds(), verifier, scope, ct).ConfigureAwait(false);
     }
 
     internal async Task<IReadOnlyList<DirectMessageCreateSnapshot>> ListOwnMessagingMessagesAsync(
-        Did2MessagingSessionScope scope,
-        DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
+        Did2MessagingSessionScope scope, CancellationToken ct)
     {
-        ArgumentNullException.ThrowIfNull(scope); ArgumentNullException.ThrowIfNull(source);
-        source.RequireAccountOwner(this);
-        var pair = await source.VerifyForOwnMessagingAsync(this, scope, ct).ConfigureAwait(false);
+        ArgumentNullException.ThrowIfNull(scope);
         using var verifier = OpenVerifier();
-        return await owner.ListMessagingMessagesAsync(TrustedUnixSeconds(), verifier, scope, pair.Own, pair.Peer, source, ct).ConfigureAwait(false);
+        return await owner.ListMessagingMessagesAsync(TrustedUnixSeconds(), verifier, scope, ct).ConfigureAwait(false);
     }
 
     internal async Task<OwnedDid2MessagingPersistedEvent> SendOwnMessagingAsync(Did2MessagingSessionScope scope,

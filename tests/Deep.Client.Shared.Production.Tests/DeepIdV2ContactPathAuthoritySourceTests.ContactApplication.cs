@@ -31,7 +31,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         {
             var account = scope.IsInitiator ? ReopenAccount() : ReopenGrantReader();
             var source = scope.IsInitiator ? Source(account) : GrantReaderSource(account);
-            var list = await account.ListConversationsAsync(source);
+            var list = await account.ListConversationsAsync();
             var selected = Assert.Single(list, value => value.Conversation.ConversationId == Convert.ToHexString(scope.Conversation)).Conversation;
             Assert.Equal(Convert.ToHexString(scope.RemoteAccount), selected.PeerAccountId);
             Assert.Equal(scope.IsInitiator, selected.IsInitiator);
@@ -52,7 +52,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         internal async Task<IReadOnlyList<DirectMessageCreateSnapshot>> ListNativeApplicationMessages(Did2MessagingSessionScope scope)
         {
             var selected = await ReadApplicationConversation(scope);
-            return await selected.Account.ListMessagesAsync(selected.Handle, selected.Source);
+            return await selected.Account.ListMessagesAsync(selected.Handle);
         }
         internal Task<IReadOnlyList<DeepIdV2PendingTextSnapshot>> ListNativePendingText(bool own = true)
             => (own ? ReopenAccount() : ReopenGrantReader()).ListPendingTextOperationsAsync();

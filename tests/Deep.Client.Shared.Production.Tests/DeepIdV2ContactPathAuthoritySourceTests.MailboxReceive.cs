@@ -124,6 +124,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         Assert.Equal(2, terminal.RetrieveCalls); Assert.Equal(2, terminal.AckCalls); Assert.Equal(1, grants.Calls);
         using (var read = await fixture.ReadPeerMailboxReads())
         { Assert.Equal(0, read.Phase); Assert.Equal(5UL, Assert.Single(read.Counters).Value); Assert.Equal(3UL, Assert.Single(read.Traversals).Value.PollGeneration); }
+        await fixture.VerifyOfflineNativeHistory(sender, receiver, "Owned Retrieve → semantic inbox → ACK");
         CryptographicOperations.ZeroMemory(initial); CryptographicOperations.ZeroMemory(cipher);
         CryptographicOperations.ZeroMemory(acceptCipher); CryptographicOperations.ZeroMemory(acceptOperation);
     }

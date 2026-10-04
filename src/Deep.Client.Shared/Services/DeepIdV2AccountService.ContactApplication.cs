@@ -55,19 +55,10 @@ public sealed partial class DeepIdV2AccountService
         finally { foreach (var bytes in new[] { intent, initial, hello }) CryptographicOperations.ZeroMemory(bytes); }
     }
 
-    public async Task<IReadOnlyList<DeepIdV2ConversationSnapshot>> ListConversationsAsync(
-        DeepIdV2ContactPathAuthoritySource source, CancellationToken ct = default)
+    public async Task<IReadOnlyList<DeepIdV2ConversationSnapshot>> ListConversationsAsync(CancellationToken ct = default)
     {
-        ArgumentNullException.ThrowIfNull(source); source.RequireAccountOwner(this);
         using var verifier = OpenVerifier();
-        var scopes = await owner.ReadInitializedConversationScopesAsync(TrustedUnixSeconds(), verifier, ct).ConfigureAwait(false);
-        var snapshots = new List<DeepIdV2ConversationSnapshot>(scopes.Count);
-        foreach (var scope in scopes)
-        {
-            var state = await ReadOwnContactAcceptanceAsync(scope, source, ct).ConfigureAwait(false);
-            snapshots.Add(new(new(scope), (DeepIdV2ContactState)state));
-        }
-        ct.ThrowIfCancellationRequested(); return snapshots.AsReadOnly();
+        return await owner.ReadLocalConversationsAsync(TrustedUnixSeconds(), verifier, ct).ConfigureAwait(false);
     }
 
     public Task<ClientMailboxStoreResult> AcceptContactAsync(DeepIdV2Conversation conversation,
@@ -121,9 +112,9 @@ public sealed partial class DeepIdV2AccountService
     }
 
     public Task<IReadOnlyList<DirectMessageCreateSnapshot>> ListMessagesAsync(DeepIdV2Conversation conversation,
-        DeepIdV2ContactPathAuthoritySource source, CancellationToken ct = default)
+        CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(conversation);
-        return ListOwnMessagingMessagesAsync(conversation.Scope, source, ct);
+        return ListOwnMessagingMessagesAsync(conversation.Scope, ct);
     }
 }

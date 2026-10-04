@@ -70,7 +70,7 @@ plans or proof of current service activation.
 | Durable delivery state | Protected exact-request retry, SQLCipher state, semantic inbox materialization and verified mailbox tombstone ACK exist. Store completion is storage evidence, not recipient AppAck or Read. |
 | AppAck and Read events | Not connected to the current DID2 authoring and semantic consumer allowlists. |
 | Scheduling | Synchronization processes one bounded page. The current consumer has no automatic message outbox drain/inbox scheduler; MAUI's network reconnect only restores its diagnostic proof/publication path. |
-| Offline use | Current conversation/history methods request fresh endpoint authority; local authenticated history and offline command queueing still need their own boundary. |
+| Offline use | Conversation/message history reopens authenticated local account/session/SQL custody without a network authority source. Offline command queueing and the scheduler remain incomplete; local reads never authorize new send/receive/ACK. |
 | Long-running custody | Independent protected Store counter floors are implemented under [DR-0092](../../docs/survival-program/decisions/DR-0092-did2-owned-mailbox-counter-floors.md), including exact retry and pre-issuer capacity checks. Send and grant journals still lack connected retirement/compaction; expired-winner replacement, authored-sequence/terminal metadata and the remaining local formats/runtime are open under [DR-0084](../../docs/survival-program/decisions/DR-0084-owned-delivery-settlement-and-retirement.md). |
 | Route renewal | Committed-predecessor renewal and protected pending phases exist. Incomplete-proposal expiry, grant/route rollover and service/topology changes are not a complete recovery lifecycle. |
 | Attachments | Local encrypted asset custody and typed offers exist. No public DID2 remote upload/download workflow is composed. |
@@ -282,7 +282,7 @@ the account/session DELETE policy is not copied to the application store.
 exposes the existing owned draft/completion/import/retirement and mailbox engine
 through StartContact, AcceptContact, SendText, ListConversations and ListMessages.
 Conversation handles have only internally constructed protected-catalog metadata;
-they grant no freshness, acceptance, transport or ACK authority. Every command
+they grant no freshness, acceptance, transport or ACK authority. Every mutation
 rechecks the current account instance and independent endpoints. Text authoring
 requires actual authenticated acceptance before allocating an outbox event.
 Local start-operation metadata enables original-intent reconciliation, not trust.
@@ -293,6 +293,20 @@ retry after lost ACK and empty next poll. Exact evidence belongs to
 [SPRINT-HISTORY](../../docs/SPRINT-HISTORY.md). The signed in-process fixture is
 not socket/device, remote BLOB or governed-group evidence. Full API/graph review,
 consumer repins and live/device activation remain open.
+
+Read-only `ListConversationsAsync(ct)` and `ListMessagesAsync(conversation, ct)`
+now have no network-source argument. There is no compatibility overload.
+The [local history owner](../src/Deep.Client.Shared/Persistence/DeviceV2/ProtectedDeepIdV2AccountOwner.LocalHistory.cs)
+requires exact phase-2 catalog registration, protected peer bootstrap, the
+current local account/device/instance, retired source custody and active
+SQL/floor reconciliation. Acceptance projection must match actual retained
+receive or explicit command/send custody; it is not fresh remote authority.
+Missing/corrupt/latched state rejects instead of enrolling or returning an empty
+history. Existing local identity restrictions remain; this is not permission to
+ignore a revoked/suspicious account. Authenticated local availability follows
+the [normative owner](../../docs/architecture/TRANSPORT-NEUTRAL-MESSAGING.md#31-local-availability-и-delivery-lifecycle).
+Exact local tests and unqualified scopes are in the
+[checkpoint](testing/s07-local-history-2026-10-04.md).
 
 
 ## Current mailbox issuer and grant evidence
