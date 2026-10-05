@@ -93,3 +93,9 @@ does not activate renewal, settlement, retirement/compaction, historic read/ACK
 or a longer object horizon. No entries/floors are evicted and no128/512 bound is
 raised. Send/read independent replay floors are unchanged. Their full lifecycle
 contracts and the linked retention fence remain unfinished S01/S04/S05 work.
+
+The expired/unknown acquisition evidence and retirement boundary are specified
+only in the semantic owner linked above, §8.4.2. Generation3 does not yet retain
+that original signed-policy ceiling or an explicit closed-unresolved disposition;
+its two phases must not be interpreted as that settlement contract. No lifecycle
+layout/API or runtime acceptance is claimed from the acquisition-slice receipt.
