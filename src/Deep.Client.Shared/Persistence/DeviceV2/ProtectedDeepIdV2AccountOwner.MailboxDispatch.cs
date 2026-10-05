@@ -131,7 +131,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             if (entry is not null && (!FixedRoute(entry.RouteHash, routeHash) ||
                 !FixedRoute(entry.EnvelopeHash, SHA256.HashData(envelopeBytes))))
                 throw new CryptographicException("An exact owned send cannot acquire a replacement route or ciphertext.");
-            await RequireMailboxSendFloorCapacityUnderLeaseAsync(sends, routeHash, locator, current, instance, held, ct).ConfigureAwait(false);
+            await RequireMailboxSendFloorCapacityUnderLeaseAsync(sends, routeHash, locator,
+                entry is null ? null : entry.GrantHash.ToArray(), current, instance, held, ct).ConfigureAwait(false);
             async Task Recheck(CancellationToken token)
             {
                 await RequireFinalMessagingFreshnessAsync(current, scope, fresh, peer, source, held, first, token).ConfigureAwait(false);
@@ -151,16 +152,24 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 finally { CryptographicOperations.ZeroMemory(retained); }
                 await RequireExactProtectedMailboxRootAsync(ProtectedDid2MailboxSendJournal.Slot, snapshot, token).ConfigureAwait(false);
             }
-            var winner = await AcquireMailboxGrantUnderLeaseAsync(current, held, source, fresh, route, locator,
-                capability, MailboxCapabilityDomain.Deposit, Recheck, grants, ct).ConfigureAwait(false);
-            var grantHash = SHA256.HashData(winner.ExactGrant.Span);
+            var winner = entry is null
+                ? await AcquireMailboxGrantUnderLeaseAsync(current, held, source, fresh, route, locator,
+                    capability, MailboxCapabilityDomain.Deposit, Recheck, grants, ct).ConfigureAwait(false)
+                : null;
             using (var root = await storage.ReadOwnedAsync(ProtectedDid2MailboxGrantJournal.Slot, ct).ConfigureAwait(false) ?? throw new InvalidDataException("Protected grant custody disappeared."))
                 grantRoot = root.Use(bytes => bytes.ToArray());
             using var grantState = ProtectedDid2MailboxGrantJournal.Decode(grantRoot, networkId, current.AccountId.Span, instance);
             var grantName = Convert.ToHexString(ProtectedDid2MailboxGrantJournal.Scope(routeHash, locator.Span, (byte)MailboxCapabilityDomain.Deposit));
-            if (!grantState.Entries.TryGetValue(grantName, out var retainedGrant) || !ProtectedDid2MailboxGrantJournal.HasWinner(retainedGrant) ||
-                !FixedRoute(ProtectedDid2MailboxGrantJournal.Response(retainedGrant).Span, winner.ExactXmc2.Span))
-                throw new CryptographicException("Dispatch has no exact protected grant winner.");
+            var retainedGrant = entry is not null
+                ? ProtectedDid2MailboxGrantJournal.RequireRetainedWinner(grantState, grantName, entry.GrantHash)
+                : ProtectedDid2MailboxGrantJournal.CurrentWinner(grantState, grantName) ??
+                    throw new CryptographicException("Dispatch has no selected protected grant winner.");
+            if (winner is not null && !FixedRoute(ProtectedDid2MailboxGrantJournal.Response(retainedGrant).Span, winner.ExactXmc2.Span))
+                throw new CryptographicException("Dispatch changed its acquired winner.");
+            winner ??= await DeepIdV2MailboxGrantResultVerifier.VerifyRetainedSuccessAsync(route,
+                ProtectedDid2MailboxGrantJournal.Request(retainedGrant), ProtectedDid2MailboxGrantJournal.Response(retainedGrant),
+                fresh.MailboxAuthority.ExactPma2, ct).ConfigureAwait(false);
+            var grantHash = SHA256.HashData(winner.ExactGrant.Span);
             using var loan = await OpenMailboxWinnerUnderLeaseAsync(current, held, route, winner, locator, capability,
                 retainedGrant, source, fresh, Recheck, ct).ConfigureAwait(false);
             if (entry is null && sends.Entries.Values.Any(value => !value.Prepared && FixedRoute(value.GrantHash, grantHash)))
@@ -301,7 +310,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     // the normal acquisition, signature, freshness and exact-grant checks still
     // run independently. A reader cannot enroll/repair an absent counter floor.
     private async Task RequireMailboxSendFloorCapacityUnderLeaseAsync(ProtectedDid2MailboxSendJournal.State sends,
-        byte[] routeHash, ReadOnlyMemory<byte> locator, VerifiedDeepIdV2CurrentAccount current,
+        byte[] routeHash, ReadOnlyMemory<byte> locator, byte[]? originalGrant, VerifiedDeepIdV2CurrentAccount current,
         byte[] instance, HeldDeepIdV2AccountLease held, CancellationToken ct)
     {
         if (sends.Floors.Count < ProtectedDid2MailboxSendJournal.MaximumFloors) return;
@@ -310,7 +319,10 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             throw new InvalidDataException("Protected grant custody is absent during replay-floor preflight.");
         using var state = root.Use(bytes => ProtectedDid2MailboxGrantJournal.Decode(bytes, networkId, current.AccountId.Span, instance));
         var name = Convert.ToHexString(ProtectedDid2MailboxGrantJournal.Scope(routeHash, locator.Span, (byte)MailboxCapabilityDomain.Deposit));
-        if (!state.Entries.TryGetValue(name, out var winner) || !ProtectedDid2MailboxGrantJournal.HasWinner(winner))
+        var winner = originalGrant is not null
+            ? ProtectedDid2MailboxGrantJournal.RequireRetainedWinner(state, name, originalGrant)
+            : ProtectedDid2MailboxGrantJournal.AcquisitionForNewWork(state, name);
+        if (winner is null || !ProtectedDid2MailboxGrantJournal.HasWinner(winner))
             throw new IOException("Protected mailbox replay floors are full; issuance cannot start.");
         var response = ContactCodec.Decode("XMC2", ProtectedDid2MailboxGrantJournal.Response(winner).Span);
         sends.RequireGrant(MailboxAuthenticatedCapabilityCodec.DecodeGrant(response.Field(8).Span));

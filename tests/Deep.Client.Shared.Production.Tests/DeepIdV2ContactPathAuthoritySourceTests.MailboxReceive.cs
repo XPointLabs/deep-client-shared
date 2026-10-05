@@ -12,9 +12,11 @@ namespace Deep.Client.Shared.Production.Tests;
 
 public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 {
-    [Fact]
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     [Trait("RequiresApprovedMlKemRuntime", "true")]
-    public async Task Did2OwnedMailboxReceive_ActualPublicationRetainedPageSemanticFaultLostAckAndNextEmptyPoll()
+    public async Task Did2OwnedMailboxReceive_ActualPublicationRetainedPageSemanticFaultLostAckAndNextEmptyPoll(bool selectedSuccessor)
     {
         // Actual PQ accounts, committed DPE2/ratchet, SQLCipher, protected page,
         // materialization and signed ACK. In-process issuer/terminal and signed
@@ -97,6 +99,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             await Assert.ThrowsAsync<ClientMailboxDispatchOutcomeUnknownException>(() => fixture.SynchronizeNativeReceiver(grants, terminal));
         Assert.True(hitPageCommitFault); Assert.Equal(1, terminal.RetrieveCalls); Assert.Equal(0, terminal.AckCalls);
         using (var read = await fixture.ReadPeerMailboxReads()) { Assert.Equal(3, read.Phase); Assert.NotEmpty(read.Active!.Page); }
+        if (selectedSuccessor) await fixture.StageVerifiedGrantSuccessorAsync(grants, own: false);
         // The real dispatch clock advanced while cold SQL ran. Model that
         // elapsed time in both signed fixture time and its monotonic sample
         // before obtaining a new proof; do not make the captured envelope future.
@@ -119,11 +122,28 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         { Assert.Equal(0, read.Phase); Assert.Null(read.Active); Assert.Equal(4UL, Assert.Single(read.Counters).Value); Assert.Equal(2UL, Assert.Single(read.Traversals).Value.PollGeneration); }
         var history = await fixture.ListNativeApplicationMessages(receiver);
         Assert.Equal(1, history.Count(value => value.Text == "Owned Retrieve → semantic inbox → ACK" && !value.IsLocalAuthor));
-        var empty = await fixture.SynchronizeNativeReceiver(grants, terminal);
-        Assert.Equal(0, empty.ProcessedEnvelopes); Assert.Equal(0, empty.DurableTombstones);
-        Assert.Equal(2, terminal.RetrieveCalls); Assert.Equal(2, terminal.AckCalls); Assert.Equal(1, grants.Calls);
-        using (var read = await fixture.ReadPeerMailboxReads())
-        { Assert.Equal(0, read.Phase); Assert.Equal(5UL, Assert.Single(read.Counters).Value); Assert.Equal(3UL, Assert.Single(read.Traversals).Value.PollGeneration); }
+        if (!selectedSuccessor)
+        {
+            var empty = await fixture.SynchronizeNativeReceiver(grants, terminal);
+            Assert.Equal(0, empty.ProcessedEnvelopes); Assert.Equal(0, empty.DurableTombstones);
+            Assert.Equal(2, terminal.RetrieveCalls); Assert.Equal(2, terminal.AckCalls); Assert.Equal(1, grants.Calls);
+            using var read = await fixture.ReadPeerMailboxReads();
+            Assert.Equal(0, read.Phase); Assert.Equal(5UL, Assert.Single(read.Counters).Value);
+            Assert.Equal(3UL, Assert.Single(read.Traversals).Value.PollGeneration);
+        }
+        else
+        {
+            // Changed selection cannot replace the captured Retrieve/ACK grant.
+            using var custody = await fixture.ReadPeerGrantsAsync();
+            var originalName = Convert.ToHexString(SHA256.HashData(grants.OriginalRequest.Span));
+            var scope = Convert.ToHexString(custody.Entries[originalName].AsSpan(0, 32));
+            Assert.Equal(2, custody.Entries.Values.Count(value => Convert.ToHexString(value.AsSpan(0, 32)) == scope));
+            var selected = new KeyValuePair<string, ProtectedDid2MailboxGrantJournal.Selection>(scope, custody.Selections[scope]);
+            Assert.NotEqual(originalName, selected.Value.Current);
+            Assert.Equal(ProtectedDid2MailboxGrantJournal.Acquisition(
+                ProtectedDid2MailboxGrantJournal.CurrentWinner(custody, selected.Key)!), selected.Value.Current);
+            Assert.Equal(1, grants.Calls); // No acquisition during old page/ACK recovery.
+        }
         await fixture.VerifyOfflineNativeHistory(sender, receiver, "Owned Retrieve → semantic inbox → ACK");
         CryptographicOperations.ZeroMemory(initial); CryptographicOperations.ZeroMemory(cipher);
         CryptographicOperations.ZeroMemory(acceptCipher); CryptographicOperations.ZeroMemory(acceptOperation);

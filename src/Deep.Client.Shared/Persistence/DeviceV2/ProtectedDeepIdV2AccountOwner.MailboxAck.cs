@@ -42,8 +42,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 grantRoot = root.Use(bytes => bytes.ToArray());
             using var grants = ProtectedDid2MailboxGrantJournal.Decode(grantRoot, networkId, current.AccountId.Span, instance);
             var grantName = Convert.ToHexString(ProtectedDid2MailboxGrantJournal.Scope(cycle.Route, publication.Locator.Span, (byte)MailboxCapabilityDomain.Retrieve));
-            if (!grants.Entries.TryGetValue(grantName, out var retained) || !ProtectedDid2MailboxGrantJournal.HasWinner(retained))
-                throw new CryptographicException("ACK has no original protected Retrieve holder; acquisition is forbidden here.");
+            var retained = ProtectedDid2MailboxGrantJournal.RequireRetainedWinner(grants, grantName, cycle.Grant);
             var winner = await DeepIdV2MailboxGrantResultVerifier.VerifyRetainedSuccessAsync(publication.Route,
                 ProtectedDid2MailboxGrantJournal.Request(retained), ProtectedDid2MailboxGrantJournal.Response(retained), fresh.MailboxAuthority.ExactPma2, ct).ConfigureAwait(false);
             if (!FixedRoute(SHA256.HashData(winner.ExactGrant.Span), cycle.Grant)) throw new CryptographicException("ACK changed its retained grant.");

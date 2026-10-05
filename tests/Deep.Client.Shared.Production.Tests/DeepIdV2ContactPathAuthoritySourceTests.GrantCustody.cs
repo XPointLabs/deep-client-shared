@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Security.Cryptography;
 using Deep.Client.Shared.Persistence.DeviceV2;
 using Deep.Client.Shared.Services;
+using Deep.Client.Shared.Services.ContactV1;
 using Deep.Client.Shared.Services.ContactV2;
 using Deep.Client.Shared.Services.XPointNetworkV1;
 using Deep.Protocol.ContactV1;
@@ -31,6 +32,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     [InlineData(3)]
     [InlineData(4)]
     [InlineData(5)]
+    [InlineData(6)]
+    [InlineData(7)]
     public void Did2GrantCustody_HeaderRejectsBeforeReadingEntries(int fault)
     {
         var network = Bytes(16, 0x11); var account = Bytes(32, 0x12); var instance = Bytes(32, 0x13);
@@ -41,6 +44,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         if (fault == 3) exact[11] = 0;
         if (fault == 4) exact[60] ^= 1;
         if (fault == 5) exact = exact.Append((byte)0).ToArray();
+        if (fault == 6) exact[0] = 2;
+        if (fault == 7) exact[94] = 1;
         Assert.Throws<InvalidDataException>(() => ProtectedDid2MailboxGrantJournal.Decode(exact, network, account, instance));
     }
 
@@ -90,6 +95,17 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             transport.LoseResponse = false;
             reader = ReopenGrantReader(); source = GrantReaderSource(reader);
             using (Did2MailboxInstallationTestHooks.Push(point =>
+                { if (point == Did2MailboxInstallationFailpoint.BeforeSelection) throw new IOException("Injected before selection."); }))
+                await Assert.ThrowsAsync<IOException>(() => reader.AcquirePermanentContactDepositGrantAsync(resolved, source, transport));
+            using (var candidate = await ReadPeerGrantsAsync())
+            {
+                Assert.Equal(3UL, candidate.Revision);
+                Assert.True(ProtectedDid2MailboxGrantJournal.HasWinner(Assert.Single(candidate.Entries).Value));
+                var selection = Assert.Single(candidate.Selections).Value;
+                Assert.Null(selection.Current); Assert.NotNull(selection.Pending);
+            }
+            reader = ReopenGrantReader(); source = GrantReaderSource(reader);
+            using (Did2MailboxInstallationTestHooks.Push(point =>
                 { if (point == Did2MailboxInstallationFailpoint.BeforeSql) throw new IOException("Injected before owned installation."); }))
                 await Assert.ThrowsAsync<IOException>(() => reader.AcquirePermanentContactDepositGrantAsync(resolved, source, transport));
             Assert.Equal(3, transport.Calls);
@@ -119,11 +135,15 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             Assert.True(transport.BuiltHeldFrame);
             using (var winner = await ReadPeerGrantsAsync())
             {
-                Assert.Equal(3UL, winner.Revision);
+                Assert.Equal(4UL, winner.Revision);
                 var entry = Assert.Single(winner.Entries).Value;
+                var selection = Assert.Single(winner.Selections).Value;
+                Assert.Equal(ProtectedDid2MailboxGrantJournal.Acquisition(entry), selection.Current);
+                Assert.Null(selection.Pending);
                 Assert.True(ProtectedDid2MailboxGrantJournal.HasWinner(entry));
                 Assert.Equal(verified.ExactXmg1.ToArray(), ProtectedDid2MailboxGrantJournal.Request(entry).ToArray());
                 Assert.Equal(verified.ExactXmc2.ToArray(), ProtectedDid2MailboxGrantJournal.Response(entry).ToArray());
+                await CheckIndependentAcquisitionsAsync(winner, transport.Route!, verified);
                 // A corrupted seed, winner, phase or reserved byte is not repaired.
                 foreach (var offset in new[] { 32, 96, 97, 100 + 435 + 32 })
                 {
@@ -169,7 +189,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             using (var winner = await ReadPeerGrantsAsync(own: true))
             {
                 var entry = Assert.Single(winner.Entries).Value;
-                Assert.Equal(3UL, winner.Revision); Assert.True(ProtectedDid2MailboxGrantJournal.HasWinner(entry));
+                Assert.Equal(4UL, winner.Revision); Assert.True(ProtectedDid2MailboxGrantJournal.HasWinner(entry));
                 Assert.Equal(retrieved.ExactXmc2.ToArray(), ProtectedDid2MailboxGrantJournal.Response(entry).ToArray());
             }
             ownerReopened = ReopenAccount();
@@ -180,6 +200,129 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             await AssertInstalledGrantSqlAsync(retrieveAgain, own: true);
             await peerStorage.DeleteBatchAsync([ProtectedDid2MailboxGrantJournal.Slot]);
             await Assert.ThrowsAsync<InvalidDataException>(() => ReopenGrantReader().GetCurrentAsync());
+        }
+
+        private async Task CheckIndependentAcquisitionsAsync(ProtectedDid2MailboxGrantJournal.State original,
+            VerifiedDeepIdV2ContactRouteClosure route, VerifiedDeepIdV2MailboxGrant first)
+        {
+            var account = Bytes(32, 0x11); var instance = Bytes(32, 0x12);
+            var originalExact = ProtectedDid2MailboxGrantJournal.Encode(original, Network, account, instance);
+            using var state = ProtectedDid2MailboxGrantJournal.Decode(originalExact, Network, account, instance);
+            var scope = Assert.Single(state.Selections).Key;
+            var firstName = Assert.Single(state.Entries).Key;
+            var firstGrant = SHA256.HashData(first.ExactGrant.Span);
+            var locator = ContactCodec.Decode("XMG1", first.ExactXmg1.Span).Field(3);
+            byte[] Encode() => ProtectedDid2MailboxGrantJournal.Encode(state, Network, account, instance);
+            var seed = Bytes(32, 0x98);
+            using var holder = ReachabilityMailboxHolderAuthority.OpenRetained(route, locator,
+                route.Route.Reachability.Field(10), MailboxCapabilityDomain.Deposit, seed);
+            var request = await DeepIdV2MailboxGrantRequestAuthor.AuthorDepositAsync(route, locator, holder);
+            var successor = ProtectedDid2MailboxGrantJournal.Pending(seed, SHA256.HashData(route.ExactRouteClosure.Span), request, Network);
+            ProtectedDid2MailboxGrantJournal.AddPending(state, successor); state.Revision++;
+            var successorName = ProtectedDid2MailboxGrantJournal.Acquisition(successor);
+            Assert.NotEqual(firstName, successorName);
+            Assert.Equal(firstName, state.Selections[scope].Current);
+            Assert.Equal(successorName, state.Selections[scope].Pending);
+            Assert.Equal(firstName, ProtectedDid2MailboxGrantJournal.Acquisition(
+                ProtectedDid2MailboxGrantJournal.AcquisitionForNewWork(state, scope)!));
+            Assert.Equal(first.ExactXmc2.ToArray(), ProtectedDid2MailboxGrantJournal.Response(
+                ProtectedDid2MailboxGrantJournal.RequireRetainedWinner(state, scope, firstGrant)).ToArray());
+            Assert.Throws<InvalidDataException>(() => ProtectedDid2MailboxGrantJournal.PromoteWinner(state, scope));
+            var response = await IssueOwnedGrantAsync(request, route, retrieve: false, default);
+            var verified = await DeepIdV2MailboxGrantResultVerifier.VerifySuccessAsync(route, request, response, operational.ExactPma2);
+            var next = ProtectedDid2MailboxGrantJournal.WithWinner(successor, verified.ExactXmc2.Span, Network);
+            state.Entries[successorName] = next; CryptographicOperations.ZeroMemory(successor); state.Revision++;
+            var candidate = Encode();
+            using (var coldCandidate = ProtectedDid2MailboxGrantJournal.Decode(candidate, Network, account, instance))
+            {
+                Assert.Equal(firstName, coldCandidate.Selections[scope].Current);
+                Assert.Equal(successorName, coldCandidate.Selections[scope].Pending);
+                Assert.Equal(firstName, ProtectedDid2MailboxGrantJournal.Acquisition(
+                    ProtectedDid2MailboxGrantJournal.AcquisitionForNewWork(coldCandidate, scope)!));
+                Assert.Equal(first.ExactXmc2.ToArray(), ProtectedDid2MailboxGrantJournal.Response(
+                    ProtectedDid2MailboxGrantJournal.CurrentWinner(coldCandidate, scope)!).ToArray());
+                Assert.Throws<CryptographicException>(() => { _ = ProtectedDid2MailboxGrantJournal.RequireRetainedWinner(
+                    coldCandidate, scope, SHA256.HashData(verified.ExactGrant.Span)); });
+            }
+            ProtectedDid2MailboxGrantJournal.PromoteWinner(state, scope); state.Revision++;
+            var promoted = Encode();
+            using (var cold = ProtectedDid2MailboxGrantJournal.Decode(promoted, Network, account, instance))
+            {
+                Assert.Equal(successorName, cold.Selections[scope].Current); Assert.Null(cold.Selections[scope].Pending);
+                Assert.Equal(first.ExactXmc2.ToArray(), ProtectedDid2MailboxGrantJournal.Response(
+                    ProtectedDid2MailboxGrantJournal.RequireRetainedWinner(cold, scope, firstGrant)).ToArray());
+                Assert.Equal(verified.ExactXmc2.ToArray(), ProtectedDid2MailboxGrantJournal.Response(
+                    ProtectedDid2MailboxGrantJournal.RequireRetainedWinner(cold, scope, SHA256.HashData(verified.ExactGrant.Span))).ToArray());
+                Assert.Equal(promoted, ProtectedDid2MailboxGrantJournal.Encode(cold, Network, account, instance));
+            }
+            // Hostile pointers/predecessors cannot pick a winner or orphan old custody.
+            var selectionOffset = ProtectedDid2MailboxGrantJournal.HeaderBytes + 2 * ProtectedDid2MailboxGrantJournal.EntryBytes;
+            foreach (var offset in new[] { 92, 94, selectionOffset, selectionOffset + 32, selectionOffset + 64,
+                ProtectedDid2MailboxGrantJournal.HeaderBytes + 1045 })
+            {
+                var damaged = promoted.ToArray(); damaged[offset] ^= 1;
+                Assert.Throws<InvalidDataException>(() => ProtectedDid2MailboxGrantJournal.Decode(damaged, Network, account, instance));
+                CryptographicOperations.ZeroMemory(damaged);
+            }
+            var selected = state.Selections[scope];
+            state.Selections[scope] = new(firstName, null); // Orphan successor, not an authorized rollback.
+            Assert.Throws<InvalidDataException>(Encode); state.Selections[scope] = selected;
+            Assert.Throws<CryptographicException>(() => ProtectedDid2MailboxGrantJournal.RequireRetainedWinner(state, scope, Bytes(32, 0xa1)));
+            Assert.Equal(Assert.Single(original.Entries).Value, state.Entries[firstName]);
+            foreach (var bytes in new[] { originalExact, candidate, promoted, response, seed }) CryptographicOperations.ZeroMemory(bytes);
+        }
+
+        // Controlled, actual signed producer fixture. This stages selection for
+        // consumer tests; it is NOT runtime renewal/compaction or device evidence.
+        internal async Task StageVerifiedGrantSuccessorAsync(OwnedGrantTransport transport, bool own)
+        {
+            var selected = own ? innerStorage : peerStorage;
+            using var generation = await selected.ReadOwnedAsync("deep.store.v2.sql-generation") ?? throw new InvalidOperationException();
+            var ownerScope = generation.Use(record => record.Slice(24, 64).ToArray());
+            using var root = await selected.ReadOwnedAsync(ProtectedDid2MailboxGrantJournal.Slot) ?? throw new InvalidOperationException();
+            var snapshot = root.Use(bytes => bytes.ToArray());
+            byte[] seed = [], response = [];
+            try
+            {
+                using var state = ProtectedDid2MailboxGrantJournal.Decode(snapshot, Network, ownerScope.AsSpan(0, 32), ownerScope.AsSpan(32));
+                var old = state.Entries[Convert.ToHexString(SHA256.HashData(transport.OriginalRequest.Span))];
+                var scope = Convert.ToHexString(old.AsSpan(0, 32));
+                var original = old.ToArray();
+                var requestRecord = ContactCodec.Decode("XMG1", ProtectedDid2MailboxGrantJournal.Request(old).Span);
+                var route = transport.Route!; var locator = requestRecord.Field(3); var capability = requestRecord.Field(4);
+                var domain = (MailboxCapabilityDomain)requestRecord.Field(6).Span[0];
+                seed = Bytes(32, 0x99);
+                using var holder = ReachabilityMailboxHolderAuthority.OpenRetained(route, locator, capability, domain, seed);
+                var request = domain == MailboxCapabilityDomain.Deposit
+                    ? await DeepIdV2MailboxGrantRequestAuthor.AuthorDepositAsync(route, locator, holder)
+                    : await DeepIdV2MailboxGrantRequestAuthor.AuthorRetrieveAsync(route, locator, capability, holder);
+                var pending = ProtectedDid2MailboxGrantJournal.Pending(seed, SHA256.HashData(route.ExactRouteClosure.Span), request, Network);
+                ProtectedDid2MailboxGrantJournal.AddPending(state, pending); await Save();
+                response = await IssueOwnedGrantAsync(request, route, domain == MailboxCapabilityDomain.Retrieve, default);
+                var verified = await DeepIdV2MailboxGrantResultVerifier.VerifySuccessAsync(route, request, response, operational.ExactPma2);
+                var next = ProtectedDid2MailboxGrantJournal.WithWinner(pending, verified.ExactXmc2.Span, Network);
+                state.Entries[ProtectedDid2MailboxGrantJournal.Acquisition(pending)] = next;
+                CryptographicOperations.ZeroMemory(pending); await Save();
+                ProtectedDid2MailboxGrantJournal.PromoteWinner(state, scope); await Save();
+                Assert.Equal(original, ProtectedDid2MailboxGrantJournal.RequireRetainedWinner(state, scope,
+                    SHA256.HashData(ContactCodec.Decode("XMC2", ProtectedDid2MailboxGrantJournal.Response(old).Span).Field(8).Span)));
+                CryptographicOperations.ZeroMemory(original);
+
+                async Task Save()
+                {
+                    state.Revision++;
+                    var exact = ProtectedDid2MailboxGrantJournal.Encode(state, Network, ownerScope.AsSpan(0, 32), ownerScope.AsSpan(32));
+                    try
+                    {
+                        Assert.True(await selected.CompareExchangeAsync(ProtectedDid2MailboxGrantJournal.Slot, snapshot, exact));
+                        using var readback = await selected.ReadOwnedAsync(ProtectedDid2MailboxGrantJournal.Slot) ?? throw new InvalidOperationException();
+                        Assert.True(readback.Use(bytes => bytes.SequenceEqual(exact)));
+                        CryptographicOperations.ZeroMemory(snapshot); snapshot = exact.ToArray();
+                    }
+                    finally { CryptographicOperations.ZeroMemory(exact); }
+                }
+            }
+            finally { foreach (var bytes in new[] { ownerScope, snapshot, seed, response }) CryptographicOperations.ZeroMemory(bytes); }
         }
 
         // Test-only independent SQLCipher observer. No runtime authority is
@@ -271,12 +414,14 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         internal bool ExactRetry { get; private set; } = true;
         internal Did2OwnedContactTransportContext? Dispatch { get; private set; }
         internal bool BuiltHeldFrame { get; private set; }
+        internal VerifiedDeepIdV2ContactRouteClosure? Route { get; private set; }
         internal Func<Task>? BeforeReturn { get; set; }
         private byte[]? requestBytes, responseBytes;
+        internal ReadOnlyMemory<byte> OriginalRequest => requestBytes ?? throw new InvalidOperationException();
         public async ValueTask<ReadOnlyMemory<byte>> AcquireAsync(AuthoredMailboxGrantRequest request,
             VerifiedDeepIdV2ContactRouteClosure route, Did2OwnedContactTransportContext dispatch, CancellationToken ct)
         {
-            ct.ThrowIfCancellationRequested(); Calls++; Dispatch = dispatch; dispatch.RequireActive();
+            ct.ThrowIfCancellationRequested(); Calls++; Dispatch = dispatch; Route = route; dispatch.RequireActive();
             using (var custody = await fixture.ReadPeerGrantsAsync(own: ownerOnPrimary ?? selfRetrieve))
             {
                 var entry = Assert.Single(custody.Entries.Values,

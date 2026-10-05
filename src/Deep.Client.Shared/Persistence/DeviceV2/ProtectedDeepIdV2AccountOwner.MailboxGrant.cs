@@ -178,7 +178,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 throw new InvalidDataException("Protected mailbox holder custody is absent; explicit local reset is required.");
             snapshot = root.Use(bytes => bytes.ToArray());
             using var state = ProtectedDid2MailboxGrantJournal.Decode(snapshot, networkId, current.AccountId.Span, instance);
-            if (!state.Entries.TryGetValue(name, out var entry))
+            var entry = ProtectedDid2MailboxGrantJournal.AcquisitionForNewWork(state, name);
+            if (entry is null)
             {
                 if (state.Entries.Count >= ProtectedDid2MailboxGrantJournal.MaximumEntries)
                     throw new IOException("Protected mailbox holder custody is full.");
@@ -193,7 +194,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     await recheck(ct).ConfigureAwait(false);
                     await RequireMailboxIssuerCurrentAsync(route, fresh.MailboxAuthority.ExactPma2, ct).ConfigureAwait(false);
                     entry = ProtectedDid2MailboxGrantJournal.Pending(seed, routeHash, request, networkId);
-                    state.Entries.Add(name, entry); state.Revision = checked(state.Revision + 1);
+                    ProtectedDid2MailboxGrantJournal.AddPending(state, entry);
+                    state.Revision = checked(state.Revision + 1);
                     var adopted = await SaveMailboxGrantJournalAsync(state, snapshot, current.AccountId, instance, ct).ConfigureAwait(false);
                     CryptographicOperations.ZeroMemory(snapshot); snapshot = adopted;
                 }
@@ -226,7 +228,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                         response, fresh.MailboxAuthority.ExactPma2, deadline.Token).ConfigureAwait(false);
                     await recheck(deadline.Token).ConfigureAwait(false);
                     var next = ProtectedDid2MailboxGrantJournal.WithWinner(entry, verified.ExactXmc2.Span, networkId);
-                    state.Entries[name] = next; CryptographicOperations.ZeroMemory(entry); entry = next;
+                    state.Entries[ProtectedDid2MailboxGrantJournal.Acquisition(entry)] = next;
+                    CryptographicOperations.ZeroMemory(entry); entry = next;
                     state.Revision = checked(state.Revision + 1);
                     var adopted = await SaveMailboxGrantJournalAsync(state, snapshot, current.AccountId, instance, deadline.Token).ConfigureAwait(false);
                     CryptographicOperations.ZeroMemory(snapshot); snapshot = adopted;
@@ -239,11 +242,26 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 throw new CryptographicException("Adopted mailbox custody disappeared.");
             using var winnerState = winnerRoot.Use(bytes => ProtectedDid2MailboxGrantJournal.Decode(
                 bytes, networkId, current.AccountId.Span, instance));
-            if (!winnerState.Entries.TryGetValue(name, out var winner) || !ProtectedDid2MailboxGrantJournal.HasWinner(winner) ||
+            var winner = ProtectedDid2MailboxGrantJournal.AcquisitionForNewWork(winnerState, name);
+            if (winner is null || !ProtectedDid2MailboxGrantJournal.HasWinner(winner) ||
                 !FixedRoute(winner, entry)) throw new CryptographicException("Mailbox winner differs from protected read-back.");
             var result = await DeepIdV2MailboxGrantResultVerifier.VerifyRetainedSuccessAsync(route,
                 ProtectedDid2MailboxGrantJournal.Request(winner), ProtectedDid2MailboxGrantJournal.Response(winner),
                 fresh.MailboxAuthority.ExactPma2, ct).ConfigureAwait(false);
+            // A received initial winner remains the pending candidate until its actual
+            // verification and protected read-back. Cold reopen adopts that exact
+            // candidate without another issuer call; selection is never inferred.
+            if (winnerState.Selections[name].Current is null)
+            {
+#if DEEP_TEST_INTERNALS
+                Did2MailboxInstallationTestHooks.Hit(Did2MailboxInstallationFailpoint.BeforeSelection);
+#endif
+                await recheck(ct).ConfigureAwait(false);
+                ProtectedDid2MailboxGrantJournal.PromoteWinner(winnerState, name);
+                winnerState.Revision = checked(winnerState.Revision + 1);
+                var adopted = await SaveMailboxGrantJournalAsync(winnerState, snapshot, current.AccountId, instance, ct).ConfigureAwait(false);
+                CryptographicOperations.ZeroMemory(snapshot); snapshot = adopted;
+            }
             await InstallMailboxWinnerUnderLeaseAsync(current, held, route, result, locator, capability,
                 winner, source, fresh, recheck, ct).ConfigureAwait(false);
             using var installedRoot = await storage.ReadOwnedAsync(ProtectedDid2MailboxGrantJournal.Slot, ct).ConfigureAwait(false) ??

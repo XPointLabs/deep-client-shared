@@ -1,7 +1,7 @@
 #if DEEP_TEST_INTERNALS
 using Deep.Client.Shared.Services.ContactV2;
 namespace Deep.Client.Shared.Persistence.DeviceV2;
-internal enum Did2MailboxInstallationFailpoint { BeforeSql, AfterSql }
+internal enum Did2MailboxInstallationFailpoint { BeforeSelection, BeforeSql, AfterSql }
 internal static class Did2MailboxInstallationTestHooks
 {
     private static readonly AsyncLocal<Action<Did2MailboxInstallationFailpoint>?> Current = new();

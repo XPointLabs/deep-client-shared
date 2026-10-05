@@ -10,21 +10,81 @@ namespace Deep.Client.Shared.Persistence.DeviceV2;
 internal static class ProtectedDid2MailboxGrantJournal
 {
     internal const string Slot = "deep.store.v2.mailbox-grant-journal";
-    // Version 2 admits only selector-bound XMC2/MCG3 custody, including empty state.
-    private const byte Version = 2;
-    internal const int HeaderBytes = 92, EntryBytes = 1045, MaximumEntries = 128;
-    internal const int MaximumBytes = HeaderBytes + MaximumEntries * EntryBytes;
+    // One current local reader; generation 2 scope-overwrite custody is retired.
+    private const byte Version = 3;
+    internal const int HeaderBytes = 96, EntryBytes = 1077, MaximumEntries = 128;
+    private const int SelectionBytes = 96, PredecessorOffset = 1045;
+    internal const int MaximumBytes = HeaderBytes + MaximumEntries * (EntryBytes + SelectionBytes);
     private const int RequestOffset = 100, ResponseOffset = RequestOffset + 435;
 
     internal sealed class State : IDisposable
     {
         internal ulong Revision { get; set; } = 1;
+        // Keys are SHA256(exact XMG1), the existing XMC2 request binding.
         internal SortedDictionary<string, byte[]> Entries { get; } = new(StringComparer.Ordinal);
+        internal SortedDictionary<string, Selection> Selections { get; } = new(StringComparer.Ordinal);
         public void Dispose()
         {
             foreach (var entry in Entries.Values) CryptographicOperations.ZeroMemory(entry);
             Entries.Clear();
+            Selections.Clear();
         }
+    }
+
+    internal sealed record Selection(string? Current, string? Pending);
+    internal static string Acquisition(byte[] entry) => Convert.ToHexString(SHA256.HashData(Request(entry).Span));
+    private static string EntryScope(byte[] entry) => Convert.ToHexString(entry.AsSpan(0, 32));
+    private static string? Predecessor(byte[] entry) => NameOrNull(entry.AsSpan(PredecessorOffset, 32));
+    private static string? NameOrNull(ReadOnlySpan<byte> value) =>
+        value.IndexOfAnyExcept((byte)0) < 0 ? null : Convert.ToHexString(value);
+
+    // Incomplete successors cannot replace current. Only the initial candidate
+    // is resumed by ordinary acquisition; renewal adoption has its own owner lane.
+    internal static byte[]? AcquisitionForNewWork(State state, string scope) =>
+        state.Selections.TryGetValue(scope, out var selection)
+            ? state.Entries[selection.Current ?? selection.Pending!]
+            : null;
+
+    internal static byte[]? CurrentWinner(State state, string scope) =>
+        state.Selections.TryGetValue(scope, out var selection) && selection.Current is { } name
+            ? state.Entries[name] : null;
+
+    // Only the held owner calls these transitions. They do not establish issuer authority.
+    internal static void AddPending(State state, byte[] entry)
+    {
+        if (state.Entries.Count >= MaximumEntries) throw new IOException("Protected mailbox holder custody is full.");
+        if (entry.Length != EntryBytes || entry[96] != 1)
+            throw new InvalidDataException("Only an exact pending acquisition can be enrolled.");
+        var scope = EntryScope(entry); state.Selections.TryGetValue(scope, out var previous);
+        if (HasWinner(entry) || Predecessor(entry) is not null || previous?.Pending is not null)
+            throw new InvalidDataException("A scope may have only one exact pending acquisition.");
+        var name = Acquisition(entry);
+        if (state.Entries.ContainsKey(name)) throw new InvalidDataException("Mailbox acquisition already exists.");
+        if (previous?.Current is { } predecessor)
+            Convert.FromHexString(predecessor).CopyTo(entry, PredecessorOffset);
+        state.Entries.Add(name, entry);
+        state.Selections[scope] = new(previous?.Current, name);
+    }
+
+    internal static void PromoteWinner(State state, string scope)
+    {
+        if (!state.Selections.TryGetValue(scope, out var selection) || selection.Pending is not { } pending ||
+            !HasWinner(state.Entries[pending]) || Predecessor(state.Entries[pending]) != selection.Current)
+            throw new InvalidDataException("Only an exact pending winner can replace its protected predecessor.");
+        state.Selections[scope] = new(pending, null);
+    }
+
+    internal static byte[] RequireRetainedWinner(State state, string scope, ReadOnlySpan<byte> grantHash)
+    {
+        Required32(grantHash);
+        if (state.Selections.TryGetValue(scope, out var selection))
+            for (var name = selection.Current; name is not null; name = Predecessor(state.Entries[name]))
+            {
+                var entry = state.Entries[name];
+                var response = ContactCodec.Decode("XMC2", Response(entry).Span);
+                if (Fixed(SHA256.HashData(response.Field(8).Span), grantHash)) return entry;
+            }
+        throw new CryptographicException("Exact original protected mailbox grant is absent; substitution is forbidden.");
     }
 
     internal static byte[] Scope(ReadOnlySpan<byte> routeHash, ReadOnlySpan<byte> locator, byte domain)
@@ -83,8 +143,10 @@ internal static class ProtectedDid2MailboxGrantJournal
             !Fixed(exact.Slice(12, 16), network) || !Fixed(exact.Slice(28, 32), account) || !Fixed(exact.Slice(60, 32), instance))
             throw new InvalidDataException("Mailbox holder custody is incompatible or has a foreign account instance.");
         var count = BinaryPrimitives.ReadUInt16BigEndian(exact.Slice(2, 2));
+        var selectionCount = BinaryPrimitives.ReadUInt16BigEndian(exact.Slice(92, 2));
         var revision = BinaryPrimitives.ReadUInt64BigEndian(exact.Slice(4, 8));
-        if (count > MaximumEntries || exact.Length != HeaderBytes + count * EntryBytes || revision < (ulong)count + 1)
+        if (count > MaximumEntries || selectionCount > count || exact.Slice(94, 2).IndexOfAnyExcept((byte)0) >= 0 ||
+            exact.Length != HeaderBytes + count * EntryBytes + selectionCount * SelectionBytes || revision < (ulong)count + 1)
             throw new InvalidDataException("Mailbox holder custody count/revision is noncanonical.");
         var state = new State { Revision = revision };
         try
@@ -93,11 +155,22 @@ internal static class ProtectedDid2MailboxGrantJournal
             for (var index = 0; index < count; index++)
             {
                 var entry = exact.Slice(HeaderBytes + index * EntryBytes, EntryBytes);
-                RequireEntry(entry, network); var name = Convert.ToHexString(entry[..32]);
+                RequireEntry(entry, network); var name = Convert.ToHexString(SHA256.HashData(entry.Slice(RequestOffset, 435)));
                 if (previous is not null && string.CompareOrdinal(previous, name) >= 0)
-                    throw new InvalidDataException("Mailbox holder scopes are duplicate or unsorted.");
+                    throw new InvalidDataException("Mailbox acquisitions are duplicate or unsorted.");
                 state.Entries.Add(name, entry.ToArray()); previous = name;
             }
+            previous = null;
+            for (var index = 0; index < selectionCount; index++)
+            {
+                var selected = exact.Slice(HeaderBytes + count * EntryBytes + index * SelectionBytes, SelectionBytes);
+                var name = Convert.ToHexString(selected[..32]);
+                if (previous is not null && string.CompareOrdinal(previous, name) >= 0)
+                    throw new InvalidDataException("Mailbox selections are duplicate or unsorted.");
+                state.Selections.Add(name, new(NameOrNull(selected.Slice(32, 32)), NameOrNull(selected.Slice(64, 32))));
+                previous = name;
+            }
+            RequireSelections(state);
             return state;
         }
         catch { state.Dispose(); throw; }
@@ -112,16 +185,56 @@ internal static class ProtectedDid2MailboxGrantJournal
         foreach (var pair in state.Entries)
         {
             RequireEntry(pair.Value, network);
-            if (Convert.ToHexString(pair.Value.AsSpan(0, 32)) != pair.Key)
-                throw new InvalidDataException("Mailbox holder scope name differs from its exact entry.");
+            if (Acquisition(pair.Value) != pair.Key)
+                throw new InvalidDataException("Mailbox acquisition name differs from its exact request.");
         }
-        var exact = new byte[HeaderBytes + state.Entries.Count * EntryBytes]; exact[0] = Version;
+        RequireSelections(state);
+        var exact = new byte[HeaderBytes + state.Entries.Count * EntryBytes + state.Selections.Count * SelectionBytes]; exact[0] = Version;
         BinaryPrimitives.WriteUInt16BigEndian(exact.AsSpan(2, 2), checked((ushort)state.Entries.Count));
         BinaryPrimitives.WriteUInt64BigEndian(exact.AsSpan(4, 8), state.Revision);
         network.CopyTo(exact.AsSpan(12)); account.CopyTo(exact.AsSpan(28)); instance.CopyTo(exact.AsSpan(60));
+        BinaryPrimitives.WriteUInt16BigEndian(exact.AsSpan(92, 2), checked((ushort)state.Selections.Count));
         var offset = HeaderBytes;
         foreach (var entry in state.Entries.Values) { entry.CopyTo(exact, offset); offset += EntryBytes; }
+        foreach (var pair in state.Selections)
+        {
+            Convert.FromHexString(pair.Key).CopyTo(exact, offset);
+            if (pair.Value.Current is { } current) Convert.FromHexString(current).CopyTo(exact, offset + 32);
+            if (pair.Value.Pending is { } pending) Convert.FromHexString(pending).CopyTo(exact, offset + 64);
+            offset += SelectionBytes;
+        }
         return exact;
+    }
+
+    private static void RequireSelections(State state)
+    {
+        var reached = new HashSet<string>(StringComparer.Ordinal);
+        var grants = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var pair in state.Selections)
+        {
+            if (pair.Key.Length != 64 || pair.Key.Any(value => value is not (>= '0' and <= '9') and not (>= 'A' and <= 'F')) ||
+                pair.Value is not { } selected || selected.Current is null && selected.Pending is null)
+                throw new InvalidDataException("Mailbox selection is noncanonical.");
+            if (selected.Pending is { } pending)
+            {
+                Visit(pending, pair.Key, requireWinner: false);
+                if (Predecessor(state.Entries[pending]) != selected.Current)
+                    throw new InvalidDataException("Pending mailbox successor differs from its selected predecessor.");
+            }
+            for (var name = selected.Current; name is not null; name = Predecessor(state.Entries[name]))
+                Visit(name, pair.Key, requireWinner: true);
+        }
+        if (reached.Count != state.Entries.Count) throw new InvalidDataException("Mailbox custody contains unreferenced acquisitions.");
+
+        void Visit(string name, string scope, bool requireWinner)
+        {
+            if (!state.Entries.TryGetValue(name, out var entry) || EntryScope(entry) != scope || !reached.Add(name) ||
+                requireWinner && !HasWinner(entry))
+                throw new InvalidDataException("Mailbox selection is dangling, cross-scope, cyclic or not a winner.");
+            if (HasWinner(entry) && !grants.Add(Convert.ToHexString(SHA256.HashData(
+                    ContactCodec.Decode("XMC2", Response(entry).Span).Field(8).Span))))
+                throw new InvalidDataException("Mailbox acquisitions contain duplicate grants.");
+        }
     }
 
     private static void RequireEntry(ReadOnlySpan<byte> entry, ReadOnlySpan<byte> network)

@@ -31,18 +31,26 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var routeHash = SHA256.HashData(publication.Route.ExactRouteClosure.Span);
             if (state.Active is { } old && !FixedRoute(old.Route, routeHash))
                 throw new CryptographicException("Resume the original protected mailbox read; silent rerouting is forbidden.");
-            var winner = await AcquireMailboxGrantUnderLeaseAsync(current, held, source, fresh, publication.Route,
-                publication.Locator, publication.Capability, MailboxCapabilityDomain.Retrieve, publication.RecheckAsync, grants, ct).ConfigureAwait(false);
-            var grantHash = SHA256.HashData(winner.ExactGrant.Span);
-            if (state.Active is { } retainedCycle && !FixedRoute(retainedCycle.Grant, grantHash))
-                throw new CryptographicException("An unknown read cannot adopt another holder/grant.");
+            // Only a new cycle may acquire the selected winner. An interrupted
+            // cycle must retain its original grant even after selection changes.
+            var winner = state.Active is null
+                ? await AcquireMailboxGrantUnderLeaseAsync(current, held, source, fresh, publication.Route,
+                    publication.Locator, publication.Capability, MailboxCapabilityDomain.Retrieve, publication.RecheckAsync, grants, ct).ConfigureAwait(false)
+                : null;
             using (var root = await storage.ReadOwnedAsync(ProtectedDid2MailboxGrantJournal.Slot, ct).ConfigureAwait(false) ??
                 throw new InvalidDataException("Protected mailbox grant custody disappeared.")) grantRoot = root.Use(bytes => bytes.ToArray());
             using var grantState = ProtectedDid2MailboxGrantJournal.Decode(grantRoot, networkId, current.AccountId.Span, instance);
             var grantName = Convert.ToHexString(ProtectedDid2MailboxGrantJournal.Scope(routeHash, publication.Locator.Span, (byte)MailboxCapabilityDomain.Retrieve));
-            if (!grantState.Entries.TryGetValue(grantName, out var retained) || !ProtectedDid2MailboxGrantJournal.HasWinner(retained) ||
-                !FixedRoute(ProtectedDid2MailboxGrantJournal.Response(retained).Span, winner.ExactXmc2.Span))
-                throw new CryptographicException("Mailbox read has no exact protected Retrieve winner.");
+            var retained = state.Active is { } retainedCycle
+                ? ProtectedDid2MailboxGrantJournal.RequireRetainedWinner(grantState, grantName, retainedCycle.Grant)
+                : ProtectedDid2MailboxGrantJournal.CurrentWinner(grantState, grantName) ??
+                    throw new CryptographicException("Mailbox read has no selected protected Retrieve winner.");
+            if (winner is not null && !FixedRoute(ProtectedDid2MailboxGrantJournal.Response(retained).Span, winner.ExactXmc2.Span))
+                throw new CryptographicException("Mailbox read changed its acquired winner.");
+            winner ??= await DeepIdV2MailboxGrantResultVerifier.VerifyRetainedSuccessAsync(publication.Route,
+                ProtectedDid2MailboxGrantJournal.Request(retained), ProtectedDid2MailboxGrantJournal.Response(retained),
+                fresh.MailboxAuthority.ExactPma2, ct).ConfigureAwait(false);
+            var grantHash = SHA256.HashData(winner.ExactGrant.Span);
             using var loan = await OpenMailboxWinnerUnderLeaseAsync(current, held, publication.Route, winner, publication.Locator,
                 publication.Capability, retained, source, fresh, publication.RecheckAsync, ct).ConfigureAwait(false);
             var scope = ClientMailboxScope.Derive(loan.Selector.IssuerContext.Span, loan.Route.MailboxId, loan.Route.Epoch);

@@ -75,6 +75,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         Assert.Equal(1, transport.Calls); Assert.Equal(1, grants.Calls);
         var originalRequest = transport.ExactRequest!.ToArray();
         var expectedRoot = await fixture.FillMailboxWorkingSetAroundPreparedAttempt(sender, committed.ExactEnvelope.ToArray());
+        await fixture.StageVerifiedGrantSuccessorAsync(grants, own: true);
+        using (var custody = await fixture.ReadPeerGrantsAsync(own: true)) Assert.Equal(2, custody.Entries.Count);
         fixture.Sample += 40; fixture.ProofTime += 40; transport.LoseReply = false;
         var settled = await fixture.DeliverNativeMessage(sender, operation, grants, transport);
         Assert.Equal(1UL, settled.Cursor); Assert.Equal(2, transport.Calls); Assert.Equal(1, grants.Calls);
