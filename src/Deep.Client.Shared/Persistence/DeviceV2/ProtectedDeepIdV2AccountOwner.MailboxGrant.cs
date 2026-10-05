@@ -192,8 +192,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                         await DeepIdV2MailboxGrantRequestAuthor.AuthorDepositAsync(route, locator, signer, ct).ConfigureAwait(false) :
                         await DeepIdV2MailboxGrantRequestAuthor.AuthorRetrieveAsync(route, locator, capability, signer, ct).ConfigureAwait(false);
                     await recheck(ct).ConfigureAwait(false);
-                    await RequireMailboxIssuerCurrentAsync(route, fresh.MailboxAuthority.ExactPma2, ct).ConfigureAwait(false);
-                    entry = ProtectedDid2MailboxGrantJournal.Pending(seed, routeHash, request, networkId);
+                    var originalPolicy = await RequireMailboxIssuerCurrentAsync(route, fresh.MailboxAuthority.ExactPma2, ct).ConfigureAwait(false);
+                    entry = ProtectedDid2MailboxGrantJournal.Pending(seed, route, request, originalPolicy, networkId);
                     ProtectedDid2MailboxGrantJournal.AddPending(state, entry);
                     state.Revision = checked(state.Revision + 1);
                     var adopted = await SaveMailboxGrantJournalAsync(state, snapshot, current.AccountId, instance, ct).ConfigureAwait(false);
@@ -279,7 +279,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         }
     }
 
-    private static async Task RequireMailboxIssuerCurrentAsync(VerifiedDeepIdV2ContactRouteClosure route,
+    private static async Task<VerifiedMailboxAuthorityV2> RequireMailboxIssuerCurrentAsync(VerifiedDeepIdV2ContactRouteClosure route,
         ReadOnlyMemory<byte> exactPma2, CancellationToken ct)
     {
         var time = await route.ReadCurrentTimeAsync(ct).ConfigureAwait(false);
@@ -287,7 +287,61 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             time.LowerUnixSeconds, time.UpperUnixSeconds);
         if (!policy.BindsProjection(route.Route.Projection.CanonicalBytes.Span))
             throw new CryptographicException("Owned mailbox acquisition has no current root-authorized issuer policy.");
-        ct.ThrowIfCancellationRequested();
+        ct.ThrowIfCancellationRequested(); return policy;
+    }
+
+    // Independent current own proof/time: this never restores an expired XMG
+    // or requires the old route/issuer to be current just to close uncertainty.
+    internal async Task<int> CloseExpiredMailboxAcquisitionsAsync(ulong unixSeconds,
+        IDeepMlDsa65Verifier verifier, DeepIdV2ContactPathAuthoritySource source,
+        DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh, CancellationToken ct)
+    {
+        using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
+        using var current = await RequireCurrentUnderLeaseAsync(unixSeconds, verifier, ct).ConfigureAwait(false);
+        var first = await RecheckRouteFreshnessAsync(current, source, fresh, held, null, ct).ConfigureAwait(false);
+        var lower = checked(fresh.Proof.TrustedLowerUnixSeconds + checked(first.SampleSeconds - fresh.Proof.MonotonicSample));
+        var instance = await SqliteDeepIdV2AccountGeneration.ReadAccountInstanceUnderLeaseAsync(
+            storage, networkId, current.AccountId, ct).ConfigureAwait(false);
+        byte[]? snapshot = null, adopted = null;
+        try
+        {
+            using var root = await storage.ReadOwnedAsync(ProtectedDid2MailboxGrantJournal.Slot, ct).ConfigureAwait(false) ??
+                throw new InvalidDataException("Original acquisition custody is absent; no settlement repair is permitted.");
+            snapshot = root.Use(bytes => bytes.ToArray());
+            using var state = ProtectedDid2MailboxGrantJournal.Decode(snapshot, networkId, current.AccountId.Span, instance);
+            var count = 0;
+            foreach (var pair in state.Selections.ToArray())
+            {
+                if (pair.Value.Pending is not { } name) continue;
+                var pending = state.Entries[name];
+                if (ProtectedDid2MailboxGrantJournal.HasWinner(pending) || lower < ProtectedDid2MailboxGrantJournal.RequestExpiry(pending)) continue;
+                var closed = ProtectedDid2MailboxGrantJournal.WithClosedUnresolved(pending, lower, networkId);
+                state.Entries[name] = closed; CryptographicOperations.ZeroMemory(pending);
+                ProtectedDid2MailboxGrantJournal.ClosePending(state, pair.Key); count++;
+            }
+            if (count == 0) { ct.ThrowIfCancellationRequested(); return 0; }
+            state.Revision = checked(state.Revision + 1);
+            await RecheckRouteFreshnessAsync(current, source, fresh, held, first, ct).ConfigureAwait(false);
+#if DEEP_TEST_INTERNALS
+            Did2MailboxInstallationTestHooks.Hit(Did2MailboxInstallationFailpoint.BeforeClosure);
+#endif
+            adopted = await SaveMailboxGrantJournalAsync(state, snapshot, current.AccountId, instance, ct).ConfigureAwait(false);
+#if DEEP_TEST_INTERNALS
+            Did2MailboxInstallationTestHooks.Hit(Did2MailboxInstallationFailpoint.AfterClosure);
+#endif
+            await RecheckRouteFreshnessAsync(current, source, fresh, held, first, ct).ConfigureAwait(false);
+            using var finalRoot = await storage.ReadOwnedAsync(ProtectedDid2MailboxGrantJournal.Slot, ct).ConfigureAwait(false) ??
+                throw new CryptographicException("Closed mailbox acquisition custody disappeared.");
+            if (!finalRoot.Use(bytes => FixedRoute(bytes, adopted)))
+                throw new CryptographicException("Closed mailbox acquisition custody changed after read-back.");
+            ct.ThrowIfCancellationRequested(); held.RequireActive(); return count;
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(instance);
+            if (snapshot is not null) CryptographicOperations.ZeroMemory(snapshot);
+            if (adopted is not null) CryptographicOperations.ZeroMemory(adopted);
+        }
     }
 
     private async Task<byte[]> SaveMailboxGrantJournalAsync(ProtectedDid2MailboxGrantJournal.State state,

@@ -133,3 +133,90 @@ shipping-graph blocker remains unchanged. This slice alone does not close S01.
 Expired-acquisition settlement, issuer
 renewal, floor/entry retirement, object horizon, historical read/ACK and the
 remaining stage contracts still block later activation.
+
+### Original issuance ceiling and closed-unresolved custody — 2026-10-06 accepted slice
+
+This is a subsequent source change, not a reinterpretation of the generation3
+receipt above. Input is Sharedb82c584 plus the current exact source/test patch;
+Protocol remainsed7153e. The sole local layout/API owner is
+[owned grant custody](../architecture/owned-mailbox-grant-custody.md).
+
+The single current reader is local generation4; prior state rejects even empty.
+It captures exact independently verified original PMA2/route evidence before
+issuance, recomputes their conservative ceiling, and retains it with the exact
+holder/request and immutable winner. Bounded length prefixes reject before
+record copying. Count limits remain128 acquisitions and512 working sends.
+The retained tail now preserves closed-unresolved acquisitions independently of
+current/pending, without permitting current-pointer rollback to an older winner.
+
+The internal account maintenance entry accepts its actual own source and
+cancellation, not caller time/outcome/route or a cleanup permission. Independent
+current own proof/network custody and the actual account lease allow closure
+even when the original request cannot be restored. A protected CAS/read-back and
+final root/authority recheck close only pending acquisitions whose request expiry
+is reached by authenticated **lower** time. It preserves original evidence and
+uncertainty; no issuer callback, SQL cleanup, grant/key/floor eviction or automatic
+replacement request occurs. It is not an autonomous renewal/drain scheduler.
+
+Intermediate focused custody11/0/0 exercised uncertainty and both crash points.
+The subsequent custody + full-working-set original-Store run completed12/0/0,
+terminal0 in1m40s, with zero build warnings. Its filter did not select the two
+owned receive cases; those still require the final full gate. Receipt SHA256:
+`ce31c60c2fe77d672c7b78ac25cffcaece10c7f09ce6dc743b59afc1fd6b5f2c`.
+
+An initial full run was deliberately stopped after review found the normal
+successful closure-return branch missing in the new fixture; it is not final
+acceptance or a product FAIL. The final fixture now separates normal success
+from after-commit interruption, while keeping before-commit interruption,
+straddling-time rejection, cold reopen, unchanged holder/request/evidence and
+no-reissue assertions in both variants. Earlier two focused failures arose from
+the fixture using nominal signed time instead of its conservative lower bound;
+the actual product check was not weakened. Final focused custody completed
+**12/0/0 terminal0**,27s, including both normal and after-commit fault variants;
+receipt SHA256
+`44b35aa12dced576b8ef59e1192e396733910f7146d25dfbd9a8b2a12c599deb`.
+The final required full production command completed terminal0, without filters:
+
+```powershell
+dotnet test Deep.Client.Shared.Production.slnx --configuration Release -m:1 `
+  --logger "trx;LogFileName=s01-acquisition-expiry-full.trx" `
+  --results-directory artifacts/s01-acquisition-expiry-complete `
+  --logger "console;verbosity=minimal"
+```
+
+Result: **570 passed, 0 failed, 0 skipped**,43m24s. The TRX reports570 total,
+executed and passed, with0 failed/not-executed; all570 individual results are
+Passed. All15 selected cases independently map to Passed: nine hostile headers,
+the two-account acquisition fixture, both expired-unknown closure variants,
+full-working-set original-Store reconciliation, and both owned receive cases
+(`selectedSuccessor: False/True`). The last pair retains semantic-fault and
+lost-ACK assertions; this is not the intermediate filter's absent receive coverage.
+
+Receipt: `artifacts/s01-acquisition-expiry-complete/s01-acquisition-expiry-full.trx`,
+SHA256 `fa9bf5a915fa7c4f3d61c2832dcfc873291cafa938b4c21ddb0bafb3e5bc5434`.
+TRX start/finish: `2026-10-06T00:51:38.7284384+05:00` /
+`2026-10-06T01:35:03.5880503+05:00`. The final command emitted no build warnings.
+All five changed source/test files and both compiled assemblies matched their
+pre-run hashes after terminal0; no runtime/test-source changes or concurrent
+rebuild occurred during the run. Exact compiled inputs:
+
+| Input relative to Shared | SHA256 |
+| --- | --- |
+| `src/Deep.Client.Shared/Persistence/DeviceV2/ProtectedDid2MailboxGrantJournal.cs` | `b1c58b643f65efec09e3fa5bff4a3e9d6fd6c387e5eb8fcc0c9d54891ee4c66a` |
+| `src/Deep.Client.Shared/Persistence/DeviceV2/ProtectedDeepIdV2AccountOwner.MailboxGrant.cs` | `9a963c5003b5470443689e572d8071f8e626f658647f75853c0d5e77b9918da8` |
+| `src/Deep.Client.Shared/Persistence/DeviceV2/Did2MailboxInstallationTestHooks.cs` | `17cd776671b948ea48d2e062f4b6f284c6409a62b7297c9c80d38c28d0dd8276` |
+| `src/Deep.Client.Shared/Services/DeepIdV2AccountService.MailboxGrant.cs` | `a3a08d308fc313e054889c00a2dd83fa241363e274ace62c8b73de973681048d` |
+| `tests/Deep.Client.Shared.Production.Tests/DeepIdV2ContactPathAuthoritySourceTests.GrantCustody.cs` | `172738c6d88ff340e89c114deeb27f0f9ca4b5aa25a4af33fb2d29f6d4be7b78` |
+| `tests/Deep.Client.Shared.Production.Tests/bin/Release/net10.0/Deep.Client.Shared.Production.Tests.dll` | `8f5d2dc5bd630047778ba992056a5a1c5fb255419665b504e5418df7d338aeee` |
+| `src/Deep.Client.Shared/bin-production-test/Release/net10.0/Deep.Client.Shared.dll` | `5864b0dde79b9688aca25e53d87b9ddd6a370b172908a070295564546aec01d0` |
+
+After this receipt, the actual `Deep.Client.Shared.Production.csproj` Release
+build completed terminal0 with **0 warnings, 0 errors**. The full test receipt
+still qualifies its source/test-internals composition, not a signed shipping
+artifact. The original-ceiling/closed-unresolved slice is accepted locally;
+ordinary push does not qualify deployment or physical delivery.
+
+This still does not close S01. Authenticated late-result adoption, irreversible
+namespace retirement/compaction, object horizon/retained-route and matched
+shipping/physical activation remain unqualified. No deployment/device reset,
+new network wire, public verification API, GitHub Release or main merge occurred.

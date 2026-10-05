@@ -26,6 +26,15 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     }
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Did2GrantCustody_ExpiredUnknownClosesUnderActualLeaseWithoutReissueAndSurvivesBothFaults(bool failAfterClosure)
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        await fixture.CheckExpiredGrantAcquisitionAsync(failAfterClosure);
+    }
+
+    [Theory]
     [InlineData(0)]
     [InlineData(1)]
     [InlineData(2)]
@@ -34,6 +43,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     [InlineData(5)]
     [InlineData(6)]
     [InlineData(7)]
+    [InlineData(8)]
     public void Did2GrantCustody_HeaderRejectsBeforeReadingEntries(int fault)
     {
         var network = Bytes(16, 0x11); var account = Bytes(32, 0x12); var instance = Bytes(32, 0x13);
@@ -46,11 +56,131 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         if (fault == 5) exact = exact.Append((byte)0).ToArray();
         if (fault == 6) exact[0] = 2;
         if (fault == 7) exact[94] = 1;
+        if (fault == 8) exact[0] = 3;
         Assert.Throws<InvalidDataException>(() => ProtectedDid2MailboxGrantJournal.Decode(exact, network, account, instance));
     }
 
     private sealed partial class Fixture
     {
+        internal async Task CheckExpiredGrantAcquisitionAsync(bool failAfterClosure)
+        {
+            var plan = await accounts.ReadOwnPermanentContactPlanAsync();
+            using var threshold = new OwnedRouteThreshold(this);
+            var route = await EnsureRoute(plan.Intent.ToArray(), Did2OwnedPermanentContactPlan.Configuration(), threshold, reopen: false);
+            _ = await accounts.EnsureOwnPermanentContactPublishedAsync(Source(), threshold,
+                new OwnedPublicationSource(this, route), new OwnedPublicationReplica(this, route));
+            var transport = new OwnedGrantTransport(this, selfRetrieve: true) { LoseResponse = true };
+            await Assert.ThrowsAsync<IOException>(() => accounts.AcquireOwnPermanentContactRetrieveGrantAsync(Source(), transport));
+            byte[] original;
+            ulong expiry, ceiling;
+            using (var pending = await ReadPeerGrantsAsync(own: true))
+            {
+                original = Assert.Single(pending.Entries).Value.ToArray();
+                expiry = ProtectedDid2MailboxGrantJournal.RequestExpiry(original);
+                ceiling = ProtectedDid2MailboxGrantJournal.PossibleGrantExpiry(original);
+                Assert.True(ceiling > expiry);
+                Assert.Equal(operational.ExactPma2.ToArray(), ProtectedDid2MailboxGrantJournal.OriginalPolicy(original).ToArray());
+                Assert.Equal(transport.Route!.ExactRouteClosure.ToArray(), ProtectedDid2MailboxGrantJournal.OriginalRoute(original).ToArray());
+            }
+            var originalTime = await transport.Route!.ReadCurrentTimeAsync();
+            var lowerUncertainty = checked(ProofTime - originalTime.LowerUnixSeconds);
+            var successorTemplate = await PrepareClosedGrantCandidateAsync(original, transport.Route!);
+            var reopened = ReopenAccount();
+            Assert.Equal(0, await reopened.CloseExpiredMailboxAcquisitionsAsync(Source(reopened)));
+            // A time interval straddling request expiry forbids dispatch, but its
+            // lower bound does not yet prove the owned closure transition.
+            var straddlingTime = checked(expiry + lowerUncertainty - 1);
+            Sample = checked(Sample + straddlingTime - ProofTime); ProofTime = straddlingTime;
+            reopened = ReopenAccount();
+            Assert.Equal(0, await reopened.CloseExpiredMailboxAcquisitionsAsync(Source(reopened)));
+            using (var unchanged = await ReadPeerGrantsAsync(own: true)) Assert.Equal(original, Assert.Single(unchanged.Entries).Value);
+            Sample++; ProofTime++;
+            reopened = ReopenAccount();
+            using (Did2MailboxInstallationTestHooks.Push(point =>
+                { if (point == Did2MailboxInstallationFailpoint.BeforeClosure) throw new IOException("Injected before unknown closure."); }))
+                await Assert.ThrowsAsync<IOException>(() => reopened.CloseExpiredMailboxAcquisitionsAsync(Source(reopened)));
+            using (var unchanged = await ReadPeerGrantsAsync(own: true)) Assert.Equal(original, Assert.Single(unchanged.Entries).Value);
+            reopened = ReopenAccount();
+            if (failAfterClosure)
+            {
+                using (Did2MailboxInstallationTestHooks.Push(point =>
+                    { if (point == Did2MailboxInstallationFailpoint.AfterClosure) throw new IOException("Injected after unknown closure."); }))
+                    await Assert.ThrowsAsync<IOException>(() => reopened.CloseExpiredMailboxAcquisitionsAsync(Source(reopened)));
+            }
+            else Assert.Equal(1, await reopened.CloseExpiredMailboxAcquisitionsAsync(Source(reopened)));
+            using (var closed = await ReadPeerGrantsAsync(own: true))
+            {
+                var entry = Assert.Single(closed.Entries).Value;
+                Assert.Equal(3UL, closed.Revision); Assert.True(ProtectedDid2MailboxGrantJournal.IsClosedUnresolved(entry));
+                Assert.False(ProtectedDid2MailboxGrantJournal.HasWinner(entry));
+                Assert.Equal(ProtectedDid2MailboxGrantJournal.Request(original).ToArray(), ProtectedDid2MailboxGrantJournal.Request(entry).ToArray());
+                Assert.Equal(ProtectedDid2MailboxGrantJournal.Seed(original).ToArray(), ProtectedDid2MailboxGrantJournal.Seed(entry).ToArray());
+                Assert.Equal(ProtectedDid2MailboxGrantJournal.OriginalPolicy(original).ToArray(), ProtectedDid2MailboxGrantJournal.OriginalPolicy(entry).ToArray());
+                Assert.Equal(ProtectedDid2MailboxGrantJournal.OriginalRoute(original).ToArray(), ProtectedDid2MailboxGrantJournal.OriginalRoute(entry).ToArray());
+                Assert.Equal(ceiling, ProtectedDid2MailboxGrantJournal.PossibleGrantExpiry(entry));
+                Assert.Equal(expiry, ProtectedDid2MailboxGrantJournal.ClosedLower(entry));
+                var selection = Assert.Single(closed.Selections);
+                Assert.Null(selection.Value.Current); Assert.Null(selection.Value.Pending);
+                Assert.Equal(ProtectedDid2MailboxGrantJournal.Acquisition(entry), selection.Value.RetainedTail);
+                Assert.Throws<IOException>(() => ProtectedDid2MailboxGrantJournal.AcquisitionForNewWork(closed, selection.Key));
+                Assert.Throws<InvalidDataException>(() => ProtectedDid2MailboxGrantJournal.PromoteWinner(closed, selection.Key));
+                CheckClosedGrantShape(closed, successorTemplate);
+            }
+            reopened = ReopenAccount();
+            Assert.Equal(0, await reopened.CloseExpiredMailboxAcquisitionsAsync(Source(reopened)));
+            transport.LoseResponse = false;
+            await Assert.ThrowsAsync<IOException>(() => reopened.AcquireOwnPermanentContactRetrieveGrantAsync(Source(reopened), transport));
+            Assert.Equal(1, transport.Calls); // Closure/reopen never consults the issuer.
+            CryptographicOperations.ZeroMemory(original); CryptographicOperations.ZeroMemory(successorTemplate);
+        }
+
+        private void CheckClosedGrantShape(ProtectedDid2MailboxGrantJournal.State closed, byte[] successorTemplate)
+        {
+            var account = Bytes(32, 0x11); var instance = Bytes(32, 0x12);
+            var exact = ProtectedDid2MailboxGrantJournal.Encode(closed, Network, account, instance);
+            using var cold = ProtectedDid2MailboxGrantJournal.Decode(exact, Network, account, instance);
+            Assert.Equal(exact, ProtectedDid2MailboxGrantJournal.Encode(cold, Network, account, instance));
+            var entry = Assert.Single(cold.Entries).Value;
+            foreach (var offset in new[] { 96, 1077, 1085, 1093, 1095, 1097 })
+            {
+                var damaged = entry.ToArray();
+                if (offset == 1085) BinaryPrimitives.WriteUInt64BigEndian(damaged.AsSpan(offset, 8),
+                    ProtectedDid2MailboxGrantJournal.RequestExpiry(entry) - 1);
+                else damaged[offset] ^= 1;
+                cold.Entries[Assert.Single(cold.Entries).Key] = damaged;
+                if (offset == 1097)
+                    Assert.Throws<ContactFormatException>(() => ProtectedDid2MailboxGrantJournal.Encode(cold, Network, account, instance));
+                else Assert.Throws<InvalidDataException>(() => ProtectedDid2MailboxGrantJournal.Encode(cold, Network, account, instance));
+                cold.Entries[Assert.Single(cold.Entries).Key] = entry; CryptographicOperations.ZeroMemory(damaged);
+            }
+            // Future renewal can retain a closed predecessor without pretending
+            // it is a current winner; no runtime successor issuance is activated.
+            // Prepared earlier under an actual current route; this shape-only
+            // staging after closure grants no authority to dispatch expired work.
+            var successor = successorTemplate.ToArray();
+            ProtectedDid2MailboxGrantJournal.AddPending(cold, successor); cold.Revision++;
+            var staged = ProtectedDid2MailboxGrantJournal.Encode(cold, Network, account, instance);
+            using var restarted = ProtectedDid2MailboxGrantJournal.Decode(staged, Network, account, instance);
+            Assert.Equal(2, restarted.Entries.Count);
+            Assert.Equal(entry, restarted.Entries[ProtectedDid2MailboxGrantJournal.Acquisition(entry)]);
+            Assert.Null(Assert.Single(restarted.Selections).Value.Current);
+            foreach (var bytes in new[] { exact, staged }) CryptographicOperations.ZeroMemory(bytes);
+        }
+
+        private async Task<byte[]> PrepareClosedGrantCandidateAsync(byte[] original, VerifiedDeepIdV2ContactRouteClosure route)
+        {
+            var record = ContactCodec.Decode("XMG1", ProtectedDid2MailboxGrantJournal.Request(original).Span);
+            var seed = Bytes(32, 0x9a);
+            try
+            {
+                using var signer = ReachabilityMailboxHolderAuthority.OpenRetained(route, record.Field(3), record.Field(4), MailboxCapabilityDomain.Retrieve, seed);
+                var request = await DeepIdV2MailboxGrantRequestAuthor.AuthorRetrieveAsync(route, record.Field(3), record.Field(4), signer);
+                var policy = await CurrentGrantPolicyAsync(route);
+                return ProtectedDid2MailboxGrantJournal.Pending(seed, route, request, policy, Network);
+            }
+            finally { CryptographicOperations.ZeroMemory(seed); }
+        }
+
         private DeepIdV2AccountService ReopenGrantReader() => new(peerStorage, Path.Combine(directory, "peer"),
             Network, 1, new FrozenClock(DateTimeOffset.FromUnixTimeSeconds(1_000)),
             DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess);
@@ -217,7 +347,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             using var holder = ReachabilityMailboxHolderAuthority.OpenRetained(route, locator,
                 route.Route.Reachability.Field(10), MailboxCapabilityDomain.Deposit, seed);
             var request = await DeepIdV2MailboxGrantRequestAuthor.AuthorDepositAsync(route, locator, holder);
-            var successor = ProtectedDid2MailboxGrantJournal.Pending(seed, SHA256.HashData(route.ExactRouteClosure.Span), request, Network);
+            var policy = await CurrentGrantPolicyAsync(route);
+            var successor = ProtectedDid2MailboxGrantJournal.Pending(seed, route, request, policy, Network);
             ProtectedDid2MailboxGrantJournal.AddPending(state, successor); state.Revision++;
             var successorName = ProtectedDid2MailboxGrantJournal.Acquisition(successor);
             Assert.NotEqual(firstName, successorName);
@@ -256,16 +387,18 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 Assert.Equal(promoted, ProtectedDid2MailboxGrantJournal.Encode(cold, Network, account, instance));
             }
             // Hostile pointers/predecessors cannot pick a winner or orphan old custody.
-            var selectionOffset = ProtectedDid2MailboxGrantJournal.HeaderBytes + 2 * ProtectedDid2MailboxGrantJournal.EntryBytes;
+            var selectionOffset = ProtectedDid2MailboxGrantJournal.HeaderBytes + state.Entries.Values.Sum(entry => 4 + entry.Length);
             foreach (var offset in new[] { 92, 94, selectionOffset, selectionOffset + 32, selectionOffset + 64,
-                ProtectedDid2MailboxGrantJournal.HeaderBytes + 1045 })
+                selectionOffset + 96, ProtectedDid2MailboxGrantJournal.HeaderBytes + 4 + 1045 })
             {
                 var damaged = promoted.ToArray(); damaged[offset] ^= 1;
                 Assert.Throws<InvalidDataException>(() => ProtectedDid2MailboxGrantJournal.Decode(damaged, Network, account, instance));
                 CryptographicOperations.ZeroMemory(damaged);
             }
             var selected = state.Selections[scope];
-            state.Selections[scope] = new(firstName, null); // Orphan successor, not an authorized rollback.
+            state.Selections[scope] = new(firstName, null, successorName); // Valid history cannot select an older winner.
+            Assert.Throws<InvalidDataException>(Encode); state.Selections[scope] = selected;
+            state.Selections[scope] = new(firstName, null, firstName); // Orphan successor, not an authorized rollback.
             Assert.Throws<InvalidDataException>(Encode); state.Selections[scope] = selected;
             Assert.Throws<CryptographicException>(() => ProtectedDid2MailboxGrantJournal.RequireRetainedWinner(state, scope, Bytes(32, 0xa1)));
             Assert.Equal(Assert.Single(original.Entries).Value, state.Entries[firstName]);
@@ -296,7 +429,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 var request = domain == MailboxCapabilityDomain.Deposit
                     ? await DeepIdV2MailboxGrantRequestAuthor.AuthorDepositAsync(route, locator, holder)
                     : await DeepIdV2MailboxGrantRequestAuthor.AuthorRetrieveAsync(route, locator, capability, holder);
-                var pending = ProtectedDid2MailboxGrantJournal.Pending(seed, SHA256.HashData(route.ExactRouteClosure.Span), request, Network);
+                var policy = await CurrentGrantPolicyAsync(route);
+                var pending = ProtectedDid2MailboxGrantJournal.Pending(seed, route, request, policy, Network);
                 ProtectedDid2MailboxGrantJournal.AddPending(state, pending); await Save();
                 response = await IssueOwnedGrantAsync(request, route, domain == MailboxCapabilityDomain.Retrieve, default);
                 var verified = await DeepIdV2MailboxGrantResultVerifier.VerifySuccessAsync(route, request, response, operational.ExactPma2);
@@ -323,6 +457,13 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 }
             }
             finally { foreach (var bytes in new[] { ownerScope, snapshot, seed, response }) CryptographicOperations.ZeroMemory(bytes); }
+        }
+
+        private async Task<VerifiedMailboxAuthorityV2> CurrentGrantPolicyAsync(VerifiedDeepIdV2ContactRouteClosure route)
+        {
+            var time = await route.ReadCurrentTimeAsync();
+            return MailboxAuthorityV2Verifier.Verify(route.NetworkAuthority, operational.ExactPma2.Span,
+                time.LowerUnixSeconds, time.UpperUnixSeconds);
         }
 
         // Test-only independent SQLCipher observer. No runtime authority is

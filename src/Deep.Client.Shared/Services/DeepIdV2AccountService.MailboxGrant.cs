@@ -5,6 +5,18 @@ namespace Deep.Client.Shared.Services;
 
 public sealed partial class DeepIdV2AccountService
 {
+    // Closed internal maintenance contract. No caller clock, outcome, policy,
+    // route, deletion permission or transport callback is accepted.
+    internal async Task<int> CloseExpiredMailboxAcquisitionsAsync(
+        DeepIdV2ContactPathAuthoritySource source, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(source); source.RequireAccountOwner(this);
+        var fresh = await source.VerifyForOwnPreKeyAuthoringAsync(this, ct).ConfigureAwait(false);
+        using var verifier = OpenVerifier();
+        return await owner.CloseExpiredMailboxAcquisitionsAsync(TrustedUnixSeconds(), verifier,
+            source, fresh, ct).ConfigureAwait(false);
+    }
+
     internal Task<VerifiedDeepIdV2MailboxGrant> AcquireOwnPermanentContactRetrieveGrantAsync(
         DeepIdV2ContactPathAuthoritySource source, CancellationToken ct = default) =>
         AcquireOwnPermanentContactRetrieveGrantAsync(source, new Did2MailboxGrantOnionTransport(source), ct);
