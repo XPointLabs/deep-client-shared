@@ -35,6 +35,24 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     }
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Did2GrantCustody_LateResultAuthenticatesBothDirectionsAndColdResumesEveryAdoptionFault(bool retrieve)
+    {
+        await using var fixture = await Fixture.CreateAsync(withPeer: true);
+        await fixture.CheckLateGrantResultAsync(retrieve);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Did2GrantCustody_ExactReplyMayCrossOriginalWindowButNotCurrentAuthority(bool retrieve)
+    {
+        await using var fixture = await Fixture.CreateAsync(withPeer: true);
+        await fixture.CheckGrantReplyCrossesOriginalWindowAsync(retrieve);
+    }
+
+    [Theory]
     [InlineData(0)]
     [InlineData(1)]
     [InlineData(2)]
@@ -44,6 +62,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     [InlineData(6)]
     [InlineData(7)]
     [InlineData(8)]
+    [InlineData(9)]
     public void Did2GrantCustody_HeaderRejectsBeforeReadingEntries(int fault)
     {
         var network = Bytes(16, 0x11); var account = Bytes(32, 0x12); var instance = Bytes(32, 0x13);
@@ -57,11 +76,226 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         if (fault == 6) exact[0] = 2;
         if (fault == 7) exact[94] = 1;
         if (fault == 8) exact[0] = 3;
+        if (fault == 9) exact[0] = 4;
         Assert.Throws<InvalidDataException>(() => ProtectedDid2MailboxGrantJournal.Decode(exact, network, account, instance));
     }
 
     private sealed partial class Fixture
     {
+        internal async Task CheckLateGrantResultAsync(bool retrieve)
+        {
+            var plan = await accounts.ReadOwnPermanentContactPlanAsync();
+            using var threshold = new OwnedRouteThreshold(this);
+            var route = await EnsureRoute(plan.Intent.ToArray(), Did2OwnedPermanentContactPlan.Configuration(), threshold, reopen: false);
+            var replicas = new OwnedPublicationReplica(this, route);
+            _ = await accounts.EnsureOwnPermanentContactPublishedAsync(Source(), threshold,
+                new OwnedPublicationSource(this, route), replicas);
+            var address = (await accounts.GetCurrentAsync())!.PermanentId;
+            var reader = retrieve ? accounts : peerAccounts!;
+            DeepIdV2ContactPathAuthoritySource ReaderSource() => retrieve ? Source(reader) : GrantReaderSource(reader);
+            VerifiedDeepIdV2PermanentContactResolveClosure? contact = null;
+            async Task RefreshContact()
+            {
+                if (!retrieve) contact = await reader.ResolvePermanentContactAsync(address, ReaderSource(),
+                    new SyntheticPermanentRead(this, ReaderSource(), replicas.ExactPublication));
+            }
+            await RefreshContact();
+            var transport = new OwnedGrantTransport(this, selfRetrieve: retrieve) { LoseResponse = true };
+            await Assert.ThrowsAsync<IOException>(() => retrieve ?
+                reader.AcquireOwnPermanentContactRetrieveGrantAsync(ReaderSource(), transport) :
+                reader.AcquirePermanentContactDepositGrantAsync(contact!, ReaderSource(), transport));
+            byte[] original;
+            using (var state = await ReadPeerGrantsAsync(own: retrieve)) original = Assert.Single(state.Entries).Value.ToArray();
+            // Controlled signed successor for codec graph assertions only; no
+            // production renewal or second protected acquisition is dispatched.
+            var successor = await PrepareLateGraphSuccessorAsync(original, transport.Route!, retrieve);
+            var requestExpiry = ProtectedDid2MailboxGrantJournal.RequestExpiry(original);
+            var before = await transport.Route!.ReadCurrentTimeAsync();
+            var nextTime = checked(requestExpiry + ProofTime - before.LowerUnixSeconds);
+            Sample = checked(Sample + nextTime - ProofTime); ProofTime = nextTime;
+            reader = retrieve ? ReopenAccount() : ReopenGrantReader();
+            Assert.Equal(1, await reader.CloseExpiredMailboxAcquisitionsAsync(ReaderSource()));
+            byte[] closedOriginal;
+            using (var state = await ReadPeerGrantsAsync(own: retrieve)) closedOriginal = Assert.Single(state.Entries).Value.ToArray();
+            await RefreshContact();
+            Task<VerifiedDeepIdV2MailboxGrant> Accept(ReadOnlyMemory<byte> packet) => retrieve ?
+                reader.AcceptOwnPermanentContactRetrieveGrantResultAsync(ReaderSource(), packet) :
+                reader.AcceptPermanentContactDepositGrantResultAsync(contact!, ReaderSource(), packet);
+            Task<VerifiedDeepIdV2MailboxGrant> Resume() => retrieve ?
+                reader.ResumeOwnPermanentContactRetrieveGrantResultAsync(ReaderSource()) :
+                reader.ResumePermanentContactDepositGrantResultAsync(contact!, ReaderSource());
+            var exact = transport.OriginalResponse.ToArray();
+            var corrupted = exact.ToArray(); corrupted[^1] ^= 1;
+            await RequireRouteRejectionAsync(async () => await Accept(corrupted));
+            await Assert.ThrowsAsync<InvalidDataException>(() => Accept(exact.AsMemory(1)));
+            using (var unchanged = await ReadPeerGrantsAsync(own: retrieve))
+                Assert.True(ProtectedDid2MailboxGrantJournal.IsClosedUnresolved(Assert.Single(unchanged.Entries).Value));
+            var failpoints = new[] { Did2MailboxInstallationFailpoint.BeforeLateResult,
+                Did2MailboxInstallationFailpoint.AfterLateResult, Did2MailboxInstallationFailpoint.BeforeLateAdoption,
+                Did2MailboxInstallationFailpoint.AfterLateAdoption, Did2MailboxInstallationFailpoint.BeforeSql,
+                Did2MailboxInstallationFailpoint.AfterSql };
+            foreach (var point in failpoints)
+            {
+                reader = retrieve ? ReopenAccount() : ReopenGrantReader();
+                using (Did2MailboxInstallationTestHooks.Push(actual =>
+                    { if (actual == point) throw new IOException("Injected late grant handover interruption."); }))
+                    await Assert.ThrowsAsync<IOException>(() => point is Did2MailboxInstallationFailpoint.BeforeLateResult or
+                        Did2MailboxInstallationFailpoint.AfterLateResult ? Accept(exact) : Resume());
+                using var state = await ReadPeerGrantsAsync(own: retrieve);
+                var entry = Assert.Single(state.Entries).Value;
+                Assert.Equal(ProtectedDid2MailboxGrantJournal.Request(original).ToArray(), ProtectedDid2MailboxGrantJournal.Request(entry).ToArray());
+                Assert.Equal(ProtectedDid2MailboxGrantJournal.Seed(original).ToArray(), ProtectedDid2MailboxGrantJournal.Seed(entry).ToArray());
+                Assert.Equal(requestExpiry, ProtectedDid2MailboxGrantJournal.ClosedLower(entry));
+                var selected = Assert.Single(state.Selections).Value;
+                if (point == Did2MailboxInstallationFailpoint.BeforeLateResult)
+                { Assert.True(ProtectedDid2MailboxGrantJournal.IsClosedUnresolved(entry)); Assert.Null(selected.Current); }
+                else if (point is Did2MailboxInstallationFailpoint.AfterLateResult or Did2MailboxInstallationFailpoint.BeforeLateAdoption)
+                {
+                    Assert.True(ProtectedDid2MailboxGrantJournal.IsLateCandidate(entry)); Assert.Null(selected.Current);
+                    Assert.Equal(exact, ProtectedDid2MailboxGrantJournal.Response(entry).ToArray());
+                    Assert.Throws<CryptographicException>(() => ProtectedDid2MailboxGrantJournal.RequireRetainedWinner(state,
+                        Assert.Single(state.Selections).Key, SHA256.HashData(ContactCodec.Decode("XMC2", exact).Field(8).Span)));
+                }
+                else { Assert.True(ProtectedDid2MailboxGrantJournal.IsLateAdopted(entry)); Assert.NotNull(selected.Current); }
+                Assert.Equal(1, transport.Calls);
+            }
+            reader = retrieve ? ReopenAccount() : ReopenGrantReader();
+            var verified = await Resume();
+            Assert.Equal(exact, verified.ExactXmc2.ToArray());
+            await AssertInstalledGrantSqlAsync(verified, own: retrieve);
+            CheckLateSelectionGraph(closedOriginal, successor, verified);
+            var ordinary = retrieve ? await reader.AcquireOwnPermanentContactRetrieveGrantAsync(ReaderSource(), transport) :
+                await reader.AcquirePermanentContactDepositGrantAsync(contact!, ReaderSource(), transport);
+            Assert.Equal(verified.ExactGrant.ToArray(), ordinary.ExactGrant.ToArray());
+            Assert.Equal(1, transport.Calls);
+            using (var state = await ReadPeerGrantsAsync(own: retrieve))
+            {
+                Assert.Equal(5UL, state.Revision);
+                var winner = Assert.Single(state.Entries).Value;
+                Assert.True(ProtectedDid2MailboxGrantJournal.IsLateAdopted(winner));
+                Assert.Equal(ProtectedDid2MailboxGrantJournal.OriginalPolicy(original).ToArray(), ProtectedDid2MailboxGrantJournal.OriginalPolicy(winner).ToArray());
+                Assert.Equal(ProtectedDid2MailboxGrantJournal.OriginalRoute(original).ToArray(), ProtectedDid2MailboxGrantJournal.OriginalRoute(winner).ToArray());
+            }
+            // A real reply does not bypass expiry after a successful adoption.
+            // Independently current source verification may also reject an old
+            // route; either way custody and its exact result cannot be replaced.
+            var grantExpiry = MailboxAuthenticatedCapabilityCodec.DecodeGrant(verified.ExactGrant.Span).ExpiresAtUnixSeconds;
+            var elapsed = checked(grantExpiry - before.LowerUnixSeconds);
+            Sample = checked(100 + elapsed); ProofTime = checked(1_100 + elapsed);
+            reader = retrieve ? ReopenAccount() : ReopenGrantReader();
+            await RequireRouteRejectionAsync(async () => await Accept(exact));
+            using (var unchanged = await ReadPeerGrantsAsync(own: retrieve))
+                Assert.Equal(exact, ProtectedDid2MailboxGrantJournal.Response(Assert.Single(unchanged.Entries).Value).ToArray());
+            foreach (var bytes in new[] { original, closedOriginal, successor, exact, corrupted }) CryptographicOperations.ZeroMemory(bytes);
+        }
+
+        private async Task<byte[]> PrepareLateGraphSuccessorAsync(byte[] original,
+            VerifiedDeepIdV2ContactRouteClosure route, bool retrieve)
+        {
+            var record = ContactCodec.Decode("XMG1", ProtectedDid2MailboxGrantJournal.Request(original).Span);
+            var seed = Bytes(32, 0x9b);
+            using var signer = ReachabilityMailboxHolderAuthority.OpenRetained(route, record.Field(3), record.Field(4),
+                retrieve ? MailboxCapabilityDomain.Retrieve : MailboxCapabilityDomain.Deposit, seed);
+            var request = retrieve ? await DeepIdV2MailboxGrantRequestAuthor.AuthorRetrieveAsync(route, record.Field(3), record.Field(4), signer) :
+                await DeepIdV2MailboxGrantRequestAuthor.AuthorDepositAsync(route, record.Field(3), signer);
+            var policy = await CurrentGrantPolicyAsync(route);
+            var pending = ProtectedDid2MailboxGrantJournal.Pending(seed, route, request, policy, Network);
+            var exact = await IssueOwnedGrantAsync(request, route, retrieve, default);
+            var verified = await DeepIdV2MailboxGrantResultVerifier.VerifySuccessAsync(route, request, exact, operational.ExactPma2);
+            try { return ProtectedDid2MailboxGrantJournal.WithWinner(pending, verified.ExactXmc2.Span, Network); }
+            finally { foreach (var bytes in new[] { seed, pending, exact }) CryptographicOperations.ZeroMemory(bytes); }
+        }
+
+        private void CheckLateSelectionGraph(byte[] closed, byte[] successor, VerifiedDeepIdV2MailboxGrant verified)
+        {
+            var account = Bytes(32, 0x11); var instance = Bytes(32, 0x12);
+            var old = ProtectedDid2MailboxGrantJournal.Acquisition(closed);
+            var scope = Convert.ToHexString(closed.AsSpan(0, 32));
+            using var state = new ProtectedDid2MailboxGrantJournal.State { Revision = 3 };
+            state.Entries.Add(old, closed.ToArray()); state.Selections.Add(scope, new(null, null, old));
+            byte[] Encode() => ProtectedDid2MailboxGrantJournal.Encode(state, Network, account, instance);
+            // A newer winner is adopted first; a later result for its predecessor
+            // must be retained without rolling this selection back.
+            var pending = successor.ToArray(); pending[96] = 1; pending.AsSpan(535, 510).Clear();
+            ProtectedDid2MailboxGrantJournal.AddPending(state, pending); state.Revision++;
+            var newer = ProtectedDid2MailboxGrantJournal.Acquisition(pending);
+            var ready = ProtectedDid2MailboxGrantJournal.WithWinner(pending, ProtectedDid2MailboxGrantJournal.Response(successor).Span, Network);
+            state.Entries[newer] = ready; CryptographicOperations.ZeroMemory(pending); state.Revision++;
+            ProtectedDid2MailboxGrantJournal.PromoteWinner(state, scope); state.Revision++;
+            var late = ProtectedDid2MailboxGrantJournal.WithLateWinner(state.Entries[old], verified.ExactXmc2.Span, Network);
+            CryptographicOperations.ZeroMemory(state.Entries[old]); state.Entries[old] = late; state.Revision++;
+            var received = Encode();
+            using (var cold = ProtectedDid2MailboxGrantJournal.Decode(received, Network, account, instance))
+            {
+                Assert.Equal(newer, cold.Selections[scope].Current);
+                Assert.True(ProtectedDid2MailboxGrantJournal.IsLateCandidate(cold.Entries[old]));
+                Assert.Equal(old, ProtectedDid2MailboxGrantJournal.Acquisition(ProtectedDid2MailboxGrantJournal.RequireLateResultForResume(cold, scope)));
+                Assert.Throws<CryptographicException>(() => ProtectedDid2MailboxGrantJournal.RequireRetainedWinner(cold, scope,
+                    SHA256.HashData(verified.ExactGrant.Span)));
+            }
+            ProtectedDid2MailboxGrantJournal.AdoptLateWinner(state, old); state.Revision++;
+            Assert.Equal(newer, state.Selections[scope].Current); Assert.Null(state.Selections[scope].Pending);
+            Assert.Equal(old, ProtectedDid2MailboxGrantJournal.Acquisition(ProtectedDid2MailboxGrantJournal.RequireRetainedWinner(state, scope,
+                SHA256.HashData(verified.ExactGrant.Span))));
+            var adopted = Encode();
+            using (var cold = ProtectedDid2MailboxGrantJournal.Decode(adopted, Network, account, instance))
+                Assert.Equal(newer, cold.Selections[scope].Current);
+            state.Selections[scope] = state.Selections[scope] with { Current = old };
+            Assert.Throws<InvalidDataException>(() => Encode()); state.Selections[scope] = state.Selections[scope] with { Current = newer };
+
+            // Independent graph: a newer pending request survives late adoption.
+            using var staged = new ProtectedDid2MailboxGrantJournal.State { Revision = 4 };
+            staged.Entries.Add(old, ProtectedDid2MailboxGrantJournal.WithLateWinner(closed, verified.ExactXmc2.Span, Network));
+            staged.Selections.Add(scope, new(null, null, old));
+            var candidate = successor.ToArray(); candidate[96] = 1; candidate.AsSpan(535, 510).Clear();
+            ProtectedDid2MailboxGrantJournal.AddPending(staged, candidate); staged.Revision++;
+            ProtectedDid2MailboxGrantJournal.AdoptLateWinner(staged, old); staged.Revision++;
+            Assert.Equal(old, staged.Selections[scope].Current); Assert.Equal(newer, staged.Selections[scope].Pending);
+            var pendingGraph = ProtectedDid2MailboxGrantJournal.Encode(staged, Network, account, instance);
+            using var resumed = ProtectedDid2MailboxGrantJournal.Decode(pendingGraph, Network, account, instance);
+            Assert.Equal(newer, resumed.Selections[scope].Pending);
+            foreach (var bytes in new[] { received, adopted, pendingGraph }) CryptographicOperations.ZeroMemory(bytes);
+        }
+
+        internal async Task CheckGrantReplyCrossesOriginalWindowAsync(bool retrieve)
+        {
+            var plan = await accounts.ReadOwnPermanentContactPlanAsync();
+            using var threshold = new OwnedRouteThreshold(this);
+            var route = await EnsureRoute(plan.Intent.ToArray(), Did2OwnedPermanentContactPlan.Configuration(), threshold, reopen: false);
+            var replicas = new OwnedPublicationReplica(this, route);
+            _ = await accounts.EnsureOwnPermanentContactPublishedAsync(Source(), threshold,
+                new OwnedPublicationSource(this, route), replicas);
+            var address = (await accounts.GetCurrentAsync())!.PermanentId;
+            var reader = retrieve ? accounts : peerAccounts!;
+            DeepIdV2ContactPathAuthoritySource ReaderSource() => retrieve ? Source(reader) : GrantReaderSource(reader);
+            VerifiedDeepIdV2PermanentContactResolveClosure? contact = null;
+            async Task Resolve()
+            {
+                if (!retrieve) contact = await reader.ResolvePermanentContactAsync(address, ReaderSource(),
+                    new SyntheticPermanentRead(this, ReaderSource(), replicas.ExactPublication));
+            }
+            await Resolve();
+            var transport = new OwnedGrantTransport(this, selfRetrieve: retrieve) { LoseResponse = true };
+            Task<VerifiedDeepIdV2MailboxGrant> Acquire() => retrieve ?
+                reader.AcquireOwnPermanentContactRetrieveGrantAsync(ReaderSource(), transport) :
+                reader.AcquirePermanentContactDepositGrantAsync(contact!, ReaderSource(), transport);
+            await Assert.ThrowsAsync<IOException>(() => Acquire());
+            ulong expiry;
+            using (var state = await ReadPeerGrantsAsync(own: retrieve)) expiry = ProtectedDid2MailboxGrantJournal.RequestExpiry(Assert.Single(state.Entries).Value);
+            var time = await transport.Route!.ReadCurrentTimeAsync();
+            var nextTime = checked(expiry - (time.UpperUnixSeconds - ProofTime) - 10);
+            Sample = checked(Sample + nextTime - ProofTime); ProofTime = nextTime;
+            reader = retrieve ? ReopenAccount() : ReopenGrantReader(); await Resolve();
+            transport.LoseResponse = false;
+            transport.BeforeReturn = () => { Sample += 20; ProofTime += 20; return Task.CompletedTask; };
+            var actual = await Acquire();
+            Assert.Equal(transport.OriginalRequest.ToArray(), actual.ExactXmg1.ToArray());
+            Assert.Equal(transport.OriginalResponse.ToArray(), actual.ExactXmc2.ToArray());
+            Assert.True(transport.ExactRetry); Assert.Equal(2, transport.Calls);
+            Assert.True((await transport.Route!.ReadCurrentTimeAsync()).LowerUnixSeconds >= expiry);
+            await AssertInstalledGrantSqlAsync(actual, own: retrieve);
+        }
+
         internal async Task CheckExpiredGrantAcquisitionAsync(bool failAfterClosure)
         {
             var plan = await accounts.ReadOwnPermanentContactPlanAsync();
@@ -559,6 +793,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         internal Func<Task>? BeforeReturn { get; set; }
         private byte[]? requestBytes, responseBytes;
         internal ReadOnlyMemory<byte> OriginalRequest => requestBytes ?? throw new InvalidOperationException();
+        internal ReadOnlyMemory<byte> OriginalResponse => responseBytes ?? throw new InvalidOperationException();
         public async ValueTask<ReadOnlyMemory<byte>> AcquireAsync(AuthoredMailboxGrantRequest request,
             VerifiedDeepIdV2ContactRouteClosure route, Did2OwnedContactTransportContext dispatch, CancellationToken ct)
         {

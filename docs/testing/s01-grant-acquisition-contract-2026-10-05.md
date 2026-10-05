@@ -220,3 +220,84 @@ This still does not close S01. Authenticated late-result adoption, irreversible
 namespace retirement/compaction, object horizon/retained-route and matched
 shipping/physical activation remain unqualified. No deployment/device reset,
 new network wire, public verification API, GitHub Release or main merge occurred.
+
+### Authenticated late-result adoption — 2026-10-06 accepted slice
+
+This subsequent source change starts from Shared840d27d; Protocol remainsed7153e.
+The generation4 receipt above qualifies only its own original-ceiling/closure
+source. The sole local layout owner now specifies one generation5 reader with
+received/adopted late phases4/5. Layout widths,128/512 counts and original evidence
+are unchanged; earlier readers/state reject, with no migration or runtime fallback.
+This is a protected local schema, not a new network protocol or crypto suite.
+
+Both actual owned Deposit and Retrieve entries snapshot an untrusted bounded XMC2
+packet before asynchronous reads, then independently verify the current actual
+route/capability/issuer and original protected acquisition. Closed3→received4 and
+received4→adopted5 use separate protected CAS/read-back and re-verification under
+the real account lease; closure lower time and immutable original evidence remain.
+The explicit resume entries use actual retained bytes after interruption without
+another packet or issuer callback. Actual SQL credential installation/read-back
+remains separately fenced; received4 does not authorize original Store/read/ACK.
+Late adoption cannot replace a newer selected winner or pending acquisition.
+
+Ordinary dispatch still restores/verifies the original request before forwarding;
+its returned exact response uses the existing retained-success verifier, allowing
+the original envelope to expire during the callback only while complete actual
+grant/route/issuer/directory authority remains current. No request is re-windowed.
+
+Intermediate focused15/0/0 passed the two-direction handover. The expanded focused
+gate completed **17/0/0 terminal0**,1m10s, with no build warnings. It additionally
+checks both real callback-window crossings. Both late-direction fixtures cover
+invalid/truncated replies, all six before/after result/adoption/SQL interruptions,
+cold recovery from protected bytes, unchanged holder/request/policy/route/closure
+proof, exact SQL read-back, ordinary reuse without reissuance and expired-authority
+rejection without custody replacement. Controlled signed graph assertions (not
+runtime renewal) cover newer adopted and newer pending acquisitions, hostile
+current-pointer rollback and exclusion of unadopted4 from original-grant lookup.
+
+Receipt: `artifacts/s01-late-result-focused-complete/s01-late-result-focused.trx`.
+SHA256 `cf3b2059b40fb203ab92d570fd8b1c66f918f31c98fe5b16eae29f10a81988f3`.
+The subsequent actual Production project Release build completed terminal0 with
+0 warnings/0 errors; only a comment changed after the expanded focused gate.
+The final required full source gate completed terminal0 without filters:
+
+```powershell
+dotnet test Deep.Client.Shared.Production.slnx --configuration Release -m:1 `
+  --logger "trx;LogFileName=s01-late-result-full.trx" `
+  --results-directory artifacts/s01-late-result-full `
+  --logger "console;verbosity=minimal"
+```
+
+Frozen pre-run source/assembly inputs (relative to Shared):
+
+| Input | SHA256 |
+| --- | --- |
+| `src/Deep.Client.Shared/Persistence/DeviceV2/ProtectedDid2MailboxGrantJournal.cs` | `60875bd0a02750391065add38d5d7f633bd9a6aa5c0fd085836207dbde890b07` |
+| `src/Deep.Client.Shared/Persistence/DeviceV2/ProtectedDeepIdV2AccountOwner.MailboxGrant.cs` | `d8db0a4eadf73e8ad7b096ebdc3b4b107bee3672d869ccdf1920adbd15efb288` |
+| `src/Deep.Client.Shared/Persistence/DeviceV2/Did2MailboxInstallationTestHooks.cs` | `ddc3e3a2f8945d3933edb58dc9f36e3ccd30a51d8a5d8fa76017c960dceee7e9` |
+| `src/Deep.Client.Shared/Services/DeepIdV2AccountService.MailboxGrant.cs` | `286402332f597e42e306a9911bd1e5ea9cb52044b3fc2349ebae694f9e1fc7a8` |
+| `tests/Deep.Client.Shared.Production.Tests/DeepIdV2ContactPathAuthoritySourceTests.GrantCustody.cs` | `16bbbd0d089dd300be82b0bdb6305540284f3f5eb6a3efebf432f07b93c60f3a` |
+| `tests/Deep.Client.Shared.Production.Tests/bin/Release/net10.0/Deep.Client.Shared.Production.Tests.dll` | `adfdd53c44ca1dda96cca224a9612abe3ed0e9edb6ee4239bcb3f04010124f27` |
+| `src/Deep.Client.Shared/bin-production-test/Release/net10.0/Deep.Client.Shared.dll` | `5bf25d10cab05c7e0ee4e97189ed9bd006e4ecacd2221f664f8724cb0ee1417c` |
+
+Final result: **575 passed, 0 failed, 0 skipped**,44m01s. The TRX independently
+reports575 total/executed/passed,0 failed/not-executed and575 individual Passed
+results. All20 selected cases independently map to Passed: ten hostile headers,
+two-account acquisition, both expired-unknown closures, both late-result
+handover directions, both callback-window crossings, original full-working-set
+Store reconciliation and both owned receive variants, including
+`selectedSuccessor: True`. These are not inferred from a focused filter or count.
+
+Receipt: `artifacts/s01-late-result-full/s01-late-result-full.trx`, SHA256
+`a27a8d23d4eb890c2739400a819edb08161c165e50e1315c2bb1cf55e6e91c90`.
+TRX start/finish: `2026-10-06T01:57:08.2493140+05:00` /
+`2026-10-06T02:41:09.3294478+05:00`. All seven frozen source/assembly hashes
+above matched after terminal0. No source/test changes or concurrent rebuilds
+occurred during the run; the command emitted no build warnings.
+
+The bounded incoming-result/cold-resume slice is accepted locally. This is
+source/test-internals evidence, not a signed installed artifact. It does not close
+S01: irreversible namespace/floor retirement, object horizon/retained-route and
+the remaining closed contracts still precede activation. No shipping composition, physical
+delivery, renewal/retirement, historical-route authority or object-horizon closure
+is claimed. No production/device state was changed.

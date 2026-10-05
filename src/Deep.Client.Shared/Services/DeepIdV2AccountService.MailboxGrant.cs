@@ -5,6 +5,62 @@ namespace Deep.Client.Shared.Services;
 
 public sealed partial class DeepIdV2AccountService
 {
+    internal async Task<VerifiedDeepIdV2MailboxGrant> ResumeOwnPermanentContactRetrieveGrantResultAsync(
+        DeepIdV2ContactPathAuthoritySource source, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(source); source.RequireAccountOwner(this);
+        var fresh = await source.VerifyForOwnPreKeyAuthoringAsync(this, ct).ConfigureAwait(false);
+        using var verifier = OpenVerifier();
+        return await owner.AcceptOwnPermanentContactRetrieveGrantResultAsync(TrustedUnixSeconds(), verifier,
+            source, fresh, ReadOnlyMemory<byte>.Empty, ct).ConfigureAwait(false);
+    }
+
+    internal async Task<VerifiedDeepIdV2MailboxGrant> ResumePermanentContactDepositGrantResultAsync(
+        VerifiedDeepIdV2PermanentContactResolveClosure contact, DeepIdV2ContactPathAuthoritySource source,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(contact); ArgumentNullException.ThrowIfNull(source); source.RequireAccountOwner(this);
+        var fresh = await source.VerifyPermanentContactAsync(contact.Candidate, ct).ConfigureAwait(false);
+        using var verifier = OpenVerifier();
+        return await owner.AcceptPermanentContactDepositGrantResultAsync(TrustedUnixSeconds(), verifier,
+            source, fresh, ReadOnlyMemory<byte>.Empty, ct).ConfigureAwait(false);
+    }
+
+    // Incoming bytes are untrusted evidence, not an outcome/clock/route supplied
+    // by the caller. Snapshot before any asynchronous current-authority read.
+    internal async Task<VerifiedDeepIdV2MailboxGrant> AcceptOwnPermanentContactRetrieveGrantResultAsync(
+        DeepIdV2ContactPathAuthoritySource source, ReadOnlyMemory<byte> exactXmc2, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(source); source.RequireAccountOwner(this);
+        if (exactXmc2.Length != 510) throw new InvalidDataException("Mailbox result must have its exact bound.");
+        var packet = exactXmc2.ToArray();
+        try
+        {
+            var fresh = await source.VerifyForOwnPreKeyAuthoringAsync(this, ct).ConfigureAwait(false);
+            using var verifier = OpenVerifier();
+            return await owner.AcceptOwnPermanentContactRetrieveGrantResultAsync(TrustedUnixSeconds(), verifier,
+                source, fresh, packet, ct).ConfigureAwait(false);
+        }
+        finally { System.Security.Cryptography.CryptographicOperations.ZeroMemory(packet); }
+    }
+
+    internal async Task<VerifiedDeepIdV2MailboxGrant> AcceptPermanentContactDepositGrantResultAsync(
+        VerifiedDeepIdV2PermanentContactResolveClosure contact, DeepIdV2ContactPathAuthoritySource source,
+        ReadOnlyMemory<byte> exactXmc2, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(contact); ArgumentNullException.ThrowIfNull(source); source.RequireAccountOwner(this);
+        if (exactXmc2.Length != 510) throw new InvalidDataException("Mailbox result must have its exact bound.");
+        var packet = exactXmc2.ToArray();
+        try
+        {
+            var fresh = await source.VerifyPermanentContactAsync(contact.Candidate, ct).ConfigureAwait(false);
+            using var verifier = OpenVerifier();
+            return await owner.AcceptPermanentContactDepositGrantResultAsync(TrustedUnixSeconds(), verifier,
+                source, fresh, packet, ct).ConfigureAwait(false);
+        }
+        finally { System.Security.Cryptography.CryptographicOperations.ZeroMemory(packet); }
+    }
+
     // Closed internal maintenance contract. No caller clock, outcome, policy,
     // route, deletion permission or transport callback is accepted.
     internal async Task<int> CloseExpiredMailboxAcquisitionsAsync(

@@ -11,7 +11,7 @@ policy. Runtime/test acceptance is recorded separately in the
 ## Serialization
 
 The protected slot remains `deep.store.v2.mailbox-grant-journal`. Its sole reader
-accepts local generation4; every earlier generation rejects, including empty
+accepts local generation5; every earlier generation rejects, including empty
 state. Existing incompatible test accounts require explicit reset. There is no
 migration, fallback or initialization by a reader. Account creation is the sole
 empty-state producer.
@@ -20,7 +20,7 @@ All integers are unsigned big-endian. The closed header is96 bytes:
 
 | Offset | Width | Field |
 | --- | --- | --- |
-| 0 | 1 | Generation4 |
+| 0 | 1 | Generation5 |
 | 1 | 1 | Zero flags |
 | 2 | 2 | Acquisition count |
 | 4 | 8 | Revision, at least acquisition count +1 |
@@ -41,13 +41,13 @@ The record has a1097-byte fixed region and exact original policy/route evidence:
 | 0 | 32 | Existing route/locator/direction scope commitment |
 | 32 | 32 | Exact nonzero independent holder seed |
 | 64 | 32 | Exact nonzero route-closure hash |
-| 96 | 1 | Phase1 pending, phase2 received winner, phase3 closed-unresolved |
+| 96 | 1 | Phase1 pending, phase2 ordinary winner, phase3 closed-unresolved, phase4 received late winner, phase5 adopted late winner |
 | 97 | 3 | Zero reserved |
 | 100 | 435 | Exact original XMG1 |
-| 535 | 510 | All zero for pending/closed-unresolved; exact successful XMC2 for winner |
+| 535 | 510 | All zero for phases1/3; exact successful XMC2 for phases2/4/5 |
 | 1045 | 32 | Predecessor acquisition identity; zero only for first acquisition |
 | 1077 | 8 | Conservative possible-grant expiry from original signed evidence |
-| 1085 | 8 | Authenticated lower Unix bound of closure; zero except phase3 |
+| 1085 | 8 | Authenticated lower Unix bound of closure; zero for phases1/2, retained for phases3/4/5 |
 | 1093 | 2 | Original PMA2 length497..1169 |
 | 1095 | 2 | Original route-closure length4143..23295 |
 | 1097 | Variable | Exact original PMA2, then exact original six-record route closure |
@@ -56,8 +56,9 @@ The last region consists of128-byte selections sorted strictly by scope:
 scope32, current acquisition32, pending acquisition32, retained tail32.
 Zero means no pointer. Pending or tail is required. Pending may reference an
 exact request or received winner and must name retained tail as its predecessor.
-The retained chain contains immutable winners and closed-unresolved acquisitions
-in the same scope. Current is exactly its most recent winner, or zero if none;
+The retained chain contains ordinary/adopted late winners, received late results
+and closed-unresolved acquisitions in the same scope. Current is exactly its
+most recent adopted winner (phase2/5), or zero if none; phase4 cannot select itself.
 selecting an older retained winner rejects. Every acquisition is reached exactly
 once from pending or retained history, including an initial closed acquisition.
 Dangling, cyclic, cross-scope, orphaned or duplicate acquisitions/grants reject.
@@ -71,8 +72,9 @@ Unknown flags/phases, noncanonical counts/revision/order, trailing bytes, wrong
 account instance, holder/request mismatch and response binding mismatch reject.
 Ceiling is recomputed from the exact evidence; request PMT2/PMS2, PMA2 reference,
 route hash and network must match. A received winner cannot exceed that ceiling.
-Phase3 retains exact holder/request/evidence with no winner, and its closure lower
-bound cannot precede XMG expiry. These checks establish custody shape, not current
+Phase3 retains exact holder/request/evidence with no winner; phases4/5 retain the
+same closure proof with one immutable late result. Their closure lower bound
+cannot precede XMG expiry. These checks establish custody shape, not current
 or historical issuer/time authorization.
 
 ## Owned transitions and consumers
@@ -104,6 +106,43 @@ lookup, without a new acquisition or substituting the current winner. They still
 require the ordinary actual route, issuer, holder, time, revocation and replay
 checks; retained lookup does not authorize expired/historical transport.
 
+`AcceptOwnPermanentContactRetrieveGrantResultAsync` and
+`AcceptPermanentContactDepositGrantResultAsync` are internal owned incoming-result
+entries. The510-byte packet is untrusted, copied before asynchronous verification;
+it cannot supply a clock, holder, policy, route or disposition. Own publication
+or independently current peer resolution supplies the actual route/capability
+under the account lease. XMC2's existing exact-request binding must name actual
+protected acquisition custody in that exact route/locator/direction scope.
+Pending requests must first close using the independent time transition above.
+
+Existing `VerifyRetainedSuccessAsync` independently verifies the exact original
+XMG/XMC, root-signed current issuer policy and complete current grant/route interval.
+It does not restore an expired request. Only then may `WithLateWinner` record
+phase3→4 by protected CAS/read-back; the closure lower bound and original
+holder/request/policy/route/ceiling remain unchanged. No issuer callback occurs.
+The owner reads and verifies the protected result again before a separate
+phase4→5 CAS/read-back (`AdoptLateWinner`), and only then installs/reopens actual
+SQL credentials with current authority checks. Received phase4 is excluded from
+current and exact-original Store/read/ACK selection. A different result cannot
+replace an existing ordinary or late winner.
+
+Adoption never changes acquisition identity, predecessor, pending or retained
+tail. Current remains the latest adopted acquisition in the retained predecessor
+chain: a late result behind a newer adopted winner cannot roll selection back;
+a newer pending candidate is not overwritten. Closure evidence survives adoption.
+`ResumeOwnPermanentContactRetrieveGrantResultAsync` and
+`ResumePermanentContactDepositGrantResultAsync` explicitly resume from the actual
+protected late result, preferring a retained phase4 candidate, otherwise a retained
+phase5 result for interrupted SQL installation. They accept no response packet or
+issuer callback. The private codec lookup establishes custody shape only; the
+same independent verification/read-back/SQL fences still apply on cold reopen.
+
+Ordinary acquisition still checks its original XMG window before forwarding.
+An exact reply arriving after that window can use the same retained-success
+verification while the actual grant/issuer/route remain independently current.
+Timeout/cancellation does not fabricate a reply, extend a request or reissue a
+closed acquisition. Unsupported historical authority remains unavailable.
+
 `DeepIdV2AccountService.CloseExpiredMailboxAcquisitionsAsync` is internal and
 accepts only the actual own source plus cancellation. It obtains independently
 current own directory/network authority; the account owner holds the actual lease
@@ -119,16 +158,19 @@ The codec helpers themselves establish shape, not permission to close.
 
 The acquisition runtime still creates only an initial candidate. The internal
 closure entry is not autonomous scheduler activation. This layout does not
-activate renewal, authenticated late-result settlement, retirement/compaction, historic read/ACK
+activate renewal, retirement/compaction, historic read/ACK
 or a longer object horizon. No entries/floors are evicted and no128/512 bound is
 raised. Send/read independent replay floors are unchanged. Their full lifecycle
 contracts and the linked retention fence remain unfinished S01/S04/S05 work.
 
 The expired/unknown semantic and retirement boundary remain specified only in
-the semantic owner linked above, §8.4.2. Generation4 adds original evidence and
-closed-unresolved custody, not proof of non-issuance or an irreversible retirement
+the semantic owner linked above, §8.4.2. Generation5 retains original evidence,
+closed uncertainty and two-phase late adoption, not proof of non-issuance or an irreversible retirement
 fence. No new network wire, magic, authority or public verification API is added.
 The earlier generation3 receipt is historical evidence for its exact source.
-The current layout/closure and original Store/read/ACK passed their own final
+Generation4's layout/closure and original Store/read/ACK passed their own final
 full source gate570/0/0; the exact receipt and source boundaries are recorded in
-the checkpoint. This accepts this bounded slice, not the whole S01 stage.
+the checkpoint. The subsequent generation5 late-result/connected-consumer gate
+completed575/0/0 terminal0 with all20 selected cases Passed and matching frozen
+inputs. Its own exact receipt is recorded separately in the checkpoint. Neither
+slice closes S01 or qualifies a signed installed client or physical transport.

@@ -13,8 +13,8 @@ namespace Deep.Client.Shared.Persistence.DeviceV2;
 internal static class ProtectedDid2MailboxGrantJournal
 {
     internal const string Slot = "deep.store.v2.mailbox-grant-journal";
-    // One current local reader. Prior custody has no original issuance ceiling.
-    private const byte Version = 4;
+    // One current local reader. Prior custody cannot express two-phase late adoption.
+    private const byte Version = 5;
     internal const int HeaderBytes = 96, MaximumEntries = 128;
     private const int SelectionBytes = 128, PredecessorOffset = 1045;
     private const int CeilingOffset = 1077, ClosedLowerOffset = 1085, EvidenceOffset = 1097;
@@ -111,11 +111,24 @@ internal static class ProtectedDid2MailboxGrantJournal
             for (var name = selection.RetainedTail; name is not null; name = Predecessor(state.Entries[name]))
             {
                 var entry = state.Entries[name];
-                if (!HasWinner(entry)) continue;
+                if (!IsAdoptedWinner(entry)) continue;
                 var response = ContactCodec.Decode("XMC2", Response(entry).Span);
                 if (Fixed(SHA256.HashData(response.Field(8).Span), grantHash)) return entry;
             }
         throw new CryptographicException("Exact original protected mailbox grant is absent; substitution is forbidden.");
+    }
+
+    internal static byte[] RequireLateResultForResume(State state, string scope)
+    {
+        byte[]? adopted = null;
+        if (state.Selections.TryGetValue(scope, out var selection))
+            for (var name = selection.RetainedTail; name is not null; name = Predecessor(state.Entries[name]))
+            {
+                var entry = state.Entries[name];
+                if (IsLateCandidate(entry)) return entry;
+                if (adopted is null && IsLateAdopted(entry)) adopted = entry;
+            }
+        return adopted ?? throw new InvalidDataException("No protected late-result continuation exists.");
     }
 
     internal static byte[] Scope(ReadOnlySpan<byte> routeHash, ReadOnlySpan<byte> locator, byte domain)
@@ -167,10 +180,46 @@ internal static class ProtectedDid2MailboxGrantJournal
         catch { CryptographicOperations.ZeroMemory(entry); throw; }
     }
 
+    // Shape only: current issuer/route/time verification belongs to the held
+    // account owner. Preserve the closure proof and exact predecessor chain.
+    internal static byte[] WithLateWinner(ReadOnlySpan<byte> closed, ReadOnlySpan<byte> exactXmc2,
+        ReadOnlySpan<byte> network)
+    {
+        RequireEntry(closed, network);
+        if (closed[96] != 3 || exactXmc2.Length != 510)
+            throw new InvalidDataException("Only a closed unresolved acquisition may retain one late success.");
+        var entry = closed.ToArray();
+        try
+        {
+            entry[96] = 4; exactXmc2.CopyTo(entry.AsSpan(ResponseOffset));
+            RequireEntry(entry, network); return entry;
+        }
+        catch { CryptographicOperations.ZeroMemory(entry); throw; }
+    }
+
+    internal static void AdoptLateWinner(State state, string acquisition)
+    {
+        if (!state.Entries.TryGetValue(acquisition, out var entry) || entry[96] != 4 ||
+            !state.Selections.TryGetValue(EntryScope(entry), out var selected))
+            throw new InvalidDataException("Only an exact retained late candidate may be adopted.");
+        // The candidate is already retained, never re-enrolled as a fresh
+        // request. A newer selected winner/pending candidate is not overwritten.
+        RequireSelections(state);
+        entry[96] = 5;
+        var scope = EntryScope(entry);
+        string? latest = null;
+        for (var name = selected.RetainedTail; name is not null; name = Predecessor(state.Entries[name]))
+            if (IsAdoptedWinner(state.Entries[name])) { latest = name; break; }
+        state.Selections[scope] = selected with { Current = latest };
+    }
+
     internal static ReadOnlyMemory<byte> Request(byte[] entry) => entry.AsMemory(RequestOffset, 435);
     internal static ReadOnlyMemory<byte> Response(byte[] entry) => entry.AsMemory(ResponseOffset, 510);
     internal static ReadOnlySpan<byte> Seed(byte[] entry) => entry.AsSpan(32, 32);
-    internal static bool HasWinner(byte[] entry) => entry[96] == 2;
+    internal static bool HasWinner(byte[] entry) => entry[96] is 2 or 4 or 5;
+    internal static bool IsAdoptedWinner(byte[] entry) => entry[96] is 2 or 5;
+    internal static bool IsLateCandidate(byte[] entry) => entry[96] == 4;
+    internal static bool IsLateAdopted(byte[] entry) => entry[96] == 5;
     internal static bool IsClosedUnresolved(byte[] entry) => entry[96] == 3;
     internal static ulong PossibleGrantExpiry(byte[] entry) => BinaryPrimitives.ReadUInt64BigEndian(entry.AsSpan(CeilingOffset, 8));
     internal static ulong ClosedLower(byte[] entry) => BinaryPrimitives.ReadUInt64BigEndian(entry.AsSpan(ClosedLowerOffset, 8));
@@ -279,7 +328,7 @@ internal static class ProtectedDid2MailboxGrantJournal
             if (selected.Pending is { } pending)
             {
                 Visit(pending, pair.Key);
-                if (IsClosedUnresolved(state.Entries[pending]) || Predecessor(state.Entries[pending]) != selected.RetainedTail)
+                if (state.Entries[pending][96] is not (1 or 2) || Predecessor(state.Entries[pending]) != selected.RetainedTail)
                     throw new InvalidDataException("Pending mailbox successor differs from its selected predecessor.");
             }
             string? newestWinner = null;
@@ -288,7 +337,7 @@ internal static class ProtectedDid2MailboxGrantJournal
                 Visit(name, pair.Key);
                 if (!HasWinner(state.Entries[name]) && !IsClosedUnresolved(state.Entries[name]))
                     throw new InvalidDataException("Retained mailbox history contains an open candidate.");
-                if (newestWinner is null && HasWinner(state.Entries[name])) newestWinner = name;
+                if (newestWinner is null && IsAdoptedWinner(state.Entries[name])) newestWinner = name;
             }
             if (selected.Current != newestWinner)
                 throw new InvalidDataException("Mailbox current selection differs from its latest retained winner.");
@@ -307,13 +356,13 @@ internal static class ProtectedDid2MailboxGrantJournal
 
     private static void RequireEntry(ReadOnlySpan<byte> entry, ReadOnlySpan<byte> network)
     {
-        if (entry.Length is < MinimumEntryBytes or > MaximumEntryBytes || entry[96] is not (1 or 2 or 3) || entry.Slice(97, 3).IndexOfAnyExcept((byte)0) >= 0)
+        if (entry.Length is < MinimumEntryBytes or > MaximumEntryBytes || entry[96] is not (1 or 2 or 3 or 4 or 5) || entry.Slice(97, 3).IndexOfAnyExcept((byte)0) >= 0)
             throw new InvalidDataException("Mailbox holder custody phase/size is noncanonical.");
         Required32(entry.Slice(32, 32)); Required32(entry.Slice(64, 32));
         var ceiling = BinaryPrimitives.ReadUInt64BigEndian(entry.Slice(CeilingOffset, 8));
         var closedLower = BinaryPrimitives.ReadUInt64BigEndian(entry.Slice(ClosedLowerOffset, 8));
         if (ceiling == 0 || ceiling != OriginalCeiling(entry) ||
-            (entry[96] == 3 ? closedLower < RequestExpiry(entry) : closedLower != 0))
+            (entry[96] is 3 or 4 or 5 ? closedLower < RequestExpiry(entry) : closedLower != 0))
             throw new InvalidDataException("Original issuance ceiling or closed acquisition outcome differs.");
         var request = ContactCodec.Decode("XMG1", entry.Slice(RequestOffset, 435));
         ContactCodec.VerifyMailboxGrantHolderSignature(request);
