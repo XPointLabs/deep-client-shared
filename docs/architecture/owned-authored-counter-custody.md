@@ -62,6 +62,15 @@ Once an authored position exists, missing/regressed/advanced SQL counters reject
 without repairing them. No stable row is regenerated. Text, AttachmentOffer and
 retries use one counter namespace and original canonical event.
 
+When an ordinary working entry is absent, `PrepareDirectAuthoredAsync` reads the
+actual native committed operation against the reconciled protected stable floor
+before capacity checks, authored reservation or SQL materialization. A retained
+operation rejects instead of minting a new logical event or reconstructing its
+working payload. This covers the same exact session scope while native event
+custody remains verifiable; it is not a namespace-retirement fence or permission
+to remove that custody. The [focused replay receipt](../testing/s01-authored-counter-floors-2026-10-06.md#outbox-replay-prerequisite--focused-only)
+is separate from the earlier full-qualified counter-floor input.
+
 Pending-text projection checks the initialized catalog for all floor scopes and
 reconciles SQL even with an empty working set. Parsed scope metadata remains a
 selector/fact, not independently current endpoint or signing authority.

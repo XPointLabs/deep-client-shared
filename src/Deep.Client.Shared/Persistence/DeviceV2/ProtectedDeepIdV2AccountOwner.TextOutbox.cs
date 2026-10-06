@@ -63,7 +63,15 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             if (journal.Pending is { } pending && (entry is null || !ReferenceEquals(pending, entry)))
                 throw new InvalidOperationException("Resume the existing pending text command before preparing another.");
             if (entry?.Pending == true) RequireRequestedOrdinaryPayload(entry.PendingDmc2, payload);
-            if (entry is null) journal.RequireCapacity(scope);
+            if (entry is null)
+            {
+                // Removing ordinary working custody cannot turn an already
+                // committed native operation into a new logical command.
+                using var committed = opened.Sql.ReadVerifiedOperation(floor, op);
+                if (committed is not null)
+                    throw new CryptographicException("A committed operation without ordinary working custody cannot be authored again.");
+                journal.RequireCapacity(scope);
+            }
             result = await application.ReconcileOwnedTextOutboxAsync(journal, current.AccountId,
                 BinaryPrimitives.ReadUInt64BigEndian(scope.Exact[84..]), scope, entry is null ? ReadOnlyMemory<byte>.Empty : op, ct).ConfigureAwait(false);
             if (entry is null)
