@@ -280,10 +280,12 @@ adopted, only matching remaining parts may be disposed, then the plan clears.
 with all exact predecessors/guards intact, persisting the existing abort phase
 before disposal. A committed phase2 cannot abort/reselect even before grant
 adoption. Cancellation leaves the already-staged plan owning exact recovery.
-Full profile qualification and the broader S01/S04 lifecycle/receipt/object
-consumers remain unfinished. The focused encrypted-journal reopen fixture uses
+The [current coupled full source gate](../testing/s01-closed-deposit-retirement-2026-10-06.md#current-coupled-full--accepted-unused-deposit-profile)
+qualifies this narrow profile:706/0/0, observed terminal0, all200 current/all687
+prior cases Passed and62/62 frozen inputs exact. The broader S01/S04
+lifecycle/receipt/object consumers remain unfinished. The encrypted-journal reopen fixture uses
 its own protector, not Windows/Android platform custody. The focused
-checkpoint records evidence separately; this implementation is not release
+checkpoint records evidence separately; this qualification is not release
 activation or a declaration that every replay namespace can be retired.
 
 The acquisition runtime still creates only an initial candidate. The internal

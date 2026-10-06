@@ -1,6 +1,6 @@
-# S01 closed unused deposit retirement — working checkpoint
+# S01 closed unused deposit retirement — accepted source checkpoint
 
-Date: 2026-10-06. Owner: Mr. X. Only the current S01 retirement block is active.
+Date: 2026-10-06. Owner: Mr. X. The whole S01 remains open.
 Semantic owner: [TRANSPORT-NEUTRAL-MESSAGING §8.4.2–8.4.4](../../../docs/architecture/TRANSPORT-NEUTRAL-MESSAGING.md#842-grant-and-route-transitions).
 Exact local API/recovery mapping: [owned mailbox grant custody](../architecture/owned-mailbox-grant-custody.md#closed-unused-deposit-retirement-profile--working-implementation).
 
@@ -13,10 +13,11 @@ native floor is unchanged; its guard now commits the complete local account/devi
 binding as well as revision, floor and history. There is no new wire, journal
 generation, scheduler, public authority or legacy reader.
 
-Build and focused regression pass. The required full Shared gate is still
-pending: this is not acceptance of this profile or the whole S01. The prior
-687-case outbox receipt remains evidence for its own frozen source, not these
-changed files. Known outcomes, Retrieve/ACK paths, linked acquisitions and
+Build, focused regression and the current coupled full gate pass. This accepts
+only the closed unused Deposit profile on the frozen source below, not the whole
+S01. The prior687-case outbox receipt remains evidence for its own frozen source;
+the current706-case receipt qualifies this changed source. Known outcomes,
+Retrieve/ACK paths, linked acquisitions and
 unclosed receipt/object work remain pinned. Their S01 closure and S04 autonomous
 lifecycle are not activated by the unused-acquisition profile.
 
@@ -66,14 +67,35 @@ and unchanged-state assertions remain mandatory. No runtime check was weakened.
 An earlier test build failed CS0117 by referencing the storage wrapper's
 nonexistent Slot; the fixture now uses the actual Did2CompactionPlan.Slot.
 
-## Required coupled full
+## Current coupled full — accepted unused Deposit profile
 
-Discovery reports706 unique cases with no missing prior687 names.
-The full candidate must map all200 current required and all687 prior cases to
-Passed, with an observed process terminal0 and exact frozen input recheck.
-The planned local manifest is
-`artifacts/s01-retirement-profile-full/expected-qualification.json`; it binds
-62 current inputs, including changed runtime/tests, test/non-test assemblies and
-native host dependencies. Artifacts remain ignored/local; their metadata is not
-upload approval. A running process or incomplete TRX cannot close this profile.
+Source: Shared `25204bfa68a200f3ce8b2e4b53a4b05e11226d51`.
+The already-built zero-warning Release host was tested with the complete,
+unfiltered Shared production suite:
 
+```powershell
+dotnet test Deep.Client.Shared.Production.slnx -c Release -m:1 --no-build --no-restore --artifacts-path artifacts/s01-native-fence-build --logger 'trx;LogFileName=s01-retirement-profile-full.trx' --logger 'console;verbosity=minimal' --results-directory artifacts/s01-retirement-profile-full
+```
+
+Full: **706 passed, 0 failed, 0 skipped**, observed process terminal0. The shell
+printed `S01_RETIREMENT_PROFILE_FULL_TEST_EXIT=0`, then the completed qualifier
+printed `S01_RETIREMENT_PROFILE_FULL_QUALIFIED_EXIT=0` and exited0. Start
+`2026-10-06T20:29:30.4079990+05:00`; finish
+`2026-10-06T22:01:32.7784427+05:00`.
+
+All706 discovery names/results/definitions and unique test/execution IDs map
+exactly. All200 current required and all687 prior cases are Passed, without
+missing/extra names, duplicate mappings or skips. All62 frozen inputs matched
+before the process and after terminal; source HEAD was still the commit above.
+These inputs include changed runtime/tests, test/non-test assemblies and native
+host dependencies. A separate readback reconfirmed counters, mappings and hashes.
+
+Receipt: `artifacts/s01-retirement-profile-full/s01-retirement-profile-full.trx`.
+SHA256: `B3184583AF4062BB220A5AE5BF37D1DAB8BAFC09F1367A6956C8B582ECD33987`.
+Manifest: `artifacts/s01-retirement-profile-full/expected-qualification.json`.
+SHA256: `5C9400C06D95AD97EF253D4EF0098A7886EADEFC544EEBB2C1D6A97A1F8B70F7`.
+
+This closes this local owner/recovery profile, not known grant/send/read floor
+retirement, application receipt completion, accepted-object/retained-route
+closure, sustained cleanup, Release composition or physical device E2E.
+Artifacts remain ignored/local; their metadata is not upload approval.

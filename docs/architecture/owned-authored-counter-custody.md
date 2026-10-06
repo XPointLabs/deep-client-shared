@@ -373,7 +373,9 @@ Actual local prefix and outbox-only recovery are implemented, but plan registrat
 its narrow owner API are not sustained lifecycle activation. The encrypted
 native fixture closes/reopens real storage handles at each handover and retains
 acceptance replay and subsequent text; it is not physical device qualification.
-Terminal/audit/replay dispositions, durable retirement fences, outstanding
+The [unused Deposit owner/recovery profile](../testing/s01-closed-deposit-retirement-2026-10-06.md#current-coupled-full--accepted-unused-deposit-profile)
+is qualified on source25204bf/full706; it removes no known send/read/replay floor.
+Other terminal/audit/replay dispositions, outstanding
 receipt work and accepted-object/retained-route obligations must still close
 before S04 cleanup. Fresh full-source acceptance is recorded separately.
 Capacity remains bounded backpressure; floors are not evicted to create space.
