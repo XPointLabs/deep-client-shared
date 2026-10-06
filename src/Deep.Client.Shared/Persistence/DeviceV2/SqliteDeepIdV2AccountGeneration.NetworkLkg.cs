@@ -22,7 +22,6 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         using var secret = await storage.ReadOwnedAsync(KeySlot, ct).ConfigureAwait(false) ??
             throw new InvalidDataException("Native replay fence lost account registration.");
         var record = secret.Use(value => value.ToArray());
-        byte[] genesis = [];
         try
         {
             var network = current.Verified.PublicEvidence.Binding.Identity.Account.Certificate.NetworkId;
@@ -30,7 +29,23 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             var binding = AccountBinding.From(current.Verified, current.AccountId.Span, network.Span,
                 current.DisplayName, current.PermanentId.CanonicalText, record.AsSpan(56, 32));
             using var connection = await OpenBoundLkgConnectionAsync(storage, Path.GetFullPath(statePath), binding, ct).ConfigureAwait(false);
+            return await ReadNativeReplayFenceInConnectionAsync(storage, accountLease, statePath, connection, binding, held, ct).ConfigureAwait(false);
+        }
+        finally { CryptographicOperations.ZeroMemory(record); }
+    }
+
+    private static async Task<Did2CompactionPlan.RootReadback> ReadNativeReplayFenceInConnectionAsync(
+        IDeepSecureStorage storage, DeepIdV2AccountFileLease accountLease, string statePath,
+        SqliteConnection connection, AccountBinding binding, HeldDeepIdV2AccountLease held, CancellationToken ct)
+    {
+        byte[] genesis = [];
+        try
+        {
             using var tx = connection.BeginTransaction(deferred: false);
+            var actualBinding = ReadNativeFenceBinding(connection, tx);
+            var bindingHash = NativeFenceBindingHash(binding);
+            if (!Fixed(bindingHash, NativeFenceBindingHash(actualBinding)))
+                throw new CryptographicException("Native replay fence changed its exact local account binding.");
             using (var command = connection.CreateCommand())
             {
                 command.Transaction = tx;
@@ -48,8 +63,8 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             var backend = new NetworkLkgStore(storage, accountLease, Path.GetFullPath(statePath), binding, genesis);
             var snapshot = await backend.ReadExistingHistoryInTransactionAsync(connection, tx, ct).ConfigureAwait(false);
             if (snapshot.Snapshot.ForkLatched) throw new CryptographicException("A fork-latched floor cannot guard retirement.");
-            var scope = new byte[80]; network.Span.CopyTo(scope); current.AccountId.Span.CopyTo(scope.AsSpan(16));
-            record.AsSpan(56, 32).CopyTo(scope.AsSpan(48));
+            var scope = new byte[80]; binding.NetworkId.CopyTo(scope, 0); binding.AccountId.CopyTo(scope, 16);
+            binding.InstanceId.CopyTo(scope, 48);
             using var digest = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
             var floor = XPointNetworkProtectedLkgCodec.Encode(snapshot.Snapshot.ProtectedLkg);
             var history = snapshot.ExactHistory.ToArray();
@@ -57,7 +72,7 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             {
                 Span<byte> revision = stackalloc byte[8];
                 BinaryPrimitives.WriteUInt64BigEndian(revision, snapshot.Snapshot.Revision);
-                digest.AppendData(revision); digest.AppendData(floor); digest.AppendData(history);
+                digest.AppendData(bindingHash); digest.AppendData(revision); digest.AppendData(floor); digest.AppendData(history);
                 ct.ThrowIfCancellationRequested(); held.RequireOwner(accountLease); tx.Commit();
                 return new(Did2CompactionPlan.RootKind.NativeFence, SHA256.HashData(scope), digest.GetHashAndReset());
             }
@@ -67,7 +82,7 @@ internal static partial class SqliteDeepIdV2AccountGeneration
                 CryptographicOperations.ZeroMemory(history);
             }
         }
-        finally { CryptographicOperations.ZeroMemory(record); CryptographicOperations.ZeroMemory(genesis); }
+        finally { CryptographicOperations.ZeroMemory(genesis); }
     }
 
     internal static async ValueTask<IXPointNetworkStateStore> OpenNetworkLkgStoreAsync(

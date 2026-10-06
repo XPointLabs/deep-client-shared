@@ -190,6 +190,16 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 Assert.Equal(!unresolved, dependencies.Dependencies.HasFlag(
                     ProtectedDeepIdV2AccountOwner.MailboxEpochExclusion.RetirementDependency.UnresolvedReceiptOrObject));
                 await dependencies.RecheckAsync();
+                using (var planBefore = await storage.ReadOwnedAsync(Did2CompactionPlan.Slot) ?? throw new InvalidDataException())
+                {
+                    // Both known and unresolved Retrieve custody remain pinned.
+                    // A fresh exclusion alone must never stage deletion of that path.
+                    await Assert.ThrowsAsync<IOException>(() => exclusion.RetireUnusedClosedDepositAcquisitionAsync());
+                    using var planAfter = await storage.ReadOwnedAsync(Did2CompactionPlan.Slot) ?? throw new InvalidDataException();
+                    Assert.Equal(planBefore.Use(bytes => SHA256.HashData(bytes)), planAfter.Use(bytes => SHA256.HashData(bytes)));
+                    using var grantAfter = await storage.ReadOwnedAsync(ProtectedDid2MailboxGrantJournal.Slot) ?? throw new InvalidDataException();
+                    Assert.Equal(SHA256.HashData(exactRoot), grantAfter.Use(bytes => SHA256.HashData(bytes)));
+                }
                 var callerCopy = dependencies.Guards;
                 Assert.True(System.Runtime.InteropServices.MemoryMarshal.TryGetArray(callerCopy[0].Digest, out var exposed));
                 Array.Clear(exposed.Array!, exposed.Offset, exposed.Count); // Never writes the captured guard.

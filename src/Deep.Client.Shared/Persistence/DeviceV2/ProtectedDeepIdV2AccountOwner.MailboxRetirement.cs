@@ -61,7 +61,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 finally { exclusion.gate.Release(); }
             }
 
-            private static async Task<RetirementDependencies> CaptureUnderGateAsync(MailboxEpochExclusion exclusion, CancellationToken ct)
+            internal static async Task<RetirementDependencies> CaptureUnderGateAsync(MailboxEpochExclusion exclusion, CancellationToken ct)
             {
                 var owner = exclusion.owner; var account = exclusion.current.AccountId;
                 var instance = exclusion.instance; var network = owner.networkId;
@@ -128,7 +128,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 finally { CryptographicOperations.ZeroMemory(scope); CryptographicOperations.ZeroMemory(route); CryptographicOperations.ZeroMemory(grant); }
             }
 
-            private async Task RequireExactGuardsUnderGateAsync(CancellationToken ct)
+            internal async Task RequireExactGuardsUnderGateAsync(CancellationToken ct)
             {
                 var owner = exclusion.owner;
                 var slots = new[] { ProtectedDid2DirectTextJournal.Slot, ProtectedDid2MailboxSendJournal.Slot,

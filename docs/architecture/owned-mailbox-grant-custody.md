@@ -196,7 +196,13 @@ plan; the API has no deletion, mutation, issuer callback or scheduler entry.
 It rechecks the exclusion before and after reading the already-committed native
 DNH2 floor. It does not commit another floor, stage a plan or retire custody.
 The local selector is SHA256(network16 || account32 || account-instance32).
-The digest is SHA256(u64be(native revision) || exact XLK1 || exact DNH2).
+The digest is SHA256(local binding commitment32 || u64be(native revision) ||
+exact XLK1 || exact DNH2). The binding commitment uses the local
+`Deep/STORE-V2/native-replay-fence-account` domain plus zero separator,
+network/account/instance, DID2/DAB2/device/certificate/directory hashes, then
+u32be-length-prefixed UTF-8 display name and permanent ID. It is not a network
+credential. Adding it before the first installed retirement profile prevents
+a changed SQL account/device projection from matching the captured guard.
 Before and After are identical; no successor bytes are present.
 
 The private SQL reader opens the already-registered account database without
@@ -243,11 +249,50 @@ Even `None` is not retirement eligibility or a deletion capability: the actual
 closed retirement profile still needs complete SQL/native/receipt/object
 readbacks and the §8.4.4 retained-route fence. Those consumers remain unfinished.
 
+## Closed unused deposit retirement profile — working implementation
+
+`MailboxEpochExclusion.RetireUnusedClosedDepositAcquisitionAsync(ct)` privately
+reselects under the same held lease; it accepts no supplied preparation or
+dependency flags. This profile requires a sole closed-unresolved Deposit entry
+in its selection, no winner/pending/predecessor link, and no observed dependency.
+The held producer rechecks current policy/time/exclusion, every exact dependency
+root and the committed native fence before atomically staging the plan/parts.
+Unsupported outcome/path closure remains pinned, not declared successful.
+
+The existing plan generation has a closed ProtectedOnly profile: one ReplayScope
+row selecting the exact acquisition, eight roots, only Grant changed, and zero
+SQL effects. The exact successor removes only that acquisition and selection,
+increments its root revision, and retains every unrelated acquisition/root.
+It does not unenroll a send/read floor or remove object/history/receipt state.
+No new journal/root/wire generation is allocated and no scheduler/UI enables it.
+
+Startup dispatches that already-stored profile without refreshing directory or
+network authority. It opens the registered SQLCipher database without creation,
+validates canonical bounded local account/device rows and the existing native
+marker/history anchor, and compares the complete binding/floor guard to the
+staged commitment. These are readback facts, not self-verified SQL identity or
+a reminted exclusion. Third root states, changed guards, missing required parts
+or missing bindings reject. The existing local commit-marker phase precedes
+grant CAS/readback; this profile makes no SQL mutation. Once the successor is
+adopted, only matching remaining parts may be disposed, then the plan clears.
+
+`AbandonUncommittedClosedAcquisitionRetirementAsync(ct)` permits only phase1
+with all exact predecessors/guards intact, persisting the existing abort phase
+before disposal. A committed phase2 cannot abort/reselect even before grant
+adoption. Cancellation leaves the already-staged plan owning exact recovery.
+Full profile qualification and the broader S01/S04 lifecycle/receipt/object
+consumers remain unfinished. The focused encrypted-journal reopen fixture uses
+its own protector, not Windows/Android platform custody. The focused
+checkpoint records evidence separately; this implementation is not release
+activation or a declaration that every replay namespace can be retired.
+
 The acquisition runtime still creates only an initial candidate. The internal
 closure entry is not autonomous scheduler activation. This layout does not
-activate renewal, retirement/compaction, historic read/ACK
-or a longer object horizon. No entries/floors are evicted and no128/512 bound is
-raised. Send/read independent replay floors are unchanged. Their full lifecycle
+activate autonomous renewal/cleanup, historic read/ACK
+or a longer object horizon. The narrow explicit held producer above removes only
+an eligible closed unused deposit acquisition; no known grant/send/read entries
+or replay floors are evicted and no128/512 bound is raised. Send/read independent
+replay floors are unchanged. Their full lifecycle
 contracts and the linked retention fence remain unfinished S01/S04/S05 work.
 
 The expired/unknown semantic and retirement boundary remain specified only in

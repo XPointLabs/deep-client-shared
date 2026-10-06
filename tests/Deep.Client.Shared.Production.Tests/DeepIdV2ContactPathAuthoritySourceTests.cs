@@ -1841,7 +1841,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         private readonly string directory = Path.Combine(Path.GetTempPath(),
             "deep-did2-path-" + Guid.NewGuid().ToString("N"));
         private readonly IDeepSecureStorage innerStorage;
-        private readonly InMemoryDeepSecureStorage peerStorage = new();
+        private readonly IDeepSecureStorage peerStorage;
         private DeepIdV2AccountService? peerAccounts;
         private VerifiedAdc1V2? peerCheckpoint;
         private IXPointNetworkStateStore? peerNetworkStore;
@@ -2624,6 +2624,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         private Fixture(bool encryptedStorage = false)
         {
             innerStorage = encryptedStorage ? new CompactionDiskFixtureStorage(directory) : new InMemoryDeepSecureStorage();
+            peerStorage = encryptedStorage ? new CompactionDiskFixtureStorage(Path.Combine(directory, "peer")) : new InMemoryDeepSecureStorage();
             storage = new(innerStorage);
         }
         internal void FailAfterNextNetworkMarker() => storage.FailAfterNetworkMarker = true;
@@ -2978,7 +2979,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         public ValueTask DisposeAsync()
         {
             if (mailboxSqlBeforePreparation is not null) CryptographicOperations.ZeroMemory(mailboxSqlBeforePreparation);
-            closure?.Dispose(); proofs?.Dispose(); peerProofs?.Dispose(); http?.Dispose(); pq.Dispose(); ((IDisposable)innerStorage).Dispose(); peerStorage.Dispose();
+            closure?.Dispose(); proofs?.Dispose(); peerProofs?.Dispose(); http?.Dispose(); pq.Dispose(); ((IDisposable)innerStorage).Dispose(); ((IDisposable)peerStorage).Dispose();
             foreach (var signer in witnesses.Concat(nodes).Append(root)) signer.Dispose();
             if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true);
             Dispose(); return ValueTask.CompletedTask;

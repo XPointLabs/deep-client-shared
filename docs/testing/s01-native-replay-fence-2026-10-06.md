@@ -6,7 +6,12 @@ The only active NEXT-SPRINT block remains the dependency-closed retirement
 fence. Semantic owner: [TRANSPORT-NEUTRAL-MESSAGING §8.4.2–8.4.4](../../../docs/architecture/TRANSPORT-NEUTRAL-MESSAGING.md#842-grant-and-route-transitions).
 Local API mapping: [owned mailbox grant custody](../architecture/owned-mailbox-grant-custody.md#native-replay-fence-guard-readback).
 
-## Current held dependency-capture checkpoint
+The subsequent actual closed-unused Deposit owner/recovery implementation is
+tracked in the [current focused checkpoint](s01-closed-deposit-retirement-2026-10-06.md).
+The guard-only/dependency-only receipts below retain their original source scope;
+they do not qualify that newer implementation.
+
+## Prior held dependency-capture checkpoint
 
 The same S01 block now captures and rechecks eight actual dependency roots under
 the held epoch exclusion. The [mapping](../architecture/owned-mailbox-grant-custody.md#held-retirement-dependency-capture)

@@ -145,6 +145,11 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
                 using var plan = await plans.ReadAsync(held, ct).ConfigureAwait(false);
                 if (plan.Phase == 0) { await RequireNoPrefixPartsAsync(ct).ConfigureAwait(false); return; }
+                if (plan.Target == Did2CompactionPlan.SqlTarget.ProtectedOnly)
+                {
+                    await ResumeClosedAcquisitionStepUnderLeaseAsync(plans, plan, held, ct).ConfigureAwait(false);
+                    continue;
+                }
                 using var catalog = await new ProtectedDid2MessagingSessionCatalog(storage, networkId, owner.Account, owner.Instance).ReadAsync(ct).ConfigureAwait(false);
                 if (plan.Target == Did2CompactionPlan.SqlTarget.Application)
                 {
