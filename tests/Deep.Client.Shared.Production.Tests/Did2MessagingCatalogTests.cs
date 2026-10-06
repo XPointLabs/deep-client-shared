@@ -176,7 +176,9 @@ public sealed class Did2MessagingCatalogTests
         var scope = initial.Scope(0);
         try
         {
-            await storage.WriteBatchAsync([new("deep.store.v2.sql-generation", keyRecord), new(ProtectedDid2MessagingSessionCatalog.Slot, exact), new(scope.FloorSlot, Did2MessagingFloor.Empty(scope).Exact)]);
+            await storage.WriteBatchAsync([new("deep.store.v2.sql-generation", keyRecord), new(ProtectedDid2MessagingSessionCatalog.Slot, exact),
+                new(scope.FloorSlot, Did2MessagingFloor.Empty(scope).Exact),
+                new(Did2MessagingHistoryCheckpoint.Slot(scope), Did2MessagingHistoryCheckpoint.RegisteredEmpty(scope).Exact)]);
             for (var iteration = 0; iteration < 2; iteration++)
             {
                 using var opened = await SqliteDeepIdV2AccountGeneration.OpenRegisteredMessagingUnderLeaseAsync(storage, accountPath, Network, Account, scope, default);
@@ -187,6 +189,18 @@ public sealed class Did2MessagingCatalogTests
             Assert.Equal(2, registered.Phase(0));
             var file = Path.Combine(accountPath + ".messaging", Convert.ToHexStringLower(scope.Hash) + ".dms2");
             Assert.False(File.ReadAllBytes(file).AsSpan(0, 16).SequenceEqual("SQLite format 3\0"u8));
+            var sqlBefore = SHA256.HashData(File.ReadAllBytes(file));
+            await storage.DeleteBatchAsync([Did2MessagingHistoryCheckpoint.Slot(scope)]);
+            await Assert.ThrowsAsync<InvalidDataException>(() => SqliteDeepIdV2AccountGeneration.OpenRegisteredMessagingUnderLeaseAsync(storage, accountPath, Network, Account, scope, default));
+            using (var absent = await storage.ReadOwnedAsync(Did2MessagingHistoryCheckpoint.Slot(scope))) Assert.Null(absent);
+            Assert.Equal(sqlBefore, SHA256.HashData(File.ReadAllBytes(file)));
+            using (var unchanged = await new ProtectedDid2MessagingSessionCatalog(storage, Network, Account, Instance).ReadAsync(default))
+                Assert.Equal(SHA256.HashData(registered.Exact.Span), SHA256.HashData(unchanged.Exact.Span));
+            Assert.Equal(Did2MessagingFloor.Empty(scope).Exact.ToArray(),
+                (await new Did2MessagingProtectedCheckpoint(storage, scope).ReadAsync(default)).Exact.ToArray());
+            // Test-only restoration of the exact originally registered empty
+            // root. The production reader above must not recreate it.
+            await storage.WriteBatchAsync([new(Did2MessagingHistoryCheckpoint.Slot(scope), Did2MessagingHistoryCheckpoint.RegisteredEmpty(scope).Exact)]);
             File.Delete(file);
             await Assert.ThrowsAsync<InvalidDataException>(() => SqliteDeepIdV2AccountGeneration.OpenRegisteredMessagingUnderLeaseAsync(storage, accountPath, Network, Account, scope, default));
             Assert.False(File.Exists(file));
@@ -213,11 +227,22 @@ public sealed class Did2MessagingCatalogTests
         var foreign = Path.Combine(messageDir, "keep-unrelated.txt");
         try
         {
-            await storage.WriteBatchAsync([new("deep.store.v2.sql-generation", record), new(ProtectedDid2MessagingSessionCatalog.Slot, exact), new(scope.FloorSlot, Did2MessagingFloor.Empty(scope).Exact)]);
-            using (var sql = SqliteDeepIdV2AccountGeneration.OpenMessagingConnectionForTests(path, Bytes(32, 9), true))
-            { using var cmd = sql.CreateCommand(); cmd.CommandText = "CREATE TABLE unexpected(x);"; cmd.ExecuteNonQuery(); }
-            await Assert.ThrowsAnyAsync<Exception>(() => SqliteDeepIdV2AccountGeneration.OpenRegisteredMessagingUnderLeaseAsync(storage, accountPath, Network, Account, scope, default));
+            await storage.WriteBatchAsync([new("deep.store.v2.sql-generation", record), new(ProtectedDid2MessagingSessionCatalog.Slot, exact),
+                new(scope.FloorSlot, Did2MessagingFloor.Empty(scope).Exact),
+                new(Did2MessagingHistoryCheckpoint.Slot(scope), Did2MessagingHistoryCheckpoint.RegisteredEmpty(scope).Exact)]);
+            using (var key = catalog.ReadKey(0))
+            using (var sql = key.Use(bytes => SqliteDeepIdV2AccountGeneration.OpenMessagingConnectionForTests(path, bytes, true)))
+            {
+                using var cmd = sql.CreateCommand();
+                cmd.CommandText = $"CREATE TABLE unexpected(x); PRAGMA application_id={Did2MessagingSqlJournal.ApplicationId}; PRAGMA user_version={Did2MessagingSqlJournal.SchemaVersion};";
+                cmd.ExecuteNonQuery();
+            }
+            var error = await Assert.ThrowsAsync<InvalidDataException>(() => SqliteDeepIdV2AccountGeneration.OpenRegisteredMessagingUnderLeaseAsync(storage, accountPath, Network, Account, scope, default));
+            Assert.Contains("schema", error.Message, StringComparison.Ordinal);
             using var unchanged = await new ProtectedDid2MessagingSessionCatalog(storage, Network, Account, Instance).ReadAsync(default); Assert.Equal(1, unchanged.Phase(0));
+            Assert.Equal(SHA256.HashData(exact), SHA256.HashData(unchanged.Exact.Span));
+            Assert.Equal(Did2MessagingHistoryCheckpoint.RegisteredEmpty(scope).Exact.ToArray(),
+                (await Did2MessagingHistoryCheckpoint.ReadRegisteredAsync(storage, scope, default)).Exact.ToArray());
             // Test-only foreign sentinel; runtime reset must preserve it.
             File.WriteAllText(foreign, "unrelated");
             SqliteDeepIdV2AccountGeneration.DeleteMessagingAfterExplicitReset(accountPath);

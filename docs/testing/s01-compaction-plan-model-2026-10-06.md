@@ -153,6 +153,46 @@ remain unfinished; no source or whole-S01 acceptance is claimed here.
 | `src/Deep.Client.Shared/Persistence/DeviceV2/ProtectedDid2CompactionPlan.cs` | `8D1424BF7B6764FF2A3B9B3B1002B8B80921D307233523F6B8BCD7B5A8CB703A` |
 | `src/Deep.Client.Shared/Persistence/DeviceV2/SqliteDeepIdV2AccountGeneration.cs` | `CF43343AEDE65A893DD2577A906D132D11EEEA3116869C5F58389C8C831346A9` |
 | `tests/Deep.Client.Shared.Production.Tests/ProtectedDid2CompactionPlanTests.cs` | `1D83C94BD498F98120F14A20ED324B9AEE93CA102B5356633637314891695EA3` |
+
+## Current coupled full gate — running, not accepted
+
+Runtime source is unchanged from Shared `9b5ca981449666576e1560e847e79cfbfea378cb`.
+Only the catalog metadata fixture setup/assertions changed. Both manual producers
+now include the mandatory registered-empty history root in their existing batch.
+The positive restart case additionally removes history and verifies exact refusal,
+no reader initialization and unchanged encrypted SQL/catalog/floor. The hostile
+SQL case uses the actual catalog key and current application/schema generation
+with hostile DDL, so it reaches exact schema rejection rather than stopping on
+missing history or a wrong SQL key. No production repair, reimport or migration
+was added; assertions are stronger.
+
+Corrected focused command adds `FullyQualifiedName~Did2MessagingCatalogTests`
+to the preceding six filters, using the same history-build artifacts path,
+logger/results `s01-prefix-catalog-corrected-focused.trx` under
+`artifacts/s01-prefix-catalog-corrected-focused`:149/0/0 terminal0,
+all149 independently inspected as Passed. TRX SHA256
+`0EFE6B334E81FF3E1B97846BA6AA939DBEFCBFCE142675B117C33431A4E8DEAB`;
+start2026-10-06T13:32:40.3355481+05:00,
+finish2026-10-06T13:32:43.2993258+05:00. This targeted result does not erase the
+first full failure or qualify the entire new host.
+
+```powershell
+dotnet test Deep.Client.Shared.Production.slnx -c Release -m:1 --no-build --no-restore --artifacts-path artifacts/s01-history-checkpoint-build --logger 'trx;LogFileName=s01-prefix-catalog-corrected-full.trx' --logger 'console;verbosity=normal' --results-directory artifacts/s01-prefix-catalog-corrected-full
+```
+
+One corrected full command is running with an explicit terminal exit marker;
+no acceptance before terminal0, complete outcome/catalog/required-case mapping
+and input recheck. Do not rebuild this host or edit its compiled source while
+it runs.40 inputs were frozen: the preceding39 table is retained as historical
+first-full evidence;37 entries remain exact, the two rebuilt host assemblies
+below replace their old hashes, and the catalog fixture is one additional input.
+Whole S01, runtime lifecycle, shipping and physical E2E remain unaccepted.
+
+| Current input delta (Shared-relative) | SHA-256 |
+| --- | --- |
+| `artifacts/s01-history-checkpoint-build/bin/Deep.Client.Shared.Production.Tests/release/Deep.Client.Shared.Production.Tests.dll` | `B4303C9E9A40C30A9A359D8588BDF7944EFA8E2268007448669695C94E185712` |
+| `artifacts/s01-history-checkpoint-build/bin/Deep.Client.Shared.Production.Tests/release/Deep.Client.Shared.dll` | `0897B4228DC7F535BB366E14136C5BF7F8F973910FC1AD9F6DDAE0C92EA3E508` |
+| `tests/Deep.Client.Shared.Production.Tests/Did2MessagingCatalogTests.cs` | `2F728104EC4AFD16A39DB1A7AC8A9F7B9E443810C3CA4F3BD58A7DACC6D9958A` |
 | `tests/Deep.Client.Shared.Production.Tests/ProtectedDeepIdV2AccountOwnerTests.cs` | `A299D4D692F34FB895C7A95AC5375DF7FFCD6D18F310B000B95504269C7C5F9E` |
 | `artifacts/s01-compaction-owner-build/bin/Deep.Client.Shared.Production.Tests/release/Deep.Client.Shared.Production.Tests.dll` | `C3B7A3387103D1959553167D8E109F38322A42B8DCC6CAF8639ECBF4E46D5BCC` |
 | `artifacts/s01-compaction-owner-build/bin/Deep.Client.Shared.Production.Tests/release/Deep.Client.Shared.dll` | `ECB1589C180239C6EE0709A4141774E13EB363191EC080FE8FAD550F635D7097` |
@@ -330,7 +370,7 @@ Actual non-test Production build after final rechecks passed terminal0,
 zero warnings/errors,4.84s. Root documentation174 and sensitive scan23files/0
 findings passed. No production deploy/reset, shipping or device claim follows.
 
-## Current coupled full gate — running, not accepted
+## First coupled full gate — completed FAIL
 
 ```powershell
 dotnet test Deep.Client.Shared.Production.slnx -c Release -m:1 --no-build --no-restore --artifacts-path artifacts/s01-history-checkpoint-build --logger 'trx;LogFileName=s01-prefix-owner-full.trx' --logger 'console;verbosity=normal' --results-directory artifacts/s01-prefix-owner-full
@@ -344,20 +384,29 @@ All130 results were independently inspected as Passed; TRX SHA256
 `F43FD727ED2471F7347484ED6EE3CCEB29ACF0190AE62D67423620B36E5A6BBD`,
 start2026-10-06T12:28:12.6721505+05:00,
 finish2026-10-06T12:28:14.9365351+05:00.
-The full command is running against that same frozen host, with an explicit
-terminal exit marker in its shell output. It is not accepted until terminal
-exit0, independent complete TRX inspection, required-case mapping and unchanged
-input recheck. Do not rebuild/replace this host or edit these compiled inputs
-while it runs. Documentation may record progress without changing that matrix.
+The full command completed677/1/0, terminal1 (explicit shell marker also1).
+Receipt `artifacts/s01-prefix-owner-full/s01-prefix-owner-full.trx`, SHA256
+`8F16ED425E5A8A4122FD63C17BD0E0AABA4299D9315E62EA3734A3A0CA8C7A5D`;
+start2026-10-06T12:28:51.4878965+05:00,
+finish2026-10-06T13:28:46.2282012+05:00. All678 discovery names mapped to exactly
+one result, with no missing/extra or skipped cases. All131 required current
+cases Passed, including the corrected encrypted native recovery fixture.
+The failure is
+`Did2MessagingCatalogTests.RegisteredSqlCreationIsRestartSafeAndInitializedMissingSqlOrFloorCannotReimport`:
+its manual metadata producer omitted the mandatory history root before opening
+SQL. This runtime rejection is required, not a reason to add reader initialization.
+One old unknown-phase case now uses4 instead of3, because3 is the explicit
+durable abort state; unknown-phase rejection and positive/hostile abort cases
+remain required. The catalog failure remains FAIL in this original receipt.
 Required coverage includes all131 preceding focused/native case names plus the
 existing genuine authored-floor/contact/owned send/receive regressions. Committing
 this checkpoint records implementation and frozen inputs, not full-gate
 acceptance or whole S01 closure. Terminal qualification or failures will be
 recorded separately; no Release/main/deploy follows from the checkpoint.
 
-| Frozen current input (Shared-relative) | SHA-256 |
+| Frozen first-full input (Shared-relative) | SHA-256 |
 | --- | --- |
-+| `../deep-protocol/registry/deep-protocol-v1.registry.json` | `A8FF8ABD6D0C857B2A42AF40BB4F1E932BDCB057967B84B6AEDF99AC7B2985AE` |
+| `../deep-protocol/registry/deep-protocol-v1.registry.json` | `A8FF8ABD6D0C857B2A42AF40BB4F1E932BDCB057967B84B6AEDF99AC7B2985AE` |
 | `../docs/architecture/TRANSPORT-NEUTRAL-MESSAGING.md` | `42096B862E1D00E44F85D562ACF76DC97B36772508C7F2201B00C45F637D2D77` |
 | `artifacts/s01-history-checkpoint-build/bin/Deep.Client.Shared.Production.Tests/release/Deep.Client.Shared.dll` | `EF08A9BF205F03C0C32B8BF3FBF430005D54F6F3AE6ABE1A1F90A22E4553ADAC` |
 | `artifacts/s01-history-checkpoint-build/bin/Deep.Client.Shared.Production.Tests/release/Deep.Client.Shared.Production.Tests.dll` | `1DF3F33EE30127B0F479F528DA7B32A13E52908A4FCB7C0D3CE579F8B7F613CB` |
