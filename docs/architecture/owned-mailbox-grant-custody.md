@@ -156,6 +156,39 @@ No SQL, issuer callback, key/floor deletion or replacement request is involved.
 Before/after closure interruption resumes from exact pending/closed custody.
 The codec helpers themselves establish shape, not permission to close.
 
+## Held epoch-exclusion prerequisite
+
+`OpenMailboxEpochExclusionAsync(originalAcquisitionHash, ownSource, ct)` is an
+internal account-owned entry, not an adapter/UI permission. The nonzero32-byte
+hash is copied before asynchronous reads and selects exact original custody.
+The actual owner/source independently obtains current complete network, PMA2
+and own proof; the returned `MailboxEpochExclusion` retains the actual account
+writer lease, current verified account, original root/instance/acquisition,
+current host authority and first monotonic reading. Its constructor is private;
+the producer always performs the native floor and original-custody checks.
+Its epoch/scalar/hash properties are facts, not a separate verification API.
+
+`RecheckAsync(ct)` is the consumer boundary under that same lease: it rechecks
+the exact account-owned directory/network floor, independently current PMA2,
+actual instance and byte-exact grant root. The original generation5 decoder
+still enforces canonical original policy/request/route/ceiling and holder
+custody. Known results additionally use the existing exact route/result binding;
+closed-unresolved custody cannot invent an observed serial/generation. Dispose
+releases the lease and zeros captured grant/instance/acquisition buffers; a
+disposed capability cannot be consumed. Cancellation or failure releases no
+exclusion authority and changes no grant/counter/cleanup state. Normal source
+verification may advance its independently verified directory/network floors
+before the exclusion producer rejects; those floors are not rolled back.
+
+No additional persistent floor/marker or local reader is introduced. On reopen,
+the producer remints only from actual native DNH2/anchor and retained original
+grant root, with independently current signed evidence. The source cannot
+replace an existing full-history floor with a tuple or cache. Semantics, time,
+strict epoch advance and unavailable rollover rules have one owner:
+[TRANSPORT-NEUTRAL-MESSAGING §8.4.2](../../../docs/architecture/TRANSPORT-NEUTRAL-MESSAGING.md#842-grant-and-route-transitions).
+This lease is only a prerequisite for a future dependency-closed protected
+plan; the API has no deletion, mutation, issuer callback or scheduler entry.
+
 The acquisition runtime still creates only an initial candidate. The internal
 closure entry is not autonomous scheduler activation. This layout does not
 activate renewal, retirement/compaction, historic read/ACK

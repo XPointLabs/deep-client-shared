@@ -198,6 +198,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         internal ReadOnlyMemory<byte> WinnerHead => winner?.ExactIssuanceAdh1 ?? ReadOnlyMemory<byte>.Empty;
         internal bool CorruptIssuanceHead { get; set; }
         internal bool WrongResponseNonce { get; set; }
+        internal ulong? ShorterSignedExpiry { get; set; }
         public async ValueTask<ContactRouteAuthorityWireResponse> FetchAsync(ContactRouteAuthorityWireRequest exactPendingRequest,
             DeepIdV2CurrentContactAuthorization authorization, VerifiedOnionNetworkContext network,
             VerifiedXPointNetworkAuthority authority,
@@ -241,7 +242,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             {
                 var threshold = await DeepIdV2ContactRouteAuthor.AuthorThresholdAsync(authorization, network, authority, exactXra1,
                     fixture.CreateRouteWitnesses(), authorization.TrustedLowerUnixSeconds,
-                    BinaryPrimitives.ReadUInt64BigEndian(xra.Field(13).Span), trustedTime, ct);
+                    ShorterSignedExpiry ?? BinaryPrimitives.ReadUInt64BigEndian(xra.Field(13).Span), trustedTime, ct);
                 winner = new(exactPendingRequest.NetworkId.Span, durableNonce32.Span, threshold.Selection.CanonicalBytes.Span,
                     threshold.LiveRoute.CanonicalBytes.Span, threshold.Successor.CanonicalBytes.Span,
                     authorization.Freshness.ExactAdh1.Span);

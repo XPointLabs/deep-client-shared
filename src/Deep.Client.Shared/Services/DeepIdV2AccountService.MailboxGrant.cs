@@ -1,10 +1,31 @@
 using Deep.Client.Shared.Services.ContactV2;
+using Deep.Client.Shared.Persistence.DeviceV2;
 using Deep.Protocol.ContactV2;
 
 namespace Deep.Client.Shared.Services;
 
 public sealed partial class DeepIdV2AccountService
 {
+    // Selector only, not a trusted grant, clock, floor or cleanup permission.
+    // The caller must dispose the returned account lease and recheck it before
+    // consuming its prerequisite in a dependency-closed owner plan.
+    internal async Task<ProtectedDeepIdV2AccountOwner.MailboxEpochExclusion> OpenMailboxEpochExclusionAsync(
+        ReadOnlyMemory<byte> originalAcquisitionHash, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(source); source.RequireAccountOwner(this);
+        if (originalAcquisitionHash.Length != 32 || originalAcquisitionHash.Span.IndexOfAnyExcept((byte)0) < 0)
+            throw new ArgumentException("An exact original acquisition hash is required.", nameof(originalAcquisitionHash));
+        var selector = originalAcquisitionHash.ToArray();
+        try
+        {
+            var fresh = await source.VerifyForOwnPreKeyAuthoringAsync(this, ct).ConfigureAwait(false);
+            using var verifier = OpenVerifier();
+            return await ProtectedDeepIdV2AccountOwner.MailboxEpochExclusion.OpenAsync(owner, TrustedUnixSeconds(), verifier,
+                source, fresh, selector, ct).ConfigureAwait(false);
+        }
+        finally { System.Security.Cryptography.CryptographicOperations.ZeroMemory(selector); }
+    }
+
     internal async Task<VerifiedDeepIdV2MailboxGrant> ResumeOwnPermanentContactRetrieveGrantResultAsync(
         DeepIdV2ContactPathAuthoritySource source, CancellationToken ct = default)
     {

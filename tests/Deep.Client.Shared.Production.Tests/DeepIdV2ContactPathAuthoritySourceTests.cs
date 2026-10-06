@@ -2904,7 +2904,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                     OmitHistoricalPolicy ? [successor.ExactXvp1] : [operational.ExactXvp1, successor.ExactXvp1],
                     [operational.ExactXnv1, successor.ExactXnv1],
                     [operational.ExactXnh1, successor.ExactXnh1], descriptors,
-                    [operational.ExactPmt2, successor.ExactPmt2], MailboxPolicies());
+                    [operational.ExactPmt2, epochSuccessorPmt ?? successor.ExactPmt2], MailboxPolicies());
             return new DeepIdV2NetworkClosureArtifacts(
                 [bootstrap.ExactXna1], [bootstrap.ExactDts1], [operational.ExactXvp1],
                 [operational.ExactXnv1], [operational.ExactXnh1], descriptors, [operational.ExactPmt2],
