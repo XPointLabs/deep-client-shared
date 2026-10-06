@@ -87,6 +87,7 @@ internal sealed class ProtectedDid2MessagingSessionCatalog
         {
             // A registered floor is never recreated or overwritten on retry.
             _ = await new Did2MessagingProtectedCheckpoint(storage, scope).ReadAsync(ct).ConfigureAwait(false);
+            _ = await Did2MessagingHistoryCheckpoint.ReadRegisteredAsync(storage, scope, ct).ConfigureAwait(false);
             var peer = await ReadPeerCredentialAsync(scope, ct).ConfigureAwait(false);
             if (!Fixed(peer.CanonicalBytes.Span, seed.ExactPeerCredential))
                 throw new CryptographicException("The registered peer credential differs from its verified seed.");
@@ -106,6 +107,7 @@ internal sealed class ProtectedDid2MessagingSessionCatalog
             using var validated = Decode(replacement, network, account, instance);
             if (!await storage.CompareExchangeAndInsertAsync(Slot, before.Exact, replacement,
                 [new(scope.FloorSlot, Did2MessagingFloor.Empty(scope).Exact),
+                 new(Did2MessagingHistoryCheckpoint.Slot(scope), Did2MessagingHistoryCheckpoint.RegisteredEmpty(scope).Exact),
                  new(ProtectedDid2MessagingPeerBootstrap.Slot(scope), bootstrap)], ct).ConfigureAwait(false))
                 throw new CryptographicException("Protected messaging registration CAS/insert conflicted; no repair is permitted.");
             return scope;

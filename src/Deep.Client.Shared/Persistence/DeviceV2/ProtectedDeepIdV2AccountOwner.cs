@@ -59,6 +59,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     {
         using var held = await lease.AcquireAsync(cancellationToken)
             .ConfigureAwait(false);
+        await ResumeLocalCompactionUnderLeaseAsync(held, cancellationToken).ConfigureAwait(false);
         return await ReadCurrentUnderLeaseAsync(trustedUnixSeconds,
             mlDsa65, cancellationToken).ConfigureAwait(false);
     }

@@ -1840,7 +1840,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         private static readonly byte[] Boot = Bytes(16, 0xf3);
         private readonly string directory = Path.Combine(Path.GetTempPath(),
             "deep-did2-path-" + Guid.NewGuid().ToString("N"));
-        private readonly InMemoryDeepSecureStorage innerStorage = new();
+        private readonly IDeepSecureStorage innerStorage;
         private readonly InMemoryDeepSecureStorage peerStorage = new();
         private DeepIdV2AccountService? peerAccounts;
         private VerifiedAdc1V2? peerCheckpoint;
@@ -2621,7 +2621,11 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             await accounts.StageOwnInitialPreKeyInventoryAsync(service, inventory);
         }
 
-        private Fixture() => storage = new(innerStorage);
+        private Fixture(bool encryptedStorage = false)
+        {
+            innerStorage = encryptedStorage ? new CompactionDiskFixtureStorage(directory) : new InMemoryDeepSecureStorage();
+            storage = new(innerStorage);
+        }
         internal void FailAfterNextNetworkMarker() => storage.FailAfterNetworkMarker = true;
         internal void FailAfterNextHistoryAnchor() => storage.FailAfterHistoryAnchor = true;
         internal async Task AssertHistoryAnchorEnvelopeAsync(ReadOnlyMemory<byte> history)
@@ -2767,9 +2771,9 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         }
 
         internal static async Task<Fixture> CreateAsync(bool withSuccessor = false, bool expiringHistory = false, bool withPeer = false,
-            bool longMailboxWindow = false)
+            bool longMailboxWindow = false, bool encryptedStorage = false)
         {
-            var fixture = new Fixture();
+            var fixture = new Fixture(encryptedStorage);
             try { await fixture.InitializeAsync(withSuccessor, expiringHistory, withPeer, longMailboxWindow); return fixture; }
             catch { await fixture.DisposeAsync(); throw; }
         }
@@ -2974,7 +2978,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         public ValueTask DisposeAsync()
         {
             if (mailboxSqlBeforePreparation is not null) CryptographicOperations.ZeroMemory(mailboxSqlBeforePreparation);
-            closure?.Dispose(); proofs?.Dispose(); peerProofs?.Dispose(); http?.Dispose(); pq.Dispose(); innerStorage.Dispose(); peerStorage.Dispose();
+            closure?.Dispose(); proofs?.Dispose(); peerProofs?.Dispose(); http?.Dispose(); pq.Dispose(); ((IDisposable)innerStorage).Dispose(); peerStorage.Dispose();
             foreach (var signer in witnesses.Concat(nodes).Append(root)) signer.Dispose();
             if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true);
             Dispose(); return ValueTask.CompletedTask;

@@ -77,14 +77,17 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             throw new InvalidDataException("DID2 messaging SQL has an incompatible/orphan file family.");
         var checkpoint = new Did2MessagingProtectedCheckpoint(storage, scope);
         var floor = await checkpoint.ReadAsync(ct).ConfigureAwait(false);
+        var history = await Did2MessagingHistoryCheckpoint.ReadRegisteredAsync(storage, scope, ct).ConfigureAwait(false);
         if (phase == 1 && !Did2MessagingSessionScope.Fixed(floor.Exact.Span, Did2MessagingFloor.Empty(scope).Exact.Span))
             throw new CryptographicException("Uninitialized DID2 messaging registration has a nonempty floor.");
+        if (phase == 1 && !Did2MessagingSessionScope.Fixed(history.Exact.Span, Did2MessagingHistoryCheckpoint.RegisteredEmpty(scope).Exact.Span))
+            throw new CryptographicException("Uninitialized DID2 messaging registration has a nonempty history checkpoint.");
         ct.ThrowIfCancellationRequested();
         using var key = registered.ReadKey(index);
         SqliteConnection? connection = key.Use(bytes => OpenMessagingConnection(path, bytes, create: phase == 1));
         try
         {
-            var sql = new Did2MessagingSqlJournal(connection, scope);
+            var sql = new Did2MessagingSqlJournal(connection, scope, history);
             if (phase == 1)
             {
                 sql.InitializeOrVerifyRegisteredEmpty(floor);
@@ -125,6 +128,26 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         if (!string.Equals(Path.GetDirectoryName(directory), parent, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("DID2 messaging path escaped its account-private parent.");
         return directory;
+    }
+
+    // Existing-only recovery open: never invokes ordinary reconciliation,
+    // provisions SQL or selects a caller-supplied database/key.
+    internal static SqliteConnection OpenExistingMessagingForCompactionUnderLease(
+        string accountPath, ProtectedDid2MessagingSessionCatalog.Snapshot catalog,
+        Did2MessagingSessionScope scope, HeldDeepIdV2AccountLease held, DeepIdV2AccountFileLease lease)
+    {
+        held.RequireOwner(lease);
+        var index = catalog.FindExact(scope);
+        if (index < 0 || catalog.Phase(index) != 2) throw new InvalidDataException("Local recovery requires an initialized registered session.");
+        var directory = MessagingDirectory(accountPath);
+        if (!Directory.Exists(directory)) throw new InvalidDataException("Local recovery lost its messaging directory.");
+        RequireOrdinaryDirectory(directory);
+        var path = Path.Combine(directory, Convert.ToHexStringLower(scope.Hash) + ".dms2");
+        if (!File.Exists(path) || (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0 ||
+            File.Exists(path + "-wal") || File.Exists(path + "-shm"))
+            throw new InvalidDataException("Local recovery lost its exact ordinary SQL file family.");
+        using var key = catalog.ReadKey(index);
+        return key.Use(bytes => OpenMessagingConnection(path, bytes, create: false));
     }
     private static void RequireOrdinaryDirectory(string path)
     {

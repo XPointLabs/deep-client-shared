@@ -47,12 +47,13 @@ internal sealed class Did2MessagingDurableCustody(Did2MessagingSessionScope scop
         // Parsed/recovered control metadata is not new activation permission.
         // A separate closed retirement owner must stage control transitions.
         if (mutation.Kind is not (1 or 2)) throw new InvalidOperationException("DID2 control mutation requires its separate closed authority.");
-        if (!Did2MessagingSessionScope.Fixed(scope.Exact, mutation.Scope.Exact) || mutation.Successor.Ordinal > Did2MessagingSqlJournal.MaximumEntries)
+        if (!Did2MessagingSessionScope.Fixed(scope.Exact, mutation.Scope.Exact) || mutation.Successor.Ordinal > long.MaxValue)
             throw new InvalidDataException("DID2 mutable custody scope/capacity differs before staging.");
         var stable = await ReconcileAsync(ct).ConfigureAwait(false);
         var expected = mutation.Successor.Cleanup(scope).Stable(scope);
         if (Did2MessagingSessionScope.Fixed(stable.Exact.Span, expected.Exact.Span)) return stable;
         RequireSame(stable, mutation.Predecessor);
+        sql.RequireAppendCapacity(stable);
         await checkpoint.StageAsync(stable, mutation.Successor, mutation.Exact, ct).ConfigureAwait(false);
 #if DEEP_TEST_INTERNALS
         if (mutation.Kind == 2) Did2MessagingCommitTestHooks.Hit(Did2MessagingCommitFailpoint.AfterPending);
@@ -95,8 +96,9 @@ internal sealed class Did2MessagingDurableCustody(Did2MessagingSessionScope scop
         sql.RequireScope(conflict.Scope);
         var stable = await ReconcileAsync(ct).ConfigureAwait(false);
         RequireSame(stable, mutation.Predecessor);
-        if (mutation.Successor.Ordinal > Did2MessagingSqlJournal.MaximumEntries)
+        if (mutation.Successor.Ordinal > long.MaxValue)
             throw new InvalidOperationException("DID2 terminal journal capacity is exhausted.");
+        sql.RequireAppendCapacity(stable);
         var expected = mutation.Successor.Cleanup(scope).Stable(scope);
         await checkpoint.StageAsync(stable, mutation.Successor, mutation.Exact, ct).ConfigureAwait(false);
         ct.ThrowIfCancellationRequested(); sql.Append(mutation); RequireSame(expected, sql.VerifyTip());

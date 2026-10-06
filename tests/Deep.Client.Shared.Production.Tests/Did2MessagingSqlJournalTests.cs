@@ -12,6 +12,7 @@ public sealed class Did2MessagingSqlJournalTests
     [InlineData("extra-table")]
     [InlineData("missing-scope")]
     [InlineData("version")]
+    [InlineData("retired-schema")]
     [InlineData("wal")]
     [InlineData("weak-sync")]
     [InlineData("weak-delete")]
@@ -24,7 +25,7 @@ public sealed class Did2MessagingSqlJournalTests
         {
             using (var connection = SqliteDeepIdV2AccountGeneration.OpenMessagingConnectionForTests(path, key, true))
             {
-                var sql = new Did2MessagingSqlJournal(connection, scope); sql.CreateRegisteredEmpty(floor);
+                var sql = new Did2MessagingSqlJournal(connection, scope, Did2MessagingHistoryCheckpoint.RegisteredEmpty(scope)); sql.CreateRegisteredEmpty(floor);
                 Assert.Equal(floor.Exact.ToArray(), sql.VerifyTip().Exact.ToArray());
                 Assert.Throws<InvalidDataException>(() => sql.ReadVerifiedLatest(floor));
                 Assert.Throws<InvalidDataException>(() => sql.CreateVerifiedTransitionContext(floor, new byte[32].Select(_ => (byte)1).ToArray(), []));
@@ -41,7 +42,7 @@ public sealed class Did2MessagingSqlJournalTests
                 mutate.CommandText = defect switch
                 {
                     "extra-table" => "CREATE TABLE unexpected(value BLOB);", "missing-scope" => "DELETE FROM scope;",
-                    "version" => "PRAGMA user_version=1;", "wal" => "PRAGMA journal_mode=WAL;",
+                    "version" => "PRAGMA user_version=1;", "retired-schema" => "PRAGMA user_version=2;", "wal" => "PRAGMA journal_mode=WAL;",
                     "weak-sync" => "PRAGMA synchronous=NORMAL;", "weak-delete" => "PRAGMA secure_delete=OFF;", _ => "SELECT 1;"
                 };
                 mutate.ExecuteNonQuery();
@@ -50,7 +51,7 @@ public sealed class Did2MessagingSqlJournalTests
             if (defect == "none")
             {
                 using var connection = SqliteDeepIdV2AccountGeneration.OpenMessagingConnectionForTests(path, key, false);
-                Assert.Equal(floor.Exact.ToArray(), new Did2MessagingSqlJournal(connection, scope).VerifyTip().Exact.ToArray());
+                Assert.Equal(floor.Exact.ToArray(), new Did2MessagingSqlJournal(connection, scope, Did2MessagingHistoryCheckpoint.RegisteredEmpty(scope)).VerifyTip().Exact.ToArray());
             }
             Assert.False(File.ReadAllBytes(path).AsSpan(0, 16).SequenceEqual("SQLite format 3\0"u8));
         }
@@ -72,9 +73,9 @@ public sealed class Did2MessagingSqlJournalTests
         {
             var scope = Scope(); var floor = Did2MessagingFloor.Empty(scope);
             using (var connection = SqliteDeepIdV2AccountGeneration.OpenMessagingConnectionForTests(rawPath, key, true))
-                new Did2MessagingSqlJournal(connection, scope).CreateRegisteredEmpty(floor);
+                new Did2MessagingSqlJournal(connection, scope, Did2MessagingHistoryCheckpoint.RegisteredEmpty(scope)).CreateRegisteredEmpty(floor);
             using (var reopened = SqliteDeepIdV2AccountGeneration.OpenMessagingConnectionForTests(rawPath, key, false))
-                Assert.Equal(floor.Exact.ToArray(), new Did2MessagingSqlJournal(reopened, scope).VerifyTip().Exact.ToArray());
+                Assert.Equal(floor.Exact.ToArray(), new Did2MessagingSqlJournal(reopened, scope, Did2MessagingHistoryCheckpoint.RegisteredEmpty(scope)).VerifyTip().Exact.ToArray());
             Assert.False(File.ReadAllBytes(rawPath).AsSpan(0, 16).SequenceEqual("SQLite format 3\0"u8));
             Assert.Equal((2, 1, "delete"), SqliteDeepIdV2AccountGeneration.ReadConnectionPolicyForTests(rawPath, key, false));
             Assert.ThrowsAny<Exception>(() =>
@@ -121,5 +122,55 @@ public sealed class Did2MessagingSqlJournalTests
         foreach (var offset in new[] { 20, 52, 92, 132, 172, 212, 244, 276, 308, 340, 372 }) bytes.AsSpan(offset, 32).Fill(checked((byte)(offset % 251 + 1)));
         foreach (var offset in new[] { 84, 124, 164, 204 }) BinaryPrimitives.WriteUInt64BigEndian(bytes.AsSpan(offset), 1);
         return Did2MessagingSessionScope.RestoreMetadata(bytes);
+    }
+
+    [Theory]
+    [InlineData("scope-size")]
+    [InlineData("scope-type")]
+    [InlineData("ratchet-size")]
+    public void CompleteProjectionRejectsHostileCellSizeAndTypeBeforeMaterialization(string defect)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "did2-msg-projection-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory); var path = Path.Combine(directory, "session.dms2"); var key = RandomNumberGenerator.GetBytes(32);
+        try
+        {
+            var scope = Scope();
+            using var connection = SqliteDeepIdV2AccountGeneration.OpenMessagingConnectionForTests(path, key, true);
+            var sql = new Did2MessagingSqlJournal(connection, scope, Did2MessagingHistoryCheckpoint.RegisteredEmpty(scope));
+            sql.CreateRegisteredEmpty(Did2MessagingFloor.Empty(scope));
+            using var corrupt = connection.CreateCommand();
+            corrupt.CommandText = "PRAGMA ignore_check_constraints=ON; " + (defect switch
+            {
+                "scope-size" => "UPDATE scope SET exact_scope=zeroblob(405);",
+                "scope-type" => "UPDATE scope SET exact_scope=CAST(zeroblob(404) AS TEXT);",
+                "ratchet-size" => "INSERT INTO ratchet VALUES(1,zeroblob(2097153));",
+                _ => throw new InvalidOperationException()
+            });
+            corrupt.ExecuteNonQuery();
+            Assert.Throws<InvalidDataException>(() => sql.ReadCompleteCompactionProjection());
+        }
+        finally
+        { CryptographicOperations.ZeroMemory(key); foreach (var file in Directory.EnumerateFiles(directory)) File.Delete(file); Directory.Delete(directory); }
+    }
+
+    [Fact]
+    public void CompleteProjectionCannotHideAnUnexpectedZeroOrdinalJournalRow()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "did2-msg-zero-prefix-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory); var path = Path.Combine(directory, "session.dms2"); var key = RandomNumberGenerator.GetBytes(32);
+        try
+        {
+            var scope = Scope();
+            using var connection = SqliteDeepIdV2AccountGeneration.OpenMessagingConnectionForTests(path, key, true);
+            var sql = new Did2MessagingSqlJournal(connection, scope, Did2MessagingHistoryCheckpoint.RegisteredEmpty(scope));
+            sql.CreateRegisteredEmpty(Did2MessagingFloor.Empty(scope)); var before = sql.ReadCompleteCompactionProjection();
+            using var corrupt = connection.CreateCommand();
+            corrupt.CommandText = "PRAGMA ignore_check_constraints=ON; INSERT INTO journal VALUES(0,zeroblob(32),zeroblob(32),zeroblob(608));";
+            corrupt.ExecuteNonQuery();
+            Assert.NotEqual(before, sql.ReadCompleteCompactionProjection());
+            Assert.Throws<CryptographicException>(() => sql.VerifyTip());
+        }
+        finally
+        { CryptographicOperations.ZeroMemory(key); foreach (var file in Directory.EnumerateFiles(directory)) File.Delete(file); Directory.Delete(directory); }
     }
 }

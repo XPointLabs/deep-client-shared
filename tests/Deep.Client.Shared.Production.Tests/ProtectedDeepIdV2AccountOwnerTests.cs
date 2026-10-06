@@ -8,6 +8,66 @@ namespace Deep.Client.Shared.Production.Tests;
 public sealed class ProtectedDeepIdV2AccountOwnerTests
 {
     [Fact]
+    public async Task ActualAccountRegistersCompactionAndRejectsMissingForeignOrActiveStateBeforeReopen()
+    {
+        if (!SupportedProvider()) return;
+        var lockPath = NewLockPath();
+        try
+        {
+            using var storage = new InMemoryDeepSecureStorage();
+            var network = Enumerable.Range(1, 16).Select(value => (byte)value).ToArray();
+            using var verifier = DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess();
+            var owner = NewOwner(storage, network, lockPath);
+            using var created = await owner.CreateFreshAsync("Compaction registration QA", 1_900_000_000, verifier, default);
+            var instance = await SqliteDeepIdV2AccountGeneration.ReadAccountInstanceUnderLeaseAsync(storage,
+                network, created.AccountId, default);
+            using var registered = await ProtectedDid2CompactionPlan.ReadRegisteredAsync(storage,
+                network, created.AccountId, instance, default);
+            Assert.Equal(0, registered.Phase); Assert.Equal(1UL, registered.Revision);
+            Assert.Equal(Did2CompactionPlan.HeaderBytes, registered.Exact.Length);
+            var databaseDigest = SHA256.HashData(File.ReadAllBytes(lockPath + ".dsv2"));
+            await storage.DeleteBatchAsync([Did2CompactionPlan.Slot]);
+            await Assert.ThrowsAsync<InvalidDataException>(() => owner.ReadCurrentAsync(1_900_000_000, verifier, default).AsTask());
+            using (var missing = await storage.ReadOwnedAsync(Did2CompactionPlan.Slot)) Assert.Null(missing);
+            Assert.Equal(databaseDigest, SHA256.HashData(File.ReadAllBytes(lockPath + ".dsv2")));
+            // Fixture restoration only: the production reader has no initializer.
+            await storage.WriteBatchAsync([new(Did2CompactionPlan.Slot, registered.Exact)]);
+            foreach (var offset in new[] { 0, 16, 32, 64 })
+            {
+                var hostile = registered.Exact.ToArray(); hostile[offset] ^= 0x80;
+                Assert.True(await storage.CompareExchangeAsync(Did2CompactionPlan.Slot, registered.Exact, hostile));
+                await Assert.ThrowsAsync<InvalidDataException>(() => owner.ReadCurrentAsync(1_900_000_000, verifier, default).AsTask());
+                Assert.Equal(databaseDigest, SHA256.HashData(File.ReadAllBytes(lockPath + ".dsv2")));
+                Assert.True(await storage.CompareExchangeAsync(Did2CompactionPlan.Slot, hostile, registered.Exact));
+            }
+            byte[] Value(byte value) => Enumerable.Repeat(value, 32).ToArray();
+            var successor = Value(44);
+            // Deliberately injected active metadata, not authenticated selection
+            // or deletion authority. It must fence the real ordinary owner.
+            using var preparation = registered.Prepare(Did2CompactionPlan.SqlTarget.ProtectedOnly,
+                Value(11), Value(12), new byte[32], new byte[32],
+                [new(Did2CompactionPlan.RootKind.Grant, Value(13), Value(14), SHA256.HashData(successor), false, successor),
+                 new(Did2CompactionPlan.RootKind.AccountRegistration, Value(15), Value(16), Value(16), true, default),
+                 new(Did2CompactionPlan.RootKind.NativeFence, Value(17), Value(18), Value(18), true, default)],
+                [new(Did2CompactionPlan.Disposition.ReplayScope, Value(19), Value(20))]);
+            var lease = new DeepIdV2AccountFileLease(lockPath);
+            using (var held = await lease.AcquireAsync(default))
+                await new ProtectedDid2CompactionPlan(storage, lease, network, created.AccountId.Span, instance)
+                    .StageAsync(registered, preparation, held, default);
+            await Assert.ThrowsAsync<InvalidDataException>(() => NewOwner(storage, network, lockPath)
+                .ReadCurrentAsync(1_900_000_000, verifier, default).AsTask());
+            using var retained = await storage.ReadOwnedAsync(Did2CompactionPlan.Slot);
+            Assert.Equal(preparation.Plan.Exact.ToArray(), retained!.Use(bytes => bytes.ToArray()));
+            Assert.Equal(databaseDigest, SHA256.HashData(File.ReadAllBytes(lockPath + ".dsv2")));
+            await owner.ResetExplicitlyAsync(default);
+            using var removed = await storage.ReadOwnedAsync(Did2CompactionPlan.Slot); Assert.Null(removed);
+            using var removedPart = await storage.ReadOwnedAsync(ProtectedDid2CompactionPlan.PartSlot(0)); Assert.Null(removedPart);
+            CryptographicOperations.ZeroMemory(instance);
+        }
+        finally { DeleteOwnerArtifacts(lockPath); }
+    }
+
+    [Fact]
     public async Task Did2ApplicationRegistrationInitializesRecoversEmptyAndNeverRecreatesLostSql()
     {
         if (!SupportedProvider()) return;

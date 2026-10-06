@@ -127,6 +127,7 @@ internal static partial class SqliteDeepIdV2AccountGeneration
                 var emptyGrants = ProtectedDid2MailboxGrantJournal.Empty(networkId.Span, accountId.Span, record.AsSpan(56, 32));
                 var emptyMailboxSends = ProtectedDid2MailboxSendJournal.Empty(networkId.Span, accountId.Span, record.AsSpan(56, 32));
                 var emptyMailboxReads = ProtectedDid2MailboxReadJournal.Empty(networkId.Span, accountId.Span, record.AsSpan(56, 32));
+                using var emptyCompaction = Did2CompactionPlan.RegisteredEmpty(networkId.Span, accountId.Span, record.AsSpan(56, 32));
                 try
                 {
                     await storage.WriteBatchAsync(
@@ -144,7 +145,8 @@ internal static partial class SqliteDeepIdV2AccountGeneration
                          new DeepSecureStorageWrite(ProtectedDid2ContactRouteJournal.Slot, emptyRoutes),
                          new DeepSecureStorageWrite(ProtectedDid2MailboxGrantJournal.Slot, emptyGrants),
                          new DeepSecureStorageWrite(ProtectedDid2MailboxSendJournal.Slot, emptyMailboxSends),
-                         new DeepSecureStorageWrite(ProtectedDid2MailboxReadJournal.Slot, emptyMailboxReads)],
+                         new DeepSecureStorageWrite(ProtectedDid2MailboxReadJournal.Slot, emptyMailboxReads),
+                         new DeepSecureStorageWrite(Did2CompactionPlan.Slot, emptyCompaction.Exact)],
                         cancellationToken).ConfigureAwait(false);
                 }
                 finally
@@ -167,6 +169,10 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             }
             // Initialized atomically with the instance key before publication.
             // An older/missing journal requires explicit QA reset, never repair.
+            using var compaction = await ProtectedDid2CompactionPlan.ReadRegisteredAsync(storage,
+                networkId, accountId, record.AsMemory(56, 32), cancellationToken).ConfigureAwait(false);
+            if (compaction.Phase != 0)
+                throw new InvalidDataException("An active compaction plan owns recovery; ordinary account reopen cannot bypass it.");
             using var application = await storage.ReadOwnedAsync(ApplicationStateSlot, cancellationToken)
                 .ConfigureAwait(false) ?? throw new InvalidDataException(
                     "The protected application registration is absent; explicit local reset is required.");
@@ -293,6 +299,32 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         {
             ValidateRecord(record, network.Span, account.Span);
             return record.Slice(56, 32).ToArray();
+        });
+    }
+
+    internal static async Task<OwnedDeepSecret> ReadCompactionRegistrationUnderLeaseAsync(IDeepSecureStorage storage,
+        ReadOnlyMemory<byte> network, ReadOnlyMemory<byte> account, CancellationToken ct)
+    {
+        using var owner = await storage.ReadOwnedAsync(KeySlot, ct).ConfigureAwait(false) ??
+            throw new InvalidDataException("Compaction lost its protected account registration.");
+        return owner.Use(record =>
+        {
+            ValidateRecord(record, network.Span, account.Span);
+            return new OwnedDeepSecret(record);
+        });
+    }
+    internal static string CompactionRegistrationSlot => KeySlot;
+    // Local recovery selector only: this does not mint fresh account authority.
+    internal static async Task<(byte[] Account, byte[] Instance)> ReadCompactionOwnerScopeUnderLeaseAsync(
+        IDeepSecureStorage storage, ReadOnlyMemory<byte> network, CancellationToken ct)
+    {
+        using var owner = await storage.ReadOwnedAsync(KeySlot, ct).ConfigureAwait(false) ??
+            throw new InvalidDataException("Local compaction lost its account registration.");
+        return owner.Use(record =>
+        {
+            if (record.Length != KeyRecordLength) throw new InvalidDataException("Local compaction registration has another generation.");
+            ValidateRecord(record, network.Span, record.Slice(24, 32));
+            return (record.Slice(24, 32).ToArray(), record.Slice(56, 32).ToArray());
         });
     }
 
