@@ -8,6 +8,15 @@ namespace Deep.Client.Shared.Production.Tests;
 
 public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 {
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public async Task Did2RetirementDependencies_ChangedOrMissingRootRejectsWithoutGrantMutation(int dependencyFault)
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        await fixture.CheckEpochExclusionAsync(unresolved: true, advanceEpoch: true, fault: -1, dependencyFault);
+    }
+
     [Fact]
     public async Task Did2ReplayFence_MissingNativeFloorRejectsWithoutInitialization()
     {
@@ -111,7 +120,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             epochSuccessorPmt = ContactCodec.Decode("PMT2", exact).CanonicalBytes;
         }
 
-        internal async Task CheckEpochExclusionAsync(bool unresolved, bool advanceEpoch, int fault)
+        internal async Task CheckEpochExclusionAsync(bool unresolved, bool advanceEpoch, int fault, int dependencyFault = -1)
         {
             var plan = await accounts.ReadOwnPermanentContactPlanAsync();
             using var threshold = new OwnedRouteThreshold(this) { ShorterSignedExpiry = 1_200 };
@@ -169,6 +178,59 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 Assert.True(capturedFence.Value.Guard);
                 Assert.Empty(capturedFence.Value.Successor.ToArray());
                 Assert.Equal(capturedFence.Value.Before.ToArray(), capturedFence.Value.After.ToArray());
+                var dependencies = await exclusion.CaptureRetirementDependenciesAsync();
+                Assert.Equal(new[] { Did2CompactionPlan.RootKind.Ordinary, Did2CompactionPlan.RootKind.Send,
+                    Did2CompactionPlan.RootKind.Grant, Did2CompactionPlan.RootKind.Read, Did2CompactionPlan.RootKind.SessionCatalog,
+                    Did2CompactionPlan.RootKind.Attachment, Did2CompactionPlan.RootKind.AccountRegistration, Did2CompactionPlan.RootKind.NativeFence },
+                    dependencies.Guards.Select(guard => guard.Kind));
+                Assert.Equal(SHA256.HashData(exactRoot), dependencies.Guards[2].Digest.ToArray());
+                Assert.Equal(Did2CompactionPlan.RootKind.NativeFence, dependencies.Guards[^1].Kind);
+                Assert.Equal(capturedFence.Value.Before.ToArray(), dependencies.Guards[^1].Digest.ToArray());
+                Assert.True(dependencies.Dependencies.HasFlag(ProtectedDeepIdV2AccountOwner.MailboxEpochExclusion.RetirementDependency.RetainedRetrievePath));
+                Assert.Equal(!unresolved, dependencies.Dependencies.HasFlag(
+                    ProtectedDeepIdV2AccountOwner.MailboxEpochExclusion.RetirementDependency.UnresolvedReceiptOrObject));
+                await dependencies.RecheckAsync();
+                var callerCopy = dependencies.Guards;
+                Assert.True(System.Runtime.InteropServices.MemoryMarshal.TryGetArray(callerCopy[0].Digest, out var exposed));
+                Array.Clear(exposed.Array!, exposed.Offset, exposed.Count); // Never writes the captured guard.
+                await dependencies.RecheckAsync();
+                if (dependencyFault >= 0)
+                {
+                    using var originalSend = await storage.ReadOwnedAsync(ProtectedDid2MailboxSendJournal.Slot) ?? throw new InvalidDataException();
+                    if (dependencyFault == 0)
+                    {
+                        using var state = originalSend.Use(bytes => ProtectedDid2MailboxSendJournal.Decode(bytes, Network, exactRoot.AsSpan(28, 32), exactRoot.AsSpan(60, 32)));
+                        state.Revision++;
+                        var changed = ProtectedDid2MailboxSendJournal.Encode(state, Network, exactRoot.AsSpan(28, 32), exactRoot.AsSpan(60, 32));
+                        var originalBytesForCas = originalSend.Use(bytes => bytes.ToArray());
+                        try { Assert.True(await storage.CompareExchangeAsync(ProtectedDid2MailboxSendJournal.Slot, originalBytesForCas, changed)); }
+                        finally { CryptographicOperations.ZeroMemory(changed); CryptographicOperations.ZeroMemory(originalBytesForCas); }
+                        await Assert.ThrowsAsync<CryptographicException>(() => dependencies.RecheckAsync());
+                        var reselected = await exclusion.CaptureRetirementDependenciesAsync();
+                        Assert.NotEqual(dependencies.Guards[1].Digest.ToArray(), reselected.Guards[1].Digest.ToArray());
+                    }
+                    else
+                    {
+                        await storage.DeleteBatchAsync([ProtectedDid2MailboxSendJournal.Slot]);
+                        await Assert.ThrowsAsync<InvalidDataException>(() => dependencies.RecheckAsync());
+                        await Assert.ThrowsAsync<InvalidDataException>(() => exclusion.CaptureRetirementDependenciesAsync());
+                    }
+                    // Restore only this injected fixture fault; not a runtime repair/recovery assertion.
+                    var originalBytes = originalSend.Use(bytes => bytes.ToArray());
+                    try
+                    {
+                        using var currentSend = await storage.ReadOwnedAsync(ProtectedDid2MailboxSendJournal.Slot);
+                        if (currentSend is null) await storage.WriteBatchAsync([new(ProtectedDid2MailboxSendJournal.Slot, originalBytes)]);
+                        else
+                        {
+                            var expected = currentSend.Use(bytes => bytes.ToArray());
+                            try { Assert.True(await storage.CompareExchangeAsync(ProtectedDid2MailboxSendJournal.Slot, expected, originalBytes)); }
+                            finally { CryptographicOperations.ZeroMemory(expected); }
+                        }
+                    }
+                    finally { CryptographicOperations.ZeroMemory(originalBytes); }
+                    await dependencies.RecheckAsync();
+                }
                 if (fault == 0) await storage.DeleteBatchAsync([ProtectedDid2MailboxGrantJournal.Slot]);
                 if (fault == 1) await storage.DeleteBatchAsync([storage.LastHistoryAnchorSlot!]);
                 if (fault == 2) Sample--;
@@ -177,16 +239,19 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 {
                     await Assert.ThrowsAsync<CryptographicException>(() => exclusion.RecheckAsync());
                     await Assert.ThrowsAsync<CryptographicException>(() => exclusion.CaptureDurableReplayFenceAsync());
+                    await Assert.ThrowsAsync<CryptographicException>(() => dependencies.RecheckAsync());
                 }
                 else
                 {
                     using var canceled = new CancellationTokenSource(); canceled.Cancel();
                     await Assert.ThrowsAnyAsync<OperationCanceledException>(() => exclusion.RecheckAsync(canceled.Token));
                     await Assert.ThrowsAnyAsync<OperationCanceledException>(() => exclusion.CaptureDurableReplayFenceAsync(canceled.Token));
+                    await Assert.ThrowsAnyAsync<OperationCanceledException>(() => dependencies.RecheckAsync(canceled.Token));
                     await exclusion.RecheckAsync();
                     exclusion.Dispose();
                     await Assert.ThrowsAsync<ObjectDisposedException>(() => exclusion.RecheckAsync());
                     await Assert.ThrowsAsync<ObjectDisposedException>(() => exclusion.CaptureDurableReplayFenceAsync());
+                    await Assert.ThrowsAsync<ObjectDisposedException>(() => dependencies.RecheckAsync());
                 }
             }
             if (fault == 1 && advanceEpoch)

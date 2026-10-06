@@ -6,6 +6,60 @@ The only active NEXT-SPRINT block remains the dependency-closed retirement
 fence. Semantic owner: [TRANSPORT-NEUTRAL-MESSAGING §8.4.2–8.4.4](../../../docs/architecture/TRANSPORT-NEUTRAL-MESSAGING.md#842-grant-and-route-transitions).
 Local API mapping: [owned mailbox grant custody](../architecture/owned-mailbox-grant-custody.md#native-replay-fence-guard-readback).
 
+## Current held dependency-capture checkpoint
+
+The same S01 block now captures and rechecks eight actual dependency roots under
+the held epoch exclusion. The [mapping](../architecture/owned-mailbox-grant-custody.md#held-retirement-dependency-capture)
+lists the observed obligations and missing closure. This snapshot is not a
+serialized 'settled' flag, eligibility proof or retirement plan. It has no SQL,
+staging, deletion or signing entry. Known outcomes/retained Retrieve paths remain
+pinned rather than inferred complete from empty work. A complete retirement
+owner/recovery profile and full current Shared gate remain required; this
+checkpoint does not close S01 or inherit the older687-case acceptance.
+
+```powershell
+dotnet build Deep.Client.Shared.Production.slnx -c Release -m:1 --no-restore --artifacts-path artifacts/s01-native-fence-build
+dotnet test Deep.Client.Shared.Production.slnx -c Release -m:1 --no-build --no-restore --artifacts-path artifacts/s01-native-fence-build --filter 'FullyQualifiedName~Did2EpochExclusion_|FullyQualifiedName~Did2ReplayFence_|FullyQualifiedName~Did2RetirementDependencies_|FullyQualifiedName~DurableHistory_|FullyQualifiedName~AccountNetworkFloor_RejectsSqlRollbackCorruptionDeletionAndRepin|FullyQualifiedName~NetworkMarkerCommittedBeforeSqlCrash_RejectsEmptyFloorAndReopen' --logger 'trx;LogFileName=s01-retirement-dependencies-corrected.trx' --logger 'console;verbosity=minimal' --results-directory artifacts/s01-retirement-dependencies-corrected
+```
+
+Build: terminal0, zero warnings/errors. Focused regression: **25/0/0**, observed
+terminal0 with `S01_RETIREMENT_DEPENDENCIES_CORRECTED_TERMINAL_EXIT=0`. Start
+`2026-10-06T19:38:46.3678362+05:00`, finish
+`2026-10-06T19:41:44.6549507+05:00`. Receipt:
+`artifacts/s01-retirement-dependencies-corrected/s01-retirement-dependencies-corrected.trx`,
+SHA256 `5EBC9E75930838404F2AC4287B3CAD5CD266BD9AB57D473122D78F00F5909495`.
+This includes the previous23-case selection, updated to consume the held
+snapshot, and two changed/missing-root cases. Caller mutation of exported
+metadata cannot alter internal commitments; cancellation/disposal and existing
+original-root/anchor/clock/proof faults still reject.
+
+Changed source/test inputs at this run:
+
+| Shared-relative file | SHA256 |
+| --- | --- |
+| `src/Deep.Client.Shared/Persistence/DeviceV2/ProtectedDeepIdV2AccountOwner.MailboxEpochExclusion.cs` | `CAE769CC2B41F173BC126CE0B7102DD7660C85997E5EE92C9A86BB61299C93C2` |
+| `src/Deep.Client.Shared/Persistence/DeviceV2/ProtectedDeepIdV2AccountOwner.MailboxRetirement.cs` | `440FB423A3DEAA3501612163AA19BAB9DF7716478179E1ADB41CD3B546EBB4F1` |
+| `tests/Deep.Client.Shared.Production.Tests/DeepIdV2ContactPathAuthoritySourceTests.EpochExclusion.cs` | `07926975483751973CC0F5FCE4CD30819A49F226BEA5C60130032879703ACA90` |
+
+Current host `Deep.Client.Shared.Production.Tests.dll` SHA256
+`BB226B5E3E844B846BC2484CA766E0877A5A4923C0285AE5DB29216690D83424`;
+current host `Deep.Client.Shared.dll` SHA256
+`5C8F809D8C3529EB0806740CA99B05AC186FA57D048F999C407542C03B976A32`.
+Host directory is the build directory listed below; those older host hashes
+identify the earlier run, not these rebuilt binaries.
+
+Preserved failure: the first dependency regression completed25 total,24 passed,
+1 failed, terminal1. Receipt
+`artifacts/s01-retirement-dependencies/s01-retirement-dependencies.trx`, SHA256
+`8AAEF1A067EC236713CF9A1498414DF4CCF07373761EFC4719C12CB0251985BC`.
+The changed-root fixture used insert-only WriteBatch for an existing secure
+slot; it failed before the intended rejection assertion. Injection/restoration
+now uses exact CAS, preserving both storage semantics and the rejection assertion.
+Only the deliberate test fault is restored; this is not runtime repair evidence.
+An earlier build found two CS0103 errors from a nonexistent fixture account
+field; the fixture now uses its actual already-decoded grant-root account/instance.
+No failing product assertion was removed or weakened.
+
 ## Implemented boundary
 
 - Capture an unchanged NativeFence plan guard from the existing committed DNH2

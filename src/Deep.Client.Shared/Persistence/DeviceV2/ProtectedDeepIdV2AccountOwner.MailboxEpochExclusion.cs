@@ -13,7 +13,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
 {
     // A held, non-serializable prerequisite for a future dependency-closed
     // compaction plan. It is not a deletion permission or non-issuance result.
-    internal sealed class MailboxEpochExclusion : IDisposable
+    internal sealed partial class MailboxEpochExclusion : IDisposable
     {
         private readonly ProtectedDeepIdV2AccountOwner owner;
         private readonly HeldDeepIdV2AccountLease held;

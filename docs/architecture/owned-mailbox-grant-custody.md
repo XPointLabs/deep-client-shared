@@ -216,6 +216,33 @@ capturing this guard alone cannot remove grant/send/read/ACK or receipt state.
 The [focused checkpoint](../testing/s01-native-replay-fence-2026-10-06.md)
 records the tested source boundary. Full S01 retirement remains unaccepted.
 
+## Held retirement dependency capture
+
+`MailboxEpochExclusion.CaptureRetirementDependenciesAsync(ct)` reads actual
+ordinary, send, grant, read, session-catalog, attachment and account-registration
+roots plus the native replay fence. The seven protected roots are canonically
+decoded/validated under the same real account lease; the grant root remains the
+exclusion's exact original root. The returned private-constructed snapshot is
+bound to that live exclusion, not reconstructed from a caller's root/digest.
+Exported guard metadata is copied and cannot mutate the captured commitments.
+
+`RetirementDependencies.RecheckAsync(ct)` rechecks current epoch exclusion and
+every byte-exact captured root/native fence. Changed or missing custody, expired
+proof, discontinuous clock, cancellation or a disposed exclusion rejects before
+any effect. No plan is staged, no SQL is deleted and no holder/floor is removed.
+
+Observed dependency reasons distinguish acquisition links, matching send work
+and floors, active read/ACK work, read floors/traversal, ordinary commands and
+attachment work. Ordinary/attachment roots currently lack a complete
+grant-to-receipt/object index, so their nonempty work is not assumed unrelated.
+A known winner or existing session remains unresolved for receipt/object
+closure; Retrieve retains a path obligation even for an unresolved acquisition.
+Empty journals or an empty poll are not remote non-issuance/non-delivery proof.
+These reasons are transient local observations, not serialized settlement flags.
+Even `None` is not retirement eligibility or a deletion capability: the actual
+closed retirement profile still needs complete SQL/native/receipt/object
+readbacks and the §8.4.4 retained-route fence. Those consumers remain unfinished.
+
 The acquisition runtime still creates only an initial candidate. The internal
 closure entry is not autonomous scheduler activation. This layout does not
 activate renewal, retirement/compaction, historic read/ACK
