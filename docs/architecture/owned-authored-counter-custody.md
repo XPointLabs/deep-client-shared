@@ -66,6 +66,65 @@ Pending-text projection checks the initialized catalog for all floor scopes and
 reconciles SQL even with an empty working set. Parsed scope metadata remains a
 selector/fact, not independently current endpoint or signing authority.
 
+## Compaction dependency/API target (not runtime activation)
+
+The sole semantics are the dependency-closed batch/recovery contract in
+[§8.4.3](../../../docs/architecture/TRANSPORT-NEUTRAL-MESSAGING.md#843-compaction-and-boundedness).
+The following maps it to current consumers; it is not another outbox, an
+implemented plan codec or permission to delete current rows.
+
+| Current custody / consumer | Required integration consequence |
+| --- | --- |
+| `ProtectedDid2DirectTextJournal`, `ReconcileOwnedTextOutboxAsync` | Keep every authored floor. SQL currently requires each retained stable command row; coordinated outbox cleanup must replace this expectation only for exact selected dispositions, preserving separately verified history and receipt work. |
+| `ProtectedDid2MailboxSendJournal`, `DeliverOwnedMailboxAsync` | Keep replay enrollment/high counters and original request/body/grant/ciphertext dependencies. Prepared is not settled. A verified ordinary Store phase does not authorize deleting unknown transport work. |
+| `ProtectedDid2MailboxGrantJournal`, `MailboxEpochExclusion` | Pin original winners/acquisitions referenced by send/read/ACK or object horizons. Recheck held exclusion and complete dependency closure before committing a retirement fence; changed grant roots cannot be hidden behind their old digest. |
+| `ProtectedDid2MailboxReadJournal`, owned Retrieve/ACK | Pin the active cycle through authenticated materialization, SQL outcome/traversal agreement and ACK completion. Keep counter/traversal floors even after clearing a cycle. |
+| `Did2MessagingSqlJournal`, `Did2MessagingFloor`, session catalog | Current schema2 verifies all journal-bound events from the registered empty floor. Prefix cleanup requires an independently protected checkpoint and retained-history verifier; an SQL-only checkpoint or renumbered ordinal is forbidden. |
+| Owned local-history/contact/acceptance consumers | Preserve `initial_events`, verified receive/send acceptance, peer bootstrap and catalog binding, or replace them through the same authenticated checkpoint contract. Deleting a ratchet journal row cannot silently invalidate a previously accepted contact. |
+| Owned attachment journal/application store | Outbox-only payload/key disposition must not delete keys still required by a retained offer, transfer or local-history object. |
+
+The target owner API has three responsibilities, under the same actual account
+lease: capture/select an exact dependency-closed batch from real protected/SQL
+custody; resume only its stored predecessor/successor transition; and prevent
+ordinary mutation/projection from bypassing an active plan. There is no public
+`CanDelete` setter, caller-supplied verified tuple, replacement clock or transport
+callback. Parsed metadata is not the owned mutation capability.
+
+Each batch names one database selected through the existing protected account/
+scope registration, never a caller file path. Guards for other databases/roots
+remain unchanged. One SQL transaction commits selected outbox cleanup plus any
+required counters/dedup/history/receipt effects. Checkpoint cleanup of a ratchet
+database is a separate batch, not an implied cross-database transaction.
+
+Recovery classifies only exact before/after SQL and an ordered prefix of root
+adoptions. It must verify complete effects, not counts or missing rows. Aborting
+before SQL requires every predecessor unchanged; after SQL the same plan must
+finish adoption before clearing. SQL rollback, foreign instance, missing root,
+changed dependency or mixed non-prefix adoption rejects without repair. Neither
+retry nor cancellation invokes a signer/encryptor or reconstructs deleted data.
+
+Before S04 activation, the mandatory plan registration/closed local generation,
+bounded byte layout, checkpoint/history commitments and exact owner API must be
+implemented together with every affected reader. No optional missing-plan
+fallback is authorized. Positive and hostile/fault fixtures must cover the
+actual account, SQLCipher and protected storage, all handovers, cancellation,
+cold reopen and capacity; codec-only fixtures cannot qualify deletion. These
+APIs/layout and fixtures remain unfinished; this mapping does not close S01.
+
+Contract review2026-10-06: normative source normalized SHA256
+`42096b862e1d00e44f85d562acf76dc97b36772508c7f2201b00c45f637d2d77`.
+Protocol repin changes only this source hash and its two derived registry
+identities; allocations, all175 anchors and production inventory are unchanged.
+Strict generator/registry checks pass; actual Protocol Release build has zero
+warnings/errors. Focused registry/parity12/0/0 terminal0, independently mapped
+to Passed in `artifacts/s01-compaction-contract-registry/s01-compaction-contract-registry.trx`
+(Protocol-relative), SHA256
+`8CEBFDCA1EE00DEFB921858281792CF00C2E38B1913225B6917377886AA112F3`;
+start09:59:09.0349240+05, finish09:59:10.2355120+05.
+Root documentation174 and governance helper22/0/0 pass. This is contract-only
+evidence, not a fresh full Shared/package/installed or cleanup qualification;
+the authored-floor591 receipt belongs to its own frozen Protocol4fa9f95 inputs.
+
 ## Remaining closure
 
 There is no production cleanup, floor unenrollment, compaction plan or reset
