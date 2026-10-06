@@ -8,6 +8,30 @@ using Deep.Protocol.ApplicationCore;
 namespace Deep.Client.Shared.Services;
 public sealed partial class DeepIdV2AccountService
 {
+    internal async Task CompactOwnOrdinaryOutboxAsync(Did2MessagingSessionScope scope, int maximumRows,
+        DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(scope); ArgumentNullException.ThrowIfNull(source);
+        if (maximumRows is < 1 or > Did2CompactionPlan.MaximumRows) throw new ArgumentOutOfRangeException(nameof(maximumRows));
+        source.RequireAccountOwner(this);
+        var pair = await source.VerifyForOwnMessagingAsync(this, scope, ct).ConfigureAwait(false);
+        using var verifier = OpenVerifier();
+        await owner.CompactOwnedOrdinaryOutboxAsync(TrustedUnixSeconds(), verifier, scope, maximumRows,
+            pair.Own, pair.Peer, source, ct).ConfigureAwait(false);
+    }
+
+    internal async Task<Did2CompactionPlan.Preparation> PrepareOwnOrdinaryOutboxCompactionAsync(
+        Did2MessagingSessionScope scope, int maximumRows, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(scope); ArgumentNullException.ThrowIfNull(source);
+        if (maximumRows is < 1 or > Did2CompactionPlan.MaximumRows) throw new ArgumentOutOfRangeException(nameof(maximumRows));
+        source.RequireAccountOwner(this);
+        var pair = await source.VerifyForOwnMessagingAsync(this, scope, ct).ConfigureAwait(false);
+        using var verifier = OpenVerifier();
+        return await owner.PrepareOwnedOrdinaryOutboxCompactionAsync(TrustedUnixSeconds(), verifier, scope, maximumRows,
+            pair.Own, pair.Peer, source, ct).ConfigureAwait(false);
+    }
+
     internal async Task<DirectTextOutboxEntry> PrepareOwnDirectAttachmentOfferAsync(Did2MessagingSessionScope scope,
         ReadOnlyMemory<byte> operation, ReadOnlyMemory<byte> assetOperation,
         DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)

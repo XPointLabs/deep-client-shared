@@ -14,9 +14,12 @@ public sealed partial class SqliteDeepMailboxStore
     internal Task<DirectTextOutboxEntry?> ReconcileOwnedTextOutboxAsync(
         ProtectedDid2DirectTextJournal.State journal, ReadOnlyMemory<byte> account,
         ulong generation, Did2MessagingSessionScope scope, ReadOnlyMemory<byte> selectOperation,
-        CancellationToken ct, List<DirectTextOutboxEntry>? retainedEntries = null)
+        CancellationToken ct, List<DirectTextOutboxEntry>? retainedEntries = null,
+        bool requireStableReadOnly = false)
     {
         ArgumentNullException.ThrowIfNull(journal); ArgumentNullException.ThrowIfNull(scope);
+        if (requireStableReadOnly && journal.Pending is not null)
+            throw new InvalidOperationException("Pending ordinary work must reconcile before compaction selection.");
         RequireDirectId(account, nameof(account));
         if (generation == 0) throw new ArgumentOutOfRangeException(nameof(generation));
         if (!selectOperation.IsEmpty) RequireDirectId(selectOperation, nameof(selectOperation));
@@ -30,7 +33,7 @@ public sealed partial class SqliteDeepMailboxStore
                 return await WithReplayConnectionAsync(connection =>
                 {
                     using var tx = connection.BeginTransaction(deferred: false);
-                    BindDirectInboxOwner(connection, tx, local, ownerGeneration);
+                    BindDirectInboxOwner(connection, tx, local, ownerGeneration, requireStableReadOnly);
                     foreach (var entry in journal.Entries.Values)
                         if (!DirectFixed(entry.Scope.LocalAccount, local) ||
                             BinaryPrimitives.ReadUInt64BigEndian(entry.Scope.Exact[84..]) != generation ||
@@ -55,7 +58,10 @@ public sealed partial class SqliteDeepMailboxStore
                         using (var read = connection.CreateCommand())
                         {
                             read.Transaction = tx;
-                            read.CommandText = "SELECT conversation_id,logical_message_id,author_device_id,recipient_account_id,recipient_device_id,sender_sequence,operation_id,exact_dmc2_hash,exact_dmc2,created_at,length(exact_dmc2),typeof(exact_dmc2) FROM direct_text_outbox ORDER BY operation_id;";
+                            var metadata = new[] { "conversation_id", "logical_message_id", "author_device_id", "recipient_account_id", "recipient_device_id", "operation_id", "exact_dmc2_hash" };
+                            read.CommandText = "SELECT conversation_id,logical_message_id,author_device_id,recipient_account_id,recipient_device_id,sender_sequence,operation_id,exact_dmc2_hash,exact_dmc2,created_at,length(exact_dmc2),typeof(exact_dmc2)," +
+                                string.Join(",", metadata.Select(name => "typeof(" + name + "),length(" + name + ")")) +
+                                ",typeof(sender_sequence),typeof(created_at) FROM direct_text_outbox ORDER BY operation_id;";
                             using var row = read.ExecuteReader();
                             while (row.Read())
                             {
@@ -64,6 +70,11 @@ public sealed partial class SqliteDeepMailboxStore
                                 // provider materializes a managed BLOB array.
                                 if (row.GetString(11) != "blob" || row.GetInt64(10) is < 285 or > ProtectedDid2DirectTextJournal.MaximumEventBytes)
                                     throw new CryptographicException("The SQL text payload exceeds its closed protected bound.");
+                                for (var field = 0; field < metadata.Length; field++)
+                                    if (row.GetString(12 + field * 2) != "blob" || row.GetInt64(13 + field * 2) != 32)
+                                        throw new CryptographicException("The SQL text metadata exceeds its exact identifier bound.");
+                                if (row.GetString(26) != "integer" || row.GetString(27) != "integer")
+                                    throw new CryptographicException("The SQL authored position has an unsupported type.");
                                 var buffers = new byte[8][];
                                 try
                                 {

@@ -157,14 +157,20 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     }
 
     private async Task RequireOwnedTextForSendAsync(VerifiedDeepIdV2CurrentAccount current,
-        HeldDeepIdV2AccountLease held, Did2MessagingSessionScope scope, ReadOnlyMemory<byte> operation,
+        HeldDeepIdV2AccountLease held, OwnedDid2MessagingStorage opened, Did2MessagingSessionScope scope, ReadOnlyMemory<byte> operation,
         ReadOnlyMemory<byte> exact, CancellationToken ct)
     {
         using var owner = await storage.ReadOwnedAsync(ProtectedDid2DirectTextJournal.Slot, ct).ConfigureAwait(false) ??
             throw new InvalidDataException("Protected text command custody is absent.");
         using var journal = owner.Use(bytes => ProtectedDid2DirectTextJournal.Decode(bytes, scope.Network, scope.LocalAccount, scope.Instance));
-        if (journal.Pending is not null || !journal.Entries.TryGetValue(Convert.ToHexString(operation.Span), out var command) ||
-            command.Pending || !Did2MessagingSessionScope.Fixed(command.Scope.Exact, scope.Exact))
+        if (journal.Pending is not null)
+            throw new CryptographicException("Only a stable exact owned text command may enter DPE2 send.");
+        if (!journal.Entries.TryGetValue(Convert.ToHexString(operation.Span), out var command))
+        {
+            await RequireRetainedOrdinaryEventUnderLeaseAsync(current, held, opened, scope, operation, journal, exact, ct).ConfigureAwait(false);
+            return; // Only an existing exact native event, never fresh encryption.
+        }
+        if (command.Pending || !Did2MessagingSessionScope.Fixed(command.Scope.Exact, scope.Exact))
             throw new CryptographicException("Only a stable exact owned text command may enter DPE2 send.");
         command.RequireEvent(exact.Span);
         using var application = await SqliteDeepIdV2AccountGeneration.OpenApplicationUnderLeaseAsync(storage, sqlStatePath, current, held, ct).ConfigureAwait(false);
@@ -181,7 +187,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     }
 
     private async Task RetainOrdinaryStoreCompletionUnderLeaseAsync(VerifiedDeepIdV2CurrentAccount current,
-        HeldDeepIdV2AccountLease held, Did2MessagingSessionScope scope, ReadOnlyMemory<byte> operation,
+        HeldDeepIdV2AccountLease held, OwnedDid2MessagingStorage opened, Did2MessagingSessionScope scope, ReadOnlyMemory<byte> operation,
         CancellationToken ct)
     {
         byte[] snapshot = [], next = [];
@@ -198,8 +204,13 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     throw new InvalidDataException("The dispatched command has no ordinary or acceptance custody.");
                 using var accepts = accepted.Use(bytes => ProtectedDid2ContactAcceptJournal.Decode(bytes, scope.Network, scope.LocalAccount, scope.Instance));
                 var winner = accepts.FindScope(scope);
-                if (winner is null || !Did2MessagingSessionScope.Fixed(winner.Operation, operation.Span))
-                    throw new CryptographicException("The dispatched command differs from actual retained acceptance.");
+                if (winner is not null && Did2MessagingSessionScope.Fixed(winner.Operation, operation.Span))
+                { held.RequireActive(); ct.ThrowIfCancellationRequested(); return; }
+                // Compacted ordinary work keeps independent native/history and
+                // transport custody. A cached exact Store completes without
+                // recreating either its authored command or its SQL payload.
+                await RequireRetainedOrdinaryEventUnderLeaseAsync(current, held, opened, scope, operation, journal,
+                    ReadOnlyMemory<byte>.Empty, ct).ConfigureAwait(false);
                 held.RequireActive(); ct.ThrowIfCancellationRequested(); return;
             }
             if (command.Pending || !Did2MessagingSessionScope.Fixed(command.Scope.Exact, scope.Exact))
@@ -224,6 +235,35 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             ct.ThrowIfCancellationRequested(); held.RequireActive();
         }
         finally { CryptographicOperations.ZeroMemory(snapshot); CryptographicOperations.ZeroMemory(next); }
+    }
+
+    private async Task RequireRetainedOrdinaryEventUnderLeaseAsync(VerifiedDeepIdV2CurrentAccount current,
+        HeldDeepIdV2AccountLease held, OwnedDid2MessagingStorage opened, Did2MessagingSessionScope scope,
+        ReadOnlyMemory<byte> operation, ProtectedDid2DirectTextJournal.State journal,
+        ReadOnlyMemory<byte> expectedEvent, CancellationToken ct)
+    {
+        var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
+        using var native = opened.Sql.ReadVerifiedOperation(floor, operation.Span) ??
+            throw new CryptographicException("Absent ordinary work has no retained native event.");
+        if (native.Direction != 1) throw new CryptographicException("Absent ordinary work selected a receive event.");
+        using var application = await SqliteDeepIdV2AccountGeneration.OpenApplicationUnderLeaseAsync(storage, sqlStatePath, current, held, ct).ConfigureAwait(false);
+        var history = await application.ReadRetainedAuthoredEventAsync(scope, native.EventHash.ToArray(), ct).ConfigureAwait(false) ??
+            throw new CryptographicException("Absent ordinary work lost its independent local history.");
+        try
+        {
+            if (!expectedEvent.IsEmpty && !Did2MessagingSessionScope.Fixed(history, expectedEvent.Span))
+                throw new CryptographicException("Cached ordinary encryption cannot accept changed event bytes.");
+            var parsed = ApplicationCoreCodec.DecodeDmc2(history);
+            try
+            {
+                if (parsed.ContentKind is not (Dmc2ContentKind.MessageCreate or Dmc2ContentKind.AttachmentOffer) ||
+                    parsed.SenderClientSequence >= journal.NextSequence(scope))
+                    throw new CryptographicException("Absent ordinary work differs from the preserved authored floor.");
+            }
+            finally { if (parsed.ParsedPayload is AttachmentOfferDmc2Payload offer) offer.Manifest.Dispose(); }
+        }
+        finally { CryptographicOperations.ZeroMemory(history); }
+        held.RequireActive(); ct.ThrowIfCancellationRequested();
     }
 
     private async Task RequireRetainedAcceptanceForTextAsync(OwnedDid2MessagingStorage opened,

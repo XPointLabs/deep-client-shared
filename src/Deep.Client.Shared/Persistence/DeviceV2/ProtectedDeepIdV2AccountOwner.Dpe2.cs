@@ -105,7 +105,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 await RequireLocalContactAcceptWinnerAsync(scope, op, exact, ct).ConfigureAwait(false);
             if (senderEvent?.ContentKind is
                 Dmc2ContentKind.MessageCreate or Dmc2ContentKind.AttachmentOffer)
-                await RequireOwnedTextForSendAsync(current, held, scope, op, exact, ct).ConfigureAwait(false);
+                await RequireOwnedTextForSendAsync(current, held, opened, scope, op, exact, ct).ConfigureAwait(false);
             if (senderEvent?.ParsedPayload is AttachmentOfferDmc2Payload attachment)
                 await RequireOwnedAttachmentForSendAsync(current, held, attachment.Manifest, own, peer, first, ct).ConfigureAwait(false);
             if (send)

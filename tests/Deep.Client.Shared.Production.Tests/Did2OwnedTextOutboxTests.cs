@@ -8,7 +8,7 @@ using Microsoft.Data.Sqlite;
 namespace Deep.Client.Shared.Production.Tests;
 
 // Local codec/SQL mirror coverage, not endpoint/crypto/consent authority.
-public sealed class Did2OwnedTextOutboxTests
+public sealed partial class Did2OwnedTextOutboxTests
 {
     [Fact]
     public void VerifiedStorePhaseIsMonotonicScopedAndRetiresOldJournal()

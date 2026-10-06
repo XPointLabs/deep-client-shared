@@ -81,7 +81,8 @@ The sole semantics are the dependency-closed batch/recovery contract in
 [§8.4.3](../../../docs/architecture/TRANSPORT-NEUTRAL-MESSAGING.md#843-compaction-and-boundedness).
 The following maps it to current consumers; it is not another outbox or
 permission to delete current rows. The narrow held messaging-prefix owner
-described below is implemented; the other dispositions are still targets.
+described below and the outbox-only owner are implemented; the other dispositions
+are still targets. Outbox affected-reader/full qualification remains open.
 
 | Current custody / consumer | Required integration consequence |
 | --- | --- |
@@ -131,7 +132,7 @@ account SQL key/instance and required protected roots in one storage batch;
 reopen reads and validates those roots without filling missing ones. Mandatory
 plan registration belongs in that same producer, not a later optional marker.
 `ProtectedDeepIdV2AccountOwner.ReadCurrentAsync` now resumes the exact stored
-prefix under its actual lease before calling the registration verifier and
+stored batch through its closed SQL profile under the actual lease before calling the registration verifier and
 receiver reconciliation. Other ordinary under-lease opens still require an idle
 plan; they fail closed rather than bypassing active recovery. Existing explicit
 reset purges the V2 storage namespace; staging is not a separate reset bypass.
@@ -315,10 +316,54 @@ Root documentation174 and governance helper22/0/0 pass. This is contract-only
 evidence, not a fresh full Shared/package/installed or cleanup qualification;
 the authored-floor591 receipt belongs to its own frozen Protocol4fa9f95 inputs.
 
+## Owned ordinary outbox-only API
+
+The internal account service `CompactOwnOrdinaryOutboxAsync` joins actual own
+and peer proofs to the held owner. `PrepareOwnedOrdinaryOutboxCompactionAsync`
+is read-only metadata; its returned preparation is never accepted as a caller's
+deletion capability. The writer reselects, verifies and stages under the same
+account lease. No UI or background scheduler activates this cleanup yet.
+
+The candidate is a bounded oldest consecutive Stored prefix in one owned
+session. Stored alone is insufficient: the owner joins the original protected
+send/grant/counter/request, actual SQL MAU3 and signed durable quorum, committed
+native event, independent semantic history and any retained attachment keys.
+Current signed issuer/projection/replica bindings remain required; unavailable
+historical bindings pin the scope. Original accepted timestamps are checked
+against the original grant, not used to authorize a fresh dispatch.
+
+This profile changes only the ordinary root, guarding send, grant, read,
+catalog, native floor, attachment, account registration, history checkpoint and
+peer bootstrap. Its SQL target is the existing application database. Complete
+ordered schema/cell commitments include every table, not just working-row
+counts; the virtual successor omits only the selected ordinary working rows.
+The SQL writer independently recaptures that selection and complete effects
+in one transaction, rechecks the actual protected plan/roots before deletion
+and commit, then adopts the exact ordinary successor with CAS/read-back.
+
+Startup uses the same local recovery dispatcher as prefix recovery, with a
+separate closed application profile and its already-initialized account key
+registration. Recovery does not initialize a database, promote registration,
+refresh network authority, sign/encrypt, reselect or reconstruct deleted work.
+Staging disposal supports the ordinary root's multiple bounded parts. Only
+verified complete adoption, or the unchanged predecessor owned by durable
+abort, can clear the plan. `AbandonUncommittedOwnedOrdinaryOutboxAsync` rejects
+SQL After, including a cancellation after commit but before its marker.
+
+Exact Store and E2EE-send replay after cleanup verify retained native/history custody and
+the independent authored floor without recreating the ordinary command or its
+SQL working copy. Cached encryption additionally requires the supplied exact
+event bytes to match that history and its existing native send; absent native
+custody cannot enter a new encryption transition. Old operation authoring still rejects; new operations retain
+monotonic sequence allocation. Send/grant attempts, receipts, native events,
+history, dedup, counters, asset keys and remote obligations are not retired.
+Implementation/build and focused fault evidence do not themselves qualify the
+required coupled full gate; acceptance is recorded in the testing checkpoint.
+
 ## Remaining closure
 
 There is no production scheduler cleanup or floor unenrollment in this slice.
-Actual local prefix recovery is implemented, but required plan registration and
+Actual local prefix and outbox-only recovery are implemented, but plan registration and
 its narrow owner API are not sustained lifecycle activation. The encrypted
 native fixture closes/reopens real storage handles at each handover and retains
 acceptance replay and subsequent text; it is not physical device qualification.

@@ -348,10 +348,15 @@ public sealed partial class SqliteDeepMailboxStore
                     }
                 }
                 using var read = connection.CreateCommand();
-                read.CommandText = "SELECT i.exact_dmc2,i.exact_dmc2_hash,f.incumbent_hash,i.author_account_id,i.content_kind,i.sender_sequence FROM authenticated_dmc2_inbox i LEFT JOIN authenticated_dmc2_inbox_forks f ON i.conversation_id=f.conversation_id AND i.logical_message_id=f.logical_message_id AND i.author_device_id=f.author_device_id WHERE i.conversation_id=$conversation AND i.logical_message_id=$logical AND i.author_device_id=$device;";
+                read.CommandText = "SELECT i.exact_dmc2,i.exact_dmc2_hash,f.incumbent_hash,i.author_account_id,i.content_kind,i.sender_sequence,length(i.exact_dmc2),typeof(i.exact_dmc2),length(i.exact_dmc2_hash),typeof(i.exact_dmc2_hash),length(i.author_account_id),typeof(i.author_account_id),length(i.sender_sequence),typeof(i.sender_sequence),typeof(i.content_kind) FROM authenticated_dmc2_inbox i LEFT JOIN authenticated_dmc2_inbox_forks f ON i.conversation_id=f.conversation_id AND i.logical_message_id=f.logical_message_id AND i.author_device_id=f.author_device_id WHERE i.conversation_id=$conversation AND i.logical_message_id=$logical AND i.author_device_id=$device;";
                 AddDirectKey(read, conversation, logical, device);
                 using var eventReader = read.ExecuteReader();
                 if (!eventReader.Read()) return Task.FromResult<byte[]?>(null);
+                if (eventReader.GetString(7) != "blob" || eventReader.GetInt64(6) is < 282 or > 33082 ||
+                    eventReader.GetString(9) != "blob" || eventReader.GetInt64(8) != 32 ||
+                    eventReader.GetString(11) != "blob" || eventReader.GetInt64(10) != 32 ||
+                    eventReader.GetString(13) != "blob" || eventReader.GetInt64(12) != 8 || eventReader.GetString(14) != "integer")
+                    throw new CryptographicException("The retained semantic event exceeds its closed metadata/payload bounds.");
                 var exact = (byte[])eventReader[0];
                 var hash = (byte[])eventReader[1];
                 var actualHash = SHA256.HashData(exact);
@@ -526,7 +531,7 @@ public sealed partial class SqliteDeepMailboxStore
         SqliteConnection connection,
         SqliteTransaction transaction,
         byte[] localAccountId,
-        byte[] generation)
+        byte[] generation, bool requireExisting = false)
     {
         using var read = connection.CreateCommand();
         read.Transaction = transaction;
@@ -551,6 +556,8 @@ public sealed partial class SqliteDeepMailboxStore
             return;
         }
         reader.Close();
+        if (requireExisting)
+            throw new CryptographicException("Compaction cannot initialize missing direct inbox ownership.");
         using var insert = connection.CreateCommand();
         insert.Transaction = transaction;
         insert.CommandText = "INSERT INTO authenticated_dmc2_inbox_owner VALUES(1,$account,$generation);";

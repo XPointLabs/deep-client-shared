@@ -287,7 +287,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
 #if DEEP_TEST_INTERNALS
                         Did2MailboxSendTestHooks.Hit(Did2MailboxSendFailpoint.BeforeOrdinaryCompletion);
 #endif
-                        await RetainOrdinaryStoreCompletionUnderLeaseAsync(current, held, scope, op, deadline.Token).ConfigureAwait(false);
+                        await RetainOrdinaryStoreCompletionUnderLeaseAsync(current, held, opened, scope, op, deadline.Token).ConfigureAwait(false);
 #if DEEP_TEST_INTERNALS
                         Did2MailboxSendTestHooks.Hit(Did2MailboxSendFailpoint.AfterOrdinaryCompletion);
 #endif

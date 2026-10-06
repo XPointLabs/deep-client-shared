@@ -119,7 +119,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 plan.ObserveReadback(effects.Before.Span, roots).Step != Did2CompactionPlan.RecoveryStep.ApplySql)
                 throw new CryptographicException("Committed or changed SQL cannot be abandoned.");
             using var abandoning = plan.WithAbandoningBeforeSql();
-            await ReplacePrefixPlanAsync(plan, abandoning, held, ct).ConfigureAwait(false);
+            await ReplaceCompactionPlanAsync(plan, abandoning, held, ct).ConfigureAwait(false);
             await ResumeLocalCompactionUnderLeaseAsync(held, ct).ConfigureAwait(false);
         }
         finally { CryptographicOperations.ZeroMemory(owner.Account); CryptographicOperations.ZeroMemory(owner.Instance); }
@@ -146,6 +146,11 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 using var plan = await plans.ReadAsync(held, ct).ConfigureAwait(false);
                 if (plan.Phase == 0) { await RequireNoPrefixPartsAsync(ct).ConfigureAwait(false); return; }
                 using var catalog = await new ProtectedDid2MessagingSessionCatalog(storage, networkId, owner.Account, owner.Instance).ReadAsync(ct).ConfigureAwait(false);
+                if (plan.Target == Did2CompactionPlan.SqlTarget.Application)
+                {
+                    await ResumeOrdinaryOutboxStepUnderLeaseAsync(plans, plan, catalog, held, ct).ConfigureAwait(false);
+                    continue;
+                }
                 var scope = ResolvePrefixScope(plan, catalog);
                 var roots = await ReadPrefixRootsUnderLeaseAsync(storage, plan, scope, held, lease, ct).ConfigureAwait(false);
                 var floor = await new Did2MessagingProtectedCheckpoint(storage, scope).ReadAsync(ct).ConfigureAwait(false);
@@ -172,7 +177,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     roots = await ReadPrefixRootsUnderLeaseAsync(storage, plan, scope, held, lease, ct).ConfigureAwait(false);
                     _ = plan.ObserveReadback(plan.SqlAfter, roots);
                     using var committed = plan.WithSqlCommitted();
-                    await ReplacePrefixPlanAsync(plan, committed, held, ct).ConfigureAwait(false);
+                    await ReplaceCompactionPlanAsync(plan, committed, held, ct).ConfigureAwait(false);
 #if DEEP_TEST_INTERNALS
                     Did2CompactionTestHooks.Hit(Did2CompactionFailpoint.AfterSqlRecorded);
 #endif
@@ -223,7 +228,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 roots = await ReadPrefixRootsUnderLeaseAsync(storage, plan, scope, held, lease, ct).ConfigureAwait(false);
                 _ = plan.ObserveReadback(sql.ReadCompleteCompactionProjection(), roots);
                 using var cleared = plan.Cleared();
-                await ReplacePrefixPlanAsync(plan, cleared, held, ct).ConfigureAwait(false);
+                await ReplaceCompactionPlanAsync(plan, cleared, held, ct).ConfigureAwait(false);
 #if DEEP_TEST_INTERNALS
                 Did2CompactionTestHooks.Hit(Did2CompactionFailpoint.AfterPlanCleared);
 #endif
@@ -284,14 +289,14 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         ct.ThrowIfCancellationRequested(); held.RequireOwner(lease); return result;
     }
 
-    private async Task ReplacePrefixPlanAsync(Did2CompactionPlan before, Did2CompactionPlan after, HeldDeepIdV2AccountLease held, CancellationToken ct)
+    private async Task ReplaceCompactionPlanAsync(Did2CompactionPlan before, Did2CompactionPlan after, HeldDeepIdV2AccountLease held, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
         if (!await storage.CompareExchangeAsync(Did2CompactionPlan.Slot, before.Exact, after.Exact, ct).ConfigureAwait(false))
-            throw new CryptographicException("Prefix plan CAS conflicted.");
+            throw new CryptographicException("Compaction plan CAS conflicted.");
         using var readback = await ProtectedDid2CompactionPlan.ReadRegisteredAsync(storage, networkId,
             after.Exact.Slice(32, 32), after.Exact.Slice(64, 32), ct).ConfigureAwait(false);
-        if (!Did2MessagingSessionScope.Fixed(readback.Exact.Span, after.Exact.Span)) throw new CryptographicException("Prefix plan CAS read-back differs.");
+        if (!Did2MessagingSessionScope.Fixed(readback.Exact.Span, after.Exact.Span)) throw new CryptographicException("Compaction plan CAS read-back differs.");
         ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
     }
 

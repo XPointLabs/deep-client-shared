@@ -179,7 +179,7 @@ public sealed class VerifiedCurrentMailboxGrant
         ArgumentNullException.ThrowIfNull(repository);
         ArgumentNullException.ThrowIfNull(holder);
         var holderKey = holder.GetEd25519PublicKey();
-        var account = DomainHash(AccountScopeDomain, holderKey);
+        var account = AccountScopeForHolder(holderKey).Value.ToArray();
         var routeContext = SHA256.HashData(ExactRouteClosure.Span);
         try
         {
@@ -202,6 +202,15 @@ public sealed class VerifiedCurrentMailboxGrant
             CryptographicOperations.ZeroMemory(account);
             CryptographicOperations.ZeroMemory(routeContext);
         }
+    }
+
+    internal static OutboxAccountScope AccountScopeForHolder(ReadOnlySpan<byte> holderKey)
+    {
+        if (holderKey.Length != 32 || holderKey.IndexOfAnyExcept((byte)0) < 0)
+            throw new ArgumentException("An exact nonzero holder key is required.", nameof(holderKey));
+        var bytes = DomainHash(AccountScopeDomain, holderKey);
+        try { return OutboxAccountScope.FromBytes(bytes); }
+        finally { CryptographicOperations.ZeroMemory(bytes); }
     }
 
     private static byte[] DomainHash(

@@ -117,6 +117,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         Assert.Equal(Convert.ToHexString(sender.Conversation), pendingText.ConversationId);
         Assert.Equal("Owned mailbox delivery 📨", pendingText.Text);
         Assert.Equal(3UL, pendingText.SenderSequence);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.PrepareNativeOutboxCompaction(sender));
         var mutableOperation = pendingText.LogicalOperation.ToArray(); mutableOperation.AsSpan().Clear();
         Assert.Equal(operation, pendingText.LogicalOperation.ToArray());
         var grants = new OwnedGrantTransport(fixture, ownerOnPrimary: true);
@@ -200,6 +201,25 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         var cached = await fixture.DeliverNativeMessage(sender, operation, grants, transport);
         Assert.False(cached.IngressDispatched); Assert.Equal(durable.Cursor, cached.Cursor); Assert.Equal(2, transport.Calls);
         Assert.Empty(await fixture.ListNativePendingText());
+        var originalRoot = await fixture.ReadAuthoredRootDigestAsync();
+        var originalApplication = await fixture.ReadAuthoredApplicationDigestAsync(sender);
+        using (var candidate = await fixture.PrepareNativeOutboxCompaction(sender))
+        {
+            Assert.Equal(Did2CompactionPlan.SqlTarget.Application, candidate.Plan.Target);
+            Assert.Equal(1, candidate.Plan.RowCount); Assert.Equal(10, candidate.Plan.RootCount);
+            Assert.Equal(operation, candidate.Plan.ReadRow(0).Selector.ToArray());
+            Assert.NotEqual(candidate.Plan.SqlBefore.ToArray(), candidate.Plan.SqlAfter.ToArray());
+            using var successorRoot = candidate.Successors.Use(bytes => candidate.Plan.OwnSuccessor(0, bytes));
+            using var after = successorRoot.Use(bytes => ProtectedDid2DirectTextJournal.Decode(bytes, sender.Network, sender.LocalAccount, sender.Instance));
+            Assert.Empty(after.Entries); Assert.Equal(4UL, after.NextSequence(sender)); Assert.Single(after.Floors);
+        }
+        Assert.Equal(originalRoot, await fixture.ReadAuthoredRootDigestAsync());
+        Assert.Equal(originalApplication, await fixture.ReadAuthoredApplicationDigestAsync(sender));
+        await fixture.AssertOutboxSelectionRejectsCorruptActualQuorum(sender, transport.StoredEnvelope!.OperationId.ToArray());
+        Assert.Equal(originalRoot, await fixture.ReadAuthoredRootDigestAsync());
+        Assert.Equal(originalApplication, await fixture.ReadAuthoredApplicationDigestAsync(sender));
+        Assert.Equal(2, transport.Calls); Assert.Equal(2, grants.Calls);
+        CryptographicOperations.ZeroMemory(originalRoot); CryptographicOperations.ZeroMemory(originalApplication);
         using (var received = await fixture.ReceiveOwnedMessage(receiver, cipher)) { }
         var history = await fixture.ListOwnedMessages(receiver);
         Assert.Contains(history, message => message.Text == "Owned mailbox delivery 📨" && !message.IsLocalAuthor);
@@ -255,6 +275,41 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 
     private sealed partial class Fixture
     {
+        internal Task<Did2CompactionPlan.Preparation> PrepareNativeOutboxCompaction(Did2MessagingSessionScope scope)
+        {
+            var account = scope.IsInitiator ? ReopenAccount() : ReopenGrantReader();
+            var source = scope.IsInitiator ? Source(account) : GrantReaderSource(account);
+            return account.PrepareOwnOrdinaryOutboxCompactionAsync(scope, 32, source, default);
+        }
+        internal async Task AssertOutboxSelectionRejectsCorruptActualQuorum(Did2MessagingSessionScope scope, byte[] logical)
+        {
+            byte[] original = [];
+            await WithAuthoredApplicationConnectionAsync(scope, connection =>
+            {
+                using var read = connection.CreateCommand();
+                read.CommandText = "SELECT evidence FROM transport_outbox_attempts WHERE logical_id=$logical AND state=$state;";
+                read.Parameters.AddWithValue("$logical", logical); read.Parameters.AddWithValue("$state", (int)TransportOutboxAttemptState.Durable);
+                original = Assert.IsType<byte[]>(read.ExecuteScalar());
+            });
+            async Task Replace(byte[] bytes)
+            {
+                await WithAuthoredApplicationConnectionAsync(scope, connection =>
+                {
+                    using var write = connection.CreateCommand();
+                    write.CommandText = "UPDATE transport_outbox_attempts SET evidence=$bytes WHERE logical_id=$logical AND state=$state;";
+                    write.Parameters.AddWithValue("$bytes", bytes); write.Parameters.AddWithValue("$logical", logical);
+                    write.Parameters.AddWithValue("$state", (int)TransportOutboxAttemptState.Durable); Assert.Equal(1, write.ExecuteNonQuery());
+                });
+            }
+            var corrupt = original.ToArray(); corrupt[^1] ^= 1;
+            try
+            {
+                await Replace(corrupt);
+                var error = await Assert.ThrowsAsync<MailboxReceiptException>(() => PrepareNativeOutboxCompaction(scope));
+                Assert.Equal(MailboxReceiptError.UnexpectedStatement, error.Error);
+            }
+            finally { await Replace(original); CryptographicOperations.ZeroMemory(original); CryptographicOperations.ZeroMemory(corrupt); }
+        }
         private VerifiedDeepIdV2PermanentContactResolveClosure? nativeMessagingContact;
         private ReadOnlyMemory<byte> nativeMessagingPublication;
         internal Action? OnNextDirectoryProof;
@@ -453,6 +508,14 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         internal byte[]? ExactRequest { get; private set; }
         internal MailboxEncryptedEnvelope? StoredEnvelope { get; private set; }
         private byte[]? durableResponse;
+        internal ulong DurableTimeForFixture
+        {
+            get
+            {
+                var quorum = MailboxReceiptV3Codec.DecodeDurableQuorum(durableResponse ?? throw new InvalidOperationException("Fixture Store has no durable quorum."));
+                return Math.Max(quorum.FirstReplica.DurableAtUnixSeconds, quorum.SecondReplica.DurableAtUnixSeconds);
+            }
+        }
         internal ulong Cursor = 1;
         internal bool LoseReply { get; set; }
         internal int Calls { get; private set; }

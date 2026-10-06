@@ -6,6 +6,38 @@ internal static partial class SqliteDeepIdV2AccountGeneration
 {
     internal const string ApplicationStateSlot = "deep.store.v2.application-state";
 
+    // Recovery opens only the already-initialized, exact account database.
+    // No current network proof, file creation or registration promotion occurs.
+    internal static async Task<SqliteDeepMailboxStore> OpenExistingApplicationForCompactionUnderLeaseAsync(
+        IDeepSecureStorage storage, string accountPath, Did2MessagingSessionScope scope,
+        HeldDeepIdV2AccountLease held, DeepIdV2AccountFileLease lease, CancellationToken ct)
+    {
+        using var borrowed = held.BorrowFor(lease);
+        using var secret = await storage.ReadOwnedAsync(KeySlot, ct).ConfigureAwait(false) ??
+            throw new InvalidDataException("Application recovery lost its account key registration.");
+        using var registered = await storage.ReadOwnedAsync(ApplicationStateSlot, ct).ConfigureAwait(false) ??
+            throw new InvalidDataException("Application recovery lost its initialized registration.");
+        var record = secret.Use(bytes => bytes.ToArray());
+        var registration = registered.Use(bytes => bytes.ToArray()); byte[] key = [];
+        try
+        {
+            ValidateRecord(record, scope.Network, scope.LocalAccount);
+            ValidateApplicationRegistration(registration, record);
+            if (registration[1] != 2 || !Fixed(record.AsSpan(56, 32), scope.Instance))
+                throw new CryptographicException("Application recovery requires its exact initialized account instance.");
+            var path = ApplicationStatePath(accountPath); RequireApplicationFileFamily(path);
+            key = DeriveApplicationKey(record);
+            using var options = new SqliteDeepMailboxStoreOptions(path, key);
+            ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
+            return SqliteDeepMailboxStore.OpenExisting(options);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(record); CryptographicOperations.ZeroMemory(registration);
+            CryptographicOperations.ZeroMemory(key);
+        }
+    }
+
     private static byte[] DeriveApplicationKey(ReadOnlySpan<byte> accountRecord)
     {
         var domain = "Deep/STORE-V2/application-state-key"u8;
