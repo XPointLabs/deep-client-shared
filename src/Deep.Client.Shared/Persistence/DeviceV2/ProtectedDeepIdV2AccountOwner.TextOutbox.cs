@@ -63,8 +63,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             if (journal.Pending is { } pending && (entry is null || !ReferenceEquals(pending, entry)))
                 throw new InvalidOperationException("Resume the existing pending text command before preparing another.");
             if (entry?.Pending == true) RequireRequestedOrdinaryPayload(entry.PendingDmc2, payload);
-            if (entry is null && journal.Entries.Count == ProtectedDid2DirectTextJournal.MaximumEntries)
-                throw new InvalidOperationException("Protected text custody requires verified rollover.");
+            if (entry is null) journal.RequireCapacity(scope);
             result = await application.ReconcileOwnedTextOutboxAsync(journal, current.AccountId,
                 BinaryPrimitives.ReadUInt64BigEndian(scope.Exact[84..]), scope, entry is null ? ReadOnlyMemory<byte>.Empty : op, ct).ConfigureAwait(false);
             if (entry is null)
@@ -80,11 +79,13 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     entry = ProtectedDid2DirectTextJournal.Entry.Prepare(scope, op, authored);
                 }
                 finally { CryptographicOperations.ZeroMemory(logical); }
-                journal.Entries.Add(name, entry);
+                try { journal.AddPending(entry); }
+                catch { entry.Dispose(); throw; }
                 pendingBytes = ProtectedDid2DirectTextJournal.Encode(journal, scope.Network, scope.LocalAccount, scope.Instance);
                 ct.ThrowIfCancellationRequested(); held.RequireActive();
                 if (!await storage.CompareExchangeAsync(ProtectedDid2DirectTextJournal.Slot, root, pendingBytes, ct).ConfigureAwait(false))
                     throw new CryptographicException("Text command custody changed under its account lease.");
+                await RequireExactProtectedMailboxRootAsync(ProtectedDid2DirectTextJournal.Slot, pendingBytes, ct).ConfigureAwait(false);
 #if DEEP_TEST_INTERNALS
                 Did2TextOutboxTestHooks.Hit(Did2TextOutboxFailpoint.AfterPending);
 #endif
@@ -101,12 +102,13 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
 #if DEEP_TEST_INTERNALS
                 Did2TextOutboxTestHooks.Hit(Did2TextOutboxFailpoint.AfterSql);
 #endif
-                var stable = entry.Stabilize(); journal.Entries[name] = stable; entry.Dispose();
+                journal.Stabilize(name);
                 stableBytes = ProtectedDid2DirectTextJournal.Encode(journal, scope.Network, scope.LocalAccount, scope.Instance);
                 ct.ThrowIfCancellationRequested(); held.RequireActive();
                 if (!await storage.CompareExchangeAsync(ProtectedDid2DirectTextJournal.Slot,
                     pendingBytes.Length == 0 ? root : pendingBytes, stableBytes, ct).ConfigureAwait(false))
                     throw new CryptographicException("The pending text command changed before stable readback.");
+                await RequireExactProtectedMailboxRootAsync(ProtectedDid2DirectTextJournal.Slot, stableBytes, ct).ConfigureAwait(false);
 #if DEEP_TEST_INTERNALS
                 Did2TextOutboxTestHooks.Hit(Did2TextOutboxFailpoint.AfterStable);
 #endif
@@ -119,6 +121,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     throw new CryptographicException("Attachment offer preparation crossed protected clock continuity.");
                 RequireAttachmentOfferTime(manifest, own, peer, final);
             }
+            await RequireExactProtectedMailboxRootAsync(ProtectedDid2DirectTextJournal.Slot,
+                stableBytes.Length != 0 ? stableBytes : pendingBytes.Length != 0 ? pendingBytes : root, ct).ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested(); held.RequireActive();
             var released = result; result = null; return released;
         }
         finally
@@ -197,7 +202,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 throw new CryptographicException("Store completion lost its verified ordinary SQL row.");
             if (!command.Stored)
             {
-                journal.Entries[name] = command.WithVerifiedStore(); command.Dispose();
+                journal.RetainStore(name);
                 next = ProtectedDid2DirectTextJournal.Encode(journal, scope.Network, scope.LocalAccount, scope.Instance);
                 ct.ThrowIfCancellationRequested(); held.RequireActive();
                 if (!await storage.CompareExchangeAsync(ProtectedDid2DirectTextJournal.Slot, snapshot, next, ct).ConfigureAwait(false))

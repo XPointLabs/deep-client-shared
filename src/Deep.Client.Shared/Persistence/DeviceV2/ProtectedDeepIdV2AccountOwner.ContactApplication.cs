@@ -24,12 +24,12 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             using var catalog = await new ProtectedDid2MessagingSessionCatalog(storage, networkId, current.AccountId.Span, instance).ReadAsync(ct).ConfigureAwait(false);
             using var application = await SqliteDeepIdV2AccountGeneration.OpenApplicationUnderLeaseAsync(storage, sqlStatePath, current, held, ct).ConfigureAwait(false);
             var result = new List<DeepIdV2PendingTextSnapshot>();
-            foreach (var entry in journal.Entries.Values)
+            foreach (var floor in journal.Floors.Values)
             {
-                var scope = entry.Scope; var index = catalog.FindExact(scope);
+                var scope = floor.Scope; var index = catalog.FindExact(scope);
                 if (index < 0 || catalog.Phase(index) != 2) throw new CryptographicException("An ordinary command lost its initialized catalog scope.");
             }
-            if (journal.Entries.Values.FirstOrDefault() is { } first)
+            if (journal.Floors.Values.FirstOrDefault() is { } first)
             {
                 var scope = first.Scope;
                 using var ignored = await application.ReconcileOwnedTextOutboxAsync(journal, current.AccountId,

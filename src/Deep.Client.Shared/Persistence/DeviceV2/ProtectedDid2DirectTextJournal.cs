@@ -9,8 +9,9 @@ namespace Deep.Client.Shared.Persistence.DeviceV2;
 internal static class ProtectedDid2DirectTextJournal
 {
     internal const string Slot = "deep.store.v2.direct-text-journal";
-    internal const int HeaderBytes = 92, PrefixBytes = 524, MaximumEntries = 512, MaximumEventBytes = 16668;
-    internal const int MaximumBytes = HeaderBytes + PrefixBytes * MaximumEntries + MaximumEventBytes;
+    internal const int HeaderBytes = 96, PrefixBytes = 524, MaximumEntries = 512, MaximumEventBytes = 16668;
+    internal const int FloorBytes = Did2MessagingSessionScope.Bytes + 8, MaximumFloors = MaximumEntries;
+    internal const int MaximumBytes = HeaderBytes + (PrefixBytes + FloorBytes) * MaximumEntries + MaximumEventBytes;
 
     internal sealed class Entry : IDisposable
     {
@@ -108,16 +109,59 @@ internal static class ProtectedDid2DirectTextJournal
 
     internal sealed class State : IDisposable
     {
+        internal ulong Revision { get; set; } = 1;
         internal SortedDictionary<string, Entry> Entries { get; } = new(StringComparer.Ordinal);
+        internal SortedDictionary<string, AuthoredFloor> Floors { get; } = new(StringComparer.Ordinal);
         internal Entry? Pending => Entries.Values.SingleOrDefault(entry => entry.Pending);
         internal ulong NextSequence(Did2MessagingSessionScope scope)
         {
-            var position = Convert.ToHexString(scope.Conversation) + Convert.ToHexString(scope.LocalDevice);
-            return Entries.Values.Where(e => e.Position == position).Select(e => e.Sequence + 1)
-                .DefaultIfEmpty(scope.IsInitiator ? 3UL : 4UL).Max();
+            if (!Floors.TryGetValue(Position(scope), out var floor))
+                return Baseline(scope);
+            if (!Fixed(floor.Scope.Exact, scope.Exact))
+                throw new CryptographicException("An authored counter cannot move to another session scope.");
+            return floor.NextSequence;
         }
-        public void Dispose() { foreach (var entry in Entries.Values) entry.Dispose(); Entries.Clear(); }
+        internal void RequireCapacity(Did2MessagingSessionScope scope)
+        {
+            if (Entries.Count >= MaximumEntries || !Floors.ContainsKey(Position(scope)) && Floors.Count >= MaximumFloors)
+                throw new InvalidOperationException("Protected ordinary custody requires verified compaction; floors cannot be evicted.");
+            if (NextSequence(scope) >= long.MaxValue || Revision == ulong.MaxValue)
+                throw new InvalidOperationException("The protected authored counter or revision is exhausted.");
+        }
+        internal void AddPending(Entry entry)
+        {
+            var scope = entry.Scope; RequireCapacity(scope);
+            if (!entry.Pending || Pending is not null || entry.Sequence != NextSequence(scope) ||
+                Entries.ContainsKey(Convert.ToHexString(entry.Operation)))
+                throw new InvalidDataException("New ordinary work must reserve exactly the protected next sequence.");
+            Entries.Add(Convert.ToHexString(entry.Operation), entry);
+            Floors[Position(scope)] = new(scope, checked(entry.Sequence + 1));
+            Revision = checked(Revision + 1);
+        }
+        internal void Stabilize(string name)
+        {
+            var entry = Entries[name];
+            var next = entry.Stabilize();
+            try { Revision = checked(Revision + 1); Entries[name] = next; entry.Dispose(); }
+            catch { next.Dispose(); throw; }
+        }
+        internal void RetainStore(string name)
+        {
+            var entry = Entries[name];
+            var next = entry.WithVerifiedStore();
+            try { Revision = checked(Revision + 1); Entries[name] = next; entry.Dispose(); }
+            catch { next.Dispose(); throw; }
+        }
+        public void Dispose()
+        { foreach (var entry in Entries.Values) entry.Dispose(); Entries.Clear(); Floors.Clear(); }
     }
+
+    // Scope metadata supplies the actual SQL counter selector after the last
+    // working row disappears. It is not session/endpoint or deletion authority.
+    internal sealed record AuthoredFloor(Did2MessagingSessionScope Scope, ulong NextSequence);
+    internal static string Position(Did2MessagingSessionScope scope) =>
+        Convert.ToHexString(scope.Conversation) + Convert.ToHexString(scope.LocalDevice);
+    internal static ulong Baseline(Did2MessagingSessionScope scope) => scope.IsInitiator ? 3UL : 4UL;
 
     internal static byte[] Empty(ReadOnlySpan<byte> network, ReadOnlySpan<byte> account, ReadOnlySpan<byte> instance)
     { using var state = new State(); return Encode(state, network, account, instance); }
@@ -125,15 +169,30 @@ internal static class ProtectedDid2DirectTextJournal
         ReadOnlySpan<byte> account, ReadOnlySpan<byte> instance)
     {
         RequireScope(network, account, instance);
-            if (exact.Length < HeaderBytes || exact.Length > MaximumBytes || exact[0] != 2 || exact[1] != 0 ||
-            !Fixed(exact.Slice(12, 16), network) || !Fixed(exact.Slice(28, 32), account) || !Fixed(exact.Slice(60, 32), instance))
+        if (exact.Length < HeaderBytes || exact.Length > MaximumBytes || exact[0] != 3 || exact[1] != 0 ||
+            !Fixed(exact.Slice(12, 16), network) || !Fixed(exact.Slice(28, 32), account) || !Fixed(exact.Slice(60, 32), instance) ||
+            exact.Slice(94, 2).IndexOfAnyExcept((byte)0) >= 0)
             throw new InvalidDataException("Protected direct text journal has an unknown or foreign header.");
         var count = BinaryPrimitives.ReadUInt16BigEndian(exact[2..]);
-        if (count > MaximumEntries) throw new InvalidDataException("Protected direct text journal exceeds capacity.");
-        var state = new State();
+        var floorCount = BinaryPrimitives.ReadUInt16BigEndian(exact[92..]);
+        if (count > MaximumEntries || floorCount > MaximumFloors || exact.Length < HeaderBytes + floorCount * FloorBytes)
+            throw new InvalidDataException("Protected direct text journal exceeds capacity.");
+        var state = new State { Revision = BinaryPrimitives.ReadUInt64BigEndian(exact[4..]) };
         try
         {
             var offset = HeaderBytes; string? prior = null;
+            for (var i = 0; i < floorCount; i++)
+            {
+                var scope = Did2MessagingSessionScope.RestoreMetadata(exact.Slice(offset, Did2MessagingSessionScope.Bytes));
+                var next = BinaryPrimitives.ReadUInt64BigEndian(exact.Slice(offset + Did2MessagingSessionScope.Bytes, 8));
+                var position = Position(scope);
+                if (!Fixed(scope.Network, network) || !Fixed(scope.LocalAccount, account) || !Fixed(scope.Instance, instance) ||
+                    next <= Baseline(scope) || next > long.MaxValue ||
+                    prior is not null && string.CompareOrdinal(prior, position) >= 0)
+                    throw new InvalidDataException("Protected authored floor is absent, foreign or noncanonical.");
+                state.Floors.Add(position, new(scope, next)); prior = position; offset += FloorBytes;
+            }
+            prior = null;
             var logicals = new HashSet<string>(StringComparer.Ordinal);
             for (var i = 0; i < count; i++)
             {
@@ -149,16 +208,25 @@ internal static class ProtectedDid2DirectTextJournal
                 state.Entries.Add(name, entry); prior = name; offset += entry.Exact.Length;
             }
             var pending = state.Entries.Values.Count(e => e.Pending);
-            if (offset != exact.Length || pending > 1 || BinaryPrimitives.ReadUInt64BigEndian(exact[4..]) !=
-                1UL + 2UL * checked((ulong)(count - pending)) + checked((ulong)pending) + checked((ulong)state.Entries.Values.Count(e => e.Stored)))
+            // Revision and counters survive compaction. The current row count
+            // cannot reconstruct either lifetime value or authorize a reset.
+            var reserved = state.Floors.Values.Aggregate(0UL, (total, floor) =>
+                checked(total + floor.NextSequence - Baseline(floor.Scope)));
+            var minimumRevision = checked(1UL + checked(2UL * reserved) - checked((ulong)pending) +
+                checked((ulong)state.Entries.Values.Count(e => e.Stored)));
+            if (offset != exact.Length || pending > 1 || state.Revision < minimumRevision ||
+                floorCount == 0 && state.Revision != 1)
                 throw new InvalidDataException("Protected direct text journal has a noncanonical revision/pending state.");
             foreach (var group in state.Entries.Values.GroupBy(e => e.Position))
             {
                 var ordered = group.OrderBy(e => e.Sequence).ToArray();
-                var next = ordered[0].Scope.IsInitiator ? 3UL : 4UL;
+                if (!state.Floors.TryGetValue(group.Key, out var floor) ||
+                    floor.NextSequence != checked(ordered[^1].Sequence + 1))
+                    throw new InvalidDataException("Ordinary working rows lost their independent authored floor.");
+                var next = ordered[0].Sequence;
                 foreach (var entry in ordered)
                 {
-                    if (entry.Sequence != next++ || entry.Scope.IsInitiator != ordered[0].Scope.IsInitiator ||
+                    if (entry.Sequence != next++ || !Fixed(entry.Scope.Exact, floor.Scope.Exact) ||
                         entry.Pending && !ReferenceEquals(entry, ordered[^1]))
                         throw new InvalidDataException("Protected direct text authored positions are not contiguous.");
                 }
@@ -170,15 +238,23 @@ internal static class ProtectedDid2DirectTextJournal
     internal static byte[] Encode(State state, ReadOnlySpan<byte> network, ReadOnlySpan<byte> account, ReadOnlySpan<byte> instance)
     {
         RequireScope(network, account, instance);
-        if (state.Entries.Count > MaximumEntries) throw new InvalidOperationException("Protected direct text requires owned rollover.");
-        var pending = state.Entries.Values.Count(e => e.Pending);
-        var exact = new byte[HeaderBytes + state.Entries.Values.Sum(e => e.Exact.Length)];
+        if (state.Entries.Count > MaximumEntries || state.Floors.Count > MaximumFloors)
+            throw new InvalidOperationException("Protected direct text requires owned rollover.");
+        var exact = new byte[HeaderBytes + state.Floors.Count * FloorBytes + state.Entries.Values.Sum(e => e.Exact.Length)];
         try
         {
-            exact[0] = 2; BinaryPrimitives.WriteUInt16BigEndian(exact.AsSpan(2), checked((ushort)state.Entries.Count));
-            BinaryPrimitives.WriteUInt64BigEndian(exact.AsSpan(4), 1UL + 2UL * checked((ulong)(state.Entries.Count - pending)) + checked((ulong)pending) + checked((ulong)state.Entries.Values.Count(e => e.Stored)));
+            exact[0] = 3; BinaryPrimitives.WriteUInt16BigEndian(exact.AsSpan(2), checked((ushort)state.Entries.Count));
+            BinaryPrimitives.WriteUInt64BigEndian(exact.AsSpan(4), state.Revision);
+            BinaryPrimitives.WriteUInt16BigEndian(exact.AsSpan(92), checked((ushort)state.Floors.Count));
             network.CopyTo(exact.AsSpan(12)); account.CopyTo(exact.AsSpan(28)); instance.CopyTo(exact.AsSpan(60));
             var offset = HeaderBytes;
+            foreach (var pair in state.Floors)
+            {
+                if (pair.Key != Position(pair.Value.Scope)) throw new InvalidDataException("Authored floor selector changed.");
+                pair.Value.Scope.Exact.CopyTo(exact.AsSpan(offset));
+                BinaryPrimitives.WriteUInt64BigEndian(exact.AsSpan(offset + Did2MessagingSessionScope.Bytes), pair.Value.NextSequence);
+                offset += FloorBytes;
+            }
             foreach (var pair in state.Entries)
             {
                 if (pair.Key != Convert.ToHexString(pair.Value.Operation)) throw new InvalidDataException("Direct text journal key differs from its command.");

@@ -19,17 +19,24 @@ public sealed class Did2OwnedTextOutboxTests
         Stabilize(state, op);
         entry = state.Entries[Convert.ToHexString(op)];
         Assert.False(entry.Stored);
-        var stored = entry.WithVerifiedStore(); state.Entries[Convert.ToHexString(op)] = stored; entry.Dispose();
+        state.RetainStore(Convert.ToHexString(op)); var stored = state.Entries[Convert.ToHexString(op)];
         Assert.True(stored.Stored); Assert.False(stored.Pending);
         Assert.Equal(op, stored.Operation.ToArray()); Assert.Equal(3UL, stored.Sequence);
         Assert.Throws<InvalidOperationException>(() => stored.WithVerifiedStore());
         var exact = ProtectedDid2DirectTextJournal.Encode(state, scope.Network, scope.LocalAccount, scope.Instance);
-        Assert.Equal((byte)2, exact[0]); Assert.Equal(4UL, BinaryPrimitives.ReadUInt64BigEndian(exact.AsSpan(4)));
+        Assert.Equal((byte)3, exact[0]); Assert.Equal(4UL, BinaryPrimitives.ReadUInt64BigEndian(exact.AsSpan(4)));
         using var reopened = ProtectedDid2DirectTextJournal.Decode(exact, scope.Network, scope.LocalAccount, scope.Instance);
         Assert.True(Assert.Single(reopened.Entries).Value.Stored);
-        var retired = exact.ToArray(); retired[0] = 1;
-        Assert.Throws<InvalidDataException>(() => ProtectedDid2DirectTextJournal.Decode(retired, scope.Network, scope.LocalAccount, scope.Instance));
-        var mismatchedRevision = exact.ToArray(); mismatchedRevision[92 + 516] = 2;
+        foreach (var oldGeneration in new byte[] { 1, 2 })
+        {
+            var retired = exact.ToArray(); retired[0] = oldGeneration;
+            Assert.Throws<InvalidDataException>(() => ProtectedDid2DirectTextJournal.Decode(retired, scope.Network, scope.LocalAccount, scope.Instance));
+            var oldEmpty = exact[..92].ToArray(); oldEmpty[0] = oldGeneration;
+            BinaryPrimitives.WriteUInt16BigEndian(oldEmpty.AsSpan(2), 0);
+            BinaryPrimitives.WriteUInt64BigEndian(oldEmpty.AsSpan(4), 1);
+            Assert.Throws<InvalidDataException>(() => ProtectedDid2DirectTextJournal.Decode(oldEmpty, scope.Network, scope.LocalAccount, scope.Instance));
+        }
+        var mismatchedRevision = exact.ToArray(); BinaryPrimitives.WriteUInt64BigEndian(mismatchedRevision.AsSpan(4), 1);
         Assert.Throws<InvalidDataException>(() => ProtectedDid2DirectTextJournal.Decode(mismatchedRevision, scope.Network, scope.LocalAccount, scope.Instance));
     }
 
@@ -67,7 +74,7 @@ public sealed class Did2OwnedTextOutboxTests
         {
             using var text = await Mirror(store, state, scope, op); Stabilize(state, op);
             Assert.Equal(4UL, state.NextSequence(scope));
-            state.Entries.Add(Convert.ToHexString(assetOp), ProtectedDid2DirectTextJournal.Entry.Prepare(scope, assetOp, offer));
+            state.AddPending(ProtectedDid2DirectTextJournal.Entry.Prepare(scope, assetOp, offer));
             using var first = await Mirror(store, state, scope, assetOp);
             Assert.Equal(4UL, first!.SenderSequence); Assert.Equal(offer.CanonicalBytes.ToArray(), first.ExactDmc2.ToArray());
             using var retry = await Mirror(store, state, scope, assetOp);
@@ -79,7 +86,7 @@ public sealed class Did2OwnedTextOutboxTests
             using var retained = await Mirror(reopened, state, scope, assetOp);
             Assert.Equal(offer.CanonicalBytes.ToArray(), retained!.ExactDmc2.ToArray());
             Assert.Equal(5UL, state.NextSequence(scope));
-            state.Entries.Add(Convert.ToHexString(nextOp), Make(scope, nextOp, 5));
+            state.AddPending(Make(scope, nextOp, 5));
             using var next = await Mirror(reopened, state, scope, nextOp); Assert.Equal(5UL, next!.SenderSequence);
             Stabilize(state, nextOp); Assert.Equal(6UL, state.NextSequence(scope));
             var changed = offer.CanonicalBytes.ToArray(); changed[^1] ^= 1;
@@ -98,8 +105,9 @@ public sealed class Did2OwnedTextOutboxTests
         var exact = ProtectedDid2DirectTextJournal.Encode(state, scope.Network, scope.LocalAccount, scope.Instance);
         using var decoded = ProtectedDid2DirectTextJournal.Decode(exact, scope.Network, scope.LocalAccount, scope.Instance);
         Assert.Single(decoded.Entries); Assert.True(decoded.Pending!.Pending); Assert.Equal(4UL, decoded.NextSequence(scope));
-        foreach (var offset in new[] { 0, 1, 3, 11, 12, 28, 60, 128, 92 + 436, 92 + 468,
-            92 + 476, 92 + 484, 92 + 516, 92 + 517, 92 + 520, exact.Length - 1 })
+        var entryStart = ProtectedDid2DirectTextJournal.HeaderBytes + ProtectedDid2DirectTextJournal.FloorBytes;
+        foreach (var offset in new[] { 0, 1, 3, 12, 28, 60, 94, 128, entryStart + 436, entryStart + 468,
+            entryStart + 476, entryStart + 484, entryStart + 516, entryStart + 517, entryStart + 520, exact.Length - 1 })
         {
             var changed = exact.ToArray(); changed[offset] ^= 0x80;
             Assert.ThrowsAny<Exception>(() => ProtectedDid2DirectTextJournal.Decode(changed, scope.Network, scope.LocalAccount, scope.Instance));
@@ -107,7 +115,7 @@ public sealed class Did2OwnedTextOutboxTests
         // Operation is authenticated by protected storage, not derived from
         // the random logical ID. A different valid operation alone is not a
         // malformed codec input; zero and duplicate commands are forbidden.
-        var zeroOperation = exact.ToArray(); zeroOperation.AsSpan(92, 32).Clear();
+        var zeroOperation = exact.ToArray(); zeroOperation.AsSpan(entryStart, 32).Clear();
         Assert.ThrowsAny<Exception>(() => ProtectedDid2DirectTextJournal.Decode(zeroOperation, scope.Network, scope.LocalAccount, scope.Instance));
         Assert.Throws<InvalidDataException>(() => ProtectedDid2DirectTextJournal.Decode(exact[..^1], scope.Network, scope.LocalAccount, scope.Instance));
         Assert.Throws<InvalidDataException>(() => ProtectedDid2DirectTextJournal.Decode([.. exact, 0], scope.Network, scope.LocalAccount, scope.Instance));
@@ -115,7 +123,7 @@ public sealed class Did2OwnedTextOutboxTests
         Stabilize(decoded, op);
         Assert.Throws<ObjectDisposedException>(() => pending.PendingDmc2.ToArray());
         var stable = ProtectedDid2DirectTextJournal.Encode(decoded, scope.Network, scope.LocalAccount, scope.Instance);
-        Assert.Equal(92 + 524, stable.Length); Assert.Equal(3UL, BinaryPrimitives.ReadUInt64BigEndian(stable.AsSpan(4)));
+        Assert.Equal(entryStart + 524, stable.Length); Assert.Equal(3UL, BinaryPrimitives.ReadUInt64BigEndian(stable.AsSpan(4)));
         using var retained = ProtectedDid2DirectTextJournal.Decode(stable, scope.Network, scope.LocalAccount, scope.Instance);
         Assert.Null(retained.Pending);
         var observed = retained.Entries.Values.Single(); retained.Dispose();
@@ -160,8 +168,7 @@ public sealed class Did2OwnedTextOutboxTests
         using (var reopened = SqliteDeepMailboxStore.OpenExisting(new(fixture.Path, fixture.Key)))
         {
             using var stable = await Mirror(reopened, state, scope, op); Assert.Equal(exact, stable!.ExactDmc2.ToArray());
-            var original = state.Entries[Convert.ToHexString(op)];
-            state.Entries[Convert.ToHexString(op)] = original.WithVerifiedStore(); original.Dispose();
+            state.RetainStore(Convert.ToHexString(op));
             using var completed = await Mirror(reopened, state, scope, op); Assert.Equal(exact, completed!.ExactDmc2.ToArray());
             var retainedRows = new List<DirectTextOutboxEntry>();
             try
@@ -173,7 +180,7 @@ public sealed class Did2OwnedTextOutboxTests
             }
             finally { foreach (var row in retainedRows) row.Dispose(); }
             var nextOp = B(32, 32); var next = Make(scope, nextOp, initial + 1);
-            state.Entries.Add(Convert.ToHexString(nextOp), next);
+            state.AddPending(next);
             using var second = await Mirror(reopened, state, scope, nextOp);
             Assert.Equal(initial + 1, second!.SenderSequence); Stabilize(state, nextOp);
             using var old = await Mirror(reopened, state, scope, op); Assert.Equal(exact, old!.ExactDmc2.ToArray());
@@ -246,11 +253,109 @@ public sealed class Did2OwnedTextOutboxTests
         await Assert.ThrowsAsync<CryptographicException>(() => Mirror(reopened, state, scope, op));
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task IndependentAuthoredFloorSurvivesEmptyWorkingSetAndColdSqlReopen(bool initiator)
+    {
+        var scope = Scope(initiator); var initial = initiator ? 3UL : 4UL;
+        var firstOp = B(32, 31); var secondOp = B(32, 32);
+        using var fixture = new SqlFixture(); using var state = Pending(scope, firstOp, initial);
+        using (var store = new SqliteDeepMailboxStore(new(fixture.Path, fixture.Key)))
+        {
+            if (!initiator) fixture.InsertCounter(scope, 4);
+            using var first = await Mirror(store, state, scope, firstOp); Stabilize(state, firstOp);
+            state.RetainStore(Convert.ToHexString(firstOp));
+        }
+        // A fixture models already authorized cleanup, not a production
+        // compactor/deletion permission. No runtime cleanup is activated.
+        state.Entries[Convert.ToHexString(firstOp)].Dispose(); state.Entries.Clear();
+        fixture.Execute("DELETE FROM direct_text_outbox;");
+        var exact = ProtectedDid2DirectTextJournal.Encode(state, scope.Network, scope.LocalAccount, scope.Instance);
+        using var cold = ProtectedDid2DirectTextJournal.Decode(exact, scope.Network, scope.LocalAccount, scope.Instance);
+        Assert.Empty(cold.Entries); Assert.Equal(4UL, cold.Revision);
+        Assert.Equal(initial + 1, cold.NextSequence(scope)); Assert.Single(cold.Floors);
+        using var reopened = SqliteDeepMailboxStore.OpenExisting(new(fixture.Path, fixture.Key));
+        using var empty = await Mirror(reopened, cold, scope, []); Assert.Null(empty);
+        cold.AddPending(Make(scope, secondOp, initial + 1));
+        using var prepared = await Mirror(reopened, cold, scope, secondOp);
+        Assert.Equal(initial + 1, prepared!.SenderSequence);
+        Stabilize(cold, secondOp); Assert.Equal(initial + 2, cold.NextSequence(scope));
+        var retained = ProtectedDid2DirectTextJournal.Encode(cold, scope.Network, scope.LocalAccount, scope.Instance);
+        using var nextCold = ProtectedDid2DirectTextJournal.Decode(retained, scope.Network, scope.LocalAccount, scope.Instance);
+        Assert.Equal(initial + 2, nextCold.NextSequence(scope));
+    }
+
+    [Theory]
+    [InlineData("DELETE FROM direct_sender_sequences;")]
+    [InlineData("UPDATE direct_sender_sequences SET next_sequence=3;")]
+    [InlineData("UPDATE direct_sender_sequences SET next_sequence=9;")]
+    public async Task EmptyWorkingSetCannotRepairOrRollBackItsSqlCounter(string tamper)
+    {
+        var scope = Scope(); var op = B(32, 31);
+        using var fixture = new SqlFixture(); using var state = Pending(scope, op, 3);
+        using (var store = new SqliteDeepMailboxStore(new(fixture.Path, fixture.Key)))
+        { using var first = await Mirror(store, state, scope, op); Stabilize(state, op); }
+        state.Entries[Convert.ToHexString(op)].Dispose(); state.Entries.Clear();
+        fixture.Execute("DELETE FROM direct_text_outbox;"); fixture.Execute(tamper);
+        var exact = ProtectedDid2DirectTextJournal.Encode(state, scope.Network, scope.LocalAccount, scope.Instance);
+        using var cold = ProtectedDid2DirectTextJournal.Decode(exact, scope.Network, scope.LocalAccount, scope.Instance);
+        using var reopened = SqliteDeepMailboxStore.OpenExisting(new(fixture.Path, fixture.Key));
+        await Assert.ThrowsAsync<CryptographicException>(() => Mirror(reopened, cold, scope, []));
+        Assert.Equal(0L, fixture.Scalar("SELECT count(*) FROM direct_text_outbox;"));
+        Assert.Equal(tamper.StartsWith("DELETE", StringComparison.Ordinal) ? 0L : 1L,
+            fixture.Scalar("SELECT count(*) FROM direct_sender_sequences;"));
+    }
+
+    [Fact]
+    public void MissingForeignRegressedOrExhaustedAuthoredFloorsFailClosed()
+    {
+        var scope = Scope(); var op = B(32, 31); using var state = Pending(scope, op, 3);
+        var position = ProtectedDid2DirectTextJournal.Position(scope); var floor = state.Floors[position];
+        foreach (var next in new[] { 0UL, 3UL, 5UL, ulong.MaxValue })
+        {
+            state.Floors[position] = floor with { NextSequence = next };
+            Assert.ThrowsAny<Exception>(() => ProtectedDid2DirectTextJournal.Encode(state, scope.Network, scope.LocalAccount, scope.Instance));
+        }
+        state.Floors.Clear();
+        Assert.Throws<InvalidDataException>(() => ProtectedDid2DirectTextJournal.Encode(state, scope.Network, scope.LocalAccount, scope.Instance));
+        state.Floors.Add(position, floor);
+        var different = scope.Exact.ToArray(); different[340] ^= 1;
+        Assert.Throws<CryptographicException>(() => state.NextSequence(Did2MessagingSessionScope.RestoreMetadata(different)));
+        state.Floors[position] = floor with { NextSequence = long.MaxValue };
+        Assert.Throws<InvalidOperationException>(() => state.RequireCapacity(scope));
+        foreach (var entry in state.Entries.Values) entry.Dispose(); state.Entries.Clear(); state.Floors.Clear();
+        Assert.Throws<InvalidDataException>(() => ProtectedDid2DirectTextJournal.Encode(state, scope.Network, scope.LocalAccount, scope.Instance));
+    }
+
+    [Fact]
+    public void BoundedAuthoredFloorsRemainEnrolledWithoutWorkingRows()
+    {
+        using var state = new ProtectedDid2DirectTextJournal.State();
+        Did2MessagingSessionScope? enrolled = null;
+        for (var i = 0; i < ProtectedDid2DirectTextJournal.MaximumFloors; i++)
+        {
+            var bytes = Scope().Exact.ToArray();
+            SHA256.HashData(BitConverter.GetBytes(i)).CopyTo(bytes, 244);
+            var scope = Did2MessagingSessionScope.RestoreMetadata(bytes); enrolled ??= scope;
+            state.Floors.Add(ProtectedDid2DirectTextJournal.Position(scope), new(scope, 4));
+        }
+        state.Revision = checked(1UL + 2UL * (ulong)state.Floors.Count);
+        var bound = enrolled!;
+        var exact = ProtectedDid2DirectTextJournal.Encode(state, bound.Network, bound.LocalAccount, bound.Instance);
+        using var cold = ProtectedDid2DirectTextJournal.Decode(exact, bound.Network, bound.LocalAccount, bound.Instance);
+        Assert.Empty(cold.Entries); Assert.Equal(ProtectedDid2DirectTextJournal.MaximumFloors, cold.Floors.Count);
+        cold.RequireCapacity(bound);
+        var other = Scope(); Assert.False(cold.Floors.ContainsKey(ProtectedDid2DirectTextJournal.Position(other)));
+        Assert.Throws<InvalidOperationException>(() => cold.RequireCapacity(other));
+        Assert.Equal(ProtectedDid2DirectTextJournal.MaximumFloors, cold.Floors.Count);
+    }
+
     private static Task<DirectTextOutboxEntry?> Mirror(SqliteDeepMailboxStore store, ProtectedDid2DirectTextJournal.State state,
         Did2MessagingSessionScope scope, byte[] operation) => store.ReconcileOwnedTextOutboxAsync(state,
         scope.LocalAccount.ToArray(), 1, scope, operation, CancellationToken.None);
     private static ProtectedDid2DirectTextJournal.State Pending(Did2MessagingSessionScope scope, byte[] op, ulong sequence)
-    { var state = new ProtectedDid2DirectTextJournal.State(); state.Entries.Add(Convert.ToHexString(op), Make(scope, op, sequence)); return state; }
+    { var state = new ProtectedDid2DirectTextJournal.State(); state.AddPending(Make(scope, op, sequence)); return state; }
     private static ProtectedDid2DirectTextJournal.Entry Make(Did2MessagingSessionScope scope, byte[] op, ulong sequence)
     {
         var logical = op.ToArray(); logical[0] ^= 0x10;
@@ -259,7 +364,7 @@ public sealed class Did2OwnedTextOutboxTests
         return ProtectedDid2DirectTextJournal.Entry.Prepare(scope, op, text);
     }
     private static void Stabilize(ProtectedDid2DirectTextJournal.State state, byte[] op)
-    { var name = Convert.ToHexString(op); var old = state.Entries[name]; state.Entries[name] = old.Stabilize(); old.Dispose(); }
+    { state.Stabilize(Convert.ToHexString(op)); }
     private static Did2MessagingSessionScope Scope(bool initiator = true)
     { var frame = Did2ContactAcceptCustodyTests.Scope().Exact.ToArray(); frame[1] = initiator ? (byte)1 : (byte)2; return Did2MessagingSessionScope.RestoreMetadata(frame); }
     private static byte[] B(int size, byte value) => Enumerable.Repeat(value, size).ToArray();

@@ -33,8 +33,14 @@ public sealed partial class SqliteDeepMailboxStore
                     BindDirectInboxOwner(connection, tx, local, ownerGeneration);
                     foreach (var entry in journal.Entries.Values)
                         if (!DirectFixed(entry.Scope.LocalAccount, local) ||
-                            BinaryPrimitives.ReadUInt64BigEndian(entry.Scope.Exact[84..]) != generation)
+                            BinaryPrimitives.ReadUInt64BigEndian(entry.Scope.Exact[84..]) != generation ||
+                            !journal.Floors.TryGetValue(entry.Position, out var floor) ||
+                            !DirectFixed(floor.Scope.Exact, entry.Scope.Exact) || entry.Sequence >= floor.NextSequence)
                             throw new CryptographicException("The protected text journal belongs to another account generation.");
+                    foreach (var floor in journal.Floors.Values)
+                        if (!DirectFixed(floor.Scope.LocalAccount, local) ||
+                            BinaryPrimitives.ReadUInt64BigEndian(floor.Scope.Exact[84..]) != generation)
+                            throw new CryptographicException("The authored floor belongs to another account generation.");
                     var pending = journal.Pending;
                     var stableCount = journal.Entries.Count - (pending is null ? 0 : 1);
                     using var count = connection.CreateCommand(); count.Transaction = tx;
@@ -82,18 +88,20 @@ public sealed partial class SqliteDeepMailboxStore
                         }
                         if (journal.Entries.Values.Any(entry => !entry.Pending && !found.Contains(Convert.ToHexString(entry.Operation))))
                             throw new CryptographicException("A stable protected text command lost its SQL row.");
-                        foreach (var group in journal.Entries.Values.GroupBy(entry => entry.Position))
+                        foreach (var floor in journal.Floors.Values)
                         {
-                            var entries = group.OrderBy(entry => entry.Sequence).ToArray();
-                            var first = entries[0]; var bound = first.Scope;
-                            var highest = entries.LastOrDefault(entry => found.Contains(Convert.ToHexString(entry.Operation)));
-                            var expected = highest is null ? first.Sequence : highest.Sequence + 1;
-                            RequireCounter(connection, tx, bound, expected, highest is null && bound.IsInitiator);
+                            var bound = floor.Scope;
+                            var pendingAbsent = pending is not null &&
+                                pending.Position == ProtectedDid2DirectTextJournal.Position(bound) &&
+                                !found.Contains(Convert.ToHexString(pending.Operation));
+                            var expected = pendingAbsent ? checked(floor.NextSequence - 1) : floor.NextSequence;
+                            RequireCounter(connection, tx, bound, expected,
+                                expected == ProtectedDid2DirectTextJournal.Baseline(bound) && bound.IsInitiator);
                         }
                         // The first command adopts only the exact role baseline,
                         // never a larger caller/SQL-supplied next sequence.
                         var position = Convert.ToHexString(scope.Conversation) + Convert.ToHexString(scope.LocalDevice);
-                        if (!journal.Entries.Values.Any(entry => entry.Position == position))
+                        if (!journal.Floors.ContainsKey(position))
                             RequireCounter(connection, tx, scope, scope.IsInitiator ? 3UL : 4UL, scope.IsInitiator);
                         if (pending is not null && !found.Contains(Convert.ToHexString(pending.Operation)))
                         {
