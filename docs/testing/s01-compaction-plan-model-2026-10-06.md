@@ -3,7 +3,7 @@
 Status: historical frozen model matrix plus subsequent working-source matrices.
 Old full outcomes completed but the original command's exit code was not captured;
 they do not qualify current source. The narrow actual prefix SQL/adoption/recovery
-owner is now implemented and under focused/native qualification below. Whole
+owner is implemented and qualified on the current frozen full matrix below. Whole
 S01, sustained lifecycle, shipping and physical E2E remain unaccepted.
 
 Root input `76aa536b2a033c412c556950680843264d6865d0`;
@@ -153,46 +153,6 @@ remain unfinished; no source or whole-S01 acceptance is claimed here.
 | `src/Deep.Client.Shared/Persistence/DeviceV2/ProtectedDid2CompactionPlan.cs` | `8D1424BF7B6764FF2A3B9B3B1002B8B80921D307233523F6B8BCD7B5A8CB703A` |
 | `src/Deep.Client.Shared/Persistence/DeviceV2/SqliteDeepIdV2AccountGeneration.cs` | `CF43343AEDE65A893DD2577A906D132D11EEEA3116869C5F58389C8C831346A9` |
 | `tests/Deep.Client.Shared.Production.Tests/ProtectedDid2CompactionPlanTests.cs` | `1D83C94BD498F98120F14A20ED324B9AEE93CA102B5356633637314891695EA3` |
-
-## Current coupled full gate — running, not accepted
-
-Runtime source is unchanged from Shared `9b5ca981449666576e1560e847e79cfbfea378cb`.
-Only the catalog metadata fixture setup/assertions changed. Both manual producers
-now include the mandatory registered-empty history root in their existing batch.
-The positive restart case additionally removes history and verifies exact refusal,
-no reader initialization and unchanged encrypted SQL/catalog/floor. The hostile
-SQL case uses the actual catalog key and current application/schema generation
-with hostile DDL, so it reaches exact schema rejection rather than stopping on
-missing history or a wrong SQL key. No production repair, reimport or migration
-was added; assertions are stronger.
-
-Corrected focused command adds `FullyQualifiedName~Did2MessagingCatalogTests`
-to the preceding six filters, using the same history-build artifacts path,
-logger/results `s01-prefix-catalog-corrected-focused.trx` under
-`artifacts/s01-prefix-catalog-corrected-focused`:149/0/0 terminal0,
-all149 independently inspected as Passed. TRX SHA256
-`0EFE6B334E81FF3E1B97846BA6AA939DBEFCBFCE142675B117C33431A4E8DEAB`;
-start2026-10-06T13:32:40.3355481+05:00,
-finish2026-10-06T13:32:43.2993258+05:00. This targeted result does not erase the
-first full failure or qualify the entire new host.
-
-```powershell
-dotnet test Deep.Client.Shared.Production.slnx -c Release -m:1 --no-build --no-restore --artifacts-path artifacts/s01-history-checkpoint-build --logger 'trx;LogFileName=s01-prefix-catalog-corrected-full.trx' --logger 'console;verbosity=normal' --results-directory artifacts/s01-prefix-catalog-corrected-full
-```
-
-One corrected full command is running with an explicit terminal exit marker;
-no acceptance before terminal0, complete outcome/catalog/required-case mapping
-and input recheck. Do not rebuild this host or edit its compiled source while
-it runs.40 inputs were frozen: the preceding39 table is retained as historical
-first-full evidence;37 entries remain exact, the two rebuilt host assemblies
-below replace their old hashes, and the catalog fixture is one additional input.
-Whole S01, runtime lifecycle, shipping and physical E2E remain unaccepted.
-
-| Current input delta (Shared-relative) | SHA-256 |
-| --- | --- |
-| `artifacts/s01-history-checkpoint-build/bin/Deep.Client.Shared.Production.Tests/release/Deep.Client.Shared.Production.Tests.dll` | `B4303C9E9A40C30A9A359D8588BDF7944EFA8E2268007448669695C94E185712` |
-| `artifacts/s01-history-checkpoint-build/bin/Deep.Client.Shared.Production.Tests/release/Deep.Client.Shared.dll` | `0897B4228DC7F535BB366E14136C5BF7F8F973910FC1AD9F6DDAE0C92EA3E508` |
-| `tests/Deep.Client.Shared.Production.Tests/Did2MessagingCatalogTests.cs` | `2F728104EC4AFD16A39DB1A7AC8A9F7B9E443810C3CA4F3BD58A7DACC6D9958A` |
 | `tests/Deep.Client.Shared.Production.Tests/ProtectedDeepIdV2AccountOwnerTests.cs` | `A299D4D692F34FB895C7A95AC5375DF7FFCD6D18F310B000B95504269C7C5F9E` |
 | `artifacts/s01-compaction-owner-build/bin/Deep.Client.Shared.Production.Tests/release/Deep.Client.Shared.Production.Tests.dll` | `C3B7A3387103D1959553167D8E109F38322A42B8DCC6CAF8639ECBF4E46D5BCC` |
 | `artifacts/s01-compaction-owner-build/bin/Deep.Client.Shared.Production.Tests/release/Deep.Client.Shared.dll` | `ECB1589C180239C6EE0709A4141774E13EB363191EC080FE8FAD550F635D7097` |
@@ -445,3 +405,58 @@ recorded separately; no Release/main/deploy follows from the checkpoint.
 | `tests/Deep.Client.Shared.Production.Tests/Did2MessagingSqlJournalTests.cs` | `F713BDBC694CA5F0217EF678091292D6BDCA3F5A6057FC56598B70DB261B5E3C` |
 | `tests/Deep.Client.Shared.Production.Tests/ProtectedDeepIdV2AccountOwnerTests.cs` | `A299D4D692F34FB895C7A95AC5375DF7FFCD6D18F310B000B95504269C7C5F9E` |
 | `tests/Deep.Client.Shared.Production.Tests/ProtectedDid2CompactionPlanTests.cs` | `1D83C94BD498F98120F14A20ED324B9AEE93CA102B5356633637314891695EA3` |
+
+## Current coupled full gate — accepted prefix slice
+
+Runtime source is unchanged from Shared `9b5ca981449666576e1560e847e79cfbfea378cb`.
+The corrected fixture source is Shared `23988df2204202374c6c0edb8b709495aaf6e1e8`;
+the exact executed assemblies are identified below, not inferred from Git metadata.
+Only the catalog metadata fixture setup/assertions changed. Both manual producers
+now include the mandatory registered-empty history root in their existing batch.
+The positive restart case additionally removes history and verifies exact refusal,
+no reader initialization and unchanged encrypted SQL/catalog/floor. The hostile
+SQL case uses the actual catalog key and current application/schema generation
+with hostile DDL, so it reaches exact schema rejection rather than stopping on
+missing history or a wrong SQL key. No production repair, reimport or migration
+was added; assertions are stronger.
+
+Corrected focused command adds `FullyQualifiedName~Did2MessagingCatalogTests`
+to the preceding six filters, using the same history-build artifacts path,
+logger/results `s01-prefix-catalog-corrected-focused.trx` under
+`artifacts/s01-prefix-catalog-corrected-focused`:149/0/0 terminal0,
+all149 independently inspected as Passed. TRX SHA256
+`0EFE6B334E81FF3E1B97846BA6AA939DBEFCBFCE142675B117C33431A4E8DEAB`;
+start2026-10-06T13:32:40.3355481+05:00,
+finish2026-10-06T13:32:43.2993258+05:00. This targeted result does not erase the
+first full failure or qualify the entire new host.
+
+```powershell
+dotnet test Deep.Client.Shared.Production.slnx -c Release -m:1 --no-build --no-restore --artifacts-path artifacts/s01-history-checkpoint-build --logger 'trx;LogFileName=s01-prefix-catalog-corrected-full.trx' --logger 'console;verbosity=normal' --results-directory artifacts/s01-prefix-catalog-corrected-full
+```
+
+The corrected full command completed678/0/0, terminal0, with explicit shell
+marker `S01_CORRECTED_FULL_TERMINAL_EXIT=0`. All678 discovery names map to one
+Passed result; no duplicates, missing/extra results or skips. All150 unique
+required cases (corrected focused149 plus native recovery) and all627 preceding
+cases Passed. The sole explicit prior-case replacement remains unknown phase3
+to phase4, because3 is the durable abort state; no other case is omitted.
+Receipt `artifacts/s01-prefix-catalog-corrected-full/s01-prefix-catalog-corrected-full.trx`,
+SHA256 `3622666E338F77C71E186B3FEB4C8C16B1E3D346A59B557D4853BFE3BBEE2B24`;
+start2026-10-06T13:34:41.4603584+05:00,
+finish2026-10-06T14:56:54.3936007+05:00. All40 frozen inputs were rechecked exact
+after terminal completion. The local expected catalog/required/input manifest
+`artifacts/s01-prefix-catalog-corrected-full/expected-qualification.json` has
+SHA256 `5A9682D2449683A828036C6B34D71CB0CFC55D3081AAC55DC6A296A78357BADF`.
+The outcome checker also rejects the first677/1/0 receipt with its exact failed
+required case; that original FAIL is preserved above. Only checkpoint section
+placement changed during the run; no compiled source or frozen binary changed.
+40 inputs were frozen: the preceding39 table is retained as historical
+first-full evidence;37 entries remain exact, the two rebuilt host assemblies
+below replace their old hashes, and the catalog fixture is one additional input.
+Whole S01, runtime lifecycle, shipping and physical E2E remain unaccepted.
+
+| Current input delta (Shared-relative) | SHA-256 |
+| --- | --- |
+| `artifacts/s01-history-checkpoint-build/bin/Deep.Client.Shared.Production.Tests/release/Deep.Client.Shared.Production.Tests.dll` | `B4303C9E9A40C30A9A359D8588BDF7944EFA8E2268007448669695C94E185712` |
+| `artifacts/s01-history-checkpoint-build/bin/Deep.Client.Shared.Production.Tests/release/Deep.Client.Shared.dll` | `0897B4228DC7F535BB366E14136C5BF7F8F973910FC1AD9F6DDAE0C92EA3E508` |
+| `tests/Deep.Client.Shared.Production.Tests/Did2MessagingCatalogTests.cs` | `2F728104EC4AFD16A39DB1A7AC8A9F7B9E443810C3CA4F3BD58A7DACC6D9958A` |
