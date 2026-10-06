@@ -82,7 +82,8 @@ The sole semantics are the dependency-closed batch/recovery contract in
 The following maps it to current consumers; it is not another outbox or
 permission to delete current rows. The narrow held messaging-prefix owner
 described below and the outbox-only owner are implemented; the other dispositions
-are still targets. Outbox affected-reader/full qualification remains open.
+are still targets. The outbox affected readers and narrow owner/recovery are
+qualified by the [current coupled full receipt](../testing/s01-ordinary-outbox-disposition-2026-10-06.md#current-coupled-full-gate--accepted-outbox-only-slice).
 
 | Current custody / consumer | Required integration consequence |
 | --- | --- |
@@ -122,8 +123,8 @@ actual account, SQLCipher and protected storage, all handovers, cancellation,
 cold reopen and capacity; codec-only fixtures cannot qualify deletion.
 The envelope/readback model, mandatory registration/protected staging, history
 registration, schema3 checkpoint reader and actual held prefix owner are
-implemented in working source. Complete producer/consumer qualification,
-other dispositions and retained-object closure remain unfinished. This mapping
+implemented and their narrow prefix/outbox owner paths separately qualified.
+Other dispositions and retained-object closure remain unfinished. This mapping
 does not close S01 or activate S04 runtime cleanup.
 
 The existing registration/reopen join is
@@ -132,7 +133,7 @@ account SQL key/instance and required protected roots in one storage batch;
 reopen reads and validates those roots without filling missing ones. Mandatory
 plan registration belongs in that same producer, not a later optional marker.
 `ProtectedDeepIdV2AccountOwner.ReadCurrentAsync` now resumes the exact stored
-stored batch through its closed SQL profile under the actual lease before calling the registration verifier and
+batch through its closed SQL profile under the actual lease before calling the registration verifier and
 receiver reconciliation. Other ordinary under-lease opens still require an idle
 plan; they fail closed rather than bypassing active recovery. Existing explicit
 reset purges the V2 storage namespace; staging is not a separate reset bypass.
@@ -144,7 +145,8 @@ The working registration producer now inserts `deep.store.v2.compaction-plan`
 atomically with the existing account instance key and mandatory roots. Reopen
 requires its exact current scope and idle phase before receiver reconciliation
 or ordinary account projection. Missing/foreign state rejects without reader
-initialization; startup resumes only the installed exact prefix profile. Existing
+initialization; startup resumes only the installed exact prefix or ordinary
+application profile. Existing
 account/SQL/application record layouts are unchanged; accounts missing this
 mandatory root require explicit reset, not a migration. Model factories do not
 write storage, delete SQL, authorize a namespace, initialize a missing slot or
@@ -358,7 +360,11 @@ custody cannot enter a new encryption transition. Old operation authoring still 
 monotonic sequence allocation. Send/grant attempts, receipts, native events,
 history, dedup, counters, asset keys and remote obligations are not retired.
 Implementation/build and focused fault evidence do not themselves qualify the
-required coupled full gate; acceptance is recorded in the testing checkpoint.
+required coupled full gate. The [current testing checkpoint](../testing/s01-ordinary-outbox-disposition-2026-10-06.md#current-coupled-full-gate--accepted-outbox-only-slice)
+records full687/0/0 terminal0, all161 current/all678 prior cases Passed and55/55
+frozen inputs exact for Shared `574d934347fb21f48453def7541a0a7a7a86d06d`.
+This qualifies only this outbox-only profile, not namespace/floor retirement or
+scheduler activation.
 
 ## Remaining closure
 

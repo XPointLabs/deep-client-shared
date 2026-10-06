@@ -21,8 +21,49 @@ The Store completion reader now supports a removed working command through
 independent native/history custody and the preserved authored floor. The E2EE
 send precondition now uses that same retained-event join, requiring exact bytes
 and an existing native send before returning cached ciphertext. Its focused
-positive/changed-input/missing-history fixture passes. Coupled full acceptance is
-still pending; focused results and earlier prefix qualification do not close it.
+positive/changed-input/missing-history fixture passes. The coupled full gate below
+accepts this bounded outbox-only API and its affected readers/recovery, not the
+remaining S01 dispositions/fences or S04 runtime cleanup.
+
+## Current coupled full gate — accepted outbox-only slice
+
+Qualified runtime/test source: Shared
+`574d934347fb21f48453def7541a0a7a7a86d06d`. The final isolated host was used
+without rebuilding or modifying its inputs during the run:
+
+```powershell
+dotnet test Deep.Client.Shared.Production.slnx -c Release -m:1 --no-build --no-restore --artifacts-path artifacts\s01-outbox-owner-final-build --logger 'trx;LogFileName=s01-outbox-owner-final-full.trx' --logger 'console;verbosity=normal' --results-directory artifacts\s01-outbox-owner-final-full
+```
+
+Observed shell marker `S01_OUTBOX_OWNER_FINAL_FULL_TERMINAL_EXIT=0` and process
+exit0. Receipt: `artifacts/s01-outbox-owner-final-full/s01-outbox-owner-final-full.trx`
+(Shared-relative), SHA256
+`D3FCF3437971DA0B3B5FE416B3CDBF5C46E20CFA1E428E4CC3BCD5306DF07F2E`.
+Start `2026-10-06T16:52:43.0696231+05:00`, finish
+`2026-10-06T18:31:44.6302396+05:00`.
+
+All687 cases passed, failed/skipped/other counters0. Independently checked:
+687 unique result names/execution IDs,687 unique test IDs and687 actual test
+definitions; exact frozen discovery with no missing/extra cases, all161 current
+required and all678 prior required cases mapped Passed. Both new native cases
+are Passed: encrypted cold recovery/all handovers and exact cached encryption
+with independent retained history. The prior required authored-floor, removed-working
+commitment, receive/ACK and other required regressions remain in this full run.
+
+Expected catalog/input manifest:
+`artifacts/s01-outbox-owner-final-full/expected-qualification.json`, SHA256
+`4095F2C250FF4361BA62BD4A2C5C4C17EB347F4680464051E8B4FF85105D5336`.
+All55 frozen source, normative and actual host/native inputs rechecked exact
+after terminal0. The read-only qualifier also rejected partial focused receipts
+and a nonzero process exit; it does not turn those receipts into full evidence.
+
+This accepts local selection/staging, complete application SQL effects/writer,
+protected adoption/recovery/abort and affected Store/E2EE readers on this matrix.
+Native send/grant/receipt/history/asset custody and floors are retained. No
+namespace retirement, receipt scheduler, remote-object deletion, sustained
+capacity lifecycle, production deployment, shipping package or physical E2E is
+qualified by this receipt. Whole S01 and the release remain open. Earlier failed
+receipts below remain failures; they are not overwritten or reclassified.
 
 ## Focused observations (not full qualification)
 
