@@ -788,7 +788,10 @@ approval.
 
 The retired Session-derived store used SQLCipher schema v16; it is not the
 clean production mailbox store. The current account-scoped `DMB1` SQLCipher
-store is schema generation8 under DR-0081, retaining DR-0066's random-key interpretation. Unsupported schemas and incorrect keys require
+store is schema generation9, retaining DR-0066's random-key interpretation. Its
+[owned recipient receipt obligation](architecture/owned-application-receipt-obligations.md)
+commits independently retained due-work atomically with current direct content.
+Unsupported schemas (including generation8) and incorrect keys require
 explicit reset; there are no migrations or dual readers. It retains mailbox
 traversal, encrypted transport inbox rows, and durable transport outbox state.
 Generation 2 adds a separate account-wide semantic DMC2 inbox for initial

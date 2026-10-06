@@ -1,5 +1,7 @@
 using System.Security.Cryptography;
 using Deep.Protocol.ApplicationCore;
+using Deep.Client.Shared.Persistence.DeviceV2;
+using System.Buffers.Binary;
 
 namespace Deep.Client.Shared.Persistence.MessagingV1;
 
@@ -11,6 +13,7 @@ internal sealed class InMemoryAuthenticatedDirectDmc2Inbox : IDisposable
     private readonly Dictionary<string, byte[]> events = new(StringComparer.Ordinal);
     private readonly HashSet<string> forks = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> authoredPositions = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, (byte[] Device, DirectApplicationReceiptObligation Metadata)> receipts = new(StringComparer.Ordinal);
     private byte[]? localAccountId;
     private ulong localAccountGeneration;
     private bool disposed;
@@ -50,7 +53,10 @@ internal sealed class InMemoryAuthenticatedDirectDmc2Inbox : IDisposable
                         if (forks.Contains(positionKey))
                             return Task.FromResult(DirectDmc2InboxDisposition.ForkLatched);
                         if (Fixed(events[positionKey], exact))
+                        {
+                            RequireReceipt(positionKey, handoff);
                             return Task.FromResult(DirectDmc2InboxDisposition.ExactReplay);
+                        }
                         cancellationToken.ThrowIfCancellationRequested();
                         forks.Add(positionKey);
                         return Task.FromResult(DirectDmc2InboxDisposition.ForkLatched);
@@ -58,7 +64,10 @@ internal sealed class InMemoryAuthenticatedDirectDmc2Inbox : IDisposable
                     if (events.TryGetValue(key, out var incumbent))
                     {
                         if (Fixed(incumbent, exact))
+                        {
+                            RequireReceipt(key, handoff);
                             return Task.FromResult(DirectDmc2InboxDisposition.ExactReplay);
+                        }
                         cancellationToken.ThrowIfCancellationRequested();
                         BindOwner(local, handoff.LocalAccountGeneration);
                         forks.Add(key);
@@ -70,6 +79,9 @@ internal sealed class InMemoryAuthenticatedDirectDmc2Inbox : IDisposable
                     BindOwner(local, handoff.LocalAccountGeneration);
                     events.Add(key, exact.ToArray());
                     authoredPositions.Add(position, key);
+                    if (SqliteDeepMailboxStore.NeedsDirectApplicationReceipt(handoff))
+                        receipts.Add(key, (((AuthenticatedDirectDmc2)handoff).LocalDeviceId.ToArray(),
+                            new DirectApplicationReceiptObligation(handoff.LogicalMessageId.Span, SHA256.HashData(exact))));
                     return Task.FromResult(DirectDmc2InboxDisposition.Materialized);
                 }
                 finally { CryptographicOperations.ZeroMemory(exact); }
@@ -176,6 +188,46 @@ internal sealed class InMemoryAuthenticatedDirectDmc2Inbox : IDisposable
         }
     }
 
+    private void RequireReceipt(string key, IAuthenticatedDmc2InboxEvent handoff)
+    {
+        if (SqliteDeepMailboxStore.NeedsDirectApplicationReceipt(handoff) &&
+            (!receipts.TryGetValue(key, out var receipt) ||
+             !Fixed(receipt.Device, ((AuthenticatedDirectDmc2)handoff).LocalDeviceId.Span)))
+            throw new CryptographicException("Materialized content lost its bound application receipt obligation.");
+    }
+
+    internal Task<IReadOnlyList<DirectApplicationReceiptObligation>> ListPendingDirectApplicationReceiptsAsync(
+        Did2MessagingSessionScope scope, int maximumItems = 100, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        if (maximumItems is < 1 or > 100) throw new ArgumentOutOfRangeException(nameof(maximumItems));
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (gate)
+        {
+            ThrowIfDisposed();
+            if (localAccountId is null) return Task.FromResult<IReadOnlyList<DirectApplicationReceiptObligation>>([]);
+            CheckOwner(scope.LocalAccount, BinaryPrimitives.ReadUInt64BigEndian(scope.Exact[84..]));
+            var result = new List<DirectApplicationReceiptObligation>();
+            foreach (var item in receipts.OrderBy(item => Convert.ToHexString(item.Value.Metadata.LogicalMessageId.Span), StringComparer.Ordinal))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var parsed = ApplicationCoreCodec.DecodeDmc2(events[item.Key]);
+                try
+                {
+                    if (!Fixed(parsed.ConversationId.Span, scope.Conversation) ||
+                        !Fixed(parsed.SenderAccountId.Span, scope.RemoteAccount) ||
+                        !Fixed(parsed.SenderDeviceId.Span, scope.RemoteDevice)) continue;
+                    if (!Fixed(item.Value.Device, scope.LocalDevice) || !Fixed(parsed.NetworkId.Span, scope.Network) || forks.Contains(item.Key))
+                        throw new CryptographicException("Forked or foreign content cannot issue an application receipt.");
+                    result.Add(new(item.Value.Metadata.LogicalMessageId.Span, item.Value.Metadata.EventHash.Span));
+                    if (result.Count == maximumItems) break;
+                }
+                finally { if (parsed.ParsedPayload is AttachmentOfferDmc2Payload offer) offer.Manifest.Dispose(); }
+            }
+            return Task.FromResult<IReadOnlyList<DirectApplicationReceiptObligation>>(result);
+        }
+    }
+
     public void Dispose()
     {
         lock (gate)
@@ -189,6 +241,8 @@ internal sealed class InMemoryAuthenticatedDirectDmc2Inbox : IDisposable
             events.Clear();
             forks.Clear();
             authoredPositions.Clear();
+            foreach (var receipt in receipts.Values) CryptographicOperations.ZeroMemory(receipt.Device);
+            receipts.Clear();
         }
     }
 

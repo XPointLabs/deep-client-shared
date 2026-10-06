@@ -248,13 +248,13 @@ public sealed class ExactDpe2SqliteDurableTransactionAuthorityTests
         using var handoff = Assert.IsType<AuthenticatedDirectDmc2>(
             await AuthenticatedDirectDmc2.FromCommittedStageAsync(
                 ratchet, Bytes(0x2D), Bytes(0x4D), network,
-                local, fixture.Scope.AccountGeneration, conversation,
+                local, fixture.Scope.AccountGeneration, fixture.Scope.LocalDeviceId.ToArray(), conversation,
                 Bytes(0x93), Bytes(0x94)));
         await Assert.ThrowsAsync<CryptographicException>(async () =>
             await AuthenticatedDirectDmc2.FromCommittedStageAsync(
                 ratchet, Bytes(0x2D), Bytes(0x4D), network,
                 Bytes(0xA2), fixture.Scope.AccountGeneration,
-                conversation, Bytes(0x93), Bytes(0x94)));
+                fixture.Scope.LocalDeviceId.ToArray(), conversation, Bytes(0x93), Bytes(0x94)));
 
         var inboxPath = System.IO.Path.ChangeExtension(fixture.Path, ".inbox.db");
         using var inbox = new SqliteDeepMailboxStore(new(inboxPath, Bytes(0xB2)));

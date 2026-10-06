@@ -15,6 +15,7 @@ internal sealed class AuthenticatedDirectDmc2 : IDisposable, IAuthenticatedDmc2I
 {
     private readonly byte[] exactDmc2;
     private readonly byte[] localAccountId;
+    private readonly byte[] localDeviceId;
     private readonly byte[] conversationId;
     private readonly byte[] logicalMessageId;
     private readonly byte[] authorAccountId;
@@ -28,6 +29,7 @@ internal sealed class AuthenticatedDirectDmc2 : IDisposable, IAuthenticatedDmc2I
         ReadOnlySpan<byte> expectedNetworkId,
         ReadOnlySpan<byte> localAccountId,
         ulong localAccountGeneration,
+        ReadOnlySpan<byte> localDeviceId,
         ReadOnlySpan<byte> expectedConversationId,
         ReadOnlySpan<byte> expectedAuthorAccountId,
         ReadOnlySpan<byte> expectedAuthorDeviceId,
@@ -35,6 +37,7 @@ internal sealed class AuthenticatedDirectDmc2 : IDisposable, IAuthenticatedDmc2I
         ReadOnlySpan<byte> exactEnvelopeHash)
     {
         Require32(localAccountId, nameof(localAccountId));
+        Require32(localDeviceId, nameof(localDeviceId));
         Require32(operationId, nameof(operationId));
         Require32(exactEnvelopeHash, nameof(exactEnvelopeHash));
         if (expectedNetworkId.Length != 16 ||
@@ -57,6 +60,7 @@ internal sealed class AuthenticatedDirectDmc2 : IDisposable, IAuthenticatedDmc2I
 
             exactDmc2 = authenticatedDmc2.ToArray();
             this.localAccountId = localAccountId.ToArray();
+            this.localDeviceId = localDeviceId.ToArray();
             LocalAccountGeneration = localAccountGeneration;
             conversationId = parsed.ConversationId.ToArray();
             logicalMessageId = parsed.LogicalMessageId.ToArray();
@@ -77,6 +81,7 @@ internal sealed class AuthenticatedDirectDmc2 : IDisposable, IAuthenticatedDmc2I
     internal Dmc2ContentKind ContentKind { get; }
     internal ReadOnlyMemory<byte> ExactDmc2 => Copy(exactDmc2);
     internal ReadOnlyMemory<byte> LocalAccountId => Copy(localAccountId);
+    internal ReadOnlyMemory<byte> LocalDeviceId => Copy(localDeviceId);
     internal ReadOnlyMemory<byte> ConversationId => Copy(conversationId);
     internal ReadOnlyMemory<byte> LogicalMessageId => Copy(logicalMessageId);
     internal ReadOnlyMemory<byte> AuthorAccountId => Copy(authorAccountId);
@@ -109,7 +114,7 @@ internal sealed class AuthenticatedDirectDmc2 : IDisposable, IAuthenticatedDmc2I
                 if (!Fixed(SHA256.HashData(exact), retained.EventHash))
                     throw new CryptographicException("DID2 semantic handoff differs from the committed event hash.");
                 return new AuthenticatedDirectDmc2(exact, scope.Network, scope.LocalAccount,
-                    BinaryPrimitives.ReadUInt64BigEndian(scope.Exact[84..]), scope.Conversation,
+                    BinaryPrimitives.ReadUInt64BigEndian(scope.Exact[84..]), scope.LocalDevice, scope.Conversation,
                     send ? scope.LocalAccount : scope.RemoteAccount,
                     send ? scope.LocalDevice : scope.RemoteDevice, op, retained.EnvelopeHash);
             });
@@ -124,6 +129,7 @@ internal sealed class AuthenticatedDirectDmc2 : IDisposable, IAuthenticatedDmc2I
         ReadOnlyMemory<byte> expectedNetworkId,
         ReadOnlyMemory<byte> localAccountId,
         ulong localAccountGeneration,
+        ReadOnlyMemory<byte> localDeviceId,
         ReadOnlyMemory<byte> expectedConversationId,
         ReadOnlyMemory<byte> expectedAuthorAccountId,
         ReadOnlyMemory<byte> expectedAuthorDeviceId,
@@ -131,7 +137,7 @@ internal sealed class AuthenticatedDirectDmc2 : IDisposable, IAuthenticatedDmc2I
     {
         ArgumentNullException.ThrowIfNull(store);
         store.RequireInboundMaterializationScope(localAccountId.Span,
-            localAccountGeneration, expectedConversationId.Span);
+            localAccountGeneration, localDeviceId.Span, expectedConversationId.Span);
         var staged = await store.ReadPendingInboundDmc2Async(
                 operationId, exactEnvelopeHash, cancellationToken)
             .ConfigureAwait(false);
@@ -140,7 +146,7 @@ internal sealed class AuthenticatedDirectDmc2 : IDisposable, IAuthenticatedDmc2I
         {
             return new AuthenticatedDirectDmc2(
                 staged, expectedNetworkId.Span, localAccountId.Span,
-                localAccountGeneration, expectedConversationId.Span,
+                localAccountGeneration, localDeviceId.Span, expectedConversationId.Span,
                 expectedAuthorAccountId.Span, expectedAuthorDeviceId.Span,
                 operationId.Span, exactEnvelopeHash.Span);
         }
@@ -153,13 +159,14 @@ internal sealed class AuthenticatedDirectDmc2 : IDisposable, IAuthenticatedDmc2I
         ReadOnlySpan<byte> expectedNetworkId,
         ReadOnlySpan<byte> localAccountId,
         ulong localAccountGeneration,
+        ReadOnlySpan<byte> localDeviceId,
         ReadOnlySpan<byte> expectedConversationId,
         ReadOnlySpan<byte> expectedAuthorAccountId,
         ReadOnlySpan<byte> expectedAuthorDeviceId,
         ReadOnlySpan<byte> operationId,
         ReadOnlySpan<byte> exactEnvelopeHash) => new(
             authenticatedDmc2, expectedNetworkId, localAccountId,
-            localAccountGeneration, expectedConversationId,
+            localAccountGeneration, localDeviceId, expectedConversationId,
             expectedAuthorAccountId, expectedAuthorDeviceId,
             operationId, exactEnvelopeHash);
 #endif
@@ -167,7 +174,7 @@ internal sealed class AuthenticatedDirectDmc2 : IDisposable, IAuthenticatedDmc2I
     public void Dispose()
     {
         if (Interlocked.Exchange(ref disposed, 1) != 0) return;
-        foreach (var value in new[] { exactDmc2, localAccountId, conversationId,
+        foreach (var value in new[] { exactDmc2, localAccountId, localDeviceId, conversationId,
                      logicalMessageId, authorAccountId, authorDeviceId, operationId,
                      exactEnvelopeHash })
             CryptographicOperations.ZeroMemory(value);

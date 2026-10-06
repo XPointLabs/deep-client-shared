@@ -75,8 +75,11 @@ public sealed partial class SqliteDeepMailboxStore
             {
                 using var transaction = connection.BeginTransaction(deferred: false);
                 BindDirectInboxOwner(connection, transaction, local, generation);
+                ValidateDirectReceiptObligations(connection, transaction);
                 using var authored = new InitialInboxEvent(exact);
                 var positionResult = CheckAuthoredPosition(connection, transaction, authored, cancellationToken);
+                if (positionResult == DirectDmc2InboxDisposition.ExactReplay)
+                    RequireDirectReceiptObligation(connection, transaction, handoff, hash);
                 if (positionResult is not null)
                     return Task.FromResult(positionResult.Value);
 
@@ -113,7 +116,10 @@ public sealed partial class SqliteDeepMailboxStore
                     try
                     {
                         if (DirectFixed(incumbentHash!, hash) && DirectFixed(incumbent, exact))
+                        {
+                            RequireDirectReceiptObligation(connection, transaction, handoff, hash);
                             return Task.FromResult(DirectDmc2InboxDisposition.ExactReplay);
+                        }
                         using var latch = connection.CreateCommand();
                         latch.Transaction = transaction;
                         latch.CommandText = "INSERT INTO authenticated_dmc2_inbox_forks VALUES($conversation,$logical,$device,$incumbent,$conflicting);";
@@ -153,6 +159,11 @@ public sealed partial class SqliteDeepMailboxStore
                 cancellationToken.ThrowIfCancellationRequested();
                 if (insert.ExecuteNonQuery() != 1)
                     throw new CryptographicException("Direct inbox materialization was not durable.");
+#if DEEP_TEST_INTERNALS
+                DirectDmc2InboxTestHooks.Hit(DirectDmc2InboxFaultPoint.AfterEventInsert);
+#endif
+                if (NeedsDirectApplicationReceipt(handoff))
+                    InsertDirectReceiptObligation(connection, transaction, (AuthenticatedDirectDmc2)handoff, hash);
                 if (handoff.ContentKind == Dmc2ContentKind.ContactAccept && DirectFixed(local, authorAccount))
                 {
                     using var reserve = connection.CreateCommand(); reserve.Transaction = transaction;
@@ -163,6 +174,7 @@ public sealed partial class SqliteDeepMailboxStore
 #if DEEP_TEST_INTERNALS
                 DirectDmc2InboxTestHooks.Hit(DirectDmc2InboxFaultPoint.BeforeCommit);
 #endif
+                cancellationToken.ThrowIfCancellationRequested();
                 transaction.Commit();
 #if DEEP_TEST_INTERNALS
                 DirectDmc2InboxTestHooks.Hit(DirectDmc2InboxFaultPoint.AfterCommit);
@@ -729,6 +741,7 @@ internal enum DirectDmc2InboxFaultPoint
 {
     BeforeCommit = 1,
     AfterCommit = 2,
+    AfterEventInsert = 3,
 }
 
 internal static class DirectDmc2InboxTestHooks

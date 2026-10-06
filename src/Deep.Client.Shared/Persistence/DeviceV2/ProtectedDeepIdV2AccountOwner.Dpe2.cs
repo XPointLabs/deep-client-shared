@@ -11,6 +11,23 @@ namespace Deep.Client.Shared.Persistence.DeviceV2;
 
 internal sealed partial class ProtectedDeepIdV2AccountOwner
 {
+    // Reads actual local due-work under the same registered account/history
+    // custody as the inbox. This is not current endpoint or signing authority.
+    internal async Task<IReadOnlyList<DirectApplicationReceiptObligation>> ListMessagingReceiptObligationsAsync(
+        ulong trustedUnixSeconds, IDeepMlDsa65Verifier verifier, Did2MessagingSessionScope scope, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
+        using var current = await RequireCurrentUnderLeaseAsync(trustedUnixSeconds, verifier, ct).ConfigureAwait(false);
+        using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, ct).ConfigureAwait(false);
+        if ((await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false)).Status != 1)
+            throw new InvalidDataException("An inactive session cannot expose application receipt work.");
+        using var application = await SqliteDeepIdV2AccountGeneration.OpenApplicationUnderLeaseAsync(
+            storage, sqlStatePath, current, held, ct).ConfigureAwait(false);
+        var work = await application.ListPendingDirectApplicationReceiptsAsync(scope, cancellationToken: ct).ConfigureAwait(false);
+        ct.ThrowIfCancellationRequested(); held.RequireActive(); return work;
+    }
+
     internal async Task<IReadOnlyList<DirectAttachmentOfferSnapshot>> ListMessagingAttachmentOffersAsync(
         ulong trustedUnixSeconds, IDeepMlDsa65Verifier verifier, Did2MessagingSessionScope scope, CancellationToken ct)
     {

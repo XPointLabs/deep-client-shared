@@ -15,7 +15,7 @@ public sealed partial class SqliteDeepMailboxStore :
     IDisposable
 {
     private const int ApplicationId = 0x444D4231; // DMB1
-    private const int SchemaVersion = 8;
+    private const int SchemaVersion = 9;
     private readonly bool allowCreate;
     private readonly string _connectionString;
     private readonly byte[] encryptionKey;
@@ -192,6 +192,17 @@ public sealed partial class SqliteDeepMailboxStore :
                 PRIMARY KEY(conversation_id, logical_message_id, author_device_id),
                 FOREIGN KEY(conversation_id, logical_message_id, author_device_id)
                     REFERENCES authenticated_dmc2_inbox(conversation_id, logical_message_id, author_device_id)
+                    ON DELETE RESTRICT);
+            CREATE TABLE direct_application_receipt_obligations (
+                conversation_id BLOB NOT NULL CHECK(typeof(conversation_id)='blob' AND length(conversation_id)=32),
+                logical_message_id BLOB NOT NULL CHECK(typeof(logical_message_id)='blob' AND length(logical_message_id)=32),
+                author_device_id BLOB NOT NULL CHECK(typeof(author_device_id)='blob' AND length(author_device_id)=32),
+                author_account_id BLOB NOT NULL CHECK(typeof(author_account_id)='blob' AND length(author_account_id)=32),
+                local_device_id BLOB NOT NULL CHECK(typeof(local_device_id)='blob' AND length(local_device_id)=32),
+                exact_dmc2_hash BLOB NOT NULL CHECK(typeof(exact_dmc2_hash)='blob' AND length(exact_dmc2_hash)=32),
+                PRIMARY KEY(conversation_id,logical_message_id,author_device_id),
+                FOREIGN KEY(conversation_id,logical_message_id,author_device_id)
+                    REFERENCES authenticated_dmc2_inbox(conversation_id,logical_message_id,author_device_id)
                     ON DELETE RESTRICT);
             CREATE TABLE direct_sender_sequences (
                 conversation_id BLOB NOT NULL CHECK(length(conversation_id) = 32),
@@ -482,6 +493,8 @@ public sealed partial class SqliteDeepMailboxStore :
         using var violation = foreignKeys.ExecuteReader();
         if (violation.Read())
             throw ResetRequired("Clean direct inbox foreign-key lineage is invalid.");
+        violation.Close();
+        ValidateDirectReceiptObligations(connection, transaction);
     }
 
     private static void EnableSqliteSecureDelete(SqliteConnection connection)

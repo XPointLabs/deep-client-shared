@@ -57,6 +57,7 @@
     <Compile Include="Persistence\SqliteDeepMailboxStore.DirectOutbox.cs" />
     <Compile Include="Persistence\SqliteDeepMailboxStore.CurrentCredentials.cs" />
     <Compile Include="Persistence\SqliteDeepMailboxStore.SemanticInbox.cs" />
+    <Compile Include="Persistence\SqliteDeepMailboxStore.ApplicationReceipts.cs" />
     <Compile Include="Persistence\SqliteDeepMailboxStore.ContactAccept.cs" />
     <Compile Include="Persistence\SqliteDeepMailboxStore.OwnedTextOutbox.cs" />
     <Compile Include="Persistence\SqliteDeepMailboxStore.OutboxCompaction.cs" />

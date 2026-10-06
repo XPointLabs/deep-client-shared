@@ -22,6 +22,10 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         using (var accept = await fixture.PrepareOwnedContactAccept(receiver, Bytes(32, 0xa2)))
         using (var sent = await fixture.SendOwnedMessage(receiver, accept.Operation.ToArray(), ApplicationCoreCodec.DecodeDmc2(accept.ExactDmc2)))
         using (var received = await fixture.ReceiveOwnedMessage(sender, sent.ExactEnvelope.ToArray())) { }
+        using (var reply = await fixture.PrepareOwnedText(receiver, Bytes(32, 0xc1), "independent recipient receipt work"))
+        using (var sentReply = await fixture.SendOwnedMessage(receiver, reply.OperationId.ToArray(), ApplicationCoreCodec.DecodeDmc2(reply.ExactDmc2.Span)))
+        using (var receivedReply = await fixture.ReceiveOwnedMessage(sender, sentReply.ExactEnvelope.ToArray())) { }
+        var receiptBefore = Assert.Single(await fixture.ListOwnedReceiptObligations(sender)).EventHash.ToArray();
         var operation = Bytes(32, 0xc0); byte[] exact, cipher;
         using (var text = await fixture.PrepareOwnedText(sender, operation, "exact retained ciphertext"))
         {
@@ -34,6 +38,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         _ = await fixture.DeliverNativeMessage(sender, operation, grants, transport);
         fixture.AdvanceSyntheticMailboxClockPast(transport.DurableTimeForFixture);
         await fixture.CompactNativeOrdinaryOutbox(sender, default);
+        Assert.Equal(receiptBefore, Assert.Single(await fixture.ListOwnedReceiptObligations(sender)).EventHash.ToArray());
         var stable = (await fixture.ReadMessagingFloor(sender)).Exact.ToArray();
         var application = await fixture.ReadCompleteOrdinaryApplicationProjection(sender);
         var root = await fixture.ReadAuthoredRootDigestAsync();

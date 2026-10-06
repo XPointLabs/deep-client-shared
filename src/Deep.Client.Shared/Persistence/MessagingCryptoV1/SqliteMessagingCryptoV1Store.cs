@@ -759,11 +759,13 @@ internal sealed class SqliteMessagingCryptoV1Store : IAsyncDisposable
     internal void RequireInboundMaterializationScope(
         ReadOnlySpan<byte> localAccountId,
         ulong localAccountGeneration,
+        ReadOnlySpan<byte> localDeviceId,
         ReadOnlySpan<byte> conversationId)
     {
         ThrowIfDisposed();
         if (!MessagingCryptoV1Trs1.Fixed(scope.AccountId, localAccountId) ||
             scope.AccountGeneration != localAccountGeneration ||
+            !MessagingCryptoV1Trs1.Fixed(scope.LocalDeviceId, localDeviceId) ||
             !MessagingCryptoV1Trs1.Fixed(scope.ConversationId, conversationId))
             throw new CryptographicException(
                 "The pending DMC2 belongs to another local account or conversation generation.");

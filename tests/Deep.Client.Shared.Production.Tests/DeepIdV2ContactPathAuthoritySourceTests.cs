@@ -326,8 +326,16 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         var reply = await Text(receiver, 0xe3, "Owned DID2 reply"); byte[] replyCipher;
         using (var sentReply = await fixture.SendOwnedMessage(receiver, Bytes(32, 0xe3), reply)) replyCipher = sentReply.ExactEnvelope.ToArray();
         await Receive(sender, replyCipher, reply);
+        var senderReceipts = await fixture.ListOwnedReceiptObligations(sender);
+        Assert.Equal(reply.LogicalMessageId.ToArray(), Assert.Single(senderReceipts).LogicalMessageId.ToArray());
+        var receiverReceipts = await fixture.ListOwnedReceiptObligations(receiver);
+        Assert.Equal(2, receiverReceipts.Count);
+        Assert.Contains(receiverReceipts, item => item.LogicalMessageId.Span.SequenceEqual(first.LogicalMessageId.Span));
+        Assert.Contains(receiverReceipts, item => item.LogicalMessageId.Span.SequenceEqual(second.LogicalMessageId.Span));
         var before = await fixture.ReadMessagingFloor(sender);
         await Receive(sender, replyCipher, reply);
+        Assert.Equal(senderReceipts.Select(item => Convert.ToHexString(item.EventHash.Span)),
+            (await fixture.ListOwnedReceiptObligations(sender)).Select(item => Convert.ToHexString(item.EventHash.Span)));
         Assert.Equal(before.Exact.ToArray(), (await fixture.ReadMessagingFloor(sender)).Exact.ToArray());
         var senderHistory = await fixture.ListOwnedMessages(sender);
         var receiverHistory = await fixture.ListOwnedMessages(receiver);
@@ -1854,6 +1862,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         private Func<Did2MessagingSessionScope, ReadOnlyMemory<byte>, ParsedDmc2, Task<OwnedDid2MessagingPersistedEvent>>? sendOwnedMessage;
         private Func<Did2MessagingSessionScope, ReadOnlyMemory<byte>, Task<OwnedDid2MessagingPersistedEvent>>? receiveOwnedMessage;
         private Func<Did2MessagingSessionScope, Task<IReadOnlyList<DirectMessageCreateSnapshot>>>? listOwnedMessages;
+        private Func<Did2MessagingSessionScope, Task<IReadOnlyList<DirectApplicationReceiptObligation>>>? listOwnedReceiptObligations;
         private Func<Did2MessagingSessionScope, ReadOnlyMemory<byte>, Task<OwnedDid2ContactAcceptDraft>>? prepareOwnedContactAccept;
         private Func<Did2MessagingSessionScope, Task<Did2ContactAcceptanceState>>? readOwnedContactState;
         private Func<Did2MessagingSessionScope, Task<DeepIdV2ContactPathAuthoritySource.MessagingEndpointAuthority>>? refreshOwnedMessaging;
@@ -1878,6 +1887,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             (readOwnedContactState ?? throw new InvalidOperationException("Owned contact state read is absent."))(scope);
         internal Task<IReadOnlyList<DirectMessageCreateSnapshot>> ListOwnedMessages(Did2MessagingSessionScope scope) =>
             (listOwnedMessages ?? throw new InvalidOperationException("Owned inbox read closure is absent."))(scope);
+        internal Task<IReadOnlyList<DirectApplicationReceiptObligation>> ListOwnedReceiptObligations(Did2MessagingSessionScope scope) =>
+            (listOwnedReceiptObligations ?? throw new InvalidOperationException("Owned receipt read closure is absent."))(scope);
         internal Task<OwnedDid2MessagingPersistedEvent> SendOwnedMessage(Did2MessagingSessionScope scope, ReadOnlyMemory<byte> op, ParsedDmc2 message) =>
             (sendOwnedMessage ?? throw new InvalidOperationException("Owned send closure is absent."))(scope, op, message);
         internal Task<OwnedDid2MessagingPersistedEvent> ReceiveOwnedMessage(Did2MessagingSessionScope scope, ReadOnlyMemory<byte> envelope) =>
@@ -2352,6 +2363,12 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 var reopened = ReopenMessaging(scope);
                 using var bounded = new CancellationTokenSource(TimeSpan.FromMinutes(3));
                 return await reopened.Account.ListOwnMessagingMessagesAsync(scope, bounded.Token);
+            };
+            listOwnedReceiptObligations = async scope =>
+            {
+                var reopened = ReopenMessaging(scope);
+                using var bounded = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+                return await reopened.Account.ListOwnMessagingReceiptObligationsAsync(scope, bounded.Token);
             };
             prepareOwnedContactAccept = async (scope, op) =>
             {

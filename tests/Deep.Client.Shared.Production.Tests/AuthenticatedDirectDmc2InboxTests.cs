@@ -7,7 +7,7 @@ using Deep.Client.Shared.Services.AttachmentV1;
 
 namespace Deep.Client.Shared.Production.Tests;
 
-public sealed class AuthenticatedDirectDmc2InboxTests
+public sealed partial class AuthenticatedDirectDmc2InboxTests
 {
     // Structural projection only; authentication is covered by the owned native lane.
     [Fact]
@@ -60,6 +60,13 @@ public sealed class AuthenticatedDirectDmc2InboxTests
                 Assert.Equal(1, change.ExecuteNonQuery());
             }
             using var options = new SqliteDeepMailboxStoreOptions(fixture.Path, fixture.Key);
+            if (assignment.StartsWith("exact_dmc2_hash", StringComparison.Ordinal))
+            {
+                // The independent receipt binding now catches this corruption
+                // at reopen, before the history reader can be reached.
+                Assert.Throws<LocalStateResetRequiredException>(() => SqliteDeepMailboxStore.OpenExisting(options));
+                return;
+            }
             using var reopened = SqliteDeepMailboxStore.OpenExisting(options);
             await Assert.ThrowsAsync<CryptographicException>(() => reopened.ListDirectMessageCreatesAsync(Local, 1, Conversation));
         }
@@ -243,6 +250,14 @@ public sealed class AuthenticatedDirectDmc2InboxTests
                 change.CommandText = "UPDATE authenticated_dmc2_inbox SET " + assignment + ";";
                 Assert.Equal(1, change.ExecuteNonQuery());
             }
+            if (!assignment.StartsWith("sender_sequence", StringComparison.Ordinal))
+            {
+                // Independent receipt metadata detects this before replay.
+                var before = ReceiptDatabaseFacts(fixture);
+                Assert.Throws<LocalStateResetRequiredException>(() => Open(true, fixture));
+                Assert.Equal(before, ReceiptDatabaseFacts(fixture));
+                return;
+            }
             using var reopened = Open(true, fixture); using var retry = Handoff(exact, 0x72);
             await Assert.ThrowsAsync<CryptographicException>(async () => await Materialize(reopened, retry));
             await Assert.ThrowsAsync<CryptographicException>(async () => await Read(reopened));
@@ -370,7 +385,7 @@ public sealed class AuthenticatedDirectDmc2InboxTests
         try
         {
             Assert.Throws<CryptographicException>(() => AuthenticatedDirectDmc2.CreateForTests(
-                exact, Network, Local, 1, Conversation, Remote,
+                exact, Network, Local, 1, LocalDevice, Conversation, Remote,
                 Bytes(32, 0x99), Bytes(32, 0x76), Bytes(32, 0x86)));
             using var first = Handoff(exact, 0x76);
             Assert.Equal(DirectDmc2InboxDisposition.Materialized,
@@ -378,7 +393,7 @@ public sealed class AuthenticatedDirectDmc2InboxTests
             await Assert.ThrowsAsync<CryptographicException>(async () =>
                 await Read(store, generation: 2));
             using var anotherGeneration = AuthenticatedDirectDmc2.CreateForTests(
-                exact, Network, Local, 2, Conversation, Remote,
+                exact, Network, Local, 2, LocalDevice, Conversation, Remote,
                 AuthorDevice, Bytes(32, 0x80), Bytes(32, 0x90));
             await Assert.ThrowsAsync<CryptographicException>(async () =>
                 await Materialize(store, anotherGeneration));
@@ -416,6 +431,7 @@ public sealed class AuthenticatedDirectDmc2InboxTests
 
     private static readonly byte[] Network = Bytes(16, 0x11);
     private static readonly byte[] Local = Bytes(32, 0x21);
+    private static readonly byte[] LocalDevice = Bytes(32, 0x22);
     private static readonly byte[] Remote = Bytes(32, 0x31);
     private static readonly byte[] AuthorDevice = Bytes(32, 0x41);
     private static readonly byte[] Conversation = Bytes(32, 0x51);
@@ -428,7 +444,7 @@ public sealed class AuthenticatedDirectDmc2InboxTests
 
     private static AuthenticatedDirectDmc2 Handoff(byte[] exact, byte operation) =>
         AuthenticatedDirectDmc2.CreateForTests(
-            exact, Network, Local, 1, Conversation, Remote, AuthorDevice,
+            exact, Network, Local, 1, LocalDevice, Conversation, Remote, AuthorDevice,
             Bytes(32, operation), Bytes(32, unchecked((byte)(operation + 0x10))));
 
     private static IDisposable Open(bool sqlite, Fixture fixture) => sqlite

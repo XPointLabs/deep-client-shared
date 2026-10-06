@@ -48,6 +48,14 @@ public sealed partial class DeepIdV2AccountService
         return await owner.ListMessagingAttachmentOffersAsync(TrustedUnixSeconds(), verifier, scope, ct).ConfigureAwait(false);
     }
 
+    internal async Task<IReadOnlyList<DirectApplicationReceiptObligation>> ListOwnMessagingReceiptObligationsAsync(
+        Did2MessagingSessionScope scope, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        using var verifier = OpenVerifier();
+        return await owner.ListMessagingReceiptObligationsAsync(TrustedUnixSeconds(), verifier, scope, ct).ConfigureAwait(false);
+    }
+
     internal async Task<IReadOnlyList<DirectMessageCreateSnapshot>> ListOwnMessagingMessagesAsync(
         Did2MessagingSessionScope scope, CancellationToken ct)
     {
