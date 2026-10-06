@@ -8,6 +8,22 @@ namespace Deep.Client.Shared.Production.Tests;
 
 public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 {
+    [Fact]
+    public async Task Did2ReplayFence_MissingNativeFloorRejectsWithoutInitialization()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        await fixture.CheckMissingReplayFenceAsync();
+    }
+
+    [Theory]
+    [InlineData(3)]
+    [InlineData(7)]
+    public async Task Did2ReplayFence_FractionalNativeRevisionRejectsWithoutRepair(int rootKind)
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        await fixture.CheckFractionalReplayFenceAsync(rootKind);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -40,6 +56,32 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     private sealed partial class Fixture
     {
         private ReadOnlyMemory<byte>? epochSuccessorPmt;
+
+        internal async Task CheckMissingReplayFenceAsync()
+        {
+            Assert.Null(await NetworkStore.ReadAsync(default));
+            await Assert.ThrowsAsync<InvalidDataException>(() => accounts.ReadOwnMailboxReplayFenceAsync());
+            Assert.Null(await NetworkStore.ReadAsync(default));
+        }
+
+        internal async Task CheckFractionalReplayFenceAsync(int rootKind)
+        {
+            _ = await Source().VerifyForOwnPreKeyAuthoringAsync(accounts, default);
+            using var before = await storage.ReadOwnedAsync(storage.LastHistoryAnchorSlot!) ?? throw new InvalidDataException();
+            var anchor = before.Use(bytes => bytes.ToArray());
+            await using var sql = await OpenSqlAsync();
+            using var command = sql.CreateCommand();
+            command.CommandText = "UPDATE protected_lkg_root SET revision=revision+0.5 WHERE root_kind=$kind;";
+            command.Parameters.AddWithValue("$kind", rootKind);
+            Assert.Equal(1, command.ExecuteNonQuery());
+            await Assert.ThrowsAsync<InvalidDataException>(() => ReopenAccount().ReadOwnMailboxReplayFenceAsync());
+            await Assert.ThrowsAsync<InvalidDataException>(async () => await NetworkStore.ReadAsync(default));
+            command.CommandText = "SELECT typeof(revision) FROM protected_lkg_root WHERE root_kind=$kind;";
+            Assert.Equal("real", command.ExecuteScalar());
+            using var after = await storage.ReadOwnedAsync(storage.LastHistoryAnchorSlot!) ?? throw new InvalidDataException();
+            Assert.Equal(anchor, after.Use(bytes => bytes.ToArray()));
+            CryptographicOperations.ZeroMemory(anchor);
+        }
 
         // A genuinely threshold-signed fixture transition, not an operational
         // deployment/handover implementation or unsigned epoch override.
@@ -106,6 +148,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             Sample = checked(Sample + nextTime - ProofTime); ProofTime = nextTime;
             if (unresolved) Assert.Equal(1, await accounts.CloseExpiredMailboxAcquisitionsAsync(Source()));
             var reopened = ReopenAccount();
+            Did2CompactionPlan.Root? capturedFence = null;
             using var before = await storage.ReadOwnedAsync(ProtectedDid2MailboxGrantJournal.Slot) ?? throw new InvalidDataException();
             var exactRoot = before.Use(bytes => bytes.ToArray());
             if (!advanceEpoch)
@@ -121,23 +164,45 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 Assert.Equal(selector, exclusion.AcquisitionHash.ToArray());
                 Assert.Equal(SHA256.HashData(exactRoot), exclusion.OriginalGrantRootHash.ToArray());
                 await exclusion.RecheckAsync();
+                capturedFence = await exclusion.CaptureDurableReplayFenceAsync();
+                Assert.Equal(Did2CompactionPlan.RootKind.NativeFence, capturedFence.Value.Kind);
+                Assert.True(capturedFence.Value.Guard);
+                Assert.Empty(capturedFence.Value.Successor.ToArray());
+                Assert.Equal(capturedFence.Value.Before.ToArray(), capturedFence.Value.After.ToArray());
                 if (fault == 0) await storage.DeleteBatchAsync([ProtectedDid2MailboxGrantJournal.Slot]);
                 if (fault == 1) await storage.DeleteBatchAsync([storage.LastHistoryAnchorSlot!]);
                 if (fault == 2) Sample--;
                 if (fault == 3) Sample += AccountDirectoryCurrentProofVerifier.RevocationFreshnessTtlSeconds;
-                if (fault >= 0) await Assert.ThrowsAsync<CryptographicException>(() => exclusion.RecheckAsync());
+                if (fault >= 0)
+                {
+                    await Assert.ThrowsAsync<CryptographicException>(() => exclusion.RecheckAsync());
+                    await Assert.ThrowsAsync<CryptographicException>(() => exclusion.CaptureDurableReplayFenceAsync());
+                }
                 else
                 {
                     using var canceled = new CancellationTokenSource(); canceled.Cancel();
                     await Assert.ThrowsAnyAsync<OperationCanceledException>(() => exclusion.RecheckAsync(canceled.Token));
+                    await Assert.ThrowsAnyAsync<OperationCanceledException>(() => exclusion.CaptureDurableReplayFenceAsync(canceled.Token));
                     await exclusion.RecheckAsync();
                     exclusion.Dispose();
                     await Assert.ThrowsAsync<ObjectDisposedException>(() => exclusion.RecheckAsync());
+                    await Assert.ThrowsAsync<ObjectDisposedException>(() => exclusion.CaptureDurableReplayFenceAsync());
                 }
             }
+            if (fault == 1 && advanceEpoch)
+                await Assert.ThrowsAsync<CryptographicException>(() => reopened.ReadOwnMailboxReplayFenceAsync());
             if (fault < 0 && advanceEpoch)
             {
                 reopened = ReopenAccount();
+                var cold = await reopened.ReadOwnMailboxReplayFenceAsync();
+                var captured = capturedFence ?? throw new InvalidDataException();
+                Assert.Equal(captured.Selector.ToArray(), cold.Selector.ToArray());
+                Assert.Equal(captured.Before.ToArray(), cold.Digest.ToArray());
+                var sampleBefore = Sample;
+                Sample += AccountDirectoryCurrentProofVerifier.RevocationFreshnessTtlSeconds;
+                var offline = await ReopenAccount().ReadOwnMailboxReplayFenceAsync();
+                Assert.Equal(cold.Digest.ToArray(), offline.Digest.ToArray()); // No fresh directory proof required.
+                Sample = sampleBefore;
                 using var restored = await reopened.OpenMailboxEpochExclusionAsync(selector, Source(reopened));
                 await restored.RecheckAsync(); // Restored from actual DNH2 + original journal, not cached proof.
             }

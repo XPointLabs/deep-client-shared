@@ -6,6 +6,14 @@ namespace Deep.Client.Shared.Services;
 
 public sealed partial class DeepIdV2AccountService
 {
+    // Cold local readback facts only: no source/callback, new fence, current
+    // policy, signing or deletion capability can be obtained through this API.
+    internal async Task<Did2CompactionPlan.RootReadback> ReadOwnMailboxReplayFenceAsync(CancellationToken ct = default)
+    {
+        using var verifier = OpenVerifier();
+        return await owner.ReadNativeReplayFenceAsync(TrustedUnixSeconds(), verifier, ct).ConfigureAwait(false);
+    }
+
     // Selector only, not a trusted grant, clock, floor or cleanup permission.
     // The caller must dispose the returned account lease and recheck it before
     // consuming its prerequisite in a dependency-closed owner plan.

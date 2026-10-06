@@ -10,6 +10,66 @@ namespace Deep.Client.Shared.Persistence.DeviceV2;
 
 internal static partial class SqliteDeepIdV2AccountGeneration
 {
+    // Local guard facts from the actual registered database and its protected
+    // markers, not a current network authority or a caller-supplied capsule.
+    // The existing committed DNH2 floor is the durable exclusion fence; do not
+    // duplicate its lifetime/rollback custody in another journal.
+    internal static async Task<Did2CompactionPlan.RootReadback> ReadNativeReplayFenceUnderLeaseAsync(
+        IDeepSecureStorage storage, DeepIdV2AccountFileLease accountLease, string statePath,
+        VerifiedDeepIdV2CurrentAccount current, HeldDeepIdV2AccountLease held, CancellationToken ct)
+    {
+        using var borrowed = held.BorrowFor(accountLease);
+        using var secret = await storage.ReadOwnedAsync(KeySlot, ct).ConfigureAwait(false) ??
+            throw new InvalidDataException("Native replay fence lost account registration.");
+        var record = secret.Use(value => value.ToArray());
+        byte[] genesis = [];
+        try
+        {
+            var network = current.Verified.PublicEvidence.Binding.Identity.Account.Certificate.NetworkId;
+            ValidateRecord(record, network.Span, current.AccountId.Span);
+            var binding = AccountBinding.From(current.Verified, current.AccountId.Span, network.Span,
+                current.DisplayName, current.PermanentId.CanonicalText, record.AsSpan(56, 32));
+            using var connection = await OpenBoundLkgConnectionAsync(storage, Path.GetFullPath(statePath), binding, ct).ConfigureAwait(false);
+            using var tx = connection.BeginTransaction(deferred: false);
+            using (var command = connection.CreateCommand())
+            {
+                command.Transaction = tx;
+                // Only bounded genesis bytes are read before the complete
+                // existing row/marker/anchor verifier authenticates this pin.
+                command.CommandText = "SELECT length(payload),typeof(payload),revision,substr(payload,9,32),typeof(revision) FROM protected_lkg_root WHERE root_kind=3;";
+                using var reader = command.ExecuteReader();
+                if (!reader.Read() || reader.GetString(4) != "integer" || reader.GetString(1) != "blob" ||
+                    reader.GetInt64(0) != 305 || reader.GetInt64(2) < 1)
+                    throw new InvalidDataException("Native replay fence requires an initialized exact network floor.");
+                genesis = reader.GetFieldValue<byte[]>(3);
+                if (genesis.Length != 32 || genesis.AsSpan().IndexOfAnyExcept((byte)0) < 0 || reader.Read())
+                    throw new InvalidDataException("Native replay fence has an ambiguous network pin.");
+            }
+            var backend = new NetworkLkgStore(storage, accountLease, Path.GetFullPath(statePath), binding, genesis);
+            var snapshot = await backend.ReadExistingHistoryInTransactionAsync(connection, tx, ct).ConfigureAwait(false);
+            if (snapshot.Snapshot.ForkLatched) throw new CryptographicException("A fork-latched floor cannot guard retirement.");
+            var scope = new byte[80]; network.Span.CopyTo(scope); current.AccountId.Span.CopyTo(scope.AsSpan(16));
+            record.AsSpan(56, 32).CopyTo(scope.AsSpan(48));
+            using var digest = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            var floor = XPointNetworkProtectedLkgCodec.Encode(snapshot.Snapshot.ProtectedLkg);
+            var history = snapshot.ExactHistory.ToArray();
+            try
+            {
+                Span<byte> revision = stackalloc byte[8];
+                BinaryPrimitives.WriteUInt64BigEndian(revision, snapshot.Snapshot.Revision);
+                digest.AppendData(revision); digest.AppendData(floor); digest.AppendData(history);
+                ct.ThrowIfCancellationRequested(); held.RequireOwner(accountLease); tx.Commit();
+                return new(Did2CompactionPlan.RootKind.NativeFence, SHA256.HashData(scope), digest.GetHashAndReset());
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(scope); CryptographicOperations.ZeroMemory(floor);
+                CryptographicOperations.ZeroMemory(history);
+            }
+        }
+        finally { CryptographicOperations.ZeroMemory(record); CryptographicOperations.ZeroMemory(genesis); }
+    }
+
     internal static async ValueTask<IXPointNetworkStateStore> OpenNetworkLkgStoreAsync(
         IDeepSecureStorage storage, DeepIdV2AccountFileLease accountLease,
         string statePath, VerifiedDeepIdV2CurrentAccount current,
@@ -274,14 +334,24 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         private sealed record ProjectionRow(XPointNetworkStateSnapshot Snapshot, byte[] Payload);
         private sealed record Row(XPointNetworkStateSnapshot Snapshot, byte[] Payload,
             byte[] HistoryEnvelope, byte[] ExactHistory);
+        internal async ValueTask<DeepIdV2NetworkHistorySnapshot> ReadExistingHistoryInTransactionAsync(
+            SqliteConnection connection, SqliteTransaction transaction, CancellationToken ct)
+        {
+            var row = ReadRow(connection, transaction) ??
+                throw new InvalidDataException("Native replay fence cannot initialize missing network history.");
+            await CheckMarkersAsync(row, ct).ConfigureAwait(false);
+            return new(row.Snapshot, row.ExactHistory);
+        }
         private ProjectionRow? ReadProjectionRow(SqliteConnection connection, SqliteTransaction transaction)
         {
             using var read = connection.CreateCommand();
             read.Transaction = transaction;
-            read.CommandText = "SELECT revision,length(payload),payload FROM protected_lkg_root WHERE root_kind=$kind;";
+            read.CommandText = "SELECT revision,length(payload),payload,typeof(revision),typeof(payload) FROM protected_lkg_root WHERE root_kind=$kind;";
             read.Parameters.AddWithValue("$kind", RootKind);
             using var reader = read.ExecuteReader();
             if (!reader.Read()) return null;
+            if (reader.GetString(3) != "integer" || reader.GetString(4) != "blob")
+                throw new InvalidDataException("The protected DID2 network row has noncanonical scalar types.");
             var revision = reader.GetInt64(0);
             if (revision < 1 || reader.GetInt64(1) != PayloadBytes)
                 throw new InvalidDataException("The protected DID2 network row is malformed.");
@@ -302,7 +372,7 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             var projection = ReadProjectionRow(connection, transaction);
             using var read = connection.CreateCommand();
             read.Transaction = transaction;
-            read.CommandText = "SELECT revision,length(payload),payload FROM protected_lkg_root WHERE root_kind=$kind;";
+            read.CommandText = "SELECT revision,length(payload),payload,typeof(revision),typeof(payload) FROM protected_lkg_root WHERE root_kind=$kind;";
             read.Parameters.AddWithValue("$kind", HistoryRootKind);
             using var reader = read.ExecuteReader();
             if (!reader.Read())
@@ -311,7 +381,8 @@ internal static partial class SqliteDeepIdV2AccountGeneration
                     throw new InvalidDataException("Initialized DID2 custody requires complete network history; no migration is available.");
                 return null;
             }
-            if (projection is null || reader.GetInt64(0) != checked((long)projection.Snapshot.Revision) ||
+            if (reader.GetString(3) != "integer" || reader.GetString(4) != "blob" ||
+                projection is null || reader.GetInt64(0) != checked((long)projection.Snapshot.Revision) ||
                 reader.GetInt64(1) is < HistoryHeaderBytes + MinimumHistoryBytes or > HistoryHeaderBytes + MaximumHistoryBytes)
                 throw new InvalidDataException("The protected DID2 network history is split or oversized.");
             var envelope = reader.GetFieldValue<byte[]>(2);

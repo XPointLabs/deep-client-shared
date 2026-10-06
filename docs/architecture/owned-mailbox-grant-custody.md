@@ -180,7 +180,7 @@ exclusion authority and changes no grant/counter/cleanup state. Normal source
 verification may advance its independently verified directory/network floors
 before the exclusion producer rejects; those floors are not rolled back.
 
-No additional persistent floor/marker or local reader is introduced. On reopen,
+No additional persistent floor/marker is introduced. On reopen,
 the producer remints only from actual native DNH2/anchor and retained original
 grant root, with independently current signed evidence. The source cannot
 replace an existing full-history floor with a tuple or cache. Semantics, time,
@@ -188,6 +188,33 @@ strict epoch advance and unavailable rollover rules have one owner:
 [TRANSPORT-NEUTRAL-MESSAGING §8.4.2](../../../docs/architecture/TRANSPORT-NEUTRAL-MESSAGING.md#842-grant-and-route-transitions).
 This lease is only a prerequisite for a future dependency-closed protected
 plan; the API has no deletion, mutation, issuer callback or scheduler entry.
+
+## Native replay-fence guard readback
+
+`MailboxEpochExclusion.CaptureDurableReplayFenceAsync(ct)` captures an unchanged
+`Did2CompactionPlan.NativeFence` guard under the same actual account lease.
+It rechecks the exclusion before and after reading the already-committed native
+DNH2 floor. It does not commit another floor, stage a plan or retire custody.
+The local selector is SHA256(network16 || account32 || account-instance32).
+The digest is SHA256(u64be(native revision) || exact XLK1 || exact DNH2).
+Before and After are identical; no successor bytes are present.
+
+The private SQL reader opens the already-registered account database without
+initialization and reads both native floor rows in one transaction. The existing
+network marker and independent full-history anchor authenticate the SQL-derived
+genesis pin and exact history; a tuple/hash supplied by a caller is not accepted.
+Missing/split history, noncanonical SQL scalar types, anchor mismatch, rollback
+or fork-latched state reject without repair. Revision must be a SQLite integer;
+conversion of a fractional REAL value to an integer is not accepted.
+
+`ReadOwnMailboxReplayFenceAsync(ct)` is an internal cold local fact reader. It
+acquires the real account lease and uses that same SQL/marker/anchor reader,
+without a current directory proof, network fetch, signing or issuer callback.
+It returns metadata only, not a reminted exclusion or deletion capability.
+Recovery still needs the closed owner profile and all dependency readbacks;
+capturing this guard alone cannot remove grant/send/read/ACK or receipt state.
+The [focused checkpoint](../testing/s01-native-replay-fence-2026-10-06.md)
+records the tested source boundary. Full S01 retirement remains unaccepted.
 
 The acquisition runtime still creates only an initial candidate. The internal
 closure entry is not autonomous scheduler activation. This layout does not

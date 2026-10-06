@@ -97,33 +97,56 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             await gate.WaitAsync(ct).ConfigureAwait(false);
             try
             {
-                ObjectDisposedException.ThrowIf(disposed, this); held.RequireOwner(owner.lease);
-                var reading = await RecheckRouteFreshnessAsync(current, source, fresh, held, first, ct).ConfigureAwait(false);
-                await authority.EnsureCurrentAsync(ct).ConfigureAwait(false);
-                using var actualRoot = await owner.storage.ReadOwnedAsync(ProtectedDid2MailboxGrantJournal.Slot, ct).ConfigureAwait(false) ??
-                    throw new CryptographicException("Epoch exclusion lost original grant custody.");
-                if (!actualRoot.Use(bytes => FixedRoute(bytes, root)))
-                    throw new CryptographicException("Epoch exclusion no longer binds the exact grant root.");
-                var actualInstance = await SqliteDeepIdV2AccountGeneration.ReadAccountInstanceUnderLeaseAsync(
-                    owner.storage, owner.networkId, current.AccountId, ct).ConfigureAwait(false);
-                try
-                {
-                    if (!FixedRoute(actualInstance, instance)) throw new CryptographicException("Epoch exclusion changed account instance.");
-                }
-                finally { CryptographicOperations.ZeroMemory(actualInstance); }
-                using var state = ProtectedDid2MailboxGrantJournal.Decode(root, owner.networkId, current.AccountId.Span, instance);
-                var entry = state.Entries[Convert.ToHexString(acquisition)];
-                var originalRoute = ContactRouteClosureCodec.Decode(ProtectedDid2MailboxGrantJournal.OriginalRoute(entry).Span);
-                RequireExclusion(entry, originalRoute, authority, fresh, reading, OriginalSelectionEpoch);
-                // Also re-read the native DNH2/anchor after the other reads.
-                await RecheckRouteFreshnessAsync(current, source, fresh, held, first, ct).ConfigureAwait(false);
-                using var finalRoot = await owner.storage.ReadOwnedAsync(ProtectedDid2MailboxGrantJournal.Slot, ct).ConfigureAwait(false) ??
-                    throw new CryptographicException("Epoch exclusion lost original grant custody after floor recheck.");
-                if (!finalRoot.Use(bytes => FixedRoute(bytes, root)))
-                    throw new CryptographicException("Epoch exclusion grant root changed during floor recheck.");
-                ct.ThrowIfCancellationRequested(); held.RequireActive();
+                await RecheckUnderGateAsync(ct).ConfigureAwait(false);
             }
             finally { gate.Release(); }
+        }
+
+        // A plan guard fact, never a deletion permission. Its durable producer
+        // is the existing native DNH2 floor verified by this held exclusion.
+        // Dependency closure still belongs to the same private plan owner.
+        internal async Task<Did2CompactionPlan.Root> CaptureDurableReplayFenceAsync(CancellationToken ct = default)
+        {
+            await gate.WaitAsync(ct).ConfigureAwait(false);
+            try
+            {
+                await RecheckUnderGateAsync(ct).ConfigureAwait(false);
+                var readback = await SqliteDeepIdV2AccountGeneration.ReadNativeReplayFenceUnderLeaseAsync(
+                    owner.storage, owner.lease, owner.sqlStatePath, current, held, ct).ConfigureAwait(false);
+                await RecheckUnderGateAsync(ct).ConfigureAwait(false);
+                return new(readback.Kind, readback.Selector, readback.Digest, readback.Digest,
+                    true, ReadOnlyMemory<byte>.Empty);
+            }
+            finally { gate.Release(); }
+        }
+
+        private async Task RecheckUnderGateAsync(CancellationToken ct)
+        {
+            ObjectDisposedException.ThrowIf(disposed, this); held.RequireOwner(owner.lease);
+            var reading = await RecheckRouteFreshnessAsync(current, source, fresh, held, first, ct).ConfigureAwait(false);
+            await authority.EnsureCurrentAsync(ct).ConfigureAwait(false);
+            using var actualRoot = await owner.storage.ReadOwnedAsync(ProtectedDid2MailboxGrantJournal.Slot, ct).ConfigureAwait(false) ??
+                throw new CryptographicException("Epoch exclusion lost original grant custody.");
+            if (!actualRoot.Use(bytes => FixedRoute(bytes, root)))
+                throw new CryptographicException("Epoch exclusion no longer binds the exact grant root.");
+            var actualInstance = await SqliteDeepIdV2AccountGeneration.ReadAccountInstanceUnderLeaseAsync(
+                owner.storage, owner.networkId, current.AccountId, ct).ConfigureAwait(false);
+            try
+            {
+                if (!FixedRoute(actualInstance, instance)) throw new CryptographicException("Epoch exclusion changed account instance.");
+            }
+            finally { CryptographicOperations.ZeroMemory(actualInstance); }
+            using var state = ProtectedDid2MailboxGrantJournal.Decode(root, owner.networkId, current.AccountId.Span, instance);
+            var entry = state.Entries[Convert.ToHexString(acquisition)];
+            var originalRoute = ContactRouteClosureCodec.Decode(ProtectedDid2MailboxGrantJournal.OriginalRoute(entry).Span);
+            RequireExclusion(entry, originalRoute, authority, fresh, reading, OriginalSelectionEpoch);
+            // Also re-read the native DNH2/anchor after the other reads.
+            await RecheckRouteFreshnessAsync(current, source, fresh, held, first, ct).ConfigureAwait(false);
+            using var finalRoot = await owner.storage.ReadOwnedAsync(ProtectedDid2MailboxGrantJournal.Slot, ct).ConfigureAwait(false) ??
+                throw new CryptographicException("Epoch exclusion lost original grant custody after floor recheck.");
+            if (!finalRoot.Use(bytes => FixedRoute(bytes, root)))
+                throw new CryptographicException("Epoch exclusion grant root changed during floor recheck.");
+            ct.ThrowIfCancellationRequested(); held.RequireActive();
         }
 
         private static void RequireExclusion(byte[] entry, ParsedContactRouteClosure originalRoute,
@@ -155,5 +178,14 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             }
             finally { gate.Release(); }
         }
+    }
+
+    internal async Task<Did2CompactionPlan.RootReadback> ReadNativeReplayFenceAsync(
+        ulong unixSeconds, IDeepMlDsa65Verifier verifier, CancellationToken ct)
+    {
+        using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
+        using var current = await RequireCurrentUnderLeaseAsync(unixSeconds, verifier, ct).ConfigureAwait(false);
+        return await SqliteDeepIdV2AccountGeneration.ReadNativeReplayFenceUnderLeaseAsync(
+            storage, lease, sqlStatePath, current, held, ct).ConfigureAwait(false);
     }
 }
