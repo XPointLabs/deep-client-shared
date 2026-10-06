@@ -20,7 +20,7 @@ internal static class MailboxRandomKeyTestEncoding
 public sealed class SqliteDeepMailboxRandomKeyTests
 {
     [Fact]
-    public async Task CurrentRawKeyReopensEncryptedSchemaEightAndPreservesDurablePolicy()
+    public async Task CurrentRawKeyReopensEncryptedSchemaAndPreservesDurablePolicy()
     {
         using var fixture = new Fixture();
         using (var store = new SqliteDeepMailboxStore(new(fixture.Path, fixture.Key)))
@@ -30,7 +30,7 @@ public sealed class SqliteDeepMailboxRandomKeyTests
         }
         Assert.False(File.ReadAllBytes(fixture.Path).AsSpan(0, 16).SequenceEqual("SQLite format 3\0"u8));
         using (var db = fixture.Open(raw: true))
-        { using var read = db.CreateCommand(); read.CommandText = "PRAGMA user_version;"; Assert.Equal(8L, read.ExecuteScalar()); }
+        { using var read = db.CreateCommand(); read.CommandText = "PRAGMA user_version;"; Assert.Equal(9L, read.ExecuteScalar()); }
         using (SqliteDeepMailboxStore.OpenExisting(new(fixture.Path, fixture.Key))) { }
         var digest = SHA256.HashData(File.ReadAllBytes(fixture.Path));
         using (var wrongMode = fixture.Open(raw: false))
@@ -41,6 +41,7 @@ public sealed class SqliteDeepMailboxRandomKeyTests
     [Theory]
     [InlineData(6)]
     [InlineData(7)]
+    [InlineData(8)]
     public void RetiredPasswordModeAndRetiredRawSchemaRejectWithoutRepairOrMutation(int retiredVersion)
     {
         using var fixture = new Fixture();

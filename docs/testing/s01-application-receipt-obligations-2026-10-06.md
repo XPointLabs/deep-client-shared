@@ -57,15 +57,37 @@ The labelled rerun uses only the first two structural filters.
 
 ## Current full acceptance remains open
 
+The first attempted full on source `aaf233b` found the old raw-key fixture
+expecting schema8 rather than the current schema9. The already-failed run was
+stopped by terminating only its verified test-process tree; observed launcher
+marker `S01_APPLICATION_RECEIPT_FULL_TEST_EXIT=-1`, no full acceptance/TRX is
+claimed. Its original launcher and725-case frozen manifest remain preserved
+under `artifacts/s01-application-receipt-full`.
+
+The raw-key fixture now explicitly requires9 and keeps the existing durable
+policy/wrong-key assertions. Its name is generation-neutral; the old
+`CurrentRawKeyReopensEncryptedSchemaEightAndPreservesDurablePolicy` maps only
+in evidence bookkeeping to `CurrentRawKeyReopensEncryptedSchemaAndPreservesDurablePolicy`.
+There is no runtime alias. An additional negative case rejects generation8
+without repair/mutation. Final structural/schema rerun:58/0/0 terminal0,
+58 unique names/test/execution IDs and exact Passed definition mappings,
+marker `S01_APPLICATION_RECEIPT_SCHEMA_EXIT=0`. Receipt
+`artifacts/s01-application-receipt-schema/s01-application-receipt-schema.trx`,
+SHA256 `3CC8502F4DAD7A7A0AB3A1FAADE1DC834FE28A583AD3F69E3FDCDF223769EC27`,
+start22:46:20.6223204+05, finish22:46:24.7846584+05.
+This rerun does not inherit current full/native-host acceptance from the earlier
+53 run; current full must execute both native cases on its own final host.
+
 One current full production-solution run is required against the committed
-source and immutable built host. Expected discovery is725 cases, including all
-706 prior accepted cases and the current receipt/affected-reader cases. The
-local launcher `artifacts/s01-application-receipt-full/run-and-verify.ps1`
+source and immutable built host. Expected discovery is726 cases, including
+705 unchanged prior names and the explicitly renamed raw-key case, plus the
+current receipt/affected-reader cases. The local launcher
+`artifacts/s01-application-receipt-full-corrected/run-and-verify.ps1`
 checks source HEAD/tree and frozen inputs before/after, then exact unique
 result/definition/execution mapping and required prior/current names.
 It uses `dotnet test Deep.Client.Shared.Production.slnx -c Release -m:1
 --no-build --no-restore --artifacts-path artifacts/s01-application-receipt-build`
-with TRX output in `artifacts/s01-application-receipt-full`.
+with TRX output in `artifacts/s01-application-receipt-full-corrected`.
 
 No current full receipt or acceptance is claimed here. These local ignored
 artifacts are not public-upload approval. Fixture-backed SQLCipher/protected
