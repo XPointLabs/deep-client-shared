@@ -378,9 +378,10 @@ is qualified on source25204bf/full706; it removes no known send/read/replay floo
 Other terminal/audit/replay dispositions, outstanding
 receipt work and accepted-object/retained-route obligations must still close
 before S04 cleanup. Fresh full-source acceptance is recorded separately.
-The current sole S01 slice is the
+The accepted S01 recipient block is the
 [recipient application-receipt obligation](owned-application-receipt-obligations.md).
-Its atomic inbox/due-work source and local reader do not activate receipt
+Its atomic inbox/due-work source and local reader are qualified on source6e9d2b3,
+full726/0/0 terminal0. They do not activate receipt
 sending or settle the sender's outstanding receipt/remote-object dependencies.
 Capacity remains bounded backpressure; floors are not evicted to create space.
 Local history, ratchet, inbox/dedup, mailbox grant/replay floors and remote objects

@@ -55,7 +55,7 @@ The focused filter uses `AuthenticatedDirectDmc2InboxTests`,
 `Did2OutboxCompaction_CachedEncryptionRequiresExactRetainedHistoryWithoutNewRatchet`.
 The labelled rerun uses only the first two structural filters.
 
-## Current full acceptance remains open
+## Current coupled full — accepted recipient obligation block
 
 The first attempted full on source `aaf233b` found the old raw-key fixture
 expecting schema8 rather than the current schema9. The already-failed run was
@@ -89,7 +89,24 @@ It uses `dotnet test Deep.Client.Shared.Production.slnx -c Release -m:1
 --no-build --no-restore --artifacts-path artifacts/s01-application-receipt-build`
 with TRX output in `artifacts/s01-application-receipt-full-corrected`.
 
-No current full receipt or acceptance is claimed here. These local ignored
-artifacts are not public-upload approval. Fixture-backed SQLCipher/protected
+The run on exact source `6e9d2b3c5d111f596291dcc4ce1d96a1c1f12c4a`
+completed726/0/0, observed process terminal0 and both explicit markers
+`S01_APPLICATION_RECEIPT_FULL_TEST_EXIT=0` and
+`S01_APPLICATION_RECEIPT_FULL_QUALIFIED_EXIT=0`.
+All726 unique results, definitions, test IDs and execution IDs map Passed;
+all259 current required and706 prior-mapped cases are present, with no
+missing/extra names. All171 frozen inputs remained exact. An independent
+post-terminal readback confirmed these facts and the source HEAD before edits
+to acceptance documentation.
+
+Receipt (Shared-relative):
+`artifacts/s01-application-receipt-full-corrected/s01-application-receipt-full-corrected.trx`,
+SHA256 `30708DE6560EBCDE227A2D604C2220CFAE930982E0031601A8789DC92886667A`.
+Manifest SHA256 `4E7A35CED642E3D9261B6F023FA6259910F375FE2FF5D7ECC26B2C67BF4556D9`.
+Start2026-10-06T22:51:01.6637318+05, finish2026-10-07T00:26:56.9848255+05.
+This accepts atomic current recipient due-work and the bounded local reader,
+not the whole S01 or any S07 sender/read/scheduler activation.
+
+These local ignored artifacts are not public-upload approval. Fixture-backed SQLCipher/protected
 custody and signatures are not physical Windows/Android transmission, current
 platform custody, real node deployment or application-receipt sending.
