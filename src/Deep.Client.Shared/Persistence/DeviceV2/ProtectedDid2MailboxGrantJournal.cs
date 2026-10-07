@@ -27,7 +27,7 @@ internal static class ProtectedDid2MailboxGrantJournal
     internal sealed class State : IDisposable
     {
         internal ulong Revision { get; set; } = 1;
-        // Keys are SHA256(exact XMG1), the existing XMC2 request binding.
+        // Keys are SHA256(exact XMG2), the existing XMC2 request binding.
         internal SortedDictionary<string, byte[]> Entries { get; } = new(StringComparer.Ordinal);
         internal SortedDictionary<string, Selection> Selections { get; } = new(StringComparer.Ordinal);
         public void Dispose()
@@ -154,7 +154,7 @@ internal static class ProtectedDid2MailboxGrantJournal
         {
             Scope(routeHash, request.LocatorHash.Span, (byte)request.Domain).CopyTo(entry, 0);
             seed.CopyTo(entry.AsSpan(32)); routeHash.CopyTo(entry.AsSpan(64)); entry[96] = 1;
-            request.ExactXmg1.Span.CopyTo(entry.AsSpan(RequestOffset, 435));
+            request.ExactXmg2.Span.CopyTo(entry.AsSpan(RequestOffset, 435));
             BinaryPrimitives.WriteUInt16BigEndian(entry.AsSpan(1093, 2), checked((ushort)exactPolicy.Length));
             BinaryPrimitives.WriteUInt16BigEndian(entry.AsSpan(1095, 2), checked((ushort)exactRoute.Length));
             exactPolicy.Span.CopyTo(entry.AsSpan(EvidenceOffset));
@@ -224,7 +224,7 @@ internal static class ProtectedDid2MailboxGrantJournal
     internal static ulong PossibleGrantExpiry(byte[] entry) => BinaryPrimitives.ReadUInt64BigEndian(entry.AsSpan(CeilingOffset, 8));
     internal static ulong ClosedLower(byte[] entry) => BinaryPrimitives.ReadUInt64BigEndian(entry.AsSpan(ClosedLowerOffset, 8));
     internal static ulong RequestExpiry(ReadOnlySpan<byte> entry) =>
-        BinaryPrimitives.ReadUInt64BigEndian(ContactCodec.Decode("XMG1", entry.Slice(RequestOffset, 435)).Field(10).Span);
+        BinaryPrimitives.ReadUInt64BigEndian(ContactCodec.Decode("XMG2", entry.Slice(RequestOffset, 435)).Field(10).Span);
     internal static ReadOnlyMemory<byte> OriginalPolicy(byte[] entry) =>
         entry.AsMemory(EvidenceOffset, BinaryPrimitives.ReadUInt16BigEndian(entry.AsSpan(1093, 2)));
     internal static ReadOnlyMemory<byte> OriginalRoute(byte[] entry) =>
@@ -364,7 +364,7 @@ internal static class ProtectedDid2MailboxGrantJournal
         if (ceiling == 0 || ceiling != OriginalCeiling(entry) ||
             (entry[96] is 3 or 4 or 5 ? closedLower < RequestExpiry(entry) : closedLower != 0))
             throw new InvalidDataException("Original issuance ceiling or closed acquisition outcome differs.");
-        var request = ContactCodec.Decode("XMG1", entry.Slice(RequestOffset, 435));
+        var request = ContactCodec.Decode("XMG2", entry.Slice(RequestOffset, 435));
         ContactCodec.VerifyMailboxGrantHolderSignature(request);
         if (!Fixed(request.Field(1).Span, network) ||
             !Fixed(entry[..32], Scope(entry.Slice(64, 32), request.Field(3).Span, request.Field(6).Span[0])))
@@ -407,7 +407,7 @@ internal static class ProtectedDid2MailboxGrantJournal
             throw new InvalidDataException("Original grant policy/route evidence framing differs.");
         var policy = ContactCodec.Decode("PMA2", entry.Slice(EvidenceOffset, policyLength));
         var route = ContactRouteClosureCodec.Decode(entry.Slice(EvidenceOffset + policyLength, routeLength));
-        var request = ContactCodec.Decode("XMG1", entry.Slice(RequestOffset, 435));
+        var request = ContactCodec.Decode("XMG2", entry.Slice(RequestOffset, 435));
         if (!Fixed(route.ExactHash.Span, entry.Slice(64, 32)) ||
             !Fixed(policy.Field(1).Span, request.Field(1).Span) ||
             !Fixed(route.Reachability.Field(1).Span, request.Field(1).Span) ||

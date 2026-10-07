@@ -31,7 +31,7 @@ All integers are unsigned big-endian. The closed header is96 bytes:
 | 94 | 2 | Zero reserved |
 
 Then follow length-prefixed acquisition records, sorted strictly by
-`SHA256(exact XMG1)`. This is the existing XMC2 tag5 request binding, not a new
+`SHA256(exact XMG2)`. This is the existing XMC2 tag5 request binding, not a new
 hash domain. The identity is derived, not stored as a second mutable field.
 Each prefix is u32be and is checked against5737..25561 before slicing or copying.
 The record has a1097-byte fixed region and exact original policy/route evidence:
@@ -43,7 +43,7 @@ The record has a1097-byte fixed region and exact original policy/route evidence:
 | 64 | 32 | Exact nonzero route-closure hash |
 | 96 | 1 | Phase1 pending, phase2 ordinary winner, phase3 closed-unresolved, phase4 received late winner, phase5 adopted late winner |
 | 97 | 3 | Zero reserved |
-| 100 | 435 | Exact original XMG1 |
+| 100 | 435 | Exact original XMG2 |
 | 535 | 510 | All zero for phases1/3; exact successful XMC2 for phases2/4/5 |
 | 1045 | 32 | Predecessor acquisition identity; zero only for first acquisition |
 | 1077 | 8 | Conservative possible-grant expiry from original signed evidence |

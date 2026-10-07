@@ -90,21 +90,21 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             Assert.Empty(typeof(VerifiedDeepIdV2MailboxGrant).GetConstructors());
             Assert.Equal(response.CanonicalBytes.ToArray(), verified.ExactXmc2.ToArray());
             var restoredRequest = await DeepIdV2MailboxGrantRequestAuthor.RestoreDepositAsync(route,
-                request.LocatorHash, request.HolderPublicKey, request.ExactXmg1);
-            Assert.Equal(request.ExactXmg1.ToArray(), restoredRequest.ExactXmg1.ToArray());
+                request.LocatorHash, request.HolderPublicKey, request.ExactXmg2);
+            Assert.Equal(request.ExactXmg2.ToArray(), restoredRequest.ExactXmg2.ToArray());
             var retained = await DeepIdV2MailboxGrantResultVerifier.VerifyRetainedSuccessAsync(route,
-                request.ExactXmg1, response.CanonicalBytes, operational.ExactPma2);
+                request.ExactXmg2, response.CanonicalBytes, operational.ExactPma2);
             Assert.Equal(verified.ExactGrant.ToArray(), retained.ExactGrant.ToArray());
             var futureResponse = MailboxGrantResultAuthor.AuthorSuccess(request.Record, route.ExactRouteClosure.Span,
                 crypto.SignGrant(grant, Bytes(32, 0x31)), window.UpperUnixSeconds + 1, window.UpperUnixSeconds + 15);
             await Assert.ThrowsAsync<CryptographicException>(async () => await DeepIdV2MailboxGrantResultVerifier.VerifyRetainedSuccessAsync(
-                route, request.ExactXmg1, futureResponse.CanonicalBytes, operational.ExactPma2));
+                route, request.ExactXmg2, futureResponse.CanonicalBytes, operational.ExactPma2));
             await Assert.ThrowsAsync<CryptographicException>(async () => await DeepIdV2MailboxGrantRequestAuthor.RestoreDepositAsync(
-                route, Bytes(32, 0xb3), request.HolderPublicKey, request.ExactXmg1));
+                route, Bytes(32, 0xb3), request.HolderPublicKey, request.ExactXmg2));
             await Assert.ThrowsAsync<ArgumentException>(async () => await DeepIdV2MailboxGrantRequestAuthor.RestoreDepositAsync(
-                route, new byte[32], request.HolderPublicKey, request.ExactXmg1));
+                route, new byte[32], request.HolderPublicKey, request.ExactXmg2));
             await Assert.ThrowsAsync<CryptographicException>(async () => await DeepIdV2MailboxGrantRequestAuthor.RestoreDepositAsync(
-                route, request.LocatorHash, Bytes(32, 0xb4), request.ExactXmg1));
+                route, request.LocatorHash, Bytes(32, 0xb4), request.ExactXmg2));
             Assert.True(MemoryMarshal.TryGetArray(verified.ExactGrant, out var exported));
             exported.AsSpan().Clear();
             Assert.Equal(response.Field(8).ToArray(), verified.ExactGrant.ToArray());
@@ -115,16 +115,40 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             Assert.Equal(MailboxCapabilityDomain.Retrieve, retrieved.Domain);
             await retrieved.EnsureCurrentAsync();
             var restoredRetrieve = await DeepIdV2MailboxGrantRequestAuthor.RestoreRetrieveAsync(route,
-                retrieve.LocatorHash, Bytes(32, 0xb2), retrieve.HolderPublicKey, retrieve.ExactXmg1);
-            Assert.Equal(retrieve.ExactXmg1.ToArray(), restoredRetrieve.ExactXmg1.ToArray());
+                retrieve.LocatorHash, Bytes(32, 0xb2), retrieve.HolderPublicKey, retrieve.ExactXmg2);
+            Assert.Equal(retrieve.ExactXmg2.ToArray(), restoredRetrieve.ExactXmg2.ToArray());
+            foreach (var original in new[] { request, retrieve })
+            {
+                var changedBytes = original.ExactXmg2.ToArray();
+                Bytes(32, 0xbe).CopyTo(changedBytes, FieldOffset(changedBytes, 11));
+                var changedRecord = ContactCodec.Decode("XMG2", changedBytes);
+                var proof = new byte[64];
+                await holder.SignMailboxGrantRequestAsync(changedRecord.SignatureInput, proof, default);
+                proof.CopyTo(changedBytes, FieldOffset(changedBytes, 12));
+                ContactCodec.VerifyMailboxGrantHolderSignature(ContactCodec.Decode("XMG2", changedBytes));
+                if (original.Domain == MailboxCapabilityDomain.Deposit)
+                    await Assert.ThrowsAsync<CryptographicException>(async () => await DeepIdV2MailboxGrantRequestAuthor.RestoreDepositAsync(
+                        route, original.LocatorHash, original.HolderPublicKey, changedBytes));
+                else
+                    await Assert.ThrowsAsync<CryptographicException>(async () => await DeepIdV2MailboxGrantRequestAuthor.RestoreRetrieveAsync(
+                        route, original.LocatorHash, Bytes(32, 0xb2), original.HolderPublicKey, changedBytes));
+                var changedResponse = Result(original, Grant(original, original.Domain == MailboxCapabilityDomain.Deposit ? (byte)0x31 : (byte)0x32),
+                    original.Domain == MailboxCapabilityDomain.Deposit ? (byte)0x31 : (byte)0x32).CanonicalBytes.ToArray();
+                SHA256.HashData(changedBytes).CopyTo(changedResponse, FieldOffset(changedResponse, 5));
+                Bytes(32, 0xbe).CopyTo(changedResponse, FieldOffset(changedResponse, 7));
+                ContactCodec.ValidateMailboxGrantResultBinding(ContactCodec.Decode("XMG2", changedBytes), ContactCodec.Decode("XMC2", changedResponse));
+                await Assert.ThrowsAsync<CryptographicException>(async () => await DeepIdV2MailboxGrantResultVerifier.VerifyRetainedSuccessAsync(
+                    route, changedBytes, changedResponse, operational.ExactPma2));
+                CryptographicOperations.ZeroMemory(proof);
+            }
             await Assert.ThrowsAsync<CryptographicException>(async () => await DeepIdV2MailboxGrantRequestAuthor.RestoreRetrieveAsync(
-                route, retrieve.LocatorHash, Bytes(32, 0xb3), retrieve.HolderPublicKey, retrieve.ExactXmg1));
+                route, retrieve.LocatorHash, Bytes(32, 0xb3), retrieve.HolderPublicKey, retrieve.ExactXmg2));
 
             // A valid winner may outlive its acquisition window. Restore must
             // not retry an expired pending request or expire the grant early.
-            var shortBytes = request.ExactXmg1.ToArray();
+            var shortBytes = request.ExactXmg2.ToArray();
             BinaryPrimitives.WriteUInt64BigEndian(shortBytes.AsSpan(FieldOffset(shortBytes, 10)), window.UpperUnixSeconds + 4);
-            var shortRecord = ContactCodec.Decode("XMG1", shortBytes);
+            var shortRecord = ContactCodec.Decode("XMG2", shortBytes);
             var shortSignature = new byte[64];
             await holder.SignMailboxGrantRequestAsync(shortRecord.SignatureInput, shortSignature, default);
             shortSignature.CopyTo(shortBytes, FieldOffset(shortBytes, 12));

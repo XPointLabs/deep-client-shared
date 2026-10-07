@@ -57,7 +57,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 throw new CryptographicException("Owned mailbox installation has no exact replica pair.");
             var first = ids[..32]; var second = ids.Slice(32, 32);
             var verified = new VerifiedCurrentMailboxGrant(
-                ContactCodec.Decode("XMG1", winner.ExactXmg1.Span),
+                ContactCodec.Decode("XMG2", winner.ExactXmg2.Span),
                 ContactCodec.Decode("XMC2", winner.ExactXmc2.Span), grant, route.Route,
                 [new(first.Span, route.Network.ResolveNodeIdentityPublicKey(first).Span),
              new(second.Span, route.Network.ResolveNodeIdentityPublicKey(second).Span)], authority);

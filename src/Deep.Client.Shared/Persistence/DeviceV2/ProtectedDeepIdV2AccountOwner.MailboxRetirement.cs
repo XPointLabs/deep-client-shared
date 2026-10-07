@@ -104,7 +104,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     using var catalogRaw = await ReadAsync(owner.storage, ProtectedDid2MessagingSessionCatalog.Slot, ct).ConfigureAwait(false);
                     using var catalog = catalogRaw.Use(bytes => ProtectedDid2MessagingSessionCatalog.Decode(bytes, network, account.Span, instance));
                     if (grant.Length != 0 || catalog.Count != 0) dependencies |= RetirementDependency.UnresolvedReceiptOrObject;
-                    var request = ContactCodec.Decode("XMG1", ProtectedDid2MailboxGrantJournal.Request(entry).Span);
+                    var request = ContactCodec.Decode("XMG2", ProtectedDid2MailboxGrantJournal.Request(entry).Span);
                     if (request.Field(6).Span[0] == (byte)MailboxCapabilityDomain.Retrieve)
                         dependencies |= RetirementDependency.RetainedRetrievePath;
                     using var registration = await SqliteDeepIdV2AccountGeneration.ReadCompactionRegistrationUnderLeaseAsync(

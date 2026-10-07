@@ -121,7 +121,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 !FixedRoute(entry.AsSpan(0, 32), Convert.FromHexString(scope)) ||
                 !FixedRoute(entry.AsSpan(64, 32), routeHash))
                 throw new CryptographicException("Late mailbox result has no exact owned acquisition in this route and role.");
-            var request = ContactCodec.Decode("XMG1", ProtectedDid2MailboxGrantJournal.Request(entry).Span);
+            var request = ContactCodec.Decode("XMG2", ProtectedDid2MailboxGrantJournal.Request(entry).Span);
             if (!FixedRoute(request.Field(4).Span, capability.Span))
                 throw new CryptographicException("Late mailbox result differs from the actual private capability.");
             if (!ProtectedDid2MailboxGrantJournal.IsClosedUnresolved(entry) && !ProtectedDid2MailboxGrantJournal.HasWinner(entry))
@@ -365,7 +365,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 {
                     // The request was current before dispatch; a delayed exact
                     // reply may outlive that envelope, never the actual grant.
-                    var verified = await DeepIdV2MailboxGrantResultVerifier.VerifyRetainedSuccessAsync(route, request.ExactXmg1,
+                    var verified = await DeepIdV2MailboxGrantResultVerifier.VerifyRetainedSuccessAsync(route, request.ExactXmg2,
                         response, fresh.MailboxAuthority.ExactPma2, deadline.Token).ConfigureAwait(false);
                     await recheck(deadline.Token).ConfigureAwait(false);
                     var next = ProtectedDid2MailboxGrantJournal.WithWinner(entry, verified.ExactXmc2.Span, networkId);

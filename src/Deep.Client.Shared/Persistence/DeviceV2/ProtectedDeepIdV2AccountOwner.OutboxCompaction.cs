@@ -184,7 +184,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         var grantName = Convert.ToHexString(ProtectedDid2MailboxGrantJournal.Scope(send.RouteHash, route.LocatorHash.Span, (byte)MailboxCapabilityDomain.Deposit));
         var retained = ProtectedDid2MailboxGrantJournal.RequireRetainedWinner(grants, grantName, send.GrantHash);
         var response = ContactCodec.Decode("XMC2", ProtectedDid2MailboxGrantJournal.Response(retained).Span);
-        var request = ContactCodec.Decode("XMG1", ProtectedDid2MailboxGrantJournal.Request(retained).Span);
+        var request = ContactCodec.Decode("XMG2", ProtectedDid2MailboxGrantJournal.Request(retained).Span);
         ContactCodec.VerifyMailboxGrantHolderSignature(request); ContactCodec.ValidateMailboxGrantResultBinding(request, response);
         ContactCodec.ValidateMailboxGrantResultRouteBinding(response, route.Route.Route);
         if (!FixedRoute(request.Field(1).Span, scope.Network) || !FixedRoute(request.Field(3).Span, route.LocatorHash.Span) ||

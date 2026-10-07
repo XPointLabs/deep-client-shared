@@ -55,7 +55,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     {
         var name = Convert.ToHexString(acquisition);
         if (!state.Entries.TryGetValue(name, out var entry) || !ProtectedDid2MailboxGrantJournal.IsClosedUnresolved(entry) ||
-            ContactCodec.Decode("XMG1", ProtectedDid2MailboxGrantJournal.Request(entry).Span).Field(6).Span[0] != (byte)MailboxCapabilityDomain.Deposit)
+            ContactCodec.Decode("XMG2", ProtectedDid2MailboxGrantJournal.Request(entry).Span).Field(6).Span[0] != (byte)MailboxCapabilityDomain.Deposit)
             throw new IOException("Only a closed unused deposit acquisition is eligible for this retirement profile.");
         var scope = entry.AsSpan(0, 32).ToArray(); var scopeName = Convert.ToHexString(scope);
         if (!state.Selections.TryGetValue(scopeName, out var selection) || selection.Current is not null || selection.Pending is not null ||

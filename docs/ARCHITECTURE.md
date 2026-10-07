@@ -1288,7 +1288,7 @@ before dispatch. The composition contract is owned by
 [DR-0032](../../docs/survival-program/decisions/DR-0032-did2-mailbox-selected-entry.md).
 No DID1 proof/source adapter or static ingress is introduced. This internal
 carrier has no shipping caller yet: durable DID2 route adoption/publication,
-protected random reachability-scoped holder, XMG1/XMC2 grants, adapter receipt
+protected random reachability-scoped holder, XMG2/XMC2 grants, adapter receipt
 and semantic ACK remain independent prerequisites. Codec/path/SQL tests do
 not establish socket, masked carrier or Windows/Android delivery.
 
@@ -1319,17 +1319,26 @@ grant, contact acceptance, semantic ACK, blob/group or device delivery evidence.
 The old caller-owned DID1 mailbox acquisition client is removed under
 [DR-0035](../../docs/survival-program/decisions/DR-0035-did2-mailbox-grant-request.md).
 `VerifiedCurrentMailboxGrant`/replica models retain only neutral credential
-bindings; they do not mint an issued grant. Protocol authors XMG1 directly from
+bindings; they do not mint an issued grant. Protocol authors XMG2 directly from
 current DID2 route/time and a captured holder key. Shipping requires a new
 account-owned holder/request journal, exact retry before transport, live
 publication, the DR81 verifier and durable XMC2
 installation. The old identity/V1-storage holder owner is removed too; its
 narrow signer has only an internal DID2 route/capability-bound factory, with
 no public seed/storage/create/delete surface and no shipping custody producer.
-It rejects wrong role capability/locator/PMT/PMS for XMG1 and wrong
+It rejects wrong role capability/locator/PMT/PMS/exact-route hash for XMG2 and wrong
 network/holder/role/placement/epoch/selector for MCP3; these scope checks do not authenticate
 an issuer or topology and cannot replace the account owner.
 Do not trust an arbitrary nonzero membership commitment as authenticated topology.
+
+The current request clean break follows
+[DR-0102](../../docs/survival-program/decisions/DR-0102-exact-mailbox-request-route-binding.md).
+Shared's native holder validates the exact route commitment before signing; the
+request author and ordinary result/restore consumers use the same commitment.
+Old requests are rejected rather than reminted. Rebuild/repin all consumers
+together; this source change does not reset account/node keys, provision a
+retained issuer or activate a shipping carrier. See the
+[bounded checkpoint](testing/s01-exact-request-binding-2026-10-07.md).
 
 The internal `ReadOwnPrivateContactMailboxRouteAsync` drafts private reply
 metadata only from the actual phase-7 own publication under the account lease

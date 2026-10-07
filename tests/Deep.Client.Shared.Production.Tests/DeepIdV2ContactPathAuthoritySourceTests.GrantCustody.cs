@@ -192,7 +192,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         private async Task<byte[]> PrepareLateGraphSuccessorAsync(byte[] original,
             VerifiedDeepIdV2ContactRouteClosure route, bool retrieve)
         {
-            var record = ContactCodec.Decode("XMG1", ProtectedDid2MailboxGrantJournal.Request(original).Span);
+            var record = ContactCodec.Decode("XMG2", ProtectedDid2MailboxGrantJournal.Request(original).Span);
             var seed = Bytes(32, 0x9b);
             using var signer = ReachabilityMailboxHolderAuthority.OpenRetained(route, record.Field(3), record.Field(4),
                 retrieve ? MailboxCapabilityDomain.Retrieve : MailboxCapabilityDomain.Deposit, seed);
@@ -289,7 +289,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             transport.LoseResponse = false;
             transport.BeforeReturn = () => { Sample += 20; ProofTime += 20; return Task.CompletedTask; };
             var actual = await Acquire();
-            Assert.Equal(transport.OriginalRequest.ToArray(), actual.ExactXmg1.ToArray());
+            Assert.Equal(transport.OriginalRequest.ToArray(), actual.ExactXmg2.ToArray());
             Assert.Equal(transport.OriginalResponse.ToArray(), actual.ExactXmc2.ToArray());
             Assert.True(transport.ExactRetry); Assert.Equal(2, transport.Calls);
             Assert.True((await transport.Route!.ReadCurrentTimeAsync()).LowerUnixSeconds >= expiry);
@@ -403,7 +403,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 
         private async Task<byte[]> PrepareClosedGrantCandidateAsync(byte[] original, VerifiedDeepIdV2ContactRouteClosure route)
         {
-            var record = ContactCodec.Decode("XMG1", ProtectedDid2MailboxGrantJournal.Request(original).Span);
+            var record = ContactCodec.Decode("XMG2", ProtectedDid2MailboxGrantJournal.Request(original).Span);
             var seed = Bytes(32, 0x9a);
             try
             {
@@ -505,7 +505,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 Assert.Equal(ProtectedDid2MailboxGrantJournal.Acquisition(entry), selection.Current);
                 Assert.Null(selection.Pending);
                 Assert.True(ProtectedDid2MailboxGrantJournal.HasWinner(entry));
-                Assert.Equal(verified.ExactXmg1.ToArray(), ProtectedDid2MailboxGrantJournal.Request(entry).ToArray());
+                Assert.Equal(verified.ExactXmg2.ToArray(), ProtectedDid2MailboxGrantJournal.Request(entry).ToArray());
                 Assert.Equal(verified.ExactXmc2.ToArray(), ProtectedDid2MailboxGrantJournal.Response(entry).ToArray());
                 await CheckIndependentAcquisitionsAsync(winner, transport.Route!, verified);
                 // A corrupted seed, winner, phase or reserved byte is not repaired.
@@ -523,7 +523,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             }
             reader = ReopenGrantReader(); source = GrantReaderSource(reader);
             var reopened = await reader.AcquirePermanentContactDepositGrantAsync(resolved, source, transport);
-            Assert.Equal(verified.ExactXmg1.ToArray(), reopened.ExactXmg1.ToArray());
+            Assert.Equal(verified.ExactXmg2.ToArray(), reopened.ExactXmg2.ToArray());
             Assert.Equal(verified.ExactXmc2.ToArray(), reopened.ExactXmc2.ToArray());
             await AssertInstalledGrantSqlAsync(reopened, own: false);
             Assert.Equal(3, transport.Calls); // Retained winner makes no issuer callback.
@@ -548,8 +548,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             var retrieved = await ownerReopened.AcquireOwnPermanentContactRetrieveGrantAsync(Source(ownerReopened), retrieval);
             Assert.Equal(MailboxCapabilityDomain.Retrieve, retrieved.Domain);
             Assert.Equal(2, retrieval.Calls); Assert.True(retrieval.ExactRetry); Assert.True(retrieval.BuiltHeldFrame);
-            Assert.NotEqual(ContactCodec.Decode("XMG1", verified.ExactXmg1.Span).Field(5).ToArray(),
-                ContactCodec.Decode("XMG1", retrieved.ExactXmg1.Span).Field(5).ToArray());
+            Assert.NotEqual(ContactCodec.Decode("XMG2", verified.ExactXmg2.Span).Field(5).ToArray(),
+                ContactCodec.Decode("XMG2", retrieved.ExactXmg2.Span).Field(5).ToArray());
             using (var winner = await ReadPeerGrantsAsync(own: true))
             {
                 var entry = Assert.Single(winner.Entries).Value;
@@ -558,7 +558,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             }
             ownerReopened = ReopenAccount();
             var retrieveAgain = await ownerReopened.AcquireOwnPermanentContactRetrieveGrantAsync(Source(ownerReopened), retrieval);
-            Assert.Equal(retrieved.ExactXmg1.ToArray(), retrieveAgain.ExactXmg1.ToArray());
+            Assert.Equal(retrieved.ExactXmg2.ToArray(), retrieveAgain.ExactXmg2.ToArray());
             Assert.Equal(retrieved.ExactXmc2.ToArray(), retrieveAgain.ExactXmc2.ToArray());
             Assert.Equal(2, retrieval.Calls);
             await AssertInstalledGrantSqlAsync(retrieveAgain, own: true);
@@ -575,7 +575,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             var scope = Assert.Single(state.Selections).Key;
             var firstName = Assert.Single(state.Entries).Key;
             var firstGrant = SHA256.HashData(first.ExactGrant.Span);
-            var locator = ContactCodec.Decode("XMG1", first.ExactXmg1.Span).Field(3);
+            var locator = ContactCodec.Decode("XMG2", first.ExactXmg2.Span).Field(3);
             byte[] Encode() => ProtectedDid2MailboxGrantJournal.Encode(state, Network, account, instance);
             var seed = Bytes(32, 0x98);
             using var holder = ReachabilityMailboxHolderAuthority.OpenRetained(route, locator,
@@ -655,7 +655,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 var old = state.Entries[Convert.ToHexString(SHA256.HashData(transport.OriginalRequest.Span))];
                 var scope = Convert.ToHexString(old.AsSpan(0, 32));
                 var original = old.ToArray();
-                var requestRecord = ContactCodec.Decode("XMG1", ProtectedDid2MailboxGrantJournal.Request(old).Span);
+                var requestRecord = ContactCodec.Decode("XMG2", ProtectedDid2MailboxGrantJournal.Request(old).Span);
                 var route = transport.Route!; var locator = requestRecord.Field(3); var capability = requestRecord.Field(4);
                 var domain = (MailboxCapabilityDomain)requestRecord.Field(6).Span[0];
                 seed = Bytes(32, 0x99);
@@ -746,7 +746,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             VerifiedDeepIdV2ContactRouteClosure route, bool retrieve, CancellationToken ct)
         {
             var effective = BinaryPrimitives.ReadUInt64BigEndian(route.Route.Reachability.Field(17).Span);
-            var tuple = MailboxGrantRouteEvidenceAuthentication.CreateTuple(SHA256.HashData(request.ExactXmg1.Span),
+            var tuple = MailboxGrantRouteEvidenceAuthentication.CreateTuple(SHA256.HashData(request.ExactXmg2.Span),
                 request.Record.Field(3).Span, MailboxGrantCapabilityDigest.Compute(request.Record.Field(4).Span, request.Domain),
                 (byte)request.Domain, 1, route.Route.ExactHash.Span, effective);
             var signing = MailboxGrantRouteEvidenceAuthentication.GetSigningBytes(tuple);
@@ -761,13 +761,13 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             var time = new OnionTrustedTimeAuthority(this);
             var invalid = evidence[0].Signature.ToArray(); invalid[^1] ^= 1;
             await Assert.ThrowsAsync<CryptographicException>(async () => await DeepIdV2MailboxGrantIssuanceVerifier.VerifyAsync(
-                route.Network, route.NetworkAuthority, operational.ExactPma2, request.ExactXmg1, route.ExactRouteClosure,
+                route.Network, route.NetworkAuthority, operational.ExactPma2, request.ExactXmg2, route.ExactRouteClosure,
                 effective, [new(evidence[0].NodeId.Span, invalid), evidence[1]], time, ct));
             await Assert.ThrowsAsync<CryptographicException>(async () => await DeepIdV2MailboxGrantIssuanceVerifier.VerifyAsync(
-                route.Network, route.NetworkAuthority, operational.ExactPma2, request.ExactXmg1, route.ExactRouteClosure,
+                route.Network, route.NetworkAuthority, operational.ExactPma2, request.ExactXmg2, route.ExactRouteClosure,
                 effective, [evidence[0], evidence[0]], time, ct));
             var authorized = await DeepIdV2MailboxGrantIssuanceVerifier.VerifyAsync(route.Network, route.NetworkAuthority,
-                operational.ExactPma2, request.ExactXmg1, route.ExactRouteClosure, effective, evidence, time, ct);
+                operational.ExactPma2, request.ExactXmg2, route.ExactRouteClosure, effective, evidence, time, ct);
             var wrong = new FixtureMailboxIssuer(retrieve ? (byte)0x31 : (byte)0x32);
             await Assert.ThrowsAsync<CryptographicException>(async () => await authorized.AuthorSuccessAsync(wrong, ct));
             Assert.Equal(0, wrong.Calls);
@@ -801,13 +801,13 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             using (var custody = await fixture.ReadPeerGrantsAsync(own: ownerOnPrimary ?? selfRetrieve))
             {
                 var entry = Assert.Single(custody.Entries.Values,
-                    value => ProtectedDid2MailboxGrantJournal.Request(value).Span.SequenceEqual(request.ExactXmg1.Span));
+                    value => ProtectedDid2MailboxGrantJournal.Request(value).Span.SequenceEqual(request.ExactXmg2.Span));
                 Assert.False(ProtectedDid2MailboxGrantJournal.HasWinner(entry));
-                Assert.Equal(request.ExactXmg1.ToArray(), ProtectedDid2MailboxGrantJournal.Request(entry).ToArray());
+                Assert.Equal(request.ExactXmg2.ToArray(), ProtectedDid2MailboxGrantJournal.Request(entry).ToArray());
             }
             if (Calls == 1)
             {
-                var canonical = ContactResolveCanonicalPathRequest.Decode(request.ExactXmg1.Span);
+                var canonical = ContactResolveCanonicalPathRequest.Decode(request.ExactXmg2.Span);
                 Assert.Equal(ContactServiceRequestKind.AcquireMailboxGrant, canonical.RequestKind);
                 var placement = ContactServicePlacementFactory.Create(dispatch.Network, canonical.RequestKind, canonical.ShardKey);
                 var source = (ownerOnPrimary ?? selfRetrieve) ? fixture.Source(dispatch.Custody.Owner) : fixture.GrantReaderSource(dispatch.Custody.Owner);
@@ -818,12 +818,12 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 var codec = new PrivacyRoutingCodec(new OnionEntropyAuthority(ledger),
                     new OnionKeyAgreementAuthority(new RejectClientReceiveVault()));
                 using var built = await codec.BuildAsync(prepared.Attempt.Path, prepared.Attempt.Request, ct);
-                Assert.True(built.Frame.Length > request.ExactXmg1.Length);
+                Assert.True(built.Frame.Length > request.ExactXmg2.Length);
                 Assert.Equal(OnionEntropyCommitOutcome.Duplicate,
                     await dispatch.Custody.Entropy.CommitAsync(ledger.LastBatch!, ct));
                 dispatch.RequireActive(); BuiltHeldFrame = true;
             }
-            var exact = request.ExactXmg1.ToArray();
+            var exact = request.ExactXmg2.ToArray();
             if (requestBytes is null) requestBytes = exact;
             else { ExactRetry &= requestBytes.AsSpan().SequenceEqual(exact); Assert.True(ExactRetry); }
             if (responseBytes is null)

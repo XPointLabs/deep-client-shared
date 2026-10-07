@@ -72,6 +72,9 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 current.Authority, route.ExactXir1V2, route.ExactRouteClosure, time);
             await verifiedAgain.EnsureCurrentAsync();
             await CheckMailboxGrantRequestsAsync(route);
+            var secondRoute = await DeepIdV2ContactRouteAuthor.CompleteGenesisAsync(recipient, current.Network,
+                current.Authority, secrets!, xra.CanonicalBytes, threshold, 2, time);
+            await CheckExactGrantRouteIntentAsync(route, secondRoute);
             var mutableInvite = route.ExactXir1V2.ToArray(); var mutableClosure = route.ExactRouteClosure.ToArray();
             var copyClock = new CallbackRendezvousClock(() =>
             {

@@ -44,14 +44,14 @@ public sealed class VerifiedCurrentMailboxReplica
 }
 
 /// <summary>
-/// A single current-epoch MCG3 returned by exact XMG1/XMC2. This is deliberately
+/// A single current-epoch MCG3 returned by exact XMG2/XMC2. This is deliberately
 /// not the legacy current/next JSON bundle and carries no Session-derived ID.
 /// </summary>
 public sealed class VerifiedCurrentMailboxGrant
 {
     private static ReadOnlySpan<byte> AccountScopeDomain =>
         "deep.mailbox.account-scope.v1"u8;
-    private readonly byte[] exactXmg1;
+    private readonly byte[] exactXmg2;
     private readonly byte[] exactXmc2;
     private readonly byte[] exactGrant;
     private readonly byte[] exactRouteClosure;
@@ -71,7 +71,7 @@ public sealed class VerifiedCurrentMailboxGrant
         IReadOnlyList<VerifiedCurrentMailboxReplica> replicas,
         VerifiedOfficialMailboxAuthority runtimeAuthority)
     {
-        exactXmg1 = request.CanonicalBytes.ToArray();
+        exactXmg2 = request.CanonicalBytes.ToArray();
         exactXmc2 = result.CanonicalBytes.ToArray();
         exactGrant = MailboxAuthenticatedCapabilityCodec.EncodeGrant(grant);
         exactRouteClosure = route.ExactBytes.ToArray();
@@ -108,7 +108,7 @@ public sealed class VerifiedCurrentMailboxGrant
     public ulong Generation { get; }
     public ulong NotBeforeUnixSeconds { get; }
     public ulong ExpiresAtUnixSeconds { get; }
-    public ReadOnlyMemory<byte> ExactXmg1 => exactXmg1.ToArray();
+    public ReadOnlyMemory<byte> ExactXmg2 => exactXmg2.ToArray();
     public ReadOnlyMemory<byte> ExactXmc2 => exactXmc2.ToArray();
     public ReadOnlyMemory<byte> ExactGrant => exactGrant.ToArray();
     public ReadOnlyMemory<byte> ExactRouteClosure => exactRouteClosure.ToArray();

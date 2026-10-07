@@ -280,7 +280,7 @@ public sealed record ScopedMailboxCredentialGeneration(
 }
 
 /// <summary>
-/// One exact current-epoch credential acquired through clean XMG1/XMC2. This
+/// One exact current-epoch credential acquired through clean XMG2/XMC2. This
 /// is the production ContactV1 shape and deliberately has no synthetic next
 /// epoch or Session-derived identity.
 /// </summary>
@@ -513,7 +513,7 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
         VerifiedOfficialMailboxAuthority authority,
         CancellationToken cancellationToken = default) =>
         throw new NotSupportedException(
-            "Clean XMG1/XMC2 credentials belong to SqliteDeepMailboxStore.");
+            "Clean XMG2/XMC2 credentials belong to SqliteDeepMailboxStore.");
 
     public async Task InstallScopedCredentialBatchAsync(
         IReadOnlyList<ScopedMailboxCredentialGeneration> generations,

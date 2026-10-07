@@ -133,9 +133,9 @@ public sealed class ContactResolveCanonicalPathRequest
                 ContactServiceRequestKind.ClaimPreKey, request.Field(16).Span,
                 System.Buffers.Binary.BinaryPrimitives.ReadUInt64BigEndian(request.Field(6).Span));
         }
-        if (exactRequest[..4].SequenceEqual("XMG1"u8))
+        if (exactRequest[..4].SequenceEqual("XMG2"u8))
         {
-            var request = ContactCodec.Decode("XMG1", exactRequest);
+            var request = ContactCodec.Decode("XMG2", exactRequest);
             ContactCodec.VerifyMailboxGrantHolderSignature(request);
             return CreateProjectionBound(
                 request.CanonicalBytes.Span,
@@ -147,7 +147,7 @@ public sealed class ContactResolveCanonicalPathRequest
         }
         throw new ContactResolvePathException(
             "contact-request-invalid",
-            "Only exact XCA2, XPU1, XIQ1, XPK1 or XMG1 can be decoded without an owned DID2 publication context.");
+            "Only exact XCA2, XPU1, XIQ1, XPK1 or XMG2 can be decoded without an owned DID2 publication context.");
     }
 
     public static ContactResolveCanonicalPathRequest FromDid2BoundedPublication(

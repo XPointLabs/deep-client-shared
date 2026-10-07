@@ -313,7 +313,7 @@ public sealed partial class SqliteDeepMailboxStore
     }
 
     private static NotSupportedException PairCredentialsUnavailable() => new(
-        "The clean mailbox store accepts only exact current XMG1/XMC2 credentials.");
+        "The clean mailbox store accepts only exact current XMG2/XMC2 credentials.");
 
     private static void ValidateCurrentCredential(
         ScopedCurrentMailboxCredential value,

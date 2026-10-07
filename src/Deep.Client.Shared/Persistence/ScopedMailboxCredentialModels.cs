@@ -50,7 +50,7 @@ public sealed class MailboxCredentialGrantSet
 }
 
 /// <summary>
-/// The clean ContactV1 grant shape. XMG1/XMC2 intentionally returns only the
+/// The clean ContactV1 grant shape. XMG2/XMC2 intentionally returns only the
 /// authenticated current epoch; a client must reacquire on epoch rollover and
 /// must never invent an unsigned next grant.
 /// </summary>

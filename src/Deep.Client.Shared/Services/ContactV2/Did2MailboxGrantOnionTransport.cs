@@ -17,9 +17,9 @@ internal sealed class Did2MailboxGrantOnionTransport(DeepIdV2ContactPathAuthorit
         dispatch.RequireActive(); source.RequireAccountOwner(dispatch.Custody.Owner);
         if (!ReferenceEquals(route.Network, dispatch.Network))
             throw new CryptographicException("Mailbox acquisition differs from the actual owned network.");
-        var exact = ContactResolveCanonicalPathRequest.Decode(request.ExactXmg1.Span);
+        var exact = ContactResolveCanonicalPathRequest.Decode(request.ExactXmg2.Span);
         if (exact.RequestKind != ContactServiceRequestKind.AcquireMailboxGrant)
-            throw new CryptographicException("Mailbox acquisition requires exact XMG1 placement.");
+            throw new CryptographicException("Mailbox acquisition requires exact XMG2 placement.");
         await route.EnsureCurrentAsync(ct).ConfigureAwait(false);
         var response = await new DeepIdV2PublicationOnionTransport(source, dispatch.Custody)
             .SendOwnedExactAsync(exact, ReadOnlyMemory<byte>.Empty, dispatch, ct).ConfigureAwait(false);
