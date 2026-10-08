@@ -37,3 +37,16 @@ make those tests compile. Move relevant coverage into
 
 Add focused persistence, service and transport tests to the production test
 project for the corresponding change.
+
+The production test framework runs at most two independent methods of
+`DeepIdV2ContactPathAuthoritySourceTests` concurrently. Each owns its account,
+SQL files, protected storage and fault-hook context; theory rows stay in the
+standard xUnit method runner. Other classes keep ordinary xUnit collection
+isolation. To reproduce a serial run, append `-- xUnit.MaxParallelThreads=1`
+to the same test command. Never overlap this gate with another heavy gate.
+
+`eng/Test-ProductionTestResults.ps1` validates a captured native exit and exact
+TRX result/definition/execution mappings against the predeclared prior-full
+plus new-focused case union. It works in Windows PowerShell 5.1 and PowerShell 7.
+Run `eng/Test-ProductionTestResultsContracts.ps1` when changing that verifier.
+Mapping validation does not replace immutable input checks or a terminal exit.

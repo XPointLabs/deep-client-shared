@@ -23,28 +23,24 @@ internal sealed class DeviceStateStoreInjectedCrashException : Exception
 
 internal static class DeviceStateStoreTestHooks
 {
-    private static readonly object Sync = new();
-    private static Action<DeviceStateStoreFailpoint>? callback;
+    private static readonly AsyncLocal<Action<DeviceStateStoreFailpoint>?> Callback = new();
 
     internal static IDisposable Push(Action<DeviceStateStoreFailpoint> value)
     {
         ArgumentNullException.ThrowIfNull(value);
-        lock (Sync)
-        {
-            if (callback is not null) throw new InvalidOperationException("A DeviceV1 test hook is already installed.");
-            callback = value; return new Reset();
-        }
+        if (Callback.Value is not null) throw new InvalidOperationException("A DeviceV1 test hook is already installed.");
+        Callback.Value = value;
+        return new Reset();
     }
 
-    internal static void Hit(DeviceStateStoreFailpoint point)
-    {
-        Action<DeviceStateStoreFailpoint>? current;
-        lock (Sync) current = callback;
-        current?.Invoke(point);
-    }
+    internal static void Hit(DeviceStateStoreFailpoint point) => Callback.Value?.Invoke(point);
 
     private sealed class Reset : IDisposable
     {
-        public void Dispose() { lock (Sync) callback = null; }
+        private int disposed;
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref disposed, 1) == 0) Callback.Value = null;
+        }
     }
 }

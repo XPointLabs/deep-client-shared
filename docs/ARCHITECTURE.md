@@ -1,5 +1,70 @@
 # Deep Client Shared architecture
 
+## Production test execution
+
+The production solution retains the standard xUnit discovery, case names,
+filters, theory rows and result messages. Its test-only framework allows at
+most two independent methods of `DeepIdV2ContactPathAuthoritySourceTests` to
+run together. The class owns no instance or shared class/collection fixtures;
+each method creates separate account directories, SQL files, protected stores
+and signed fixture state. A class with shared instance state or fixtures keeps
+normal serial method execution. Other classes and explicitly nonparallel
+collections retain standard xUnit behavior.
+
+SQLCipher work can execute synchronously through otherwise completed awaits.
+The bounded scheduler therefore starts methods on separate tasks; it does not
+remove cryptographic work, cold opens, durable read-back or crash boundaries.
+The device-state crash callback now follows the same `AsyncLocal` isolation as
+the other persistence hooks. Nested device-hook installation still rejects,
+and disposing an old hook twice cannot clear a newer owner.
+
+Append `-- xUnit.MaxParallelThreads=1` to the normal production test command
+for a serial reproduction. The runner's disable-parallelization option also
+takes precedence. Do not run another heavy gate alongside this solution.
+Neither SQLCipher key mode/KDF, pooling, authority deadlines nor test assertions
+are changed by this scheduling policy. Native source tests remain distinct
+from real transport, shipping packages and physical-device acceptance.
+
+The reusable `eng/Test-ProductionTestResults.ps1` reader checks actual native
+exit0, unique case/result/execution identities, method bindings, row counters
+and the exact prior-full/new-focused case union. It rejects missing exits,
+partial mappings, duplicate executions, failures and current skips. Reference
+receipts may preserve historical failures/skips; they never become passing
+current evidence. Canonical theory rows may have a method-only definition name.
+The xUnit convention of zero `notExecuted` with explicit skipped rows is checked
+against `total-executed`, not interpreted as zero skipped tests. The reader uses
+APIs available in both Windows PowerShell 5.1 and PowerShell 7. It is only result
+validation, not a replacement for prelaunch input capture or release acceptance.
+
+### Qualified Windows throughput observation — 2026-10-08
+
+The original recovery methods and their assertions are unchanged. Fresh serial
+outbox/prefix baselines took 7m42s and 4m22s respectively. The bounded concurrent
+repeat passed all 17 selected cases, including the actual initial-session
+device crash/reopen case, in 5m54s. The two recovery methods overlapped for
+233 seconds; this is approximately 51% less elapsed time than their separate
+serial baselines. One baseline included a bounded sampled-thread trace, which
+identified repeated device/prekey SQLCipher opens; no key mode, KDF, fixture
+snapshot or source-verification cache was introduced.
+
+The fresh unfiltered production solution passed **751/0/0 in 37m53s** (runner
+39m07s, including build/capture/qualification). Build, actual test and separate
+qualification exits are all0, with zero build warnings/errors. Exact mappings
+preserve all736 prior cases plus15 scheduling/isolation regressions. All1794
+prelaunch source/binary/normative/qualification inputs remained unchanged.
+The previous accepted 736-case receipt took106m32s; the observed full elapsed
+reduction is64%, not a performance SLO or a controlled historical-load comparison.
+Serial override passed20 existing theory rows; the PowerShell5.1 verifier passed
+16 adversarial contract checks and independently read the original736-case matrix.
+
+Receipts are retained under `artifacts/test-throughput-20261008/`, with the full
+terminal/manifest/qualification in `full-01`. Full TRX SHA256:
+`C189501A4FF47170081B95609C92A73CFDAB8BE72F17B7B1107AD7B6D2D415AC`;
+prelaunch manifest SHA256:
+`F06B1B8C36D349BEE0F233A835274D6F9C5F591EA3255D4B034D54047E335155`.
+This paragraph is a post-terminal evidence record, not an executing input.
+The result does not close S01, the Linux provider, shipping graph or devices.
+
 ## Owned Store counter floor format
 
 [DR-0092](../../docs/survival-program/decisions/DR-0092-did2-owned-mailbox-counter-floors.md)
