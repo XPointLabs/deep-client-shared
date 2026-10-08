@@ -28,13 +28,32 @@ from real transport, shipping packages and physical-device acceptance.
 The reusable `eng/Test-ProductionTestResults.ps1` reader checks actual native
 exit0, unique case/result/execution identities, method bindings, row counters
 and the exact prior-full/new-focused case union. It rejects missing exits,
-partial mappings, duplicate executions, failures and current skips. Reference
+partial mappings, duplicate executions and unclassified failures/skips. Reference
 receipts may preserve historical failures/skips; they never become passing
 current evidence. Canonical theory rows may have a method-only definition name.
 The xUnit convention of zero `notExecuted` with explicit skipped rows is checked
 against `total-executed`, not interpreted as zero skipped tests. The reader uses
 APIs available in both Windows PowerShell 5.1 and PowerShell 7. It is only result
 validation, not a replacement for prelaunch input capture or release acceptance.
+
+The reader is now a thin entry point into the sole root `scripts/TestGate.psm1`
+implementation. Runtime theories may share a definition and some xUnit display
+names collide; the exact key combines the stable test ID with the complete case
+name. Execution IDs stay unique and every row binds to its method/definition.
+The common reader handles genuinely empty filtered-project TRX files, explicit
+historical skip/FAIL classifications, Unicode without a BOM, and missing native
+terminals without converting any of them to a successful full run.
+
+The canonical runner builds once, captures all executing source/binary/tooling
+inputs, then runs the five genuine `FixturePreflight=true` prerequisites before
+unfiltered full. They cover signed fixture intervals and successor overlap,
+the carried/current network lease after encrypted account reopen, required
+ContactAccept vectors and approved native provider loading. Current proof/SQL/
+signature checks are not cached or weakened. Preflight failure prevents full.
+The runner records the actual PowerShell edition/version, SDK, phase exits and
+elapsed time, and serializes heavy gates with a workspace lease. The same
+prerequisite selector precedes full in the Shared CI source; Linux's existing
+portable ML-KEM exclusion remains explicit, not Windows/native qualification.
 
 ### Qualified Windows throughput observation — 2026-10-08
 
@@ -64,6 +83,27 @@ prelaunch manifest SHA256:
 `F06B1B8C36D349BEE0F233A835274D6F9C5F591EA3255D4B034D54047E335155`.
 This paragraph is a post-terminal evidence record, not an executing input.
 The result does not close S01, the Linux provider, shipping graph or devices.
+
+### Fixture-preflight and unified-runner observation — 2026-10-08
+
+With five additional prerequisite executions, the fresh unfiltered Shared
+matrix passed **756/0/0 in 36m03s**, compared with the preceding751-case37m53s.
+The genuine prerequisite process took10.39s; the complete build/capture/
+preflight/full/qualification runner took37m37s versus39m07s. The observed
+additional reduction is1m50s (4.8%) for full, about1m40s (4.4%) when charging
+the new preflight, and1m30s (3.8%) for the complete runner. This is an elapsed
+observation, not a controlled attribution or SLO. Preflight's main benefit is
+rejecting bad prerequisites before a37-minute run, not removing crypto work.
+
+The original receipt is retained at
+`artifacts/test-gate-20261008/shared-full-01`; actual build/preflight/test/
+qualification exits are0 and all1817 captured inputs were unchanged during
+that run. Full TRX SHA256:
+`D2C93FE29372284459A683CD7EB25C66B714F9EF69945D949A1248A6851A6835`.
+Subsequent common-helper environment/counter corrections are separately checked;
+this terminal's frozen helper snapshot is not relabelled as the final helper.
+No scheduling bound, signed deadline, cryptographic work or fixture assertion
+was reduced for the second measurement.
 
 ## Owned Store counter floor format
 

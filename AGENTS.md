@@ -30,6 +30,20 @@ primitives belong in `deep-protocol`; deployed service behavior belongs in servi
 dotnet test Deep.Client.Shared.Production.slnx --configuration Release -m:1
 ```
 
+For mandatory full qualification, use the root canonical gate from Windows
+PowerShell5.1:
+
+```powershell
+& ..\scripts\Invoke-RepositoryTestGate.ps1 -Repository deep-client-shared `
+  -RunDirectory "$PWD\artifacts\test-gate-<new-run>" `
+  -ReferencePaths @('<prior-full.trx>', '<new-focused.trx>')
+```
+
+Include the five `FixturePreflight=true` cases in the declared reference union.
+They verify real signed PMA/PMT windows, successor overlap, carried/current lease
+after encrypted cold reopen, the frozen ContactAccept consumer and approved
+native providers. They are cheap prerequisites, not sustained delivery evidence.
+
 The old `Deep.Client.Shared.slnx` test project is a pre-cutover Session corpus;
 it is not the clean production gate. Do not restore removed runtime types to
 make those tests compile. Move relevant coverage into
@@ -45,8 +59,10 @@ standard xUnit method runner. Other classes keep ordinary xUnit collection
 isolation. To reproduce a serial run, append `-- xUnit.MaxParallelThreads=1`
 to the same test command. Never overlap this gate with another heavy gate.
 
-`eng/Test-ProductionTestResults.ps1` validates a captured native exit and exact
+`eng/Test-ProductionTestResults.ps1` delegates to the root single implementation and validates a captured native exit and exact
 TRX result/definition/execution mappings against the predeclared prior-full
 plus new-focused case union. It works in Windows PowerShell 5.1 and PowerShell 7.
 Run `eng/Test-ProductionTestResultsContracts.ps1` when changing that verifier.
 Mapping validation does not replace immutable input checks or a terminal exit.
+Use the canonical runner rather than copying artifact scripts containing
+`Path.GetRelativePath`, per-run TRX counters or guessed fixture deadlines.
