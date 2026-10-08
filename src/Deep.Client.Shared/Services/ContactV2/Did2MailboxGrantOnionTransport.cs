@@ -15,12 +15,32 @@ internal sealed class Did2MailboxGrantOnionTransport(DeepIdV2ContactPathAuthorit
         VerifiedDeepIdV2ContactRouteClosure route, Did2OwnedContactTransportContext dispatch, CancellationToken ct)
     {
         dispatch.RequireActive(); source.RequireAccountOwner(dispatch.Custody.Owner);
+        if (request.Domain != Deep.Protocol.DeepExtension.MailboxCapabilities.MailboxCapabilityDomain.Deposit)
+            throw new CryptographicException("Current route courier is Deposit-only.");
         if (!ReferenceEquals(route.Network, dispatch.Network))
             throw new CryptographicException("Mailbox acquisition differs from the actual owned network.");
         var exact = ContactResolveCanonicalPathRequest.Decode(request.ExactXmg2.Span);
         if (exact.RequestKind != ContactServiceRequestKind.AcquireMailboxGrant)
             throw new CryptographicException("Mailbox acquisition requires exact XMG2 placement.");
         await route.EnsureCurrentAsync(ct).ConfigureAwait(false);
+        return await SendAsync(request, exact, dispatch, ct).ConfigureAwait(false);
+    }
+
+    public async ValueTask<ReadOnlyMemory<byte>> AcquireRetainedReadAsync(AuthoredMailboxGrantRequest request,
+        Did2OwnedContactTransportContext dispatch, CancellationToken ct)
+    {
+        dispatch.RequireActive(); source.RequireAccountOwner(dispatch.Custody.Owner);
+        if (request.Domain != Deep.Protocol.DeepExtension.MailboxCapabilities.MailboxCapabilityDomain.Retrieve)
+            throw new CryptographicException("Retained request courier cannot dispatch Deposit.");
+        var exact = ContactResolveCanonicalPathRequest.Decode(request.ExactXmg2.Span);
+        if (exact.RequestKind != ContactServiceRequestKind.AcquireMailboxGrant)
+            throw new CryptographicException("Retained acquisition requires exact XMG2 placement.");
+        return await SendAsync(request, exact, dispatch, ct).ConfigureAwait(false);
+    }
+
+    private async ValueTask<ReadOnlyMemory<byte>> SendAsync(AuthoredMailboxGrantRequest request,
+        ContactResolveCanonicalPathRequest exact, Did2OwnedContactTransportContext dispatch, CancellationToken ct)
+    {
         var response = await new DeepIdV2PublicationOnionTransport(source, dispatch.Custody)
             .SendOwnedExactAsync(exact, ReadOnlyMemory<byte>.Empty, dispatch, ct).ConfigureAwait(false);
         if (response.ExactBody.Length != 510)

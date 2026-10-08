@@ -109,10 +109,10 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     private sealed class MailboxCredentialLoan : IDisposable
     {
         private readonly ReachabilityMailboxHolderAuthority.ReachabilityMailboxHolderSigner holder;
-        private readonly MailboxInstallationPolicy policy;
+        private readonly IOwnedMailboxInstallationPolicy policy;
         internal MailboxCredentialLoan(SqliteDeepMailboxStore store,
             ReachabilityMailboxHolderAuthority.ReachabilityMailboxHolderSigner holder,
-            MailboxInstallationPolicy policy, VerifiedOfficialMailboxAuthority authority,
+            IOwnedMailboxInstallationPolicy policy, VerifiedOfficialMailboxAuthority authority,
             MailboxCredentialSelector selector, ScopedMailboxResolvedRoute route, MailboxAuthenticatedGrant grant)
         {
             Store = store; this.holder = holder; this.policy = policy; Authority = authority;
@@ -152,7 +152,12 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     // global revocation list: every foreign serial/role/epoch is denied, while
     // current PMA2 minimum generation and independently verified closure bind
     // the one exact winner. No factory/authority escapes this held operation.
-    private sealed class MailboxInstallationPolicy : IFreshMailboxCapabilityRevocationSource, IDisposable
+    private interface IOwnedMailboxInstallationPolicy : IFreshMailboxCapabilityRevocationSource, IDisposable
+    {
+        TimeProvider Clock { get; }
+    }
+
+    private sealed class MailboxInstallationPolicy : IOwnedMailboxInstallationPolicy
     {
         private readonly HeldDeepIdV2AccountLease held;
         private readonly VerifiedDeepIdV2ContactRouteClosure route;
@@ -171,7 +176,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             ValidateFreshness();
         }
 
-        internal TimeProvider Clock { get; }
+        public TimeProvider Clock { get; }
 
         private ulong CurrentUpper()
         {

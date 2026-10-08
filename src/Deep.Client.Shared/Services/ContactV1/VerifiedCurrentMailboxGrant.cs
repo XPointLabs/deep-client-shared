@@ -44,7 +44,7 @@ public sealed class VerifiedCurrentMailboxReplica
 }
 
 /// <summary>
-/// A single current-epoch MCG3 returned by exact XMG2/XMC2. This is deliberately
+/// A single still-current MCG3 on its exact signed selection returned by XMG2/XMC2. This is deliberately
 /// not the legacy current/next JSON bundle and carries no Session-derived ID.
 /// </summary>
 public sealed class VerifiedCurrentMailboxGrant

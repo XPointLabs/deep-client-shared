@@ -13,6 +13,22 @@ namespace Deep.Client.Shared.Services.ContactV1;
 /// be supplied by the account owner before this internal factory is used.</summary>
 public static class ReachabilityMailboxHolderAuthority
 {
+    // Internal signer scope, not a proof of publication or an installation
+    // capability. The actual held account owner supplies the original records
+    // and its private protected-root/current-source continuation.
+    internal static ReachabilityMailboxHolderSigner OpenRetainedRead(
+        ParsedContactRouteClosure route, ReadOnlyMemory<byte> networkId,
+        ReadOnlyMemory<byte> locatorHash, ReadOnlyMemory<byte> ownerCapability,
+        ReadOnlySpan<byte> retainedSeed, Func<CancellationToken, Task> recheck)
+    {
+        ArgumentNullException.ThrowIfNull(recheck);
+        if (retainedSeed.Length != 32 || retainedSeed.IndexOfAnyExcept((byte)0) < 0)
+            throw new CryptographicException("An exact nonzero retained holder seed is required.");
+        var binding = BoundScope.CreateRetainedRead(route, networkId, locatorHash, ownerCapability, recheck);
+        try { return new(binding, retainedSeed); }
+        catch { binding.Dispose(); throw; }
+    }
+
     internal static ReachabilityMailboxHolderSigner OpenRetained(
         VerifiedDeepIdV2ContactRouteClosure route, ReadOnlyMemory<byte> locatorHash,
         ReadOnlyMemory<byte> roleCapability, MailboxCapabilityDomain domain,
@@ -30,19 +46,26 @@ public static class ReachabilityMailboxHolderAuthority
     {
         private BoundScope(VerifiedDeepIdV2ContactRouteClosure route,
             ReadOnlySpan<byte> locator, ReadOnlySpan<byte> capability, MailboxCapabilityDomain domain)
+            : this(route.Route, route.Network.NetworkId, locator, capability, domain,
+                token => route.EnsureCurrentAsync(token).AsTask())
+        { }
+
+        private BoundScope(ParsedContactRouteClosure route, ReadOnlyMemory<byte> network,
+            ReadOnlySpan<byte> locator, ReadOnlySpan<byte> capability, MailboxCapabilityDomain domain,
+            Func<CancellationToken, Task> recheck)
         {
-            Route = route;
-            NetworkId = route.Network.NetworkId.ToArray();
+            Recheck = recheck;
+            NetworkId = network.ToArray();
             LocatorHash = locator.ToArray(); RoleCapability = capability.ToArray();
-            Pmt2Reference = ContactCodec.ArtifactReference("PMT2", route.Route.Projection).CanonicalBytes.ToArray();
-            Pms2Hash = route.Route.Selection.ArtifactHash.ToArray();
-            ExactRouteHash = route.Route.ExactHash.ToArray();
-            SelectionInput = route.Route.Selection.Field(3).ToArray();
-            PlacementCommitment = MailboxPlacementCommitment.Compute(new BlindedPlacementId(route.Route.Reachability.Field(10).Span));
-            Epoch = BinaryPrimitives.ReadUInt64BigEndian(route.Route.Selection.Field(4).Span);
+            Pmt2Reference = ContactCodec.ArtifactReference("PMT2", route.Projection).CanonicalBytes.ToArray();
+            Pms2Hash = route.Selection.ArtifactHash.ToArray();
+            ExactRouteHash = route.ExactHash.ToArray();
+            SelectionInput = route.Selection.Field(3).ToArray();
+            PlacementCommitment = MailboxPlacementCommitment.Compute(new BlindedPlacementId(route.Reachability.Field(10).Span));
+            Epoch = BinaryPrimitives.ReadUInt64BigEndian(route.Selection.Field(4).Span);
             Domain = domain;
         }
-        internal VerifiedDeepIdV2ContactRouteClosure Route { get; }
+        internal Func<CancellationToken, Task> Recheck { get; }
         internal byte[] NetworkId { get; }
         internal byte[] LocatorHash { get; }
         internal byte[] RoleCapability { get; }
@@ -53,6 +76,18 @@ public static class ReachabilityMailboxHolderAuthority
         internal byte[] PlacementCommitment { get; }
         internal ulong Epoch { get; }
         internal MailboxCapabilityDomain Domain { get; }
+        internal static BoundScope CreateRetainedRead(ParsedContactRouteClosure route, ReadOnlyMemory<byte> network,
+            ReadOnlyMemory<byte> locator, ReadOnlyMemory<byte> capability, Func<CancellationToken, Task> recheck)
+        {
+            ArgumentNullException.ThrowIfNull(route);
+            route = ContactRouteClosureCodec.Decode(route.ExactBytes.Span);
+            if (network.Length != 16 || !CryptographicOperations.FixedTimeEquals(network.Span, route.Reachability.Field(1).Span) ||
+                locator.Length != 32 || locator.Span.IndexOfAnyExcept((byte)0) < 0 ||
+                capability.Length != 32 || capability.Span.IndexOfAnyExcept((byte)0) < 0 ||
+                CryptographicOperations.FixedTimeEquals(capability.Span, route.Reachability.Field(10).Span))
+                throw new CryptographicException("Retained holder requires its exact original private Retrieve scope.");
+            return new(route, network, locator.Span, capability.Span, MailboxCapabilityDomain.Retrieve, recheck);
+        }
         internal static BoundScope Create(VerifiedDeepIdV2ContactRouteClosure route,
             ReadOnlyMemory<byte> locator, ReadOnlyMemory<byte> capability, MailboxCapabilityDomain domain)
         {
@@ -123,12 +158,12 @@ public static class ReachabilityMailboxHolderAuthority
                     "The XMG2 signature destination is too short.",
                     nameof(signature64));
             ValidateXmg2SigningInput(exactSigningInput.Span);
-            await binding.Route.EnsureCurrentAsync(cancellationToken).ConfigureAwait(false);
+            await binding.Recheck(cancellationToken).ConfigureAwait(false);
             var signature = Sign(exactSigningInput.Span);
             try
             {
                 signature.CopyTo(signature64);
-                await binding.Route.EnsureCurrentAsync(cancellationToken).ConfigureAwait(false);
+                await binding.Recheck(cancellationToken).ConfigureAwait(false);
                 return signature.Length;
             }
             finally

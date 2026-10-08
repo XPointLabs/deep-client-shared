@@ -13,7 +13,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     [InlineData(1)]
     public async Task Did2RetirementDependencies_ChangedOrMissingRootRejectsWithoutGrantMutation(int dependencyFault)
     {
-        await using var fixture = await Fixture.CreateAsync();
+        await using var fixture = await Fixture.CreateAsync(shortMailboxAuthority: true);
         await fixture.CheckEpochExclusionAsync(unresolved: true, advanceEpoch: true, fault: -1, dependencyFault);
     }
 
@@ -38,7 +38,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     [InlineData(true)]
     public async Task Did2EpochExclusion_ActualClosedCustodyAndSignedAdvanceSurviveColdReopenWithoutDeletion(bool unresolved)
     {
-        await using var fixture = await Fixture.CreateAsync();
+        await using var fixture = await Fixture.CreateAsync(shortMailboxAuthority: true);
         await fixture.CheckEpochExclusionAsync(unresolved, advanceEpoch: true, fault: -1);
     }
 
@@ -47,7 +47,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     [InlineData(true)]
     public async Task Did2EpochExclusion_OriginalCeilingAndOperationalRenewalAloneCannotExcludeNamespace(bool unresolved)
     {
-        await using var fixture = await Fixture.CreateAsync();
+        await using var fixture = await Fixture.CreateAsync(shortMailboxAuthority: true);
         await fixture.CheckEpochExclusionAsync(unresolved, advanceEpoch: false, fault: -1);
     }
 
@@ -58,7 +58,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     [InlineData(3)]
     public async Task Did2EpochExclusion_ConsumerRejectsChangedRootAnchorClockOrExpiredProof(int fault)
     {
-        await using var fixture = await Fixture.CreateAsync();
+        await using var fixture = await Fixture.CreateAsync(shortMailboxAuthority: true);
         await fixture.CheckEpochExclusionAsync(unresolved: true, advanceEpoch: true, fault);
     }
 
@@ -122,6 +122,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 
         internal async Task CheckEpochExclusionAsync(bool unresolved, bool advanceEpoch, int fault, int dependencyFault = -1)
         {
+            Assert.Equal(1_200UL, BinaryPrimitives.ReadUInt64BigEndian(ContactCodec.Decode("PMA2", operational.ExactPma2.Span).Field(12).Span));
             var plan = await accounts.ReadOwnPermanentContactPlanAsync();
             using var threshold = new OwnedRouteThreshold(this) { ShorterSignedExpiry = 1_200 };
             var route = await EnsureRoute(plan.Intent.ToArray(), Did2OwnedPermanentContactPlan.Configuration(), threshold, reopen: false);

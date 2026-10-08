@@ -527,6 +527,11 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             Calls++;
             var decoded = MailboxAuthenticatedClientRequestCodec.Decode(request.Span);
             var envelope = MailboxAuthenticatedRequestTranscript.DecodeStoreBody(decoded.Binding.CanonicalRequest.Span);
+            // Actual held owner/SQL preparation must preserve the product
+            // object horizon instead of clipping it to this short Deposit grant.
+            var grant = decoded.Presentation.Grant;
+            Assert.Equal(30UL * 24 * 60 * 60, envelope.ExpiresAtUnixSeconds - envelope.CreatedAtUnixSeconds);
+            Assert.True(envelope.ExpiresAtUnixSeconds > grant.ExpiresAtUnixSeconds);
             if (dpe is not null) Assert.Equal(dpe, envelope.Ciphertext.ToArray());
             StoredEnvelope ??= envelope;
             if (ExactRequest is null) ExactRequest = request.ToArray(); else Assert.Equal(ExactRequest, request.ToArray());

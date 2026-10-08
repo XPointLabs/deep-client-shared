@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Security.Cryptography;
 using Deep.Client.Shared.Features;
 using Deep.Client.Shared.Services;
@@ -22,20 +21,19 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         {
             using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
             using var current = await RequireCurrentUnderLeaseAsync(unixSeconds, verifier, ct).ConfigureAwait(false);
-            using var publication = await OpenOwnPermanentMailboxPublicationUnderLeaseAsync(current, held, source, fresh, ct).ConfigureAwait(false);
+            using var publication = await OpenOwnRetainedPublicationUnderLeaseAsync(current, held, source, fresh, ct).ConfigureAwait(false);
             instance = await SqliteDeepIdV2AccountGeneration.ReadAccountInstanceUnderLeaseAsync(storage, networkId, current.AccountId, ct).ConfigureAwait(false);
             using (var root = await storage.ReadOwnedAsync(ProtectedDid2MailboxReadJournal.Slot, ct).ConfigureAwait(false) ??
                 throw new InvalidDataException("Protected mailbox read custody is absent; explicit reset is required."))
                 snapshot = root.Use(bytes => bytes.ToArray());
             using var state = ProtectedDid2MailboxReadJournal.Decode(snapshot, networkId, current.AccountId.Span, instance);
-            var routeHash = SHA256.HashData(publication.Route.ExactRouteClosure.Span);
+            var routeHash = publication.Route.ExactHash.ToArray();
             if (state.Active is { } old && !FixedRoute(old.Route, routeHash))
                 throw new CryptographicException("Resume the original protected mailbox read; silent rerouting is forbidden.");
             // Only a new cycle may acquire the selected winner. An interrupted
             // cycle must retain its original grant even after selection changes.
             var winner = state.Active is null
-                ? await AcquireMailboxGrantUnderLeaseAsync(current, held, source, fresh, publication.Route,
-                    publication.Locator, publication.Capability, MailboxCapabilityDomain.Retrieve, publication.RecheckAsync, grants, ct).ConfigureAwait(false)
+                ? await AcquireRetainedMailboxReadUnderLeaseAsync(current, held, publication, source, fresh, grants, ct).ConfigureAwait(false)
                 : null;
             using (var root = await storage.ReadOwnedAsync(ProtectedDid2MailboxGrantJournal.Slot, ct).ConfigureAwait(false) ??
                 throw new InvalidDataException("Protected mailbox grant custody disappeared.")) grantRoot = root.Use(bytes => bytes.ToArray());
@@ -47,12 +45,12 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     throw new CryptographicException("Mailbox read has no selected protected Retrieve winner.");
             if (winner is not null && !FixedRoute(ProtectedDid2MailboxGrantJournal.Response(retained).Span, winner.ExactXmc2.Span))
                 throw new CryptographicException("Mailbox read changed its acquired winner.");
-            winner ??= await DeepIdV2MailboxGrantResultVerifier.VerifyRetainedSuccessAsync(publication.Route,
+            winner ??= await publication.Host.VerifyRetainedReadSuccessAsync(publication.Route.ExactBytes,
                 ProtectedDid2MailboxGrantJournal.Request(retained), ProtectedDid2MailboxGrantJournal.Response(retained),
-                fresh.MailboxAuthority.ExactPma2, ct).ConfigureAwait(false);
+                ct).ConfigureAwait(false);
             var grantHash = SHA256.HashData(winner.ExactGrant.Span);
-            using var loan = await OpenMailboxWinnerUnderLeaseAsync(current, held, publication.Route, winner, publication.Locator,
-                publication.Capability, retained, source, fresh, publication.RecheckAsync, ct).ConfigureAwait(false);
+            using var loan = await OpenRetainedMailboxWinnerUnderLeaseAsync(current, held, publication, winner,
+                retained, source, fresh, ct).ConfigureAwait(false);
             var scope = ClientMailboxScope.Derive(loan.Selector.IssuerContext.Span, loan.Route.MailboxId, loan.Route.Epoch);
             var scopeHash = scope.ToArray(); var scopeName = Convert.ToHexString(scopeHash);
             var traversal = await loan.Store.ReadTraversalAsync(scope, ct).ConfigureAwait(false);
@@ -104,14 +102,12 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             await publication.RecheckAsync(ct).ConfigureAwait(false);
             var custody = await SqliteDeepIdV2AccountGeneration.OpenBorrowedOnionCustodyAsync(storage, lease, sqlStatePath,
                 current, source.AccountOwner, held, ct).ConfigureAwait(false);
-            var started = Stopwatch.GetTimestamp(); var time = await publication.Route.ReadCurrentTimeAsync(ct).ConfigureAwait(false);
-            var pma = MailboxAuthorityV2Verifier.Verify(publication.Route.NetworkAuthority, winner.ExactPma2.Span, time.LowerUnixSeconds, time.UpperUnixSeconds);
-            if (!pma.BindsProjection(publication.Route.Route.Projection.CanonicalBytes.Span)) throw new CryptographicException("Mailbox read lost its current issuer projection.");
-            using var policy = new MailboxInstallationPolicy(held, publication.Route, pma, loan.Grant, time, started);
+            var pma = fresh.MailboxAuthority;
+            using var policy = await OpenRetainedInstallationPolicyAsync(current, held, publication, winner, source, fresh, ct).ConfigureAwait(false);
             var authority = new VerifiedOfficialMailboxAuthority(pma.NetworkId, pma.MinimumGrantGeneration,
                 [pma.ResolveIssuer(MailboxCapabilityDomain.Retrieve)], false, static () => true, policy, policy.Clock);
             var decoder = new OwnedMailboxDecodePolicy(loan.Grant, authority);
-            var context = new Did2OwnedMailboxTransportContext(source, custody, current, fresh, held, publication.Route, winner);
+            var context = new Did2OwnedMailboxTransportContext(source, custody, current, fresh, held, publication.Route.ExactBytes, winner);
             async Task Guard(CancellationToken token)
             {
                 policy.ValidateFreshness(); await context.RequireCurrentAsync(token).ConfigureAwait(false);
@@ -179,7 +175,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     }
 
     private static void RequirePreparedMailboxRead(ProtectedDid2MailboxReadJournal.Cycle cycle, ReadOnlySpan<byte> exact,
-        VerifiedDeepIdV2MailboxGrant winner, bool ack)
+        VerifiedMailboxRetainedReadGrantV2 winner, bool ack)
     {
         var request = MailboxAuthenticatedClientRequestCodec.Decode(exact);
         if (request.Binding.Operation != (ack ? MailboxAuthenticatedOperation.Ack : MailboxAuthenticatedOperation.Retrieve) ||

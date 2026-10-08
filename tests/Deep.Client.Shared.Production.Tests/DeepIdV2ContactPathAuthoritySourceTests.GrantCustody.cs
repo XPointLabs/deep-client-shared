@@ -100,7 +100,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                     new SyntheticPermanentRead(this, ReaderSource(), replicas.ExactPublication));
             }
             await RefreshContact();
-            var transport = new OwnedGrantTransport(this, selfRetrieve: retrieve) { LoseResponse = true };
+            var transport = new OwnedGrantTransport(this, selfRetrieve: retrieve) { LoseResponse = true, Route = route };
             await Assert.ThrowsAsync<IOException>(() => retrieve ?
                 reader.AcquireOwnPermanentContactRetrieveGrantAsync(ReaderSource(), transport) :
                 reader.AcquirePermanentContactDepositGrantAsync(contact!, ReaderSource(), transport));
@@ -118,12 +118,26 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             byte[] closedOriginal;
             using (var state = await ReadPeerGrantsAsync(own: retrieve)) closedOriginal = Assert.Single(state.Entries).Value.ToArray();
             await RefreshContact();
-            Task<VerifiedDeepIdV2MailboxGrant> Accept(ReadOnlyMemory<byte> packet) => retrieve ?
-                reader.AcceptOwnPermanentContactRetrieveGrantResultAsync(ReaderSource(), packet) :
-                reader.AcceptPermanentContactDepositGrantResultAsync(contact!, ReaderSource(), packet);
-            Task<VerifiedDeepIdV2MailboxGrant> Resume() => retrieve ?
-                reader.ResumeOwnPermanentContactRetrieveGrantResultAsync(ReaderSource()) :
-                reader.ResumePermanentContactDepositGrantResultAsync(contact!, ReaderSource());
+            async Task<(ReadOnlyMemory<byte> ExactXmc2, ReadOnlyMemory<byte> ExactGrant)> Accept(ReadOnlyMemory<byte> packet)
+            {
+                if (retrieve)
+                {
+                    var result = await reader.AcceptOwnPermanentContactRetrieveGrantResultAsync(ReaderSource(), packet);
+                    return (result.ExactXmc2, result.ExactGrant);
+                }
+                var deposit = await reader.AcceptPermanentContactDepositGrantResultAsync(contact!, ReaderSource(), packet);
+                return (deposit.ExactXmc2, deposit.ExactGrant);
+            }
+            async Task<(ReadOnlyMemory<byte> ExactXmc2, ReadOnlyMemory<byte> ExactGrant)> Resume()
+            {
+                if (retrieve)
+                {
+                    var result = await reader.ResumeOwnPermanentContactRetrieveGrantResultAsync(ReaderSource());
+                    return (result.ExactXmc2, result.ExactGrant);
+                }
+                var deposit = await reader.ResumePermanentContactDepositGrantResultAsync(contact!, ReaderSource());
+                return (deposit.ExactXmc2, deposit.ExactGrant);
+            }
             var exact = transport.OriginalResponse.ToArray();
             var corrupted = exact.ToArray(); corrupted[^1] ^= 1;
             await RequireRouteRejectionAsync(async () => await Accept(corrupted));
@@ -162,11 +176,11 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             reader = retrieve ? ReopenAccount() : ReopenGrantReader();
             var verified = await Resume();
             Assert.Equal(exact, verified.ExactXmc2.ToArray());
-            await AssertInstalledGrantSqlAsync(verified, own: retrieve);
+            await AssertInstalledGrantSqlAsync(verified.ExactGrant, own: retrieve);
             CheckLateSelectionGraph(closedOriginal, successor, verified);
-            var ordinary = retrieve ? await reader.AcquireOwnPermanentContactRetrieveGrantAsync(ReaderSource(), transport) :
-                await reader.AcquirePermanentContactDepositGrantAsync(contact!, ReaderSource(), transport);
-            Assert.Equal(verified.ExactGrant.ToArray(), ordinary.ExactGrant.ToArray());
+            var ordinaryGrant = retrieve ? (await reader.AcquireOwnPermanentContactRetrieveGrantAsync(ReaderSource(), transport)).ExactGrant :
+                (await reader.AcquirePermanentContactDepositGrantAsync(contact!, ReaderSource(), transport)).ExactGrant;
+            Assert.Equal(verified.ExactGrant.ToArray(), ordinaryGrant.ToArray());
             Assert.Equal(1, transport.Calls);
             using (var state = await ReadPeerGrantsAsync(own: retrieve))
             {
@@ -192,6 +206,23 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         private async Task<byte[]> PrepareLateGraphSuccessorAsync(byte[] original,
             VerifiedDeepIdV2ContactRouteClosure route, bool retrieve)
         {
+            if (retrieve)
+            {
+                var parsed = ContactRouteClosureCodec.Decode(ProtectedDid2MailboxGrantJournal.OriginalRoute(original).Span);
+                var seedRead = Bytes(32, 0x9b);
+                try
+                {
+                    var (host, requestRead, pendingRead) = await PrepareRetainedGraphRequestAsync(original, parsed, route.Network, seedRead);
+                    try
+                    {
+                        var exactRead = await IssueRetainedFixtureGrantAsync(requestRead, parsed, host, route.Network, default);
+                        var verifiedRead = await host.VerifyRetainedReadSuccessAsync(parsed.ExactBytes, requestRead.ExactXmg2, exactRead);
+                        return ProtectedDid2MailboxGrantJournal.WithWinner(pendingRead, verifiedRead.ExactXmc2.Span, Network);
+                    }
+                    finally { CryptographicOperations.ZeroMemory(pendingRead); }
+                }
+                finally { CryptographicOperations.ZeroMemory(seedRead); }
+            }
             var record = ContactCodec.Decode("XMG2", ProtectedDid2MailboxGrantJournal.Request(original).Span);
             var seed = Bytes(32, 0x9b);
             using var signer = ReachabilityMailboxHolderAuthority.OpenRetained(route, record.Field(3), record.Field(4),
@@ -206,7 +237,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             finally { foreach (var bytes in new[] { seed, pending, exact }) CryptographicOperations.ZeroMemory(bytes); }
         }
 
-        private void CheckLateSelectionGraph(byte[] closed, byte[] successor, VerifiedDeepIdV2MailboxGrant verified)
+        private void CheckLateSelectionGraph(byte[] closed, byte[] successor,
+            (ReadOnlyMemory<byte> ExactXmc2, ReadOnlyMemory<byte> ExactGrant) verified)
         {
             var account = Bytes(32, 0x11); var instance = Bytes(32, 0x12);
             var old = ProtectedDid2MailboxGrantJournal.Acquisition(closed);
@@ -275,10 +307,17 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                     new SyntheticPermanentRead(this, ReaderSource(), replicas.ExactPublication));
             }
             await Resolve();
-            var transport = new OwnedGrantTransport(this, selfRetrieve: retrieve) { LoseResponse = true };
-            Task<VerifiedDeepIdV2MailboxGrant> Acquire() => retrieve ?
-                reader.AcquireOwnPermanentContactRetrieveGrantAsync(ReaderSource(), transport) :
-                reader.AcquirePermanentContactDepositGrantAsync(contact!, ReaderSource(), transport);
+            var transport = new OwnedGrantTransport(this, selfRetrieve: retrieve) { LoseResponse = true, Route = route };
+            async Task<(ReadOnlyMemory<byte> ExactXmg2, ReadOnlyMemory<byte> ExactXmc2, ReadOnlyMemory<byte> ExactGrant)> Acquire()
+            {
+                if (retrieve)
+                {
+                    var result = await reader.AcquireOwnPermanentContactRetrieveGrantAsync(ReaderSource(), transport);
+                    return (result.ExactXmg2, result.ExactXmc2, result.ExactGrant);
+                }
+                var deposit = await reader.AcquirePermanentContactDepositGrantAsync(contact!, ReaderSource(), transport);
+                return (deposit.ExactXmg2, deposit.ExactXmc2, deposit.ExactGrant);
+            }
             await Assert.ThrowsAsync<IOException>(() => Acquire());
             ulong expiry;
             using (var state = await ReadPeerGrantsAsync(own: retrieve)) expiry = ProtectedDid2MailboxGrantJournal.RequestExpiry(Assert.Single(state.Entries).Value);
@@ -293,7 +332,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             Assert.Equal(transport.OriginalResponse.ToArray(), actual.ExactXmc2.ToArray());
             Assert.True(transport.ExactRetry); Assert.Equal(2, transport.Calls);
             Assert.True((await transport.Route!.ReadCurrentTimeAsync()).LowerUnixSeconds >= expiry);
-            await AssertInstalledGrantSqlAsync(actual, own: retrieve);
+            await AssertInstalledGrantSqlAsync(actual.ExactGrant, own: retrieve);
         }
 
         internal async Task CheckExpiredGrantAcquisitionAsync(bool failAfterClosure)
@@ -303,7 +342,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             var route = await EnsureRoute(plan.Intent.ToArray(), Did2OwnedPermanentContactPlan.Configuration(), threshold, reopen: false);
             _ = await accounts.EnsureOwnPermanentContactPublishedAsync(Source(), threshold,
                 new OwnedPublicationSource(this, route), new OwnedPublicationReplica(this, route));
-            var transport = new OwnedGrantTransport(this, selfRetrieve: true) { LoseResponse = true };
+            var transport = new OwnedGrantTransport(this, selfRetrieve: true) { LoseResponse = true, Route = route };
             await Assert.ThrowsAsync<IOException>(() => accounts.AcquireOwnPermanentContactRetrieveGrantAsync(Source(), transport));
             byte[] original;
             ulong expiry, ceiling;
@@ -403,14 +442,12 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 
         private async Task<byte[]> PrepareClosedGrantCandidateAsync(byte[] original, VerifiedDeepIdV2ContactRouteClosure route)
         {
-            var record = ContactCodec.Decode("XMG2", ProtectedDid2MailboxGrantJournal.Request(original).Span);
             var seed = Bytes(32, 0x9a);
             try
             {
-                using var signer = ReachabilityMailboxHolderAuthority.OpenRetained(route, record.Field(3), record.Field(4), MailboxCapabilityDomain.Retrieve, seed);
-                var request = await DeepIdV2MailboxGrantRequestAuthor.AuthorRetrieveAsync(route, record.Field(3), record.Field(4), signer);
-                var policy = await CurrentGrantPolicyAsync(route);
-                return ProtectedDid2MailboxGrantJournal.Pending(seed, route, request, policy, Network);
+                var parsed = ContactRouteClosureCodec.Decode(ProtectedDid2MailboxGrantJournal.OriginalRoute(original).Span);
+                var (_, _, pending) = await PrepareRetainedGraphRequestAsync(original, parsed, route.Network, seed);
+                return pending;
             }
             finally { CryptographicOperations.ZeroMemory(seed); }
         }
@@ -494,7 +531,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 verified = await reader.AcquirePermanentContactDepositGrantAsync(resolved, source, transport);
             Assert.NotNull(heldPath);
             await Assert.ThrowsAsync<ObjectDisposedException>(async () => await heldPath.RequireCurrentAsync(default));
-            await AssertInstalledGrantSqlAsync(verified, own: false);
+            await AssertInstalledGrantSqlAsync(verified.ExactGrant, own: false);
             Assert.Equal(3, transport.Calls); Assert.True(transport.ExactRetry);
             Assert.True(transport.BuiltHeldFrame);
             using (var winner = await ReadPeerGrantsAsync())
@@ -525,7 +562,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             var reopened = await reader.AcquirePermanentContactDepositGrantAsync(resolved, source, transport);
             Assert.Equal(verified.ExactXmg2.ToArray(), reopened.ExactXmg2.ToArray());
             Assert.Equal(verified.ExactXmc2.ToArray(), reopened.ExactXmc2.ToArray());
-            await AssertInstalledGrantSqlAsync(reopened, own: false);
+            await AssertInstalledGrantSqlAsync(reopened.ExactGrant, own: false);
             Assert.Equal(3, transport.Calls); // Retained winner makes no issuer callback.
             Assert.False(await reader.HasOwnStagedPreKeyInventoryAsync()); // Not a session/acceptance/ACK.
             Assert.NotNull(transport.Dispatch);
@@ -561,7 +598,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             Assert.Equal(retrieved.ExactXmg2.ToArray(), retrieveAgain.ExactXmg2.ToArray());
             Assert.Equal(retrieved.ExactXmc2.ToArray(), retrieveAgain.ExactXmc2.ToArray());
             Assert.Equal(2, retrieval.Calls);
-            await AssertInstalledGrantSqlAsync(retrieveAgain, own: true);
+            await AssertInstalledGrantSqlAsync(retrieveAgain.ExactGrant, own: true);
             await peerStorage.DeleteBatchAsync([ProtectedDid2MailboxGrantJournal.Slot]);
             await Assert.ThrowsAsync<InvalidDataException>(() => ReopenGrantReader().GetCurrentAsync());
         }
@@ -656,19 +693,36 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 var scope = Convert.ToHexString(old.AsSpan(0, 32));
                 var original = old.ToArray();
                 var requestRecord = ContactCodec.Decode("XMG2", ProtectedDid2MailboxGrantJournal.Request(old).Span);
-                var route = transport.Route!; var locator = requestRecord.Field(3); var capability = requestRecord.Field(4);
+                var locator = requestRecord.Field(3); var capability = requestRecord.Field(4);
                 var domain = (MailboxCapabilityDomain)requestRecord.Field(6).Span[0];
                 seed = Bytes(32, 0x99);
-                using var holder = ReachabilityMailboxHolderAuthority.OpenRetained(route, locator, capability, domain, seed);
-                var request = domain == MailboxCapabilityDomain.Deposit
-                    ? await DeepIdV2MailboxGrantRequestAuthor.AuthorDepositAsync(route, locator, holder)
-                    : await DeepIdV2MailboxGrantRequestAuthor.AuthorRetrieveAsync(route, locator, capability, holder);
-                var policy = await CurrentGrantPolicyAsync(route);
-                var pending = ProtectedDid2MailboxGrantJournal.Pending(seed, route, request, policy, Network);
-                ProtectedDid2MailboxGrantJournal.AddPending(state, pending); await Save();
-                response = await IssueOwnedGrantAsync(request, route, domain == MailboxCapabilityDomain.Retrieve, default);
-                var verified = await DeepIdV2MailboxGrantResultVerifier.VerifySuccessAsync(route, request, response, operational.ExactPma2);
-                var next = ProtectedDid2MailboxGrantJournal.WithWinner(pending, verified.ExactXmc2.Span, Network);
+                byte[] pending, next;
+                if (domain == MailboxCapabilityDomain.Deposit)
+                {
+                    // Deposit remains the genuine current-only producer. It
+                    // cannot borrow a retained Retrieve request or issuer.
+                    var route = transport.Route ?? throw new InvalidOperationException();
+                    using var holder = ReachabilityMailboxHolderAuthority.OpenRetained(route, locator, capability, domain, seed);
+                    var request = await DeepIdV2MailboxGrantRequestAuthor.AuthorDepositAsync(route, locator, holder);
+                    var policy = await CurrentGrantPolicyAsync(route);
+                    pending = ProtectedDid2MailboxGrantJournal.Pending(seed, route, request, policy, Network);
+                    ProtectedDid2MailboxGrantJournal.AddPending(state, pending); await Save();
+                    response = await IssueOwnedGrantAsync(request, route, retrieve: false, default);
+                    var verified = await DeepIdV2MailboxGrantResultVerifier.VerifySuccessAsync(route, request, response, operational.ExactPma2);
+                    next = ProtectedDid2MailboxGrantJournal.WithWinner(pending, verified.ExactXmc2.Span, Network);
+                }
+                else
+                {
+                    Assert.Equal(MailboxCapabilityDomain.Retrieve, domain);
+                    var parsed = ContactRouteClosureCodec.Decode(ProtectedDid2MailboxGrantJournal.OriginalRoute(old).Span);
+                    var network = transport.Dispatch!.Network;
+                    var (host, request, retainedPending) = await PrepareRetainedGraphRequestAsync(original, parsed, network, seed);
+                    pending = retainedPending;
+                    ProtectedDid2MailboxGrantJournal.AddPending(state, pending); await Save();
+                    response = await IssueRetainedFixtureGrantAsync(request, parsed, host, network, default);
+                    var verified = await host.VerifyRetainedReadSuccessAsync(parsed.ExactBytes, request.ExactXmg2, response);
+                    next = ProtectedDid2MailboxGrantJournal.WithWinner(pending, verified.ExactXmc2.Span, Network);
+                }
                 state.Entries[ProtectedDid2MailboxGrantJournal.Acquisition(pending)] = next;
                 CryptographicOperations.ZeroMemory(pending); await Save();
                 ProtectedDid2MailboxGrantJournal.PromoteWinner(state, scope); await Save();
@@ -693,6 +747,34 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             finally { foreach (var bytes in new[] { ownerScope, snapshot, seed, response }) CryptographicOperations.ZeroMemory(bytes); }
         }
 
+        private async Task<(VerifiedMailboxHostAuthorityV2 Host, AuthoredMailboxGrantRequest Request, byte[] Pending)>
+            PrepareRetainedGraphRequestAsync(byte[] original, ParsedContactRouteClosure route, VerifiedOnionNetworkContext network, byte[] seed)
+        {
+            var prior = ContactCodec.Decode("XMG2", ProtectedDid2MailboxGrantJournal.Request(original).Span);
+            var fresh = await Source().VerifyForOwnPreKeyAuthoringAsync(accounts, default);
+            var host = await MailboxHostAuthorityV2Verifier.VerifyAsync(network, bootstrap.Authority,
+                operational.ExactPma2, new OnionTrustedTimeAuthority(this));
+            using var signer = ReachabilityMailboxHolderAuthority.OpenRetainedRead(route, Network, prior.Field(3), prior.Field(4),
+                seed, token => host.EnsureCurrentAsync(token).AsTask());
+            var request = await host.AuthorRetainedReadRequestAsync(route.ExactBytes, prior.Field(3), prior.Field(4), signer);
+            return (host, request, ProtectedDid2MailboxGrantJournal.PendingRetainedRead(seed, route, request, fresh.MailboxAuthority, Network));
+        }
+
+        internal async Task<byte[]> IssueRetainedFixtureGrantAsync(AuthoredMailboxGrantRequest request,
+            ParsedContactRouteClosure original, VerifiedMailboxHostAuthorityV2 host, VerifiedOnionNetworkContext network, CancellationToken ct)
+        {
+            var horizon = checked(OriginalAdmissionEnd(original) + 2_592_000UL);
+            var tuple = MailboxRetainedReadEvidenceAuthentication.CreateTuple(SHA256.HashData(request.ExactXmg2.Span),
+                request.Record.Field(3).Span, MailboxGrantCapabilityDigest.Compute(request.Record.Field(4).Span, request.Domain), original.ExactHash.Span, horizon);
+            var placement = ContactServicePlacementFactory.Create(network, ContactServiceRequestKind.AcquireMailboxGrant, request.Record.Field(3));
+            var evidence = placement.RankedReplicaNodeIds.Select(id => new DeepIdV2MailboxGrantReplicaEvidence(id.Span,
+                PublicationReceipt(id, MailboxRetainedReadEvidenceAuthentication.GetSigningBytes(tuple)))).ToArray();
+            var candidate = await host.VerifyRetainedReadIssuanceAsync(request.ExactXmg2, original.ExactBytes, horizon, evidence, ct);
+            var issuer = new FixtureMailboxIssuer(0x32);
+            var result = (await candidate.AuthorSuccessAsync(issuer, ct)).ToArray();
+            Assert.Equal(1, issuer.Calls); return result;
+        }
+
         private async Task<VerifiedMailboxAuthorityV2> CurrentGrantPolicyAsync(VerifiedDeepIdV2ContactRouteClosure route)
         {
             var time = await route.ReadCurrentTimeAsync();
@@ -702,7 +784,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 
         // Test-only independent SQLCipher observer. No runtime authority is
         // constructed by this reader, and no key/path/payload is logged.
-        private async Task AssertInstalledGrantSqlAsync(VerifiedDeepIdV2MailboxGrant verified, bool own)
+        internal async Task AssertInstalledGrantSqlAsync(ReadOnlyMemory<byte> exactGrant, bool own)
         {
             var selected = own ? innerStorage : peerStorage;
             using var root = await selected.ReadOwnedAsync("deep.store.v2.sql-generation") ?? throw new InvalidOperationException();
@@ -731,7 +813,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                     Assert.Equal(0, Convert.ToInt32(read.ExecuteScalar())); // Installation is not dispatch.
                 }
                 read.CommandText = "SELECT canonical_grant FROM mailbox_credential_grants;";
-                Assert.Equal(verified.ExactGrant.ToArray(), (byte[])read.ExecuteScalar()!);
+                Assert.Equal(exactGrant.ToArray(), (byte[])read.ExecuteScalar()!);
                 read.CommandText = "SELECT scope_kind FROM mailbox_credential_scopes;";
                 Assert.Equal(own ? 1 : 2, Convert.ToInt32(read.ExecuteScalar()));
             }
@@ -789,7 +871,9 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         internal bool ExactRetry { get; private set; } = true;
         internal Did2OwnedContactTransportContext? Dispatch { get; private set; }
         internal bool BuiltHeldFrame { get; private set; }
-        internal VerifiedDeepIdV2ContactRouteClosure? Route { get; private set; }
+        // Prior verified fixture route, used only by current-route graph tests.
+        // Retained issuance below always reads the actual protected request root.
+        internal VerifiedDeepIdV2ContactRouteClosure? Route { get; set; }
         internal Func<Task>? BeforeReturn { get; set; }
         private byte[]? requestBytes, responseBytes;
         internal ReadOnlyMemory<byte> OriginalRequest => requestBytes ?? throw new InvalidOperationException();
@@ -797,7 +881,27 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         public async ValueTask<ReadOnlyMemory<byte>> AcquireAsync(AuthoredMailboxGrantRequest request,
             VerifiedDeepIdV2ContactRouteClosure route, Did2OwnedContactTransportContext dispatch, CancellationToken ct)
         {
-            ct.ThrowIfCancellationRequested(); Calls++; Dispatch = dispatch; Route = route; dispatch.RequireActive();
+            Assert.Equal(MailboxCapabilityDomain.Deposit, request.Domain); Route = route;
+            return await SendAsync(request, dispatch, () => fixture.IssueOwnedGrantAsync(request, route, retrieve: false, ct), ct);
+        }
+        public async ValueTask<ReadOnlyMemory<byte>> AcquireRetainedReadAsync(AuthoredMailboxGrantRequest request,
+            Did2OwnedContactTransportContext dispatch, CancellationToken ct)
+        {
+            Assert.Equal(MailboxCapabilityDomain.Retrieve, request.Domain);
+            using var custody = await fixture.ReadPeerGrantsAsync(own: ownerOnPrimary ?? selfRetrieve);
+            var pending = Assert.Single(custody.Entries.Values,
+                value => ProtectedDid2MailboxGrantJournal.Request(value).Span.SequenceEqual(request.ExactXmg2.Span));
+            var original = ContactRouteClosureCodec.Decode(ProtectedDid2MailboxGrantJournal.OriginalRoute(pending).Span);
+            return await SendAsync(request, dispatch, async () =>
+            {
+                var host = await fixture.RetainedReadHostAsync(dispatch, ct);
+                return await fixture.IssueRetainedFixtureGrantAsync(request, original, host, dispatch.Network, ct);
+            }, ct);
+        }
+        private async ValueTask<ReadOnlyMemory<byte>> SendAsync(AuthoredMailboxGrantRequest request,
+            Did2OwnedContactTransportContext dispatch, Func<Task<byte[]>> issue, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested(); Calls++; Dispatch = dispatch; dispatch.RequireActive();
             using (var custody = await fixture.ReadPeerGrantsAsync(own: ownerOnPrimary ?? selfRetrieve))
             {
                 var entry = Assert.Single(custody.Entries.Values,
@@ -828,7 +932,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             else { ExactRetry &= requestBytes.AsSpan().SequenceEqual(exact); Assert.True(ExactRetry); }
             if (responseBytes is null)
             {
-                responseBytes = await fixture.IssueOwnedGrantAsync(request, route, selfRetrieve, ct);
+                responseBytes = await issue();
             }
             if (LoseResponse) throw new IOException("Injected lost private grant response.");
             var response = responseBytes.ToArray(); if (CorruptResponse) response[^1] ^= 1;

@@ -18,6 +18,18 @@ jobs:
           - os: ubuntu-latest
           - os: windows-2022
     steps:
+      # ContactAccept custody tests consume the current frozen vector corpus
+      # from the sibling root docs tree. Pin the same cross-protocol snapshot
+      # as Protocol CI; no synthetic route or missing-input skip is permitted.
+      - name: Checkout pinned ContactAccept specification input
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/deep-platform
+          ref: 9f6d123f95583763d3fe99c266fd4ab83ae37cc5
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            docs/survival-program/releases/v3.0.0/specs/contact-codec-v1.vectors.json
       - uses: actions/checkout@v4
         with:
           path: deep-client-shared

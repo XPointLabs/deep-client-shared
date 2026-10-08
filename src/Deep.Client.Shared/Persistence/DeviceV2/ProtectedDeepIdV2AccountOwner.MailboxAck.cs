@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Security.Cryptography;
 using Deep.Client.Shared.Features;
 using Deep.Client.Shared.Persistence.MessagingV1;
@@ -27,7 +26,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         {
             using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
             using var current = await RequireCurrentUnderLeaseAsync(unixSeconds, verifier, ct).ConfigureAwait(false);
-            using var publication = await OpenOwnPermanentMailboxPublicationUnderLeaseAsync(current, held, source, fresh, ct).ConfigureAwait(false);
+            using var publication = await OpenOwnRetainedPublicationUnderLeaseAsync(current, held, source, fresh, ct).ConfigureAwait(false);
             instance = await SqliteDeepIdV2AccountGeneration.ReadAccountInstanceUnderLeaseAsync(storage, networkId, current.AccountId, ct).ConfigureAwait(false);
             using (var root = await storage.ReadOwnedAsync(ProtectedDid2MailboxReadJournal.Slot, ct).ConfigureAwait(false) ?? throw new InvalidDataException("Protected mailbox read custody disappeared."))
                 snapshot = root.Use(bytes => bytes.ToArray());
@@ -35,7 +34,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var cycle = state.Active ?? throw new CryptographicException("No active protected page can authorize ACK.");
             if (state.Phase < 4 || !FixedRoute(cycle.Grant, descriptor.Grant) || !FixedRoute(cycle.Scope, descriptor.Scope) ||
                 !FixedRoute(cycle.RetrieveMauHash, descriptor.RetrieveMauHash) || !FixedRoute(cycle.Page, descriptor.ExactPage) ||
-                cycle.CapturedAt != descriptor.CapturedAt || !FixedRoute(cycle.Route, SHA256.HashData(publication.Route.ExactRouteClosure.Span)))
+                cycle.CapturedAt != descriptor.CapturedAt || !FixedRoute(cycle.Route, publication.Route.ExactHash.Span))
                 throw new CryptographicException("ACK descriptor differs from the actual protected committed page.");
             var page = cycle.ReadPage(); if (page.Items.Count == 0) throw new CryptographicException("An empty page cannot mint an ACK.");
             using (var root = await storage.ReadOwnedAsync(ProtectedDid2MailboxGrantJournal.Slot, ct).ConfigureAwait(false) ?? throw new InvalidDataException("Protected holder custody disappeared."))
@@ -43,15 +42,15 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             using var grants = ProtectedDid2MailboxGrantJournal.Decode(grantRoot, networkId, current.AccountId.Span, instance);
             var grantName = Convert.ToHexString(ProtectedDid2MailboxGrantJournal.Scope(cycle.Route, publication.Locator.Span, (byte)MailboxCapabilityDomain.Retrieve));
             var retained = ProtectedDid2MailboxGrantJournal.RequireRetainedWinner(grants, grantName, cycle.Grant);
-            var winner = await DeepIdV2MailboxGrantResultVerifier.VerifyRetainedSuccessAsync(publication.Route,
-                ProtectedDid2MailboxGrantJournal.Request(retained), ProtectedDid2MailboxGrantJournal.Response(retained), fresh.MailboxAuthority.ExactPma2, ct).ConfigureAwait(false);
+            var winner = await publication.Host.VerifyRetainedReadSuccessAsync(publication.Route.ExactBytes,
+                ProtectedDid2MailboxGrantJournal.Request(retained), ProtectedDid2MailboxGrantJournal.Response(retained), ct).ConfigureAwait(false);
             if (!FixedRoute(SHA256.HashData(winner.ExactGrant.Span), cycle.Grant)) throw new CryptographicException("ACK changed its retained grant.");
             // Independently reconstruct semantic handoffs from actual verified
             // ratchet rows, not descriptor/callback flags. Do this before starting
             // the bounded signing loan; the ordinary receive already committed.
             await MaterializeMailboxPageUnderLeaseAsync(current, held, page, endpoints, source, ct).ConfigureAwait(false);
-            using var loan = await OpenMailboxWinnerUnderLeaseAsync(current, held, publication.Route, winner, publication.Locator,
-                publication.Capability, retained, source, fresh, publication.RecheckAsync, ct).ConfigureAwait(false);
+            using var loan = await OpenRetainedMailboxWinnerUnderLeaseAsync(current, held, publication, winner,
+                retained, source, fresh, ct).ConfigureAwait(false);
             var scope = ClientMailboxScope.Derive(loan.Selector.IssuerContext.Span, loan.Route.MailboxId, loan.Route.Epoch);
             if (!FixedRoute(scope.ToArray(), cycle.Scope)) throw new CryptographicException("ACK differs from the actual installed scope.");
             RequireReadTraversal(await loan.Store.ReadTraversalAsync(scope, ct).ConfigureAwait(false), state.Traversals[Convert.ToHexString(cycle.Scope)]);
@@ -84,14 +83,12 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 state.Counters[Convert.ToHexString(cycle.Grant)] = cycle.AckCounter; state.Phase = 6; await Save(ct).ConfigureAwait(false);
             }
             var custody = await SqliteDeepIdV2AccountGeneration.OpenBorrowedOnionCustodyAsync(storage, lease, sqlStatePath, current, source.AccountOwner, held, ct).ConfigureAwait(false);
-            var started = Stopwatch.GetTimestamp(); var time = await publication.Route.ReadCurrentTimeAsync(ct).ConfigureAwait(false);
-            var pma = MailboxAuthorityV2Verifier.Verify(publication.Route.NetworkAuthority, winner.ExactPma2.Span, time.LowerUnixSeconds, time.UpperUnixSeconds);
-            if (!pma.BindsProjection(publication.Route.Route.Projection.CanonicalBytes.Span)) throw new CryptographicException("ACK lost current issuer projection.");
-            using var policy = new MailboxInstallationPolicy(held, publication.Route, pma, loan.Grant, time, started);
+            var pma = fresh.MailboxAuthority;
+            using var policy = await OpenRetainedInstallationPolicyAsync(current, held, publication, winner, source, fresh, ct).ConfigureAwait(false);
             var authority = new VerifiedOfficialMailboxAuthority(pma.NetworkId, pma.MinimumGrantGeneration,
                 [pma.ResolveIssuer(MailboxCapabilityDomain.Retrieve)], false, static () => true, policy, policy.Clock);
             var decoder = new OwnedMailboxDecodePolicy(loan.Grant, authority);
-            var context = new Did2OwnedMailboxTransportContext(source, custody, current, fresh, held, publication.Route, winner);
+            var context = new Did2OwnedMailboxTransportContext(source, custody, current, fresh, held, publication.Route.ExactBytes, winner);
             var pinned = new ClientMailboxPinnedRoute(loan.Route.PlacementId, loan.Route.MembershipCommitment.Span,
                 loan.Route.Replicas.FirstId.Span, loan.Route.Replicas.FirstSigningKey.Span, loan.Route.Replicas.SecondId.Span, loan.Route.Replicas.SecondSigningKey.Span);
             var receiptVerifier = new PinnedClientMailboxReceiptVerifier(new SodiumMailboxPeerReplicationCrypto());

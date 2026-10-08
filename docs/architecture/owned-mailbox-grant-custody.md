@@ -70,14 +70,60 @@ The count bounds remain128; the additional bytes retain actual original evidence
 not extra acquisitions. A mismatched prefix/evidence length rejects before copying.
 Unknown flags/phases, noncanonical counts/revision/order, trailing bytes, wrong
 account instance, holder/request mismatch and response binding mismatch reject.
-Ceiling is recomputed from the exact evidence; request PMT2/PMS2, PMA2 reference,
-route hash and network must match. A received winner cannot exceed that ceiling.
+Ceiling is recomputed from the exact evidence; request PMT2/PMS2, route hash
+and network must match. Deposit additionally requires the original projection's
+PMA2 reference and its admission interval. The DR-0104 Retrieve source increment
+captures the current acquisition PMA2 with the exact original selection: its
+conservative ceiling is the lesser of that policy expiry and original six-record
+admission end plus the normative maximum retained-object horizon. This is a
+custody ceiling only, not a TTL extension or issuance/admission permission.
+A received winner cannot exceed that ceiling. This changes Retrieve evidence
+validation in the sole current reader; an incompatible old nonempty record
+rejects, without a second reader, a migration or automatic reset.
 Phase3 retains exact holder/request/evidence with no winner; phases4/5 retain the
 same closure proof with one immutable late result. Their closure lower bound
 cannot precede XMG expiry. These checks establish custody shape, not current
 or historical issuer/time authorization.
 
 ## Owned transitions and consumers
+
+The working-tree DR-0104 `AcquireOwnPermanentContactRetrieveGrantAsync` joins the actual
+held account, account instance and permanent phase7 publication to current
+proof/network/PMA2/host checks. The original private capability is read only from
+that exact protected completed publication; the publisher must still be an
+active device of the current exact DID2. Original signatures are not interpreted
+as current admission. The separate current-only initial-contact/Deposit paths
+are unchanged. Signing is confined to the original route/locator/Retrieve scope.
+Pending holder/request custody is CAS-persisted and independently read back
+before the bounded selected ContactResolve courier. Returned bytes are untrusted
+until the current closed host verifies the retained result; winner and selection
+have separate protected CAS/read-back fences. A cold retry restores exact XMG2,
+not its operation/window; a selected winner is not reissued. Post-callback
+publication/source loss rejects adoption. The owner installs and independently
+reads back the exact credential in SQLCipher under that same held lease. The
+returned Protocol proof remains issuer evidence, not an exported SQL signer or
+native dispatch/ACK permission. The actual Retrieve and ACK operations reopen
+that protected winner and original pair with the current host/PMA2/proof, not
+current admission of the original publication. Their private transport loan is
+bounded by the complete current interval. Semantic durable materialization still
+precedes ACK and its tombstone quorum. Late-result adoption retains the same
+two-phase protected settlement and SQL failpoints. Deposit and initial-contact
+admission stay current-only; no current-to-history fallback exists. The standalone
+candidate acquisition API was removed. This connected source is not full-gate
+accepted; native original-selection/object/replay and physical qualification
+remain required.
+
+The matching accepted-object increment uses the sole
+[retention matrix](../../../docs/architecture/RETENTION-AND-RECOVERY-V1.md#1-service-and-protocol-retention)
+for MEO1, native blob admission and the shared SQL/in-memory state machine's
+inbox/coordinator-statement bounds. Short grant expiry authorizes an attempt,
+not payload retention. A new send persists its original object deadline before
+dispatch; exact retry keeps that deadline and ciphertext. A signed Store receipt
+does not become accepted local settlement unless its exact coordinator statement
+can be durably recorded. Retained Retrieve still requires current issuance and
+held ownership; longer payload retention never permits stale Store or extends
+an existing pending/unknown operation. This changes no journal generation or
+working-set capacity and does not activate runtime renewal or compaction.
 
 `AddPending` preserves an existing current winner and records one candidate with
 its exact retained predecessor. It cannot replace another pending candidate. No callback

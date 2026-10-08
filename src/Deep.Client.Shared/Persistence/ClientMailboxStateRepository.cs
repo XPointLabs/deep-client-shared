@@ -18,7 +18,7 @@ public static class ClientMailboxStateLimits
     public const int MaximumInstallationTraversalTokenBytes = 128 * 1024;
     public const int MaximumInstallationExpiredQuarantineEntries = 1000;
     public const int MaximumInstallationExpiredQuarantineBytes = 32 * 1024 * 1024;
-    public const ulong MaximumActiveInboxAgeSeconds = 7 * 24 * 60 * 60;
+    public const ulong MaximumActiveInboxAgeSeconds = MailboxClientLimits.MaximumTtlSeconds;
     public const ulong ExpiredQuarantineRetentionSeconds = 30 * 24 * 60 * 60;
     public const int MaximumCoordinatorStatements = 1024;
 }

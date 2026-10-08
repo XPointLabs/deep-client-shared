@@ -1,6 +1,7 @@
 using Deep.Client.Shared.Services.ContactV2;
 using Deep.Client.Shared.Persistence.DeviceV2;
 using Deep.Protocol.ContactV2;
+using Deep.Protocol.XPointNetworkV1;
 
 namespace Deep.Client.Shared.Services;
 
@@ -34,7 +35,7 @@ public sealed partial class DeepIdV2AccountService
         finally { System.Security.Cryptography.CryptographicOperations.ZeroMemory(selector); }
     }
 
-    internal async Task<VerifiedDeepIdV2MailboxGrant> ResumeOwnPermanentContactRetrieveGrantResultAsync(
+    internal async Task<VerifiedMailboxRetainedReadGrantV2> ResumeOwnPermanentContactRetrieveGrantResultAsync(
         DeepIdV2ContactPathAuthoritySource source, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(source); source.RequireAccountOwner(this);
@@ -57,7 +58,7 @@ public sealed partial class DeepIdV2AccountService
 
     // Incoming bytes are untrusted evidence, not an outcome/clock/route supplied
     // by the caller. Snapshot before any asynchronous current-authority read.
-    internal async Task<VerifiedDeepIdV2MailboxGrant> AcceptOwnPermanentContactRetrieveGrantResultAsync(
+    internal async Task<VerifiedMailboxRetainedReadGrantV2> AcceptOwnPermanentContactRetrieveGrantResultAsync(
         DeepIdV2ContactPathAuthoritySource source, ReadOnlyMemory<byte> exactXmc2, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(source); source.RequireAccountOwner(this);
@@ -102,12 +103,12 @@ public sealed partial class DeepIdV2AccountService
             source, fresh, ct).ConfigureAwait(false);
     }
 
-    internal Task<VerifiedDeepIdV2MailboxGrant> AcquireOwnPermanentContactRetrieveGrantAsync(
+    internal Task<VerifiedMailboxRetainedReadGrantV2> AcquireOwnPermanentContactRetrieveGrantAsync(
         DeepIdV2ContactPathAuthoritySource source, CancellationToken ct = default) =>
         AcquireOwnPermanentContactRetrieveGrantAsync(source, new Did2MailboxGrantOnionTransport(source), ct);
 
-    internal async Task<VerifiedDeepIdV2MailboxGrant> AcquireOwnPermanentContactRetrieveGrantAsync(
-        DeepIdV2ContactPathAuthoritySource source, IDid2MailboxGrantTransport transport, CancellationToken ct = default)
+    internal async Task<VerifiedMailboxRetainedReadGrantV2> AcquireOwnPermanentContactRetrieveGrantAsync(
+        DeepIdV2ContactPathAuthoritySource source, IDid2RetainedMailboxReadGrantTransport transport, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(source); ArgumentNullException.ThrowIfNull(transport);
         source.RequireAccountOwner(this);

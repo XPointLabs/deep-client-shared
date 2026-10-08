@@ -149,6 +149,25 @@ internal static class ProtectedDid2MailboxGrantJournal
         var routeHash = SHA256.HashData(exactRoute.Span);
         if (!policy.BindsProjection(route.Route.Projection.CanonicalBytes.Span))
             throw new CryptographicException("Original grant policy does not bind the acquisition projection.");
+        return PendingCore(seed, exactRoute, request, exactPolicy, network);
+    }
+
+    // Framing/custody only: the caller must be the actual held owner, and the
+    // current host must independently verify issuance before adopting a winner.
+    internal static byte[] PendingRetainedRead(ReadOnlySpan<byte> seed, ParsedContactRouteClosure route,
+        AuthoredMailboxGrantRequest request, VerifiedMailboxAuthorityV2 policy, ReadOnlySpan<byte> network)
+    {
+        Required32(seed);
+        if (request.Domain != MailboxCapabilityDomain.Retrieve ||
+            !Fixed(policy.NetworkId.Span, network))
+            throw new CryptographicException("Retained custody requires an actual current Retrieve issuer scope.");
+        return PendingCore(seed, route.ExactBytes, request, policy.ExactPma2, network);
+    }
+
+    private static byte[] PendingCore(ReadOnlySpan<byte> seed, ReadOnlyMemory<byte> exactRoute,
+        AuthoredMailboxGrantRequest request, ReadOnlyMemory<byte> exactPolicy, ReadOnlySpan<byte> network)
+    {
+        var routeHash = SHA256.HashData(exactRoute.Span);
         var entry = new byte[checked(EvidenceOffset + exactPolicy.Length + exactRoute.Length)];
         try
         {
@@ -412,13 +431,18 @@ internal static class ProtectedDid2MailboxGrantJournal
             !Fixed(policy.Field(1).Span, request.Field(1).Span) ||
             !Fixed(route.Reachability.Field(1).Span, request.Field(1).Span) ||
             // Canonical PMT2 decoding verifies the exact PMA2 CoreRef header.
-            !Fixed(route.Projection.Field(4).Span[6..], policy.CoreHash.Span) ||
+            (request.Field(6).Span[0] == (byte)MailboxCapabilityDomain.Deposit &&
+             !Fixed(route.Projection.Field(4).Span[6..], policy.CoreHash.Span)) ||
             !Fixed(request.Field(7).Span, ContactCodec.ArtifactReference("PMT2", route.Projection).CanonicalBytes.Span) ||
             !Fixed(request.Field(8).Span, route.Selection.ArtifactHash.Span))
             throw new CryptographicException("Original issuance evidence differs from the exact signed request.");
         static ulong Expiry(ContactRecord record, int tag) => BinaryPrimitives.ReadUInt64BigEndian(record.Field(tag).Span);
-        var ceiling = new[] { Expiry(policy, 12), Expiry(route.Reachability, 17), Expiry(route.Authorization, 13),
+        var admissionEnd = new[] { Expiry(route.Reachability, 17), Expiry(route.Authorization, 13),
             Expiry(route.Route, 18), Expiry(route.Successor, 11), Expiry(route.Projection, 12), Expiry(route.Selection, 9) }.Min();
+        var routeEnd = request.Field(6).Span[0] == (byte)MailboxCapabilityDomain.Retrieve
+            ? checked(admissionEnd + 2_592_000UL) // DR-0104 maximum retained-object horizon, not a TTL extension.
+            : admissionEnd;
+        var ceiling = Math.Min(Expiry(policy, 12), routeEnd);
         if (ceiling <= Expiry(request, 9)) throw new InvalidDataException("Original issuance evidence has no possible grant interval.");
         return ceiling;
     }

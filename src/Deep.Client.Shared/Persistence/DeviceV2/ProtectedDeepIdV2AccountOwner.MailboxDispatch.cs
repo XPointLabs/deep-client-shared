@@ -175,7 +175,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             if (entry is null && sends.Entries.Values.Any(value => !value.Prepared && FixedRoute(value.GrantHash, grantHash)))
                 throw new IOException("Resume the pending protected mailbox request or perform verified rollover.");
             var created = entry?.Created ?? loan.Authority.NowUnixSeconds;
-            var expiry = entry?.Expires ?? Math.Min(loan.Grant.ExpiresAtUnixSeconds, checked(created + MailboxClientLimits.MaximumTtlSeconds));
+            // The short grant permits this attempt, not the accepted object's
+            // retention. Exact retry retains the original signed body expiry.
+            var expiry = entry?.Expires ?? checked(created + MailboxClientLimits.MaximumTtlSeconds);
             var ciphertext = envelopeBytes.ToArray();
             var envelope = new MailboxEncryptedEnvelope
             {

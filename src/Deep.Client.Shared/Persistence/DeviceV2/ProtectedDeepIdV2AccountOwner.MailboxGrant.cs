@@ -42,31 +42,27 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             transport, ct).ConfigureAwait(false);
     }
 
-    internal async Task<VerifiedDeepIdV2MailboxGrant> AcquireOwnPermanentContactRetrieveGrantAsync(
+    internal async Task<VerifiedMailboxRetainedReadGrantV2> AcquireOwnPermanentContactRetrieveGrantAsync(
         ulong unixSeconds, IDeepMlDsa65Verifier verifier, DeepIdV2ContactPathAuthoritySource source,
         DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh,
-        IDid2MailboxGrantTransport transport, CancellationToken ct)
+        IDid2RetainedMailboxReadGrantTransport transport, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(transport);
         using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
         using var current = await RequireCurrentUnderLeaseAsync(unixSeconds, verifier, ct).ConfigureAwait(false);
-        using var publication = await OpenOwnPermanentMailboxPublicationUnderLeaseAsync(current, held, source, fresh, ct).ConfigureAwait(false);
-        return await AcquireMailboxGrantUnderLeaseAsync(current, held, source, fresh, publication.Route,
-            publication.Locator, publication.Capability, MailboxCapabilityDomain.Retrieve,
-            publication.RecheckAsync, transport, ct).ConfigureAwait(false);
+        using var publication = await OpenOwnRetainedPublicationUnderLeaseAsync(current, held, source, fresh, ct).ConfigureAwait(false);
+        return await AcquireRetainedMailboxReadUnderLeaseAsync(current, held, publication, source, fresh, transport, ct).ConfigureAwait(false);
     }
 
-    internal async Task<VerifiedDeepIdV2MailboxGrant> AcceptOwnPermanentContactRetrieveGrantResultAsync(
+    internal async Task<VerifiedMailboxRetainedReadGrantV2> AcceptOwnPermanentContactRetrieveGrantResultAsync(
         ulong unixSeconds, IDeepMlDsa65Verifier verifier, DeepIdV2ContactPathAuthoritySource source,
         DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh,
         ReadOnlyMemory<byte> exactXmc2, CancellationToken ct)
     {
         using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
         using var current = await RequireCurrentUnderLeaseAsync(unixSeconds, verifier, ct).ConfigureAwait(false);
-        using var publication = await OpenOwnPermanentMailboxPublicationUnderLeaseAsync(current, held, source, fresh, ct).ConfigureAwait(false);
-        return await AcceptMailboxGrantResultUnderLeaseAsync(current, held, source, fresh, publication.Route,
-            publication.Locator, publication.Capability, MailboxCapabilityDomain.Retrieve,
-            publication.RecheckAsync, exactXmc2, ct).ConfigureAwait(false);
+        using var publication = await OpenOwnRetainedPublicationUnderLeaseAsync(current, held, source, fresh, ct).ConfigureAwait(false);
+        return await AcceptRetainedMailboxReadResultUnderLeaseAsync(current, held, publication, source, fresh, exactXmc2, ct).ConfigureAwait(false);
     }
 
     internal async Task<VerifiedDeepIdV2MailboxGrant> AcceptPermanentContactDepositGrantResultAsync(
@@ -95,6 +91,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         ReadOnlyMemory<byte> exactXmc2, CancellationToken ct)
     {
         held.RequireActive(); ct.ThrowIfCancellationRequested();
+        if (domain != MailboxCapabilityDomain.Deposit)
+            throw new CryptographicException("Current-route settlement is Deposit-only.");
         if (exactXmc2.Length is not (0 or 510)) throw new InvalidDataException("Late mailbox result exceeds its exact bound.");
         var routeHash = SHA256.HashData(route.ExactRouteClosure.Span);
         var scope = Convert.ToHexString(ProtectedDid2MailboxGrantJournal.Scope(routeHash, locator.Span, (byte)domain));
@@ -293,7 +291,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         }
     }
 
-    // Both directions enter through the closed wrappers above. The recheck
+    // Deposit enters through its closed wrapper above. The recheck
     // delegate is constructed here inside the actual owner's held lease, never
     // supplied by a public caller or used as a caller-mintable trust flag.
     private async Task<VerifiedDeepIdV2MailboxGrant> AcquireMailboxGrantUnderLeaseAsync(
@@ -304,6 +302,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         IDid2MailboxGrantTransport transport, CancellationToken ct)
     {
         held.RequireActive();
+        if (domain != MailboxCapabilityDomain.Deposit)
+            throw new CryptographicException("Current-route acquisition is Deposit-only.");
         await RequireMailboxIssuerCurrentAsync(route, fresh.MailboxAuthority.ExactPma2, ct).ConfigureAwait(false);
         var routeHash = SHA256.HashData(route.ExactRouteClosure.Span);
         var scope = ProtectedDid2MailboxGrantJournal.Scope(routeHash, locator.Span, (byte)domain);
@@ -327,9 +327,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 {
                     using var signer = ReachabilityMailboxHolderAuthority.OpenRetained(route, locator,
                         capability, domain, seed);
-                    var request = domain == MailboxCapabilityDomain.Deposit ?
-                        await DeepIdV2MailboxGrantRequestAuthor.AuthorDepositAsync(route, locator, signer, ct).ConfigureAwait(false) :
-                        await DeepIdV2MailboxGrantRequestAuthor.AuthorRetrieveAsync(route, locator, capability, signer, ct).ConfigureAwait(false);
+                    var request = await DeepIdV2MailboxGrantRequestAuthor.AuthorDepositAsync(route, locator, signer, ct).ConfigureAwait(false);
                     await recheck(ct).ConfigureAwait(false);
                     var originalPolicy = await RequireMailboxIssuerCurrentAsync(route, fresh.MailboxAuthority.ExactPma2, ct).ConfigureAwait(false);
                     entry = ProtectedDid2MailboxGrantJournal.Pending(seed, route, request, originalPolicy, networkId);
@@ -345,11 +343,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 using var signer = ReachabilityMailboxHolderAuthority.OpenRetained(route, locator,
                     capability, domain,
                     ProtectedDid2MailboxGrantJournal.Seed(entry));
-                var request = domain == MailboxCapabilityDomain.Deposit ?
-                    await DeepIdV2MailboxGrantRequestAuthor.RestoreDepositAsync(route, locator,
-                        signer.Ed25519PublicKey, ProtectedDid2MailboxGrantJournal.Request(entry), ct).ConfigureAwait(false) :
-                    await DeepIdV2MailboxGrantRequestAuthor.RestoreRetrieveAsync(route, locator, capability,
-                        signer.Ed25519PublicKey, ProtectedDid2MailboxGrantJournal.Request(entry), ct).ConfigureAwait(false);
+                var request = await DeepIdV2MailboxGrantRequestAuthor.RestoreDepositAsync(route, locator,
+                    signer.Ed25519PublicKey, ProtectedDid2MailboxGrantJournal.Request(entry), ct).ConfigureAwait(false);
                 await recheck(ct).ConfigureAwait(false);
                 await RequireMailboxIssuerCurrentAsync(route, fresh.MailboxAuthority.ExactPma2, ct).ConfigureAwait(false);
                 using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);

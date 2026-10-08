@@ -5,6 +5,8 @@ using Deep.Client.Shared.Services.XPointNetworkV1;
 using Deep.Protocol.ContactV2;
 using Deep.Protocol.DeepExtension.MailboxCapabilities;
 using Deep.Protocol.DeepExtension.PrivacyRouting;
+using Deep.Protocol.ContactV1;
+using Deep.Protocol.XPointNetworkV1;
 
 namespace Deep.Client.Shared.Services.ContactV2;
 
@@ -15,8 +17,10 @@ internal sealed class Did2OwnedMailboxTransportContext : IMailboxPrivacyNetworkA
     private readonly VerifiedDeepIdV2CurrentAccount account;
     private readonly DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh;
     private readonly HeldDeepIdV2AccountLease held;
-    private readonly VerifiedDeepIdV2ContactRouteClosure route;
-    private readonly VerifiedDeepIdV2MailboxGrant grant;
+    private readonly VerifiedDeepIdV2ContactRouteClosure? route;
+    private readonly VerifiedDeepIdV2MailboxGrant? grant;
+    private readonly VerifiedMailboxRetainedReadGrantV2? retainedRead;
+    private readonly byte[]? originalRoute;
     private readonly long started = Stopwatch.GetTimestamp();
 
     internal Did2OwnedMailboxTransportContext(DeepIdV2ContactPathAuthoritySource source,
@@ -32,6 +36,23 @@ internal sealed class Did2OwnedMailboxTransportContext : IMailboxPrivacyNetworkA
             throw new CryptographicException("Held mailbox transport differs from the actual owned network.");
     }
 
+    internal Did2OwnedMailboxTransportContext(DeepIdV2ContactPathAuthoritySource source,
+        DeepIdV2OnionClientCustody custody, VerifiedDeepIdV2CurrentAccount account,
+        DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh,
+        HeldDeepIdV2AccountLease held, ReadOnlyMemory<byte> exactOriginalRoute,
+        VerifiedMailboxRetainedReadGrantV2 retainedRead)
+    {
+        Source = source; Custody = custody; this.account = account; this.fresh = fresh;
+        this.held = held; this.retainedRead = retainedRead;
+        originalRoute = ContactRouteClosureCodec.Decode(exactOriginalRoute.Span).ExactBytes.ToArray();
+        source.RequireAccountOwner(custody.Owner); held.RequireActive();
+        var request = ContactCodec.Decode("XMG2", retainedRead.ExactXmg2.Span);
+        if (retainedRead.Domain != MailboxCapabilityDomain.Retrieve ||
+            !CryptographicOperations.FixedTimeEquals(request.Field(1).Span, fresh.Network.NetworkId.Span) ||
+            !CryptographicOperations.FixedTimeEquals(request.Field(11).Span, SHA256.HashData(originalRoute)))
+            throw new CryptographicException("Retained transport differs from its held original selection.");
+    }
+
     internal DeepIdV2ContactPathAuthoritySource Source { get; }
     internal DeepIdV2OnionClientCustody Custody { get; }
 
@@ -45,9 +66,20 @@ internal sealed class Did2OwnedMailboxTransportContext : IMailboxPrivacyNetworkA
         // gate or account APIs which would reacquire the lock already held here.
         var reading = await Source.RecheckEndpointPairUnderLeaseAsync(fresh, fresh.Proof, held, ct).ConfigureAwait(false);
         _ = DeepIdV2AccountService.RequireOwnCurrentDirectory(account, fresh.Proof, reading.BootId.Span, reading.SampleSeconds);
-        _ = await DeepIdV2MailboxGrantResultVerifier.VerifyRetainedSuccessAsync(route,
-            grant.ExactXmg2, grant.ExactXmc2, fresh.MailboxAuthority.ExactPma2, ct).ConfigureAwait(false);
-        await grant.EnsureCurrentAsync(ct).ConfigureAwait(false);
+        if (retainedRead is not null)
+        {
+            var host = await MailboxHostAuthorityV2Verifier.VerifyAsync(fresh.Network, fresh.Authority,
+                fresh.MailboxAuthority.ExactPma2, Source.RendezvousTrustedTime, ct).ConfigureAwait(false);
+            _ = await host.VerifyRetainedReadSuccessAsync(originalRoute!, retainedRead.ExactXmg2,
+                retainedRead.ExactXmc2, ct).ConfigureAwait(false);
+            await retainedRead.EnsureCurrentAsync(ct).ConfigureAwait(false);
+        }
+        else
+        {
+            _ = await DeepIdV2MailboxGrantResultVerifier.VerifyRetainedSuccessAsync(route!,
+                grant!.ExactXmg2, grant.ExactXmc2, fresh.MailboxAuthority.ExactPma2, ct).ConfigureAwait(false);
+            await grant.EnsureCurrentAsync(ct).ConfigureAwait(false);
+        }
         if (Stopwatch.GetElapsedTime(started) >= TimeSpan.FromSeconds(30))
             throw new CryptographicException("Held mailbox transport expired during its authority check.");
         ct.ThrowIfCancellationRequested(); held.RequireActive();
@@ -62,7 +94,7 @@ internal sealed class Did2OwnedMailboxTransportContext : IMailboxPrivacyNetworkA
         var exact = placementCommitment.ToArray();
         try
         {
-            var decoded = MailboxAuthenticatedCapabilityCodec.DecodeGrant(grant.ExactGrant.Span);
+            var decoded = MailboxAuthenticatedCapabilityCodec.DecodeGrant((retainedRead?.ExactGrant ?? grant!.ExactGrant).Span);
             if (!CryptographicOperations.FixedTimeEquals(exact, decoded.PlacementCommitment.Span))
                 throw new CryptographicException("Held mailbox path changed its installed placement.");
             await RequireCurrentAsync(ct).ConfigureAwait(false); return fresh.Network;

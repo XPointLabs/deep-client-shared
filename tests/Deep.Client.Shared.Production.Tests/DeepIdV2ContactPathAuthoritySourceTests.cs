@@ -2789,21 +2789,27 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         }
 
         internal static async Task<Fixture> CreateAsync(bool withSuccessor = false, bool expiringHistory = false, bool withPeer = false,
-            bool longMailboxWindow = false, bool encryptedStorage = false)
+            bool longMailboxWindow = false, bool encryptedStorage = false, bool shortMailboxAuthority = false)
         {
             var fixture = new Fixture(encryptedStorage);
-            try { await fixture.InitializeAsync(withSuccessor, expiringHistory, withPeer, longMailboxWindow); return fixture; }
+            try { await fixture.InitializeAsync(withSuccessor, expiringHistory, withPeer, longMailboxWindow, shortMailboxAuthority); return fixture; }
             catch { await fixture.DisposeAsync(); throw; }
         }
 
-        private async Task InitializeAsync(bool withSuccessor, bool expiringHistory, bool withPeer, bool longMailboxWindow)
+        private async Task InitializeAsync(bool withSuccessor, bool expiringHistory, bool withPeer, bool longMailboxWindow, bool shortMailboxAuthority)
         {
             if (longMailboxWindow && (withSuccessor || expiringHistory))
                 throw new ArgumentException("The moving mailbox clock has a separate fixture window.");
+            if (shortMailboxAuthority && (withSuccessor || expiringHistory || longMailboxWindow))
+                throw new ArgumentException("The short initial authority has a separate signed successor fixture.");
             // Cold native/SQLCipher recovery takes longer than the short 500s
             // static-fixture view. Author a genuinely longer signed view/head,
             // still within the root interval; never suppress expiry validation.
             var windowExpiry = longMailboxWindow ? 6_000UL : 1_500UL;
+            // Retained Retrieve issuance is not capped by the publication's
+            // shorter expiry. Exclusion tests need a genuinely short original
+            // network/PMA window while directory heads remain current later.
+            var initialNetworkExpiry = shortMailboxAuthority ? 1_200UL : windowExpiry;
             Directory.CreateDirectory(directory);
             accounts = new(storage, directory, Network, 1,
                 new FrozenClock(DateTimeOffset.FromUnixTimeSeconds(1_000)),
@@ -2831,7 +2837,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             var pendingOperational = await XPointNetworkOperationalGenesisAuthor.AuthorNetworkCandidateAsync(new(
                 Bytes(32, 0x12), bootstrap, [root], witnesses, descriptors, Bytes(32, 0xf1),
                 Bytes(32, 0xf5), Bytes(32, 0xf6), PublicKey(0x31), PublicKey(0x32),
-                990, 1_000, expiringHistory ? 1_090UL : windowExpiry));
+                990, 1_000, expiringHistory ? 1_090UL : initialNetworkExpiry));
             var admission = DeepIdV2GenesisAdmissionWireCodec.DecodeRequest(
                 await accounts.PrepareGenesisAdmissionAsync()).Admission;
             checkpoint = DeepIdV2GenesisAdmissionVerifier.Verify(admission, 1_000, 1, 2, pq);
