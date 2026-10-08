@@ -131,7 +131,7 @@ public sealed class JournaledDeepSecureStorage : IDeepSecureStorage, IDisposable
                     values.Add(addition.Key, addition.Value);
                 }
                 additions.Clear();
-                Commit(values, cancellationToken);
+                await CommitAsync(values, cancellationToken).ConfigureAwait(false);
             }
             finally
             {
@@ -287,7 +287,7 @@ public sealed class JournaledDeepSecureStorage : IDeepSecureStorage, IDisposable
             values = Load();
             if (mutation(values))
             {
-                Commit(values, cancellationToken);
+                await CommitAsync(values, cancellationToken).ConfigureAwait(false);
             }
         }
         finally
@@ -338,7 +338,7 @@ public sealed class JournaledDeepSecureStorage : IDeepSecureStorage, IDisposable
         }
     }
 
-    private void Commit(
+    private async Task CommitAsync(
         IReadOnlyDictionary<string, byte[]> values,
         CancellationToken cancellationToken)
     {
@@ -370,12 +370,8 @@ public sealed class JournaledDeepSecureStorage : IDeepSecureStorage, IDisposable
             if (File.Exists(statePath))
             {
                 TryDelete(backupPath);
-                ReplaceDurably(pendingPath, statePath);
             }
-            else
-            {
-                ReplaceDurably(pendingPath, statePath);
-            }
+            await ReplaceDurablyAsync(pendingPath, statePath, cancellationToken).ConfigureAwait(false);
 
             // The new aggregate is authoritative after the rename. No previous
             // aggregate is retained, so deletion cannot later roll back secrets.
@@ -587,13 +583,18 @@ public sealed class JournaledDeepSecureStorage : IDeepSecureStorage, IDisposable
         }
     }
 
-    private static void ReplaceDurably(string temporaryPath, string finalPath)
+    private static async Task ReplaceDurablyAsync(string temporaryPath, string finalPath,
+        CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         if (OperatingSystem.IsWindows())
         {
-            const int maximumAttempts = 8;
-            for (var attempt = 0; attempt < maximumAttempts; attempt++)
+            var deadline = TimeSpan.FromSeconds(2);
+            var elapsed = Stopwatch.StartNew();
+            var delayMilliseconds = 25;
+            while (true)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 if (MoveFileEx(
                         temporaryPath,
                         finalPath,
@@ -603,16 +604,22 @@ public sealed class JournaledDeepSecureStorage : IDeepSecureStorage, IDisposable
                 }
 
                 var error = Marshal.GetLastPInvokeError();
+                var remaining = deadline - elapsed.Elapsed;
                 if (!IsTransientWindowsReplaceError(error)
-                    || attempt == maximumAttempts - 1)
+                    || remaining <= TimeSpan.Zero)
                 {
                     throw new Win32Exception(error);
                 }
 
-                // Antivirus and indexing filters can briefly retain an old handle
-                // after the protected aggregate was read. Keep the critical atomic
-                // replacement fail-closed, but tolerate that bounded host race.
-                Thread.Sleep(1 << attempt);
+                // An external handle can deny replacement longer than127ms.
+                // Keep both writer leases while asynchronously waiting; never
+                // delete/copy the authoritative file or alter its permissions.
+                // Cancellation before rename leaves only uncommitted pending data.
+                await Task.Delay(TimeSpan.FromMilliseconds(
+                    Math.Min(delayMilliseconds, remaining.TotalMilliseconds)), cancellationToken)
+                    .ConfigureAwait(false);
+                if (elapsed.Elapsed >= deadline) throw new Win32Exception(error);
+                delayMilliseconds = Math.Min(delayMilliseconds * 2, 100);
             }
         }
 

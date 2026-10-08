@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Security.Cryptography;
 using Deep.Client.Shared.Persistence;
 
@@ -5,6 +6,106 @@ namespace Deep.Client.Shared.Production.Tests;
 
 public sealed class SecureStorageCompareExchangeTests
 {
+    [WindowsStorageFact]
+    public Task AtomicReplacementSurvivesTemporaryDeleteSharingConflict() =>
+        CheckWindowsReplacementAsync("release");
+
+    [WindowsStorageFact]
+    public Task AtomicReplacementCancellationPreservesWholePreviousInventory() =>
+        CheckWindowsReplacementAsync("cancel");
+
+    [WindowsStorageFact]
+    public Task AtomicReplacementPersistentDeleteSharingConflictFailsClosed() =>
+        CheckWindowsReplacementAsync("exhaust");
+
+    [WindowsStorageFact]
+    public async Task AtomicReplacementReadOnlyDestinationFailsWithoutChangingPermissionsOrState()
+    {
+        using var fixture = new Fixture(true);
+        await fixture.Store.WriteBatchAsync([new("catalog", new byte[] { 1 }), new("foreign", new byte[] { 9 })]);
+        var original = File.ReadAllBytes(fixture.StatePath);
+        var attributes = File.GetAttributes(fixture.StatePath);
+        try
+        {
+            File.SetAttributes(fixture.StatePath, attributes | FileAttributes.ReadOnly);
+            var error = await Assert.ThrowsAsync<Win32Exception>(() => fixture.Store.CompareExchangeAsync(
+                "catalog", new byte[] { 1 }, new byte[] { 2 }));
+            Assert.Equal(5, error.NativeErrorCode);
+            Assert.True(File.GetAttributes(fixture.StatePath).HasFlag(FileAttributes.ReadOnly));
+            Assert.Equal(original, File.ReadAllBytes(fixture.StatePath));
+        }
+        finally { File.SetAttributes(fixture.StatePath, attributes); }
+        using var reopened = fixture.OpenJournaled();
+        using var current = await reopened.ReadOwnedAsync("catalog");
+        using var foreign = await reopened.ReadOwnedAsync("foreign");
+        Assert.Equal(1, current!.Use(value => value[0]));
+        Assert.Equal(9, foreign!.Use(value => value[0]));
+    }
+
+    private static async Task CheckWindowsReplacementAsync(string outcome)
+    {
+        using var fixture = new Fixture(true);
+        await fixture.Store.WriteBatchAsync([new("catalog", new byte[] { 1 }), new("foreign", new byte[] { 9 })]);
+        var original = File.ReadAllBytes(fixture.StatePath);
+        using var cancelled = new CancellationTokenSource();
+        var locked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        FileStream? blocker = null;
+        fixture.Protector.AfterProtect = () =>
+        {
+            // Real native handle: reads/writes are shared, atomic rename/delete is not.
+            blocker = new FileStream(fixture.StatePath, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite);
+            locked.SetResult();
+        };
+        var commit = Task.Run(() => fixture.Store.CompareExchangeAndInsertAsync("catalog",
+            new byte[] { 1 }, new byte[] { 2 }, [new("new-floor", new byte[] { 3 })], cancelled.Token));
+        try
+        {
+            await locked.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            // Longer than the old 127ms retry window. No test-only storage seam.
+            await Task.Delay(350);
+            Assert.Equal(original, File.ReadAllBytes(fixture.StatePath));
+            if (commit.IsFaulted) await commit;
+            if (outcome == "release")
+            {
+                Assert.False(commit.IsCompleted);
+                blocker!.Dispose(); blocker = null;
+                Assert.True(await commit.WaitAsync(TimeSpan.FromSeconds(10)));
+            }
+            else if (outcome == "cancel")
+            {
+                Assert.False(commit.IsCompleted);
+                cancelled.Cancel();
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(() => commit.WaitAsync(TimeSpan.FromSeconds(10)));
+            }
+            else
+            {
+                var error = await Assert.ThrowsAsync<Win32Exception>(() => commit.WaitAsync(TimeSpan.FromSeconds(10)));
+                Assert.Contains(error.NativeErrorCode, new[] { 5, 32, 33 });
+            }
+        }
+        finally
+        {
+            cancelled.Cancel(); blocker?.Dispose(); fixture.Protector.AfterProtect = null;
+            // Drain the owner before fixture disposal, including assertion failures.
+            try { await commit.WaitAsync(TimeSpan.FromSeconds(10)); }
+            catch (OperationCanceledException) { }
+            catch (Win32Exception) { }
+        }
+        var succeeded = outcome == "release";
+        if (!succeeded) Assert.Equal(original, File.ReadAllBytes(fixture.StatePath));
+        using var reopened = fixture.OpenJournaled();
+        using var current = await reopened.ReadOwnedAsync("catalog");
+        using var foreign = await reopened.ReadOwnedAsync("foreign");
+        using var floor = await reopened.ReadOwnedAsync("new-floor");
+        Assert.Equal(succeeded ? 2 : 1, current!.Use(value => value[0]));
+        Assert.Equal(9, foreign!.Use(value => value[0]));
+        if (succeeded) Assert.Equal(3, floor!.Use(value => value[0]));
+        else Assert.Null(floor);
+        Assert.False(File.Exists(fixture.StatePath + ".pending"));
+        Assert.False(File.Exists(fixture.StatePath + ".backup"));
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -128,6 +229,7 @@ public sealed class SecureStorageCompareExchangeTests
         private readonly byte[] key = RandomNumberGenerator.GetBytes(32);
         internal readonly Protector Protector;
         internal readonly IDeepSecureStorage Store;
+        internal string StatePath => Path.Combine(root, "protected.bin");
         internal Fixture(bool journaled)
         {
             Directory.CreateDirectory(root);
@@ -146,12 +248,14 @@ public sealed class SecureStorageCompareExchangeTests
     {
         private readonly byte[] key = value.ToArray();
         internal bool FailProtect;
+        internal Action? AfterProtect;
         public byte[] Protect(ReadOnlySpan<byte> plaintext)
         {
             if (FailProtect) throw new IOException("Injected protection failure before commit.");
             var result = new byte[28 + plaintext.Length]; RandomNumberGenerator.Fill(result.AsSpan(0, 12));
             using var aes = new AesGcm(key, 16);
             aes.Encrypt(result.AsSpan(0, 12), plaintext, result.AsSpan(28), result.AsSpan(12, 16));
+            AfterProtect?.Invoke();
             return result;
         }
         public byte[] Unprotect(ReadOnlySpan<byte> bytes)
@@ -161,5 +265,13 @@ public sealed class SecureStorageCompareExchangeTests
             catch { CryptographicOperations.ZeroMemory(result); throw; }
         }
         public void Dispose() => CryptographicOperations.ZeroMemory(key);
+    }
+}
+
+public sealed class WindowsStorageFactAttribute : FactAttribute
+{
+    public WindowsStorageFactAttribute()
+    {
+        if (!OperatingSystem.IsWindows()) Skip = "Requires native Windows file-sharing and MoveFileEx semantics.";
     }
 }
