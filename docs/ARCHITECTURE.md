@@ -310,7 +310,12 @@ The schema change alone does not make retained expiry recover automatically.
 connects the account-owned permanent-contact entry to route/object/publication
 successors under one actual account lease. The fully committed predecessor stays
 unchanged while exact pending phases advance. Only verified two-replica success
-replaces it in one whole-slot CAS with independent readback. No public intent,
+promotes the successor and retains the predecessor in one whole-slot CAS with
+independent readback. The already reserved pending slot becomes private completed
+predecessor custody; signed bytes, route keys and owner Retrieve capability remain
+exact. Active Retrieve/ACK selects its original protected cycle's route, not the
+newest discoverable publication. Missing/ambiguous original custody rejects, with
+no request regeneration or route fallback. No public intent,
 secret, time or signing callback is added; the existing journal generation and
 wire bounds remain current-only. Reopen after promotion restores the persisted
 winner without another threshold/publication/replica callback.
@@ -323,6 +328,9 @@ replica results are not remote durability or physical device evidence. Expired
 incomplete proposals are retained and rejected, not silently reminted. Registry
 publication predecessor verification/generation reservation, service/PMT rollover,
 matched deployment and physical contacts/text/assets/groups remain release gates.
+Idle scheduling across retained publications, dependency-closed last-path cleanup
+and matching full remain unfinished; the focused source observation is in the
+[S01 checkpoint](testing/s01-idle-mailbox-floors-2026-10-09.md#publication-promotion-preserves-original-read-custody).
 
 ## Retired identity consumer cutover (2026-10-02)
 

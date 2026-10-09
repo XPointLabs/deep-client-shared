@@ -21,12 +21,15 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         {
             using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
             using var current = await RequireCurrentUnderLeaseAsync(unixSeconds, verifier, ct).ConfigureAwait(false);
-            using var publication = await OpenOwnRetainedPublicationUnderLeaseAsync(current, held, source, fresh, ct).ConfigureAwait(false);
             instance = await SqliteDeepIdV2AccountGeneration.ReadAccountInstanceUnderLeaseAsync(storage, networkId, current.AccountId, ct).ConfigureAwait(false);
             using (var root = await storage.ReadOwnedAsync(ProtectedDid2MailboxReadJournal.Slot, ct).ConfigureAwait(false) ??
                 throw new InvalidDataException("Protected mailbox read custody is absent; explicit reset is required."))
                 snapshot = root.Use(bytes => bytes.ToArray());
             using var state = ProtectedDid2MailboxReadJournal.Decode(snapshot, networkId, current.AccountId.Span, instance);
+            // Resume the route held by the actual protected cycle, not whichever
+            // publication became current while this read was interrupted.
+            using var publication = await OpenOwnRetainedPublicationUnderLeaseAsync(current, held, source, fresh, ct,
+                state.Active is { } active ? active.Route : ReadOnlyMemory<byte>.Empty).ConfigureAwait(false);
             var routeHash = publication.Route.ExactHash.ToArray();
             if (state.Active is { } old && !FixedRoute(old.Route, routeHash))
                 throw new CryptographicException("Resume the original protected mailbox read; silent rerouting is forbidden.");

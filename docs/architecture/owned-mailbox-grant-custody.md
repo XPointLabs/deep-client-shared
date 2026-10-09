@@ -113,6 +113,17 @@ candidate acquisition API was removed. This connected source is not full-gate
 accepted; native original-selection/object/replay and physical qualification
 remain required.
 
+Publication promotion retains its exact completed predecessor under the local
+renewal intent in the existing bounded journal. Active Retrieve/ACK reopens the
+unique original route from that custody, bound to the current permanent intent,
+account instance and unchanged private owner capability. Archived intent binding
+is independently rederived from the predecessor bytes; arbitrary completed reusable
+entries do not become permanent-account read custody. Missing/ambiguous custody
+rejects before acquisition or dispatch, with no fallback to the new publication.
+Superseded-holder selection likewise opens the actual acquisition's original route.
+Current host/proof/time, holder, SQL and native checks are unchanged. Idle polling
+of all retained routes and dependency-closed retirement are not activated here.
+
 The matching accepted-object increment uses the sole
 [retention matrix](../../../docs/architecture/RETENTION-AND-RECOVERY-V1.md#1-service-and-protocol-retention)
 for MEO1, native blob admission and the shared SQL/in-memory state machine's

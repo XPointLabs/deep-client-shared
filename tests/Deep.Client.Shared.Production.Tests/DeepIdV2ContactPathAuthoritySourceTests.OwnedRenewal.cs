@@ -1,11 +1,13 @@
 using System.Buffers.Binary;
 using System.Security.Cryptography;
 using Deep.Client.Shared.Persistence.DeviceV2;
+using Deep.Client.Shared.Services;
 using Deep.Client.Shared.Services.ContactV2;
 using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.ContactV1;
 using Deep.Protocol.ContactV2;
 using Deep.Protocol.DeepExtension.PrivacyRouting;
+using Deep.Protocol.DeepExtension.MailboxCapabilities;
 using Deep.Protocol.Identity;
 using Deep.Protocol.XPointNetworkV1;
 
@@ -18,6 +20,13 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     {
         await using var fixture = await Fixture.CreateAsync();
         await fixture.CheckOwnedRenewalAsync();
+    }
+
+    [Fact]
+    public async Task Did2OwnedRenewal_PromotionPreservesInterruptedOriginalRetrieveAndRejectsMissingCustody()
+    {
+        await using var fixture = await Fixture.CreateAsync(encryptedStorage: true);
+        await fixture.CheckOwnedRenewalAsync(interruptedRetrieve: true);
     }
 
     [Fact]
@@ -81,7 +90,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             }
         }
 
-        internal async Task CheckOwnedRenewalAsync()
+        internal async Task CheckOwnedRenewalAsync(bool interruptedRetrieve = false)
         {
             await SeedShortPermanentProposalAsync();
             var address = (await accounts.GetCurrentAsync())!.PermanentId;
@@ -89,6 +98,20 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             var backend = new RenewalBackend(this);
             var genesisCommit = await EnsureAsync();
             Assert.Equal(0UL, genesisCommit.Generation);
+            var grants = new OwnedGrantTransport(this, selfRetrieve: true);
+            var terminal = new OwnedReadTerminal(this, [], ownerOnPrimary: true) { ReturnEmptyPage = true };
+            byte[]? readRoot = null, grantRoot = null;
+            if (interruptedRetrieve)
+            {
+                using (ClientMailboxRetrieveTestHooks.Push(point =>
+                    { if (point == ClientMailboxRetrieveFailpoint.AfterPageCommit) throw new IOException("Interrupted original-route read before promotion."); }))
+                    await Assert.ThrowsAsync<ClientMailboxDispatchOutcomeUnknownException>(() => SynchronizeNativeSender(grants, terminal));
+                using var reads = await ReadPeerMailboxReads(own: true);
+                Assert.Equal(3, reads.Phase); Assert.NotNull(reads.Active);
+                readRoot = await RootCopy(ProtectedDid2MailboxReadJournal.Slot);
+                grantRoot = await RootCopy(ProtectedDid2MailboxGrantJournal.Slot);
+                Assert.Equal(1, grants.Calls); Assert.Equal(1, terminal.RetrieveCalls);
+            }
             byte[] priorBytes, priorLocator;
             using (var state = await RouteState())
             {
@@ -148,9 +171,17 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 byte[] exactCommit;
                 using (var state = await RouteState())
                 {
-                    var entry = Assert.Single(state.Entries).Value;
-                    Assert.Equal(name, Assert.Single(state.Entries).Key); Assert.Equal((byte)7, entry.Phase);
+                    Assert.Equal(2, state.Entries.Count);
+                    var entry = state.Entries[name];
+                    Assert.Equal((byte)7, entry.Phase);
                     Assert.Equal(1UL, ContactPublicationAuthorityWireCodec.DecodeRequest(entry.Record(9).Span).Generation);
+                    var retained = Assert.Single(state.Entries, pair => pair.Key != name).Value;
+                    Assert.Equal((byte)7, retained.Phase);
+                    // Only the local intent prefix moves. Private capability,
+                    // route keys and every exact signed record stay unchanged.
+                    Assert.Equal(priorBytes.AsSpan(32).ToArray(), retained.Exact[32..].ToArray());
+                    Assert.NotEqual(ContactRouteClosureCodec.Decode(retained.Record(6).Span).ExactHash.ToArray(),
+                        ContactRouteClosureCodec.Decode(entry.Record(6).Span).ExactHash.ToArray());
                     exactCommit = entry.Record(11).ToArray();
                     Assert.Equal(priorLocator, Xpu1Codec.Decode(
                         ContactPublicationAuthorityWireCodec.DecodeResponse(ContactPublicationAuthorityWireCodec.DecodeRequest(entry.Record(9).Span),
@@ -162,8 +193,60 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 Assert.Equal(callbacks, (backend.RouteCalls, backend.PublicationCalls, backend.ReplicaCalls));
                 Assert.Equal(address.CanonicalText, (await accounts.GetCurrentAsync())!.PermanentId.CanonicalText);
                 Assert.True(plan.Matches(await accounts.ReadOwnPermanentContactPlanAsync()));
+                if (interruptedRetrieve)
+                {
+                    Assert.Equal(readRoot, await RootCopy(ProtectedDid2MailboxReadJournal.Slot));
+                    Assert.Equal(grantRoot, await RootCopy(ProtectedDid2MailboxGrantJournal.Slot));
+                    await RejectMissingOriginalPublication();
+                    Assert.Equal(0, (await SynchronizeNativeSender(grants, terminal)).ProcessedEnvelopes);
+                    Assert.Equal(1, grants.Calls); Assert.Equal(1, terminal.RetrieveCalls); Assert.Equal(0, terminal.AckCalls);
+                    Assert.Equal(grantRoot, await RootCopy(ProtectedDid2MailboxGrantJournal.Slot));
+                    using var reads = await ReadPeerMailboxReads(own: true);
+                    Assert.Equal(0, reads.Phase); Assert.Null(reads.Active);
+                }
             }
-            finally { CryptographicOperations.ZeroMemory(priorBytes); }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(priorBytes);
+                if (readRoot is not null) CryptographicOperations.ZeroMemory(readRoot);
+                if (grantRoot is not null) CryptographicOperations.ZeroMemory(grantRoot);
+            }
+
+            async Task<byte[]> RootCopy(string slot)
+            {
+                using var root = await innerStorage.ReadOwnedAsync(slot) ?? throw new InvalidOperationException();
+                return root.Use(bytes => bytes.ToArray());
+            }
+            async Task RejectMissingOriginalPublication()
+            {
+                var good = await RouteSnapshot(); byte[]? damaged = null;
+                using var state = await RouteState();
+                var archived = Assert.Single(state.Entries, pair => pair.Key != name);
+                state.Entries.Remove(archived.Key); archived.Value.Dispose();
+                using var generation = await innerStorage.ReadOwnedAsync("deep.store.v2.sql-generation");
+                var instance = generation!.Use(bytes => bytes.Slice(56, 32).ToArray());
+                try
+                {
+                    damaged = ProtectedDid2ContactRouteJournal.Encode(state, Network, checkpoint.Directory.Record.DeepAccountId.Span, instance);
+                    Assert.True(await innerStorage.CompareExchangeAsync(ProtectedDid2ContactRouteJournal.Slot, good, damaged));
+                    await Assert.ThrowsAsync<CryptographicException>(() => SynchronizeNativeSender(grants, terminal));
+                    Assert.Equal(damaged, await RouteSnapshot());
+                    Assert.Equal(readRoot, await RootCopy(ProtectedDid2MailboxReadJournal.Slot));
+                    Assert.Equal(grantRoot, await RootCopy(ProtectedDid2MailboxGrantJournal.Slot));
+                    Assert.Equal(1, grants.Calls); Assert.Equal(1, terminal.RetrieveCalls);
+                }
+                finally
+                {
+                    // Disposable test fault only; production cannot reconstruct
+                    // absent original private publication custody.
+                    if (damaged is not null)
+                    {
+                        Assert.True(await innerStorage.CompareExchangeAsync(ProtectedDid2ContactRouteJournal.Slot, damaged, good));
+                        CryptographicOperations.ZeroMemory(damaged);
+                    }
+                    CryptographicOperations.ZeroMemory(good); CryptographicOperations.ZeroMemory(instance);
+                }
+            }
 
             Task<VerifiedDeepIdV2PublicationCommit> EnsureAsync()
             {

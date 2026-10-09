@@ -195,10 +195,15 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                         winner.ExactXpu1, deadline.Token).ConfigureAwait(false);
                     using var completed = entry.WithPublicationCommit(committed, networkId, current.AccountId.Span);
                     var replacement = completed.RebindCommittedIntent(plan.Intent.Span, networkId, current.AccountId.Span);
-                    state.Entries[currentName] = replacement; state.Entries.Remove(pendingName);
+                    // Promotion changes the discoverable publication, not the
+                    // lifetime of objects or exact reads on its predecessor.
+                    // Reuse the already reserved pending slot for private old
+                    // publication custody; no signed bytes/capability change.
+                    var retained = prior.RebindCommittedIntent(pendingIntent, networkId, current.AccountId.Span);
+                    state.Entries[currentName] = replacement; state.Entries[pendingName] = retained;
                     prior.Dispose(); entry.Dispose(); entry = replacement;
                     deadline.Token.ThrowIfCancellationRequested();
-                    await SaveAsync(deadline.Token).ConfigureAwait(false); // Atomic replacement, then independent readback.
+                    await SaveAsync(deadline.Token).ConfigureAwait(false); // Atomic promotion and retention, then readback.
 #if DEEP_TEST_INTERNALS
                     Did2ContactRouteTestHooks.Hit(Did2ContactRouteFailpoint.AfterRenewalPromotion);
 #endif

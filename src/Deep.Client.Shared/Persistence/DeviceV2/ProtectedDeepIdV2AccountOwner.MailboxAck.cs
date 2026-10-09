@@ -26,12 +26,13 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         {
             using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
             using var current = await RequireCurrentUnderLeaseAsync(unixSeconds, verifier, ct).ConfigureAwait(false);
-            using var publication = await OpenOwnRetainedPublicationUnderLeaseAsync(current, held, source, fresh, ct).ConfigureAwait(false);
             instance = await SqliteDeepIdV2AccountGeneration.ReadAccountInstanceUnderLeaseAsync(storage, networkId, current.AccountId, ct).ConfigureAwait(false);
             using (var root = await storage.ReadOwnedAsync(ProtectedDid2MailboxReadJournal.Slot, ct).ConfigureAwait(false) ?? throw new InvalidDataException("Protected mailbox read custody disappeared."))
                 snapshot = root.Use(bytes => bytes.ToArray());
             using var state = ProtectedDid2MailboxReadJournal.Decode(snapshot, networkId, current.AccountId.Span, instance);
             var cycle = state.Active ?? throw new CryptographicException("No active protected page can authorize ACK.");
+            using var publication = await OpenOwnRetainedPublicationUnderLeaseAsync(current, held, source, fresh, ct,
+                cycle.Route).ConfigureAwait(false);
             if (state.Phase < 4 || !FixedRoute(cycle.Grant, descriptor.Grant) || !FixedRoute(cycle.Scope, descriptor.Scope) ||
                 !FixedRoute(cycle.RetrieveMauHash, descriptor.RetrieveMauHash) || !FixedRoute(cycle.Page, descriptor.ExactPage) ||
                 cycle.CapturedAt != descriptor.CapturedAt || !FixedRoute(cycle.Route, publication.Route.ExactHash.Span))

@@ -26,7 +26,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 var entry = ProtectedDid2MailboxGrantJournal.RequireSupersededRetrieve(grants, acquisition);
                 var replacement = ProtectedDid2MailboxGrantJournal.CurrentWinner(grants, Convert.ToHexString(entry.AsSpan(0, 32)))!;
                 var before = await owner.CaptureCompletedContactSendGuardsUnderLeaseAsync(current, held, ct).ConfigureAwait(false);
-                using var publication = await owner.OpenOwnRetainedPublicationUnderLeaseAsync(current, held, source, fresh, ct).ConfigureAwait(false);
+                using var publication = await owner.OpenOwnRetainedPublicationUnderLeaseAsync(current, held, source, fresh, ct,
+                    ContactRouteClosureCodec.Decode(ProtectedDid2MailboxGrantJournal.OriginalRoute(entry).Span).ExactHash).ConfigureAwait(false);
                 if (!FixedRoute(publication.Route.ExactBytes.Span, ProtectedDid2MailboxGrantJournal.OriginalRoute(entry).Span))
                     throw new CryptographicException("Replacement read path lost this account's actual original publication.");
                 var winner = await publication.Host.VerifyRetainedReadSuccessAsync(publication.Route.ExactBytes,

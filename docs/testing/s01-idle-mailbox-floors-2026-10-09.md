@@ -759,3 +759,41 @@ migration, independent receipt-key rotation, sustained128/512 cleanup, a matchin
 mandatory full, S01 acceptance, S02/S04 activation or physical Windows/Android.
 The current source requires full qualification after the complete S01 batch.
 Production, accounts, Release publication and main were not changed.
+
+## Publication promotion preserves original read custody
+
+Source review of the remaining S01 last-path dependency found that successful
+contact renewal removed the predecessor publication, including its private owner
+Retrieve capability, while original objects or an interrupted read could remain.
+Retrieve/ACK also selected only the newest publication. Promotion now atomically
+retains the completed predecessor in the already reserved pending slot and selects
+an active read's exact original route. All signed records, private route material
+and capability remain byte-exact apart from the local intent prefix. The private
+reader independently rederives the archived intent binding and rejects missing or
+ambiguous original custody. No journal generation, wire, public selector, legacy
+reader, reranking, request remint or capacity increase was introduced.
+
+Predeclared focused matrix: three `Did2OwnedRenewal_` cases and all six
+`FixturePreflight=true` cases; serial xUnit, Windows PowerShell5.1/SDK10.0.301.
+Final build native0, zero warnings/errors,3.17s. Two earlier compilation attempts
+failed only on missing/wrong test-hook imports/names; no tests launched from them.
+No source/executable inputs changed while the successful focused run was live.
+`artifacts/s01-publication-retention/renewal-retention-01/renewal-retention-01.trx`:
+**9/0/0, native0,52.6618s**, canonical receipt mappings/counters verified.
+SHA256: `A2AC042BE5852432B7CF5AD1392B7ED15C2F3DF79D202D3E2B2BFCC2576ED0E8`.
+
+The encrypted-storage case captures an actual owned empty Retrieve at phase3,
+renews through every protected handover/response-loss case, observes lost promotion
+reply and reopens the persisted successor. The original read/grant roots stay exact.
+Removing only the predecessor in disposable fixture storage rejects without
+issuer/terminal callback or root changes; restoring only that fixture permits the
+original captured read to complete, without another Retrieve or issuer call.
+The existing renewal and expired-incomplete-proposal regressions also pass.
+This is actual Shared/native crypto/SQL source evidence with signed in-process
+issuer/terminal results, not physical devices or two remote HTTP stores.
+
+An ACK across publication promotion is not qualified by this empty-page case.
+Idle polling of every retained publication, last-path/traversal retirement,
+unused/unknown Retrieve closure, sustained128/512, current matching full and S01
+acceptance remain open. S02/S04 activation, production, Release/main and physical
+Windows/Android were not changed. No complete release percentage is inferred.

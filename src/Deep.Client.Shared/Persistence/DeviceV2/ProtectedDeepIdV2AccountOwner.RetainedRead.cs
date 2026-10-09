@@ -118,13 +118,16 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     }
 
     // The only provenance of these original facts is the actual private phase7
-    // journal, bound to the current account instance and permanent intent.
+    // journal, bound to the current account instance and permanent intent,
+    // including predecessors retained atomically by this owner's promotion.
     // Decoding old signatures never makes them current admission authority.
     private async Task<OwnRetainedPublication> OpenOwnRetainedPublicationUnderLeaseAsync(
         VerifiedDeepIdV2CurrentAccount current, HeldDeepIdV2AccountLease held,
         DeepIdV2ContactPathAuthoritySource source, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh,
-        CancellationToken ct)
+        CancellationToken ct, ReadOnlyMemory<byte> originalRouteHash = default)
     {
+        if (!originalRouteHash.IsEmpty && (originalRouteHash.Length != 32 || originalRouteHash.Span.IndexOfAnyExcept((byte)0) < 0))
+            throw new CryptographicException("Retained publication selection requires an exact original route hash.");
         var first = await RecheckRouteFreshnessAsync(current, source, fresh, held, null, ct).ConfigureAwait(false);
         var host = await MailboxHostAuthorityV2Verifier.VerifyAsync(fresh.Network, fresh.Authority,
             fresh.MailboxAuthority.ExactPma2, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
@@ -138,7 +141,32 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 throw new InvalidDataException("Original publication custody is absent; retained reading cannot repair it.");
             snapshot = root.Use(bytes => bytes.ToArray());
             using var state = ProtectedDid2ContactRouteJournal.Decode(snapshot, networkId, current.AccountId.Span, instance);
-            if (!state.Entries.TryGetValue(Convert.ToHexString(plan.Intent.Span), out var entry) ||
+            var currentName = Convert.ToHexString(plan.Intent.Span);
+            state.Entries.TryGetValue(currentName, out var entry);
+            if (!originalRouteHash.IsEmpty)
+            {
+                entry = null;
+                foreach (var candidate in state.Entries)
+                {
+                    if (candidate.Value.Phase != 7 || candidate.Value.Kind != 1 ||
+                        !candidate.Value.Matches(Did2OwnedPermanentContactPlan.Configuration()) ||
+                        !FixedRoute(ContactRouteClosureCodec.Decode(candidate.Value.Record(6).Span).ExactHash.Span, originalRouteHash.Span)) continue;
+                    if (entry is not null) throw new CryptographicException("Original publication custody is ambiguous.");
+                    if (candidate.Key != currentName)
+                    {
+                        using var predecessor = candidate.Value.RebindCommittedIntent(plan.Intent.Span, networkId, current.AccountId.Span);
+                        var retainedIntent = DeriveContactRenewalIntent(networkId, current.AccountId.Span, instance, plan.Intent.Span, predecessor.Exact);
+                        try
+                        {
+                            if (candidate.Key != Convert.ToHexString(retainedIntent))
+                                throw new CryptographicException("Original publication is not retained by this account's permanent promotion.");
+                        }
+                        finally { CryptographicOperations.ZeroMemory(retainedIntent); }
+                    }
+                    entry = candidate.Value;
+                }
+            }
+            if (entry is null ||
                 entry.Phase != 7 || entry.Kind != 1 || !entry.Matches(Did2OwnedPermanentContactPlan.Configuration()))
                 throw new CryptographicException("Retained reading requires this account's exact completed permanent publication.");
             var contact = DeepIdV2ResolverClosureCodec.Decode(entry.Record(7).Span);
