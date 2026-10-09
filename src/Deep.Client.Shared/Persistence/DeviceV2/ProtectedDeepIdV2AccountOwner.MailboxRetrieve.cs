@@ -29,7 +29,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             // Resume the route held by the actual protected cycle, not whichever
             // publication became current while this read was interrupted.
             using var publication = await OpenOwnRetainedPublicationUnderLeaseAsync(current, held, source, fresh, ct,
-                state.Active is { } active ? active.Route : ReadOnlyMemory<byte>.Empty).ConfigureAwait(false);
+                state.Active is { } active ? active.Route : ReadOnlyMemory<byte>.Empty,
+                state.Active is null ? state : null).ConfigureAwait(false);
             var routeHash = publication.Route.ExactHash.ToArray();
             if (state.Active is { } old && !FixedRoute(old.Route, routeHash))
                 throw new CryptographicException("Resume the original protected mailbox read; silent rerouting is forbidden.");

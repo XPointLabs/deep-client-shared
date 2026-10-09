@@ -121,8 +121,23 @@ is independently rederived from the predecessor bytes; arbitrary completed reusa
 entries do not become permanent-account read custody. Missing/ambiguous custody
 rejects before acquisition or dispatch, with no fallback to the new publication.
 Superseded-holder selection likewise opens the actual acquisition's original route.
-Current host/proof/time, holder, SQL and native checks are unchanged. Idle polling
-of all retained routes and dependency-closed retirement are not activated here.
+Current host/proof/time, holder, SQL and native checks are unchanged. A new idle
+cycle chooses one least-polled route among the actual current and independently
+bound archived permanent publications, using existing protected traversal poll
+generations. Active original work always takes precedence. One page per call
+keeps the existing bounds; absent traversal metadata is not absence of objects,
+and no route/grant is evicted or reminted. This owner selection does not introduce
+a background scheduler or dependency-closed retirement.
+
+Semantic rematerialization of actual native-committed Hello/Accept follows
+[DR-0063's retained-event clarification](../../../docs/survival-program/decisions/DR-0063-did2-contact-reply-route-embedding.md),
+not current admission of its old return publication. The Shared handoff joins
+actual protected native floor and exact committed events, checks original route
+signatures through the closed historical predecessor verifier, and rechecks the
+same native source before returning. Current endpoint/DCA/XUR authority remains
+required; unsupported PMT/device/delegation rollover rejects. No public trust
+flag, live route or Store permission leaves that reader. Current retained
+Retrieve/ACK authority is verified independently and is not relaxed.
 
 The matching accepted-object increment uses the sole
 [retention matrix](../../../docs/architecture/RETENTION-AND-RECOVERY-V1.md#1-service-and-protocol-retention)

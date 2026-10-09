@@ -797,3 +797,74 @@ Idle polling of every retained publication, last-path/traversal retirement,
 unused/unknown Retrieve closure, sustained128/512, current matching full and S01
 acceptance remain open. S02/S04 activation, production, Release/main and physical
 Windows/Android were not changed. No complete release percentage is inferred.
+
+## Retained publication polling and original lost ACK
+
+The next coherent S01 source increment adds bounded new-read selection across
+actual current and archived permanent publications. It uses the existing
+owner-protected traversal poll generation, one least-polled route/page per call;
+active work still resumes its exact original route. An arbitrary completed entry
+with the permanent configuration but an unbound archived intent rejects before
+issuer/terminal callbacks or protected read/grant mutations. No new journal,
+format, public selector, remint, deletion permission or capacity increase.
+
+The nonempty regression performs actual initial exchange, explicit acceptance,
+native ContactAccept commit and semantic materialization. It loses the ACK reply,
+renews the actual publication past original XRA expiry, and resumes the exact old
+ACK. This exposed a product defect: reconstructing the native-committed Hello
+required its old return publication to pass current admission again. The source
+now uses the existing closed DR-0072 historical signature/graph verifier only
+inside actual native-committed Hello/Accept handoffs, following DR-0063's dated
+clarification. Current endpoint/DCA/XUR/network checks remain; actual native
+floor/events are independently reread after verification. Historical facts do
+not grant new Store, Retrieve, ACK or dispatch authority.
+
+Windows PowerShell5.1 / SDK10.0.301 builds before focused tests:
+idle-poll build18.47s; nonempty regression build4.78s; historical-reader build
+23.14s and final-readback build16.95s, all native0/zero warnings/errors. An earlier
+historical-reader build failed2 diagnostics on an inaccessible trusted-time API;
+no tests ran from it. The subsequently compiled source incorrectly used a
+lease-acquiring recheck while already holding the account lease. This was a
+product deadlock, not infrastructure contention; it was corrected to the existing
+held-lease endpoint-pair recheck, without extending timeouts or weakening checks.
+Final functional build32.32s, native0/zero warnings/errors.
+
+Fresh serial focused receipts under `artifacts/s01-publication-retention/`:
+
+- `retained-poll-01/retained-poll-01.trx`:10/0/0/native0,1.2963min;
+  four renewal cases plus six prerequisites. SHA256
+  `FB68870DFB1781ABC122D815C5F6A67A6616E20DAFE7AD9EA4307C1FD8FDF7C0`.
+- `retained-read-ack-01/retained-read-ack-01.trx`:9/1/0/native1,12.5970min;
+  new ACK-promotion case failed on XRA expiry; existing cases passed. SHA256
+  `399759EA4D5ACFBFE6878EC01BA870F4E14158161718DFE34514C60D2DA4923B`.
+- `retained-read-ack-02/retained-read-ack-02.trx`:7/3/0/native1,4.9698min;
+  all three receive cases failed on the nested account lease. SHA256
+  `38D205D0D974ABFB545E36E3E0AA245021807F0001C9261B1690E9E9D0925EC6`.
+- `retained-read-ack-03/retained-read-ack-03.trx`:10/0/0/native0,14.3410min;
+  both original receive variants, new lost-ACK/promotion case, retained idle
+  polling and all six prerequisites pass. SHA256
+  `36D9E980EB4AE1C658C933D6490AC71A8B31E0258997AF7639506B45272BB00B`.
+
+The ten-case matrix was listed before execution. No source/executable/normative
+edits were made during any live run. The canonical receipt reader verifies each
+mapping/counter; `Test-TestGateResults` confirms03 against the predeclared02
+reference with native0, exact10 cases and no skips. These are focused receipts,
+not an unfiltered full gate. Original FAILs remain unchanged.
+
+Two protected traversals each advance at least three polls; only two original
+issuer acquisitions occur, once per publication. Lost-ACK retry uses identical
+MAU bytes, one original Retrieve and one issuer acquisition; native/semantic
+contact acceptance remains singular. Real PQ/native/SQLCipher custody is used
+with signed in-process issuer/terminal results, not remote two-store HTTP or
+physical Windows/Android. Original DCA/XUR expiry and PMT/device/delegation/key
+rollover are not comprehensively qualified by this same-projection profile.
+
+After the focused terminal, reviewed normative source/inventory repins regenerate
+only Protocol registry metadata; strict registry/176-anchor checks pass. This
+also records already accepted DR-0106 and signed-request start changes from the
+prior source packet. No frozen allocation, approved Git blob, wire bytes,
+signature domain or activation status changes. Final matching build is recorded
+below; current matching mandatory full, last-path/traversal retirement,
+unused/unknown Retrieve closure, sustained128/512, S01 and shipping/device
+acceptance remain open. Final build after mechanical metadata repin: native0,
+zero warnings/errors,20.55s. No production deploy/reset, Release or main merge.

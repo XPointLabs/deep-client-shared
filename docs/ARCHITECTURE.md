@@ -328,8 +328,19 @@ replica results are not remote durability or physical device evidence. Expired
 incomplete proposals are retained and rejected, not silently reminted. Registry
 publication predecessor verification/generation reservation, service/PMT rollover,
 matched deployment and physical contacts/text/assets/groups remain release gates.
-Idle scheduling across retained publications, dependency-closed last-path cleanup
-and matching full remain unfinished; the focused source observation is in the
+New idle reads choose one least-polled permanent publication from actual current
+and archived custody; active cycles keep their original route. The protected
+traversal generation is scheduling metadata, never deletion or expiry authority.
+Native-committed Hello/Accept reconstruction verifies original signed route facts
+through DR-0072, following the retained-event clarification in
+[DR-0063](../../docs/survival-program/decisions/DR-0063-did2-contact-reply-route-embedding.md).
+Current endpoint authority and exact native source readback remain mandatory;
+historical verification returns no live route or transport permission. The lost
+ACK regression crosses actual publication promotion and old XRA expiry without
+another Retrieve or issuer request. Current DCA/XUR checks and unsupported
+PMT/device/delegation rollover still reject. This is not background scheduling,
+dependency-closed last-path cleanup, a matching full or physical acceptance.
+The focused source observation is in the
 [S01 checkpoint](testing/s01-idle-mailbox-floors-2026-10-09.md#publication-promotion-preserves-original-read-custody).
 
 ## Retired identity consumer cutover (2026-10-02)

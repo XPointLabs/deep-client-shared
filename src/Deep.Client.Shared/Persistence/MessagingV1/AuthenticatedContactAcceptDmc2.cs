@@ -77,12 +77,19 @@ internal sealed class AuthenticatedContactAcceptDmc2 : IAuthenticatedDmc2InboxEv
                 ApplicationCoreCodec.DecodeDmc2(hello), scope.IsInitiator ? own.Proof : peer,
                 scope.IsInitiator ? peer : own.Proof, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
             var parsedAccept = ApplicationCoreCodec.DecodeDmc2(accepted);
-            _ = await Deep.Protocol.ContactV2.DeepIdV2ContactMailboxRouteVerifier.VerifyAsync(
+            await AuthenticatedInitialDmc2Batch.RequireRetainedMailboxRouteFactsAsync(
                 ((ContactAcceptDmc2Payload)parsedAccept.ParsedPayload).MailboxRoute, scope.IsInitiator ? peer : own.Proof,
-                own.Network, own.Authority, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
+                own, source, held, ct).ConfigureAwait(false);
             handoff = new(accepted, scope);
             var reading = await source.RecheckEndpointPairUnderLeaseAsync(own, peer, held, ct).ConfigureAwait(false);
             OwnedInitialMessagingSeed.RequireFreshScope(scope, own.Proof, peer, reading);
+            var confirmedFloor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
+            if (!Fixed(floor.Exact.Span, confirmedFloor.Exact.Span))
+                throw new CryptographicException("ContactAccept source changed during semantic verification.");
+            using var confirmed = opened.Sql.ReadVerifiedOperation(confirmedFloor, op) ??
+                throw new CryptographicException("ContactAccept lost its actual native commit during verification.");
+            if (confirmed.Direction != retained.Direction || !Fixed(confirmed.EventHash, SHA256.HashData(accepted)))
+                throw new CryptographicException("ContactAccept changed its committed event during verification.");
             ct.ThrowIfCancellationRequested(); held.RequireActive();
             var result = handoff; handoff = null; return result;
         }

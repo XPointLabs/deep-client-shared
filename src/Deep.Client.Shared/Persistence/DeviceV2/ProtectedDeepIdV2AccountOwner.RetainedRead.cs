@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Security.Cryptography;
 using Deep.Client.Shared.Services.ContactV1;
 using Deep.Client.Shared.Services.ContactV2;
@@ -124,7 +125,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     private async Task<OwnRetainedPublication> OpenOwnRetainedPublicationUnderLeaseAsync(
         VerifiedDeepIdV2CurrentAccount current, HeldDeepIdV2AccountLease held,
         DeepIdV2ContactPathAuthoritySource source, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh,
-        CancellationToken ct, ReadOnlyMemory<byte> originalRouteHash = default)
+        CancellationToken ct, ReadOnlyMemory<byte> originalRouteHash = default,
+        ProtectedDid2MailboxReadJournal.State? newRead = null)
     {
         if (!originalRouteHash.IsEmpty && (originalRouteHash.Length != 32 || originalRouteHash.Span.IndexOfAnyExcept((byte)0) < 0))
             throw new CryptographicException("Retained publication selection requires an exact original route hash.");
@@ -143,6 +145,34 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             using var state = ProtectedDid2ContactRouteJournal.Decode(snapshot, networkId, current.AccountId.Span, instance);
             var currentName = Convert.ToHexString(plan.Intent.Span);
             state.Entries.TryGetValue(currentName, out var entry);
+            if (newRead is not null)
+            {
+                if (!originalRouteHash.IsEmpty || newRead.Active is not null || newRead.Phase != 0)
+                    throw new InvalidOperationException("New-route polling cannot replace an active original read.");
+                if (entry is null || entry.Phase != 7 || entry.Kind != 1 || !entry.Matches(Did2OwnedPermanentContactPlan.Configuration()))
+                    throw new CryptographicException("New-route polling requires the completed current permanent publication.");
+                // Poll generations are owner-protected scheduling metadata, not
+                // time/issuance/expiry or permission to delete an old path. One
+                // least-polled path per call keeps every retained route live.
+                var selected = ContactRouteClosureCodec.Decode(entry.Record(6).Span);
+                ulong PollGeneration(ParsedContactRouteClosure route)
+                {
+                    var scope = ClientMailboxScope.Derive(route.ExactHash.Span, new BlindedMailboxId(route.Reachability.Field(2).Span),
+                        BinaryPrimitives.ReadUInt64BigEndian(route.Selection.Field(4).Span));
+                    return newRead.Traversals.TryGetValue(Convert.ToHexString(scope.Value), out var traversal) ? traversal.PollGeneration : 0;
+                }
+                var least = PollGeneration(selected);
+                foreach (var candidate in state.Entries)
+                {
+                    if (candidate.Key == currentName || candidate.Value.Phase != 7 || candidate.Value.Kind != 1 ||
+                        !candidate.Value.Matches(Did2OwnedPermanentContactPlan.Configuration())) continue;
+                    RequireRetainedPermanentIntent(candidate.Key, candidate.Value, plan, current.AccountId.Span, instance);
+                    var route = ContactRouteClosureCodec.Decode(candidate.Value.Record(6).Span);
+                    var generation = PollGeneration(route);
+                    if (generation < least) { selected = route; least = generation; }
+                }
+                originalRouteHash = selected.ExactHash;
+            }
             if (!originalRouteHash.IsEmpty)
             {
                 entry = null;
@@ -153,16 +183,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                         !FixedRoute(ContactRouteClosureCodec.Decode(candidate.Value.Record(6).Span).ExactHash.Span, originalRouteHash.Span)) continue;
                     if (entry is not null) throw new CryptographicException("Original publication custody is ambiguous.");
                     if (candidate.Key != currentName)
-                    {
-                        using var predecessor = candidate.Value.RebindCommittedIntent(plan.Intent.Span, networkId, current.AccountId.Span);
-                        var retainedIntent = DeriveContactRenewalIntent(networkId, current.AccountId.Span, instance, plan.Intent.Span, predecessor.Exact);
-                        try
-                        {
-                            if (candidate.Key != Convert.ToHexString(retainedIntent))
-                                throw new CryptographicException("Original publication is not retained by this account's permanent promotion.");
-                        }
-                        finally { CryptographicOperations.ZeroMemory(retainedIntent); }
-                    }
+                        RequireRetainedPermanentIntent(candidate.Key, candidate.Value, plan, current.AccountId.Span, instance);
                     entry = candidate.Value;
                 }
             }
@@ -218,6 +239,19 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             if (snapshot is not null) CryptographicOperations.ZeroMemory(snapshot);
             if (capability is not null) CryptographicOperations.ZeroMemory(capability);
         }
+    }
+
+    private void RequireRetainedPermanentIntent(string name, ProtectedDid2ContactRouteJournal.Entry entry,
+        Did2OwnedPermanentContactPlan plan, ReadOnlySpan<byte> account, ReadOnlySpan<byte> instance)
+    {
+        using var predecessor = entry.RebindCommittedIntent(plan.Intent.Span, networkId, account);
+        var expected = DeriveContactRenewalIntent(networkId, account, instance, plan.Intent.Span, predecessor.Exact);
+        try
+        {
+            if (name != Convert.ToHexString(expected))
+                throw new CryptographicException("Original publication is not retained by this account's permanent promotion.");
+        }
+        finally { CryptographicOperations.ZeroMemory(expected); }
     }
 
     private sealed class OwnRetainedPublication : IDisposable

@@ -30,6 +30,13 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     }
 
     [Fact]
+    public async Task Did2OwnedRenewal_IdlePollingCoversCurrentAndRetainedPublicationWithoutReminting()
+    {
+        await using var fixture = await Fixture.CreateAsync(encryptedStorage: true);
+        await fixture.CheckOwnedRenewalAsync(interruptedRetrieve: true, pollRetainedPaths: true);
+    }
+
+    [Fact]
     public async Task Did2OwnedRenewal_ExpiredIncompleteProposalIsNotSilentlyAbandoned()
     {
         await using var fixture = await Fixture.CreateAsync();
@@ -53,7 +60,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     {
         // A genuinely signed short proposal stored through the canonical
         // protected codec. No runtime lifetime/test-currentness flag is added.
-        internal async Task SeedShortPermanentProposalAsync()
+        internal async Task SeedShortPermanentProposalAsync(ulong validitySeconds = 20)
         {
             var plan = await accounts.ReadOwnPermanentContactPlanAsync(); var source = Source();
             var staged = await accounts.EnsureOwnInitialPreKeyInventoryAsync(source);
@@ -67,7 +74,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             var configuration = Did2OwnedPermanentContactPlan.Configuration();
             var xra = await DeepIdV2ContactRouteAuthor.AuthorAdvertisementAsync(authorization, fresh.Network, fresh.Authority,
                 device!, configuration.Quota, configuration.AntiSpamHash, keyId, DeepIdentityCrypto.DeriveX25519PublicKey(scalar),
-                authorization.TrustedLowerUnixSeconds, authorization.TrustedUpperUnixSeconds + 20, source.RendezvousTrustedTime);
+                authorization.TrustedLowerUnixSeconds, checked(authorization.TrustedUpperUnixSeconds + validitySeconds), source.RendezvousTrustedTime);
             var before = await RouteSnapshot();
             using var state = await RouteState();
             using var generation = await innerStorage.ReadOwnedAsync("deep.store.v2.sql-generation");
@@ -90,7 +97,33 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             }
         }
 
-        internal async Task CheckOwnedRenewalAsync(bool interruptedRetrieve = false)
+        internal async Task RenewNativeSenderPublicationPastExpiryAsync()
+        {
+            var plan = await accounts.ReadOwnPermanentContactPlanAsync();
+            ulong expiry;
+            using (var state = await RouteState())
+            {
+                var original = state.Entries[Convert.ToHexString(plan.Intent.Span)];
+                expiry = Math.Min(BinaryPrimitives.ReadUInt64BigEndian(ContactCodec.Decode("XRA1", original.Record(1).Span).Field(13).Span),
+                    BinaryPrimitives.ReadUInt64BigEndian(DeepIdV2ResolverClosureCodec.Decode(original.Record(7).Span).Bundle.Field(18).Span));
+            }
+            var nextTime = checked(expiry + 20);
+            if (CurrentProofTime < nextTime)
+            {
+                // Move both independently signed fixture time and monotonic
+                // sample. Grant/network lifetimes are never extended or frozen.
+                var elapsed = nextTime - CurrentProofTime;
+                ProofTime = checked(ProofTime + elapsed); Sample = checked(Sample + elapsed);
+            }
+            var reopened = ReopenAccount(); var backend = new RenewalBackend(this);
+            var committed = await reopened.EnsureOwnPermanentContactPublishedAsync(Source(reopened), backend, backend, backend);
+            Assert.Equal(1UL, committed.Generation);
+            Assert.Equal(1, backend.RouteSignings); Assert.Equal(1, backend.PublicationSignings);
+            using var promoted = await RouteState(); Assert.Equal(2, promoted.Entries.Count);
+            Assert.All(promoted.Entries.Values, entry => Assert.Equal((byte)7, entry.Phase));
+        }
+
+        internal async Task CheckOwnedRenewalAsync(bool interruptedRetrieve = false, bool pollRetainedPaths = false)
         {
             await SeedShortPermanentProposalAsync();
             var address = (await accounts.GetCurrentAsync())!.PermanentId;
@@ -203,6 +236,21 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                     Assert.Equal(grantRoot, await RootCopy(ProtectedDid2MailboxGrantJournal.Slot));
                     using var reads = await ReadPeerMailboxReads(own: true);
                     Assert.Equal(0, reads.Phase); Assert.Null(reads.Active);
+                    if (pollRetainedPaths)
+                    {
+                        var multiple = new OwnedPublicationGrantTransport(this, grants);
+                        for (var index = 0; index < 6; index++)
+                            Assert.Equal(0, (await SynchronizeNativeSender(multiple, terminal)).ProcessedEnvelopes);
+                        using var polled = await ReadPeerMailboxReads(own: true);
+                        Assert.Equal(0, polled.Phase); Assert.Null(polled.Active);
+                        Assert.Equal(2, polled.Traversals.Count);
+                        Assert.All(polled.Traversals.Values, traversal => Assert.True(traversal.PollGeneration >= 3));
+                        Assert.Equal(2, multiple.Transports.Count);
+                        Assert.All(multiple.Transports.Values, transport => Assert.Equal(1, transport.Calls));
+                        Assert.Equal(7, terminal.RetrieveCalls); Assert.Equal(0, terminal.AckCalls);
+                        Assert.Equal(2, terminal.RetrievedOriginalRoutes.DistinctBy(Convert.ToHexString).Count());
+                        await RejectUnboundArchivedPublication(multiple, terminal);
+                    }
                 }
             }
             finally
@@ -245,6 +293,40 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                         CryptographicOperations.ZeroMemory(damaged);
                     }
                     CryptographicOperations.ZeroMemory(good); CryptographicOperations.ZeroMemory(instance);
+                }
+            }
+            async Task RejectUnboundArchivedPublication(IDid2MailboxGrantTransport multiple, OwnedReadTerminal terminal)
+            {
+                var good = await RouteSnapshot(); byte[]? damaged = null;
+                var beforeReads = await RootCopy(ProtectedDid2MailboxReadJournal.Slot);
+                var beforeGrants = await RootCopy(ProtectedDid2MailboxGrantJournal.Slot);
+                using var state = await RouteState();
+                var archived = Assert.Single(state.Entries, pair => pair.Key != name);
+                var hostileIntent = Bytes(32, 0xe3);
+                var hostile = archived.Value.RebindCommittedIntent(hostileIntent, Network, checkpoint.Directory.Record.DeepAccountId.Span);
+                state.Entries.Remove(archived.Key); archived.Value.Dispose(); state.Entries.Add(Convert.ToHexString(hostileIntent), hostile);
+                using var generation = await innerStorage.ReadOwnedAsync("deep.store.v2.sql-generation");
+                var instance = generation!.Use(bytes => bytes.Slice(56, 32).ToArray());
+                try
+                {
+                    damaged = ProtectedDid2ContactRouteJournal.Encode(state, Network, checkpoint.Directory.Record.DeepAccountId.Span, instance);
+                    Assert.True(await innerStorage.CompareExchangeAsync(ProtectedDid2ContactRouteJournal.Slot, good, damaged));
+                    var calls = terminal.RetrieveCalls;
+                    await Assert.ThrowsAsync<CryptographicException>(() => SynchronizeNativeSender(multiple, terminal));
+                    Assert.Equal(calls, terminal.RetrieveCalls);
+                    Assert.Equal(damaged, await RouteSnapshot());
+                    Assert.Equal(beforeReads, await RootCopy(ProtectedDid2MailboxReadJournal.Slot));
+                    Assert.Equal(beforeGrants, await RootCopy(ProtectedDid2MailboxGrantJournal.Slot));
+                }
+                finally
+                {
+                    if (damaged is not null)
+                    {
+                        Assert.True(await innerStorage.CompareExchangeAsync(ProtectedDid2ContactRouteJournal.Slot, damaged, good));
+                        CryptographicOperations.ZeroMemory(damaged);
+                    }
+                    CryptographicOperations.ZeroMemory(good); CryptographicOperations.ZeroMemory(instance);
+                    CryptographicOperations.ZeroMemory(beforeReads); CryptographicOperations.ZeroMemory(beforeGrants);
                 }
             }
 
@@ -302,6 +384,25 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                     CryptographicOperations.ZeroMemory(good); CryptographicOperations.ZeroMemory(entry); CryptographicOperations.ZeroMemory(instance);
                 }
             }
+        }
+    }
+
+    // Isolated issuer routing only. Each path still uses the actual owned
+    // request/holder/protected journal and independently signed current result.
+    private sealed class OwnedPublicationGrantTransport(Fixture fixture, OwnedGrantTransport original) : IDid2MailboxGrantTransport
+    {
+        internal Dictionary<string, OwnedGrantTransport> Transports { get; } = new(StringComparer.Ordinal)
+        { [Convert.ToHexString(ContactCodec.Decode("XMG2", original.OriginalRequest.Span).Field(11).Span)] = original };
+        public ValueTask<ReadOnlyMemory<byte>> AcquireAsync(AuthoredMailboxGrantRequest request,
+            VerifiedDeepIdV2ContactRouteClosure route, Did2OwnedContactTransportContext dispatch, CancellationToken ct) =>
+            throw new InvalidOperationException("Read-path qualification cannot acquire a Deposit grant.");
+        public ValueTask<ReadOnlyMemory<byte>> AcquireRetainedReadAsync(AuthoredMailboxGrantRequest request,
+            Did2OwnedContactTransportContext dispatch, CancellationToken ct)
+        {
+            var key = Convert.ToHexString(request.Record.Field(11).Span);
+            if (!Transports.TryGetValue(key, out var transport))
+                Transports.Add(key, transport = new OwnedGrantTransport(fixture, selfRetrieve: true));
+            return transport.AcquireRetainedReadAsync(request, dispatch, ct);
         }
     }
 

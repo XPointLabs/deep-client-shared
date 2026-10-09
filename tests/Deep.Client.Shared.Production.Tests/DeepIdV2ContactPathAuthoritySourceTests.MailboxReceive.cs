@@ -17,11 +17,20 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     [InlineData(true)]
     [Trait("RequiresApprovedMlKemRuntime", "true")]
     public async Task Did2OwnedMailboxReceive_ActualPublicationRetainedPageSemanticFaultLostAckAndNextEmptyPoll(bool selectedSuccessor)
+        => await CheckOwnedMailboxReceiveAsync(selectedSuccessor, renewPublicationDuringAck: false);
+
+    [Fact]
+    [Trait("RequiresApprovedMlKemRuntime", "true")]
+    public async Task Did2OwnedMailboxReceive_PublicationPromotionKeepsOriginalLostAckAndSingleContactAccept()
+        => await CheckOwnedMailboxReceiveAsync(selectedSuccessor: false, renewPublicationDuringAck: true);
+
+    private static async Task CheckOwnedMailboxReceiveAsync(bool selectedSuccessor, bool renewPublicationDuringAck)
     {
         // Actual PQ accounts, committed DPE2/ratchet, SQLCipher, protected page,
         // materialization and signed ACK. In-process issuer/terminal and signed
         // fixture time: NOT socket/device or a remote attachment transfer.
         await using var fixture = await Fixture.CreateAsync(withPeer: true, longMailboxWindow: true);
+        if (renewPublicationDuringAck) await fixture.SeedShortPermanentProposalAsync(validitySeconds: 800);
         var intent = Bytes(32, 0xa1);
         var (complete, hello, init, _, _) = await fixture.PrepareNativeHelloCompletion(intent, verifyDraftRecovery: true);
         byte[] initial;
@@ -76,9 +85,25 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         var ownRetrieval = new OwnedGrantTransport(fixture, selfRetrieve: true, ownerOnPrimary: true);
         var acceptTerminal = new OwnedReadTerminal(fixture, acceptCipher, ownerOnPrimary: true)
         { RetainedEnvelope = acceptStore.StoredEnvelope };
+        if (renewPublicationDuringAck)
+        {
+            acceptTerminal.LoseAckReply = true;
+            await Assert.ThrowsAsync<ClientMailboxDispatchOutcomeUnknownException>(() => fixture.SynchronizeNativeSender(ownRetrieval, acceptTerminal));
+            using (var interrupted = await fixture.ReadPeerMailboxReads(own: true))
+            {
+                Assert.Equal(6, interrupted.Phase); Assert.NotEmpty(interrupted.Active!.AckBody);
+                Assert.Equal(2UL, interrupted.Active.AckCounter);
+            }
+            var originalGrant = ownRetrieval.OriginalRequest.ToArray();
+            await fixture.RenewNativeSenderPublicationPastExpiryAsync();
+            Assert.Equal(originalGrant, ownRetrieval.OriginalRequest.ToArray());
+            Assert.Equal(1, ownRetrieval.Calls); Assert.Equal(1, acceptTerminal.RetrieveCalls); Assert.Equal(1, acceptTerminal.AckCalls);
+            acceptTerminal.LoseAckReply = false;
+        }
         var accepted = await fixture.SynchronizeNativeSender(ownRetrieval, acceptTerminal);
         Assert.Equal(1, accepted.ProcessedEnvelopes); Assert.Equal(1, accepted.DurableTombstones);
-        Assert.Equal(1, ownRetrieval.Calls); Assert.Equal(1, acceptTerminal.RetrieveCalls); Assert.Equal(1, acceptTerminal.AckCalls);
+        Assert.Equal(1, ownRetrieval.Calls); Assert.Equal(1, acceptTerminal.RetrieveCalls);
+        Assert.Equal(renewPublicationDuringAck ? 2 : 1, acceptTerminal.AckCalls);
         Assert.True(acceptTerminal.BuiltRetrieveFrame); Assert.True(acceptTerminal.BuiltAckFrame);
         Assert.Equal(Did2ContactAcceptanceState.PeerAcceptanceRetained, await fixture.ReadOwnedContactState(sender));
         using (var replay = await fixture.ReceiveOwnedMessage(sender, acceptCipher)) { }
@@ -217,6 +242,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         internal MailboxEncryptedEnvelope? RetainedEnvelope;
         internal ulong Cursor = 1, ExpectedAckCounter = 2;
         internal int RetrieveCalls, AckCalls;
+        internal List<byte[]> RetrievedOriginalRoutes { get; } = [];
         internal bool LoseAckReply, BuiltRetrieveFrame, BuiltAckFrame, ReturnEmptyPage;
         public IClientMailboxBinaryIngress Create(Did2OwnedMailboxTransportContext loan, IMailboxClientDecodePolicyProvider decoder)
         { context = loan; policy = decoder; return this; }
@@ -234,7 +260,11 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             var mau = MailboxAuthenticatedClientRequestCodec.Decode(exact.Span);
             var request = MailboxAuthenticatedRequestTranscript.DecodeRetrieveBody(mau.Binding.CanonicalRequest.Span);
             using (var root = await fixture.ReadPeerMailboxReads(own: ownerOnPrimary))
-            { Assert.Equal(2, root.Phase); Assert.Equal(mau.Presentation.ReplayCounter, root.Active!.RetrieveCounter); Assert.Equal(SHA256.HashData(exact.Span), root.Active.RetrieveMauHash); }
+            {
+                Assert.Equal(2, root.Phase); Assert.Equal(mau.Presentation.ReplayCounter, root.Active!.RetrieveCounter);
+                Assert.Equal(SHA256.HashData(exact.Span), root.Active.RetrieveMauHash);
+                RetrievedOriginalRoutes.Add(root.Active.Route.ToArray());
+            }
             Assert.Equal(8, request.MaximumItems);
             await BuildHeldFrame(OnionOperation.Retrieve, exact, route, ct); BuiltRetrieveFrame = true;
             var decode = policy.GetCurrent();

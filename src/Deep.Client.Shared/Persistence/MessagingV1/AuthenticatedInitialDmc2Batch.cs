@@ -9,6 +9,7 @@ using Deep.Protocol.MessagingWire;
 using Deep.Client.Shared.Persistence.DeviceV2;
 using Deep.Client.Shared.Services.ContactV2;
 using Deep.Protocol.AccountDirectoryV1;
+using Deep.Protocol.ContactV2;
 
 namespace Deep.Client.Shared.Persistence.MessagingV1;
 
@@ -69,13 +70,23 @@ internal sealed class AuthenticatedInitialDmc2Batch : IDisposable
                 ApplicationCoreCodec.DecodeDmc2(retained.Hello), scope.IsInitiator ? own.Proof : peer,
                 scope.IsInitiator ? peer : own.Proof, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
             var hello = (ContactHelloDmc2Payload)ApplicationCoreCodec.DecodeDmc2(retained.Hello).ParsedPayload;
-            _ = await Deep.Protocol.ContactV2.DeepIdV2ContactMailboxRouteVerifier.VerifyAsync(hello.MailboxRoute,
-                scope.IsInitiator ? own.Proof : peer, own.Network, own.Authority, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
+            await RequireRetainedMailboxRouteFactsAsync(hello.MailboxRoute, scope.IsInitiator ? own.Proof : peer,
+                own, source, held, ct).ConfigureAwait(false);
             batch = new(retained.SessionInit, retained.Hello, scope);
             var final = await source.RecheckEndpointPairUnderLeaseAsync(own, peer, held, ct).ConfigureAwait(false);
             if (!Fixed(first.BootId.Span, final.BootId.Span) || final.SampleSeconds < first.SampleSeconds)
                 throw new CryptographicException("Initial application handoff crossed a clock discontinuity.");
             OwnedInitialMessagingSeed.RequireFreshScope(scope, own.Proof, peer, final);
+            var confirmedFloor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
+            if (!Fixed(floor.Exact.Span, confirmedFloor.Exact.Span))
+                throw new CryptographicException("Retained initial source changed during semantic verification.");
+            var confirmed = opened.Sql.ReadVerifiedActiveInitialEvents(confirmedFloor);
+            try
+            {
+                if (!Fixed(retained.SessionInit, confirmed.SessionInit) || !Fixed(retained.Hello, confirmed.Hello))
+                    throw new CryptographicException("Retained initial events changed during semantic verification.");
+            }
+            finally { CryptographicOperations.ZeroMemory(confirmed.SessionInit); CryptographicOperations.ZeroMemory(confirmed.Hello); }
             ct.ThrowIfCancellationRequested(); held.RequireActive();
             var result = batch; batch = null; return result;
         }
@@ -84,6 +95,24 @@ internal sealed class AuthenticatedInitialDmc2Batch : IDisposable
             batch?.Dispose(); CryptographicOperations.ZeroMemory(retained.SessionInit);
             CryptographicOperations.ZeroMemory(retained.Hello);
         }
+    }
+
+    // Only the actual native-committed Hello/Accept handoffs call this reader.
+    // Its route is historical event data, not the current route for a new Store.
+    // Keep signature/identity/graph checks, but do not turn rematerialization
+    // into renewal or require an expired old publication to be live again.
+    internal static async Task RequireRetainedMailboxRouteFactsAsync(ParsedDeepIdV2ContactMailboxRoute package,
+        VerifiedDeepIdV2DirectoryFreshness author, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own,
+        DeepIdV2ContactPathAuthoritySource source, HeldDeepIdV2AccountLease held, CancellationToken ct)
+    {
+        held.RequireActive(); ct.ThrowIfCancellationRequested();
+        var checkpoint = author.CurrentCheckpoint ?? throw new CryptographicException("Retained contact route has no current author identity.");
+        var dca = DeepIdV2ContactAuthorizationCodec.Verify(package.Authorization, checkpoint.Binding, checkpoint.Directory);
+        var reading = await source.RecheckEndpointPairUnderLeaseAsync(own, author, held, ct).ConfigureAwait(false);
+        var authorization = DeepIdV2CurrentContactAuthorizationVerifier.Verify(author, dca, reading.BootId.Span, reading.SampleSeconds);
+        _ = await DeepIdV2ContactRouteVerifier.VerifyPredecessorAsync(authorization, own.Network, own.Authority,
+            package.Invite.CanonicalBytes, package.Route.ExactBytes, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
+        ct.ThrowIfCancellationRequested(); held.RequireActive();
     }
 
     internal byte[] SessionInitDmc2 => Copy(sessionInit);
