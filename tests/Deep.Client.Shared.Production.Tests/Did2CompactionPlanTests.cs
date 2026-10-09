@@ -133,7 +133,7 @@ public sealed class Did2CompactionPlanTests
             var raw = original.ToArray(); mutate(raw);
             Assert.Throws<InvalidDataException>(() => Decode(raw, Network, Account, Instance));
         }
-        Reject(raw => raw[HeaderBytes] = 12);
+        Reject(raw => raw[HeaderBytes] = 13);
         Reject(raw => raw[HeaderBytes + 1] = 3);
         Reject(raw => raw[HeaderBytes + 2] = 1);
         Reject(raw => raw.AsSpan(HeaderBytes + 4, 32).Clear());
@@ -191,6 +191,45 @@ public sealed class Did2CompactionPlanTests
                 BeforeSql, AfterSql, roots, Rows(Disposition.JournalPrefix));
             Assert.Equal(roots.Length, prepared.Plan.RootCount);
         }
+    }
+
+    [Fact]
+    public void CompleteMailboxStateIsAUniqueUnchangedGuardAndChangedReadbackRejects()
+    {
+        using var idle = RegisteredEmpty(Network, Account, Instance);
+        var roots = Roots().Append(Guard(RootKind.MailboxStoreState, 19)).ToArray();
+        using var prepared = idle.Prepare(SqlTarget.ProtectedOnly, Bytes(32, 8), Bytes(32, 9),
+            new byte[32], new byte[32], roots, Rows(Disposition.ReplayScope));
+        var readbacks = Readbacks(roots);
+        Assert.Equal(RecoveryStep.RecordSqlCommit, prepared.Plan.ObserveReadback(new byte[32], readbacks).Step);
+        readbacks[^1] = readbacks[^1] with { Digest = Bytes(32, 0x99) };
+        Assert.Throws<InvalidDataException>(() => prepared.Plan.ObserveReadback(new byte[32], readbacks));
+        roots[^1] = Changed(RootKind.MailboxStoreState, 19, 25);
+        Assert.Throws<InvalidDataException>(() => idle.Prepare(SqlTarget.ProtectedOnly, Bytes(32, 8), Bytes(32, 9),
+            new byte[32], new byte[32], roots, Rows(Disposition.ReplayScope)));
+        roots[^1] = Guard(RootKind.MailboxStoreState, 19);
+        Assert.Throws<InvalidDataException>(() => idle.Prepare(SqlTarget.ProtectedOnly, Bytes(32, 8), Bytes(32, 9),
+            new byte[32], new byte[32], roots.Append(Guard(RootKind.MailboxStoreState, 20)).ToArray(), Rows(Disposition.ReplayScope)));
+    }
+
+    [Fact]
+    public void CompletedContactSendAuditRequiresOneSendAndCompleteNativeSqlGuards()
+    {
+        using var idle = RegisteredEmpty(Network, Account, Instance);
+        Root[] roots = [Guard(RootKind.Ordinary, 10), Changed(RootKind.Send, 11, 21), Guard(RootKind.Grant, 12),
+            Guard(RootKind.Read, 13), Guard(RootKind.SessionCatalog, 14), Guard(RootKind.Attachment, 15),
+            Guard(RootKind.AccountRegistration, 16), Guard(RootKind.NativeFence, 17), Guard(RootKind.MailboxStoreState, 18)];
+        var row = Rows(Disposition.Audit)[0];
+        using var prepared = idle.Prepare(SqlTarget.ProtectedOnly, Bytes(32, 8), Bytes(32, 9), new byte[32], new byte[32], roots, [row]);
+        Assert.Equal(RecoveryStep.RecordSqlCommit, prepared.Plan.ObserveReadback(new byte[32], Readbacks(roots)).Step);
+        foreach (var required in new[] { RootKind.NativeFence, RootKind.MailboxStoreState })
+            Assert.Throws<InvalidDataException>(() => idle.Prepare(SqlTarget.ProtectedOnly, Bytes(32, 8), Bytes(32, 9),
+                new byte[32], new byte[32], roots.Where(root => root.Kind != required).ToArray(), [row]));
+        Assert.Throws<InvalidDataException>(() => idle.Prepare(SqlTarget.ProtectedOnly, Bytes(32, 8), Bytes(32, 9),
+            new byte[32], new byte[32], roots, Rows(Disposition.Audit)));
+        roots[0] = Changed(RootKind.Ordinary, 10, 22);
+        Assert.Throws<InvalidDataException>(() => idle.Prepare(SqlTarget.ProtectedOnly, Bytes(32, 8), Bytes(32, 9),
+            new byte[32], new byte[32], roots, [row]));
     }
 
     [Fact]

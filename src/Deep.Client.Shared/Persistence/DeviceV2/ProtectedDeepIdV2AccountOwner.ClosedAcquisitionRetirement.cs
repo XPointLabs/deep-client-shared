@@ -87,28 +87,56 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
          ProtectedDid2MailboxReadJournal.Slot, ProtectedDid2MessagingSessionCatalog.Slot, ProtectedDid2AttachmentJournal.Slot,
          SqliteDeepIdV2AccountGeneration.CompactionRegistrationSlot];
 
-    private static void RequireClosedAcquisitionProfile(Did2CompactionPlan plan)
+    private static int RequireMailboxRetirementProfile(Did2CompactionPlan plan)
     {
-        if (plan.Target != Did2CompactionPlan.SqlTarget.ProtectedOnly || plan.RootCount != 8 || plan.RowCount != 1 ||
-            plan.ReadRow(0).Action != Did2CompactionPlan.Disposition.ReplayScope)
+        if (plan.Target != Did2CompactionPlan.SqlTarget.ProtectedOnly || plan.RootCount is not (8 or 9) || plan.RowCount != 1 ||
+            plan.ReadRow(0).Action is not (Did2CompactionPlan.Disposition.ReplayScope or Did2CompactionPlan.Disposition.Audit))
             throw new InvalidDataException("No owned recovery is installed for this protected retirement profile.");
+        var changedIndex = -1;
         for (var index = 0; index < 8; index++)
         {
             var root = plan.ReadRoot(index);
-            if (root.Kind != ClosedAcquisitionRootKinds[index] || root.Guard != (index != 2) ||
+            if (root.Kind != ClosedAcquisitionRootKinds[index] ||
                 index < 7 && !FixedRoute(root.Selector.Span, CompactionSlotSelector(ClosedAcquisitionRootSlots[index])))
                 throw new InvalidDataException("Stored retirement changed its closed root mapping.");
+            if (!root.Guard)
+            {
+                if (changedIndex != -1 || index is not (1 or 2 or 3))
+                    throw new InvalidDataException("Mailbox retirement must change exactly one grant or counter root.");
+                changedIndex = index;
+            }
         }
+        if (changedIndex == -1) throw new InvalidDataException("Mailbox retirement has no owned successor.");
+        if (plan.ReadRow(0).Action == Did2CompactionPlan.Disposition.Audit && changedIndex != 1)
+            throw new InvalidDataException("Completed contact-send retirement can change only its exact send root.");
+        if (changedIndex == 2)
+        {
+            if (plan.RootCount != 8) throw new InvalidDataException("Unused acquisition retirement changed its closed profile.");
+        }
+        else if (plan.RootCount != 9 || plan.ReadRoot(8).Kind != Did2CompactionPlan.RootKind.MailboxStoreState || !plan.ReadRoot(8).Guard)
+            throw new InvalidDataException("Counter retirement requires its complete unchanged mailbox state guard.");
+        return changedIndex;
     }
 
     private async Task<IReadOnlyList<Did2CompactionPlan.RootReadback>> ReadClosedAcquisitionRootsUnderLeaseAsync(
         Did2CompactionPlan plan, HeldDeepIdV2AccountLease held, CancellationToken ct)
     {
-        RequireClosedAcquisitionProfile(plan); held.RequireOwner(lease);
+        _ = RequireMailboxRetirementProfile(plan); held.RequireOwner(lease);
         var exact = plan.Exact; var account = exact.Slice(32, 32); var instance = exact.Slice(64, 32);
         using var actualPlan = await ProtectedDid2CompactionPlan.ReadRegisteredAsync(storage, networkId, account, instance, ct).ConfigureAwait(false);
         if (!FixedRoute(actualPlan.Exact.Span, exact.Span)) throw new CryptographicException("Retirement plan changed during readback.");
-        var result = new List<Did2CompactionPlan.RootReadback>(8);
+        var result = await ReadMailboxProtectedRootsUnderLeaseAsync(account, instance, held, ct).ConfigureAwait(false);
+        result.Add(await SqliteDeepIdV2AccountGeneration.ReadStoredPlanNativeFenceUnderLeaseAsync(storage, lease, sqlStatePath, plan, held, ct).ConfigureAwait(false));
+        if (plan.RootCount == 9)
+            result.Add(await ReadMailboxStoreStateUnderLeaseAsync(account, instance, held, ct).ConfigureAwait(false));
+        ct.ThrowIfCancellationRequested(); held.RequireOwner(lease); return result;
+    }
+
+    private async Task<List<Did2CompactionPlan.RootReadback>> ReadMailboxProtectedRootsUnderLeaseAsync(
+        ReadOnlyMemory<byte> account, ReadOnlyMemory<byte> instance, HeldDeepIdV2AccountLease held, CancellationToken ct)
+    {
+        held.RequireOwner(lease);
+        var result = new List<Did2CompactionPlan.RootReadback>(9);
         for (var index = 0; index < 7; index++)
         {
             using var raw = await storage.ReadOwnedAsync(ClosedAcquisitionRootSlots[index], ct).ConfigureAwait(false) ??
@@ -129,7 +157,6 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             }
             result.Add(new(ClosedAcquisitionRootKinds[index], CompactionSlotSelector(ClosedAcquisitionRootSlots[index]), raw.Use(bytes => SHA256.HashData(bytes))));
         }
-        result.Add(await SqliteDeepIdV2AccountGeneration.ReadStoredPlanNativeFenceUnderLeaseAsync(storage, lease, sqlStatePath, plan, held, ct).ConfigureAwait(false));
         ct.ThrowIfCancellationRequested(); held.RequireOwner(lease); return result;
     }
 
@@ -148,21 +175,26 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         finally { CryptographicOperations.ZeroMemory(scope); }
     }
 
-    private async Task ResumeClosedAcquisitionStepUnderLeaseAsync(ProtectedDid2CompactionPlan plans,
+    private async Task ResumeMailboxRetirementStepUnderLeaseAsync(ProtectedDid2CompactionPlan plans,
         Did2CompactionPlan plan, HeldDeepIdV2AccountLease held, CancellationToken ct)
     {
+        var changedIndex = RequireMailboxRetirementProfile(plan);
+        var changedSlot = ClosedAcquisitionRootSlots[changedIndex];
         var roots = await ReadClosedAcquisitionRootsUnderLeaseAsync(plan, held, ct).ConfigureAwait(false);
         var observation = plan.ObserveReadback(new byte[32], roots);
         if (plan.Phase == 1 || observation.Step == Did2CompactionPlan.RecoveryStep.AdoptRoot)
         {
             using var parts = await plans.ReadSuccessorsAsync(plan, held, ct).ConfigureAwait(false);
-            using var successor = parts.Use(bytes => plan.OwnSuccessor(2, bytes));
-            using var predecessor = await storage.ReadOwnedAsync(ProtectedDid2MailboxGrantJournal.Slot, ct).ConfigureAwait(false) ??
-                throw new InvalidDataException("Retirement lost original grant custody before adoption.");
+            using var successor = parts.Use(bytes => plan.OwnSuccessor(changedIndex, bytes));
+            using var predecessor = await storage.ReadOwnedAsync(changedSlot, ct).ConfigureAwait(false) ??
+                throw new InvalidDataException("Retirement lost original custody before adoption.");
             var before = predecessor.Use(bytes => bytes.ToArray()); var after = successor.Use(bytes => bytes.ToArray());
             try
             {
-                RequireClosedAcquisitionSuccessor(plan, before, after);
+                if (changedIndex == 2) RequireClosedAcquisitionSuccessor(plan, before, after);
+                else if (plan.ReadRow(0).Action == Did2CompactionPlan.Disposition.Audit)
+                    RequireCompletedContactSendSuccessor(plan, before, after);
+                else await RequireMailboxFloorSuccessorAsync(plan, changedIndex, before, after, ct).ConfigureAwait(false);
                 roots = await ReadClosedAcquisitionRootsUnderLeaseAsync(plan, held, ct).ConfigureAwait(false);
                 var latest = plan.ObserveReadback(new byte[32], roots);
                 if (plan.Phase == 1)
@@ -176,13 +208,13 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
 #endif
                     return;
                 }
-                if (latest.Step != Did2CompactionPlan.RecoveryStep.AdoptRoot || latest.RootIndex != 2)
-                    throw new CryptographicException("Retirement dependencies changed before grant adoption.");
+                if (latest.Step != Did2CompactionPlan.RecoveryStep.AdoptRoot || latest.RootIndex != changedIndex)
+                    throw new CryptographicException("Retirement dependencies changed before root adoption.");
                 ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
-                if (!await storage.CompareExchangeAsync(ProtectedDid2MailboxGrantJournal.Slot, before, after, ct).ConfigureAwait(false))
-                    throw new CryptographicException("Retirement grant adoption conflicted.");
-                using var actual = await storage.ReadOwnedAsync(ProtectedDid2MailboxGrantJournal.Slot, ct).ConfigureAwait(false) ?? throw new InvalidDataException("Retired grant root disappeared.");
-                if (!actual.Use(bytes => FixedRoute(bytes, after))) throw new CryptographicException("Retirement grant adoption readback differs.");
+                if (!await storage.CompareExchangeAsync(changedSlot, before, after, ct).ConfigureAwait(false))
+                    throw new CryptographicException("Retirement root adoption conflicted.");
+                using var actual = await storage.ReadOwnedAsync(changedSlot, ct).ConfigureAwait(false) ?? throw new InvalidDataException("Retired root disappeared.");
+                if (!actual.Use(bytes => FixedRoute(bytes, after))) throw new CryptographicException("Retirement root adoption readback differs.");
 #if DEEP_TEST_INTERNALS
                 Did2CompactionTestHooks.Hit(Did2CompactionFailpoint.AfterHistoryAdopted);
 #endif
@@ -211,7 +243,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
 
     private async Task ValidateFinishingClosedAcquisitionPartsAsync(Did2CompactionPlan plan, CancellationToken ct)
     {
-        using var adopted = plan.Phase == 2 ? await storage.ReadOwnedAsync(ProtectedDid2MailboxGrantJournal.Slot, ct).ConfigureAwait(false) ??
+        var changedIndex = RequireMailboxRetirementProfile(plan);
+        using var adopted = plan.Phase == 2 ? await storage.ReadOwnedAsync(ClosedAcquisitionRootSlots[changedIndex], ct).ConfigureAwait(false) ??
             throw new InvalidDataException("Retirement successor is absent.") : null;
         if (adopted is not null) adopted.Use(bytes => { plan.ValidateSuccessors(bytes); return true; });
         var parts = new List<OwnedDeepSecret>();
@@ -242,7 +275,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         finally { foreach (var part in parts) part.Dispose(); }
     }
 
-    internal async Task AbandonUncommittedClosedAcquisitionRetirementAsync(CancellationToken ct)
+    internal async Task AbandonUncommittedMailboxRetirementAsync(CancellationToken ct)
     {
         using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
         var owner = await SqliteDeepIdV2AccountGeneration.ReadCompactionOwnerScopeUnderLeaseAsync(storage, networkId, ct).ConfigureAwait(false);

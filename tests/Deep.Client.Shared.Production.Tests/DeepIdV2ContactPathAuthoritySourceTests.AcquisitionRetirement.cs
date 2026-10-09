@@ -113,11 +113,11 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 CryptographicOperations.ZeroMemory(acquisition);
                 return;
             }
-            if (abandon) await owner.AbandonUncommittedClosedAcquisitionRetirementAsync(default);
+            if (abandon) await owner.AbandonUncommittedMailboxRetirementAsync(default);
             else
             {
                 if (handover > 0)
-                    await Assert.ThrowsAsync<InvalidOperationException>(() => owner.AbandonUncommittedClosedAcquisitionRetirementAsync(default));
+                    await Assert.ThrowsAsync<InvalidOperationException>(() => owner.AbandonUncommittedMailboxRetirementAsync(default));
                 await owner.ResumeOwnedLocalCompactionAsync(default);
             }
             using (var after = await ReadPeerGrantsAsync())

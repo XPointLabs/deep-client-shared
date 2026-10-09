@@ -2789,14 +2789,16 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         }
 
         internal static async Task<Fixture> CreateAsync(bool withSuccessor = false, bool expiringHistory = false, bool withPeer = false,
-            bool longMailboxWindow = false, bool encryptedStorage = false, bool shortMailboxAuthority = false)
+            bool longMailboxWindow = false, bool encryptedStorage = false, bool shortMailboxAuthority = false,
+            ulong? initialMailboxAuthorityExpiry = null)
         {
             var fixture = new Fixture(encryptedStorage);
-            try { await fixture.InitializeAsync(withSuccessor, expiringHistory, withPeer, longMailboxWindow, shortMailboxAuthority); return fixture; }
+            try { await fixture.InitializeAsync(withSuccessor, expiringHistory, withPeer, longMailboxWindow, shortMailboxAuthority, initialMailboxAuthorityExpiry); return fixture; }
             catch { await fixture.DisposeAsync(); throw; }
         }
 
-        private async Task InitializeAsync(bool withSuccessor, bool expiringHistory, bool withPeer, bool longMailboxWindow, bool shortMailboxAuthority)
+        private async Task InitializeAsync(bool withSuccessor, bool expiringHistory, bool withPeer, bool longMailboxWindow, bool shortMailboxAuthority,
+            ulong? initialMailboxAuthorityExpiry)
         {
             if (longMailboxWindow && (withSuccessor || expiringHistory))
                 throw new ArgumentException("The moving mailbox clock has a separate fixture window.");
@@ -2806,10 +2808,14 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             // static-fixture view. Author a genuinely longer signed view/head,
             // still within the root interval; never suppress expiry validation.
             var windowExpiry = longMailboxWindow ? 6_000UL : 1_500UL;
+            if (initialMailboxAuthorityExpiry is { } explicitExpiry &&
+                (!longMailboxWindow || withSuccessor || expiringHistory || shortMailboxAuthority ||
+                 explicitExpiry <= ProofTime + 30 || explicitExpiry >= windowExpiry))
+                throw new ArgumentException("The explicit initial authority must fit the long signed head and leave a successor interval.", nameof(initialMailboxAuthorityExpiry));
             // Retained Retrieve issuance is not capped by the publication's
             // shorter expiry. Exclusion tests need a genuinely short original
             // network/PMA window while directory heads remain current later.
-            var initialNetworkExpiry = shortMailboxAuthority ? 1_200UL : windowExpiry;
+            var initialNetworkExpiry = initialMailboxAuthorityExpiry ?? (shortMailboxAuthority ? 1_200UL : windowExpiry);
             Directory.CreateDirectory(directory);
             accounts = new(storage, directory, Network, 1,
                 new FrozenClock(DateTimeOffset.FromUnixTimeSeconds(1_000)),
@@ -2900,7 +2906,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 HttpServiceEndpointPolicy.Production));
         }
 
-        internal async Task AdvanceNetworkAsync()
+        internal async Task AdvanceNetworkAsync(ulong expiry = 1_500)
         {
             Assert.Null(successor);
             var rollovers = nodes.Select((signer, index) => new XPointNetworkOperationalNodeRollover(
@@ -2913,7 +2919,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 operational.ExactXnh1, operational.ExactPma2, operational.ExactPmt2,
                 XPointNetworkOperationalSuccessorAuthor.ComputeXnh1CoreHash(operational.ExactXnh1.Span),
                 Deep.Protocol.ContactV1.ContactCodec.Decode("PMT2", operational.ExactPmt2.Span).ArtifactHash.Span,
-                HeadReference(head.CoreHash.Span), 1_070, 1_080, 1_500));
+                HeadReference(head.CoreHash.Span), 1_070, 1_080, expiry));
         }
 
         internal DeepIdV2ContactPathAuthoritySource Source(DeepIdV2AccountService? account = null) =>

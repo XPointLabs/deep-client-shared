@@ -296,7 +296,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySource :
         Deep.Protocol.AccountDirectoryV1.VerifiedDeepIdV2DirectoryFreshness Peer);
 
     internal async ValueTask<MessagingEndpointAuthority> VerifyForOwnMessagingAsync(
-        DeepIdV2AccountService account, Did2MessagingSessionScope scope, CancellationToken ct)
+        DeepIdV2AccountService account, Did2MessagingSessionScope scope, CancellationToken ct,
+        OwnPreKeyAuthoringAuthority? verifiedOwn = null)
     {
         RequireAccountOwner(account); ArgumentNullException.ThrowIfNull(scope);
         using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -307,7 +308,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySource :
         await gate.WaitAsync(token).ConfigureAwait(false);
         try
         {
-            var own = await VerifyCurrentNetworkCoreAsync(token).ConfigureAwait(false);
+            var own = verifiedOwn ?? await VerifyCurrentNetworkCoreAsync(token).ConfigureAwait(false);
             var peer = await proofs.FetchByDid2Async(did, own.Authority, account.DeploymentProfileId,
                 supportedReader: 2, token).ConfigureAwait(false);
             ProtectedDid2MessagingPeerBootstrap.RequireProof(did, peer);

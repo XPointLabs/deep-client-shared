@@ -39,7 +39,7 @@ PowerShell5.1:
   -ReferencePaths @('<prior-full.trx>', '<new-focused.trx>')
 ```
 
-Include the five `FixturePreflight=true` cases in the declared reference union.
+Include every current `FixturePreflight=true` case in the declared reference union.
 They verify real signed PMA/PMT windows, successor overlap, carried/current lease
 after encrypted cold reopen, the frozen ContactAccept consumer and approved
 native providers. They are cheap prerequisites, not sustained delivery evidence.

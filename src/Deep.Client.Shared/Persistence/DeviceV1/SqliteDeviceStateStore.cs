@@ -267,6 +267,20 @@ public sealed partial class SqliteDeviceStateStore : IDeviceStateStore, IProtect
         { throw Failure(DeviceStateStoreOpenFailure.Corrupt, "DeviceV1 persisted state violates its sealed semantic contract.", ex); }
     }
 
+    // Local guard facts only; a stored scalar cannot mint account authority.
+    // Selection separately verifies the actual owned source and retired keys.
+    internal static void RequireReadOnlyMailboxSource(SqliteConnection db, ReadOnlySpan<byte> instance, ReadOnlySpan<byte> account)
+    {
+        if (ScalarLong(db, "PRAGMA application_id;") != ApplicationId || ScalarLong(db, "PRAGMA user_version;") != SchemaGeneration)
+            throw new InvalidDataException("Mailbox source readback requires the current exact device schema.");
+        ValidateSchema(db); ValidateCipher(db); ValidatePersistedPrimitiveSemantics(db);
+        using var command = db.CreateCommand();
+        command.CommandText = "SELECT store_instance_id,account_id FROM device_store_meta WHERE singleton=1 AND typeof(database_generation)='blob' AND length(database_generation)=8 AND database_generation=X'0000000000000001' AND typeof(account_generation)='blob' AND length(account_generation)=8 AND account_generation<>zeroblob(8) AND typeof(store_instance_id)='blob' AND length(store_instance_id)=32 AND typeof(account_id)='blob' AND length(account_id)=32;";
+        using var reader = command.ExecuteReader();
+        if (!reader.Read() || !reader.GetFieldValue<byte[]>(0).AsSpan().SequenceEqual(instance) || !reader.GetFieldValue<byte[]>(1).AsSpan().SequenceEqual(account) || reader.Read())
+            throw new CryptographicException("Mailbox source readback opened another stored owner.");
+    }
+
     private static void ValidateCipher(SqliteConnection db)
     {
         var version = Convert.ToString(Scalar(db, "PRAGMA cipher_version;"), CultureInfo.InvariantCulture);

@@ -188,7 +188,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
 
     private async Task RetainOrdinaryStoreCompletionUnderLeaseAsync(VerifiedDeepIdV2CurrentAccount current,
         HeldDeepIdV2AccountLease held, OwnedDid2MessagingStorage opened, Did2MessagingSessionScope scope, ReadOnlyMemory<byte> operation,
-        CancellationToken ct)
+        Did2StorePublicEvidence publicEvidence, CancellationToken ct)
     {
         byte[] snapshot = [], next = [];
         try
@@ -205,7 +205,30 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 using var accepts = accepted.Use(bytes => ProtectedDid2ContactAcceptJournal.Decode(bytes, scope.Network, scope.LocalAccount, scope.Instance));
                 var winner = accepts.FindScope(scope);
                 if (winner is not null && Did2MessagingSessionScope.Fixed(winner.Operation, operation.Span))
-                { held.RequireActive(); ct.ThrowIfCancellationRequested(); return; }
+                {
+                    using var acceptanceApplication = await SqliteDeepIdV2AccountGeneration.OpenExistingApplicationForCompactionUnderLeaseAsync(
+                        storage, sqlStatePath, scope, held, lease, ct).ConfigureAwait(false);
+                    await RequireRetainedContactAcceptEventUnderLeaseAsync(held, opened, acceptanceApplication, winner, operation, ct).ConfigureAwait(false);
+                    // Ingress is an external callback. Its verified Store is
+                    // durable, but a lost/substituted original local source
+                    // must not be silently repaired before reporting success.
+                    var retainedEvidence = await acceptanceApplication.RequireStorePublicEvidenceAsync(scope, operation, ct).ConfigureAwait(false);
+                    var expectedRecords = publicEvidence.CopyRecords(); var actualRecords = retainedEvidence.CopyRecords();
+                    var acceptanceSnapshot = accepted.Use(bytes => bytes.ToArray());
+                    try
+                    {
+                        if (expectedRecords.Where((bytes, index) => !FixedRoute(bytes, actualRecords[index])).Any())
+                            throw new CryptographicException("ContactAccept original Store evidence changed during ingress.");
+                        await RequireRetainedContactAcceptEventUnderLeaseAsync(held, opened, acceptanceApplication, winner, operation, ct).ConfigureAwait(false);
+                        await RequireExactProtectedMailboxRootAsync(ProtectedDid2ContactAcceptJournal.Slot, acceptanceSnapshot, ct).ConfigureAwait(false);
+                        held.RequireActive(); ct.ThrowIfCancellationRequested(); return;
+                    }
+                    finally
+                    {
+                        foreach (var bytes in expectedRecords.Concat(actualRecords)) CryptographicOperations.ZeroMemory(bytes);
+                        CryptographicOperations.ZeroMemory(acceptanceSnapshot);
+                    }
+                }
                 // Compacted ordinary work keeps independent native/history and
                 // transport custody. A cached exact Store completes without
                 // recreating either its authored command or its SQL payload.
@@ -219,6 +242,10 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             using var retained = await application.ReconcileOwnedTextOutboxAsync(journal, current.AccountId,
                 BinaryPrimitives.ReadUInt64BigEndian(scope.Exact[84..]), scope, operation, ct).ConfigureAwait(false) ??
                 throw new CryptographicException("Store completion lost its verified ordinary SQL row.");
+            // Retain original public evidence before protected Stored allows
+            // compaction. Interrupted insertion leaves the exact send pending;
+            // retries accept only the immutable same records, never replacements.
+            await application.RecordStorePublicEvidenceAsync(scope, operation, publicEvidence, ct).ConfigureAwait(false);
             if (!command.Stored)
             {
                 journal.RetainStore(name);

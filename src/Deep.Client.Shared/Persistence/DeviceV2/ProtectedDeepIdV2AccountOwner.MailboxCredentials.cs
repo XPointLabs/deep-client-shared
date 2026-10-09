@@ -165,14 +165,16 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         private readonly MailboxAuthenticatedGrant grant;
         private readonly DeepIdV2ContactRouteTimeWindow sample;
         private readonly long started;
+        private readonly TimeProvider? preparationClock;
         private bool disposed;
 
         internal MailboxInstallationPolicy(HeldDeepIdV2AccountLease held,
             VerifiedDeepIdV2ContactRouteClosure route, VerifiedMailboxAuthorityV2 policy,
-            MailboxAuthenticatedGrant grant, DeepIdV2ContactRouteTimeWindow sample, long started)
+            MailboxAuthenticatedGrant grant, DeepIdV2ContactRouteTimeWindow sample, long started,
+            TimeProvider? preparationClock = null)
         {
             this.held = held; this.route = route; this.policy = policy; this.grant = grant;
-            this.sample = sample; this.started = started; Clock = new InstallationClock(this);
+            this.sample = sample; this.started = started; this.preparationClock = preparationClock; Clock = new InstallationClock(this);
             ValidateFreshness();
         }
 
@@ -185,6 +187,12 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             if (elapsed < TimeSpan.Zero || elapsed >= TimeSpan.FromSeconds(30))
                 throw new CryptographicException("Owned mailbox installation exceeded its bounded authenticated scope.");
             var upper = checked(sample.UpperUnixSeconds + (ulong)Math.Ceiling(elapsed.TotalSeconds));
+            // An independently sampled conservative upper bound can be lower
+            // than preparation's elapsed upper bound. Dispatch must not rewind
+            // its own persisted NotBefore. Keep the actual predecessor clock,
+            // including its held lease, original expiry and bounded scope checks.
+            if (preparationClock is not null)
+                upper = Math.Max(upper, checked((ulong)preparationClock.GetUtcNow().ToUnixTimeSeconds()));
             var expiry = new[] { grant.ExpiresAtUnixSeconds, policy.ExpiresAtUnixSeconds,
                 route.Network.MaximumRecordExpiryUnixSeconds,
                 U64(route.Route.Reachability.Field(17).Span), U64(route.Route.Authorization.Field(13).Span),

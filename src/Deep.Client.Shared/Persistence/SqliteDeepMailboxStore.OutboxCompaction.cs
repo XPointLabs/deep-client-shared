@@ -83,6 +83,23 @@ public sealed partial class SqliteDeepMailboxStore
             return Task.FromResult(CompleteApplicationCompactionProjection(connection, tx, scope, null, ct));
         }, ct);
 
+    // Complete application facts for an exact held owner, not deletion permission.
+    internal async Task<byte[]> ReadCompleteMailboxStateProjectionAsync(ReadOnlyMemory<byte> selector, CancellationToken ct)
+    {
+        if (selector.Length != 32) throw new ArgumentException("An exact local state selector is required.", nameof(selector));
+        var owned = selector.ToArray();
+        try
+        {
+            return await WithReplayConnectionAsync(connection =>
+            {
+                using var tx = connection.BeginTransaction();
+                ValidateTransportOutboxSchema(connection, tx); ValidateDirectInboxState(connection, tx);
+                return Task.FromResult(CompleteApplicationCompactionProjection(connection, tx, owned, null, ct));
+            }, ct).ConfigureAwait(false);
+        }
+        finally { CryptographicOperations.ZeroMemory(owned); }
+    }
+
     internal Task ApplyStoredOrdinaryOutboxAsync(IDeepSecureStorage storage, Did2CompactionPlan plan,
         Did2MessagingSessionScope scope, IReadOnlyList<ProtectedDid2DirectTextJournal.Entry> selected,
         HeldDeepIdV2AccountLease held, DeepIdV2AccountFileLease lease, CancellationToken ct) =>
@@ -161,9 +178,22 @@ public sealed partial class SqliteDeepMailboxStore
 
     private static byte[] CompleteApplicationCompactionProjection(SqliteConnection connection, SqliteTransaction tx,
         Did2MessagingSessionScope scope, HashSet<string>? omitted, CancellationToken ct)
+        => CompleteApplicationCompactionProjection(connection, tx, scope.Hash, omitted, ct);
+
+    // Canonical read-only local facts, shared with the account's device-source
+    // guard. This does not authenticate a source or authorize a disposition.
+    internal static byte[] ReadCompleteLocalSqlProjection(SqliteConnection connection, ReadOnlySpan<byte> selector, CancellationToken ct)
+    {
+        if (selector.Length != 32) throw new ArgumentException("An exact local selector is required.", nameof(selector));
+        using var tx = connection.BeginTransaction();
+        return CompleteApplicationCompactionProjection(connection, tx, selector, null, ct);
+    }
+
+    private static byte[] CompleteApplicationCompactionProjection(SqliteConnection connection, SqliteTransaction tx,
+        ReadOnlySpan<byte> selector, HashSet<string>? omitted, CancellationToken ct)
     {
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        hash.AppendData("Deep/STORE-V2/application-compaction-sql"u8); hash.AppendData([0]); hash.AppendData(scope.Hash);
+        hash.AppendData("Deep/STORE-V2/application-compaction-sql"u8); hash.AppendData([0]); hash.AppendData(selector);
         Span<byte> number = stackalloc byte[8];
         foreach (var schema in ReadSchemaObjects(connection, tx))
         {

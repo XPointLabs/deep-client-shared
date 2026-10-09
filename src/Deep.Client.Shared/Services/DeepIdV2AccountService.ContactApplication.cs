@@ -42,6 +42,17 @@ public sealed partial class DeepIdV2AccountService
         var intent = logicalIntent.ToArray(); byte[] initial = [], hello = [];
         try
         {
+            using (var verifier = OpenVerifier())
+            {
+                var existing = await owner.TryFindCompletedContactMessagingScopeAsync(TrustedUnixSeconds(), verifier, intent, address, ct).ConfigureAwait(false);
+                if (existing is not null)
+                {
+                    var own = await source.VerifyForOwnPreKeyAuthoringAsync(this, ct).ConfigureAwait(false);
+                    var retained = await owner.ReadRetainedInitialStoreAsync(TrustedUnixSeconds(), verifier, existing, intent,
+                        address, own, source, ct).ConfigureAwait(false);
+                    if (retained is not null) return new(new(existing), retained);
+                }
+            }
             var resolved = contactRead is null ? await ResolvePermanentContactAsync(address, source, ct).ConfigureAwait(false) :
                 await ResolvePermanentContactAsync(address, source, contactRead, ct).ConfigureAwait(false);
             using var draft = await PrepareOwnInitialContactDraftAsync(intent, resolved, source, ct).ConfigureAwait(false);

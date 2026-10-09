@@ -5,6 +5,23 @@ namespace Deep.Client.Shared.Persistence.DeviceV2;
 
 internal static partial class SqliteDeepIdV2AccountGeneration
 {
+    // Optional local discovery only. An absent marker grants no provisioning;
+    // the owner separately rejects a registered sender that lost this source.
+    internal static async ValueTask<Deep.Client.Shared.Persistence.DeviceV1.SqliteDeviceStateStore?>
+        TryOpenExistingMessagingSenderSourceUnderLeaseAsync(IDeepSecureStorage storage,
+            string accountPath, VerifiedDeepIdV2CurrentAccount current, CancellationToken ct)
+    {
+        using var marker = await storage.ReadOwnedAsync(DeviceStateMarkerSlot, ct).ConfigureAwait(false);
+        if (marker is null)
+        {
+            var path = DeviceStatePath(accountPath);
+            if (File.Exists(path) || File.Exists(path + "-journal") || File.Exists(path + "-wal") || File.Exists(path + "-shm"))
+                throw new InvalidDataException("Initial source file family lost its protected marker; no provisioning is allowed.");
+            ct.ThrowIfCancellationRequested(); return null;
+        }
+        return await OpenCurrentDeviceStateStoreAsync(storage, accountPath, current, ct).ConfigureAwait(false);
+    }
+
     internal static async ValueTask<Deep.Client.Shared.Persistence.DeviceV1.SqliteDeviceStateStore>
         OpenExistingMessagingSenderSourceUnderLeaseAsync(IDeepSecureStorage storage,
             string accountPath, VerifiedDeepIdV2CurrentAccount current, CancellationToken ct)

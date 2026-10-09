@@ -7,6 +7,16 @@ namespace Deep.Client.Shared.Services;
 
 public sealed partial class DeepIdV2AccountService
 {
+    internal async Task RetireOwnCompletedContactMailboxSendAsync(Did2MessagingSessionScope scope, ReadOnlyMemory<byte> operation,
+        ReadOnlyMemory<byte> initialIntent, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope); ArgumentNullException.ThrowIfNull(source); source.RequireAccountOwner(this);
+        var own = await source.VerifyForOwnPreKeyAuthoringAsync(this, ct).ConfigureAwait(false);
+        using var verifier = OpenVerifier();
+        await owner.RetireOwnedCompletedContactMailboxSendAsync(TrustedUnixSeconds(), verifier, scope, operation, initialIntent,
+            own, source, ct).ConfigureAwait(false);
+    }
+
     internal Task<ClientMailboxStoreResult> DeliverOwnInitialContactAsync(ReadOnlyMemory<byte> intent,
         VerifiedDeepIdV2PermanentContactResolveClosure contact, DeepIdV2ContactPathAuthoritySource source,
         CancellationToken ct = default) => DeliverOwnInitialContactAsync(intent, contact, source,
@@ -25,6 +35,10 @@ public sealed partial class DeepIdV2AccountService
         {
             using var verifier = OpenVerifier();
             var scope = await owner.FindOutgoingInitialMessagingScopeAsync(TrustedUnixSeconds(), verifier, ownedIntent, ct).ConfigureAwait(false);
+            var own = await source.VerifyForOwnPreKeyAuthoringAsync(this, ct).ConfigureAwait(false);
+            var retained = await owner.ReadRetainedInitialStoreAsync(TrustedUnixSeconds(), verifier, scope, ownedIntent,
+                contact.Candidate.Address, own, source, ct).ConfigureAwait(false);
+            if (retained is not null) return retained;
             var refreshed = contactRead is null
                 ? await ResolvePermanentContactAsync(contact.Candidate.Address, source, ct).ConfigureAwait(false)
                 : await ResolvePermanentContactAsync(contact.Candidate.Address, source, contactRead, ct).ConfigureAwait(false);
@@ -54,8 +68,13 @@ public sealed partial class DeepIdV2AccountService
         var op = operation.ToArray();
         try
         {
-            var pair = await source.VerifyForOwnMessagingAsync(this, scope, ct).ConfigureAwait(false);
             using var verifier = OpenVerifier();
+            var own = await source.VerifyForOwnPreKeyAuthoringAsync(this, ct).ConfigureAwait(false);
+            var retained = await owner.ReadRetainedMessagingStoreAsync(TrustedUnixSeconds(), verifier, scope, op, own, source, ct).ConfigureAwait(false);
+            if (retained is not null) return retained;
+            // Reuse the independently verified owned endpoint; peer freshness
+            // is fetched only for actual working dispatch, never historical Store.
+            var pair = await source.VerifyForOwnMessagingAsync(this, scope, ct, own).ConfigureAwait(false);
             return await owner.DeliverMessagingAsync(TrustedUnixSeconds(), verifier, scope, op,
                 source, pair.Own, pair.Peer, grants, transport, ct).ConfigureAwait(false);
         }

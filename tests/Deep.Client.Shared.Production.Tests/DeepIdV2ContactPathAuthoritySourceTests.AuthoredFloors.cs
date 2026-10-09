@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using Deep.Client.Shared.Persistence;
 using Deep.Client.Shared.Persistence.DeviceV2;
 using Deep.Protocol.ApplicationCore;
 using Microsoft.Data.Sqlite;
@@ -105,9 +106,9 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             return root.Use(bytes => ProtectedDid2DirectTextJournal.Decode(bytes, scope.Network, scope.LocalAccount, scope.Instance));
         }
 
-        internal async Task<byte[]> ReadAuthoredRootDigestAsync()
+        internal async Task<byte[]> ReadAuthoredRootDigestAsync(bool own = true)
         {
-            using var root = await innerStorage.ReadOwnedAsync(ProtectedDid2DirectTextJournal.Slot) ??
+            using var root = await (own ? innerStorage : peerStorage).ReadOwnedAsync(ProtectedDid2DirectTextJournal.Slot) ??
                 throw new InvalidDataException("Fixture authored root absent.");
             return root.Use(bytes => SHA256.HashData(bytes));
         }
@@ -115,13 +116,21 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         // Test-only access to the already-existing encrypted application SQL.
         // The key is derived from actual owned account registration under its
         // lease; no production callback, supplied path or repair API is added.
-        private async Task WithAuthoredApplicationConnectionAsync(Did2MessagingSessionScope scope,
-            Action<SqliteConnection> inspect)
+        private Task WithAuthoredApplicationConnectionAsync(Did2MessagingSessionScope scope,
+            Action<SqliteConnection> inspect, bool acquireOwnerLease = true)
+            => WithOwnedApplicationConnectionAsync(scope.IsInitiator, scope.Network.ToArray(), scope.LocalAccount.ToArray(), inspect, acquireOwnerLease);
+
+        private async Task WithOwnedApplicationConnectionAsync(bool own, ReadOnlyMemory<byte> network, ReadOnlyMemory<byte> account,
+            Action<SqliteConnection> inspect, bool acquireOwnerLease = true)
         {
-            using var held = await new DeepIdV2AccountFileLease(Path.Combine(directory,
-                "deep-store-v2-account.lock")).AcquireAsync(default);
+            var accountDirectory = own ? directory : Path.Combine(directory, "peer");
+            var secure = own ? (IDeepSecureStorage)storage : peerStorage;
+            // Only an explicit hostile-database fault injection may bypass the
+            // fixture lease while the real product owner already holds it.
+            using var held = acquireOwnerLease ? await new DeepIdV2AccountFileLease(Path.Combine(accountDirectory,
+                "deep-store-v2-account.lock")).AcquireAsync(default).ConfigureAwait(false) : null;
             using var registration = await SqliteDeepIdV2AccountGeneration.ReadCompactionRegistrationUnderLeaseAsync(
-                storage, scope.Network.ToArray(), scope.LocalAccount.ToArray(), default);
+                secure, network, account, default).ConfigureAwait(false);
             var key = registration.Use(record =>
             {
                 var domain = "Deep/STORE-V2/application-state-key"u8;
@@ -138,11 +147,11 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             {
                 using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
                 {
-                    DataSource = Path.Combine(directory, "deep-store-v2-account.dsv2.application.dmb1"),
+                    DataSource = Path.Combine(accountDirectory, "deep-store-v2-account.dsv2.application.dmb1"),
                     Mode = SqliteOpenMode.ReadWrite, Pooling = false
                 }.ToString());
                 connection.Open(); Assert.Equal(SQLitePCL.raw.SQLITE_OK, MailboxRandomKeyTestEncoding.Apply(connection, key));
-                inspect(connection); held.RequireActive();
+                inspect(connection); held?.RequireActive();
             }
             finally { CryptographicOperations.ZeroMemory(key); }
         }

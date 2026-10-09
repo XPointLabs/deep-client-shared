@@ -196,6 +196,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                     // Both known and unresolved Retrieve custody remain pinned.
                     // A fresh exclusion alone must never stage deletion of that path.
                     await Assert.ThrowsAsync<IOException>(() => exclusion.RetireUnusedClosedDepositAcquisitionAsync());
+                    if (unresolved)
+                        await Assert.ThrowsAsync<IOException>(() => exclusion.RetireIdleMailboxCounterFloorAsync());
                     using var planAfter = await storage.ReadOwnedAsync(Did2CompactionPlan.Slot) ?? throw new InvalidDataException();
                     Assert.Equal(planBefore.Use(bytes => SHA256.HashData(bytes)), planAfter.Use(bytes => SHA256.HashData(bytes)));
                     using var grantAfter = await storage.ReadOwnedAsync(ProtectedDid2MailboxGrantJournal.Slot) ?? throw new InvalidDataException();

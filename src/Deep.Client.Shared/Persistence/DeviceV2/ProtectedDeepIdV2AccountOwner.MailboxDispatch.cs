@@ -111,6 +111,12 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var first = await RequireMessagingFreshnessAsync(current, fresh, peer, source, held, ct).ConfigureAwait(false);
             OwnedInitialMessagingSeed.RequireFreshScope(scope, fresh.Proof, peer, first);
             using var opened = await SqliteDeepIdV2AccountGeneration.OpenOwnedMessagingUnderLeaseAsync(storage, sqlStatePath, current, scope, ct).ConfigureAwait(false);
+            if (resolved is null && initialIntent.IsEmpty)
+            {
+                var cached = await TryReadRetainedMessagingStoreUnderLeaseAsync(current, held, opened, scope, op,
+                    fresh, source, ct).ConfigureAwait(false);
+                if (cached is not null) return cached; // Historical outcome only; no renewed dispatch.
+            }
             var privateContact = resolved is null
                 ? await ReadAuthenticatedPeerMailboxRouteUnderLeaseAsync(current, opened, fresh, peer, source, held, ct).ConfigureAwait(false) : null;
             var route = privateContact?.Route ?? contact.Contact.Route;
@@ -251,7 +257,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     dispatchTime.LowerUnixSeconds, dispatchTime.UpperUnixSeconds);
                 if (!dispatchPma.BindsProjection(route.Route.Projection.CanonicalBytes.Span))
                     throw new CryptographicException("Owned Store lost its current dispatch projection.");
-                using var dispatchPolicy = new MailboxInstallationPolicy(held, route, dispatchPma, loan.Grant, dispatchTime, dispatchStarted);
+                using var dispatchPolicy = new MailboxInstallationPolicy(held, route, dispatchPma, loan.Grant, dispatchTime, dispatchStarted,
+                    loan.Authority.TimeProvider);
                 var dispatchAuthority = new VerifiedOfficialMailboxAuthority(dispatchPma.NetworkId, dispatchPma.MinimumGrantGeneration,
                     [dispatchPma.ResolveIssuer(loan.Grant.Domain)], false, static () => true, dispatchPolicy, dispatchPolicy.Clock);
                 var dispatchFactory = new MailboxAuthenticatedRequestFactory(loan.Store, dispatchAuthority);
@@ -274,6 +281,24 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     new PinnedClientMailboxReceiptVerifier(new SodiumMailboxPeerReplicationCrypto()), dispatchFactory, decoder, dispatchAuthority.TimeProvider);
                 using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct); deadline.CancelAfter(TimeSpan.FromSeconds(30));
                 await Guard(deadline.Token).ConfigureAwait(false);
+                var publicReplicas = await MailboxStoreReplicaEvidenceVerifier.CaptureAsync(route, deadline.Token).ConfigureAwait(false);
+                var publicEvidence = new Did2StorePublicEvidence(loan.Selector.AccountScope.ToArray(), envelope.OperationId,
+                    ProtectedDid2MailboxGrantJournal.OriginalPolicy(retainedGrant), publicReplicas,
+                    resolved is null ? default : contact.Contact.Contact.CanonicalBytes,
+                    resolved is null ? default : route.ExactRouteClosure,
+                    resolved is null ? default : contact.Contact.Authorization.Freshness.ExactAdp1V2);
+                if (initialIntent.IsEmpty)
+                {
+                    // Persist ContactAccept public evidence before ingress can
+                    // become durable. Pending evidence is not a success marker;
+                    // interrupted sends still resume only their exact request.
+                    await RetainContactAcceptStoreEvidenceBeforeDispatchUnderLeaseAsync(current, held, opened, scope, op,
+                        publicEvidence, deadline.Token).ConfigureAwait(false);
+                }
+                else publicEvidence = await RetainInitialStoreEvidenceUnderLeaseAsync(current, held, opened, scope, op, initialIntent,
+                    envelopeBytes, publicEvidence, fresh.Authority, verifier, envelope.CreatedAtUnixSeconds,
+                    requireExisting: false, deadline.Token).ConfigureAwait(false);
+                await Guard(deadline.Token).ConfigureAwait(false);
 #if DEEP_TEST_INTERNALS
                 Did2MailboxSendTestHooks.Hit(Did2MailboxSendFailpoint.BeforeDispatch);
 #endif
@@ -289,11 +314,24 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
 #if DEEP_TEST_INTERNALS
                         Did2MailboxSendTestHooks.Hit(Did2MailboxSendFailpoint.BeforeOrdinaryCompletion);
 #endif
-                        await RetainOrdinaryStoreCompletionUnderLeaseAsync(current, held, opened, scope, op, deadline.Token).ConfigureAwait(false);
+                        await RetainOrdinaryStoreCompletionUnderLeaseAsync(current, held, opened, scope, op, publicEvidence, deadline.Token).ConfigureAwait(false);
 #if DEEP_TEST_INTERNALS
                         Did2MailboxSendTestHooks.Hit(Did2MailboxSendFailpoint.AfterOrdinaryCompletion);
 #endif
                     }
+                    else
+                    {
+#if DEEP_TEST_INTERNALS
+                        Did2MailboxSendTestHooks.Hit(Did2MailboxSendFailpoint.BeforeOrdinaryCompletion);
+#endif
+                        await RetainInitialStoreEvidenceUnderLeaseAsync(current, held, opened, scope, op, initialIntent,
+                            envelopeBytes, publicEvidence, fresh.Authority, verifier, envelope.CreatedAtUnixSeconds,
+                            requireExisting: true, deadline.Token).ConfigureAwait(false);
+                    }
+                    // Local SQL/protected completion can await platform IO.
+                    // Its durable fact survives expiry or cancellation, but
+                    // that does not authorize a stale successful UI return.
+                    await Guard(deadline.Token).ConfigureAwait(false);
                     return result;
                 }
                 catch (Exception error) when (ingress.Attempted && error is not ClientMailboxDispatchOutcomeUnknownException &&

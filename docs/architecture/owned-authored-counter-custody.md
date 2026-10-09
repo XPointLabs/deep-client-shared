@@ -320,8 +320,11 @@ the authored-floor591 receipt belongs to its own frozen Protocol4fa9f95 inputs.
 
 ## Owned ordinary outbox-only API
 
-The internal account service `CompactOwnOrdinaryOutboxAsync` joins actual own
-and peer proofs to the held owner. `PrepareOwnedOrdinaryOutboxCompactionAsync`
+The internal account service `CompactOwnOrdinaryOutboxAsync` joins independently
+current own authority/time and the original Store closure of
+[DR-0106](../../../docs/survival-program/decisions/DR-0106-retained-store-public-evidence.md)
+to the held owner. It does not require renewed peer or issuer admission merely
+to remove completed working commitments. `PrepareOwnedOrdinaryOutboxCompactionAsync`
 is read-only metadata; its returned preparation is never accepted as a caller's
 deletion capability. The writer reselects, verifies and stages under the same
 account lease. No UI or background scheduler activates this cleanup yet.
@@ -330,24 +333,33 @@ The candidate is a bounded oldest consecutive Stored prefix in one owned
 session. Stored alone is insufficient: the owner joins the original protected
 send/grant/counter/request, actual SQL MAU3 and signed durable quorum, committed
 native event, independent semantic history and any retained attachment keys.
-Current signed issuer/projection/replica bindings remain required; unavailable
-historical bindings pin the scope. Original accepted timestamps are checked
-against the original grant, not used to authorize a fresh dispatch.
+Original signed policy/projection/replica bindings remain required; unavailable
+historical bindings pin the scope. The same independent historical Store reader
+checks the complete native/semantic/MAU/quorum/coordinator joins before selection.
+Every removed send field additionally matches the actual retained MAU/body/grant,
+original acquisition and independent replay floor. Original accepted timestamps
+are checked against the original grant, not used to authorize a fresh dispatch.
+Existing-only application/native readers never provision or promote state.
 
-This profile changes only the ordinary root, guarding send, grant, read,
-catalog, native floor, attachment, account registration, history checkpoint and
-peer bootstrap. Its SQL target is the existing application database. Complete
+This profile changes the ordinary root and removes only its selected completed
+entries from the send root. Every send counter floor and unselected entry is
+preserved. Grant, read, catalog, native floor, attachment, account registration,
+history checkpoint and peer bootstrap remain exact guards. Its SQL target is the
+existing application database. Complete
 ordered schema/cell commitments include every table, not just working-row
 counts; the virtual successor omits only the selected ordinary working rows.
 The SQL writer independently recaptures that selection and complete effects
 in one transaction, rechecks the actual protected plan/roots before deletion
-and commit, then adopts the exact ordinary successor with CAS/read-back.
+and commit, then adopts the exact ordinary successor followed by the exact send
+successor with CAS/read-back. Send-first adoption is a forbidden non-prefix.
 
 Startup uses the same local recovery dispatcher as prefix recovery, with a
 separate closed application profile and its already-initialized account key
 registration. Recovery does not initialize a database, promote registration,
 refresh network authority, sign/encrypt, reselect or reconstruct deleted work.
-Staging disposal supports the ordinary root's multiple bounded parts. Only
+The closed application profile requires both changed roots; the former
+single-root plan is rejected, without a compatibility reader. Staging disposal
+supports the two roots' bounded successor parts. Only
 verified complete adoption, or the unchanged predecessor owned by durable
 abort, can clear the plan. `AbandonUncommittedOwnedOrdinaryOutboxAsync` rejects
 SQL After, including a cancellation after commit but before its marker.
@@ -356,15 +368,76 @@ Exact Store and E2EE-send replay after cleanup verify retained native/history cu
 the independent authored floor without recreating the ordinary command or its
 SQL working copy. Cached encryption additionally requires the supplied exact
 event bytes to match that history and its existing native send; absent native
-custody cannot enter a new encryption transition. Old operation authoring still rejects; new operations retain
-monotonic sequence allocation. Send/grant attempts, receipts, native events,
-history, dedup, counters, asset keys and remote obligations are not retired.
+custody cannot enter a new encryption transition. Store replay joins the original
+SQL MAU3, signed durable quorum and independently recorded coordinator statement
+to the original grant, route, retained counter and native event. It never enrolls
+a replacement send entry, signs or dispatches, nor inserts/prunes/repairs the
+coordinator ledger. Missing or changed evidence rejects. Original issuer/route
+bindings and the independently current own account/network/time guard still apply; cached Store is not
+new admission or current-route evidence. Old operation authoring still rejects;
+new operations retain monotonic sequence allocation. Original SQL attempts,
+grant attempts, receipts, native events, history, dedup, counters, asset keys and
+remote obligations are not retired.
 Implementation/build and focused fault evidence do not themselves qualify the
-required coupled full gate. The [current testing checkpoint](../testing/s01-ordinary-outbox-disposition-2026-10-06.md#current-coupled-full-gate--accepted-outbox-only-slice)
+required coupled full gate. The [historical single-root checkpoint](../testing/s01-ordinary-outbox-disposition-2026-10-06.md#current-coupled-full-gate--accepted-outbox-only-slice)
 records full687/0/0 terminal0, all161 current/all678 prior cases Passed and55/55
 frozen inputs exact for Shared `574d934347fb21f48453def7541a0a7a7a86d06d`.
-This qualifies only this outbox-only profile, not namespace/floor retirement or
-scheduler activation.
+This qualifies only that former single-root profile, not the current two-root
+increment, namespace/floor retirement or scheduler activation. Current source
+qualification is tracked in [the S01 checkpoint](../testing/s01-idle-mailbox-floors-2026-10-09.md).
+
+## Completed initial / ContactAccept send working entries
+
+Private S01 `RetireOwnCompletedContactMailboxSendAsync(scope, operation,
+initialIntent, source, ct)` accepts selectors only. An initiator must select its
+exact initial intent/operation; a receiver must select its actual protected
+explicit ContactAccept command. It obtains independently current own authority
+and keeps the approved verifier alive throughout held selection. It does not
+request a current peer route or renew an original grant.
+
+The owner reuses the genuine historical Store reader: actual retired initial
+sender source/draft/peer/ADP/DCR or native ContactAccept and semantic projection,
+original signed public policy/view/descriptors/pair, exact holder-signed MAU,
+durable quorum and independent coordinator. It additionally joins every removed
+send field, counter/replay floor and original XMG/XMC acquisition. A prepared
+flag, SQL Durable alone, caller assertion or cache miss cannot authorize removal.
+Pending/unknown Store remains pinned before staging. An absent entry is
+idempotent only after the independent original Store closure succeeds; no reader
+reenrolls a missing send, floor, holder or request.
+
+The protected-only profile uses one Audit row selecting the exact send key and
+entry commitment, the exact native scope hash as SQL selector, and zero SQL
+before/after. Only Send changes; every floor and other entry remains unchanged.
+The shared protected-retirement dispatcher explicitly distinguishes Audit send
+disposition from ReplayScope counter/acquisition disposition; no fallback tries
+to reinterpret a failed profile. Shape requires a single Send change and both
+NativeFence and complete MailboxStoreState guards. The owned profile requires
+the closed nine-root mapping and rederives the exact successor from the original
+prepared entry and retained replay floor before the protected commit marker/CAS.
+
+The unchanged mailbox-state guard includes contact-start/acceptance, preclaim and
+initial-key retirement roots, actual protected device-source marker/checkpoint,
+complete read-only existing device SQL, responder checkpoint and prekey
+install/inventory/commit markers, complete existing encrypted prekey file,
+application SQL and every catalogued native SQL/history/floor/peer.
+The prekey guard streams ciphertext with fixed memory under the lease and a
+write-excluding file handle. It does not authenticate a source: selection's
+original Store/source verification remains independently required. Even a
+logically equivalent ciphertext rewrite pins the stored plan; recovery cannot
+repair/recreate the file or assume equivalence. Missing/empty files, orphan or
+pending sidecars, foreign markers and pending responder checkpoints reject.
+Device readback uses the exact current schema,
+SQLCipher profile and registered key scope, without source reconciliation,
+creation, key deletion, PRAGMA mutation or current-proof callbacks. Missing,
+changed, pending or foreign source custody pins recovery. All native/application
+source, grant/holder/route, counters, receipts/objects and Retrieve/ACK paths stay
+intact. Existing crash handovers, pre-commit abort and cancellation ownership
+apply; the stored plan finishes without acquiring fresh network authority.
+
+This profile removes one completed working send, not its original acquisition
+or semantic/receipt/object source. S04 scheduler activation and whole S01/source,
+connected, package and device qualification remain separate. Exact evidence is
+tracked in the [S01 checkpoint](../testing/s01-idle-mailbox-floors-2026-10-09.md).
 
 ## Remaining closure
 

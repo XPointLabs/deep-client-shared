@@ -12,6 +12,14 @@ namespace Deep.Client.Shared.Production.Tests;
 
 public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 {
+    [Theory]
+    [InlineData(0UL)] [InlineData(1UL)] [InlineData(5UL)]
+    public async Task Did2GrantResults_IssuerPreservesTheSignedRequestStart(ulong elapsed)
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        await fixture.CheckGrantRequestStartAsync(elapsed);
+    }
+
     [Fact]
     public async Task Did2GrantResults_RealRootIssuerRouteAndFullIntervalRejectSubstitution()
     {
@@ -28,6 +36,24 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 
     private sealed partial class Fixture
     {
+        internal async Task CheckGrantRequestStartAsync(ulong elapsed)
+        {
+            var plan = await accounts.ReadOwnPermanentContactPlanAsync();
+            using var threshold = new OwnedRouteThreshold(this);
+            var route = await EnsureRoute(plan.Intent.ToArray(), Did2OwnedPermanentContactPlan.Configuration(), threshold);
+            using var holder = new GrantHolder();
+            var request = await DeepIdV2MailboxGrantRequestAuthor.AuthorDepositAsync(route, Bytes(32, 0xc7), holder);
+            var originalStart = BinaryPrimitives.ReadUInt64BigEndian(request.Record.Field(9).Span);
+            Sample = checked(Sample + elapsed); ProofTime = checked(ProofTime + elapsed);
+            var response = await IssueOwnedGrantAsync(request, route, retrieve: false, default);
+            var result = ContactCodec.Decode("XMC2", response);
+            var grant = MailboxAuthenticatedCapabilityCodec.DecodeGrant(result.Field(8).Span);
+            Assert.Equal(originalStart, grant.NotBeforeUnixSeconds);
+            var retained = await DeepIdV2MailboxGrantResultVerifier.VerifyRetainedSuccessAsync(route,
+                request.ExactXmg2, response, operational.ExactPma2);
+            await retained.EnsureCurrentAsync();
+        }
+
         private int mailboxPolicyFault;
         private IReadOnlyList<ReadOnlyMemory<byte>> MailboxPolicies()
         {

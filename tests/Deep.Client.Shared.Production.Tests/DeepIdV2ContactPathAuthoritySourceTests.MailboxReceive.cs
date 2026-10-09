@@ -217,7 +217,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         internal MailboxEncryptedEnvelope? RetainedEnvelope;
         internal ulong Cursor = 1, ExpectedAckCounter = 2;
         internal int RetrieveCalls, AckCalls;
-        internal bool LoseAckReply, BuiltRetrieveFrame, BuiltAckFrame;
+        internal bool LoseAckReply, BuiltRetrieveFrame, BuiltAckFrame, ReturnEmptyPage;
         public IClientMailboxBinaryIngress Create(Did2OwnedMailboxTransportContext loan, IMailboxClientDecodePolicyProvider decoder)
         { context = loan; policy = decoder; return this; }
         private async Task BuildHeldFrame(OnionOperation operation, ReadOnlyMemory<byte> exact, ScopedMailboxResolvedRoute route, CancellationToken ct)
@@ -238,6 +238,12 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             Assert.Equal(8, request.MaximumItems);
             await BuildHeldFrame(OnionOperation.Retrieve, exact, route, ct); BuiltRetrieveFrame = true;
             var decode = policy.GetCurrent();
+            if (ReturnEmptyPage)
+                return MailboxClientCodec.EncodeRetrievePage(new()
+                {
+                    Epoch = request.Epoch, OperationId = request.OperationId, NextCursor = 0, HasMore = false,
+                    ContinuationToken = ReadOnlyMemory<byte>.Empty, Items = []
+                });
             envelope ??= RetainedEnvelope ?? new()
             {
                 Epoch = request.Epoch, MailboxId = request.MailboxId, PlacementId = request.PlacementId,

@@ -11,6 +11,14 @@ internal static partial class SqliteDeepIdV2AccountGeneration
     internal static async Task<SqliteDeepMailboxStore> OpenExistingApplicationForCompactionUnderLeaseAsync(
         IDeepSecureStorage storage, string accountPath, Did2MessagingSessionScope scope,
         HeldDeepIdV2AccountLease held, DeepIdV2AccountFileLease lease, CancellationToken ct)
+        => await OpenExistingApplicationForOwnerUnderLeaseAsync(storage, accountPath, scope.Network.ToArray(),
+            scope.LocalAccount.ToArray(), scope.Instance.ToArray(), held, lease, ct).ConfigureAwait(false);
+
+    // Exact local owner/plan readback only; these copied fields mint no authority.
+    internal static async Task<SqliteDeepMailboxStore> OpenExistingApplicationForOwnerUnderLeaseAsync(
+        IDeepSecureStorage storage, string accountPath, ReadOnlyMemory<byte> network,
+        ReadOnlyMemory<byte> account, ReadOnlyMemory<byte> instance,
+        HeldDeepIdV2AccountLease held, DeepIdV2AccountFileLease lease, CancellationToken ct)
     {
         using var borrowed = held.BorrowFor(lease);
         using var secret = await storage.ReadOwnedAsync(KeySlot, ct).ConfigureAwait(false) ??
@@ -21,9 +29,9 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         var registration = registered.Use(bytes => bytes.ToArray()); byte[] key = [];
         try
         {
-            ValidateRecord(record, scope.Network, scope.LocalAccount);
+            ValidateRecord(record, network.Span, account.Span);
             ValidateApplicationRegistration(registration, record);
-            if (registration[1] != 2 || !Fixed(record.AsSpan(56, 32), scope.Instance))
+            if (registration[1] != 2 || !Fixed(record.AsSpan(56, 32), instance.Span))
                 throw new CryptographicException("Application recovery requires its exact initialized account instance.");
             var path = ApplicationStatePath(accountPath); RequireApplicationFileFamily(path);
             key = DeriveApplicationKey(record);

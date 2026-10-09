@@ -23,7 +23,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         ProtectedDid2MessagingSessionCatalog.Snapshot catalog)
     {
         if (plan.Target != Did2CompactionPlan.SqlTarget.Application || plan.RootCount != OrdinaryOutboxRootKinds.Length ||
-            plan.SuccessorBytes is < ProtectedDid2DirectTextJournal.HeaderBytes or > ProtectedDid2DirectTextJournal.MaximumBytes)
+            plan.SuccessorBytes < ProtectedDid2DirectTextJournal.HeaderBytes + ProtectedDid2MailboxSendJournal.HeaderBytes ||
+            plan.SuccessorBytes > ProtectedDid2DirectTextJournal.MaximumBytes + ProtectedDid2MailboxSendJournal.MaximumBytes)
             throw new InvalidDataException("No owned recovery is installed for this application compaction profile.");
         for (var index = 0; index < plan.RowCount; index++)
             if (plan.ReadRow(index).Action != Did2CompactionPlan.Disposition.OutboxPayload)
@@ -47,7 +48,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         for (var index = 0; index < slots.Length; index++)
         {
             var expected = plan.ReadRoot(index); var selector = CompactionSlotSelector(slots[index]);
-            if (expected.Kind != OrdinaryOutboxRootKinds[index] || expected.Guard != (index != 0) || !FixedRoute(expected.Selector.Span, selector))
+            if (expected.Kind != OrdinaryOutboxRootKinds[index] || expected.Guard != (index >= 2) || !FixedRoute(expected.Selector.Span, selector))
                 throw new InvalidDataException("Ordinary batch changed its closed root mapping.");
             using var raw = await storage.ReadOwnedAsync(slots[index], ct).ConfigureAwait(false) ??
                 throw new InvalidDataException("Ordinary batch lost a mandatory dependency root.");
@@ -107,6 +108,33 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         finally { CryptographicOperations.ZeroMemory(expected); }
     }
 
+    private static byte[] RemoveSelectedOrdinarySendCommitments(ProtectedDid2MailboxSendJournal.State sends,
+        Did2MessagingSessionScope scope, IReadOnlyList<Did2CompactionPlan.Row> rows)
+    {
+        foreach (var row in rows)
+        {
+            var key = Convert.ToHexString(ProtectedDid2MailboxSendJournal.Key(scope.Hash, row.Selector.Span));
+            if (row.Action != Did2CompactionPlan.Disposition.OutboxPayload ||
+                !sends.Entries.TryGetValue(key, out var send) || !send.Prepared ||
+                !FixedRoute(send.ScopeHash, scope.Hash) || !FixedRoute(send.Operation, row.Selector.Span))
+                throw new CryptographicException("Selected ordinary work lost its exact prepared send commitment.");
+            sends.Entries.Remove(key); send.Dispose();
+        }
+        // All independent floors and unrelated/pending sends remain exact.
+        sends.Revision = checked(sends.Revision + 1);
+        return ProtectedDid2MailboxSendJournal.Encode(sends, scope.Network, scope.LocalAccount, scope.Instance);
+    }
+
+    private static void RequireOrdinarySendSuccessor(Did2CompactionPlan plan, Did2MessagingSessionScope scope,
+        ReadOnlySpan<byte> predecessor, ReadOnlySpan<byte> successor)
+    {
+        using var sends = ProtectedDid2MailboxSendJournal.Decode(predecessor, scope.Network, scope.LocalAccount, scope.Instance);
+        var rows = Enumerable.Range(0, plan.RowCount).Select(plan.ReadRow).ToArray();
+        var expected = RemoveSelectedOrdinarySendCommitments(sends, scope, rows);
+        try { if (!FixedRoute(expected, successor)) throw new CryptographicException("Send successor changed unrelated requests or replay floors."); }
+        finally { CryptographicOperations.ZeroMemory(expected); }
+    }
+
     // A local stored plan resumes without freshness acquisition. It cannot
     // remove native events/history/Store receipts or mint new request authority.
     private async Task ResumeOrdinaryOutboxStepUnderLeaseAsync(ProtectedDid2CompactionPlan plans, Did2CompactionPlan plan,
@@ -132,11 +160,30 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         if (plan.Phase == 1 || observation.Step == Did2CompactionPlan.RecoveryStep.AdoptRoot)
         {
             using var parts = await plans.ReadSuccessorsAsync(plan, held, ct).ConfigureAwait(false);
-            using var successor = parts.Use(bytes => plan.OwnSuccessor(0, bytes));
-            using var predecessor = await storage.ReadOwnedAsync(ProtectedDid2DirectTextJournal.Slot, ct).ConfigureAwait(false) ??
+            var changedIndex = plan.Phase == 1 ? 0 : observation.RootIndex;
+            if (changedIndex is not (0 or 1)) throw new InvalidDataException("Ordinary recovery has another changed root.");
+            var changedSlot = OrdinaryOutboxSlots(scope)[changedIndex];
+            using var successor = parts.Use(bytes => plan.OwnSuccessor(changedIndex, bytes));
+            using var predecessor = await storage.ReadOwnedAsync(changedSlot, ct).ConfigureAwait(false) ??
                 throw new InvalidDataException("Ordinary recovery lost its predecessor.");
             var predecessorBytes = predecessor.Use(bytes => bytes.ToArray());
-            try { successor.Use(after => { RequireOrdinarySuccessor(plan, scope, predecessorBytes, after); return true; }); }
+            try
+            {
+                successor.Use(after =>
+                {
+                    if (changedIndex == 0) RequireOrdinarySuccessor(plan, scope, predecessorBytes, after);
+                    else RequireOrdinarySendSuccessor(plan, scope, predecessorBytes, after);
+                    return true;
+                });
+                if (plan.Phase == 1)
+                {
+                    using var sendBefore = await storage.ReadOwnedAsync(ProtectedDid2MailboxSendJournal.Slot, ct).ConfigureAwait(false) ?? throw new InvalidDataException("Prepared ordinary batch lost send custody.");
+                    using var sendAfter = parts.Use(bytes => plan.OwnSuccessor(1, bytes));
+                    var original = sendBefore.Use(bytes => bytes.ToArray());
+                    try { sendAfter.Use(bytes => { RequireOrdinarySendSuccessor(plan, scope, original, bytes); return true; }); }
+                    finally { CryptographicOperations.ZeroMemory(original); }
+                }
+            }
             finally { CryptographicOperations.ZeroMemory(predecessorBytes); }
             if (plan.Phase == 1)
             {
@@ -165,17 +212,17 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
 #endif
                 return;
             }
-            if (observation.RootIndex != 0) throw new InvalidDataException("Ordinary recovery has another changed root.");
             roots = await ReadOrdinaryOutboxRootsUnderLeaseAsync(storage, plan, scope, held, lease, ct).ConfigureAwait(false);
-            if (plan.ObserveReadback(await application.ReadCompleteOrdinaryCompactionProjectionAsync(scope, ct).ConfigureAwait(false), roots).Step != Did2CompactionPlan.RecoveryStep.AdoptRoot)
+            var latest = plan.ObserveReadback(await application.ReadCompleteOrdinaryCompactionProjectionAsync(scope, ct).ConfigureAwait(false), roots);
+            if (latest.Step != Did2CompactionPlan.RecoveryStep.AdoptRoot || latest.RootIndex != changedIndex)
                 throw new CryptographicException("Ordinary dependencies changed before root adoption.");
             var beforeBytes = predecessor.Use(bytes => bytes.ToArray()); var afterBytes = successor.Use(bytes => bytes.ToArray());
             try
             {
                 ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
-                if (!await storage.CompareExchangeAsync(ProtectedDid2DirectTextJournal.Slot, beforeBytes, afterBytes, ct).ConfigureAwait(false))
+                if (!await storage.CompareExchangeAsync(changedSlot, beforeBytes, afterBytes, ct).ConfigureAwait(false))
                     throw new CryptographicException("Ordinary root adoption conflicted.");
-                using var readback = await storage.ReadOwnedAsync(ProtectedDid2DirectTextJournal.Slot, ct).ConfigureAwait(false) ?? throw new InvalidDataException("Adopted ordinary root disappeared.");
+                using var readback = await storage.ReadOwnedAsync(changedSlot, ct).ConfigureAwait(false) ?? throw new InvalidDataException("Adopted ordinary root disappeared.");
                 if (!readback.Use(bytes => FixedRoute(bytes, afterBytes))) throw new CryptographicException("Ordinary root adoption read-back differs.");
             }
             finally { CryptographicOperations.ZeroMemory(beforeBytes); CryptographicOperations.ZeroMemory(afterBytes); }
@@ -205,9 +252,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
 
     private async Task ValidateFinishingOrdinaryPartsAsync(Did2CompactionPlan plan, CancellationToken ct)
     {
-        using var adopted = plan.Phase == 2
-            ? await storage.ReadOwnedAsync(ProtectedDid2DirectTextJournal.Slot, ct).ConfigureAwait(false) ?? throw new InvalidDataException("Ordinary successor is absent.")
-            : null;
+        using var ordinary = plan.Phase == 2 ? await storage.ReadOwnedAsync(ProtectedDid2DirectTextJournal.Slot, ct).ConfigureAwait(false) ?? throw new InvalidDataException("Ordinary successor is absent.") : null;
+        using var send = plan.Phase == 2 ? await storage.ReadOwnedAsync(ProtectedDid2MailboxSendJournal.Slot, ct).ConfigureAwait(false) ?? throw new InvalidDataException("Send successor is absent.") : null;
+        using var adopted = ordinary is not null && send is not null ? OwnOrdinarySuccessors(ordinary, send) : null;
         if (adopted is not null) adopted.Use(bytes => { plan.ValidateSuccessors(bytes); return true; });
         var remaining = new List<OwnedDeepSecret>();
         try
@@ -246,6 +293,13 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             }
         }
         finally { foreach (var part in remaining) part.Dispose(); }
+    }
+
+    private static OwnedDeepSecret OwnOrdinarySuccessors(OwnedDeepSecret ordinary, OwnedDeepSecret send)
+    {
+        var bytes = new byte[checked(ordinary.Length + send.Length)];
+        try { ordinary.CopyTo(bytes); send.CopyTo(bytes.AsSpan(ordinary.Length)); return new OwnedDeepSecret(bytes); }
+        finally { CryptographicOperations.ZeroMemory(bytes); }
     }
 
     internal async Task AbandonUncommittedOwnedOrdinaryOutboxAsync(CancellationToken ct)

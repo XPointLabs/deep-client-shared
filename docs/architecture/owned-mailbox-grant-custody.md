@@ -322,7 +322,7 @@ or missing bindings reject. The existing local commit-marker phase precedes
 grant CAS/readback; this profile makes no SQL mutation. Once the successor is
 adopted, only matching remaining parts may be disposed, then the plan clears.
 
-`AbandonUncommittedClosedAcquisitionRetirementAsync(ct)` permits only phase1
+`AbandonUncommittedMailboxRetirementAsync(ct)` permits only phase1
 with all exact predecessors/guards intact, persisting the existing abort phase
 before disposal. A committed phase2 cannot abort/reselect even before grant
 adoption. Cancellation leaves the already-staged plan owning exact recovery.
@@ -340,14 +340,43 @@ activate autonomous renewal/cleanup, historic read/ACK
 or a longer object horizon. The narrow explicit held producer above removes only
 an eligible closed unused deposit acquisition; no known grant/send/read entries
 or replay floors are evicted and no128/512 bound is raised. Send/read independent
-replay floors are unchanged. Their full lifecycle
-contracts and the linked retention fence remain unfinished S01/S04/S05 work.
+replay floors are unchanged by that acquisition profile. The separate
+[idle counter profile](owned-mailbox-counter-retirement.md) changes no grant or
+retained path and has its own qualification boundary. Full lifecycle contracts
+and the linked retention fence remain unfinished S01/S04/S05 work.
 
 The expired/unknown semantic and retirement boundary remain specified only in
 the semantic owner linked above, §8.4.2. Generation5 retains original evidence,
 closed uncertainty and two-phase late adoption, not proof of non-issuance or an irreversible retirement
 fence. No new network wire, magic, authority or public verification API is added.
 The earlier generation3 receipt is historical evidence for its exact source.
+
+[DR-0106](../../../docs/survival-program/decisions/DR-0106-retained-store-public-evidence.md)
+owns the separate original public Store outcome dependency. Shared inserts the
+immutable original public records before ordinary Stored permits compaction;
+selection never repairs them. Its historical reader joins native/semantic/MAU/
+quorum/coordinator custody without issuing a new grant. It reads a completed
+protected Stored ordinary command both before and after compaction, without
+renewed peer admission; pending/authored-only work remains current-only.
+ContactAccept uses the same original outcome closure with its retained explicit
+winner, actual native Hello/send and semantic acceptance. Its public evidence
+is retained before ingress; evidence alone cannot return success. A durable
+candidate with missing evidence fails without reconstruction. Acceptance and
+initial-message working-slot retirement remain unactivated. Initial evidence
+also fails before a new peer resolve: its original recipient DCR/route/ADP
+records are retained in the same SQL row and independently joined to protected
+draft, key-retired sender source, native events and pinned peer DID2. Public
+StartContact and initial dispatch retries share that historical reader. No
+Hello return route substitutes for the original recipient route. Losing
+mandatory send registration is corruption, not successful retirement. Dispatch
+rechecks current authority after awaited local completion before returning;
+expiry leaves an independently verifiable durable outcome, not new admission.
+Application schema10 rejects its predecessor and earlier, unqualified schema10
+candidate layouts. Its initial-recipient extension is a pre-production reset
+boundary, not a migration or an additional journal generation.
+The [current source checkpoint](../testing/s01-idle-mailbox-floors-2026-10-09.md#original-public-store-outcome-source--dr-0106)
+records qualification and remaining gates; it permits no known acquisition or
+last retained Retrieve/ACK deletion.
 Generation4's layout/closure and original Store/read/ACK passed their own final
 full source gate570/0/0; the exact receipt and source boundaries are recorded in
 the checkpoint. The subsequent generation5 late-result/connected-consumer gate

@@ -15,7 +15,7 @@ public sealed partial class SqliteDeepMailboxStore :
     IDisposable
 {
     private const int ApplicationId = 0x444D4231; // DMB1
-    private const int SchemaVersion = 9;
+    private const int SchemaVersion = 10;
     private readonly bool allowCreate;
     private readonly string _connectionString;
     private readonly byte[] encryptionKey;
@@ -246,6 +246,21 @@ public sealed partial class SqliteDeepMailboxStore :
                 group_membership_commitment BLOB NULL
                     CHECK(group_membership_commitment IS NULL OR length(group_membership_commitment) = 32),
                 UNIQUE(account_scope, scope_kind, subject_id, issuer_context));
+            CREATE TABLE mailbox_store_public_evidence (
+                scope_hash BLOB NOT NULL CHECK(length(scope_hash)=32),
+                operation_id BLOB NOT NULL CHECK(length(operation_id)=32),
+                account_scope BLOB NOT NULL CHECK(length(account_scope)=32),
+                logical_id BLOB NOT NULL CHECK(length(logical_id)=16),
+                exact_pma BLOB NOT NULL CHECK(length(exact_pma) BETWEEN 1 AND 65535),
+                exact_view BLOB NOT NULL CHECK(length(exact_view) BETWEEN 1 AND 65535),
+                first_descriptor BLOB NOT NULL CHECK(length(first_descriptor) BETWEEN 1 AND 65535),
+                second_descriptor BLOB NOT NULL CHECK(length(second_descriptor) BETWEEN 1 AND 65535),
+                original_dcr BLOB NOT NULL CHECK(length(original_dcr) BETWEEN 0 AND 65535),
+                original_route BLOB NOT NULL CHECK(length(original_route) BETWEEN 0 AND 23295),
+                original_peer_adp BLOB NOT NULL CHECK(length(original_peer_adp) BETWEEN 0 AND 524288),
+                CHECK((length(original_dcr)=0 AND length(original_route)=0 AND length(original_peer_adp)=0)
+                    OR (length(original_dcr)>0 AND length(original_route)>0 AND length(original_peer_adp)>0)),
+                PRIMARY KEY(scope_hash,operation_id));
             CREATE TABLE mailbox_credential_epochs (
                 scope_id BLOB NOT NULL CHECK(length(scope_id) = 32),
                 epoch BLOB NOT NULL CHECK(length(epoch) = 8),

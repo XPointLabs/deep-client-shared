@@ -14,10 +14,10 @@ public sealed partial class DeepIdV2AccountService
         ArgumentNullException.ThrowIfNull(scope); ArgumentNullException.ThrowIfNull(source);
         if (maximumRows is < 1 or > Did2CompactionPlan.MaximumRows) throw new ArgumentOutOfRangeException(nameof(maximumRows));
         source.RequireAccountOwner(this);
-        var pair = await source.VerifyForOwnMessagingAsync(this, scope, ct).ConfigureAwait(false);
+        var own = await source.VerifyForOwnPreKeyAuthoringAsync(this, ct).ConfigureAwait(false);
         using var verifier = OpenVerifier();
         await owner.CompactOwnedOrdinaryOutboxAsync(TrustedUnixSeconds(), verifier, scope, maximumRows,
-            pair.Own, pair.Peer, source, ct).ConfigureAwait(false);
+            own, source, ct).ConfigureAwait(false);
     }
 
     internal async Task<Did2CompactionPlan.Preparation> PrepareOwnOrdinaryOutboxCompactionAsync(
@@ -26,10 +26,10 @@ public sealed partial class DeepIdV2AccountService
         ArgumentNullException.ThrowIfNull(scope); ArgumentNullException.ThrowIfNull(source);
         if (maximumRows is < 1 or > Did2CompactionPlan.MaximumRows) throw new ArgumentOutOfRangeException(nameof(maximumRows));
         source.RequireAccountOwner(this);
-        var pair = await source.VerifyForOwnMessagingAsync(this, scope, ct).ConfigureAwait(false);
+        var own = await source.VerifyForOwnPreKeyAuthoringAsync(this, ct).ConfigureAwait(false);
         using var verifier = OpenVerifier();
         return await owner.PrepareOwnedOrdinaryOutboxCompactionAsync(TrustedUnixSeconds(), verifier, scope, maximumRows,
-            pair.Own, pair.Peer, source, ct).ConfigureAwait(false);
+            own, source, ct).ConfigureAwait(false);
     }
 
     internal async Task<DirectTextOutboxEntry> PrepareOwnDirectAttachmentOfferAsync(Did2MessagingSessionScope scope,

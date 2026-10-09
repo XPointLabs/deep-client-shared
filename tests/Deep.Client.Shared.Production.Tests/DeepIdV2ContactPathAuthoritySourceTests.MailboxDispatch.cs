@@ -315,11 +315,11 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         internal Action? OnNextDirectoryProof;
         private byte[]? mailboxSqlBeforePreparation;
         internal Task<ClientMailboxStoreResult> DeliverNativeMessage(Did2MessagingSessionScope scope, byte[] op,
-            IDid2MailboxGrantTransport grants, IDid2OwnedMailboxTransportFactory transport)
+            IDid2MailboxGrantTransport grants, IDid2OwnedMailboxTransportFactory transport, CancellationToken ct = default)
         {
             var account = scope.IsInitiator ? ReopenAccount() : ReopenGrantReader();
             var source = scope.IsInitiator ? Source(account) : GrantReaderSource(account);
-            return account.DeliverOwnMessagingAsync(scope, op, source, grants, transport);
+            return account.DeliverOwnMessagingAsync(scope, op, source, grants, transport, ct);
         }
         internal Task<ClientMailboxStoreResult> DeliverNativeInitial(byte[] intent,
             IDid2MailboxGrantTransport grants, IDid2OwnedMailboxTransportFactory transport)

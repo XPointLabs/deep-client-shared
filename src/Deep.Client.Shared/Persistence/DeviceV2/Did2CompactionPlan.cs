@@ -19,7 +19,8 @@ internal sealed class Did2CompactionPlan : IDisposable
     {
         Ordinary = 1, Send = 2, Grant = 3, Read = 4, SessionCatalog = 5,
         MessagingFloor = 6, Attachment = 7, AccountRegistration = 8,
-        NativeFence = 9, MessagingHistoryCheckpoint = 10, MessagingPeerBootstrap = 11
+        NativeFence = 9, MessagingHistoryCheckpoint = 10, MessagingPeerBootstrap = 11,
+        MailboxStoreState = 12
     }
     internal enum Disposition : byte { OutboxPayload = 1, Audit = 2, JournalPrefix = 3, ReplayScope = 4 }
     internal enum RecoveryStep : byte { ApplySql = 1, RecordSqlCommit = 2, AdoptRoot = 3, ClearPlan = 4 }
@@ -162,9 +163,9 @@ internal sealed class Did2CompactionPlan : IDisposable
         for (var i = 0; i < roots; i++)
         {
             var record = raw.Slice(HeaderBytes + i * RootBytes, RootBytes);
-            if (record[0] is < 1 or > 11 || record[1] is not (1 or 2) || !Zero(record.Slice(2, 2))) throw Bad();
-            if (record[0] is (byte)RootKind.SessionCatalog or (byte)RootKind.AccountRegistration or (byte)RootKind.NativeFence or (byte)RootKind.MessagingPeerBootstrap && record[1] != 2) throw Bad();
-            if (record[0] is >= 1 and <= 5 or 7 or 8 && !globalRoots.Add((RootKind)record[0])) throw Bad();
+            if (record[0] is < 1 or > 12 || record[1] is not (1 or 2) || !Zero(record.Slice(2, 2))) throw Bad();
+            if (record[0] is (byte)RootKind.SessionCatalog or (byte)RootKind.AccountRegistration or (byte)RootKind.NativeFence or (byte)RootKind.MessagingPeerBootstrap or (byte)RootKind.MailboxStoreState && record[1] != 2) throw Bad();
+            if (record[0] is >= 1 and <= 5 or 7 or 8 or 12 && !globalRoots.Add((RootKind)record[0])) throw Bad();
             Require32(record.Slice(4, 32)); Require32(record.Slice(36, 32)); Require32(record.Slice(68, 32));
             if ((record[1] == 2) != Fixed(record.Slice(36, 32), record.Slice(68, 32))) throw Bad();
             var length = BinaryPrimitives.ReadUInt32BigEndian(record[100..]);
@@ -187,7 +188,7 @@ internal sealed class Did2CompactionPlan : IDisposable
             var record = raw.Slice(HeaderBytes + roots * RootBytes + i * RowBytes, RowBytes);
             if (record[0] is < 1 or > 4 || !Zero(record.Slice(1, 7)) ||
                 raw[2] == (byte)SqlTarget.Messaging && record[0] != (byte)Disposition.JournalPrefix ||
-                raw[2] == (byte)SqlTarget.ProtectedOnly && record[0] != (byte)Disposition.ReplayScope ||
+                raw[2] == (byte)SqlTarget.ProtectedOnly && record[0] is not ((byte)Disposition.ReplayScope or (byte)Disposition.Audit) ||
                 raw[2] is (byte)SqlTarget.Application or (byte)SqlTarget.Transport && record[0] == (byte)Disposition.JournalPrefix) throw Bad();
             Require32(record.Slice(8, 32)); Require32(record.Slice(40, 32));
             actions.Add((Disposition)record[0]);
@@ -200,6 +201,9 @@ internal sealed class Did2CompactionPlan : IDisposable
         }
         if (!guards.Contains(RootKind.AccountRegistration) ||
             actions.Contains(Disposition.ReplayScope) && !guards.Contains(RootKind.NativeFence) ||
+            raw[2] == (byte)SqlTarget.ProtectedOnly && actions.Contains(Disposition.Audit) &&
+                (rows != 1 || actions.Count != 1 || !changedKinds.Contains(RootKind.Send) || changedKinds.Count != 1 ||
+                 !guards.Contains(RootKind.NativeFence) || !guards.Contains(RootKind.MailboxStoreState)) ||
             raw[2] == (byte)SqlTarget.Messaging && (!changedKinds.Contains(RootKind.MessagingHistoryCheckpoint) ||
                 !guards.Contains(RootKind.MessagingFloor) || !guards.Contains(RootKind.SessionCatalog)) ||
             raw[2] == (byte)SqlTarget.Application && actions.Contains(Disposition.OutboxPayload) &&
