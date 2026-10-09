@@ -111,7 +111,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             throw new InvalidDataException("Completed contact-send retirement can change only its exact send root.");
         if (changedIndex == 2)
         {
-            if (plan.RootCount != 8) throw new InvalidDataException("Unused acquisition retirement changed its closed profile.");
+            if (plan.RootCount == 9 && (plan.ReadRoot(8).Kind != Did2CompactionPlan.RootKind.MailboxStoreState || !plan.ReadRoot(8).Guard))
+                throw new InvalidDataException("Used Deposit retirement requires its complete unchanged mailbox state guard.");
         }
         else if (plan.RootCount != 9 || plan.ReadRoot(8).Kind != Did2CompactionPlan.RootKind.MailboxStoreState || !plan.ReadRoot(8).Guard)
             throw new InvalidDataException("Counter retirement requires its complete unchanged mailbox state guard.");
@@ -191,7 +192,11 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var before = predecessor.Use(bytes => bytes.ToArray()); var after = successor.Use(bytes => bytes.ToArray());
             try
             {
-                if (changedIndex == 2) RequireClosedAcquisitionSuccessor(plan, before, after);
+                if (changedIndex == 2)
+                {
+                    if (plan.RootCount == 8) RequireClosedAcquisitionSuccessor(plan, before, after);
+                    else RequireUsedDepositSuccessor(plan, before, after);
+                }
                 else if (plan.ReadRow(0).Action == Did2CompactionPlan.Disposition.Audit)
                     RequireCompletedContactSendSuccessor(plan, before, after);
                 else await RequireMailboxFloorSuccessorAsync(plan, changedIndex, before, after, ct).ConfigureAwait(false);

@@ -264,6 +264,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 Assert.Equal(old, ProtectedDid2MailboxGrantJournal.Acquisition(ProtectedDid2MailboxGrantJournal.RequireLateResultForResume(cold, scope)));
                 Assert.Throws<CryptographicException>(() => ProtectedDid2MailboxGrantJournal.RequireRetainedWinner(cold, scope,
                     SHA256.HashData(verified.ExactGrant.Span)));
+                Assert.Throws<IOException>(() => ProtectedDid2MailboxGrantJournal.RequireOldestAdoptedDeposit(cold, Convert.FromHexString(old)));
             }
             ProtectedDid2MailboxGrantJournal.AdoptLateWinner(state, old); state.Revision++;
             Assert.Equal(newer, state.Selections[scope].Current); Assert.Null(state.Selections[scope].Pending);
@@ -271,7 +272,23 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 SHA256.HashData(verified.ExactGrant.Span))));
             var adopted = Encode();
             using (var cold = ProtectedDid2MailboxGrantJournal.Decode(adopted, Network, account, instance))
+            {
                 Assert.Equal(newer, cold.Selections[scope].Current);
+                if (ContactCodec.Decode("XMG2", ProtectedDid2MailboxGrantJournal.Request(cold.Entries[old]).Span).Field(6).Span[0] == (byte)MailboxCapabilityDomain.Deposit)
+                {
+                    Assert.Throws<IOException>(() => ProtectedDid2MailboxGrantJournal.RequireOldestAdoptedDeposit(cold, Convert.FromHexString(newer)));
+                    var nextRequest = ProtectedDid2MailboxGrantJournal.Request(cold.Entries[newer]).ToArray();
+                    var retired = ProtectedDid2MailboxGrantJournal.RemoveOldestAdoptedDeposit(cold, Convert.FromHexString(old), Network, account, instance);
+                    using var remaining = ProtectedDid2MailboxGrantJournal.Decode(retired, Network, account, instance);
+                    Assert.Equal(newer, remaining.Selections[scope].Current); Assert.Equal(newer, remaining.Selections[scope].RetainedTail);
+                    Assert.Equal(nextRequest, ProtectedDid2MailboxGrantJournal.Request(Assert.Single(remaining.Entries).Value).ToArray());
+                    var empty = ProtectedDid2MailboxGrantJournal.RemoveOldestAdoptedDeposit(remaining, Convert.FromHexString(newer), Network, account, instance);
+                    using var final = ProtectedDid2MailboxGrantJournal.Decode(empty, Network, account, instance);
+                    Assert.Empty(final.Entries); Assert.Empty(final.Selections);
+                    foreach (var bytes in new[] { retired, empty, nextRequest }) CryptographicOperations.ZeroMemory(bytes);
+                }
+                else Assert.Throws<IOException>(() => ProtectedDid2MailboxGrantJournal.RequireOldestAdoptedDeposit(cold, Convert.FromHexString(old)));
+            }
             state.Selections[scope] = state.Selections[scope] with { Current = old };
             Assert.Throws<InvalidDataException>(() => Encode()); state.Selections[scope] = state.Selections[scope] with { Current = newer };
 

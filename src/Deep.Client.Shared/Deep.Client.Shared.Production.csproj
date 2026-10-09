@@ -63,6 +63,7 @@
     <Compile Include="Persistence\SqliteDeepMailboxStore.OutboxCompaction.cs" />
     <Compile Include="Persistence\SqliteDeepMailboxStore.RetainedCoordinator.cs" />
     <Compile Include="Persistence\SqliteDeepMailboxStore.StorePublicEvidence.cs" />
+    <Compile Include="Persistence\SqliteDeepMailboxStore.GrantStoreDependencies.cs" />
     <Compile Include="Persistence\SqliteDeepMailboxStore.Attachments.cs" />
     <Compile Include="Persistence\SqliteSessionStore.Mailbox.cs" />
     <Compile Include="Persistence\SqliteTransportOutboxRepository.cs" />

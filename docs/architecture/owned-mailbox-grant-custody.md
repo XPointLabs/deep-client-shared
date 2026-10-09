@@ -377,6 +377,61 @@ boundary, not a migration or an additional journal generation.
 The [current source checkpoint](../testing/s01-idle-mailbox-floors-2026-10-09.md#original-public-store-outcome-source--dr-0106)
 records qualification and remaining gates; it permits no known acquisition or
 last retained Retrieve/ACK deletion.
+
+## Used Deposit holder retirement — S01 source candidate
+
+`DeepIdV2AccountService.RetireUsedDepositAcquisitionAsync(acquisition, source, ct)`
+is a closed internal maintenance entry, not runtime activation. The service owns
+the real verifier for the entire held epoch-exclusion/selection operation. No
+caller clock, successor, SQL-count or terminal flag grants permission.
+
+This implements a different disposition from object deletion: an independently
+excluded **write holder** can retire after every original Store is positively
+verified and its accepted-object/read/history/receipt dependencies remain in
+independent, byte-exact custody. It does not wait for or shorten object expiry,
+delete an object/read route, or synthesize recipient Delivered/Read. The
+historical Store reader already verifies without any private Deposit holder;
+all custody that reader consumes remains unchanged. Sole semantics are
+[messaging §8.4.3](../../../docs/architecture/TRANSPORT-NEUTRAL-MESSAGING.md#843-compaction-and-boundedness)
+and [DR-0106](../../../docs/survival-program/decisions/DR-0106-retained-store-public-evidence.md).
+
+The selected acquisition must be the oldest adopted phase2/5 Deposit in its
+canonical chain. Pending, unresolved or unadopted links pin the chain; a later
+winner cannot be selected around them. A remaining successor loses only its
+local predecessor link; its seed, request/result, original policy/route and
+current/tail selection remain exact. A sole acquisition removes its selection.
+This structural helper is not a deletion capability.
+
+Matching send work/floors, active read/ACK, read counter/traversal and ordinary
+or attachment work pin selection. The owner then joins both directions:
+
+- Stream all outgoing events, including compacted prefix history, from each
+  independently verified relevant native session; include initial DPH2 through
+  its actual protected draft/source rather than assume it is a direction1 row.
+- Independently authenticate native/semantic/source, original public policy,
+  grant/holder signature, exact MAU3/body, quorum and coordinator for each Store.
+  Initial recipient DCR/ADP/route and ordinary/acceptance native peer routes are
+  preserved, not reconstructed from the newest roster or grant journal.
+- Stream every actual request for the selected holder/grant in bounded SQL pages
+  and require its exact initialized native session and original Store binding.
+  Missing/ambiguous evidence, unknown work, an empty result or orphan request
+  pins selection. No lifetime-sized set or new128/512 capacity is introduced.
+
+The existing ProtectedOnly plan stores one ReplayScope row, zero SQL effects,
+the original eight root mappings and the mandatory unchanged MailboxStoreState
+ninth guard. Only Grant changes. Complete application/native/history/device/
+prekey/source/receipt custody is rechecked before staging and by cold recovery.
+The existing private dispatcher distinguishes this nine-root used-Deposit
+profile from the eight-root unused closed-Deposit profile; no reader guesses a
+missing guard. Recovery rederives the exact oldest-acquisition successor before
+commit/adoption and uses the shared CAS/parts/abort protocol without fresh
+proofs, signing, transport callbacks or reissuing the request.
+
+The matching targeted source packet passed65/0/0/native0; exact evidence is
+in the [checkpoint](../testing/s01-idle-mailbox-floors-2026-10-09.md#used-deposit-holder-retirement--targeted-source-checkpoint).
+This candidate still requires matching full qualification; it
+does not close remaining S01 traversal/last-path/rotation/sustained requirements,
+activate the S04 scheduler, or qualify a physical client/release.
 Generation4's layout/closure and original Store/read/ACK passed their own final
 full source gate570/0/0; the exact receipt and source boundaries are recorded in
 the checkpoint. The subsequent generation5 late-result/connected-consumer gate

@@ -564,3 +564,51 @@ receipt/object dependency closure, sustained capacity/recovery and runtime
 renewal/cleanup remain unfinished. Whole S01, physical Windows/Android,
 files/groups/calls and shipping qualification are not accepted by this batch.
 No production deployment, account reset, Release publication or main merge occurred.
+
+## Used Deposit holder retirement — targeted source checkpoint
+
+The next coherent S01 source packet adds the closed internal used-Deposit
+producer, native/public Store completeness joins and oldest-first chain
+unlinking. Its single private owner is
+[grant custody](../architecture/owned-mailbox-grant-custody.md#used-deposit-holder-retirement--s01-source-candidate).
+It changes only Grant. Native/public original Store, live accepted objects,
+read paths, semantic/source/history/prekey and receipt work remain independently
+verifiable and byte-exact. This is write-holder retirement, not object expiry,
+recipient delivery, last Retrieve/ACK removal or S04 activation.
+
+Initial exploratory `used-deposit-01` completed61/1/0/native1 in4m51s. Its first
+initial Store exceeded the real30s installation scope after dispatch and
+returned outcome-unknown; no deletion was performed. Original SHA256:
+`60BF322D80E644BEC01C9D4478C9D82523B7D04C8EDF065A12407D43034219F2`.
+That FAIL remains FAIL. Its provisional object-expiry-only selection was
+replaced by the actual independent-custody disposition required by §8.4.3;
+the old receipt does not qualify the replacement or authenticated object expiry.
+
+Matching rebuild under Windows PowerShell5.1/SDK10.0.301 passed with zero
+warnings/errors in30.48s. `--list-tests` declared the final65-case selection:
+both new contact paths, both modified late-result/chain graph cases, unused
+Deposit abandonment, all six fixture prerequisites and existing plan/staging
+metadata cases. `used-deposit-02` ran serially with `xUnit.MaxParallelThreads=1`
+and completed65/0/0/native0 in12m59s. Canonical `Read-TestGateReceipt` verified
+all65 mappings and the named source cases. Receipt:
+`artifacts/s01-used-deposit-retirement/used-deposit-02/used-deposit-02.trx`.
+SHA256: `2E9F0B40E0BFC4891E1F36E2186C95BDD8A394527DFD54EC956DAAE3297AEB91`.
+
+Both initial DPH2 and ContactAccept use a genuine owned Store whose original
+thirty-day object is still live. Each exercises all five cold handovers, SQL
+evidence loss before staging and during stored recovery, exact original public
+evidence restoration only in the disposable fixture, unchanged complete
+application/source/native/non-grant custody and cached Store after acquisition
+removal with no new issuer/ingress. A bounded ordinary exact-retry helper can
+retry an outcome-unknown original request with fresh guards and checks unchanged
+request bytes; it does not widen any signed/installation window or freeze time.
+Chain checks distinguish received-unadopted, adopted-oldest and Retrieve cases;
+they prove structural unlinking, not independent used multi-acquisition owner
+qualification. No production retention/capacity/assertion was shortened.
+
+Matching mandatory full, independent issuer/receipt-key rollover, sustained
+128/512 capacity/recovery, broader ordinary/asset dependency closure, known
+Retrieve/traversal/last-path retirement and whole S01 remain open. No full was
+launched for this source increment. Physical Windows/Android, shipping/package,
+files/groups/calls and release acceptance remain unqualified. No production
+deployment, reset, GitHub Release publication or main merge occurred.

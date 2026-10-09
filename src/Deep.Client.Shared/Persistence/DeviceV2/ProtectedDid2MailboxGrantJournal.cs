@@ -58,6 +58,43 @@ internal static class ProtectedDid2MailboxGrantJournal
         state.Selections.TryGetValue(scope, out var selection) && selection.Current is { } name
             ? state.Entries[name] : null;
 
+    // Structural transition only. The held owner must independently close
+    // Store/object/replay dependencies before staging this exact successor.
+    // Retire oldest first: never orphan an unresolved request or skip a link.
+    internal static byte[] RequireOldestAdoptedDeposit(State state, ReadOnlySpan<byte> acquisition)
+    {
+        var name = Convert.ToHexString(acquisition);
+        if (!state.Entries.TryGetValue(name, out var selected) || !IsAdoptedWinner(selected) ||
+            ContactCodec.Decode("XMG2", Request(selected).Span).Field(6).Span[0] != (byte)MailboxCapabilityDomain.Deposit)
+            throw new IOException("Retirement requires an adopted exact Deposit acquisition.");
+        var scope = EntryScope(selected);
+        if (!state.Selections.TryGetValue(scope, out var selection) || selection.Pending is not null ||
+            selection.Current is null || selection.RetainedTail is null)
+            throw new IOException("Pending acquisition custody pins Deposit retirement.");
+        var last = selection.RetainedTail;
+        for (var cursor = selection.RetainedTail; cursor is not null; cursor = Predecessor(state.Entries[cursor]))
+        {
+            var entry = state.Entries[cursor];
+            if (!IsAdoptedWinner(entry)) throw new IOException("Unresolved or unadopted acquisition custody pins Deposit retirement.");
+            last = cursor;
+        }
+        if (last != name) throw new IOException("Linked Deposit acquisitions retire oldest first.");
+        return selected;
+    }
+
+    internal static byte[] RemoveOldestAdoptedDeposit(State state, ReadOnlySpan<byte> acquisition,
+        ReadOnlySpan<byte> network, ReadOnlySpan<byte> account, ReadOnlySpan<byte> instance)
+    {
+        var selected = RequireOldestAdoptedDeposit(state, acquisition);
+        var name = Convert.ToHexString(acquisition); var scope = EntryScope(selected);
+        var successor = state.Entries.Values.SingleOrDefault(entry => EntryScope(entry) == scope && Predecessor(entry) == name);
+        if (successor is null) state.Selections.Remove(scope);
+        else successor.AsSpan(PredecessorOffset, 32).Clear();
+        state.Entries.Remove(name); CryptographicOperations.ZeroMemory(selected);
+        state.Revision = checked(state.Revision + 1);
+        return Encode(state, network, account, instance);
+    }
+
     // Only the held owner calls these transitions. They do not establish issuer authority.
     internal static void AddPending(State state, byte[] entry)
     {

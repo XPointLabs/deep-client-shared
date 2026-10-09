@@ -62,7 +62,11 @@ No namespace tombstone set or new unbounded storage is introduced.
 The shared protected-retirement dispatcher distinguishes the unused closed
 Deposit acquisition profile (Grant changed, eight roots) from these counter
 profiles (Send or Read changed, nine roots). An eight-root counter plan is rejected:
-there is no compatibility reader or inferred missing SQL guard. Before
+there is no compatibility reader or inferred missing SQL guard.
+The separate [used Deposit source candidate](owned-mailbox-grant-custody.md#used-deposit-holder-retirement--s01-source-candidate)
+changes Grant with nine roots and preserves independent object/read custody;
+it is not this counter disposition or activation permission.
+Before
 commit-marker recording and before CAS adoption it rederives
 the exact counter successor from actual unchanged grant custody and the exact
 predecessor. Wrong row/scope/domain, non-prefix or third root state, missing

@@ -7,6 +7,24 @@ namespace Deep.Client.Shared.Services;
 
 public sealed partial class DeepIdV2AccountService
 {
+    internal async Task RetireUsedDepositAcquisitionAsync(ReadOnlyMemory<byte> originalAcquisitionHash,
+        DeepIdV2ContactPathAuthoritySource source, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(source); source.RequireAccountOwner(this);
+        if (originalAcquisitionHash.Length != 32 || originalAcquisitionHash.Span.IndexOfAnyExcept((byte)0) < 0)
+            throw new ArgumentException("An exact original acquisition hash is required.", nameof(originalAcquisitionHash));
+        var selector = originalAcquisitionHash.ToArray();
+        try
+        {
+            var fresh = await source.VerifyForOwnPreKeyAuthoringAsync(this, ct).ConfigureAwait(false);
+            using var verifier = OpenVerifier();
+            using var exclusion = await ProtectedDeepIdV2AccountOwner.MailboxEpochExclusion.OpenAsync(owner,
+                TrustedUnixSeconds(), verifier, source, fresh, selector, ct).ConfigureAwait(false);
+            await exclusion.RetireUsedDepositAcquisitionAsync(verifier, ct).ConfigureAwait(false);
+        }
+        finally { System.Security.Cryptography.CryptographicOperations.ZeroMemory(selector); }
+    }
+
     // Cold local readback facts only: no source/callback, new fence, current
     // policy, signing or deletion capability can be obtained through this API.
     internal async Task<Did2CompactionPlan.RootReadback> ReadOwnMailboxReplayFenceAsync(CancellationToken ct = default)

@@ -167,6 +167,25 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
         try { return new(bytes); } finally { CryptographicOperations.ZeroMemory(bytes); }
     }
 
+    // Includes retained prefix history, not just the working journal. Fixed
+    // memory enumeration; the held owner authenticates the tip before reading.
+    internal IEnumerable<byte[]> ReadVerifiedOutgoingOperations(Did2MessagingFloor protectedStable, CancellationToken ct)
+    {
+        _ = Did2MessagingFloor.Decode(protectedStable.Exact.Span, scope);
+        if (protectedStable.Phase != 1 || protectedStable.Status != 1)
+            throw new InvalidDataException("Outgoing history requires an active stable messaging floor.");
+        RequireSame(protectedStable, VerifyTip());
+        using var command = Command("SELECT operation,typeof(operation),length(operation) FROM events WHERE direction=1 ORDER BY ordinal;");
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            ct.ThrowIfCancellationRequested();
+            if (reader.GetString(1) != "blob" || reader.GetInt64(2) != 32)
+                throw new InvalidDataException("An outgoing history selector has an invalid shape.");
+            yield return reader.GetFieldValue<byte[]>(0);
+        }
+    }
+
     internal OwnedDid2MessagingPersistedEvent? ReadVerifiedOperation(Did2MessagingFloor protectedStable, ReadOnlySpan<byte> operation)
     {
         if (operation.Length != 32 || Did2MessagingSessionScope.Zero(operation)) throw new ArgumentException("An exact nonzero operation is required.");
