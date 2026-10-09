@@ -89,7 +89,20 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             TrackMailboxDispatchClock(); // Signed fixture sample advances with actual native dispatch time.
             var deposit = new OwnedGrantTransport(this, ownerOnPrimary: true);
             var store = new OwnedStoreFixture(this, null, ProtectedDeepIdV2AccountOwner.InitialMailboxOperation(intent), initial);
-            _ = await StartNativeContact(intent, deposit, store);
+            try { _ = await StartNativeContact(intent, deposit, store); }
+            catch (ClientMailboxDispatchOutcomeUnknownException)
+            {
+                // A slow durable Store may cross the existing 30s return fence.
+                // Reconcile once through the public original-operation path;
+                // do not resolve again, stretch time or reauthor the request.
+                var original = store.ExactRequest?.ToArray() ?? throw new InvalidDataException();
+                try
+                {
+                    _ = await ReplayInitialStartWithoutResolver(intent, deposit, store);
+                    Assert.Equal(original, store.ExactRequest); Assert.Equal(1, deposit.Calls);
+                }
+                finally { CryptographicOperations.ZeroMemory(original); }
+            }
             var retrieve = new OwnedGrantTransport(this, selfRetrieve: true, ownerOnPrimary: false);
             var terminal = new OwnedReadTerminal(this, initial) { RetainedEnvelope = store.StoredEnvelope };
             var received = await SynchronizeNativeReceiver(retrieve, terminal);
@@ -119,6 +132,9 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 var dependencies = await exclusion.CaptureRetirementDependenciesAsync();
                 Assert.True(dependencies.Dependencies.HasFlag(ProtectedDeepIdV2AccountOwner.MailboxEpochExclusion.RetirementDependency.RetainedRetrievePath));
                 Assert.True(dependencies.Dependencies.HasFlag(ProtectedDeepIdV2AccountOwner.MailboxEpochExclusion.RetirementDependency.UnresolvedReceiptOrObject));
+                Assert.True(dependencies.Dependencies.HasFlag(ProtectedDeepIdV2AccountOwner.MailboxEpochExclusion.RetirementDependency.ReadTraversal));
+                Assert.True(dependencies.Dependencies.HasFlag(ProtectedDeepIdV2AccountOwner.MailboxEpochExclusion.RetirementDependency.ReadFloor));
+                Assert.False(dependencies.Dependencies.HasFlag(ProtectedDeepIdV2AccountOwner.MailboxEpochExclusion.RetirementDependency.ReadWork));
                 if (nativeSqlFault)
                 {
                     using (Did2CompactionTestHooks.Push(point =>
@@ -175,6 +191,18 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             await PeerRetirementOwner().ResumeOwnedLocalCompactionAsync(default);
             using (var read = await ReadPeerMailboxReads())
             { Assert.Equal(0, read.Phase); Assert.Empty(read.Counters); Assert.Single(read.Traversals); }
+            reader = ReopenGrantReader();
+            using (var exclusion = await reader.OpenMailboxEpochExclusionAsync(selector, GrantReaderSource(reader)))
+            {
+                var dependencies = await exclusion.CaptureRetirementDependenciesAsync();
+                Assert.True(dependencies.Dependencies.HasFlag(ProtectedDeepIdV2AccountOwner.MailboxEpochExclusion.RetirementDependency.ReadTraversal));
+                Assert.True(dependencies.Dependencies.HasFlag(ProtectedDeepIdV2AccountOwner.MailboxEpochExclusion.RetirementDependency.RetainedRetrievePath));
+                Assert.False(dependencies.Dependencies.HasFlag(ProtectedDeepIdV2AccountOwner.MailboxEpochExclusion.RetirementDependency.ReadFloor));
+                using var plan = await peerStorage.ReadOwnedAsync(Did2CompactionPlan.Slot) ?? throw new InvalidDataException();
+                await Assert.ThrowsAsync<IOException>(() => exclusion.RetireUnusedClosedDepositAcquisitionAsync());
+                using var actualPlan = await peerStorage.ReadOwnedAsync(Did2CompactionPlan.Slot) ?? throw new InvalidDataException();
+                Assert.Equal(plan.Use(bytes => bytes.ToArray()), actualPlan.Use(bytes => bytes.ToArray()));
+            }
             for (var index = 0; index < pinnedSlots.Length; index++)
             { using var raw = await peerStorage.ReadOwnedAsync(pinnedSlots[index]) ?? throw new InvalidDataException(); Assert.Equal(hashes[index], raw.Use(bytes => SHA256.HashData(bytes))); }
             // Durable local display survives exclusion; it does not renew the

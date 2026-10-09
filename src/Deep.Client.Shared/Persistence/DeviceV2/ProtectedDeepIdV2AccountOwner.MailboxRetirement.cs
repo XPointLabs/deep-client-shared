@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Security.Cryptography;
 using Deep.Protocol.ContactV1;
 using Deep.Protocol.DeepExtension.MailboxCapabilities;
@@ -72,10 +73,23 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 var entry = grants.Entries[Convert.ToHexString(exclusion.acquisition)];
                 var scope = entry.AsSpan(0, 32).ToArray(); var route = entry.AsSpan(64, 32).ToArray();
                 var scopeName = Convert.ToHexString(scope);
+                var request = ContactCodec.Decode("XMG2", ProtectedDid2MailboxGrantJournal.Request(entry).Span);
+                var retrieve = request.Field(6).Span[0] == (byte)MailboxCapabilityDomain.Retrieve;
+                byte[] readScope = [];
                 byte[] grant = ProtectedDid2MailboxGrantJournal.HasWinner(entry)
                     ? SHA256.HashData(ContactCodec.Decode("XMC2", ProtectedDid2MailboxGrantJournal.Response(entry).Span).Field(8).Span) : [];
                 try
                 {
+                    if (retrieve)
+                    {
+                        // Acquisition Scope(route, locator, domain) is NOT the
+                        // installed mailbox scope used by read cycles/traversals.
+                        // Derive the same original route/epoch binding as the
+                        // actual retained credential and Retrieve producer.
+                        var original = ContactRouteClosureCodec.Decode(ProtectedDid2MailboxGrantJournal.OriginalRoute(entry).Span);
+                        readScope = ClientMailboxScope.Derive(route, new BlindedMailboxId(original.Reachability.Field(2).Span),
+                            BinaryPrimitives.ReadUInt64BigEndian(original.Selection.Field(4).Span)).ToArray();
+                    }
                     var selection = grants.Selections[scopeName];
                     var dependencies = selection.Pending is not null ||
                         grants.Entries.Values.Count(value => value.AsSpan(0, 32).SequenceEqual(scope)) != 1
@@ -88,10 +102,11 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                         dependencies |= RetirementDependency.SendFloor;
                     using var readRaw = await ReadAsync(owner.storage, ProtectedDid2MailboxReadJournal.Slot, ct).ConfigureAwait(false);
                     using var read = readRaw.Use(bytes => ProtectedDid2MailboxReadJournal.Decode(bytes, network, account.Span, instance));
-                    if (read.Active is { } active && (FixedRoute(active.Scope, scope) || FixedRoute(active.Route, route) ||
+                    if (read.Active is { } active && (readScope.Length != 0 && FixedRoute(active.Scope, readScope) || FixedRoute(active.Route, route) ||
                             grant.Length != 0 && FixedRoute(active.Grant, grant))) dependencies |= RetirementDependency.ReadWork;
                     if (grant.Length != 0 && read.Counters.ContainsKey(Convert.ToHexString(grant))) dependencies |= RetirementDependency.ReadFloor;
-                    if (read.Traversals.ContainsKey(scopeName)) dependencies |= RetirementDependency.ReadTraversal;
+                    if (readScope.Length != 0 && read.Traversals.ContainsKey(Convert.ToHexString(readScope)))
+                        dependencies |= RetirementDependency.ReadTraversal;
                     using var ordinaryRaw = await ReadAsync(owner.storage, ProtectedDid2DirectTextJournal.Slot, ct).ConfigureAwait(false);
                     using var ordinary = ordinaryRaw.Use(bytes => ProtectedDid2DirectTextJournal.Decode(bytes, network, account.Span, instance));
                     // Current ordinary/asset roots do not contain a complete
@@ -104,8 +119,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     using var catalogRaw = await ReadAsync(owner.storage, ProtectedDid2MessagingSessionCatalog.Slot, ct).ConfigureAwait(false);
                     using var catalog = catalogRaw.Use(bytes => ProtectedDid2MessagingSessionCatalog.Decode(bytes, network, account.Span, instance));
                     if (grant.Length != 0 || catalog.Count != 0) dependencies |= RetirementDependency.UnresolvedReceiptOrObject;
-                    var request = ContactCodec.Decode("XMG2", ProtectedDid2MailboxGrantJournal.Request(entry).Span);
-                    if (request.Field(6).Span[0] == (byte)MailboxCapabilityDomain.Retrieve)
+                    if (retrieve)
                         dependencies |= RetirementDependency.RetainedRetrievePath;
                     using var registration = await SqliteDeepIdV2AccountGeneration.ReadCompactionRegistrationUnderLeaseAsync(
                         owner.storage, network, account, ct).ConfigureAwait(false);
@@ -125,7 +139,11 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     ct.ThrowIfCancellationRequested(); exclusion.held.RequireOwner(owner.lease);
                     return new(exclusion, dependencies, guards);
                 }
-                finally { CryptographicOperations.ZeroMemory(scope); CryptographicOperations.ZeroMemory(route); CryptographicOperations.ZeroMemory(grant); }
+                finally
+                {
+                    CryptographicOperations.ZeroMemory(scope); CryptographicOperations.ZeroMemory(route);
+                    CryptographicOperations.ZeroMemory(grant); CryptographicOperations.ZeroMemory(readScope);
+                }
             }
 
             internal async Task RequireExactGuardsUnderGateAsync(CancellationToken ct)

@@ -655,3 +655,51 @@ sustained128/512 lifetime, independent issuer/receipt-key rollover, known
 Retrieve/traversal/last-path closure, the matching mandatory full, whole S01,
 runtime activation, physical Windows/Android or release acceptance. No full,
 production deployment, account reset, GitHub Release or main merge occurred.
+
+## Original issuer rotation and actual traversal dependency index
+
+The next S01 packet independently changes both MCG3 issuer public keys in a
+genuine root-signed PMA2 successor, rebinds/threshold-signs PMT2 and advances the
+real protected network lineage. Initial DPH2 and ContactAccept original Stores
+remain independently verifiable after encrypted cold reopen, completed-send/
+floor/used-holder retirement and a staged cold handover. Substituting the valid
+current PMA2 into original SQL evidence rejects before staging or mutation;
+restoring the exact disposable-fixture record permits recovery. History, native
+floor, source SQL, retained roots and live objects remain exact. No new issuer
+or ingress call is needed for cached original outcomes. This covers these two
+issuer-rotation consumers, not independent node receipt-key rotation or renewal.
+
+Inspection also found a real dependency-index defect: traversal lookup used the
+grant acquisition scope, whereas actual Retrieve stores a different mailbox
+scope. Capture now derives that original installed route/mailbox/epoch scope;
+the sole mapping belongs to [counter custody](../architecture/owned-mailbox-counter-retirement.md#held-selection-and-exact-dependencies).
+The actual Store/receive/semantic ACK case asserts traversal and read-floor
+dependencies before retirement, then preserved traversal/last-path pinning and
+no read floor afterwards. Unpolled known/unknown Retrieve cases assert that a
+traversal is not invented. This correction does not delete a traversal/path.
+
+All runs used Windows PowerShell5.1, SDK10.0.301 and serial xUnit execution;
+declared case lists and canonical receipt mappings agreed. No source/executable
+input was edited while a run was live. Receipts under
+`artifacts/s01-issuer-rotation/`:
+
+- `issuer-rotation-01/issuer-rotation-01.trx`:9/0/0, native0,6m06s;
+  predates the production index correction. SHA256
+  `97142EA4290BAE8968550010CDD1E8120E05A95BC267F0C17986796F19ADB4A4`.
+- `issuer-traversal-02/issuer-traversal-02.trx`:11/1/0, native1,9m58s.
+  Both issuer consumers, unpolled cases and prerequisites passed. Actual ACK
+  setup stopped at Store's post-dispatch 30s installation fence before the new
+  index assertions. This FAIL remains FAIL. SHA256
+  `60DFA7AC838DE2A6704FB86DEA0006B8C7F6B41108F8854FA9712C2C77B6BF03`.
+- `traversal-receive-03/traversal-receive-03.trx`:7/0/0, native0,3m31s.
+  After one bounded exact-retry handling correction in the ACK fixture, actual
+  receive/ACK and all six prerequisites passed. The retry uses the public
+  original-operation path with a forbidden resolver, checks unchanged MAU bytes
+  and one grant acquisition, and never stretches signed time or reencrypts.
+  Production code is unchanged from02. SHA256
+  `E67F9EDD4A4922D403860853501FBF34BB0BA197D308B0AE852E2E5026F27E9C`.
+
+Final production solution build: native0, zero warnings/errors,9.97s.
+No matching mandatory full was launched: remaining S01 dependency/path closure,
+receipt-key rotation, sustained lifecycle and connected/shipping/device gates
+are still open. No production deploy/reset, Release publication or main merge.

@@ -103,6 +103,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             {
                 var length = checked((int)BinaryPrimitives.ReadUInt32BigEndian(exact.AsSpan(offset + 4, 4)));
                 offset += 8;
+                if (tag == 4 && rotatedIssuerPma is not null)
+                    ContactCodec.Decode("PMA2", rotatedIssuerPma).CoreHash.Span.CopyTo(exact.AsSpan(offset + 6, 32));
                 if (tag == 6)
                     BinaryPrimitives.WriteUInt64BigEndian(exact.AsSpan(offset, length),
                         checked(BinaryPrimitives.ReadUInt64BigEndian(prior.Field(6).Span) + 1));
@@ -188,6 +190,9 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 Assert.Equal(Did2CompactionPlan.RootKind.NativeFence, dependencies.Guards[^1].Kind);
                 Assert.Equal(capturedFence.Value.Before.ToArray(), dependencies.Guards[^1].Digest.ToArray());
                 Assert.True(dependencies.Dependencies.HasFlag(ProtectedDeepIdV2AccountOwner.MailboxEpochExclusion.RetirementDependency.RetainedRetrievePath));
+                // This acquisition has never polled: a Retrieve domain alone
+                // must not invent a protected traversal dependency.
+                Assert.False(dependencies.Dependencies.HasFlag(ProtectedDeepIdV2AccountOwner.MailboxEpochExclusion.RetirementDependency.ReadTraversal));
                 Assert.Equal(!unresolved, dependencies.Dependencies.HasFlag(
                     ProtectedDeepIdV2AccountOwner.MailboxEpochExclusion.RetirementDependency.UnresolvedReceiptOrObject));
                 await dependencies.RecheckAsync();

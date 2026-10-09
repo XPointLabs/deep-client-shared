@@ -32,6 +32,16 @@ those dependencies stay protected and are not reclassified as settled. An idle
 read floor may therefore retire while its last retained route stays pinned.
 An empty poll alone, without independently checked exclusion, grants no permission.
 
+The general retirement dependency capture uses two distinct opaque namespaces:
+grant acquisition uses `Scope(originalRouteHash, locator, domain)`, whereas a
+Retrieve cycle/traversal uses the actual `ClientMailboxScope.Derive` from the
+original route hash (the installed issuer context), original mailbox and original
+selection epoch. Never look up a traversal by the acquisition scope or by a new
+current epoch. This structural index identifies a preserved dependency; it does
+not verify receipt completion, grant deletion permission or path migration.
+After idle read-floor removal, a retained traversal and the last Retrieve/ACK
+path remain indexed and pinned even though the selected counter is absent.
+
 ## Stored profile and cold recovery
 
 Use the existing ProtectedOnly plan, one ReplayScope row selecting the exact

@@ -434,6 +434,11 @@ passed9/0/0/native0: two original Stores under distinct adopted holders,
 oldest-first cold recovery, preserved successor custody and pinning by an
 unknown successor send. Its signed selection setup uses the controlled producer
 fixture; it does not qualify autonomous runtime renewal.
+The [issuer-rotation/index packet](../testing/s01-idle-mailbox-floors-2026-10-09.md#original-issuer-rotation-and-actual-traversal-dependency-index)
+additionally checks genuine root-signed issuer-key replacement for original
+initial/acceptance Stores, refusal of current-policy substitution and preserved
+original outcomes after cold holder retirement. It does not qualify independent
+node receipt-key rollover or current issuance/renewal activation.
 This candidate still requires matching full qualification; it
 does not close remaining S01 traversal/last-path/rotation/sustained requirements,
 activate the S04 scheduler, or qualify a physical client/release.
