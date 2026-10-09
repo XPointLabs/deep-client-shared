@@ -564,3 +564,39 @@ known holder, traversal or last-path disposition. An independent current issuer
 may subsequently create a new acquisition through the ordinary owned reader;
 it cannot restore the retired expired response. Focused/full, sustained and
 physical acceptance are recorded separately in the checkpoint.
+
+## Explicit owned Retrieve successor — S01 source candidate
+
+The internal `RenewOwnPermanentContactRetrieveGrantAsync(originalAcquisition,
+source, transport, ct)` implements one explicit transition, not an autonomous
+renewal policy or S04 scheduler. Its only caller input is the original XMG2 hash
+selector. The owner reopens that acquisition and its exact completed permanent
+publication (including an independently bound archived predecessor) under the
+actual account lease. Current proof/network/host/time, private capability and
+holder authority still come from their original closed owners.
+
+The original must be an adopted Retrieve winner in the same scope. With current
+and retained tail both naming it, renewal either creates one pending successor
+or resumes that exact pending request. A closed-unresolved/late intervening tail
+pins renewal. After promotion, retrying the same original selector returns only
+its immediate adopted successor, with no further pending/tail continuation.
+An absent original, Deposit, unrelated selector or advanced chain rejects before
+request authoring. Ordinary acquisition keeps selecting current while renewal
+is pending; it never implicitly adopts or forwards the renewal candidate.
+
+The existing generation5 journal already encodes this predecessor/pending/current
+transition. No layout, magic, Protocol public API or capacity change is added.
+New signing occurs only before the pending request CAS/read-back. Lost reply,
+cancellation and cold retry preserve the exact operation/window/holder. A current
+host independently verifies the returned result before winner persistence;
+selection and SQL installation remain separate existing read-back fences.
+Retry after selection/SQL interruption installs the same winner without another
+issuer call. Expired pending requests are not regenerated or silently discarded;
+their existing explicit closure/reconciliation lane remains mandatory.
+
+Original holder/request/result, publication/private path, read/traversal/counters,
+send, native session and attachment custody remain retained. This transition
+does not delete the original grant, complete a read/ACK/application receipt or
+authorize last-path retirement. The superseded-holder fixtures now obtain their
+replacement through this actual owner lane rather than directly staging the
+protected journal. Targeted, full and physical qualification remain separate.

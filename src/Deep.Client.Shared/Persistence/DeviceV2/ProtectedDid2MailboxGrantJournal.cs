@@ -58,6 +58,31 @@ internal static class ProtectedDid2MailboxGrantJournal
         state.Selections.TryGetValue(scope, out var selection) && selection.Current is { } name
             ? state.Entries[name] : null;
 
+    // Explicit owner renewal is bound to one original adopted acquisition.
+    // Ordinary acquisition continues selecting current, never this candidate.
+    // A retry after promotion returns that exact immediate successor rather
+    // than creating another request. Unknown/late intervening work stays pinned.
+    internal static byte[]? AcquisitionForRenewal(State state, string scope, ReadOnlySpan<byte> originalAcquisition)
+    {
+        Required32(originalAcquisition);
+        var originalName = Convert.ToHexString(originalAcquisition);
+        if (!state.Entries.TryGetValue(originalName, out var original) || !IsAdoptedWinner(original) ||
+            EntryScope(original) != scope ||
+            ContactCodec.Decode("XMG2", Request(original).Span).Field(6).Span[0] != (byte)MailboxCapabilityDomain.Retrieve ||
+            !state.Selections.TryGetValue(scope, out var selection) || selection.Current is not { } current)
+            throw new IOException("Renewal requires the exact adopted original Retrieve acquisition.");
+        if (current != originalName)
+        {
+            var successor = state.Entries[current];
+            if (Predecessor(successor) != originalName || selection.Pending is not null || selection.RetainedTail != current)
+                throw new IOException("Another acquisition continuation owns this renewal scope.");
+            return successor;
+        }
+        if (selection.RetainedTail != originalName)
+            throw new IOException("Unresolved or late acquisition custody pins renewal.");
+        return selection.Pending is { } pending ? state.Entries[pending] : null;
+    }
+
     // Structural transition only. The held owner must independently close
     // Store/object/replay dependencies before staging this exact successor.
     // Retire oldest first: never orphan an unresolved request or skip a link.

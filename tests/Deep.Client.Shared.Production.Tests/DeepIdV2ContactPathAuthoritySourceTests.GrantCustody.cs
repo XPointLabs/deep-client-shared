@@ -695,7 +695,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 
         // Controlled, actual signed producer fixture. This stages selection for
         // consumer tests; it is NOT runtime renewal/compaction or device evidence.
-        internal async Task StageVerifiedGrantSuccessorAsync(OwnedGrantTransport transport, bool own, bool currentRetainedAuthority = false)
+        internal async Task StageVerifiedGrantSuccessorAsync(OwnedGrantTransport transport, bool own)
         {
             var selected = own ? innerStorage : peerStorage;
             using var generation = await selected.ReadOwnedAsync("deep.store.v2.sql-generation") ?? throw new InvalidOperationException();
@@ -732,11 +732,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 {
                     Assert.Equal(MailboxCapabilityDomain.Retrieve, domain);
                     var parsed = ContactRouteClosureCodec.Decode(ProtectedDid2MailboxGrantJournal.OriginalRoute(old).Span);
-                    var currentAccount = own ? ReopenAccount() : ReopenGrantReader();
-                    var currentSource = own ? Source(currentAccount) : GrantReaderSource(currentAccount);
-                    var fresh = currentRetainedAuthority ? await currentSource.VerifyForOwnPreKeyAuthoringAsync(currentAccount, default) : null;
-                    var network = fresh?.Network ?? transport.Dispatch!.Network;
-                    var (host, request, retainedPending) = await PrepareRetainedGraphRequestAsync(original, parsed, network, seed, fresh);
+                    var network = transport.Dispatch!.Network;
+                    var (host, request, retainedPending) = await PrepareRetainedGraphRequestAsync(original, parsed, network, seed);
                     pending = retainedPending;
                     ProtectedDid2MailboxGrantJournal.AddPending(state, pending); await Save();
                     response = await IssueRetainedFixtureGrantAsync(request, parsed, host, network, default);

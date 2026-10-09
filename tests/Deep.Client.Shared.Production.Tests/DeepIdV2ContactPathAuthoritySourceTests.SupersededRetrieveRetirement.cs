@@ -53,11 +53,16 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             }
             // Namespace exclusion/floor removal alone cannot delete the last holder.
             await Assert.ThrowsAsync<IOException>(Retire);
-            await StageVerifiedGrantSuccessorAsync(oldTransport, own, currentRetainedAuthority: true);
+            var renewalAccount = Account();
+            var renewalTransport = new OwnedGrantTransport(this, selfRetrieve: true, ownerOnPrimary: own);
+            _ = await renewalAccount.RenewOwnPermanentContactRetrieveGrantAsync(acquisition,
+                own ? Source(renewalAccount) : GrantReaderSource(renewalAccount), renewalTransport);
+            Assert.Equal(1, renewalTransport.Calls);
+            Assert.True(renewalTransport.BuiltHeldFrame);
             var installedAccount = Account();
             _ = await installedAccount.AcquireOwnPermanentContactRetrieveGrantAsync(
                 own ? Source(installedAccount) : GrantReaderSource(installedAccount), oldTransport);
-            Assert.Equal(1, oldTransport.Calls); // Controlled selection is not an automatic issuer renewal.
+            Assert.Equal(1, oldTransport.Calls); // Ordinary acquisition reopens the already selected successor.
             // A replacement installed in SQL without an actual completed read
             // is not enough to declare the retained path available.
             await Assert.ThrowsAsync<IOException>(Retire);

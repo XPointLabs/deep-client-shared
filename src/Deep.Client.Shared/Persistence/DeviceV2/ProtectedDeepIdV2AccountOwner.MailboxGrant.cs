@@ -81,6 +81,40 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             exactXmc2, ct).ConfigureAwait(false);
     }
 
+    // A selector is not supplied route/time/holder authority. The actual
+    // original acquisition and phase7 publication are reopened under one lease.
+    internal async Task<VerifiedMailboxRetainedReadGrantV2> RenewOwnPermanentContactRetrieveGrantAsync(
+        ulong unixSeconds, IDeepMlDsa65Verifier verifier, DeepIdV2ContactPathAuthoritySource source,
+        DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh,
+        ReadOnlyMemory<byte> originalAcquisition, IDid2RetainedMailboxReadGrantTransport transport, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(transport);
+        if (originalAcquisition.Length != 32 || originalAcquisition.Span.IndexOfAnyExcept((byte)0) < 0)
+            throw new ArgumentException("An exact original acquisition selector is required.", nameof(originalAcquisition));
+        using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
+        using var current = await RequireCurrentUnderLeaseAsync(unixSeconds, verifier, ct).ConfigureAwait(false);
+        var instance = await SqliteDeepIdV2AccountGeneration.ReadAccountInstanceUnderLeaseAsync(
+            storage, networkId, current.AccountId, ct).ConfigureAwait(false);
+        byte[] routeHash;
+        try
+        {
+            using var root = await storage.ReadOwnedAsync(ProtectedDid2MailboxGrantJournal.Slot, ct).ConfigureAwait(false) ??
+                throw new InvalidDataException("Renewal lost its original acquisition custody.");
+            using var state = root.Use(bytes => ProtectedDid2MailboxGrantJournal.Decode(bytes, networkId, current.AccountId.Span, instance));
+            if (!state.Entries.TryGetValue(Convert.ToHexString(originalAcquisition.Span), out var original))
+                throw new IOException("Renewal cannot recreate an absent original acquisition.");
+            routeHash = ContactRouteClosureCodec.Decode(ProtectedDid2MailboxGrantJournal.OriginalRoute(original).Span).ExactHash.ToArray();
+        }
+        finally { CryptographicOperations.ZeroMemory(instance); }
+        try
+        {
+            using var publication = await OpenOwnRetainedPublicationUnderLeaseAsync(current, held, source, fresh, ct, routeHash).ConfigureAwait(false);
+            return await AcquireRetainedMailboxReadUnderLeaseAsync(current, held, publication, source, fresh,
+                transport, ct, originalAcquisition).ConfigureAwait(false);
+        }
+        finally { CryptographicOperations.ZeroMemory(routeHash); }
+    }
+
     // The packet is untrusted input, never a caller-supplied outcome or authority.
     // All route/capability/proof continuations originate in this actual owner.
     private async Task<VerifiedDeepIdV2MailboxGrant> AcceptMailboxGrantResultUnderLeaseAsync(

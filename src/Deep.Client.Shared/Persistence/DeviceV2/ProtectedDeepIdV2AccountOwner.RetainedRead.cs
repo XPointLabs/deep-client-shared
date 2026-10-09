@@ -15,7 +15,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     private async Task<VerifiedMailboxRetainedReadGrantV2> AcquireRetainedMailboxReadUnderLeaseAsync(
         VerifiedDeepIdV2CurrentAccount current, HeldDeepIdV2AccountLease held, OwnRetainedPublication publication,
         DeepIdV2ContactPathAuthoritySource source, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh,
-        IDid2RetainedMailboxReadGrantTransport transport, CancellationToken ct)
+        IDid2RetainedMailboxReadGrantTransport transport, CancellationToken ct,
+        ReadOnlyMemory<byte> renewalAcquisition = default)
     {
         var instance = await SqliteDeepIdV2AccountGeneration.ReadAccountInstanceUnderLeaseAsync(
             storage, networkId, current.AccountId, ct).ConfigureAwait(false);
@@ -28,7 +29,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             using var state = ProtectedDid2MailboxGrantJournal.Decode(snapshot, networkId, current.AccountId.Span, instance);
             var scope = Convert.ToHexString(ProtectedDid2MailboxGrantJournal.Scope(publication.Route.ExactHash.Span,
                 publication.Locator.Span, (byte)MailboxCapabilityDomain.Retrieve));
-            var entry = ProtectedDid2MailboxGrantJournal.AcquisitionForNewWork(state, scope);
+            var entry = renewalAcquisition.IsEmpty
+                ? ProtectedDid2MailboxGrantJournal.AcquisitionForNewWork(state, scope)
+                : ProtectedDid2MailboxGrantJournal.AcquisitionForRenewal(state, scope, renewalAcquisition.Span);
             if (entry is null)
             {
                 if (state.Entries.Count >= ProtectedDid2MailboxGrantJournal.MaximumEntries)
@@ -86,13 +89,16 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             if (!receivedRoot.Use(bytes => FixedRoute(bytes, snapshot)))
                 throw new CryptographicException("Retained-read custody changed before read-back.");
             using var received = ProtectedDid2MailboxGrantJournal.Decode(snapshot, networkId, current.AccountId.Span, instance);
-            var winner = ProtectedDid2MailboxGrantJournal.AcquisitionForNewWork(received, scope);
+            var winner = renewalAcquisition.IsEmpty
+                ? ProtectedDid2MailboxGrantJournal.AcquisitionForNewWork(received, scope)
+                : ProtectedDid2MailboxGrantJournal.AcquisitionForRenewal(received, scope, renewalAcquisition.Span);
             if (winner is null || !ProtectedDid2MailboxGrantJournal.HasWinner(winner) || !FixedRoute(winner, entry))
                 throw new CryptographicException("Retained-read winner differs from its protected original acquisition.");
             var result = await publication.Host.VerifyRetainedReadSuccessAsync(publication.Route.ExactBytes,
                 ProtectedDid2MailboxGrantJournal.Request(winner), ProtectedDid2MailboxGrantJournal.Response(winner), ct).ConfigureAwait(false);
             await publication.RecheckAsync(ct).ConfigureAwait(false);
-            if (received.Selections[scope].Current is null)
+            if (received.Selections[scope].Current is null ||
+                !renewalAcquisition.IsEmpty && received.Selections[scope].Pending == ProtectedDid2MailboxGrantJournal.Acquisition(winner))
             {
 #if DEEP_TEST_INTERNALS
                 Did2MailboxInstallationTestHooks.Hit(Did2MailboxInstallationFailpoint.BeforeSelection);

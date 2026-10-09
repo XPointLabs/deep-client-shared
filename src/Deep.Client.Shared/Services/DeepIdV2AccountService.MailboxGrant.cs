@@ -159,6 +159,27 @@ public sealed partial class DeepIdV2AccountService
         CancellationToken ct = default) =>
         AcquirePermanentContactDepositGrantAsync(contact, source, new Did2MailboxGrantOnionTransport(source), ct);
 
+    // Explicit same-original-path transition. Automatic scheduling belongs to
+    // the later runtime stage; this selector cannot supply authority or custody.
+    internal async Task<VerifiedMailboxRetainedReadGrantV2> RenewOwnPermanentContactRetrieveGrantAsync(
+        ReadOnlyMemory<byte> originalAcquisition, DeepIdV2ContactPathAuthoritySource source,
+        IDid2RetainedMailboxReadGrantTransport transport, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(source); ArgumentNullException.ThrowIfNull(transport);
+        source.RequireAccountOwner(this);
+        if (originalAcquisition.Length != 32 || originalAcquisition.Span.IndexOfAnyExcept((byte)0) < 0)
+            throw new ArgumentException("An exact original acquisition selector is required.", nameof(originalAcquisition));
+        var selector = originalAcquisition.ToArray();
+        try
+        {
+            var fresh = await source.VerifyForOwnPreKeyAuthoringAsync(this, ct).ConfigureAwait(false);
+            using var verifier = OpenVerifier();
+            return await owner.RenewOwnPermanentContactRetrieveGrantAsync(TrustedUnixSeconds(), verifier,
+                source, fresh, selector, transport, ct).ConfigureAwait(false);
+        }
+        finally { System.Security.Cryptography.CryptographicOperations.ZeroMemory(selector); }
+    }
+
     // Internal connected custody entry; no public callback/trust/key injection.
     // The protected winner is installed/read back under the actual owner lease;
     // no signer or SQL/runtime authority escapes. Shipping dispatch remains gated.

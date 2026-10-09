@@ -933,3 +933,61 @@ in-process issuer/terminal results, not physical devices or two remote HTTP stor
 Remaining acquisition/traversal/last-path dispositions, DCA/XUR/PMT/key rollover,
 sustained128/512 and current mandatory full after the complete S01 batch remain
 open. S02/S04 activation, production deployment/reset, Release and main unchanged.
+
+## Explicit owned Retrieve renewal — 2026-10-09
+
+The new internal owner transition binds renewal to one original adopted XMG2
+selector. It reopens actual phase7 original publication/private custody under
+the account lease, signs and persists one pending successor before the courier,
+then independently verifies and adopts the current host's result. Ordinary
+acquisition continues selecting original current while renewal is pending.
+Cold retry resumes the exact pending operation/window/holder or already promoted
+immediate successor; a further advanced chain rejects the stale selector.
+No old grant/path/read/traversal/native/attachment state is removed. The closed
+local API owner is
+[owned mailbox custody](../architecture/owned-mailbox-grant-custody.md#explicit-owned-retrieve-successor--s01-source-candidate).
+No Protocol public API, wire, magic, generation or128/512 limit changes.
+
+The existing empty/nonempty superseded-holder retirement fixtures now obtain
+their actual signed replacement through the account owner and held-frame
+courier, not direct fixture writes to the grant journal. The old controlled
+current-route consumer fixture remains for its separately labelled fault tests;
+its now-unused post-epoch authority switch was removed.
+
+Both Windows PowerShell5.1/Desktop/SDK10.0.301 builds passed with native0 and
+zero warnings/errors:46.95s and7.84s. Focused receipts are preserved under
+`artifacts/s01-owned-retrieve-renewal/`:
+
+- `owned-renewal-01/owned-renewal-01.trx`:23 total,17 passed,6 failed,0 skipped,
+  native1,6m40s. All six new rows reached renewed SQL installation but invoked
+  the first-install observer that expected one credential. The owner correctly
+  retained old plus new credentials; the single-install helper was not relaxed.
+  SHA256 `C3027D34E5361F0B5CB7B72B03BD92B8F5142290866A914E67BBBD96A1DA2A68`.
+- `owned-renewal-02/owned-renewal-02.trx`:24/24/0/0,native0,6m58s.
+  The renewal-specific independent SQLCipher observer requires exactly two
+  scopes/epochs/grants and both exact old/new canonical grants, with no prepared
+  dispatch/outbox rows. SHA256
+  `1A6773DD2980142DAFDC53DFFA9945056B23D9E7479CC9EE5AB882AE3079554A`.
+
+The first23 cases and second24 cases were listed before their runs. The second
+matrix adds only `expired` to the same six renewal handovers, two existing
+superseded-holder scenarios, nine retained-read cases and six prerequisites.
+Canonical receipt parsing verifies all exact result/definition/execution
+mappings; set comparison preserves every original23 identity and adds only that
+declared expired row. This is a filtered source matrix, not a full repository gate.
+No source/executable/normative edits occurred during either live build/test.
+
+Positive cases cover reply loss, cancellation, before-selection, before/after
+SQL, exact cold retry and repeated completion without another issuer call.
+The ordinary lane cannot implicitly forward/adopt the pending successor.
+Expired unknown renewal is closed via the actual owner and then remains pinned:
+no fresh request, rewindowing, successful outcome or deletion is inferred.
+Further renewal followed by retry of the earlier selector rejects without
+mutation/courier. Missing original selector rejects before the courier.
+Real PQ/native/SQLCipher and current signed in-process issuer/held-frame facts
+are used; this is not two-remote-store, production or physical device evidence.
+
+S01 remains unaccepted: linked/remaining acquisition, traversal/last-path
+dispositions, DCA/XUR/PMT/key rollover, sustained128/512 and the current mandatory
+full after the complete source batch are still required. S02/S04 activation,
+production, GitHub Release and main were not changed by this packet.
