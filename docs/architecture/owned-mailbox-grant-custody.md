@@ -524,9 +524,10 @@ one actual phase3 closed-unresolved acquisition only after the held producer
 independently passes its original possible-issuance ceiling and irreversible
 native epoch exclusion. It does not assert non-issuance, successful reading,
 BeforeForward or a remote terminal outcome. Pending/received/adopted winners,
-linked candidates, counters, any original active read/ACK, traversal and unresolved
-ordinary/attachment/native-session work remain pinned. The dependency capture
-must contain only the conservative RetainedRetrievePath flag.
+non-tail/intervening candidates, any original active read/ACK and unresolved
+ordinary/attachment work remain pinned. The sole never-used acquisition profile
+allows only the conservative RetainedRetrievePath flag. Its linked renewal-tail
+extension is specified below; it never deletes a selected holder or traversal.
 
 Selection discharges that one flag by reopening the exact actual completed
 permanent publication, including an independently bound archived predecessor.
@@ -600,3 +601,43 @@ does not delete the original grant, complete a read/ACK/application receipt or
 authorize last-path retirement. The superseded-holder fixtures now obtain their
 replacement through this actual owner lane rather than directly staging the
 protected journal. Targeted, full and physical qualification remain separate.
+
+## Closed unused renewal-tail disposition — S01 source candidate
+
+The same internal `RetireUnusedClosedRetrieveAcquisitionAsync` may remove one
+closed phase3 renewal tail when its direct predecessor is the exact selected
+adopted Retrieve winner. Pending must be absent, retained tail must name that
+closed candidate, and original route/locator/private capability must match the
+selected predecessor. Intervening unknown/late work or a non-tail selector
+rejects. The actual held original ceiling/native epoch exclusion is still
+mandatory; expiry of XMG2 alone cannot authorize this disposition.
+
+The linked producer discharges AcquisitionChain by preserving the complete
+selected predecessor chain and changing only its retained-tail pointer back to
+current. Original publication/private read custody remains mandatory. Original
+read journal must be idle. When a traversal exists, it must match independent
+SQL, and bounded enumeration requires positive settled original Retrieve/ACK
+coverage; pending/unknown/orphan ACK rejects. A native semantic dependency
+without that completed original read is pinned. Complete source/native history,
+consent, application receipt obligations, SQL and read/send counters remain
+byte-exact under the existing ninth guard. No native/session, traversal, selected
+grant, payload, receipt work or accepted-object path is deleted.
+
+This extends only the existing nine-root ProtectedOnly/Grant/ReplayScope shape.
+Cold recovery rederives the sole-or-linked structural successor from actual
+predecessor custody before commit/CAS; no supplied linked flag, new layout,
+generation, wire, Protocol API, tombstone or callback is added. Clearing the
+closed candidate is not a remote non-issuance assertion or a successful read.
+Once recovered, the explicit owner may create a new independently current
+request on the same original path, never revive the discarded expired request.
+All existing prefix, guard, parts, cancellation and phase1-only abandonment
+rules remain in force. Runtime scheduling and final S01 acceptance stay gated.
+
+Native-committed contact projection uses the read-only historical metadata/route
+checks owned by CONTACT-AND-GROUP and DR-0072, independently of this grant
+disposition. First ContactAccept send/receive instead checks the exact retained
+Hello, current endpoint/XUR metadata and current full route before committing
+its native mutation. An expired first attempt cannot create native history and
+then recover through the historical reader. Actual native exact replay skips
+fresh admission and retains its original event/hash; held lease and final
+native readbacks remain mandatory. This changes no journal generation or API.

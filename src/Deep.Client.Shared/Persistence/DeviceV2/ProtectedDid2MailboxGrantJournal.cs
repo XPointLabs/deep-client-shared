@@ -83,6 +83,46 @@ internal static class ProtectedDid2MailboxGrantJournal
         return selection.Pending is { } pending ? state.Entries[pending] : null;
     }
 
+    // One never-adopted closed tail, either the sole acquisition or the direct
+    // successor of current. Structural custody only; the owner must discharge
+    // epoch exclusion, original publication and read/SQL/native dependencies.
+    internal static byte[] RequireUnusedClosedRetrieveTail(State state, ReadOnlySpan<byte> acquisition)
+    {
+        var name = Convert.ToHexString(acquisition);
+        if (!state.Entries.TryGetValue(name, out var entry) || !IsClosedUnresolved(entry) ||
+            ContactCodec.Decode("XMG2", Request(entry).Span).Field(6).Span[0] != (byte)MailboxCapabilityDomain.Retrieve ||
+            !state.Selections.TryGetValue(EntryScope(entry), out var selection) || selection.Pending is not null || selection.RetainedTail != name)
+            throw new IOException("Only the exact closed unused Retrieve tail can retire.");
+        if (selection.Current is null)
+        {
+            if (Predecessor(entry) is not null || state.Entries.Values.Count(value => EntryScope(value) == EntryScope(entry)) != 1)
+                throw new IOException("An unresolved chain without a selected original holder pins retirement.");
+        }
+        else
+        {
+            var original = state.Entries[selection.Current];
+            var request = ContactCodec.Decode("XMG2", Request(entry).Span);
+            var priorRequest = ContactCodec.Decode("XMG2", Request(original).Span);
+            if (Predecessor(entry) != selection.Current || !IsAdoptedWinner(original) ||
+                priorRequest.Field(6).Span[0] != (byte)MailboxCapabilityDomain.Retrieve ||
+                !Fixed(OriginalRoute(entry).Span, OriginalRoute(original).Span) ||
+                !Fixed(request.Field(3).Span, priorRequest.Field(3).Span) || !Fixed(request.Field(4).Span, priorRequest.Field(4).Span))
+                throw new IOException("Closed renewal cannot orphan or replace its exact selected original holder.");
+        }
+        return entry;
+    }
+
+    internal static byte[] RemoveUnusedClosedRetrieveTail(State state, ReadOnlySpan<byte> acquisition,
+        ReadOnlySpan<byte> network, ReadOnlySpan<byte> account, ReadOnlySpan<byte> instance)
+    {
+        var entry = RequireUnusedClosedRetrieveTail(state, acquisition);
+        var name = Convert.ToHexString(acquisition); var scope = EntryScope(entry); var selection = state.Selections[scope];
+        if (selection.Current is null) state.Selections.Remove(scope);
+        else state.Selections[scope] = selection with { RetainedTail = selection.Current };
+        state.Entries.Remove(name); CryptographicOperations.ZeroMemory(entry); state.Revision = checked(state.Revision + 1);
+        return Encode(state, network, account, instance);
+    }
+
     // Structural transition only. The held owner must independently close
     // Store/object/replay dependencies before staging this exact successor.
     // Retire oldest first: never orphan an unresolved request or skip a link.

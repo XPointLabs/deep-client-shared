@@ -73,7 +73,7 @@ internal sealed class AuthenticatedContactAcceptDmc2 : IAuthenticatedDmc2InboxEv
                     !Fixed(winner.HelloHash, SHA256.HashData(hello)))
                     throw new CryptographicException("A local Accept was not this account's durable explicit-command winner.");
             }
-            await ApplicationCoreVerifier.RequireContactAcceptEndpointBindingsAsync(ApplicationCoreCodec.DecodeDmc2(accepted),
+            await ApplicationCoreVerifier.RequireRetainedContactAcceptEndpointBindingsAsync(ApplicationCoreCodec.DecodeDmc2(accepted),
                 ApplicationCoreCodec.DecodeDmc2(hello), scope.IsInitiator ? own.Proof : peer,
                 scope.IsInitiator ? peer : own.Proof, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
             var parsedAccept = ApplicationCoreCodec.DecodeDmc2(accepted);

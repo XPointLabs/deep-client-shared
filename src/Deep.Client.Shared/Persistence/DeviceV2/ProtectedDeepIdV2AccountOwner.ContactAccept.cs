@@ -73,7 +73,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                         !Did2MessagingSessionScope.Fixed(sent.EventHash, SHA256.HashData(accepted)))
                         throw new CryptographicException("Local acceptance differs from its actual command/send custody.");
                 }
-                await ApplicationCoreVerifier.RequireContactAcceptEndpointBindingsAsync(ApplicationCoreCodec.DecodeDmc2(accepted),
+                await ApplicationCoreVerifier.RequireRetainedContactAcceptEndpointBindingsAsync(ApplicationCoreCodec.DecodeDmc2(accepted),
                     ApplicationCoreCodec.DecodeDmc2(hello), scope.IsInitiator ? own.Proof : peer,
                     scope.IsInitiator ? peer : own.Proof, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
             }

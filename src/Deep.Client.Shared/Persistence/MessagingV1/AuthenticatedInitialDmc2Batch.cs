@@ -66,7 +66,7 @@ internal sealed class AuthenticatedInitialDmc2Batch : IDisposable
         AuthenticatedInitialDmc2Batch? batch = null;
         try
         {
-            await ApplicationCoreVerifier.RequireContactHelloEndpointBindingsAsync(
+            await ApplicationCoreVerifier.RequireRetainedContactHelloEndpointBindingsAsync(
                 ApplicationCoreCodec.DecodeDmc2(retained.Hello), scope.IsInitiator ? own.Proof : peer,
                 scope.IsInitiator ? peer : own.Proof, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
             var hello = (ContactHelloDmc2Payload)ApplicationCoreCodec.DecodeDmc2(retained.Hello).ParsedPayload;
@@ -110,7 +110,7 @@ internal sealed class AuthenticatedInitialDmc2Batch : IDisposable
         var dca = DeepIdV2ContactAuthorizationCodec.Verify(package.Authorization, checkpoint.Binding, checkpoint.Directory);
         var reading = await source.RecheckEndpointPairUnderLeaseAsync(own, author, held, ct).ConfigureAwait(false);
         var authorization = DeepIdV2CurrentContactAuthorizationVerifier.Verify(author, dca, reading.BootId.Span, reading.SampleSeconds);
-        _ = await DeepIdV2ContactRouteVerifier.VerifyPredecessorAsync(authorization, own.Network, own.Authority,
+        await DeepIdV2ContactRouteVerifier.RequireRetainedEventRouteFactsAsync(authorization, own.Network, own.Authority,
             package.Invite.CanonicalBytes, package.Route.ExactBytes, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
         ct.ThrowIfCancellationRequested(); held.RequireActive();
     }

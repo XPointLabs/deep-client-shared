@@ -165,6 +165,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         Assert.Equal(application, await fixture.ReadCompleteOrdinaryApplicationProjection(receiver));
         Assert.Equal(native, (await fixture.ReadMessagingFloor(receiver)).Exact.ToArray());
         Assert.Equal(controls, await fixture.ReadRetainedContactStoreRoots(receiver));
+        Assert.Equal(Did2ContactAcceptanceState.LocalAcceptanceRetained, await fixture.ReadOwnedContactState(receiver));
         foreach (var bytes in new[] { operation, application, native, controls }) CryptographicOperations.ZeroMemory(bytes);
     }
 
@@ -218,6 +219,104 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             () => fixture.DeliverNativeMessage(receiver, operation, grants, transport));
         Assert.Equal(1, transport.Calls); Assert.Equal(1, grants.Calls);
         foreach (var bytes in new[] { operation, authored, application, native, controls }) CryptographicOperations.ZeroMemory(bytes);
+    }
+
+    [Fact]
+    [Trait("RequiresApprovedMlKemRuntime", "true")]
+    public async Task Did2ContactOwner_AcceptanceReopenAfterOriginalRendezvousExpiryKeepsCommittedConsent()
+    {
+        await using var fixture = await Fixture.CreateAsync(withPeer: true, encryptedStorage: true,
+            longMailboxWindow: true, initialMailboxAuthorityExpiry: 2_000);
+        var (complete, hello, init, _, _) = await fixture.PrepareNativeHelloCompletion(Bytes(32, 0xee));
+        using var initial = await complete(fixture.Accounts);
+        using (var received = await fixture.CompleteReceiver(initial.ExactDph2.ToArray())) { }
+        var sender = await fixture.EnsureSenderMessaging(init, hello);
+        var receiver = await fixture.EnsureReceiverMessaging(initial.ExactDph2.ToArray());
+        using var accept = await fixture.PrepareOwnedContactAccept(receiver, Bytes(32, 0xef));
+        using var sent = await fixture.SendOwnedMessage(receiver, accept.Operation.ToArray(), ApplicationCoreCodec.DecodeDmc2(accept.ExactDmc2));
+        using (var received = await fixture.ReceiveOwnedMessage(sender, sent.ExactEnvelope.ToArray())) { }
+        var senderFloor = (await fixture.ReadMessagingFloor(sender)).Exact.ToArray();
+        var receiverFloor = (await fixture.ReadMessagingFloor(receiver)).Exact.ToArray();
+        await fixture.AdvanceOriginalStoreEpochForTestAsync(2_100);
+        fixture.ColdReopenCompactionStorage(); fixture.ColdReopenReceiverStoreStorage();
+        await fixture.CheckRetainedEventRouteIsNotRenewalPredecessorAsync(((ContactHelloDmc2Payload)hello.ParsedPayload).MailboxRoute);
+        using (var replay = await fixture.ReceiveOwnedMessage(sender, sent.ExactEnvelope.ToArray()))
+            Assert.Equal(sent.ExactEnvelope.ToArray(), replay.ExactEnvelope.ToArray());
+        Assert.Equal(Did2ContactAcceptanceState.PeerAcceptanceRetained, await fixture.ReadOwnedContactState(sender));
+        Assert.Equal(Did2ContactAcceptanceState.LocalAcceptanceRetained, await fixture.ReadOwnedContactState(receiver));
+        Assert.Equal(senderFloor, (await fixture.ReadMessagingFloor(sender)).Exact.ToArray());
+        Assert.Equal(receiverFloor, (await fixture.ReadMessagingFloor(receiver)).Exact.ToArray());
+        CryptographicOperations.ZeroMemory(senderFloor); CryptographicOperations.ZeroMemory(receiverFloor);
+    }
+
+    [Theory]
+    [InlineData(false)] // Authored earlier, but not durably sent.
+    [InlineData(true)] // Durably sent, but never admitted by the initiator.
+    [Trait("RequiresApprovedMlKemRuntime", "true")]
+    public async Task Did2ContactOwner_FirstAcceptanceAfterOriginalRendezvousExpiryCannotBecomeHistory(bool sentBeforeExpiry)
+    {
+        await using var fixture = await Fixture.CreateAsync(withPeer: true, encryptedStorage: true,
+            longMailboxWindow: true, initialMailboxAuthorityExpiry: 2_000);
+        var (complete, hello, init, _, _) = await fixture.PrepareNativeHelloCompletion(Bytes(32, 0xe8));
+        using var initial = await complete(fixture.Accounts);
+        using (var received = await fixture.CompleteReceiver(initial.ExactDph2.ToArray())) { }
+        var sender = await fixture.EnsureSenderMessaging(init, hello);
+        var receiver = await fixture.EnsureReceiverMessaging(initial.ExactDph2.ToArray());
+        using var accept = await fixture.PrepareOwnedContactAccept(receiver, Bytes(32, 0xe9));
+        byte[] envelope = [];
+        if (sentBeforeExpiry)
+        {
+            using var sent = await fixture.SendOwnedMessage(receiver, accept.Operation.ToArray(), ApplicationCoreCodec.DecodeDmc2(accept.ExactDmc2));
+            envelope = sent.ExactEnvelope.ToArray();
+        }
+        await fixture.AdvanceOriginalStoreEpochForTestAsync(2_100);
+        fixture.ColdReopenCompactionStorage(); fixture.ColdReopenReceiverStoreStorage();
+        var target = sentBeforeExpiry ? sender : receiver;
+        var native = (await fixture.ReadMessagingFloor(target)).Exact.ToArray();
+        var application = await fixture.ReadCompleteOrdinaryApplicationProjection(target);
+        try
+        {
+            for (var attempt = 0; attempt < 2; attempt++)
+            {
+                if (sentBeforeExpiry)
+                    await Assert.ThrowsAsync<CryptographicException>(() => fixture.ReceiveOwnedMessage(sender, envelope));
+                else
+                    await Assert.ThrowsAsync<CryptographicException>(() => fixture.SendOwnedMessage(receiver,
+                        accept.Operation.ToArray(), ApplicationCoreCodec.DecodeDmc2(accept.ExactDmc2)));
+                Assert.Equal(native, (await fixture.ReadMessagingFloor(target)).Exact.ToArray());
+                Assert.Equal(application, await fixture.ReadCompleteOrdinaryApplicationProjection(target));
+                Assert.Equal(sentBeforeExpiry ? Did2ContactAcceptanceState.OutgoingRequest : Did2ContactAcceptanceState.IncomingRequest,
+                    await fixture.ReadOwnedContactState(target));
+                fixture.ColdReopenCompactionStorage(); fixture.ColdReopenReceiverStoreStorage();
+            }
+        }
+        finally
+        {
+            foreach (var bytes in new[] { envelope, native, application }) CryptographicOperations.ZeroMemory(bytes);
+        }
+    }
+
+    private sealed partial class Fixture
+    {
+        internal async Task CheckRetainedEventRouteIsNotRenewalPredecessorAsync(Deep.Protocol.ContactV2.ParsedDeepIdV2ContactMailboxRoute package)
+        {
+            var account = ReopenAccount(); var source = Source(account);
+            var fresh = await source.VerifyForOwnPreKeyAuthoringAsync(account, default);
+            var checkpoint = fresh.Proof.CurrentCheckpoint!;
+            var delegation = DeepIdV2ContactAuthorizationCodec.Verify(package.Authorization, checkpoint.Binding, checkpoint.Directory);
+            var reading = await source.RecheckOwnPreKeyAuthoringAsync(fresh, default);
+            var authorization = Deep.Protocol.ContactV2.DeepIdV2CurrentContactAuthorizationVerifier.Verify(fresh.Proof, delegation, reading.BootId.Span, reading.SampleSeconds);
+            await Assert.ThrowsAsync<CryptographicException>(async () => await Deep.Protocol.ContactV2.DeepIdV2ContactRouteVerifier.VerifyPredecessorAsync(
+                authorization, fresh.Network, fresh.Authority, package.Invite.CanonicalBytes, package.Route.ExactBytes, source.RendezvousTrustedTime));
+            await Deep.Protocol.ContactV2.DeepIdV2ContactRouteVerifier.RequireRetainedEventRouteFactsAsync(authorization, fresh.Network, fresh.Authority,
+                package.Invite.CanonicalBytes, package.Route.ExactBytes, source.RendezvousTrustedTime);
+            var changed = package.Invite.CanonicalBytes.ToArray();
+            var offset = changed.AsSpan().IndexOf(package.Invite.Field(17).Span); Assert.True(offset >= 0); changed[offset] ^= 1;
+            var error = await Assert.ThrowsAsync<ApplicationCoreFormatException>(async () => await Deep.Protocol.ContactV2.DeepIdV2ContactRouteVerifier.RequireRetainedEventRouteFactsAsync(
+                authorization, fresh.Network, fresh.Authority, changed, package.Route.ExactBytes, source.RendezvousTrustedTime));
+            Assert.Equal(ApplicationCoreValidationStage.CryptographicVerification, error.Stage);
+            CryptographicOperations.ZeroMemory(changed);
+        }
     }
 
     [Fact]

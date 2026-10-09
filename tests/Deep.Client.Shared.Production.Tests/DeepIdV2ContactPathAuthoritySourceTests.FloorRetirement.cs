@@ -80,7 +80,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 
     private sealed partial class Fixture
     {
-        internal async Task CheckCompletedAckFloorRetirementAsync(bool nativeSqlFault = false, bool retireSupersededHolder = false)
+        internal async Task CheckCompletedAckFloorRetirementAsync(bool nativeSqlFault = false, bool retireSupersededHolder = false,
+            bool retireClosedRenewal = false)
         {
             var intent = Bytes(32, 0xd1);
             var (complete, _, _, _, _) = await PrepareNativeHelloCompletion(intent, verifyDraftRecovery: false);
@@ -111,6 +112,12 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             Assert.Equal(Did2ContactAcceptanceState.IncomingRequest, await ReadOwnedContactState(receiver));
             using (var read = await ReadPeerMailboxReads())
             { Assert.Equal(0, read.Phase); Assert.Null(read.Active); Assert.Equal(2UL, Assert.Single(read.Counters).Value); }
+            if (retireClosedRenewal)
+            {
+                await CheckLinkedUnusedRetrieveRetirementAsync(own: false);
+                Assert.Equal(Did2ContactAcceptanceState.IncomingRequest, await ReadOwnedContactState(receiver));
+                return;
+            }
             byte[] selector; ulong ceiling;
             using (var grants = await ReadPeerGrantsAsync())
             {

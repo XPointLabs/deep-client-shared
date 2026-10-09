@@ -144,7 +144,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 var context = opened.Sql.CreateVerifiedTransitionContext(floor, op, send ? [] : exact);
                 using var state = opened.Sql.ReadVerifiedLatest(floor);
                 var authority = new AccountDpe2Authority(opened, held, floor, op, eventHash, send ? [] : exact,
-                    context.ReceiveReplayDisposition);
+                    context.ReceiveReplayDisposition, senderEvent, own, peer, source);
                 if (send)
                 {
                     using var prepared = state.Use(bytes => ExactDpe2DurableTransactionProducer.PrepareSend(
@@ -209,7 +209,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     // real lease; both initial-key retirement and current heads were verified.
     private sealed class AccountDpe2Authority(OwnedDid2MessagingStorage opened, HeldDeepIdV2AccountLease held,
         Did2MessagingFloor floor, byte[] operation, byte[] sendEventHash, byte[] receivedEnvelope,
-        ExactDpe2ReceiveReplayDisposition replay) : IExactDpe2DurableTransactionAuthority
+        ExactDpe2ReceiveReplayDisposition replay, ParsedDmc2? senderEvent,
+        DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own,
+        VerifiedDeepIdV2DirectoryFreshness peer, DeepIdV2ContactPathAuthoritySource source) : IExactDpe2DurableTransactionAuthority
     {
         private int consumed;
         public async ValueTask<ExactDpe2DurableCommitReceipt> CommitAsync(ExactDpe2DurablePersistencePlan plan,
@@ -236,6 +238,41 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 throw new CryptographicException("DID2 operation predecessor changed under the held lease.");
             if (snapshot.HasStateMutation)
             {
+                // Historical semantic reconstruction is available only after
+                // native custody exists. A first send/receive must satisfy the
+                // current ContactAccept endpoint/XUR and route prerequisites
+                // before the native floor or SQL can make it durable history.
+                var applicationEvent = send ? senderEvent! : ApplicationCoreCodec.DecodeDmc2(snapshot.AuthenticatedDmc2);
+                if (!send && applicationEvent.ParsedPayload is AttachmentOfferDmc2Payload admissionAttachment)
+                    admissionAttachment.Manifest.Dispose(); // No attachment metadata is borrowed by this contact-only check.
+                if (applicationEvent.ContentKind == Dmc2ContentKind.ContactAccept)
+                {
+                    using var pending = await AuthenticatedInitialDmc2Batch.FromOwnedDid2Async(
+                        opened, own, peer, source, held, cancellationToken).ConfigureAwait(false);
+                    var hello = pending.FirstApplicationDmc2;
+                    try
+                    {
+                        await ApplicationCoreVerifier.RequireContactAcceptEndpointBindingsAsync(applicationEvent,
+                            ApplicationCoreCodec.DecodeDmc2(hello), opened.Scope.IsInitiator ? own.Proof : peer,
+                            opened.Scope.IsInitiator ? peer : own.Proof, source.RendezvousTrustedTime,
+                            cancellationToken).ConfigureAwait(false);
+                        var author = opened.Scope.IsInitiator ? peer : own.Proof;
+                        var package = ((ContactAcceptDmc2Payload)applicationEvent.ParsedPayload).MailboxRoute;
+                        var checkpoint = author.CurrentCheckpoint ?? throw new CryptographicException("First ContactAccept requires a current author.");
+                        var delegation = DeepIdV2ContactAuthorizationCodec.Verify(package.Authorization, checkpoint.Binding, checkpoint.Directory);
+                        var reading = await source.RecheckEndpointPairUnderLeaseAsync(own, peer, held, cancellationToken).ConfigureAwait(false);
+                        var authorization = Deep.Protocol.ContactV2.DeepIdV2CurrentContactAuthorizationVerifier.Verify(
+                            author, delegation, reading.BootId.Span, reading.SampleSeconds);
+                        _ = await Deep.Protocol.ContactV2.DeepIdV2ContactRouteVerifier.VerifyAsync(authorization,
+                            own.Network, own.Authority, package.Invite.CanonicalBytes, package.Route.ExactBytes,
+                            source.RendezvousTrustedTime, cancellationToken).ConfigureAwait(false);
+                        current = await opened.Custody.ReconcileAsync(cancellationToken).ConfigureAwait(false);
+                        if (!Did2MessagingSessionScope.Fixed(current.Exact.Span, floor.Exact.Span))
+                            throw new CryptographicException("ContactAccept predecessor changed during admission verification.");
+                        cancellationToken.ThrowIfCancellationRequested(); held.RequireActive();
+                    }
+                    finally { CryptographicOperations.ZeroMemory(hello); }
+                }
                 using var mutation = OwnedDid2MessagingMutation.Ratchet(opened.Scope, floor, plan, sendEventHash);
                 current = await opened.Custody.CommitOwnedAsync(mutation, cancellationToken).ConfigureAwait(false);
             }

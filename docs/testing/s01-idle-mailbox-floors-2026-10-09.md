@@ -991,3 +991,76 @@ S01 remains unaccepted: linked/remaining acquisition, traversal/last-path
 dispositions, DCA/XUR/PMT/key rollover, sustained128/512 and the current mandatory
 full after the complete source batch are still required. S02/S04 activation,
 production, GitHub Release and main were not changed by this packet.
+
+## Linked closed Retrieve and committed contact history — 2026-10-09
+
+The private owner now disposes one closed unused renewal tail while preserving
+the actual selected original holder, publication/private path, completed
+Retrieve/ACK, traversal, native consent/history and complete application SQL.
+The exact structural/recovery profile is owned by
+[mailbox grant custody](../architecture/owned-mailbox-grant-custody.md#closed-unused-renewal-tail-disposition--s01-source-candidate).
+Every five stored-plan handovers, cold recovery, cancellation/phase1-only
+abandonment, an actual active-read pin and hostile SQL readback are covered.
+The hostile SQL case retains the original plan and grant root without adoption;
+fixture restoration between independent fault injections is not a production
+rollback guarantee. Subsequent renewal uses a genuinely new current issuer
+request, never revives the unknown expired candidate.
+
+Positive original read/ACK and cold accepted-contact checks exposed two product
+defects: re-reading native-committed Hello/Accept required its expired XUR to be
+live, and historical route reconstruction used the current-PMT-only typed
+renewal predecessor. The bounded read-only Protocol metadata/route checks now
+preserve those committed facts without granting live rendezvous, route or
+renewal authority. The exact original PMT must remain in protected network
+lineage under unchanged authority; first admission is independently strict.
+The real old-PMT fixture rejects a renewal predecessor and a forged original
+invite signature, while committed consent survives on both accounts.
+
+The native DPE2 authority now checks first ContactAccept send/receive against
+current endpoint/XUR and full route before native mutation. Two new negative
+rows cover an earlier authored but never sent Accept, and a sent but never
+received Accept after expiry. Each rejects twice through encrypted cold reopen,
+with exact native/application state unchanged and no accepted contact. A real
+previously admitted Accept instead exact-replays after expiry without changing
+the native floor. No journal/wire generation, capacity, legacy reader or
+scheduler is added.
+
+Windows PowerShell5.1/Desktop/SDK10.0.301 native build/test results are retained
+under `artifacts/s01-linked-retrieve/` (counts: total/passed/failed/skipped):
+
+| Run | Result | Cause / SHA256 |
+| --- | --- | --- |
+| `linked-retrieve-01` | 19/16/3/0, native1 | Fixture snapshot preceded required signed-epoch import. `5A0D9F5A095CE8100A556F29D2280CB6431B137A30D19DC01812711E9499F817` |
+| `linked-retrieve-02` | 19/17/2/0, native1 | Hostile SQL readback correctly throws InvalidDataException, not fixture's expected CryptographicException. `FCBBE5431915469225A62F302F65AC3C9D98B4C6079B57F19550677DE530ADA9` |
+| `linked-retrieve-03` | 19/18/1/0, native1 | Product expired-XUR reconstruction defect. `09DD9668390774F4FDC950184BA2A0FC4F5C22F09A928C899A99D40E08F14154` |
+| `linked-retrieve-04` | 23/21/2/0, native1 | Product old-PMT reconstruction defect. `B5D580BDF6EA85A9BE7659CB4DD51E8AA215AF8E294A590238CBAE06A058BCB3` |
+| `retained-route-01` | 7/7/0/0, native0,1m33s | Real retained-route/contact check plus six prerequisites. `DC7703633353E03D35FC60B5F2BEB687EA3FFAA207F996F64E3BBAEB64097D38` |
+| `linked-retrieve-05` | 23/23/0/0, native0,9m52s | Same declared23 as04; canonical exact case/method qualification0. `7B3BBADC42F27FD9081EBE0BE629D0935AA14329B8C2CF41835426BE4F319E58` |
+| `linked-retrieve-07` | 25/25/0/0, native0,9m10s | First run including two new first-admission negatives. `7FD40A427841F303103124A15209AD73F32E1FD6DBEE235DC61EB8471FA67DE3` |
+
+Run06 built with zero warnings/errors in27.61s but the actual shell was
+PowerShell7.6.5 despite the requested shell setting. It was interrupted before
+test output; no test receipt or qualification is claimed. Run07 explicitly
+invoked the Windows PowerShell5.1 executable and recorded the actual interpreter
+and SDK; matching build native0/zero warnings/errors in1.42s. Earlier matching
+builds and the one namespace-helper compile failure are not source qualification.
+No source/executable/normative inputs were edited during the live runs.
+
+The canonical old05-only reference check for07 rejects the two genuinely new
+cases; that qualification failure is preserved, not represented as PASS. The
+single canonical receipt parser validates all25 internal result/definition/
+execution mappings. Independent exact set comparison preserves every prior23
+case/method and adds only the predeclared `sentBeforeExpiry: True/False` rows.
+This first-run focused receipt is a required new reference for the final full
+stage gate, not itself unfiltered or canonical full acceptance. Avoid rerunning
+the same whole focused matrix solely to manufacture a prior receipt.
+
+The matching Protocol focused metadata/currentness result is separately
+[recorded](../../../deep-protocol/docs/testing/s01-retained-contact-history-2026-10-09.md).
+All retained failures remain available; neither fixture correction removes an
+assertion or relaxes a signed window. Real PQ/native/SQLCipher and signed
+in-process issuer facts are used, not two-remote-store or physical evidence.
+S01 still requires remaining acquisition/traversal/last-path dispositions,
+DCA/XUR/PMT/issuer/root rollover for new routing/authoring, sustained128/512 and
+the mandatory matching full reference union after the complete stage batch.
+Production, device E2E, Release and main remain unchanged by this packet.
