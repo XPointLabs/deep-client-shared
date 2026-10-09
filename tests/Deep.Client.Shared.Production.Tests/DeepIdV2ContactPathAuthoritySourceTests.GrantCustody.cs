@@ -938,7 +938,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 var source = (ownerOnPrimary ?? selfRetrieve) ? fixture.Source(dispatch.Custody.Owner) : fixture.GrantReaderSource(dispatch.Custody.Owner);
                 var paths = new ContactResolvePrivacyPathProvider(source, dispatch.Custody.Guards);
                 var prepared = await paths.PrepareWithAuthorityAsync(OnionOperation.ContactResolve, canonical,
-                    ReadOnlyMemory<byte>.Empty, new(dispatch.Network, placement), ct);
+                    ReadOnlyMemory<byte>.Empty, new(dispatch.Network, placement), ct, dispatch.RetainedReadRequest);
                 var ledger = new CapturingEntropyLedger(dispatch.Custody.Entropy);
                 var codec = new PrivacyRoutingCodec(new OnionEntropyAuthority(ledger),
                     new OnionKeyAgreementAuthority(new RejectClientReceiveVault()));

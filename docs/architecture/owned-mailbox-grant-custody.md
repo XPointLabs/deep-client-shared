@@ -516,3 +516,51 @@ This is same-original-path holder replacement, not retirement of a traversal or
 the last retained path. Autonomous renewal/cleanup remains S04; source receipts,
 matching full and remaining S01/physical/release status belong to the
 [checkpoint](../testing/s01-idle-mailbox-floors-2026-10-09.md).
+
+## Closed unused Retrieve retirement — S01 source candidate
+
+`MailboxEpochExclusion.RetireUnusedClosedRetrieveAcquisitionAsync(ct)` removes
+one actual phase3 closed-unresolved acquisition only after the held producer
+independently passes its original possible-issuance ceiling and irreversible
+native epoch exclusion. It does not assert non-issuance, successful reading,
+BeforeForward or a remote terminal outcome. Pending/received/adopted winners,
+linked candidates, counters, any original active read/ACK, traversal and unresolved
+ordinary/attachment/native-session work remain pinned. The dependency capture
+must contain only the conservative RetainedRetrievePath flag.
+
+Selection discharges that one flag by reopening the exact actual completed
+permanent publication, including an independently bound archived predecessor.
+The original route bytes, private locator and owner Retrieve capability must
+match the original protected XMG2. Current account/device/network/host/time
+checks remain mandatory. Missing/corrupt/substituted custody rejects without
+staging; no holder, request, publication, issuer result or SQL credential is
+created or repaired during selection. Original publication and resolver-capability
+custody remain independently guarded, so deleting this never-used holder is not
+deleting the last retained-object path.
+
+The existing nine-root ProtectedOnly plan changes only Grant, uses one exact
+ReplayScope selector/commitment and preserves complete MailboxStoreState.
+Recovery rederives the same phase3/domain-specific successor before commit/CAS;
+eight-root closed-Deposit plans cannot select Retrieve. Original application,
+native/history, device/prekey/source, publication, resolver custody and replay
+fence stay unchanged. All existing handover/abort/parts guards apply without new
+network authority or callbacks. No wire, generation, public API, tombstone set,
+runtime scheduler or increased128/512 capacity is introduced.
+
+The owned retained courier also loans the existing Protocol-minted
+`VerifiedMailboxRetainedReadRequestV2` through its private dispatch context.
+Only its byte-exact XMG2 can pass the retained projection prerequisite while
+the three-hop ingress/relay/ContactResolve exit and service placement remain
+current. The path provider rechecks the closed request/time capability before
+guard access and after asynchronous guard writes; the real courier rechecks it
+before HTTP forwarding and after reply authentication. A parsed historical PMT2,
+request boolean or copied projection cannot bypass current-only placement.
+Deposit and non-owned/public courier paths keep the current projection check.
+This reuses DR-0100/0104 authority; it adds no Protocol API or wire allocation
+and does not grant retained mailbox mutation, issuer success or deletion.
+
+This closes a never-used excluded acquisition, not an original completed read,
+known holder, traversal or last-path disposition. An independent current issuer
+may subsequently create a new acquisition through the ordinary owned reader;
+it cannot restore the retired expired response. Focused/full, sustained and
+physical acceptance are recorded separately in the checkpoint.

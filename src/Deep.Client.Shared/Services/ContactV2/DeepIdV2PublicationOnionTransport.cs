@@ -46,7 +46,7 @@ internal sealed class DeepIdV2PublicationOnionTransport : IExactContactResolveOn
             request.RequestKind, request.ShardKey);
         var authority = new ContactResolvePathAuthority(operation.Network, placement);
         var prepared = await paths.PrepareWithAuthorityAsync(OnionOperation.ContactResolve,
-            request, requiredExitReplicaId, authority, cancellationToken).ConfigureAwait(false);
+            request, requiredExitReplicaId, authority, cancellationToken, operation.RetainedReadRequest).ConfigureAwait(false);
         operation.RequireActive();
         var result = await SendPreparedAsync(prepared, operation, cancellationToken).ConfigureAwait(false);
         operation.RequireActive();
@@ -61,6 +61,8 @@ internal sealed class DeepIdV2PublicationOnionTransport : IExactContactResolveOn
         using var transport = new PrivacyManagedIngressHttpTransport(entry);
         using var built = await codec.BuildAsync(prepared.Attempt.Path, prepared.Attempt.Request,
             cancellationToken).ConfigureAwait(false);
+        if (ownedOperation?.RetainedReadRequest is { } retained)
+            await retained.EnsureCurrentAsync(cancellationToken).ConfigureAwait(false);
         ownedOperation?.RequireActive();
         cancellationToken.ThrowIfCancellationRequested();
         var response = await ForwardOnceAsync(transport, built.Frame, cancellationToken).ConfigureAwait(false);
@@ -73,6 +75,8 @@ internal sealed class DeepIdV2PublicationOnionTransport : IExactContactResolveOn
             opened.Result.Kind != OnionTerminalResultKind.Success)
             throw new ClientMailboxDispatchOutcomeUnknownException("The DID2 ONION publication has no successful authenticated terminal result.");
         entry.EnsureCurrent();
+        if (ownedOperation?.RetainedReadRequest is { } returnedRetained)
+            await returnedRetained.EnsureCurrentAsync(cancellationToken).ConfigureAwait(false);
         ownedOperation?.RequireActive();
         cancellationToken.ThrowIfCancellationRequested();
         return new(opened.Result.Body, prepared.Authority);

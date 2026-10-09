@@ -174,6 +174,21 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         var original = state.Entries[Convert.ToHexString(row.Selector.Span)];
         var retrieve = ContactCodec.Decode("XMG2", ProtectedDid2MailboxGrantJournal.Request(original).Span).Field(6).Span[0] ==
             (byte)MailboxCapabilityDomain.Retrieve;
+        if (retrieve && ProtectedDid2MailboxGrantJournal.IsClosedUnresolved(original))
+        {
+            var scope = RequireUnusedClosedRetrieve(state, row.Selector.Span);
+            try
+            {
+                if (!FixedRoute(scope, plan.SqlSelector) || !FixedRoute(SHA256.HashData(original), row.Commitment.Span))
+                    throw new CryptographicException("Closed Retrieve retirement changed its original selection.");
+                var closedSuccessor = RemoveUnusedClosedRetrieve(state, row.Selector.Span, networkId,
+                    plan.Exact.Slice(32, 32).Span, plan.Exact.Slice(64, 32).Span);
+                try { if (!FixedRoute(closedSuccessor, successor)) throw new CryptographicException("Closed Retrieve successor changed unrelated custody."); }
+                finally { CryptographicOperations.ZeroMemory(closedSuccessor); }
+            }
+            finally { CryptographicOperations.ZeroMemory(scope); }
+            return;
+        }
         var entry = retrieve ? ProtectedDid2MailboxGrantJournal.RequireSupersededRetrieve(state, row.Selector.Span) :
             ProtectedDid2MailboxGrantJournal.RequireOldestAdoptedDeposit(state, row.Selector.Span);
         if (!FixedRoute(entry.AsSpan(0, 32), plan.SqlSelector) || !FixedRoute(SHA256.HashData(entry), row.Commitment.Span))

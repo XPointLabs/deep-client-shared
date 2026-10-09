@@ -52,11 +52,15 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     }
 
     private static byte[] RequireUnusedClosedDeposit(ProtectedDid2MailboxGrantJournal.State state, ReadOnlySpan<byte> acquisition)
+        => RequireUnusedClosedAcquisition(state, acquisition, MailboxCapabilityDomain.Deposit);
+
+    private static byte[] RequireUnusedClosedAcquisition(ProtectedDid2MailboxGrantJournal.State state, ReadOnlySpan<byte> acquisition,
+        MailboxCapabilityDomain domain)
     {
         var name = Convert.ToHexString(acquisition);
         if (!state.Entries.TryGetValue(name, out var entry) || !ProtectedDid2MailboxGrantJournal.IsClosedUnresolved(entry) ||
-            ContactCodec.Decode("XMG2", ProtectedDid2MailboxGrantJournal.Request(entry).Span).Field(6).Span[0] != (byte)MailboxCapabilityDomain.Deposit)
-            throw new IOException("Only a closed unused deposit acquisition is eligible for this retirement profile.");
+            ContactCodec.Decode("XMG2", ProtectedDid2MailboxGrantJournal.Request(entry).Span).Field(6).Span[0] != (byte)domain)
+            throw new IOException("Only a closed unused acquisition of the selected domain is eligible for this retirement profile.");
         var scope = entry.AsSpan(0, 32).ToArray(); var scopeName = Convert.ToHexString(scope);
         if (!state.Selections.TryGetValue(scopeName, out var selection) || selection.Current is not null || selection.Pending is not null ||
             selection.RetainedTail != name || state.Entries.Values.Count(value => value.AsSpan(0, 32).SequenceEqual(scope)) != 1)
@@ -66,8 +70,12 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
 
     private static byte[] RemoveUnusedClosedDeposit(ProtectedDid2MailboxGrantJournal.State state, ReadOnlySpan<byte> acquisition,
         ReadOnlySpan<byte> network, ReadOnlySpan<byte> account, ReadOnlySpan<byte> instance)
+        => RemoveUnusedClosedAcquisition(state, acquisition, network, account, instance, MailboxCapabilityDomain.Deposit);
+
+    private static byte[] RemoveUnusedClosedAcquisition(ProtectedDid2MailboxGrantJournal.State state, ReadOnlySpan<byte> acquisition,
+        ReadOnlySpan<byte> network, ReadOnlySpan<byte> account, ReadOnlySpan<byte> instance, MailboxCapabilityDomain domain)
     {
-        var scope = RequireUnusedClosedDeposit(state, acquisition);
+        var scope = RequireUnusedClosedAcquisition(state, acquisition, domain);
         try
         {
             var name = Convert.ToHexString(acquisition); var entry = state.Entries[name];

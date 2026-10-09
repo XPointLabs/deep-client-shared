@@ -298,7 +298,8 @@ public sealed class ContactResolvePrivacyPathProvider : IPrivacyMailboxPathProvi
 
     internal async ValueTask<ContactResolvePreparedPath> PrepareWithAuthorityAsync(
         OnionOperation operation, ContactResolveCanonicalPathRequest request,
-        ReadOnlyMemory<byte> requiredExitReplicaId, ContactResolvePathAuthority authority, CancellationToken cancellationToken)
+        ReadOnlyMemory<byte> requiredExitReplicaId, ContactResolvePathAuthority authority, CancellationToken cancellationToken,
+        VerifiedMailboxRetainedReadRequestV2? retainedReadRequest = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (operation != OnionOperation.ContactResolve)
@@ -309,11 +310,18 @@ public sealed class ContactResolvePrivacyPathProvider : IPrivacyMailboxPathProvi
         network.EnsureCurrent();
         if (!ReferenceEquals(network, placement.Network))
             throw Fail("placement-context-mismatch", "Contact placement belongs to another verified network context.");
+        if (retainedReadRequest is not null)
+        {
+            if (request.RequestKind != ContactServiceRequestKind.AcquireMailboxGrant || request.HasExplicitPlacementBinding ||
+                !Fixed(request.ExactRequest.Span, retainedReadRequest.ExactXmg2.Span))
+                throw Fail("retained-request-mismatch", "Retained request authority belongs to different exact request bytes.");
+            await retainedReadRequest.EnsureCurrentAsync(cancellationToken).ConfigureAwait(false);
+        }
         if (!Fixed(request.NetworkId.Span, network.NetworkId.Span) ||
             request.HasExplicitPlacementBinding &&
                 (!Fixed(request.ViewHash.Span, placement.ViewHash.Span) ||
                  !Fixed(request.PlacementHash.Span, placement.PlacementHash.Span)) ||
-            !request.HasExplicitPlacementBinding &&
+            !request.HasExplicitPlacementBinding && retainedReadRequest is null &&
                 !network.BindsProjection(request.ProjectionReference) ||
             !placement.Binds(request.RequestKind, request.ShardKey) ||
             request.ExpiresAtUnixSeconds > placement.ValidUntilUnixSeconds)
@@ -358,6 +366,8 @@ public sealed class ContactResolvePrivacyPathProvider : IPrivacyMailboxPathProvi
                     current?.Revision, next, cancellationToken).ConfigureAwait(false);
                 if (write.Disposition == EntryGuardStoreWriteDisposition.Conflict) continue;
             }
+            if (retainedReadRequest is not null)
+                await retainedReadRequest.EnsureCurrentAsync(cancellationToken).ConfigureAwait(false);
             return new ContactResolvePreparedPath(
                 new PrivacyMailboxOnionAttempt(selected, verifiedRequest),
                 authority);

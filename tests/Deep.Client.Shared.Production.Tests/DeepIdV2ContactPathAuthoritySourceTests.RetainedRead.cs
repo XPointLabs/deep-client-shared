@@ -116,7 +116,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     {
         internal ValueTask<VerifiedMailboxHostAuthorityV2> RetainedReadHostAsync(Did2OwnedContactTransportContext dispatch,
             CancellationToken ct) => MailboxHostAuthorityV2Verifier.VerifyAsync(dispatch.Network, bootstrap.Authority,
-                operational.ExactPma2, Source(dispatch.Custody.Owner).RendezvousTrustedTime, ct);
+                rotatedIssuerPma ?? successor?.ExactPma2 ?? operational.ExactPma2,
+                Source(dispatch.Custody.Owner).RendezvousTrustedTime, ct);
 
         internal async Task<ParsedDeepIdV2ContactMailboxRoute> PrepareRetainedPublicationAsync(bool elapsed)
         {

@@ -66,7 +66,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 deadline.CancelAfter(TimeSpan.FromSeconds(30));
                 var custody = await SqliteDeepIdV2AccountGeneration.OpenBorrowedOnionCustodyAsync(storage, lease,
                     sqlStatePath, current, source.AccountOwner, held, deadline.Token).ConfigureAwait(false);
-                var dispatch = new Did2OwnedContactTransportContext(custody, fresh.Network, held);
+                var requestContext = await publication.Host.VerifyRetainedReadRequestAsync(request.ExactXmg2, deadline.Token).ConfigureAwait(false);
+                var dispatch = new Did2OwnedContactTransportContext(custody, fresh.Network, held, requestContext);
                 var response = await transport.AcquireRetainedReadAsync(request, dispatch, deadline.Token).AsTask()
                     .WaitAsync(deadline.Token).ConfigureAwait(false);
                 if (response.Length != 510) throw new InvalidDataException("Retained-read result exceeds its exact bound.");

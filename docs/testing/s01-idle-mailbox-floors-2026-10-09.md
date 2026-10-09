@@ -868,3 +868,68 @@ below; current matching mandatory full, last-path/traversal retirement,
 unused/unknown Retrieve closure, sustained128/512, S01 and shipping/device
 acceptance remain open. Final build after mechanical metadata repin: native0,
 zero warnings/errors,20.55s. No production deploy/reset, Release or main merge.
+
+## Closed-unused Retrieve and retained courier projection
+
+The next S01 increment implements the private closed-unused Retrieve disposition
+in the [grant custody owner](../architecture/owned-mailbox-grant-custody.md#closed-unused-retrieve-retirement--s01-source-candidate).
+Actual lost issuer reply remains unknown, not non-issuance or a completed read.
+Only after its conservative issuance ceiling and independently protected native
+epoch exclusion may the held owner select a sole phase3 acquisition. The exact
+permanent publication/private capability, resolver custody, complete application/
+native SQL and source/history/fence remain unchanged. No traversal, last path,
+known winner, journal generation, public API or wire allocation is removed/added.
+
+The two new encrypted fixtures exercise all five protected handovers and cold
+recovery, cancellation and phase1-only abandonment, changed publication pinning,
+an uninitialized application rejecting without staging, and subsequent actual
+owned Retrieve through the same original path with a new current grant. SQL is
+initialized only by the ordinary public client projection before positive
+selection, never by creating a test substitute or by recovery repairing custody.
+The existing known-holder regression rejects this unused-acquisition profile.
+
+The original-path read exposed a product gap: ContactResolve path construction
+required the XMG2's original PMT2 to equal the current PMT2, even for an already
+host-verified retained request. The owner now loans the existing Protocol-minted
+DR-0100 request/time capability through its private dispatch. Only byte-exact
+XMG2 can use it; current service placement and all three routing hops remain
+current. The real courier rechecks the live capability before HTTP forwarding
+and after authenticated reply. Missing capability and another exact request
+reject; Deposit/public unowned paths retain the current projection prerequisite.
+This is not historical routing, issuer success, lookup or mutation authority.
+
+Windows PowerShell5.1/SDK10.0.301 builds:70.37s,15.31s,19.26s and final5.06s,
+all native0, zero warnings/errors. Fresh focused receipts beneath
+`artifacts/s01-unused-retrieve/` retain every failure:
+
+- `closed-retrieve-01/closed-retrieve-01.trx`:9/7 passed/2 failed/0 skipped,
+  native1,15.6284s. New fixture attempted opening application SQL before its
+  normal first open. SHA256
+  `9D9494354F2D08B91C702BF39D37092E16EAE0038B6AE3064B9FA113C36C65EB`.
+- `closed-retrieve-02/closed-retrieve-02.trx`:9/7/2/0,native1,1.2310min.
+  Recovery passed before subsequent read hit the current-projection product
+  gap described above. SHA256
+  `9A44A13B0D418FF633355320C6A61AF9E62E2E3FFAB67DEDD8BFDCFE103FE17B`.
+- `closed-retrieve-03/closed-retrieve-03.trx`:20/18/2/0,native1,5.5877min.
+  Both new reads passed path construction but the fixture issuer selected the
+  expired original PMA2 instead of its genuinely signed successor. The host
+  correctly rejected it; fixture source selection was corrected without time
+  extension, unsigned policy or assertion weakening. SHA256
+  `D6729137F588EB29F6305CF214AAB4F1D4CD12AB1A06BE845BE2F9DD6D853E60`.
+- `closed-retrieve-04/closed-retrieve-04.trx`:20/20/0/0,native0,8.0869min.
+  SHA256 `8718F2897F151AEBB3D05640A93BC736FB290F7D9F710D808041FE0DC60399D6`.
+
+The final twenty-case matrix was listed before03, then repeated unchanged in04:
+two new facts, existing closed-Deposit abandonment, both superseded Retrieve
+variants, nine retained-read cases and all six prerequisites. Existing bounded
+two-method concurrency was used; no source/executable/normative edits during
+live builds/tests. Canonical receipt readbacks preserve the failures; exact
+`Test-TestGateResults`04 against03 passes with native0 and no skips. The generic
+qualifier's FullAccepted field does not turn this filtered run into an unfiltered
+repository gate or stage acceptance.
+
+Evidence uses real PQ/native/SQLCipher custody, held-frame construction and signed
+in-process issuer/terminal results, not physical devices or two remote HTTP stores.
+Remaining acquisition/traversal/last-path dispositions, DCA/XUR/PMT/key rollover,
+sustained128/512 and current mandatory full after the complete S01 batch remain
+open. S02/S04 activation, production deployment/reset, Release and main unchanged.

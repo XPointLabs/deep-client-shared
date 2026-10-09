@@ -34,7 +34,10 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             await AdvanceOriginalStoreEpochForTestAsync(2_100);
             var reader = ReopenAccount();
             using (var exclusion = await reader.OpenMailboxEpochExclusionAsync(acquisition, Source(reader)))
+            {
                 await exclusion.RetireIdleMailboxCounterFloorAsync();
+                await Assert.ThrowsAsync<IOException>(() => exclusion.RetireUnusedClosedRetrieveAcquisitionAsync());
+            }
             await CheckSupersededRetrieveRetirementAsync(transport, own: true, acquisition);
             CryptographicOperations.ZeroMemory(acquisition);
         }
