@@ -52,7 +52,9 @@ Grant, Read, SessionCatalog, Attachment, AccountRegistration, NativeFence.
 The counter profile additionally requires the unique unchanged MailboxStoreState
 guard. It binds the actual registered application database's complete logical
 schema/rows and every catalogued native database, authenticated history/tip,
-protected floor and peer binding. Reads open existing files only; missing or
+protected floor and peer binding. Reads open existing files only. Changed/missing
+original publication journal or protected resolver-capability custody also pins
+selection/recovery; these remain unchanged under the same guard. Missing or
 changed contact intents, initial-key/preclaim custody and protected device-source
 marker/checkpoint or complete existing device SQL also pin recovery. Responder
 checkpoint, prekey install/inventory/commit markers and the entire existing
@@ -76,6 +78,9 @@ there is no compatibility reader or inferred missing SQL guard.
 The separate [used Deposit source candidate](owned-mailbox-grant-custody.md#used-deposit-holder-retirement--s01-source-candidate)
 changes Grant with nine roots and preserves independent object/read custody;
 it is not this counter disposition or activation permission.
+The [superseded Retrieve source candidate](owned-mailbox-grant-custody.md#superseded-retrieve-holder-retirement--s01-source-candidate)
+also changes only Grant, after an independently installed and completed replacement
+read on the same original path; it preserves the traversal and last-path custody.
 Before
 commit-marker recording and before CAS adoption it rederives
 the exact counter successor from actual unchanged grant custody and the exact

@@ -62,23 +62,46 @@ internal static class ProtectedDid2MailboxGrantJournal
     // Store/object/replay dependencies before staging this exact successor.
     // Retire oldest first: never orphan an unresolved request or skip a link.
     internal static byte[] RequireOldestAdoptedDeposit(State state, ReadOnlySpan<byte> acquisition)
+        => RequireOldestAdopted(state, acquisition, MailboxCapabilityDomain.Deposit);
+
+    internal static byte[] RequireSupersededRetrieve(State state, ReadOnlySpan<byte> acquisition)
+    {
+        var selected = RequireOldestAdopted(state, acquisition, MailboxCapabilityDomain.Retrieve);
+        var selection = state.Selections[EntryScope(selected)];
+        if (selection.Current == Convert.ToHexString(acquisition))
+            throw new IOException("The current or sole Retrieve holder cannot retire.");
+        var replacement = state.Entries[selection.Current!];
+        var oldRequest = ContactCodec.Decode("XMG2", Request(selected).Span);
+        var newRequest = ContactCodec.Decode("XMG2", Request(replacement).Span);
+        var oldGrant = MailboxAuthenticatedCapabilityCodec.DecodeGrant(ContactCodec.Decode("XMC2", Response(selected).Span).Field(8).Span);
+        var newGrant = MailboxAuthenticatedCapabilityCodec.DecodeGrant(ContactCodec.Decode("XMC2", Response(replacement).Span).Field(8).Span);
+        if (!Fixed(OriginalRoute(selected).Span, OriginalRoute(replacement).Span) ||
+            !Fixed(oldRequest.Field(3).Span, newRequest.Field(3).Span) ||
+            !Fixed(oldRequest.Field(4).Span, newRequest.Field(4).Span) ||
+            oldGrant.Epoch == newGrant.Epoch && oldGrant.Generation == newGrant.Generation &&
+            Fixed(oldGrant.IssuerPublicKey.Span, newGrant.IssuerPublicKey.Span) && Fixed(oldGrant.Serial.Span, newGrant.Serial.Span))
+            throw new CryptographicException("Retrieve replacement changed original route or private capability custody.");
+        return selected;
+    }
+
+    private static byte[] RequireOldestAdopted(State state, ReadOnlySpan<byte> acquisition, MailboxCapabilityDomain domain)
     {
         var name = Convert.ToHexString(acquisition);
         if (!state.Entries.TryGetValue(name, out var selected) || !IsAdoptedWinner(selected) ||
-            ContactCodec.Decode("XMG2", Request(selected).Span).Field(6).Span[0] != (byte)MailboxCapabilityDomain.Deposit)
-            throw new IOException("Retirement requires an adopted exact Deposit acquisition.");
+            ContactCodec.Decode("XMG2", Request(selected).Span).Field(6).Span[0] != (byte)domain)
+            throw new IOException("Retirement requires an adopted exact acquisition in its selected role.");
         var scope = EntryScope(selected);
         if (!state.Selections.TryGetValue(scope, out var selection) || selection.Pending is not null ||
             selection.Current is null || selection.RetainedTail is null)
-            throw new IOException("Pending acquisition custody pins Deposit retirement.");
+            throw new IOException("Pending acquisition custody pins holder retirement.");
         var last = selection.RetainedTail;
         for (var cursor = selection.RetainedTail; cursor is not null; cursor = Predecessor(state.Entries[cursor]))
         {
             var entry = state.Entries[cursor];
-            if (!IsAdoptedWinner(entry)) throw new IOException("Unresolved or unadopted acquisition custody pins Deposit retirement.");
+            if (!IsAdoptedWinner(entry)) throw new IOException("Unresolved or unadopted acquisition custody pins holder retirement.");
             last = cursor;
         }
-        if (last != name) throw new IOException("Linked Deposit acquisitions retire oldest first.");
+        if (last != name) throw new IOException("Linked acquisitions retire oldest first.");
         return selected;
     }
 
@@ -86,6 +109,19 @@ internal static class ProtectedDid2MailboxGrantJournal
         ReadOnlySpan<byte> network, ReadOnlySpan<byte> account, ReadOnlySpan<byte> instance)
     {
         var selected = RequireOldestAdoptedDeposit(state, acquisition);
+        return RemoveOldestAdopted(state, acquisition, selected, network, account, instance);
+    }
+
+    internal static byte[] RemoveSupersededRetrieve(State state, ReadOnlySpan<byte> acquisition,
+        ReadOnlySpan<byte> network, ReadOnlySpan<byte> account, ReadOnlySpan<byte> instance)
+    {
+        var selected = RequireSupersededRetrieve(state, acquisition);
+        return RemoveOldestAdopted(state, acquisition, selected, network, account, instance);
+    }
+
+    private static byte[] RemoveOldestAdopted(State state, ReadOnlySpan<byte> acquisition, byte[] selected,
+        ReadOnlySpan<byte> network, ReadOnlySpan<byte> account, ReadOnlySpan<byte> instance)
+    {
         var name = Convert.ToHexString(acquisition); var scope = EntryScope(selected);
         var successor = state.Entries.Values.SingleOrDefault(entry => EntryScope(entry) == scope && Predecessor(entry) == name);
         if (successor is null) state.Selections.Remove(scope);

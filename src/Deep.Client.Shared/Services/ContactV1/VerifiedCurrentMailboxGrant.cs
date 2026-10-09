@@ -138,6 +138,22 @@ public sealed class VerifiedCurrentMailboxGrant
                 selector.Kind == MailboxCredentialScopeKind.Self)
             throw new InvalidOperationException(
                 "The verified current grant role does not match its mailbox scope.");
+        return repository.InstallCurrentScopedCredentialAsync(CurrentCredential(selector), runtimeAuthority, cancellationToken);
+    }
+
+    // Read existing installation only. Retirement must never repair/install a
+    // replacement or allocate a request/counter as a side effect of selection.
+    internal Task RequireInstalledRetrieveAsync(SqliteDeepMailboxStore repository, CancellationToken ct)
+    {
+        if (Domain != MailboxCapabilityDomain.Retrieve)
+            throw new InvalidOperationException("A replacement read path requires the Retrieve role.");
+        var selector = new MailboxCredentialSelector(AccountScopeForHolder(holderPublicKey),
+            MailboxCredentialScopeKind.Self, holderPublicKey, SHA256.HashData(exactRouteClosure));
+        return repository.RequireExactCurrentCredentialAsync(CurrentCredential(selector), runtimeAuthority, ct);
+    }
+
+    private ScopedCurrentMailboxCredential CurrentCredential(MailboxCredentialSelector selector)
+    {
         var epoch = new MailboxCredentialEpoch(
             Epoch,
             NotBeforeUnixSeconds,
@@ -148,8 +164,7 @@ public sealed class VerifiedCurrentMailboxGrant
         var grants = Domain == MailboxCapabilityDomain.Retrieve
             ? new CurrentMailboxCredentialGrants(retrieveGrant: ExactGrant.Span)
             : new CurrentMailboxCredentialGrants(depositGrant: ExactGrant.Span);
-        return repository.InstallCurrentScopedCredentialAsync(
-            new ScopedCurrentMailboxCredential(
+        return new ScopedCurrentMailboxCredential(
                 selector,
                 SHA256.HashData(ExactGrant.Span),
                 HolderPublicKey,
@@ -160,9 +175,7 @@ public sealed class VerifiedCurrentMailboxGrant
                     replicas[0].NodeId.Span,
                     replicas[0].IdentityPublicKey.Span,
                     replicas[1].NodeId.Span,
-                    replicas[1].IdentityPublicKey.Span)),
-            runtimeAuthority,
-            cancellationToken);
+                    replicas[1].IdentityPublicKey.Span));
     }
 
     /// <summary>

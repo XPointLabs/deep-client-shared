@@ -98,6 +98,23 @@ internal sealed class ProtectedDeepIdV2ResolverCapabilityStore
         });
     }
 
+    // Structural local readback only, never a capability or current authority.
+    // The live owner independently verifies the DID2 commitment before stage.
+    internal async Task<byte[]> ReadCustodyDigestAsync(CancellationToken ct)
+    {
+        using var raw = await storage.ReadOwnedAsync(Slot, ct).ConfigureAwait(false) ??
+            throw new InvalidDataException("Retirement lost protected resolver capability custody.");
+        if (raw.Length != RecordLength) throw new InvalidDataException("Resolver custody has a hostile size.");
+        return raw.Use(value =>
+        {
+            if (!value[..4].SequenceEqual("DRC2"u8) || !Fixed(value.Slice(4, 16), networkId) ||
+                !Fixed(value.Slice(20, 32), accountId) || value.Slice(52, 32).IndexOfAnyExcept((byte)0) < 0 ||
+                value.Slice(84, 16).IndexOfAnyExcept((byte)0) < 0)
+                throw new CryptographicException("Resolver custody changed its exact local binding.");
+            return SHA256.HashData(value);
+        });
+    }
+
     private static bool Fixed(ReadOnlySpan<byte> left, ReadOnlySpan<byte> right) =>
         left.Length == right.Length &&
         CryptographicOperations.FixedTimeEquals(left, right);

@@ -10,6 +10,23 @@ namespace Deep.Client.Shared.Production.Tests;
 
 public sealed class CurrentScopedMailboxCredentialTests
 {
+    [Theory]
+    [InlineData(0)] [InlineData(1)] [InlineData(2)]
+    public async Task ExactInstalledReadbackRejectsChangedNamespaceReplicaOrScopeWithoutRepair(int fault)
+    {
+        using var fixture = new Fixture();
+        using var store = fixture.Open();
+        await store.InstallCurrentScopedCredentialAsync(fixture.Credential, fixture.Authority);
+        await store.RequireExactCurrentCredentialAsync(fixture.Credential, fixture.Authority, default);
+        var original = fixture.ReadProjection();
+        fixture.CorruptInstalledReadback(fault);
+        var corrupt = fixture.ReadProjection();
+        Assert.NotEqual(original, corrupt);
+        var error = await Record.ExceptionAsync(() => store.RequireExactCurrentCredentialAsync(fixture.Credential, fixture.Authority, default));
+        Assert.True(error is CryptographicException or InvalidOperationException, error?.GetType().Name ?? "Corrupt readback unexpectedly accepted");
+        Assert.Equal(corrupt, fixture.ReadProjection()); // No install, repair or counter allocation.
+    }
+
     [Fact]
     public async Task CurrentGrantSurvivesRestartAndPreparedMau3ResumesExactly()
     {
@@ -166,6 +183,34 @@ public sealed class CurrentScopedMailboxCredentialTests
         internal SqliteDeepMailboxStore Open() => new(
             new SqliteDeepMailboxStoreOptions(
                 Path.Combine(directory, "mailbox.db"), key));
+
+        private Microsoft.Data.Sqlite.SqliteConnection OpenObserver()
+        {
+            var connection = new Microsoft.Data.Sqlite.SqliteConnection(new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
+            { DataSource = Path.Combine(directory, "mailbox.db"), Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadWrite, Pooling = false }.ToString());
+            connection.Open();
+            Assert.Equal(SQLitePCL.raw.SQLITE_OK, MailboxRandomKeyTestEncoding.Apply(connection, key));
+            return connection;
+        }
+
+        internal byte[] ReadProjection()
+        {
+            using var connection = OpenObserver();
+            return SqliteDeepMailboxStore.ReadCompleteLocalSqlProjection(connection, Selector.ScopeId.Span, default);
+        }
+
+        internal void CorruptInstalledReadback(int fault)
+        {
+            using var connection = OpenObserver(); using var command = connection.CreateCommand();
+            command.CommandText = fault switch
+            {
+                0 => "UPDATE mailbox_credential_grants SET grant_digest=$corrupt;",
+                1 => "UPDATE mailbox_credential_epochs SET first_replica_key=$corrupt;",
+                2 => "UPDATE mailbox_credential_scopes SET issuer_context=$corrupt;",
+                _ => throw new ArgumentOutOfRangeException(nameof(fault))
+            };
+            command.Parameters.AddWithValue("$corrupt", Bytes(32, 0xe1)); Assert.Equal(1, command.ExecuteNonQuery());
+        }
 
         internal ScopedCurrentMailboxCredential CreateCredential(
             ulong epoch,

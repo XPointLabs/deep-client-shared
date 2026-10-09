@@ -695,7 +695,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 
         // Controlled, actual signed producer fixture. This stages selection for
         // consumer tests; it is NOT runtime renewal/compaction or device evidence.
-        internal async Task StageVerifiedGrantSuccessorAsync(OwnedGrantTransport transport, bool own)
+        internal async Task StageVerifiedGrantSuccessorAsync(OwnedGrantTransport transport, bool own, bool currentRetainedAuthority = false)
         {
             var selected = own ? innerStorage : peerStorage;
             using var generation = await selected.ReadOwnedAsync("deep.store.v2.sql-generation") ?? throw new InvalidOperationException();
@@ -732,8 +732,11 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 {
                     Assert.Equal(MailboxCapabilityDomain.Retrieve, domain);
                     var parsed = ContactRouteClosureCodec.Decode(ProtectedDid2MailboxGrantJournal.OriginalRoute(old).Span);
-                    var network = transport.Dispatch!.Network;
-                    var (host, request, retainedPending) = await PrepareRetainedGraphRequestAsync(original, parsed, network, seed);
+                    var currentAccount = own ? ReopenAccount() : ReopenGrantReader();
+                    var currentSource = own ? Source(currentAccount) : GrantReaderSource(currentAccount);
+                    var fresh = currentRetainedAuthority ? await currentSource.VerifyForOwnPreKeyAuthoringAsync(currentAccount, default) : null;
+                    var network = fresh?.Network ?? transport.Dispatch!.Network;
+                    var (host, request, retainedPending) = await PrepareRetainedGraphRequestAsync(original, parsed, network, seed, fresh);
                     pending = retainedPending;
                     ProtectedDid2MailboxGrantJournal.AddPending(state, pending); await Save();
                     response = await IssueRetainedFixtureGrantAsync(request, parsed, host, network, default);
@@ -765,12 +768,13 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         }
 
         private async Task<(VerifiedMailboxHostAuthorityV2 Host, AuthoredMailboxGrantRequest Request, byte[] Pending)>
-            PrepareRetainedGraphRequestAsync(byte[] original, ParsedContactRouteClosure route, VerifiedOnionNetworkContext network, byte[] seed)
+            PrepareRetainedGraphRequestAsync(byte[] original, ParsedContactRouteClosure route, VerifiedOnionNetworkContext network, byte[] seed,
+                DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority? currentAuthority = null)
         {
             var prior = ContactCodec.Decode("XMG2", ProtectedDid2MailboxGrantJournal.Request(original).Span);
-            var fresh = await Source().VerifyForOwnPreKeyAuthoringAsync(accounts, default);
+            var fresh = currentAuthority ?? await Source().VerifyForOwnPreKeyAuthoringAsync(accounts, default);
             var host = await MailboxHostAuthorityV2Verifier.VerifyAsync(network, bootstrap.Authority,
-                operational.ExactPma2, new OnionTrustedTimeAuthority(this));
+                currentAuthority?.MailboxAuthority.ExactPma2 ?? operational.ExactPma2, new OnionTrustedTimeAuthority(this));
             using var signer = ReachabilityMailboxHolderAuthority.OpenRetainedRead(route, Network, prior.Field(3), prior.Field(4),
                 seed, token => host.EnsureCurrentAsync(token).AsTask());
             var request = await host.AuthorRetainedReadRequestAsync(route.ExactBytes, prior.Field(3), prior.Field(4), signer);

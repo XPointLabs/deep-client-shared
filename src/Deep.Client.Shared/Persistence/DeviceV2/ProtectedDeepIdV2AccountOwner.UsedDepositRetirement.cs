@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using Deep.Client.Shared.Services.ContactV2;
 using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.ContactV1;
+using Deep.Protocol.DeepExtension.MailboxCapabilities;
 
 namespace Deep.Client.Shared.Persistence.DeviceV2;
 
@@ -165,16 +166,22 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         return result ?? throw new CryptographicException("Initial native custody lost its original contact draft.");
     }
 
-    private void RequireUsedDepositSuccessor(Did2CompactionPlan plan, ReadOnlySpan<byte> predecessor, ReadOnlySpan<byte> successor)
+    private void RequireAdoptedAcquisitionSuccessor(Did2CompactionPlan plan, ReadOnlySpan<byte> predecessor, ReadOnlySpan<byte> successor)
     {
         using var state = ProtectedDid2MailboxGrantJournal.Decode(predecessor, networkId,
             plan.Exact.Slice(32, 32).Span, plan.Exact.Slice(64, 32).Span);
         var row = plan.ReadRow(0);
-        var entry = ProtectedDid2MailboxGrantJournal.RequireOldestAdoptedDeposit(state, row.Selector.Span);
+        var original = state.Entries[Convert.ToHexString(row.Selector.Span)];
+        var retrieve = ContactCodec.Decode("XMG2", ProtectedDid2MailboxGrantJournal.Request(original).Span).Field(6).Span[0] ==
+            (byte)MailboxCapabilityDomain.Retrieve;
+        var entry = retrieve ? ProtectedDid2MailboxGrantJournal.RequireSupersededRetrieve(state, row.Selector.Span) :
+            ProtectedDid2MailboxGrantJournal.RequireOldestAdoptedDeposit(state, row.Selector.Span);
         if (!FixedRoute(entry.AsSpan(0, 32), plan.SqlSelector) || !FixedRoute(SHA256.HashData(entry), row.Commitment.Span))
             throw new CryptographicException("Used Deposit retirement changed its original selection.");
-        var expected = ProtectedDid2MailboxGrantJournal.RemoveOldestAdoptedDeposit(state, row.Selector.Span,
-            networkId, plan.Exact.Slice(32, 32).Span, plan.Exact.Slice(64, 32).Span);
+        var expected = retrieve ? ProtectedDid2MailboxGrantJournal.RemoveSupersededRetrieve(state, row.Selector.Span,
+            networkId, plan.Exact.Slice(32, 32).Span, plan.Exact.Slice(64, 32).Span) :
+            ProtectedDid2MailboxGrantJournal.RemoveOldestAdoptedDeposit(state, row.Selector.Span,
+                networkId, plan.Exact.Slice(32, 32).Span, plan.Exact.Slice(64, 32).Span);
         try { if (!FixedRoute(expected, successor)) throw new CryptographicException("Used Deposit successor changed unrelated custody."); }
         finally { CryptographicOperations.ZeroMemory(expected); }
     }

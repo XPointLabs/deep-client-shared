@@ -80,7 +80,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 
     private sealed partial class Fixture
     {
-        internal async Task CheckCompletedAckFloorRetirementAsync(bool nativeSqlFault = false)
+        internal async Task CheckCompletedAckFloorRetirementAsync(bool nativeSqlFault = false, bool retireSupersededHolder = false)
         {
             var intent = Bytes(32, 0xd1);
             var (complete, _, _, _, _) = await PrepareNativeHelloCompletion(intent, verifyDraftRecovery: false);
@@ -218,6 +218,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             // authority rejects it before any new Retrieve/ACK callback.
             await Assert.ThrowsAsync<CryptographicException>(() => SynchronizeNativeReceiver(retrieve, terminal));
             Assert.Equal(1, retrieve.Calls); Assert.Equal(1, terminal.RetrieveCalls); Assert.Equal(1, terminal.AckCalls);
+            if (retireSupersededHolder)
+                await CheckSupersededRetrieveRetirementAsync(retrieve, own: false, selector);
             CryptographicOperations.ZeroMemory(initial); CryptographicOperations.ZeroMemory(selector);
         }
 

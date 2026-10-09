@@ -13,6 +13,32 @@ namespace Deep.Client.Shared.Persistence;
 /// </summary>
 public sealed partial class SqliteDeepMailboxStore
 {
+    internal async Task RequireExactCurrentCredentialAsync(ScopedCurrentMailboxCredential credential,
+        VerifiedOfficialMailboxAuthority authority, CancellationToken ct)
+    {
+        ValidateCurrentCredential(credential, authority);
+        await _databaseGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            await using var connection = await OpenAsync(ct).ConfigureAwait(false);
+            await using var transaction = connection.BeginTransaction(deferred: false);
+            ValidateCurrentCredential(credential, authority);
+            EnsureExactCurrentCredential(connection, transaction, credential, authority);
+            var actual = ResolveCurrent(connection, transaction, credential.Selector, MailboxCredentialRole.Retrieve,
+                authority, binding: null, allocateCounter: false).Route;
+            var expected = credential.Replicas;
+            if (actual.Epoch != credential.Current.Epoch || actual.ExpiresAtUnixSeconds != credential.Current.ExpiresAtUnixSeconds ||
+                !FixedCurrent(actual.Replicas.FirstId.Span, expected.FirstId.Span) ||
+                !FixedCurrent(actual.Replicas.SecondId.Span, expected.SecondId.Span) ||
+                !FixedCurrent(actual.Replicas.FirstSigningKey.Span, expected.FirstSigningKey.Span) ||
+                !FixedCurrent(actual.Replicas.SecondSigningKey.Span, expected.SecondSigningKey.Span))
+                throw new CryptographicException("Replacement credential differs from the exact original ranked read replicas.");
+            authority.Validate(); ct.ThrowIfCancellationRequested();
+            await transaction.CommitAsync(ct).ConfigureAwait(false);
+        }
+        finally { _databaseGate.Release(); }
+    }
+
     public Task InstallScopedCredentialAsync(
         ScopedMailboxCredentialGeneration generation,
         VerifiedOfficialMailboxAuthority authority,
@@ -574,7 +600,7 @@ public sealed partial class SqliteDeepMailboxStore
                    s.active_epoch,s.group_membership_commitment,e.not_before,e.expires_at,
                    e.mailbox_id,e.placement_id,e.placement_commitment,e.membership_commitment,
                    e.first_replica_id,e.first_replica_key,e.second_replica_id,e.second_replica_key,
-                   NULL,NULL
+                   NULL,NULL,s.scope_kind,s.subject_id,s.issuer_context,typeof(s.scope_kind)
             FROM mailbox_credential_scopes s
             JOIN mailbox_credential_epochs e
               ON e.scope_id=s.scope_id AND e.epoch=s.active_epoch
@@ -584,7 +610,7 @@ public sealed partial class SqliteDeepMailboxStore
                    s.active_epoch,s.group_membership_commitment,e.not_before,e.expires_at,
                    e.mailbox_id,e.placement_id,e.placement_commitment,e.membership_commitment,
                    e.first_replica_id,e.first_replica_key,e.second_replica_id,e.second_replica_key,
-                   g.grant_digest,g.canonical_grant
+                   g.grant_digest,g.canonical_grant,s.scope_kind,s.subject_id,s.issuer_context,typeof(s.scope_kind)
             FROM mailbox_credential_scopes s
             JOIN mailbox_credential_epochs e
               ON e.scope_id=s.scope_id AND e.epoch=s.active_epoch
@@ -606,7 +632,10 @@ public sealed partial class SqliteDeepMailboxStore
         var placement = (byte[])reader.GetValue(9);
         var placementCommitment = (byte[])reader.GetValue(10);
         var membership = (byte[])reader.GetValue(11);
-        if (!FixedCurrent((byte[])reader.GetValue(0), selector.AccountScope.Value) ||
+        if (reader.GetString(21) != "integer" || reader.GetInt32(18) != (int)selector.Kind ||
+            !FixedCurrent((byte[])reader.GetValue(19), selector.SubjectId.Span) ||
+            !FixedCurrent((byte[])reader.GetValue(20), selector.IssuerContext.Span) ||
+            !FixedCurrent((byte[])reader.GetValue(0), selector.AccountScope.Value) ||
             !FixedCurrent((byte[])reader.GetValue(1), authority.NetworkId.Span) ||
             !FixedCurrent((byte[])reader.GetValue(2), authority.PolicyFingerprint.Span) ||
             authority.NowUnixSeconds < notBefore || authority.NowUnixSeconds >= expires ||
@@ -631,6 +660,8 @@ public sealed partial class SqliteDeepMailboxStore
                 (byte[])reader.GetValue(17), role.Value, epoch, notBefore,
                 expires, placementCommitment, membership, holder,
                 authority, rejectRevoked: true);
+            if (!FixedCurrent(grantDigest, SHA256.HashData(MailboxAuthenticatedCapabilityCodec.EncodeGrant(grant))))
+                throw new CryptographicException("Current credential lost the exact canonical grant replay namespace.");
         }
         var replicas = new MailboxCredentialReplicaPair(
             (byte[])reader.GetValue(12), (byte[])reader.GetValue(13),

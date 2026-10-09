@@ -21,6 +21,16 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         if (!registration.Use(bytes => FixedRoute(bytes.Slice(56, 32), instance.Span)))
             throw new CryptographicException("Mailbox state readback changed its registered account instance.");
         registration.Use(bytes => { hash.AppendData(bytes); return true; });
+        using (var publication = await storage.ReadOwnedAsync(ProtectedDid2ContactRouteJournal.Slot, ct).ConfigureAwait(false) ??
+            throw new InvalidDataException("Mailbox state lost protected publication/retained-route custody."))
+        {
+            using var decoded = publication.Use(bytes => ProtectedDid2ContactRouteJournal.Decode(bytes, networkId, account.Span, instance.Span));
+            publication.Use(bytes => { hash.AppendData(SHA256.HashData(bytes)); return true; });
+        }
+        var resolverDigest = await new ProtectedDeepIdV2ResolverCapabilityStore(storage, networkId, account.Span)
+            .ReadCustodyDigestAsync(ct).ConfigureAwait(false);
+        try { hash.AppendData(resolverDigest); }
+        finally { CryptographicOperations.ZeroMemory(resolverDigest); }
         using (var contact = await storage.ReadOwnedAsync(ProtectedDid2ContactStartJournal.Slot, ct).ConfigureAwait(false) ?? throw new InvalidDataException("Mailbox state lost contact-start custody."))
         {
             using var decoded = contact.Use(bytes => ProtectedDid2ContactStartJournal.Decode(bytes, networkId, account.Span, instance.Span));

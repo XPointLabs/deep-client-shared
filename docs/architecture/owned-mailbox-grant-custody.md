@@ -448,3 +448,45 @@ the checkpoint. The subsequent generation5 late-result/connected-consumer gate
 completed575/0/0 terminal0 with all20 selected cases Passed and matching frozen
 inputs. Its own exact receipt is recorded separately in the checkpoint. Neither
 slice closes S01 or qualifies a signed installed client or physical transport.
+
+## Superseded Retrieve holder retirement — S01 source candidate
+
+`DeepIdV2AccountService.RetireSupersededRetrieveAcquisitionAsync(acquisition, source, ct)`
+removes only the oldest adopted Retrieve acquisition after actual epoch exclusion
+and its separate idle-counter retirement. It never removes a current/sole holder,
+original route, capability, traversal, SQL request/outcome, semantic state or object.
+Pending, unresolved or unadopted acquisition links, matching active read/ACK,
+remaining old counters and unresolved ordinary/attachment work pin selection.
+
+The live held owner opens the actual completed permanent publication, rechecks
+private locator/capability custody and verifies the protected current successor
+with the current retained-read host/PMA2. The replacement keeps the exact original
+route and ranked node pair, has a distinct replay namespace, and must already be
+installed with exact SQL grant/generation/scope/replica-key readback. Selection
+cannot install or repair credentials, sign a request, allocate a counter, contact
+an issuer or rerank a mailbox path. Its local installation policy is not native
+MGR1 admission authority; node revocation/holder/replay checks remain mandatory.
+
+Both original and replacement holders need positive completed owned-read custody.
+The protected read journal must be idle and its original-scope traversal must
+agree with SQL. Bounded SQL enumeration verifies each exact grant, holder-signed
+request, operation/route binding and durable outcome shape. Each nonempty Retrieve
+joins its exact ACK operation derived from scope/grant/request/page commitments;
+missing or orphan ACK, unknown request or missing read custody rejects. MRSO/MCO1
+remain SQL facts, not new independent quorum or application receipt authorities.
+Semantic/native/history/source custody is independently checked and preserved
+by the complete unchanged MailboxStoreState guard. No Delivered/Read is invented.
+
+The existing nine-root ProtectedOnly plan changes only Grant and clears only the
+immediate successor's predecessor link. Every other root and complete application/
+native SQL stays exact. MailboxStoreState also binds the canonically decoded
+publication journal and bounded resolver-capability custody digest; cold recovery
+cannot proceed after loss/change of that original path, even with unchanged SQL.
+Stored recovery rederives the same structural successor under unchanged guards,
+without a fresh proof, network/signing callback or holder reconstruction. No new
+wire, journal generation, compatibility reader or namespace tombstone is added.
+
+This is same-original-path holder replacement, not retirement of a traversal or
+the last retained path. Autonomous renewal/cleanup remains S04; source receipts,
+matching full and remaining S01/physical/release status belong to the
+[checkpoint](../testing/s01-idle-mailbox-floors-2026-10-09.md).

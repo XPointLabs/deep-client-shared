@@ -703,3 +703,59 @@ Final production solution build: native0, zero warnings/errors,9.97s.
 No matching mandatory full was launched: remaining S01 dependency/path closure,
 receipt-key rotation, sustained lifecycle and connected/shipping/device gates
 are still open. No production deploy/reset, Release publication or main merge.
+
+## Superseded Retrieve holder and retained-path guard checkpoint
+
+The S01 source packet implements the private same-original-path holder transition
+in the [sole grant owner](../architecture/owned-mailbox-grant-custody.md#superseded-retrieve-holder-retirement--s01-source-candidate).
+No wire, schema/journal generation or runtime renewal was added. A controlled
+genuine signed successor is installed through the actual owned client; the issuer
+callback is not repeated. Both empty and actual initial Store/receive/semantic
+ACK cases complete an original read, exclude the old namespace, retire its idle
+floor, then complete an actual replacement read on the original selected path.
+Only afterward can the oldest private holder retire.
+
+Both cases reject sole-holder removal, installation without a completed read,
+and an actual phase3 replacement read interrupted after SQL page commit. Exact
+retry completes that read without another terminal callback. Every protected-plan
+handover is injected, disk storage is cold-reopened, and recovery preserves the
+entire application SQL, native fence, all non-grant roots and original route.
+AfterStage additionally corrupts the actual publication journal: recovery rejects
+without changing the staged plan or grant root; restoring only the disposable
+fixture bytes permits recovery. The remaining current holder still reads the same
+mailbox after recovery. MRSO/MCO1 are checked as SQL commitments, not presented as
+independent quorum or Delivered/Read authority.
+
+Readback review also found two missing SQL checks: current scope kind/subject/
+issuer-context columns were not compared with the exact selector, and the stored
+grant digest was not compared with canonical grant bytes before counter use.
+The actual current credential resolver now enforces both. Three negative SQLCipher
+cases independently alter digest, replica key or scope context; exact installed
+readback rejects without repair or allocation. Existing cold exact-MAU and expiry
+boundary cases remain unchanged and pass. The complete MailboxStoreState guard now
+also binds decoded publication custody and the bounded protected resolver-capability
+digest, as required by the replacement path's cold recovery dependencies.
+
+Final build: Windows PowerShell5.1/SDK10.0.301, native0, zero warnings/errors,6.02s.
+Both focused runs used predeclared exact case lists, `--no-build --no-restore` and
+serial xUnit execution; source/executable inputs did not change while either was
+live. Canonical receipt mappings and counters were verified under
+`artifacts/s01-superseded-retrieve/`:
+
+- `retrieve-retirement-01/retrieve-retirement-01.trx`:9/1/0, native1,7.7098min.
+  The empty case attempted polling before actual completed publication and failed
+  before retirement. Nonempty owner recovery, both Deposit-chain variants and all
+  prerequisites passed. This FAIL remains FAIL. SHA256:
+  `1545DAD5C29847C5AC2C57702567B577B64E468E873DCC02B3C46A4263020433`.
+- `retrieve-retirement-02/retrieve-retirement-02.trx`:16/0/0, native0,9.6506min.
+  After correcting publication setup and adding the readback/path-loss checks,
+  both new owner variants, both Deposit-chain variants, all six current credential
+  cases and all six prerequisites passed. SHA256:
+  `31307783383B3F5DBEFDABF48C5A971A4A26D3F4E1DBF6AF179E6B4C7D797A2E`.
+
+This qualifies the tested same-route superseded-holder source transition, not
+retirement of a traversal/last path, unused/unknown Retrieve acquisitions, cross-path
+migration, independent receipt-key rotation, sustained128/512 cleanup, a matching
+mandatory full, S01 acceptance, S02/S04 activation or physical Windows/Android.
+The current source requires full qualification after the complete S01 batch.
+Production, accounts, Release publication and main were not changed.
