@@ -429,6 +429,11 @@ proofs, signing, transport callbacks or reissuing the request.
 
 The matching targeted source packet passed65/0/0/native0; exact evidence is
 in the [checkpoint](../testing/s01-idle-mailbox-floors-2026-10-09.md#used-deposit-holder-retirement--targeted-source-checkpoint).
+The subsequent [actual chain-owner packet](../testing/s01-idle-mailbox-floors-2026-10-09.md#used-deposit-chain--actual-owner-checkpoint)
+passed9/0/0/native0: two original Stores under distinct adopted holders,
+oldest-first cold recovery, preserved successor custody and pinning by an
+unknown successor send. Its signed selection setup uses the controlled producer
+fixture; it does not qualify autonomous runtime renewal.
 This candidate still requires matching full qualification; it
 does not close remaining S01 traversal/last-path/rotation/sustained requirements,
 activate the S04 scheduler, or qualify a physical client/release.

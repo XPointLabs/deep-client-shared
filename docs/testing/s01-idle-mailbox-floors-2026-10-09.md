@@ -612,3 +612,46 @@ Retrieve/traversal/last-path retirement and whole S01 remain open. No full was
 launched for this source increment. Physical Windows/Android, shipping/package,
 files/groups/calls and release acceptance remain unqualified. No production
 deployment, reset, GitHub Release publication or main merge occurred.
+
+## Used Deposit chain — actual owner checkpoint
+
+The next coherent S01 packet exercises the actual held retirement producer on
+two adopted acquisitions in one scope, not just the journal graph helper.
+Its source contract remains in the
+[sole grant owner](../architecture/owned-mailbox-grant-custody.md#used-deposit-holder-retirement--s01-source-candidate).
+The controlled setup authors a genuine signed successor and persists the three
+selection transitions; this is consumer/retirement evidence, not qualification
+of an autonomous renewal producer or scheduler.
+
+Both variants perform a real owned ContactAccept Store followed by an ordinary
+text Store with the distinct successor holder. The completed variant uses the
+actual ordinary cleanup API, removes both excluded idle floors, rejects
+newest-first selection, interrupts the oldest's plan after staging and resumes
+through a cold owner. The remaining seed/request/result/policy/route and current
+selection are preserved. It then retires the remaining used holder and checks
+both original cached Store outcomes, exact original encrypted message replay,
+unchanged application/native/source/non-grant custody and both live objects.
+
+The lost-reply variant produces a genuine signed durable response but loses it
+before the client can confirm the second Store. That unknown successor send
+pins oldest-holder retirement after the signed epoch advance. Original
+prepared send, grant chain, application SQL, native floor and idle plan remain
+unchanged; no reply is invented, no request is reissued and no key is evicted.
+
+The test helper now routes ordinary cleanup to the actual scope's account for
+both directions instead of unconditionally choosing the initiator. Product
+code required no correction for the tested chain transition. The final build
+under Windows PowerShell5.1/SDK10.0.301 passed zero warnings/errors in5.74s.
+`--list-tests` declared exactly nine cases: both chain variants, the actual
+cached-encryption/history regression and all six fixture prerequisites.
+`used-deposit-chain-01` ran serially and completed9/0/0/native0 in8m38s;
+the canonical receipt reader verified every mapping. Receipt:
+`artifacts/s01-used-deposit-retirement/used-deposit-chain-01/used-deposit-chain-01.trx`.
+SHA256: `D41661F7FCA669D0350785466C353500A22AF56B802B1E81F3A702AB0A3B062A`.
+No source or executable input changed while this run was live.
+
+This closes the previously untested two-used-acquisition owner scenario, not
+sustained128/512 lifetime, independent issuer/receipt-key rollover, known
+Retrieve/traversal/last-path closure, the matching mandatory full, whole S01,
+runtime activation, physical Windows/Android or release acceptance. No full,
+production deployment, account reset, GitHub Release or main merge occurred.

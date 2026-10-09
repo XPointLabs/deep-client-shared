@@ -381,7 +381,9 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         }
         internal Task CompactNativeOrdinaryOutbox(Did2MessagingSessionScope scope, CancellationToken ct)
         {
-            var account = ReopenAccount(); return account.CompactOwnOrdinaryOutboxAsync(scope, 32, Source(account), ct);
+            var account = scope.IsInitiator ? ReopenAccount() : ReopenGrantReader();
+            var source = scope.IsInitiator ? Source(account) : GrantReaderSource(account);
+            return account.CompactOwnOrdinaryOutboxAsync(scope, 32, source, ct);
         }
         internal async Task<byte[]> ReadCompleteOrdinaryApplicationProjection(Did2MessagingSessionScope scope)
         {
