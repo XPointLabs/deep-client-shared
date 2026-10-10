@@ -1,5 +1,69 @@
 # S01 known send/read retirement — 2026-10-09
 
+## Joint archived-path working batch — 2026-10-09
+
+Current summary: the complete23-case archived-path matrix passed before the
+subsequent conservative-clock arithmetic correction. The corrected source
+then passed13 arithmetic cases and2 native send/receive regression scenarios.
+New-routing same-key renewal and protected-dependency refusal scenarios also
+pass on their matching focused inputs; neither substitutes for the pending full.
+Exact receipts are recorded at the end of this file. Earlier next-step and
+unqualified-row statements below describe their respective historical inputs;
+they do not override these later results. Mandatory full and S01 remain open.
+
+Uncommitted source candidate for the remaining S01 traversal/last-path obligation.
+Its sole private profile owner is
+[grant custody](../architecture/owned-mailbox-grant-custody.md#joint-archived-read-path-disposition--unqualified-s01-source-candidate).
+It connects complete application SQL, grant/read roots and the archived publication
+in one stored operation, with unchanged independent source/native custody.
+No runtime scheduler, wire change, production deployment or physical E2E claim.
+
+Actual Windows PowerShell5.1.26100.9457/Desktop and SDK10.0.301 were recorded.
+Builds used Release, `--no-restore -m:1 -p:EnableDeepTestInternals=true`;
+tests used the matching production project, `--no-build --no-restore`.
+Every native handle below is terminal; no input was edited during its build/test.
+
+| Receipt | Exact result | Qualification |
+| --- | --- | --- |
+| `artifacts/s01-retained-path/path-model-01/path-model-01.trx` | 62 Passed / 0 Failed / 0 Skipped, native0,366ms; preceding build0/zero warnings/errors,53.15s | Structural plan model only, including8 new cases; not actual SQL/custody permission |
+| `artifacts/s01-retained-path/path-owner-01/path-owner-01.trx` | 62 Passed / 1 Failed / 0 Skipped, native1; build0/zero warnings/errors,11.51s | FAIL before owner scenario: proposed DTS1 fixture exceeded its30-day bound; no lifetime validation weakened |
+| `artifacts/s01-retained-path/path-owner-02/path-owner-02.trx` | 0 Passed / 2 Failed / 0 Skipped, native1; build0/zero warnings/errors,4.97s | FAIL before owner scenario: proposed head exceeded its24-hour bound |
+| `artifacts/s01-retained-path/path-owner-03/path-owner-03.trx` | 1 Passed / 1 Failed / 0 Skipped, native1,15s; build0/zero warnings/errors,5.17s | Actual pre-horizon rejection passes after owned publication promotion, completed empty read and signed epoch advance; positive horizon case FAIL at expired DTS1/current-proof boundary, before compaction staging |
+
+SHA256 in that order:
+`E5B6F944A6E200E4093C74952357E9F5B80DDD32EB203BF61510FF462379AC6A`,
+`46B2DA0E5D3FF4F60E6D975DB270F984E50EE96375D537C64B47EB01F91E7636`,
+`AA3ED5FDE1B65CBB3B313C859C7DDA79503AB24DB0EBA0DC10CC8105065DB928`,
+`AC5CAB599EC33449DE5C331853D0344EB87056D7165280C0BE05DF02B2236739`.
+All original failures remain; none is classified as PASS or skip.
+
+Next implementation is the same S01 batch: genuine signed head/view and
+DTS1/XNA1 successors across the object horizon, including original namespace
+exclusion under protected authority lineage. Existing exclusion deliberately
+rejects a changed XNA1 core; an ancestor hash alone cannot replace current
+protected floor continuity. Do not enlarge DTS/head/view windows or freeze a
+clock to make the positive path reachable. Sixteen empty/nonempty cold handovers
+and two cancellation/abandon cases are authored but **not run/qualified**.
+Hostile SQL/root/part and final native-contact/ACK preservation still need actual
+owned execution. Current full, sustained128/512 and all remaining S01 rollover
+requirements stay open. No S01 acceptance, S02 activation or release percentage.
+
+The next S01 source increment now has genuine signed DTS1/XNA1 horizon inputs
+and fixes directory-head renewal against an exact historical protected predecessor.
+Matching Protocol focused47/0/0/native0 and registry consistency pass; see
+[actual horizon evidence](../../../deep-protocol/docs/testing/s01-authority-horizon-2026-10-09.md).
+This does not update the Shared owner-03 receipt or qualify its positive path.
+Network history/author rollover and original namespace exclusion remain next,
+followed by the full actual SQL/protected/native recovery matrix. No caller clock,
+new genesis, enlarged window or historical signing permission was introduced.
+The subsequent Protocol continuation implements exact authority-ancestor network
+history verification under DR-0107, with current terminal bindings unchanged:
+125 focused cases pass, including19 new network rollover cases. Matching Shared
+build0/zero warnings/errors,19.74s. See the same linked checkpoint for exact
+receipts/non-claims. The real operational successor producer and this owner’s
+original namespace exclusion remain unimplemented across root renewal, so this
+does not qualify owner-03 or its18 cold/cancellation cases.
+
 Private source batch implementing
 [DR-0105](../../../docs/survival-program/decisions/DR-0105-idle-mailbox-counter-retirement.md).
 The exact API/profile belongs to
@@ -1064,3 +1128,329 @@ S01 still requires remaining acquisition/traversal/last-path dispositions,
 DCA/XUR/PMT/issuer/root rollover for new routing/authoring, sustained128/512 and
 the mandatory matching full reference union after the complete stage batch.
 Production, device E2E, Release and main remain unchanged by this packet.
+
+## Joint archived path working batch — 2026-10-09
+
+The current uncommitted S01 batch now reaches the actual object-retention
+horizon using signed XNA1/DTS1 successors and current directory/network heads,
+not an extended genesis window. Original namespace verification uses the exact
+retained PMA2/PMT2 and its own verified ancestor authority (DR-0108).
+
+The SQL selector preserves the required positive poll-generation floor and
+completed original Retrieve/ACK. The normalized mailbox repository may already
+have pruned an empty traversal row: absence is accepted only when the protected
+cursor/token and SQL inbox/quarantine are empty. A missing poll floor or missing
+nonempty traversal still rejects; empty row absence never proves completion.
+
+`path-owner-06b` terminated with native1 at build (zero warnings, one CS1061:
+an unnecessary `.Span` on an existing ReadOnlySpan); no tests launched. After
+that compile fix, `path-owner-07` ran in Windows PowerShell5.1/Desktop with
+SDK10.0.301: build native0, zero warnings/errors, 12.42s; tests native0,
+2 passed / 0 failed / 0 skipped, 35s. The root canonical receipt reader verified
+the exact result/definition/execution mappings; TRX SHA256:
+`AAC7BF371821512AADD50688953BEB84BC9389CAA7D439F7EE3FE8927E91AA86`.
+Receipt: `artifacts/s01-retained-path/path-owner-07/path-owner-07.trx`.
+
+These two cases prove pre-horizon rejection and the positive joint SQL/protected
+disposition with real account/native/SQLCipher custody. They do not qualify the
+remaining 18 cold-handover/cancellation rows, hostile SQL matrix, current Protocol
+producer changes, matching full, shipping or physical devices. S01 remains open;
+S02 is not activated and no production, Release or main state changed.
+
+Current continuation keeps all earlier FAIL evidence and adds these owner runs
+(Windows PowerShell5.1/Desktop, SDK10.0.301; all matching builds zero warnings/errors):
+
+| Run | Passed/failed/skipped; terminal | Finding / TRX SHA256 |
+| --- | --- | --- |
+| `path-owner-08` | 13/9/0; native1,7m25s | All9 nonempty rows failed before cleanup: fixture enabled delivery clocks before Hello preparation, then supplied the old sample. `4D471ABE6CC431A6D5AD98A5B76EAA809F6C9ED66B1750375165D3EEC9E8458C` |
+| `path-owner-09` | 1/1/0; native1,3m46s | Initial Store dispatch still borrowed preparation's expiring clock. `5F347F3384EF1B0C11959CFD66C78C574394284464CC4E6383325AF7BCE18FB4` |
+| `path-owner-10` | 1/1/0; native1,4m52s | Store/Hello receive passed after runtime clock fix; fixture's intentionally short PMS expired before Accept. `FED7D4B51F2AE67335C105B548E8B08FA0975E12F1C6E5439C45431C73C92D81` |
+| `path-owner-11` | 2/1/0; native1,5m26s | Cold hostile staging/SQL and empty owner passed. Nonempty Hello/Accept/Retrieve/ACK reached the horizon; test incorrectly expected a nonzero cursor after final ACK. `9AC4861A39AB15302CE980D24DE3E089651ACD1339D6F70ACF5EDCC62313A236` |
+| `path-owner-12` | 3/0/0; native0,6m04s | Empty/nonempty SQL-floor refusals plus cold prepared-part/SQL guards, then real disposition/native accepted-event replay. `753FD17144AE549C4D7C946F713731F31323BCEEC3657E02D27B123DFB2AA149` |
+
+Run12 build native0 in4.66s. Canonical receipt mappings validate and retain all
+three run11 cases. Receipts are under `artifacts/s01-retained-path/<run>/<run>.trx`.
+The delivery clock now starts after Hello commit. Only this horizon fixture
+authors its initial PMS until1900, within the already signed800-second XRA:
+no existing signed record, lifetime bound or object horizon is extended. Other
+retained-read fixtures retain their original short-window input. The nonempty
+case completes one real non-final page/ACK so cursor/token actually remain;
+ordinary final-page receive coverage is not replaced or removed.
+
+The product dispatch now captures the live preparation's conservative upper
+bound before entering a new independently bounded signer-free dispatch scope,
+instead of consulting the old clock after callbacks. Original bytes/NotBefore,
+all grant/route expiries, current authority and endpoint/native rechecks remain;
+post-ingress failure still retains unknown exact work, never a success flag.
+
+Hostile owner checks remove/change the poll floor, zero the original replay
+counter and remove the real nonempty traversal. Repeated refusals preserve the
+complete damaged SQL, grant/read/publication roots and idle plan. Cold prepared
+recovery rejects missing/changed/extra successor parts and substituted SQL twice,
+preserving the actual damaged parts, complete SQL, roots and exact phase1 plan.
+Fixture-only restoration is explicitly not a production repair API; unchanged
+before-SQL abandonment and subsequent real disposition also pass. The remaining
+18 cold/cancel rows and mandatory full are still unqualified on current inputs.
+The separate Protocol171-case producer matrix and DevOps signer/caller checks
+pass; neither proves two remote stores, production activation or device E2E.
+
+`path-owner-13` then completed the entire23-case archived-path matrix on the
+unchanged run12 compiled inputs:23 passed /0 failed /0 skipped, native0.
+The original live dotnet process was observed through a retained OS process
+handle; its actual terminal exit0 was captured, not inferred from the TRX.
+The canonical receipt/matrix checker retains every run08 and run12 case in
+their exact23-case union. SHA256:
+`352E6A8173ADD370E3201CDBFED7FE209E017866A8B9BB2F6470A57AA7B50007`.
+This qualifies all empty/nonempty cold handovers, cancellation and hostile
+SQL/staging refusals in this focused batch, not an unfiltered repository full.
+The earlier remaining18-row qualification gap is closed for those inputs.
+
+Subsequent source review found an additional arithmetic boundary in the new
+dispatch clock: the captured preparation upper bound must age with dispatch
+elapsed time, not stay constant until a lower fresh sample catches up.
+The private owner now advances both bounds conservatively, rejects a negative
+or30-second elapsed scope and checked overflow, and starts the dispatch timer
+before capturing the still-live preparation floor.13 new arithmetic cases
+exercise the actual production calculation; matching verification follows below.
+This creates no clock/lease/grant authority or public API and extends no expiry.
+
+Protocol's exact required PowerShell7.5.4 witness is now available as a local
+portable official binary outside the repositories. Its release archive SHA256
+`B40D192AE95BA6CCC4CC362FF4E1B18CA6FB5055BEBBCD3920684E12701FA8F6`,
+valid Microsoft executable signature and exact runtime version were verified
+with native0. The system PATH/interpreter were not changed. This prerequisite
+is not a Protocol full or shipping qualification. S01/RC/device gates remain open.
+
+`dispatch-clock-01` qualified the corrected source in Windows PowerShell5.1/
+Desktop with SDK10.0.301: build native0, zero warnings/errors in33.13s; tests
+native0,15 passed /0 failed /0 skipped in6m47s. The canonical receipt parser
+validates all15 result/definition/execution mappings:7 conservative-bound rows,
+3 invalid-scope rows,2 overflow rows,1 expiry-boundary fact and2 native scenarios.
+The native scenarios preserve exact Store retry after interruption/lost reply,
+durable receipt recovery, and original lost ACK/single ContactAccept through
+publication promotion. No expiry, assertion, native provider or TLS check was
+weakened. SHA256:
+`0515C9A71E3DE105611BBBF3604C7B08658FD843351F857F1580F458C204E27C`.
+Receipt: `artifacts/s01-retained-path/dispatch-clock-01/dispatch-clock-01.trx`.
+This new focused receipt belongs in the final full reference union: the old
+Oct08 full alone contains only one of these two native scenarios and none of
+the13 arithmetic cases. Neither this15-case regression nor the earlier23-case
+matrix is a current unfiltered full or physical E2E qualification. Remaining
+S01 lifecycle/rollover/sustained128/512 and mandatory full still gate acceptance.
+
+After that source correction and current-queue reconciliation, the strict
+Protocol registry check ran with the verified portable PowerShell7.5.4 and
+terminated native0: generated source/resolved manifest current,44 artifacts,
+245 magics,10 suites,5 carriers,4 profiles and11 retired aliases. No repin or
+wire allocation was needed for the clock arithmetic change. Root, Shared,
+Protocol and DevOps diff checks terminate0. These checks do not replace the
+mandatory full reference union or qualify a release. The batch remains WIP.
+
+### Current new-routing authority renewal — 2026-10-10
+
+The new scenario primes both independent native accounts' protected floors,
+advances signed network/placement evidence, passes the original PMA expiry,
+and authors a genuine same-key XNA/DTS renewal plus current operational closure.
+It preserves genesis, directory history and the separately advanced placement
+epoch; current-only verification rejects the original PMA at the new time.
+It then reuses the complete owned publication/resolve/claim/Hello/Accept/text
+workflow with actual native accounts and SQLCipher, interruption before semantic
+commit, lost ACK, exact retry, single materialization and offline history.
+Signed service fixtures remain in-process, not remote/production/device E2E.
+
+The initial failed receipts remain unchanged:
+
+- `current-routing-01`: 0/1/0; native terminal not captured, so unqualified.
+  Incorrect fixture assertion expected epoch1 instead of the actual successor2.
+  SHA256 `397DC20CEDF7137BC75BAAD5AFB7884EA4D67E89F989574F65BBFAE6099ABB2A`.
+- `current-routing-02`: 0/1/0, actual native1 in34s; build0/zero warnings/errors
+  in8.04s. The fixture's claimed result still stamped1100 after signed time2100;
+  the unchanged production codec correctly rejected it before claim completion.
+  SHA256 `42A16C37B4DB7F4C24A73B8F223646D456523B7249E3A5031CF6B23D9CB594FE`.
+
+The epoch check now requires original+1 and exact preservation through routine
+renewal, not a hardcoded genesis value. Native claim preparation supplies the
+fixture's actual signed scenario time; isolated codec fixtures retain their
+existing default. No production verifier or validity window was relaxed.
+
+`current-routing-03`: Windows PowerShell5.1.26100.9457/Desktop, SDK10.0.301;
+build0/zero warnings/errors in5.02s; tests1/0/0, actual native0 in6m50s.
+Canonical qualification retains the exact case from run01 and validates all
+result/definition/execution mappings. SHA256
+`DF64623600AE41D999CDA8C06610590E823716BF1A477A6CB053A7807DAD8667`.
+Receipts: `artifacts/s01-retained-path/current-routing-<number>/current-routing-<number>.trx`.
+
+This qualifies only new contact/text/lost-ACK under routine same-key authority
+renewal and signed placement advancement. Independent root/witness/issuer key
+rotation, DCA/XUR rollover, sustained128/512, remaining dependency closure and
+mandatory matching unfiltered gates remain open. S01 and physical E2E are not
+accepted; no production, Release, main, commit or push action occurred here.
+
+### Protected last-path dependencies — 2026-10-10
+
+The new actual-owner scenario removes, in turn, the completed protected
+traversal, the original grant's protected read replay floor and the completed
+current permanent publication, while retaining the authentic archived path.
+Each structurally valid hostile root is injected only into disposable fixture
+storage after opening the real held epoch-exclusion owner. Two consecutive
+retirement attempts reject with the specific missing-dependency/last-path error
+before staging. Complete SQL, all protected roots (including the intentionally
+damaged root) and the idle plan remain exact. Fixture-only restoration is not
+a production repair API. Subsequent genuine horizon disposition succeeds and
+preserves the current publication and actual native replay fence.
+
+Initial builds failed before any test for a missing Services import and misuse
+of `.Span` on the scope's existing ReadOnlySpan. Both compile errors were fixed;
+no production source, assertion, expiry or deletion rule changed in this increment.
+`path-dependencies-03`: Windows PowerShell5.1.26100.9457/Desktop, SDK10.0.301;
+build0/zero warnings/errors in11.55s, tests1/0/0, actual native0 in41s. Canonical
+receipt parsing validates the result/definition/execution bindings; SHA256
+`F69A3DE085859C0B39AF5C4CFC7446F00D68DD0541A198297253614EF488C6F4`.
+Receipt: `artifacts/s01-retained-path/path-dependencies-03/path-dependencies-03.trx`.
+
+The matching coherent batch is prepared for the canonical unfiltered Shared
+gate at `artifacts/test-gate-20261010/shared-authority-path-full-01`. References
+are the exact prior784-case full and every subsequent focused receipt captured
+before launch, including original FAILs:60 receipts,895 unique cases. Historical
+FAIL outcomes are not waived; every current Shared execution must pass. Build,
+fixture preflight, frozen-input check, full, exact union qualification and final
+unchanged-input check must all complete before claiming this batch qualified.
+No full PASS, S01 closure, device result or release approval is inferred here.
+
+### Interrupted full and retained-history contract correction — 2026-10-10
+
+`shared-authority-path-full-01` was deliberately stopped at the isolated native
+testhost so required source/normative corrections could be batched before final
+qualification. The parent canonical runner was preserved and wrote its actual
+terminal: Windows PowerShell5.1.26100.9457, SDK10.0.301, build0/zero warnings,
+preflight0 with6/0/0 in14.36s, test1, qualification1, FullAccepted=false.
+The partial full executed712 of the predeclared895 cases:711 Passed,1 Failed,
+0 Skipped in58m54s. This is not an accepted full or a product-failure claim caused
+by termination. Original TRX SHA256:
+`9D3751987978F389F3627C647546383E53736FA5C6160BDA97474CEA774702D9`.
+
+The one assertion failed before termination in
+`Did2SupersededRetrieveRetirement_ActualReadsKeepOriginalPathAndRecoverEveryHandover(nonempty: True)`.
+Its shared fixture expected `ReadOwnedContactState` to throw after epoch
+exclusion, although the actual independently native-committed IncomingRequest
+remained authenticated in the retained lineage. Existing retained contact-state
+tests distinguish that history from first acceptance/admission after expiry.
+The fixture now requires IncomingRequest plus an unchanged native messaging
+floor. The separate CryptographicException/no-new-Retrieve-or-ACK callback
+assertion remains; no production expiry/admission/retirement rule is relaxed.
+The matching seven-case history/floor/superseded-holder regression was run
+as `artifacts/s01-retained-path/history-contract-01`. It completed on Windows
+PowerShell5.1.26100.9457/Desktop/SDK10.0.301: build0, zero warnings/errors in28.75s;
+tests7/0/0, actual native0 in9m27s. The canonical reader validates all seven
+result/definition/execution mappings. Both completed-ACK/native-SQL guard facts,
+empty/nonempty superseded-holder cases, retained committed acceptance and the
+two first-acceptance-after-expiry refusals pass. These focused results do not
+qualify an unfiltered full or erase the original pre-termination FAIL.
+TRX SHA256: `E64BABF52783511517CB9179E0337808BF4E75B0AEC5B162DBBB33168C0AF51F`.
+
+Root's cross-interpreter status reader also had a demonstrated diagnostic defect:
+PowerShell7 converts the recorded JSON start into DateTime, making the former
+ISO-string equality false for the exact live process. It now compares exact UTC
+ticks and retains the PID/start guard. Common contracts33/0 pass independently
+in PowerShell5.1 and7.5.4, including live start, one-tick mismatch and malformed
+start. They also pass33/0 in the actual PowerShell7.6.5 caller. This diagnostic
+correction does not relabel the interrupted native run.
+
+TRANSPORT-NEUTRAL-MESSAGING's stale blanket rollover exclusion and the downstream
+grant document now point to DR-0108's exact own-ancestor/current-host separation.
+The sole transport-neutral source hash was mechanically repinned after review;
+all176 structured anchors remain unchanged. Strict registry/source generation
+passes with unchanged44/245/10/5/4/11 allocations. Final full must capture these
+new inputs and retain the partial FAIL/reference matrix; no old snapshot is
+advertised as qualification of this correction, S01, physical devices or release.
+
+### Full02 terminal and missing-case correction — 2026-10-10
+
+`artifacts/test-gate-20261010/shared-authority-path-full-02` completed naturally
+on Windows PowerShell5.1.26100.9457/Desktop, SDK10.0.301. Build native0 with
+zero warnings/errors; prerequisite6/0/0, native0 in13.26s. The unfiltered test
+completed native0:892 Passed,0 Failed,0 Skipped in2h21m. The canonical terminal
+retains qualification1 and FullAccepted=false: actual892 cases do not equal
+the predeclared63-receipt/895-case union. TRX SHA256:
+`B6CB1087ED140A6F066E5676654824D69990FD49977D2871B528AA0CD990D8AA`.
+
+The three missing reference cases are:
+
+- `Did2OwnedMailboxSend_ExpiredOwnContextAfterCompletionCannotReturnSuccess`;
+- `Did2UsedDepositRetirement_LiveOriginalObjectAndMissingSqlPinActualOwner(initial: True)`;
+- `Did2UsedDepositRetirement_LiveOriginalObjectAndMissingSqlPinActualOwner(initial: False)`.
+
+Their earlier test bodies were expanded/renamed; the new ordinary-text
+completion/cancellation theory and cold-handover retirement theory do not
+execute those original identities. No missing-case waiver or reference removal
+is used. The unfiltered native0 is not a qualified full. Because qualification
+threw before the runner's final input check, an independent post-terminal
+Windows PowerShell5.1 call to the canonical `Get-TestGateInputs` verified exactly
+all1919 captured paths/hashes unchanged before any follow-up source edit.
+That separate check does not relabel the failed qualification or write a new
+terminal. The outer observation shell exit0 is not the qualification exit.
+
+The current follow-up adds independent current-DID2 fixtures with those exact
+names. ContactAccept, separately from ordinary text, crosses authenticated own
+directory freshness after actual Store completion, retains its original
+native/protected/public SQL custody through cold reopen, and returns no success.
+The two used-Deposit admission fixtures reject missing original SQL twice before
+staging, preserve protected/native roots, then retire only the excluded write
+holder after fixture-only restoration. The live original30-day object,
+complete SQL/source/native evidence and cached no-dispatch outcome remain.
+The existing ordinary-text/cancellation and every-cold-handover theories stay
+unchanged; these are neither compatibility aliases nor legacy protocol tests.
+
+The first follow-up build failed on access to a private fixture helper, before
+any test. A fixture-local bounded SQL read resolved that compile error; the
+next Release build completed native0, zero warnings/errors in8.68s. The focused
+three-case run `artifacts/s01-retained-path/case-closure-01` completed native0:
+3 Passed,0 Failed,0 Skipped, native wall7m13s. The canonical reader validates
+all result/definition/execution mappings and exactly the three original
+reference case IDs/names. TRX SHA256:
+`151894E9B5C6EF492AD3EC16ABA42CB28B0FCB9C9692DF2D950E685E3511915A`.
+No existing failure or reference was waived.
+
+Separate compiled discovery, `artifacts/s01-retained-path/case-discovery-01`,
+completed native0 in3.24s. Its895 unique names match all895 predeclared names,
+with no missing or unexpected name. This is a fail-fast diagnostic only: it
+does not execute cases, compare their IDs or qualify native full/immutable inputs.
+The next canonical full remains mandatory, retaining every original reference
+plus the full02/preflight and new focused receipts:66 receipts,895 unique cases.
+No current full PASS or S01 acceptance is inferred from the focused correction.
+The prepared fresh run is
+`artifacts/test-gate-20261010/shared-authority-path-full-03`. Changed-source-only
+secret review scans61 files with0 findings; all four repository diff checks
+terminate0. The metadata review reports the same9 technical prose path matches,
+with0 IP findings; this is not artifact-upload or release privacy acceptance.
+S01, physical contacts/messages/files/groups, production activation and release
+remain unaccepted. No commit, push, main or GitHub Release was performed here.
+
+### Matching full03 — current Shared source qualified
+
+`artifacts/test-gate-20261010/shared-authority-path-full-03` completed naturally
+on Windows PowerShell5.1.26100.9457/Desktop, SDK10.0.301. The canonical run started
+at `2026-10-10T00:03:54.4512912Z` and finished at
+`2026-10-10T02:34:04.1029463Z`. Build native0, zero warnings/errors; prerequisite
+6/0/0, native0 in13.40s. Unfiltered full:895 Passed,0 Failed,0 Skipped, native0
+(VSTest duration2h28m). Qualification0, ExactCaseMapping/MatrixQualified=true,
+FullAccepted=true; all1922 captured inputs remained unchanged. The parent native
+session also terminated0; its first-use PowerShell progress is not a test error.
+
+The reference union was declared before launch:66 receipts,895 unique cases,
+including every original prior/full/focused receipt and the independent
+three-case correction. No failure, skip or missing-case waiver was allowed.
+Canonical `Read-TestGateReceipt` independently reads895 exact names, case keys
+and unique executions, with895/0/0. Full TRX:
+`full/nikit_SURFACE-LT_2026-10-10_05_05_05_net10.0.trx`.
+SHA256: `15218DDF4C09F7F27BBAFCB3E52C00432108451C33A4701051717DB5D54622A0`.
+Original interrupted/missing-case FAILs above remain retained, not relabelled.
+
+This qualifies the current Shared source batch, including archived-path cold
+recovery, original namespace/dependency guards and the clock/three-case fixes.
+The remaining whole-S01 contract/API/layout/fault review and final diff/commit
+work are separate. Protocol's exact source qualification retains its real
+actual-package FAIL/native1/FullAccepted=false under DR-0095; no shipping claim
+follows. S04 runtime activation, sustained128/512, independent operational key
+rotation and physical contacts/messages/files/groups remain unqualified.
+No production deployment, main merge or GitHub Release was performed by this run.

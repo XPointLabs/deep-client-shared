@@ -8,19 +8,32 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     // exclusion/dependency closure; a copied digest never grants deletion.
     private async Task<Did2CompactionPlan.RootReadback> ReadMailboxStoreStateUnderLeaseAsync(
         ReadOnlyMemory<byte> account, ReadOnlyMemory<byte> instance, HeldDeepIdV2AccountLease held, CancellationToken ct)
+        => await ReadMailboxCustodyUnderLeaseAsync(account, instance, held, false, ct).ConfigureAwait(false);
+
+    // Publication and application SQL have their own exact before/after roots
+    // in the joint retained-path profile. Every OTHER source/native dependency
+    // remains independently guarded; Root12 keeps its original complete meaning.
+    private async Task<Did2CompactionPlan.RootReadback> ReadMailboxLocalCustodyUnderLeaseAsync(
+        ReadOnlyMemory<byte> account, ReadOnlyMemory<byte> instance, HeldDeepIdV2AccountLease held, CancellationToken ct)
+        => await ReadMailboxCustodyUnderLeaseAsync(account, instance, held, true, ct).ConfigureAwait(false);
+
+    private async Task<Did2CompactionPlan.RootReadback> ReadMailboxCustodyUnderLeaseAsync(
+        ReadOnlyMemory<byte> account, ReadOnlyMemory<byte> instance, HeldDeepIdV2AccountLease held,
+        bool jointPath, CancellationToken ct)
     {
         held.RequireOwner(lease);
         using var selectorHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        selectorHash.AppendData("Deep/STORE-V2/mailbox-store-state-selector"u8); selectorHash.AppendData([0]);
+        selectorHash.AppendData(jointPath ? "Deep/STORE-V2/mailbox-local-custody-selector"u8 : "Deep/STORE-V2/mailbox-store-state-selector"u8); selectorHash.AppendData([0]);
         selectorHash.AppendData(networkId); selectorHash.AppendData(account.Span); selectorHash.AppendData(instance.Span);
         var selector = selectorHash.GetHashAndReset();
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        hash.AppendData("Deep/STORE-V2/mailbox-store-state"u8); hash.AppendData([0]); hash.AppendData(selector);
+        hash.AppendData(jointPath ? "Deep/STORE-V2/mailbox-local-custody"u8 : "Deep/STORE-V2/mailbox-store-state"u8); hash.AppendData([0]); hash.AppendData(selector);
         using var registration = await SqliteDeepIdV2AccountGeneration.ReadCompactionRegistrationUnderLeaseAsync(
             storage, networkId, account, ct).ConfigureAwait(false);
         if (!registration.Use(bytes => FixedRoute(bytes.Slice(56, 32), instance.Span)))
             throw new CryptographicException("Mailbox state readback changed its registered account instance.");
         registration.Use(bytes => { hash.AppendData(bytes); return true; });
+        if (!jointPath)
         using (var publication = await storage.ReadOwnedAsync(ProtectedDid2ContactRouteJournal.Slot, ct).ConfigureAwait(false) ??
             throw new InvalidDataException("Mailbox state lost protected publication/retained-route custody."))
         {
@@ -62,6 +75,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         using var catalog = await new ProtectedDid2MessagingSessionCatalog(storage, networkId, account.Span, instance.Span)
             .ReadAsync(ct).ConfigureAwait(false);
         hash.AppendData(catalog.Exact.Span);
+        if (!jointPath)
         using (var application = await SqliteDeepIdV2AccountGeneration.OpenExistingApplicationForOwnerUnderLeaseAsync(
             storage, sqlStatePath, networkId, account, instance, held, lease, ct).ConfigureAwait(false))
         {
@@ -105,6 +119,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         if (!FixedRoute(catalog.Exact.Span, finalCatalog.Exact.Span))
             throw new CryptographicException("Mailbox state catalog changed during readback.");
         ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
-        return new(Did2CompactionPlan.RootKind.MailboxStoreState, selector, hash.GetHashAndReset());
+        return new(jointPath ? Did2CompactionPlan.RootKind.MailboxLocalCustody : Did2CompactionPlan.RootKind.MailboxStoreState,
+            selector, hash.GetHashAndReset());
     }
 }

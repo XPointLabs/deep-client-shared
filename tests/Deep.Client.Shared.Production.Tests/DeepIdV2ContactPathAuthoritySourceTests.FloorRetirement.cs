@@ -212,14 +212,21 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             }
             for (var index = 0; index < pinnedSlots.Length; index++)
             { using var raw = await peerStorage.ReadOwnedAsync(pinnedSlots[index]) ?? throw new InvalidDataException(); Assert.Equal(hashes[index], raw.Use(bytes => SHA256.HashData(bytes))); }
-            // Durable local display survives exclusion; it does not renew the
-            // expired Hello/rendezvous or mint current operation authority.
+            // Both local display and independently verified native contact
+            // history survive exclusion. Reading retained IncomingRequest is
+            // not renewal of the expired Hello or operation authority.
             var priorProofRequests = ProofRequests;
             var local = Assert.Single(await ReopenGrantReader().ListConversationsAsync());
             Assert.Equal(DeepIdV2ContactState.IncomingRequest, local.ContactState);
             Assert.Equal(receiver.Exact.ToArray(), local.Conversation.Scope.Exact.ToArray());
             Assert.Equal(priorProofRequests, ProofRequests);
-            await Assert.ThrowsAsync<CryptographicException>(() => ReadOwnedContactState(receiver));
+            var localFloor = (await ReadMessagingFloor(receiver)).Exact.ToArray();
+            try
+            {
+                Assert.Equal(Did2ContactAcceptanceState.IncomingRequest, await ReadOwnedContactState(receiver));
+                Assert.Equal(localFloor, (await ReadMessagingFloor(receiver)).Exact.ToArray());
+            }
+            finally { CryptographicOperations.ZeroMemory(localFloor); }
             Assert.Equal(1, retrieve.Calls); Assert.Equal(1, terminal.RetrieveCalls); Assert.Equal(1, terminal.AckCalls);
             // Old grant cannot dispatch again after losing its floor; current
             // authority rejects it before any new Retrieve/ACK callback.

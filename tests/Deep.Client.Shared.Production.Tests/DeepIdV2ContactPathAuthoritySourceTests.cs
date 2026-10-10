@@ -1911,6 +1911,9 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         private VerifiedXPointNetworkBootstrap bootstrap = null!;
         private AuthoredXPointNetworkOperationalGenesis operational = null!;
         private AuthoredXPointNetworkOperationalSuccessor? successor;
+        private VerifiedXPointNetworkAuthority? objectHorizonAuthority;
+        private DeepIdV2NetworkClosureArtifacts? objectHorizonClosure;
+        private VerifiedXPointNetworkAuthority ProofAuthority => objectHorizonAuthority ?? bootstrap.Authority;
         private OwnedPublicationReplica? nativeHelloPublicationReplica;
         private AuthoredAccountDirectoryHeadMutation genesis = null!;
         private AuthoredAccountDirectoryHeadMutation head = null!;
@@ -2237,7 +2240,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             Assert.Equal(started.ClaimOperationId.ToArray(), request.Field(2).ToArray());
             Assert.Equal(started.SenderEphemeralCommitment.ToArray(), request.Field(21).ToArray());
             Assert.Equal(publication.Manifest.Field(6).Span[6..].ToArray(), request.Field(18).ToArray());
-            var exactResult = AuthorClaimResult(request, path, publication, false, oneTimeIndex: oneTimeIndex);
+            var exactResult = AuthorClaimResult(request, path, publication, false,
+                oneTimeIndex: oneTimeIndex, serverTime: CurrentProofTime);
             var custody = await accounts.OpenOwnClaimRequestCustodyAsync();
             using (var cancelledDispatch = new CancellationTokenSource())
             {
@@ -2505,7 +2509,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         }
 
         internal byte[] AuthorClaimResult(ParsedXpk1V2 request, ContactResolvePathAuthority authority,
-            ParsedXpp1V2 publication, bool replay, bool badSignature = false, int oneTimeIndex = -1)
+            ParsedXpp1V2 publication, bool replay, bool badSignature = false, int oneTimeIndex = -1,
+            ulong serverTime = 1_100)
         {
             var member = oneTimeIndex >= 0 ? publication.OneTimeMembers[oneTimeIndex] : publication.LastResortMember;
             var useCounter = checked((ushort)(oneTimeIndex >= 0 ? 0 : 1));
@@ -2534,7 +2539,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 counter, generation, rows, manifest.CanonicalBytes, lastIndex, inclusion];
             return DeepIdV2PreKeyClaimResultCodec.Encode(request.CanonicalBytes.Span,
                 replay ? Xpc1V2Status.Replay : Xpc1V2Status.Claimed,
-                Xpc1V2MutationOutcome.DurablyCommitted, 1_100, 0, payload);
+                Xpc1V2MutationOutcome.DurablyCommitted, serverTime, 0, payload);
         }
 
         // Independent fixture oracle for the fixed 32-member test inventory;
@@ -2790,15 +2795,15 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 
         internal static async Task<Fixture> CreateAsync(bool withSuccessor = false, bool expiringHistory = false, bool withPeer = false,
             bool longMailboxWindow = false, bool encryptedStorage = false, bool shortMailboxAuthority = false,
-            ulong? initialMailboxAuthorityExpiry = null)
+            ulong? initialMailboxAuthorityExpiry = null, bool objectHorizonWindow = false)
         {
             var fixture = new Fixture(encryptedStorage);
-            try { await fixture.InitializeAsync(withSuccessor, expiringHistory, withPeer, longMailboxWindow, shortMailboxAuthority, initialMailboxAuthorityExpiry); return fixture; }
+            try { await fixture.InitializeAsync(withSuccessor, expiringHistory, withPeer, longMailboxWindow, shortMailboxAuthority, initialMailboxAuthorityExpiry, objectHorizonWindow); return fixture; }
             catch { await fixture.DisposeAsync(); throw; }
         }
 
         private async Task InitializeAsync(bool withSuccessor, bool expiringHistory, bool withPeer, bool longMailboxWindow, bool shortMailboxAuthority,
-            ulong? initialMailboxAuthorityExpiry)
+            ulong? initialMailboxAuthorityExpiry, bool objectHorizonWindow)
         {
             if (longMailboxWindow && (withSuccessor || expiringHistory))
                 throw new ArgumentException("The moving mailbox clock has a separate fixture window.");
@@ -2807,6 +2812,10 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             // Cold native/SQLCipher recovery takes longer than the short 500s
             // static-fixture view. Author a genuinely longer signed view/head,
             // still within the root interval; never suppress expiry validation.
+            if (objectHorizonWindow && (!longMailboxWindow || withSuccessor || expiringHistory || shortMailboxAuthority))
+                throw new ArgumentException("The object-horizon fixture requires its own long signed authority window.");
+            // A long root is not a long DTS/head/network view: their genuine
+            // successors are required to reach the object horizon later.
             var windowExpiry = longMailboxWindow ? 6_000UL : 1_500UL;
             if (initialMailboxAuthorityExpiry is { } explicitExpiry &&
                 (!longMailboxWindow || withSuccessor || expiringHistory || shortMailboxAuthority ||
@@ -2828,7 +2837,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                         w.Ed25519PublicKey.Span, w.FailureDomainHash.Span)).ToArray(), 2,
                     [new(Bytes(32, 0x60), Bytes(32, 0x61), 1, "time1.invalid", 4460, Bytes(32, 0x62), 5),
                      new(Bytes(32, 0x63), Bytes(32, 0x64), 1, "time2.invalid", 4460, Bytes(32, 0x65), 5)],
-                    5, 10, 900, 900, 10_000, 900, 9_000, 1, 1), [root]);
+                    5, 10, 900, 900, objectHorizonWindow ? 3_100_000UL : 10_000UL,
+                    900, 9_000UL, 1, 1), [root]);
             var descriptors = nodes.Select((signer, index) => new XPointNetworkOperationalNode(signer,
                 Bytes(32, (byte)(0x80 + index)), Bytes(32, (byte)(0x90 + index)),
                 Bytes(32, (byte)(0xa0 + index)), Bytes(32, (byte)(0xb0 + index)),
@@ -2914,7 +2924,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 ScalarMult.Base(Bytes(32, (byte)(0x50 + index))),
                 ScalarMult.Base(Bytes(32, (byte)(0x58 + index))))).ToArray();
             successor = await XPointNetworkOperationalSuccessorAuthor.AuthorAsync(new(
-                Bytes(32, 0x13), bootstrap, [root], witnesses, rollovers,
+                Bytes(32, 0x13), bootstrap.Authority, [root], witnesses, rollovers,
                 operational.ExactXvp1, operational.ExactXnd1, [operational.ExactXnv1],
                 operational.ExactXnh1, operational.ExactPma2, operational.ExactPmt2,
                 XPointNetworkOperationalSuccessorAuthor.ComputeXnh1CoreHash(operational.ExactXnh1.Span),
@@ -2929,6 +2939,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 
         private DeepIdV2NetworkClosureArtifacts PublicClosure()
         {
+            if (objectHorizonClosure is not null) return objectHorizonClosure;
             var descriptors = (successor?.ExactXnd1 ?? operational.ExactXnd1)
                 .Select(value => (ReadOnlyMemory<byte>)value.ToArray()).ToArray();
             if (AlterNode) { var bytes = descriptors[0].ToArray(); bytes[^1] ^= 1; descriptors[0] = bytes; }
@@ -2968,7 +2979,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             {
                 if (RejectProof) return new(HttpStatusCode.ServiceUnavailable) { RequestMessage = request };
                 var exact = await request.Content!.ReadAsByteArrayAsync(cancellationToken);
-                var encoded = DeepIdV2DirectoryHistoryWireCodec.AuthorResponse(bootstrap.Authority, exact,
+                var encoded = DeepIdV2DirectoryHistoryWireCodec.AuthorResponse(ProofAuthority, exact,
                     RouteRequestHistoryHeads(), head.ExactAllTransitions);
                 var historyResponse = new HttpResponseMessage(HttpStatusCode.OK)
                 { RequestMessage = request, Content = new ByteArrayContent(encoded) };
@@ -2986,10 +2997,10 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             var material = DeepIdV2DirectoryProofMaterialAuthor.Create(head.ProtectedHead,
                 head.ExactAllTransitions, peerCheckpoint is null ? [checkpoint] : [checkpoint, peerCheckpoint], query.DirectoryLeafKey.Span, floor);
             var proofTime = CurrentProofTime;
-            var issued = await DeepIdV2DirectoryProofAuthor.IssueGenesisAsync(bootstrap.Authority,
+            var issued = await DeepIdV2DirectoryProofAuthor.IssueGenesisAsync(ProofAuthority,
                 new(Network, query.Nonce.Span, query.BootId.Span, query.ClientMonotonicSendSample,
-                    head.ExactAdh1.Span, (successor?.ExactXnv1 ?? operational.ExactXnv1).Span, proofTime, 5, proofTime, proofTime + 30,
-                    AccountDirectoryDtt1IssuanceEpoch.Derive(bootstrap.Authority, proofTime, 5), 2),
+                    head.ExactAdh1.Span, (objectHorizonClosure?.ExactOrderedXnv1Chain[^1] ?? successor?.ExactXnv1 ?? operational.ExactXnv1).Span, proofTime, 5, proofTime, proofTime + 30,
+                    AccountDirectoryDtt1IssuanceEpoch.Derive(ProofAuthority, proofTime, 5), 2),
                 material, witnesses, 1, pq, cancellationToken);
             var body = DeepIdV2DirectoryProofWireCodec.EncodeResponse(query, issued);
             var response = new HttpResponseMessage(HttpStatusCode.OK)

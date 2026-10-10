@@ -157,6 +157,15 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         TimeProvider Clock { get; }
     }
 
+    // Arithmetic only: this does not mint a clock or an installation authority.
+    internal static ulong MailboxInstallationUpperAtElapsed(ulong sampledUpper,
+        ulong minimumPreparedUpper, TimeSpan elapsed)
+    {
+        if (elapsed < TimeSpan.Zero || elapsed >= TimeSpan.FromSeconds(30))
+            throw new CryptographicException("Owned mailbox installation exceeded its bounded authenticated scope.");
+        return checked(Math.Max(sampledUpper, minimumPreparedUpper) + (ulong)Math.Ceiling(elapsed.TotalSeconds));
+    }
+
     private sealed class MailboxInstallationPolicy : IOwnedMailboxInstallationPolicy
     {
         private readonly HeldDeepIdV2AccountLease held;
@@ -165,16 +174,16 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         private readonly MailboxAuthenticatedGrant grant;
         private readonly DeepIdV2ContactRouteTimeWindow sample;
         private readonly long started;
-        private readonly TimeProvider? preparationClock;
+        private readonly ulong minimumPreparedUpper;
         private bool disposed;
 
         internal MailboxInstallationPolicy(HeldDeepIdV2AccountLease held,
             VerifiedDeepIdV2ContactRouteClosure route, VerifiedMailboxAuthorityV2 policy,
             MailboxAuthenticatedGrant grant, DeepIdV2ContactRouteTimeWindow sample, long started,
-            TimeProvider? preparationClock = null)
+            ulong minimumPreparedUpper = 0)
         {
             this.held = held; this.route = route; this.policy = policy; this.grant = grant;
-            this.sample = sample; this.started = started; this.preparationClock = preparationClock; Clock = new InstallationClock(this);
+            this.sample = sample; this.started = started; this.minimumPreparedUpper = minimumPreparedUpper; Clock = new InstallationClock(this);
             ValidateFreshness();
         }
 
@@ -184,15 +193,15 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         {
             ObjectDisposedException.ThrowIf(disposed, this); held.RequireActive(); route.Network.EnsureCurrent();
             var elapsed = Stopwatch.GetElapsedTime(started);
-            if (elapsed < TimeSpan.Zero || elapsed >= TimeSpan.FromSeconds(30))
-                throw new CryptographicException("Owned mailbox installation exceeded its bounded authenticated scope.");
-            var upper = checked(sample.UpperUnixSeconds + (ulong)Math.Ceiling(elapsed.TotalSeconds));
             // An independently sampled conservative upper bound can be lower
             // than preparation's elapsed upper bound. Dispatch must not rewind
-            // its own persisted NotBefore. Keep the actual predecessor clock,
-            // including its held lease, original expiry and bounded scope checks.
-            if (preparationClock is not null)
-                upper = Math.Max(upper, checked((ulong)preparationClock.GetUtcNow().ToUnixTimeSeconds()));
+            // its own persisted NotBefore. Carry only the conservative upper
+            // bound captured while preparation was live, not its expired clock
+            // capability. This fresh scope independently enforces the held
+            // lease, current authority, its own30-second bound and all expiries.
+            // Both bounds age with this scope: a constant preparation floor
+            // would pause its clock until a lower fresh sample caught up.
+            var upper = MailboxInstallationUpperAtElapsed(sample.UpperUnixSeconds, minimumPreparedUpper, elapsed);
             var expiry = new[] { grant.ExpiresAtUnixSeconds, policy.ExpiresAtUnixSeconds,
                 route.Network.MaximumRecordExpiryUnixSeconds,
                 U64(route.Route.Reachability.Field(17).Span), U64(route.Route.Authorization.Field(13).Span),

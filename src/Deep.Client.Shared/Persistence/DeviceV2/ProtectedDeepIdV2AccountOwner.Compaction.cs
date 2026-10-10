@@ -145,6 +145,11 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
                 using var plan = await plans.ReadAsync(held, ct).ConfigureAwait(false);
                 if (plan.Phase == 0) { await RequireNoPrefixPartsAsync(ct).ConfigureAwait(false); return; }
+                if (plan.ReadRow(plan.RowCount - 1).Action == Did2CompactionPlan.Disposition.RetainedPath)
+                {
+                    await ResumeRetainedPathStepUnderLeaseAsync(plans, plan, held, ct).ConfigureAwait(false);
+                    continue;
+                }
                 if (plan.Target == Did2CompactionPlan.SqlTarget.ProtectedOnly)
                 {
                     await ResumeMailboxRetirementStepUnderLeaseAsync(plans, plan, held, ct).ConfigureAwait(false);

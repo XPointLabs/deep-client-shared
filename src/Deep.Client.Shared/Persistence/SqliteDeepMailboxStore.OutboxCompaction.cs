@@ -190,7 +190,8 @@ public sealed partial class SqliteDeepMailboxStore
     }
 
     private static byte[] CompleteApplicationCompactionProjection(SqliteConnection connection, SqliteTransaction tx,
-        ReadOnlySpan<byte> selector, HashSet<string>? omitted, CancellationToken ct)
+        ReadOnlySpan<byte> selector, HashSet<string>? omitted, CancellationToken ct,
+        RetainedPathSqlSelection? retainedPath = null)
     {
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         hash.AppendData("Deep/STORE-V2/application-compaction-sql"u8); hash.AppendData([0]); hash.AppendData(selector);
@@ -232,6 +233,7 @@ public sealed partial class SqliteDeepMailboxStore
                     try { if (omitted.Contains(Convert.ToHexString(operation))) { omittedCount++; continue; } }
                     finally { CryptographicOperations.ZeroMemory(operation); }
                 }
+                if (retainedPath is not null && retainedPath.Omit(name, fields, rows)) continue;
                 hash.AppendData([1]); count = checked(count + 1);
                 for (var index = 0; index < fields.Count; index++)
                 {

@@ -71,7 +71,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     throw new InvalidDataException("Epoch exclusion requires an exact protected original acquisition.");
                 var originalRoute = ContactRouteClosureCodec.Decode(ProtectedDid2MailboxGrantJournal.OriginalRoute(entry).Span);
                 var originalEpoch = BinaryPrimitives.ReadUInt64BigEndian(originalRoute.Projection.Field(6).Span);
-                RequireExclusion(entry, originalRoute, authority, fresh, first, originalEpoch);
+                await RequireExclusionAsync(entry, originalRoute, authority, fresh, first, originalEpoch, ct).ConfigureAwait(false);
                 result = new(owner, held, current, source, fresh, authority, first,
                     snapshot, instance, acquisition.ToArray(), originalEpoch, ProtectedDid2MailboxGrantJournal.IsClosedUnresolved(entry));
                 await result.RecheckAsync(ct).ConfigureAwait(false);
@@ -139,7 +139,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             using var state = ProtectedDid2MailboxGrantJournal.Decode(root, owner.networkId, current.AccountId.Span, instance);
             var entry = state.Entries[Convert.ToHexString(acquisition)];
             var originalRoute = ContactRouteClosureCodec.Decode(ProtectedDid2MailboxGrantJournal.OriginalRoute(entry).Span);
-            RequireExclusion(entry, originalRoute, authority, fresh, reading, OriginalSelectionEpoch);
+            await RequireExclusionAsync(entry, originalRoute, authority, fresh, reading, OriginalSelectionEpoch, ct).ConfigureAwait(false);
             // Also re-read the native DNH2/anchor after the other reads.
             await RecheckRouteFreshnessAsync(current, source, fresh, held, first, ct).ConfigureAwait(false);
             using var finalRoot = await owner.storage.ReadOwnedAsync(ProtectedDid2MailboxGrantJournal.Slot, ct).ConfigureAwait(false) ??
@@ -149,15 +149,14 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             ct.ThrowIfCancellationRequested(); held.RequireActive();
         }
 
-        private static void RequireExclusion(byte[] entry, ParsedContactRouteClosure originalRoute,
+        private static async Task RequireExclusionAsync(byte[] entry, ParsedContactRouteClosure originalRoute,
             VerifiedMailboxHostAuthorityV2 authority, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh,
-            OnionMonotonicReading reading, ulong originalEpoch)
+            OnionMonotonicReading reading, ulong originalEpoch, CancellationToken ct)
         {
             if (!ProtectedDid2MailboxGrantJournal.HasWinner(entry) && !ProtectedDid2MailboxGrantJournal.IsClosedUnresolved(entry))
                 throw new CryptographicException("A pending acquisition has no closed epoch-exclusion disposition.");
-            var originalPolicy = ContactCodec.Decode("PMA2", ProtectedDid2MailboxGrantJournal.OriginalPolicy(entry).Span);
-            if (!FixedRoute(originalPolicy.Field(13).Span, fresh.Authority.AuthorityCoreReference.Span))
-                throw new NotSupportedException("Epoch exclusion requires the existing exact authority lineage; rollover is unavailable.");
+            await authority.RequireOriginalNamespaceAsync(ProtectedDid2MailboxGrantJournal.OriginalPolicy(entry),
+                originalRoute.Projection.CanonicalBytes, ct).ConfigureAwait(false);
             if (ProtectedDid2MailboxGrantJournal.HasWinner(entry))
                 ContactCodec.ValidateMailboxGrantResultRouteBinding(
                     ContactCodec.Decode("XMC2", ProtectedDid2MailboxGrantJournal.Response(entry).Span), originalRoute);

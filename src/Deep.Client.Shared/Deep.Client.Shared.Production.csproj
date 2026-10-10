@@ -61,6 +61,7 @@
     <Compile Include="Persistence\SqliteDeepMailboxStore.ContactAccept.cs" />
     <Compile Include="Persistence\SqliteDeepMailboxStore.OwnedTextOutbox.cs" />
     <Compile Include="Persistence\SqliteDeepMailboxStore.OutboxCompaction.cs" />
+    <Compile Include="Persistence\SqliteDeepMailboxStore.RetainedPathCompaction.cs" />
     <Compile Include="Persistence\SqliteDeepMailboxStore.RetainedCoordinator.cs" />
     <Compile Include="Persistence\SqliteDeepMailboxStore.StorePublicEvidence.cs" />
     <Compile Include="Persistence\SqliteDeepMailboxStore.GrantStoreDependencies.cs" />

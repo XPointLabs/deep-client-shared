@@ -3,11 +3,92 @@ using Deep.Client.Shared.Persistence;
 using Deep.Client.Shared.Persistence.DeviceV2;
 using Deep.Client.Shared.Services;
 using Deep.Protocol.ContactV1;
+using Deep.Protocol.DeepExtension.MailboxCapabilities;
 
 namespace Deep.Client.Shared.Production.Tests;
 
 public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 {
+    [Theory]
+    [InlineData(true)] [InlineData(false)]
+    [Trait("RequiresApprovedMlKemRuntime", "true")]
+    public async Task Did2UsedDepositRetirement_LiveOriginalObjectAndMissingSqlPinActualOwner(bool initial)
+    {
+        // A live accepted object pins its independent read/evidence custody,
+        // not the already excluded write holder. Exercise the actual admission
+        // guard separately from the multi-handover recovery theory below.
+        await using var fixture = await Fixture.CreateAsync(withPeer: true, encryptedStorage: true,
+            longMailboxWindow: true, initialMailboxAuthorityExpiry: 2_000);
+        var test = await fixture.PrepareCompletedContactSendCase(initial);
+        var stored = await fixture.DeliverCompletedCaseWithExactRetry(test);
+        var dispatches = test.Transport.Calls;
+        await fixture.AdvanceOriginalStoreEpochForTestAsync(2_100);
+        await fixture.RetireCompletedContactSend(test);
+        var account = fixture.UsedDepositAccount(initial);
+        var source = initial ? fixture.Source(account) : fixture.GrantReaderSource(account);
+        byte[] acquisition;
+        using (var grants = await fixture.ReadPeerGrantsAsync(own: initial))
+            acquisition = Convert.FromHexString(Assert.Single(grants.Entries).Key);
+        using (var exclusion = await account.OpenMailboxEpochExclusionAsync(acquisition, source))
+            await exclusion.RetireIdleMailboxCounterFloorAsync();
+        var secure = fixture.CompletedContactSendStorage(initial);
+        using var grant = await secure.ReadOwnedAsync(ProtectedDid2MailboxGrantJournal.Slot) ?? throw new InvalidDataException();
+        using var idle = await secure.ReadOwnedAsync(Did2CompactionPlan.Slot) ?? throw new InvalidDataException();
+        var beforeGrant = grant.Use(bytes => bytes.ToArray());
+        var beforePlan = idle.Use(bytes => bytes.ToArray());
+        var application = await fixture.ReadCompleteOrdinaryApplicationProjection(test.Scope);
+        var native = (await fixture.ReadMessagingFloor(test.Scope)).Exact.ToArray();
+        var retained = await fixture.ReadUsedDepositRetainedRoots(test.Scope);
+        var sourceSql = await fixture.ReadCompletedContactSendSourceProjection(test.Scope);
+        var envelope = test.Transport.StoredEnvelope ?? throw new InvalidDataException();
+        var exactEnvelope = MailboxClientCodec.EncodeEncryptedEnvelope(envelope);
+        try
+        {
+            Assert.Equal(30UL * 24 * 60 * 60, envelope.ExpiresAtUnixSeconds - envelope.CreatedAtUnixSeconds);
+            Assert.True(envelope.ExpiresAtUnixSeconds > 2_100);
+            var missingRow = await fixture.RemoveOriginalStoreEvidenceForTest(test);
+            try
+            {
+                for (var attempt = 0; attempt < 2; attempt++)
+                {
+                    var error = await Record.ExceptionAsync(() => account.RetireUsedDepositAcquisitionAsync(acquisition, source));
+                    Assert.True(error is CryptographicException or InvalidDataException or IOException,
+                        error?.GetType().Name ?? "Missing original SQL unexpectedly authorized retirement");
+                    using var actualGrant = await secure.ReadOwnedAsync(ProtectedDid2MailboxGrantJournal.Slot) ?? throw new InvalidDataException();
+                    using var actualPlan = await secure.ReadOwnedAsync(Did2CompactionPlan.Slot) ?? throw new InvalidDataException();
+                    Assert.Equal(beforeGrant, actualGrant.Use(bytes => bytes.ToArray()));
+                    Assert.Equal(beforePlan, actualPlan.Use(bytes => bytes.ToArray()));
+                    Assert.Equal(retained, await fixture.ReadUsedDepositRetainedRoots(test.Scope));
+                    Assert.Equal(native, (await fixture.ReadMessagingFloor(test.Scope)).Exact.ToArray());
+                }
+            }
+            finally { await fixture.RestoreOriginalStoreEvidenceForTest(test, missingRow); }
+
+            // Restore only the intentionally damaged disposable fixture row;
+            // the product reader is never allowed to reconstruct it.
+            await account.RetireUsedDepositAcquisitionAsync(acquisition, source);
+            if (initial) fixture.ColdReopenCompactionStorage(); else fixture.ColdReopenReceiverStoreStorage();
+            using (var grants = await fixture.ReadPeerGrantsAsync(own: initial))
+            { Assert.Empty(grants.Entries); Assert.Empty(grants.Selections); }
+            Assert.Equal(application, await fixture.ReadCompleteOrdinaryApplicationProjection(test.Scope));
+            Assert.Equal(native, (await fixture.ReadMessagingFloor(test.Scope)).Exact.ToArray());
+            Assert.Equal(retained, await fixture.ReadUsedDepositRetainedRoots(test.Scope));
+            Assert.Equal(sourceSql, await fixture.ReadCompletedContactSendSourceProjection(test.Scope));
+            Assert.Equal(exactEnvelope, MailboxClientCodec.EncodeEncryptedEnvelope(test.Transport.StoredEnvelope!));
+            var cached = await test.Deliver();
+            Assert.False(cached.IngressDispatched);
+            Assert.Equal(stored.Cursor, cached.Cursor);
+            Assert.Equal(stored.Disposition, cached.Disposition);
+            Assert.Equal(dispatches, test.Transport.Calls);
+            Assert.Equal(1, test.Grants.Calls);
+        }
+        finally
+        {
+            foreach (var bytes in new[] { acquisition, beforeGrant, beforePlan, application, native, retained, sourceSql, exactEnvelope })
+                CryptographicOperations.ZeroMemory(bytes);
+        }
+    }
+
     [Theory]
     [InlineData(true)] [InlineData(false)]
     [Trait("RequiresApprovedMlKemRuntime", "true")]

@@ -115,14 +115,14 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     private sealed partial class Fixture
     {
         internal ValueTask<VerifiedMailboxHostAuthorityV2> RetainedReadHostAsync(Did2OwnedContactTransportContext dispatch,
-            CancellationToken ct) => MailboxHostAuthorityV2Verifier.VerifyAsync(dispatch.Network, bootstrap.Authority,
-                rotatedIssuerPma ?? successor?.ExactPma2 ?? operational.ExactPma2,
+            CancellationToken ct) => MailboxHostAuthorityV2Verifier.VerifyAsync(dispatch.Network, ProofAuthority,
+                objectHorizonClosure?.ExactOrderedPma2Chain[^1] ?? rotatedIssuerPma ?? successor?.ExactPma2 ?? operational.ExactPma2,
                 Source(dispatch.Custody.Owner).RendezvousTrustedTime, ct);
 
-        internal async Task<ParsedDeepIdV2ContactMailboxRoute> PrepareRetainedPublicationAsync(bool elapsed)
+        internal async Task<ParsedDeepIdV2ContactMailboxRoute> PrepareRetainedPublicationAsync(bool elapsed, ulong signedExpiry = 1_200)
         {
             var source = Source(); var plan = await accounts.ReadOwnPermanentContactPlanAsync();
-            using var threshold = new OwnedRouteThreshold(this) { ShorterSignedExpiry = 1_200 };
+            using var threshold = new OwnedRouteThreshold(this) { ShorterSignedExpiry = signedExpiry };
             var route = await accounts.EnsureOwnContactRouteAsync(plan.Intent, source, Did2OwnedPermanentContactPlan.Configuration(), threshold);
             _ = await accounts.EnsureOwnPermanentContactPublishedAsync(source, threshold,
                 new OwnedPublicationSource(this, route), new OwnedPublicationReplica(this, route));

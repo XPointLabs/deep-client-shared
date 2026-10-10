@@ -252,13 +252,14 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 // Signing preparation is not renewed. This new dispatch-only
                 // scope has no signer and cannot alter the original request.
                 var dispatchStarted = Stopwatch.GetTimestamp();
+                var minimumPreparedUpper = loan.Authority.NowUnixSeconds;
                 var dispatchTime = await route.ReadCurrentTimeAsync(ct).ConfigureAwait(false);
                 var dispatchPma = MailboxAuthorityV2Verifier.Verify(route.NetworkAuthority, winner.ExactPma2.Span,
                     dispatchTime.LowerUnixSeconds, dispatchTime.UpperUnixSeconds);
                 if (!dispatchPma.BindsProjection(route.Route.Projection.CanonicalBytes.Span))
                     throw new CryptographicException("Owned Store lost its current dispatch projection.");
                 using var dispatchPolicy = new MailboxInstallationPolicy(held, route, dispatchPma, loan.Grant, dispatchTime, dispatchStarted,
-                    loan.Authority.TimeProvider);
+                    minimumPreparedUpper);
                 var dispatchAuthority = new VerifiedOfficialMailboxAuthority(dispatchPma.NetworkId, dispatchPma.MinimumGrantGeneration,
                     [dispatchPma.ResolveIssuer(loan.Grant.Domain)], false, static () => true, dispatchPolicy, dispatchPolicy.Clock);
                 var dispatchFactory = new MailboxAuthenticatedRequestFactory(loan.Store, dispatchAuthority);

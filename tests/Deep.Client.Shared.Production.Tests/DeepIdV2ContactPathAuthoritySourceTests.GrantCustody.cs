@@ -859,15 +859,19 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 finally { CryptographicOperations.ZeroMemory(pair.PrivateKey); }
             }).ToArray();
             var time = new OnionTrustedTimeAuthority(this);
+            // Only the genuine current-authority fixture override changes
+            // this scenario's policy. Existing initial-policy inputs remain
+            // unchanged; the production verifier still authenticates PMA2.
+            var exactPolicy = objectHorizonClosure?.ExactOrderedPma2Chain[^1] ?? operational.ExactPma2;
             var invalid = evidence[0].Signature.ToArray(); invalid[^1] ^= 1;
             await Assert.ThrowsAsync<CryptographicException>(async () => await DeepIdV2MailboxGrantIssuanceVerifier.VerifyAsync(
-                route.Network, route.NetworkAuthority, operational.ExactPma2, request.ExactXmg2, route.ExactRouteClosure,
+                route.Network, route.NetworkAuthority, exactPolicy, request.ExactXmg2, route.ExactRouteClosure,
                 effective, [new(evidence[0].NodeId.Span, invalid), evidence[1]], time, ct));
             await Assert.ThrowsAsync<CryptographicException>(async () => await DeepIdV2MailboxGrantIssuanceVerifier.VerifyAsync(
-                route.Network, route.NetworkAuthority, operational.ExactPma2, request.ExactXmg2, route.ExactRouteClosure,
+                route.Network, route.NetworkAuthority, exactPolicy, request.ExactXmg2, route.ExactRouteClosure,
                 effective, [evidence[0], evidence[0]], time, ct));
             var authorized = await DeepIdV2MailboxGrantIssuanceVerifier.VerifyAsync(route.Network, route.NetworkAuthority,
-                operational.ExactPma2, request.ExactXmg2, route.ExactRouteClosure, effective, evidence, time, ct);
+                exactPolicy, request.ExactXmg2, route.ExactRouteClosure, effective, evidence, time, ct);
             var wrong = new FixtureMailboxIssuer(retrieve ? (byte)0x31 : (byte)0x32);
             await Assert.ThrowsAsync<CryptographicException>(async () => await authorized.AuthorSuccessAsync(wrong, ct));
             Assert.Equal(0, wrong.Calls);

@@ -423,6 +423,55 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 
     [Fact]
     [Trait("RequiresApprovedMlKemRuntime", "true")]
+    public async Task Did2OwnedMailboxSend_ExpiredOwnContextAfterCompletionCannotReturnSuccess()
+    {
+        // ContactAccept completion has its own protected/native custody. Test
+        // it independently of the ordinary-text completion/cancellation theory.
+        await using var fixture = await Fixture.CreateAsync(withPeer: true, encryptedStorage: true);
+        var test = await fixture.PrepareCompletedContactSendCase(isInitial: false);
+        var native = (await fixture.ReadMessagingFloor(test.Scope)).Exact.ToArray();
+        try
+        {
+            var reached = false;
+            using (Did2MailboxSendTestHooks.Push(point =>
+            {
+                if (point != Did2MailboxSendFailpoint.AfterOrdinaryCompletion) return;
+                reached = true;
+                fixture.Sample = checked(fixture.Sample + AccountDirectoryCurrentProofVerifier.RevocationFreshnessTtlSeconds);
+            }))
+                await Assert.ThrowsAsync<Deep.Client.Shared.Services.ClientMailboxDispatchOutcomeUnknownException>(test.Deliver);
+
+            Assert.True(reached);
+            Assert.Equal(1, test.Transport.Calls);
+            Assert.Equal(1, test.Grants.Calls);
+            Assert.NotNull(test.Transport.ExactRequest);
+            Assert.NotNull(test.Transport.StoredEnvelope);
+            Assert.Equal(native, (await fixture.ReadMessagingFloor(test.Scope)).Exact.ToArray());
+            // The exception must not roll back the independently durable
+            // ContactAccept Store evidence or erase the original acceptance.
+            await fixture.RequireOriginalContactStoreSqlRowAsync(test);
+            var application = await fixture.ReadCompleteOrdinaryApplicationProjection(test.Scope);
+            var retained = await fixture.ReadCompletedContactSendRetainedRoots(test.Scope);
+            try
+            {
+                fixture.ColdReopenReceiverStoreStorage();
+                Assert.Equal(application, await fixture.ReadCompleteOrdinaryApplicationProjection(test.Scope));
+                Assert.Equal(retained, await fixture.ReadCompletedContactSendRetainedRoots(test.Scope));
+                Assert.Equal(native, (await fixture.ReadMessagingFloor(test.Scope)).Exact.ToArray());
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(application);
+                CryptographicOperations.ZeroMemory(retained);
+            }
+            Assert.Equal(1, test.Transport.Calls);
+            Assert.Equal(1, test.Grants.Calls);
+        }
+        finally { CryptographicOperations.ZeroMemory(native); }
+    }
+
+    [Fact]
+    [Trait("RequiresApprovedMlKemRuntime", "true")]
     public async Task Did2OwnedMailboxSend_SlowPreparationCannotRewindTheDispatchClock()
     {
         await using var fixture = await Fixture.CreateAsync(withPeer: true);
@@ -488,6 +537,16 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 
     private sealed partial class Fixture
     {
+        internal Task RequireOriginalContactStoreSqlRowAsync(CompletedContactSendCase test) =>
+            WithAuthoredApplicationConnectionAsync(test.Scope, connection =>
+            {
+                using var read = connection.CreateCommand();
+                read.CommandText = "SELECT count(*) FROM mailbox_store_public_evidence WHERE scope_hash=$scope AND operation_id=$op;";
+                read.Parameters.AddWithValue("$scope", test.Scope.Hash.ToArray());
+                read.Parameters.AddWithValue("$op", test.Operation);
+                Assert.Equal(1L, read.ExecuteScalar());
+            });
+
         internal async Task AssertInitialStartRejectsMissingDraft(Did2MessagingSessionScope scope, byte[] intent,
             IDid2MailboxGrantTransport grants, IDid2OwnedMailboxTransportFactory transport)
         {

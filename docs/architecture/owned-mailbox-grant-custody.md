@@ -151,6 +151,17 @@ held ownership; longer payload retention never permits stale Store or extends
 an existing pending/unknown operation. This changes no journal generation or
 working-set capacity and does not activate runtime renewal or compaction.
 
+Store dispatch carries only a conservative upper-time floor captured while the
+private signing/preparation clock was live. It does not keep that clock as a
+dispatch dependency. The new signer-free dispatch scope independently checks
+its own bounded lifetime, current authority, held lease and all original grant/
+route expiries; its clock cannot rewind below the captured preparation floor.
+Both the fresh upper bound and the captured floor advance by the ceiling of
+dispatch elapsed time. Keeping the captured floor constant would pause its
+clock when the fresh sample is lower, potentially crossing an original expiry.
+An expired preparation still rejects before opening dispatch, and expiry or
+lost confirmation after ingress remains unknown with the exact request retained.
+
 `AddPending` preserves an existing current winner and records one candidate with
 its exact retained predecessor. It cannot replace another pending candidate. No callback
 occurs before the account owner's protected CAS and exact read-back.
@@ -256,7 +267,7 @@ No additional persistent floor/marker is introduced. On reopen,
 the producer remints only from actual native DNH2/anchor and retained original
 grant root, with independently current signed evidence. The source cannot
 replace an existing full-history floor with a tuple or cache. Semantics, time,
-strict epoch advance and unavailable rollover rules have one owner:
+strict epoch advance and exact historical namespace continuity have one owner:
 [TRANSPORT-NEUTRAL-MESSAGING §8.4.2](../../../docs/architecture/TRANSPORT-NEUTRAL-MESSAGING.md#842-grant-and-route-transitions).
 This lease is only a prerequisite for a future dependency-closed protected
 plan; the API has no deletion, mutation, issuer callback or scheduler entry.
@@ -641,3 +652,73 @@ its native mutation. An expired first attempt cannot create native history and
 then recover through the historical reader. Actual native exact replay skips
 fresh admission and retains its original event/hash; held lease and final
 native readbacks remain mandatory. This changes no journal generation or API.
+
+## Joint archived read-path disposition — qualified source profile
+
+`MailboxEpochExclusion.RetireArchivedReadPathAsync(ct)` is an internal held
+owner transition, not a runtime scheduler or public deletion authority. It
+selects exactly one phase7 archived permanent publication, independently bound
+to this account's promotion intent. The current permanent entry cannot be
+selected and remains byte-exact. Pending publication work pins selection.
+
+The producer requires independently protected epoch exclusion for every
+original adopted Retrieve winner, its original possible-issuance ceiling and
+matching private locator/capability. Each scope must have one selected winner,
+no pending/unknown/intervening predecessor; its exact SQL credential and
+positive completed original Retrieve/ACK coverage must exist. An idle protected
+traversal must agree with SQL. Active reads, ordinary/attachment work and sends
+on the original path pin disposition. The producer conservatively waits until
+original XRA1 expiry plus the existing maximum object TTL; short Retrieve-grant
+expiry does not shorten accepted-object retention. Actual source/native roots,
+history, consent and replay exclusion remain mandatory under the live lease.
+
+The private plan uses the existing framing/part bounds and one closed new
+Application profile. Local root kinds13/14 and disposition5 are not wire values.
+The ordered roots are Ordinary, Send, Grant, Read, SessionCatalog, Attachment,
+AccountRegistration, NativeFence, ContactPublication, MailboxLocalCustody.
+Only Grant/Read/ContactPublication change, in that order. ReplayScope rows here
+select exact MCG3 digests and commit exact acquisition entries; one final
+RetainedPath row selects the original route hash and commits the archived entry.
+Other profiles cannot borrow these kinds/action. SQL selector is the original
+route hash. No bounds, namespace aliases or compatibility readers are added.
+
+MailboxLocalCustody has its own domain/selector and guards all source/native
+custody from MailboxStoreState except publication and application SQL: those
+have independent exact before/after effects in this joint profile. Root12's
+complete unchanged semantics are preserved for existing profiles. Root14 still
+binds registered device/prekey SQL, resolver capability, contact drafts,
+preclaims, initial-key custody, the complete native catalog, authenticated
+history/tip, floor and peer records. It cannot stand in for application SQL.
+
+Read-only virtual SQL omission predicts the exact complete successor before
+staging; no delete-and-rollback preview is used. Mutation deletes only selected
+credential scopes/epochs/grants/replay counters and original traversal/poll
+clock. Inbox, dedup, quarantine, history, terminal attempts, exact prepared
+transport requests and application receipt work remain. The complete SQL
+successor is rechecked inside the transaction before commit. Grant/read/archive
+successors remove only exact selected custody; the cursor is never removed
+while its original private publication remains independently pollable.
+
+Cold recovery rederives all three successors from actual predecessors before
+SQL. SQL may be exactly-before or exactly-after; adopted roots must form a
+contiguous ordered prefix. Remaining read adoption derives its scope from the
+still-original publication, not an already deleted acquisition. Fully-after
+recovery authenticates successor parts against the concatenated actual adopted
+roots; explicit before-SQL abandonment regenerates them from unchanged actual
+predecessors. Missing parts are legal only at that verified finishing boundary.
+No signing, network callback, current proof fetch, re-encryption or repaired
+root is a recovery step. Cancellation after SQL cannot abandon the plan.
+
+The current DR-0108 source authenticates the original namespace under its actual
+retained ancestor, while independently requiring a current host and native epoch
+exclusion. Actual empty/nonempty owner fixtures reach the object horizon using
+genuine signed head/view and DTS1/XNA1 successors, never enlarged validity windows
+or an expired current authority. The nonempty case completes a non-final
+Retrieve/ACK page and preserves its actual cursor/token and native accepted
+contact through disposition/replay. Cold/cancel handovers, missing dependency
+refusals and exact SQL/protected readbacks are included in the matching accepted
+Shared full895/0/0. Model tests alone are not deletion authority. Exact native
+exits, unchanged-input proof, prior FAILs and the remaining whole-S01 review are
+owned by the [checkpoint](../testing/s01-idle-mailbox-floors-2026-10-09.md#matching-full03--current-shared-source-qualified).
+This source profile does not activate the S04 scheduler or qualify production,
+physical clients, shipping packages or a release.

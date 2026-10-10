@@ -38,6 +38,66 @@ public sealed class Did2CompactionPlanTests
     private static RootReadback[] Readbacks(Root[] roots, bool after = false) => roots.Select(root =>
         new RootReadback(root.Kind, root.Selector, after ? root.After : root.Before)).ToArray();
 
+    private static Root[] RetainedPathRoots() =>
+    [
+        Guard(RootKind.Ordinary, 10), Guard(RootKind.Send, 11), Changed(RootKind.Grant, 12, 22),
+        Changed(RootKind.Read, 13, 23), Guard(RootKind.SessionCatalog, 14), Guard(RootKind.Attachment, 15),
+        Guard(RootKind.AccountRegistration, 16), Guard(RootKind.NativeFence, 17),
+        Changed(RootKind.ContactPublication, 18, 24), Guard(RootKind.MailboxLocalCustody, 19)
+    ];
+
+    [Fact]
+    public void RetainedPathRequiresJointSqlAndThreeOrderedRootAdoptions()
+    {
+        using var idle = RegisteredEmpty(Network, Account, Instance);
+        var roots = RetainedPathRoots();
+        Row[] rows = [new(Disposition.ReplayScope, Bytes(32, 30), Bytes(32, 40)),
+            new(Disposition.RetainedPath, Bytes(32, 31), Bytes(32, 41))];
+        using var prepared = idle.Prepare(SqlTarget.Application, Bytes(32, 8), Bytes(32, 31), BeforeSql, AfterSql, roots, rows);
+        var actual = Readbacks(roots);
+        Assert.Equal(RecoveryStep.ApplySql, prepared.Plan.ObserveReadback(BeforeSql, actual).Step);
+        Assert.Equal(RecoveryStep.RecordSqlCommit, prepared.Plan.ObserveReadback(AfterSql, actual).Step);
+        using var committed = prepared.Plan.WithSqlCommitted();
+        using var reopened = Decode(committed.Exact.Span, Network, Account, Instance);
+        foreach (var index in new[] { 2, 3, 8 })
+        {
+            Assert.Equal(new RecoveryObservation(RecoveryStep.AdoptRoot, index), reopened.ObserveReadback(AfterSql, actual));
+            using var successor = prepared.Successors.Use(bytes => reopened.OwnSuccessor(index, bytes));
+            Assert.True(successor.Use(bytes => bytes.SequenceEqual(roots[index].Successor.Span)));
+            actual[index] = actual[index] with { Digest = roots[index].After };
+        }
+        Assert.Equal(RecoveryStep.ClearPlan, reopened.ObserveReadback(AfterSql, actual).Step);
+        Assert.Throws<InvalidDataException>(() => reopened.ObserveReadback(BeforeSql, actual));
+        actual[2] = actual[2] with { Digest = roots[2].Before };
+        Assert.Throws<InvalidDataException>(() => reopened.ObserveReadback(AfterSql, actual));
+    }
+
+    [Theory]
+    [InlineData("sql-less")] [InlineData("read-guard")] [InlineData("publication-guard")]
+    [InlineData("missing-source")] [InlineData("extra-path")] [InlineData("unrelated-action")]
+    [InlineData("unowned-roots")]
+    public void RetainedPathRejectsIncompleteOrBorrowedCompactionProfiles(string defect)
+    {
+        using var idle = RegisteredEmpty(Network, Account, Instance);
+        var roots = RetainedPathRoots();
+        var rows = new List<Row> { new(Disposition.ReplayScope, Bytes(32, 30), Bytes(32, 40)),
+            new(Disposition.RetainedPath, Bytes(32, 31), Bytes(32, 41)) };
+        var target = SqlTarget.Application;
+        switch (defect)
+        {
+            case "sql-less": target = SqlTarget.ProtectedOnly; break;
+            case "read-guard": roots[3] = Guard(RootKind.Read, 13); break;
+            case "publication-guard": roots[8] = Guard(RootKind.ContactPublication, 18); break;
+            case "missing-source": roots = roots[..^1]; break;
+            case "extra-path": rows.Add(new(Disposition.RetainedPath, Bytes(32, 32), Bytes(32, 42))); break;
+            case "unrelated-action": rows[0] = rows[0] with { Action = Disposition.Audit }; break;
+            case "unowned-roots": rows[1] = rows[1] with { Action = Disposition.ReplayScope }; break;
+        }
+        Assert.Throws<InvalidDataException>(() => idle.Prepare(target, Bytes(32, 8), Bytes(32, 31),
+            target == SqlTarget.ProtectedOnly ? new byte[32] : BeforeSql,
+            target == SqlTarget.ProtectedOnly ? new byte[32] : AfterSql, roots, rows));
+    }
+
     [Theory]
     [InlineData((byte)1)]
     [InlineData((byte)2)]

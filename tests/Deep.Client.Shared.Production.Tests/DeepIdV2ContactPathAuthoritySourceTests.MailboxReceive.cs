@@ -24,12 +24,15 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     public async Task Did2OwnedMailboxReceive_PublicationPromotionKeepsOriginalLostAckAndSingleContactAccept()
         => await CheckOwnedMailboxReceiveAsync(selectedSuccessor: false, renewPublicationDuringAck: true);
 
-    private static async Task CheckOwnedMailboxReceiveAsync(bool selectedSuccessor, bool renewPublicationDuringAck)
+    private static async Task CheckOwnedMailboxReceiveAsync(bool selectedSuccessor, bool renewPublicationDuringAck,
+        bool authorityRollover = false)
     {
         // Actual PQ accounts, committed DPE2/ratchet, SQLCipher, protected page,
         // materialization and signed ACK. In-process issuer/terminal and signed
         // fixture time: NOT socket/device or a remote attachment transfer.
-        await using var fixture = await Fixture.CreateAsync(withPeer: true, longMailboxWindow: true);
+        await using var fixture = await Fixture.CreateAsync(withPeer: true, longMailboxWindow: true,
+            initialMailboxAuthorityExpiry: authorityRollover ? 2_000UL : null);
+        if (authorityRollover) await fixture.AdvanceCurrentRoutingAuthorityAsync();
         if (renewPublicationDuringAck) await fixture.SeedShortPermanentProposalAsync(validitySeconds: 800);
         var intent = Bytes(32, 0xa1);
         var (complete, hello, init, _, _) = await fixture.PrepareNativeHelloCompletion(intent, verifyDraftRecovery: true);
@@ -244,6 +247,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         internal int RetrieveCalls, AckCalls;
         internal List<byte[]> RetrievedOriginalRoutes { get; } = [];
         internal bool LoseAckReply, BuiltRetrieveFrame, BuiltAckFrame, ReturnEmptyPage;
+        internal bool HasMoreAfterPage;
         public IClientMailboxBinaryIngress Create(Did2OwnedMailboxTransportContext loan, IMailboxClientDecodePolicyProvider decoder)
         { context = loan; policy = decoder; return this; }
         private async Task BuildHeldFrame(OnionOperation operation, ReadOnlyMemory<byte> exact, ScopedMailboxResolvedRoute route, CancellationToken ct)
@@ -283,8 +287,9 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             };
             return MailboxClientCodec.EncodeRetrievePage(new()
             {
-                Epoch = request.Epoch, OperationId = request.OperationId, NextCursor = tombstoned ? 0UL : Cursor, HasMore = false,
-                ContinuationToken = ReadOnlyMemory<byte>.Empty, Items = tombstoned ? [] : [new() { Cursor = Cursor, Envelope = envelope }]
+                Epoch = request.Epoch, OperationId = request.OperationId, NextCursor = tombstoned ? 0UL : Cursor, HasMore = HasMoreAfterPage && !tombstoned,
+                ContinuationToken = HasMoreAfterPage && !tombstoned ? Bytes(32, 0xb4) : ReadOnlyMemory<byte>.Empty,
+                Items = tombstoned ? [] : [new() { Cursor = Cursor, Envelope = envelope }]
             });
         }
         public async Task<ReadOnlyMemory<byte>> AcknowledgeOnRouteAsync(ReadOnlyMemory<byte> exact, ScopedMailboxResolvedRoute route, CancellationToken ct)
@@ -297,6 +302,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             if (ackRequest is null) ackRequest = exact.ToArray(); else Assert.Equal(ackRequest, exact.ToArray());
             await BuildHeldFrame(OnionOperation.Acknowledge, exact, route, ct); BuiltAckFrame = true;
             Assert.Equal(Cursor, Assert.Single(request.Acknowledgements).Cursor);
+            Assert.Equal(!HasMoreAfterPage, request.IsFinalPage);
+            Assert.Equal(HasMoreAfterPage ? Bytes(32, 0xb4) : [], request.ContinuationToken.ToArray());
             Assert.Equal(envelope!.DeduplicationDigest.ToArray(), request.Acknowledgements[0].EnvelopeDigest.ToArray());
             if (ackResponse is null)
             {
