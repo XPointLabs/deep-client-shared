@@ -3,7 +3,8 @@
 Status: narrow S01 recipient obligation block accepted on source6e9d2b3,
 current full726/0/0 terminal0. [Exact evidence](../testing/s01-application-receipt-obligations-2026-10-06.md#current-coupled-full--accepted-recipient-obligation-block). This is
 not S07 receipt sending or physical E2E. Semantic ownership remains solely in
-[TRANSPORT-NEUTRAL-MESSAGING §8.4.1 and §8.4.3](../../../docs/architecture/TRANSPORT-NEUTRAL-MESSAGING.md#841-delivery-transitions).
+[TRANSPORT-NEUTRAL-MESSAGING §8.4.1](../../../docs/architecture/TRANSPORT-NEUTRAL-MESSAGING.md#841-sendattempt-transitions)
+and [§8.4.3](../../../docs/architecture/TRANSPORT-NEUTRAL-MESSAGING.md#843-compaction-and-boundedness).
 
 ## Current producer and local format
 
