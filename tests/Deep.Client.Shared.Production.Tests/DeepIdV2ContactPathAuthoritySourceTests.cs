@@ -1410,6 +1410,59 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     }
 
     [Fact]
+    public async Task CompletedPublication_OperationalRenewalReopensExactPairWithoutNewInventoryOrDispatch()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        await using var fixture = await Fixture.CreateAsync();
+        var expected = await fixture.StageAndRecordPairAsync();
+        var staged = (await fixture.Accounts.ReadOwnStagedPreKeyPublicationAsync())!;
+        var publication = DeepIdV2PreKeyPublicationCodec.Decode(staged.ExactXpp1.Span);
+        var before = await fixture.Source().GetCurrentForPublicationAsync(Fixture.Network, publication.Manifest.Field(2));
+        await fixture.AdvanceNetworkAsync();
+        var reopened = fixture.ReopenAccount();
+        var source = fixture.Source(reopened);
+        var after = await source.GetCurrentForPublicationAsync(Fixture.Network, publication.Manifest.Field(2));
+        Assert.NotEqual(before.Placement.ViewHash.ToArray(), after.Placement.ViewHash.ToArray());
+        Assert.Equal(before.Placement.PlacementHash.ToArray(), after.Placement.PlacementHash.ToArray());
+        var custody = await reopened.OpenOwnOnionClientCustodyAsync();
+        var actual = await reopened.PublishOwnStagedPreKeyInventoryAsync(source, custody);
+        Assert.Equal(expected.ExactFirstXic1.ToArray(), actual.ExactFirstXic1.ToArray());
+        Assert.Equal(expected.ExactSecondXic1.ToArray(), actual.ExactSecondXic1.ToArray());
+        Assert.Equal(staged.ExactXpp1.ToArray(), (await reopened.ReadOwnStagedPreKeyPublicationAsync())!.ExactXpp1.ToArray());
+        Assert.Null(await custody.Guards.ReadAsync(default));
+    }
+
+    [Fact]
+    public async Task PendingPublication_OperationalRenewalChangesOnlyCarriageViewNotProtectedInventory()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        await using var fixture = await Fixture.CreateAsync();
+        var source = fixture.Source();
+        var staged = await fixture.Accounts.EnsureOwnInitialPreKeyInventoryAsync(source);
+        var publication = DeepIdV2PreKeyPublicationCodec.Decode(staged.ExactXpp1.Span);
+        var before = await source.GetCurrentForPublicationAsync(Fixture.Network, publication.Manifest.Field(2));
+        await fixture.AdvanceNetworkAsync();
+        var reopened = fixture.ReopenAccount();
+        var after = await fixture.Source(reopened).GetCurrentForPublicationAsync(Fixture.Network, publication.Manifest.Field(2));
+        Assert.Equal(publication.PlacementHash.ToArray(), after.Placement.PlacementHash.ToArray());
+        var original = DeepIdV2BoundedPreKeyPublicationCodec.CreateSequence(staged.ExactXpp1.Span,
+            before.Placement.ViewHash.Span, staged.ExactDid2.Span, staged.ExactDca1.Span, staged.ExactXps1.Span);
+        var renewed = DeepIdV2BoundedPreKeyPublicationCodec.CreateSequence(staged.ExactXpp1.Span,
+            after.Placement.ViewHash.Span, staged.ExactDid2.Span, staged.ExactDca1.Span, staged.ExactXps1.Span);
+        Assert.Equal(original.Count, renewed.Count);
+        for (var index = 0; index < original.Count; index++)
+        {
+            var oldFragment = DeepIdV2BoundedPreKeyPublicationCodec.Decode(original[index]);
+            var newFragment = DeepIdV2BoundedPreKeyPublicationCodec.Decode(renewed[index]);
+            Assert.NotEqual(oldFragment.ViewHash.ToArray(), newFragment.ViewHash.ToArray());
+            for (var tag = 1; tag <= 12; tag++)
+                if (tag != 4) Assert.Equal(oldFragment.Field(tag).ToArray(), newFragment.Field(tag).ToArray());
+        }
+        Assert.Equal(staged.ExactXpp1.ToArray(), (await reopened.ReadOwnStagedPreKeyPublicationAsync())!.ExactXpp1.ToArray());
+        Assert.Null(await reopened.ReadOwnPreKeyCommitPairAsync());
+    }
+
+    [Fact]
     public async Task CompletedPublication_DoesNotSubstituteSavedPairForFreshProof()
     {
         if (!OperatingSystem.IsWindows()) return;
@@ -1530,6 +1583,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             var prepared = await paths.PrepareExactAsync(OnionOperation.ContactResolve, request, exit, default);
             var entry = OnionEntryTransportFactory.Create(prepared.Attempt.Path);
             entry.EnsureCurrent();
+            using var transport = new PrivacyManagedIngressHttpTransport(entry);
+            Assert.Equal(false, transport.SignedEntryTlsAllowsSessionResumption);
             using var built = await codec.BuildAsync(prepared.Attempt.Path, prepared.Attempt.Request, default);
             Assert.False(built.Frame.IsEmpty);
             Assert.NotNull(ledger.LastBatch);

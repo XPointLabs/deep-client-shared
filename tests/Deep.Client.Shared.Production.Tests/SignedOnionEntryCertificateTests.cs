@@ -7,6 +7,14 @@ namespace Deep.Client.Shared.Production.Tests;
 
 public sealed class SignedOnionEntryCertificateTests
 {
+    [Fact]
+    public void CaManagedOrigin_DoesNotInstallSignedEntryTlsPolicy()
+    {
+        using var client = new HttpClient { BaseAddress = new Uri("https://localhost/") };
+        using var transport = new PrivacyManagedIngressHttpTransport(client);
+        Assert.Null(transport.SignedEntryTlsAllowsSessionResumption);
+    }
+
     [Theory]
     [InlineData(SslPolicyErrors.None)]
     [InlineData(SslPolicyErrors.RemoteCertificateChainErrors)]

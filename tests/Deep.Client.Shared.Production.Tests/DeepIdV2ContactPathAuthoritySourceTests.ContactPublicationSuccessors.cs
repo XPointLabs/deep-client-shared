@@ -67,6 +67,18 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 var result = PublicationResult(route, authorized.ExactXpu1);
                 Assert.Equal(0UL, (await DeepIdV2PublicationCommitVerifier.VerifyCommittedAsync(route, contact,
                     publication.WireRequest, authorized.ExactXpu1, result)).Generation);
+                if (mode == 0)
+                {
+                    var rejected = Xpo1Codec.Encode(authorized.ExactXpu1.Span, Xpo1Status.Expired,
+                        ContactServiceMutationOutcome.None, current.Proof.TrustedUpperUnixSeconds, 0,
+                        ContactServicePaddingClass.Bytes256, []);
+                    var error = await Assert.ThrowsAsync<CryptographicException>(async () =>
+                        await DeepIdV2PublicationCommitVerifier.VerifyCommittedAsync(route, contact,
+                            publication.WireRequest, authorized.ExactXpu1, rejected));
+                    Assert.Equal((ushort)Xpo1Status.Expired, error.Data["Deep.ContactPublication.Status"]);
+                    Assert.Equal((byte)ContactServiceMutationOutcome.None, error.Data["Deep.ContactPublication.MutationOutcome"]);
+                    Assert.Equal(2, error.Data.Count);
+                }
                 Sample += 20;
                 await Assert.ThrowsAsync<CryptographicException>(async () => await route.EnsureCurrentAsync());
                 await Assert.ThrowsAsync<CryptographicException>(async () => await DeepIdV2ContactObjectAuthor.RestoreAsync(

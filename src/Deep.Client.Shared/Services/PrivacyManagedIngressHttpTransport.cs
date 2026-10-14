@@ -47,7 +47,11 @@ internal sealed class PrivacyManagedIngressHttpTransport :
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(30);
     private readonly HttpClient httpClient;
     private readonly VerifiedOnionEntryTransport? verifiedEntry;
+    private readonly SslClientAuthenticationOptions? signedEntryTlsOptions;
+    private string? certificateRejection;
     private int disposed;
+
+    internal bool? SignedEntryTlsAllowsSessionResumption => signedEntryTlsOptions?.AllowTlsResume;
 
     internal PrivacyManagedIngressHttpTransport(
         Uri origin)
@@ -114,10 +118,36 @@ internal sealed class PrivacyManagedIngressHttpTransport :
                 catch { socket.Dispose(); throw; }
             }
         };
+        // Each signed entry has its own key even when several node origins
+        // share one host. A resumed session must not substitute another pin's
+        // cached certificate for this exact path's full authenticated handshake.
+        handler.SslOptions.AllowTlsResume = false;
+        signedEntryTlsOptions = handler.SslOptions;
         handler.SslOptions.RemoteCertificateValidationCallback = (_, certificate, _, errors) =>
         {
-            try { entry.EnsureCurrent(); return ValidateSignedNodeCertificate(certificate, errors, pin); }
-            catch (OnionBoundaryException) { return false; }
+            try {
+                entry.EnsureCurrent();
+                var valid = ValidateSignedNodeCertificate(certificate, errors, pin);
+                if (!valid) certificateRejection = errors.HasFlag(SslPolicyErrors.RemoteCertificateNameMismatch)
+                    ? "certificate-name" : errors.HasFlag(SslPolicyErrors.RemoteCertificateNotAvailable)
+                        ? "certificate-missing" : "certificate-policy";
+                if (!valid && certificateRejection == "certificate-policy" && certificate is X509Certificate2 observed)
+                {
+                    try
+                    {
+                        certificateRejection = CryptographicOperations.FixedTimeEquals(
+                            SHA256.HashData(observed.PublicKey.ExportSubjectPublicKeyInfo()), pin)
+                            ? "certificate-usage-or-time" : "certificate-pin";
+                    }
+                    catch (Exception exception) when (exception is CryptographicException or InvalidOperationException or ArgumentException)
+                    {
+                        // Diagnostic classification must not change the original rejection.
+                        certificateRejection = "certificate-policy";
+                    }
+                }
+                return valid;
+            }
+            catch (OnionBoundaryException) { certificateRejection = "entry-authority"; return false; }
         };
         verifiedEntry = entry;
         httpClient = new HttpClient(handler, disposeHandler: true)
@@ -202,6 +232,10 @@ internal sealed class PrivacyManagedIngressHttpTransport :
             }
             catch (HttpRequestException exception) when (IsDefinitelyBeforeForward(exception))
             {
+                // Closed connection diagnostic only; no endpoint, certificate,
+                // pin or live authority is exposed and certainty is unchanged.
+                if (certificateRejection is { } category)
+                    exception.Data["Deep.ManagedIngress.TlsFailure"] = category;
                 throw new PrivacyIngressRejectedBeforeForwardException(
                     retryable: true,
                     "Privacy ingress was unreachable before the opaque frame could be forwarded.",
