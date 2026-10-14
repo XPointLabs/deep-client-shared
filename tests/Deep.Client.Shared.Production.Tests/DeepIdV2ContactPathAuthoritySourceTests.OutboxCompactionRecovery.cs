@@ -23,13 +23,14 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         using (var accept = await fixture.PrepareOwnedContactAccept(receiver, Bytes(32, 0xa2)))
         using (var sent = await fixture.SendOwnedMessage(receiver, accept.Operation.ToArray(), ApplicationCoreCodec.DecodeDmc2(accept.ExactDmc2)))
         using (var received = await fixture.ReceiveOwnedMessage(sender, sent.ExactEnvelope.ToArray())) { }
-        using (var reply = await fixture.PrepareOwnedText(receiver, Bytes(32, 0xc1), "independent recipient receipt work"))
+        using (var reply = await fixture.CreateOwnedText(receiver, "independent recipient receipt work"))
         using (var sentReply = await fixture.SendOwnedMessage(receiver, reply.OperationId.ToArray(), ApplicationCoreCodec.DecodeDmc2(reply.ExactDmc2.Span)))
         using (var receivedReply = await fixture.ReceiveOwnedMessage(sender, sentReply.ExactEnvelope.ToArray())) { }
         var receiptBefore = Assert.Single(await fixture.ListOwnedReceiptObligations(sender)).EventHash.ToArray();
-        var operation = Bytes(32, 0xc0); byte[] exact, cipher;
-        using (var text = await fixture.PrepareOwnedText(sender, operation, "exact retained ciphertext"))
+        byte[] operation, exact, cipher;
+        using (var text = await fixture.CreateOwnedText(sender, "exact retained ciphertext"))
         {
+            operation = text.OperationId.ToArray();
             exact = text.ExactDmc2.ToArray();
             using var sent = await fixture.SendOwnedMessage(sender, operation, ApplicationCoreCodec.DecodeDmc2(exact));
             cipher = sent.ExactEnvelope.ToArray();
@@ -102,12 +103,14 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         using (var sent = await fixture.SendOwnedMessage(receiver, accept.Operation.ToArray(), ApplicationCoreCodec.DecodeDmc2(accept.ExactDmc2)))
         using (var received = await fixture.ReceiveOwnedMessage(sender, sent.ExactEnvelope.ToArray())) { }
         var grants = new OwnedGrantTransport(fixture, ownerOnPrimary: true); var index = 0;
-        foreach (var point in Enum.GetValues<Did2CompactionFailpoint>())
+        foreach (var point in new[] { Did2CompactionFailpoint.AfterStage, Did2CompactionFailpoint.AfterSql,
+            Did2CompactionFailpoint.AfterSqlRecorded, Did2CompactionFailpoint.AfterHistoryAdopted,
+            Did2CompactionFailpoint.AfterPartsDeleted, Did2CompactionFailpoint.AfterPlanCleared })
         {
-            var operation = Bytes(32, checked((byte)(0xc0 + index)));
-            byte[] cipher;
-            using (var text = await fixture.PrepareOwnedText(sender, operation, "retained history after outbox cleanup " + index))
+            byte[] operation, cipher;
+            using (var text = await fixture.CreateOwnedText(sender, "retained history after outbox cleanup " + index))
             {
+                operation = text.OperationId.ToArray();
                 Assert.Equal(checked((ulong)(3 + index)), text.SenderSequence);
                 using var sent = await fixture.SendOwnedMessage(sender, operation, ApplicationCoreCodec.DecodeDmc2(text.ExactDmc2.Span));
                 cipher = sent.ExactEnvelope.ToArray();
@@ -154,17 +157,20 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             var cached = await fixture.DeliverNativeMessage(sender, operation, grants, transport);
             Assert.False(cached.IngressDispatched); Assert.Equal(durable.Cursor, cached.Cursor); Assert.Equal(1, transport.Calls);
             Assert.Equal(expectedAfter, await fixture.ReadCompleteOrdinaryApplicationProjection(sender));
-            await Assert.ThrowsAsync<CryptographicException>(() => fixture.PrepareOwnedText(sender, operation, "cannot remint compacted operation"));
+            await Assert.ThrowsAsync<IOException>(() => fixture.RetryOwnedText(sender, operation, "cannot remint compacted operation"));
             Assert.Equal(expectedAfter, await fixture.ReadCompleteOrdinaryApplicationProjection(sender));
             foreach (var bytes in row.OfType<byte[]>()) CryptographicOperations.ZeroMemory(bytes);
             CryptographicOperations.ZeroMemory(cipher); CryptographicOperations.ZeroMemory(beforeFloor); CryptographicOperations.ZeroMemory(expectedAfter);
             index++;
         }
 
-        var pendingOperation = Bytes(32, 0xd0); byte[] pendingCipher;
-        using (var text = await fixture.PrepareOwnedText(sender, pendingOperation, "unknown is never eligible"))
-        using (var sent = await fixture.SendOwnedMessage(sender, pendingOperation, ApplicationCoreCodec.DecodeDmc2(text.ExactDmc2.Span)))
+        byte[] pendingOperation, pendingCipher;
+        using (var text = await fixture.CreateOwnedText(sender, "unknown is never eligible"))
+        {
+            pendingOperation = text.OperationId.ToArray();
+            using var sent = await fixture.SendOwnedMessage(sender, pendingOperation, ApplicationCoreCodec.DecodeDmc2(text.ExactDmc2.Span));
             pendingCipher = sent.ExactEnvelope.ToArray();
+        }
         var pendingTransport = new OwnedStoreFixture(fixture, sender, pendingOperation, pendingCipher) { LoseReply = true };
         await Assert.ThrowsAsync<ClientMailboxDispatchOutcomeUnknownException>(() => fixture.DeliverNativeMessage(sender, pendingOperation, grants, pendingTransport));
         await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.PrepareNativeOutboxCompaction(sender));
@@ -235,26 +241,26 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             {
                 using var read = connection.CreateCommand(); read.CommandText = "SELECT * FROM mailbox_store_public_evidence;";
                 using var reader = read.ExecuteReader(); Assert.True(reader.Read());
-                row = new object[reader.FieldCount]; reader.GetValues(row); Assert.Equal(11, row.Length); Assert.False(reader.Read());
+                row = new object[reader.FieldCount]; reader.GetValues(row); Assert.Equal(13, row.Length); Assert.False(reader.Read());
             });
             try
             {
                 var columns = new[] { "account_scope", "logical_id", "exact_pma", "exact_view", "first_descriptor", "second_descriptor" };
-                if (((byte[])row[8]).Length != 0) columns = [.. columns, "original_dcr", "original_route", "original_peer_adp"];
+                if (((byte[])row[9]).Length != 0) columns = [.. columns, "original_dcr", "original_route", "original_peer_adp"];
                 foreach (var mutation in Enumerable.Range(-2, columns.Length + 2))
                 {
                     await WithAuthoredApplicationConnectionAsync(scope, connection =>
                     {
                         using var write = connection.CreateCommand();
-                        if (mutation == -2) write.CommandText = "DELETE FROM mailbox_store_public_evidence WHERE operation_id=$op;";
-                        else if (mutation == -1) write.CommandText = "UPDATE mailbox_store_public_evidence SET first_descriptor=second_descriptor,second_descriptor=first_descriptor WHERE operation_id=$op;";
+                        if (mutation == -2) write.CommandText = "DELETE FROM mailbox_store_public_evidence WHERE attempt_id=$op;";
+                        else if (mutation == -1) write.CommandText = "UPDATE mailbox_store_public_evidence SET first_descriptor=second_descriptor,second_descriptor=first_descriptor WHERE attempt_id=$op;";
                         else
                         {
-                            var changed = ((byte[])row[mutation + 2]).ToArray(); changed[^1] ^= 1;
-                            write.CommandText = "UPDATE mailbox_store_public_evidence SET " + columns[mutation] + "=$value WHERE operation_id=$op;";
+                            var changed = ((byte[])row[mutation + 3]).ToArray(); changed[^1] ^= 1;
+                            write.CommandText = "UPDATE mailbox_store_public_evidence SET " + columns[mutation] + "=$value WHERE attempt_id=$op;";
                             write.Parameters.AddWithValue("$value", changed);
                         }
-                        write.Parameters.AddWithValue("$op", row[1]); Assert.Equal(1, write.ExecuteNonQuery());
+                        write.Parameters.AddWithValue("$op", row[2]); Assert.Equal(1, write.ExecuteNonQuery());
                     });
                     var before = await ReadCompleteOrdinaryApplicationProjection(scope);
                     try
@@ -271,8 +277,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                         {
                             using var tx = connection.BeginTransaction();
                             using var delete = connection.CreateCommand(); delete.Transaction = tx;
-                            delete.CommandText = "DELETE FROM mailbox_store_public_evidence WHERE operation_id=$op;";
-                            delete.Parameters.AddWithValue("$op", row[1]); delete.ExecuteNonQuery();
+                            delete.CommandText = "DELETE FROM mailbox_store_public_evidence WHERE attempt_id=$op;";
+                            delete.Parameters.AddWithValue("$op", row[2]); delete.ExecuteNonQuery();
                             using var insert = connection.CreateCommand(); insert.Transaction = tx;
                             insert.CommandText = "INSERT INTO mailbox_store_public_evidence VALUES(" + string.Join(",", Enumerable.Range(0, row.Length).Select(index => "$v" + index)) + ");";
                             for (var index = 0; index < row.Length; index++) insert.Parameters.AddWithValue("$v" + index, row[index]);

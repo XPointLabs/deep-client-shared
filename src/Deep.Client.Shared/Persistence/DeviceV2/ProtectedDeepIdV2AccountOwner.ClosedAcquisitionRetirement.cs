@@ -297,9 +297,21 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var plans = new ProtectedDid2CompactionPlan(storage, lease, networkId, owner.Account, owner.Instance);
             using var plan = await plans.ReadAsync(held, ct).ConfigureAwait(false);
             if (plan.Phase != 1) throw new InvalidOperationException("Only a prepared protected retirement can be abandoned.");
-            var roots = await ReadClosedAcquisitionRootsUnderLeaseAsync(plan, held, ct).ConfigureAwait(false);
+            var contactPayload = plan.Target == Did2CompactionPlan.SqlTarget.ProtectedOnly &&
+                plan.ReadRow(0).Action is Did2CompactionPlan.Disposition.ContactAcceptPayload or Did2CompactionPlan.Disposition.InitialPayload;
+            var roots = contactPayload
+                ? await ReadContactPayloadRetirementRootsAsync(plan, held, ct).ConfigureAwait(false)
+                : await ReadClosedAcquisitionRootsUnderLeaseAsync(plan, held, ct).ConfigureAwait(false);
             if (plan.ObserveReadback(new byte[32], roots).Step != Did2CompactionPlan.RecoveryStep.RecordSqlCommit)
                 throw new CryptographicException("Only the exact unchanged retirement predecessor can be abandoned.");
+            if (contactPayload)
+            {
+                using var successors = await plans.ReadSuccessorsAsync(plan, held, ct).ConfigureAwait(false);
+                await RequireUnadoptedContactPayloadSuccessorsAsync(plan, successors, held, ct).ConfigureAwait(false);
+                roots = await ReadContactPayloadRetirementRootsAsync(plan, held, ct).ConfigureAwait(false);
+                if (plan.ObserveReadback(new byte[32], roots).Step != Did2CompactionPlan.RecoveryStep.RecordSqlCommit)
+                    throw new CryptographicException("Contact retirement changed before abandonment.");
+            }
             using var abandoning = plan.WithAbandoningBeforeSql(); await ReplaceCompactionPlanAsync(plan, abandoning, held, ct).ConfigureAwait(false);
             await ResumeLocalCompactionUnderLeaseAsync(held, ct).ConfigureAwait(false);
         }

@@ -110,3 +110,40 @@ internal sealed class DeepSecureStorageRegistration : IDisposable
         Insertions.Clear();
     }
 }
+
+// Owned inputs for one guarded atomic deletion. No serialized record, cached
+// verification, key mode or inventory bound is introduced by this primitive.
+internal sealed class DeepSecureStorageGuardedDeletion : IDisposable
+{
+    internal readonly string GuardSlot;
+    internal readonly byte[] Expected;
+    internal readonly string[] Slots;
+
+    internal DeepSecureStorageGuardedDeletion(string guardSlot, ReadOnlyMemory<byte> expected,
+        IReadOnlyList<string> slots)
+    {
+        DeepSecureStorageRegistration.ValidateSlot(guardSlot);
+        ArgumentNullException.ThrowIfNull(slots);
+        if (expected.IsEmpty || expected.Length > DeepSecureStorageRegistration.MaximumValueBytes)
+            throw new ArgumentException("Secure-storage guard is outside its byte bound.", nameof(expected));
+        var count = slots.Count;
+        if (count is < 1 or > DeepSecureStorageRegistration.MaximumEntries)
+            throw new ArgumentException("Guarded deletion has an invalid slot count.", nameof(slots));
+        var unique = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var slot in slots)
+        {
+            DeepSecureStorageRegistration.ValidateSlot(slot);
+            if (slot == guardSlot || !unique.Add(slot))
+                throw new ArgumentException("Guarded deletion repeats a slot or selects its guard.", nameof(slots));
+            if (unique.Count > count)
+                throw new ArgumentException("Guarded deletion changed its declared count.", nameof(slots));
+        }
+        if (unique.Count != count)
+            throw new ArgumentException("Guarded deletion changed its declared count.", nameof(slots));
+        GuardSlot = guardSlot;
+        Slots = unique.ToArray();
+        Expected = expected.ToArray();
+    }
+
+    public void Dispose() => CryptographicOperations.ZeroMemory(Expected);
+}

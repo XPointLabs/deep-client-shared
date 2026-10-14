@@ -11,7 +11,14 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
 {
     internal sealed partial class MailboxEpochExclusion
     {
-        internal async Task RetireSupersededRetrieveAcquisitionAsync(IDeepMlDsa65Verifier verifier, CancellationToken ct)
+        internal Task RetireSupersededRetrieveAcquisitionAsync(IDeepMlDsa65Verifier verifier, CancellationToken ct) =>
+            RetireSupersededRetrieveAcquisitionCoreAsync(verifier, requireOriginalRead: true, ct);
+
+        internal Task RetireUnusedAdoptedRetrieveAcquisitionAsync(IDeepMlDsa65Verifier verifier, CancellationToken ct) =>
+            RetireSupersededRetrieveAcquisitionCoreAsync(verifier, requireOriginalRead: false, ct);
+
+        // Private producer policies, never caller/serialized authority flags.
+        private async Task RetireSupersededRetrieveAcquisitionCoreAsync(IDeepMlDsa65Verifier verifier, bool requireOriginalRead, CancellationToken ct)
         {
             await gate.WaitAsync(ct).ConfigureAwait(false);
             try
@@ -24,6 +31,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     throw new IOException("Working requests, counters or unresolved assets pin Retrieve holder retirement.");
                 using var grants = ProtectedDid2MailboxGrantJournal.Decode(root, owner.networkId, current.AccountId.Span, instance);
                 var entry = ProtectedDid2MailboxGrantJournal.RequireSupersededRetrieve(grants, acquisition);
+                if (ProtectedDid2MailboxGrantJournal.HasReservedReadIntent(entry) != requireOriginalRead)
+                    throw new IOException("Original read-intent custody disagrees with the selected used/unused retirement producer.");
                 var replacement = ProtectedDid2MailboxGrantJournal.CurrentWinner(grants, Convert.ToHexString(entry.AsSpan(0, 32)))!;
                 var before = await owner.CaptureCompletedContactSendGuardsUnderLeaseAsync(current, held, ct).ConfigureAwait(false);
                 using var publication = await owner.OpenOwnRetainedPublicationUnderLeaseAsync(current, held, source, fresh, ct,
@@ -56,8 +65,13 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     throw new IOException("Incomplete read/ACK or missing protected traversal pins holder retirement.");
                 RequireReadTraversal(await application.ReadTraversalAsync(scope, ct).ConfigureAwait(false), traversal);
                 var exactGrant = ContactCodec.Decode("XMC2", ProtectedDid2MailboxGrantJournal.Response(entry).Span).Field(8);
-                await application.RequireSettledGrantReadCoverageAsync(exactGrant, scope, traversal, credential.MailboxId, credential.PlacementId, ct).ConfigureAwait(false);
+                var originalReads = await application.ReadCompleteGrantReadCoverageAsync(exactGrant, scope, traversal,
+                    credential.MailboxId, credential.PlacementId, ct).ConfigureAwait(false);
+                if (requireOriginalRead ? originalReads == 0 : originalReads != 0)
+                    throw new IOException("Original exact read coverage disagrees with protected used/unused custody; SQL absence is not authority.");
                 await application.RequireSettledGrantReadCoverageAsync(winner.ExactGrant, scope, traversal, credential.MailboxId, credential.PlacementId, ct).ConfigureAwait(false);
+                if (!ProtectedDid2MailboxGrantJournal.HasReservedReadIntent(replacement))
+                    throw new CryptographicException("Replacement completed read lost its original read-intent custody.");
                 var plans = new ProtectedDid2CompactionPlan(owner.storage, owner.lease, owner.networkId, current.AccountId.Span, instance);
                 using var idle = await plans.ReadAsync(held, ct).ConfigureAwait(false);
                 if (idle.Phase != 0) throw new InvalidOperationException("An active local plan owns recovery.");

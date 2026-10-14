@@ -4,30 +4,53 @@ namespace Deep.Client.Shared.Persistence.DeviceV2;
 
 internal sealed partial class ProtectedDeepIdV2AccountOwner
 {
+    private enum MailboxCustodyProfile { Complete, RetainedPath, ContactPayload, InitialPayload, StoppedAccept, StoppedInitial }
     // A local readback digest only. The live producer independently owns
     // exclusion/dependency closure; a copied digest never grants deletion.
     private async Task<Did2CompactionPlan.RootReadback> ReadMailboxStoreStateUnderLeaseAsync(
         ReadOnlyMemory<byte> account, ReadOnlyMemory<byte> instance, HeldDeepIdV2AccountLease held, CancellationToken ct)
-        => await ReadMailboxCustodyUnderLeaseAsync(account, instance, held, false, ct).ConfigureAwait(false);
+        => await ReadMailboxCustodyUnderLeaseAsync(account, instance, held, MailboxCustodyProfile.Complete, ct).ConfigureAwait(false);
 
     // Publication and application SQL have their own exact before/after roots
     // in the joint retained-path profile. Every OTHER source/native dependency
     // remains independently guarded; Root12 keeps its original complete meaning.
     private async Task<Did2CompactionPlan.RootReadback> ReadMailboxLocalCustodyUnderLeaseAsync(
         ReadOnlyMemory<byte> account, ReadOnlyMemory<byte> instance, HeldDeepIdV2AccountLease held, CancellationToken ct)
-        => await ReadMailboxCustodyUnderLeaseAsync(account, instance, held, true, ct).ConfigureAwait(false);
+        => await ReadMailboxCustodyUnderLeaseAsync(account, instance, held, MailboxCustodyProfile.RetainedPath, ct).ConfigureAwait(false);
+
+    // Only this joint profile owns a separate exact ContactAccept successor.
+    // Root12 keeps its complete meaning; every other source remains guarded.
+    private async Task<Did2CompactionPlan.RootReadback> ReadMailboxContactCustodyUnderLeaseAsync(
+        ReadOnlyMemory<byte> account, ReadOnlyMemory<byte> instance, HeldDeepIdV2AccountLease held, CancellationToken ct)
+        => await ReadMailboxCustodyUnderLeaseAsync(account, instance, held, MailboxCustodyProfile.ContactPayload, ct).ConfigureAwait(false);
+    private async Task<Did2CompactionPlan.RootReadback> ReadMailboxInitialCustodyUnderLeaseAsync(
+        ReadOnlyMemory<byte> account, ReadOnlyMemory<byte> instance, HeldDeepIdV2AccountLease held, CancellationToken ct)
+        => await ReadMailboxCustodyUnderLeaseAsync(account, instance, held, MailboxCustodyProfile.InitialPayload, ct).ConfigureAwait(false);
+    private Task<Did2CompactionPlan.RootReadback> ReadStoppedControlCustodyUnderLeaseAsync(
+        ReadOnlyMemory<byte> account, ReadOnlyMemory<byte> instance, HeldDeepIdV2AccountLease held, bool initial, CancellationToken ct)
+        => ReadMailboxCustodyUnderLeaseAsync(account, instance, held, initial ? MailboxCustodyProfile.StoppedInitial : MailboxCustodyProfile.StoppedAccept, ct);
 
     private async Task<Did2CompactionPlan.RootReadback> ReadMailboxCustodyUnderLeaseAsync(
         ReadOnlyMemory<byte> account, ReadOnlyMemory<byte> instance, HeldDeepIdV2AccountLease held,
-        bool jointPath, CancellationToken ct)
+        MailboxCustodyProfile profile, CancellationToken ct)
     {
         held.RequireOwner(lease);
+        var jointPath = profile == MailboxCustodyProfile.RetainedPath;
+        var stopped = profile is MailboxCustodyProfile.StoppedAccept or MailboxCustodyProfile.StoppedInitial;
+        var contactPayload = profile is MailboxCustodyProfile.ContactPayload or MailboxCustodyProfile.StoppedAccept;
+        var initialPayload = profile is MailboxCustodyProfile.InitialPayload or MailboxCustodyProfile.StoppedInitial;
         using var selectorHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        selectorHash.AppendData(jointPath ? "Deep/STORE-V2/mailbox-local-custody-selector"u8 : "Deep/STORE-V2/mailbox-store-state-selector"u8); selectorHash.AppendData([0]);
+        selectorHash.AppendData(stopped ? (initialPayload ? "Deep/STORE-V2/stopped-initial-custody-selector"u8 : "Deep/STORE-V2/stopped-accept-custody-selector"u8) :
+            initialPayload ? "Deep/STORE-V2/mailbox-initial-custody-selector"u8 :
+            contactPayload ? "Deep/STORE-V2/mailbox-contact-custody-selector"u8 :
+            jointPath ? "Deep/STORE-V2/mailbox-local-custody-selector"u8 : "Deep/STORE-V2/mailbox-store-state-selector"u8); selectorHash.AppendData([0]);
         selectorHash.AppendData(networkId); selectorHash.AppendData(account.Span); selectorHash.AppendData(instance.Span);
         var selector = selectorHash.GetHashAndReset();
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        hash.AppendData(jointPath ? "Deep/STORE-V2/mailbox-local-custody"u8 : "Deep/STORE-V2/mailbox-store-state"u8); hash.AppendData([0]); hash.AppendData(selector);
+        hash.AppendData(stopped ? (initialPayload ? "Deep/STORE-V2/stopped-initial-custody"u8 : "Deep/STORE-V2/stopped-accept-custody"u8) :
+            initialPayload ? "Deep/STORE-V2/mailbox-initial-custody"u8 :
+            contactPayload ? "Deep/STORE-V2/mailbox-contact-custody"u8 :
+            jointPath ? "Deep/STORE-V2/mailbox-local-custody"u8 : "Deep/STORE-V2/mailbox-store-state"u8); hash.AppendData([0]); hash.AppendData(selector);
         using var registration = await SqliteDeepIdV2AccountGeneration.ReadCompactionRegistrationUnderLeaseAsync(
             storage, networkId, account, ct).ConfigureAwait(false);
         if (!registration.Use(bytes => FixedRoute(bytes.Slice(56, 32), instance.Span)))
@@ -44,11 +67,13 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             .ReadCustodyDigestAsync(ct).ConfigureAwait(false);
         try { hash.AppendData(resolverDigest); }
         finally { CryptographicOperations.ZeroMemory(resolverDigest); }
+        if (!initialPayload)
         using (var contact = await storage.ReadOwnedAsync(ProtectedDid2ContactStartJournal.Slot, ct).ConfigureAwait(false) ?? throw new InvalidDataException("Mailbox state lost contact-start custody."))
         {
             using var decoded = contact.Use(bytes => ProtectedDid2ContactStartJournal.Decode(bytes, networkId, account.Span, instance.Span));
             contact.Use(bytes => { hash.AppendData(SHA256.HashData(bytes)); return true; });
         }
+        if (!contactPayload)
         using (var contact = await storage.ReadOwnedAsync(ProtectedDid2ContactAcceptJournal.Slot, ct).ConfigureAwait(false) ?? throw new InvalidDataException("Mailbox state lost contact-accept custody."))
         {
             using var decoded = contact.Use(bytes => ProtectedDid2ContactAcceptJournal.Decode(bytes, networkId, account.Span, instance.Span));
@@ -75,7 +100,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         using var catalog = await new ProtectedDid2MessagingSessionCatalog(storage, networkId, account.Span, instance.Span)
             .ReadAsync(ct).ConfigureAwait(false);
         hash.AppendData(catalog.Exact.Span);
-        if (!jointPath)
+        if (!jointPath && !stopped)
         using (var application = await SqliteDeepIdV2AccountGeneration.OpenExistingApplicationForOwnerUnderLeaseAsync(
             storage, sqlStatePath, networkId, account, instance, held, lease, ct).ConfigureAwait(false))
         {
@@ -119,7 +144,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         if (!FixedRoute(catalog.Exact.Span, finalCatalog.Exact.Span))
             throw new CryptographicException("Mailbox state catalog changed during readback.");
         ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
-        return new(jointPath ? Did2CompactionPlan.RootKind.MailboxLocalCustody : Did2CompactionPlan.RootKind.MailboxStoreState,
+        return new(contactPayload || initialPayload ? Did2CompactionPlan.RootKind.MailboxContactCustody :
+            jointPath ? Did2CompactionPlan.RootKind.MailboxLocalCustody : Did2CompactionPlan.RootKind.MailboxStoreState,
             selector, hash.GetHashAndReset());
     }
 }

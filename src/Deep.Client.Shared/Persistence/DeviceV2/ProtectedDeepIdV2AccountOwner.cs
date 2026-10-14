@@ -128,6 +128,14 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         using var current = await RequireCurrentUnderLeaseAsync(trustedUnixSeconds,
             mlDsa65, cancellationToken).ConfigureAwait(false);
         _ = DeepIdV2AccountService.RequireOwnCurrentDirectory(current, currentProof, currentBootId.Span, currentMonotonicSample);
+        var initialInstance = await SqliteDeepIdV2AccountGeneration.ReadAccountInstanceUnderLeaseAsync(storage,
+            networkId, current.AccountId, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await SqliteDeepIdV2AccountGeneration.RequireInitialIntentNotStoppedUnderLeaseAsync(storage, networkId,
+                current.AccountId, initialInstance, ownedIntent, cancellationToken).ConfigureAwait(false);
+        }
+        finally { CryptographicOperations.ZeroMemory(initialInstance); }
         using var completedStore = await SqliteDeepIdV2AccountGeneration.OpenCurrentDeviceStateStoreAsync(
             storage, sqlStatePath, current, cancellationToken).ConfigureAwait(false);
         if (await completedStore.HasCompletedInitialSessionAsync(ownedIntent, cancellationToken).ConfigureAwait(false))

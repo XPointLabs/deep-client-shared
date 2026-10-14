@@ -15,19 +15,37 @@ namespace Deep.Client.Shared.Production.Tests;
 public sealed class Did2ContactAcceptCustodyTests
 {
     [Fact]
+    public void EmptyAcceptanceRootCannotInventPriorCustodyOrAcceptPriorGeneration()
+    {
+        var scope = Scope(); var exact = ProtectedDid2ContactAcceptJournal.Empty(scope.Network, scope.LocalAccount, scope.Instance);
+        using var state = ProtectedDid2ContactAcceptJournal.Decode(exact, scope.Network, scope.LocalAccount, scope.Instance);
+        Assert.Equal(1UL, state.Revision); Assert.Empty(state.Entries);
+        foreach (var revision in new[] { 0UL, 2UL, 129UL, ulong.MaxValue })
+        {
+            var changed = exact.ToArray(); BinaryPrimitives.WriteUInt64BigEndian(changed.AsSpan(4), revision);
+            Assert.Throws<InvalidDataException>(() => ProtectedDid2ContactAcceptJournal.Decode(changed, scope.Network, scope.LocalAccount, scope.Instance));
+        }
+        foreach (var generation in new byte[] { 1, 2, 3, 4 })
+        {
+            var changed = exact.ToArray(); changed[0] = generation;
+            Assert.Throws<InvalidDataException>(() => ProtectedDid2ContactAcceptJournal.Decode(changed, scope.Network, scope.LocalAccount, scope.Instance));
+        }
+    }
+    [Fact]
     public void ProtectedCodecHasCanonicalScopeCountRolePositionAndLogicalBinding()
     {
         var scope = Scope(); var operation = B(32, 20); var accept = Accept(scope, operation);
-        var entry = new byte[468 + accept.Length]; operation.CopyTo(entry, 0); scope.Exact.CopyTo(entry.AsSpan(32));
-        B(32, 25).CopyTo(entry, 436); accept.CopyTo(entry, 468);
+        var entry = new byte[ProtectedDid2ContactAcceptJournal.PrefixBytes + accept.Length]; operation.CopyTo(entry, 0); scope.Exact.CopyTo(entry.AsSpan(32));
+        B(32, 25).CopyTo(entry, 436); SHA256.HashData(accept).CopyTo(entry, 468); entry[500] = 1;
+        accept.CopyTo(entry, ProtectedDid2ContactAcceptJournal.PrefixBytes);
         using var state = new ProtectedDid2ContactAcceptJournal.State();
         state.Entries.Add(Convert.ToHexString(operation), ProtectedDid2ContactAcceptJournal.Entry.Decode(entry, scope.Network, scope.LocalAccount, scope.Instance));
         var encoded = ProtectedDid2ContactAcceptJournal.Encode(state, scope.Network, scope.LocalAccount, scope.Instance);
         using var decoded = ProtectedDid2ContactAcceptJournal.Decode(encoded, scope.Network, scope.LocalAccount, scope.Instance);
         Assert.Equal(accept, decoded.FindScope(scope)!.Accept.ToArray());
-        Assert.Equal(2, encoded[0]);
+        Assert.Equal(5, encoded[0]);
         Assert.Equal(entry.Length, (int)BinaryPrimitives.ReadUInt32BigEndian(encoded.AsSpan(92)));
-        foreach (var offset in new[] { 0, 1, 2, 11, 12, 28, 60, 92, 96 + 33, 96 + 436, 96 + 468 + 44 })
+        foreach (var offset in new[] { 0, 1, 2, 12, 28, 60, 92, 96 + 33, 96 + 436, 96 + 468, 96 + 500, 96 + 501 })
         {
             var changed = encoded.ToArray(); changed[offset] ^= 0x80;
             Assert.ThrowsAny<Exception>(() => ProtectedDid2ContactAcceptJournal.Decode(changed, scope.Network, scope.LocalAccount, scope.Instance));
@@ -35,9 +53,27 @@ public sealed class Did2ContactAcceptCustodyTests
         }
         Assert.Throws<InvalidDataException>(() => ProtectedDid2ContactAcceptJournal.Decode(encoded[..^1], scope.Network, scope.LocalAccount, scope.Instance));
         Assert.Throws<InvalidDataException>(() => ProtectedDid2ContactAcceptJournal.Decode([.. encoded, 0], scope.Network, scope.LocalAccount, scope.Instance));
-        var retired = encoded.ToArray(); retired[0] = 1;
-        Assert.Throws<InvalidDataException>(() => ProtectedDid2ContactAcceptJournal.Decode(retired, scope.Network, scope.LocalAccount, scope.Instance));
-        CryptographicOperations.ZeroMemory(retired);
+        foreach (var generation in new byte[] { 1, 2, 3, 4 })
+        {
+            var retired = encoded.ToArray(); retired[0] = generation;
+            Assert.Throws<InvalidDataException>(() => ProtectedDid2ContactAcceptJournal.Decode(retired, scope.Network, scope.LocalAccount, scope.Instance));
+            CryptographicOperations.ZeroMemory(retired);
+        }
+        var missingRevision = encoded.ToArray(); missingRevision.AsSpan(4, 8).Clear();
+        Assert.Throws<InvalidDataException>(() => ProtectedDid2ContactAcceptJournal.Decode(missingRevision, scope.Network, scope.LocalAccount, scope.Instance));
+        using (var successful = decoded.FindScope(scope)!.WithVerifiedStore(1000)) // Structural transition only, not Store authority.
+        using (var marker = successful.WithoutWorkingPayload())
+        {
+            Assert.True(marker.PayloadRetired); Assert.Equal(ProtectedDid2ContactAcceptJournal.PrefixBytes, marker.Exact.Length);
+            marker.RequireExactAccept(accept);
+            Assert.Throws<InvalidOperationException>(() => marker.Accept.ToArray());
+            var hostile = accept.ToArray(); hostile[^1] ^= 1;
+            Assert.Throws<CryptographicException>(() => marker.RequireExactAccept(hostile));
+            var resurrected = marker.Exact.ToArray().Concat(accept).ToArray();
+            Assert.Throws<InvalidDataException>(() => ProtectedDid2ContactAcceptJournal.Entry.Decode(resurrected, scope.Network, scope.LocalAccount, scope.Instance));
+            foreach (var bytes in new[] { hostile, resurrected }) CryptographicOperations.ZeroMemory(bytes);
+        }
+        CryptographicOperations.ZeroMemory(missingRevision);
         var hostileLength = encoded.ToArray(); BinaryPrimitives.WriteUInt32BigEndian(hostileLength.AsSpan(92), uint.MaxValue);
         Assert.Throws<InvalidDataException>(() => ProtectedDid2ContactAcceptJournal.Decode(hostileLength, scope.Network, scope.LocalAccount, scope.Instance));
         CryptographicOperations.ZeroMemory(hostileLength);

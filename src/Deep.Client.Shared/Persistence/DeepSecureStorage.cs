@@ -192,6 +192,14 @@ public interface IDeepSecureStorage
         ReadOnlyMemory<byte> replacement, IReadOnlyList<DeepSecureStorageWrite> insertions,
         CancellationToken cancellationToken = default);
 
+    /// <summary>Atomically checks an exact existing guard and deletes only the
+    /// requested other slots. The guard is never replaced or deleted. False
+    /// means missing/conflicting guard and no mutation; true also covers an
+    /// idempotent no-op when every requested slot is already absent. This is a
+    /// storage transaction primitive, not retirement or currentness authority.</summary>
+    Task<bool> CompareAndDeleteAsync(string guardSlot, ReadOnlyMemory<byte> expected,
+        IReadOnlyList<string> slots, CancellationToken cancellationToken = default);
+
     Task DeleteBatchAsync(
         IReadOnlyList<string> slots,
         CancellationToken cancellationToken = default);
@@ -215,6 +223,24 @@ public sealed class InMemoryDeepSecureStorage : IDeepSecureStorage, IDisposable
     private readonly ConcurrentDictionary<string, byte[]> values = new(StringComparer.Ordinal);
     private readonly object gate = new();
     private int disposed;
+
+    public Task<bool> CompareAndDeleteAsync(string guardSlot, ReadOnlyMemory<byte> expected,
+        IReadOnlyList<string> slots, CancellationToken cancellationToken = default)
+    {
+        using var batch = new DeepSecureStorageGuardedDeletion(guardSlot, expected, slots);
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (gate)
+        {
+            ThrowIfDisposed(); cancellationToken.ThrowIfCancellationRequested();
+            if (!values.TryGetValue(batch.GuardSlot, out var current) ||
+                !CryptographicOperations.FixedTimeEquals(current, batch.Expected))
+                return Task.FromResult(false);
+            foreach (var slot in batch.Slots)
+                if (values.TryRemove(slot, out var removed))
+                    CryptographicOperations.ZeroMemory(removed);
+            return Task.FromResult(true);
+        }
+    }
 
     public Task<bool> CompareExchangeAndInsertAsync(string slot, ReadOnlyMemory<byte> expected,
         ReadOnlyMemory<byte> replacement, IReadOnlyList<DeepSecureStorageWrite> insertions,

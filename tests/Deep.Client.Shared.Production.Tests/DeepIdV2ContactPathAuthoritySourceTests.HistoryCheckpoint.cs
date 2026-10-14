@@ -70,6 +70,31 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             using var latest = after.ReadVerifiedLatest(before); Assert.Equal(ratchetHash, latest.Use(bytes => SHA256.HashData(bytes)));
             using var retained = after.ReadVerifiedReceiveForEvent(before, SHA256.HashData(acceptance)); Assert.NotNull(retained);
             using var exact = retained!.OwnAuthenticatedDmc2(); Assert.True(exact.Use(bytes => bytes.SequenceEqual(acceptance)));
+            // The new ordered route-history reader includes independently
+            // protected prefix receives, not merely the working journal.
+            using (var incoming = after.ReadVerifiedIncomingEvents(before, default).GetEnumerator())
+            {
+                Assert.True(incoming.MoveNext());
+                var firstReceive = incoming.Current;
+                Assert.Equal(retained.Ordinal, firstReceive.Ordinal);
+                Assert.Equal(retained.EventHash.ToArray(), firstReceive.EventHash.ToArray());
+                using var firstPlain = firstReceive.OwnAuthenticatedDmc2();
+                Assert.True(firstPlain.Use(bytes => bytes.SequenceEqual(acceptance)));
+                Assert.False(incoming.MoveNext());
+                Assert.Throws<ObjectDisposedException>(() => firstReceive.OwnAuthenticatedDmc2());
+            }
+            using (var abandoned = after.ReadVerifiedIncomingEvents(before, default).GetEnumerator())
+            {
+                Assert.True(abandoned.MoveNext()); var escaped = abandoned.Current;
+                abandoned.Dispose();
+                Assert.Throws<ObjectDisposedException>(() => escaped.OwnAuthenticatedDmc2());
+            }
+            using (var cancelled = new CancellationTokenSource())
+            {
+                cancelled.Cancel();
+                Assert.Throws<OperationCanceledException>(() =>
+                    after.ReadVerifiedIncomingEvents(before, cancelled.Token).GetEnumerator().MoveNext());
+            }
             var retainedInitial = after.ReadVerifiedActiveInitialEvents(before);
             Assert.Equal(init.CanonicalBytes.ToArray(), retainedInitial.SessionInit); Assert.Equal(hello.CanonicalBytes.ToArray(), retainedInitial.Hello);
             CryptographicOperations.ZeroMemory(retainedInitial.SessionInit); CryptographicOperations.ZeroMemory(retainedInitial.Hello);
@@ -83,6 +108,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             using (var corrupt = observer.CreateCommand())
             { corrupt.CommandText = "UPDATE events SET plaintext=zeroblob(length(plaintext)) WHERE direction=2;"; Assert.Equal(1, corrupt.ExecuteNonQuery()); }
             Assert.ThrowsAny<Exception>(() => after.VerifyTip());
+            Assert.ThrowsAny<Exception>(() => after.ReadVerifiedIncomingEvents(before, default).GetEnumerator().MoveNext());
             Assert.NotEqual(effects.After.ToArray(), after.ReadCompleteCompactionProjection());
             using (var restore = observer.CreateCommand())
             { restore.CommandText = "UPDATE events SET plaintext=$original WHERE direction=2;"; restore.Parameters.AddWithValue("$original", acceptance); Assert.Equal(1, restore.ExecuteNonQuery()); }
@@ -97,14 +123,50 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         Assert.Equal(before.Exact.ToArray(), (await fixture.ReadMessagingFloor(sender)).Exact.ToArray());
         using (var replay = await fixture.ReceiveOwnedMessage(sender, ciphertext)) { }
         Assert.Equal(before.Exact.ToArray(), (await fixture.ReadMessagingFloor(sender)).Exact.ToArray());
-        using var draft = await fixture.PrepareOwnedText(sender, Bytes(32, 0xa3), "after authenticated history checkpoint");
+        using var draft = await fixture.CreateOwnedText(sender, "after authenticated history checkpoint");
         byte[] nextCipher;
-        using (var next = await fixture.SendOwnedMessage(sender, Bytes(32, 0xa3), ApplicationCoreCodec.DecodeDmc2(draft.ExactDmc2.Span)))
+        using (var next = await fixture.SendOwnedMessage(sender, draft.OperationId, ApplicationCoreCodec.DecodeDmc2(draft.ExactDmc2.Span)))
             nextCipher = next.ExactEnvelope.ToArray();
         var progressed = await fixture.ReadMessagingFloor(sender);
         Assert.Equal(before.Ordinal + 1, progressed.Ordinal); Assert.Equal(before.RatchetGeneration + 1, progressed.RatchetGeneration);
         using (var received = await fixture.ReceiveOwnedMessage(receiver, nextCipher)) { }
         Assert.Single(await fixture.ListOwnedMessages(receiver));
+        await fixture.WithSenderHistoryStorage(sender, async (opened, secure, observer, held) =>
+        {
+            // The outgoing reader joins actual native commitments rather than
+            // inventing plaintext. It remains valid with an adopted old prefix
+            // and a new working suffix after encrypted cold reopen.
+            using var sent = opened.Sql.ReadVerifiedOperation(progressed, draft.OperationId.Span);
+            Assert.NotNull(sent); Assert.Equal(1, sent!.Direction);
+            using (var outgoing = opened.Sql.ReadVerifiedOutgoingEvents(progressed, default).GetEnumerator())
+            {
+                Assert.True(outgoing.MoveNext()); var row = outgoing.Current;
+                Assert.Equal(sent.Ordinal, row.Ordinal); Assert.Equal(sent.EventHash.ToArray(), row.EventHash.ToArray());
+                Assert.Equal(nextCipher, row.ExactEnvelope.ToArray());
+                Assert.Throws<InvalidOperationException>(() => row.OwnAuthenticatedDmc2());
+                Assert.False(outgoing.MoveNext());
+                Assert.Throws<ObjectDisposedException>(() => row.ExactEnvelope.ToArray());
+            }
+            using (var abandoned = opened.Sql.ReadVerifiedOutgoingEvents(progressed, default).GetEnumerator())
+            {
+                Assert.True(abandoned.MoveNext()); var row = abandoned.Current; abandoned.Dispose();
+                Assert.Throws<ObjectDisposedException>(() => row.ExactEnvelope.ToArray());
+            }
+            using var cancellation = new CancellationTokenSource();
+            using (var cancelled = opened.Sql.ReadVerifiedOutgoingEvents(progressed, cancellation.Token).GetEnumerator())
+            {
+                Assert.True(cancelled.MoveNext()); var row = cancelled.Current; cancellation.Cancel();
+                Assert.Throws<OperationCanceledException>(() => cancelled.MoveNext());
+                Assert.Throws<ObjectDisposedException>(() => row.ExactEnvelope.ToArray());
+            }
+            using (var tamper = observer.CreateCommand())
+            { tamper.CommandText = "UPDATE events SET envelope=zeroblob(length(envelope)) WHERE direction=1;"; Assert.Equal(1, tamper.ExecuteNonQuery()); }
+            Assert.ThrowsAny<Exception>(() => opened.Sql.ReadVerifiedOutgoingEvents(progressed, default).GetEnumerator().MoveNext());
+            using (var restore = observer.CreateCommand())
+            { restore.CommandText = "UPDATE events SET envelope=$original WHERE direction=1;"; restore.Parameters.AddWithValue("$original", nextCipher); Assert.Equal(1, restore.ExecuteNonQuery()); }
+            Assert.Equal(progressed.Exact.ToArray(), opened.Sql.VerifyTip().Exact.ToArray());
+            held.RequireActive(); await Task.CompletedTask;
+        });
         CryptographicOperations.ZeroMemory(acceptance); CryptographicOperations.ZeroMemory(ciphertext); CryptographicOperations.ZeroMemory(nextCipher);
     }
 

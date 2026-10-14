@@ -10,7 +10,7 @@ namespace Deep.Client.Shared.Persistence.DeviceV2;
 /// <summary>Closed owned capture of initial custody or a Protocol-sealed
 /// transition. Restored protected pending bytes are only exact crash recovery;
 /// neither form grants retirement, dispatch or ACK permission.</summary>
-internal sealed class OwnedDid2MessagingMutation : IDisposable
+internal sealed partial class OwnedDid2MessagingMutation : IDisposable
 {
     private readonly byte[] bytes = [];
     private readonly int[] lengths;
@@ -84,7 +84,8 @@ internal sealed class OwnedDid2MessagingMutation : IDisposable
     }
 
     internal static OwnedDid2MessagingMutation Ratchet(Did2MessagingSessionScope scope, Did2MessagingFloor stable,
-        ExactDpe2DurablePersistencePlan plan, ReadOnlySpan<byte> exactSendEventHash)
+        ExactDpe2DurablePersistencePlan plan, ReadOnlySpan<byte> exactSendEventHash,
+        ProtectedDeepIdV2AccountOwner.OwnedPeerRouteProcessingOutcome? routeOutcome = null)
     {
         ArgumentNullException.ThrowIfNull(plan);
         _ = Did2MessagingFloor.Decode(stable.Exact.Span, scope);
@@ -109,6 +110,8 @@ internal sealed class OwnedDid2MessagingMutation : IDisposable
         Put(header, 428, owned.MessageKeyDeletionEvidence); Put(header, 460, owned.ReplayEvidenceCommitment);
         PutOptional(header, 492, owned.DeduplicationMutationCommitment); PutOptional(header, 524, owned.PqFenceMutationCommitment);
         PutOptional(header, 556, owned.TerminalStateCommitment);
+        if (routeOutcome is not null)
+            routeOutcome.CopyForSealedTransition(scope, stable, owned, header.AsSpan(Did2RouteProcessingMetadata.Offset));
         return Encode(scope, header, owned.NextTrs1, owned.ExactEnvelope, owned.AuthenticatedDmc2, [], []);
     }
 
@@ -129,7 +132,7 @@ internal sealed class OwnedDid2MessagingMutation : IDisposable
         ReadOnlySpan<byte> eventHash, ReadOnlySpan<byte> envelopeHash)
     {
         var header = new byte[Did2MessagingFloor.MetadataBytes]; "MSP2"u8.CopyTo(header);
-        header[4] = 1; header[5] = kind; header[6] = direction; header[7] = status; predecessor.Exact.Span.CopyTo(header.AsSpan(8));
+        header[4] = 2; header[5] = kind; header[6] = direction; header[7] = status; predecessor.Exact.Span.CopyTo(header.AsSpan(8));
         BinaryPrimitives.WriteUInt64BigEndian(header.AsSpan(196), generation);
         Put(header, 204, commitment); Put(header, 236, trsHash); Put(header, 268, operation);
         Put(header, 300, eventHash); Put(header, 332, envelopeHash); return header;
@@ -163,8 +166,12 @@ internal sealed class OwnedDid2MessagingMutation : IDisposable
     internal static void ValidateMetadata(ReadOnlySpan<byte> exact)
     {
         if (exact.Length != Did2MessagingFloor.MetadataBytes || !exact[..4].SequenceEqual("MSP2"u8) ||
-            exact[4] != 1 || exact[5] is not (1 or 2 or 3 or 4) || exact[6] > 2 || exact[7] > 2)
+            exact[4] != 2 || exact[5] is not (1 or 2 or 3 or 4 or 5) || exact[6] > 4 || exact[7] > 2)
             throw new InvalidDataException("DID2 mutation has an unknown closed header.");
+        var outcome = exact.Slice(Did2RouteProcessingMetadata.Offset, Did2RouteProcessingMetadata.Bytes);
+        Did2RouteProcessingMetadata.RequireShape(outcome);
+        if (outcome[0] != 0 && (exact[5] != 2 || exact[6] != 2))
+            throw new InvalidDataException("Only an authenticated native receive can retain route processing.");
         Span<uint> sizes = stackalloc uint[5]; long total = Did2MessagingFloor.MetadataBytes;
         for (var index = 0; index < 5; index++) { sizes[index] = BinaryPrimitives.ReadUInt32BigEndian(exact[(588 + index * 4)..]); total += sizes[index]; }
         if (total > Did2MessagingFloor.MaximumPendingBytes || Zero(exact.Slice(268, 32)) || Zero(exact.Slice(300, 32)))
@@ -185,6 +192,15 @@ internal sealed class OwnedDid2MessagingMutation : IDisposable
             if (exact[6] == 1 ? !Zero(exact.Slice(492, 32)) : Zero(exact.Slice(492, 32)))
                 throw new InvalidDataException("DID2 ratchet deduplication evidence has a different direction.");
         }
+        else if (exact[5] == 5)
+        {
+            if (exact[6] is not (3 or 4) || exact[7] != 1 || sizes[0] is 0 or > 2097152 || sizes[1] != Dbr2Codec.TotalBytes ||
+                sizes[2] != 0 || sizes[3] != 0 || sizes[4] != 0 || !Zero(exact.Slice(428, 32)) ||
+                !Zero(exact.Slice(492, 96)) || !Zero(outcome))
+                throw new InvalidDataException("DID2 Braid control has a different closed shape.");
+            foreach (var offset in new[] { 332, 364, 396, 460 })
+                if (Zero(exact.Slice(offset, 32))) throw new InvalidDataException("DID2 Braid control lacks closed custody evidence.");
+        }
         else if (exact[6] != 0 || sizes.IndexOfAnyExcept(0U) >= 0 || !Zero(exact.Slice(332, 256)) ||
                  exact[7] != (exact[5] == 3 ? 1 : 2))
             throw new InvalidDataException("DID2 control mutation has a different closed shape.");
@@ -196,7 +212,7 @@ internal sealed class OwnedDid2MessagingMutation : IDisposable
         var generation = BinaryPrimitives.ReadUInt64BigEndian(header[196..]); var kind = header[5];
         if (!Fixed(predecessor.Exact.Span, retained.Exact.Span) || retained.Phase != 1 || retained.Status == 2 || generation == 0 ||
             (kind == 1 ? retained.Ordinal != 0 || generation != 1 :
-                kind == 2 ? retained.Status != 1 || retained.RatchetGeneration == ulong.MaxValue || generation != retained.RatchetGeneration + 1 :
+                kind is 2 or 5 ? retained.Status != 1 || retained.RatchetGeneration == ulong.MaxValue || generation != retained.RatchetGeneration + 1 :
                 retained.Ordinal == 0 || generation != retained.RatchetGeneration || kind == 3 && retained.Status != 0))
             throw new InvalidDataException("DID2 mutation metadata predecessor or transition is invalid.");
         if (kind == 3 ? !Fixed(header.Slice(204, 32), retained.RatchetCommitment) || !Fixed(header.Slice(236, 32), retained.RatchetHash) :
@@ -209,7 +225,7 @@ internal sealed class OwnedDid2MessagingMutation : IDisposable
         if (Predecessor.Phase != 1 || Predecessor.Status == 2 || generation == 0)
             throw new InvalidDataException("DID2 mutation predecessor cannot advance.");
         if (Kind == 1 ? Predecessor.Ordinal != 0 || generation != 1 :
-            Kind == 2 ? Predecessor.Status != 1 || generation != checked(Predecessor.RatchetGeneration + 1) :
+            Kind is 2 or 5 ? Predecessor.Status != 1 || generation != checked(Predecessor.RatchetGeneration + 1) :
             Predecessor.Ordinal == 0 || generation != Predecessor.RatchetGeneration || Kind == 3 && Predecessor.Status != 0)
             throw new InvalidDataException("DID2 mutation generation/status transition is invalid.");
         if (Kind is 3 or 4)
@@ -246,6 +262,11 @@ internal sealed class OwnedDid2MessagingMutation : IDisposable
                 !Fixed(ApplicationCoreVerifier.ComputeContactConversationId(Scope.Network, Scope.Relationship, Scope.LocalAccount, Scope.RemoteAccount), Scope.Conversation))
                 throw new CryptographicException("DID2 import's authenticated events are inconsistent.");
         }
+        else if (Kind == 5)
+        {
+            if (facts.TerminallyLatched) throw new CryptographicException("Braid control cannot install a terminal successor.");
+            RequireControlEnvelope(Scope, Direction, Operation, Header, Envelope);
+        }
         else
         {
             var envelope = Dpe2Codec.Decode(Envelope);
@@ -258,7 +279,9 @@ internal sealed class OwnedDid2MessagingMutation : IDisposable
                 throw new CryptographicException("DID2 ratchet envelope differs from the exact mutation.");
             if (Direction == 2)
             {
-                RequireEvent(ApplicationCoreCodec.DecodeDmc2(AuthenticatedDmc2), false, initialConversation: false);
+                var message = ApplicationCoreCodec.DecodeDmc2(AuthenticatedDmc2);
+                try { Did2RouteProcessingMetadata.RequireReceivedEvent(Header.Slice(Did2RouteProcessingMetadata.Offset), message); }
+                finally { RequireEvent(message, false, initialConversation: false); }
                 if (!Fixed(SHA256.HashData(AuthenticatedDmc2), EventCommitment)) throw new CryptographicException("DID2 receive event commitment differs.");
             }
             if (facts.TerminallyLatched && Zero(Header.Slice(556, 32)))
@@ -267,10 +290,14 @@ internal sealed class OwnedDid2MessagingMutation : IDisposable
     }
     private void RequireEvent(ParsedDmc2 record, bool localSender, bool initialConversation = true)
     {
-        if (!Fixed(record.NetworkId.Span, Scope.Network) || initialConversation && !Fixed(record.ConversationId.Span, Scope.Conversation) ||
-            !Fixed(record.SenderAccountId.Span, localSender ? Scope.LocalAccount : Scope.RemoteAccount) ||
-            !Fixed(record.SenderDeviceId.Span, localSender ? Scope.LocalDevice : Scope.RemoteDevice))
-            throw new CryptographicException("DID2 authenticated event has a different session scope.");
+        try
+        {
+            if (!Fixed(record.NetworkId.Span, Scope.Network) || initialConversation && !Fixed(record.ConversationId.Span, Scope.Conversation) ||
+                !Fixed(record.SenderAccountId.Span, localSender ? Scope.LocalAccount : Scope.RemoteAccount) ||
+                !Fixed(record.SenderDeviceId.Span, localSender ? Scope.LocalDevice : Scope.RemoteDevice))
+                throw new CryptographicException("DID2 authenticated event has a different session scope.");
+        }
+        finally { if (record.ParsedPayload is AttachmentOfferDmc2Payload offer) offer.Manifest.Dispose(); }
     }
     private static MessagingCryptoV1Trs1Facts Facts(ReadOnlySpan<byte> trs, Did2MessagingSessionScope scope)
     {

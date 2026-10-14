@@ -40,12 +40,12 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             {
                 var entry = journal.Entries[Convert.ToHexString(row.OperationId.Span)];
                 var scope = entry.Scope;
-                var exact = row.ExactDmc2.ToArray();
+                var exact = OwnedByteExports.TakeArray(row.ExactDmc2);
                 try
                 {
                     entry.RequireEvent(exact);
                     var message = ApplicationCoreCodec.DecodeDmc2(exact);
-                    if (message.ParsedPayload is MessageCreateDmc2Payload text && !entry.Stored)
+                    if (message.ParsedPayload is MessageCreateDmc2Payload text && !entry.Stored && !entry.WorkStopped)
                         result.Add(new(entry.Operation, Convert.ToHexString(scope.Conversation), text.Text, entry.Sequence));
                     else if (message.ParsedPayload is AttachmentOfferDmc2Payload offer) offer.Manifest.Dispose();
                 }
@@ -77,8 +77,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var result = new List<DeepIdV2ContactOperationSnapshot>(state.Entries.Count);
             foreach (var entry in state.Entries.Values)
             {
-                var hello = ApplicationCoreCodec.DecodeDmc2(entry.Hello);
-                result.Add(new(entry.Intent, entry.Exact.Slice(32, 32), hello.CreatedAtUnixMilliseconds, hello.ExpiresAtUnixMilliseconds));
+                result.Add(new(entry.Intent, entry.Exact.Slice(32, 32), entry.HelloCreatedAtUnixMilliseconds, entry.ExpiresAtUnixMilliseconds));
             }
             using var readback = await storage.ReadOwnedAsync(ProtectedDid2ContactStartJournal.Slot, ct).ConfigureAwait(false) ??
                 throw new CryptographicException("The contact start root disappeared during projection.");

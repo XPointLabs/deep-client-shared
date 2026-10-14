@@ -247,7 +247,8 @@ public sealed partial class SqliteDeepMailboxStore
                     canonical,
                     request.CreatedAt,
                     DateTimeOffset.FromUnixTimeSeconds(
-                        checked((long)resolved.Grant!.ExpiresAtUnixSeconds)),
+                        checked((long)ScopedMailboxCredentialValidator.OutboxExpiryUnixSeconds(
+                            target.Binding.Operation, target.Binding.CanonicalRequest, resolved.Grant!.ExpiresAtUnixSeconds))),
                     request.CreatedAt);
                 if (ReadTransportOutboxItem(
                         connection, transaction, request.AccountScope.Value,

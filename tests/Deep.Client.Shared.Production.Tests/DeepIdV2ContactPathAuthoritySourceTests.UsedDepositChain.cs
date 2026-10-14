@@ -46,9 +46,10 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 successorPolicy = ProtectedDid2MailboxGrantJournal.OriginalPolicy(entry).ToArray();
                 successorRoute = ProtectedDid2MailboxGrantJournal.OriginalRoute(entry).ToArray();
             }
-            var operation = Bytes(32, 0xd1); byte[] plaintext, cipher;
-            using (var text = await PrepareOwnedText(contact.Scope, operation, "second original Store under successor"))
+            byte[] operation, plaintext, cipher;
+            using (var text = await CreateOwnedText(contact.Scope, "second original Store under successor"))
             {
+                operation = text.OperationId.ToArray();
                 plaintext = text.ExactDmc2.ToArray();
                 using var sent = await SendOwnedMessage(contact.Scope, operation, ApplicationCoreCodec.DecodeDmc2(plaintext));
                 cipher = sent.ExactEnvelope.ToArray();

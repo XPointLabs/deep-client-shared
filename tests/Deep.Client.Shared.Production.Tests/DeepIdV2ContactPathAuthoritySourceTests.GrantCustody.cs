@@ -204,7 +204,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         }
 
         private async Task<byte[]> PrepareLateGraphSuccessorAsync(byte[] original,
-            VerifiedDeepIdV2ContactRouteClosure route, bool retrieve)
+            VerifiedDeepIdV2MailboxRouteClosure route, bool retrieve)
         {
             if (retrieve)
             {
@@ -457,7 +457,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             foreach (var bytes in new[] { exact, staged }) CryptographicOperations.ZeroMemory(bytes);
         }
 
-        private async Task<byte[]> PrepareClosedGrantCandidateAsync(byte[] original, VerifiedDeepIdV2ContactRouteClosure route)
+        private async Task<byte[]> PrepareClosedGrantCandidateAsync(byte[] original, VerifiedDeepIdV2MailboxRouteClosure route)
         {
             var seed = Bytes(32, 0x9a);
             try
@@ -621,7 +621,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         }
 
         private async Task CheckIndependentAcquisitionsAsync(ProtectedDid2MailboxGrantJournal.State original,
-            VerifiedDeepIdV2ContactRouteClosure route, VerifiedDeepIdV2MailboxGrant first)
+            VerifiedDeepIdV2MailboxRouteClosure route, VerifiedDeepIdV2MailboxGrant first)
         {
             var account = Bytes(32, 0x11); var instance = Bytes(32, 0x12);
             var originalExact = ProtectedDid2MailboxGrantJournal.Encode(original, Network, account, instance);
@@ -779,7 +779,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         }
 
         internal async Task<byte[]> IssueRetainedFixtureGrantAsync(AuthoredMailboxGrantRequest request,
-            ParsedContactRouteClosure original, VerifiedMailboxHostAuthorityV2 host, VerifiedOnionNetworkContext network, CancellationToken ct)
+            ParsedContactRouteClosure original, VerifiedMailboxHostAuthorityV2 host, VerifiedOnionNetworkContext network, CancellationToken ct,
+            uint? fixtureLifetimeCeiling = null)
         {
             var horizon = checked(OriginalAdmissionEnd(original) + 2_592_000UL);
             var tuple = MailboxRetainedReadEvidenceAuthentication.CreateTuple(SHA256.HashData(request.ExactXmg2.Span),
@@ -790,10 +791,25 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             var candidate = await host.VerifyRetainedReadIssuanceAsync(request.ExactXmg2, original.ExactBytes, horizon, evidence, ct);
             var issuer = new FixtureMailboxIssuer(0x32);
             var result = (await candidate.AuthorSuccessAsync(issuer, ct)).ToArray();
-            Assert.Equal(1, issuer.Calls); return result;
+            Assert.Equal(1, issuer.Calls);
+            if (fixtureLifetimeCeiling is { } lifetime)
+            {
+                // Genuine role signature on a shorter permitted interval, not
+                // a production policy override or an expired-grant reader.
+                Assert.InRange(lifetime, 1U, 3_600U);
+                var response = ContactCodec.Decode("XMC2", result);
+                var grant = MailboxAuthenticatedCapabilityCodec.DecodeGrant(response.Field(8).Span);
+                var shorter = grant with { ExpiresAtUnixSeconds = Math.Min(grant.ExpiresAtUnixSeconds,
+                    checked(grant.NotBeforeUnixSeconds + lifetime)), IssuerSignature = new byte[64] };
+                var signature = await issuer.SignAsync(MailboxAuthenticatedCapabilityCodec.GetGrantSigningBytes(shorter), ct);
+                result = MailboxGrantResultAuthor.AuthorSuccess(request.Record, original.ExactBytes.Span,
+                    shorter with { IssuerSignature = signature }, BinaryPrimitives.ReadUInt64BigEndian(response.Field(4).Span),
+                    BinaryPrimitives.ReadUInt64BigEndian(response.Field(6).Span)).CanonicalBytes.ToArray();
+            }
+            return result;
         }
 
-        private async Task<VerifiedMailboxAuthorityV2> CurrentGrantPolicyAsync(VerifiedDeepIdV2ContactRouteClosure route)
+        private async Task<VerifiedMailboxAuthorityV2> CurrentGrantPolicyAsync(VerifiedDeepIdV2MailboxRouteClosure route)
         {
             var time = await route.ReadCurrentTimeAsync();
             return MailboxAuthorityV2Verifier.Verify(route.NetworkAuthority, operational.ExactPma2.Span,
@@ -843,7 +859,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         }
 
         internal async Task<byte[]> IssueOwnedGrantAsync(AuthoredMailboxGrantRequest request,
-            VerifiedDeepIdV2ContactRouteClosure route, bool retrieve, CancellationToken ct)
+            VerifiedDeepIdV2MailboxRouteClosure route, bool retrieve, CancellationToken ct, uint? fixtureLifetimeCeiling = null)
         {
             var effective = BinaryPrimitives.ReadUInt64BigEndian(route.Route.Reachability.Field(17).Span);
             var tuple = MailboxGrantRouteEvidenceAuthentication.CreateTuple(SHA256.HashData(request.ExactXmg2.Span),
@@ -878,6 +894,21 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             var issuer = new FixtureMailboxIssuer(retrieve ? (byte)0x32 : (byte)0x31);
             var exact = (await authorized.AuthorSuccessAsync(issuer, ct)).ToArray();
             Assert.Equal(1, issuer.Calls);
+            if (fixtureLifetimeCeiling is { } lifetime)
+            {
+                // In-process issuer profile only. A genuine role signature may
+                // choose a shorter interval within the signed PMA maximum; the
+                // production result verifier still independently checks it.
+                Assert.InRange(lifetime, 1U, 3_600U);
+                var result = ContactCodec.Decode("XMC2", exact);
+                var issued = MailboxAuthenticatedCapabilityCodec.DecodeGrant(result.Field(8).Span);
+                var shorter = issued with { ExpiresAtUnixSeconds = Math.Min(issued.ExpiresAtUnixSeconds,
+                    checked(issued.NotBeforeUnixSeconds + lifetime)), IssuerSignature = new byte[64] };
+                var signature = await issuer.SignAsync(MailboxAuthenticatedCapabilityCodec.GetGrantSigningBytes(shorter), ct);
+                exact = MailboxGrantResultAuthor.AuthorSuccess(request.Record, route.ExactRouteClosure.Span,
+                    shorter with { IssuerSignature = signature }, BinaryPrimitives.ReadUInt64BigEndian(result.Field(4).Span),
+                    BinaryPrimitives.ReadUInt64BigEndian(result.Field(6).Span)).CanonicalBytes.ToArray();
+            }
             Assert.Equal(request.Record.Field(10).ToArray(), ContactCodec.Decode("XMC2", exact).Field(6).ToArray());
             return exact;
         }
@@ -889,22 +920,24 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     {
         internal bool CorruptResponse { get; set; }
         internal bool LoseResponse { get; set; }
+        internal uint? MaximumFixtureGrantLifetimeSeconds { get; set; }
         internal int Calls { get; private set; }
         internal bool ExactRetry { get; private set; } = true;
         internal Did2OwnedContactTransportContext? Dispatch { get; private set; }
         internal bool BuiltHeldFrame { get; private set; }
         // Prior verified fixture route, used only by current-route graph tests.
         // Retained issuance below always reads the actual protected request root.
-        internal VerifiedDeepIdV2ContactRouteClosure? Route { get; set; }
+        internal VerifiedDeepIdV2MailboxRouteClosure? Route { get; set; }
         internal Func<Task>? BeforeReturn { get; set; }
         private byte[]? requestBytes, responseBytes;
         internal ReadOnlyMemory<byte> OriginalRequest => requestBytes ?? throw new InvalidOperationException();
         internal ReadOnlyMemory<byte> OriginalResponse => responseBytes ?? throw new InvalidOperationException();
         public async ValueTask<ReadOnlyMemory<byte>> AcquireAsync(AuthoredMailboxGrantRequest request,
-            VerifiedDeepIdV2ContactRouteClosure route, Did2OwnedContactTransportContext dispatch, CancellationToken ct)
+            VerifiedDeepIdV2MailboxRouteClosure route, Did2OwnedContactTransportContext dispatch, CancellationToken ct)
         {
             Assert.Equal(MailboxCapabilityDomain.Deposit, request.Domain); Route = route;
-            return await SendAsync(request, dispatch, () => fixture.IssueOwnedGrantAsync(request, route, retrieve: false, ct), ct);
+            return await SendAsync(request, dispatch, () => fixture.IssueOwnedGrantAsync(request, route, retrieve: false, ct,
+                MaximumFixtureGrantLifetimeSeconds), ct);
         }
         public async ValueTask<ReadOnlyMemory<byte>> AcquireRetainedReadAsync(AuthoredMailboxGrantRequest request,
             Did2OwnedContactTransportContext dispatch, CancellationToken ct)
@@ -917,7 +950,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             return await SendAsync(request, dispatch, async () =>
             {
                 var host = await fixture.RetainedReadHostAsync(dispatch, ct);
-                return await fixture.IssueRetainedFixtureGrantAsync(request, original, host, dispatch.Network, ct);
+                return await fixture.IssueRetainedFixtureGrantAsync(request, original, host, dispatch.Network, ct,
+                    MaximumFixtureGrantLifetimeSeconds);
             }, ct);
         }
         private async ValueTask<ReadOnlyMemory<byte>> SendAsync(AuthoredMailboxGrantRequest request,

@@ -117,11 +117,11 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             await WithAuthoredApplicationConnectionAsync(scope, sql =>
             {
                 using var read = sql.CreateCommand();
-                read.CommandText = "SELECT exact_pma FROM mailbox_store_public_evidence WHERE scope_hash=$scope AND operation_id=$op;";
+                read.CommandText = "SELECT exact_pma FROM mailbox_store_public_evidence WHERE scope_hash=$scope AND attempt_id=$op;";
                 read.Parameters.AddWithValue("$scope", scope.Hash.ToArray()); read.Parameters.AddWithValue("$op", operation);
                 original = Assert.IsType<byte[]>(read.ExecuteScalar());
                 using var change = sql.CreateCommand();
-                change.CommandText = "UPDATE mailbox_store_public_evidence SET exact_pma=$pma WHERE scope_hash=$scope AND operation_id=$op;";
+                change.CommandText = "UPDATE mailbox_store_public_evidence SET exact_pma=$pma WHERE scope_hash=$scope AND attempt_id=$op;";
                 change.Parameters.AddWithValue("$pma", exactPma.ToArray());
                 change.Parameters.AddWithValue("$scope", scope.Hash.ToArray()); change.Parameters.AddWithValue("$op", operation);
                 Assert.Equal(1, change.ExecuteNonQuery());

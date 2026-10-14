@@ -17,7 +17,7 @@ internal sealed class Did2OwnedMailboxTransportContext : IMailboxPrivacyNetworkA
     private readonly VerifiedDeepIdV2CurrentAccount account;
     private readonly DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh;
     private readonly HeldDeepIdV2AccountLease held;
-    private readonly VerifiedDeepIdV2ContactRouteClosure? route;
+    private readonly VerifiedDeepIdV2MailboxRouteClosure? route;
     private readonly VerifiedDeepIdV2MailboxGrant? grant;
     private readonly VerifiedMailboxRetainedReadGrantV2? retainedRead;
     private readonly byte[]? originalRoute;
@@ -26,7 +26,7 @@ internal sealed class Did2OwnedMailboxTransportContext : IMailboxPrivacyNetworkA
     internal Did2OwnedMailboxTransportContext(DeepIdV2ContactPathAuthoritySource source,
         DeepIdV2OnionClientCustody custody, VerifiedDeepIdV2CurrentAccount account,
         DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh,
-        HeldDeepIdV2AccountLease held, VerifiedDeepIdV2ContactRouteClosure route,
+        HeldDeepIdV2AccountLease held, VerifiedDeepIdV2MailboxRouteClosure route,
         VerifiedDeepIdV2MailboxGrant grant)
     {
         Source = source; Custody = custody; this.account = account; this.fresh = fresh;

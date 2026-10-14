@@ -161,8 +161,7 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             installed.Use(bytes => { hash.AppendData(bytes); return true; }); checkpoint.Use(bytes => { hash.AppendData(bytes); return true; });
             using var db = new Microsoft.Data.Sqlite.SqliteConnection(new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
             { DataSource = path, Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadOnly, Pooling = false }.ToString());
-            db.Open(); var code = SQLitePCL.raw.sqlite3_key(db.Handle, key);
-            if (code != SQLitePCL.raw.SQLITE_OK) throw new CryptographicException("Device source key was rejected.");
+            db.Open(); SqliteDeviceStateStore.InstallRandomKey(db, key);
             SqliteDeviceStateStore.RequireReadOnlyMailboxSource(db, storeId, account.Span);
             var projection = SqliteDeepMailboxStore.ReadCompleteLocalSqlProjection(db, storeId, ct);
             try { hash.AppendData(projection); }

@@ -12,7 +12,7 @@ internal sealed class Did2MailboxGrantOnionTransport(DeepIdV2ContactPathAuthorit
     : IDid2MailboxGrantTransport
 {
     public async ValueTask<ReadOnlyMemory<byte>> AcquireAsync(AuthoredMailboxGrantRequest request,
-        VerifiedDeepIdV2ContactRouteClosure route, Did2OwnedContactTransportContext dispatch, CancellationToken ct)
+        VerifiedDeepIdV2MailboxRouteClosure route, Did2OwnedContactTransportContext dispatch, CancellationToken ct)
     {
         dispatch.RequireActive(); source.RequireAccountOwner(dispatch.Custody.Owner);
         if (request.Domain != Deep.Protocol.DeepExtension.MailboxCapabilities.MailboxCapabilityDomain.Deposit)

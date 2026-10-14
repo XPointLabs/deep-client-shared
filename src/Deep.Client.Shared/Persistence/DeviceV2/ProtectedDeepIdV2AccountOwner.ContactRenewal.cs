@@ -65,9 +65,25 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 // independently current time. Corruption is not expiry recovery.
                 var now = await RecheckRouteFreshnessAsync(current, source, fresh, held, first, ct).ConfigureAwait(false);
                 authorization = DeepIdV2CurrentContactAuthorizationVerifier.Verify(fresh.Proof, dca, now.BootId.Span, now.SampleSeconds);
-                var expiry = Math.Min(BinaryPrimitives.ReadUInt64BigEndian(ContactCodec.Decode("XRA1", prior.Record(1).Span).Field(13).Span),
-                    BinaryPrimitives.ReadUInt64BigEndian(priorObject.Closure.Bundle.Field(18).Span));
-                if (authorization.TrustedUpperUnixSeconds < expiry) return null;
+                var advertisement = ContactCodec.Decode("XRA1", prior.Record(1).Span);
+                var refreshAt = Math.Min(ProactiveRefreshAt(
+                        BinaryPrimitives.ReadUInt64BigEndian(advertisement.Field(12).Span),
+                        BinaryPrimitives.ReadUInt64BigEndian(advertisement.Field(13).Span)),
+                    ProactiveRefreshAt(
+                        BinaryPrimitives.ReadUInt64BigEndian(priorObject.Closure.Bundle.Field(17).Span),
+                        BinaryPrimitives.ReadUInt64BigEndian(priorObject.Closure.Bundle.Field(18).Span)));
+                // The threshold may shorten selection/live/successor windows
+                // below the subject's XRA or object lifetime. All these exact
+                // records were independently authenticated above; expiry is
+                // never inferred from a parse failure or extended on retry.
+                var authenticatedRoute = ContactRouteClosureCodec.Decode(priorRoute.ExactRouteClosure.Span);
+                foreach (var (record, issuedTag, expiryTag) in new[] {
+                    (authenticatedRoute.Selection, 8, 9), (authenticatedRoute.Route, 17, 18),
+                    (authenticatedRoute.Successor, 10, 11), (authenticatedRoute.Reachability, 16, 17) })
+                    refreshAt = Math.Min(refreshAt, ProactiveRefreshAt(
+                        BinaryPrimitives.ReadUInt64BigEndian(record.Field(issuedTag).Span),
+                        BinaryPrimitives.ReadUInt64BigEndian(record.Field(expiryTag).Span)));
+                if (authorization.TrustedUpperUnixSeconds < refreshAt) return null;
                 var scalar = NewRouteRandom32(); var keyId = NewRouteRandom32(); var nonce = NewRouteRandom32();
                 try
                 {
@@ -243,6 +259,19 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             if (capability is not null) CryptographicOperations.ZeroMemory(capability);
             if (pendingIntent is not null) CryptographicOperations.ZeroMemory(pendingIntent);
         }
+    }
+
+    // CONTACT-RESOLVER and TRANSPORT-NEUTRAL-MESSAGING own their proactive margins.
+    // Call only after authenticating
+    // the original signed interval; this arithmetic is not currentness authority.
+    // Round the margin upward, without floating point or multiplying a u64 lifetime.
+    internal static ulong ProactiveRefreshAt(ulong issuedAt, ulong expiresAt)
+    {
+        if (issuedAt == 0 || expiresAt <= issuedAt)
+            throw new CryptographicException("Owned authority has no valid signed refresh interval.");
+        var lifetime = expiresAt - issuedAt;
+        var margin = lifetime / 5 + (lifetime % 5 == 0 ? 0UL : 1UL);
+        return expiresAt - margin;
     }
 
     private static byte[] DeriveContactRenewalIntent(ReadOnlySpan<byte> network, ReadOnlySpan<byte> account,

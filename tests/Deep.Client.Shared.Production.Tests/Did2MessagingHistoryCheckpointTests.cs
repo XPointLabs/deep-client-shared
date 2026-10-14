@@ -47,7 +47,7 @@ public sealed class Did2MessagingHistoryCheckpointTests
         {
             case "length-short": raw = raw[..^1]; break;
             case "length-long": raw = [..raw, 0]; break;
-            case "generation": raw[0] = 2; break;
+            case "generation": raw[0] = 1; break;
             case "reserved": raw[1] = 1; break;
             case "scope": raw[12] ^= 1; break;
             case "revision-zero": BinaryPrimitives.WriteUInt64BigEndian(raw.AsSpan(4), 0); break;
@@ -110,6 +110,15 @@ public sealed class Did2MessagingHistoryCheckpointTests
         if (defect == "revision-overflow") Assert.IsType<OverflowException>(error);
         else Assert.True(error is InvalidDataException or CryptographicException, error?.GetType().FullName ?? "No rejection");
         Assert.Equal(before, first.Exact.ToArray());
+    }
+
+    [Fact]
+    public void PreviousEmptyHistoryGenerationRejectsWithoutRepair()
+    {
+        var scope = Scope(); var raw = Did2MessagingHistoryCheckpoint.RegisteredEmpty(scope).Exact.ToArray();
+        Assert.Equal(2, raw[0]); raw[0] = 1;
+        Assert.Throws<InvalidDataException>(() => Did2MessagingHistoryCheckpoint.Decode(raw, scope));
+        Assert.Equal(1, raw[0]);
     }
 
     [Fact]

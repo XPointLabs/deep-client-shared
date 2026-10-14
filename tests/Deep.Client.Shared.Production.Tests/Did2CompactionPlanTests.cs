@@ -9,6 +9,133 @@ namespace Deep.Client.Shared.Production.Tests;
 // SQL cleanup, deletion capability or sustained delivery is asserted here.
 public sealed class Did2CompactionPlanTests
 {
+    private static Root[] ContactPayloadRoots(bool initial = false) =>
+    [
+        Guard(RootKind.Ordinary, 10), Changed(RootKind.Send, 11, 21), Guard(RootKind.Grant, 12),
+        Guard(RootKind.Read, 13), Guard(RootKind.SessionCatalog, 14), Guard(RootKind.Attachment, 15),
+        Guard(RootKind.AccountRegistration, 16), Guard(RootKind.NativeFence, 17),
+        initial ? Guard(RootKind.MailboxContactCustody, 18) : Changed(RootKind.ContactAccept, 18, 24),
+        initial ? Changed(RootKind.ContactStart, 19, 24) : Guard(RootKind.MailboxContactCustody, 19)
+    ];
+
+    [Theory]
+    [InlineData(false)] [InlineData(true)]
+    public void ContactPayloadRecoveryRequiresBothOrderedSuccessorsAndIndependentCustody(bool initial)
+    {
+        using var idle = RegisteredEmpty(Network, Account, Instance);
+        var roots = ContactPayloadRoots(initial); var payloadIndex = initial ? 9 : 8; var guardIndex = initial ? 8 : 9;
+        using var prepared = idle.Prepare(SqlTarget.ProtectedOnly, Bytes(32, 8), Bytes(32, 9), new byte[32], new byte[32],
+            roots, [Rows(initial ? Disposition.InitialPayload : Disposition.ContactAcceptPayload)[0]]);
+        var actual = Readbacks(roots);
+        Assert.Equal(RecoveryStep.RecordSqlCommit, prepared.Plan.ObserveReadback(new byte[32], actual).Step);
+        using var committed = prepared.Plan.WithSqlCommitted();
+        actual[payloadIndex] = actual[payloadIndex] with { Digest = roots[payloadIndex].After };
+        Assert.Throws<InvalidDataException>(() => committed.ObserveReadback(new byte[32], actual));
+        actual[payloadIndex] = actual[payloadIndex] with { Digest = roots[payloadIndex].Before };
+        foreach (var index in new[] { 1, payloadIndex })
+        {
+            Assert.Equal(new RecoveryObservation(RecoveryStep.AdoptRoot, index), committed.ObserveReadback(new byte[32], actual));
+            using var successor = prepared.Successors.Use(bytes => committed.OwnSuccessor(index, bytes));
+            Assert.True(successor.Use(bytes => bytes.SequenceEqual(roots[index].Successor.Span)));
+            actual[index] = actual[index] with { Digest = roots[index].After };
+        }
+        Assert.Equal(RecoveryStep.ClearPlan, committed.ObserveReadback(new byte[32], actual).Step);
+        actual[guardIndex] = actual[guardIndex] with { Digest = Bytes(32, 0x99) };
+        Assert.Throws<InvalidDataException>(() => committed.ObserveReadback(new byte[32], actual));
+    }
+
+    [Theory]
+    [InlineData("complete-state", false)] [InlineData("missing-custody", false)] [InlineData("missing-consent", false)]
+    [InlineData("consent-guard", false)] [InlineData("send-guard", false)] [InlineData("changed-custody", false)]
+    [InlineData("other-action", false)] [InlineData("extra-action", false)] [InlineData("sql-target", false)]
+    [InlineData("complete-state", true)] [InlineData("missing-custody", true)] [InlineData("missing-consent", true)]
+    [InlineData("consent-guard", true)] [InlineData("send-guard", true)] [InlineData("changed-custody", true)]
+    [InlineData("other-action", true)] [InlineData("extra-action", true)] [InlineData("sql-target", true)]
+    public void ContactPayloadRejectsBorrowedIncompleteOrChangedCustodyProfiles(string defect, bool initial)
+    {
+        using var idle = RegisteredEmpty(Network, Account, Instance);
+        var roots = ContactPayloadRoots(initial); var action = initial ? Disposition.InitialPayload : Disposition.ContactAcceptPayload;
+        var rows = new[] { Rows(action)[0] }; var payloadIndex = initial ? 9 : 8; var guardIndex = initial ? 8 : 9;
+        var target = SqlTarget.ProtectedOnly;
+        switch (defect)
+        {
+            case "complete-state": roots[guardIndex] = Guard(RootKind.MailboxStoreState, 19); break;
+            case "missing-custody": roots = roots.Where(root => root.Kind != RootKind.MailboxContactCustody).ToArray(); break;
+            case "missing-consent": roots = roots.Where(root => root.Kind != (initial ? RootKind.ContactStart : RootKind.ContactAccept)).ToArray(); break;
+            case "consent-guard": roots[payloadIndex] = Guard(initial ? RootKind.ContactStart : RootKind.ContactAccept, 18); break;
+            case "send-guard": roots[1] = Guard(RootKind.Send, 11); break;
+            case "changed-custody": roots[guardIndex] = Changed(RootKind.MailboxContactCustody, 19, 25); break;
+            case "other-action": rows = [Rows(Disposition.ReplayScope)[0]]; break;
+            case "extra-action": rows = Rows(action); break;
+            case "sql-target": target = SqlTarget.Application; break;
+        }
+        Assert.Throws<InvalidDataException>(() => idle.Prepare(target, Bytes(32, 8), Bytes(32, 9),
+            target == SqlTarget.ProtectedOnly ? new byte[32] : BeforeSql,
+            target == SqlTarget.ProtectedOnly ? new byte[32] : AfterSql, roots, rows));
+    }
+
+    [Theory]
+    [InlineData(false, (byte)Disposition.StoppedControlPayload)]
+    [InlineData(true, (byte)Disposition.StoppedControlPayload)]
+    [InlineData(false, (byte)Disposition.ExpiredControlAudit)]
+    [InlineData(true, (byte)Disposition.ExpiredControlAudit)]
+    public void StoppedControlAuditRequiresSqlThenOnePayloadSuccessorAndUnchangedSend(bool initial, byte actionValue)
+    {
+        using var idle = RegisteredEmpty(Network, Account, Instance);
+        var roots = ContactPayloadRoots(initial); roots[1] = Guard(RootKind.Send, 11);
+        var row = Rows((Disposition)actionValue)[0]; var payloadIndex = initial ? 9 : 8;
+        using var prepared = idle.Prepare(SqlTarget.Application, Bytes(32, 8), Bytes(32, 9), BeforeSql, AfterSql, roots, [row]);
+        var actual = Readbacks(roots);
+        Assert.Equal(RecoveryStep.ApplySql, prepared.Plan.ObserveReadback(BeforeSql, actual).Step);
+        Assert.Equal(RecoveryStep.RecordSqlCommit, prepared.Plan.ObserveReadback(AfterSql, actual).Step);
+        using var committed = prepared.Plan.WithSqlCommitted();
+        Assert.Equal(new RecoveryObservation(RecoveryStep.AdoptRoot, payloadIndex), committed.ObserveReadback(AfterSql, actual));
+        actual[payloadIndex] = actual[payloadIndex] with { Digest = roots[payloadIndex].After };
+        Assert.Equal(RecoveryStep.ClearPlan, committed.ObserveReadback(AfterSql, actual).Step);
+        foreach (var defect in new[] { "changed-send", "payload-guard", "changed-custody", "missing-custody", "extra-row", "protected-only" })
+        {
+            var damaged = roots.ToArray(); var target = SqlTarget.Application; var rows = new[] { row };
+            switch (defect)
+            {
+                case "changed-send": damaged[1] = Changed(RootKind.Send, 11, 21); break;
+                case "payload-guard": damaged[payloadIndex] = Guard(damaged[payloadIndex].Kind, 24); break;
+                case "changed-custody": damaged[initial ? 8 : 9] = Changed(RootKind.MailboxContactCustody, 25, 26); break;
+                case "missing-custody": damaged = damaged.Where(root => root.Kind != RootKind.MailboxContactCustody).ToArray(); break;
+                case "extra-row": rows = Rows((Disposition)actionValue); break;
+                case "protected-only": target = SqlTarget.ProtectedOnly; break;
+            }
+            Assert.Throws<InvalidDataException>(() => idle.Prepare(target, Bytes(32, 8), Bytes(32, 9),
+                target == SqlTarget.ProtectedOnly ? new byte[32] : BeforeSql,
+                target == SqlTarget.ProtectedOnly ? new byte[32] : AfterSql, damaged, rows));
+        }
+    }
+
+    [Theory]
+    [InlineData((byte)Disposition.StoppedOutboxPayload)]
+    [InlineData((byte)Disposition.ExpiredTerminalAudit)]
+    public void StoppedPayloadPlanHasOneClosedApplicationProfile(byte actionValue)
+    {
+        var action = (Disposition)actionValue;
+        using var idle = RegisteredEmpty(Network, Account, Instance);
+        RootKind[] kinds = [RootKind.Ordinary, RootKind.Send, RootKind.Grant, RootKind.Read,
+            RootKind.SessionCatalog, RootKind.MessagingFloor, RootKind.Attachment, RootKind.AccountRegistration,
+            RootKind.MessagingHistoryCheckpoint, RootKind.MessagingPeerBootstrap];
+        var roots = kinds.Select((kind, index) => index == 0 ? Changed(kind, 10, 20) : Guard(kind, checked((byte)(10 + index)))).ToArray();
+        using var prepared = idle.Prepare(SqlTarget.Application, Bytes(32, 8), Bytes(32, 9), BeforeSql, AfterSql,
+            roots, Rows(action));
+        Assert.Equal(10, prepared.Plan.RootCount); Assert.Equal(action, prepared.Plan.ReadRow(0).Action);
+        Assert.Throws<InvalidDataException>(() => idle.Prepare(SqlTarget.Transport, Bytes(32, 8), Bytes(32, 9), BeforeSql, AfterSql,
+            roots, Rows(action)));
+        var altered = roots.ToArray(); altered[1] = Changed(RootKind.Send, 11, 21);
+        Assert.Throws<InvalidDataException>(() => idle.Prepare(SqlTarget.Application, Bytes(32, 8), Bytes(32, 9), BeforeSql, AfterSql,
+            altered, Rows(action)));
+        Assert.Throws<InvalidDataException>(() => idle.Prepare(SqlTarget.Application, Bytes(32, 8), Bytes(32, 9), BeforeSql, AfterSql,
+            roots, [Rows(Disposition.OutboxPayload)[0], Rows(action)[1]]));
+        Assert.Throws<InvalidDataException>(() => idle.Prepare(SqlTarget.Application, Bytes(32, 8), Bytes(32, 9), BeforeSql, AfterSql,
+            roots, [Rows(Disposition.StoppedOutboxPayload)[0], Rows(Disposition.ExpiredTerminalAudit)[1]]));
+        Assert.Throws<InvalidDataException>(() => idle.Prepare(SqlTarget.Application, Bytes(32, 8), Bytes(32, 9), BeforeSql, AfterSql,
+            roots, Rows((Disposition)7))); // Removed entry-based audit expiry is not another reader.
+    }
     private static byte[] Bytes(int count, byte value) => Enumerable.Repeat(value, count).ToArray();
     private static readonly byte[] Network = Bytes(16, 1), Account = Bytes(32, 2), Instance = Bytes(32, 3);
     private static readonly byte[] BeforeSql = Bytes(32, 4), AfterSql = Bytes(32, 5);

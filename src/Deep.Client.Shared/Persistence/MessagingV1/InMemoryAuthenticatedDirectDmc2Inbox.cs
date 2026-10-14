@@ -26,11 +26,19 @@ internal sealed class InMemoryAuthenticatedDirectDmc2Inbox : IDisposable
         AuthenticatedContactAcceptDmc2 handoff, CancellationToken cancellationToken = default) =>
         MaterializeAuthenticatedDmc2Async(handoff, cancellationToken);
 
+    internal Task<DirectDmc2InboxDisposition> MaterializeOwnRouteUpdateAsync(
+        AuthenticatedOwnRouteUpdateDmc2 handoff, CancellationToken cancellationToken = default) =>
+        MaterializeAuthenticatedDmc2Async(handoff, cancellationToken);
+
+    internal Task<DirectDmc2InboxDisposition> MaterializePeerRouteUpdateAsync(
+        AuthenticatedPeerRouteUpdateDmc2 handoff, CancellationToken cancellationToken = default) =>
+        MaterializeAuthenticatedDmc2Async(handoff, cancellationToken);
+
     private Task<DirectDmc2InboxDisposition> MaterializeAuthenticatedDmc2Async(
         IAuthenticatedDmc2InboxEvent handoff, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(handoff);
-        if (handoff is not AuthenticatedDirectDmc2 and not AuthenticatedContactAcceptDmc2)
+        if (handoff is not AuthenticatedDirectDmc2 and not AuthenticatedContactAcceptDmc2 and not AuthenticatedOwnRouteUpdateDmc2 and not AuthenticatedPeerRouteUpdateDmc2)
             throw new CryptographicException("Only closed authenticated event handoffs can materialize.");
         cancellationToken.ThrowIfCancellationRequested();
         lock (gate)
@@ -44,10 +52,13 @@ internal sealed class InMemoryAuthenticatedDirectDmc2Inbox : IDisposable
                     handoff.LogicalMessageId.Span, handoff.AuthorDeviceId.Span);
                 if (forks.Contains(key))
                     return Task.FromResult(DirectDmc2InboxDisposition.ForkLatched);
-                var exact = handoff.ExactDmc2.ToArray();
+                var exact = OwnedByteExports.TakeArray(handoff.ExactDmc2);
                 try
                 {
-                    var position = Position(ApplicationCoreCodec.DecodeDmc2(exact));
+                    var parsed = ApplicationCoreCodec.DecodeDmc2(exact);
+                    string position;
+                    try { position = Position(parsed); }
+                    finally { if (parsed.ParsedPayload is AttachmentOfferDmc2Payload offer) offer.Manifest.Dispose(); }
                     if (authoredPositions.TryGetValue(position, out var positionKey))
                     {
                         if (forks.Contains(positionKey))
@@ -112,32 +123,36 @@ internal sealed class InMemoryAuthenticatedDirectDmc2Inbox : IDisposable
                 foreach (var exact in exacts)
                 {
                     var parsed = ApplicationCoreCodec.DecodeDmc2(exact);
-                    if (parsed.ContentKind != Dmc2ContentKind.SessionInit &&
-                        !AuthenticatedInitialDmc2Batch.IsSupportedInitialApplicationKind(parsed.ContentKind))
-                        throw new CryptographicException("The initial inbox event kind is unsupported.");
-                    var key = Key(parsed.ConversationId.Span,
-                        parsed.LogicalMessageId.Span, parsed.SenderDeviceId.Span);
-                    if (forks.Contains(key))
-                        return Task.FromResult(DirectDmc2InboxDisposition.ForkLatched);
-                    var position = Position(parsed);
-                    if (authoredPositions.TryGetValue(position, out var positionKey))
+                    try
                     {
-                        if (forks.Contains(positionKey))
+                        if (parsed.ContentKind != Dmc2ContentKind.SessionInit &&
+                            !AuthenticatedInitialDmc2Batch.IsSupportedInitialApplicationKind(parsed.ContentKind))
+                            throw new CryptographicException("The initial inbox event kind is unsupported.");
+                        var key = Key(parsed.ConversationId.Span,
+                            parsed.LogicalMessageId.Span, parsed.SenderDeviceId.Span);
+                        if (forks.Contains(key))
                             return Task.FromResult(DirectDmc2InboxDisposition.ForkLatched);
-                        if (Fixed(events[positionKey], exact)) continue;
-                        cancellationToken.ThrowIfCancellationRequested();
-                        forks.Add(positionKey);
-                        return Task.FromResult(DirectDmc2InboxDisposition.ForkLatched);
+                        var position = Position(parsed);
+                        if (authoredPositions.TryGetValue(position, out var positionKey))
+                        {
+                            if (forks.Contains(positionKey))
+                                return Task.FromResult(DirectDmc2InboxDisposition.ForkLatched);
+                            if (Fixed(events[positionKey], exact)) continue;
+                            cancellationToken.ThrowIfCancellationRequested();
+                            forks.Add(positionKey);
+                            return Task.FromResult(DirectDmc2InboxDisposition.ForkLatched);
+                        }
+                        if (events.TryGetValue(key, out var incumbent))
+                        {
+                            if (Fixed(incumbent, exact)) continue;
+                            cancellationToken.ThrowIfCancellationRequested();
+                            BindOwner(local, batch.LocalAccountGeneration);
+                            forks.Add(key);
+                            return Task.FromResult(DirectDmc2InboxDisposition.ForkLatched);
+                        }
+                        newItems.Add((key, position, exact));
                     }
-                    if (events.TryGetValue(key, out var incumbent))
-                    {
-                        if (Fixed(incumbent, exact)) continue;
-                        cancellationToken.ThrowIfCancellationRequested();
-                        BindOwner(local, batch.LocalAccountGeneration);
-                        forks.Add(key);
-                        return Task.FromResult(DirectDmc2InboxDisposition.ForkLatched);
-                    }
-                    newItems.Add((key, position, exact));
+                    finally { if (parsed.ParsedPayload is AttachmentOfferDmc2Payload offer) offer.Manifest.Dispose(); }
                 }
                 if (events.Count + newItems.Count > MaximumEvents)
                     return Task.FromResult(DirectDmc2InboxDisposition.CapacityExceeded);

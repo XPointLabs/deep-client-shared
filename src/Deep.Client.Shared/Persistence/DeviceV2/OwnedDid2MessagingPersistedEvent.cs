@@ -7,18 +7,23 @@ namespace Deep.Client.Shared.Persistence.DeviceV2;
 internal sealed class OwnedDid2MessagingPersistedEvent : IDisposable
 {
     private byte[]? envelope, plaintext;
-    private readonly byte[] eventHash, envelopeHash;
+    private readonly byte[] eventHash, envelopeHash, routeProcessing;
     internal int Direction { get; }
+    internal ulong Ordinal { get; }
     // Called only by the verified SQL reader, adopting its fresh blob buffers.
-    internal OwnedDid2MessagingPersistedEvent(int direction, byte[] envelope, byte[] plaintext, ReadOnlySpan<byte> eventHash)
+    internal OwnedDid2MessagingPersistedEvent(int direction, ulong ordinal, byte[] envelope, byte[] plaintext,
+        ReadOnlySpan<byte> eventHash, ReadOnlySpan<byte> routeProcessing)
     {
-        Direction = direction; this.envelope = envelope; this.plaintext = plaintext;
+        Direction = direction; Ordinal = ordinal; this.envelope = envelope; this.plaintext = plaintext;
         this.eventHash = eventHash.ToArray();
+        Did2RouteProcessingMetadata.RequireShape(routeProcessing);
+        this.routeProcessing = routeProcessing.ToArray();
         envelopeHash = MessagingWireCryptographicInputs.ComputeDpe2FullReplayHash(Dpe2Codec.Decode(envelope));
     }
     internal ReadOnlySpan<byte> ExactEnvelope { get { RequireLive(); return envelope; } }
     internal ReadOnlySpan<byte> EnvelopeHash { get { RequireLive(); return envelopeHash; } }
     internal ReadOnlySpan<byte> EventHash { get { RequireLive(); return eventHash; } }
+    internal ReadOnlySpan<byte> RouteProcessing { get { RequireLive(); return routeProcessing; } }
     internal OwnedDeepSecret OwnAuthenticatedDmc2()
     {
         RequireLive();

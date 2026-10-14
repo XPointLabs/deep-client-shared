@@ -97,15 +97,30 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             }
         }
 
-        internal async Task RenewNativeSenderPublicationPastExpiryAsync()
+        internal async Task RenewNativeSenderPublicationPastExpiryAsync(ulong? renewedRouteLifetimeSeconds = null,
+            ulong? successorAdvertisementLifetimeSeconds = null, bool proactive = false)
         {
             var plan = await accounts.ReadOwnPermanentContactPlanAsync();
-            ulong expiry;
+            ulong expiry, priorGeneration; int priorCount;
             using (var state = await RouteState())
             {
                 var original = state.Entries[Convert.ToHexString(plan.Intent.Span)];
-                expiry = Math.Min(BinaryPrimitives.ReadUInt64BigEndian(ContactCodec.Decode("XRA1", original.Record(1).Span).Field(13).Span),
-                    BinaryPrimitives.ReadUInt64BigEndian(DeepIdV2ResolverClosureCodec.Decode(original.Record(7).Span).Bundle.Field(18).Span));
+                priorGeneration = ContactPublicationAuthorityWireCodec.DecodeRequest(original.Record(9).Span).Generation;
+                priorCount = state.Entries.Count;
+                ulong Due(ReadOnlyMemory<byte> issued, ReadOnlyMemory<byte> until) => proactive
+                    ? ProtectedDeepIdV2AccountOwner.ProactiveRefreshAt(BinaryPrimitives.ReadUInt64BigEndian(issued.Span),
+                        BinaryPrimitives.ReadUInt64BigEndian(until.Span))
+                    : BinaryPrimitives.ReadUInt64BigEndian(until.Span);
+                var advertisement = ContactCodec.Decode("XRA1", original.Record(1).Span);
+                var bundle = DeepIdV2ResolverClosureCodec.Decode(original.Record(7).Span).Bundle;
+                expiry = Math.Min(Due(advertisement.Field(12), advertisement.Field(13)), Due(bundle.Field(17), bundle.Field(18)));
+                var route = ContactRouteClosureCodec.Decode(original.Record(6).Span);
+                // A threshold may give a shorter live route than its XRA/DCR.
+                // Advance beyond the ACTUAL signed minimum, never beyond base
+                // ADH/network authority just to force another renewal.
+                expiry = Math.Min(expiry, Due(route.Selection.Field(8), route.Selection.Field(9)));
+                expiry = Math.Min(expiry, Due(route.Route.Field(17), route.Route.Field(18)));
+                expiry = Math.Min(expiry, Due(route.Successor.Field(10), route.Successor.Field(11)));
             }
             var nextTime = checked(expiry + 20);
             if (CurrentProofTime < nextTime)
@@ -115,12 +130,64 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 var elapsed = nextTime - CurrentProofTime;
                 ProofTime = checked(ProofTime + elapsed); Sample = checked(Sample + elapsed);
             }
-            var reopened = ReopenAccount(); var backend = new RenewalBackend(this);
+            if (successorAdvertisementLifetimeSeconds is { } lifetime)
+                await SeedShortPendingRenewalAsync(lifetime);
+            var reopened = ReopenAccount(); var backend = new RenewalBackend(this, renewedRouteLifetimeSeconds);
             var committed = await reopened.EnsureOwnPermanentContactPublishedAsync(Source(reopened), backend, backend, backend);
-            Assert.Equal(1UL, committed.Generation);
+            Assert.Equal(checked(priorGeneration + 1), committed.Generation);
             Assert.Equal(1, backend.RouteSignings); Assert.Equal(1, backend.PublicationSignings);
-            using var promoted = await RouteState(); Assert.Equal(2, promoted.Entries.Count);
+            using var promoted = await RouteState(); Assert.Equal(priorCount + 1, promoted.Entries.Count);
             Assert.All(promoted.Entries.Values, entry => Assert.Equal((byte)7, entry.Phase));
+        }
+
+        // Test input generation only: actual device signs a short XRA successor
+        // and stores a canonical pending proposal. The real owner independently
+        // authenticates it and performs threshold/object/publication/adoption.
+        // No phase7 flag, currentness shortcut or changed signed record is used.
+        private async Task SeedShortPendingRenewalAsync(ulong lifetime)
+        {
+            var plan = await accounts.ReadOwnPermanentContactPlanAsync(); var source = Source();
+            var staged = await accounts.EnsureOwnInitialPreKeyInventoryAsync(source);
+            var fresh = await source.VerifyForOwnPreKeyAuthoringAsync(accounts, default);
+            var dca = DeepIdV2ContactAuthorizationCodec.Verify(DeepIdV2ContactAuthorizationCodec.Decode(staged.ExactDca1.Span),
+                checkpoint.Binding, checkpoint.Directory);
+            var reading = await ReadAsync(default);
+            var authorization = DeepIdV2CurrentContactAuthorizationVerifier.Verify(fresh.Proof, dca, reading.BootId.Span, reading.SampleSeconds);
+            using var device = await new ProtectedDeepIdV2GenesisDeviceSecretsStore(storage, Network,
+                checkpoint.Directory.Record.DeepAccountId.Span).ReadVerifiedAsync(checkpoint.Binding.Identity.ActiveDevices.Single(), default);
+            var before = await RouteSnapshot(); using var state = await RouteState();
+            using var generation = await innerStorage.ReadOwnedAsync("deep.store.v2.sql-generation");
+            var instance = generation!.Use(bytes => bytes.Slice(56, 32).ToArray());
+            var scalar = Bytes(32, 0xb4); var keyId = Bytes(32, 0xb5); var nonce = Bytes(32, 0xb6);
+            byte[]? intent = null, after = null;
+            try
+            {
+                var prior = state.Entries[Convert.ToHexString(plan.Intent.Span)]; Assert.Equal(7, prior.Phase);
+                var configuration = Did2OwnedPermanentContactPlan.Configuration();
+                var xra = await DeepIdV2ContactRouteAuthor.AuthorAdvertisementSuccessorAsync(authorization,
+                    fresh.Network, fresh.Authority, device!, prior.Record(1), configuration.AntiSpamHash, keyId,
+                    DeepIdentityCrypto.DeriveX25519PublicKey(scalar), checked(authorization.TrustedUpperUnixSeconds + lifetime),
+                    source.RendezvousTrustedTime);
+                using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+                hash.AppendData("Deep/Client/DID2/contact-renewal/v1"u8); hash.AppendData([0]);
+                hash.AppendData(Network); hash.AppendData(checkpoint.Directory.Record.DeepAccountId.Span);
+                hash.AppendData(instance); hash.AppendData(plan.Intent.Span);
+                var committedHash = SHA256.HashData(prior.Exact);
+                try { hash.AppendData(committedHash); intent = hash.GetHashAndReset(); }
+                finally { CryptographicOperations.ZeroMemory(committedHash); }
+                state.Entries.Add(Convert.ToHexString(intent), ProtectedDid2ContactRouteJournal.Entry.Proposal(intent,
+                    configuration, scalar, keyId, nonce, staged.ExactDca1, xra, new ContactRouteAuthorityWireRequest(Network, nonce,
+                        fresh.Proof.QueriedDirectoryLeafKey.Span, fresh.Proof.NextProtectedLkg.LogGeneration, fresh.Proof.NextProtectedLkg.CoreHash.Span,
+                        staged.ExactDca1.Span, xra.CanonicalBytes.Span, prior.Record(5).Span, prior.Record(6).Span),
+                    Network, checkpoint.Directory.Record.DeepAccountId.Span));
+                after = ProtectedDid2ContactRouteJournal.Encode(state, Network, checkpoint.Directory.Record.DeepAccountId.Span, instance);
+                Assert.True(await innerStorage.CompareExchangeAsync(ProtectedDid2ContactRouteJournal.Slot, before, after));
+            }
+            finally
+            {
+                foreach (var bytes in new[] { before, instance, scalar, keyId, nonce, intent, after })
+                    if (bytes is not null) CryptographicOperations.ZeroMemory(bytes);
+            }
         }
 
         internal async Task CheckOwnedRenewalAsync(bool interruptedRetrieve = false, bool pollRetainedPaths = false)
@@ -394,7 +461,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         internal Dictionary<string, OwnedGrantTransport> Transports { get; } = new(StringComparer.Ordinal)
         { [Convert.ToHexString(ContactCodec.Decode("XMG2", original.OriginalRequest.Span).Field(11).Span)] = original };
         public ValueTask<ReadOnlyMemory<byte>> AcquireAsync(AuthoredMailboxGrantRequest request,
-            VerifiedDeepIdV2ContactRouteClosure route, Did2OwnedContactTransportContext dispatch, CancellationToken ct) =>
+            VerifiedDeepIdV2MailboxRouteClosure route, Did2OwnedContactTransportContext dispatch, CancellationToken ct) =>
             throw new InvalidOperationException("Read-path qualification cannot acquire a Deposit grant.");
         public ValueTask<ReadOnlyMemory<byte>> AcquireRetainedReadAsync(AuthoredMailboxGrantRequest request,
             Did2OwnedContactTransportContext dispatch, CancellationToken ct)
@@ -408,7 +475,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 
     // Real PQ/device/witness/node crypto and protected SQL; in-process durable
     // winners and synthetic signed replica results, NOT live Registry/device evidence.
-    private sealed class RenewalBackend(Fixture fixture)
+    private sealed class RenewalBackend(Fixture fixture, ulong? renewedRouteLifetimeSeconds = null)
         : IDid2ContactRouteThresholdSource, IDid2ContactPublicationSource, IDid2ContactReplicaPublicationTransport
     {
         internal int RouteCalls, PublicationCalls, ReplicaCalls, RouteSignings, PublicationSignings;
@@ -435,6 +502,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             if (!routeWinners.TryGetValue(generation, out var winner))
             {
                 var expiry = BinaryPrimitives.ReadUInt64BigEndian(xra.Field(13).Span);
+                if (request.HasPredecessor && renewedRouteLifetimeSeconds is { } lifetime)
+                    expiry = Math.Min(expiry, checked(current.TrustedUpperUnixSeconds + lifetime));
                 var threshold = request.HasPredecessor ? await DeepIdV2ContactRouteAuthor.AuthorThresholdSuccessorAsync(current, network, authority,
                     await DeepIdV2ContactRouteVerifier.VerifyPredecessorAsync(current, network, authority, request.ExactPredecessorXir1V2,
                         request.ExactPredecessorRouteClosure, time, ct), request.ExactXra1, fixture.CreateRouteWitnesses(), expiry, time, ct) :
@@ -462,7 +531,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 if (request.Generation == 0) authorized = await DeepIdV2PublicationAuthorityAuthor.AuthorThresholdAsync(route, request, fixture.PublicationWitnesses(), ct);
                 else
                 {
-                    using var state = await fixture.RouteState(); var prior = Assert.Single(state.Entries.Values, entry => entry.Phase == 7);
+                    using var state = await fixture.RouteState(); var prior = Assert.Single(state.Entries.Values,
+                        entry => entry.Phase == 7 && entry.Record(11).Span.SequenceEqual(request.ExactPriorXpo1.Span));
                     var priorRequest = ContactPublicationAuthorityWireCodec.DecodeRequest(prior.Record(9).Span);
                     var priorResponse = ContactPublicationAuthorityWireCodec.DecodeResponse(priorRequest, prior.Record(10).Span);
                     var predecessor = await DeepIdV2PublicationCommitVerifier.VerifyIssuerPredecessorAsync(authorization, network, authority,

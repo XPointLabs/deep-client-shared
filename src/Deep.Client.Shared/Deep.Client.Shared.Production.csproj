@@ -47,6 +47,7 @@
     <Compile Include="Persistence\XPointNetworkV1\**\*.cs" />
     <Compile Include="Persistence\DeepAccountStoreContracts.cs" />
     <Compile Include="Persistence\DeepSecureStorage.cs" />
+    <Compile Include="Persistence\OwnedByteExports.cs" />
     <Compile Include="Persistence\DeepSecureStorageRegistration.cs" />
     <Compile Include="Persistence\InMemoryDeepAccountStore.cs" />
     <Compile Include="Persistence\JournaledDeepSecureStorage.cs" />
@@ -61,9 +62,12 @@
     <Compile Include="Persistence\SqliteDeepMailboxStore.ContactAccept.cs" />
     <Compile Include="Persistence\SqliteDeepMailboxStore.OwnedTextOutbox.cs" />
     <Compile Include="Persistence\SqliteDeepMailboxStore.OutboxCompaction.cs" />
+    <Compile Include="Persistence\SqliteDeepMailboxStore.StoppedWorkAudit.cs" />
+    <Compile Include="Persistence\SqliteDeepMailboxStore.TerminalAudit.cs" />
     <Compile Include="Persistence\SqliteDeepMailboxStore.RetainedPathCompaction.cs" />
     <Compile Include="Persistence\SqliteDeepMailboxStore.RetainedCoordinator.cs" />
     <Compile Include="Persistence\SqliteDeepMailboxStore.StorePublicEvidence.cs" />
+    <Compile Include="Persistence\SqliteDeepMailboxStore.OriginalStoreCommit.cs" />
     <Compile Include="Persistence\SqliteDeepMailboxStore.GrantStoreDependencies.cs" />
     <Compile Include="Persistence\SqliteDeepMailboxStore.Attachments.cs" />
     <Compile Include="Persistence\SqliteSessionStore.Mailbox.cs" />
@@ -105,6 +109,7 @@
     <Compile Include="Services\DeepIdV2AccountService.InitialClaimPreview.cs" />
     <Compile Include="Services\DeepIdV2AccountService.ReceiverSessions.cs" />
     <Compile Include="Services\DeepIdV2AccountService.Messaging.cs" />
+    <Compile Include="Services\DeepIdV2AccountService.BraidControl.cs" />
     <Compile Include="Services\HttpServiceEndpointPolicy.cs" />
     <Compile Include="Services\HttpServiceRequestTransport.cs" />
     <Compile Include="Services\MailboxAuthenticatedRequestFactory.cs" />

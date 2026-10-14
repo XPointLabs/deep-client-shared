@@ -218,8 +218,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             return hash.GetHashAndReset();
         }
 
-        private static readonly string[] StoreEvidenceColumns = ["scope_hash", "operation_id", "account_scope", "logical_id", "exact_pma", "exact_view",
-            "first_descriptor", "second_descriptor", "original_dcr", "original_route", "original_peer_adp"];
+        private static readonly string[] StoreEvidenceColumns = ["scope_hash", "native_operation_id", "attempt_id", "account_scope", "logical_id", "exact_pma", "exact_view",
+            "first_descriptor", "second_descriptor", "original_dcr", "original_route", "original_peer_adp", "evidence_commitment"];
 
         internal async Task<byte[][]> RemoveOriginalStoreEvidenceForTest(CompletedContactSendCase test)
         {
@@ -228,13 +228,13 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             {
                 using (var read = connection.CreateCommand())
                 {
-                    read.CommandText = "SELECT " + string.Join(",", StoreEvidenceColumns) + " FROM mailbox_store_public_evidence WHERE scope_hash=$scope AND operation_id=$op;";
+                    read.CommandText = "SELECT " + string.Join(",", StoreEvidenceColumns) + " FROM mailbox_store_public_evidence WHERE scope_hash=$scope AND attempt_id=$op;";
                     read.Parameters.AddWithValue("$scope", test.Scope.Hash.ToArray()); read.Parameters.AddWithValue("$op", test.Operation);
                     using var reader = read.ExecuteReader(); Assert.True(reader.Read());
                     result = StoreEvidenceColumns.Select((_, index) => reader.GetFieldValue<byte[]>(index)).ToArray(); Assert.False(reader.Read());
                 }
                 using var command = connection.CreateCommand();
-                command.CommandText = "DELETE FROM mailbox_store_public_evidence WHERE scope_hash=$scope AND operation_id=$op;";
+                command.CommandText = "DELETE FROM mailbox_store_public_evidence WHERE scope_hash=$scope AND attempt_id=$op;";
                 command.Parameters.AddWithValue("$scope", test.Scope.Hash.ToArray()); command.Parameters.AddWithValue("$op", test.Operation);
                 Assert.Equal(1, command.ExecuteNonQuery());
             });

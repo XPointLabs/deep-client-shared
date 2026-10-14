@@ -75,10 +75,16 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         VerifiedDeepIdV2DirectoryFreshness peer, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct) =>
         RunMessagingAsync(trustedUnixSeconds, verifier, scope, ReadOnlyMemory<byte>.Empty, exactDpe2, false, own, peer, source, ct);
 
+    internal Task<OwnedDid2MessagingPersistedEvent> SendRouteControlMessagingAsync(ulong trustedUnixSeconds,
+        IDeepMlDsa65Verifier verifier, Did2MessagingSessionScope scope, ReadOnlyMemory<byte> operation,
+        ReadOnlyMemory<byte> exactDmc2, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own,
+        VerifiedDeepIdV2DirectoryFreshness peer, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct) =>
+        RunMessagingAsync(trustedUnixSeconds, verifier, scope, operation, exactDmc2, true, own, peer, source, ct, routeControl: true);
+
     private async Task<OwnedDid2MessagingPersistedEvent> RunMessagingAsync(ulong trustedUnixSeconds,
         IDeepMlDsa65Verifier verifier, Did2MessagingSessionScope scope, ReadOnlyMemory<byte> operation,
         ReadOnlyMemory<byte> input, bool send, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own,
-        VerifiedDeepIdV2DirectoryFreshness peer, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
+        VerifiedDeepIdV2DirectoryFreshness peer, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct, bool routeControl = false)
     {
         ArgumentNullException.ThrowIfNull(scope);
         if (input.IsEmpty || input.Length > (send ? 33082 : 65536))
@@ -92,7 +98,12 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             if (send)
             {
                 var parsed = senderEvent = ApplicationCoreCodec.DecodeDmc2(exact);
-                Deep.Client.Shared.Services.DeepIdV2AccountService.RequireOwnedSendKind(parsed.ContentKind);
+                if (routeControl)
+                {
+                    if (parsed.ContentKind != Dmc2ContentKind.ContactRouteUpdate)
+                        throw new CryptographicException("Owned route encryption requires its exact closed control kind.");
+                }
+                else Deep.Client.Shared.Services.DeepIdV2AccountService.RequireOwnedSendKind(parsed.ContentKind);
                 if (!Did2MessagingSessionScope.Fixed(parsed.NetworkId.Span, scope.Network) ||
                     !Did2MessagingSessionScope.Fixed(parsed.SenderAccountId.Span, scope.LocalAccount) ||
                     !Did2MessagingSessionScope.Fixed(parsed.SenderDeviceId.Span, scope.LocalDevice) ||
@@ -118,8 +129,16 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             using var opened = await SqliteDeepIdV2AccountGeneration.OpenOwnedMessagingUnderLeaseAsync(
                 storage, sqlStatePath, current, scope, ct).ConfigureAwait(false);
             var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
+            if (send) result = opened.Sql.ReadVerifiedOperation(floor, op);
+            if (send && result is null && senderEvent?.ContentKind is
+                Dmc2ContentKind.MessageCreate or Dmc2ContentKind.AttachmentOffer or Dmc2ContentKind.ContactRouteUpdate)
+                await RequireOrdinaryWorkNotStoppedUnderLeaseAsync(scope, op, held, ct).ConfigureAwait(false);
             if (senderEvent?.ContentKind == Dmc2ContentKind.ContactAccept)
-                await RequireLocalContactAcceptWinnerAsync(scope, op, exact, ct).ConfigureAwait(false);
+            {
+                var payloadRetired = await RequireLocalContactAcceptWinnerAsync(scope, op, exact, ct).ConfigureAwait(false);
+                if (payloadRetired && result is null)
+                    throw new CryptographicException("Consent-only custody cannot re-encrypt or reinitialize a retired ContactAccept.");
+            }
             if (senderEvent?.ContentKind is
                 Dmc2ContentKind.MessageCreate or Dmc2ContentKind.AttachmentOffer)
                 await RequireOwnedTextForSendAsync(current, held, opened, scope, op, exact, ct).ConfigureAwait(false);
@@ -127,7 +146,6 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 await RequireOwnedAttachmentForSendAsync(current, held, attachment.Manifest, own, peer, first, ct).ConfigureAwait(false);
             if (send)
             {
-                result = opened.Sql.ReadVerifiedOperation(floor, op);
                 if (result is not null)
                 {
                     if (result.Direction != 1) throw new CryptographicException("DID2 local operation collides with a retained receive.");
@@ -141,9 +159,18 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             }
             if (result is null)
             {
+                if (send && senderEvent?.ContentKind == Dmc2ContentKind.ContactRouteUpdate)
+                    await RequireOwnRouteControlAdmissionUnderLeaseAsync(current, held, opened, op, exact,
+                        own, peer, source, ct).ConfigureAwait(false);
+                // A draft may have been prepared before other work consumed
+                // transport capacity. Check again under this encryption lease.
+                // Exact committed replay above must remain available when full.
+                if (send && senderEvent?.ContentKind is Dmc2ContentKind.MessageCreate or Dmc2ContentKind.AttachmentOffer or Dmc2ContentKind.ContactRouteUpdate)
+                    await RequireNewMailboxWorkCapacityUnderLeaseAsync(current, held, opened, scope, op,
+                        own, peer, source, verifier, ct).ConfigureAwait(false);
                 var context = opened.Sql.CreateVerifiedTransitionContext(floor, op, send ? [] : exact);
                 using var state = opened.Sql.ReadVerifiedLatest(floor);
-                var authority = new AccountDpe2Authority(opened, held, floor, op, eventHash, send ? [] : exact,
+                var authority = new AccountDpe2Authority(this, current, opened, held, floor, op, eventHash, send ? [] : exact,
                     context.ReceiveReplayDisposition, senderEvent, own, peer, source);
                 if (send)
                 {
@@ -185,6 +212,31 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     storage, sqlStatePath, current, held, ct).ConfigureAwait(false);
                 RequireApplicationDisposition(await application.MaterializeContactAcceptAsync(handoff, ct).ConfigureAwait(false));
             }
+            else if (stagedEvent.ContentKind == Dmc2ContentKind.ContactRouteUpdate)
+            {
+                using var application = await SqliteDeepIdV2AccountGeneration.OpenApplicationUnderLeaseAsync(
+                    storage, sqlStatePath, current, held, ct).ConfigureAwait(false);
+                if (send)
+                {
+                    using var handoff = await AuthenticatedOwnRouteUpdateDmc2.FromOwnedCommitAsync(this, current,
+                        held, opened, op, own, peer, source, ct).ConfigureAwait(false);
+                    RequireApplicationDisposition(await application.MaterializeOwnRouteUpdateAsync(handoff, ct).ConfigureAwait(false));
+                }
+                else if (result.RouteProcessing[0] == 2)
+                {
+                    // Preserve the authenticated rejected receive and live TRS.
+                    // No positive projection; page ACK independently repeats
+                    // this native/history qualification under its own lease.
+                    await RequireRejectedPeerRouteControlCommitUnderLeaseAsync(current, held, opened,
+                        op, own, peer, source, ct).ConfigureAwait(false);
+                }
+                else
+                {
+                    using var handoff = await AuthenticatedPeerRouteUpdateDmc2.FromOwnedCommitAsync(this, current,
+                        held, opened, op, own, peer, source, ct).ConfigureAwait(false);
+                    RequireApplicationDisposition(await application.MaterializePeerRouteUpdateAsync(handoff, ct).ConfigureAwait(false));
+                }
+            }
             await RequireFinalMessagingFreshnessAsync(current, scope, own, peer, source, held, first, ct).ConfigureAwait(false);
             if (senderEvent?.ParsedPayload is AttachmentOfferDmc2Payload offered)
             {
@@ -207,7 +259,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     // No externally constructible authority, callback or raw-store adapter.
     // Its inputs are captured by the one account operation while holding its
     // real lease; both initial-key retirement and current heads were verified.
-    private sealed class AccountDpe2Authority(OwnedDid2MessagingStorage opened, HeldDeepIdV2AccountLease held,
+    private sealed class AccountDpe2Authority(ProtectedDeepIdV2AccountOwner owner, VerifiedDeepIdV2CurrentAccount account,
+        OwnedDid2MessagingStorage opened, HeldDeepIdV2AccountLease held,
         Did2MessagingFloor floor, byte[] operation, byte[] sendEventHash, byte[] receivedEnvelope,
         ExactDpe2ReceiveReplayDisposition replay, ParsedDmc2? senderEvent,
         DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own,
@@ -273,7 +326,13 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     }
                     finally { CryptographicOperations.ZeroMemory(hello); }
                 }
-                using var mutation = OwnedDid2MessagingMutation.Ratchet(opened.Scope, floor, plan, sendEventHash);
+                if (send && applicationEvent.ContentKind == Dmc2ContentKind.ContactRouteUpdate)
+                    await owner.RequireOwnRouteControlAdmissionUnderLeaseAsync(account, held, opened, operation,
+                        applicationEvent.CanonicalBytes, own, peer, source, cancellationToken).ConfigureAwait(false);
+                var routeOutcome = !send && applicationEvent.ContentKind == Dmc2ContentKind.ContactRouteUpdate ?
+                    await OwnedPeerRouteProcessingOutcome.CaptureUnderLeaseAsync(owner, account, opened, held, floor,
+                        snapshot, own, peer, source, cancellationToken).ConfigureAwait(false) : null;
+                using var mutation = OwnedDid2MessagingMutation.Ratchet(opened.Scope, floor, plan, sendEventHash, routeOutcome);
                 current = await opened.Custody.CommitOwnedAsync(mutation, cancellationToken).ConfigureAwait(false);
             }
             using var retained = opened.Sql.ReadVerifiedOperation(current, operation) ??

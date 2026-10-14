@@ -33,6 +33,10 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             await Assert.ThrowsAsync<Deep.Client.Shared.Services.ClientMailboxDispatchOutcomeUnknownException>(
                 () => fixture.DeliverNativeInitial(intent, grants, transport));
             Assert.Equal(1, transport.Calls); transport.LoseReply = false;
+            // A lost reply retains the real retry lease. Advance the signed
+            // fixture sample/proof together, not the production lease/window;
+            // do not depend on slow database opening to make the retry due.
+            fixture.Sample += 40; fixture.ProofTime += 40;
         }
         var expectedIngress = loseReply ? 2 : 1;
         if (interruptBeforeIngress)
@@ -43,6 +47,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             }))
                 await Assert.ThrowsAsync<IOException>(() => fixture.DeliverNativeInitial(intent, grants, transport));
             Assert.Equal(0, transport.Calls);
+            // BeforeDispatch already reserved the exact request's retry lease.
+            fixture.Sample += 40; fixture.ProofTime += 40;
         }
         var stored = await fixture.DeliverNativeInitial(intent, grants, transport);
         Assert.True(stored.IngressDispatched); Assert.Equal(expectedIngress, transport.Calls); Assert.Equal(1, grants.Calls);
@@ -198,6 +204,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             Assert.Equal(0, transport.Calls);
             // Public evidence alone is not a Store success. The exact prepared
             // request must still reach ingress once on the subsequent attempt.
+            fixture.Sample += 40; fixture.ProofTime += 40;
         }
         var stored = await fixture.DeliverNativeMessage(receiver, operation, grants, transport);
         Assert.True(stored.IngressDispatched); Assert.Equal(1, transport.Calls); Assert.Equal(1, grants.Calls);
@@ -333,8 +340,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         using (var accept = await fixture.PrepareOwnedContactAccept(receiver, Bytes(32, 0xd2)))
         using (var sent = await fixture.SendOwnedMessage(receiver, accept.Operation.ToArray(), ApplicationCoreCodec.DecodeDmc2(accept.ExactDmc2)))
         using (var received = await fixture.ReceiveOwnedMessage(sender, sent.ExactEnvelope.ToArray())) { }
-        var operation = Bytes(32, 0xd3);
-        using var text = await fixture.PrepareOwnedText(sender, operation, "completed Store is not renewed admission");
+        using var text = await fixture.CreateOwnedText(sender, "completed Store is not renewed admission");
+        var operation = text.OperationId.ToArray();
         using var committed = await fixture.SendOwnedMessage(sender, operation, ApplicationCoreCodec.DecodeDmc2(text.ExactDmc2.Span));
         var grants = new OwnedGrantTransport(fixture, ownerOnPrimary: true);
         var transport = new OwnedStoreFixture(fixture, sender, operation, committed.ExactEnvelope.ToArray());
@@ -381,8 +388,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         using (var accept = await fixture.PrepareOwnedContactAccept(receiver, Bytes(32, 0xe2)))
         using (var sent = await fixture.SendOwnedMessage(receiver, accept.Operation.ToArray(), ApplicationCoreCodec.DecodeDmc2(accept.ExactDmc2)))
         using (var received = await fixture.ReceiveOwnedMessage(sender, sent.ExactEnvelope.ToArray())) { }
-        var operation = Bytes(32, 0xe3);
-        using var text = await fixture.PrepareOwnedText(sender, operation, "completion keeps facts, not expired authority");
+        using var text = await fixture.CreateOwnedText(sender, "completion keeps facts, not expired authority");
+        var operation = text.OperationId.ToArray();
         using var committed = await fixture.SendOwnedMessage(sender, operation, ApplicationCoreCodec.DecodeDmc2(text.ExactDmc2.Span));
         // Signed receipts use the advancing dispatch clock. The independently
         // sampled authority clock must advance too; a frozen sample would put
@@ -483,8 +490,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         using (var accept = await fixture.PrepareOwnedContactAccept(receiver, Bytes(32, 0xb2)))
         using (var sent = await fixture.SendOwnedMessage(receiver, accept.Operation.ToArray(), ApplicationCoreCodec.DecodeDmc2(accept.ExactDmc2)))
         using (var received = await fixture.ReceiveOwnedMessage(sender, sent.ExactEnvelope.ToArray())) { }
-        var operation = Bytes(32, 0xb3);
-        using var text = await fixture.PrepareOwnedText(sender, operation, "one monotonic owned preparation/dispatch clock");
+        using var text = await fixture.CreateOwnedText(sender, "one monotonic owned preparation/dispatch clock");
+        var operation = text.OperationId.ToArray();
         using var committed = await fixture.SendOwnedMessage(sender, operation, ApplicationCoreCodec.DecodeDmc2(text.ExactDmc2.Span));
         var grants = new OwnedGrantTransport(fixture, ownerOnPrimary: true);
         var transport = new OwnedStoreFixture(fixture, sender, operation, committed.ExactEnvelope.ToArray());
@@ -541,7 +548,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             WithAuthoredApplicationConnectionAsync(test.Scope, connection =>
             {
                 using var read = connection.CreateCommand();
-                read.CommandText = "SELECT count(*) FROM mailbox_store_public_evidence WHERE scope_hash=$scope AND operation_id=$op;";
+                read.CommandText = "SELECT count(*) FROM mailbox_store_public_evidence WHERE scope_hash=$scope AND attempt_id=$op;";
                 read.Parameters.AddWithValue("$scope", test.Scope.Hash.ToArray());
                 read.Parameters.AddWithValue("$op", test.Operation);
                 Assert.Equal(1L, read.ExecuteScalar());
@@ -560,7 +567,13 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                     original = root.Use(bytes => bytes.ToArray());
                     using var drafts = ProtectedDid2ContactStartJournal.Decode(original, scope.Network, scope.LocalAccount, scope.Instance);
                     Assert.True(drafts.Entries.Remove(Convert.ToHexString(intent), out var removed)); removed!.Dispose();
-                    missing = ProtectedDid2ContactStartJournal.Encode(drafts, scope.Network, scope.LocalAccount, scope.Instance);
+                    // The current encoder rejects an emptied non-genesis root.
+                    Assert.Throws<InvalidDataException>(() => ProtectedDid2ContactStartJournal.Encode(
+                        drafts, scope.Network, scope.LocalAccount, scope.Instance));
+                    // Deliberate hostile rollback in this disposable fixture:
+                    // even a canonical empty genesis cannot erase an existing
+                    // native contact command or authorize another resolution.
+                    missing = ProtectedDid2ContactStartJournal.Empty(scope.Network, scope.LocalAccount, scope.Instance);
                     Assert.True(await storage.CompareExchangeAsync(ProtectedDid2ContactStartJournal.Slot, original, missing)); held.RequireActive();
                 }
                 var application = await ReadCompleteOrdinaryApplicationProjection(scope);
@@ -598,7 +611,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             WithAuthoredApplicationConnectionAsync(scope, connection =>
             {
                 using var delete = connection.CreateCommand();
-                delete.CommandText = "DELETE FROM mailbox_store_public_evidence WHERE scope_hash=$scope AND operation_id=$op;";
+                delete.CommandText = "DELETE FROM mailbox_store_public_evidence WHERE scope_hash=$scope AND attempt_id=$op;";
                 delete.Parameters.AddWithValue("$scope", scope.Hash.ToArray()); delete.Parameters.AddWithValue("$op", operation);
                 Assert.Equal(1, delete.ExecuteNonQuery());
             }, acquireOwnerLease: false);

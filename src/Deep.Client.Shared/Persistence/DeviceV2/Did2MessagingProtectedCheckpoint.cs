@@ -29,10 +29,18 @@ internal sealed class Did2MessagingProtectedCheckpoint(IDeepSecureStorage storag
     internal async Task EraseStableOrphansAsync(Did2MessagingFloor stable, CancellationToken ct)
     {
         _ = Did2MessagingFloor.Decode(stable.Exact.Span, scope);
-        var current = await ReadAsync(ct).ConfigureAwait(false);
-        if (stable.Phase != 1 || !Did2MessagingSessionScope.Fixed(current.Exact.Span, stable.Exact.Span))
+        if (stable.Phase != 1)
             throw new CryptographicException("Protected messaging orphan cleanup lacks its exact stable floor.");
-        await storage.DeleteBatchAsync(PartSlots(), ct).ConfigureAwait(false);
+        // Authenticate the aggregate, compare this exact stable floor and
+        // delete its orphan slots inside one storage transaction. This is
+        // not a cached floor or permission to erase another pending payload.
+        if (!await storage.CompareAndDeleteAsync(scope.FloorSlot, stable.Exact, PartSlots(), ct).ConfigureAwait(false))
+        {
+            // Preserve missing/malformed-floor rejection, but never retry a
+            // failed guard even if a subsequent read happens to match again.
+            _ = await ReadAsync(ct).ConfigureAwait(false);
+            throw new CryptographicException("Protected messaging orphan cleanup lacks its exact stable floor.");
+        }
     }
 
     internal async Task StageAsync(Did2MessagingFloor predecessor, Did2MessagingFloor pending,

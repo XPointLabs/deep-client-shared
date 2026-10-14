@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Security.Cryptography;
 using Deep.Client.Shared.Persistence;
 using Deep.Client.Shared.Persistence.DeviceV2;
@@ -18,16 +19,24 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             longMailboxWindow: true, initialMailboxAuthorityExpiry: 2_000);
         var test = await fixture.PrepareCompletedContactSendCase(initial);
         var stored = await test.Deliver();
+        // This test isolates the subsequent send/floor cleanup. The successful
+        // control payload/audit handover has its own actual-owner fault matrix.
+        await fixture.CancelNativeMessagingWork(test.Scope, test.Operation);
         await fixture.AdvanceOriginalStoreEpochForTestAsync(2_100);
         var secure = fixture.CompletedContactSendStorage(initial);
         using var raw = await secure.ReadOwnedAsync(ProtectedDid2MailboxSendJournal.Slot) ?? throw new InvalidDataException();
         var original = raw.Use(bytes => bytes.ToArray());
+        byte[] originalConsent = [];
+        var payloadSlot = initial ? ProtectedDid2ContactStartJournal.Slot : ProtectedDid2ContactAcceptJournal.Slot;
+        using (var consent = await secure.ReadOwnedAsync(payloadSlot) ?? throw new InvalidDataException()) originalConsent = consent.Use(bytes => bytes.ToArray());
         var application = await fixture.ReadCompleteOrdinaryApplicationProjection(test.Scope);
         var native = (await fixture.ReadMessagingFloor(test.Scope)).Exact.ToArray();
         var heldRoots = await fixture.ReadCompletedContactSendRetainedRoots(test.Scope);
         var sourceSql = await fixture.ReadCompletedContactSendSourceProjection(test.Scope);
-        var points = new[] { Did2CompactionFailpoint.AfterStage, Did2CompactionFailpoint.AfterSqlRecorded,
-            Did2CompactionFailpoint.AfterHistoryAdopted, Did2CompactionFailpoint.AfterPartsDeleted, Did2CompactionFailpoint.AfterPlanCleared };
+        var points = new[] { (Did2CompactionFailpoint.AfterStage, 1), (Did2CompactionFailpoint.AfterSqlRecorded, 1),
+            (Did2CompactionFailpoint.AfterHistoryAdopted, 1), (Did2CompactionFailpoint.AfterHistoryAdopted, 2),
+            (Did2CompactionFailpoint.AfterPartsDeleted, 1), (Did2CompactionFailpoint.AfterPlanCleared, 1) }
+            .ToArray();
         for (var index = 0; index < points.Length; index++)
         {
             if (index != 0)
@@ -36,8 +45,11 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 // to exercise each boundary with the same one-time real Store.
                 using var retired = await secure.ReadOwnedAsync(ProtectedDid2MailboxSendJournal.Slot) ?? throw new InvalidDataException();
                 Assert.True(await secure.CompareExchangeAsync(ProtectedDid2MailboxSendJournal.Slot, retired.Use(bytes => bytes.ToArray()), original));
+                using var marker = await secure.ReadOwnedAsync(payloadSlot) ?? throw new InvalidDataException();
+                Assert.True(await secure.CompareExchangeAsync(payloadSlot, marker.Use(bytes => bytes.ToArray()), originalConsent));
             }
-            using (Did2CompactionTestHooks.Push(point => { if (point == points[index]) throw new IOException("Injected completed contact-send handover."); }))
+            var hits = 0;
+            using (Did2CompactionTestHooks.Push(point => { if (point == points[index].Item1 && ++hits == points[index].Item2) throw new IOException("Injected completed contact-send handover."); }))
                 await Assert.ThrowsAsync<IOException>(() => fixture.RetireCompletedContactSend(test));
             if (initial) fixture.ColdReopenCompactionStorage(); else fixture.ColdReopenReceiverStoreStorage();
             var owner = fixture.CompletedContactSendRecoveryOwner(initial);
@@ -62,11 +74,34 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                     using var restore = sql.CreateCommand(); restore.CommandText = "UPDATE device_store_meta SET account_generation=X'0000000000000001';";
                     Assert.Equal(1, restore.ExecuteNonQuery());
                 });
-                if (!initial) await fixture.AssertCompletedContactResponderMutationPinsPlan(test, owner, original);
+                if (!initial)
+                {
+                    await fixture.AssertCompletedContactResponderMutationPinsPlan(test, owner, original);
+                }
+                await fixture.AssertCompletedContactConsentMutationPinsPlan(initial, owner, original, originalConsent);
             }
+            if (points[index].Item1 is Did2CompactionFailpoint.AfterSqlRecorded or Did2CompactionFailpoint.AfterHistoryAdopted)
+                await Assert.ThrowsAsync<InvalidOperationException>(() => owner.AbandonUncommittedMailboxRetirementAsync(default));
             await owner.ResumeOwnedLocalCompactionAsync(default);
             using (var sends = await fixture.ReadMailboxSends(own: initial))
             { Assert.Empty(sends.Entries); Assert.Equal(1UL, Assert.Single(sends.Floors).Value.HighestCounter); }
+            if (initial)
+            {
+                using var draft = await secure.ReadOwnedAsync(payloadSlot) ?? throw new InvalidDataException();
+                using var commands = draft.Use(bytes => ProtectedDid2ContactStartJournal.Decode(bytes, test.Scope.Network, test.Scope.LocalAccount, test.Scope.Instance));
+                var command = commands.Entries[Convert.ToHexString(test.Intent)];
+                Assert.True(command.PayloadRetired); Assert.Equal(ProtectedDid2ContactStartJournal.PrefixBytes, command.Exact.Length);
+                Assert.True(command.Intent.SequenceEqual(test.Intent));
+            }
+            else
+            {
+                using var consent = await secure.ReadOwnedAsync(ProtectedDid2ContactAcceptJournal.Slot) ?? throw new InvalidDataException();
+                using var commands = consent.Use(bytes => ProtectedDid2ContactAcceptJournal.Decode(bytes,
+                    test.Scope.Network, test.Scope.LocalAccount, test.Scope.Instance));
+                var command = commands.FindScope(test.Scope) ?? throw new InvalidDataException();
+                Assert.True(command.PayloadRetired); Assert.Equal(ProtectedDid2ContactAcceptJournal.PrefixBytes, command.Exact.Length);
+                Assert.True(command.Operation.SequenceEqual(test.Operation));
+            }
             Assert.Equal(application, await fixture.ReadCompleteOrdinaryApplicationProjection(test.Scope));
             Assert.Equal(native, (await fixture.ReadMessagingFloor(test.Scope)).Exact.ToArray());
             Assert.Equal(heldRoots, await fixture.ReadCompletedContactSendRetainedRoots(test.Scope));
@@ -80,7 +115,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         await fixture.AssertCompactedStoreRejectsChangedPublicEvidence(test.Scope, () => fixture.RetireCompletedContactSend(test));
         Assert.Equal(1, test.Grants.Calls); Assert.Equal(1, test.Transport.Calls);
         Assert.Equal(application, await fixture.ReadCompleteOrdinaryApplicationProjection(test.Scope));
-        foreach (var bytes in new[] { original, application, native, heldRoots, sourceSql, test.Operation, test.Intent }) CryptographicOperations.ZeroMemory(bytes);
+        foreach (var bytes in new[] { original, originalConsent, application, native, heldRoots, sourceSql, test.Operation, test.Intent }) CryptographicOperations.ZeroMemory(bytes);
     }
 
     [Theory]
@@ -111,9 +146,10 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         internal IDeepSecureStorage CompletedContactSendStorage(bool own) => own ? storage : peerStorage;
         internal ProtectedDeepIdV2AccountOwner CompletedContactSendRecoveryOwner(bool own) => own ? SenderCompactionOwner() : PeerRetirementOwner();
         internal sealed record CompletedContactSendCase(Did2MessagingSessionScope Scope, byte[] Operation, byte[] Intent,
-            OwnedGrantTransport Grants, OwnedStoreFixture Transport, Func<Task<ClientMailboxStoreResult>> Deliver);
+            OwnedGrantTransport Grants, OwnedStoreFixture Transport, Func<Task<ClientMailboxStoreResult>> Deliver,
+            Did2MessagingSessionScope? PeerScope = null);
 
-        internal async Task<CompletedContactSendCase> PrepareCompletedContactSendCase(bool isInitial)
+        internal async Task<CompletedContactSendCase> PrepareCompletedContactSendCase(bool isInitial, bool encryptAcceptance = true)
         {
             var intent = Bytes(32, 0x61);
             var (complete, hello, init, _, _) = await PrepareNativeHelloCompletion(intent);
@@ -126,13 +162,17 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             else
             {
                 using var accept = await PrepareOwnedContactAccept(scope, Bytes(32, 0x62)); operation = accept.Operation.ToArray();
-                using var sent = await SendOwnedMessage(scope, operation, ApplicationCoreCodec.DecodeDmc2(accept.ExactDmc2));
-                envelope = sent.ExactEnvelope.ToArray(); intent = [];
+                if (encryptAcceptance)
+                { using var sent = await SendOwnedMessage(scope, operation, ApplicationCoreCodec.DecodeDmc2(accept.ExactDmc2)); envelope = sent.ExactEnvelope.ToArray(); }
+                else envelope = [];
+                intent = [];
             }
             TrackMailboxDispatchClock();
             var grants = new OwnedGrantTransport(this, ownerOnPrimary: isInitial);
             var transport = new OwnedStoreFixture(this, isInitial ? null : scope, operation, envelope);
-            return new(scope, operation, intent, grants, transport, () => isInitial ? DeliverNativeInitial(intent, grants, transport) : DeliverNativeMessage(scope, operation, grants, transport));
+            return new(scope, operation, intent, grants, transport,
+                () => isInitial ? DeliverNativeInitial(intent, grants, transport) : DeliverNativeMessage(scope, operation, grants, transport),
+                isInitial ? null : sender);
         }
 
         internal Task RetireCompletedContactSend(CompletedContactSendCase test)
@@ -150,7 +190,26 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 ProtectedDid2MailboxReadJournal.Slot, ProtectedDid2MessagingSessionCatalog.Slot, ProtectedDid2AttachmentJournal.Slot,
                 SqliteDeepIdV2AccountGeneration.CompactionRegistrationSlot, ProtectedDid2ContactStartJournal.Slot,
                 ProtectedDid2ContactAcceptJournal.Slot, ProtectedInitialKeyRetirementJournal.Slot, ProtectedDph2PreClaimJournal.Slot })
-            { using var raw = await secure.ReadOwnedAsync(slot) ?? throw new InvalidDataException(); raw.Use(bytes => { hash.AppendData(SHA256.HashData(bytes)); return true; }); }
+            {
+                using var raw = await secure.ReadOwnedAsync(slot) ?? throw new InvalidDataException();
+                if (slot == ProtectedDid2ContactStartJournal.Slot)
+                {
+                    using var commands = raw.Use(bytes => ProtectedDid2ContactStartJournal.Decode(bytes, scope.Network, scope.LocalAccount, scope.Instance));
+                    hash.AppendData(BitConverter.GetBytes(commands.Entries.Count));
+                    foreach (var entry in commands.Entries.Values) hash.AppendData(entry.Exact[..432]);
+                }
+                else if (slot == ProtectedDid2ContactAcceptJournal.Slot)
+                {
+                    // Consent/history identity must stay exact; declared
+                    // working payload and phase/revision are intentionally retired.
+                    using var commands = raw.Use(bytes => ProtectedDid2ContactAcceptJournal.Decode(bytes,
+                        scope.Network, scope.LocalAccount, scope.Instance));
+                    hash.AppendData(BitConverter.GetBytes(commands.Entries.Count));
+                    foreach (var command in commands.Entries.Values)
+                    { hash.AppendData(command.Operation); hash.AppendData(command.Scope.Exact); hash.AppendData(command.HelloHash); hash.AppendData(command.EventHash); }
+                }
+                else raw.Use(bytes => { hash.AppendData(SHA256.HashData(bytes)); return true; });
+            }
             return hash.GetHashAndReset();
         }
 
@@ -209,6 +268,32 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             finally { CryptographicOperations.ZeroMemory(exactCiphertext); }
         }
 
+        internal async Task AssertCompletedContactConsentMutationPinsPlan(bool initial, ProtectedDeepIdV2AccountOwner owner,
+            byte[] originalSend, byte[] originalConsent)
+        {
+            var changed = originalConsent.ToArray();
+            BinaryPrimitives.WriteUInt64BigEndian(changed.AsSpan(4),
+                checked(BinaryPrimitives.ReadUInt64BigEndian(changed.AsSpan(4)) + 1));
+            try
+            {
+                var secure = CompletedContactSendStorage(initial);
+                var slot = initial ? ProtectedDid2ContactStartJournal.Slot : ProtectedDid2ContactAcceptJournal.Slot;
+                Assert.True(await secure.CompareExchangeAsync(slot, originalConsent, changed));
+                using var before = await secure.ReadOwnedAsync(Did2CompactionPlan.Slot) ?? throw new InvalidDataException();
+                var error = await Record.ExceptionAsync(() => owner.ResumeOwnedLocalCompactionAsync(default));
+                Assert.True(error is InvalidDataException or CryptographicException, error?.GetType().Name ?? "Unexpected successful recovery");
+                using var after = await secure.ReadOwnedAsync(Did2CompactionPlan.Slot) ?? throw new InvalidDataException();
+                using var send = await secure.ReadOwnedAsync(ProtectedDid2MailboxSendJournal.Slot) ?? throw new InvalidDataException();
+                using var consent = await secure.ReadOwnedAsync(slot) ?? throw new InvalidDataException();
+                var beforeDigest = before.Use(bytes => SHA256.HashData(bytes));
+                Assert.True(after.Use(bytes => CryptographicOperations.FixedTimeEquals(SHA256.HashData(bytes), beforeDigest)));
+                Assert.True(send.Use(bytes => bytes.SequenceEqual(originalSend)));
+                Assert.True(consent.Use(bytes => bytes.SequenceEqual(changed)));
+                Assert.True(await secure.CompareExchangeAsync(slot, changed, originalConsent));
+            }
+            finally { CryptographicOperations.ZeroMemory(changed); }
+        }
+
         internal async Task WithCompletedContactSourceSql(Did2MessagingSessionScope scope, Action<SqliteConnection> change)
         {
             var accountDirectory = scope.IsInitiator ? directory : Path.Combine(directory, "peer");
@@ -227,7 +312,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             {
                 using var sql = new SqliteConnection(new SqliteConnectionStringBuilder
                 { DataSource = Path.Combine(accountDirectory, "deep-store-v2-account.dsv2.devices.dvs1"), Mode = SqliteOpenMode.ReadWrite, Pooling = false }.ToString());
-                sql.Open(); Assert.Equal(SQLitePCL.raw.SQLITE_OK, SQLitePCL.raw.sqlite3_key(sql.Handle, key)); change(sql); held.RequireActive();
+                sql.Open(); Assert.Equal(SQLitePCL.raw.SQLITE_OK, MailboxRandomKeyTestEncoding.Apply(sql, key)); change(sql); held.RequireActive();
             }
             finally { CryptographicOperations.ZeroMemory(key); }
         }

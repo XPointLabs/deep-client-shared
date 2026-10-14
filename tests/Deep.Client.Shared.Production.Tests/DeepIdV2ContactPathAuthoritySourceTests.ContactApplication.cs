@@ -47,7 +47,12 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             IDid2MailboxGrantTransport grants, IDid2OwnedMailboxTransportFactory transport)
         {
             var selected = await ReadApplicationConversation(scope);
-            return await selected.Account.SendTextAsync(selected.Handle, op, text, selected.Source, grants, transport);
+            return await selected.Account.RetryTextAsync(selected.Handle, op, text, selected.Source, grants, transport);
+        }
+        internal async Task<byte[]> QueueNativeText(Did2MessagingSessionScope scope, string text)
+        {
+            var selected = await ReadApplicationConversation(scope);
+            return (await selected.Account.QueueTextAsync(selected.Handle, text, selected.Source)).ToArray();
         }
         internal async Task<IReadOnlyList<DirectMessageCreateSnapshot>> ListNativeApplicationMessages(Did2MessagingSessionScope scope)
         {

@@ -37,7 +37,15 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             key = DeriveApplicationKey(record);
             using var options = new SqliteDeepMailboxStoreOptions(path, key);
             ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
-            return SqliteDeepMailboxStore.OpenExisting(options);
+            var store = SqliteDeepMailboxStore.OpenExisting(options);
+            try
+            {
+                BindStoppedAuditKey(store, record);
+                await BindControlAuditCustodyAsync(store, storage, record, held, ct).ConfigureAwait(false);
+                await ValidateIdleStoppedAuditCustodyAsync(store, storage, record, held, ct).ConfigureAwait(false);
+                return store;
+            }
+            catch { store.Dispose(); throw; }
         }
         finally
         {
@@ -58,6 +66,55 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             return HMACSHA256.HashData(accountRecord.Slice(88, 32), context);
         }
         finally { CryptographicOperations.ZeroMemory(context); }
+    }
+
+    private static void BindStoppedAuditKey(SqliteDeepMailboxStore store, ReadOnlySpan<byte> record)
+    {
+        var domain = "Deep/STORE-V2/stopped-work-audit-key"u8;
+        var context = new byte[domain.Length + 1 + 80]; byte[] key = [];
+        try
+        {
+            domain.CopyTo(context); record.Slice(8, 80).CopyTo(context.AsSpan(domain.Length + 1));
+            key = HMACSHA256.HashData(record.Slice(88, 32), context);
+            store.BindStoppedAuditKey(key);
+        }
+        finally { CryptographicOperations.ZeroMemory(context); CryptographicOperations.ZeroMemory(key); }
+    }
+
+    private static async Task BindControlAuditCustodyAsync(SqliteDeepMailboxStore store, IDeepSecureStorage storage,
+        byte[] record, HeldDeepIdV2AccountLease held, CancellationToken ct)
+    {
+        held.RequireActive();
+        using var startsRaw = await storage.ReadOwnedAsync(ProtectedDid2ContactStartJournal.Slot, ct).ConfigureAwait(false) ?? throw new InvalidDataException("Control audit binding lost Initial custody.");
+        using var acceptsRaw = await storage.ReadOwnedAsync(ProtectedDid2ContactAcceptJournal.Slot, ct).ConfigureAwait(false) ?? throw new InvalidDataException("Control audit binding lost acceptance custody.");
+        using var starts = startsRaw.Use(bytes => ProtectedDid2ContactStartJournal.Decode(bytes, record.AsSpan(8, 16), record.AsSpan(24, 32), record.AsSpan(56, 32)));
+        using var accepts = acceptsRaw.Use(bytes => ProtectedDid2ContactAcceptJournal.Decode(bytes, record.AsSpan(8, 16), record.AsSpan(24, 32), record.AsSpan(56, 32)));
+        var rows = new List<SqliteDeepMailboxStore.ControlAuditCustody>();
+        try
+        {
+            foreach (var entry in starts.Entries.Values.Where(entry => entry.WorkStopped || entry.SuccessfullyStored))
+                rows.Add(new(1, ProtectedDeepIdV2AccountOwner.InitialMailboxOperation(entry.Intent), entry.WorkStopped ? (byte)entry.StopReason : (byte)3,
+                    entry.TerminalAtUpper, entry.PayloadRetired, entry.AuditDisposition));
+            foreach (var entry in accepts.Entries.Values.Where(entry => entry.WorkStopped || entry.SuccessfullyStored))
+                rows.Add(new(2, entry.Operation.ToArray(), entry.WorkStopped ? (byte)entry.StopReason : (byte)3, entry.TerminalAtUpper, entry.PayloadRetired, entry.AuditDisposition));
+            ct.ThrowIfCancellationRequested(); held.RequireActive(); store.BindControlAuditCustody(rows);
+        }
+        finally { foreach (var row in rows) CryptographicOperations.ZeroMemory(row.Operation); }
+    }
+
+    private static async Task ValidateIdleStoppedAuditCustodyAsync(SqliteDeepMailboxStore store, IDeepSecureStorage storage,
+        byte[] record, HeldDeepIdV2AccountLease held, CancellationToken ct)
+    {
+        held.RequireActive();
+        using var plan = await ProtectedDid2CompactionPlan.ReadRegisteredAsync(storage, record.AsMemory(8, 16),
+            record.AsMemory(24, 32), record.AsMemory(56, 32), ct).ConfigureAwait(false);
+        if (plan.Phase != 0) return; // The exact active transaction owns intermediate SQL/root agreement.
+        using var raw = await storage.ReadOwnedAsync(ProtectedDid2DirectTextJournal.Slot, ct).ConfigureAwait(false) ??
+            throw new InvalidDataException("Audit completeness lost ordinary custody.");
+        using var ordinary = raw.Use(bytes => ProtectedDid2DirectTextJournal.Decode(bytes, record.AsSpan(8, 16),
+            record.AsSpan(24, 32), record.AsSpan(56, 32)));
+        await store.ValidateCompleteStoppedAuditsAsync(ordinary, ct).ConfigureAwait(false);
+        ct.ThrowIfCancellationRequested(); held.RequireActive();
     }
 
     private static byte[] NewApplicationRegistration(ReadOnlySpan<byte> accountRecord)
@@ -108,6 +165,9 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             ct.ThrowIfCancellationRequested(); held.RequireActive();
             store = registration[1] == 1 && !File.Exists(path)
                 ? new(options) : SqliteDeepMailboxStore.OpenExisting(options);
+            BindStoppedAuditKey(store, record);
+            await BindControlAuditCustodyAsync(store, storage, record, held, ct).ConfigureAwait(false);
+            await ValidateIdleStoppedAuditCustodyAsync(store, storage, record, held, ct).ConfigureAwait(false);
             if (registration[1] == 1)
             {
                 store.RequireInitializedEmpty();

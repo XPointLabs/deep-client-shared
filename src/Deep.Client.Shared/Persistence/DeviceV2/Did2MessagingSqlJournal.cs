@@ -16,7 +16,7 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
     Did2MessagingHistoryCheckpoint history)
 {
     private readonly Did2MessagingHistoryCheckpoint historyRoot = history ?? throw new ArgumentNullException(nameof(history));
-    internal const int ApplicationId = 0x444d5332, SchemaVersion = 3, MaximumEntries = 4096;
+    internal const int ApplicationId = 0x444d5332, SchemaVersion = 5, MaximumEntries = 4096;
     private readonly SqliteConnection connection = connection ?? throw new ArgumentNullException(nameof(connection));
     private readonly Did2MessagingSessionScope scope = scope ?? throw new ArgumentNullException(nameof(scope));
     internal void RequireScope(Did2MessagingSessionScope expected)
@@ -26,10 +26,10 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
     private static readonly (string Name, string Sql)[] Schema =
     [
         ("scope", "CREATE TABLE scope (singleton INTEGER PRIMARY KEY CHECK(singleton=1), exact_scope BLOB NOT NULL CHECK(length(exact_scope)=404));"),
-        ("journal", "CREATE TABLE journal (ordinal INTEGER PRIMARY KEY CHECK(ordinal BETWEEN 1 AND 9223372036854775807), predecessor BLOB NOT NULL CHECK(length(predecessor)=32), head BLOB NOT NULL CHECK(length(head)=32), metadata BLOB NOT NULL CHECK(length(metadata)=608));"),
+        ("journal", "CREATE TABLE journal (ordinal INTEGER PRIMARY KEY CHECK(ordinal BETWEEN 1 AND 9223372036854775807), predecessor BLOB NOT NULL CHECK(length(predecessor)=32), head BLOB NOT NULL CHECK(length(head)=32), metadata BLOB NOT NULL CHECK(length(metadata)=672));"),
         ("ratchet", "CREATE TABLE ratchet (singleton INTEGER PRIMARY KEY CHECK(singleton=1), exact_state BLOB NOT NULL CHECK(length(exact_state) BETWEEN 1 AND 2097152));"),
-        ("initial_events", "CREATE TABLE initial_events (singleton INTEGER PRIMARY KEY CHECK(singleton=1), envelope BLOB NOT NULL CHECK(length(envelope) BETWEEN 1 AND 65536), session_init BLOB NOT NULL CHECK(length(session_init) BETWEEN 1 AND 32768), hello BLOB NOT NULL CHECK(length(hello) BETWEEN 1 AND 32768), metadata BLOB NOT NULL CHECK(length(metadata)=608));"),
-        ("events", "CREATE TABLE events (operation BLOB PRIMARY KEY CHECK(length(operation)=32), ordinal INTEGER NOT NULL UNIQUE CHECK(ordinal BETWEEN 1 AND 9223372036854775807), direction INTEGER NOT NULL CHECK(direction IN (1,2)), envelope BLOB NOT NULL CHECK(length(envelope) BETWEEN 1 AND 65536), plaintext BLOB, metadata BLOB NOT NULL CHECK(length(metadata)=608), CHECK((direction=1 AND plaintext IS NULL) OR (direction=2 AND plaintext IS NOT NULL AND length(plaintext) BETWEEN 1 AND 33082)));"),
+        ("initial_events", "CREATE TABLE initial_events (singleton INTEGER PRIMARY KEY CHECK(singleton=1), envelope BLOB NOT NULL CHECK(length(envelope) BETWEEN 1 AND 65536), session_init BLOB NOT NULL CHECK(length(session_init) BETWEEN 1 AND 32768), hello BLOB NOT NULL CHECK(length(hello) BETWEEN 1 AND 32768), metadata BLOB NOT NULL CHECK(length(metadata)=672));"),
+        ("events", "CREATE TABLE events (operation BLOB PRIMARY KEY CHECK(length(operation)=32), ordinal INTEGER NOT NULL UNIQUE CHECK(ordinal BETWEEN 1 AND 9223372036854775807), direction INTEGER NOT NULL CHECK(direction IN (1,2,3,4)), envelope BLOB NOT NULL CHECK(length(envelope) BETWEEN 1 AND 65536), plaintext BLOB, metadata BLOB NOT NULL CHECK(length(metadata)=672), CHECK((direction=1 AND plaintext IS NULL) OR (direction=2 AND plaintext IS NOT NULL AND length(plaintext) BETWEEN 1 AND 33082) OR (direction IN (3,4) AND length(envelope)=4112 AND plaintext IS NULL)));"),
     ];
 
     internal void CreateRegisteredEmpty(Did2MessagingFloor registeredEmpty)
@@ -66,12 +66,14 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
         else RequireSame(registeredEmpty, VerifyTip());
     }
 
-    internal Did2MessagingFloor VerifyTip()
+    internal Did2MessagingFloor VerifyTip() => VerifyTipInTransaction(null);
+
+    private Did2MessagingFloor VerifyTipInTransaction(SqliteTransaction? tx)
     {
-        RequireCipherPolicy(); ValidateSchema();
-        VerifyHistoryPrefix();
-        var headers = ReadJournal(out var tip);
-        VerifyRows(headers, tip);
+        RequireCipherPolicy(tx); ValidateSchema(tx);
+        VerifyHistoryPrefix(tx);
+        var headers = ReadJournal(out var tip, tx);
+        VerifyRows(headers, tip, tx);
         return tip;
     }
 
@@ -124,7 +126,7 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
             blobs.Add(journal, "$previous", prior.Head); blobs.Add(journal, "$head", mutation.Successor.Head); blobs.Add(journal, "$header", mutation.Header);
             journal.ExecuteNonQuery();
         }
-        if (mutation.Kind is 1 or 2)
+        if (mutation.Kind is 1 or 2 or 5)
         {
             Execute("DELETE FROM ratchet;", tx);
             using var state = Command("INSERT INTO ratchet VALUES(1,$state);", tx);
@@ -138,7 +140,7 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
             blobs.Add(initial, "$metadata", mutation.Header);
             initial.ExecuteNonQuery();
         }
-        else if (mutation.Kind == 2)
+        else if (mutation.Kind is 2 or 5)
         {
             using var message = Command("INSERT INTO events VALUES($operation,$ordinal,$direction,$envelope,$plain,$metadata);", tx);
             blobs.Add(message, "$operation", mutation.Operation); message.Parameters.AddWithValue("$ordinal", checked((long)mutation.Successor.Ordinal));
@@ -192,10 +194,24 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
         _ = Did2MessagingFloor.Decode(protectedStable.Exact.Span, scope);
         if (protectedStable.Phase != 1 || protectedStable.Status != 1)
             throw new InvalidDataException("Operation read-back requires an active stable messaging floor.");
-        RequireSame(protectedStable, VerifyTip());
-        using var command = Command("SELECT direction,length(envelope),envelope,length(plaintext),plaintext,metadata FROM events WHERE operation=$op;");
+        using var tx = connection.BeginTransaction(deferred: true);
+        RequireSame(protectedStable, VerifyTipInTransaction(tx));
+        using var command = Command("SELECT direction,length(envelope),envelope,length(plaintext),plaintext,metadata,ordinal FROM events WHERE operation=$op;", tx);
         command.Parameters.AddWithValue("$op", operation.ToArray()); using var row = command.ExecuteReader();
+        return ReadSelectedOrdinaryEvent(protectedStable, row);
+    }
+
+    // Both selectors fully authenticate SQL against the independent protected
+    // tip and execute their single bounded row query in the same read snapshot.
+    // There is no await or callback while that transaction is held. This
+    // materializer cannot select an operation or confer verification authority.
+    private OwnedDid2MessagingPersistedEvent? ReadSelectedOrdinaryEvent(
+        Did2MessagingFloor protectedStable, SqliteDataReader row)
+    {
         if (!row.Read()) return null;
+        _ = Did2MessagingFloor.Decode(protectedStable.Exact.Span, scope);
+        if (protectedStable.Phase != 1 || protectedStable.Status != 1)
+            throw new InvalidDataException("Operation read-back requires an active stable messaging floor.");
         var direction = row.GetInt32(0);
         if (direction is not (1 or 2) || row.GetInt64(1) is < 1 or > 65536 ||
             direction == 1 && !row.IsDBNull(3) || direction == 2 && (row.IsDBNull(3) || row.GetInt64(3) is < 1 or > 33082))
@@ -205,7 +221,8 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
         {
             if (direction == 2) plaintext = row.GetFieldValue<byte[]>(4);
             var metadata = row.GetFieldValue<byte[]>(5);
-            result = new(direction, envelope, plaintext, metadata.AsSpan(300, 32));
+            result = new(direction, checked((ulong)row.GetInt64(6)), envelope, plaintext, metadata.AsSpan(300, 32),
+                metadata.AsSpan(Did2RouteProcessingMetadata.Offset, Did2RouteProcessingMetadata.Bytes));
             envelope = []; plaintext = [];
             if (row.Read()) throw new InvalidDataException("Retained messaging operation is not unique.");
             var value = result; result = null; return value;
@@ -216,13 +233,15 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
     internal OwnedDid2MessagingPersistedEvent? ReadVerifiedReceiveForEvent(Did2MessagingFloor protectedStable, ReadOnlySpan<byte> eventHash)
     {
         ProtectedDph2PreClaimJournal.RequireIntent(eventHash);
-        RequireSame(protectedStable, VerifyTip());
-        using var command = Command("SELECT operation FROM events WHERE direction=2 AND substr(metadata,301,32)=$hash ORDER BY ordinal LIMIT 1;");
+        using var tx = connection.BeginTransaction(deferred: true);
+        RequireSame(protectedStable, VerifyTipInTransaction(tx));
+        // Select and materialize the earliest exact native receive in one query.
+        // There is no await, callback, mutation or verification-result cache
+        // between the complete authenticated tip and this row read.
+        using var command = Command("SELECT direction,length(envelope),envelope,length(plaintext),plaintext,metadata,ordinal FROM events WHERE direction=2 AND substr(metadata,301,32)=$hash ORDER BY ordinal LIMIT 1;", tx);
         command.Parameters.AddWithValue("$hash", eventHash.ToArray());
-        var operation = command.ExecuteScalar() as byte[];
-        if (operation is null) return null;
-        try { return ReadVerifiedOperation(protectedStable, operation); }
-        finally { CryptographicOperations.ZeroMemory(operation); }
+        using var row = command.ExecuteReader();
+        return ReadSelectedOrdinaryEvent(protectedStable, row);
     }
 
     // Store-derived snapshot only: neither an arbitrary retention hash nor a
@@ -239,6 +258,12 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
                 throw new CryptographicException("DID2 retained operation does not authorize this exact receive replay.");
             replay = ExactDpe2ReceiveReplayDisposition.ExactReplay;
         }
+        return CreateVerifiedContext(protectedStable, replay);
+    }
+
+    private ExactDpe2DurableTransitionContext CreateVerifiedContext(Did2MessagingFloor protectedStable,
+        ExactDpe2ReceiveReplayDisposition replay)
+    {
         var headers = ReadJournal(out var tip);
         if (replay == ExactDpe2ReceiveReplayDisposition.Fresh && headers.Count >= MaximumEntries - 1)
             throw new InvalidOperationException("DID2 ordinary messaging requires verified journal checkpointing.");
@@ -248,11 +273,11 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
         Span<byte> number = stackalloc byte[8]; BinaryPrimitives.WriteUInt64BigEndian(number, 1);
         digest.AppendData(number); digest.AppendData(scope.Hash); digest.AppendData(protectedStable.Exact.Span);
         digest.AppendData(historyRoot.Exact.Span);
-        BinaryPrimitives.WriteUInt64BigEndian(number, checked((ulong)headers.Count(h => h[5] == 2)));
+        BinaryPrimitives.WriteUInt64BigEndian(number, checked((ulong)headers.Count(h => h[5] is 2 or 5)));
         digest.AppendData(number);
         for (var index = 0; index < headers.Count; index++)
         {
-            if (headers[index][5] != 2) continue;
+            if (headers[index][5] is not (2 or 5)) continue;
             BinaryPrimitives.WriteUInt64BigEndian(number, checked(historyRoot.Basis.Ordinal + (ulong)index + 1));
             digest.AppendData(number); digest.AppendData(headers[index]);
         }
@@ -310,20 +335,37 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
         }
         VerifyInitial(headers, tx);
         var count = 0;
-        using var events = Command("SELECT operation,ordinal,direction,envelope,plaintext,metadata,length(envelope),length(plaintext),length(metadata) FROM events WHERE ordinal>$basis ORDER BY ordinal;", tx);
+        using var events = Command("SELECT operation,ordinal,direction,envelope,plaintext,metadata,length(envelope),length(plaintext),length(metadata),typeof(operation),typeof(ordinal),typeof(direction),typeof(envelope),typeof(plaintext),typeof(metadata),length(operation) FROM events WHERE ordinal>$basis ORDER BY ordinal;", tx);
         events.Parameters.AddWithValue("$basis", checked((long)historyRoot.Basis.Ordinal));
         using var eventReader = events.ExecuteReader();
         while (eventReader.Read())
         {
-            count++; var ordinal = eventReader.GetInt64(1); var direction = eventReader.GetInt32(2);
+            count++;
+            // Check storage types before requesting converted values. SQLite
+            // can return unchanged TEXT bytes through a BLOB accessor; byte
+            // hashes alone do not prove the closed native SQL representation.
+            if (eventReader.GetString(9) != "blob" || eventReader.GetInt64(15) != 32 ||
+                eventReader.GetString(10) != "integer" || eventReader.GetString(11) != "integer" ||
+                eventReader.GetString(12) != "blob" || eventReader.GetString(14) != "blob")
+                throw new InvalidDataException("DID2 SQL event has a noncanonical storage type.");
+            var ordinal = eventReader.GetInt64(1); var direction = eventReader.GetInt32(2);
             if (ordinal <= checked((long)historyRoot.Basis.Ordinal) || (ulong)ordinal - historyRoot.Basis.Ordinal > (ulong)headers.Count ||
+                eventReader.GetString(13) != (direction == 2 ? "blob" : "null") ||
                 eventReader.GetInt64(6) is < 1 or > 65536 || eventReader.GetInt64(8) != Did2MessagingFloor.MetadataBytes ||
-                direction == 1 && !eventReader.IsDBNull(7) || direction == 2 && (eventReader.IsDBNull(7) || eventReader.GetInt64(7) is < 1 or > 33082))
+                direction is not (1 or 2 or 3 or 4) || direction != 2 && !eventReader.IsDBNull(7) ||
+                direction == 2 && (eventReader.IsDBNull(7) || eventReader.GetInt64(7) is < 1 or > 33082) ||
+                direction is 3 or 4 && eventReader.GetInt64(6) != Dbr2Codec.TotalBytes)
                 throw new InvalidDataException("DID2 SQL event journal reference/size differs.");
             var header = headers[checked((int)((ulong)ordinal - historyRoot.Basis.Ordinal - 1))];
             if (!Fixed(eventReader.GetFieldValue<byte[]>(5), header))
                 throw new CryptographicException("DID2 SQL event metadata differs from its current journal.");
             var envelopeBytes = eventReader.GetFieldValue<byte[]>(3);
+            if (direction is 3 or 4)
+            {
+                OwnedDid2MessagingMutation.RequireControlEnvelope(scope, direction,
+                    eventReader.GetFieldValue<byte[]>(0), header, envelopeBytes);
+                continue;
+            }
             var envelope = Dpe2Codec.Decode(envelopeBytes);
             if (header[5] != 2 || direction != header[6] || !Fixed(eventReader.GetFieldValue<byte[]>(0), header.AsSpan(268, 32)) ||
                 !Fixed(envelope.OperationId.Span, header.AsSpan(268, 32)) || !Fixed(envelope.NetworkId.Span, scope.Network) ||
@@ -341,14 +383,19 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
                 try
                 {
                     var parsed = ApplicationCoreCodec.DecodeDmc2(plaintext);
-                    if (!Fixed(SHA256.HashData(plaintext), header.AsSpan(300, 32)) || !Fixed(parsed.NetworkId.Span, scope.Network) ||
-                        !Fixed(parsed.SenderAccountId.Span, scope.RemoteAccount) || !Fixed(parsed.SenderDeviceId.Span, scope.RemoteDevice))
-                        throw new CryptographicException("DID2 SQL authenticated receive scope differs.");
+                    try
+                    {
+                        Did2RouteProcessingMetadata.RequireReceivedEvent(header.AsSpan(Did2RouteProcessingMetadata.Offset), parsed);
+                        if (!Fixed(SHA256.HashData(plaintext), header.AsSpan(300, 32)) || !Fixed(parsed.NetworkId.Span, scope.Network) ||
+                            !Fixed(parsed.SenderAccountId.Span, scope.RemoteAccount) || !Fixed(parsed.SenderDeviceId.Span, scope.RemoteDevice))
+                            throw new CryptographicException("DID2 SQL authenticated receive scope differs.");
+                    }
+                    finally { if (parsed.ParsedPayload is AttachmentOfferDmc2Payload offer) offer.Manifest.Dispose(); }
                 }
                 finally { CryptographicOperations.ZeroMemory(plaintext); }
             }
         }
-        if (count != headers.Count(static header => header[5] == 2)) throw new InvalidDataException("DID2 SQL lost a journal-bound event.");
+        if (count != headers.Count(static header => header[5] is 2 or 5)) throw new InvalidDataException("DID2 SQL lost a journal-bound event.");
     }
     private void VerifyInitial(List<byte[]> headers, SqliteTransaction? tx)
     {
@@ -379,12 +426,12 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
         finally { CryptographicOperations.ZeroMemory(initBytes); CryptographicOperations.ZeroMemory(helloBytes); }
         if (reader.Read()) throw new InvalidDataException("DID2 SQL has duplicate initial events.");
     }
-    private void ValidateSchema()
+    private void ValidateSchema(SqliteTransaction? tx = null)
     {
-        if (PragmaInteger("application_id") != ApplicationId || PragmaInteger("user_version") != SchemaVersion)
+        if (PragmaInteger("application_id", tx) != ApplicationId || PragmaInteger("user_version", tx) != SchemaVersion)
             throw new InvalidDataException("DID2 messaging SQL generation differs; no old reader is permitted.");
         var expected = Schema.OrderBy(static row => row.Name, StringComparer.Ordinal).ToArray(); var index = 0;
-        using var command = Command("SELECT type,name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY name;");
+        using var command = Command("SELECT type,name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY name;", tx);
         using var reader = command.ExecuteReader();
         while (reader.Read())
         {
@@ -395,18 +442,18 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
         }
         if (index != expected.Length) throw new InvalidDataException("DID2 messaging SQL schema is incomplete.");
     }
-    private void RequireCipherPolicy()
+    private void RequireCipherPolicy(SqliteTransaction? tx = null)
     {
-        using var cipher = Command("PRAGMA cipher_version;");
+        using var cipher = Command("PRAGMA cipher_version;", tx);
         var version = Convert.ToString(cipher.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
-        if (version is null || !version.StartsWith("4.", StringComparison.Ordinal) || PragmaInteger("secure_delete") != 1 ||
-            PragmaInteger("synchronous") != 2 || PragmaInteger("foreign_keys") != 1)
+        if (version is null || !version.StartsWith("4.", StringComparison.Ordinal) || PragmaInteger("secure_delete", tx) != 1 ||
+            PragmaInteger("synchronous", tx) != 2 || PragmaInteger("foreign_keys", tx) != 1)
             throw new InvalidDataException("DID2 messaging SQL requires exact SQLCipher durability/deletion policy.");
-        using var journal = Command("PRAGMA journal_mode;");
+        using var journal = Command("PRAGMA journal_mode;", tx);
         if (!string.Equals(Convert.ToString(journal.ExecuteScalar()), "delete", StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("DID2 messaging SQL forbids WAL or plaintext compatibility.");
     }
-    private long PragmaInteger(string name) { using var cmd = Command("PRAGMA " + name + ";"); return Convert.ToInt64(cmd.ExecuteScalar()); }
+    private long PragmaInteger(string name, SqliteTransaction? tx = null) { using var cmd = Command("PRAGMA " + name + ";", tx); return Convert.ToInt64(cmd.ExecuteScalar()); }
     private SqliteCommand Command(string sql, SqliteTransaction? tx = null) { var command = connection.CreateCommand(); command.Transaction = tx; command.CommandText = sql; return command; }
     private void Execute(string sql, SqliteTransaction tx) { using var command = Command(sql, tx); command.ExecuteNonQuery(); }
     private static bool Fixed(ReadOnlySpan<byte> a, ReadOnlySpan<byte> b) => Did2MessagingSessionScope.Fixed(a, b);

@@ -70,22 +70,21 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     {
         var operation = InitialMailboxOperation(intent.Span);
         var envelope = await ReadOwnedMailboxEnvelopeUnderLeaseAsync(current, scope, opened, operation, intent, ct).ConfigureAwait(false);
-        var logical = MailboxSendOperation(scope, operation, envelope);
+        byte[] logical = [];
         byte[] sendRoot = [], peerRoot = [];
         try
         {
             using var application = await SqliteDeepIdV2AccountGeneration.OpenExistingApplicationForCompactionUnderLeaseAsync(
                 storage, sqlStatePath, scope, held, lease, ct).ConfigureAwait(false);
-            var evidence = await application.ReadDurableStorePublicEvidenceAsync(scope, operation, logical, ct).ConfigureAwait(false);
-            if (evidence is null)
-            {
-                await application.RequireAttemptedStoreEvidenceAsync(scope, operation, logical, ct).ConfigureAwait(false);
-                return null; // Original pending evidence is not success.
-            }
-            if (!evidence.IsInitial) throw new CryptographicException("Initial Store lost its original recipient proof.");
             using (var raw = await storage.ReadOwnedAsync(ProtectedDid2MailboxSendJournal.Slot, ct).ConfigureAwait(false) ??
                 throw new InvalidDataException("Initial Store lost mandatory send custody.")) sendRoot = raw.Use(bytes => bytes.ToArray());
-            using (var sends = ProtectedDid2MailboxSendJournal.Decode(sendRoot, scope.Network, scope.LocalAccount, scope.Instance)) { }
+            using var sends = ProtectedDid2MailboxSendJournal.Decode(sendRoot, scope.Network, scope.LocalAccount, scope.Instance);
+            using var selected = await ReadRetainedStoreAttemptCandidateUnderLeaseAsync(held, scope, operation,
+                envelope, application, sends, ct).ConfigureAwait(false);
+            if (selected is null) return null; // Original pending evidence is not success.
+            var evidence = selected.Evidence;
+            logical = MailboxSendOperation(scope, selected.Attempt.Span, envelope);
+            if (!evidence.IsInitial) throw new CryptographicException("Initial Store lost its original recipient proof.");
             using (var raw = await storage.ReadOwnedAsync(ProtectedDid2MessagingPeerBootstrap.Slot(scope), ct).ConfigureAwait(false) ??
                 throw new InvalidDataException("Initial Store lost its protected peer credential.")) peerRoot = raw.Use(bytes => bytes.ToArray());
             var pinned = ProtectedDid2MessagingPeerBootstrap.Restore(peerRoot, scope);
@@ -97,13 +96,13 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var route = ContactRouteClosureCodec.Decode(evidence.OriginalRoute.Span);
             var replicas = MailboxStoreReplicaEvidenceVerifier.Verify(own.Network, own.Authority, route, evidence.Replicas);
             var upper = checked(own.Proof.TrustedUpperUnixSeconds + first.SampleSeconds - own.Proof.MonotonicSample);
-            var receipt = await VerifyOriginalStoreOutcomeAsync(scope, operation, envelope, application,
-                route, evidence, replicas, own.Authority, upper, ct).ConfigureAwait(false);
+            var receipt = await VerifyOriginalStoreOutcomeAsync(scope, selected.Attempt, envelope, application,
+                route, evidence, replicas, own, source, upper, ct).ConfigureAwait(false);
             // Only holder/quorum authenticated times enter historical identity
             // verification. No supplied scalar becomes current time authority.
             var transport = await application.ReadTransportOutboxAsync(OutboxAccountScope.FromBytes(evidence.AccountScope.Span),
                 OutboxLogicalId.FromBytes(logical), ct).ConfigureAwait(false);
-            if (transport is not { Result: TransportOutboxReadResult.Found, Item.State: TransportOutboxState.Durable })
+            if (transport is not { Result: TransportOutboxReadResult.Found, Item.State: TransportOutboxState.Durable or TransportOutboxState.Delivered })
                 throw new CryptographicException("Initial Store lost its actual durable request during verification.");
             var exact = transport.Item.GetCiphertextBundleCopy();
             try
@@ -119,16 +118,17 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             await RequireRetainedInitialContactFactsUnderLeaseAsync(current, held, opened, intent, evidence, envelope, ct).ConfigureAwait(false);
             if (!FixedRoute((await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false)).Exact.Span, floor.Exact.Span))
                 throw new CryptographicException("Initial Store native custody changed during verification.");
-            var final = await application.RequireStorePublicEvidenceAsync(scope, operation, ct).ConfigureAwait(false);
+            var final = await application.RequireStorePublicEvidenceAsync(scope, operation, selected.Attempt, ct).ConfigureAwait(false);
             RequireSameInitialStoreEvidence(evidence, final);
-            var repeated = await VerifyOriginalStoreOutcomeAsync(scope, operation, envelope, application,
-                route, final, replicas, own.Authority, upper, ct).ConfigureAwait(false);
+            var repeated = await VerifyOriginalStoreOutcomeAsync(scope, selected.Attempt, envelope, application,
+                route, final, replicas, own, source, upper, ct).ConfigureAwait(false);
             if (!FixedRoute(MailboxReceiptV3Codec.EncodeDurableQuorum(receipt.CoordinatorReceipt),
                     MailboxReceiptV3Codec.EncodeDurableQuorum(repeated.CoordinatorReceipt)))
                 throw new CryptographicException("Initial Store coordinator outcome changed during verification.");
             await RequireExactProtectedMailboxRootAsync(ProtectedDid2MailboxSendJournal.Slot, sendRoot, ct).ConfigureAwait(false);
             await RequireExactProtectedMailboxRootAsync(ProtectedDid2MessagingPeerBootstrap.Slot(scope), peerRoot, ct).ConfigureAwait(false);
             await RecheckRouteFreshnessAsync(current, source, own, held, first, ct).ConfigureAwait(false);
+            await RetainContactStoreCompletionUnderLeaseAsync(current, held, scope, operation, own, source, ct).ConfigureAwait(false);
             ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
             return new(receipt.Cursor, receipt.Disposition, false, receipt.CoordinatorReceipt.CoordinatorId.Span);
         }
@@ -146,49 +146,65 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         using var application = await SqliteDeepIdV2AccountGeneration.OpenExistingApplicationForCompactionUnderLeaseAsync(
             storage, sqlStatePath, scope, held, lease, ct).ConfigureAwait(false);
         await RequireRetainedInitialContactFactsUnderLeaseAsync(current, held, opened, intent, evidence, envelope, ct).ConfigureAwait(false);
-        if (requireExisting)
-            RequireSameInitialStoreEvidence(evidence, await application.RequireStorePublicEvidenceAsync(scope, operation, ct).ConfigureAwait(false));
-        else
+        var attempt = await RequireCurrentStoreEvidenceAttemptUnderLeaseAsync(current, held, opened, scope, operation,
+            intent, evidence, ct).ConfigureAwait(false);
+        try
         {
-            var retained = await application.ReadStorePublicEvidenceIfPresentAsync(scope, operation, ct).ConfigureAwait(false);
-            if (retained is not null)
-            {
-                // Fresh nonce-bound ADP bytes differ on every lookup. Preserve
-                // the original proof; every other original record must still
-                // match this exact prepared request and current route.
-                var expected = evidence.CopyRecords(); var actual = retained.CopyRecords();
-                try
-                {
-                    if (!retained.IsInitial || expected.Take(8).Where((bytes, index) => !FixedRoute(bytes, actual[index])).Any())
-                        throw new CryptographicException("Initial retry differs from its first original public evidence.");
-                }
-                finally { foreach (var bytes in expected.Concat(actual)) CryptographicOperations.ZeroMemory(bytes); }
-                using var peer = await storage.ReadOwnedAsync(ProtectedDid2MessagingPeerBootstrap.Slot(scope), ct).ConfigureAwait(false) ??
-                    throw new InvalidDataException("Initial retry lost its protected peer credential.");
-                var pinned = peer.Use(bytes => ProtectedDid2MessagingPeerBootstrap.Restore(bytes, scope));
-                _ = DeepIdV2OriginalContactStoreVerifier.Verify(authority, pinned, retained.OriginalPeerAdp.Span,
-                    retained.OriginalDcr.Span, retained.OriginalRoute.Span, originalCreated, deploymentProfileId, 2, verifier);
-                evidence = retained;
-            }
+            if (requireExisting)
+                RequireSameInitialStoreEvidence(evidence, await application.RequireStorePublicEvidenceAsync(scope, operation, attempt, ct).ConfigureAwait(false));
             else
             {
-                var outbox = await application.ReadTransportOutboxAsync(OutboxAccountScope.FromBytes(evidence.AccountScope.Span),
-                    OutboxLogicalId.FromBytes(evidence.Logical.Span), ct).ConfigureAwait(false);
-                if (outbox is not { Result: TransportOutboxReadResult.Found, Item.State: TransportOutboxState.Prepared } || outbox.Item.Attempts.Count != 0)
-                    throw new CryptographicException("Attempted initial Store lost its original public evidence; no reconstruction is allowed.");
-                await application.RecordStorePublicEvidenceAsync(scope, operation, evidence, ct).ConfigureAwait(false);
+                var retained = await application.ReadStorePublicEvidenceIfPresentAsync(scope, operation, attempt, ct).ConfigureAwait(false);
+                if (retained is not null)
+                {
+                    await RequireStoreEvidenceCommitmentUnderLeaseAsync(held, scope, operation, attempt, retained, ct).ConfigureAwait(false);
+                    // Fresh nonce-bound ADP bytes differ on every lookup. Preserve
+                    // the original proof; every other original record must still
+                    // match this exact prepared request and current route.
+                    var expected = evidence.CopyRecords(); var actual = retained.CopyRecords();
+                    try
+                    {
+                        if (!retained.IsInitial || expected.Take(8).Where((bytes, index) => !FixedRoute(bytes, actual[index])).Any())
+                            throw new CryptographicException("Initial retry differs from its first original public evidence.");
+                    }
+                    finally { foreach (var bytes in expected.Concat(actual)) CryptographicOperations.ZeroMemory(bytes); }
+                    using var peer = await storage.ReadOwnedAsync(ProtectedDid2MessagingPeerBootstrap.Slot(scope), ct).ConfigureAwait(false) ??
+                        throw new InvalidDataException("Initial retry lost its protected peer credential.");
+                    var pinned = peer.Use(bytes => ProtectedDid2MessagingPeerBootstrap.Restore(bytes, scope));
+                    _ = DeepIdV2OriginalContactStoreVerifier.Verify(authority, pinned, retained.OriginalPeerAdp.Span,
+                        retained.OriginalDcr.Span, retained.OriginalRoute.Span, originalCreated, deploymentProfileId, 2, verifier);
+                    evidence = retained;
+                }
+                else
+                {
+                    var outbox = await application.ReadTransportOutboxAsync(OutboxAccountScope.FromBytes(evidence.AccountScope.Span),
+                        OutboxLogicalId.FromBytes(evidence.Logical.Span), ct).ConfigureAwait(false);
+                    if (outbox is not { Result: TransportOutboxReadResult.Found, Item.State: TransportOutboxState.Prepared } || outbox.Item.Attempts.Count != 0)
+                        throw new CryptographicException("Attempted initial Store lost its original public evidence; no reconstruction is allowed.");
+                    await application.RecordStorePublicEvidenceAsync(scope, operation, attempt, evidence, ct).ConfigureAwait(false);
+                }
             }
+            await RequireRetainedInitialContactFactsUnderLeaseAsync(current, held, opened, intent, evidence, envelope, ct).ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested(); held.RequireOwner(lease); return evidence;
         }
-        await RequireRetainedInitialContactFactsUnderLeaseAsync(current, held, opened, intent, evidence, envelope, ct).ConfigureAwait(false);
-        ct.ThrowIfCancellationRequested(); held.RequireOwner(lease); return evidence;
+        finally { CryptographicOperations.ZeroMemory(attempt); }
     }
 
     private async Task RequireRetainedInitialContactFactsUnderLeaseAsync(VerifiedDeepIdV2CurrentAccount current,
         HeldDeepIdV2AccountLease held, OwnedDid2MessagingStorage opened, ReadOnlyMemory<byte> intent,
         Did2StorePublicEvidence evidence, ReadOnlyMemory<byte> expectedEnvelope, CancellationToken ct)
     {
+        if (!evidence.IsInitial) throw new CryptographicException("Initial Store has no original recipient evidence.");
+        await RequireRetainedInitialDraftAndRecipientUnderLeaseAsync(current, held, opened, intent,
+            evidence.OriginalDcr, expectedEnvelope, ct).ConfigureAwait(false);
+    }
+
+    private async Task RequireRetainedInitialDraftAndRecipientUnderLeaseAsync(VerifiedDeepIdV2CurrentAccount current,
+        HeldDeepIdV2AccountLease held, OwnedDid2MessagingStorage opened, ReadOnlyMemory<byte> intent,
+        ReadOnlyMemory<byte> exactDcr, ReadOnlyMemory<byte> expectedEnvelope, CancellationToken ct)
+    {
         var scope = opened.Scope;
-        if (!scope.IsInitiator || !evidence.IsInitial) throw new CryptographicException("Initial Store has no original sender scope.");
+        if (!scope.IsInitiator) throw new CryptographicException("Initial Store has no original sender scope.");
         using var source = await SqliteDeepIdV2AccountGeneration.OpenExistingMessagingSenderSourceUnderLeaseAsync(storage, sqlStatePath, current, ct).ConfigureAwait(false);
         using var retained = await source.ReadMessagingSourceByIntentUnderLeaseAsync(intent, ct).ConfigureAwait(false);
         Did2MessagingSourceScope.RequireSender(scope, retained);
@@ -205,10 +221,10 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 throw new InvalidDataException("Initial Store lost its protected explicit draft.");
             using var drafts = raw.Use(bytes => ProtectedDid2ContactStartJournal.Decode(bytes, scope.Network, scope.LocalAccount, scope.Instance));
             if (!drafts.Entries.TryGetValue(Convert.ToHexString(intent.Span), out var draft) ||
-                !FixedRoute(draft.Init, initial.SessionInit) || !FixedRoute(draft.Hello, initial.Hello) ||
-                !FixedRoute(draft.Exact.Slice(192, 32), SHA256.HashData(evidence.OriginalDcr.Span)))
+                !FixedRoute(draft.Exact.Slice(192, 32), SHA256.HashData(exactDcr.Span)))
                 throw new CryptographicException("Initial Store lost its exact original draft/contact join.");
-            var dcr = DeepIdV2ResolverClosureCodec.Decode(evidence.OriginalDcr.Span);
+            draft.RequireExactEvents(initial.SessionInit, initial.Hello, scope.Network, scope.LocalAccount);
+            var dcr = DeepIdV2ResolverClosureCodec.Decode(exactDcr.Span);
             var directory = ApplicationCoreCodec.DecodeDmd1(dcr.Bundle.Field(5).Span);
             var dca = DeepIdV2ContactAuthorizationCodec.Decode(dcr.Bundle.Field(6).Span);
             if (!FixedRoute(directory.DeepAccountId.Span, scope.RemoteAccount) ||
@@ -231,5 +247,34 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 throw new CryptographicException("Initial Store original public evidence changed; no repair is permitted.");
         }
         finally { foreach (var bytes in before.Concat(after)) CryptographicOperations.ZeroMemory(bytes); }
+    }
+
+    // Applied to EACH attempt, not just the first selected historical result.
+    // Original authenticated request/receipt times cannot become fresh authority.
+    private async Task RequireOriginalInitialStoreRecipientUnderLeaseAsync(
+        VerifiedDeepIdV2CurrentAccount current, HeldDeepIdV2AccountLease held,
+        OwnedDid2MessagingStorage opened, Did2MessagingSessionScope scope, ReadOnlyMemory<byte> intent,
+        Did2StorePublicEvidence evidence, ReadOnlyMemory<byte> nativeEnvelope, ReadOnlyMemory<byte> canonicalRequest,
+        VerifiedMailboxDurableQuorumV3 receipt, VerifiedXPointNetworkAuthority authority,
+        IDeepMlDsa65Verifier verifier, CancellationToken ct)
+    {
+        await RequireRetainedInitialContactFactsUnderLeaseAsync(current, held, opened, intent,
+            evidence, nativeEnvelope, ct).ConfigureAwait(false);
+        using var raw = await storage.ReadOwnedAsync(ProtectedDid2MessagingPeerBootstrap.Slot(scope), ct).ConfigureAwait(false) ??
+            throw new InvalidDataException("Original Initial recipient lost its protected permanent credential.");
+        var exact = raw.Use(bytes => bytes.ToArray());
+        try
+        {
+            var pinned = ProtectedDid2MessagingPeerBootstrap.Restore(exact, scope);
+            var request = MailboxAuthenticatedClientRequestCodec.Decode(canonicalRequest.Span);
+            var body = MailboxAuthenticatedRequestTranscript.DecodeStoreBody(request.Binding.CanonicalRequest.Span);
+            foreach (var time in receipt.ReplicaReceipts.Select(item => item.AcceptedAtUnixSeconds)
+                .Append(body.CreatedAtUnixSeconds).Distinct())
+                _ = DeepIdV2OriginalContactStoreVerifier.Verify(authority, pinned, evidence.OriginalPeerAdp.Span,
+                    evidence.OriginalDcr.Span, evidence.OriginalRoute.Span, time, deploymentProfileId, 2, verifier);
+            await RequireExactProtectedMailboxRootAsync(ProtectedDid2MessagingPeerBootstrap.Slot(scope), exact, ct).ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
+        }
+        finally { CryptographicOperations.ZeroMemory(exact); }
     }
 }

@@ -215,15 +215,18 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         var lostText = false;
         using (Did2TextOutboxTestHooks.Push(point =>
         { if (point == Did2TextOutboxFailpoint.AfterSql) { lostText = true; throw new IOException("Injected owned text SQL response loss."); } }))
-            await Assert.ThrowsAsync<IOException>(() => fixture.PrepareOwnedText(receiver, Bytes(32, 0xc5), "reply after explicit contact acceptance"));
+            await Assert.ThrowsAsync<IOException>(() => fixture.CreateOwnedText(receiver, "reply after explicit contact acceptance"));
         Assert.True(lostText);
+        byte[] replyOperation;
+        using (var observed = await fixture.ReadAuthoredTextJournalAsync(receiver))
+            replyOperation = (observed.Pending ?? throw new InvalidDataException()).Operation.ToArray();
         ParsedDmc2 reply;
-        using (var draft = await fixture.PrepareOwnedText(receiver, Bytes(32, 0xc5), "reply after explicit contact acceptance"))
+        using (var draft = await fixture.RetryOwnedText(receiver, replyOperation, "reply after explicit contact acceptance"))
         { Assert.Equal(4UL, draft.SenderSequence); reply = ApplicationCoreCodec.DecodeDmc2(draft.ExactDmc2.Span); }
-        using (var retry = await fixture.PrepareOwnedText(receiver, Bytes(32, 0xc5), "reply after explicit contact acceptance"))
+        using (var retry = await fixture.RetryOwnedText(receiver, replyOperation, "reply after explicit contact acceptance"))
             Assert.Equal(reply.CanonicalBytes.ToArray(), retry.ExactDmc2.ToArray());
-        await Assert.ThrowsAsync<CryptographicException>(() => fixture.PrepareOwnedText(receiver, Bytes(32, 0xc5), "changed command"));
-        using (var sent = await fixture.SendOwnedMessage(receiver, Bytes(32, 0xc5), reply))
+        await Assert.ThrowsAsync<CryptographicException>(() => fixture.RetryOwnedText(receiver, replyOperation, "changed command"));
+        using (var sent = await fixture.SendOwnedMessage(receiver, replyOperation, reply))
             ciphertext = sent.ExactEnvelope.ToArray();
         using (var received = await fixture.ReceiveOwnedMessage(sender, ciphertext))
         using (var plain = received.OwnAuthenticatedDmc2())
@@ -278,27 +281,27 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         using (var acceptance = await fixture.PrepareOwnedContactAccept(receiver, Bytes(32, 0xf0)))
         using (var sentAccept = await fixture.SendOwnedMessage(receiver, acceptance.Operation.ToArray(), ApplicationCoreCodec.DecodeDmc2(acceptance.ExactDmc2)))
         using (var receivedAccept = await fixture.ReceiveOwnedMessage(sender, sentAccept.ExactEnvelope.ToArray())) { }
-        async Task<ParsedDmc2> Text(Did2MessagingSessionScope scope, byte operation, string value)
+        async Task<(byte[] Operation, ParsedDmc2 Message)> Text(Did2MessagingSessionScope scope, string value)
         {
-            using var draft = await fixture.PrepareOwnedText(scope, Bytes(32, operation), value);
-            return ApplicationCoreCodec.DecodeDmc2(draft.ExactDmc2.Span);
+            using var draft = await fixture.CreateOwnedText(scope, value);
+            return (draft.OperationId.ToArray(), ApplicationCoreCodec.DecodeDmc2(draft.ExactDmc2.Span));
         }
         var senderBase = await fixture.ReadMessagingFloor(sender);
         var receiverBase = await fixture.ReadMessagingFloor(receiver);
-        var first = await Text(sender, 0xe1, "Owned DID2 text 📨");
-        var second = await Text(sender, 0xe2, "Owned DID2 reordered text");
+        var (firstOperation, first) = await Text(sender, "Owned DID2 text 📨");
+        var (secondOperation, second) = await Text(sender, "Owned DID2 reordered text");
         byte[] cipher1, cipher2;
         var lostSend = false;
         using (Did2MessagingCommitTestHooks.Push(point =>
         { if (point == Did2MessagingCommitFailpoint.AfterSql) { lostSend = true; throw new IOException("Injected lost DID2 send response."); } }))
-            await Assert.ThrowsAsync<IOException>(() => fixture.SendOwnedMessage(sender, Bytes(32, 0xe1), first));
+            await Assert.ThrowsAsync<IOException>(() => fixture.SendOwnedMessage(sender, firstOperation, first));
         Assert.True(lostSend);
         var pendingSend = await fixture.ReadMessagingFloor(sender);
         Assert.Equal((byte)2, pendingSend.Phase); Assert.Equal(senderBase.Ordinal + 1, pendingSend.Ordinal);
-        using (var send1 = await fixture.SendOwnedMessage(sender, Bytes(32, 0xe1), first)) cipher1 = send1.ExactEnvelope.ToArray();
-        using (var send2 = await fixture.SendOwnedMessage(sender, Bytes(32, 0xe2), second)) cipher2 = send2.ExactEnvelope.ToArray();
+        using (var send1 = await fixture.SendOwnedMessage(sender, firstOperation, first)) cipher1 = send1.ExactEnvelope.ToArray();
+        using (var send2 = await fixture.SendOwnedMessage(sender, secondOperation, second)) cipher2 = send2.ExactEnvelope.ToArray();
         var senderFloor = await fixture.ReadMessagingFloor(sender);
-        using (var retry = await fixture.SendOwnedMessage(sender, Bytes(32, 0xe1), first)) Assert.Equal(cipher1, retry.ExactEnvelope.ToArray());
+        using (var retry = await fixture.SendOwnedMessage(sender, firstOperation, first)) Assert.Equal(cipher1, retry.ExactEnvelope.ToArray());
         Assert.Equal(senderFloor.Exact.ToArray(), (await fixture.ReadMessagingFloor(sender)).Exact.ToArray());
         async Task Receive(Did2MessagingSessionScope scope, byte[] cipher, ParsedDmc2 expected)
         {
@@ -323,8 +326,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         await Assert.ThrowsAsync<CryptographicException>(() => fixture.ReceiveOwnedMessage(receiver, tampered));
         await Assert.ThrowsAsync<CryptographicException>(() => fixture.ReceiveOwnedMessage(sender, cipher1));
         Assert.Equal(receiverFloor.Exact.ToArray(), (await fixture.ReadMessagingFloor(receiver)).Exact.ToArray());
-        var reply = await Text(receiver, 0xe3, "Owned DID2 reply"); byte[] replyCipher;
-        using (var sentReply = await fixture.SendOwnedMessage(receiver, Bytes(32, 0xe3), reply)) replyCipher = sentReply.ExactEnvelope.ToArray();
+        var (replyOperation, reply) = await Text(receiver, "Owned DID2 reply"); byte[] replyCipher;
+        using (var sentReply = await fixture.SendOwnedMessage(receiver, replyOperation, reply)) replyCipher = sentReply.ExactEnvelope.ToArray();
         await Receive(sender, replyCipher, reply);
         var senderReceipts = await fixture.ListOwnedReceiptObligations(sender);
         Assert.Equal(reply.LogicalMessageId.ToArray(), Assert.Single(senderReceipts).LogicalMessageId.ToArray());
@@ -347,16 +350,17 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         Assert.Single(receiverHistory, message => message.IsLocalAuthor);
         // Caller substitution is not a protected authored text command and
         // cannot authorize destructive latching or consume a ratchet position.
-        await Assert.ThrowsAsync<CryptographicException>(() => fixture.SendOwnedMessage(sender, Bytes(32, 0xe1), second));
+        await Assert.ThrowsAsync<CryptographicException>(() => fixture.SendOwnedMessage(sender, firstOperation, second));
         var latched = await fixture.ReadMessagingFloor(sender);
         Assert.Equal(before.Exact.ToArray(), latched.Exact.ToArray());
-        using (var retainedSend = await fixture.SendOwnedMessage(sender, Bytes(32, 0xe1), first)) Assert.Equal(cipher1, retainedSend.ExactEnvelope.ToArray());
+        using (var retainedSend = await fixture.SendOwnedMessage(sender, firstOperation, first)) Assert.Equal(cipher1, retainedSend.ExactEnvelope.ToArray());
         // Same actual account/session/counter, not a raw DAM1 send bypass.
         // Cipher chunks are copied locally only: this does not test BLOB-01.
-        var assetOperation = Bytes(32, 0xe4); var offerOperation = Bytes(32, 0xe5);
+        var assetOperation = Bytes(32, 0xe4);
         var fileBytes = System.Text.Encoding.UTF8.GetBytes("Owned DID2 attachment integrity 📨");
         using var asset = await fixture.PrepareOwnedAsset(sender, assetOperation, fileBytes, "document.txt", "text/plain", 1_400);
-        using var draftOffer = await fixture.PrepareOwnedAttachmentOffer(sender, offerOperation, assetOperation);
+        using var draftOffer = await fixture.CreateOwnedAttachmentOffer(sender, assetOperation);
+        var offerOperation = draftOffer.OperationId.ToArray();
         var offer = ApplicationCoreCodec.DecodeDmc2(draftOffer.ExactDmc2.Span);
         var offered = Assert.IsType<AttachmentOfferDmc2Payload>(offer.ParsedPayload);
         try
@@ -380,15 +384,15 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             var afterOffer = await fixture.ReadMessagingFloor(receiver);
             using (var replay = await fixture.ReceiveOwnedMessage(receiver, cipherOffer)) { }
             Assert.Equal(afterOffer.Exact.ToArray(), (await fixture.ReadMessagingFloor(receiver)).Exact.ToArray());
-            var followup = await Text(sender, 0xe6, "Owned DID2 text after attachment");
+            var (followupOperation, followup) = await Text(sender, "Owned DID2 text after attachment");
             Assert.Equal(offer.SenderClientSequence + 1, followup.SenderClientSequence);
-            using var followupSend = await fixture.SendOwnedMessage(sender, Bytes(32, 0xe6), followup);
+            using var followupSend = await fixture.SendOwnedMessage(sender, followupOperation, followup);
             await Receive(receiver, followupSend.ExactEnvelope.ToArray(), followup);
             // A text operation cannot be substituted with an offer, and a
             // shorter-lived adopted asset cannot gain current offer authority.
-            await Assert.ThrowsAsync<CryptographicException>(() => fixture.PrepareOwnedAttachmentOffer(sender, Bytes(32, 0xe1), assetOperation));
+            await Assert.ThrowsAsync<CryptographicException>(() => fixture.RetryOwnedAttachmentOffer(sender, firstOperation, assetOperation));
             using var expired = await fixture.PrepareOwnedAsset(sender, Bytes(32, 0xe7), fileBytes, "expired.txt", "text/plain", 1_001);
-            await Assert.ThrowsAsync<CryptographicException>(() => fixture.PrepareOwnedAttachmentOffer(sender, Bytes(32, 0xe8), Bytes(32, 0xe7)));
+            await Assert.ThrowsAsync<CryptographicException>(() => fixture.CreateOwnedAttachmentOffer(sender, Bytes(32, 0xe7)));
             CryptographicOperations.ZeroMemory(cipherOffer);
         }
         finally { offered.Manifest.Dispose(); CryptographicOperations.ZeroMemory(fileBytes); }
@@ -1860,7 +1864,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         private Func<ParsedDmc2, ParsedDmc2, Task<Did2MessagingSessionScope>>? ensureSenderMessaging;
         private Func<ReadOnlyMemory<byte>, Task<Did2MessagingSessionScope>>? ensureReceiverMessaging;
         private Func<Did2MessagingSessionScope, ReadOnlyMemory<byte>, ParsedDmc2, Task<OwnedDid2MessagingPersistedEvent>>? sendOwnedMessage;
-        private Func<Did2MessagingSessionScope, ReadOnlyMemory<byte>, Task<OwnedDid2MessagingPersistedEvent>>? receiveOwnedMessage;
+        private Func<Did2MessagingSessionScope, ReadOnlyMemory<byte>, CancellationToken, Task<OwnedDid2MessagingPersistedEvent>>? receiveOwnedMessage;
         private Func<Did2MessagingSessionScope, Task<IReadOnlyList<DirectMessageCreateSnapshot>>>? listOwnedMessages;
         private Func<Did2MessagingSessionScope, Task<IReadOnlyList<DirectApplicationReceiptObligation>>>? listOwnedReceiptObligations;
         private Func<Did2MessagingSessionScope, ReadOnlyMemory<byte>, Task<OwnedDid2ContactAcceptDraft>>? prepareOwnedContactAccept;
@@ -1870,17 +1874,32 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             (refreshOwnedMessaging ?? throw new InvalidOperationException("Owned endpoint refresh is absent."))(scope);
         internal Task DropPeerBootstrap(Did2MessagingSessionScope scope) =>
             (scope.IsInitiator ? (IDeepSecureStorage)storage : peerStorage).DeleteBatchAsync([ProtectedDid2MessagingPeerBootstrap.Slot(scope)]);
-        private Func<Did2MessagingSessionScope, ReadOnlyMemory<byte>, string, Task<DirectTextOutboxEntry>>? prepareOwnedText;
-        private Func<Did2MessagingSessionScope, ReadOnlyMemory<byte>, ReadOnlyMemory<byte>, Task<DirectTextOutboxEntry>>? prepareOwnedAttachmentOffer;
+        private Func<Did2MessagingSessionScope, ReadOnlyMemory<byte>, string, Task<DirectTextOutboxEntry>>? retryOwnedText;
+        private Func<Did2MessagingSessionScope, string, Task<DirectTextOutboxEntry>>? createOwnedText;
+        private Func<Did2MessagingSessionScope, ReadOnlyMemory<byte>, Task<DirectTextOutboxEntry>>? retryOwnedRouteUpdate;
+        private Func<Did2MessagingSessionScope, Task<DirectTextOutboxEntry>>? createOwnedRouteUpdate;
+        private Func<Did2MessagingSessionScope, ReadOnlyMemory<byte>, Task<OwnedDid2MessagingPersistedEvent>>? sendOwnedRouteUpdate;
+        internal Task<DirectTextOutboxEntry> RetryOwnedRouteUpdate(Did2MessagingSessionScope scope, ReadOnlyMemory<byte> operation) =>
+            (retryOwnedRouteUpdate ?? throw new InvalidOperationException("Owned route authoring is absent."))(scope, operation);
+        internal Task<OwnedDid2MessagingPersistedEvent> SendOwnedRouteUpdate(Did2MessagingSessionScope scope, ReadOnlyMemory<byte> operation) =>
+            (sendOwnedRouteUpdate ?? throw new InvalidOperationException("Owned route sending is absent."))(scope, operation);
+        private Func<Did2MessagingSessionScope, ReadOnlyMemory<byte>, ReadOnlyMemory<byte>, Task<DirectTextOutboxEntry>>? retryOwnedAttachmentOffer;
+        private Func<Did2MessagingSessionScope, ReadOnlyMemory<byte>, Task<DirectTextOutboxEntry>>? createOwnedAttachmentOffer;
         private Func<Did2MessagingSessionScope, ReadOnlyMemory<byte>, byte[], string, string, ulong, Task<OwnedAttachmentPreparation>>? prepareOwnedAsset;
         internal Task<OwnedAttachmentPreparation> PrepareOwnedAsset(Did2MessagingSessionScope scope, ReadOnlyMemory<byte> operation,
             byte[] bytes, string filename, string mediaType, ulong expiry) =>
             (prepareOwnedAsset ?? throw new InvalidOperationException("Owned asset preparation is absent."))(scope, operation, bytes, filename, mediaType, expiry);
-        internal Task<DirectTextOutboxEntry> PrepareOwnedAttachmentOffer(Did2MessagingSessionScope scope, ReadOnlyMemory<byte> operation,
+        internal Task<DirectTextOutboxEntry> RetryOwnedAttachmentOffer(Did2MessagingSessionScope scope, ReadOnlyMemory<byte> operation,
             ReadOnlyMemory<byte> assetOperation) =>
-            (prepareOwnedAttachmentOffer ?? throw new InvalidOperationException("Owned offer preparation is absent."))(scope, operation, assetOperation);
-        internal Task<DirectTextOutboxEntry> PrepareOwnedText(Did2MessagingSessionScope scope, ReadOnlyMemory<byte> op, string text) =>
-            (prepareOwnedText ?? throw new InvalidOperationException("Owned text command is absent."))(scope, op, text);
+            (retryOwnedAttachmentOffer ?? throw new InvalidOperationException("Owned offer preparation is absent."))(scope, operation, assetOperation);
+        internal Task<DirectTextOutboxEntry> RetryOwnedText(Did2MessagingSessionScope scope, ReadOnlyMemory<byte> op, string text) =>
+            (retryOwnedText ?? throw new InvalidOperationException("Owned text command is absent."))(scope, op, text);
+        internal Task<DirectTextOutboxEntry> CreateOwnedText(Did2MessagingSessionScope scope, string text) =>
+            (createOwnedText ?? throw new InvalidOperationException("Owned text creation is absent."))(scope, text);
+        internal Task<DirectTextOutboxEntry> CreateOwnedRouteUpdate(Did2MessagingSessionScope scope) =>
+            (createOwnedRouteUpdate ?? throw new InvalidOperationException("Owned route creation is absent."))(scope);
+        internal Task<DirectTextOutboxEntry> CreateOwnedAttachmentOffer(Did2MessagingSessionScope scope, ReadOnlyMemory<byte> assetOperation) =>
+            (createOwnedAttachmentOffer ?? throw new InvalidOperationException("Owned offer creation is absent."))(scope, assetOperation);
         internal Task<OwnedDid2ContactAcceptDraft> PrepareOwnedContactAccept(Did2MessagingSessionScope scope, ReadOnlyMemory<byte> op) =>
             (prepareOwnedContactAccept ?? throw new InvalidOperationException("Owned acceptance command is absent."))(scope, op);
         internal Task<Did2ContactAcceptanceState> ReadOwnedContactState(Did2MessagingSessionScope scope) =>
@@ -1891,8 +1910,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             (listOwnedReceiptObligations ?? throw new InvalidOperationException("Owned receipt read closure is absent."))(scope);
         internal Task<OwnedDid2MessagingPersistedEvent> SendOwnedMessage(Did2MessagingSessionScope scope, ReadOnlyMemory<byte> op, ParsedDmc2 message) =>
             (sendOwnedMessage ?? throw new InvalidOperationException("Owned send closure is absent."))(scope, op, message);
-        internal Task<OwnedDid2MessagingPersistedEvent> ReceiveOwnedMessage(Did2MessagingSessionScope scope, ReadOnlyMemory<byte> envelope) =>
-            (receiveOwnedMessage ?? throw new InvalidOperationException("Owned receive closure is absent."))(scope, envelope);
+        internal Task<OwnedDid2MessagingPersistedEvent> ReceiveOwnedMessage(Did2MessagingSessionScope scope, ReadOnlyMemory<byte> envelope, CancellationToken ct = default) =>
+            (receiveOwnedMessage ?? throw new InvalidOperationException("Owned receive closure is absent."))(scope, envelope, ct);
         internal Task<Did2MessagingSessionScope> EnsureSenderMessaging(ParsedDmc2 initial, ParsedDmc2 hello) =>
             (ensureSenderMessaging ?? throw new InvalidOperationException("Owner messaging closure is absent."))(initial, hello);
         internal Task<Did2MessagingSessionScope> EnsureReceiverMessaging(ReadOnlyMemory<byte> exact) =>
@@ -2160,7 +2179,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         internal async Task<(Func<DeepIdV2AccountService, Task<DeepIdV2InitialSessionCommit>> Complete,
             ParsedDmc2 Hello, ParsedDmc2 Init,
             Func<ReadOnlyMemory<byte>, Task<Dph2InitialClaimPreview>> Preview,
-            Func<Dph2InitialClaimPreview, Task<ResponderInitialSessionCommitCapability>> Prepare)> PrepareNativeHelloCompletion(byte[] intent, int oneTimeIndex = -1, bool verifyDraftRecovery = false)
+            Func<Dph2InitialClaimPreview, Task<ResponderInitialSessionCommitCapability>> Prepare)> PrepareNativeHelloCompletion(byte[] intent, int oneTimeIndex = -1, bool verifyDraftRecovery = false, string? preSessionCut = null)
         {
             var recipientAccount = peerAccounts ?? throw new InvalidOperationException("Peer fixture is required.");
             var recipientCheckpoint = peerCheckpoint!;
@@ -2232,6 +2251,10 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             // Production orchestration chooses the verified publisher service,
             // protected operation/ephemeral commitment and authoritative time.
             // The test no longer constructs XPK from the staged inventory.
+            if (preSessionCut == "draft") return (
+                _ => Task.FromException<DeepIdV2InitialSessionCommit>(new InvalidOperationException("Draft-only fixture has no completed claim.")), hello, init,
+                _ => Task.FromException<Dph2InitialClaimPreview>(new InvalidOperationException("No initial ciphertext.")),
+                _ => Task.FromException<ResponderInitialSessionCommitCapability>(new InvalidOperationException("No initial ciphertext.")));
             var request = await accounts.PrepareOwnPermanentContactClaimAsync(intent, resolved, senderSource, 32);
             var retainedRequest = await accounts.PrepareOwnPermanentContactClaimAsync(intent, resolved, senderSource, 32);
             Assert.Equal(request.CanonicalBytes.ToArray(), retainedRequest.CanonicalBytes.ToArray());
@@ -2252,6 +2275,10 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 Assert.Equal(1, ignoringToken.Calls);
                 Assert.Null(await custody.FindResultAsync(request.Field(2), default));
             }
+            if (preSessionCut == "unknown-claim") return (
+                _ => Task.FromException<DeepIdV2InitialSessionCommit>(new InvalidOperationException("Unknown claim cannot become completed custody.")), hello, init,
+                _ => Task.FromException<Dph2InitialClaimPreview>(new InvalidOperationException("No initial ciphertext.")),
+                _ => Task.FromException<ResponderInitialSessionCommitCapability>(new InvalidOperationException("No initial ciphertext.")));
             var claimTransport = new DeepIdV2PreKeyClaimTransport(senderSource, new ClaimOnion(path, exactResult), custody);
             var verifiedResult = await claimTransport.ClaimExactAsync(request.CanonicalBytes);
             var result = DeepIdV2PreKeyClaimResultCodec.Decode(verifiedResult.ExactResult.Span, request.CanonicalBytes.Span);
@@ -2337,11 +2364,64 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 return await reopened.Account.SendOwnMessagingAsync(scope, op, message.CanonicalBytes,
                     reopened.Source, bounded.Token);
             };
-            prepareOwnedText = async (scope, op, text) =>
+            sendOwnedBraidControl = async (scope, operation, ct) =>
+            {
+                var reopened = ReopenMessaging(scope);
+                return await reopened.Account.SendOwnBraidControlAsync(scope, operation, reopened.Source, ct);
+            };
+            receiveOwnedBraidControl = async (scope, exact, ct) =>
+            {
+                var reopened = ReopenMessaging(scope);
+                return await reopened.Account.ReceiveOwnBraidControlAsync(scope, exact, reopened.Source, ct);
+            };
+            deliverNativeBraid = async (scope, operation, grants, terminal) =>
+            {
+                var reopened = ReopenMessaging(scope);
+                using var bounded = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+                return await reopened.Account.DeliverOwnBraidControlAsync(scope, operation, reopened.Source,
+                    grants, terminal, bounded.Token);
+            };
+            receiveNativeBraidMailbox = async (endpoint, exact) =>
+            {
+                var reopened = ReopenMessaging(endpoint);
+                using var bounded = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+                return await reopened.Account.ReceiveOwnBraidMailboxEnvelopeAsync(exact, reopened.Source, bounded.Token);
+            };
+            retryOwnedText = async (scope, op, text) =>
             {
                 var reopened = ReopenMessaging(scope);
                 using var bounded = new CancellationTokenSource(TimeSpan.FromMinutes(3));
                 return await reopened.Account.PrepareOwnDirectTextAsync(scope, op, text, reopened.Source, bounded.Token);
+            };
+            createOwnedText = async (scope, text) =>
+            {
+                var reopened = ReopenMessaging(scope);
+                using var bounded = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+                return await reopened.Account.CreateOwnDirectTextAsync(scope, text, reopened.Source, bounded.Token);
+            };
+            createOwnedRouteUpdate = async scope =>
+            {
+                var reopened = ReopenMessaging(scope);
+                using var bounded = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+                return await reopened.Account.CreateOwnDirectRouteUpdateAsync(scope, reopened.Source, bounded.Token);
+            };
+            createOwnedAttachmentOffer = async (scope, asset) =>
+            {
+                var reopened = ReopenMessaging(scope);
+                using var bounded = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+                return await reopened.Account.CreateOwnDirectAttachmentOfferAsync(scope, asset, reopened.Source, bounded.Token);
+            };
+            retryOwnedRouteUpdate = async (scope, op) =>
+            {
+                var reopened = ReopenMessaging(scope);
+                using var bounded = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+                return await reopened.Account.PrepareOwnDirectRouteUpdateAsync(scope, op, reopened.Source, bounded.Token);
+            };
+            sendOwnedRouteUpdate = async (scope, op) =>
+            {
+                var reopened = ReopenMessaging(scope);
+                using var bounded = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+                return await reopened.Account.SendOwnRouteUpdateAsync(scope, op, reopened.Source, bounded.Token);
             };
             prepareOwnedAsset = async (scope, op, bytes, filename, mediaType, expiry) =>
             {
@@ -2350,17 +2430,18 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 using var input = new MemoryStream(bytes, writable: false);
                 return await reopened.Account.PrepareOwnAttachmentAsync(op, input, bytes.Length, filename, mediaType, expiry, bounded.Token);
             };
-            prepareOwnedAttachmentOffer = async (scope, op, asset) =>
+            retryOwnedAttachmentOffer = async (scope, op, asset) =>
             {
                 var reopened = ReopenMessaging(scope);
                 using var bounded = new CancellationTokenSource(TimeSpan.FromMinutes(3));
                 return await reopened.Account.PrepareOwnDirectAttachmentOfferAsync(scope, op, asset, reopened.Source, bounded.Token);
             };
-            receiveOwnedMessage = async (scope, exact) =>
+            receiveOwnedMessage = async (scope, exact, ct) =>
             {
                 var reopened = ReopenMessaging(scope);
                 using var bounded = new CancellationTokenSource(TimeSpan.FromMinutes(3));
-                return await reopened.Account.ReceiveOwnMessagingEnvelopeAsync(exact, reopened.Source, bounded.Token);
+                using var linked = CancellationTokenSource.CreateLinkedTokenSource(bounded.Token, ct);
+                return await reopened.Account.ReceiveOwnMessagingEnvelopeAsync(exact, reopened.Source, linked.Token);
             };
             listOwnedMessages = async scope =>
             {
@@ -2991,6 +3072,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             if (RejectProof) return new(HttpStatusCode.ServiceUnavailable) { RequestMessage = request };
             var query = DeepIdV2DirectoryProofWireCodec.DecodeRequest(
                 await request.Content!.ReadAsByteArrayAsync(cancellationToken));
+            if (RejectContactRetryProof(query.DirectoryLeafKey.Span))
+                return new(HttpStatusCode.ServiceUnavailable) { RequestMessage = request };
             var floor = RouteRequestHistoryHeads().SingleOrDefault(value =>
                 value.LogGeneration == query.Lookup.MinimumAdhGeneration) ??
                 throw new CryptographicException("Unknown test directory floor.");
@@ -3028,6 +3111,9 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 
     private sealed class NetworkMarkerFaultStorage(IDeepSecureStorage inner) : IDeepSecureStorage
     {
+        public Task<bool> CompareAndDeleteAsync(string guardSlot, ReadOnlyMemory<byte> expected,
+            IReadOnlyList<string> slots, CancellationToken ct = default) => inner.CompareAndDeleteAsync(guardSlot, expected, slots, ct);
+
         public Task<bool> CompareExchangeAndInsertAsync(string slot, ReadOnlyMemory<byte> expected,
             ReadOnlyMemory<byte> replacement, IReadOnlyList<DeepSecureStorageWrite> insertions,
             CancellationToken ct = default) => inner.CompareExchangeAndInsertAsync(slot, expected, replacement, insertions, ct);

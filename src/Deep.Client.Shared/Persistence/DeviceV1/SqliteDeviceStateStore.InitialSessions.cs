@@ -136,6 +136,9 @@ public sealed partial class SqliteDeviceStateStore
             await gate.WaitAsync(ct).ConfigureAwait(false); entered = true; ThrowIfDisposed();
             await ReconcileInitialSessionsUnderGateAsync(ct).ConfigureAwait(false);
             var storage = RequireInitialSessionStorage(); var network = initialSessionNetwork!;
+            var instance = await SqliteDeepIdV2AccountGeneration.ReadAccountInstanceUnderLeaseAsync(storage, network, accountId.ToArray(), ct).ConfigureAwait(false);
+            await SqliteDeepIdV2AccountGeneration.RequireInitialIntentNotStoppedUnderLeaseAsync(storage, network,
+                accountId.ToArray(), instance, intent, ct).ConfigureAwait(false);
             var evidence = CurrentDmd1Evidence.FromVerified(directory);
             var device = LocalDeviceAgreementBinding.FromAuthority(authority);
             var operation = DeviceOperationId32.FromBytes(started.ClaimOperationId.Span);

@@ -17,6 +17,8 @@ internal sealed class OwnedDid2ContactAcceptDraft : IDisposable
     private byte[]? operation, exact;
     internal OwnedDid2ContactAcceptDraft(ProtectedDid2ContactAcceptJournal.Entry winner)
     { operation = winner.Operation.ToArray(); exact = winner.Accept.ToArray(); }
+    internal OwnedDid2ContactAcceptDraft(ProtectedDid2ContactAcceptJournal.Entry winner, ReadOnlySpan<byte> verifiedHistory)
+    { winner.RequireExactAccept(verifiedHistory); operation = winner.Operation.ToArray(); exact = verifiedHistory.ToArray(); }
     internal ReadOnlySpan<byte> Operation => operation ?? throw new ObjectDisposedException(nameof(OwnedDid2ContactAcceptDraft));
     internal ReadOnlySpan<byte> ExactDmc2 => exact ?? throw new ObjectDisposedException(nameof(OwnedDid2ContactAcceptDraft));
     public void Dispose()
@@ -38,6 +40,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     {
         ArgumentNullException.ThrowIfNull(scope);
         using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
+        await ResumeLocalCompactionUnderLeaseAsync(held, ct).ConfigureAwait(false);
         using var current = await RequireCurrentUnderLeaseAsync(trustedUnixSeconds, verifier, ct).ConfigureAwait(false);
         var first = await RequireMessagingFreshnessAsync(current, own, peer, source, held, ct).ConfigureAwait(false);
         OwnedInitialMessagingSeed.RequireFreshScope(scope, own.Proof, peer, first);
@@ -69,7 +72,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     using var commands = marker.Use(bytes => ProtectedDid2ContactAcceptJournal.Decode(bytes, scope.Network, scope.LocalAccount, scope.Instance));
                     var winner = commands.FindScope(scope) ?? throw new CryptographicException("Local acceptance has no protected winner.");
                     using var sent = opened.Sql.ReadVerifiedOperation(floor, winner.Operation) ?? throw new CryptographicException("Local acceptance was not durably sent.");
-                    if (sent.Direction != 1 || !Did2MessagingSessionScope.Fixed(winner.Accept, accepted) ||
+                    winner.RequireExactAccept(accepted);
+                    if (sent.Direction != 1 ||
                         !Did2MessagingSessionScope.Fixed(sent.EventHash, SHA256.HashData(accepted)))
                         throw new CryptographicException("Local acceptance differs from its actual command/send custody.");
                 }
@@ -88,7 +92,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         }
     }
 
-    private async Task RequireLocalContactAcceptWinnerAsync(Did2MessagingSessionScope scope,
+    private async Task<bool> RequireLocalContactAcceptWinnerAsync(Did2MessagingSessionScope scope,
         ReadOnlyMemory<byte> operation, ReadOnlyMemory<byte> exact, CancellationToken ct)
     {
         if (scope.IsInitiator) throw new CryptographicException("The initiator cannot author the responder acceptance.");
@@ -97,9 +101,11 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         using var journal = snapshot.Use(bytes => ProtectedDid2ContactAcceptJournal.Decode(bytes,
             scope.Network, scope.LocalAccount, scope.Instance));
         var winner = journal.FindScope(scope);
-        if (winner is null || !Did2MessagingSessionScope.Fixed(winner.Operation, operation.Span) ||
-            !Did2MessagingSessionScope.Fixed(winner.Accept, exact.Span))
+        if (winner is null || !Did2MessagingSessionScope.Fixed(winner.Operation, operation.Span))
             throw new CryptographicException("Only the exact protected explicit acceptance winner may be sent.");
+        winner.RequireExactAccept(exact.Span);
+        if (winner.WorkStopped) throw new IOException("Stopped acceptance cannot authorize native encryption or cached send.");
+        return winner.PayloadRetired;
     }
 
     // Explicit local command. Its recoverable draft is not a DPE2, active
@@ -116,6 +122,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         try
         {
             using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
+            await ResumeLocalCompactionUnderLeaseAsync(held, ct).ConfigureAwait(false);
             using var current = await RequireCurrentUnderLeaseAsync(trustedUnixSeconds, verifier, ct).ConfigureAwait(false);
             var first = await RequireMessagingFreshnessAsync(current, own, peer, source, held, ct).ConfigureAwait(false);
             OwnedInitialMessagingSeed.RequireFreshScope(scope, own.Proof, peer, first);
@@ -133,6 +140,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var winner = journal.FindScope(scope);
             if (winner is null)
             {
+                await MaintainMailboxNamespacesUnderLeaseAsync(current, held, verifier, own, source, ct).ConfigureAwait(false);
                 var hello = ApplicationCoreCodec.DecodeDmc2(helloBytes);
                 var upper = Math.Max(checked(own.Proof.TrustedUpperUnixSeconds + first.SampleSeconds - own.Proof.MonotonicSample),
                     checked(peer.TrustedUpperUnixSeconds + first.SampleSeconds - peer.MonotonicSample));
@@ -165,6 +173,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 }
                 finally { CryptographicOperations.ZeroMemory(logical); }
                 journal.Entries.Add(Convert.ToHexString(op), winner);
+                journal.Revision = checked(journal.Revision + 1);
                 after = ProtectedDid2ContactAcceptJournal.Encode(journal, scope.Network, scope.LocalAccount, scope.Instance);
                 ct.ThrowIfCancellationRequested(); held.RequireActive();
                 if (!await storage.CompareExchangeAsync(ProtectedDid2ContactAcceptJournal.Slot, before, after, ct).ConfigureAwait(false))
@@ -172,9 +181,24 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             }
             if (!Did2MessagingSessionScope.Fixed(winner.HelloHash, SHA256.HashData(helloBytes)))
                 throw new CryptographicException("Retained acceptance belongs to another exact pending Hello.");
-            await ApplicationCoreVerifier.RequireContactAcceptEndpointBindingsAsync(ApplicationCoreCodec.DecodeDmc2(winner.Accept),
-                ApplicationCoreCodec.DecodeDmc2(helloBytes), peer, own.Proof, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
-            draft = new(winner);
+            if (winner.WorkStopped) throw new IOException("Stopped acceptance cannot reauthor its original command.");
+            if (winner.PayloadRetired)
+            {
+                using var application = await SqliteDeepIdV2AccountGeneration.OpenExistingApplicationForCompactionUnderLeaseAsync(
+                    storage, sqlStatePath, scope, held, lease, ct).ConfigureAwait(false);
+                using var history = await ReadRetainedContactAcceptEventUnderLeaseAsync(held, opened, application,
+                    winner, winner.Operation.ToArray(), ct).ConfigureAwait(false);
+                var parsed = history.Use(bytes => ApplicationCoreCodec.DecodeDmc2(bytes));
+                await ApplicationCoreVerifier.RequireRetainedContactAcceptEndpointBindingsAsync(parsed,
+                    ApplicationCoreCodec.DecodeDmc2(helloBytes), peer, own.Proof, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
+                draft = history.Use(bytes => new OwnedDid2ContactAcceptDraft(winner, bytes));
+            }
+            else
+            {
+                await ApplicationCoreVerifier.RequireContactAcceptEndpointBindingsAsync(ApplicationCoreCodec.DecodeDmc2(winner.Accept),
+                    ApplicationCoreCodec.DecodeDmc2(helloBytes), peer, own.Proof, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
+                draft = new(winner);
+            }
             await RequireFinalMessagingFreshnessAsync(current, scope, own, peer, source, held, first, ct).ConfigureAwait(false);
             var result = draft; draft = null; return result;
         }

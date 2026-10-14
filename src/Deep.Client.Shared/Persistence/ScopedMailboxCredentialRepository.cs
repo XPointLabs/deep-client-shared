@@ -2054,7 +2054,8 @@ public sealed partial class SqliteSessionStore : IScopedMailboxCredentialReposit
                     canonical,
                     request.CreatedAt,
                     DateTimeOffset.FromUnixTimeSeconds(
-                        checked((long)resolved.Grant.ExpiresAtUnixSeconds)),
+                        checked((long)ScopedMailboxCredentialValidator.OutboxExpiryUnixSeconds(
+                            target.Binding.Operation, target.Binding.CanonicalRequest, resolved.Grant.ExpiresAtUnixSeconds))),
                     request.CreatedAt);
                 var candidate = TransportOutboxStateMachine.Prepared(prepared);
                 if (ReadTransportOutboxItem(

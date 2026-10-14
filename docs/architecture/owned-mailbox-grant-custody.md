@@ -11,7 +11,7 @@ policy. Runtime/test acceptance is recorded separately in the
 ## Serialization
 
 The protected slot remains `deep.store.v2.mailbox-grant-journal`. Its sole reader
-accepts local generation5; every earlier generation rejects, including empty
+accepts local generation6; every earlier generation rejects, including empty
 state. Existing incompatible test accounts require explicit reset. There is no
 migration, fallback or initialization by a reader. Account creation is the sole
 empty-state producer.
@@ -20,7 +20,7 @@ All integers are unsigned big-endian. The closed header is96 bytes:
 
 | Offset | Width | Field |
 | --- | --- | --- |
-| 0 | 1 | Generation5 |
+| 0 | 1 | Generation6 |
 | 1 | 1 | Zero flags |
 | 2 | 2 | Acquisition count |
 | 4 | 8 | Revision, at least acquisition count +1 |
@@ -42,7 +42,8 @@ The record has a1097-byte fixed region and exact original policy/route evidence:
 | 32 | 32 | Exact nonzero independent holder seed |
 | 64 | 32 | Exact nonzero route-closure hash |
 | 96 | 1 | Phase1 pending, phase2 ordinary winner, phase3 closed-unresolved, phase4 received late winner, phase5 adopted late winner |
-| 97 | 3 | Zero reserved |
+| 97 | 1 | Read-intent reservation: 0 never reserved, 1 reserved by the held read producer; 1 only for an adopted Retrieve winner |
+| 98 | 2 | Zero reserved |
 | 100 | 435 | Exact original XMG2 |
 | 535 | 510 | All zero for phases1/3; exact successful XMC2 for phases2/4/5 |
 | 1045 | 32 | Predecessor acquisition identity; zero only for first acquisition |
@@ -70,6 +71,36 @@ The count bounds remain128; the additional bytes retain actual original evidence
 not extra acquisitions. A mismatched prefix/evidence length rejects before copying.
 Unknown flags/phases, noncanonical counts/revision/order, trailing bytes, wrong
 account instance, holder/request mismatch and response binding mismatch reject.
+Generation6 consumes one previously reserved byte without increasing any size
+or count bound. Before the first MAU signing/SQL reservation the actual read
+owner durably saves its exact phase1 cycle, then monotonically records read-intent
+reservation in that cycle's exact adopted grant and reads it back. Cold phase1
+resumes this same sequence; later phases and ACK require the retained reservation.
+It never clears with a standalone counter-floor retirement. Request, holder,
+issuer response and original evidence stay immutable. The reservation means
+possible use, not successful reading, non-delivery or authenticated settlement.
+A reader cannot initialize, infer, set or repair it from SQL. No wire value,
+public authority, extra journal/tombstone collection or compatibility reader.
+
+A never-used superseded Retrieve consumer requires the original reservation to
+be absent, no original counter/active cycle and zero exact original SQL requests,
+plus the same independently verified current replacement, positive completed
+replacement read/ACK, original private path and native namespace exclusion as
+the used producer. Missing SQL after any reservation rejects; SQL absence alone
+is never authorization. The current/last holder remains pinned. The existing
+grant-only protected plan owns effect/recovery; deleting a grant is not deleting
+its original traversal or accepted-object path. Qualification remains separate.
+Normal maintenance processes at most one namespace pair per business call,
+rather than multiple separate plans borrowing the same short freshness loan.
+An expired/not-yet-live/old-issuer selected replacement is a pinned candidate,
+not retirement authority or a crypto error swallowed after an effect. Numeric
+interval/role hints can only defer cleanup; the actual producer still performs
+all current signature, custody, completed-read and native/SQL guard checks.
+When capacity permits, ordinary new-read acquisition can renew the selected
+grant first. Full capacity still applies backpressure without losing custody.
+New-work renewal also observes the existing operation's HTTP timeout+retry
+window: a short grant can become unusable before its proportional refresh margin.
+This scheduling hint cannot extend a grant or alter a pending/active request.
 Ceiling is recomputed from the exact evidence; request PMT2/PMS2, route hash
 and network must match. Deposit additionally requires the original projection's
 PMA2 reference and its admission interval. The DR-0104 Retrieve source increment
@@ -77,7 +108,20 @@ captures the current acquisition PMA2 with the exact original selection: its
 conservative ceiling is the lesser of that policy expiry and original six-record
 admission end plus the normative maximum retained-object horizon. This is a
 custody ceiling only, not a TTL extension or issuance/admission permission.
-A received winner cannot exceed that ceiling. This changes Retrieve evidence
+A received winner cannot exceed that ceiling. Epoch exclusion must authenticate
+its captured issuance PMA2 against an exact retained PMT2 naming that policy,
+and separately authenticate the original route PMT2 against its own named PMA2.
+The source retains only bounded owned public record lookup inputs; each exact
+pair passes the existing current host's strict historical namespace verifier.
+Lookup bytes are not a verified cache or authority. Missing/changed records
+reject before effect. Deposit keeps its original single policy/projection join;
+the issuance ceiling and all native/dependency/replacement-read guards remain.
+When the captured issuance policy already is the route projection's named policy,
+the same strict pair supplies both facts; redundant distribution lookup is not
+required. This is not a fallback or an alternative policy reader. Distinct
+namespaces still require both exact joins and reject missing lookup inputs.
+This is a Shared consumer correction, not a wire/API/journal generation change.
+This changes Retrieve evidence
 validation in the sole current reader; an incompatible old nonempty record
 rejects, without a second reader, a migration or automatic reset.
 Phase3 retains exact holder/request/evidence with no winner; phases4/5 retain the
@@ -120,6 +164,15 @@ account instance and unchanged private owner capability. Archived intent binding
 is independently rederived from the predecessor bytes; arbitrary completed reusable
 entries do not become permanent-account read custody. Missing/ambiguous custody
 rejects before acquisition or dispatch, with no fallback to the new publication.
+
+The S04 publication-owner candidate triggers renewal from authenticated original
+XRA1/DCB1 intervals and independently current upper time, using the proactive
+policy owned by [CONTACT-RESOLVER](../../../docs/architecture/CONTACT-RESOLVER-V1.md).
+The earliest signed interval controls the trigger; conservative integer rounding
+does not extend any interval. Pending successor work is resumed first and never
+replaces current until the existing complete protected promotion. This does not
+activate automatic grant renewal, rotation or retirement; current verification
+status belongs to the [S04 checkpoint](../testing/s04-lifecycle-2026-10-11.md).
 Superseded-holder selection likewise opens the actual acquisition's original route.
 Current host/proof/time, holder, SQL and native checks are unchanged. A new idle
 cycle chooses one least-polled route among the actual current and independently
@@ -253,7 +306,7 @@ Its epoch/scalar/hash properties are facts, not a separate verification API.
 
 `RecheckAsync(ct)` is the consumer boundary under that same lease: it rechecks
 the exact account-owned directory/network floor, independently current PMA2,
-actual instance and byte-exact grant root. The original generation5 decoder
+actual instance and byte-exact grant root. The current generation6 decoder
 still enforces canonical original policy/request/route/ceiling and holder
 custody. Known results additionally use the existing exact route/result binding;
 closed-unresolved custody cannot invent an observed serial/generation. Dispose
@@ -408,17 +461,72 @@ Hello return route substitutes for the original recipient route. Losing
 mandatory send registration is corruption, not successful retirement. Dispatch
 rechecks current authority after awaited local completion before returning;
 expiry leaves an independently verifiable durable outcome, not new admission.
-Application schema10 rejects its predecessor and earlier, unqualified schema10
-candidate layouts. Its initial-recipient extension is a pre-production reset
-boundary, not a migration or an additional journal generation.
+Application schema11 rejects schema10 and earlier layouts. The same original
+public-evidence table now separates native operation from attempt identity:
+`(scope_hash,attempt_id)` is its primary key, `native_operation_id` is an immutable
+association checked on read/write, and `(account_scope,logical_id)` cannot alias
+another attempt. Every first attempt uses its actual native operation as its
+attempt ID; a linked successor keeps the native operation but uses its own ID.
+The held owner obtains the writer's ID from mandatory current protected prepared
+custody, exact native ciphertext and the independent reserved counter floor.
+Neither SQL association, a parsed descriptor nor these original records is
+positive Store/dispatch authority. The historical Initial/ContactAccept/ordinary
+reader now selects bounded candidates across attempts, rejecting an unlinked SQL
+candidate while the protected chain exists and checking missing attempted
+evidence even after discovering a possible Durable result. It independently
+verifies the selected native/signature/quorum/coordinator binding and repeats
+exact evidence/root checks; selection alone never reports success. Interrupted
+ordinary completion uses that selected prepared attempt/floor/acquisition.
+It does not discard predecessor/successor uncertainty or authorize dependency
+retirement. New successor dispatch, changed-route custody and linked cleanup
+still require their connected producers/consumers and matching gates.
+This is a pre-production reset boundary in the same SQLCipher database, not a
+migration, another runtime reader or extra journal slot.
 The [current source checkpoint](../testing/s01-idle-mailbox-floors-2026-10-09.md#original-public-store-outcome-source--dr-0106)
 records qualification and remaining gates; it permits no known acquisition or
 last retained Retrieve/ACK deletion.
 
+## S04 new-work namespace maintenance — source candidate
+
+The existing owned new-authoring capacity gate, new Initial/ContactAccept draft
+and idle mailbox reader invoke private `MaintainMailboxNamespacesUnderLeaseAsync`
+before new mutation/acquisition. Existing authored/native exact retries bypass
+maintenance; captured active read/ACK makes it return without retirement effects. Ordinary working-set cleanup
+remains its separate producer. Maintenance uses a bounded batch with the existing
+plan row bound, re-reading actual roots after every transition; it never raises
+128/512 limits or starts another background scheduler.
+
+`MailboxEpochExclusion.OpenUnderLeaseAsync` loans the actual held lease/current
+account to the same original-policy/current-host/native-DNH2 verifier. Only the
+standalone opener owns their lifetime; disposing a loan cannot release its
+business caller's lease or dispose its account. Selection timestamps, pure
+structural eligibility and positive SQL presence are scheduling hints, not
+verification or deletion authority. SQL absence skips this maintenance lane;
+it never authorizes holder deletion. After selection every original verification,
+dependency guard and recovery plan remains independently mandatory. IO,
+corruption, cancellation and plan faults are not swallowed as ineligible work.
+
+Known used Deposit holders and superseded Retrieve holders retire through their
+existing oldest-first owners after separate idle-counter disposition. Current/
+sole Retrieve and original publication/read paths remain. The first replacement
+read is permitted to establish positive coverage before superseded-holder cleanup;
+SQL credential installation alone does not qualify it. Existing sole closed-unused
+Deposit and sole/linked closed-unused Retrieve dispositions use their own complete
+guards; unresolved links cannot borrow the used-holder profile. Known winners
+without any original transport work remain pinned in this candidate, not treated
+as successful Store/read or negative remote issuance.
+
+Fault after a floor effect leaves it retired under irreversible exclusion, while
+the holder and original SQL remain independently verifiable. Cold retry resumes
+the actual staged plan before new work, then reselects from current roots. Missing
+floor alone cannot grant deletion: the actual holder/native/public/SQL closure
+still runs. No new journal, layout, wire, receipt, repaired counter or clock
+authority is added. Final source/physical acceptance is owned by the S04 checkpoint.
+
 ## Used Deposit holder retirement — S01 source candidate
 
 `DeepIdV2AccountService.RetireUsedDepositAcquisitionAsync(acquisition, source, ct)`
-is a closed internal maintenance entry, not runtime activation. The service owns
+is a closed internal maintenance entry, not a scheduler or shipping activation. The service owns
 the real verifier for the entire held epoch-exclusion/selection operation. No
 caller clock, successor, SQL-count or terminal flag grants permission.
 
@@ -449,6 +557,16 @@ or attachment work pin selection. The owner then joins both directions:
   grant/holder signature, exact MAU3/body, quorum and coordinator for each Store.
   Initial recipient DCR/ADP/route and ordinary/acceptance native peer routes are
   preserved, not reconstructed from the newest roster or grant journal.
+- One native operation may own several original Store attempts after a permitted
+  successor. The owner joins every bounded public attempt to the same actual
+  native ciphertext and independently verifies its original request, policy,
+  replicas, quorum and coordinator; Initial recipient evidence is checked for
+  each sibling. A verified predecessor is not evidence for its successor.
+  `IsOriginalStoreForGrantRetirementAsync` receives both actual operation and
+  attempt selectors and supplies exact-grant membership only after that
+  verification. Verification does not stop at the first matching grant. This
+  also applies after working send-chain compaction; all original public/SQL
+  attempts remain, and missing or unknown sibling evidence pins retirement.
 - Stream every actual request for the selected holder/grant in bounded SQL pages
   and require its exact initialized native session and original Store binding.
   Missing/ambiguous evidence, unknown work, an empty result or orphan request
@@ -592,11 +710,12 @@ and retained tail both naming it, renewal either creates one pending successor
 or resumes that exact pending request. A closed-unresolved/late intervening tail
 pins renewal. After promotion, retrying the same original selector returns only
 its immediate adopted successor, with no further pending/tail continuation.
-An absent original, Deposit, unrelated selector or advanced chain rejects before
-request authoring. Ordinary acquisition keeps selecting current while renewal
-is pending; it never implicitly adopts or forwards the renewal candidate.
+An absent original, Deposit in this explicit Retrieve lane, unrelated selector
+or advanced chain rejects before request authoring. The explicit Retrieve
+acquisition API keeps selecting current while renewal is pending; it never
+implicitly adopts or forwards the renewal candidate.
 
-The existing generation5 journal already encodes this predecessor/pending/current
+The current journal already encodes this predecessor/pending/current
 transition. No layout, magic, Protocol public API or capacity change is added.
 New signing occurs only before the pending request CAS/read-back. Lost reply,
 cancellation and cold retry preserve the exact operation/window/holder. A current
@@ -612,6 +731,39 @@ does not delete the original grant, complete a read/ACK/application receipt or
 authorize last-path retirement. The superseded-holder fixtures now obtain their
 replacement through this actual owner lane rather than directly staging the
 protected journal. Targeted, full and physical qualification remain separate.
+
+### S04 automatic new-work consumer — source candidate
+
+The ordinary Deposit acquisition owner and a new phase0 mailbox read invoke the
+private `SelectNewWorkMailboxGrantRenewalUnderLeaseAsync` selector. It reads the
+actual adopted current winner, rechecks the actual grant root around independently
+current own proof/time and uses the trigger owned by
+[TRANSPORT-NEUTRAL-MESSAGING §8.4.2](../../../docs/architecture/TRANSPORT-NEUTRAL-MESSAGING.md#842-grant-and-route-transitions).
+These protected timestamps are scheduling custody, not a current-grant proof.
+Successor request authoring, issuer/route/host checks, winner verification, SQL
+installation and final currentness remain independent and mandatory.
+
+The existing internal acquisition selector also admits an explicitly closed
+Deposit direction for this owner; the explicit Retrieve method stays Retrieve-only.
+Each new acquisition retains its immutable original and protected predecessor.
+Pending work resumes its same XMG2; closed-unresolved/late tail pins the scope.
+Selection changes only after exact successor verification/read-back. A cold retry
+after promotion installs that selected winner without another acquisition.
+There is no new local generation, wire, public selector or legacy reader.
+
+Prepared Store attempts and active read/ACK cycles never enter this scheduling
+lane; they keep their exact retained grant/request. Full new-work capacity checks
+account for a required successor, rather than treating a due old winner as a free
+slot. Missing custody and exhausted bounds reject without regeneration, eviction,
+increased limits or unsigned expiry. A new-read owner checks its exact protected
+read root before grant acquisition: active work cannot enter this lane; a new
+counter or traversal must fit before signing/issuer callback. The traversal scope
+uses the retained route hash, blinded mailbox and selection epoch, exactly as the
+actual SQL reader does. Existing exact scope/counter reuse remains possible at a
+full bound; a full journal is not blanket permission to block retained work.
+No retirement, rotation or autonomous worker
+is activated by this source increment; qualification remains in the
+[S04 checkpoint](../testing/s04-lifecycle-2026-10-11.md).
 
 ## Closed unused renewal-tail disposition — S01 source candidate
 
@@ -722,3 +874,81 @@ exits, unchanged-input proof, prior FAILs and the remaining whole-S01 review are
 owned by the [checkpoint](../testing/s01-idle-mailbox-floors-2026-10-09.md#matching-full03--current-shared-source-qualified).
 This source profile does not activate the S04 scheduler or qualify production,
 physical clients, shipping packages or a release.
+
+## S04 known Deposit without original transport work
+
+The transition authority remains solely
+[TRANSPORT-NEUTRAL-MESSAGING §8.4](../../../docs/architecture/TRANSPORT-NEUTRAL-MESSAGING.md#84-owned-attempt-settlement-renewal-and-retirement).
+The existing held epoch-exclusion consumer now covers an adopted Deposit winner
+that was never used. Maintenance's SQL-existence query selects only a candidate;
+it cannot authorize cleanup. The private owner independently traverses complete
+protected native outgoing history, verifies every original attempt/route/MAC,
+and checks the reverse exact-grant SQL/native join. Missing SQL for genuine
+native work rejects. Native and SQL selected-work observations must agree.
+The used producer still requires positive original work; the unused producer
+requires none. No counter is removed before selecting the unused producer.
+
+Both use the existing protected-only adopted-acquisition plan, complete mailbox
+state guard and exact cold recovery; no table, wire, reader generation, journal,
+bound or public capability is added. Original Store evidence/history and accepted
+objects are preserved even when another holder's never-used successor retires.
+Known unused Retrieve and archived-path automatic consumption are separate
+S04 joins, not granted permission by this Deposit consumer. Their current
+consumers and source qualification are described below.
+Exact local native cases and preserved compile failure are in the
+[lifecycle checkpoint](../testing/s04-lifecycle-2026-10-11.md#known-unused-adopted-deposit).
+
+## S04 automatic archived-path maintenance — focused source qualification
+
+The new-work maintenance owner invokes the existing joint archived-path producer
+before unrelated counter/holder maintenance, under the same actual account lease.
+The transition contract remains solely TRANSPORT-NEUTRAL-MESSAGING §8.4 and the
+joint profile above. The scheduling selector skips current/pending publications,
+active reads, working ordinary/attachment/original sends, incomplete acquisition
+chains, missing completed traversal/floors/SQL hints and an outstanding original
+object horizon. These checks select candidates, never authorize deletion.
+
+The actual producer independently reopens original private publication/capability,
+all selected grants and positive completed Retrieve/ACK coverage, current authority
+and native namespace exclusion, and stages its existing application-SQL/three-root
+plan. No effect error is swallowed. After one transition maintenance reloads all
+actual roots. Ordinary new read resumes a stored plan before acquiring or forwarding
+another request and then polls the remaining current path. The last current path,
+original native contact/history/ACK and other custody survive; no synthetic receipt,
+new journal/wire/API/generation, bound increase or background worker is introduced.
+
+Matching native cases verify ordinary reads, early-retention refusal and all eight
+cold handovers. The preserved fixture FAIL and actual elapsed-time correction,
+exact receipts and source/physical scope are in the
+[checkpoint](../testing/s04-lifecycle-2026-10-11.md#automatic-archived-path-consumer).
+This is not whole-S04, deployed/runtime package or Windows/Android qualification.
+
+## S04 never-used superseded Retrieve — focused source qualification
+
+The generation6 reservation above is actual possible-use custody, not a signed
+terminal outcome or supplied deletion flag. The normal reader checks it against
+existing protected counters/active cycles before acquisition, SQL installation
+or cycle mutation. Phase1 cold recovery preserves the original body and completes
+the same reservation sequence before MAU signing; later phases and ACK cannot
+repair a missing reservation. An installed but not-yet-read replacement remains
+an ordinary unfinished prerequisite, not corrupted completed custody.
+
+Maintenance invokes the private never-used superseded producer only after actual
+replacement SQL work exists. The common held producer independently requires
+zero original read reservation/counter/active work and exact zero original SQL
+requests, positive settled replacement read/ACK, current installed replacement,
+same private publication/path, current authority and native epoch exclusion.
+The SQL hint and complete read coverage select the exact grant, not merely its
+holder, so holder reuse is not a second grant's work. Other signed holder requests
+are not reclassified as this grant's completion. The used producer still requires
+its original reservation and positive original coverage. Missing used SQL after
+floor retirement rejects before any plan/new read effect.
+
+The existing grant-only protected plan removes only the exact old acquisition
+and preserves replacement, traversal, original object path, complete SQL/native
+history and other roots. Staging/adoption/parts/plan interruptions use its existing
+encrypted cold recovery. The current/last holder still cannot retire; a fresh
+replacement credential alone cannot authorize it. No new journal, bound, wire,
+public authority or background scheduler. Exact affected23/native receipts,
+preserved connected43 FAIL and current-source limitations are owned by the
+[checkpoint](../testing/s04-lifecycle-2026-10-11.md#never-used-superseded-retrieve).

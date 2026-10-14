@@ -13,6 +13,42 @@ namespace Deep.Client.Shared.Persistence.DeviceV2;
 
 internal sealed partial class ProtectedDeepIdV2AccountOwner
 {
+    // Amortized business-owner maintenance, not a scheduler or permission to
+    // delete unknown work. The existing dependency-closed producer chooses and
+    // verifies the actual settled prefix; the same protected plan owns recovery.
+    private async Task MaintainOrdinaryOutboxUnderLeaseAsync(VerifiedDeepIdV2CurrentAccount current,
+        HeldDeepIdV2AccountLease held, Did2MessagingSessionScope scope, ReadOnlyMemory<byte> operation,
+        DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own,
+        DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
+    {
+        held.RequireOwner(lease); ct.ThrowIfCancellationRequested();
+        await RetireStoppedWorkingPayloadUnderLeaseAsync(current, held, scope, own, source, ct).ConfigureAwait(false);
+        using var root = await storage.ReadOwnedAsync(ProtectedDid2DirectTextJournal.Slot, ct).ConfigureAwait(false) ??
+            throw new InvalidDataException("Ordinary maintenance lost mandatory authored custody.");
+        using var ordinary = root.Use(bytes => ProtectedDid2DirectTextJournal.Decode(bytes,
+            scope.Network, scope.LocalAccount, scope.Instance));
+        if (ordinary.Pending is not null || ordinary.Entries.ContainsKey(Convert.ToHexString(operation.Span))) return;
+        using var sendRoot = await storage.ReadOwnedAsync(ProtectedDid2MailboxSendJournal.Slot, ct).ConfigureAwait(false) ??
+            throw new InvalidDataException("Ordinary maintenance lost mandatory send custody.");
+        using var sends = sendRoot.Use(bytes => ProtectedDid2MailboxSendJournal.Decode(bytes,
+            scope.Network, scope.LocalAccount, scope.Instance));
+        if (ordinary.Entries.Count < Did2CompactionPlan.MaximumRows &&
+            sends.Entries.Count < ProtectedDid2MailboxSendJournal.MaximumEntries) return;
+        var eligible = ordinary.Entries.Values.Where(entry => FixedRoute(entry.Scope.Exact, scope.Exact))
+            .OrderBy(entry => entry.Sequence).TakeWhile(entry => entry.Stored && !entry.WorkStopped).Take(Did2CompactionPlan.MaximumRows).Count();
+        eligible = Math.Min(eligible, ProtectedDid2DirectTextJournal.MaximumTerminalAudits - ordinary.TerminalAudits.Count);
+        if (eligible == 0) return; // Capacity checks still refuse; unknown is never evicted.
+        var plans = new ProtectedDid2CompactionPlan(storage, lease, scope.Network, scope.LocalAccount, scope.Instance);
+        using var prior = await plans.ReadAsync(held, ct).ConfigureAwait(false);
+        if (prior.Phase != 0) throw new InvalidDataException("Stored compaction owns recovery before new ordinary work.");
+        using var selected = await PrepareOrdinaryOutboxUnderLeaseAsync(current, scope, eligible, own, source, held, ct).ConfigureAwait(false);
+        await plans.StageAsync(prior, selected, held, ct).ConfigureAwait(false);
+#if DEEP_TEST_INTERNALS
+        Did2CompactionTestHooks.Hit(Did2CompactionFailpoint.AfterStage);
+#endif
+        await ResumeLocalCompactionUnderLeaseAsync(held, ct).ConfigureAwait(false);
+    }
+
     // Read-only owned selection, not a stage/deletion capability. The batch
     // removes only redundant ordinary/send commitments, never native events, transport
     // requests/evidence, history, asset keys, receipt obligations or floors.
@@ -31,9 +67,13 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     private async Task<Did2CompactionPlan.Preparation> PrepareOrdinaryOutboxUnderLeaseAsync(
         VerifiedDeepIdV2CurrentAccount current, Did2MessagingSessionScope scope, int maximumRows,
         DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own,
-        DeepIdV2ContactPathAuthoritySource source, HeldDeepIdV2AccountLease held, CancellationToken ct)
+        DeepIdV2ContactPathAuthoritySource source, HeldDeepIdV2AccountLease held, CancellationToken ct,
+        Did2CompactionPlan.Disposition action = Did2CompactionPlan.Disposition.OutboxPayload)
     {
         held.RequireOwner(lease);
+        if (action is not (Did2CompactionPlan.Disposition.OutboxPayload or Did2CompactionPlan.Disposition.StoppedOutboxPayload))
+            throw new InvalidDataException("Unsupported ordinary maintenance disposition.");
+        var stoppedOnly = action != Did2CompactionPlan.Disposition.OutboxPayload;
         var first = await RecheckRouteFreshnessAsync(current, source, own, held, null, ct).ConfigureAwait(false);
         RequireRetainedStoreOwnScope(scope, own);
         using var plans = await ProtectedDid2CompactionPlan.ReadRegisteredAsync(storage, scope.Network.ToArray(),
@@ -68,34 +108,44 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     throw new CryptographicException("Outbox selection differs from its actual account instance.");
             // A retained suffix is required by the ordinary reader. Never skip
             // an earlier unknown command in order to reclaim a later slot.
-            var selected = journal.Entries.Values.Where(entry => FixedRoute(entry.Scope.Exact, scope.Exact))
-                .OrderBy(entry => entry.Sequence).TakeWhile(entry => entry.Stored).Take(maximumRows).ToArray();
+            var candidates = journal.Entries.Values.Where(entry => FixedRoute(entry.Scope.Exact, scope.Exact)).OrderBy(entry => entry.Sequence);
+            var selected = (stoppedOnly ? candidates.Where(entry => entry.WorkStopped)
+                : candidates.TakeWhile(entry => entry.Stored && !entry.WorkStopped))
+                .Take(Math.Min(maximumRows, ProtectedDid2DirectTextJournal.MaximumTerminalAudits - journal.TerminalAudits.Count)).ToArray();
             if (selected.Length == 0) throw new InvalidOperationException("No settled ordinary prefix is eligible.");
             using (await application.ReconcileOwnedTextOutboxAsync(journal, current.AccountId,
                 BinaryPrimitives.ReadUInt64BigEndian(scope.Exact[84..]), scope, ReadOnlyMemory<byte>.Empty, ct,
                 retained, requireStableReadOnly: true).ConfigureAwait(false)) { }
             foreach (var command in selected)
             {
-                var payload = retained.Single(item => FixedRoute(item.OperationId.Span, command.Operation)).ExactDmc2.ToArray();
+                var payload = OwnedByteExports.TakeArray(retained.Single(item => FixedRoute(item.OperationId.Span, command.Operation)).ExactDmc2);
                 try
                 {
-                    using var native = opened.Sql.ReadVerifiedOperation(stable, command.Operation) ??
-                        throw new CryptographicException("Outbox settlement has no verified committed native event.");
-                    if (native.Direction != 1 || !FixedRoute(native.EventHash, command.EventHash))
-                        throw new CryptographicException("Outbox settlement differs from native event custody.");
-                    var history = await application.ReadDirectDmc2Async(current.AccountId, BinaryPrimitives.ReadUInt64BigEndian(scope.Exact[84..]),
-                        scope.Conversation.ToArray(), command.Logical.ToArray(), scope.LocalDevice.ToArray(), ct).ConfigureAwait(false) ??
-                        throw new InvalidDataException("Outbox cleanup cannot remove the sole local event source.");
-                    try { command.RequireEvent(history); if (!FixedRoute(history, payload)) throw new CryptographicException("Independent history differs from authored work."); }
-                    finally { CryptographicOperations.ZeroMemory(history); }
+                    using var native = opened.Sql.ReadVerifiedOperation(stable, command.Operation);
+                    if (native is null)
+                    {
+                        if (!stoppedOnly) throw new CryptographicException("Store settlement has no verified committed native event.");
+                        await RequireUnencryptedCancelledDraftAsync(scope, command, application, sends, ct).ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        if (native.Direction != 1 || !FixedRoute(native.EventHash, command.EventHash))
+                            throw new CryptographicException("Outbox settlement differs from native event custody.");
+                        var history = await application.ReadDirectDmc2Async(current.AccountId, BinaryPrimitives.ReadUInt64BigEndian(scope.Exact[84..]),
+                            scope.Conversation.ToArray(), command.Logical.ToArray(), scope.LocalDevice.ToArray(), ct).ConfigureAwait(false) ??
+                            throw new InvalidDataException("Outbox cleanup cannot remove the sole local event source.");
+                        try { command.RequireEvent(history); if (!FixedRoute(history, payload)) throw new CryptographicException("Independent history differs from authored work."); }
+                        finally { CryptographicOperations.ZeroMemory(history); }
+                    }
                     // Removal reports no new dispatch permission. Verify the
                     // original Store independently of a fresh peer/issuer,
                     // then join every removed send field to the actual MAU.
-                    if (await TryReadRetainedMessagingStoreUnderLeaseAsync(current, held, opened, scope,
+                    if (!stoppedOnly && await TryReadRetainedMessagingStoreUnderLeaseAsync(current, held, opened, scope,
                         command.Operation.ToArray(), own, source, ct).ConfigureAwait(false) is null)
                         throw new CryptographicException("Outbox selection has no independently verified original Store.");
-                    await RequireOriginalMailboxSendCommitmentAsync(current, held, opened, scope, command.Operation.ToArray(), native.ExactEnvelope.ToArray(),
-                        application, sends, grants, ct).ConfigureAwait(false);
+                    if (!stoppedOnly) await RequireOriginalMailboxSendChainAsync(current, held, opened, scope, command.Operation.ToArray(), native!.ExactEnvelope.ToArray(),
+                        application, sends, grants, own, source,
+                        checked(own.Proof.TrustedUpperUnixSeconds + first.SampleSeconds - own.Proof.MonotonicSample), ct).ConfigureAwait(false);
                     var parsed = ApplicationCoreCodec.DecodeDmc2(payload);
                     if (parsed.ParsedPayload is AttachmentOfferDmc2Payload offer)
                     {
@@ -103,25 +153,30 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                         var asset = assets.Entries.Values.SingleOrDefault(item => FixedRoute(item.Object, manifest.ObjectId.Span)) ??
                             throw new InvalidDataException("A retained attachment offer lost its protected local object.");
                         using var actual = await ReadStableAttachmentManifestUnderLeaseAsync(current, held, application, asset.Operation.ToArray(), ct).ConfigureAwait(false);
-                        if (!FixedRoute(actual.CanonicalBytes.Span, manifest.CanonicalBytes.Span))
+                        if (!EqualOwnedAttachmentManifests(actual, manifest))
                             throw new CryptographicException("Retained attachment keys differ from the independently preserved offer.");
                     }
                 }
                 finally { CryptographicOperations.ZeroMemory(payload); }
             }
-            var effects = await application.CaptureOrdinaryOutboxEffectsAsync(scope, selected, ct).ConfigureAwait(false);
-            var rows = selected.Select(entry => new Did2CompactionPlan.Row(Did2CompactionPlan.Disposition.OutboxPayload,
+            var effects = await application.CaptureOrdinaryOutboxEffectsAsync(scope, selected, ct, action).ConfigureAwait(false);
+            var rows = selected.Select(entry => new Did2CompactionPlan.Row(action,
                 entry.Operation.ToArray(), SHA256.HashData(entry.Exact))).OrderBy(row => Convert.ToHexString(row.Selector.Span), StringComparer.Ordinal).ToArray();
-            sendSuccessor = RemoveSelectedOrdinarySendCommitments(sends, scope, rows);
-            foreach (var entry in selected) { journal.Entries.Remove(Convert.ToHexString(entry.Operation)); entry.Dispose(); }
-            journal.Revision = checked(journal.Revision + 1);
+            if (stoppedOnly)
+                foreach (var entry in selected)
+                    journal.RetireWorkingPayload(Convert.ToHexString(entry.Operation));
+            else
+            {
+                sendSuccessor = RemoveSelectedOrdinarySendCommitments(sends, scope, rows);
+                journal.RetireSuccessfulCommands(selected);
+            }
             successor = ProtectedDid2DirectTextJournal.Encode(journal, scope.Network, scope.LocalAccount, scope.Instance);
             var descriptors = new List<Did2CompactionPlan.Root>();
             for (var rootIndex = 0; rootIndex < roots.Count; rootIndex++)
             {
                 var digest = roots[rootIndex].Use(bytes => SHA256.HashData(bytes));
                 var changed = rootIndex == 0 ? successor : sendSuccessor;
-                descriptors.Add(rootIndex < 2
+                descriptors.Add(rootIndex == 0 || rootIndex == 1 && !stoppedOnly
                     ? new(kinds[rootIndex], CompactionSlotSelector(slots[rootIndex]), digest, SHA256.HashData(changed), false, changed)
                     : Guard(kinds[rootIndex], slots[rootIndex], digest));
             }
@@ -169,24 +224,56 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         finally { CryptographicOperations.ZeroMemory(registered.Account); CryptographicOperations.ZeroMemory(registered.Instance); }
     }
 
-    private async Task RequireOriginalMailboxSendCommitmentAsync(VerifiedDeepIdV2CurrentAccount current,
+    private async Task RequireOriginalMailboxSendChainAsync(VerifiedDeepIdV2CurrentAccount current,
         HeldDeepIdV2AccountLease held, OwnedDid2MessagingStorage opened, Did2MessagingSessionScope scope,
         ReadOnlyMemory<byte> operation, ReadOnlyMemory<byte> nativeEnvelope, SqliteDeepMailboxStore application,
-        ProtectedDid2MailboxSendJournal.State sends, ProtectedDid2MailboxGrantJournal.State grants, CancellationToken ct)
+        ProtectedDid2MailboxSendJournal.State sends, ProtectedDid2MailboxGrantJournal.State grants,
+        DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own, DeepIdV2ContactPathAuthoritySource source,
+        ulong currentUpper, CancellationToken ct,
+        ReadOnlyMemory<byte> initialIntent = default, IDeepMlDsa65Verifier? initialVerifier = null)
     {
-        if (!sends.Entries.TryGetValue(Convert.ToHexString(ProtectedDid2MailboxSendJournal.Key(scope.Hash, operation.Span)), out var send) ||
+        foreach (var send in sends.RequirePreparedChain(scope.Hash, operation.Span))
+        {
+            var attempt = send.Attempt.ToArray(); var logical = MailboxSendOperation(scope, attempt, nativeEnvelope.Span);
+            try
+            {
+                // Known loss of possibly-forwarded public evidence is corruption;
+                // still-pending/unknown work is backpressure, never deletion proof.
+                await application.RequireAttemptedStoreEvidenceAsync(scope, operation, attempt, logical, ct).ConfigureAwait(false);
+                if (await application.ReadDurableStorePublicEvidenceAsync(scope, operation, attempt, logical, ct).ConfigureAwait(false) is null)
+                    throw new IOException("An unresolved attempt pins the complete native send chain.");
+                await RequireOriginalMailboxSendCommitmentAsync(current, held, opened, scope, operation, attempt, nativeEnvelope,
+                    application, sends, grants, own, source, currentUpper, ct, initialIntent, initialVerifier).ConfigureAwait(false);
+            }
+            finally { CryptographicOperations.ZeroMemory(attempt); CryptographicOperations.ZeroMemory(logical); }
+        }
+    }
+
+    private async Task RequireOriginalMailboxSendCommitmentAsync(VerifiedDeepIdV2CurrentAccount current,
+        HeldDeepIdV2AccountLease held, OwnedDid2MessagingStorage opened, Did2MessagingSessionScope scope,
+        ReadOnlyMemory<byte> operation, ReadOnlyMemory<byte> attempt, ReadOnlyMemory<byte> nativeEnvelope, SqliteDeepMailboxStore application,
+        ProtectedDid2MailboxSendJournal.State sends, ProtectedDid2MailboxGrantJournal.State grants,
+        DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own, DeepIdV2ContactPathAuthoritySource source,
+        ulong currentUpper, CancellationToken ct,
+        ReadOnlyMemory<byte> initialIntent = default, IDeepMlDsa65Verifier? initialVerifier = null)
+    {
+        if (!sends.Entries.TryGetValue(Convert.ToHexString(ProtectedDid2MailboxSendJournal.Key(scope.Hash, attempt.Span)), out var send) ||
             !send.Prepared || !FixedRoute(send.ScopeHash, scope.Hash) || !FixedRoute(send.Operation, operation.Span) ||
+            !FixedRoute(send.Attempt, attempt.Span) ||
             !FixedRoute(send.EnvelopeHash, SHA256.HashData(nativeEnvelope.Span)))
             throw new CryptographicException("Original Store lost the exact prepared native send commitment.");
-        var evidence = await application.RequireStorePublicEvidenceAsync(scope, operation, ct).ConfigureAwait(false);
+        var evidence = await application.RequireStorePublicEvidenceAsync(scope, operation, attempt, ct).ConfigureAwait(false);
+        await RequireStoreEvidenceCommitmentUnderLeaseAsync(held, scope, operation, attempt, evidence, ct).ConfigureAwait(false);
+        if (evidence.IsInitial != !initialIntent.IsEmpty)
+            throw new CryptographicException("Original chain recipient evidence differs from its native send kind.");
         var route = evidence.IsInitial ? ContactRouteClosureCodec.Decode(evidence.OriginalRoute.Span) :
-            await ReadOriginalPeerStoreRouteAsync(current, held, opened, application, ct).ConfigureAwait(false);
+            await ReadOriginalPeerStoreRouteAsync(current, held, opened, application, evidence.OriginalRoute, ct).ConfigureAwait(false);
         if (!FixedRoute(evidence.Logical.Span, send.MailboxOperation) ||
             !FixedRoute(send.RouteHash, SHA256.HashData(route.ExactBytes.Span)))
             throw new CryptographicException("Original send differs from retained public/native route custody.");
         var read = await application.ReadTransportOutboxAsync(OutboxAccountScope.FromBytes(evidence.AccountScope.Span),
             OutboxLogicalId.FromBytes(send.MailboxOperation), ct).ConfigureAwait(false);
-        if (read is not { Result: TransportOutboxReadResult.Found, Item.State: TransportOutboxState.Durable })
+        if (read is not { Result: TransportOutboxReadResult.Found, Item.State: TransportOutboxState.Durable or TransportOutboxState.Delivered })
             throw new CryptographicException("Original send lost its actual durable transport request.");
         var exact = read.Item.GetCiphertextBundleCopy();
         try
@@ -222,6 +309,13 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             ContactCodec.VerifyMailboxGrantHolderSignature(request);
             ContactCodec.ValidateMailboxGrantResultBinding(request, response);
             ContactCodec.ValidateMailboxGrantResultRouteBinding(response, route);
+            var keys = MailboxStoreReplicaEvidenceVerifier.Verify(own.Network, own.Authority, route, evidence.Replicas);
+            var receipt = await VerifyOriginalStoreOutcomeAsync(scope, attempt, nativeEnvelope, application, route,
+                evidence, keys, own, source, currentUpper, ct).ConfigureAwait(false);
+            if (evidence.IsInitial)
+                await RequireOriginalInitialStoreRecipientUnderLeaseAsync(current, held, opened, scope, initialIntent,
+                    evidence, nativeEnvelope, exact, receipt, own.Authority,
+                    initialVerifier ?? throw new CryptographicException("Initial chain lost its live approved verifier."), ct).ConfigureAwait(false);
             ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
         }
         finally { CryptographicOperations.ZeroMemory(exact); }

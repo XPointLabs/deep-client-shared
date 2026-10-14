@@ -39,6 +39,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         IDeepMlDsa65Verifier verifier, Did2MessagingSessionScope scope, CancellationToken ct)
     {
         using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
+        await ResumeLocalCompactionUnderLeaseAsync(held, ct).ConfigureAwait(false);
         using var current = await RequireCurrentUnderLeaseAsync(trustedUnixSeconds, verifier, ct).ConfigureAwait(false);
         var instance = await SqliteDeepIdV2AccountGeneration.ReadAccountInstanceUnderLeaseAsync(
             storage, networkId, current.AccountId, ct).ConfigureAwait(false);
@@ -77,6 +78,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 scope = registered.FindSource(retained.SessionId.Span, SHA256.HashData(retained.CanonicalSpan));
             if (scope is null)
             {
+                await SqliteDeepIdV2AccountGeneration.RequireInitialIntentNotStoppedUnderLeaseAsync(storage, networkId,
+                    current.AccountId, instance, ownedIntent, ct).ConfigureAwait(false);
                 seed = await OwnedInitialMessagingSeed.FromSenderAsync(retained, initial, hello, instance, own, peer, source, held, ct).ConfigureAwait(false);
                 scope = await catalog.RegisterAsync(seed, ct).ConfigureAwait(false);
             }
@@ -88,6 +91,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
             if (floor.Ordinal == 0)
             {
+                await SqliteDeepIdV2AccountGeneration.RequireInitialIntentNotStoppedUnderLeaseAsync(storage, networkId,
+                    current.AccountId, instance, ownedIntent, ct).ConfigureAwait(false);
                 seed ??= await OwnedInitialMessagingSeed.FromSenderAsync(retained, initial, hello, instance, own, peer, source, held, ct).ConfigureAwait(false);
                 using var import = OwnedDid2MessagingMutation.Import(seed, floor);
                 _ = await opened.Custody.CommitOwnedAsync(import, ct).ConfigureAwait(false);

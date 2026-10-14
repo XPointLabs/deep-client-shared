@@ -142,9 +142,16 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var plans = new ProtectedDid2CompactionPlan(storage, lease, networkId, owner.Account, owner.Instance);
             for (var iteration = 0; iteration < 8; iteration++)
             {
+                if (iteration == 0) await ResumeInitialCancellationKeysUnderLeaseAsync(owner.Account, owner.Instance, held, ct).ConfigureAwait(false);
                 ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
                 using var plan = await plans.ReadAsync(held, ct).ConfigureAwait(false);
                 if (plan.Phase == 0) { await RequireNoPrefixPartsAsync(ct).ConfigureAwait(false); return; }
+                if (IsStoppedControlPlan(plan))
+                {
+                    if (IsPreSessionControlPlan(plan)) await ResumePreSessionControlAuditStepUnderLeaseAsync(plans, plan, held, ct).ConfigureAwait(false);
+                    else await ResumeControlAuditStepUnderLeaseAsync(plans, plan, held, ct).ConfigureAwait(false);
+                    continue;
+                }
                 if (plan.ReadRow(plan.RowCount - 1).Action == Did2CompactionPlan.Disposition.RetainedPath)
                 {
                     await ResumeRetainedPathStepUnderLeaseAsync(plans, plan, held, ct).ConfigureAwait(false);
@@ -152,7 +159,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 }
                 if (plan.Target == Did2CompactionPlan.SqlTarget.ProtectedOnly)
                 {
-                    await ResumeMailboxRetirementStepUnderLeaseAsync(plans, plan, held, ct).ConfigureAwait(false);
+                    if (plan.ReadRow(0).Action is Did2CompactionPlan.Disposition.ContactAcceptPayload or Did2CompactionPlan.Disposition.InitialPayload)
+                        await ResumeContactPayloadRetirementStepAsync(plans, plan, held, ct).ConfigureAwait(false);
+                    else await ResumeMailboxRetirementStepUnderLeaseAsync(plans, plan, held, ct).ConfigureAwait(false);
                     continue;
                 }
                 using var catalog = await new ProtectedDid2MessagingSessionCatalog(storage, networkId, owner.Account, owner.Instance).ReadAsync(ct).ConfigureAwait(false);

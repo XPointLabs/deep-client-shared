@@ -196,6 +196,29 @@ public sealed class JournaledDeepSecureStorage : IDeepSecureStorage, IDisposable
         return matched;
     }
 
+    public async Task<bool> CompareAndDeleteAsync(string guardSlot, ReadOnlyMemory<byte> expected,
+        IReadOnlyList<string> slots, CancellationToken cancellationToken = default)
+    {
+        using var batch = new DeepSecureStorageGuardedDeletion(guardSlot, expected, slots);
+        var matched = false;
+        await MutateAsync(values =>
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!values.TryGetValue(batch.GuardSlot, out var current) ||
+                !CryptographicOperations.FixedTimeEquals(current, batch.Expected)) return false;
+            matched = true;
+            var changed = false;
+            foreach (var slot in batch.Slots)
+                if (values.Remove(slot, out var removed))
+                {
+                    CryptographicOperations.ZeroMemory(removed);
+                    changed = true;
+                }
+            return changed; // Missing parts do not re-encrypt/rewrite the aggregate.
+        }, cancellationToken).ConfigureAwait(false);
+        return matched;
+    }
+
     public async Task DeleteBatchAsync(
         IReadOnlyList<string> slots,
         CancellationToken cancellationToken = default)

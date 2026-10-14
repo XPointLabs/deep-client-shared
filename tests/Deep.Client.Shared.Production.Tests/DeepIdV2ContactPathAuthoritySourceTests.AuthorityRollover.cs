@@ -20,20 +20,24 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         // Same-key routine renewal, not root/witness key rotation. This source
         // fixture uses real signed lineage/heads/views and native account/SQL
         // owners; its in-process services are not production/device evidence.
-        internal async Task AdvanceCurrentRoutingAuthorityAsync()
+        internal async Task AdvanceCurrentRoutingAuthorityAsync(ulong? transitionTime = null)
         {
             var before = await Source().VerifyForOwnPreKeyAuthoringAsync(accounts, default);
             Assert.Equal(0UL, before.Authority.AuthorityGeneration);
             var peer = peerAccounts ?? throw new InvalidOperationException("Independent peer is required.");
             _ = await Source(peer).VerifyForOwnPreKeyAuthoringAsync(peer, default);
-            await AdvanceNetworkAsync(expiry: 6_000);
-            AuthorSignedEpochAdvance();
+            if (successor is null)
+            {
+                await AdvanceNetworkAsync(expiry: 6_000);
+                AuthorSignedEpochAdvance();
+            }
+            else Assert.NotNull(epochSuccessorPmt);
             var originalEpoch = BinaryPrimitives.ReadUInt64BigEndian(
                 ContactCodec.Decode("PMT2", operational.ExactPmt2.Span).Field(6).Span);
             var advancedEpoch = BinaryPrimitives.ReadUInt64BigEndian(
                 ContactCodec.Decode("PMT2", epochSuccessorPmt!.Value.Span).Field(6).Span);
             Assert.Equal(checked(originalEpoch + 1), advancedEpoch);
-            var delta = checked(2_100UL - CurrentProofTime);
+            var delta = checked((transitionTime ?? 2_100UL) - CurrentProofTime);
             ProofTime = checked(ProofTime + delta); Sample = checked(Sample + delta);
 
             var renewedRoot = await XPointNetworkBootstrapAuthor.AuthorSameKeyRenewalAsync(

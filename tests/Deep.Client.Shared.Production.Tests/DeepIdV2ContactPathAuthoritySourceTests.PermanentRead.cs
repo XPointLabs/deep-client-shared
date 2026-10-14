@@ -67,6 +67,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             ReadOnlyMemory<byte> requiredExitReplicaId, CancellationToken ct = default)
         {
             ct.ThrowIfCancellationRequested(); Calls++;
+            fixture.RequireContactRetryReadAvailable();
             var authority = await source.GetCurrentAsync(canonical, ct);
             var query = Xiq1Codec.Decode(canonical.ExactRequest.Span);
             var publication = Xpu1Codec.Decode(exactPublication.Span);

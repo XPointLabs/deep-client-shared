@@ -290,7 +290,52 @@ public sealed partial class DeepIdV2ContactPathAuthoritySource :
         VerifiedOnionNetworkContext Network,
         VerifiedXPointNetworkAuthority Authority,
         Deep.Protocol.AccountDirectoryV1.VerifiedDeepIdV2DirectoryFreshness Proof,
-        VerifiedMailboxAuthorityV2 MailboxAuthority);
+        VerifiedMailboxAuthorityV2 MailboxAuthority,
+        DeepIdV2NetworkClosureArtifacts NamespaceRecords)
+    {
+        // Bounded owned public records are lookup inputs, never historical
+        // authority. Every selected exact pair must pass the current host's
+        // strict retained-history/ancestor verifier before an owned effect.
+        internal async ValueTask RequireOriginalMailboxNamespacesAsync(
+            VerifiedMailboxHostAuthorityV2 host, ReadOnlyMemory<byte> exactIssuancePma2,
+            ContactRecord originalProjection, Deep.Protocol.DeepExtension.MailboxCapabilities.MailboxCapabilityDomain domain,
+            CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (domain == Deep.Protocol.DeepExtension.MailboxCapabilities.MailboxCapabilityDomain.Deposit)
+            {
+                await host.RequireOriginalNamespaceAsync(exactIssuancePma2, originalProjection.CanonicalBytes, ct).ConfigureAwait(false);
+                return;
+            }
+            if (domain != Deep.Protocol.DeepExtension.MailboxCapabilities.MailboxCapabilityDomain.Retrieve)
+                throw new CryptographicException("Original namespace custody has no supported mailbox role.");
+            // DR-0104: a retained Retrieve is issued under then-current PMA2,
+            // while naming an older route selection. These are two exact
+            // historical joins, not one mismatched PMA2/PMT2 pair.
+            var issuance = ContactCodec.Decode("PMA2", exactIssuancePma2.Span);
+            if (Fixed(issuance.CoreHash.Span, originalProjection.Field(4).Span[6..]))
+            {
+                // The actual two namespaces coincide. The captured exact
+                // policy already supplies the strict join; unrelated public
+                // distribution metadata is neither needed nor authority.
+                await host.RequireOriginalNamespaceAsync(issuance.CanonicalBytes, originalProjection.CanonicalBytes, ct).ConfigureAwait(false);
+                return;
+            }
+            // PMT2's canonical decoder checks the complete typed PMA2 CoreRef
+            // header, as in VerifyMailboxAuthorityAsync below.
+            var issuanceProjection = NamespaceRecords.ExactOrderedPmt2Chain
+                .Select(bytes => ContactCodec.Decode("PMT2", bytes.Span))
+                .FirstOrDefault(candidate => Fixed(candidate.Field(4).Span[6..], issuance.CoreHash.Span)) ??
+                throw new CryptographicException("Original Retrieve issuance policy has no exact retained projection metadata.");
+            var routePolicy = NamespaceRecords.ExactOrderedPma2Chain
+                .Select(bytes => ContactCodec.Decode("PMA2", bytes.Span))
+                .FirstOrDefault(candidate => Fixed(candidate.CoreHash.Span, originalProjection.Field(4).Span[6..])) ??
+                throw new CryptographicException("Original Retrieve route projection has no exact retained policy metadata.");
+            await host.RequireOriginalNamespaceAsync(issuance.CanonicalBytes, issuanceProjection.CanonicalBytes, ct).ConfigureAwait(false);
+            await host.RequireOriginalNamespaceAsync(routePolicy.CanonicalBytes, originalProjection.CanonicalBytes, ct).ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested();
+        }
+    }
 
     internal sealed record MessagingEndpointAuthority(OwnPreKeyAuthoringAuthority Own,
         Deep.Protocol.AccountDirectoryV1.VerifiedDeepIdV2DirectoryFreshness Peer);
@@ -300,11 +345,13 @@ public sealed partial class DeepIdV2ContactPathAuthoritySource :
         OwnPreKeyAuthoringAuthority? verifiedOwn = null)
     {
         RequireAccountOwner(account); ArgumentNullException.ThrowIfNull(scope);
+        // This local read may finish an already committed bounded compaction
+        // plan. It uses caller cancellation, not a network-authority deadline;
+        // no fetch/signing/dispatch occurs during recovery under the lease.
+        var did = await account.ReadOwnMessagingPeerCredentialAsync(scope, ct).ConfigureAwait(false);
         using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);
         budget.CancelAfter(TimeSpan.FromSeconds(30));
         var token = budget.Token;
-        // No network fetch occurs while this short account-owned read holds its lease.
-        var did = await account.ReadOwnMessagingPeerCredentialAsync(scope, token).ConfigureAwait(false);
         await gate.WaitAsync(token).ConfigureAwait(false);
         try
         {
@@ -480,7 +527,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySource :
         verified.EnsureCurrent();
         mailboxAuthority = await VerifyMailboxAuthorityAsync(exact, verified, authority, fresh,
             cancellationToken).ConfigureAwait(false);
-        return new(verified, authority, fresh, mailboxAuthority);
+        return new(verified, authority, fresh, mailboxAuthority, exact);
     }
 
     private async ValueTask<VerifiedMailboxAuthorityV2> VerifyMailboxAuthorityAsync(

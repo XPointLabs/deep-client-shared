@@ -48,7 +48,7 @@ public sealed class SqliteDeviceStateStoreOptions
 public sealed partial class SqliteDeviceStateStore : IDeviceStateStore, IProtectedCurrentDmd1Store, IDisposable
 {
     private const int ApplicationId = 0x44565331; // DVS1
-    private const int SchemaGeneration = 5;
+    private const int SchemaGeneration = 6;
     // This is a sealed, clean-break schema.  It is deliberately kept as one canonical input for
     // creation and for the cryptographic sqlite_master contract checked on every open.
     private const string SchemaDdl = """
@@ -104,12 +104,9 @@ public sealed partial class SqliteDeviceStateStore : IDeviceStateStore, IProtect
         }.ToString();
         try
         {
-            using (var opened = Open())
-            {
-                if (exists) Validate(opened); else Create(opened);
-            }
-            ValidateEncryptedMainDatabase(statePath);
             connection = Open();
+            if (exists) Validate(connection); else Create(connection);
+            ValidateEncryptedMainDatabase(statePath);
             ValidateEncryptedSidecars(statePath, connection);
         }
         catch (DeviceStateStoreOpenException)
@@ -122,12 +119,31 @@ public sealed partial class SqliteDeviceStateStore : IDeviceStateStore, IProtect
             throw Failure(DeviceStateStoreOpenFailure.UnreadableOrWrongKey,
                 "DeviceV1 SQLCipher state cannot be opened with this key.", ex);
         }
+        catch
+        {
+            connection?.Dispose(); connection = null; CryptographicOperations.ZeroMemory(key); throw;
+        }
     }
 
     internal string ConnectionString => connectionString;
     internal bool IsKeyZeroedForTesting => key.All(static value => value == 0);
     internal void ValidateEncryptedFilesForTesting()
     { ValidateEncryptedMainDatabase(statePath); ValidateEncryptedSidecars(statePath, GetConnection()); }
+
+#if DEEP_TEST_INTERNALS
+    internal (long Synchronous, long SecureDelete, string Journal, long ForeignKeys) ReadConnectionPolicyForTesting()
+    {
+        using var operation = EnterOperation(); gate.Wait();
+        try
+        {
+            ThrowIfDisposed(); var db = GetConnection();
+            return (ScalarLong(db, "PRAGMA synchronous;"), ScalarLong(db, "PRAGMA secure_delete;"),
+                Convert.ToString(Scalar(db, "PRAGMA journal_mode;"), CultureInfo.InvariantCulture)!,
+                ScalarLong(db, "PRAGMA foreign_keys;"));
+        }
+        finally { gate.Release(); }
+    }
+#endif
 
     public async ValueTask<DeviceStoreReadResult> ReadAsync(DeviceAccountId32 requestedAccountId,
         ulong requestedAccountGeneration, CancellationToken cancellationToken)
@@ -217,12 +233,34 @@ public sealed partial class SqliteDeviceStateStore : IDeviceStateStore, IProtect
         var db = new SqliteConnection(connectionString);
         try
         {
-            db.Open(); var rc = SQLitePCL.raw.sqlite3_key(db.Handle, key);
-            if (rc != SQLitePCL.raw.SQLITE_OK) throw new SqliteException("SQLCipher rejected the key.", rc);
+            db.Open(); InstallRandomKey(db, key);
             Execute(db, null, "PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA secure_delete=ON; PRAGMA synchronous=FULL; PRAGMA journal_mode=DELETE;");
             return db;
         }
         catch { db.Dispose(); throw; }
+    }
+
+    // Only for the current random-keyed device generation, never human passwords.
+    // The read-only projection reader uses the identical interpretation; callers
+    // must still authenticate encrypted pages, schema, scope and protected custody.
+    internal static void InstallRandomKey(SqliteConnection db, ReadOnlySpan<byte> randomKey)
+    {
+        if (randomKey.Length != 32 || randomKey.IndexOfAnyExcept((byte)0) < 0)
+            throw new CryptographicException("Device SQLCipher requires its nonzero random 256-bit key.");
+        var encoded = new byte[67];
+        encoded[0] = (byte)'x'; encoded[1] = encoded[66] = (byte)'\'';
+        ReadOnlySpan<byte> alphabet = "0123456789abcdef"u8;
+        for (var index = 0; index < randomKey.Length; index++)
+        {
+            encoded[2 + index * 2] = alphabet[randomKey[index] >> 4];
+            encoded[3 + index * 2] = alphabet[randomKey[index] & 15];
+        }
+        try
+        {
+            var rc = SQLitePCL.raw.sqlite3_key(db.Handle, encoded);
+            if (rc != SQLitePCL.raw.SQLITE_OK) throw new SqliteException("SQLCipher rejected the device key.", rc);
+        }
+        finally { CryptographicOperations.ZeroMemory(encoded); }
     }
 
     private void Create(SqliteConnection db)

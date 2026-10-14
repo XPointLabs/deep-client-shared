@@ -522,10 +522,28 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         => OpenRandomKeyConnection(path, key, create);
 
     // These account/session keys are independently random, not human passwords.
-    // DR60 changes only DSV2 to generation3; DMS2 remains generation2. Keep the
-    // supported native raw-key encoding in wipeable buffers, never SQL/string.
+    // Each SQL store owns its current schema generation independently. Keep
+    // the supported native raw-key encoding in wipeable buffers, never SQL/string.
     private static SqliteConnection OpenMessagingConnection(string path,
-        ReadOnlySpan<byte> key, bool create) => OpenRandomKeyConnection(path, key, create);
+        ReadOnlySpan<byte> key, bool create)
+    {
+        var connection = OpenRandomKeyConnection(path, key, create);
+        try
+        {
+            // Connection-local native page caching only, never a cached
+            // verification result. Keep every protected-floor/history check
+            // and the existing non-pooled SQLCipher/durability policy intact.
+            using var configure = connection.CreateCommand();
+            configure.CommandText = "PRAGMA cache_size=-8192;";
+            configure.ExecuteNonQuery();
+            configure.CommandText = "PRAGMA cache_size;";
+            if (Convert.ToInt64(configure.ExecuteScalar(),
+                System.Globalization.CultureInfo.InvariantCulture) != -8192)
+                throw new InvalidDataException("SQLCipher did not retain the bounded messaging page-cache setting.");
+            return connection;
+        }
+        catch { connection.Dispose(); throw; }
+    }
 
     private static SqliteConnection OpenRandomKeyConnection(string path,
         ReadOnlySpan<byte> key, bool create)

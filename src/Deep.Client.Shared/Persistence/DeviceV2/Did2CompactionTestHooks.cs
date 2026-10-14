@@ -1,6 +1,6 @@
 #if DEEP_TEST_INTERNALS
 namespace Deep.Client.Shared.Persistence.DeviceV2;
-internal enum Did2CompactionFailpoint { AfterStage, AfterSql, AfterSqlRecorded, AfterHistoryAdopted, AfterPartsDeleted, AfterPlanCleared }
+internal enum Did2CompactionFailpoint { AfterStage, AfterSql, AfterSqlRecorded, AfterHistoryAdopted, AfterPartsDeleted, AfterPlanCleared, AfterAbandonRecorded }
 internal static class Did2CompactionTestHooks
 {
     private static readonly AsyncLocal<Action<Did2CompactionFailpoint>?> Current = new();

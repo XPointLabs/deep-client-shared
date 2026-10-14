@@ -13,6 +13,8 @@ public sealed class Did2MessagingSqlJournalTests
     [InlineData("missing-scope")]
     [InlineData("version")]
     [InlineData("retired-schema")]
+    [InlineData("retired-prefix-schema")]
+    [InlineData("retired-data-only-schema")]
     [InlineData("wal")]
     [InlineData("weak-sync")]
     [InlineData("weak-delete")]
@@ -42,7 +44,9 @@ public sealed class Did2MessagingSqlJournalTests
                 mutate.CommandText = defect switch
                 {
                     "extra-table" => "CREATE TABLE unexpected(value BLOB);", "missing-scope" => "DELETE FROM scope;",
-                    "version" => "PRAGMA user_version=1;", "retired-schema" => "PRAGMA user_version=2;", "wal" => "PRAGMA journal_mode=WAL;",
+                    "version" => "PRAGMA user_version=1;", "retired-schema" => "PRAGMA user_version=2;",
+                    "retired-prefix-schema" => "PRAGMA user_version=3;", "wal" => "PRAGMA journal_mode=WAL;",
+                    "retired-data-only-schema" => "PRAGMA user_version=4;",
                     "weak-sync" => "PRAGMA synchronous=NORMAL;", "weak-delete" => "PRAGMA secure_delete=OFF;", _ => "SELECT 1;"
                 };
                 mutate.ExecuteNonQuery();
@@ -165,7 +169,7 @@ public sealed class Did2MessagingSqlJournalTests
             var sql = new Did2MessagingSqlJournal(connection, scope, Did2MessagingHistoryCheckpoint.RegisteredEmpty(scope));
             sql.CreateRegisteredEmpty(Did2MessagingFloor.Empty(scope)); var before = sql.ReadCompleteCompactionProjection();
             using var corrupt = connection.CreateCommand();
-            corrupt.CommandText = "PRAGMA ignore_check_constraints=ON; INSERT INTO journal VALUES(0,zeroblob(32),zeroblob(32),zeroblob(608));";
+            corrupt.CommandText = "PRAGMA ignore_check_constraints=ON; INSERT INTO journal VALUES(0,zeroblob(32),zeroblob(32),zeroblob(672));";
             corrupt.ExecuteNonQuery();
             Assert.NotEqual(before, sql.ReadCompleteCompactionProjection());
             Assert.Throws<CryptographicException>(() => sql.VerifyTip());

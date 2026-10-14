@@ -743,6 +743,9 @@ public sealed class DeepIdV2AccountServiceTests
             ReadOnlyMemory<byte> replacement, CancellationToken ct = default) =>
             inner.CompareExchangeAsync(slot, expected, replacement, ct);
 
+        public Task<bool> CompareAndDeleteAsync(string guardSlot, ReadOnlyMemory<byte> expected,
+            IReadOnlyList<string> slots, CancellationToken ct = default) => inner.CompareAndDeleteAsync(guardSlot, expected, slots, ct);
+
         public Task<bool> CompareExchangeAndInsertAsync(string slot, ReadOnlyMemory<byte> expected,
             ReadOnlyMemory<byte> replacement, IReadOnlyList<DeepSecureStorageWrite> insertions,
             CancellationToken ct = default) => inner.CompareExchangeAndInsertAsync(slot, expected, replacement, insertions, ct);

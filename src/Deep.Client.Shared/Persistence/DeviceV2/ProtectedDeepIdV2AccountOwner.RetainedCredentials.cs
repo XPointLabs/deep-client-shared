@@ -127,11 +127,16 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var now = checked(upper + seconds);
             var policy = fresh.MailboxAuthority;
             if (grant.Domain != MailboxCapabilityDomain.Retrieve || lower > upper ||
-                lower < grant.NotBeforeUnixSeconds || lower < policy.NotBeforeUnixSeconds ||
-                checked(sample + seconds) >= fresh.Proof.FreshnessDeadlineMonotonicSeconds ||
-                now >= Math.Min(grant.ExpiresAtUnixSeconds,
-                    Math.Min(policy.ExpiresAtUnixSeconds, fresh.Network.MaximumRecordExpiryUnixSeconds)))
-                throw new CryptographicException("Retained installation lost its complete current authority interval.");
+                lower < grant.NotBeforeUnixSeconds || lower < policy.NotBeforeUnixSeconds)
+                throw new CryptographicException("Retained installation lost its exact role or authenticated lower bound.");
+            if (checked(sample + seconds) >= fresh.Proof.FreshnessDeadlineMonotonicSeconds)
+                throw new CryptographicException("Retained installation reached its original authenticated freshness deadline.");
+            if (now >= grant.ExpiresAtUnixSeconds)
+                throw new CryptographicException("Retained installation reached its exact grant expiry.");
+            if (now >= policy.ExpiresAtUnixSeconds)
+                throw new CryptographicException("Retained installation reached its current issuer policy expiry.");
+            if (now >= fresh.Network.MaximumRecordExpiryUnixSeconds)
+                throw new CryptographicException("Retained installation reached its current network record expiry.");
             return now;
         }
         public void ValidateFreshness() => _ = CurrentUpper();

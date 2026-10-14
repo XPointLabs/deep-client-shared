@@ -3,6 +3,7 @@ using Deep.Client.Shared.Services.ContactV2;
 using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.ContactV1;
 using Deep.Protocol.DeepExtension.MailboxCapabilities;
+using Deep.Protocol.XPointNetworkV1;
 
 namespace Deep.Client.Shared.Persistence.DeviceV2;
 
@@ -17,6 +18,16 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         // independently held: this removes a write-holder, not a read path or
         // object. No recipient Delivered/Read outcome is synthesized.
         internal async Task RetireUsedDepositAcquisitionAsync(IDeepMlDsa65Verifier verifier, CancellationToken ct)
+            => await RetireAdoptedDepositAcquisitionAsync(verifier, requireOriginalWork: true, ct).ConfigureAwait(false);
+
+        // Private maintenance producer only. SQL absence chooses a candidate,
+        // not permission. Actual native-forward and SQL-reverse coverage below
+        // must both prove no original work for this exact excluded grant.
+        internal async Task RetireUnusedAdoptedDepositAcquisitionAsync(IDeepMlDsa65Verifier verifier, CancellationToken ct)
+            => await RetireAdoptedDepositAcquisitionAsync(verifier, requireOriginalWork: false, ct).ConfigureAwait(false);
+
+        private async Task RetireAdoptedDepositAcquisitionAsync(IDeepMlDsa65Verifier verifier,
+            bool requireOriginalWork, CancellationToken ct)
         {
             await gate.WaitAsync(ct).ConfigureAwait(false);
             try
@@ -33,7 +44,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 byte[] successor = [];
                 try
                 {
-                    await RequireOriginalStoreObjectClosureUnderGateAsync(entry, exactGrant, verifier, ct).ConfigureAwait(false);
+                    var hasOriginalWork = await RequireOriginalStoreObjectClosureUnderGateAsync(entry, exactGrant, verifier, ct).ConfigureAwait(false);
+                    if (hasOriginalWork != requireOriginalWork)
+                        throw new IOException("Deposit retirement profile differs from independently verified original work.");
                     var plans = new ProtectedDid2CompactionPlan(owner.storage, owner.lease, owner.networkId, current.AccountId.Span, instance);
                     using var idle = await plans.ReadAsync(held, ct).ConfigureAwait(false);
                     if (idle.Phase != 0) throw new InvalidOperationException("An active local plan owns recovery.");
@@ -65,7 +78,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             finally { gate.Release(); }
         }
 
-        private async Task RequireOriginalStoreObjectClosureUnderGateAsync(byte[] entry, byte[] exactGrant,
+        private async Task<bool> RequireOriginalStoreObjectClosureUnderGateAsync(byte[] entry, byte[] exactGrant,
             IDeepMlDsa65Verifier verifier, CancellationToken ct)
         {
             await RecheckRouteFreshnessAsync(current, source, fresh, held, first, ct).ConfigureAwait(false);
@@ -81,30 +94,72 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             async Task<bool> VerifyOriginal(Did2MessagingSessionScope scope, OwnedDid2MessagingStorage opened,
                 ReadOnlyMemory<byte> operation, CancellationToken token)
             {
-                var metadata = await application.RequireStorePublicEvidenceAsync(scope, operation, token).ConfigureAwait(false);
-                if (metadata.IsInitial)
+                var draft = scope.IsInitiator ? RequireRetirementInitialDraft(drafts, scope) : null;
+                var intent = draft is not null && FixedRoute(InitialMailboxOperation(draft.Intent), operation.Span)
+                    ? draft.Intent.ToArray() : [];
+                byte[][] attempts = [];
+                byte[] envelope = [];
+                try
                 {
-                    var draft = RequireRetirementInitialDraft(drafts, scope);
-                    if (!FixedRoute(InitialMailboxOperation(draft.Intent), operation.Span))
-                        throw new CryptographicException("Original initial Store has a different native intent.");
-                    if (await owner.TryReadRetainedInitialStoreUnderLeaseAsync(current, held, opened, scope, draft.Intent.ToArray(),
-                        null, fresh, source, verifier, token).ConfigureAwait(false) is null)
-                        throw new IOException("An unknown original initial Store pins Deposit retirement.");
+                    if (intent.Length != 0)
+                    {
+                        if (await owner.TryReadRetainedInitialStoreUnderLeaseAsync(current, held, opened, scope, intent,
+                            null, fresh, source, verifier, token).ConfigureAwait(false) is null)
+                            throw new IOException("An unknown original initial Store pins Deposit retirement.");
+                    }
+                    else if (await owner.TryReadRetainedMessagingStoreUnderLeaseAsync(current, held, opened, scope, operation,
+                        fresh, source, token).ConfigureAwait(false) is null)
+                        throw new IOException("An unknown original outgoing Store pins Deposit retirement.");
+                    // One native event may have several original attempts/holders.
+                    // A selected predecessor outcome cannot authenticate a successor
+                    // or prove that this selected grant has complete object custody.
+                    attempts = await application.ReadStoreAttemptCandidatesAsync(scope, operation, token).ConfigureAwait(false);
+                    if (attempts.Length == 0) throw new IOException("Actual outgoing work lost original Store attempts.");
+                    envelope = await owner.ReadOwnedMailboxEnvelopeUnderLeaseAsync(current, scope, opened, operation,
+                        intent, token).ConfigureAwait(false);
+                    var reading = await RecheckRouteFreshnessAsync(current, source, fresh, held, first, token).ConfigureAwait(false);
+                    var upper = checked(fresh.Proof.TrustedUpperUnixSeconds + reading.SampleSeconds - fresh.Proof.MonotonicSample);
+                    var belongs = false;
+                    foreach (var attempt in attempts)
+                    {
+                        var metadata = await application.RequireStorePublicEvidenceAsync(scope, operation, attempt, token).ConfigureAwait(false);
+                        await owner.RequireStoreEvidenceCommitmentUnderLeaseAsync(held, scope, operation, attempt, metadata, token).ConfigureAwait(false);
+                        if (metadata.IsInitial != (intent.Length != 0))
+                            throw new CryptographicException("Original grant attempt differs from its actual native send kind.");
+                        var originalRoute = metadata.IsInitial ? ContactRouteClosureCodec.Decode(metadata.OriginalRoute.Span) :
+                            await owner.ReadOriginalPeerStoreRouteAsync(current, held, opened, application, metadata.OriginalRoute, token).ConfigureAwait(false);
+                        var replicas = MailboxStoreReplicaEvidenceVerifier.Verify(fresh.Network, fresh.Authority, originalRoute, metadata.Replicas);
+                        var receipt = await VerifyOriginalStoreOutcomeAsync(scope, attempt, envelope, application,
+                            originalRoute, metadata, replicas, fresh, source, upper, token).ConfigureAwait(false);
+                        if (metadata.IsInitial)
+                        {
+                            var stored = await application.ReadTransportOutboxAsync(OutboxAccountScope.FromBytes(metadata.AccountScope.Span),
+                                OutboxLogicalId.FromBytes(metadata.Logical.Span), token).ConfigureAwait(false);
+                            var request = stored.Item?.GetCiphertextBundleCopy() ?? throw new CryptographicException("Original Initial request disappeared.");
+                            try
+                            {
+                                await owner.RequireOriginalInitialStoreRecipientUnderLeaseAsync(current, held, opened, scope, intent,
+                                    metadata, envelope, request, receipt, fresh.Authority, verifier, token).ConfigureAwait(false);
+                            }
+                            finally { CryptographicOperations.ZeroMemory(request); }
+                        }
+                        // SQL membership is only a fact AFTER each exact native,
+                        // original request/policy/replica/coordinator verification.
+                        belongs |= await application.IsOriginalStoreForGrantRetirementAsync(scope, operation, attempt,
+                            exactGrant, token).ConfigureAwait(false);
+                    }
+                    return belongs;
                 }
-                else if (await owner.TryReadRetainedMessagingStoreUnderLeaseAsync(current, held, opened, scope, operation,
-                    fresh, source, token).ConfigureAwait(false) is null)
-                    throw new IOException("An unknown original outgoing Store pins Deposit retirement.");
-                // The historical verifier above reconstructs the original
-                // recipient route from independent public/native custody and
-                // verifies the exact accepted body, holder signature, quorum
-                // and coordinator. It never reads a private Deposit holder.
-                // Keep those complete paths byte-exact under the ninth guard;
-                // a live object is preserved, not shortened to grant expiry.
-                return await application.IsOriginalStoreForGrantRetirementAsync(scope, operation, exactGrant, token).ConfigureAwait(false);
+                finally
+                {
+                    foreach (var bytes in attempts) CryptographicOperations.ZeroMemory(bytes);
+                    CryptographicOperations.ZeroMemory(envelope); CryptographicOperations.ZeroMemory(intent);
+                }
             }
 
             // Forward join from independently protected native custody. Missing
             // application rows never make actual outgoing work disappear.
+            var hasSelectedNativeWork = false;
             for (var index = 0; index < catalog.Count; index++)
             {
                 var scope = catalog.Scope(index);
@@ -115,13 +170,13 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 {
                     var draft = RequireRetirementInitialDraft(drafts, scope);
                     var operation = InitialMailboxOperation(draft.Intent);
-                    try { await VerifyOriginal(scope, opened, operation, ct).ConfigureAwait(false); }
+                    try { hasSelectedNativeWork |= await VerifyOriginal(scope, opened, operation, ct).ConfigureAwait(false); }
                     finally { CryptographicOperations.ZeroMemory(operation); }
                 }
                 var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
                 foreach (var operation in opened.Sql.ReadVerifiedOutgoingOperations(floor, ct))
                 {
-                    try { await VerifyOriginal(scope, opened, operation, ct).ConfigureAwait(false); }
+                    try { hasSelectedNativeWork |= await VerifyOriginal(scope, opened, operation, ct).ConfigureAwait(false); }
                     finally { CryptographicOperations.ZeroMemory(operation); }
                 }
             }
@@ -129,7 +184,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             // Reverse join: every actual original MAU for this holder/grant
             // must have independently verified native/source custody. Streaming
             // pages keep memory fixed even when retained history grows.
-            await application.RequireCompleteGrantStoreCoverageAsync(exactGrant, async (scopeHash, operation, token) =>
+            var selectedSqlWork = await application.ReadCompleteGrantStoreCoverageAsync(exactGrant, async (scopeHash, operation, token) =>
             {
                 Did2MessagingSessionScope? selected = null;
                 for (var index = 0; index < catalog.Count; index++)
@@ -148,6 +203,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 if (!await VerifyOriginal(selected, opened, operation, token).ConfigureAwait(false))
                     throw new CryptographicException("Original grant SQL coverage selected another native Store request.");
             }, ct).ConfigureAwait(false);
+            if (hasSelectedNativeWork != (selectedSqlWork != 0))
+                throw new CryptographicException("Original grant native and SQL coverage disagree.");
+            return hasSelectedNativeWork;
         }
     }
 
@@ -157,8 +215,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         ProtectedDid2ContactStartJournal.Entry? result = null;
         foreach (var draft in drafts.Entries.Values)
         {
-            var init = ApplicationCoreCodec.DecodeDmc2(draft.Init);
-            if (!FixedRoute(init.ConversationId.Span, scope.Conversation) || !FixedRoute(init.SenderDeviceId.Span, scope.LocalDevice) ||
+            if (!FixedRoute(draft.Conversation, scope.Conversation) || !FixedRoute(draft.LocalDevice, scope.LocalDevice) ||
                 !FixedRoute(draft.Exact.Slice(64, 32), scope.RemoteAccount)) continue;
             if (result is not null) throw new CryptographicException("Initial native custody has ambiguous original drafts.");
             result = draft;

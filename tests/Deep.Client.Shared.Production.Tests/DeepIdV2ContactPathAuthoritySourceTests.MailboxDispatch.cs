@@ -34,8 +34,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         using (var accept = await fixture.PrepareOwnedContactAccept(receiver, Bytes(32, 0xae)))
         using (var sent = await fixture.SendOwnedMessage(receiver, accept.Operation.ToArray(), ApplicationCoreCodec.DecodeDmc2(accept.ExactDmc2)))
         using (var received = await fixture.ReceiveOwnedMessage(sender, sent.ExactEnvelope.ToArray())) { }
-        var operation = Bytes(32, 0xaf);
-        using var text = await fixture.PrepareOwnedText(sender, operation, "Capacity must precede network mutation");
+        using var text = await fixture.CreateOwnedText(sender, "Capacity must precede network mutation");
+        var operation = text.OperationId.ToArray();
         using var committed = await fixture.SendOwnedMessage(sender, operation, ApplicationCoreCodec.DecodeDmc2(text.ExactDmc2.Span));
         var expectedJournalHash = await fixture.StageRejectedMailboxSend(sender, operation, committed.ExactEnvelope.ToArray(), fault);
         var grants = new OwnedGrantTransport(fixture, ownerOnPrimary: true);
@@ -66,8 +66,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         using (var accept = await fixture.PrepareOwnedContactAccept(receiver, Bytes(32, 0xae)))
         using (var sent = await fixture.SendOwnedMessage(receiver, accept.Operation.ToArray(), ApplicationCoreCodec.DecodeDmc2(accept.ExactDmc2)))
         using (var received = await fixture.ReceiveOwnedMessage(sender, sent.ExactEnvelope.ToArray())) { }
-        var operation = Bytes(32, 0xaf);
-        using var text = await fixture.PrepareOwnedText(sender, operation, "Reconcile before working-set retirement");
+        using var text = await fixture.CreateOwnedText(sender, "Reconcile before working-set retirement");
+        var operation = text.OperationId.ToArray();
         using var committed = await fixture.SendOwnedMessage(sender, operation, ApplicationCoreCodec.DecodeDmc2(text.ExactDmc2.Span));
         var grants = new OwnedGrantTransport(fixture, ownerOnPrimary: true);
         var transport = new OwnedStoreFixture(fixture, sender, operation, committed.ExactEnvelope.ToArray()) { LoseReply = true };
@@ -107,11 +107,13 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         using (var accept = await fixture.PrepareOwnedContactAccept(receiver, Bytes(32, 0xae)))
         using (var sent = await fixture.SendOwnedMessage(receiver, accept.Operation.ToArray(), ApplicationCoreCodec.DecodeDmc2(accept.ExactDmc2)))
         using (var received = await fixture.ReceiveOwnedMessage(sender, sent.ExactEnvelope.ToArray())) { }
-        var operation = Bytes(32, 0xaf);
-        byte[] cipher;
-        using (var text = await fixture.PrepareOwnedText(sender, operation, "Owned mailbox delivery 📨"))
-        using (var sent = await fixture.SendOwnedMessage(sender, operation, ApplicationCoreCodec.DecodeDmc2(text.ExactDmc2.Span)))
+        byte[] cipher, operation;
+        using (var text = await fixture.CreateOwnedText(sender, "Owned mailbox delivery 📨"))
+        {
+            operation = text.OperationId.ToArray();
+            using var sent = await fixture.SendOwnedMessage(sender, operation, ApplicationCoreCodec.DecodeDmc2(text.ExactDmc2.Span));
             cipher = sent.ExactEnvelope.ToArray();
+        }
         var pendingText = Assert.Single(await fixture.ListNativePendingText());
         Assert.Equal(operation, pendingText.LogicalOperation.ToArray());
         Assert.Equal(Convert.ToHexString(sender.Conversation), pendingText.ConversationId);
@@ -247,8 +249,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         using (var accept = await fixture.PrepareOwnedContactAccept(receiver, Bytes(32, 0xae)))
         using (var sent = await fixture.SendOwnedMessage(receiver, accept.Operation.ToArray(), ApplicationCoreCodec.DecodeDmc2(accept.ExactDmc2)))
         using (var received = await fixture.ReceiveOwnedMessage(sender, sent.ExactEnvelope.ToArray())) { }
-        var operation = Bytes(32, 0xaf);
-        using var text = await fixture.PrepareOwnedText(sender, operation, "Independent counter floor");
+        using var text = await fixture.CreateOwnedText(sender, "Independent counter floor");
+        var operation = text.OperationId.ToArray();
         using var committed = await fixture.SendOwnedMessage(sender, operation, ApplicationCoreCodec.DecodeDmc2(text.ExactDmc2.Span));
         var grants = new OwnedGrantTransport(fixture, ownerOnPrimary: true);
         var transport = new OwnedStoreFixture(fixture, sender, operation, committed.ExactEnvelope.ToArray()) { LoseReply = true };
@@ -508,6 +510,9 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         internal byte[]? ExactRequest { get; private set; }
         internal MailboxEncryptedEnvelope? StoredEnvelope { get; private set; }
         private byte[]? durableResponse;
+        internal byte[] CopyOriginalQuorumForFixture() =>
+            (durableResponse ?? throw new InvalidOperationException("Fixture Store has no signed reply.")).ToArray();
+        internal Action<ulong>? BeforeReturnedReply { get; set; }
         internal ulong DurableTimeForFixture
         {
             get
@@ -530,15 +535,20 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             // Actual held owner/SQL preparation must preserve the product
             // object horizon instead of clipping it to this short Deposit grant.
             var grant = decoded.Presentation.Grant;
-            Assert.Equal(30UL * 24 * 60 * 60, envelope.ExpiresAtUnixSeconds - envelope.CreatedAtUnixSeconds);
             Assert.True(envelope.ExpiresAtUnixSeconds > grant.ExpiresAtUnixSeconds);
             if (dpe is not null) Assert.Equal(dpe, envelope.Ciphertext.ToArray());
             StoredEnvelope ??= envelope;
             if (ExactRequest is null) ExactRequest = request.ToArray(); else Assert.Equal(ExactRequest, request.ToArray());
             using (var journal = await fixture.ReadMailboxSends(own: scope?.IsInitiator ?? ownerOnPrimary))
             {
-                var entry = Assert.Single(journal.Entries, value => value.Value.Operation.SequenceEqual(op)).Value;
-                scope ??= await fixture.ReadStoredSendScope(entry.ScopeHash.ToArray(), ownerOnPrimary);
+                var original = Assert.Single(journal.Entries.Values,
+                    value => value.Operation.SequenceEqual(op) && !value.HasPredecessor);
+                scope ??= await fixture.ReadStoredSendScope(original.ScopeHash.ToArray(), ownerOnPrimary);
+                var entry = journal.Current(scope.Hash, op) ?? throw new InvalidDataException("Fixture requires an actual current attempt.");
+                Assert.Equal(30UL * 24 * 60 * 60, original.Expires - original.Created);
+                Assert.Equal(original.Expires, envelope.ExpiresAtUnixSeconds);
+                Assert.Equal(entry.Created, envelope.CreatedAtUnixSeconds);
+                Assert.True(envelope.CreatedAtUnixSeconds >= original.Created);
                 Assert.True(entry.Prepared); Assert.Equal(op, entry.Operation.ToArray()); Assert.Equal(scope.Hash.ToArray(), entry.ScopeHash.ToArray());
                 Assert.Equal(SHA256.HashData(envelope.Ciphertext.Span), entry.EnvelopeHash.ToArray());
                 Assert.Equal(SHA256.HashData(request.Span), entry.MauHash.ToArray()); Assert.Equal(decoded.Presentation.ReplayCounter, entry.Counter);
@@ -574,6 +584,12 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 return durableResponse.ToArray();
             }
             var ids = route.Replicas; var crypto = new SodiumMailboxPeerReplicationCrypto();
+            // A fixture node stamps its own actual signed-time clock, not the
+            // client's uncertainty upper bound. If the client-created object is
+            // a few seconds ahead, model that elapsed time in both fixture UTC
+            // and its protected monotonic sample before accepting it.
+            var acceptedAt = fixture.ObserveMailboxNodeAcceptance(envelope.CreatedAtUnixSeconds);
+            Assert.InRange(acceptedAt, grant.NotBeforeUnixSeconds, grant.ExpiresAtUnixSeconds - 1);
             MailboxReplicaReceiptV2 Receipt(ReadOnlyMemory<byte> id)
             {
                 var marker = Enumerable.Range(0x70, 3).Single(value => PublicKey((byte)value).AsSpan().SequenceEqual(id.Span));
@@ -581,8 +597,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 {
                     Status = MailboxReceiptStatus.Durable, Disposition = MailboxReplicaDisposition.Stored,
                     ReplicaId = id, OperationId = envelope.OperationId, Epoch = envelope.Epoch, Cursor = Cursor,
-                    AcceptedAtUnixSeconds = policy!.GetCurrent().NowUnixSeconds,
-                    DurableAtUnixSeconds = policy.GetCurrent().NowUnixSeconds, ExpiresAtUnixSeconds = envelope.ExpiresAtUnixSeconds,
+                    AcceptedAtUnixSeconds = acceptedAt,
+                    DurableAtUnixSeconds = acceptedAt, ExpiresAtUnixSeconds = envelope.ExpiresAtUnixSeconds,
                     BlindedMailboxId = envelope.MailboxId.Bytes, PlacementCommitment = route.PlacementCommitment,
                     MembershipCommitment = route.MembershipCommitment, EnvelopeDigest = envelope.DeduplicationDigest, Signature = new byte[64]
                 }, Bytes(32, (byte)marker));
@@ -594,6 +610,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 SecondReplica = Receipt(ids.SecondId), Signature = new byte[64]
             }, Bytes(32, (byte)firstMarker)));
             if (LoseReply) throw new IOException("Injected lost Store reply after durable quorum creation.");
+            BeforeReturnedReply?.Invoke(grant.ExpiresAtUnixSeconds);
             return durableResponse.ToArray();
         }
         public Task<ReadOnlyMemory<byte>> StoreAsync(ReadOnlyMemory<byte> request, CancellationToken ct = default) => throw new InvalidOperationException();

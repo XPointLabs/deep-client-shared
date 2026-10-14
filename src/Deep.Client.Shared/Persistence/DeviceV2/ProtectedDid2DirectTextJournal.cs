@@ -4,14 +4,17 @@ using Deep.Protocol.ApplicationCore;
 
 namespace Deep.Client.Shared.Persistence.DeviceV2;
 
-// DR30/46 common owned MessageCreate/AttachmentOffer command namespace.
+// DR30/46/110 common owned MessageCreate/AttachmentOffer/route-control namespace.
 // The storage identifier is not a second counter or a legacy wire reader.
 internal static class ProtectedDid2DirectTextJournal
 {
     internal const string Slot = "deep.store.v2.direct-text-journal";
-    internal const int HeaderBytes = 96, PrefixBytes = 524, MaximumEntries = 512, MaximumEventBytes = 16668;
+    internal const int HeaderBytes = 100, PrefixBytes = 540, MaximumEntries = 512, MaximumEventBytes = 23649;
+    internal const int TerminalAuditBytes = 48, MaximumTerminalAudits = 8192;
     internal const int FloorBytes = Did2MessagingSessionScope.Bytes + 8, MaximumFloors = MaximumEntries;
-    internal const int MaximumBytes = HeaderBytes + (PrefixBytes + FloorBytes) * MaximumEntries + MaximumEventBytes;
+    internal const int MaximumBytes = HeaderBytes + (PrefixBytes + FloorBytes) * MaximumEntries + MaximumEventBytes +
+        TerminalAuditBytes * MaximumTerminalAudits;
+    internal enum WorkStopReason : byte { Active = 0, UserCancelled = 1, RetryExpired = 2 }
 
     internal sealed class Entry : IDisposable
     {
@@ -26,6 +29,11 @@ internal static class ProtectedDid2DirectTextJournal
         internal ReadOnlySpan<byte> EventHash => Exact.Slice(484, 32);
         internal bool Pending => Exact[516] == 1;
         internal bool Stored => Exact[516] == 3;
+        internal WorkStopReason StopReason => (WorkStopReason)Exact[518];
+        internal bool WorkStopped => StopReason != WorkStopReason.Active;
+        internal ulong StoppedAtUpper => BinaryPrimitives.ReadUInt64BigEndian(Exact[524..]);
+        internal ulong FirstSuccessfulStoreUpper => BinaryPrimitives.ReadUInt64BigEndian(Exact[532..]);
+        internal Dmc2ContentKind Kind => (Dmc2ContentKind)Exact[517];
         internal ReadOnlySpan<byte> PendingDmc2 => Exact[PrefixBytes..];
         internal string Position => Convert.ToHexString(Scope.Conversation) + Convert.ToHexString(Scope.LocalDevice);
 
@@ -33,8 +41,18 @@ internal static class ProtectedDid2DirectTextJournal
             ReadOnlySpan<byte> account, ReadOnlySpan<byte> instance)
         {
             if (exact.Length < PrefixBytes || exact.Length > PrefixBytes + MaximumEventBytes ||
-                exact[516] is not (1 or 2 or 3) || exact.Slice(517, 3).IndexOfAnyExcept((byte)0) >= 0)
+                exact[516] is not (1 or 2 or 3) ||
+                (Dmc2ContentKind)exact[517] is not (Dmc2ContentKind.MessageCreate or Dmc2ContentKind.AttachmentOffer or Dmc2ContentKind.ContactRouteUpdate) ||
+                exact[518] > (byte)WorkStopReason.RetryExpired || exact[519] != 0 ||
+                exact[516] == 1 && exact[518] != 0)
                 throw new InvalidDataException("Protected direct text has an unknown shape.");
+            var stoppedAt = BinaryPrimitives.ReadUInt64BigEndian(exact[524..]);
+            var successAt = BinaryPrimitives.ReadUInt64BigEndian(exact[532..]);
+            if (exact[516] == 3 && exact[518] == 0
+                ? successAt is 0 or > long.MaxValue - 2_592_000 : successAt != 0)
+                throw new InvalidDataException("Successful Store lost its canonical first terminal time.");
+            if (exact[518] == 0 ? stoppedAt != 0 : stoppedAt is 0 or > long.MaxValue - 2_592_000)
+                throw new InvalidDataException("Protected work has a noncanonical terminal time or payload disposition.");
             var size = BinaryPrimitives.ReadUInt32BigEndian(exact[520..]);
             if (size != exact.Length - PrefixBytes || (exact[516] != 1 ? size != 0 : size is < 285 or > MaximumEventBytes))
                 throw new InvalidDataException("Protected direct text has a noncanonical phase/length.");
@@ -55,18 +73,25 @@ internal static class ProtectedDid2DirectTextJournal
         internal static Entry Prepare(Did2MessagingSessionScope scope, ReadOnlySpan<byte> operation, ParsedDmc2 message)
         {
             ProtectedDph2PreClaimJournal.RequireIntent(operation);
-            var exact = message.CanonicalBytes.ToArray();
-            var frame = new byte[PrefixBytes + exact.Length];
+            ReadOnlyMemory<byte> exact = default;
+            byte[] frame = [];
             try
             {
+                exact = message.CanonicalBytes;
+                frame = new byte[PrefixBytes + exact.Length];
                 operation.CopyTo(frame); scope.Exact.CopyTo(frame.AsSpan(32)); message.LogicalMessageId.Span.CopyTo(frame.AsSpan(436));
                 BinaryPrimitives.WriteUInt64BigEndian(frame.AsSpan(468), message.SenderClientSequence);
                 BinaryPrimitives.WriteUInt64BigEndian(frame.AsSpan(476), message.CreatedAtUnixMilliseconds);
-                SHA256.HashData(exact, frame.AsSpan(484, 32)); frame[516] = 1;
-                BinaryPrimitives.WriteUInt32BigEndian(frame.AsSpan(520), checked((uint)exact.Length)); exact.CopyTo(frame, PrefixBytes);
+                SHA256.HashData(exact.Span, frame.AsSpan(484, 32)); frame[516] = 1;
+                frame[517] = (byte)message.ContentKind;
+                BinaryPrimitives.WriteUInt32BigEndian(frame.AsSpan(520), checked((uint)exact.Length)); exact.Span.CopyTo(frame.AsSpan(PrefixBytes));
                 return Decode(frame, scope.Network, scope.LocalAccount, scope.Instance);
             }
-            finally { CryptographicOperations.ZeroMemory(exact); CryptographicOperations.ZeroMemory(frame); }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(System.Runtime.InteropServices.MemoryMarshal.AsMemory(exact).Span);
+                CryptographicOperations.ZeroMemory(frame);
+            }
         }
 
         internal Entry Stabilize()
@@ -77,10 +102,23 @@ internal static class ProtectedDid2DirectTextJournal
             finally { CryptographicOperations.ZeroMemory(frame); }
         }
 
-        internal Entry WithVerifiedStore()
+        internal Entry WithVerifiedStore(ulong successfulAtUpper)
         {
             if (Pending || Stored) throw new InvalidOperationException("Only an authored command can retain Store completion.");
             var frame = Exact.ToArray(); frame[516] = 3;
+            if (!WorkStopped) BinaryPrimitives.WriteUInt64BigEndian(frame.AsSpan(532), successfulAtUpper);
+            try { var scope = Scope; return Decode(frame, scope.Network, scope.LocalAccount, scope.Instance); }
+            finally { CryptographicOperations.ZeroMemory(frame); }
+        }
+
+        // Local sender policy, not non-delivery, Store or deletion evidence.
+        // Store adoption preserves this independent, irreversible stop fact.
+        internal Entry WithStoppedWork(WorkStopReason reason, ulong stoppedAtUpper)
+        {
+            if (Pending || WorkStopped || Stored || reason is not (WorkStopReason.UserCancelled or WorkStopReason.RetryExpired))
+                throw new InvalidOperationException("Only stable active work can stop once.");
+            var frame = Exact.ToArray(); frame[518] = (byte)reason;
+            BinaryPrimitives.WriteUInt64BigEndian(frame.AsSpan(524), stoppedAtUpper);
             try { var scope = Scope; return Decode(frame, scope.Network, scope.LocalAccount, scope.Instance); }
             finally { CryptographicOperations.ZeroMemory(frame); }
         }
@@ -90,21 +128,73 @@ internal static class ProtectedDid2DirectTextJournal
             if (exact.Length is < 285 or > MaximumEventBytes || !Fixed(SHA256.HashData(exact), EventHash) ||
                 Pending && !Fixed(exact, PendingDmc2))
                 throw new CryptographicException("Direct text differs from its protected command hash.");
-            var parsed = ApplicationCoreCodec.DecodeDmc2(exact); var scope = Scope;
+            var parsed = ApplicationCoreCodec.DecodeDmc2(exact);
+            ReadOnlyMemory<byte> canonical = default;
             try
             {
-                if (parsed.ContentKind is not (Dmc2ContentKind.MessageCreate or Dmc2ContentKind.AttachmentOffer) || parsed.Flags != Dmc2Flags.None ||
-                    parsed.ExpiresAtUnixMilliseconds != 0 || parsed.ReplyToLogicalMessageId.Length != 0 ||
+                var scope = Scope;
+                canonical = parsed.CanonicalBytes;
+                var routeControl = parsed.ParsedPayload as ContactRouteUpdateDmc2Payload;
+                if (parsed.ContentKind != Kind || parsed.Flags != Dmc2Flags.None ||
+                    (Kind == Dmc2ContentKind.ContactRouteUpdate
+                        ? routeControl is null || parsed.ExpiresAtUnixMilliseconds == 0 || !Fixed(routeControl.RelationshipId.Span, scope.Relationship)
+                        : parsed.ExpiresAtUnixMilliseconds != 0) || parsed.ReplyToLogicalMessageId.Length != 0 ||
                     !Fixed(parsed.NetworkId.Span, scope.Network) || !Fixed(parsed.SenderAccountId.Span, scope.LocalAccount) ||
                     !Fixed(parsed.SenderDeviceId.Span, scope.LocalDevice) || !Fixed(parsed.ConversationId.Span, scope.Conversation) ||
                     !Fixed(parsed.LogicalMessageId.Span, Logical) || parsed.SenderClientSequence != Sequence ||
-                    parsed.CreatedAtUnixMilliseconds != Created || !Fixed(parsed.CanonicalBytes.Span, exact))
+                    parsed.CreatedAtUnixMilliseconds != Created || !Fixed(canonical.Span, exact))
                     throw new CryptographicException("Direct text differs from its protected command scope.");
             }
-            finally { if (parsed.ParsedPayload is AttachmentOfferDmc2Payload offer) offer.Manifest.Dispose(); }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(System.Runtime.InteropServices.MemoryMarshal.AsMemory(canonical).Span);
+                if (parsed.ParsedPayload is AttachmentOfferDmc2Payload offer) offer.Manifest.Dispose();
+            }
         }
         public void Dispose()
         { var owned = Interlocked.Exchange(ref bytes, null); if (owned is not null) CryptographicOperations.ZeroMemory(owned); }
+    }
+
+    // Key-free metadata only. Parsing never proves Store or expiry authority.
+    internal sealed class TerminalAudit : IDisposable
+    {
+        private byte[]? bytes;
+        internal TerminalAudit(ReadOnlySpan<byte> exact)
+        {
+            if (exact.Length != TerminalAuditBytes || exact[40] is not (1 or 2 or 3) ||
+                exact.Slice(41, 7).IndexOfAnyExcept((byte)0) >= 0 ||
+                BinaryPrimitives.ReadUInt64BigEndian(exact[32..]) is 0 or > long.MaxValue - 2_592_000)
+                throw new InvalidDataException("Successful audit has an unknown closed shape.");
+            ProtectedDph2PreClaimJournal.RequireIntent(exact[..32]); bytes = exact.ToArray();
+        }
+        internal ReadOnlySpan<byte> Exact => bytes ?? throw new ObjectDisposedException(nameof(TerminalAudit));
+        internal ReadOnlySpan<byte> Operation => Exact[..32];
+        internal ulong TerminalAtUpper => BinaryPrimitives.ReadUInt64BigEndian(Exact[32..]);
+        internal byte Reason => Exact[40];
+        internal static TerminalAudit FromStored(Entry entry)
+        {
+            if (!entry.Stored || entry.WorkStopped) throw new InvalidOperationException("Only actual successful work can supply audit metadata.");
+            var raw = new byte[TerminalAuditBytes];
+            try
+            {
+                entry.Operation.CopyTo(raw); BinaryPrimitives.WriteUInt64BigEndian(raw.AsSpan(32), entry.FirstSuccessfulStoreUpper);
+                raw[40] = 3;
+                return new(raw);
+            }
+            finally { CryptographicOperations.ZeroMemory(raw); }
+        }
+        internal static TerminalAudit FromStopped(Entry entry)
+        {
+            if (entry.Pending || !entry.WorkStopped) throw new InvalidOperationException("Only actual stopped work supplies stop audit metadata.");
+            var raw = new byte[TerminalAuditBytes];
+            try
+            {
+                entry.Operation.CopyTo(raw); BinaryPrimitives.WriteUInt64BigEndian(raw.AsSpan(32), entry.StoppedAtUpper);
+                raw[40] = (byte)entry.StopReason; return new(raw);
+            }
+            finally { CryptographicOperations.ZeroMemory(raw); }
+        }
+        public void Dispose() { var owned = Interlocked.Exchange(ref bytes, null); if (owned is not null) CryptographicOperations.ZeroMemory(owned); }
     }
 
     internal sealed class State : IDisposable
@@ -112,6 +202,7 @@ internal static class ProtectedDid2DirectTextJournal
         internal ulong Revision { get; set; } = 1;
         internal SortedDictionary<string, Entry> Entries { get; } = new(StringComparer.Ordinal);
         internal SortedDictionary<string, AuthoredFloor> Floors { get; } = new(StringComparer.Ordinal);
+        internal SortedDictionary<string, TerminalAudit> TerminalAudits { get; } = new(StringComparer.Ordinal);
         internal Entry? Pending => Entries.Values.SingleOrDefault(entry => entry.Pending);
         internal ulong NextSequence(Did2MessagingSessionScope scope)
         {
@@ -123,7 +214,8 @@ internal static class ProtectedDid2DirectTextJournal
         }
         internal void RequireCapacity(Did2MessagingSessionScope scope)
         {
-            if (Entries.Count >= MaximumEntries || !Floors.ContainsKey(Position(scope)) && Floors.Count >= MaximumFloors)
+            if (Entries.Count >= MaximumEntries || TerminalAudits.Count >= MaximumTerminalAudits ||
+                !Floors.ContainsKey(Position(scope)) && Floors.Count >= MaximumFloors)
                 throw new InvalidOperationException("Protected ordinary custody requires verified compaction; floors cannot be evicted.");
             if (NextSequence(scope) >= long.MaxValue || Revision == ulong.MaxValue)
                 throw new InvalidOperationException("The protected authored counter or revision is exhausted.");
@@ -132,7 +224,7 @@ internal static class ProtectedDid2DirectTextJournal
         {
             var scope = entry.Scope; RequireCapacity(scope);
             if (!entry.Pending || Pending is not null || entry.Sequence != NextSequence(scope) ||
-                Entries.ContainsKey(Convert.ToHexString(entry.Operation)))
+                Entries.ContainsKey(Convert.ToHexString(entry.Operation)) || TerminalAudits.ContainsKey(Convert.ToHexString(entry.Operation)))
                 throw new InvalidDataException("New ordinary work must reserve exactly the protected next sequence.");
             Entries.Add(Convert.ToHexString(entry.Operation), entry);
             Floors[Position(scope)] = new(scope, checked(entry.Sequence + 1));
@@ -145,15 +237,53 @@ internal static class ProtectedDid2DirectTextJournal
             try { Revision = checked(Revision + 1); Entries[name] = next; entry.Dispose(); }
             catch { next.Dispose(); throw; }
         }
-        internal void RetainStore(string name)
+        internal void RetainStore(string name, ulong successfulAtUpper)
         {
             var entry = Entries[name];
-            var next = entry.WithVerifiedStore();
+            var next = entry.WithVerifiedStore(successfulAtUpper);
             try { Revision = checked(Revision + 1); Entries[name] = next; entry.Dispose(); }
             catch { next.Dispose(); throw; }
         }
+        internal void StopWork(string name, WorkStopReason reason, ulong stoppedAtUpper)
+        {
+            var entry = Entries[name];
+            var next = entry.WithStoppedWork(reason, stoppedAtUpper);
+            try { Revision = checked(Revision + 1); Entries[name] = next; entry.Dispose(); }
+            catch { next.Dispose(); throw; }
+        }
+        internal void RetireWorkingPayload(string name)
+        {
+            var entry = Entries[name];
+            if (TerminalAudits.Count >= MaximumTerminalAudits || TerminalAudits.ContainsKey(name))
+                throw new InvalidOperationException("Terminal audit capacity requires proven expiry, not eviction.");
+            using var audit = TerminalAudit.FromStopped(entry);
+            var revision = checked(Revision + 1);
+            TerminalAudits.Add(name, new(audit.Exact)); Entries.Remove(name); entry.Dispose(); Revision = revision;
+        }
+        internal void ExpireAudit(string name)
+        {
+            if (!TerminalAudits.TryGetValue(name, out var audit)) throw new InvalidOperationException("No retained terminal audit exists.");
+            var revision = checked(Revision + 1);
+            TerminalAudits.Remove(name); audit.Dispose(); Revision = revision;
+        }
+        internal void RetireSuccessfulCommands(IReadOnlyList<Entry> selected)
+        {
+            if (selected.Count == 0 || selected.Count > MaximumTerminalAudits - TerminalAudits.Count)
+                throw new InvalidOperationException("Successful audit capacity requires proven expiry, not eviction.");
+            foreach (var entry in selected)
+            {
+                var name = Convert.ToHexString(entry.Operation);
+                if (!Entries.TryGetValue(name, out var actual) || !ReferenceEquals(actual, entry) || TerminalAudits.ContainsKey(name))
+                    throw new InvalidDataException("Successful cleanup changed actual working membership.");
+                TerminalAudits.Add(name, TerminalAudit.FromStored(entry)); Entries.Remove(name); entry.Dispose();
+            }
+            Revision = checked(Revision + 1);
+        }
         public void Dispose()
-        { foreach (var entry in Entries.Values) entry.Dispose(); Entries.Clear(); Floors.Clear(); }
+        {
+            foreach (var entry in Entries.Values) entry.Dispose(); foreach (var audit in TerminalAudits.Values) audit.Dispose();
+            Entries.Clear(); TerminalAudits.Clear(); Floors.Clear();
+        }
     }
 
     // Scope metadata supplies the actual SQL counter selector after the last
@@ -169,13 +299,15 @@ internal static class ProtectedDid2DirectTextJournal
         ReadOnlySpan<byte> account, ReadOnlySpan<byte> instance)
     {
         RequireScope(network, account, instance);
-        if (exact.Length < HeaderBytes || exact.Length > MaximumBytes || exact[0] != 3 || exact[1] != 0 ||
+        if (exact.Length < HeaderBytes || exact.Length > MaximumBytes || exact[0] != 8 || exact[1] != 0 ||
             !Fixed(exact.Slice(12, 16), network) || !Fixed(exact.Slice(28, 32), account) || !Fixed(exact.Slice(60, 32), instance) ||
-            exact.Slice(94, 2).IndexOfAnyExcept((byte)0) >= 0)
+            exact.Slice(94, 2).IndexOfAnyExcept((byte)0) >= 0 || exact.Slice(98, 2).IndexOfAnyExcept((byte)0) >= 0)
             throw new InvalidDataException("Protected direct text journal has an unknown or foreign header.");
         var count = BinaryPrimitives.ReadUInt16BigEndian(exact[2..]);
         var floorCount = BinaryPrimitives.ReadUInt16BigEndian(exact[92..]);
-        if (count > MaximumEntries || floorCount > MaximumFloors || exact.Length < HeaderBytes + floorCount * FloorBytes)
+        var auditCount = BinaryPrimitives.ReadUInt16BigEndian(exact[96..]);
+        if (count > MaximumEntries || floorCount > MaximumFloors || auditCount > MaximumTerminalAudits ||
+            exact.Length < HeaderBytes + floorCount * FloorBytes + auditCount * TerminalAuditBytes)
             throw new InvalidDataException("Protected direct text journal exceeds capacity.");
         var state = new State { Revision = BinaryPrimitives.ReadUInt64BigEndian(exact[4..]) };
         try
@@ -207,28 +339,40 @@ internal static class ProtectedDid2DirectTextJournal
                 { entry.Dispose(); throw new InvalidDataException("Protected direct text repeats an operation or logical position."); }
                 state.Entries.Add(name, entry); prior = name; offset += entry.Exact.Length;
             }
+            prior = null;
+            for (var index = 0; index < auditCount; index++)
+            {
+                if (exact.Length - offset < TerminalAuditBytes) throw new InvalidDataException("Successful audit is truncated.");
+                var audit = new TerminalAudit(exact.Slice(offset, TerminalAuditBytes));
+                var name = Convert.ToHexString(audit.Operation);
+                if (prior is not null && string.CompareOrdinal(prior, name) >= 0 || state.Entries.ContainsKey(name))
+                { audit.Dispose(); throw new InvalidDataException("Successful audit repeats or resurrects working custody."); }
+                state.TerminalAudits.Add(name, audit); prior = name; offset += TerminalAuditBytes;
+            }
             var pending = state.Entries.Values.Count(e => e.Pending);
             // Revision and counters survive compaction. The current row count
             // cannot reconstruct either lifetime value or authorize a reset.
             var reserved = state.Floors.Values.Aggregate(0UL, (total, floor) =>
                 checked(total + floor.NextSequence - Baseline(floor.Scope)));
             var minimumRevision = checked(1UL + checked(2UL * reserved) - checked((ulong)pending) +
-                checked((ulong)state.Entries.Values.Count(e => e.Stored)));
-            if (offset != exact.Length || pending > 1 || state.Revision < minimumRevision ||
+                checked((ulong)state.Entries.Values.Count(e => e.Stored)) + (ulong)auditCount +
+                checked((ulong)state.Entries.Values.Count(e => e.WorkStopped)));
+            if (offset != exact.Length || pending > 1 || (ulong)auditCount > reserved || state.Revision < minimumRevision ||
                 floorCount == 0 && state.Revision != 1)
                 throw new InvalidDataException("Protected direct text journal has a noncanonical revision/pending state.");
             foreach (var group in state.Entries.Values.GroupBy(e => e.Position))
             {
                 var ordered = group.OrderBy(e => e.Sequence).ToArray();
                 if (!state.Floors.TryGetValue(group.Key, out var floor) ||
-                    floor.NextSequence != checked(ordered[^1].Sequence + 1))
+                    floor.NextSequence <= ordered[^1].Sequence)
                     throw new InvalidDataException("Ordinary working rows lost their independent authored floor.");
-                var next = ordered[0].Sequence;
+                ulong priorSequence = 0;
                 foreach (var entry in ordered)
                 {
-                    if (entry.Sequence != next++ || !Fixed(entry.Scope.Exact, floor.Scope.Exact) ||
-                        entry.Pending && !ReferenceEquals(entry, ordered[^1]))
-                        throw new InvalidDataException("Protected direct text authored positions are not contiguous.");
+                    if (entry.Sequence <= priorSequence || !Fixed(entry.Scope.Exact, floor.Scope.Exact) ||
+                        entry.Pending && (!ReferenceEquals(entry, ordered[^1]) || floor.NextSequence != checked(entry.Sequence + 1)))
+                        throw new InvalidDataException("Protected direct text repeats or exceeds its independent authored positions.");
+                    priorSequence = entry.Sequence;
                 }
             }
             return state;
@@ -238,14 +382,16 @@ internal static class ProtectedDid2DirectTextJournal
     internal static byte[] Encode(State state, ReadOnlySpan<byte> network, ReadOnlySpan<byte> account, ReadOnlySpan<byte> instance)
     {
         RequireScope(network, account, instance);
-        if (state.Entries.Count > MaximumEntries || state.Floors.Count > MaximumFloors)
+        if (state.Entries.Count > MaximumEntries || state.Floors.Count > MaximumFloors || state.TerminalAudits.Count > MaximumTerminalAudits)
             throw new InvalidOperationException("Protected direct text requires owned rollover.");
-        var exact = new byte[HeaderBytes + state.Floors.Count * FloorBytes + state.Entries.Values.Sum(e => e.Exact.Length)];
+        var exact = new byte[HeaderBytes + state.Floors.Count * FloorBytes + state.Entries.Values.Sum(e => e.Exact.Length) +
+            state.TerminalAudits.Count * TerminalAuditBytes];
         try
         {
-            exact[0] = 3; BinaryPrimitives.WriteUInt16BigEndian(exact.AsSpan(2), checked((ushort)state.Entries.Count));
+            exact[0] = 8; BinaryPrimitives.WriteUInt16BigEndian(exact.AsSpan(2), checked((ushort)state.Entries.Count));
             BinaryPrimitives.WriteUInt64BigEndian(exact.AsSpan(4), state.Revision);
             BinaryPrimitives.WriteUInt16BigEndian(exact.AsSpan(92), checked((ushort)state.Floors.Count));
+            BinaryPrimitives.WriteUInt16BigEndian(exact.AsSpan(96), checked((ushort)state.TerminalAudits.Count));
             network.CopyTo(exact.AsSpan(12)); account.CopyTo(exact.AsSpan(28)); instance.CopyTo(exact.AsSpan(60));
             var offset = HeaderBytes;
             foreach (var pair in state.Floors)
@@ -259,6 +405,11 @@ internal static class ProtectedDid2DirectTextJournal
             {
                 if (pair.Key != Convert.ToHexString(pair.Value.Operation)) throw new InvalidDataException("Direct text journal key differs from its command.");
                 pair.Value.Exact.CopyTo(exact.AsSpan(offset)); offset += pair.Value.Exact.Length;
+            }
+            foreach (var pair in state.TerminalAudits)
+            {
+                if (pair.Key != Convert.ToHexString(pair.Value.Operation)) throw new InvalidDataException("Successful audit selector changed.");
+                pair.Value.Exact.CopyTo(exact.AsSpan(offset)); offset += TerminalAuditBytes;
             }
             using var validated = Decode(exact, network, account, instance); return exact;
         }

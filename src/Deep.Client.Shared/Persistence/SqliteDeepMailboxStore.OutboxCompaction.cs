@@ -45,33 +45,39 @@ public sealed partial class SqliteDeepMailboxStore
     // row-count-derived permission is provided by this reader.
     internal Task<(byte[] Before, byte[] After)> CaptureOrdinaryOutboxEffectsAsync(
         Did2MessagingSessionScope scope, IReadOnlyList<ProtectedDid2DirectTextJournal.Entry> selected,
-        CancellationToken ct)
+        CancellationToken ct, Did2CompactionPlan.Disposition action = Did2CompactionPlan.Disposition.OutboxPayload)
     {
         return WithReplayConnectionAsync(connection =>
         {
             using var tx = connection.BeginTransaction();
-            return Task.FromResult(CaptureOrdinaryOutboxEffects(connection, tx, scope, selected, ct));
+            return Task.FromResult(CaptureOrdinaryOutboxEffects(connection, tx, scope, selected, ct, action));
         }, ct);
     }
 
-    private static (byte[] Before, byte[] After) CaptureOrdinaryOutboxEffects(SqliteConnection connection,
+    private (byte[] Before, byte[] After) CaptureOrdinaryOutboxEffects(SqliteConnection connection,
         SqliteTransaction tx, Did2MessagingSessionScope scope,
-        IReadOnlyList<ProtectedDid2DirectTextJournal.Entry> selected, CancellationToken ct)
+        IReadOnlyList<ProtectedDid2DirectTextJournal.Entry> selected, CancellationToken ct, Did2CompactionPlan.Disposition action)
     {
-        if (selected.Count is < 1 or > Did2CompactionPlan.MaximumRows || selected.Any(entry =>
-            !entry.Stored || !DirectFixed(entry.Scope.Exact, scope.Exact)))
+        if (action is not (Did2CompactionPlan.Disposition.OutboxPayload or Did2CompactionPlan.Disposition.StoppedOutboxPayload) ||
+            selected.Count is < 1 or > Did2CompactionPlan.MaximumRows || selected.Any(entry =>
+            entry.Pending || !DirectFixed(entry.Scope.Exact, scope.Exact) ||
+            (action == Did2CompactionPlan.Disposition.StoppedOutboxPayload ? !entry.WorkStopped : !entry.Stored || entry.WorkStopped)))
             throw new InvalidDataException("Outbox capture requires a bounded exact stable selection.");
         ValidateTransportOutboxSchema(connection, tx); ValidateDirectInboxState(connection, tx);
         var operations = new HashSet<string>(StringComparer.Ordinal);
+        var audits = ReadStoppedAuditFacts(connection, tx);
         foreach (var entry in selected)
         {
             ct.ThrowIfCancellationRequested();
             if (!operations.Add(Convert.ToHexString(entry.Operation)))
                 throw new InvalidDataException("Duplicate selected ordinary operation.");
             RequireSelectedOrdinaryRow(connection, tx, entry);
+            if (audits.ContainsKey(Convert.ToHexString(entry.Operation))) throw new CryptographicException("Working payload cannot already have an audit row.");
         }
         var before = CompleteApplicationCompactionProjection(connection, tx, scope, null, ct);
-        var after = CompleteApplicationCompactionProjection(connection, tx, scope, operations, ct);
+        var additions = action == Did2CompactionPlan.Disposition.StoppedOutboxPayload ? selected.Select(NewStoppedAudit).ToArray() :
+            action == Did2CompactionPlan.Disposition.OutboxPayload ? selected.Select(NewTerminalAudit).ToArray() : null;
+        var after = CompleteApplicationCompactionProjection(connection, tx, scope.Hash, operations, ct, addAudits: additions);
         ct.ThrowIfCancellationRequested(); return (before, after);
     }
 
@@ -110,14 +116,15 @@ public sealed partial class SqliteDeepMailboxStore
                 !DirectFixed(plan.SqlSelector, scope.Hash) || selected.Count != plan.RowCount)
                 throw new InvalidDataException("Only an exact stored ordinary selection can enter SQL.");
             using var tx = connection.BeginTransaction();
-            var effects = CaptureOrdinaryOutboxEffects(connection, tx, scope, selected, ct);
+            var action = plan.ReadRow(0).Action;
+            var effects = CaptureOrdinaryOutboxEffects(connection, tx, scope, selected, ct, action);
             if (!DirectFixed(effects.Before, plan.SqlBefore) || !DirectFixed(effects.After, plan.SqlAfter))
                 throw new CryptographicException("Stored ordinary selection differs from complete SQL effects.");
             var ordered = selected.OrderBy(entry => Convert.ToHexString(entry.Operation), StringComparer.Ordinal).ToArray();
             for (var index = 0; index < ordered.Length; index++)
             {
                 var row = plan.ReadRow(index);
-                if (row.Action != Did2CompactionPlan.Disposition.OutboxPayload ||
+                if (row.Action != action ||
                     !DirectFixed(row.Selector.Span, ordered[index].Operation) ||
                     !DirectFixed(row.Commitment.Span, SHA256.HashData(ordered[index].Exact)))
                     throw new CryptographicException("Stored ordinary selection changed a disposition or row.");
@@ -132,6 +139,8 @@ public sealed partial class SqliteDeepMailboxStore
                 delete.CommandText = "DELETE FROM direct_text_outbox WHERE operation_id=$operation;";
                 delete.Parameters.AddWithValue("$operation", entry.Operation.ToArray());
                 if (delete.ExecuteNonQuery() != 1) throw new CryptographicException("Ordinary cleanup lost an exact selected row.");
+                if (action == Did2CompactionPlan.Disposition.StoppedOutboxPayload) InsertStoppedAudit(connection, tx, NewStoppedAudit(entry));
+                else if (action == Did2CompactionPlan.Disposition.OutboxPayload) InsertStoppedAudit(connection, tx, NewTerminalAudit(entry));
             }
             if (!DirectFixed(CompleteApplicationCompactionProjection(connection, tx, scope, null, ct), plan.SqlAfter))
                 throw new CryptographicException("Ordinary SQL effects differ before commit.");
@@ -191,7 +200,7 @@ public sealed partial class SqliteDeepMailboxStore
 
     private static byte[] CompleteApplicationCompactionProjection(SqliteConnection connection, SqliteTransaction tx,
         ReadOnlySpan<byte> selector, HashSet<string>? omitted, CancellationToken ct,
-        RetainedPathSqlSelection? retainedPath = null)
+        RetainedPathSqlSelection? retainedPath = null, IReadOnlyList<StoppedAuditRow>? addAudits = null, HashSet<string>? omitAudits = null)
     {
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         hash.AppendData("Deep/STORE-V2/application-compaction-sql"u8); hash.AppendData([0]); hash.AppendData(selector);
@@ -208,6 +217,8 @@ public sealed partial class SqliteDeepMailboxStore
         foreach (var name in names)
         {
             ct.ThrowIfCancellationRequested();
+            if (name == "stopped_work_audit")
+            { ProjectStoppedAudits(hash, connection, tx, addAudits, omitAudits); continue; }
             var table = "\"" + name.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"";
             using var columns = connection.CreateCommand(); columns.Transaction = tx; columns.CommandText = "PRAGMA table_info(" + table + ");";
             var fields = new List<string>(); using (var reader = columns.ExecuteReader()) while (reader.Read()) fields.Add(reader.GetString(1));

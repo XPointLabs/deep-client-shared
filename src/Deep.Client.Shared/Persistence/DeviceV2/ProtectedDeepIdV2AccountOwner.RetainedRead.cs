@@ -16,7 +16,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         VerifiedDeepIdV2CurrentAccount current, HeldDeepIdV2AccountLease held, OwnRetainedPublication publication,
         DeepIdV2ContactPathAuthoritySource source, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh,
         IDid2RetainedMailboxReadGrantTransport transport, CancellationToken ct,
-        ReadOnlyMemory<byte> renewalAcquisition = default)
+        ReadOnlyMemory<byte> renewalAcquisition = default, bool renewForNewRead = false,
+        ReadOnlyMemory<byte> expectedNewReadRoot = default)
     {
         var instance = await SqliteDeepIdV2AccountGeneration.ReadAccountInstanceUnderLeaseAsync(
             storage, networkId, current.AccountId, ct).ConfigureAwait(false);
@@ -29,9 +30,38 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             using var state = ProtectedDid2MailboxGrantJournal.Decode(snapshot, networkId, current.AccountId.Span, instance);
             var scope = Convert.ToHexString(ProtectedDid2MailboxGrantJournal.Scope(publication.Route.ExactHash.Span,
                 publication.Locator.Span, (byte)MailboxCapabilityDomain.Retrieve));
+            if (renewForNewRead)
+            {
+                if (!renewalAcquisition.IsEmpty) throw new InvalidOperationException("A new read cannot take a caller renewal selector.");
+                renewalAcquisition = await SelectNewWorkMailboxGrantRenewalUnderLeaseAsync(current, held, state,
+                    scope, snapshot, source, fresh, ct).ConfigureAwait(false);
+            }
             var entry = renewalAcquisition.IsEmpty
                 ? ProtectedDid2MailboxGrantJournal.AcquisitionForNewWork(state, scope)
                 : ProtectedDid2MailboxGrantJournal.AcquisitionForRenewal(state, scope, renewalAcquisition.Span);
+            if (renewForNewRead)
+            {
+                using var readRoot = await storage.ReadOwnedAsync(ProtectedDid2MailboxReadJournal.Slot, ct).ConfigureAwait(false) ??
+                    throw new InvalidDataException("Protected new-read custody is absent before grant acquisition.");
+                if (expectedNewReadRoot.IsEmpty || !readRoot.Use(bytes => FixedRoute(bytes, expectedNewReadRoot.Span)))
+                    throw new CryptographicException("New-read custody changed before grant acquisition.");
+                using var read = readRoot.Use(bytes => ProtectedDid2MailboxReadJournal.Decode(bytes, networkId, current.AccountId.Span, instance));
+                if (read.Active is not null) throw new CryptographicException("An active read cannot enter new-grant scheduling.");
+                var readScope = ClientMailboxScope.Derive(publication.Route.ExactHash.Span,
+                    new BlindedMailboxId(publication.Route.Reachability.Field(2).Span),
+                    BinaryPrimitives.ReadUInt64BigEndian(publication.Route.Selection.Field(4).Span));
+                if (read.Traversals.Count >= ProtectedDid2MailboxReadJournal.MaximumFloors &&
+                    !read.Traversals.ContainsKey(Convert.ToHexString(readScope.Value)))
+                    throw new IOException("Protected new-read traversal capacity is exhausted before issuer callback.");
+                if (read.Counters.Count >= ProtectedDid2MailboxReadJournal.MaximumFloors)
+                {
+                    if (entry is null || !ProtectedDid2MailboxGrantJournal.HasWinner(entry))
+                        throw new IOException("Protected Retrieve counter floors are full before issuer callback.");
+                    var response = ContactCodec.Decode("XMC2", ProtectedDid2MailboxGrantJournal.Response(entry).Span);
+                    if (!read.Counters.ContainsKey(Convert.ToHexString(SHA256.HashData(response.Field(8).Span))))
+                        throw new IOException("Protected Retrieve counter floors cannot fit the selected grant.");
+                }
+            }
             if (entry is null)
             {
                 if (state.Entries.Count >= ProtectedDid2MailboxGrantJournal.MaximumEntries)

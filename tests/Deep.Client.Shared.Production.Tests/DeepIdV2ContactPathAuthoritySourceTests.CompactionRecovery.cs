@@ -26,13 +26,20 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 
         var ordinal = (await fixture.ReadMessagingFloor(sender)).Ordinal;
         var index = 0;
-        foreach (var point in Enum.GetValues<Did2CompactionFailpoint>())
+        // Abandon-recorded is exercised by the separate rejected-plan branch,
+        // never by a successfully committed prefix.
+        foreach (var point in new[] { Did2CompactionFailpoint.AfterStage, Did2CompactionFailpoint.AfterSql,
+            Did2CompactionFailpoint.AfterSqlRecorded, Did2CompactionFailpoint.AfterHistoryAdopted,
+            Did2CompactionFailpoint.AfterPartsDeleted, Did2CompactionFailpoint.AfterPlanCleared })
         {
             var before = await fixture.ReadMessagingFloor(sender);
             var rows = index == 0 ? checked((int)before.Ordinal) : 1;
             var predecessorRows = await fixture.CaptureCompactionPrefixRows(sender, rows);
-            using (Did2CompactionTestHooks.Push(actual => { if (actual == point) throw new IOException("Injected compaction handover."); }))
+            var hit = false;
+            using (Did2CompactionTestHooks.Push(actual =>
+                { if (actual == point) { hit = true; throw new IOException("Injected compaction handover."); } }))
                 await Assert.ThrowsAsync<IOException>(() => fixture.CompactSenderPrefix(sender, rows, default));
+            Assert.True(hit);
             if (point == Did2CompactionFailpoint.AfterStage)
                 await fixture.AssertPreparedCompactionRejectsMissingPartsGuardAndSqlSubstitution(sender);
             if (point == Did2CompactionFailpoint.AfterSqlRecorded)
@@ -51,8 +58,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             await fixture.AssertSenderCompactionIdle(sender);
             using (var replay = await fixture.ReceiveOwnedMessage(sender, acceptance)) { }
             Assert.Equal(before.Exact.ToArray(), (await fixture.ReadMessagingFloor(sender)).Exact.ToArray());
-            var operation = Bytes(32, checked((byte)(0xb0 + index)));
-            using var draft = await fixture.PrepareOwnedText(sender, operation, "after exact prefix recovery " + index);
+            using var draft = await fixture.CreateOwnedText(sender, "after exact prefix recovery " + index);
+            var operation = draft.OperationId.ToArray();
             byte[] envelope;
             using (var sent = await fixture.SendOwnedMessage(sender, operation, ApplicationCoreCodec.DecodeDmc2(draft.ExactDmc2.Span))) envelope = sent.ExactEnvelope.ToArray();
             using (var received = await fixture.ReceiveOwnedMessage(receiver, envelope)) { }
@@ -227,6 +234,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         public Task<OwnedDeepSecret?> ReadOwnedAsync(string slot, CancellationToken ct = default) => store.ReadOwnedAsync(slot, ct);
         public Task WriteBatchAsync(IReadOnlyList<DeepSecureStorageWrite> writes, CancellationToken ct = default) => store.WriteBatchAsync(writes, ct);
         public Task<bool> CompareExchangeAsync(string slot, ReadOnlyMemory<byte> expected, ReadOnlyMemory<byte> replacement, CancellationToken ct = default) => store.CompareExchangeAsync(slot, expected, replacement, ct);
+        public Task<bool> CompareAndDeleteAsync(string guardSlot, ReadOnlyMemory<byte> expected, IReadOnlyList<string> slots, CancellationToken ct = default) => store.CompareAndDeleteAsync(guardSlot, expected, slots, ct);
         public Task<bool> CompareExchangeAndInsertAsync(string slot, ReadOnlyMemory<byte> expected, ReadOnlyMemory<byte> replacement, IReadOnlyList<DeepSecureStorageWrite> insertions, CancellationToken ct = default) => store.CompareExchangeAndInsertAsync(slot, expected, replacement, insertions, ct);
         public Task DeleteBatchAsync(IReadOnlyList<string> slots, CancellationToken ct = default) => store.DeleteBatchAsync(slots, ct);
         public Task PurgeStoreV1NamespaceAsync(CancellationToken ct = default) => store.PurgeStoreV1NamespaceAsync(ct);

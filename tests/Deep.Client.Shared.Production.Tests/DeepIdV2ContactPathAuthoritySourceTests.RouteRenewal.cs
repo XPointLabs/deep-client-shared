@@ -151,6 +151,34 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 Assert.Equal(2UL, BinaryPrimitives.ReadUInt64BigEndian(secondRoute.Invite.Field(3).Span));
                 Assert.Equal(route.Invite.ObjectHash.ToArray(), secondRoute.Invite.Field(4).ToArray());
                 await secondRoute.EnsureCurrentAsync();
+                // Independent closed route-control metadata author/verification,
+                // not native custody, an adopted command or physical delivery.
+                var originalPrivate = DeepIdV2ContactMailboxRouteCodec.Decode(DeepIdV2ContactMailboxRouteCodec.Encode(old));
+                var eventHead = Bytes(32, 0x91); var relationship = Bytes(32, 0x92); var conversation = Bytes(32, 0x93);
+                var control = await ApplicationCoreCodec.AuthorVerifiedContactRouteUpdateAsync(route, originalPrivate,
+                    oldClosure, eventHead, relationship, conversation, Bytes(32, 0x94), 3, time);
+                Assert.IsType<ContactRouteUpdateDmc2Payload>(control.Record.ParsedPayload);
+                Assert.Equal(1UL, ((ContactRouteUpdateDmc2Payload)control.Record.ParsedPayload).RouteGeneration);
+                Assert.True(control.Record.ExpiresAtUnixMilliseconds > control.Record.CreatedAtUnixMilliseconds);
+                var privateRoute = await DeepIdV2ContactRouteUpdateVerifier.VerifyCurrentSuccessorAsync(originalPrivate,
+                    current.Proof, current.Network, current.Authority, time, oldClosure, eventHead, relationship,
+                    conversation, control.CanonicalBytes);
+                Assert.Equal(route.ExactRouteClosure.ToArray(), privateRoute.ExactRouteClosure.ToArray());
+                Assert.Equal(route.LocatorHash.ToArray(), privateRoute.LocatorHash.ToArray());
+                Assert.False(typeof(VerifiedDeepIdV2ContactRouteClosure).IsAssignableFrom(privateRoute.GetType()));
+                var nextControl = await ApplicationCoreCodec.AuthorVerifiedContactRouteUpdateAsync(secondRoute, originalPrivate,
+                    route.ExactRouteClosure, SHA256.HashData(control.CanonicalBytes.Span), relationship, conversation,
+                    Bytes(32, 0x95), 4, time);
+                Assert.Equal(2UL, ((ContactRouteUpdateDmc2Payload)nextControl.Record.ParsedPayload).RouteGeneration);
+                await Did2OwnedTextOutboxTests.CheckRouteControlMirrorAsync(control.Record, nextControl.Record);
+                await Assert.ThrowsAsync<CryptographicException>(async () =>
+                    await ApplicationCoreCodec.AuthorVerifiedContactRouteUpdateAsync(secondRoute, originalPrivate,
+                        oldClosure, eventHead, relationship, conversation, Bytes(32, 0x96), 5, time));
+                using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
+                await Assert.ThrowsAsync<OperationCanceledException>(async () =>
+                    await ApplicationCoreCodec.AuthorVerifiedContactRouteUpdateAsync(secondRoute, originalPrivate,
+                        route.ExactRouteClosure, SHA256.HashData(control.CanonicalBytes.Span), relationship, conversation,
+                        Bytes(32, 0x97), 4, time, cancelled.Token));
             }
             else if (mode == 1)
             {

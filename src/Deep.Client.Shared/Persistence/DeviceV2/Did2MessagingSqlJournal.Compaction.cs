@@ -115,10 +115,10 @@ internal sealed partial class Did2MessagingSqlJournal
             var cells = name switch
             {
                 "scope" => new[] { ("singleton", 0, 0), ("exact_scope", 404, 404) },
-                "journal" => [("ordinal", 0, 0), ("predecessor", 32, 32), ("head", 32, 32), ("metadata", 608, 608)],
+                "journal" => [("ordinal", 0, 0), ("predecessor", 32, 32), ("head", 32, 32), ("metadata", Did2MessagingFloor.MetadataBytes, Did2MessagingFloor.MetadataBytes)],
                 "ratchet" => [("singleton", 0, 0), ("exact_state", 1, 2097152)],
-                "initial_events" => [("singleton", 0, 0), ("envelope", 1, 65536), ("session_init", 1, 32768), ("hello", 1, 32768), ("metadata", 608, 608)],
-                "events" => [("operation", 32, 32), ("ordinal", 0, 0), ("direction", 0, 0), ("envelope", 1, 65536), ("plaintext", 1, 33082), ("metadata", 608, 608)],
+                "initial_events" => [("singleton", 0, 0), ("envelope", 1, 65536), ("session_init", 1, 32768), ("hello", 1, 32768), ("metadata", Did2MessagingFloor.MetadataBytes, Did2MessagingFloor.MetadataBytes)],
+                "events" => [("operation", 32, 32), ("ordinal", 0, 0), ("direction", 0, 0), ("envelope", 1, 65536), ("plaintext", 1, 33082), ("metadata", Did2MessagingFloor.MetadataBytes, Did2MessagingFloor.MetadataBytes)],
                 _ => throw new InvalidDataException("Unsupported compaction SQL table.")
             };
             var boundColumns = string.Join(",", cells.Select(cell => "typeof(" + cell.Item1 + "),length(" + cell.Item1 + ")"));

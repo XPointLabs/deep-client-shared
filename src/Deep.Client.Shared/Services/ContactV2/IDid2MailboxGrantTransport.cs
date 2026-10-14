@@ -8,6 +8,6 @@ namespace Deep.Client.Shared.Services.ContactV2;
 internal interface IDid2MailboxGrantTransport : IDid2RetainedMailboxReadGrantTransport
 {
     ValueTask<ReadOnlyMemory<byte>> AcquireAsync(AuthoredMailboxGrantRequest request,
-        VerifiedDeepIdV2ContactRouteClosure route, Did2OwnedContactTransportContext dispatch,
+        VerifiedDeepIdV2MailboxRouteClosure route, Did2OwnedContactTransportContext dispatch,
         CancellationToken cancellationToken);
 }

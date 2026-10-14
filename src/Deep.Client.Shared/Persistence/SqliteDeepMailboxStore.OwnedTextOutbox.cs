@@ -34,6 +34,7 @@ public sealed partial class SqliteDeepMailboxStore
                 {
                     using var tx = connection.BeginTransaction(deferred: false);
                     BindDirectInboxOwner(connection, tx, local, ownerGeneration, requireStableReadOnly);
+                    ValidateOwnedStoppedAudits(connection, tx, journal);
                     foreach (var entry in journal.Entries.Values)
                         if (!DirectFixed(entry.Scope.LocalAccount, local) ||
                             BinaryPrimitives.ReadUInt64BigEndian(entry.Scope.Exact[84..]) != generation ||
@@ -45,11 +46,12 @@ public sealed partial class SqliteDeepMailboxStore
                             BinaryPrimitives.ReadUInt64BigEndian(floor.Scope.Exact[84..]) != generation)
                             throw new CryptographicException("The authored floor belongs to another account generation.");
                     var pending = journal.Pending;
-                    var stableCount = journal.Entries.Count - (pending is null ? 0 : 1);
+                    var payloadCount = journal.Entries.Count;
+                    var stableCount = payloadCount - (pending is null ? 0 : 1);
                     using var count = connection.CreateCommand(); count.Transaction = tx;
                     count.CommandText = "SELECT count(*) FROM direct_text_outbox;";
                     var rowCount = Convert.ToInt64(count.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
-                    if (rowCount < stableCount || rowCount > journal.Entries.Count)
+                    if (rowCount < stableCount || rowCount > payloadCount)
                         throw new CryptographicException("The SQL text outbox differs from its protected row floor.");
                     var found = new HashSet<string>(StringComparer.Ordinal);
                     DirectTextOutboxEntry? result = null;

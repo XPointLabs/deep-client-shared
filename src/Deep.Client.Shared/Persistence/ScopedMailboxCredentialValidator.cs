@@ -22,6 +22,15 @@ internal static class ScopedMailboxCredentialValidator
             _ => throw new ArgumentOutOfRangeException(nameof(operation))
         };
 
+    // The durable Store fact lives to its immutable signed object horizon.
+    // Dispatch admission is STILL independently fenced by the original grant;
+    // SQL retention cannot make an expired MAU admissible. Other operations keep
+    // their existing admission horizon. Never rewrite an already prepared item.
+    internal static ulong OutboxExpiryUnixSeconds(MailboxAuthenticatedOperation operation,
+        ReadOnlyMemory<byte> canonicalBody, ulong admissionUntil) => operation == MailboxAuthenticatedOperation.Store
+            ? MailboxAuthenticatedRequestTranscript.DecodeStoreBody(canonicalBody.Span).ExpiresAtUnixSeconds
+            : admissionUntil;
+
     internal static void EnsureRoleAllowed(
         MailboxCredentialSelector selector,
         MailboxCredentialRole role)

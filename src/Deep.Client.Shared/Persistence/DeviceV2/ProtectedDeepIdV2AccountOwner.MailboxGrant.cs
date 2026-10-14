@@ -120,7 +120,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     private async Task<VerifiedDeepIdV2MailboxGrant> AcceptMailboxGrantResultUnderLeaseAsync(
         VerifiedDeepIdV2CurrentAccount current, HeldDeepIdV2AccountLease held,
         DeepIdV2ContactPathAuthoritySource source, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh,
-        VerifiedDeepIdV2ContactRouteClosure route, ReadOnlyMemory<byte> locator, ReadOnlyMemory<byte> capability,
+        VerifiedDeepIdV2MailboxRouteClosure route, ReadOnlyMemory<byte> locator, ReadOnlyMemory<byte> capability,
         MailboxCapabilityDomain domain, Func<CancellationToken, Task> recheck,
         ReadOnlyMemory<byte> exactXmc2, CancellationToken ct)
     {
@@ -325,13 +325,55 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         }
     }
 
+    // A protected adopted winner is scheduling custody, not current grant authority.
+    // Both callers author/verify the successor independently through their actual
+    // current route/host. An active attempt/cycle never calls this selector.
+    private async Task<ReadOnlyMemory<byte>> SelectNewWorkMailboxGrantRenewalUnderLeaseAsync(
+        VerifiedDeepIdV2CurrentAccount current, HeldDeepIdV2AccountLease held,
+        ProtectedDid2MailboxGrantJournal.State state, string scope, byte[] snapshot,
+        DeepIdV2ContactPathAuthoritySource source, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh,
+        CancellationToken ct)
+    {
+        held.RequireActive(); ct.ThrowIfCancellationRequested();
+        var original = ProtectedDid2MailboxGrantJournal.CurrentWinner(state, scope);
+        if (original is null) return ReadOnlyMemory<byte>.Empty;
+        await RequireExactProtectedMailboxRootAsync(ProtectedDid2MailboxGrantJournal.Slot, snapshot, ct).ConfigureAwait(false);
+        var reading = await RecheckRouteFreshnessAsync(current, source, fresh, held, null, ct).ConfigureAwait(false);
+        var elapsed = checked(reading.SampleSeconds - fresh.Proof.MonotonicSample);
+        var upper = checked(fresh.Proof.TrustedUpperUnixSeconds + elapsed);
+        var response = ContactCodec.Decode("XMC2", ProtectedDid2MailboxGrantJournal.Response(original).Span);
+        var grant = MailboxAuthenticatedCapabilityCodec.DecodeGrant(response.Field(8).Span);
+        var resume = state.Selections[scope].Pending is not null;
+        var due = IsMailboxGrantRenewalDueForNewWork(grant.NotBeforeUnixSeconds, grant.ExpiresAtUnixSeconds, grant.Domain, upper);
+        await RequireExactProtectedMailboxRootAsync(ProtectedDid2MailboxGrantJournal.Slot, snapshot, ct).ConfigureAwait(false);
+        ct.ThrowIfCancellationRequested(); held.RequireActive();
+        return resume || due ? SHA256.HashData(ProtectedDid2MailboxGrantJournal.Request(original).Span) : ReadOnlyMemory<byte>.Empty;
+    }
+
+    // Scheduling only: a short grant can lose its usable transport retry
+    // window before the proportional20% margin. No lifetime is extended and
+    // no active/captured request enters this new-work selector.
+    internal static bool IsMailboxGrantRenewalDueForNewWork(ulong notBefore, ulong expires,
+        MailboxCapabilityDomain domain, ulong upper)
+    {
+        var contract = domain switch
+        {
+            MailboxCapabilityDomain.Deposit => MailboxWireHttpContract.Store,
+            MailboxCapabilityDomain.Retrieve => MailboxWireHttpContract.Retrieve,
+            _ => throw new CryptographicException("New-work grant renewal has no supported mailbox role.")
+        };
+        var proportional = ProactiveRefreshAt(notBefore, expires);
+        var requestWindow = checked((ulong)(contract.RequestTimeoutSeconds + 5));
+        return upper >= proportional || expires - upper <= requestWindow;
+    }
+
     // Deposit enters through its closed wrapper above. The recheck
     // delegate is constructed here inside the actual owner's held lease, never
     // supplied by a public caller or used as a caller-mintable trust flag.
     private async Task<VerifiedDeepIdV2MailboxGrant> AcquireMailboxGrantUnderLeaseAsync(
         VerifiedDeepIdV2CurrentAccount current, HeldDeepIdV2AccountLease held,
         DeepIdV2ContactPathAuthoritySource source, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh,
-        VerifiedDeepIdV2ContactRouteClosure route, ReadOnlyMemory<byte> locator, ReadOnlyMemory<byte> capability,
+        VerifiedDeepIdV2MailboxRouteClosure route, ReadOnlyMemory<byte> locator, ReadOnlyMemory<byte> capability,
         MailboxCapabilityDomain domain, Func<CancellationToken, Task> recheck,
         IDid2MailboxGrantTransport transport, CancellationToken ct)
     {
@@ -351,7 +393,11 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 throw new InvalidDataException("Protected mailbox holder custody is absent; explicit local reset is required.");
             snapshot = root.Use(bytes => bytes.ToArray());
             using var state = ProtectedDid2MailboxGrantJournal.Decode(snapshot, networkId, current.AccountId.Span, instance);
-            var entry = ProtectedDid2MailboxGrantJournal.AcquisitionForNewWork(state, name);
+            var renewal = await SelectNewWorkMailboxGrantRenewalUnderLeaseAsync(current, held, state,
+                name, snapshot, source, fresh, ct).ConfigureAwait(false);
+            var entry = renewal.IsEmpty
+                ? ProtectedDid2MailboxGrantJournal.AcquisitionForNewWork(state, name)
+                : ProtectedDid2MailboxGrantJournal.AcquisitionForRenewal(state, name, renewal.Span, MailboxCapabilityDomain.Deposit);
             if (entry is null)
             {
                 if (state.Entries.Count >= ProtectedDid2MailboxGrantJournal.MaximumEntries)
@@ -412,7 +458,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 throw new CryptographicException("Adopted mailbox custody disappeared.");
             using var winnerState = winnerRoot.Use(bytes => ProtectedDid2MailboxGrantJournal.Decode(
                 bytes, networkId, current.AccountId.Span, instance));
-            var winner = ProtectedDid2MailboxGrantJournal.AcquisitionForNewWork(winnerState, name);
+            var winner = renewal.IsEmpty
+                ? ProtectedDid2MailboxGrantJournal.AcquisitionForNewWork(winnerState, name)
+                : ProtectedDid2MailboxGrantJournal.AcquisitionForRenewal(winnerState, name, renewal.Span, MailboxCapabilityDomain.Deposit);
             if (winner is null || !ProtectedDid2MailboxGrantJournal.HasWinner(winner) ||
                 !FixedRoute(winner, entry)) throw new CryptographicException("Mailbox winner differs from protected read-back.");
             var result = await DeepIdV2MailboxGrantResultVerifier.VerifyRetainedSuccessAsync(route,
@@ -421,7 +469,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             // A received initial winner remains the pending candidate until its actual
             // verification and protected read-back. Cold reopen adopts that exact
             // candidate without another issuer call; selection is never inferred.
-            if (winnerState.Selections[name].Current is null)
+            if (winnerState.Selections[name].Current is null ||
+                !renewal.IsEmpty && winnerState.Selections[name].Pending == ProtectedDid2MailboxGrantJournal.Acquisition(winner))
             {
 #if DEEP_TEST_INTERNALS
                 Did2MailboxInstallationTestHooks.Hit(Did2MailboxInstallationFailpoint.BeforeSelection);
@@ -449,7 +498,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         }
     }
 
-    private static async Task<VerifiedMailboxAuthorityV2> RequireMailboxIssuerCurrentAsync(VerifiedDeepIdV2ContactRouteClosure route,
+    private static async Task<VerifiedMailboxAuthorityV2> RequireMailboxIssuerCurrentAsync(VerifiedDeepIdV2MailboxRouteClosure route,
         ReadOnlyMemory<byte> exactPma2, CancellationToken ct)
     {
         var time = await route.ReadCurrentTimeAsync(ct).ConfigureAwait(false);

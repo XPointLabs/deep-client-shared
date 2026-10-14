@@ -14,7 +14,7 @@ namespace Deep.Client.Shared.Persistence.DeviceV2;
 internal sealed partial class ProtectedDeepIdV2AccountOwner
 {
     private async Task InstallMailboxWinnerUnderLeaseAsync(VerifiedDeepIdV2CurrentAccount current,
-        HeldDeepIdV2AccountLease held, VerifiedDeepIdV2ContactRouteClosure route,
+        HeldDeepIdV2AccountLease held, VerifiedDeepIdV2MailboxRouteClosure route,
         VerifiedDeepIdV2MailboxGrant winner, ReadOnlyMemory<byte> locator,
         ReadOnlyMemory<byte> capability, byte[] protectedWinner,
         DeepIdV2ContactPathAuthoritySource source, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh,
@@ -25,7 +25,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     }
 
     private async Task<MailboxCredentialLoan> OpenMailboxWinnerUnderLeaseAsync(VerifiedDeepIdV2CurrentAccount current,
-        HeldDeepIdV2AccountLease held, VerifiedDeepIdV2ContactRouteClosure route,
+        HeldDeepIdV2AccountLease held, VerifiedDeepIdV2MailboxRouteClosure route,
         VerifiedDeepIdV2MailboxGrant winner, ReadOnlyMemory<byte> locator,
         ReadOnlyMemory<byte> capability, byte[] protectedWinner,
         DeepIdV2ContactPathAuthoritySource source, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh,
@@ -169,7 +169,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     private sealed class MailboxInstallationPolicy : IOwnedMailboxInstallationPolicy
     {
         private readonly HeldDeepIdV2AccountLease held;
-        private readonly VerifiedDeepIdV2ContactRouteClosure route;
+        private readonly VerifiedDeepIdV2MailboxRouteClosure route;
         private readonly VerifiedMailboxAuthorityV2 policy;
         private readonly MailboxAuthenticatedGrant grant;
         private readonly DeepIdV2ContactRouteTimeWindow sample;
@@ -178,7 +178,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         private bool disposed;
 
         internal MailboxInstallationPolicy(HeldDeepIdV2AccountLease held,
-            VerifiedDeepIdV2ContactRouteClosure route, VerifiedMailboxAuthorityV2 policy,
+            VerifiedDeepIdV2MailboxRouteClosure route, VerifiedMailboxAuthorityV2 policy,
             MailboxAuthenticatedGrant grant, DeepIdV2ContactRouteTimeWindow sample, long started,
             ulong minimumPreparedUpper = 0)
         {

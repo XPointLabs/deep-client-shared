@@ -65,8 +65,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             {
                 var grants = new OwnedGrantTransport(this, ownerOnPrimary: true);
                 var terminal = new RejectInitialDispatchFactory();
-                await Assert.ThrowsAnyAsync<IOException>(() => SendNativeText(sender, Bytes(32, 0xd1),
-                    "must not send offline", grants, terminal));
+                await Assert.ThrowsAnyAsync<IOException>(() => QueueNativeText(sender, "must not send offline"));
                 Assert.Equal(0, grants.Calls); Assert.Equal(0, terminal.Calls);
             }
             finally { RejectProof = reject; }

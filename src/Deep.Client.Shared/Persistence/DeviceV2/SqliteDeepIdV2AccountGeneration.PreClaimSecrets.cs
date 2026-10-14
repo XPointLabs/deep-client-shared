@@ -8,6 +8,51 @@ namespace Deep.Client.Shared.Persistence.DeviceV2;
 
 internal static partial class SqliteDeepIdV2AccountGeneration
 {
+    internal static async Task<byte[]> ReadPreclaimCancellationHashUnderLeaseAsync(IDeepSecureStorage storage,
+        ReadOnlyMemory<byte> network, ReadOnlyMemory<byte> account, ReadOnlyMemory<byte> instance,
+        ReadOnlyMemory<byte> intent, ReadOnlyMemory<byte> draftBinding, bool hasSource, CancellationToken ct)
+    {
+        using var raw = await storage.ReadOwnedAsync(ProtectedDph2PreClaimJournal.Slot, ct).ConfigureAwait(false) ?? throw new InvalidDataException();
+        var state = raw.Use(bytes => ProtectedDph2PreClaimJournal.Decode(bytes, network.Span, account.Span, instance.Span));
+        var name = Convert.ToHexString(intent.Span);
+        if (state.Retired.ContainsKey(name)) throw new CryptographicException("A transferred preclaim cannot become pre-session cancellation.");
+        if (state.Claims.TryGetValue(name, out var live)) return SHA256.HashData(live.CanonicalBytes.Span);
+        if (state.Cancelled.TryGetValue(name, out var cancelled))
+        {
+            if (!Fixed(cancelled.DraftBinding, draftBinding.Span)) throw new CryptographicException("Cancelled preclaim changed its draft owner.");
+            return cancelled.BlobHash.ToArray();
+        }
+        if (hasSource) throw new CryptographicException("Completed sender source lost its original preclaim.");
+        return new byte[32]; // Actual complete protected snapshot proves no preclaim; not a fabricated blob hash.
+    }
+
+    internal static async Task CancelPreclaimUnderLeaseAsync(IDeepSecureStorage storage,
+        ReadOnlyMemory<byte> network, ReadOnlyMemory<byte> account, ReadOnlyMemory<byte> instance,
+        ProtectedInitialKeyRetirementJournal.Entry expected, CancellationToken ct)
+    {
+        var journal = await ProtectedInitialKeyRetirementJournal.ReadAsync(storage, network, account, ct).ConfigureAwait(false);
+        var actual = journal.FindCancellation(expected.Intent);
+        if (actual is null || !Fixed(actual.Stable().Exact, expected.Stable().Exact)) throw new CryptographicException("Preclaim deletion lost its independently owned cancellation.");
+        using var raw = await storage.ReadOwnedAsync(ProtectedDph2PreClaimJournal.Slot, ct).ConfigureAwait(false) ?? throw new InvalidDataException();
+        var before = raw.Use(bytes => bytes.ToArray()); byte[] after = [];
+        try
+        {
+            var state = ProtectedDph2PreClaimJournal.Decode(before, network.Span, account.Span, instance.Span);
+            journal.RequirePreclaimState(state);
+            var name = Convert.ToHexString(actual.Intent);
+            if (state.Cancelled.TryGetValue(name, out var cancelled)) return; // Exact binding was checked above, never repair.
+            if (actual.Phase == 2) throw new CryptographicException("Completed cancellation cannot erase resurrected preclaim keys.");
+            var existed = state.Claims.Remove(name);
+            state.Cancelled.Add(name, new(actual.PreclaimHash.ToArray(), actual.ScopeHash.ToArray()));
+            after = ProtectedDph2PreClaimJournal.Encode(state with { Revision = checked(state.Revision + (existed ? 1UL : 2UL)) },
+                network.Span, account.Span, instance.Span);
+            ct.ThrowIfCancellationRequested();
+            if (!await storage.CompareExchangeAsync(ProtectedDph2PreClaimJournal.Slot, before, after, ct).ConfigureAwait(false))
+                throw new CryptographicException("Preclaim cancellation changed before deletion.");
+        }
+        finally { CryptographicOperations.ZeroMemory(before); CryptographicOperations.ZeroMemory(after); }
+    }
+
     internal static async Task<byte[]> ReadPreclaimRetirementHashUnderLeaseAsync(IDeepSecureStorage storage,
         Did2InitialStateTransfer transfer, ReadOnlyMemory<byte> intent, CancellationToken ct)
     {
@@ -79,6 +124,8 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         {
             ValidateRecord(record, network.Span, current.AccountId.Span);
             var scope = new InitiatorDph2PreKeyClaimPersistenceScope(record.AsSpan(56, 32), logicalIntent.Span);
+            await RequireInitialIntentNotStoppedUnderLeaseAsync(storage, network, current.AccountId,
+                scope.DatabaseInstanceId, logicalIntent, ct).ConfigureAwait(false);
             using var protector = new InitiatorDph2PreKeyClaimPersistenceProtector(record.AsSpan(88, 32));
             using var snapshotOwner = await storage.ReadOwnedAsync(ProtectedDph2PreClaimJournal.Slot, ct)
                 .ConfigureAwait(false) ?? throw new InvalidDataException("The protected preclaim journal is absent.");
@@ -86,7 +133,7 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             var state = ProtectedDph2PreClaimJournal.Decode(exact, network.Span, current.AccountId.Span,
                 scope.DatabaseInstanceId.Span);
             var name = Convert.ToHexString(logicalIntent.Span);
-            if (state.Retired.ContainsKey(name))
+            if (state.Retired.ContainsKey(name) || state.Cancelled.ContainsKey(name))
                 throw new CryptographicException("This preclaim intent is retired; only exact completed custody may be retried.");
             using var authority = DeepIdV2AccountService.OwnAgreementAuthority(current);
             ct.ThrowIfCancellationRequested();

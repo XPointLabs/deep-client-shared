@@ -17,13 +17,23 @@ namespace Deep.Client.Shared.Persistence.DeviceV2;
 
 internal sealed partial class ProtectedDeepIdV2AccountOwner
 {
+    private enum OwnedMailboxPayloadKind { Application, BraidControl }
+
     internal Task<ClientMailboxStoreResult> DeliverMessagingAsync(ulong unixSeconds,
         IDeepMlDsa65Verifier verifier, Did2MessagingSessionScope scope, ReadOnlyMemory<byte> operation,
         DeepIdV2ContactPathAuthoritySource source, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own,
         VerifiedDeepIdV2DirectoryFreshness peer,
         IDid2MailboxGrantTransport grants, IDid2OwnedMailboxTransportFactory transport, CancellationToken ct) =>
         DeliverOwnedMailboxAsync(unixSeconds, verifier, scope, operation, ReadOnlyMemory<byte>.Empty,
-            source, null, own, peer, grants, transport, ct);
+            source, null, own, peer, grants, transport, OwnedMailboxPayloadKind.Application, ct);
+
+    internal Task<ClientMailboxStoreResult> DeliverBraidControlAsync(ulong unixSeconds,
+        IDeepMlDsa65Verifier verifier, Did2MessagingSessionScope scope, ReadOnlyMemory<byte> operation,
+        DeepIdV2ContactPathAuthoritySource source, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own,
+        VerifiedDeepIdV2DirectoryFreshness peer, IDid2MailboxGrantTransport grants,
+        IDid2OwnedMailboxTransportFactory transport, CancellationToken ct) =>
+        DeliverOwnedMailboxAsync(unixSeconds, verifier, scope, operation, ReadOnlyMemory<byte>.Empty,
+            source, null, own, peer, grants, transport, OwnedMailboxPayloadKind.BraidControl, ct);
 
     internal async Task<Did2MessagingSessionScope> FindOutgoingInitialMessagingScopeAsync(ulong unixSeconds,
         IDeepMlDsa65Verifier verifier, ReadOnlyMemory<byte> intent, CancellationToken ct)
@@ -58,7 +68,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     {
         ProtectedDph2PreClaimJournal.RequireIntent(intent.Span);
         return DeliverOwnedMailboxAsync(unixSeconds, verifier, scope, InitialMailboxOperation(intent.Span), intent,
-            source, resolved, null, null, grants, transport, ct);
+            source, resolved, null, null, grants, transport, OwnedMailboxPayloadKind.Application, ct);
     }
 
     internal static byte[] InitialMailboxOperation(ReadOnlySpan<byte> intent)
@@ -84,6 +94,14 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 throw new CryptographicException("Initial Store differs from the actual retired sender intent.");
             return retained.ExactDph2.ToArray();
         }
+        // The class comes from authenticated native history, never a transport
+        // flag. Ordinary semantic readers remain data-only.
+        if (opened.Sql.ReadVerifiedNativeEventDirection(floor, operation.Span) == 3)
+        {
+            using var control = opened.Sql.ReadVerifiedBraidControl(floor, operation.Span) ??
+                throw new CryptographicException("Control Store lost its actual committed send.");
+            return control.ExactControl.ToArray();
+        }
         using var sent = opened.Sql.ReadVerifiedOperation(floor, operation.Span) ?? throw new CryptographicException("Only an actual committed owned message can be dispatched.");
         if (sent.Direction != 1) throw new CryptographicException("A receive row cannot authorize mailbox Store.");
         return sent.ExactEnvelope.ToArray();
@@ -95,10 +113,11 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         DeepIdV2ContactPathAuthoritySource.PermanentContactAuthority? resolved,
         DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority? ordinaryOwn,
         VerifiedDeepIdV2DirectoryFreshness? ordinaryPeer,
-        IDid2MailboxGrantTransport grants, IDid2OwnedMailboxTransportFactory transport, CancellationToken ct)
+        IDid2MailboxGrantTransport grants, IDid2OwnedMailboxTransportFactory transport,
+        OwnedMailboxPayloadKind payloadKind, CancellationToken ct)
     {
         ProtectedDph2PreClaimJournal.RequireIntent(operation.Span);
-        var op = operation.ToArray(); byte[] snapshot = [], grantRoot = [], instance = [], exactMau = [], envelopeBytes = [];
+        var op = operation.ToArray(); byte[] snapshot = [], grantRoot = [], instance = [], exactMau = [], envelopeBytes = [], attemptId = [];
         try
         {
             using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
@@ -113,41 +132,97 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             using var opened = await SqliteDeepIdV2AccountGeneration.OpenOwnedMessagingUnderLeaseAsync(storage, sqlStatePath, current, scope, ct).ConfigureAwait(false);
             if (resolved is null && initialIntent.IsEmpty)
             {
-                var cached = await TryReadRetainedMessagingStoreUnderLeaseAsync(current, held, opened, scope, op,
-                    fresh, source, ct).ConfigureAwait(false);
+                var cached = payloadKind == OwnedMailboxPayloadKind.BraidControl
+                    ? await TryReadRetainedBraidStoreUnderLeaseAsync(current, held, opened, scope, op, fresh, source, ct).ConfigureAwait(false)
+                    : await TryReadRetainedMessagingStoreUnderLeaseAsync(current, held, opened, scope, op, fresh, source, ct).ConfigureAwait(false);
                 if (cached is not null) return cached; // Historical outcome only; no renewed dispatch.
+            }
+            envelopeBytes = await ReadOwnedMailboxEnvelopeUnderLeaseAsync(current, scope, opened, op, initialIntent, ct).ConfigureAwait(false);
+            var controlPayload = envelopeBytes.AsSpan().StartsWith("DBR2"u8);
+            if (controlPayload != (payloadKind == OwnedMailboxPayloadKind.BraidControl))
+                throw new CryptographicException("Mailbox dispatch selected a different native payload class.");
+            if (controlPayload)
+                await RequireBraidStorePurposeUnderLeaseAsync(opened, scope, op, envelopeBytes, held, ct).ConfigureAwait(false);
+            else if (initialIntent.IsEmpty)
+                await RequireOrdinaryWorkNotStoppedUnderLeaseAsync(scope, op, held, ct).ConfigureAwait(false);
+            // A control has no DMC2/application lifetime. Its original signed
+            // transport interval still limits every attempt and successor.
+            var applicationRetryUntil = controlPayload ? ulong.MaxValue :
+                await ReadMailboxApplicationRetryDeadlineUnderLeaseAsync(current, held, opened,
+                    scope, op, initialIntent, ct).ConfigureAwait(false);
+            // Acquiring a grant persists holder custody and can cause remote
+            // issuance. Reject absent/full or changed attempt custody first.
+            instance = await SqliteDeepIdV2AccountGeneration.ReadAccountInstanceUnderLeaseAsync(storage, networkId, current.AccountId, ct).ConfigureAwait(false);
+            using (var root = await storage.ReadOwnedAsync(ProtectedDid2MailboxSendJournal.Slot, ct).ConfigureAwait(false) ?? throw new InvalidDataException("Protected send custody is absent; explicit reset is required."))
+                snapshot = root.Use(bytes => bytes.ToArray());
+            using var sends = ProtectedDid2MailboxSendJournal.Decode(snapshot, networkId, current.AccountId.Span, instance);
+            var entry = sends.Current(scope.Hash, op);
+            if (entry is not null && entry.RetryUntil != Math.Min(entry.Expires, applicationRetryUntil))
+                throw new CryptographicException("Original attempt lost its effective authenticated application retry deadline.");
+            var closedRoot = await CloseExpiredMailboxAttemptUnderLeaseAsync(current, held, opened, scope, op,
+                initialIntent, envelopeBytes, sends, snapshot, instance, source, fresh, ct).ConfigureAwait(false);
+            if (closedRoot is not null) { CryptographicOperations.ZeroMemory(snapshot); snapshot = closedRoot; }
+            entry = sends.Current(scope.Hash, op);
+            if (!controlPayload && initialIntent.IsEmpty && entry is not null)
+            {
+                var expiryTime = await RecheckRouteFreshnessAsync(current, source, fresh, held, null, ct).ConfigureAwait(false);
+                var lower = checked(fresh.Proof.TrustedLowerUnixSeconds + expiryTime.SampleSeconds - fresh.Proof.MonotonicSample);
+                if (lower >= entry.RetryUntil)
+                {
+                    await StopExpiredOrdinaryWorkUnderLeaseAsync(current, held, opened, scope, op, fresh, source, ct).ConfigureAwait(false);
+                    throw new IOException("The original logical retry deadline permanently stops sender work.");
+                }
+            }
+            // Expiry may close original uncertainty, never authorize replacement.
+            await RequireMailboxRetryTimeUnderLeaseAsync(current, source, fresh, held,
+                Math.Min(applicationRetryUntil, entry?.RetryUntil ?? ulong.MaxValue), ct).ConfigureAwait(false);
+            var predecessor = entry?.Closed == true ? entry : null;
+            if (predecessor is not null)
+            {
+                await RequireClosedMailboxChainForSuccessorUnderLeaseAsync(current, held, opened, scope, op,
+                    initialIntent, resolved is null ? null : contact.Contact, verifier,
+                    envelopeBytes, sends, snapshot, instance, source, fresh, ct).ConfigureAwait(false);
+                entry = null;
             }
             var privateContact = resolved is null
                 ? await ReadAuthenticatedPeerMailboxRouteUnderLeaseAsync(current, opened, fresh, peer, source, held, ct).ConfigureAwait(false) : null;
             var route = privateContact?.Route ?? contact.Contact.Route;
-            envelopeBytes = await ReadOwnedMailboxEnvelopeUnderLeaseAsync(current, scope, opened, op, initialIntent, ct).ConfigureAwait(false);
             var locator = privateContact?.LocatorHash ?? contact.Contact.Candidate.Request.LocatorHash;
             var capability = route.Route.Reachability.Field(10);
-            // Acquiring a grant persists holder custody and can cause remote
-            // issuance. Reject absent/full or changed attempt custody first.
-            instance = await SqliteDeepIdV2AccountGeneration.ReadAccountInstanceUnderLeaseAsync(storage, networkId, current.AccountId, ct).ConfigureAwait(false);
             var routeHash = SHA256.HashData(route.ExactRouteClosure.Span);
-            using (var root = await storage.ReadOwnedAsync(ProtectedDid2MailboxSendJournal.Slot, ct).ConfigureAwait(false) ?? throw new InvalidDataException("Protected send custody is absent; explicit reset is required."))
-                snapshot = root.Use(bytes => bytes.ToArray());
-            using var sends = ProtectedDid2MailboxSendJournal.Decode(snapshot, networkId, current.AccountId.Span, instance);
-            var name = Convert.ToHexString(ProtectedDid2MailboxSendJournal.Key(scope.Hash, op));
-            sends.Entries.TryGetValue(name, out var entry);
+            if (!initialIntent.IsEmpty)
+                await RequireRetainedInitialDraftAndRecipientUnderLeaseAsync(current, held, opened, initialIntent,
+                    contact.Contact.Contact.CanonicalBytes, envelopeBytes, ct).ConfigureAwait(false);
+            // Ordinary successors now join every original attempt to actual
+            // qualified native peer history above, while this new route has
+            // its own independently current delivery verification. Initial
+            // contact still requires its original invitation-bound recipient.
+            if (predecessor is not null && !initialIntent.IsEmpty && !FixedRoute(predecessor.RouteHash, routeHash))
+                throw new CryptographicException("A replacement recipient route requires authenticated session-update custody.");
             if (entry is null && sends.Entries.Count >= ProtectedDid2MailboxSendJournal.MaximumEntries)
                 throw new IOException("Resume the pending protected mailbox request or perform verified rollover.");
             if (entry is not null && (!FixedRoute(entry.RouteHash, routeHash) ||
                 !FixedRoute(entry.EnvelopeHash, SHA256.HashData(envelopeBytes))))
                 throw new CryptographicException("An exact owned send cannot acquire a replacement route or ciphertext.");
             await RequireMailboxSendFloorCapacityUnderLeaseAsync(sends, routeHash, locator,
-                entry is null ? null : entry.GrantHash.ToArray(), current, instance, held, ct).ConfigureAwait(false);
+                entry is null ? null : entry.GrantHash.ToArray(), current, instance, held, source, fresh, ct).ConfigureAwait(false);
             async Task Recheck(CancellationToken token)
             {
                 await RequireFinalMessagingFreshnessAsync(current, scope, fresh, peer, source, held, first, token).ConfigureAwait(false);
+                await RequireMailboxRetryTimeUnderLeaseAsync(current, source, fresh, held,
+                    Math.Min(applicationRetryUntil, sends.Current(scope.Hash, op)?.RetryUntil ?? ulong.MaxValue), token).ConfigureAwait(false);
                 if (resolved is not null)
+                {
                     await RequireClaimContactTimeAsync(current, source, resolved, held, contact.Contact, contact.Time, token).ConfigureAwait(false);
+                    await RequireRetainedInitialDraftAndRecipientUnderLeaseAsync(current, held, opened, initialIntent,
+                        contact.Contact.Contact.CanonicalBytes, envelopeBytes, token).ConfigureAwait(false);
+                }
                 else
                 {
                     var retainedRoute = await ReadAuthenticatedPeerMailboxRouteUnderLeaseAsync(current, opened, fresh, peer, source, held, token).ConfigureAwait(false);
-                    if (!FixedRoute(retainedRoute.Package.ExactBytes.Span, privateContact!.Package.ExactBytes.Span))
+                    if (!FixedRoute(retainedRoute.HeadEventHash.Span, privateContact!.HeadEventHash.Span) ||
+                        !FixedRoute(retainedRoute.NativeFloor.Span, privateContact.NativeFloor.Span) ||
+                        !FixedRoute(retainedRoute.Route.ExactRouteClosure.Span, privateContact.Route.ExactRouteClosure.Span))
                         throw new CryptographicException("The authenticated peer mailbox route changed during this exact dispatch.");
                 }
                 var retained = await ReadOwnedMailboxEnvelopeUnderLeaseAsync(current, scope, opened, op, initialIntent, token).ConfigureAwait(false);
@@ -156,7 +231,13 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     if (!FixedRoute(retained, envelopeBytes)) throw new CryptographicException("The committed send changed during dispatch.");
                 }
                 finally { CryptographicOperations.ZeroMemory(retained); }
+                if (controlPayload)
+                    await RequireBraidStorePurposeUnderLeaseAsync(opened, scope, op, envelopeBytes, held, token).ConfigureAwait(false);
                 await RequireExactProtectedMailboxRootAsync(ProtectedDid2MailboxSendJournal.Slot, snapshot, token).ConfigureAwait(false);
+                if (sends.Current(scope.Hash, op) is { Closed: true } || entry?.HasPredecessor == true)
+                    await RequireClosedMailboxChainForSuccessorUnderLeaseAsync(current, held, opened, scope, op,
+                        initialIntent, resolved is null ? null : contact.Contact, verifier,
+                        envelopeBytes, sends, snapshot, instance, source, fresh, token).ConfigureAwait(false);
             }
             var winner = entry is null
                 ? await AcquireMailboxGrantUnderLeaseAsync(current, held, source, fresh, route, locator,
@@ -176,6 +257,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 ProtectedDid2MailboxGrantJournal.Request(retainedGrant), ProtectedDid2MailboxGrantJournal.Response(retainedGrant),
                 fresh.MailboxAuthority.ExactPma2, ct).ConfigureAwait(false);
             var grantHash = SHA256.HashData(winner.ExactGrant.Span);
+            if (predecessor is not null && FixedRoute(predecessor.GrantHash, grantHash))
+                throw new CryptographicException("A closed attempt cannot reuse its original grant.");
             using var loan = await OpenMailboxWinnerUnderLeaseAsync(current, held, route, winner, locator, capability,
                 retainedGrant, source, fresh, Recheck, ct).ConfigureAwait(false);
             if (entry is null && sends.Entries.Values.Any(value => !value.Prepared && FixedRoute(value.GrantHash, grantHash)))
@@ -183,14 +266,16 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var created = entry?.Created ?? loan.Authority.NowUnixSeconds;
             // The short grant permits this attempt, not the accepted object's
             // retention. Exact retry retains the original signed body expiry.
-            var expiry = entry?.Expires ?? checked(created + MailboxClientLimits.MaximumTtlSeconds);
+            var expiry = entry?.Expires ?? predecessor?.Expires ?? checked(created + MailboxClientLimits.MaximumTtlSeconds);
+            attemptId = entry is not null ? entry.Attempt.ToArray() : predecessor is not null ? NewRouteRandom32() : op.ToArray();
+            var name = Convert.ToHexString(ProtectedDid2MailboxSendJournal.Key(scope.Hash, attemptId));
             var ciphertext = envelopeBytes.ToArray();
             var envelope = new MailboxEncryptedEnvelope
             {
                 Epoch = loan.Grant.Epoch,
                 MailboxId = loan.Route.MailboxId,
                 PlacementId = loan.Route.PlacementId,
-                OperationId = MailboxSendOperation(scope, op, envelopeBytes),
+                OperationId = MailboxSendOperation(scope, attemptId, envelopeBytes),
                 DeduplicationDigest = SHA256.HashData(envelopeBytes),
                 CreatedAtUnixSeconds = created,
                 ExpiresAtUnixSeconds = expiry,
@@ -198,17 +283,35 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             };
             try
             {
-                using var candidate = ProtectedDid2MailboxSendJournal.Entry.Pending(scope, op, grantHash, routeHash, envelope);
+                var body = MailboxAuthenticatedRequestTranscript.ForStore(envelope).CanonicalRequest;
+                if (entry is not null && (!FixedRoute(entry.MailboxOperation, envelope.OperationId.Span) ||
+                    !FixedRoute(entry.GrantHash, grantHash) || !FixedRoute(entry.BodyHash, SHA256.HashData(body.Span))))
+                    throw new CryptographicException("Mailbox retry changed its exact attempt body or selected grant.");
+                using var candidate = predecessor is not null
+                    ? ProtectedDid2MailboxSendJournal.Entry.SuccessorOf(predecessor, attemptId, grantHash, routeHash, envelope,
+                        Math.Min(loan.Grant.ExpiresAtUnixSeconds, predecessor.RetryUntil))
+                    : entry is not null ? ProtectedDid2MailboxSendJournal.Entry.Decode(entry.Exact)
+                    : NewOriginalMailboxSend(scope, op, grantHash, routeHash, envelope, loan.Grant.ExpiresAtUnixSeconds,
+                        Math.Min(applicationRetryUntil, expiry));
                 if (entry is null)
                 {
                     sends.EnrollGrant(loan.Grant);
-                    entry = ProtectedDid2MailboxSendJournal.Entry.Decode(candidate.Exact); sends.Entries.Add(name, entry);
-                    sends.Revision = checked(sends.Revision + 1);
+                    if (predecessor is not null) sends.LinkSuccessor(predecessor, candidate);
+                    else
+                    {
+                        sends.Entries.Add(name, ProtectedDid2MailboxSendJournal.Entry.Decode(candidate.Exact));
+                        sends.Revision = checked(sends.Revision + 1);
+                    }
+#if DEEP_TEST_INTERNALS
+                    if (predecessor is not null) Did2MailboxSendTestHooks.Hit(Did2MailboxSendFailpoint.BeforeSuccessorRoot);
+#endif
                     var adopted = await SaveMailboxSendJournalAsync(sends, snapshot, current, instance, held, ct).ConfigureAwait(false);
                     CryptographicOperations.ZeroMemory(snapshot); snapshot = adopted;
+#if DEEP_TEST_INTERNALS
+                    if (predecessor is not null) Did2MailboxSendTestHooks.Hit(Did2MailboxSendFailpoint.AfterSuccessorRoot);
+#endif
+                    entry = sends.Entries[name];
                 }
-                else if (!FixedRoute(entry.Exact[..256], candidate.Exact[..256]))
-                    throw new CryptographicException("Mailbox retry changed its protected message, grant, route or original lifetime.");
                 sends.RequireGrant(loan.Grant);
                 loan.MinimumCounter = sends.MinimumCounter(grantHash);
                 var existing = await loan.Store.ReadTransportOutboxAsync(loan.Selector.AccountScope,
@@ -286,14 +389,19 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 var publicEvidence = new Did2StorePublicEvidence(loan.Selector.AccountScope.ToArray(), envelope.OperationId,
                     ProtectedDid2MailboxGrantJournal.OriginalPolicy(retainedGrant), publicReplicas,
                     resolved is null ? default : contact.Contact.Contact.CanonicalBytes,
-                    resolved is null ? default : route.ExactRouteClosure,
+                    route.ExactRouteClosure,
                     resolved is null ? default : contact.Contact.Authorization.Freshness.ExactAdp1V2);
-                if (initialIntent.IsEmpty)
+                publicEvidence = await BindStoreEvidenceUnderLeaseAsync(current, held, opened, scope, op,
+                    entry.Attempt.ToArray(), initialIntent, publicEvidence, deadline.Token).ConfigureAwait(false);
+                if (controlPayload)
+                    await RetainBraidStoreEvidenceBeforeDispatchUnderLeaseAsync(current, held, opened, scope, op,
+                        publicEvidence, deadline.Token).ConfigureAwait(false);
+                else if (initialIntent.IsEmpty)
                 {
-                    // Persist ContactAccept public evidence before ingress can
+                    // Persist ordinary/ContactAccept public evidence before ingress can
                     // become durable. Pending evidence is not a success marker;
                     // interrupted sends still resume only their exact request.
-                    await RetainContactAcceptStoreEvidenceBeforeDispatchUnderLeaseAsync(current, held, opened, scope, op,
+                    await RetainMessageStoreEvidenceBeforeDispatchUnderLeaseAsync(current, held, opened, scope, op,
                         publicEvidence, deadline.Token).ConfigureAwait(false);
                 }
                 else publicEvidence = await RetainInitialStoreEvidenceUnderLeaseAsync(current, held, opened, scope, op, initialIntent,
@@ -303,6 +411,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
 #if DEEP_TEST_INTERNALS
                 Did2MailboxSendTestHooks.Hit(Did2MailboxSendFailpoint.BeforeDispatch);
 #endif
+                var dispatchValidated = false;
                 try
                 {
                     var result = await adapter.DispatchPreparedStoreAsync(loan.Selector.AccountScope, loan.Selector, prepared, deadline.Token)
@@ -310,12 +419,19 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     await Guard(deadline.Token).ConfigureAwait(false);
                     if (result.Cursor is null || result.Disposition is not (MailboxReplicaDisposition.Stored or MailboxReplicaDisposition.Duplicate))
                         throw new CryptographicException("Owned Store did not retain a verified durable storage result.");
-                    if (initialIntent.IsEmpty)
+                    dispatchValidated = true;
+                    if (controlPayload)
+                    {
+                        _ = await TryReadRetainedBraidStoreUnderLeaseAsync(current, held, opened, scope, op,
+                            fresh, source, deadline.Token).ConfigureAwait(false) ??
+                            throw new CryptographicException("Control Store lost its original authenticated durable outcome.");
+                    }
+                    else if (initialIntent.IsEmpty)
                     {
 #if DEEP_TEST_INTERNALS
                         Did2MailboxSendTestHooks.Hit(Did2MailboxSendFailpoint.BeforeOrdinaryCompletion);
 #endif
-                        await RetainOrdinaryStoreCompletionUnderLeaseAsync(current, held, opened, scope, op, publicEvidence, deadline.Token).ConfigureAwait(false);
+                        await RetainOrdinaryStoreCompletionUnderLeaseAsync(current, held, opened, scope, op, entry.Attempt.ToArray(), publicEvidence, fresh, source, deadline.Token).ConfigureAwait(false);
 #if DEEP_TEST_INTERNALS
                         Did2MailboxSendTestHooks.Hit(Did2MailboxSendFailpoint.AfterOrdinaryCompletion);
 #endif
@@ -328,6 +444,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                         await RetainInitialStoreEvidenceUnderLeaseAsync(current, held, opened, scope, op, initialIntent,
                             envelopeBytes, publicEvidence, fresh.Authority, verifier, envelope.CreatedAtUnixSeconds,
                             requireExisting: true, deadline.Token).ConfigureAwait(false);
+                        _ = await TryReadRetainedInitialStoreUnderLeaseAsync(current, held, opened, scope, initialIntent,
+                            null, fresh, source, verifier, deadline.Token).ConfigureAwait(false) ??
+                            throw new CryptographicException("Initial completion lost its independently verified original Store.");
                     }
                     // Local SQL/protected completion can await platform IO.
                     // Its durable fact survives expiry or cancellation, but
@@ -335,15 +454,102 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     await Guard(deadline.Token).ConfigureAwait(false);
                     return result;
                 }
-                catch (Exception error) when (ingress.Attempted && error is not ClientMailboxDispatchOutcomeUnknownException &&
+                catch (Exception error) when (ingress.Attempted &&
                     error is CryptographicException or IOException or InvalidOperationException or OperationCanceledException)
                 {
+                    // A returned bounded response is untrusted input, not a fresh
+                    // dispatch capability. Authenticate original custody under this
+                    // SAME owner lease; never re-sign or re-dispatch an expired grant.
+                    if (!dispatchValidated && !ingress.OriginalReply.IsEmpty)
+                        return await AdoptOriginalMailboxStoreReplyUnderLeaseAsync(current, held, opened, verifier,
+                            scope, op, entry.Attempt.ToArray(), initialIntent, ingress.OriginalReply, fresh, source, ct)
+                            .ConfigureAwait(false);
+                    if (error is ClientMailboxDispatchOutcomeUnknownException) throw;
                     throw new ClientMailboxDispatchOutcomeUnknownException("Owned Store cannot confirm its outcome after dispatch; retain the exact request.", error);
                 }
             }
             finally { CryptographicOperations.ZeroMemory(ciphertext); }
         }
-        finally { foreach (var value in new[] { op, snapshot, grantRoot, instance, exactMau, envelopeBytes }) CryptographicOperations.ZeroMemory(value); }
+        finally { foreach (var value in new[] { op, snapshot, grantRoot, instance, exactMau, envelopeBytes, attemptId }) CryptographicOperations.ZeroMemory(value); }
+    }
+
+    // Denial-only preflight for a new ordinary command / ratchet transition.
+    // It neither reserves a slot nor grants signing/dispatch authority. Every
+    // actual transport writer still performs its own existing capacity checks.
+    private async Task RequireNewMailboxWorkCapacityUnderLeaseAsync(VerifiedDeepIdV2CurrentAccount current,
+        HeldDeepIdV2AccountLease held, OwnedDid2MessagingStorage opened, Did2MessagingSessionScope scope,
+        ReadOnlyMemory<byte> operation, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own,
+        VerifiedDeepIdV2DirectoryFreshness peer, DeepIdV2ContactPathAuthoritySource source, IDeepMlDsa65Verifier verifier, CancellationToken ct)
+    {
+        held.RequireActive(); ct.ThrowIfCancellationRequested();
+        await RequireNoRetainedPeerRouteFaultUnderLeaseAsync(opened, held, ct).ConfigureAwait(false);
+        await MaintainMailboxNamespacesUnderLeaseAsync(current, held, verifier, own, source, ct).ConfigureAwait(false);
+        using var sendRoot = await storage.ReadOwnedAsync(ProtectedDid2MailboxSendJournal.Slot, ct).ConfigureAwait(false) ??
+            throw new InvalidDataException("Protected send custody is absent before new authored work.");
+        using var sends = sendRoot.Use(bytes => ProtectedDid2MailboxSendJournal.Decode(bytes,
+            scope.Network, scope.LocalAccount, scope.Instance));
+        var name = Convert.ToHexString(ProtectedDid2MailboxSendJournal.Key(scope.Hash, operation.Span));
+        // A transport commitment requires its original committed ciphertext.
+        // An absent native ratchet operation cannot reconstruct that source.
+        if (sends.Entries.ContainsKey(name))
+            throw new CryptographicException("Protected transport work has lost its original committed operation.");
+        if (sends.Entries.Count >= ProtectedDid2MailboxSendJournal.MaximumEntries)
+            throw new IOException("Protected mailbox send capacity is exhausted before new authored work.");
+        using var grantRoot = await storage.ReadOwnedAsync(ProtectedDid2MailboxGrantJournal.Slot, ct).ConfigureAwait(false) ??
+            throw new InvalidDataException("Protected grant custody is absent before new authored work.");
+        using var grants = grantRoot.Use(bytes => ProtectedDid2MailboxGrantJournal.Decode(bytes,
+            scope.Network, scope.LocalAccount, scope.Instance));
+        if (sends.Floors.Count >= ProtectedDid2MailboxSendJournal.MaximumFloors ||
+            grants.Entries.Count >= ProtectedDid2MailboxGrantJournal.MaximumEntries)
+        {
+            // Only when a bound is exhausted is a retained route/winner needed
+            // to distinguish reusable custody from issuance of another scope.
+            // Structural winner metadata is a capacity hint, never authority.
+            var route = await ReadAuthenticatedPeerMailboxRouteUnderLeaseAsync(current, opened, own, peer,
+                source, held, ct).ConfigureAwait(false);
+            var routeHash = SHA256.HashData(route.Route.ExactRouteClosure.Span);
+            var grantScope = Convert.ToHexString(ProtectedDid2MailboxGrantJournal.Scope(routeHash,
+                route.LocatorHash.Span, (byte)MailboxCapabilityDomain.Deposit));
+            var candidate = ProtectedDid2MailboxGrantJournal.AcquisitionForNewWork(grants, grantScope);
+            if (candidate is null && grants.Entries.Count >= ProtectedDid2MailboxGrantJournal.MaximumEntries)
+                throw new IOException("Protected mailbox acquisition capacity is exhausted before new authored work.");
+            if (candidate is not null)
+            {
+                var renewalRoot = grantRoot.Use(bytes => bytes.ToArray());
+                try
+                {
+                    var renewal = await SelectNewWorkMailboxGrantRenewalUnderLeaseAsync(current, held, grants,
+                        grantScope, renewalRoot, source, own, ct).ConfigureAwait(false);
+                    if (!renewal.IsEmpty)
+                    {
+                        var continuation = ProtectedDid2MailboxGrantJournal.AcquisitionForRenewal(grants,
+                            grantScope, renewal.Span, MailboxCapabilityDomain.Deposit);
+                        if (sends.Floors.Count >= ProtectedDid2MailboxSendJournal.MaximumFloors ||
+                            continuation is null && grants.Entries.Count >= ProtectedDid2MailboxGrantJournal.MaximumEntries)
+                            throw new IOException("A new grant or replay scope cannot fit before new authored work.");
+                    }
+                }
+                finally { CryptographicOperations.ZeroMemory(renewalRoot); }
+            }
+            if (sends.Floors.Count >= ProtectedDid2MailboxSendJournal.MaximumFloors)
+            {
+                if (candidate is null || !ProtectedDid2MailboxGrantJournal.HasWinner(candidate))
+                    throw new IOException("Protected mailbox replay floors are full before new authored work.");
+                var response = ContactCodec.Decode("XMC2", ProtectedDid2MailboxGrantJournal.Response(candidate).Span);
+                sends.RequireGrant(MailboxAuthenticatedCapabilityCodec.DecodeGrant(response.Field(8).Span));
+            }
+            var exactSend = sendRoot.Use(bytes => bytes.ToArray());
+            var exactGrant = grantRoot.Use(bytes => bytes.ToArray());
+            try
+            {
+                await RequireExactProtectedMailboxRootAsync(ProtectedDid2MailboxSendJournal.Slot,
+                    exactSend, ct).ConfigureAwait(false);
+                await RequireExactProtectedMailboxRootAsync(ProtectedDid2MailboxGrantJournal.Slot,
+                    exactGrant, ct).ConfigureAwait(false);
+            }
+            finally { CryptographicOperations.ZeroMemory(exactSend); CryptographicOperations.ZeroMemory(exactGrant); }
+        }
+        ct.ThrowIfCancellationRequested(); held.RequireActive();
     }
 
     // Capacity is checked before grant acquisition can enroll a holder or call
@@ -352,7 +558,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     // run independently. A reader cannot enroll/repair an absent counter floor.
     private async Task RequireMailboxSendFloorCapacityUnderLeaseAsync(ProtectedDid2MailboxSendJournal.State sends,
         byte[] routeHash, ReadOnlyMemory<byte> locator, byte[]? originalGrant, VerifiedDeepIdV2CurrentAccount current,
-        byte[] instance, HeldDeepIdV2AccountLease held, CancellationToken ct)
+        byte[] instance, HeldDeepIdV2AccountLease held, DeepIdV2ContactPathAuthoritySource source,
+        DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh, CancellationToken ct)
     {
         if (sends.Floors.Count < ProtectedDid2MailboxSendJournal.MaximumFloors) return;
         held.RequireActive();
@@ -365,12 +572,34 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             : ProtectedDid2MailboxGrantJournal.AcquisitionForNewWork(state, name);
         if (winner is null || !ProtectedDid2MailboxGrantJournal.HasWinner(winner))
             throw new IOException("Protected mailbox replay floors are full; issuance cannot start.");
+        if (originalGrant is null)
+        {
+            var exact = root.Use(bytes => bytes.ToArray());
+            try
+            {
+                // A due successor needs a distinct enrolled replay scope; the old
+                // winner cannot conceal exhausted floors before issuer callback.
+                var renewal = await SelectNewWorkMailboxGrantRenewalUnderLeaseAsync(current, held, state,
+                    name, exact, source, fresh, ct).ConfigureAwait(false);
+                if (!renewal.IsEmpty) throw new IOException("Protected mailbox replay floors cannot fit a grant successor.");
+            }
+            finally { CryptographicOperations.ZeroMemory(exact); }
+        }
         var response = ContactCodec.Decode("XMC2", ProtectedDid2MailboxGrantJournal.Response(winner).Span);
         sends.RequireGrant(MailboxAuthenticatedCapabilityCodec.DecodeGrant(response.Field(8).Span));
         ct.ThrowIfCancellationRequested(); held.RequireActive();
     }
 
-    private async Task<VerifiedDeepIdV2ContactMailboxRoute> ReadAuthenticatedPeerMailboxRouteUnderLeaseAsync(
+    private async Task<OwnedPeerMailboxRoute> ReadAuthenticatedPeerMailboxRouteUnderLeaseAsync(
+        VerifiedDeepIdV2CurrentAccount current, OwnedDid2MessagingStorage opened,
+        DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own, VerifiedDeepIdV2DirectoryFreshness peer,
+        DeepIdV2ContactPathAuthoritySource source, HeldDeepIdV2AccountLease held, CancellationToken ct)
+    {
+        var history = await ReadAuthenticatedPeerRouteHistoryUnderLeaseAsync(current, opened, own, peer, source, held, ct).ConfigureAwait(false);
+        return await RequireCurrentPeerRouteUnderLeaseAsync(opened, history, own, peer, source, held, ct).ConfigureAwait(false);
+    }
+
+    private async Task<OwnedPeerRouteHistory> ReadAuthenticatedPeerRouteHistoryUnderLeaseAsync(
         VerifiedDeepIdV2CurrentAccount current, OwnedDid2MessagingStorage opened,
         DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own, VerifiedDeepIdV2DirectoryFreshness peer,
         DeepIdV2ContactPathAuthoritySource source, HeldDeepIdV2AccountLease held, CancellationToken ct)
@@ -380,9 +609,15 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         var hello = pending.FirstApplicationDmc2; byte[]? accepted = null;
         try
         {
+            var greeting = ApplicationCoreCodec.DecodeDmc2(hello);
+            if (greeting.ParsedPayload is not ContactHelloDmc2Payload helloPayload)
+                throw new CryptographicException("Private route has no actual native Hello custody.");
             ParsedDeepIdV2ContactMailboxRoute package;
+            var policy = helloPayload.Policy;
+            ReadOnlyMemory<byte> originalEvent = greeting.CanonicalBytes;
+            ulong originalOrdinal = 1;
             if (!scope.IsInitiator)
-                package = ((ContactHelloDmc2Payload)ApplicationCoreCodec.DecodeDmc2(hello).ParsedPayload).MailboxRoute;
+                package = helloPayload.MailboxRoute;
             else
             {
                 using var application = await SqliteDeepIdV2AccountGeneration.OpenApplicationUnderLeaseAsync(storage, sqlStatePath, current, held, ct).ConfigureAwait(false);
@@ -396,12 +631,49 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 if (!plain.Use(bytes => FixedRoute(bytes, accepted)))
                     throw new CryptographicException("The peer acceptance projection differs from its authenticated event.");
                 var response = ApplicationCoreCodec.DecodeDmc2(accepted);
-                await ApplicationCoreVerifier.RequireContactAcceptEndpointBindingsAsync(response, ApplicationCoreCodec.DecodeDmc2(hello),
-                    own.Proof, peer, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
+                using var verifiedAccept = await AuthenticatedContactAcceptDmc2.FromOwnedCommitAsync(opened,
+                    Deep.Protocol.MessagingWire.Dpe2Codec.Decode(received.ExactEnvelope).OperationId,
+                    ReadOnlyMemory<byte>.Empty, storage, own, peer, source, held, ct).ConfigureAwait(false);
                 package = ((ContactAcceptDmc2Payload)response.ParsedPayload).MailboxRoute;
+                policy &= ((ContactAcceptDmc2Payload)response.ParsedPayload).Policy;
+                originalEvent = response.CanonicalBytes;
+                originalOrdinal = received.Ordinal;
             }
-            return await DeepIdV2ContactMailboxRouteVerifier.VerifyAsync(package, peer, own.Network, own.Authority,
-                source.RendezvousTrustedTime, ct).ConfigureAwait(false);
+            var localAccountGeneration = pending.LocalAccountGeneration;
+            async Task<bool> HasUpdateConsent(ulong updateOrdinal, CancellationToken token)
+            {
+                if ((policy & ContactPolicy.AllowRouteUpdates) == 0)
+                    return false;
+                if (updateOrdinal <= originalOrdinal)
+                    return false;
+                if (scope.IsInitiator) return true; // Both native Hello/Accept policies were checked above.
+                using var application = await SqliteDeepIdV2AccountGeneration.OpenApplicationUnderLeaseAsync(
+                    storage, sqlStatePath, current, held, token).ConfigureAwait(false);
+                await RequireRetainedAcceptanceForTextAsync(opened, application, own, peer, source, held, token).ConfigureAwait(false);
+                var localAccept = await application.ReadContactAcceptAsync(current.AccountId, localAccountGeneration,
+                    scope.Conversation.ToArray(), scope.LocalAccount.ToArray(), scope.LocalDevice.ToArray(), token).ConfigureAwait(false) ??
+                    throw new CryptographicException("Private route update lost its native local acceptance.");
+                try
+                {
+                    if (ApplicationCoreCodec.DecodeDmc2(localAccept).ParsedPayload is not ContactAcceptDmc2Payload local)
+                        throw new CryptographicException("Native local acceptance has a different canonical kind.");
+                    using var raw = await storage.ReadOwnedAsync(ProtectedDid2ContactAcceptJournal.Slot, token).ConfigureAwait(false) ??
+                        throw new CryptographicException("Private route update lost protected local acceptance.");
+                    using var commands = raw.Use(bytes => ProtectedDid2ContactAcceptJournal.Decode(bytes,
+                        scope.Network, scope.LocalAccount, scope.Instance));
+                    var command = commands.FindScope(scope) ??
+                        throw new CryptographicException("Private route update lost its local acceptance winner.");
+                    var floor = await opened.Custody.ReconcileAsync(token).ConfigureAwait(false);
+                    using var native = opened.Sql.ReadVerifiedOperation(floor, command.Operation) ??
+                        throw new CryptographicException("Private route update lost actual native local acceptance.");
+                    if (native.Direction != 1 || !FixedRoute(native.EventHash, SHA256.HashData(localAccept)))
+                        throw new CryptographicException("Private route update local consent differs from native custody.");
+                    return native.Ordinal < updateOrdinal && (local.Policy & ContactPolicy.AllowRouteUpdates) != 0;
+                }
+                finally { CryptographicOperations.ZeroMemory(localAccept); }
+            }
+            return await ReadNativePeerRouteHistoryUnderLeaseAsync(opened, package, originalEvent,
+                own, peer, source, held, HasUpdateConsent, ct).ConfigureAwait(false);
         }
         finally
         {
@@ -423,12 +695,22 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     {
         var signing = MailboxAuthenticatedCapabilityCodec.GetPresentationSigningBytes(request.Presentation);
         if (request.Binding.Operation != MailboxAuthenticatedOperation.Store ||
+            entry.Closed || entry.HasSuccessor ||
+            entry.AdmissionUntil != Math.Min(request.Presentation.Grant.ExpiresAtUnixSeconds, entry.RetryUntil) ||
             !FixedRoute(request.Binding.OperationId.Span, entry.MailboxOperation) ||
             !FixedRoute(SHA256.HashData(request.Binding.CanonicalRequest.Span), entry.BodyHash) ||
             !FixedRoute(MailboxAuthenticatedCapabilityCodec.EncodeGrant(request.Presentation.Grant), winner.ExactGrant.Span) ||
             !PublicKeyAuth.VerifyDetached(request.Presentation.HolderSignature.ToArray(), signing, request.Presentation.Grant.HolderPublicKey.ToArray()) ||
             entry.Prepared && (request.Presentation.ReplayCounter != entry.Counter || !FixedRoute(SHA256.HashData(exact), entry.MauHash)))
             throw new CryptographicException("Prepared MAU3 differs from the exact protected message/grant/counter.");
+    }
+
+    private static ProtectedDid2MailboxSendJournal.Entry NewOriginalMailboxSend(Did2MessagingSessionScope scope,
+        ReadOnlySpan<byte> operation, ReadOnlySpan<byte> grantHash, ReadOnlySpan<byte> routeHash,
+        MailboxEncryptedEnvelope envelope, ulong grantExpiry, ulong retryUntil)
+    {
+        using var pending = ProtectedDid2MailboxSendJournal.Entry.Pending(scope, operation, grantHash, routeHash, envelope, retryUntil);
+        return pending.WithAdmissionCeiling(Math.Min(grantExpiry, retryUntil));
     }
 
     private async Task<byte[]> SaveMailboxSendJournalAsync(ProtectedDid2MailboxSendJournal.State state, byte[] expected,
@@ -478,8 +760,11 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         IClientMailboxBinaryIngress, IRouteBoundClientMailboxBinaryIngress, IDisposable
     {
         private readonly byte[] expected = exact.ToArray();
+        private readonly object replyGate = new();
+        private byte[] originalReply = [];
         private bool disposed;
         internal bool Attempted { get; private set; }
+        internal ReadOnlyMemory<byte> OriginalReply => originalReply;
         public async Task<ReadOnlyMemory<byte>> StoreOnRouteAsync(ReadOnlyMemory<byte> request,
             ScopedMailboxResolvedRoute route, CancellationToken ct)
         {
@@ -501,7 +786,20 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     throw new InvalidDataException("Owned Store reply exceeds its closed quorum bound.");
                 // Do not retain callback-owned bytes across the asynchronous fence.
                 var receipt = response.ToArray();
-                try { await guard(ct).ConfigureAwait(false); return receipt; }
+                try
+                {
+                    lock (replyGate)
+                    {
+                        ObjectDisposedException.ThrowIf(disposed, this);
+                        if (receipt.Length == MailboxReceiptV3Limits.QuorumFixedHeaderLength +
+                            2 * MailboxPeerWireV2Limits.Ed25519ReplicaResponseLength + 64)
+                        {
+                            CryptographicOperations.ZeroMemory(originalReply);
+                            originalReply = receipt.ToArray();
+                        }
+                    }
+                    await guard(ct).ConfigureAwait(false); return receipt;
+                }
                 catch { CryptographicOperations.ZeroMemory(receipt); throw; }
             }
             finally { CryptographicOperations.ZeroMemory(owned); }
@@ -513,6 +811,10 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         public Task<ReadOnlyMemory<byte>> AcknowledgeOnRouteAsync(ReadOnlyMemory<byte> request, ScopedMailboxResolvedRoute route, CancellationToken ct) => Reject();
         private static Task<ReadOnlyMemory<byte>> Reject() => Task.FromException<ReadOnlyMemory<byte>>(
             new CryptographicException("This owned loan authorizes only exact route-bound Store."));
-        public void Dispose() { disposed = true; CryptographicOperations.ZeroMemory(expected); }
+        public void Dispose()
+        {
+            lock (replyGate)
+            { disposed = true; CryptographicOperations.ZeroMemory(expected); CryptographicOperations.ZeroMemory(originalReply); }
+        }
     }
 }

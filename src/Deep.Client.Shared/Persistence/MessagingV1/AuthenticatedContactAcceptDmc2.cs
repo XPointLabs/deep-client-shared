@@ -16,15 +16,19 @@ internal sealed class AuthenticatedContactAcceptDmc2 : IAuthenticatedDmc2InboxEv
     private AuthenticatedContactAcceptDmc2(ReadOnlySpan<byte> exact, Did2MessagingSessionScope scope)
     {
         var parsed = ApplicationCoreCodec.DecodeDmc2(exact);
-        if (exact.Length is < ApplicationCoreCodec.MinimumContactControlRecordBytes or > ApplicationCoreCodec.MaximumContactControlRecordBytes || !Fixed(parsed.CanonicalBytes.Span, exact) ||
-            parsed.ContentKind != Dmc2ContentKind.ContactAccept || parsed.SenderClientSequence != 3 ||
-            !Fixed(parsed.NetworkId.Span, scope.Network) || !Fixed(parsed.ConversationId.Span, scope.Conversation) ||
-            !Fixed(parsed.SenderAccountId.Span, scope.IsInitiator ? scope.RemoteAccount : scope.LocalAccount) ||
-            !Fixed(parsed.SenderDeviceId.Span, scope.IsInitiator ? scope.RemoteDevice : scope.LocalDevice))
-            throw new CryptographicException("ContactAccept is outside its authenticated responder position.");
-        this.exact = exact.ToArray(); local = scope.LocalAccount.ToArray(); conversation = parsed.ConversationId.ToArray();
-        logical = parsed.LogicalMessageId.ToArray(); author = parsed.SenderAccountId.ToArray(); device = parsed.SenderDeviceId.ToArray();
-        LocalAccountGeneration = BinaryPrimitives.ReadUInt64BigEndian(scope.Exact[84..]);
+        try
+        {
+            if (exact.Length is < ApplicationCoreCodec.MinimumContactControlRecordBytes or > ApplicationCoreCodec.MaximumContactControlRecordBytes || !OwnedByteExports.EqualAndErase(parsed.CanonicalBytes, exact) ||
+                parsed.ContentKind != Dmc2ContentKind.ContactAccept || parsed.SenderClientSequence != 3 ||
+                !Fixed(parsed.NetworkId.Span, scope.Network) || !Fixed(parsed.ConversationId.Span, scope.Conversation) ||
+                !Fixed(parsed.SenderAccountId.Span, scope.IsInitiator ? scope.RemoteAccount : scope.LocalAccount) ||
+                !Fixed(parsed.SenderDeviceId.Span, scope.IsInitiator ? scope.RemoteDevice : scope.LocalDevice))
+                throw new CryptographicException("ContactAccept is outside its authenticated responder position.");
+            this.exact = exact.ToArray(); local = scope.LocalAccount.ToArray(); conversation = parsed.ConversationId.ToArray();
+            logical = parsed.LogicalMessageId.ToArray(); author = parsed.SenderAccountId.ToArray(); device = parsed.SenderDeviceId.ToArray();
+            LocalAccountGeneration = BinaryPrimitives.ReadUInt64BigEndian(scope.Exact[84..]);
+        }
+        finally { if (parsed.ParsedPayload is AttachmentOfferDmc2Payload offer) offer.Manifest.Dispose(); }
     }
     public ReadOnlyMemory<byte> ExactDmc2 => Copy(exact);
     public ReadOnlyMemory<byte> LocalAccountId => Copy(local);
@@ -69,9 +73,10 @@ internal sealed class AuthenticatedContactAcceptDmc2 : IAuthenticatedDmc2InboxEv
                 using var journal = journalOwner.Use(bytes => ProtectedDid2ContactAcceptJournal.Decode(bytes,
                     scope.Network, scope.LocalAccount, scope.Instance));
                 var winner = journal.FindScope(scope);
-                if (winner is null || !Fixed(winner.Operation, op) || !Fixed(winner.Accept, accepted) ||
+                if (winner is null || !Fixed(winner.Operation, op) ||
                     !Fixed(winner.HelloHash, SHA256.HashData(hello)))
                     throw new CryptographicException("A local Accept was not this account's durable explicit-command winner.");
+                winner.RequireExactAccept(accepted);
             }
             await ApplicationCoreVerifier.RequireRetainedContactAcceptEndpointBindingsAsync(ApplicationCoreCodec.DecodeDmc2(accepted),
                 ApplicationCoreCodec.DecodeDmc2(hello), scope.IsInitiator ? own.Proof : peer,

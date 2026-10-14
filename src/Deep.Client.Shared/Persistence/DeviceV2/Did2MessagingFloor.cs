@@ -7,7 +7,7 @@ namespace Deep.Client.Shared.Persistence.DeviceV2;
 internal sealed class Did2MessagingFloor
 {
     internal const int Bytes = 188, PartBytes = 128 * 1024, MaximumParts = 18;
-    internal const int MetadataBytes = 608;
+    internal const int MetadataBytes = 672;
     internal const int MaximumPendingBytes = MetadataBytes + 2097152 + 65536 + 33082 + 65536;
     private readonly byte[] exact;
     private Did2MessagingFloor(byte[] exact) => this.exact = exact;

@@ -15,23 +15,23 @@ public sealed partial class Did2OwnedTextOutboxTests
     {
         var scope = Scope(); var op = B(32, 31); using var state = Pending(scope, op, 3);
         var entry = Assert.Single(state.Entries).Value;
-        Assert.Throws<InvalidOperationException>(() => entry.WithVerifiedStore());
+        Assert.Throws<InvalidOperationException>(() => entry.WithVerifiedStore(1000));
         Stabilize(state, op);
         entry = state.Entries[Convert.ToHexString(op)];
         Assert.False(entry.Stored);
-        state.RetainStore(Convert.ToHexString(op)); var stored = state.Entries[Convert.ToHexString(op)];
+        state.RetainStore(Convert.ToHexString(op), 1000); var stored = state.Entries[Convert.ToHexString(op)];
         Assert.True(stored.Stored); Assert.False(stored.Pending);
         Assert.Equal(op, stored.Operation.ToArray()); Assert.Equal(3UL, stored.Sequence);
-        Assert.Throws<InvalidOperationException>(() => stored.WithVerifiedStore());
+        Assert.Throws<InvalidOperationException>(() => stored.WithVerifiedStore(1000));
         var exact = ProtectedDid2DirectTextJournal.Encode(state, scope.Network, scope.LocalAccount, scope.Instance);
-        Assert.Equal((byte)3, exact[0]); Assert.Equal(4UL, BinaryPrimitives.ReadUInt64BigEndian(exact.AsSpan(4)));
+        Assert.Equal((byte)8, exact[0]); Assert.Equal(4UL, BinaryPrimitives.ReadUInt64BigEndian(exact.AsSpan(4)));
         using var reopened = ProtectedDid2DirectTextJournal.Decode(exact, scope.Network, scope.LocalAccount, scope.Instance);
         Assert.True(Assert.Single(reopened.Entries).Value.Stored);
-        foreach (var oldGeneration in new byte[] { 1, 2 })
+        foreach (var oldGeneration in new byte[] { 1, 2, 3, 4, 5, 6, 7 })
         {
             var retired = exact.ToArray(); retired[0] = oldGeneration;
             Assert.Throws<InvalidDataException>(() => ProtectedDid2DirectTextJournal.Decode(retired, scope.Network, scope.LocalAccount, scope.Instance));
-            var oldEmpty = exact[..92].ToArray(); oldEmpty[0] = oldGeneration;
+            var oldEmpty = ProtectedDid2DirectTextJournal.Empty(scope.Network, scope.LocalAccount, scope.Instance); oldEmpty[0] = oldGeneration;
             BinaryPrimitives.WriteUInt16BigEndian(oldEmpty.AsSpan(2), 0);
             BinaryPrimitives.WriteUInt64BigEndian(oldEmpty.AsSpan(4), 1);
             Assert.Throws<InvalidDataException>(() => ProtectedDid2DirectTextJournal.Decode(oldEmpty, scope.Network, scope.LocalAccount, scope.Instance));
@@ -70,6 +70,8 @@ public sealed partial class Did2OwnedTextOutboxTests
         using var ownedManifest = prepared.OwnManifest(); using var manifest = ownedManifest.Use(bytes => ApplicationCoreCodec.DecodeDam1(bytes));
         var offer = ApplicationCoreCodec.AuthorDmc2(scope.Network, B(32, 47), scope.Conversation, scope.LocalAccount,
             scope.LocalDevice, 4, 2000, 0, Dmc2Flags.None, [], ApplicationCoreCodec.CreateAttachmentOfferPayload(manifest));
+        using var ownedOfferManifest = Assert.IsType<AttachmentOfferDmc2Payload>(offer.ParsedPayload).Manifest;
+        Assert.NotSame(manifest, ownedOfferManifest);
         using (var store = new SqliteDeepMailboxStore(new(fixture.Path, fixture.Key)))
         {
             using var text = await Mirror(store, state, scope, op); Stabilize(state, op);
@@ -123,7 +125,7 @@ public sealed partial class Did2OwnedTextOutboxTests
         Stabilize(decoded, op);
         Assert.Throws<ObjectDisposedException>(() => pending.PendingDmc2.ToArray());
         var stable = ProtectedDid2DirectTextJournal.Encode(decoded, scope.Network, scope.LocalAccount, scope.Instance);
-        Assert.Equal(entryStart + 524, stable.Length); Assert.Equal(3UL, BinaryPrimitives.ReadUInt64BigEndian(stable.AsSpan(4)));
+        Assert.Equal(entryStart + ProtectedDid2DirectTextJournal.PrefixBytes, stable.Length); Assert.Equal(3UL, BinaryPrimitives.ReadUInt64BigEndian(stable.AsSpan(4)));
         using var retained = ProtectedDid2DirectTextJournal.Decode(stable, scope.Network, scope.LocalAccount, scope.Instance);
         Assert.Null(retained.Pending);
         var observed = retained.Entries.Values.Single(); retained.Dispose();
@@ -168,7 +170,7 @@ public sealed partial class Did2OwnedTextOutboxTests
         using (var reopened = SqliteDeepMailboxStore.OpenExisting(new(fixture.Path, fixture.Key)))
         {
             using var stable = await Mirror(reopened, state, scope, op); Assert.Equal(exact, stable!.ExactDmc2.ToArray());
-            state.RetainStore(Convert.ToHexString(op));
+            state.RetainStore(Convert.ToHexString(op), 1000);
             using var completed = await Mirror(reopened, state, scope, op); Assert.Equal(exact, completed!.ExactDmc2.ToArray());
             var retainedRows = new List<DirectTextOutboxEntry>();
             try
@@ -230,10 +232,10 @@ public sealed partial class Did2OwnedTextOutboxTests
         { using var first = await Mirror(store, state, scope, op); Stabilize(state, op); }
         // Simulate hostile preexisting bytes without removing production DDL
         // checks. This pragma applies only to the fixture mutation connection.
-        fixture.Execute("PRAGMA ignore_check_constraints=ON; UPDATE direct_text_outbox SET exact_dmc2=zeroblob(16669); PRAGMA ignore_check_constraints=OFF;");
+        fixture.Execute("PRAGMA ignore_check_constraints=ON; UPDATE direct_text_outbox SET exact_dmc2=zeroblob(23650); PRAGMA ignore_check_constraints=OFF;");
         using var reopened = SqliteDeepMailboxStore.OpenExisting(new(fixture.Path, fixture.Key));
         await Assert.ThrowsAsync<CryptographicException>(() => Mirror(reopened, state, scope, op));
-        Assert.Equal(16669L, fixture.Scalar("SELECT length(exact_dmc2) FROM direct_text_outbox;"));
+        Assert.Equal(23650L, fixture.Scalar("SELECT length(exact_dmc2) FROM direct_text_outbox;"));
     }
 
     [Fact]
@@ -265,7 +267,7 @@ public sealed partial class Did2OwnedTextOutboxTests
         {
             if (!initiator) fixture.InsertCounter(scope, 4);
             using var first = await Mirror(store, state, scope, firstOp); Stabilize(state, firstOp);
-            state.RetainStore(Convert.ToHexString(firstOp));
+            state.RetainStore(Convert.ToHexString(firstOp), 1000);
         }
         // A fixture models already authorized cleanup, not a production
         // compactor/deletion permission. No runtime cleanup is activated.
@@ -349,6 +351,55 @@ public sealed partial class Did2OwnedTextOutboxTests
         var other = Scope(); Assert.False(cold.Floors.ContainsKey(ProtectedDid2DirectTextJournal.Position(other)));
         Assert.Throws<InvalidOperationException>(() => cold.RequireCapacity(other));
         Assert.Equal(ProtectedDid2DirectTextJournal.MaximumFloors, cold.Floors.Count);
+    }
+
+    // Called with independently authored genuine successor records by the
+    // route fixture. This exercises local custody only, not native delivery.
+    internal static async Task CheckRouteControlMirrorAsync(ParsedDmc2 first, ParsedDmc2 second)
+    {
+        var frame = Scope().Exact.ToArray();
+        first.NetworkId.Span.CopyTo(frame.AsSpan(4)); first.SenderAccountId.Span.CopyTo(frame.AsSpan(52));
+        first.SenderDeviceId.Span.CopyTo(frame.AsSpan(92)); first.ConversationId.Span.CopyTo(frame.AsSpan(244));
+        ((ContactRouteUpdateDmc2Payload)first.ParsedPayload).RelationshipId.Span.CopyTo(frame.AsSpan(276));
+        var scope = Did2MessagingSessionScope.RestoreMetadata(frame);
+        var firstOp = B(32, 0xb1); var secondOp = B(32, 0xb2); var textOp = B(32, 0xb3);
+        using var fixture = new SqlFixture(); using var state = new ProtectedDid2DirectTextJournal.State();
+        state.AddPending(ProtectedDid2DirectTextJournal.Entry.Prepare(scope, firstOp, first));
+        var entryStart = ProtectedDid2DirectTextJournal.HeaderBytes + ProtectedDid2DirectTextJournal.FloorBytes;
+        var pending = ProtectedDid2DirectTextJournal.Encode(state, scope.Network, scope.LocalAccount, scope.Instance);
+        Assert.Equal((byte)Dmc2ContentKind.ContactRouteUpdate, pending[entryStart + 517]);
+        Assert.Equal(23649, ProtectedDid2DirectTextJournal.MaximumEventBytes);
+        Assert.Equal(904389, ProtectedDid2DirectTextJournal.MaximumBytes);
+        foreach (var offset in new[] { entryStart + 517, entryStart + 518, entryStart + 519 })
+        {
+            var changed = pending.ToArray(); changed[offset] ^= 0x80;
+            Assert.ThrowsAny<Exception>(() => ProtectedDid2DirectTextJournal.Decode(changed, scope.Network, scope.LocalAccount, scope.Instance));
+        }
+        using (var store = new SqliteDeepMailboxStore(new(fixture.Path, fixture.Key)))
+        {
+            using var firstRow = await Mirror(store, state, scope, firstOp);
+            Assert.Equal(first.CanonicalBytes.ToArray(), firstRow!.ExactDmc2.ToArray());
+            // A pending control rolls forward exactly; SQL is not an author.
+            using var exactRetry = await Mirror(store, state, scope, firstOp);
+            Assert.Equal(firstRow.ExactDmc2.ToArray(), exactRetry!.ExactDmc2.ToArray());
+            Stabilize(state, firstOp);
+        }
+        var stable = ProtectedDid2DirectTextJournal.Encode(state, scope.Network, scope.LocalAccount, scope.Instance);
+        using var cold = ProtectedDid2DirectTextJournal.Decode(stable, scope.Network, scope.LocalAccount, scope.Instance);
+        using var reopened = SqliteDeepMailboxStore.OpenExisting(new(fixture.Path, fixture.Key));
+        using (var retained = await Mirror(reopened, cold, scope, firstOp))
+            Assert.Equal(first.CanonicalBytes.ToArray(), retained!.ExactDmc2.ToArray());
+        Assert.Equal(4UL, cold.NextSequence(scope));
+        cold.AddPending(ProtectedDid2DirectTextJournal.Entry.Prepare(scope, secondOp, second));
+        using (var successor = await Mirror(reopened, cold, scope, secondOp))
+            Assert.Equal(second.CanonicalBytes.ToArray(), successor!.ExactDmc2.ToArray());
+        Stabilize(cold, secondOp); Assert.Equal(5UL, cold.NextSequence(scope));
+        cold.AddPending(Make(scope, textOp, 5));
+        using (var text = await Mirror(reopened, cold, scope, textOp)) Assert.Equal(5UL, text!.SenderSequence);
+        Stabilize(cold, textOp); Assert.Equal(6UL, cold.NextSequence(scope));
+        Assert.Throws<CryptographicException>(() => cold.Entries[Convert.ToHexString(firstOp)].RequireEvent(second.CanonicalBytes.Span));
+        fixture.Execute("UPDATE direct_sender_sequences SET next_sequence=4;");
+        await Assert.ThrowsAsync<CryptographicException>(() => Mirror(reopened, cold, scope, firstOp));
     }
 
     private static Task<DirectTextOutboxEntry?> Mirror(SqliteDeepMailboxStore store, ProtectedDid2DirectTextJournal.State state,

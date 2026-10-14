@@ -95,12 +95,27 @@ public sealed partial class DeepIdV2AccountService
         finally { foreach (var bytes in new[] { op, retainedOp, exact }) CryptographicOperations.ZeroMemory(bytes); }
     }
 
-    public Task<ClientMailboxStoreResult> SendTextAsync(DeepIdV2Conversation conversation, ReadOnlyMemory<byte> logicalOperation,
+    // Creation durably reserves a command before exposing its operation. Sending
+    // that operation is a separate retry-only boundary, including after restart.
+    public async Task<ReadOnlyMemory<byte>> QueueTextAsync(DeepIdV2Conversation conversation, string text,
+        DeepIdV2ContactPathAuthoritySource source, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(conversation); ArgumentNullException.ThrowIfNull(source);
+        source.RequireAccountOwner(this);
+        _ = ApplicationCoreCodec.CreateMessageCreatePayload(text);
+        var state = await ReadOwnContactAcceptanceAsync(conversation.Scope, source, ct).ConfigureAwait(false);
+        if (conversation.IsInitiator ? state != Did2ContactAcceptanceState.PeerAcceptanceRetained : state != Did2ContactAcceptanceState.LocalAcceptanceRetained)
+            throw new InvalidOperationException("The contact has not retained the required explicit acceptance.");
+        using var draft = await CreateOwnDirectTextAsync(conversation.Scope, text, source, ct).ConfigureAwait(false);
+        return draft.OperationId.ToArray();
+    }
+
+    public Task<ClientMailboxStoreResult> RetryTextAsync(DeepIdV2Conversation conversation, ReadOnlyMemory<byte> logicalOperation,
         string text, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct = default)
-        => SendTextAsync(conversation, logicalOperation, text, source, new Did2MailboxGrantOnionTransport(source),
+        => RetryTextAsync(conversation, logicalOperation, text, source, new Did2MailboxGrantOnionTransport(source),
             new Did2OwnedMailboxOnionTransportFactory(), ct);
 
-    internal async Task<ClientMailboxStoreResult> SendTextAsync(DeepIdV2Conversation conversation, ReadOnlyMemory<byte> logicalOperation,
+    internal async Task<ClientMailboxStoreResult> RetryTextAsync(DeepIdV2Conversation conversation, ReadOnlyMemory<byte> logicalOperation,
         string text, DeepIdV2ContactPathAuthoritySource source, IDid2MailboxGrantTransport grants,
         IDid2OwnedMailboxTransportFactory transport, CancellationToken ct = default)
     {
@@ -114,8 +129,10 @@ public sealed partial class DeepIdV2AccountService
             var state = await ReadOwnContactAcceptanceAsync(conversation.Scope, source, ct).ConfigureAwait(false);
             if (conversation.IsInitiator ? state != Did2ContactAcceptanceState.PeerAcceptanceRetained : state != Did2ContactAcceptanceState.LocalAcceptanceRetained)
                 throw new InvalidOperationException("The contact has not retained the required explicit acceptance.");
+            var retained = await ReadRetainedPublicTextStoreAsync(conversation.Scope, op, text, source, ct).ConfigureAwait(false);
+            if (retained is not null) return retained;
             using var draft = await PrepareOwnDirectTextAsync(conversation.Scope, op, text, source, ct).ConfigureAwait(false);
-            exact = draft.ExactDmc2.ToArray();
+            exact = OwnedByteExports.TakeArray(draft.ExactDmc2);
             using var sent = await SendOwnMessagingAsync(conversation.Scope, op, exact, source, ct).ConfigureAwait(false);
             return await DeliverOwnMessagingAsync(conversation.Scope, op, source, grants, transport, ct).ConfigureAwait(false);
         }

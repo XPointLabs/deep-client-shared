@@ -20,9 +20,10 @@ internal sealed class Did2CompactionPlan : IDisposable
         Ordinary = 1, Send = 2, Grant = 3, Read = 4, SessionCatalog = 5,
         MessagingFloor = 6, Attachment = 7, AccountRegistration = 8,
         NativeFence = 9, MessagingHistoryCheckpoint = 10, MessagingPeerBootstrap = 11,
-        MailboxStoreState = 12, ContactPublication = 13, MailboxLocalCustody = 14
+        MailboxStoreState = 12, ContactPublication = 13, MailboxLocalCustody = 14, ContactAccept = 15,
+        MailboxContactCustody = 16, ContactStart = 17
     }
-    internal enum Disposition : byte { OutboxPayload = 1, Audit = 2, JournalPrefix = 3, ReplayScope = 4, RetainedPath = 5 }
+    internal enum Disposition : byte { OutboxPayload = 1, Audit = 2, JournalPrefix = 3, ReplayScope = 4, RetainedPath = 5, StoppedOutboxPayload = 6, ContactAcceptPayload = 8, InitialPayload = 9, StoppedControlPayload = 10, ExpiredControlAudit = 11, PreSessionInitialPayload = 12, ExpiredPreSessionInitialAudit = 13, ExpiredTerminalAudit = 14 }
     internal enum RecoveryStep : byte { ApplySql = 1, RecordSqlCommit = 2, AdoptRoot = 3, ClearPlan = 4 }
     internal readonly record struct Root(RootKind Kind, ReadOnlyMemory<byte> Selector,
         ReadOnlyMemory<byte> Before, ReadOnlyMemory<byte> After, bool Guard, ReadOnlyMemory<byte> Successor);
@@ -163,9 +164,9 @@ internal sealed class Did2CompactionPlan : IDisposable
         for (var i = 0; i < roots; i++)
         {
             var record = raw.Slice(HeaderBytes + i * RootBytes, RootBytes);
-            if (record[0] is < 1 or > 14 || record[1] is not (1 or 2) || !Zero(record.Slice(2, 2))) throw Bad();
-            if (record[0] is (byte)RootKind.SessionCatalog or (byte)RootKind.AccountRegistration or (byte)RootKind.NativeFence or (byte)RootKind.MessagingPeerBootstrap or (byte)RootKind.MailboxStoreState or (byte)RootKind.MailboxLocalCustody && record[1] != 2) throw Bad();
-            if (record[0] is >= 1 and <= 5 or 7 or 8 or 12 or 13 or 14 && !globalRoots.Add((RootKind)record[0])) throw Bad();
+            if (record[0] is < 1 or > 17 || record[1] is not (1 or 2) || !Zero(record.Slice(2, 2))) throw Bad();
+            if (record[0] is (byte)RootKind.SessionCatalog or (byte)RootKind.AccountRegistration or (byte)RootKind.NativeFence or (byte)RootKind.MessagingPeerBootstrap or (byte)RootKind.MailboxStoreState or (byte)RootKind.MailboxLocalCustody or (byte)RootKind.MailboxContactCustody && record[1] != 2) throw Bad();
+            if (record[0] is >= 1 and <= 5 or 7 or 8 or 12 or 13 or 14 or 15 or 16 or 17 && !globalRoots.Add((RootKind)record[0])) throw Bad();
             Require32(record.Slice(4, 32)); Require32(record.Slice(36, 32)); Require32(record.Slice(68, 32));
             if ((record[1] == 2) != Fixed(record.Slice(36, 32), record.Slice(68, 32))) throw Bad();
             var length = BinaryPrimitives.ReadUInt32BigEndian(record[100..]);
@@ -186,9 +187,9 @@ internal sealed class Did2CompactionPlan : IDisposable
         for (var i = 0; i < rows; i++)
         {
             var record = raw.Slice(HeaderBytes + roots * RootBytes + i * RowBytes, RowBytes);
-            if (record[0] is < 1 or > 5 || !Zero(record.Slice(1, 7)) ||
+            if (record[0] is < 1 or > 14 or 7 || !Zero(record.Slice(1, 7)) ||
                 raw[2] == (byte)SqlTarget.Messaging && record[0] != (byte)Disposition.JournalPrefix ||
-                raw[2] == (byte)SqlTarget.ProtectedOnly && record[0] is not ((byte)Disposition.ReplayScope or (byte)Disposition.Audit) ||
+                raw[2] == (byte)SqlTarget.ProtectedOnly && record[0] is not ((byte)Disposition.ReplayScope or (byte)Disposition.Audit or (byte)Disposition.ContactAcceptPayload or (byte)Disposition.InitialPayload) ||
                 raw[2] is (byte)SqlTarget.Application or (byte)SqlTarget.Transport && record[0] == (byte)Disposition.JournalPrefix) throw Bad();
             Require32(record.Slice(8, 32)); Require32(record.Slice(40, 32));
             actions.Add((Disposition)record[0]);
@@ -213,6 +214,36 @@ internal sealed class Did2CompactionPlan : IDisposable
             raw[2] == (byte)SqlTarget.ProtectedOnly && !changedKinds.Overlaps([RootKind.Grant, RootKind.Send, RootKind.Read])) throw Bad();
         // This action owns one closed joint SQL + grant/read/publication profile.
         // Other compaction profiles cannot borrow these roots or this action.
+        if (actions.Overlaps([Disposition.StoppedOutboxPayload, Disposition.ExpiredTerminalAudit]))
+        {
+            RootKind[] expected = [RootKind.Ordinary, RootKind.Send, RootKind.Grant, RootKind.Read,
+                RootKind.SessionCatalog, RootKind.MessagingFloor, RootKind.Attachment, RootKind.AccountRegistration,
+                RootKind.MessagingHistoryCheckpoint, RootKind.MessagingPeerBootstrap];
+            if (raw[2] != (byte)SqlTarget.Application || actions.Count != 1 || roots != expected.Length) throw Bad();
+            for (var i = 0; i < expected.Length; i++)
+            {
+                var record = raw.Slice(HeaderBytes + i * RootBytes, RootBytes);
+                if (record[0] != (byte)expected[i] || record[1] != (i == 0 ? 1 : 2)) throw Bad();
+            }
+        }
+        if (actions.Overlaps([Disposition.ContactAcceptPayload, Disposition.InitialPayload, Disposition.StoppedControlPayload, Disposition.ExpiredControlAudit, Disposition.PreSessionInitialPayload, Disposition.ExpiredPreSessionInitialAudit]))
+        {
+            var preSession = actions.Overlaps([Disposition.PreSessionInitialPayload, Disposition.ExpiredPreSessionInitialAudit]);
+            var stoppedControl = preSession || actions.Overlaps([Disposition.StoppedControlPayload, Disposition.ExpiredControlAudit]);
+            var initialPayload = stoppedControl ? globalRoots.Contains(RootKind.ContactStart) : actions.Contains(Disposition.InitialPayload);
+            RootKind[] expected = [RootKind.Ordinary, RootKind.Send, RootKind.Grant, RootKind.Read,
+                RootKind.SessionCatalog, RootKind.Attachment, RootKind.AccountRegistration,
+                RootKind.NativeFence, initialPayload ? RootKind.MailboxContactCustody : RootKind.ContactAccept,
+                initialPayload ? RootKind.ContactStart : RootKind.MailboxContactCustody];
+            if (raw[2] != (byte)(stoppedControl ? SqlTarget.Application : SqlTarget.ProtectedOnly) || actions.Count != 1 || rows != 1 || roots != expected.Length) throw Bad();
+            if (preSession && !initialPayload) throw Bad();
+            for (var i = 0; i < roots; i++)
+            {
+                var record = raw.Slice(HeaderBytes + i * RootBytes, RootBytes);
+                if (record[0] != (byte)expected[i] || record[1] != ((!stoppedControl && i == 1) || i == (initialPayload ? 9 : 8) ? 1 : 2)) throw Bad();
+            }
+        }
+        else if (globalRoots.Contains(RootKind.ContactAccept) || globalRoots.Contains(RootKind.ContactStart) || globalRoots.Contains(RootKind.MailboxContactCustody)) throw Bad();
         var retainedPath = actions.Contains(Disposition.RetainedPath);
         if (retainedPath)
         {

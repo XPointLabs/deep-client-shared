@@ -4,6 +4,7 @@ using Deep.Client.Shared.Persistence.DeviceV2;
 using Deep.Client.Shared.Services;
 using Deep.Protocol.ContactV1;
 using Deep.Protocol.DeepExtension.MailboxCapabilities;
+using Deep.Protocol.XPointNetworkV1;
 
 namespace Deep.Client.Shared.Production.Tests;
 
@@ -228,9 +229,23 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             }
             finally { CryptographicOperations.ZeroMemory(localFloor); }
             Assert.Equal(1, retrieve.Calls); Assert.Equal(1, terminal.RetrieveCalls); Assert.Equal(1, terminal.AckCalls);
-            // Old grant cannot dispatch again after losing its floor; current
-            // authority rejects it before any new Retrieve/ACK callback.
-            await Assert.ThrowsAsync<CryptographicException>(() => SynchronizeNativeReceiver(retrieve, terminal));
+            // Authenticate the exact old grant against the actual current host.
+            // A normal new poll may independently acquire a successor; it is
+            // not a replay of this retired counter's original request/result.
+            using (var grants = await ReadPeerGrantsAsync())
+            {
+                var original = grants.Entries[Convert.ToHexString(selector)];
+                var source = GrantReaderSource(reader);
+                var fresh = await source.VerifyForOwnPreKeyAuthoringAsync(reader, default);
+                var host = await MailboxHostAuthorityV2Verifier.VerifyAsync(fresh.Network, fresh.Authority,
+                    fresh.MailboxAuthority.ExactPma2, source.RendezvousTrustedTime);
+                await Assert.ThrowsAsync<CryptographicException>(() => host.VerifyRetainedReadSuccessAsync(
+                    ProtectedDid2MailboxGrantJournal.OriginalRoute(original),
+                    ProtectedDid2MailboxGrantJournal.Request(original),
+                    ProtectedDid2MailboxGrantJournal.Response(original)).AsTask());
+            }
+            using (var read = await ReadPeerMailboxReads())
+            { Assert.Equal(0, read.Phase); Assert.Null(read.Active); Assert.Empty(read.Counters); Assert.Single(read.Traversals); }
             Assert.Equal(1, retrieve.Calls); Assert.Equal(1, terminal.RetrieveCalls); Assert.Equal(1, terminal.AckCalls);
             if (retireSupersededHolder)
                 await CheckSupersededRetrieveRetirementAsync(retrieve, own: false, selector);

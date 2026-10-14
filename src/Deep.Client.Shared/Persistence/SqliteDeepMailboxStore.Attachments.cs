@@ -10,7 +10,8 @@ namespace Deep.Client.Shared.Persistence;
 public sealed partial class SqliteDeepMailboxStore
 {
     internal Task<OwnedAttachmentPreparation?> ReconcileOwnedAttachmentsAsync(ProtectedDid2AttachmentJournal.State state,
-        ReadOnlyMemory<byte> account, ulong generation, ReadOnlyMemory<byte> network, ReadOnlyMemory<byte> select, CancellationToken ct)
+        ReadOnlyMemory<byte> account, ulong generation, ReadOnlyMemory<byte> network, ReadOnlyMemory<byte> select, CancellationToken ct,
+        bool requireStableReadOnly = false)
     {
         RequireDirectId(account, nameof(account));
         if (generation == 0 || network.Length != 16) throw new ArgumentException("An owned attachment scope is required.");
@@ -58,6 +59,8 @@ public sealed partial class SqliteDeepMailboxStore
                             }
                         }
                         if (found.Count != state.Entries.Count) throw new CryptographicException("Protected attachment custody lost its exact SQL object.");
+                        if (requireStableReadOnly && orphans.Count != 0)
+                            throw new CryptographicException("Read-only attachment dependencies cannot discard unadopted asset candidates.");
                         // No protected command references these candidates. They
                         // have never been returned or authorized for upload.
                         foreach (var orphan in orphans)

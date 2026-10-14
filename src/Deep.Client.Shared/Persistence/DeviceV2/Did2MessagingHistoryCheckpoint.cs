@@ -23,7 +23,7 @@ internal sealed class Did2MessagingHistoryCheckpoint
     internal static Did2MessagingHistoryCheckpoint RegisteredEmpty(Did2MessagingSessionScope scope)
     {
         ArgumentNullException.ThrowIfNull(scope);
-        var raw = new byte[Bytes]; raw[0] = 1;
+        var raw = new byte[Bytes]; raw[0] = 2;
         BinaryPrimitives.WriteUInt64BigEndian(raw.AsSpan(4), 1);
         scope.Hash.CopyTo(raw.AsSpan(12)); Did2MessagingFloor.Empty(scope).Exact.Span.CopyTo(raw.AsSpan(44));
         return Decode(raw, scope);
@@ -31,7 +31,7 @@ internal sealed class Did2MessagingHistoryCheckpoint
     internal static Did2MessagingHistoryCheckpoint Decode(ReadOnlySpan<byte> raw, Did2MessagingSessionScope scope)
     {
         ArgumentNullException.ThrowIfNull(scope);
-        if (raw.Length != Bytes || raw[0] != 1 || !Did2MessagingSessionScope.Zero(raw.Slice(1, 3)) ||
+        if (raw.Length != Bytes || raw[0] != 2 || !Did2MessagingSessionScope.Zero(raw.Slice(1, 3)) ||
             !Did2MessagingSessionScope.Fixed(raw.Slice(12, 32), scope.Hash))
             throw new InvalidDataException("Messaging history checkpoint is absent, foreign or unsupported.");
         var revision = BinaryPrimitives.ReadUInt64BigEndian(raw[4..]);

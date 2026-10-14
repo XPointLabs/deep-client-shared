@@ -13,8 +13,9 @@ namespace Deep.Client.Shared.Persistence.DeviceV2;
 internal static class ProtectedDid2MailboxGrantJournal
 {
     internal const string Slot = "deep.store.v2.mailbox-grant-journal";
-    // One current local reader. Prior custody cannot express two-phase late adoption.
-    private const byte Version = 5;
+    // One current local reader. Prior custody loses possible read use when
+    // its replay floor retires, so it cannot support a never-used proof.
+    private const byte Version = 6;
     internal const int HeaderBytes = 96, MaximumEntries = 128;
     private const int SelectionBytes = 128, PredecessorOffset = 1045;
     private const int CeilingOffset = 1077, ClosedLowerOffset = 1085, EvidenceOffset = 1097;
@@ -62,15 +63,18 @@ internal static class ProtectedDid2MailboxGrantJournal
     // Ordinary acquisition continues selecting current, never this candidate.
     // A retry after promotion returns that exact immediate successor rather
     // than creating another request. Unknown/late intervening work stays pinned.
-    internal static byte[]? AcquisitionForRenewal(State state, string scope, ReadOnlySpan<byte> originalAcquisition)
+    internal static byte[]? AcquisitionForRenewal(State state, string scope, ReadOnlySpan<byte> originalAcquisition,
+        MailboxCapabilityDomain domain = MailboxCapabilityDomain.Retrieve)
     {
         Required32(originalAcquisition);
+        if (domain is not (MailboxCapabilityDomain.Deposit or MailboxCapabilityDomain.Retrieve))
+            throw new InvalidDataException("Renewal requires one closed mailbox direction.");
         var originalName = Convert.ToHexString(originalAcquisition);
         if (!state.Entries.TryGetValue(originalName, out var original) || !IsAdoptedWinner(original) ||
             EntryScope(original) != scope ||
-            ContactCodec.Decode("XMG2", Request(original).Span).Field(6).Span[0] != (byte)MailboxCapabilityDomain.Retrieve ||
+            ContactCodec.Decode("XMG2", Request(original).Span).Field(6).Span[0] != (byte)domain ||
             !state.Selections.TryGetValue(scope, out var selection) || selection.Current is not { } current)
-            throw new IOException("Renewal requires the exact adopted original Retrieve acquisition.");
+            throw new IOException("Renewal requires the exact adopted original acquisition in its direction.");
         if (current != originalName)
         {
             var successor = state.Entries[current];
@@ -279,7 +283,7 @@ internal static class ProtectedDid2MailboxGrantJournal
         return hash.GetHashAndReset();
     }
 
-    internal static byte[] Pending(ReadOnlySpan<byte> seed, VerifiedDeepIdV2ContactRouteClosure route,
+    internal static byte[] Pending(ReadOnlySpan<byte> seed, VerifiedDeepIdV2MailboxRouteClosure route,
         AuthoredMailboxGrantRequest request, VerifiedMailboxAuthorityV2 policy, ReadOnlySpan<byte> network)
     {
         Required32(seed); route.Network.EnsureCurrent();
@@ -375,6 +379,19 @@ internal static class ProtectedDid2MailboxGrantJournal
     internal static ReadOnlySpan<byte> Seed(byte[] entry) => entry.AsSpan(32, 32);
     internal static bool HasWinner(byte[] entry) => entry[96] is 2 or 4 or 5;
     internal static bool IsAdoptedWinner(byte[] entry) => entry[96] is 2 or 5;
+    internal static bool HasReservedReadIntent(byte[] entry) => entry[97] == 1;
+
+    // Structural bookkeeping only. The actual held owner must first save its
+    // exact phase1 read cycle and protect/read back this root before signing.
+    // There is deliberately no transition that clears this reservation.
+    internal static void ReserveReadIntent(State state, byte[] entry)
+    {
+        if (!state.Entries.TryGetValue(Acquisition(entry), out var retained) || !ReferenceEquals(retained, entry) ||
+            !IsAdoptedWinner(entry) || ContactCodec.Decode("XMG2", Request(entry).Span).Field(6).Span[0] != (byte)MailboxCapabilityDomain.Retrieve)
+            throw new CryptographicException("Read-intent reservation requires the actual adopted Retrieve acquisition.");
+        if (HasReservedReadIntent(entry)) return;
+        entry[97] = 1; state.Revision = checked(state.Revision + 1);
+    }
     internal static bool IsLateCandidate(byte[] entry) => entry[96] == 4;
     internal static bool IsLateAdopted(byte[] entry) => entry[96] == 5;
     internal static bool IsClosedUnresolved(byte[] entry) => entry[96] == 3;
@@ -513,7 +530,8 @@ internal static class ProtectedDid2MailboxGrantJournal
 
     private static void RequireEntry(ReadOnlySpan<byte> entry, ReadOnlySpan<byte> network)
     {
-        if (entry.Length is < MinimumEntryBytes or > MaximumEntryBytes || entry[96] is not (1 or 2 or 3 or 4 or 5) || entry.Slice(97, 3).IndexOfAnyExcept((byte)0) >= 0)
+        if (entry.Length is < MinimumEntryBytes or > MaximumEntryBytes || entry[96] is not (1 or 2 or 3 or 4 or 5) ||
+            entry[97] > 1 || entry.Slice(98, 2).IndexOfAnyExcept((byte)0) >= 0)
             throw new InvalidDataException("Mailbox holder custody phase/size is noncanonical.");
         Required32(entry.Slice(32, 32)); Required32(entry.Slice(64, 32));
         var ceiling = BinaryPrimitives.ReadUInt64BigEndian(entry.Slice(CeilingOffset, 8));
@@ -522,6 +540,8 @@ internal static class ProtectedDid2MailboxGrantJournal
             (entry[96] is 3 or 4 or 5 ? closedLower < RequestExpiry(entry) : closedLower != 0))
             throw new InvalidDataException("Original issuance ceiling or closed acquisition outcome differs.");
         var request = ContactCodec.Decode("XMG2", entry.Slice(RequestOffset, 435));
+        if (entry[97] == 1 && (entry[96] is not (2 or 5) || request.Field(6).Span[0] != (byte)MailboxCapabilityDomain.Retrieve))
+            throw new InvalidDataException("Only an adopted Retrieve winner can retain read-intent reservation.");
         ContactCodec.VerifyMailboxGrantHolderSignature(request);
         if (!Fixed(request.Field(1).Span, network) ||
             !Fixed(entry[..32], Scope(entry.Slice(64, 32), request.Field(3).Span, request.Field(6).Span[0])))

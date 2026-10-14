@@ -5,7 +5,7 @@ using Deep.Protocol.MessagingWire;
 namespace Deep.Client.Shared.Services;
 
 /// <summary>One completed bounded mailbox page. Processed envelopes include
-/// idempotent replays and contact events, not only new user messages. These
+/// idempotent replays, contact events and control disposal, not only new user messages. These
 /// counts expose no plaintext, selector, key or acknowledgement authority.</summary>
 public sealed class DeepIdV2MailboxSynchronizationResult
 {
@@ -64,6 +64,8 @@ public sealed partial class DeepIdV2AccountService
             Did2MessagingSessionScope scope;
             if (item.Envelope.Ciphertext.Span.StartsWith("DPH2"u8))
                 scope = await ReceiveOwnMailboxInitialAsync(item.Envelope.Ciphertext, source, ct).ConfigureAwait(false);
+            else if (item.Envelope.Ciphertext.Span.StartsWith("DBR2"u8))
+                scope = await ReceiveOwnBraidMailboxEnvelopeAsync(item.Envelope.Ciphertext, source, ct).ConfigureAwait(false);
             else
             {
                 // Unknown/group input still has no semantic fallback or ACK.

@@ -25,33 +25,35 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         using (var received = await fixture.ReceiveOwnedMessage(sender, sent.ExactEnvelope.ToArray())) { }
         var ratchetBefore = await fixture.ReadMessagingFloor(sender);
         var points = new[] { Did2TextOutboxFailpoint.AfterPending, Did2TextOutboxFailpoint.AfterSql, Did2TextOutboxFailpoint.AfterStable };
+        var createdOperations = new List<byte[]>();
         for (var i = 0; i < points.Length; i++)
         {
-            var op = Bytes(32, checked((byte)(0x93 + i))); var point = points[i];
+            var point = points[i];
             var interrupted = false;
             using (Did2TextOutboxTestHooks.Push(found =>
             {
                 if (found != point) return;
                 interrupted = true; throw new IOException("Injected owned authored-floor handover interruption.");
             }))
-                await Assert.ThrowsAsync<IOException>(() => fixture.PrepareOwnedText(sender, op, "authored-floor recovery"));
+                await Assert.ThrowsAsync<IOException>(() => fixture.CreateOwnedText(sender, "authored-floor recovery"));
             Assert.True(interrupted);
-            byte[] retainedHash;
+            byte[] retainedHash, op;
             using (var journal = await fixture.ReadAuthoredTextJournalAsync(sender))
             {
-                var command = journal.Entries[Convert.ToHexString(op)];
+                var command = Assert.Single(journal.Entries.Values, entry => entry.Sequence == checked((ulong)i + 3));
+                op = command.Operation.ToArray(); createdOperations.Add(op);
                 retainedHash = command.EventHash.ToArray();
                 Assert.Equal(checked((ulong)i + 3), command.Sequence);
                 Assert.Equal(point != Did2TextOutboxFailpoint.AfterStable, command.Pending);
                 Assert.Equal(checked((ulong)i + 4), journal.NextSequence(sender));
                 Assert.Single(journal.Floors);
             }
-            // PrepareOwnedText constructs a new account/source on each call.
-            using (var resumed = await fixture.PrepareOwnedText(sender, op, "authored-floor recovery"))
+            // RetryOwnedText constructs a new account/source on each call.
+            using (var resumed = await fixture.RetryOwnedText(sender, op, "authored-floor recovery"))
             {
                 Assert.Equal(checked((ulong)i + 3), resumed.SenderSequence);
                 Assert.Equal(retainedHash, SHA256.HashData(resumed.ExactDmc2.Span));
-                using var retry = await fixture.PrepareOwnedText(sender, op, "authored-floor recovery");
+                using var retry = await fixture.RetryOwnedText(sender, op, "authored-floor recovery");
                 Assert.Equal(resumed.ExactDmc2.ToArray(), retry.ExactDmc2.ToArray());
             }
             using var stable = await fixture.ReadAuthoredTextJournalAsync(sender);
@@ -63,8 +65,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         // Fixture-only disposition shape: remove both working copies, never
         // native committed events, independent local history or either floor.
         // This does not authorize production cleanup or imply remote Store.
-        var committedOperation = Bytes(32, 0x93);
-        using (var original = await fixture.PrepareOwnedText(sender, committedOperation, "authored-floor recovery"))
+        var committedOperation = createdOperations[0];
+        using (var original = await fixture.RetryOwnedText(sender, committedOperation, "authored-floor recovery"))
         using (var sent = await fixture.SendOwnedMessage(sender, committedOperation,
             ApplicationCoreCodec.DecodeDmc2(original.ExactDmc2.Span))) { }
         var committedFloor = await fixture.ReadMessagingFloor(sender);
@@ -80,14 +82,14 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         // The actual cold owner must refuse before reserving a logical ID,
         // advancing the authored counter or materializing another SQL row.
         using (Did2TextOutboxTestHooks.Push(_ => throw new IOException("Retired replay reached a write handover.")))
-            await Assert.ThrowsAsync<CryptographicException>(() =>
-                fixture.PrepareOwnedText(sender, committedOperation, "authored-floor recovery"));
+            await Assert.ThrowsAsync<IOException>(() =>
+                fixture.RetryOwnedText(sender, committedOperation, "authored-floor recovery"));
         Assert.Equal(protectedBefore, await fixture.ReadAuthoredRootDigestAsync());
         Assert.Equal(applicationBefore, await fixture.ReadAuthoredApplicationDigestAsync(sender));
         Assert.Equal(committedFloor.Exact.ToArray(), (await fixture.ReadMessagingFloor(sender)).Exact.ToArray());
         var history = Assert.Single(await fixture.ListNativeApplicationMessages(sender));
         Assert.True(history.IsLocalAuthor); Assert.Equal("authored-floor recovery", history.Text);
-        using (var next = await fixture.PrepareOwnedText(sender, Bytes(32, 0x96), "next distinct operation"))
+        using (var next = await fixture.CreateOwnedText(sender, "next distinct operation"))
         {
             Assert.Equal(6UL, next.SenderSequence);
             using var retained = await fixture.ReadAuthoredTextJournalAsync(sender);
@@ -101,7 +103,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     {
         internal async Task<ProtectedDid2DirectTextJournal.State> ReadAuthoredTextJournalAsync(Did2MessagingSessionScope scope)
         {
-            using var root = await innerStorage.ReadOwnedAsync(ProtectedDid2DirectTextJournal.Slot) ??
+            using var root = await (scope.IsInitiator ? innerStorage : peerStorage).ReadOwnedAsync(ProtectedDid2DirectTextJournal.Slot) ??
                 throw new InvalidDataException("Test observer lost the actual authored root.");
             return root.Use(bytes => ProtectedDid2DirectTextJournal.Decode(bytes, scope.Network, scope.LocalAccount, scope.Instance));
         }
@@ -116,7 +118,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         // Test-only access to the already-existing encrypted application SQL.
         // The key is derived from actual owned account registration under its
         // lease; no production callback, supplied path or repair API is added.
-        private Task WithAuthoredApplicationConnectionAsync(Did2MessagingSessionScope scope,
+        internal Task WithAuthoredApplicationConnectionAsync(Did2MessagingSessionScope scope,
             Action<SqliteConnection> inspect, bool acquireOwnerLease = true)
             => WithOwnedApplicationConnectionAsync(scope.IsInitiator, scope.Network.ToArray(), scope.LocalAccount.ToArray(), inspect, acquireOwnerLease);
 

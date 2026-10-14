@@ -81,15 +81,20 @@ internal sealed partial class Did2MessagingSqlJournal
         using var digest = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         digest.AppendData("Deep/STORE-V2/messaging-history-prefix"u8); digest.AppendData([0]);
         digest.AppendData(scope.Hash); digest.AppendData(basis.Exact.Span); digest.AppendData(initial);
-        using var command = Command("SELECT ordinal,direction,operation,metadata,envelope,plaintext,length(operation),length(metadata),length(envelope),length(plaintext) FROM events WHERE ordinal<=$basis ORDER BY ordinal;", tx);
+        using var command = Command("SELECT ordinal,direction,operation,metadata,envelope,plaintext,length(operation),length(metadata),length(envelope),length(plaintext),typeof(ordinal),typeof(direction),typeof(operation),typeof(metadata),typeof(envelope),typeof(plaintext) FROM events WHERE ordinal<=$basis ORDER BY ordinal;", tx);
         command.Parameters.AddWithValue("$basis", checked((long)basis.Ordinal)); using var reader = command.ExecuteReader();
         ulong count = 0, previous = 0; Span<byte> number = stackalloc byte[8];
         while (reader.Read())
         {
+            if (reader.GetString(10) != "integer" || reader.GetString(11) != "integer" ||
+                reader.GetString(12) != "blob" || reader.GetString(13) != "blob" || reader.GetString(14) != "blob")
+                throw new InvalidDataException("Retained messaging history has a noncanonical storage type.");
             var ordinal = reader.GetInt64(0); var direction = reader.GetInt32(1);
-            if (ordinal < 1 || (ulong)ordinal <= previous || (ulong)ordinal > basis.Ordinal || direction is not (1 or 2) ||
+            if (ordinal < 1 || (ulong)ordinal <= previous || (ulong)ordinal > basis.Ordinal || direction is not (1 or 2 or 3 or 4) ||
+                reader.GetString(15) != (direction == 2 ? "blob" : "null") ||
                 reader.GetInt64(6) != 32 || reader.GetInt64(7) != Did2MessagingFloor.MetadataBytes || reader.GetInt64(8) is < 1 or > 65536 ||
-                (direction == 1 ? !reader.IsDBNull(9) : reader.IsDBNull(9) || reader.GetInt64(9) is < 1 or > 33082))
+                (direction != 2 ? !reader.IsDBNull(9) : reader.IsDBNull(9) || reader.GetInt64(9) is < 1 or > 33082) ||
+                direction is 3 or 4 && reader.GetInt64(8) != Dbr2Codec.TotalBytes)
                 throw new InvalidDataException("Retained messaging history has a noncanonical reference or size.");
             var operation = reader.GetFieldValue<byte[]>(2); var metadata = reader.GetFieldValue<byte[]>(3);
             var envelope = reader.GetFieldValue<byte[]>(4); byte[] plaintext = [];
@@ -111,6 +116,13 @@ internal sealed partial class Did2MessagingSqlJournal
     {
         var prior = Did2MessagingFloor.Decode(metadata.Slice(8, Did2MessagingFloor.Bytes), scope);
         OwnedDid2MessagingMutation.ValidateMetadataTransition(metadata, scope, prior);
+        if (direction is 3 or 4)
+        {
+            if (prior.Ordinal == ulong.MaxValue || ordinal != prior.Ordinal + 1 || plaintext.Length != 0)
+                throw new InvalidDataException("Retained Braid control has a different ordinal/plaintext shape.");
+            OwnedDid2MessagingMutation.RequireControlEnvelope(scope, direction, operation, metadata, envelopeBytes);
+            return;
+        }
         var envelope = Dpe2Codec.Decode(envelopeBytes);
         if (prior.Ordinal == ulong.MaxValue || ordinal != prior.Ordinal + 1 || metadata[5] != 2 || direction != metadata[6] ||
             !Fixed(operation, metadata.Slice(268, 32)) || !Fixed(envelope.OperationId.Span, operation) ||
@@ -125,9 +137,14 @@ internal sealed partial class Did2MessagingSqlJournal
         else
         {
             var parsed = ApplicationCoreCodec.DecodeDmc2(plaintext);
-            if (!Fixed(SHA256.HashData(plaintext), metadata.Slice(300, 32)) || !Fixed(parsed.NetworkId.Span, scope.Network) ||
-                !Fixed(parsed.SenderAccountId.Span, scope.RemoteAccount) || !Fixed(parsed.SenderDeviceId.Span, scope.RemoteDevice))
-                throw new CryptographicException("Retained receive history lost its authenticated event.");
+            try
+            {
+                Did2RouteProcessingMetadata.RequireReceivedEvent(metadata[Did2RouteProcessingMetadata.Offset..], parsed);
+                if (!Fixed(SHA256.HashData(plaintext), metadata.Slice(300, 32)) || !Fixed(parsed.NetworkId.Span, scope.Network) ||
+                    !Fixed(parsed.SenderAccountId.Span, scope.RemoteAccount) || !Fixed(parsed.SenderDeviceId.Span, scope.RemoteDevice))
+                    throw new CryptographicException("Retained receive history lost its authenticated event.");
+            }
+            finally { if (parsed.ParsedPayload is AttachmentOfferDmc2Payload offer) offer.Manifest.Dispose(); }
         }
     }
 }

@@ -30,7 +30,7 @@ public sealed class SqliteDeepMailboxRandomKeyTests
         }
         Assert.False(File.ReadAllBytes(fixture.Path).AsSpan(0, 16).SequenceEqual("SQLite format 3\0"u8));
         using (var db = fixture.Open(raw: true))
-        { using var read = db.CreateCommand(); read.CommandText = "PRAGMA user_version;"; Assert.Equal(10L, read.ExecuteScalar()); }
+        { using var read = db.CreateCommand(); read.CommandText = "PRAGMA user_version;"; Assert.Equal(16L, read.ExecuteScalar()); }
         using (SqliteDeepMailboxStore.OpenExisting(new(fixture.Path, fixture.Key))) { }
         var digest = SHA256.HashData(File.ReadAllBytes(fixture.Path));
         using (var wrongMode = fixture.Open(raw: false))
@@ -43,6 +43,11 @@ public sealed class SqliteDeepMailboxRandomKeyTests
     [InlineData(7)]
     [InlineData(8)]
     [InlineData(9)]
+    [InlineData(10)]
+    [InlineData(11)]
+    [InlineData(12)]
+    [InlineData(13)]
+    [InlineData(14)]
     public void RetiredPasswordModeAndRetiredRawSchemaRejectWithoutRepairOrMutation(int retiredVersion)
     {
         using var fixture = new Fixture();

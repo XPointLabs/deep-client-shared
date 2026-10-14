@@ -70,6 +70,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         var earlyGrants = new OwnedGrantTransport(fixture, ownerOnPrimary: false);
         var earlyTransport = new RejectInitialDispatchFactory();
         await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.SendNativeText(receiver, Bytes(32, 0xb0), "no implicit acceptance", earlyGrants, earlyTransport));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.QueueNativeText(receiver, "no implicit acceptance"));
         Assert.Equal(0, earlyGrants.Calls); Assert.Equal(0, earlyTransport.Calls);
         var acceptOperation = Bytes(32, 0xa2);
         // The reverse response uses the authenticated Hello private route, not
@@ -110,7 +111,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         Assert.True(acceptTerminal.BuiltRetrieveFrame); Assert.True(acceptTerminal.BuiltAckFrame);
         Assert.Equal(Did2ContactAcceptanceState.PeerAcceptanceRetained, await fixture.ReadOwnedContactState(sender));
         using (var replay = await fixture.ReceiveOwnedMessage(sender, acceptCipher)) { }
-        var textOperation = Bytes(32, 0xa3);
+        var textOperation = await fixture.QueueNativeText(sender, "Owned Retrieve → semantic inbox → ACK");
         var textStore = new OwnedStoreFixture(fixture, sender, textOperation, null) { Cursor = 2 };
         var textReceipt = await fixture.SendNativeText(sender, textOperation, "Owned Retrieve → semantic inbox → ACK", depositGrants, textStore);
         var cipher = textStore.StoredEnvelope!.Ciphertext.ToArray();
@@ -187,6 +188,16 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         private ulong MailboxElapsedSeconds => mailboxClockStarted is { } started
             ? checked((ulong)System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalSeconds) : 0;
         internal ulong CurrentProofTime => checked(ProofTime + MailboxElapsedSeconds);
+        internal ulong ObserveMailboxNodeAcceptance(ulong objectCreated)
+        {
+            var now = CurrentProofTime;
+            if (now < objectCreated)
+            {
+                var elapsed = objectCreated - now;
+                ProofTime = checked(ProofTime + elapsed); Sample = checked(Sample + elapsed);
+            }
+            return CurrentProofTime;
+        }
         internal void TrackMailboxDispatchClock() => mailboxClockStarted = System.Diagnostics.Stopwatch.GetTimestamp();
         internal Task<Did2MessagingSessionScope> ReceiveNativeMailboxInitial(ReadOnlyMemory<byte> exact)
         { var reopened = ReopenGrantReader(); return reopened.ReceiveOwnMailboxInitialAsync(exact, GrantReaderSource(reopened)); }

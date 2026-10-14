@@ -4,7 +4,7 @@ using Deep.Client.Shared.Persistence;
 
 namespace Deep.Client.Shared.Production.Tests;
 
-public sealed class SecureStorageCompareExchangeTests
+public sealed partial class SecureStorageCompareExchangeTests
 {
     [WindowsStorageFact]
     public Task AtomicReplacementSurvivesTemporaryDeleteSharingConflict() =>
@@ -249,8 +249,11 @@ public sealed class SecureStorageCompareExchangeTests
         private readonly byte[] key = value.ToArray();
         internal bool FailProtect;
         internal Action? AfterProtect;
+        internal Action? AfterUnprotect;
+        internal int ProtectCalls, UnprotectCalls;
         public byte[] Protect(ReadOnlySpan<byte> plaintext)
         {
+            ProtectCalls++;
             if (FailProtect) throw new IOException("Injected protection failure before commit.");
             var result = new byte[28 + plaintext.Length]; RandomNumberGenerator.Fill(result.AsSpan(0, 12));
             using var aes = new AesGcm(key, 16);
@@ -260,8 +263,9 @@ public sealed class SecureStorageCompareExchangeTests
         }
         public byte[] Unprotect(ReadOnlySpan<byte> bytes)
         {
+            UnprotectCalls++;
             var result = new byte[bytes.Length - 28];
-            try { using var aes = new AesGcm(key, 16); aes.Decrypt(bytes[..12], bytes[28..], bytes.Slice(12, 16), result); return result; }
+            try { using var aes = new AesGcm(key, 16); aes.Decrypt(bytes[..12], bytes[28..], bytes.Slice(12, 16), result); AfterUnprotect?.Invoke(); return result; }
             catch { CryptographicOperations.ZeroMemory(result); throw; }
         }
         public void Dispose() => CryptographicOperations.ZeroMemory(key);

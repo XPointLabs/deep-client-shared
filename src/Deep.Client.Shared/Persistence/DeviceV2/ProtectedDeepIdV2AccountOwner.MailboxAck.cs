@@ -46,6 +46,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var winner = await publication.Host.VerifyRetainedReadSuccessAsync(publication.Route.ExactBytes,
                 ProtectedDid2MailboxGrantJournal.Request(retained), ProtectedDid2MailboxGrantJournal.Response(retained), ct).ConfigureAwait(false);
             if (!FixedRoute(SHA256.HashData(winner.ExactGrant.Span), cycle.Grant)) throw new CryptographicException("ACK changed its retained grant.");
+            if (!ProtectedDid2MailboxGrantJournal.HasReservedReadIntent(retained))
+                throw new CryptographicException("ACK lost its original read-intent reservation; repair is forbidden.");
             // Independently reconstruct semantic handoffs from actual verified
             // ratchet rows, not descriptor/callback flags. Do this before starting
             // the bounded signing loan; the ordinary receive already committed.
@@ -178,6 +180,23 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                         endpoints, catalog, source, ct).ConfigureAwait(false);
                     continue;
                 }
+                if (item.Envelope.Ciphertext.Span.StartsWith("DBR2"u8))
+                {
+                    var control = Dbr2Codec.Decode(item.Envelope.Ciphertext.Span);
+                    var controlScope = catalog.FindIncoming(control.NetworkId.Span, control.SessionId.Span,
+                        control.SenderDeviceId.Span, control.RecipientDeviceId.Span) ??
+                        throw new CryptographicException("Unknown Braid session cannot authorize tombstone.");
+                    var endpoint = endpoints.SingleOrDefault(value => FixedRoute(value.Scope.Hash, controlScope.Hash)) ??
+                        throw new CryptographicException("Braid tombstone lost its refreshed owned endpoint pair.");
+                    var reading = await RequireMessagingFreshnessAsync(current, endpoint.Pair.Own, endpoint.Pair.Peer, source, held, ct).ConfigureAwait(false);
+                    OwnedInitialMessagingSeed.RequireFreshScope(controlScope, endpoint.Pair.Own.Proof, endpoint.Pair.Peer, reading);
+                    using var controlStorage = await SqliteDeepIdV2AccountGeneration.OpenOwnedMessagingUnderLeaseAsync(storage, sqlStatePath, current, controlScope, ct).ConfigureAwait(false);
+                    var controlFloor = await controlStorage.Custody.ReconcileAsync(ct).ConfigureAwait(false);
+                    if (ClassifyBraidMailboxCustodyUnderLease(controlStorage, controlScope, controlFloor, control, held, ct) == BraidMailboxCustody.NotCommitted)
+                        throw new CryptographicException("Braid tombstone has neither authenticated receive nor obsolete-purpose custody.");
+                    await RequireFinalMessagingFreshnessAsync(current, controlScope, endpoint.Pair.Own, endpoint.Pair.Peer, source, held, reading, ct).ConfigureAwait(false);
+                    continue; // No DMC2 materialization, receipt obligation or AppAck for controls.
+                }
                 var incoming = Dpe2Codec.Decode(item.Envelope.Ciphertext.Span);
                 var scope = catalog.FindIncoming(incoming.NetworkId.Span, incoming.SessionId.Span, incoming.SenderDeviceId.Span, incoming.RecipientDeviceId.Span) ??
                     throw new CryptographicException("Unknown mailbox session cannot authorize ACK.");
@@ -205,6 +224,18 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                         using var handoff = await AuthenticatedContactAcceptDmc2.FromOwnedCommitAsync(opened, incoming.OperationId, ReadOnlyMemory<byte>.Empty,
                             storage, selected.Pair.Own, selected.Pair.Peer, source, held, ct).ConfigureAwait(false);
                         RequireApplicationDisposition(await application.MaterializeContactAcceptAsync(handoff, ct).ConfigureAwait(false));
+                    }
+                    else if (parsed.ContentKind == Dmc2ContentKind.ContactRouteUpdate)
+                    {
+                        if (retained.RouteProcessing[0] == 2)
+                            await RequireRejectedPeerRouteControlCommitUnderLeaseAsync(current, held, opened,
+                                incoming.OperationId, selected.Pair.Own, selected.Pair.Peer, source, ct).ConfigureAwait(false);
+                        else
+                        {
+                            using var handoff = await AuthenticatedPeerRouteUpdateDmc2.FromOwnedCommitAsync(this, current,
+                                held, opened, incoming.OperationId, selected.Pair.Own, selected.Pair.Peer, source, ct).ConfigureAwait(false);
+                            RequireApplicationDisposition(await application.MaterializePeerRouteUpdateAsync(handoff, ct).ConfigureAwait(false));
+                        }
                     }
                     else throw new NotSupportedException("This mailbox event has no actual composed semantic ACK consumer; retain it.");
                 }

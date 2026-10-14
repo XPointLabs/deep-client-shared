@@ -52,6 +52,9 @@ public sealed class ProtectedInitialKeyRetirementJournalTests
         state.Entries.Add(second.Coordinate, second);
         Assert.Throws<InvalidDataException>(() => ProtectedInitialKeyRetirementJournal.Encode(state with { Revision = 3 }, Network, Account, Instance));
         secondRaw[76] ^= 1; secondRaw[108] ^= 1; second = new(secondRaw); state.Entries[second.Coordinate] = second;
+        // Independent source ordinals still cannot share a single claim intent.
+        Assert.Throws<InvalidDataException>(() => ProtectedInitialKeyRetirementJournal.Encode(state with { Revision = 3 }, Network, Account, Instance));
+        secondRaw[172] ^= 1; second = new(secondRaw); state.Entries[second.Coordinate] = second;
         var pair = ProtectedInitialKeyRetirementJournal.Encode(state with { Revision = 3 }, Network, Account, Instance);
         var swapped = pair.ToArray(); pair.AsSpan(92, 236).CopyTo(swapped.AsSpan(92 + 236)); pair.AsSpan(92 + 236, 236).CopyTo(swapped.AsSpan(92));
         Assert.Throws<InvalidDataException>(() => ProtectedInitialKeyRetirementJournal.Decode(swapped, Network, Account, Instance));

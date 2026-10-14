@@ -3,6 +3,7 @@ using Deep.Client.Shared.Features;
 using Deep.Client.Shared.Services;
 using Deep.Client.Shared.Services.ContactV2;
 using Deep.Protocol.ApplicationCore;
+using Deep.Protocol.ContactV1;
 using Deep.Protocol.ContactV2;
 using Deep.Protocol.DeepExtension.MailboxCapabilities;
 using Deep.Protocol.XPointNetworkV1;
@@ -20,12 +21,15 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         try
         {
             using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
+            await ResumeLocalCompactionUnderLeaseAsync(held, ct).ConfigureAwait(false);
             using var current = await RequireCurrentUnderLeaseAsync(unixSeconds, verifier, ct).ConfigureAwait(false);
+            await MaintainMailboxNamespacesUnderLeaseAsync(current, held, verifier, fresh, source, ct).ConfigureAwait(false);
             instance = await SqliteDeepIdV2AccountGeneration.ReadAccountInstanceUnderLeaseAsync(storage, networkId, current.AccountId, ct).ConfigureAwait(false);
             using (var root = await storage.ReadOwnedAsync(ProtectedDid2MailboxReadJournal.Slot, ct).ConfigureAwait(false) ??
                 throw new InvalidDataException("Protected mailbox read custody is absent; explicit reset is required."))
                 snapshot = root.Use(bytes => bytes.ToArray());
             using var state = ProtectedDid2MailboxReadJournal.Decode(snapshot, networkId, current.AccountId.Span, instance);
+            await RequireMailboxReadIntentCustodyUnderLeaseAsync(state, current, instance, held, ct).ConfigureAwait(false);
             // Resume the route held by the actual protected cycle, not whichever
             // publication became current while this read was interrupted.
             using var publication = await OpenOwnRetainedPublicationUnderLeaseAsync(current, held, source, fresh, ct,
@@ -37,7 +41,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             // Only a new cycle may acquire the selected winner. An interrupted
             // cycle must retain its original grant even after selection changes.
             var winner = state.Active is null
-                ? await AcquireRetainedMailboxReadUnderLeaseAsync(current, held, publication, source, fresh, grants, ct).ConfigureAwait(false)
+                ? await AcquireRetainedMailboxReadUnderLeaseAsync(current, held, publication, source, fresh, grants, ct,
+                    renewForNewRead: true, expectedNewReadRoot: snapshot).ConfigureAwait(false)
                 : null;
             using (var root = await storage.ReadOwnedAsync(ProtectedDid2MailboxGrantJournal.Slot, ct).ConfigureAwait(false) ??
                 throw new InvalidDataException("Protected mailbox grant custody disappeared.")) grantRoot = root.Use(bytes => bytes.ToArray());
@@ -77,6 +82,23 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             }
             var cycle = state.Active!;
             if (!FixedRoute(cycle.Scope, scopeHash)) throw new CryptographicException("Protected read belongs to another installed mailbox scope.");
+            if (!ProtectedDid2MailboxGrantJournal.HasReservedReadIntent(retained))
+            {
+                if (state.Phase != 1) throw new CryptographicException("Prepared read lost its original read-intent reservation; repair is forbidden.");
+                // The exact phase1 cycle is already protected. A crash before
+                // either root write resumes this same cycle, never a SQL-derived
+                // guessed intent. Reserve possible use before the MAU factory.
+                await RequireExactProtectedMailboxRootAsync(ProtectedDid2MailboxReadJournal.Slot, snapshot, ct).ConfigureAwait(false);
+#if DEEP_TEST_INTERNALS
+                Did2MailboxInstallationTestHooks.Hit(Did2MailboxInstallationFailpoint.BeforeReadIntent);
+#endif
+                ProtectedDid2MailboxGrantJournal.ReserveReadIntent(grantState, retained);
+                var reserved = await SaveMailboxGrantJournalAsync(grantState, grantRoot, current.AccountId, instance, ct).ConfigureAwait(false);
+                CryptographicOperations.ZeroMemory(grantRoot); grantRoot = reserved;
+#if DEEP_TEST_INTERNALS
+                Did2MailboxInstallationTestHooks.Hit(Did2MailboxInstallationFailpoint.AfterReadIntent);
+#endif
+            }
             var request = MailboxAuthenticatedRequestTranscript.DecodeRetrieveBody(cycle.RetrieveBody);
             var original = new ClientMailboxTraversal(request.AfterCursor, request.ContinuationToken.Span, cycle.PollGeneration);
             if (state.Phase is 1 or 2) RequireReadTraversal(traversal, original);
@@ -170,6 +192,34 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             }
         }
         finally { foreach (var bytes in new[] { instance, snapshot, grantRoot, exact }) CryptographicOperations.ZeroMemory(bytes); }
+    }
+
+    // Check before winner acquisition/SQL installation or a new phase1 write.
+    // Later protected counters/cycles cannot repair a lost grant reservation.
+    private async Task RequireMailboxReadIntentCustodyUnderLeaseAsync(ProtectedDid2MailboxReadJournal.State read,
+        VerifiedDeepIdV2CurrentAccount current, ReadOnlyMemory<byte> instance, HeldDeepIdV2AccountLease held, CancellationToken ct)
+    {
+        held.RequireOwner(lease);
+        using var raw = await storage.ReadOwnedAsync(ProtectedDid2MailboxGrantJournal.Slot, ct).ConfigureAwait(false) ?? throw new InvalidDataException();
+        using var grants = raw.Use(bytes => ProtectedDid2MailboxGrantJournal.Decode(bytes, networkId, current.AccountId.Span, instance.Span));
+        var foundActive = false;
+        foreach (var entry in grants.Entries.Values)
+        {
+            if (!ProtectedDid2MailboxGrantJournal.IsAdoptedWinner(entry) ||
+                ContactCodec.Decode("XMG2", ProtectedDid2MailboxGrantJournal.Request(entry).Span).Field(6).Span[0] != (byte)MailboxCapabilityDomain.Retrieve) continue;
+            var hash = SHA256.HashData(ContactCodec.Decode("XMC2", ProtectedDid2MailboxGrantJournal.Response(entry).Span).Field(8).Span);
+            try
+            {
+                var active = read.Active is { } cycle && FixedRoute(cycle.Grant, hash);
+                foundActive |= active;
+                if (!ProtectedDid2MailboxGrantJournal.HasReservedReadIntent(entry) &&
+                    (read.Counters.ContainsKey(Convert.ToHexString(hash)) || active && read.Phase >= 2))
+                    throw new CryptographicException("Protected read lost its original read-intent reservation; repair is forbidden.");
+            }
+            finally { CryptographicOperations.ZeroMemory(hash); }
+        }
+        if (read.Active is not null && !foundActive)
+            throw new CryptographicException("Active original read lost its adopted grant custody.");
     }
 
     private static void RequireReadTraversal(ClientMailboxTraversal actual, ClientMailboxTraversal expected)

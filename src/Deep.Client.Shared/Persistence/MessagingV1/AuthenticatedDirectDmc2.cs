@@ -46,9 +46,10 @@ internal sealed class AuthenticatedDirectDmc2 : IDisposable, IAuthenticatedDmc2I
             throw new CryptographicException("The direct inbox local scope is invalid.");
 
         var parsed = ApplicationCoreCodec.DecodeDmc2(authenticatedDmc2);
-        var canonical = parsed.CanonicalBytes.ToArray();
+        byte[] canonical = [];
         try
         {
+            canonical = OwnedByteExports.TakeArray(parsed.CanonicalBytes);
             if (!Fixed(canonical, authenticatedDmc2) ||
                 !Fixed(parsed.NetworkId.Span, expectedNetworkId) ||
                 !Fixed(parsed.ConversationId.Span, expectedConversationId) ||

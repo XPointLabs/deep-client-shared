@@ -288,7 +288,7 @@ public sealed class DeviceInitialSessionCustodyTests
         private SqliteConnection Connect()
         {
             var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = Path.Combine(directory, "device.db"), Pooling = false }.ToString());
-            connection.Open(); Assert.Equal(0, SQLitePCL.raw.sqlite3_key(connection.Handle, key)); return connection;
+            connection.Open(); Assert.Equal(0, MailboxRandomKeyTestEncoding.Apply(connection, key)); return connection;
         }
         internal void Mutate(string sql) { using var connection = Connect(); using var command = connection.CreateCommand(); command.CommandText = sql; command.ExecuteNonQuery(); }
         internal long Count(string table) { using var connection = Connect(); using var command = connection.CreateCommand(); command.CommandText = "SELECT COUNT(*) FROM " + table; return (long)command.ExecuteScalar()!; }
@@ -298,6 +298,9 @@ public sealed class DeviceInitialSessionCustodyTests
     }
     private sealed class FaultStorage : IDeepSecureStorage
     {
+        public Task<bool> CompareAndDeleteAsync(string guardSlot, ReadOnlyMemory<byte> expected,
+            IReadOnlyList<string> slots, CancellationToken ct = default) => inner.CompareAndDeleteAsync(guardSlot, expected, slots, ct);
+
         public Task<bool> CompareExchangeAndInsertAsync(string slot, ReadOnlyMemory<byte> expected,
             ReadOnlyMemory<byte> replacement, IReadOnlyList<DeepSecureStorageWrite> insertions,
             CancellationToken ct = default) => inner.CompareExchangeAndInsertAsync(slot, expected, replacement, insertions, ct);

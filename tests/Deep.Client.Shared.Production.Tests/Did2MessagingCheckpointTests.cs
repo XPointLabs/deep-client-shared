@@ -7,7 +7,7 @@ namespace Deep.Client.Shared.Production.Tests;
 
 // Structural storage tests use opaque bytes, not authenticated TRS/DPE2.
 // They do not mint a session, retirement permission, message or ACK.
-public sealed class Did2MessagingCheckpointTests
+public sealed partial class Did2MessagingCheckpointTests
 {
     [Fact]
     public void ScopeAndFloorRejectMissingUnknownAndNoncanonicalFields()
@@ -34,7 +34,7 @@ public sealed class Did2MessagingCheckpointTests
         Assert.Throws<CryptographicException>(() => Did2MessagingSessionScope.RestoreMetadata(same));
         Assert.Throws<CryptographicException>(() => Did2MessagingFloor.Decode(empty.Exact.Span, Scope(9)));
         Assert.Throws<InvalidDataException>(() => Did2MessagingFloor.PartsFor(Did2MessagingFloor.MaximumPendingBytes + 1));
-        var payload = OpaquePayload(608); var pending = Pending(scope, empty, payload);
+        var payload = OpaquePayload(Did2MessagingFloor.MetadataBytes); var pending = Pending(scope, empty, payload);
         Assert.Equal(1UL, pending.Ordinal); Assert.Equal((byte)2, pending.Phase);
         Assert.Throws<InvalidDataException>(() => pending.Stable(scope));
         Assert.Throws<InvalidDataException>(() => empty.Cleanup(scope));
@@ -50,7 +50,7 @@ public sealed class Did2MessagingCheckpointTests
     }
 
     [Theory]
-    [InlineData(608)]
+    [InlineData(Did2MessagingFloor.MetadataBytes)]
     [InlineData(131072)]
     [InlineData(131073)]
     [InlineData(Did2MessagingFloor.MaximumPendingBytes)]
@@ -137,7 +137,7 @@ public sealed class Did2MessagingCheckpointTests
         var owner = new Did2MessagingProtectedCheckpoint(storage, scope);
         await Assert.ThrowsAsync<InvalidDataException>(() => owner.ReadAsync(default));
         await owner.InitializeRegisteredSessionAsync(default); var empty = await owner.ReadAsync(default);
-        var first = OpaquePayload(608); var pending = Pending(scope, empty, first);
+        var first = OpaquePayload(Did2MessagingFloor.MetadataBytes); var pending = Pending(scope, empty, first);
         await owner.StageAsync(empty, pending, first, default);
         var second = first.ToArray(); second[^1] ^= 1;
         var conflicting = Pending(scope, empty, second);
@@ -202,6 +202,8 @@ public sealed class Did2MessagingCheckpointTests
 
     private sealed class LostResponseStorage(IDeepSecureStorage inner) : IDeepSecureStorage
     {
+        public async Task<bool> CompareAndDeleteAsync(string guardSlot, ReadOnlyMemory<byte> expected, IReadOnlyList<string> slots, CancellationToken ct = default)
+        { var result = await inner.CompareAndDeleteAsync(guardSlot, expected, slots, ct); if (result) Fail("erase"); return result; }
         public Task<bool> CompareExchangeAndInsertAsync(string slot, ReadOnlyMemory<byte> expected,
             ReadOnlyMemory<byte> replacement, IReadOnlyList<DeepSecureStorageWrite> insertions,
             CancellationToken ct = default) => inner.CompareExchangeAndInsertAsync(slot, expected, replacement, insertions, ct);

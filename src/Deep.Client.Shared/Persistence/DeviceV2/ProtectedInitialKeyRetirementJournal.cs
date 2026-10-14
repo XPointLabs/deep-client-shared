@@ -14,14 +14,24 @@ internal static class ProtectedInitialKeyRetirementJournal
         private readonly byte[] bytes;
         internal Entry(ReadOnlySpan<byte> exact)
         {
-            if (exact.Length != EntryBytes || exact[0] is not (1 or 2) || exact[1] is not (1 or 2) ||
-                exact[2] != 0 || exact[3] != 0 || BinaryPrimitives.ReadUInt64BigEndian(exact[36..]) is 0 or > 128)
+            if (exact.Length != EntryBytes || exact[0] is not (1 or 2 or 3) || exact[1] is not (1 or 2) ||
+                exact[2] != 0 || exact[3] != 0 || BinaryPrimitives.ReadUInt64BigEndian(exact[36..]) > 128 ||
+                exact[0] != 3 && BinaryPrimitives.ReadUInt64BigEndian(exact[36..]) == 0)
                 throw new InvalidDataException("Initial-key retirement has an invalid closed entry.");
-            foreach (var offset in new[] { 4, 44, 76, 108, 140, 172 })
+            foreach (var offset in exact[0] == 3 ? new[] { 4, 76, 172 } : new[] { 4, 44, 76, 108, 140, 172 })
                 if (exact.Slice(offset, 32).IndexOfAnyExcept((byte)0) < 0)
                     throw new InvalidDataException("Initial-key retirement has an empty commitment.");
-            if ((exact[0] == 2) != (exact.Slice(204, 32).IndexOfAnyExcept((byte)0) < 0))
+            if (exact[0] != 3 && (exact[0] == 2) != Zero(exact.Slice(204, 32)))
                 throw new InvalidDataException("Initial-key retirement has a different preclaim role.");
+            if (exact[0] == 3)
+            {
+                var absent = BinaryPrimitives.ReadUInt64BigEndian(exact[36..]) == 0;
+                foreach (var offset in new[] { 44, 108, 140 })
+                    if (Zero(exact.Slice(offset, 32)) != absent)
+                        throw new InvalidDataException("Cancelled source has mixed absence commitments.");
+                if (!absent && Zero(exact.Slice(204, 32)))
+                    throw new InvalidDataException("Cancelled source has mixed absence or lost original preclaim commitments.");
+            }
             bytes = exact.ToArray();
         }
         internal ReadOnlySpan<byte> Exact => bytes;
@@ -35,7 +45,8 @@ internal static class ProtectedInitialKeyRetirementJournal
         internal ReadOnlySpan<byte> TrsHash => bytes.AsSpan(140, 32);
         internal ReadOnlySpan<byte> Intent => bytes.AsSpan(172, 32);
         internal ReadOnlySpan<byte> PreclaimHash => bytes.AsSpan(204, 32);
-        internal string Coordinate => $"{Role:X2}{Convert.ToHexString(SourceInstance)}{Ordinal:X16}";
+        internal string Coordinate => Role == 3 ? $"{Role:X2}{Convert.ToHexString(SourceInstance)}{Convert.ToHexString(Intent)}" :
+            $"{Role:X2}{Convert.ToHexString(SourceInstance)}{Ordinal:X16}";
         internal Entry Stable() { var result = bytes.ToArray(); result[1] = 2; return new(result); }
     }
     internal sealed record State(ulong Revision, SortedDictionary<string, Entry> Entries)
@@ -45,17 +56,41 @@ internal static class ProtectedInitialKeyRetirementJournal
             var key = $"{role:X2}{Convert.ToHexString(instance)}{ordinal:X16}";
             return Entries.GetValueOrDefault(key);
         }
+        internal Entry? FindCancellation(ReadOnlySpan<byte> intent)
+        {
+            Entry? found = null;
+            foreach (var entry in Entries.Values)
+                if (entry.Role == 3 && Fixed(entry.Intent, intent))
+                {
+                    if (found is not null) throw new CryptographicException("Cancelled intent has duplicate source owners.");
+                    found = entry;
+                }
+            return found;
+        }
         internal void RequireSourceTip(byte role, ReadOnlySpan<byte> instance, ulong maximumOrdinal)
         {
             foreach (var entry in Entries.Values)
-                if (entry.Role == role && Fixed(entry.SourceInstance, instance) && entry.Ordinal > maximumOrdinal)
+                if ((entry.Role == role || role == 1 && entry.Role == 3) && Fixed(entry.SourceInstance, instance) && entry.Ordinal > maximumOrdinal)
                     throw new CryptographicException("Protected retirement refers to missing source history.");
         }
         internal void RequirePreclaimState(ProtectedDph2PreClaimJournal.State preclaims)
         {
-            foreach (var entry in Entries.Values.Where(value => value.Role == 1))
+            foreach (var entry in Entries.Values.Where(value => value.Role is 1 or 3))
             {
                 var name = Convert.ToHexString(entry.Intent);
+                if (entry.Role == 3)
+                {
+                    if (preclaims.Retired.ContainsKey(name)) throw new CryptographicException("Cancellation cannot borrow transferred preclaim custody.");
+                    if (preclaims.Cancelled.TryGetValue(name, out var cancelled))
+                    {
+                        if (!Fixed(cancelled.BlobHash, entry.PreclaimHash) || !Fixed(cancelled.DraftBinding, entry.ScopeHash))
+                            throw new CryptographicException("Cancelled preclaim differs from its independent deletion owner.");
+                    }
+                    else if (entry.Phase == 2 || (preclaims.Claims.TryGetValue(name, out var pending)
+                        ? !Fixed(SHA256.HashData(pending.CanonicalBytes.Span), entry.PreclaimHash) : !Zero(entry.PreclaimHash)))
+                        throw new CryptographicException("Cancelled preclaim was lost or resurrected.");
+                    continue;
+                }
                 if (preclaims.Retired.TryGetValue(name, out var retired))
                 {
                     if (!Fixed(retired.BlobHash, entry.PreclaimHash) || !Fixed(retired.SourceBasis, entry.Basis) || !Fixed(retired.MutableScope, entry.ScopeHash))
@@ -68,12 +103,27 @@ internal static class ProtectedInitialKeyRetirementJournal
             foreach (var pair in preclaims.Retired)
                 if (!Entries.Values.Any(entry => entry.Role == 1 && Convert.ToHexString(entry.Intent) == pair.Key))
                     throw new CryptographicException("Preclaim tombstone has no protected retirement history.");
+            foreach (var pair in preclaims.Cancelled)
+                if (!Entries.Values.Any(entry => entry.Role == 3 && Convert.ToHexString(entry.Intent) == pair.Key))
+                    throw new CryptographicException("Cancelled preclaim has no independent deletion owner.");
         }
         internal void RequireSource(byte role, ReadOnlySpan<byte> instance, ulong ordinal,
             ReadOnlySpan<byte> recordHash, ReadOnlySpan<byte> metadata, ReadOnlySpan<byte> trsHash,
             ReadOnlySpan<byte> intent, bool live)
         {
             var entry = Find(role, instance, ordinal);
+            if (entry is null && role == 1)
+            {
+                var cancelled = FindCancellation(intent);
+                if (cancelled is not null)
+                {
+                    if (cancelled.Ordinal != ordinal || !Fixed(cancelled.SourceInstance, instance) ||
+                        !Fixed(cancelled.RecordHash, recordHash) || !Fixed(cancelled.Basis, SHA256.HashData(metadata)) ||
+                        !Fixed(cancelled.TrsHash, trsHash) || cancelled.Phase == 2 && live)
+                        throw new CryptographicException("Cancelled initial source was substituted or its keys resurrected.");
+                    return;
+                }
+            }
             if (entry is null)
             {
                 if (!live) throw new CryptographicException("Initial state disappeared without protected retirement.");
@@ -91,7 +141,7 @@ internal static class ProtectedInitialKeyRetirementJournal
     {
         RequireScope(network, account, instance);
         if (exact.Length < HeaderBytes || exact.Length > HeaderBytes + MaximumEntries * EntryBytes ||
-            exact[0] != 1 || exact[1] != 0 || !Fixed(exact.Slice(12, 16), network) ||
+            exact[0] != 2 || exact[1] != 0 || !Fixed(exact.Slice(12, 16), network) ||
             !Fixed(exact.Slice(28, 32), account) || !Fixed(exact.Slice(60, 32), instance))
             throw new CryptographicException("Initial-key retirement journal has a different scope/generation.");
         var count = BinaryPrimitives.ReadUInt16BigEndian(exact.Slice(2, 2));
@@ -112,7 +162,7 @@ internal static class ProtectedInitialKeyRetirementJournal
     internal static byte[] Encode(State state, ReadOnlySpan<byte> network, ReadOnlySpan<byte> account, ReadOnlySpan<byte> instance)
     {
         RequireScope(network, account, instance); Validate(state);
-        var result = new byte[HeaderBytes + state.Entries.Count * EntryBytes]; result[0] = 1;
+        var result = new byte[HeaderBytes + state.Entries.Count * EntryBytes]; result[0] = 2;
         BinaryPrimitives.WriteUInt16BigEndian(result.AsSpan(2), checked((ushort)state.Entries.Count));
         BinaryPrimitives.WriteUInt64BigEndian(result.AsSpan(4), state.Revision);
         network.CopyTo(result.AsSpan(12)); account.CopyTo(result.AsSpan(28)); instance.CopyTo(result.AsSpan(60));
@@ -125,10 +175,16 @@ internal static class ProtectedInitialKeyRetirementJournal
             (ulong)state.Entries.Values.Count(entry => entry.Phase == 2))
             throw new InvalidDataException("Initial-key retirement revision/cardinality differs.");
         var scopes = new HashSet<string>(StringComparer.Ordinal); var bases = new HashSet<string>(StringComparer.Ordinal);
+        var sourceCoordinates = new HashSet<string>(StringComparer.Ordinal); var intents = new HashSet<string>(StringComparer.Ordinal);
         foreach (var pair in state.Entries)
-            if (pair.Key != pair.Value.Coordinate || !scopes.Add(Convert.ToHexString(pair.Value.ScopeHash)) ||
-                !bases.Add(Convert.ToHexString(pair.Value.Basis)))
+        {
+            var entry = pair.Value;
+            if (pair.Key != entry.Coordinate || !scopes.Add(Convert.ToHexString(entry.ScopeHash)) ||
+                !Zero(entry.Basis) && !bases.Add(Convert.ToHexString(entry.Basis)) ||
+                entry.Role is 1 or 3 && !intents.Add(Convert.ToHexString(entry.Intent)) ||
+                entry.Ordinal != 0 && !sourceCoordinates.Add($"{(entry.Role == 3 ? 1 : entry.Role):X2}{Convert.ToHexString(entry.SourceInstance)}{entry.Ordinal:X16}"))
                 throw new InvalidDataException("Initial-key retirement binding is nonunique.");
+        }
     }
     internal static async Task<Entry> StageUnderLeaseAsync(IDeepSecureStorage storage, Did2InitialStateTransfer transfer,
         ReadOnlyMemory<byte> sourceInstance, ulong ordinal, ReadOnlyMemory<byte> recordHash,
@@ -183,8 +239,81 @@ internal static class ProtectedInitialKeyRetirementJournal
         var instance = await SqliteDeepIdV2AccountGeneration.ReadAccountInstanceUnderLeaseAsync(storage, network, account, ct).ConfigureAwait(false);
         using var owned = await storage.ReadOwnedAsync(Slot, ct).ConfigureAwait(false) ??
             throw new InvalidDataException("Protected initial-key retirement journal is missing; explicit reset is required.");
-        return owned.Use(value => Decode(value, network.Span, account.Span, instance));
+        var result = owned.Use(value => Decode(value, network.Span, account.Span, instance));
+        await RequireCancellationOwnersAsync(storage, result, network, account, instance, ct).ConfigureAwait(false);
+        return result;
     }
+    internal static async Task<Entry> StageCancellationUnderLeaseAsync(IDeepSecureStorage storage,
+        ReadOnlyMemory<byte> network, ReadOnlyMemory<byte> account, ReadOnlyMemory<byte> instance, Entry candidate, CancellationToken ct)
+    {
+        if (candidate.Role != 3 || candidate.Phase != 1) throw new InvalidDataException("Only exact pending Initial cancellation may stage.");
+        using var raw = await storage.ReadOwnedAsync(Slot, ct).ConfigureAwait(false) ?? throw new InvalidDataException();
+        var before = raw.Use(bytes => bytes.ToArray()); byte[] after = [];
+        try
+        {
+            var state = Decode(before, network.Span, account.Span, instance.Span);
+            var prior = state.FindCancellation(candidate.Intent);
+            if (prior is not null)
+            {
+                if (!Fixed(prior.Stable().Exact, candidate.Stable().Exact)) throw new CryptographicException("Cancelled source selection changed.");
+                await RequireCancellationOwnersAsync(storage, state, network, account, instance, ct).ConfigureAwait(false);
+                return prior;
+            }
+            state.Entries.Add(candidate.Coordinate, candidate);
+            after = Encode(state with { Revision = checked(state.Revision + 1) }, network.Span, account.Span, instance.Span);
+            await RequireCancellationOwnersAsync(storage, state, network, account, instance, ct).ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested();
+            if (!await storage.CompareExchangeAsync(Slot, before, after, ct).ConfigureAwait(false)) throw new CryptographicException("Cancelled source pending conflicted.");
+            return candidate;
+        }
+        finally { CryptographicOperations.ZeroMemory(before); CryptographicOperations.ZeroMemory(after); }
+    }
+    internal static async Task CompleteCancellationUnderLeaseAsync(IDeepSecureStorage storage,
+        ReadOnlyMemory<byte> network, ReadOnlyMemory<byte> account, ReadOnlyMemory<byte> instance, Entry expected, CancellationToken ct)
+    {
+        using var raw = await storage.ReadOwnedAsync(Slot, ct).ConfigureAwait(false) ?? throw new InvalidDataException();
+        var before = raw.Use(bytes => bytes.ToArray()); byte[] after = [];
+        try
+        {
+            var state = Decode(before, network.Span, account.Span, instance.Span);
+            var pending = state.FindCancellation(expected.Intent);
+            if (pending is null || !Fixed(pending.Stable().Exact, expected.Stable().Exact)) throw new CryptographicException("Cancelled source completion changed its pending owner.");
+            await RequireCancellationOwnersAsync(storage, state, network, account, instance, ct).ConfigureAwait(false);
+            if (pending.Phase == 2) return;
+            state.Entries[pending.Coordinate] = pending.Stable();
+            after = Encode(state with { Revision = checked(state.Revision + 1) }, network.Span, account.Span, instance.Span);
+            ct.ThrowIfCancellationRequested();
+            if (!await storage.CompareExchangeAsync(Slot, before, after, ct).ConfigureAwait(false)) throw new CryptographicException("Cancelled source completion conflicted.");
+        }
+        finally { CryptographicOperations.ZeroMemory(before); CryptographicOperations.ZeroMemory(after); }
+    }
+    private static async Task RequireCancellationOwnersAsync(IDeepSecureStorage storage, State state,
+        ReadOnlyMemory<byte> network, ReadOnlyMemory<byte> account, ReadOnlyMemory<byte> instance, CancellationToken ct)
+    {
+        if (!state.Entries.Values.Any(entry => entry.Role == 3)) return;
+        using var raw = await storage.ReadOwnedAsync(ProtectedDid2ContactStartJournal.Slot, ct).ConfigureAwait(false) ?? throw new InvalidDataException();
+        using var drafts = raw.Use(bytes => ProtectedDid2ContactStartJournal.Decode(bytes, network.Span, account.Span, instance.Span));
+        using var catalog = await new ProtectedDid2MessagingSessionCatalog(storage, network.Span, account.Span, instance.Span).ReadAsync(ct).ConfigureAwait(false);
+        foreach (var entry in state.Entries.Values.Where(entry => entry.Role == 3))
+        {
+            if (!drafts.Entries.TryGetValue(Convert.ToHexString(entry.Intent), out var draft) || !draft.WorkStopped || draft.NativeStopMode != 2 ||
+                !Fixed(draft.CancellationBinding, entry.ScopeHash)) throw new CryptographicException("Initial cancellation lost its exact protected stop owner.");
+            for (var index = 0; index < catalog.Count; index++)
+            {
+                var scope = catalog.Scope(index);
+                if (!scope.IsInitiator || !Fixed(scope.Conversation, draft.Conversation) || !Fixed(scope.LocalDevice, draft.LocalDevice) ||
+                    !Fixed(scope.RemoteAccount, draft.Exact.Slice(64, 32))) continue;
+                if (entry.Ordinal == 0 || !Fixed(scope.InitialBasis, entry.Basis) || catalog.Phase(index) != 2)
+                    throw new CryptographicException("Cancelled Initial has foreign or unresolved import custody.");
+                var floor = await new Did2MessagingProtectedCheckpoint(storage, scope).ReadAsync(ct).ConfigureAwait(false);
+                var history = await Did2MessagingHistoryCheckpoint.ReadRegisteredAsync(storage, scope, ct).ConfigureAwait(false);
+                if (!Fixed(floor.Exact.Span, Did2MessagingFloor.Empty(scope).Exact.Span) ||
+                    !Fixed(history.Exact.Span, Did2MessagingHistoryCheckpoint.RegisteredEmpty(scope).Exact.Span))
+                    throw new CryptographicException("Pre-session cancellation cannot own a committed native import.");
+            }
+        }
+    }
+    private static bool Zero(ReadOnlySpan<byte> value) => value.IndexOfAnyExcept((byte)0) < 0;
     private static void RequireScope(ReadOnlySpan<byte> network, ReadOnlySpan<byte> account, ReadOnlySpan<byte> instance)
     {
         if (network.Length != 16 || network.IndexOfAnyExcept((byte)0) < 0)

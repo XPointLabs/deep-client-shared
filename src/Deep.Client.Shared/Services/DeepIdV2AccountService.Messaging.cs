@@ -64,9 +64,24 @@ public sealed partial class DeepIdV2AccountService
         return await owner.ListMessagingMessagesAsync(TrustedUnixSeconds(), verifier, scope, ct).ConfigureAwait(false);
     }
 
-    internal async Task<OwnedDid2MessagingPersistedEvent> SendOwnMessagingAsync(Did2MessagingSessionScope scope,
+    internal Task<OwnedDid2MessagingPersistedEvent> SendOwnMessagingAsync(Did2MessagingSessionScope scope,
         ReadOnlyMemory<byte> operation, ReadOnlyMemory<byte> exactDmc2,
-        DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
+        DeepIdV2ContactPathAuthoritySource source, CancellationToken ct) =>
+        SendOwnedMessagingCoreAsync(scope, operation, exactDmc2, source, ct, routeControl: false);
+
+    // No caller control payload/previous hash/sequence. The common owned draft
+    // is independently rechecked under the actual encryption and commit lease.
+    internal async Task<OwnedDid2MessagingPersistedEvent> SendOwnRouteUpdateAsync(Did2MessagingSessionScope scope,
+        ReadOnlyMemory<byte> operation, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
+    {
+        using var command = await PrepareOwnDirectRouteUpdateAsync(scope, operation, source, ct).ConfigureAwait(false);
+        return await SendOwnedMessagingCoreAsync(scope, command.OperationId, command.ExactDmc2, source, ct,
+            routeControl: true).ConfigureAwait(false);
+    }
+
+    private async Task<OwnedDid2MessagingPersistedEvent> SendOwnedMessagingCoreAsync(Did2MessagingSessionScope scope,
+        ReadOnlyMemory<byte> operation, ReadOnlyMemory<byte> exactDmc2,
+        DeepIdV2ContactPathAuthoritySource source, CancellationToken ct, bool routeControl)
     {
         ArgumentNullException.ThrowIfNull(scope); ArgumentNullException.ThrowIfNull(source);
         ProtectedDph2PreClaimJournal.RequireIntent(operation.Span);
@@ -76,7 +91,12 @@ public sealed partial class DeepIdV2AccountService
         try
         {
             parsed = ApplicationCoreCodec.DecodeDmc2(exact);
-            RequireOwnedSendKind(parsed.ContentKind);
+            if (routeControl)
+            {
+                if (parsed.ContentKind != Dmc2ContentKind.ContactRouteUpdate)
+                    throw new CryptographicException("Owned route command has a different closed kind.");
+            }
+            else RequireOwnedSendKind(parsed.ContentKind);
             if (!Did2MessagingSessionScope.Fixed(parsed.NetworkId.Span, scope.Network) ||
                 !Did2MessagingSessionScope.Fixed(parsed.SenderAccountId.Span, scope.LocalAccount) ||
                 !Did2MessagingSessionScope.Fixed(parsed.SenderDeviceId.Span, scope.LocalDevice) ||
@@ -86,7 +106,10 @@ public sealed partial class DeepIdV2AccountService
             source.RequireAccountOwner(this);
             var pair = await source.VerifyForOwnMessagingAsync(this, scope, ct).ConfigureAwait(false);
             using var verifier = OpenVerifier();
-            return await owner.SendMessagingAsync(TrustedUnixSeconds(), verifier, scope, op, exact, pair.Own, pair.Peer, source, ct).ConfigureAwait(false);
+            return routeControl ?
+                await owner.SendRouteControlMessagingAsync(TrustedUnixSeconds(), verifier, scope, op, exact,
+                    pair.Own, pair.Peer, source, ct).ConfigureAwait(false) :
+                await owner.SendMessagingAsync(TrustedUnixSeconds(), verifier, scope, op, exact, pair.Own, pair.Peer, source, ct).ConfigureAwait(false);
         }
         finally
         {

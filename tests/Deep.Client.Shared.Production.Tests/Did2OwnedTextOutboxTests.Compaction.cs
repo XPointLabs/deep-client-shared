@@ -28,9 +28,10 @@ public sealed partial class Did2OwnedTextOutboxTests
     {
         using var fixture = new SqlFixture(); using var options = new SqliteDeepMailboxStoreOptions(fixture.Path, fixture.Key);
         using var store = new SqliteDeepMailboxStore(options); var scope = Scope(); var first = B(32, 31); var second = B(32, 32);
+        store.BindStoppedAuditKey(B(32, 0x7d)); // Diagnostic MAC only; synthetic Stored grants no cleanup authority.
         using var journal = Pending(scope, first, 3); using (await Mirror(store, journal, scope, first)) { } Stabilize(journal, first);
         journal.AddPending(Make(scope, second, 4)); using (await Mirror(store, journal, scope, second)) { } Stabilize(journal, second);
-        journal.RetainStore(Convert.ToHexString(first)); var selected = new[] { journal.Entries[Convert.ToHexString(first)] };
+        journal.RetainStore(Convert.ToHexString(first), 1000); var selected = new[] { journal.Entries[Convert.ToHexString(first)] };
         var effects = await store.CaptureOrdinaryOutboxEffectsAsync(scope, selected, default);
         var repeated = await store.CaptureOrdinaryOutboxEffectsAsync(scope, selected, default);
         Assert.Equal(effects.Before, repeated.Before); Assert.Equal(effects.After, repeated.After); Assert.NotEqual(effects.Before, effects.After);
@@ -57,7 +58,7 @@ public sealed partial class Did2OwnedTextOutboxTests
         using var fixture = new SqlFixture(); using var options = new SqliteDeepMailboxStoreOptions(fixture.Path, fixture.Key);
         using var store = new SqliteDeepMailboxStore(options); var scope = Scope(); var op = B(32, 31);
         using var journal = Pending(scope, op, 3); using (await Mirror(store, journal, scope, op)) { } Stabilize(journal, op);
-        journal.RetainStore(Convert.ToHexString(op)); var selected = new[] { journal.Entries[Convert.ToHexString(op)] };
+        journal.RetainStore(Convert.ToHexString(op), 1000); var selected = new[] { journal.Entries[Convert.ToHexString(op)] };
         fixture.Execute(corrupt); var count = fixture.Scalar("SELECT count(*) FROM direct_text_outbox;");
         await Assert.ThrowsAsync<CryptographicException>(() => store.CaptureOrdinaryOutboxEffectsAsync(scope, selected, default));
         Assert.Equal(count, fixture.Scalar("SELECT count(*) FROM direct_text_outbox;"));

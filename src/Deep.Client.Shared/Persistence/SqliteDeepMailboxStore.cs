@@ -15,7 +15,7 @@ public sealed partial class SqliteDeepMailboxStore :
     IDisposable
 {
     private const int ApplicationId = 0x444D4231; // DMB1
-    private const int SchemaVersion = 10;
+    private const int SchemaVersion = 16;
     private readonly bool allowCreate;
     private readonly string _connectionString;
     private readonly byte[] encryptionKey;
@@ -218,10 +218,16 @@ public sealed partial class SqliteDeepMailboxStore :
                 sender_sequence INTEGER NOT NULL CHECK(sender_sequence >= 3),
                 operation_id BLOB NOT NULL UNIQUE CHECK(length(operation_id) = 32),
                 exact_dmc2_hash BLOB NOT NULL CHECK(length(exact_dmc2_hash) = 32),
-                exact_dmc2 BLOB NOT NULL CHECK(length(exact_dmc2) BETWEEN 285 AND 16668),
+                exact_dmc2 BLOB NOT NULL CHECK(length(exact_dmc2) BETWEEN 285 AND 23649),
                 created_at INTEGER NOT NULL CHECK(created_at > 0),
                 PRIMARY KEY(conversation_id, logical_message_id, author_device_id),
                 UNIQUE(conversation_id, author_device_id, sender_sequence));
+            CREATE TABLE stopped_work_audit (
+                operation_id BLOB PRIMARY KEY NOT NULL CHECK(length(operation_id)=32),
+                reason INTEGER NOT NULL CHECK(reason IN (1,2,3)),
+                stopped_at INTEGER NOT NULL CHECK(stopped_at BETWEEN 1 AND 9223372036852183807),
+                expires_at INTEGER NOT NULL CHECK(expires_at=stopped_at+2592000),
+                authenticator BLOB NOT NULL CHECK(length(authenticator)=32));
             CREATE TABLE local_attachment_objects (
                 operation_id BLOB PRIMARY KEY NOT NULL CHECK(length(operation_id)=32),
                 object_id BLOB NOT NULL UNIQUE CHECK(length(object_id)=32),
@@ -248,7 +254,8 @@ public sealed partial class SqliteDeepMailboxStore :
                 UNIQUE(account_scope, scope_kind, subject_id, issuer_context));
             CREATE TABLE mailbox_store_public_evidence (
                 scope_hash BLOB NOT NULL CHECK(length(scope_hash)=32),
-                operation_id BLOB NOT NULL CHECK(length(operation_id)=32),
+                native_operation_id BLOB NOT NULL CHECK(length(native_operation_id)=32),
+                attempt_id BLOB NOT NULL CHECK(length(attempt_id)=32),
                 account_scope BLOB NOT NULL CHECK(length(account_scope)=32),
                 logical_id BLOB NOT NULL CHECK(length(logical_id)=16),
                 exact_pma BLOB NOT NULL CHECK(length(exact_pma) BETWEEN 1 AND 65535),
@@ -256,11 +263,15 @@ public sealed partial class SqliteDeepMailboxStore :
                 first_descriptor BLOB NOT NULL CHECK(length(first_descriptor) BETWEEN 1 AND 65535),
                 second_descriptor BLOB NOT NULL CHECK(length(second_descriptor) BETWEEN 1 AND 65535),
                 original_dcr BLOB NOT NULL CHECK(length(original_dcr) BETWEEN 0 AND 65535),
-                original_route BLOB NOT NULL CHECK(length(original_route) BETWEEN 0 AND 23295),
+                original_route BLOB NOT NULL CHECK(length(original_route) BETWEEN 4143 AND 23295),
                 original_peer_adp BLOB NOT NULL CHECK(length(original_peer_adp) BETWEEN 0 AND 524288),
-                CHECK((length(original_dcr)=0 AND length(original_route)=0 AND length(original_peer_adp)=0)
-                    OR (length(original_dcr)>0 AND length(original_route)>0 AND length(original_peer_adp)>0)),
-                PRIMARY KEY(scope_hash,operation_id));
+                evidence_commitment BLOB NOT NULL CHECK(length(evidence_commitment)=32),
+                CHECK((length(original_dcr)=0 AND length(original_peer_adp)=0)
+                    OR (length(original_dcr)>0 AND length(original_peer_adp)>0)),
+                PRIMARY KEY(scope_hash,attempt_id),
+                UNIQUE(account_scope,logical_id));
+            CREATE INDEX mailbox_store_public_evidence_native
+                ON mailbox_store_public_evidence(scope_hash,native_operation_id,attempt_id);
             CREATE TABLE mailbox_credential_epochs (
                 scope_id BLOB NOT NULL CHECK(length(scope_id) = 32),
                 epoch BLOB NOT NULL CHECK(length(epoch) = 8),
@@ -483,7 +494,7 @@ public sealed partial class SqliteDeepMailboxStore :
     {
         using var count = connection.CreateCommand();
         count.Transaction = transaction;
-        count.CommandText = "SELECT (SELECT count(*) FROM authenticated_dmc2_inbox_owner),(SELECT count(*) FROM authenticated_dmc2_inbox),(SELECT count(*) FROM authenticated_dmc2_inbox_forks),(SELECT count(*) FROM direct_text_outbox),(SELECT count(*) FROM direct_sender_sequences),(SELECT count(*) FROM local_attachment_objects),(SELECT count(*) FROM local_attachment_chunks);";
+        count.CommandText = "SELECT (SELECT count(*) FROM authenticated_dmc2_inbox_owner),(SELECT count(*) FROM authenticated_dmc2_inbox),(SELECT count(*) FROM authenticated_dmc2_inbox_forks),(SELECT count(*) FROM direct_text_outbox),(SELECT count(*) FROM direct_sender_sequences),(SELECT count(*) FROM local_attachment_objects),(SELECT count(*) FROM local_attachment_chunks),(SELECT count(*) FROM stopped_work_audit);";
         using (var reader = count.ExecuteReader())
         {
             if (!reader.Read()) throw ResetRequired("Clean direct inbox state is missing.");
@@ -493,13 +504,14 @@ public sealed partial class SqliteDeepMailboxStore :
             var outboundCount = reader.GetInt64(3);
             var senderCount = reader.GetInt64(4);
             var assetCount = reader.GetInt64(5); var chunkCount = reader.GetInt64(6);
+            var auditCount = reader.GetInt64(7);
             if (ownerCount is < 0 or > 1 ||
                 eventCount is < 0 or > 100_000 ||
                 forkCount < 0 || forkCount > eventCount ||
                 outboundCount is < 0 or > 100_000 ||
-                senderCount is < 0 or > 100_000 || assetCount is < 0 or > 129 || chunkCount is < 0 or > 12_900 ||
+                senderCount is < 0 or > 100_000 || assetCount is < 0 or > 129 || chunkCount is < 0 or > 12_900 || auditCount < 0 || auditCount > MaximumStoppedAudits ||
                 ownerCount == 0 &&
-                    (eventCount != 0 || outboundCount != 0 || senderCount != 0 || assetCount != 0 || chunkCount != 0))
+                    (eventCount != 0 || outboundCount != 0 || senderCount != 0 || assetCount != 0 || chunkCount != 0 || auditCount != 0))
                 throw ResetRequired("Clean direct inbox ownership or cardinality is invalid.");
         }
         using var foreignKeys = connection.CreateCommand();
@@ -509,6 +521,9 @@ public sealed partial class SqliteDeepMailboxStore :
         if (violation.Read())
             throw ResetRequired("Clean direct inbox foreign-key lineage is invalid.");
         violation.Close();
+        // Route projection enters only through a closed own/peer handoff.
+        // Delivery history independently reads native processing metadata;
+        // this application projection never authorizes a peer route or ACK.
         ValidateDirectReceiptObligations(connection, transaction);
     }
 
@@ -535,6 +550,9 @@ public sealed partial class SqliteDeepMailboxStore :
         try
         {
             CryptographicOperations.ZeroMemory(encryptionKey);
+            CryptographicOperations.ZeroMemory(stoppedAuditKey);
+            foreach (var row in controlAuditCustody.Values) CryptographicOperations.ZeroMemory(row.Operation);
+            controlAuditCustody.Clear();
         }
         finally
         {

@@ -665,110 +665,114 @@ public sealed partial class SqliteSessionStore :
             ulong nowUnixSeconds,
             CancellationToken cancellationToken)
     {
-        ArgumentNullException.ThrowIfNull(scope);
-        var probe = new ClientMailboxJournalState();
-        _ = ClientMailboxStateMachine.RecordCoordinator(
-            probe, membershipCommitment.Span, epoch, coordinatorId.Span,
-            coordinatorSequence, statementDigest.Span, expiresAtUnixSeconds,
-            nowUnixSeconds);
         await _databaseGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            await using var connection = await OpenAsync(cancellationToken)
-                .ConfigureAwait(false);
-            await using var transaction =
-                connection.BeginTransaction(deferred: false);
-            var scopeBytes = scope.ToArray();
-            var statementKey = CoordinatorStatementKey(
-                membershipCommitment.Span,
-                epoch,
-                coordinatorId.Span,
-                coordinatorSequence);
-            await using (var prune = connection.CreateCommand())
-            {
-                prune.Transaction = transaction;
-                prune.CommandText = """
-                    DELETE FROM client_mailbox_coordinator_journal
-                    WHERE expires_at <= $now;
-                    """;
-                prune.Parameters.Add("$now", SqliteType.Blob).Value = U64(nowUnixSeconds);
-                await prune.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-            }
-            await EnforceInstallationScopeCapacityAsync(
-                connection, transaction, cancellationToken)
-                .ConfigureAwait(false);
+            await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+            await using var transaction = connection.BeginTransaction(deferred: false);
+            var result = await RecordCoordinatorInTransactionAsync(connection, transaction, scope,
+                membershipCommitment, epoch, coordinatorId, coordinatorSequence, statementDigest,
+                expiresAtUnixSeconds, nowUnixSeconds, true, cancellationToken).ConfigureAwait(false);
+            if (result == ClientMailboxCoordinatorRecordResult.Applied)
+                commitFault?.Invoke(ClientMailboxCommitFaultPoint.BeforeCommit);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            if (result == ClientMailboxCoordinatorRecordResult.Applied)
+                commitFault?.Invoke(ClientMailboxCommitFaultPoint.AfterCommit);
+            return result;
+        }
+        finally { _databaseGate.Release(); }
+    }
 
-            await using (var find = connection.CreateCommand())
-            {
-                find.Transaction = transaction;
-                find.CommandText = """
-                    SELECT statement_digest
-                    FROM client_mailbox_coordinator_journal
-                    WHERE statement_key = $key;
-                    """;
-                find.Parameters.Add("$key", SqliteType.Blob).Value = statementKey;
-                await using var reader = await find.ExecuteReaderAsync(cancellationToken)
-                    .ConfigureAwait(false);
-                var found = false;
-                while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-                {
-                    found = true;
-                    if (!Fixed(
-                            reader.GetFieldValue<byte[]>(0),
-                            statementDigest.Span))
-                    {
-                        await reader.DisposeAsync().ConfigureAwait(false);
-                        await transaction.CommitAsync(cancellationToken)
-                            .ConfigureAwait(false);
-                        return ClientMailboxCoordinatorRecordResult.Equivocation;
-                    }
-                }
+    // Shared bounded coordinator logic; transaction ownership stays with the
+    // caller. A late Store adoption does not prune unrelated statements.
+    private static async Task<ClientMailboxCoordinatorRecordResult> RecordCoordinatorInTransactionAsync(
+        SqliteConnection connection, SqliteTransaction transaction, ClientMailboxJournalScope scope,
+        ReadOnlyMemory<byte> membershipCommitment, ulong epoch, ReadOnlyMemory<byte> coordinatorId,
+        ulong coordinatorSequence, ReadOnlyMemory<byte> statementDigest, ulong expiresAtUnixSeconds,
+        ulong nowUnixSeconds, bool pruneExpired, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        var probe = new ClientMailboxJournalState();
+        _ = ClientMailboxStateMachine.RecordCoordinator(probe, membershipCommitment.Span, epoch,
+            coordinatorId.Span, coordinatorSequence, statementDigest.Span, expiresAtUnixSeconds, nowUnixSeconds);
+        var scopeBytes = scope.ToArray();
+        var statementKey = CoordinatorStatementKey(
+            membershipCommitment.Span,
+            epoch,
+            coordinatorId.Span,
+            coordinatorSequence);
+        if (pruneExpired)
+        await using (var prune = connection.CreateCommand())
+        {
+            prune.Transaction = transaction;
+            prune.CommandText = """
+                DELETE FROM client_mailbox_coordinator_journal
+                WHERE expires_at <= $now;
+                """;
+            prune.Parameters.Add("$now", SqliteType.Blob).Value = U64(nowUnixSeconds);
+            await prune.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await EnforceInstallationScopeCapacityAsync(
+            connection, transaction, cancellationToken)
+            .ConfigureAwait(false);
 
-                if (found)
+        await using (var find = connection.CreateCommand())
+        {
+            find.Transaction = transaction;
+            find.CommandText = """
+                SELECT statement_digest, expires_at
+                FROM client_mailbox_coordinator_journal
+                WHERE statement_key = $key;
+                """;
+            find.Parameters.Add("$key", SqliteType.Blob).Value = statementKey;
+            await using var reader = await find.ExecuteReaderAsync(cancellationToken)
+                .ConfigureAwait(false);
+            var found = false;
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                found = true;
+                if (!Fixed(reader.GetFieldValue<byte[]>(0), statementDigest.Span) ||
+                    ReadU64(reader.GetFieldValue<byte[]>(1)) != expiresAtUnixSeconds)
                 {
                     await reader.DisposeAsync().ConfigureAwait(false);
-                    await transaction.CommitAsync(cancellationToken)
-                        .ConfigureAwait(false);
-                    return ClientMailboxCoordinatorRecordResult.Idempotent;
+                    return ClientMailboxCoordinatorRecordResult.Equivocation;
                 }
             }
 
-            await using (var count = connection.CreateCommand())
+            if (found)
             {
-                count.Transaction = transaction;
-                count.CommandText = "SELECT count(*) FROM client_mailbox_coordinator_journal;";
-                if (Convert.ToInt32(await count.ExecuteScalarAsync(cancellationToken)
-                        .ConfigureAwait(false)) >=
-                    ClientMailboxStateLimits.MaximumCoordinatorStatements)
-                {
-                    await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-                    return ClientMailboxCoordinatorRecordResult.CapacityExceeded;
-                }
+                await reader.DisposeAsync().ConfigureAwait(false);
+                return ClientMailboxCoordinatorRecordResult.Idempotent;
             }
+        }
 
-            await using var insert = connection.CreateCommand();
-            insert.Transaction = transaction;
-            insert.CommandText = """
-                INSERT INTO client_mailbox_coordinator_journal(
-                    installation_scope, statement_key, statement_digest, expires_at)
-                VALUES($scope, $key, $digest, $expires);
-                """;
-            insert.Parameters.Add("$scope", SqliteType.Blob).Value = scopeBytes;
-            insert.Parameters.Add("$key", SqliteType.Blob).Value = statementKey;
-            insert.Parameters.Add("$digest", SqliteType.Blob).Value =
-                statementDigest.ToArray();
-            insert.Parameters.Add("$expires", SqliteType.Blob).Value =
-                U64(expiresAtUnixSeconds);
-            await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-            commitFault?.Invoke(ClientMailboxCommitFaultPoint.BeforeCommit);
-            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-            commitFault?.Invoke(ClientMailboxCommitFaultPoint.AfterCommit);
-            return ClientMailboxCoordinatorRecordResult.Applied;
-        }
-        finally
+        await using (var count = connection.CreateCommand())
         {
-            _databaseGate.Release();
+            count.Transaction = transaction;
+            count.CommandText = "SELECT count(*) FROM client_mailbox_coordinator_journal;";
+            if (Convert.ToInt32(await count.ExecuteScalarAsync(cancellationToken)
+                    .ConfigureAwait(false)) >=
+                ClientMailboxStateLimits.MaximumCoordinatorStatements)
+            {
+                return ClientMailboxCoordinatorRecordResult.CapacityExceeded;
+            }
         }
+
+        await using var insert = connection.CreateCommand();
+        insert.Transaction = transaction;
+        insert.CommandText = """
+            INSERT INTO client_mailbox_coordinator_journal(
+                installation_scope, statement_key, statement_digest, expires_at)
+            VALUES($scope, $key, $digest, $expires);
+            """;
+        insert.Parameters.Add("$scope", SqliteType.Blob).Value = scopeBytes;
+        insert.Parameters.Add("$key", SqliteType.Blob).Value = statementKey;
+        insert.Parameters.Add("$digest", SqliteType.Blob).Value =
+            statementDigest.ToArray();
+        insert.Parameters.Add("$expires", SqliteType.Blob).Value =
+            U64(expiresAtUnixSeconds);
+        await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        return ClientMailboxCoordinatorRecordResult.Applied;
     }
 
     private static async Task<ulong> ReadPollGenerationAsync(

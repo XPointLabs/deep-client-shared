@@ -54,11 +54,19 @@ public sealed partial class SqliteDeepMailboxStore
         AuthenticatedContactAcceptDmc2 handoff,
         CancellationToken cancellationToken = default) => MaterializeAuthenticatedDmc2Async(handoff, cancellationToken);
 
+    internal Task<DirectDmc2InboxDisposition> MaterializeOwnRouteUpdateAsync(
+        AuthenticatedOwnRouteUpdateDmc2 handoff,
+        CancellationToken cancellationToken = default) => MaterializeAuthenticatedDmc2Async(handoff, cancellationToken);
+
+    internal Task<DirectDmc2InboxDisposition> MaterializePeerRouteUpdateAsync(
+        AuthenticatedPeerRouteUpdateDmc2 handoff,
+        CancellationToken cancellationToken = default) => MaterializeAuthenticatedDmc2Async(handoff, cancellationToken);
+
     private Task<DirectDmc2InboxDisposition> MaterializeAuthenticatedDmc2Async(
         IAuthenticatedDmc2InboxEvent handoff, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(handoff);
-        if (handoff is not AuthenticatedDirectDmc2 and not AuthenticatedContactAcceptDmc2)
+        if (handoff is not AuthenticatedDirectDmc2 and not AuthenticatedContactAcceptDmc2 and not AuthenticatedOwnRouteUpdateDmc2 and not AuthenticatedPeerRouteUpdateDmc2)
             throw new CryptographicException("Only closed authenticated event handoffs can materialize.");
         return WithReplayConnectionAsync(connection =>
         {
@@ -69,7 +77,7 @@ public sealed partial class SqliteDeepMailboxStore
             var logical = handoff.LogicalMessageId.ToArray();
             var authorDevice = handoff.AuthorDeviceId.ToArray();
             var authorAccount = handoff.AuthorAccountId.ToArray();
-            var exact = handoff.ExactDmc2.ToArray();
+            var exact = OwnedByteExports.TakeArray(handoff.ExactDmc2);
             var hash = SHA256.HashData(exact);
             try
             {
@@ -379,10 +387,11 @@ public sealed partial class SqliteDeepMailboxStore
                         throw new CryptographicException(
                             "The direct inbox event is forked or corrupt.");
                     var parsed = Deep.Protocol.ApplicationCore.ApplicationCoreCodec.DecodeDmc2(exact);
-                    var storedAuthor = (byte[])eventReader[3];
-                    var canonical = parsed.CanonicalBytes.ToArray();
+                    byte[] storedAuthor = [], canonical = [];
                     try
                     {
+                        storedAuthor = (byte[])eventReader[3];
+                        canonical = OwnedByteExports.TakeArray(parsed.CanonicalBytes);
                         if (!DirectFixed(parsed.ConversationId.Span, conversation) ||
                             !DirectFixed(parsed.LogicalMessageId.Span, logical) ||
                             !DirectFixed(parsed.SenderDeviceId.Span, device) ||
@@ -504,10 +513,13 @@ public sealed partial class SqliteDeepMailboxStore
                     ParsedDmc2? parsed = null;
                     try
                     {
+                        // Authenticate retained bytes before handing them to a
+                        // wire decoder. Corrupt SQL is not a new wire message.
+                        if (!reader.IsDBNull(5) || !DirectFixed(hash, actualHash))
+                            throw new CryptographicException(
+                                "A direct message projection is forked or corrupt.");
                         parsed = ApplicationCoreCodec.DecodeDmc2(exact);
-                        if (!reader.IsDBNull(5) ||
-                            !DirectFixed(hash, actualHash) ||
-                            !DirectFixed(parsed.CanonicalBytes.Span, exact) ||
+                        if (!OwnedByteExports.EqualAndErase(parsed.CanonicalBytes, exact) ||
                             !DirectFixed(parsed.ConversationId.Span, conversation) ||
                             !DirectFixed(parsed.LogicalMessageId.Span, logical) ||
                             !DirectFixed(parsed.SenderDeviceId.Span, device) ||
@@ -605,7 +617,7 @@ public sealed partial class SqliteDeepMailboxStore
         try
         {
             parsed = ApplicationCoreCodec.DecodeDmc2(exact);
-            if (!DirectFixed(actualHash, hash) || !DirectFixed(parsed.CanonicalBytes.Span, exact) ||
+            if (!DirectFixed(actualHash, hash) || !OwnedByteExports.EqualAndErase(parsed.CanonicalBytes, exact) ||
                 !DirectFixed(parsed.ConversationId.Span, conversation) || !DirectFixed(parsed.LogicalMessageId.Span, logical) ||
                 !DirectFixed(parsed.SenderDeviceId.Span, device) || !DirectFixed(parsed.SenderAccountId.Span, author) ||
                 reader.GetInt32(3) != (int)parsed.ContentKind || !IsAccountInboxKind(parsed.ContentKind) ||
@@ -643,7 +655,7 @@ public sealed partial class SqliteDeepMailboxStore
             var actualHash = SHA256.HashData(exact);
             try
             {
-                if (!DirectFixed(actualHash, hash) || !DirectFixed(parsed.CanonicalBytes.Span, exact) ||
+                if (!DirectFixed(actualHash, hash) || !OwnedByteExports.EqualAndErase(parsed.CanonicalBytes, exact) ||
                     !DirectFixed(parsed.ConversationId.Span, candidate.ConversationId) ||
                     !DirectFixed(parsed.LogicalMessageId.Span, logical) ||
                     !DirectFixed(parsed.SenderAccountId.Span, candidate.AuthorAccountId) ||
@@ -686,7 +698,7 @@ public sealed partial class SqliteDeepMailboxStore
         CryptographicOperations.FixedTimeEquals(left, right);
 
     private static bool IsAccountInboxKind(Dmc2ContentKind kind) =>
-        kind is Dmc2ContentKind.SessionInit or Dmc2ContentKind.ContactAccept ||
+        kind is Dmc2ContentKind.SessionInit or Dmc2ContentKind.ContactAccept or Dmc2ContentKind.ContactRouteUpdate ||
         AuthenticatedInitialDmc2Batch.IsSupportedInitialApplicationKind(kind);
 
     private sealed class InitialInboxEvent : IDisposable
@@ -697,7 +709,7 @@ public sealed partial class SqliteDeepMailboxStore
             try
             {
                 if (!IsAccountInboxKind(parsed.ContentKind) ||
-                    !DirectFixed(parsed.CanonicalBytes.Span, exact))
+                    !OwnedByteExports.EqualAndErase(parsed.CanonicalBytes, exact))
                     throw new CryptographicException("The initial inbox event is not canonical or supported.");
                 ExactDmc2 = exact.ToArray();
                 Hash = SHA256.HashData(exact);

@@ -23,7 +23,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             throw new CryptographicException("Only an exact stable owned asset may be offered.");
         using var asset = await application.ReconcileOwnedAttachmentsAsync(state, current.AccountId,
             current.Verified.PublicEvidence.Binding.Identity.Account.Certificate.AccountGeneration,
-            networkId, operation, ct).ConfigureAwait(false) ??
+            networkId, operation, ct, requireStableReadOnly: true).ConfigureAwait(false) ??
             throw new CryptographicException("An offered asset lost its exact SQL custody.");
         using var manifest = asset.OwnManifest();
         var result = manifest.Use(bytes => entry.RequireManifest(bytes, networkId));
@@ -46,9 +46,26 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         using var application = await SqliteDeepIdV2AccountGeneration.OpenApplicationUnderLeaseAsync(storage,
             sqlStatePath, current, held, ct).ConfigureAwait(false);
         using var retained = await ReadStableAttachmentManifestUnderLeaseAsync(current, held, application, entry.Operation.ToArray(), ct).ConfigureAwait(false);
-        if (!Did2MessagingSessionScope.Fixed(retained.CanonicalBytes.Span, offered.CanonicalBytes.Span))
+        if (!EqualOwnedAttachmentManifests(retained, offered))
             throw new CryptographicException("Attachment offer differs from its exact stable owned manifest.");
         RequireAttachmentOfferTime(retained, own, peer, reading);
+    }
+
+    // CanonicalBytes exports independent copies containing the DAM1 key.
+    // This comparison owns and erases those exports, not either parsed record.
+    private static bool EqualOwnedAttachmentManifests(ParsedDam1 first, ParsedDam1 second)
+    {
+        ReadOnlyMemory<byte> left = default, right = default;
+        try
+        {
+            left = first.CanonicalBytes; right = second.CanonicalBytes;
+            return Did2MessagingSessionScope.Fixed(left.Span, right.Span);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(System.Runtime.InteropServices.MemoryMarshal.AsMemory(left).Span);
+            CryptographicOperations.ZeroMemory(System.Runtime.InteropServices.MemoryMarshal.AsMemory(right).Span);
+        }
     }
 
     private static void RequireAttachmentOfferTime(ParsedDam1 manifest,

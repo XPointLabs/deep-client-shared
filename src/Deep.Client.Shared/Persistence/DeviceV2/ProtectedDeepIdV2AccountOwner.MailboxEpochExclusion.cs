@@ -25,6 +25,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         private readonly byte[] root, instance, acquisition;
         private readonly SemaphoreSlim gate = new(1, 1);
         private bool disposed;
+        private bool ownsLifetime;
 
         private MailboxEpochExclusion(ProtectedDeepIdV2AccountOwner owner, HeldDeepIdV2AccountLease held,
             VerifiedDeepIdV2CurrentAccount current, DeepIdV2ContactPathAuthoritySource source,
@@ -53,11 +54,30 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 throw new ArgumentException("An exact original acquisition hash is required.", nameof(acquisition));
             var held = await owner.lease.AcquireAsync(ct).ConfigureAwait(false);
             VerifiedDeepIdV2CurrentAccount? current = null;
+            try
+            {
+                current = await owner.RequireCurrentUnderLeaseAsync(unixSeconds, verifier, ct).ConfigureAwait(false);
+                var result = await OpenUnderLeaseAsync(owner, current, held, source, fresh, acquisition, ct).ConfigureAwait(false);
+                result.ownsLifetime = true;
+                return result;
+            }
+            catch { current?.Dispose(); held.Dispose(); throw; }
+        }
+
+        // Private owner loan, not a caller-supplied verification/deletion flag.
+        // Disposal never releases the business caller's current account/lease.
+        internal static async Task<MailboxEpochExclusion> OpenUnderLeaseAsync(ProtectedDeepIdV2AccountOwner owner,
+            VerifiedDeepIdV2CurrentAccount current, HeldDeepIdV2AccountLease held,
+            DeepIdV2ContactPathAuthoritySource source, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh,
+            byte[] acquisition, CancellationToken ct)
+        {
+            held.RequireOwner(owner.lease); ct.ThrowIfCancellationRequested();
+            if (acquisition.Length != 32 || acquisition.AsSpan().IndexOfAnyExcept((byte)0) < 0)
+                throw new ArgumentException("An exact original acquisition hash is required.", nameof(acquisition));
             byte[]? snapshot = null, instance = null;
             MailboxEpochExclusion? result = null;
             try
             {
-                current = await owner.RequireCurrentUnderLeaseAsync(unixSeconds, verifier, ct).ConfigureAwait(false);
                 var first = await RecheckRouteFreshnessAsync(current, source, fresh, held, null, ct).ConfigureAwait(false);
                 var authority = await MailboxHostAuthorityV2Verifier.VerifyAsync(fresh.Network, fresh.Authority,
                     fresh.MailboxAuthority.ExactPma2, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
@@ -82,7 +102,6 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 if (result is not null) result.Dispose();
                 else
                 {
-                    current?.Dispose(); held.Dispose();
                     if (snapshot is not null) CryptographicOperations.ZeroMemory(snapshot);
                     if (instance is not null) CryptographicOperations.ZeroMemory(instance);
                 }
@@ -155,8 +174,10 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         {
             if (!ProtectedDid2MailboxGrantJournal.HasWinner(entry) && !ProtectedDid2MailboxGrantJournal.IsClosedUnresolved(entry))
                 throw new CryptographicException("A pending acquisition has no closed epoch-exclusion disposition.");
-            await authority.RequireOriginalNamespaceAsync(ProtectedDid2MailboxGrantJournal.OriginalPolicy(entry),
-                originalRoute.Projection.CanonicalBytes, ct).ConfigureAwait(false);
+            var domain = (Deep.Protocol.DeepExtension.MailboxCapabilities.MailboxCapabilityDomain)
+                ContactCodec.Decode("XMG2", ProtectedDid2MailboxGrantJournal.Request(entry).Span).Field(6).Span[0];
+            await fresh.RequireOriginalMailboxNamespacesAsync(authority, ProtectedDid2MailboxGrantJournal.OriginalPolicy(entry),
+                originalRoute.Projection, domain, ct).ConfigureAwait(false);
             if (ProtectedDid2MailboxGrantJournal.HasWinner(entry))
                 ContactCodec.ValidateMailboxGrantResultRouteBinding(
                     ContactCodec.Decode("XMC2", ProtectedDid2MailboxGrantJournal.Response(entry).Span), originalRoute);
@@ -171,7 +192,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             try
             {
                 if (disposed) return;
-                disposed = true; current.Dispose(); held.Dispose();
+                disposed = true;
+                if (ownsLifetime) { current.Dispose(); held.Dispose(); }
                 CryptographicOperations.ZeroMemory(root); CryptographicOperations.ZeroMemory(instance);
                 CryptographicOperations.ZeroMemory(acquisition);
             }

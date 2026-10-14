@@ -46,7 +46,7 @@ internal sealed class Did2MessagingDurableCustody(Did2MessagingSessionScope scop
         ArgumentNullException.ThrowIfNull(mutation);
         // Parsed/recovered control metadata is not new activation permission.
         // A separate closed retirement owner must stage control transitions.
-        if (mutation.Kind is not (1 or 2)) throw new InvalidOperationException("DID2 control mutation requires its separate closed authority.");
+        if (mutation.Kind is not (1 or 2 or 5)) throw new InvalidOperationException("DID2 activation/latch mutation requires its separate closed authority.");
         if (!Did2MessagingSessionScope.Fixed(scope.Exact, mutation.Scope.Exact) || mutation.Successor.Ordinal > long.MaxValue)
             throw new InvalidDataException("DID2 mutable custody scope/capacity differs before staging.");
         var stable = await ReconcileAsync(ct).ConfigureAwait(false);
@@ -56,15 +56,15 @@ internal sealed class Did2MessagingDurableCustody(Did2MessagingSessionScope scop
         sql.RequireAppendCapacity(stable);
         await checkpoint.StageAsync(stable, mutation.Successor, mutation.Exact, ct).ConfigureAwait(false);
 #if DEEP_TEST_INTERNALS
-        if (mutation.Kind == 2) Did2MessagingCommitTestHooks.Hit(Did2MessagingCommitFailpoint.AfterPending);
+        if (mutation.Kind is 2 or 5) await Did2MessagingCommitTestHooks.HitAsync(Did2MessagingCommitFailpoint.AfterPending).ConfigureAwait(false);
 #endif
         ct.ThrowIfCancellationRequested(); sql.Append(mutation); RequireSame(expected, sql.VerifyTip());
 #if DEEP_TEST_INTERNALS
-        if (mutation.Kind == 2) Did2MessagingCommitTestHooks.Hit(Did2MessagingCommitFailpoint.AfterSql);
+        if (mutation.Kind is 2 or 5) await Did2MessagingCommitTestHooks.HitAsync(Did2MessagingCommitFailpoint.AfterSql).ConfigureAwait(false);
 #endif
         var completed = await checkpoint.FinishVerifiedSqlCommitAsync(mutation.Successor, ct).ConfigureAwait(false);
 #if DEEP_TEST_INTERNALS
-        if (mutation.Kind == 2) Did2MessagingCommitTestHooks.Hit(Did2MessagingCommitFailpoint.AfterStable);
+        if (mutation.Kind is 2 or 5) await Did2MessagingCommitTestHooks.HitAsync(Did2MessagingCommitFailpoint.AfterStable).ConfigureAwait(false);
 #endif
         return completed;
     }

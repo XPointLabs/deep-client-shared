@@ -30,7 +30,7 @@ public static class ReachabilityMailboxHolderAuthority
     }
 
     internal static ReachabilityMailboxHolderSigner OpenRetained(
-        VerifiedDeepIdV2ContactRouteClosure route, ReadOnlyMemory<byte> locatorHash,
+        VerifiedDeepIdV2MailboxRouteClosure route, ReadOnlyMemory<byte> locatorHash,
         ReadOnlyMemory<byte> roleCapability, MailboxCapabilityDomain domain,
         ReadOnlySpan<byte> retainedSeed)
     {
@@ -44,7 +44,7 @@ public static class ReachabilityMailboxHolderAuthority
 
     internal sealed class BoundScope : IDisposable
     {
-        private BoundScope(VerifiedDeepIdV2ContactRouteClosure route,
+        private BoundScope(VerifiedDeepIdV2MailboxRouteClosure route,
             ReadOnlySpan<byte> locator, ReadOnlySpan<byte> capability, MailboxCapabilityDomain domain)
             : this(route.Route, route.Network.NetworkId, locator, capability, domain,
                 token => route.EnsureCurrentAsync(token).AsTask())
@@ -88,7 +88,7 @@ public static class ReachabilityMailboxHolderAuthority
                 throw new CryptographicException("Retained holder requires its exact original private Retrieve scope.");
             return new(route, network, locator.Span, capability.Span, MailboxCapabilityDomain.Retrieve, recheck);
         }
-        internal static BoundScope Create(VerifiedDeepIdV2ContactRouteClosure route,
+        internal static BoundScope Create(VerifiedDeepIdV2MailboxRouteClosure route,
             ReadOnlyMemory<byte> locator, ReadOnlyMemory<byte> capability, MailboxCapabilityDomain domain)
         {
             if (domain is not (MailboxCapabilityDomain.Deposit or MailboxCapabilityDomain.Retrieve))

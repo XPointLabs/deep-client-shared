@@ -2,7 +2,7 @@ using Deep.Protocol.ApplicationCore;
 
 namespace Deep.Client.Shared.Persistence.MessagingV1;
 
-// Transaction data shared by the two closed handoffs, not an authentication API.
+// Transaction data shared by closed handoffs, not an authentication API.
 internal interface IAuthenticatedDmc2InboxEvent
 {
     ReadOnlyMemory<byte> ExactDmc2 { get; }

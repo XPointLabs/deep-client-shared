@@ -84,7 +84,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                             var winner = commands.FindScope(scope) ?? throw new CryptographicException("Local acceptance lost its protected winner.");
                             using var sent = opened.Sql.ReadVerifiedOperation(floor, winner.Operation) ??
                                 throw new CryptographicException("Local acceptance lost actual send custody.");
-                            if (sent.Direction != 1 || !Did2MessagingSessionScope.Fixed(winner.Accept, accepted) ||
+                            winner.RequireExactAccept(accepted);
+                            if (sent.Direction != 1 ||
                                 !Did2MessagingSessionScope.Fixed(sent.EventHash, SHA256.HashData(accepted)))
                                 throw new CryptographicException("Local acceptance differs from its exact command/send custody.");
                         }

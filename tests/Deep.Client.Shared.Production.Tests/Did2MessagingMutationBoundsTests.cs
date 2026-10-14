@@ -8,7 +8,7 @@ public sealed class Did2MessagingMutationBoundsTests
 {
     [Theory]
     [InlineData(0, 0)]
-    [InlineData(4, 2)]
+    [InlineData(4, 1)]
     [InlineData(5, 0)]
     [InlineData(5, 5)]
     [InlineData(6, 3)]
@@ -19,7 +19,7 @@ public sealed class Did2MessagingMutationBoundsTests
     {
         var scope = MetadataScope(); var empty = Did2MessagingFloor.Empty(scope);
         var bytes = new byte[Did2MessagingFloor.MetadataBytes]; "MSP2"u8.CopyTo(bytes);
-        bytes[4] = 1; bytes[5] = 1; empty.Exact.Span.CopyTo(bytes.AsSpan(8)); bytes[offset] = value;
+        bytes[4] = 2; bytes[5] = 1; empty.Exact.Span.CopyTo(bytes.AsSpan(8)); bytes[offset] = value;
         var pending = Did2MessagingFloor.Pending(scope, empty, 0, 1, Hash(1), Hash(2), bytes, bytes);
         Assert.Throws<InvalidDataException>(() => OwnedDid2MessagingMutation.RecoverProtectedPending(scope, pending, bytes));
         // A rejected constructor/finalizer must never dereference an unowned buffer.

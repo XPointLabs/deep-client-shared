@@ -78,10 +78,30 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         await fixture.CheckArchivedReadPathAsync(nonempty: false, handover: -1, hostileProtected: true);
     }
 
+    [Theory]
+    [InlineData(false, -1)] [InlineData(true, -1)]
+    [InlineData(false, 0)] [InlineData(false, 1)] [InlineData(false, 2)] [InlineData(false, 3)]
+    [InlineData(false, 4)] [InlineData(false, 5)] [InlineData(false, 6)] [InlineData(false, 7)]
+    [Trait("RequiresApprovedMlKemRuntime", "true")]
+    public async Task Did2AutomaticArchivedReadPath_NormalReadRetiresOriginalAndResumesColdPlan(bool nonempty, int handover)
+    {
+        await using var fixture = await Fixture.CreateAsync(withPeer: nonempty, encryptedStorage: true, longMailboxWindow: true,
+            initialMailboxAuthorityExpiry: 2_000, objectHorizonWindow: true);
+        await fixture.CheckArchivedReadPathAsync(nonempty, handover, automaticMaintenance: true);
+    }
+
+    [Fact]
+    public async Task Did2AutomaticArchivedReadPath_NewReadKeepsOriginalBeforeObjectHorizon()
+    {
+        await using var fixture = await Fixture.CreateAsync(encryptedStorage: true, longMailboxWindow: true,
+            initialMailboxAuthorityExpiry: 2_000, objectHorizonWindow: true);
+        await fixture.CheckArchivedReadPathAsync(nonempty: false, handover: -1, beforeHorizonOnly: true, automaticMaintenance: true);
+    }
+
     private sealed partial class Fixture
     {
         internal async Task CheckArchivedReadPathAsync(bool nonempty, int handover, bool cancel = false, bool beforeHorizonOnly = false,
-            bool hostileSql = false, bool hostileRecovery = false, bool hostileProtected = false)
+            bool hostileSql = false, bool hostileRecovery = false, bool hostileProtected = false, bool automaticMaintenance = false)
         {
             await SeedShortPermanentProposalAsync(validitySeconds: 800);
             // This test creates and delivers a real native contact before
@@ -146,6 +166,21 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 Assert.Equal(0, idle.Use(bytes => bytes[1]));
             if (beforeHorizonOnly)
             {
+                if (automaticMaintenance)
+                {
+                    using var before = await ReadPeerGrantsAsync(own: true);
+                    var originalHolder = before.Entries[Convert.ToHexString(acquisition)].ToArray();
+                    var beforeHorizonIssuer = new OwnedGrantTransport(this, selfRetrieve: true, ownerOnPrimary: true);
+                    var beforeHorizonTerminal = new OwnedReadTerminal(this, [], ownerOnPrimary: true) { ReturnEmptyPage = true };
+                    Assert.Equal(0, (await SynchronizeNativeSender(beforeHorizonIssuer, beforeHorizonTerminal)).ProcessedEnvelopes);
+                    using var after = await ReadPeerGrantsAsync(own: true);
+                    Assert.Equal(originalHolder, after.Entries[Convert.ToHexString(acquisition)]);
+                    using var read = await ReadPeerMailboxReads(own: true);
+                    Assert.Contains(Convert.ToHexString(SHA256.HashData(ContactCodec.Decode("XMC2",
+                        ProtectedDid2MailboxGrantJournal.Response(originalHolder).Span).Field(8).Span)), read.Counters.Keys);
+                    Assert.Equal(1, beforeHorizonIssuer.Calls); Assert.Equal(1, beforeHorizonTerminal.RetrieveCalls);
+                    CryptographicOperations.ZeroMemory(originalHolder);
+                }
                 using var publications = await RouteState(); Assert.Equal(2, publications.Entries.Count);
                 using var retained = await ReadPeerGrantsAsync(own: true); Assert.True(retained.Entries.ContainsKey(Convert.ToHexString(acquisition)));
                 Assert.Equal(1, issuer.Calls); Assert.Equal(1, terminal.RetrieveCalls);
@@ -153,7 +188,10 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             }
             var horizon = checked(BinaryPrimitives.ReadUInt64BigEndian(original.Route.Authorization.Field(13).Span) +
                 (ulong)MailboxClientLimits.MaximumTtlSeconds + 31);
-            var future = checked(horizon - ProofTime); ProofTime += future; Sample += future;
+            // CurrentProofTime already includes real elapsed native setup.
+            // Adding that elapsed time twice can exhaust the independently
+            // signed replacement path before the first ordinary read.
+            var future = checked(horizon - CurrentProofTime); ProofTime += future; Sample += future;
             await AdvanceObjectHorizonAuthorityAsync();
             account = ReopenAccount();
             _ = await Source(account).VerifyForOwnPreKeyAuthoringAsync(account, default);
@@ -183,9 +221,23 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 Did2CompactionFailpoint.AfterSqlRecorded, Did2CompactionFailpoint.AfterHistoryAdopted,
                 Did2CompactionFailpoint.AfterHistoryAdopted, Did2CompactionFailpoint.AfterHistoryAdopted,
                 Did2CompactionFailpoint.AfterPartsDeleted, Did2CompactionFailpoint.AfterPlanCleared };
+            var nextIssuer = new OwnedGrantTransport(this, selfRetrieve: true, ownerOnPrimary: true);
+            var nextTerminal = new OwnedReadTerminal(this, [], ownerOnPrimary: true) { ReturnEmptyPage = true };
+            async Task Execute(CancellationToken token)
+            {
+                if (automaticMaintenance)
+                {
+                    var reader = ReopenAccount();
+                    Assert.Equal(0, (await reader.SynchronizeOwnMailboxAsync(Source(reader), nextIssuer, nextTerminal, token)).ProcessedEnvelopes);
+                }
+                else
+                {
+                    using var exclusion = await account.OpenMailboxEpochExclusionAsync(acquisition, Source(account));
+                    await exclusion.RetireArchivedReadPathAsync(token);
+                }
+            }
             using var cancellation = new CancellationTokenSource();
             var adoptions = 0; var hit = false;
-            using (var exclusion = await account.OpenMailboxEpochExclusionAsync(acquisition, Source(account)))
             using (Did2CompactionTestHooks.Push(point =>
             {
                 if (point == Did2CompactionFailpoint.AfterHistoryAdopted) adoptions++;
@@ -194,15 +246,22 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 if (cancel) cancellation.Cancel(); else throw new IOException("Injected joint retained-path handover.");
             }))
             {
-                if (cancel) await Assert.ThrowsAnyAsync<OperationCanceledException>(() => exclusion.RetireArchivedReadPathAsync(cancellation.Token));
-                else if (handover >= 0) await Assert.ThrowsAsync<IOException>(() => exclusion.RetireArchivedReadPathAsync());
-                else await exclusion.RetireArchivedReadPathAsync();
+                if (cancel) await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Execute(cancellation.Token));
+                else if (handover >= 0) await Assert.ThrowsAsync<IOException>(() => Execute(default));
+                else await Execute(default);
             }
             if (handover >= 0) Assert.True(hit);
             ColdReopenCompactionStorage();
             var recovery = SenderCompactionOwner();
             var abandoned = cancel && handover == 0;
-            if (abandoned) await recovery.AbandonUncommittedRetainedPathAsync(default);
+            if (automaticMaintenance)
+            {
+                if (handover >= 0) { Assert.Equal(0, nextIssuer.Calls); Assert.Equal(0, nextTerminal.RetrieveCalls); }
+                // The normal business owner resumes the stored plan before
+                // selecting a new path, issuing a grant or forwarding a read.
+                await Execute(default);
+            }
+            else if (abandoned) await recovery.AbandonUncommittedRetainedPathAsync(default);
             else
             {
                 if (handover == 1)
@@ -241,6 +300,16 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 using var replay = await ReceiveOwnedMessage(sender, acceptCipher!);
             }
             Assert.Equal(1, issuer.Calls); Assert.Equal(1, terminal.RetrieveCalls); Assert.Equal(nonempty ? 1 : 0, terminal.AckCalls);
+            if (automaticMaintenance)
+            {
+                Assert.Equal(1, nextIssuer.Calls);
+                Assert.Equal(handover >= 0 ? 1 : 2, nextTerminal.RetrieveCalls);
+                Assert.Equal(0, nextTerminal.AckCalls);
+                using var read = await ReadPeerMailboxReads(own: true);
+                Assert.Equal(0, read.Phase); Assert.Null(read.Active);
+                using var grants = await ReadPeerGrantsAsync(own: true);
+                Assert.All(grants.Entries.Values, entry => Assert.False(FixedTestRoute(entry, original.Route.ExactHash.Span)));
+            }
             foreach (var bytes in new[] { acquisition, accountId, native, originalSql, currentPublication }) CryptographicOperations.ZeroMemory(bytes);
             if (acceptCipher is not null) CryptographicOperations.ZeroMemory(acceptCipher);
         }

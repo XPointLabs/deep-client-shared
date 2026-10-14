@@ -66,6 +66,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 var exactGrants = selected.Select(entry => ContactCodec.Decode("XMC2", ProtectedDid2MailboxGrantJournal.Response(entry).Span).Field(8)).ToArray();
                 foreach (var grant in exactGrants)
                 {
+                    var entry = selected.Single(entry => FixedRoute(ContactCodec.Decode("XMC2", ProtectedDid2MailboxGrantJournal.Response(entry).Span).Field(8).Span, grant.Span));
+                    if (!ProtectedDid2MailboxGrantJournal.HasReservedReadIntent(entry))
+                        throw new IOException("Original completed read lost its read-intent custody.");
                     if (!read.Counters.TryGetValue(Convert.ToHexString(SHA256.HashData(grant.Span)), out var counter) || counter == 0)
                         throw new IOException("Original read replay floor is absent.");
                     await application.RequireSettledGrantReadCoverageAsync(grant, scope, traversal,

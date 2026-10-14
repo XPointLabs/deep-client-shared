@@ -1,6 +1,6 @@
 #if DEEP_TEST_INTERNALS
 namespace Deep.Client.Shared.Persistence.DeviceV2;
-internal enum Did2TextOutboxFailpoint { AfterPending, AfterSql, AfterStable }
+internal enum Did2TextOutboxFailpoint { AfterPending, AfterSql, AfterStable, AfterCancelledPendingSql, AfterCancelledPendingStable }
 internal static class Did2TextOutboxTestHooks
 {
     private static readonly AsyncLocal<Action<Did2TextOutboxFailpoint>?> Current = new();

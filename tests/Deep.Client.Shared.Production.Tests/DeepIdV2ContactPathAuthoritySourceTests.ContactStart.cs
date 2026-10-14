@@ -40,7 +40,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 }
                 var hostile = exact.ToArray(); BinaryPrimitives.WriteUInt32BigEndian(hostile.AsSpan(92), uint.MaxValue);
                 Assert.Throws<InvalidDataException>(() => ProtectedDid2ContactStartJournal.Decode(hostile, Network, account, instance));
-                foreach (var lengthOffset in new[] { 96 + 288, 96 + 292 })
+                foreach (var lengthOffset in new[] { 96 + 440, 96 + 444 })
                 {
                     var changed = exact.ToArray(); BinaryPrimitives.WriteUInt32BigEndian(changed.AsSpan(lengthOffset), uint.MaxValue);
                     Assert.Throws<InvalidDataException>(() => ProtectedDid2ContactStartJournal.Decode(changed, Network, account, instance));
@@ -59,6 +59,22 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 await Assert.ThrowsAnyAsync<OperationCanceledException>(() => accounts.PrepareOwnInitialContactDraftAsync(intent, contact, source, cancelled.Token));
                 using var readback = await storage.ReadOwnedAsync(ProtectedDid2ContactStartJournal.Slot);
                 Assert.Equal(exact, readback!.Use(bytes => bytes.ToArray()));
+                var predecessor = exact.ToArray();
+                foreach (var generation in new byte[] { 1, 2, 3, 4 })
+                {
+                    predecessor[0] = generation;
+                    Assert.Throws<InvalidDataException>(() => ProtectedDid2ContactStartJournal.Decode(predecessor, Network, account, instance));
+                }
+                using var successful = entry.WithVerifiedStore(1000, Network, account); // Structural transition, not actual Store proof.
+                using var marker = successful.WithoutWorkingPayload(Network, account);
+                Assert.True(marker.PayloadRetired); Assert.Equal(ProtectedDid2ContactStartJournal.PrefixBytes, marker.Exact.Length);
+                marker.RequireExactEvents(init.CanonicalBytes.Span, hello.CanonicalBytes.Span, Network, account);
+                Assert.Throws<InvalidOperationException>(() => marker.Init.ToArray());
+                var changedEvent = init.CanonicalBytes.ToArray(); changedEvent[^1] ^= 1;
+                Assert.Throws<CryptographicException>(() => marker.RequireExactEvents(changedEvent, hello.CanonicalBytes.Span, Network, account));
+                var withPayload = new byte[marker.Exact.Length + 1]; marker.Exact.CopyTo(withPayload);
+                Assert.Throws<InvalidDataException>(() => ProtectedDid2ContactStartJournal.Entry.Decode(withPayload, Network, account));
+                foreach (var bytes in new[] { predecessor, changedEvent, withPayload }) CryptographicOperations.ZeroMemory(bytes);
                 state.Dispose(); Assert.Throws<ObjectDisposedException>(() => entry.Exact.ToArray());
             }
             finally { foreach (var bytes in new[] { instance, exact, account }) CryptographicOperations.ZeroMemory(bytes); }

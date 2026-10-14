@@ -16,10 +16,11 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         DeepIdV2ContactPathAuthoritySource.PermanentContactAuthority resolved, CancellationToken ct)
     {
         ProtectedDph2PreClaimJournal.RequireIntent(intent.Span);
-        var op = intent.ToArray(); byte[] instance = [], before = [], after = [], metadata = new byte[288];
+        var op = intent.ToArray(); byte[] instance = [], before = [], after = [], metadata = new byte[288], retainedInit = [], retainedHelloBytes = [];
         try
         {
             using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
+            await ResumeLocalCompactionUnderLeaseAsync(held, ct).ConfigureAwait(false);
             using var current = await RequireCurrentUnderLeaseAsync(unixSeconds, verifier, ct).ConfigureAwait(false);
             var contact = await RecheckPermanentContactUnderLeaseAsync(current, source, resolved, held, ct).ConfigureAwait(false);
             var peer = contact.Contact.Authorization.Freshness;
@@ -41,6 +42,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var name = Convert.ToHexString(op);
             if (!journal.Entries.TryGetValue(name, out var winner))
             {
+                await MaintainMailboxNamespacesUnderLeaseAsync(current, held, verifier, resolved.Own, source, ct).ConfigureAwait(false);
                 if (journal.Entries.Count >= ProtectedDid2ContactStartJournal.MaximumEntries)
                     throw new IOException("Protected initial contact draft custody is full.");
                 var predictedSize = ProtectedDid2ContactStartJournal.HeaderBytes +
@@ -72,6 +74,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                         relationship, helloLogical, conversation, checked(created + 1), expiry, source.RendezvousTrustedTime, cancellationToken: ct).ConfigureAwait(false)).Record;
                     winner = ProtectedDid2ContactStartJournal.Entry.Create(metadata, init, hello, networkId, current.AccountId.Span);
                     journal.Entries.Add(name, winner);
+                    journal.Revision = checked(journal.Revision + 1);
                     after = ProtectedDid2ContactStartJournal.Encode(journal, networkId, current.AccountId.Span, instance);
                 }
                 finally
@@ -81,7 +84,10 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             }
             if (!FixedRoute(winner.Exact[..288], metadata))
                 throw new CryptographicException("The retained contact intent belongs to another endpoint or exact peer contact.");
-            var retainedHello = ApplicationCoreCodec.DecodeDmc2(winner.Hello);
+            if (winner.WorkStopped) throw new IOException("Stopped Initial cannot reauthor its original intent.");
+            if (winner.PayloadRetired)
+                (retainedInit, retainedHelloBytes) = await ReadRetainedInitialDraftEventsUnderLeaseAsync(current, held, winner, instance, ct).ConfigureAwait(false);
+            var retainedHello = ApplicationCoreCodec.DecodeDmc2(winner.PayloadRetired ? retainedHelloBytes : winner.Hello);
             if (retainedHello.ParsedPayload is not ContactHelloDmc2Payload payload || !FixedRoute(payload.MailboxRoute.ExactBytes.Span, mailbox.ExactBytes.Span))
                 throw new CryptographicException("The retained draft differs from the actual own publication.");
             async Task Recheck(CancellationToken token)
@@ -102,11 +108,12 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             if (!readback.Use(bytes => FixedRoute(bytes, after.Length == 0 ? before : after)))
                 throw new CryptographicException("Initial contact draft custody differs from exact protected readback.");
             await Recheck(ct).ConfigureAwait(false);
-            return new(winner, networkId, current.AccountId.Span);
+            return winner.PayloadRetired ? new(winner, retainedInit, retainedHelloBytes, networkId, current.AccountId.Span) :
+                new(winner, networkId, current.AccountId.Span);
         }
         finally
         {
-            foreach (var bytes in new[] { op, instance, before, after, metadata }) CryptographicOperations.ZeroMemory(bytes);
+            foreach (var bytes in new[] { op, instance, before, after, metadata, retainedInit, retainedHelloBytes }) CryptographicOperations.ZeroMemory(bytes);
         }
     }
 
@@ -128,6 +135,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             using var state = ProtectedDid2ContactStartJournal.Decode(snapshot, networkId, current.AccountId.Span, instance);
             if (!state.Entries.TryGetValue(Convert.ToHexString(intent.Span), out var winner))
                 throw new InvalidOperationException("An exact initial contact draft must be retained before prekey claim.");
+            if (winner.PayloadRetired) throw new CryptographicException("Retired Initial work cannot authorize another prekey claim.");
+            if (winner.WorkStopped) throw new IOException("Stopped Initial cannot authorize another prekey claim.");
             FillInitialContactMetadata(metadata, intent.Span, contact, resolved.Own.Proof.CurrentCheckpoint!);
             if (!FixedRoute(winner.Exact[..288], metadata))
                 throw new CryptographicException("The retained initial draft belongs to another peer or endpoint generation.");
@@ -153,6 +162,34 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             ct.ThrowIfCancellationRequested(); held.RequireActive();
         }
         finally { foreach (var bytes in new[] { instance, snapshot, metadata }) CryptographicOperations.ZeroMemory(bytes); }
+    }
+
+    private async Task<(byte[] Init, byte[] Hello)> ReadRetainedInitialDraftEventsUnderLeaseAsync(
+        VerifiedDeepIdV2CurrentAccount current, HeldDeepIdV2AccountLease held, ProtectedDid2ContactStartJournal.Entry winner,
+        ReadOnlyMemory<byte> instance, CancellationToken ct)
+    {
+        using var source = await SqliteDeepIdV2AccountGeneration.OpenExistingMessagingSenderSourceUnderLeaseAsync(storage, sqlStatePath, current, ct).ConfigureAwait(false);
+        using var retained = await source.ReadMessagingSourceByIntentUnderLeaseAsync(winner.Intent.ToArray(), ct).ConfigureAwait(false);
+        if (retained.HasInitialState) throw new CryptographicException("Retired Initial work lost its completed key transfer.");
+        using var catalog = await new ProtectedDid2MessagingSessionCatalog(storage, networkId, current.AccountId.Span, instance.Span).ReadAsync(ct).ConfigureAwait(false);
+        var scope = catalog.FindSource(retained.SessionId.Span, SHA256.HashData(retained.CanonicalSpan)) ??
+            throw new CryptographicException("Retired Initial work lost its exact native source registration.");
+        var index = catalog.FindExact(scope);
+        if (index < 0 || catalog.Phase(index) != 2) throw new CryptographicException("Retired Initial source is not fully adopted.");
+        Did2MessagingSourceScope.RequireSender(scope, retained);
+        using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, ct).ConfigureAwait(false);
+        var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
+        var events = opened.Sql.ReadVerifiedActiveInitialEvents(floor);
+        try
+        {
+            var conversation = retained.RequireInitialConversation(events.SessionInit, events.Hello);
+            try { if (!FixedRoute(conversation, scope.Conversation)) throw new CryptographicException("Retired Initial native conversation changed."); }
+            finally { CryptographicOperations.ZeroMemory(conversation); }
+            winner.RequireExactEvents(events.SessionInit, events.Hello, networkId, current.AccountId.Span);
+            ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
+            var result = events; events = ([], []); return result;
+        }
+        finally { CryptographicOperations.ZeroMemory(events.SessionInit); CryptographicOperations.ZeroMemory(events.Hello); }
     }
 
     private static void FillInitialContactMetadata(Span<byte> metadata, ReadOnlySpan<byte> intent,
