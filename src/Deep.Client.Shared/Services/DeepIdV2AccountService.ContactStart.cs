@@ -18,8 +18,21 @@ public sealed partial class DeepIdV2AccountService
         try
         {
             var fresh = await source.VerifyPermanentContactAsync(contact.Candidate, ct).ConfigureAwait(false);
+            return await PrepareOwnedInitialContactDraftAsync(intent, fresh, source, ct).ConfigureAwait(false);
+        }
+        finally { CryptographicOperations.ZeroMemory(intent); }
+    }
+
+    internal async Task<OwnedDid2InitialContactDraft> PrepareOwnedInitialContactDraftAsync(
+        ReadOnlyMemory<byte> logicalIntent, DeepIdV2ContactPathAuthoritySource.PermanentContactAuthority contact,
+        DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
+    {
+        source.RequireAccountOwner(this); ProtectedDph2PreClaimJournal.RequireIntent(logicalIntent.Span);
+        var intent = logicalIntent.ToArray();
+        try
+        {
             using var verifier = OpenVerifier();
-            return await owner.PrepareInitialContactDraftAsync(TrustedUnixSeconds(), verifier, intent, source, fresh, ct).ConfigureAwait(false);
+            return await owner.PrepareInitialContactDraftAsync(TrustedUnixSeconds(), verifier, intent, source, contact, ct).ConfigureAwait(false);
         }
         finally { CryptographicOperations.ZeroMemory(intent); }
     }
@@ -40,17 +53,18 @@ public sealed partial class DeepIdV2AccountService
         var intent = logicalIntent.ToArray();
         try
         {
-            using var draft = await PrepareOwnInitialContactDraftAsync(intent, contact, source, ct).ConfigureAwait(false);
-            return await CompletePreparedOwnInitialContactAsync(intent, contact, source, claimOnion, draft, ct).ConfigureAwait(false);
+            var fresh = await source.VerifyPermanentContactAsync(contact.Candidate, ct).ConfigureAwait(false);
+            using var draft = await PrepareOwnedInitialContactDraftAsync(intent, fresh, source, ct).ConfigureAwait(false);
+            return await CompletePreparedOwnInitialContactAsync(intent, fresh, source, claimOnion, draft, ct).ConfigureAwait(false);
         }
         finally { CryptographicOperations.ZeroMemory(intent); }
     }
 
     // StartContact already prepared this exact owned draft in the same command.
-    // Reuse only its bytes, not its authority: the protected draft, endpoint,
-    // clock and claim checks below still run under their current owner leases.
+    // Same-command proof inputs are not a verification cache: protected draft,
+    // endpoint, clock and claim checks still run under their current leases.
     private async Task<DeepIdV2InitialSessionCommit> CompletePreparedOwnInitialContactAsync(
-        ReadOnlyMemory<byte> logicalIntent, VerifiedDeepIdV2PermanentContactResolveClosure contact,
+        ReadOnlyMemory<byte> logicalIntent, DeepIdV2ContactPathAuthoritySource.PermanentContactAuthority contact,
         DeepIdV2ContactPathAuthoritySource source, IExactContactResolveOnionTransport? claimOnion,
         OwnedDid2InitialContactDraft draft, CancellationToken ct)
     {
@@ -58,17 +72,14 @@ public sealed partial class DeepIdV2AccountService
         try
         {
             initial = draft.ExactInit.ToArray(); hello = draft.ExactHello.ToArray();
-            var fresh = await source.VerifyPermanentContactAsync(contact.Candidate, ct).ConfigureAwait(false);
             using var verifier = OpenVerifier();
             var completed = await owner.FindCompletedContactDraftAsync(TrustedUnixSeconds(), verifier, intent,
-                initial, hello, source, fresh, ct).ConfigureAwait(false);
+                initial, hello, source, contact, ct).ConfigureAwait(false);
             if (completed is not null) return completed;
-            var request = await PrepareOwnPermanentContactClaimAsync(intent, contact, source, OwnedMailboxMaximumMessagesWithoutPqInjection, ct).ConfigureAwait(false);
-            var custody = await OpenOwnClaimRequestCustodyAsync(ct).ConfigureAwait(false);
-            claimOnion ??= new DeepIdV2PublicationOnionTransport(source, await OpenOwnOnionClientCustodyAsync(ct).ConfigureAwait(false));
-            var verified = await new DeepIdV2PreKeyClaimTransport(source, claimOnion, custody).ClaimExactAsync(request.CanonicalBytes, ct).ConfigureAwait(false);
-            var result = DeepIdV2PreKeyClaimResultCodec.Decode(verified.ExactResult.Span, request.CanonicalBytes.Span);
-            return await source.CompleteOwnContactDraftClaimAsync(intent, contact, request, result, initial, hello, ct).ConfigureAwait(false);
+            var claim = await owner.ClaimPermanentContactAsync(TrustedUnixSeconds(), verifier, intent, source, contact,
+                OwnedMailboxMaximumMessagesWithoutPqInjection, claimOnion, ct).ConfigureAwait(false);
+            var result = DeepIdV2PreKeyClaimResultCodec.Decode(claim.Result.ExactResult.Span, claim.Request.CanonicalBytes.Span);
+            return await source.CompleteOwnContactDraftClaimAsync(intent, contact, claim.Request, result, initial, hello, ct).ConfigureAwait(false);
         }
         finally { foreach (var bytes in new[] { intent, initial, hello }) CryptographicOperations.ZeroMemory(bytes); }
     }

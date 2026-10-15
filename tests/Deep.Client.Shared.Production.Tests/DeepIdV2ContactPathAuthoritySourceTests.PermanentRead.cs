@@ -59,16 +59,32 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     // are real. Actual two-node opaque stores are covered by XNode, not here;
     // this test makes no socket/TLS/ONION/device or consent claim.
     private sealed class SyntheticPermanentRead(Fixture fixture, DeepIdV2ContactPathAuthoritySource source,
-        ReadOnlyMemory<byte> exactPublication) : IExactContactResolveOnionTransport
+        ReadOnlyMemory<byte> exactPublication) : IDid2OwnedExactContactResolveOnionTransport
     {
         internal bool CorruptReceipt { get; set; }
         internal int Calls { get; private set; }
         public async ValueTask<ExactContactResolveOnionResponse> SendExactAsync(ContactResolveCanonicalPathRequest canonical,
             ReadOnlyMemory<byte> requiredExitReplicaId, CancellationToken ct = default)
         {
+            var authority = await source.GetCurrentAsync(canonical, ct);
+            return Respond(canonical, requiredExitReplicaId, authority, ct);
+        }
+
+        public ValueTask<ExactContactResolveOnionResponse> SendOwnedExactAsync(ContactResolveCanonicalPathRequest canonical,
+            ReadOnlyMemory<byte> requiredExitReplicaId, Did2OwnedContactTransportContext operation, CancellationToken ct)
+        {
+            operation.RequireActive(); source.RequireAccountOwner(operation.Custody.Owner);
+            var authority = new ContactResolvePathAuthority(operation.Network, ContactServicePlacementFactory.Create(
+                operation.Network, canonical.RequestKind, canonical.ShardKey));
+            var response = Respond(canonical, requiredExitReplicaId, authority, ct);
+            operation.RequireActive(); return ValueTask.FromResult(response);
+        }
+
+        private ExactContactResolveOnionResponse Respond(ContactResolveCanonicalPathRequest canonical,
+            ReadOnlyMemory<byte> requiredExitReplicaId, ContactResolvePathAuthority authority, CancellationToken ct)
+        {
             ct.ThrowIfCancellationRequested(); Calls++;
             fixture.RequireContactRetryReadAvailable();
-            var authority = await source.GetCurrentAsync(canonical, ct);
             var query = Xiq1Codec.Decode(canonical.ExactRequest.Span);
             var publication = Xpu1Codec.Decode(exactPublication.Span);
             Assert.Equal(publication.LocatorHash.ToArray(), query.LocatorHash.ToArray());

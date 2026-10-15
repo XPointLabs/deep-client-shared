@@ -15,9 +15,18 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         VerifiedDeepIdV2CurrentAccount current, CancellationToken ct)
         => new(await OpenClaimRequestStoreUnderLeaseAsync(storage, accountLease, statePath, current, ct).ConfigureAwait(false));
 
+    internal static async ValueTask<DeepIdV2ClaimRequestCustody> OpenBorrowedClaimRequestCustodyAsync(
+        IDeepSecureStorage storage, DeepIdV2AccountFileLease accountLease, string statePath,
+        VerifiedDeepIdV2CurrentAccount current, HeldDeepIdV2AccountLease held, CancellationToken ct)
+    {
+        using var borrow = held.BorrowFor(accountLease);
+        var store = await OpenClaimRequestStoreUnderLeaseAsync(storage, accountLease, statePath, current, ct, held).ConfigureAwait(false);
+        held.RequireActive(); ct.ThrowIfCancellationRequested(); return new(store);
+    }
+
     private static async ValueTask<ClaimRequestStore> OpenClaimRequestStoreUnderLeaseAsync(
         IDeepSecureStorage storage, DeepIdV2AccountFileLease accountLease, string statePath,
-        VerifiedDeepIdV2CurrentAccount current, CancellationToken ct)
+        VerifiedDeepIdV2CurrentAccount current, CancellationToken ct, HeldDeepIdV2AccountLease? borrowed = null)
     {
         using var secret = await storage.ReadOwnedAsync(KeySlot, ct).ConfigureAwait(false)
             ?? throw new InvalidDataException("The DID2 SQL key record is absent.");
@@ -32,7 +41,7 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             // Reuse the existing account/instance-bound two-slot floor protocol,
             // not a V1 journal, an unprotected database or one OS slot per claim.
             var root = new OnionCustodyRoot(storage, accountLease, statePath, binding, 8,
-                ClaimRequestStore.MaximumPayloadBytes, null);
+                ClaimRequestStore.MaximumPayloadBytes, borrowed);
             var store = new ClaimRequestStore(root);
             var row = await root.ReadUnderLeaseAsync(ct).ConfigureAwait(false);
             if (row is not null) store.Decode(row.Payload);

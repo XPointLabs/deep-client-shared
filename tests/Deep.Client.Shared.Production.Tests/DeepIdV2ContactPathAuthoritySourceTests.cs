@@ -1111,13 +1111,20 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         }
     }
 
-    private sealed class ClaimOnion(ContactResolvePathAuthority? authority, byte[] body) : IExactContactResolveOnionTransport
+    private sealed class ClaimOnion(ContactResolvePathAuthority? authority, byte[] body) : IDid2OwnedExactContactResolveOnionTransport
     {
         internal int Calls { get; private set; }
         internal byte[]? Request { get; private set; }
         internal byte[]? Exit { get; private set; }
         internal Action? AfterSend { get; set; }
         internal Func<Task>? BeforeSend { get; set; }
+        public async ValueTask<ExactContactResolveOnionResponse> SendOwnedExactAsync(ContactResolveCanonicalPathRequest request,
+            ReadOnlyMemory<byte> requiredExitReplicaId, Did2OwnedContactTransportContext operation, CancellationToken ct)
+        {
+            operation.RequireActive();
+            var result = await SendExactAsync(request, requiredExitReplicaId, ct);
+            operation.RequireActive(); return result;
+        }
         public async ValueTask<ExactContactResolveOnionResponse> SendExactAsync(ContactResolveCanonicalPathRequest request,
             ReadOnlyMemory<byte> requiredExitReplicaId, CancellationToken cancellationToken = default)
         {
@@ -3097,6 +3104,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         {
             if (request.RequestUri!.AbsolutePath == HttpDeepIdV2NetworkClosureArtifactSource.EndpointPath)
             {
+                Interlocked.Increment(ref networkClosureFetches);
                 var network = XPointNetworkClosureWireCodec.DecodeRequest(
                     await request.Content!.ReadAsByteArrayAsync(cancellationToken));
                 Assert.Equal(Network, network);

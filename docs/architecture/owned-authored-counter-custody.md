@@ -1015,6 +1015,47 @@ rollover/missing-evidence refusal, and the two actual owned application
 Store/receive/materialization/lost-ACK fixture variants. These in-process signed
 fixtures do not prove socket/device delivery or quantify an Android speedup.
 
+### Current same-command proof and owned transport candidate
+
+The connected Start path carries its independently verified permanent-contact
+authority only on the current async call stack. Each consuming account owner
+still reads the actual protected directory/network floors, checks exact account
+and endpoint binding, signature/route validity, monotonic continuity and the
+original request time window. A changed floor, stale proof, stopped draft or
+cancellation rejects; nothing persists a verification flag or bypasses a check.
+
+Permanent read and prekey claim use the existing explicit borrowed-account
+transport loan, not a second unscoped network acquisition during the operation.
+The real account file lease covers each bounded network operation; no SQL
+transaction is held over the network await. Claim preparation, exact request
+custody, selected-replica verification and result custody share that owner lease.
+The borrowed claim store uses the same root kind8 and exact existing framing;
+it cannot outlive the lease. Generic transports are not silently substituted for
+the explicit owned ONION contract. Read/claim remain single attempts with the
+original30s transport budget, no automatic retry or fallback. Any verified result
+retained before a final refusal stays retained, not reauthored or erased.
+
+Standalone commands acquire their own fresh evidence. Initial mailbox delivery
+still obtains its independent current read/route and grant. Protocol bytes,
+request120s lifetime, signed policy, floors, algorithms and public APIs do not
+change. This candidate removes repeated full network acquisition between local
+preclaim phases, not authority revalidation. Native fixture and device/full
+qualification are pending; prior source/device receipts do not qualify it.
+
+`scoped-contact-start-01` compiled and ran12 cases:11passed/1failed/native1.
+The new invalid-replica-signature assertion incorrectly expected a generic
+cryptographic exception instead of Protocol's exact ApplicationCoreFormatException;
+the original failed receipt is preserved. No production guard was relaxed.
+`scoped-contact-start-02` then passed8/0/0/native0: first claim/native completion/
+Store plus cold exact retry; expiry/cancellation/bad-signature refusal; late reply
+after cancellation; changed protected fork floor, expired proof and foreign
+account refusal without draft mutation. Before first claim, the new application
+fixture observes exactly two full network acquisitions, not another acquisition
+between every local phase. The eight existing completion/receive/claim-transport
+regression cases passed in the first run on the same production source. These
+are native SQLCipher/signed in-process fixtures, not physical socket delivery,
+wall-clock performance or final unfiltered source/release acceptance.
+
 ## S04 native SQL read-path performance — source candidate
 
 Exact operation/receive point reads authenticate the complete current journal

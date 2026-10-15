@@ -6,10 +6,18 @@ using Deep.Protocol.XPointNetworkV1;
 
 namespace Deep.Client.Shared.Services.ContactV2;
 
+// Explicit owned loan; a generic transport cannot silently bypass it.
+internal interface IDid2OwnedExactContactResolveOnionTransport : IExactContactResolveOnionTransport
+{
+    ValueTask<ExactContactResolveOnionResponse> SendOwnedExactAsync(
+        ContactResolveCanonicalPathRequest request, ReadOnlyMemory<byte> requiredExitReplicaId,
+        Did2OwnedContactTransportContext operation, CancellationToken ct);
+}
+
 /// <summary>One exact three-hop DID2 publication attempt. Its TLS entry is
 /// derived after exit-specific path selection, never from a fixed URL or an
 /// unsigned route hint. No direct request or outcome-unknown fallback exists.</summary>
-internal sealed class DeepIdV2PublicationOnionTransport : IExactContactResolveOnionTransport
+internal sealed class DeepIdV2PublicationOnionTransport : IDid2OwnedExactContactResolveOnionTransport
 {
     private readonly ContactResolvePrivacyPathProvider paths;
     private readonly PrivacyRoutingCodec codec;
@@ -53,6 +61,11 @@ internal sealed class DeepIdV2PublicationOnionTransport : IExactContactResolveOn
         cancellationToken.ThrowIfCancellationRequested();
         return result;
     }
+
+    ValueTask<ExactContactResolveOnionResponse> IDid2OwnedExactContactResolveOnionTransport.SendOwnedExactAsync(
+        ContactResolveCanonicalPathRequest request, ReadOnlyMemory<byte> requiredExitReplicaId,
+        Did2OwnedContactTransportContext operation, CancellationToken ct)
+        => SendOwnedExactAsync(request, requiredExitReplicaId, operation, ct);
 
     private async ValueTask<ExactContactResolveOnionResponse> SendPreparedAsync(
         ContactResolvePreparedPath prepared, Did2OwnedContactTransportContext? ownedOperation, CancellationToken cancellationToken)

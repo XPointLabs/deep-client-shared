@@ -53,13 +53,14 @@ public sealed partial class DeepIdV2AccountService
                     if (retained is not null) return new(new(existing), retained);
                 }
             }
-            var resolved = contactRead is null ? await ResolvePermanentContactAsync(address, source, ct).ConfigureAwait(false) :
-                await ResolvePermanentContactAsync(address, source, contactRead, ct).ConfigureAwait(false);
-            using var draft = await PrepareOwnInitialContactDraftAsync(intent, resolved, source, ct).ConfigureAwait(false);
+            var contact = await ResolveOwnedPermanentContactAsync(address, source, contactRead, ct).ConfigureAwait(false);
+            var resolved = contact.Contact;
+            using var draft = await PrepareOwnedInitialContactDraftAsync(intent, contact, source, ct).ConfigureAwait(false);
             initial = draft.ExactInit.ToArray(); hello = draft.ExactHello.ToArray();
-            using var completed = await CompletePreparedOwnInitialContactAsync(intent, resolved, source, claimOnion, draft, ct).ConfigureAwait(false);
-            var refreshed = await source.VerifyPermanentContactAsync(resolved.Candidate, ct).ConfigureAwait(false);
-            var scope = await EnsureOwnSenderMessagingAsync(intent, initial, hello, refreshed.Contact.Authorization.Freshness, source, ct).ConfigureAwait(false);
+            using var completed = await CompletePreparedOwnInitialContactAsync(intent, contact, source, claimOnion, draft, ct).ConfigureAwait(false);
+            using var senderVerifier = OpenVerifier();
+            var scope = await owner.EnsureSenderMessagingAsync(TrustedUnixSeconds(), senderVerifier, intent, initial, hello,
+                contact.Own, resolved.Authorization.Freshness, source, ct).ConfigureAwait(false);
             var stored = await DeliverOwnInitialContactAsync(intent, resolved, source, grants, transport, ct, contactRead).ConfigureAwait(false);
             ct.ThrowIfCancellationRequested(); return new(new(scope), stored);
         }

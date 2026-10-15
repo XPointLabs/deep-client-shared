@@ -18,19 +18,36 @@ internal sealed class DeepIdV2PreKeyClaimTransport(
     IExactContactResolveOnionTransport onion,
     DeepIdV2ClaimRequestCustody custody)
 {
-    internal async ValueTask<VerifiedXpc1V2ReplicaSignatures> ClaimExactAsync(
+    internal ValueTask<VerifiedXpc1V2ReplicaSignatures> ClaimExactAsync(
         ReadOnlyMemory<byte> exactRequest, CancellationToken cancellationToken = default)
+        => ClaimCoreAsync(exactRequest, null, cancellationToken);
+
+    internal ValueTask<VerifiedXpc1V2ReplicaSignatures> ClaimOwnedExactAsync(
+        ReadOnlyMemory<byte> exactRequest, Did2OwnedContactTransportContext operation, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(operation); operation.RequireActive();
+        if (onion is not IDid2OwnedExactContactResolveOnionTransport)
+            throw new NotSupportedException("Owned claim requires an explicit owned ONION transport.");
+        return ClaimCoreAsync(exactRequest, operation, ct);
+    }
+
+    private async ValueTask<VerifiedXpc1V2ReplicaSignatures> ClaimCoreAsync(
+        ReadOnlyMemory<byte> exactRequest, Did2OwnedContactTransportContext? operation, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(authoritySource);
         ArgumentNullException.ThrowIfNull(onion);
         ArgumentNullException.ThrowIfNull(custody);
         cancellationToken.ThrowIfCancellationRequested();
+        operation?.RequireActive();
         var retained = await custody.ReserveAsync(exactRequest, cancellationToken).ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
         var request = DeepIdV2PreKeyClaimRequestCodec.Decode(retained.Span);
         var canonical = ContactResolveCanonicalPathRequest.Decode(request.CanonicalBytes.Span);
-        var authority = await authoritySource.GetCurrentAsync(canonical, cancellationToken)
-            .ConfigureAwait(false);
+        var authority = operation is null
+            ? await authoritySource.GetCurrentAsync(canonical, cancellationToken).ConfigureAwait(false)
+            : new ContactResolvePathAuthority(operation.Network, ContactServicePlacementFactory.Create(
+                operation.Network, canonical.RequestKind, canonical.ShardKey));
+        operation?.RequireActive();
         cancellationToken.ThrowIfCancellationRequested();
         RequirePlacement(authority, request);
         var placement = authority.Placement;
@@ -39,6 +56,7 @@ internal sealed class DeepIdV2PreKeyClaimTransport(
         cancellationToken.ThrowIfCancellationRequested();
         if (priorResult is { } exactPrior)
         {
+            operation?.RequireActive();
             RequirePlacement(authority, request);
             return DeepIdV2PreKeyClaimReplicaSignatureVerifier.Verify(request,
                 DeepIdV2PreKeyClaimResultCodec.Decode(exactPrior.Span, request.CanonicalBytes.Span), placement);
@@ -47,8 +65,12 @@ internal sealed class DeepIdV2PreKeyClaimTransport(
         // There is no second independent claim or generated retry operation.
         using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         budget.CancelAfter(TimeSpan.FromSeconds(30));
-        var response = await onion.SendExactAsync(canonical,
-            placement.RankedReplicaNodeIds[0], budget.Token).AsTask().WaitAsync(budget.Token).ConfigureAwait(false);
+        var pending = operation is null
+            ? onion.SendExactAsync(canonical, placement.RankedReplicaNodeIds[0], budget.Token)
+            : ((IDid2OwnedExactContactResolveOnionTransport)onion).SendOwnedExactAsync(
+                canonical, placement.RankedReplicaNodeIds[0], operation, budget.Token);
+        var response = await pending.AsTask().WaitAsync(budget.Token).ConfigureAwait(false);
+        operation?.RequireActive();
         cancellationToken.ThrowIfCancellationRequested();
         RequirePlacement(response.PathAuthority, request);
         authority.Network.EnsureCurrent();
@@ -59,6 +81,7 @@ internal sealed class DeepIdV2PreKeyClaimTransport(
                 BinaryPrimitives.ReadUInt32BigEndian(result.Field(7).Span));
         var verified = DeepIdV2PreKeyClaimReplicaSignatureVerifier.Verify(request, result, placement);
         await custody.RecordVerifiedResultAsync(verified, cancellationToken).ConfigureAwait(false);
+        operation?.RequireActive();
         cancellationToken.ThrowIfCancellationRequested();
         RequirePlacement(authority, request);
         return verified;

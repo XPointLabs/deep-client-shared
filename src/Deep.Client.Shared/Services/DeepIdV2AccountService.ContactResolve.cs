@@ -40,9 +40,7 @@ public sealed partial class DeepIdV2AccountService
     {
         ArgumentNullException.ThrowIfNull(address); ArgumentNullException.ThrowIfNull(source);
         source.RequireAccountOwner(this);
-        var custody = await OpenOwnOnionClientCustodyAsync(ct).ConfigureAwait(false);
-        return await ResolvePermanentContactAsync(address, source,
-            new DeepIdV2PublicationOnionTransport(source, custody), ct).ConfigureAwait(false);
+        return (await ResolveOwnedPermanentContactAsync(address, source, null, ct).ConfigureAwait(false)).Contact;
     }
 
     // Read-only bootstrap: no contact acceptance, claim, durable trust flag,
@@ -53,26 +51,28 @@ public sealed partial class DeepIdV2AccountService
     {
         ArgumentNullException.ThrowIfNull(address); ArgumentNullException.ThrowIfNull(source);
         ArgumentNullException.ThrowIfNull(transport); source.RequireAccountOwner(this);
+        return (await ResolveOwnedPermanentContactAsync(address, source, transport, ct).ConfigureAwait(false)).Contact;
+    }
+
+    // Same-command capability, never a retained verification cache. Every
+    // consuming owner rechecks the actual protected floors and current clocks.
+    private async Task<DeepIdV2ContactPathAuthoritySource.PermanentContactAuthority> ResolveOwnedPermanentContactAsync(
+        DeepPermanentIdV2 address, DeepIdV2ContactPathAuthoritySource source,
+        IExactContactResolveOnionTransport? transport, CancellationToken ct)
+    {
+        source.RequireAccountOwner(this);
         var own = await source.VerifyForOwnPreKeyAuthoringAsync(this, ct).ConfigureAwait(false);
         using var verifier = OpenVerifier();
-        var query = await owner.AuthorPermanentContactQueryAsync(TrustedUnixSeconds(), verifier, address,
-            source, own, ct).ConfigureAwait(false);
-        var canonical = ContactResolveCanonicalPathRequest.Decode(query.CanonicalBytes.Span);
-        var placement = ContactServicePlacementFactory.Create(own.Network,
-            ContactServiceRequestKind.ResolveInvite, query.LocatorHash);
-        // Bounded single read through the selected coordinator. A caller may
-        // explicitly retry a read; no second hidden dispatch follows failure.
-        using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        budget.CancelAfter(TimeSpan.FromSeconds(30));
-        var response = await transport.SendExactAsync(canonical, placement.RankedReplicaNodeIds[0], budget.Token)
-            .AsTask().WaitAsync(budget.Token).ConfigureAwait(false);
+        var read = await owner.ReadPermanentContactAsync(TrustedUnixSeconds(), verifier, address,
+            source, own, transport, ct).ConfigureAwait(false);
         ct.ThrowIfCancellationRequested();
         var candidate = DeepIdV2PermanentContactResolveVerifier.OpenCandidate(address,
-            query.CanonicalBytes, response.ExactBody);
+            read.Query.CanonicalBytes, read.Response.ExactBody);
         var resolved = await source.VerifyPermanentContactAsync(candidate, ct).ConfigureAwait(false);
         using var releaseVerifier = OpenVerifier();
-        return await owner.RecheckPermanentContactAsync(TrustedUnixSeconds(), releaseVerifier,
+        var released = await owner.RecheckPermanentContactAsync(TrustedUnixSeconds(), releaseVerifier,
             source, resolved, ct).ConfigureAwait(false);
+        return new(resolved.Own, released);
     }
 
     // Only the account-bound source uses this profile-bound peer lookup.
