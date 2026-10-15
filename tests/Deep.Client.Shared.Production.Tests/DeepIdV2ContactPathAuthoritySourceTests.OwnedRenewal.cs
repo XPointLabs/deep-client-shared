@@ -479,6 +479,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         : IDid2ContactRouteThresholdSource, IDid2ContactPublicationSource, IDid2ContactReplicaPublicationTransport
     {
         internal int RouteCalls, PublicationCalls, ReplicaCalls, RouteSignings, PublicationSignings;
+        internal int WinnerReadCalls, WinnerReadFault;
         internal bool LoseRouteResponse, LosePublicationResponse, LoseReplicaResponse, CorruptReceipt;
         internal Action? AfterRouteReply;
         internal ulong CurrentDeadline => authorization.Freshness.FreshnessDeadlineMonotonicSeconds;
@@ -489,6 +490,26 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         private VerifiedDeepIdV2ContactRouteClosure route = null!;
         private readonly Dictionary<ulong, byte[]> routeRequests = [], publicationRequests = [], publicationWinners = [];
         private readonly Dictionary<ulong, ContactRouteAuthorityWireResponse> routeWinners = [];
+
+        internal async Task PrepareWinnerReadAsync(ContactPublicationAuthorityWireRequest original) =>
+            route = await fixture.CurrentWinnerReadRouteAsync(original, default);
+
+        public async ValueTask<ReadOnlyMemory<byte>> ReadWinnerAsync(PublicationWinnerReadWireRequest request,
+            Did2OwnedContactTransportContext operation, CancellationToken ct)
+        {
+            operation.RequireActive(); WinnerReadCalls++;
+            var original = publicationRequests.Values.Select(value => ContactPublicationAuthorityWireCodec.DecodeRequest(value))
+                .Single(value => value.RequestNonce.Span.SequenceEqual(request.OriginalCoordinationNonce.Span));
+            var originalResponse = publicationWinners[original.Generation];
+            var parsed = ContactPublicationAuthorityWireCodec.DecodeResponse(original, originalResponse);
+            var intent = await DeepIdV2PublicationCommitVerifier.VerifyIssuerRetainedIntentAsync(route, original, parsed.ExactXpu1, ct);
+            await DeepIdV2PublicationWinnerReadAuthor.VerifyIssuerRequestAsync(intent, request, ct);
+            var bytes = DeepIdV2PublicationWinnerReadWireCodec.EncodeResponse(request, originalResponse);
+            if (WinnerReadFault == 1) bytes[24] ^= 1;
+            if (WinnerReadFault == 2) bytes[^1] ^= 1;
+            if (WinnerReadFault == 3) throw new IOException("Injected lost readonly winner response.");
+            return bytes;
+        }
 
         public async ValueTask<ReadOnlyMemory<byte>> FetchLeaseAsync(PublicationLeaseWireRequest request,
             Did2OwnedContactTransportContext operation, CancellationToken ct)

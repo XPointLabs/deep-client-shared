@@ -10,6 +10,12 @@ namespace Deep.Client.Shared.Production.Tests;
 
 public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 {
+    [Fact]
+    public async Task Did2PublicationWinnerRead_CurrentReadRejectsHostileFramingPublisherAndClock()
+    {
+        await using var fixture = await Fixture.CreateAsync(encryptedStorage: true);
+        await fixture.CheckRetainedPublicationIntentAsync(8);
+    }
     [Theory]
     [InlineData(0)]
     [InlineData(1)]
@@ -87,6 +93,49 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 Assert.Equal(request.RequestHash.ToArray(), owned.RequestHash.ToArray());
                 Assert.Equal(owned.RequestHash.ToArray(), issuer.RequestHash.ToArray());
                 Assert.Equal(before, ContactPublicationAuthorityWireCodec.EncodeRequest(authored.WireRequest));
+                if (mode == 8)
+                {
+                    var read = await DeepIdV2PublicationWinnerReadAuthor.AuthorRequestAsync(route, restored, authored.WireRequest, device!);
+                    await DeepIdV2PublicationWinnerReadAuthor.VerifyIssuerRequestAsync(issuer, read);
+                    var originalResponse = ContactPublicationAuthorityWireCodec.EncodeResponse(authored.WireRequest,
+                        new(authored.WireRequest.NetworkId.Span, authored.WireRequest.RequestNonce.Span, exact));
+                    var response = DeepIdV2PublicationWinnerReadWireCodec.EncodeResponse(read, originalResponse);
+                    var restoredIntent = await DeepIdV2PublicationWinnerReadAuthor.VerifyOwnedResponseAsync(route, restored,
+                        authored.WireRequest, read, response);
+                    Assert.Equal(owned.RequestHash.ToArray(), restoredIntent.RequestHash.ToArray());
+                    var wrapper = ContactCoordinationOnionCodec.EncodeRequest(ContactCoordinationTarget.PublicationWinnerRead, read.CanonicalBytes.Span);
+                    var parsedRead = ContactCoordinationOnionCodec.DecodeRequest(wrapper);
+                    var pathRead = Deep.Client.Shared.Services.XPointNetworkV1.ContactResolveCanonicalPathRequest.Decode(wrapper);
+                    Assert.Equal(read.ViewHash.ToArray(), pathRead.ViewHash.ToArray());
+                    Assert.Equal(read.GatewayShard.ToArray(), pathRead.ShardKey.ToArray());
+                    Assert.Equal(read.GatewayShard.ToArray(), parsedRead.GatewayShard.ToArray());
+                    Assert.Equal(response, ContactCoordinationOnionCodec.DecodeResponse(parsedRead,
+                        ContactCoordinationOnionCodec.EncodeResponse(parsedRead, response)));
+                    foreach (var offset in new[] { 0, 2, 4, 8, 24, 56, 88, 128, 160, 192, 224, 232, 240 })
+                    {
+                        var changed = read.CanonicalBytes.ToArray(); changed[offset] ^= 1;
+                        var error = await Record.ExceptionAsync(async () => await DeepIdV2PublicationWinnerReadAuthor.VerifyIssuerRequestAsync(
+                            issuer, DeepIdV2PublicationWinnerReadWireCodec.DecodeRequest(changed)));
+                        Assert.True(error is FormatException or CryptographicException, $"Read field offset {offset} was not rejected.");
+                    }
+                    foreach (var damaged in new[] { read.CanonicalBytes[..^1].ToArray(), read.CanonicalBytes.ToArray().Concat(new byte[] { 0 }).ToArray(),
+                        new byte[305], new byte[0] })
+                        Assert.Throws<FormatException>(() => DeepIdV2PublicationWinnerReadWireCodec.DecodeRequest(damaged));
+                    foreach (var offset in new[] { 0, 2, 4, 8, 24, 56, response.Length - 1 })
+                    {
+                        var changed = response.ToArray(); changed[offset] ^= 1;
+                        var error = await Record.ExceptionAsync(async () => await DeepIdV2PublicationWinnerReadAuthor.VerifyOwnedResponseAsync(
+                            route, restored, authored.WireRequest, read, changed));
+                        Assert.True(error is FormatException or CryptographicException, $"Read response offset {offset} was not rejected.");
+                    }
+                    using var cancel = new CancellationTokenSource(); cancel.Cancel();
+                    await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await DeepIdV2PublicationWinnerReadAuthor.VerifyIssuerRequestAsync(issuer, read, cancel.Token));
+                    var oldSample = Sample; onRead = () => Sample--;
+                    var clockFailure = await Assert.ThrowsAsync<Deep.Protocol.AccountDirectoryV1.AccountDirectoryFreshnessVerificationException>(
+                        async () => await DeepIdV2PublicationWinnerReadAuthor.VerifyIssuerRequestAsync(issuer, read));
+                    Assert.Equal("DirectoryFreshnessExpired", clockFailure.Code);
+                    onRead = null; Sample = oldSample;
+                }
 
                 if (mode >= 5)
                 {

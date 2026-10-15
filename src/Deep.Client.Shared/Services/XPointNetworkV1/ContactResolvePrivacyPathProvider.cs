@@ -112,6 +112,13 @@ public sealed class ContactResolveCanonicalPathRequest
                     [], ContactServiceRequestKind.CoordinateContact, request.GatewayShard.Span,
                     request.ExpiresAtUnixSeconds, false, []);
             }
+            if (request.Target == ContactCoordinationTarget.PublicationWinnerRead)
+            {
+                var read = DeepIdV2PublicationWinnerReadWireCodec.DecodeRequest(request.ExactBody.Span);
+                return new(request.CanonicalBytes.Span, request.NetworkId.Span, read.ViewHash.Span,
+                    [], ContactServiceRequestKind.CoordinateContact, request.GatewayShard.Span,
+                    request.ExpiresAtUnixSeconds, false, []);
+            }
             var expiry = new byte[8];
             System.Buffers.Binary.BinaryPrimitives.WriteUInt64BigEndian(expiry, request.ExpiresAtUnixSeconds);
             return CreateProjectionBound(request.CanonicalBytes.Span, request.NetworkId.Span,
@@ -342,12 +349,12 @@ public sealed class ContactResolvePrivacyPathProvider : IPrivacyMailboxPathProvi
                 throw Fail("retained-request-mismatch", "Retained request authority belongs to different exact request bytes.");
             await retainedReadRequest.EnsureCurrentAsync(cancellationToken).ConfigureAwait(false);
         }
-        var leaseCoordination = request.RequestKind == ContactServiceRequestKind.CoordinateContact &&
-            ContactCoordinationOnionCodec.DecodeRequest(request.ExactRequest.Span).Target == ContactCoordinationTarget.PublicationLease;
-        var projectionMatches = leaseCoordination
+        var currentViewCoordination = request.RequestKind == ContactServiceRequestKind.CoordinateContact &&
+            ContactCoordinationOnionCodec.DecodeRequest(request.ExactRequest.Span).Target is ContactCoordinationTarget.PublicationLease or ContactCoordinationTarget.PublicationWinnerRead;
+        var projectionMatches = currentViewCoordination
             ? Fixed(request.ViewHash.Span, placement.ViewHash.Span)
             : network.BindsProjection(request.ProjectionReference);
-        if (!leaseCoordination && !request.HasExplicitPlacementBinding && retainedReadRequest is null && ownedOperation is not null)
+        if (!currentViewCoordination && !request.HasExplicitPlacementBinding && retainedReadRequest is null && ownedOperation is not null)
         {
             network.RequireCurrentMailboxAssignment(ownedOperation.Authority, request.ProjectionReference);
             projectionMatches = true;

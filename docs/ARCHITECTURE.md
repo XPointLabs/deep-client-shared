@@ -1,5 +1,22 @@
 # Deep Client Shared architecture
 
+## Completed publication response read-back
+
+[DR-0124](../../docs/survival-program/decisions/DR-0124-publication-winner-readback.md)
+owns the phase5 lost-response contract. The owned permanent-contact pipeline
+retains the exact original request and, after its window expires, authors a
+separate current publisher-authenticated winner READ through selected ONION
+coordination. It independently verifies the returned original XPA/object/route,
+then CAS/readbacks the existing response slot as phase6. The ordinary fresh XPL
+and both-node XPO checks still precede phase7. No request rewrite, new journal
+generation, account reset, fence release or direct Registry fallback is added.
+Missing/pending/corrupt replies remain failed state, not permission to issue.
+
+Focused owner evidence is under `artifacts/s05-winner-readback-20261015/`:
+`owned-focused-04` passed5/0/0 with actual encrypted cold reopen and preserved
+original request/scalars; in-process backend/synthetic replica signatures are
+not physical or two-store transport evidence. Earlier failing receipts remain.
+
 ## App-scoped private CA failure diagnostics
 
 Explicit private-root trust keeps hostname, server EKU, current chain and online

@@ -86,6 +86,17 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         internal int Calls { get; private set; }
         internal bool StableRequest { get; private set; } = true;
         private byte[]? exactRequest, winner;
+        public async ValueTask<ReadOnlyMemory<byte>> ReadWinnerAsync(PublicationWinnerReadWireRequest request,
+            Did2OwnedContactTransportContext operation, CancellationToken ct)
+        {
+            operation.RequireActive();
+            if (exactRequest is null || winner is null) throw new InvalidDataException("No exact completed publication winner.");
+            var original = ContactPublicationAuthorityWireCodec.DecodeRequest(exactRequest);
+            var response = ContactPublicationAuthorityWireCodec.DecodeResponse(original, winner);
+            var intent = await DeepIdV2PublicationCommitVerifier.VerifyIssuerRetainedIntentAsync(route, original, response.ExactXpu1, ct);
+            await DeepIdV2PublicationWinnerReadAuthor.VerifyIssuerRequestAsync(intent, request, ct);
+            return DeepIdV2PublicationWinnerReadWireCodec.EncodeResponse(request, winner);
+        }
         public async ValueTask<ReadOnlyMemory<byte>> FetchLeaseAsync(PublicationLeaseWireRequest request,
             Did2OwnedContactTransportContext operation, CancellationToken ct)
         {
