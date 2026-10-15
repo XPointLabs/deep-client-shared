@@ -1,6 +1,7 @@
 using Deep.Client.Shared.Persistence.DeviceV2;
 using Deep.Client.Shared.Services.ContactV2;
 using Deep.Protocol.ContactV2;
+using Deep.Protocol.ContactV1;
 
 namespace Deep.Client.Shared.Services;
 
@@ -103,7 +104,7 @@ public sealed partial class DeepIdV2AccountService
             source, fresh, configuration, publicationSource, transport, ct, bootstrap).ConfigureAwait(false);
     }
 
-    internal async Task<VerifiedDeepIdV2PublicationAuthorization> EnsureOwnContactPublicationAsync(
+    internal async Task<VerifiedXpa1PublicationAuthorization> EnsureOwnContactPublicationAsync(
         ReadOnlyMemory<byte> logicalIntent32, DeepIdV2ContactPathAuthoritySource source,
         Did2ContactRouteConfiguration configuration, IDid2ContactRouteThresholdSource thresholdSource,
         string profileName, IDid2ContactPublicationSource publicationSource, CancellationToken ct = default)

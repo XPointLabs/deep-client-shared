@@ -479,7 +479,11 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         : IDid2ContactRouteThresholdSource, IDid2ContactPublicationSource, IDid2ContactReplicaPublicationTransport
     {
         internal int RouteCalls, PublicationCalls, ReplicaCalls, RouteSignings, PublicationSignings;
-        internal int WinnerReadCalls, WinnerReadFault;
+        internal int CurrentResponseFault;
+        internal bool LoseBeforeReservation, LoseAfterReservation;
+        internal int ReservationCount => publicationRequests.Count;
+        internal int CompletedCount => publicationWinners.Count;
+        internal PublicationCurrentWireRequest? LastCurrentRequest;
         internal bool LoseRouteResponse, LosePublicationResponse, LoseReplicaResponse, CorruptReceipt;
         internal Action? AfterRouteReply;
         internal ulong CurrentDeadline => authorization.Freshness.FreshnessDeadlineMonotonicSeconds;
@@ -491,36 +495,49 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         private readonly Dictionary<ulong, byte[]> routeRequests = [], publicationRequests = [], publicationWinners = [];
         private readonly Dictionary<ulong, ContactRouteAuthorityWireResponse> routeWinners = [];
 
-        internal async Task PrepareWinnerReadAsync(ContactPublicationAuthorityWireRequest original) =>
-            route = await fixture.CurrentWinnerReadRouteAsync(original, default);
-
-        public async ValueTask<ReadOnlyMemory<byte>> ReadWinnerAsync(PublicationWinnerReadWireRequest request,
-            Did2OwnedContactTransportContext operation, CancellationToken ct)
+        internal async Task PrepareCurrentAsync(ContactPublicationAuthorityWireRequest original)
         {
-            operation.RequireActive(); WinnerReadCalls++;
-            var original = publicationRequests.Values.Select(value => ContactPublicationAuthorityWireCodec.DecodeRequest(value))
-                .Single(value => value.RequestNonce.Span.SequenceEqual(request.OriginalCoordinationNonce.Span));
-            var originalResponse = publicationWinners[original.Generation];
-            var parsed = ContactPublicationAuthorityWireCodec.DecodeResponse(original, originalResponse);
-            var intent = await DeepIdV2PublicationCommitVerifier.VerifyIssuerRetainedIntentAsync(route, original, parsed.ExactXpu1, ct);
-            await DeepIdV2PublicationWinnerReadAuthor.VerifyIssuerRequestAsync(intent, request, ct);
-            var bytes = DeepIdV2PublicationWinnerReadWireCodec.EncodeResponse(request, originalResponse);
-            if (WinnerReadFault == 1) bytes[24] ^= 1;
-            if (WinnerReadFault == 2) bytes[^1] ^= 1;
-            if (WinnerReadFault == 3) throw new IOException("Injected lost readonly winner response.");
-            return bytes;
+            // Independent fixture issuer preparation must precede the held
+            // client operation; never reenter its owner from a callback.
+            route = await fixture.CurrentPublicationIssuerRouteAsync(original, default);
+            authorization = route.Recipient; network = route.Network; authority = route.NetworkAuthority;
+            time = new OnionTrustedTimeAuthority(fixture);
         }
 
-        public async ValueTask<ReadOnlyMemory<byte>> FetchLeaseAsync(PublicationLeaseWireRequest request,
+        public async ValueTask<ReadOnlyMemory<byte>> AcquireCurrentAsync(PublicationCurrentWireRequest request,
             Did2OwnedContactTransportContext operation, CancellationToken ct)
         {
-            operation.RequireActive();
-            var original = publicationRequests.Values.Select(value => ContactPublicationAuthorityWireCodec.DecodeRequest(value))
-                .Single(value => value.RequestNonce.Span.SequenceEqual(request.OriginalCoordinationNonce.Span));
-            var winner = ContactPublicationAuthorityWireCodec.DecodeResponse(original, publicationWinners[original.Generation]);
-            var intent = await DeepIdV2PublicationCommitVerifier.VerifyIssuerRetainedIntentAsync(route, original, winner.ExactXpu1, ct);
-            var lease = await DeepIdV2PublicationLeaseAuthor.AuthorThresholdAsync(intent, request, fixture.PublicationLeaseWitnesses(), ct);
-            return DeepIdV2PublicationLeaseWireCodec.EncodeResponse(request, lease.CanonicalBytes.Span);
+            operation.RequireActive(); PublicationCalls++; LastCurrentRequest = request;
+            var original = request.OriginalRequest;
+            route = await DeepIdV2ContactRouteVerifier.VerifyAsync(authorization, network, authority,
+                DeepIdV2ResolverClosureCodec.Decode(original.ExactDcr1.Span).Bundle.Field(14)[40..], original.ExactRouteClosure, time, ct);
+            VerifiedDeepIdV2PublicationIssuerPredecessor? predecessor = null;
+            if (original.Generation != 0)
+            {
+                var prior = ContactPublicationAuthorityWireCodec.DecodeRequest(publicationRequests[original.Generation - 1]);
+                var priorResponse = ContactPublicationAuthorityWireCodec.DecodeResponse(prior, publicationWinners[prior.Generation]);
+                predecessor = await DeepIdV2PublicationCommitVerifier.VerifyIssuerPredecessorAsync(authorization, network, authority,
+                    prior, priorResponse.ExactXpu1, original.ExactPriorXpo1, time, ct);
+            }
+            var submission = await DeepIdV2PublicationCurrentAuthor.VerifyIssuerRequestAsync(route, request, predecessor, ct);
+            if (LoseBeforeReservation) { LoseBeforeReservation = false; throw new IOException("Injected request loss before reservation."); }
+            RequireExact(publicationRequests, original.Generation, ContactPublicationAuthorityWireCodec.EncodeRequest(original));
+            if (LoseAfterReservation) { LoseAfterReservation = false; throw new IOException("Injected pending reservation without response."); }
+            if (!publicationWinners.TryGetValue(original.Generation, out var winner))
+            {
+                var approved = await DeepIdV2PublicationCurrentAuthor.AuthorApprovalAsync(submission, fixture.PublicationWitnesses(), ct);
+                publicationWinners.Add(original.Generation, winner = ContactPublicationAuthorityWireCodec.EncodeResponse(original,
+                    new(original.NetworkId.Span, original.RequestNonce.Span, approved.CanonicalBytes.Span))); PublicationSignings++;
+            }
+            var response = ContactPublicationAuthorityWireCodec.DecodeResponse(original, winner);
+            var intent = await DeepIdV2PublicationCommitVerifier.VerifyIssuerRetainedIntentAsync(route, original, response.ExactXpu1, ct);
+            var lease = await DeepIdV2PublicationCurrentAuthor.AuthorLeaseAsync(submission, intent, fixture.PublicationLeaseWitnesses(), ct);
+            var exact = DeepIdV2PublicationCurrentWireCodec.EncodeResponse(request, lease.CanonicalBytes.Span);
+            if (LosePublicationResponse) { LosePublicationResponse = false; throw new IOException("Lost retained publication winner."); }
+            if (CurrentResponseFault == 1) exact[24] ^= 1;
+            if (CurrentResponseFault == 2) exact[^1] ^= 1;
+            if (CurrentResponseFault == 3) throw new IOException("Injected lost current publication response.");
+            return exact;
         }
 
         public async ValueTask<ContactRouteAuthorityWireResponse> FetchAsync(ContactRouteAuthorityWireRequest request,
@@ -554,7 +571,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         public async ValueTask<ReadOnlyMemory<byte>> FetchAsync(ContactPublicationAuthorityWireRequest request,
             Did2OwnedContactTransportContext operation, CancellationToken ct)
         {
-            operation.RequireActive(); PublicationCalls++;
+            operation.RequireActive(); Assert.Equal((byte)2, request.PublicationKind); PublicationCalls++;
             RequireExact(publicationRequests, request.Generation, ContactPublicationAuthorityWireCodec.EncodeRequest(request));
             route = await DeepIdV2ContactRouteVerifier.VerifyAsync(authorization, network, authority,
                 DeepIdV2ResolverClosureCodec.Decode(request.ExactDcr1.Span).Bundle.Field(14)[40..], request.ExactRouteClosure, time, ct);

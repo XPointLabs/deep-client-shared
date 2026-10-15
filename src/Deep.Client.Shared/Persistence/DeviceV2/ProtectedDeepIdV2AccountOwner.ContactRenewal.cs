@@ -171,21 +171,18 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 finally { CryptographicOperations.ZeroMemory(nonce); CryptographicOperations.ZeroMemory(operationId); }
             }
             var request = ContactPublicationAuthorityWireCodec.DecodeRequest(entry.Record(9).Span);
-            if (entry.Phase == 5)
-                await DeepIdV2PublicationAuthorityAuthor.VerifySuccessorRequestAsync(route, request, priorPublication, ct).ConfigureAwait(false);
+            VerifiedXpa1PublicationAuthorization? mutationLease = null;
             if (entry.Phase == 5)
             {
                 using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct); deadline.CancelAfter(TimeSpan.FromSeconds(30));
                 var dispatch = await DispatchAsync(deadline.Token).ConfigureAwait(false);
-                var returned = await publicationSource.FetchAsync(request, dispatch, deadline.Token).AsTask().WaitAsync(deadline.Token).ConfigureAwait(false);
-                if (returned.Length is < ContactPublicationAuthorityWireCodec.MinimumResponseBytes or > ContactPublicationAuthorityWireCodec.MaximumResponseBytes)
-                    throw new InvalidDataException("Publication successor response exceeds its exact bound.");
-                var response = returned.ToArray();
+                mutationLease = await AcquireCurrentPublicationAsync(route, contact, request,
+                    current.Verified.DeviceSecrets, publicationSource, dispatch, deadline.Token).ConfigureAwait(false);
+                var response = ContactPublicationAuthorityWireCodec.EncodeResponse(request,
+                    new(request.NetworkId.Span, request.RequestNonce.Span, mutationLease.ExactOriginalXpu1.Span));
                 try
                 {
-                    var candidate = ContactPublicationAuthorityWireCodec.DecodeResponse(request, response);
-                    _ = await DeepIdV2PublicationAuthorityAuthor.VerifySuccessorResponseAsync(route, request, priorPublication,
-                        candidate.ExactXpu1, deadline.Token).ConfigureAwait(false);
+                    await mutationLease.EnsureCurrentAsync(deadline.Token).ConfigureAwait(false);
                     deadline.Token.ThrowIfCancellationRequested();
                     await AdoptAsync(entry.WithPublicationResponse(response, networkId, current.AccountId.Span), deadline.Token).ConfigureAwait(false);
 #if DEEP_TEST_INTERNALS
@@ -199,8 +196,11 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             {
                 deadline.CancelAfter(TimeSpan.FromSeconds(30));
                 var dispatch = await DispatchAsync(deadline.Token).ConfigureAwait(false);
-                var mutationLease = await AcquirePublicationMutationLeaseAsync(route, contact, request,
-                    winner.ExactXpu1, current.Verified.DeviceSecrets, publicationSource, dispatch, deadline.Token).ConfigureAwait(false);
+                mutationLease ??= await AcquireCurrentPublicationAsync(route, contact, request,
+                    current.Verified.DeviceSecrets, publicationSource, dispatch, deadline.Token).ConfigureAwait(false);
+                if (!CryptographicOperations.FixedTimeEquals(mutationLease.ExactOriginalXpu1.Span, winner.ExactXpu1.Span))
+                    throw new CryptographicException("Current successor publication replaced the exact persisted original winner.");
+                await mutationLease.EnsureCurrentAsync(deadline.Token).ConfigureAwait(false);
                 var returned = await transport.PublishAsync(mutationLease.ExactDispatchRequest, dispatch, deadline.Token).WaitAsync(deadline.Token).ConfigureAwait(false);
                 if (returned.Length is < 256 or > DeepIdV2PublicationCommitVerifier.MaximumResultBytes)
                     throw new InvalidDataException("Publication successor commit exceeds its exact bound.");

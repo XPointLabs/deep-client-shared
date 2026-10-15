@@ -47,10 +47,11 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             await Assert.ThrowsAsync<CryptographicException>(() => EnsureCommit());
             using (var state = await RouteState())
                 Assert.Equal((byte)6, state.Entries[Convert.ToHexString(intent)].Phase);
-            Assert.Equal(2, publication.Calls);
+            Assert.Equal(3, publication.Calls);
             replica.CorruptReceipt = false;
             var committed = await EnsureCommit();
             Assert.Equal(0ul, committed.Generation);
+            Assert.Equal(4, publication.Calls); Assert.Equal(1, publication.ApprovalCalls);
             Assert.True(publication.StableRequest); Assert.True(replica.StableRequest);
             using (var state = await RouteState())
             {
@@ -84,35 +85,36 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     {
         internal bool CorruptResponse { get; set; }
         internal int Calls { get; private set; }
+        internal int ApprovalCalls { get; private set; }
         internal bool StableRequest { get; private set; } = true;
         private byte[]? exactRequest, winner;
-        public async ValueTask<ReadOnlyMemory<byte>> ReadWinnerAsync(PublicationWinnerReadWireRequest request,
+        public async ValueTask<ReadOnlyMemory<byte>> AcquireCurrentAsync(PublicationCurrentWireRequest request,
             Did2OwnedContactTransportContext operation, CancellationToken ct)
         {
-            operation.RequireActive();
-            if (exactRequest is null || winner is null) throw new InvalidDataException("No exact completed publication winner.");
-            var original = ContactPublicationAuthorityWireCodec.DecodeRequest(exactRequest);
-            var response = ContactPublicationAuthorityWireCodec.DecodeResponse(original, winner);
-            var intent = await DeepIdV2PublicationCommitVerifier.VerifyIssuerRetainedIntentAsync(route, original, response.ExactXpu1, ct);
-            await DeepIdV2PublicationWinnerReadAuthor.VerifyIssuerRequestAsync(intent, request, ct);
-            return DeepIdV2PublicationWinnerReadWireCodec.EncodeResponse(request, winner);
-        }
-        public async ValueTask<ReadOnlyMemory<byte>> FetchLeaseAsync(PublicationLeaseWireRequest request,
-            Did2OwnedContactTransportContext operation, CancellationToken ct)
-        {
-            operation.RequireActive();
-            if (exactRequest is null || winner is null) throw new InvalidDataException("No exact publication winner.");
-            var original = ContactPublicationAuthorityWireCodec.DecodeRequest(exactRequest);
+            operation.RequireActive(); Calls++;
+            var original = request.OriginalRequest;
+            var exact = ContactPublicationAuthorityWireCodec.EncodeRequest(original);
+            StableRequest &= exactRequest is null || exactRequest.AsSpan().SequenceEqual(exact);
+            exactRequest ??= exact;
+            var submission = await DeepIdV2PublicationCurrentAuthor.VerifyIssuerRequestAsync(route, request, ct: ct);
+            if (winner is null)
+            {
+                var approved = await DeepIdV2PublicationCurrentAuthor.AuthorApprovalAsync(submission, fixture.PublicationWitnesses(), ct);
+                winner = ContactPublicationAuthorityWireCodec.EncodeResponse(original,
+                    new(original.NetworkId.Span, original.RequestNonce.Span, approved.CanonicalBytes.Span)); ApprovalCalls++;
+            }
             var response = ContactPublicationAuthorityWireCodec.DecodeResponse(original, winner);
             var intent = await DeepIdV2PublicationCommitVerifier.VerifyIssuerRetainedIntentAsync(
                 route, original, response.ExactXpu1, ct);
-            var lease = await DeepIdV2PublicationLeaseAuthor.AuthorThresholdAsync(intent, request,
+            var lease = await DeepIdV2PublicationCurrentAuthor.AuthorLeaseAsync(submission, intent,
                 fixture.PublicationLeaseWitnesses(), ct);
-            return DeepIdV2PublicationLeaseWireCodec.EncodeResponse(request, lease.CanonicalBytes.Span);
+            var returned = DeepIdV2PublicationCurrentWireCodec.EncodeResponse(request, lease.CanonicalBytes.Span);
+            if (CorruptResponse) returned[^1] ^= 1;
+            return returned;
         }
         public async ValueTask<ReadOnlyMemory<byte>> FetchAsync(ContactPublicationAuthorityWireRequest request, Did2OwnedContactTransportContext operation, CancellationToken ct)
         {
-            Calls++; var exact = ContactPublicationAuthorityWireCodec.EncodeRequest(request);
+            Assert.Equal((byte)2, request.PublicationKind); Calls++; var exact = ContactPublicationAuthorityWireCodec.EncodeRequest(request);
             StableRequest &= exactRequest is null || exactRequest.AsSpan().SequenceEqual(exact);
             exactRequest ??= exact;
             if (winner is null)

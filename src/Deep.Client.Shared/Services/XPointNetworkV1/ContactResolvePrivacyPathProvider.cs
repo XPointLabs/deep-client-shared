@@ -105,17 +105,10 @@ public sealed class ContactResolveCanonicalPathRequest
         if (exactRequest[..4].SequenceEqual("XCA2"u8))
         {
             var request = ContactCoordinationOnionCodec.DecodeRequest(exactRequest);
-            if (request.Target == ContactCoordinationTarget.PublicationLease)
+            if (request.Target == ContactCoordinationTarget.PublicationCurrent)
             {
-                var leaseRequest = DeepIdV2PublicationLeaseWireCodec.DecodeRequest(request.ExactBody.Span);
-                return new(request.CanonicalBytes.Span, request.NetworkId.Span, leaseRequest.ViewHash.Span,
-                    [], ContactServiceRequestKind.CoordinateContact, request.GatewayShard.Span,
-                    request.ExpiresAtUnixSeconds, false, []);
-            }
-            if (request.Target == ContactCoordinationTarget.PublicationWinnerRead)
-            {
-                var read = DeepIdV2PublicationWinnerReadWireCodec.DecodeRequest(request.ExactBody.Span);
-                return new(request.CanonicalBytes.Span, request.NetworkId.Span, read.ViewHash.Span,
+                var current = DeepIdV2PublicationCurrentWireCodec.DecodeRequest(request.ExactBody.Span);
+                return new(request.CanonicalBytes.Span, request.NetworkId.Span, current.ViewHash.Span,
                     [], ContactServiceRequestKind.CoordinateContact, request.GatewayShard.Span,
                     request.ExpiresAtUnixSeconds, false, []);
             }
@@ -350,7 +343,7 @@ public sealed class ContactResolvePrivacyPathProvider : IPrivacyMailboxPathProvi
             await retainedReadRequest.EnsureCurrentAsync(cancellationToken).ConfigureAwait(false);
         }
         var currentViewCoordination = request.RequestKind == ContactServiceRequestKind.CoordinateContact &&
-            ContactCoordinationOnionCodec.DecodeRequest(request.ExactRequest.Span).Target is ContactCoordinationTarget.PublicationLease or ContactCoordinationTarget.PublicationWinnerRead;
+            ContactCoordinationOnionCodec.DecodeRequest(request.ExactRequest.Span).Target == ContactCoordinationTarget.PublicationCurrent;
         var projectionMatches = currentViewCoordination
             ? Fixed(request.ViewHash.Span, placement.ViewHash.Span)
             : network.BindsProjection(request.ProjectionReference);

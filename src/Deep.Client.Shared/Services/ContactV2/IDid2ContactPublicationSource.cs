@@ -7,10 +7,7 @@ namespace Deep.Client.Shared.Services.ContactV2;
 // exercise exact custody, not authorization for a direct Registry fallback.
 internal interface IDid2ContactPublicationSource
 {
-    ValueTask<ReadOnlyMemory<byte>> ReadWinnerAsync(PublicationWinnerReadWireRequest request,
-        Did2OwnedContactTransportContext operation, CancellationToken cancellationToken);
-
-    ValueTask<ReadOnlyMemory<byte>> FetchLeaseAsync(PublicationLeaseWireRequest request,
+    ValueTask<ReadOnlyMemory<byte>> AcquireCurrentAsync(PublicationCurrentWireRequest request,
         Did2OwnedContactTransportContext operation, CancellationToken cancellationToken);
 
     ValueTask<ReadOnlyMemory<byte>> FetchAsync(ContactPublicationAuthorityWireRequest exactPendingRequest,

@@ -8,7 +8,7 @@ namespace Deep.Client.Shared.Persistence.DeviceV2;
 
 internal sealed partial class ProtectedDeepIdV2AccountOwner
 {
-    internal async Task<VerifiedDeepIdV2PublicationAuthorization> EnsureContactPublicationAsync(
+    internal async Task<VerifiedXpa1PublicationAuthorization> EnsureContactPublicationAsync(
         ulong trustedUnixSeconds, IDeepMlDsa65Verifier verifier, ReadOnlyMemory<byte> intent,
         DeepIdV2ContactPathAuthoritySource source, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh,
         Did2ContactRouteConfiguration configuration, IDid2ContactPublicationSource publicationSource, CancellationToken ct)
@@ -43,7 +43,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         return result.Commit ?? throw new InvalidOperationException("One-time publication commit is absent.");
     }
 
-    private async Task<(VerifiedDeepIdV2PublicationAuthorization? Authorization, VerifiedDeepIdV2PublicationCommit? Commit)>
+    private async Task<(VerifiedXpa1PublicationAuthorization? Authorization, VerifiedDeepIdV2PublicationCommit? Commit)>
         EnsureContactPublicationCoreAsync(
         ulong trustedUnixSeconds, IDeepMlDsa65Verifier verifier, ReadOnlyMemory<byte> intent,
         DeepIdV2ContactPathAuthoritySource source, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh,
@@ -109,11 +109,10 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             // The exact request, including nonce and owner Retrieve, is durable
             // and independently read back before the first external callback.
             var request = ContactPublicationAuthorityWireCodec.DecodeRequest(entry.Record(9).Span);
-            var recoverWinner = kind == 1 && transport is not null && entry.Phase == 5 &&
-                (await route.ReadCurrentTimeAsync(ct).ConfigureAwait(false)).UpperUnixSeconds >= request.ExpiresAtUnixSeconds;
-            // A retained commit is historical evidence, never a renewal of its
-            // short-lived request/XPA dispatch permission.
-            if (entry.Phase == 5 && !recoverWinner || transport is null || kind != 1 && entry.Phase < 7)
+            VerifiedXpa1PublicationAuthorization? mutationLease = null;
+            // Reusable current authority is independent of immutable request
+            // time. One-time dispatch retains its strict original short window.
+            if (kind != 1 && entry.Phase < 7)
                 await DeepIdV2PublicationAuthorityAuthor.VerifyRequestAsync(route, request, ct).ConfigureAwait(false);
             if (entry.Phase == 5)
             {
@@ -122,20 +121,15 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 var custody = await SqliteDeepIdV2AccountGeneration.OpenBorrowedOnionCustodyAsync(storage, lease,
                     sqlStatePath, current, source.AccountOwner, held, deadline.Token).ConfigureAwait(false);
                 var dispatch = new Did2OwnedContactTransportContext(custody, fresh.Network, fresh.Authority, held);
-                PublicationWinnerReadWireRequest? readRequest = null;
-                ReadOnlyMemory<byte> readResponse = default;
                 ReadOnlyMemory<byte> returned;
-                if (recoverWinner)
+                if (kind == 1)
                 {
-                    // A separate current authenticated READ, never redispatch
-                    // of the expired mutation or replacement of its exact intent.
-                    readRequest = await DeepIdV2PublicationWinnerReadAuthor.AuthorRequestAsync(route, contact!, request,
-                        current.Verified.DeviceSecrets, deadline.Token).ConfigureAwait(false);
-                    readResponse = await publicationSource.ReadWinnerAsync(readRequest, dispatch, deadline.Token).AsTask()
-                        .WaitAsync(deadline.Token).ConfigureAwait(false);
-                    _ = await DeepIdV2PublicationWinnerReadAuthor.VerifyOwnedResponseAsync(route, contact!, request,
-                        readRequest, readResponse, deadline.Token).ConfigureAwait(false);
-                    returned = DeepIdV2PublicationWinnerReadWireCodec.DecodeResponse(readRequest, readResponse.Span);
+                    mutationLease = await AcquireCurrentPublicationAsync(route, contact!, request,
+                        current.Verified.DeviceSecrets, publicationSource, dispatch, deadline.Token).ConfigureAwait(false);
+                    // XPL contains the exact permanent original XPU. Reconstruct
+                    // only its canonical original response; never replace intent.
+                    returned = ContactPublicationAuthorityWireCodec.EncodeResponse(request,
+                        new(request.NetworkId.Span, request.RequestNonce.Span, mutationLease.ExactOriginalXpu1.Span));
                 }
                 else returned = await publicationSource.FetchAsync(request, dispatch, deadline.Token).AsTask()
                     .WaitAsync(deadline.Token).ConfigureAwait(false);
@@ -145,12 +139,10 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 try
                 {
                     var wire = ContactPublicationAuthorityWireCodec.DecodeResponse(request, response);
-                    if (readRequest is null)
+                    if (kind != 1)
                         _ = await DeepIdV2PublicationAuthorityAuthor.VerifyResponseAsync(route, request, wire.ExactXpu1, deadline.Token).ConfigureAwait(false);
                     await RecheckRouteFreshnessAsync(current, source, fresh, held, first, deadline.Token).ConfigureAwait(false);
-                    if (readRequest is not null)
-                        _ = await DeepIdV2PublicationWinnerReadAuthor.VerifyOwnedResponseAsync(route, contact!, request,
-                            readRequest, readResponse, deadline.Token).ConfigureAwait(false);
+                    if (mutationLease is not null) await mutationLease.EnsureCurrentAsync(deadline.Token).ConfigureAwait(false);
                     var next = entry.WithPublicationResponse(response, networkId, current.AccountId.Span);
                     state.Entries[name] = next; entry.Dispose(); entry = next;
                     var adopted = await SaveRouteJournalAsync(state, snapshot, current.AccountId, instance, deadline.Token).ConfigureAwait(false);
@@ -159,13 +151,27 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 finally { CryptographicOperations.ZeroMemory(response); }
             }
             var winner = ContactPublicationAuthorityWireCodec.DecodeResponse(request, entry.Record(10).Span);
-            VerifiedDeepIdV2PublicationAuthorization? authorized = null;
-            if (transport is null || kind != 1 && entry.Phase < 7)
-                authorized = await DeepIdV2PublicationAuthorityAuthor.VerifyResponseAsync(route, request, winner.ExactXpu1, ct).ConfigureAwait(false);
+            if (kind != 1 && entry.Phase < 7)
+                _ = await DeepIdV2PublicationAuthorityAuthor.VerifyResponseAsync(route, request, winner.ExactXpu1, ct).ConfigureAwait(false);
             await RecheckRouteFreshnessAsync(current, source, fresh, held, first, ct).ConfigureAwait(false);
             if (transport is null)
             {
-                ct.ThrowIfCancellationRequested(); held.RequireActive(); return (authorized, null);
+                if (kind != 1 || entry.Phase != 6)
+                    throw new InvalidOperationException("Current issuance requires an unfinished reusable intent; committed custody uses the commit entry.");
+                using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct); deadline.CancelAfter(TimeSpan.FromSeconds(30));
+                if (mutationLease is null)
+                {
+                    var custody = await SqliteDeepIdV2AccountGeneration.OpenBorrowedOnionCustodyAsync(storage, lease,
+                        sqlStatePath, current, source.AccountOwner, held, deadline.Token).ConfigureAwait(false);
+                    var dispatch = new Did2OwnedContactTransportContext(custody, fresh.Network, fresh.Authority, held);
+                    mutationLease = await AcquireCurrentPublicationAsync(route, contact!, request,
+                        current.Verified.DeviceSecrets, publicationSource, dispatch, deadline.Token).ConfigureAwait(false);
+                }
+                if (!CryptographicOperations.FixedTimeEquals(mutationLease.ExactOriginalXpu1.Span, winner.ExactXpu1.Span))
+                    throw new CryptographicException("Current issuance replaced the exact persisted original winner.");
+                await mutationLease.EnsureCurrentAsync(deadline.Token).ConfigureAwait(false);
+                await RecheckRouteFreshnessAsync(current, source, fresh, held, first, deadline.Token).ConfigureAwait(false);
+                ct.ThrowIfCancellationRequested(); held.RequireActive(); return (mutationLease, null);
             }
             if (entry.Phase == 6)
             {
@@ -174,8 +180,14 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 var custody = await SqliteDeepIdV2AccountGeneration.OpenBorrowedOnionCustodyAsync(storage, lease,
                     sqlStatePath, current, source.AccountOwner, held, deadline.Token).ConfigureAwait(false);
                 var dispatch = new Did2OwnedContactTransportContext(custody, fresh.Network, fresh.Authority, held);
-                var mutationLease = kind == 1 ? await AcquirePublicationMutationLeaseAsync(route, contact!, request,
-                    winner.ExactXpu1, current.Verified.DeviceSecrets, publicationSource, dispatch, deadline.Token).ConfigureAwait(false) : null;
+                if (kind == 1)
+                {
+                    mutationLease ??= await AcquireCurrentPublicationAsync(route, contact!, request,
+                        current.Verified.DeviceSecrets, publicationSource, dispatch, deadline.Token).ConfigureAwait(false);
+                    if (!CryptographicOperations.FixedTimeEquals(mutationLease.ExactOriginalXpu1.Span, winner.ExactXpu1.Span))
+                        throw new CryptographicException("Current publication replaced the exact persisted original winner.");
+                    await mutationLease.EnsureCurrentAsync(deadline.Token).ConfigureAwait(false);
+                }
                 var returned = await transport.PublishAsync(mutationLease?.ExactDispatchRequest ?? winner.ExactXpu1, dispatch, deadline.Token)
                     .WaitAsync(deadline.Token).ConfigureAwait(false);
                 if (returned.Length is < 256 or > DeepIdV2PublicationCommitVerifier.MaximumResultBytes)
@@ -221,20 +233,17 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         }
     }
 
-    private static async Task<VerifiedXpa1PublicationAuthorization> AcquirePublicationMutationLeaseAsync(
+    private static async Task<VerifiedXpa1PublicationAuthorization> AcquireCurrentPublicationAsync(
         VerifiedDeepIdV2ContactRouteClosure route, AuthoredDeepIdV2ContactObject contact,
-        ContactPublicationAuthorityWireRequest originalRequest, ReadOnlyMemory<byte> originalXpu,
+        ContactPublicationAuthorityWireRequest originalRequest,
         Deep.Protocol.Identity.OwnedGenesisDeviceSecrets device, IDid2ContactPublicationSource source,
         Did2OwnedContactTransportContext operation, CancellationToken ct)
     {
         operation.RequireActive();
-        var intent = await DeepIdV2PublicationCommitVerifier.VerifyOwnedRetainedIntentAsync(
-            route, contact, originalRequest, originalXpu, ct).ConfigureAwait(false);
-        var request = await DeepIdV2PublicationLeaseAuthor.AuthorRequestAsync(intent, device, ct).ConfigureAwait(false);
-        var returned = await source.FetchLeaseAsync(request, operation, ct).AsTask().WaitAsync(ct).ConfigureAwait(false);
-        var response = DeepIdV2PublicationLeaseWireCodec.DecodeResponse(request, returned.Span);
-        var authority = await DeepIdV2PublicationLeaseAuthor.VerifyOwnedResponseAsync(
-            intent, request, response.CanonicalBytes, ct).ConfigureAwait(false);
+        var request = await DeepIdV2PublicationCurrentAuthor.AuthorOwnedRequestAsync(route, contact, originalRequest, device, ct).ConfigureAwait(false);
+        var returned = await source.AcquireCurrentAsync(request, operation, ct).AsTask().WaitAsync(ct).ConfigureAwait(false);
+        var authority = await DeepIdV2PublicationCurrentAuthor.VerifyOwnedResponseAsync(
+            route, contact, originalRequest, request, returned, ct).ConfigureAwait(false);
         operation.RequireActive(); ct.ThrowIfCancellationRequested(); return authority;
     }
 }
