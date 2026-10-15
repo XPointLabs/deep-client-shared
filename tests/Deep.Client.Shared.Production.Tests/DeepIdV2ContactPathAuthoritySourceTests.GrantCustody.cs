@@ -28,7 +28,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task Did2GrantCustody_ExpiredUnknownClosesUnderActualLeaseWithoutReissueAndSurvivesBothFaults(bool failAfterClosure)
+    public async Task Did2GrantCustody_ExpiredUnknownRetainsOriginalWhileIndependentNewWorkSurvivesBothFaults(bool failAfterClosure)
     {
         await using var fixture = await Fixture.CreateAsync();
         await fixture.CheckExpiredGrantAcquisitionAsync(failAfterClosure);
@@ -412,15 +412,33 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 var selection = Assert.Single(closed.Selections);
                 Assert.Null(selection.Value.Current); Assert.Null(selection.Value.Pending);
                 Assert.Equal(ProtectedDid2MailboxGrantJournal.Acquisition(entry), selection.Value.RetainedTail);
-                Assert.Throws<IOException>(() => ProtectedDid2MailboxGrantJournal.AcquisitionForNewWork(closed, selection.Key));
+                Assert.Null(ProtectedDid2MailboxGrantJournal.AcquisitionForNewWork(closed, selection.Key));
                 Assert.Throws<InvalidDataException>(() => ProtectedDid2MailboxGrantJournal.PromoteWinner(closed, selection.Key));
                 CheckClosedGrantShape(closed, successorTemplate);
             }
             reopened = ReopenAccount();
             Assert.Equal(0, await reopened.CloseExpiredMailboxAcquisitionsAsync(Source(reopened)));
-            transport.LoseResponse = false;
-            await Assert.ThrowsAsync<IOException>(() => reopened.AcquireOwnPermanentContactRetrieveGrantAsync(Source(reopened), transport));
-            Assert.Equal(1, transport.Calls); // Closure/reopen never consults the issuer.
+            byte[] closedOriginal;
+            using (var closed = await ReadPeerGrantsAsync(own: true))
+                closedOriginal = Assert.Single(closed.Entries).Value.ToArray();
+            var independent = new OwnedGrantTransport(this, selfRetrieve: true);
+            _ = await reopened.AcquireOwnPermanentContactRetrieveGrantAsync(Source(reopened), independent);
+            Assert.Equal(1, transport.Calls); // The original issuer callback is never repeated.
+            Assert.Equal(1, independent.Calls);
+            using (var history = await ReadPeerGrantsAsync(own: true))
+            {
+                Assert.Equal(2, history.Entries.Count);
+                Assert.Equal(closedOriginal, history.Entries[ProtectedDid2MailboxGrantJournal.Acquisition(original)]);
+                var currentName = Assert.Single(history.Selections).Value.Current!;
+                var current = history.Entries[currentName];
+                Assert.True(ProtectedDid2MailboxGrantJournal.HasWinner(current));
+                Assert.NotEqual(ProtectedDid2MailboxGrantJournal.Acquisition(original), currentName);
+                Assert.False(ProtectedDid2MailboxGrantJournal.Seed(original).SequenceEqual(ProtectedDid2MailboxGrantJournal.Seed(current)));
+            }
+            reopened = ReopenAccount();
+            _ = await reopened.AcquireOwnPermanentContactRetrieveGrantAsync(Source(reopened), independent);
+            Assert.Equal(1, independent.Calls); Assert.Equal(1, transport.Calls);
+            CryptographicOperations.ZeroMemory(closedOriginal);
             CryptographicOperations.ZeroMemory(original); CryptographicOperations.ZeroMemory(successorTemplate);
         }
 
@@ -443,8 +461,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 else Assert.Throws<InvalidDataException>(() => ProtectedDid2MailboxGrantJournal.Encode(cold, Network, account, instance));
                 cold.Entries[Assert.Single(cold.Entries).Key] = entry; CryptographicOperations.ZeroMemory(damaged);
             }
-            // Future renewal can retain a closed predecessor without pretending
-            // it is a current winner; no runtime successor issuance is activated.
+            // A new acquisition retains the closed predecessor without
+            // pretending it is a current winner or proof of non-issuance.
             // Prepared earlier under an actual current route; this shape-only
             // staging after closure grants no authority to dispatch expired work.
             var successor = successorTemplate.ToArray();
@@ -454,7 +472,75 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             Assert.Equal(2, restarted.Entries.Count);
             Assert.Equal(entry, restarted.Entries[ProtectedDid2MailboxGrantJournal.Acquisition(entry)]);
             Assert.Null(Assert.Single(restarted.Selections).Value.Current);
+            var scope = Assert.Single(restarted.Selections).Key;
+            var candidateName = Assert.Single(restarted.Selections).Value.Pending!;
+            Assert.Equal(candidateName, ProtectedDid2MailboxGrantJournal.Acquisition(
+                ProtectedDid2MailboxGrantJournal.AcquisitionForNewWork(restarted, scope)!));
+            var candidate = restarted.Entries[candidateName];
+            var closedCandidate = ProtectedDid2MailboxGrantJournal.WithClosedUnresolved(candidate,
+                ProtectedDid2MailboxGrantJournal.RequestExpiry(candidate), Network);
+            restarted.Entries[candidateName] = closedCandidate;
+            CryptographicOperations.ZeroMemory(candidate);
+            ProtectedDid2MailboxGrantJournal.ClosePending(restarted, scope);
+            Assert.Null(ProtectedDid2MailboxGrantJournal.AcquisitionForNewWork(restarted, scope));
+            // Pure malformed-metadata probes, not authenticated closure or owner
+            // state. The selector must reject cross-scope/cyclic history boundedly.
+            var parent = closedCandidate.AsSpan(1045, 32).ToArray();
+            Convert.FromHexString(candidateName).CopyTo(closedCandidate, 1045);
+            Assert.Throws<IOException>(() => ProtectedDid2MailboxGrantJournal.AcquisitionForNewWork(restarted, scope));
+            parent.CopyTo(closedCandidate, 1045);
+            closedCandidate[0] ^= 1;
+            Assert.Throws<IOException>(() => ProtectedDid2MailboxGrantJournal.AcquisitionForNewWork(restarted, scope));
+            closedCandidate[0] ^= 1;
+            var multipleClosed = ProtectedDid2MailboxGrantJournal.Encode(restarted, Network, account, instance);
+            using var coldClosed = ProtectedDid2MailboxGrantJournal.Decode(multipleClosed, Network, account, instance);
+            Assert.Null(ProtectedDid2MailboxGrantJournal.AcquisitionForNewWork(coldClosed, scope));
+            CryptographicOperations.ZeroMemory(parent); CryptographicOperations.ZeroMemory(multipleClosed);
             foreach (var bytes in new[] { exact, staged }) CryptographicOperations.ZeroMemory(bytes);
+        }
+
+        internal async Task<ulong> FillIndependentUnknownGrantCapacityAsync(VerifiedOnionNetworkContext network)
+        {
+            // Disposable, valid signed metadata at the bound, NOT evidence of
+            // 128 remotely issued grants or authenticated closure transitions.
+            using var raw = await storage.ReadOwnedAsync(ProtectedDid2MailboxGrantJournal.Slot) ?? throw new InvalidDataException();
+            var expected = raw.Use(bytes => bytes.ToArray());
+            using var state = await ReadPeerGrantsAsync(own: true);
+            var original = Assert.Single(state.Entries).Value;
+            var scopeName = Assert.Single(state.Selections).Key;
+            using var generation = await storage.ReadOwnedAsync("deep.store.v2.sql-generation") ?? throw new InvalidDataException();
+            var scopeBytes = generation.Use(bytes => bytes.Slice(24, 64).ToArray());
+            byte[] encoded = [];
+            try
+            {
+                var originalName = ProtectedDid2MailboxGrantJournal.Acquisition(original);
+                var closedOriginal = ProtectedDid2MailboxGrantJournal.WithClosedUnresolved(original,
+                    ProtectedDid2MailboxGrantJournal.RequestExpiry(original), Network);
+                state.Entries[originalName] = closedOriginal;
+                ProtectedDid2MailboxGrantJournal.ClosePending(state, scopeName); state.Revision++;
+                while (state.Entries.Count < ProtectedDid2MailboxGrantJournal.MaximumEntries)
+                {
+                    var seed = Bytes(32, checked((byte)(0x10 + state.Entries.Count)));
+                    byte[] candidate;
+                    try
+                    {
+                        var parsed = ContactRouteClosureCodec.Decode(ProtectedDid2MailboxGrantJournal.OriginalRoute(original).Span);
+                        (_, _, candidate) = await PrepareRetainedGraphRequestAsync(original, parsed, network, seed);
+                    }
+                    finally { CryptographicOperations.ZeroMemory(seed); }
+                    ProtectedDid2MailboxGrantJournal.AddPending(state, candidate);
+                    var name = ProtectedDid2MailboxGrantJournal.Acquisition(candidate);
+                    var closed = ProtectedDid2MailboxGrantJournal.WithClosedUnresolved(candidate,
+                        ProtectedDid2MailboxGrantJournal.RequestExpiry(candidate), Network);
+                    state.Entries[name] = closed; CryptographicOperations.ZeroMemory(candidate);
+                    ProtectedDid2MailboxGrantJournal.ClosePending(state, scopeName);
+                    state.Revision++;
+                }
+                encoded = ProtectedDid2MailboxGrantJournal.Encode(state, Network, scopeBytes.AsSpan(0, 32), scopeBytes.AsSpan(32));
+                Assert.True(await storage.CompareExchangeAsync(ProtectedDid2MailboxGrantJournal.Slot, expected, encoded));
+                return state.Entries.Values.Max(entry => ProtectedDid2MailboxGrantJournal.RequestExpiry(entry));
+            }
+            finally { CryptographicOperations.ZeroMemory(original); CryptographicOperations.ZeroMemory(expected); CryptographicOperations.ZeroMemory(encoded); CryptographicOperations.ZeroMemory(scopeBytes); }
         }
 
         private async Task<byte[]> PrepareClosedGrantCandidateAsync(byte[] original, VerifiedDeepIdV2MailboxRouteClosure route)

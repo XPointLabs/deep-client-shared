@@ -46,13 +46,17 @@ internal static class ProtectedDid2MailboxGrantJournal
     private static string? NameOrNull(ReadOnlySpan<byte> value) =>
         value.IndexOfAnyExcept((byte)0) < 0 ? null : Convert.ToHexString(value);
 
-    // Incomplete successors cannot replace current. Only the initial candidate
-    // is resumed by ordinary acquisition; renewal adoption has its own owner lane.
+    // Incomplete successors cannot replace current. A closed acquisition is
+    // retained uncertainty, not authority to retry its original request. New
+    // work may append an independent holder/request without deleting that tail.
     internal static byte[]? AcquisitionForNewWork(State state, string scope)
     {
         if (!state.Selections.TryGetValue(scope, out var selection)) return null;
         if ((selection.Current ?? selection.Pending) is { } name) return state.Entries[name];
-        throw new IOException("Closed unresolved mailbox acquisition requires owned settlement; automatic reissuance is forbidden.");
+        if (selection.RetainedTail is null)
+            throw new InvalidDataException("Mailbox acquisition selection has no retained custody.");
+        RequireClosedContinuation(state, scope, selection.RetainedTail, null);
+        return null;
     }
 
     internal static byte[]? CurrentWinner(State state, string scope) =>
@@ -62,7 +66,8 @@ internal static class ProtectedDid2MailboxGrantJournal
     // Explicit owner renewal is bound to one original adopted acquisition.
     // Ordinary acquisition continues selecting current, never this candidate.
     // A retry after promotion returns that exact immediate successor rather
-    // than creating another request. Unknown/late intervening work stays pinned.
+    // than creating another request. Closed uncertainty remains linked; an
+    // unadopted late result cannot be skipped by new-work scheduling.
     internal static byte[]? AcquisitionForRenewal(State state, string scope, ReadOnlySpan<byte> originalAcquisition,
         MailboxCapabilityDomain domain = MailboxCapabilityDomain.Retrieve)
     {
@@ -78,13 +83,28 @@ internal static class ProtectedDid2MailboxGrantJournal
         if (current != originalName)
         {
             var successor = state.Entries[current];
-            if (Predecessor(successor) != originalName || selection.Pending is not null || selection.RetainedTail != current)
+            if (!IsAdoptedWinner(successor) || EntryScope(successor) != scope ||
+                selection.Pending is not null || selection.RetainedTail != current)
                 throw new IOException("Another acquisition continuation owns this renewal scope.");
+            RequireClosedContinuation(state, scope, Predecessor(successor), originalName);
             return successor;
         }
-        if (selection.RetainedTail != originalName)
-            throw new IOException("Unresolved or late acquisition custody pins renewal.");
+        RequireClosedContinuation(state, scope, selection.RetainedTail, originalName);
         return selection.Pending is { } pending ? state.Entries[pending] : null;
+    }
+
+    // Structural selection only. The owning caller still proves new-work
+    // eligibility/current authority and persists the independent candidate.
+    // Bound traversal even for a malformed in-memory test/caller graph.
+    private static void RequireClosedContinuation(State state, string scope, string? tail, string? predecessor)
+    {
+        for (var remaining = MaximumEntries; tail != predecessor; remaining--)
+        {
+            if (remaining == 0 || tail is null || !state.Entries.TryGetValue(tail, out var entry) ||
+                EntryScope(entry) != scope || !IsClosedUnresolved(entry))
+                throw new IOException("Unadopted or unrelated acquisition custody requires exact owned recovery.");
+            tail = Predecessor(entry);
+        }
     }
 
     // One never-adopted closed tail, either the sole acquisition or the direct

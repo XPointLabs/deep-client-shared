@@ -233,8 +233,11 @@ counter, not a derived replay floor.
 Ordinary acquisition uses `AcquisitionForNewWork`: current if selected, otherwise
 the initial pending candidate. A pending successor cannot replace current merely
 because a new message/poll arrives; renewal adoption remains a separate owner
-lane. If a scope has only closed history, ordinary acquisition returns bounded
-backpressure, not a new initial request. `CurrentWinner` is used after owned
+lane. Under [DR-0126](../../../docs/survival-program/decisions/DR-0126-independent-grant-after-unresolved-acquisition.md),
+a scope with only authenticated closed-unresolved history may append an
+independent new-work acquisition. Every old row remains linked and counted;
+an unadopted late candidate requires its existing exact recovery first.
+`CurrentWinner` is used after owned
 acquisition. `RequireRetainedWinner` searches retained winners by exact MCG3 hash and scope;
 it excludes an unpromoted candidate. Missing original custody rejects.
 Existing Store attempts, active Retrieve cycles and ACK pages use this exact
@@ -502,10 +505,11 @@ active read/ACK bypasses this step too. Only independently authenticated lower
 time reaching the original request expiry may close a pending candidate; the
 original request, holder seed, route, policy and possible-grant ceiling remain.
 The ordinary epoch/dependency-closed retirement selection then rereads actual
-roots. Request expiry alone still pins the namespace and cannot issue a fresh
-request. Only the existing complete exclusion/retirement producer can remove an
-eligible closed unused holder before a new read uses that original publication
-path. Before/after closure failure stops new work; cold retry reads the actual
+roots. Request expiry alone still cannot retire the old namespace. DR-0126 permits
+an independent new-work authorization while retaining that exact uncertainty;
+it never reissues the original request or replaces a prepared transport attempt.
+Only the complete exclusion/dependency-closed retirement producer can remove an
+eligible closed unused holder. Before/after closure failure stops new work; cold retry reads the actual
 pending/closed root. No journal layout, generation, bounds, grant/request lifetime,
 wire or signature change is introduced by this composition.
 
@@ -514,6 +518,19 @@ passed6/0/0/native0 with actual SQLCipher/native custody; the affected grant,
 renewal and retirement regression in `pending-maintenance-regression-01` passed
 48/0/0/native0. These are source diagnostics, not canonical full qualification or
 proof that an installed retained device has satisfied its exclusion prerequisites.
+The unconditional new-work refusal in that checkpoint is superseded by DR-0126.
+The matching `independent-grant-focused-03` passed16/0/0/native0 and
+`independent-grant-regression-01` passed58/0/0/native0 with actual SQLCipher/native
+custody. They cover independent Deposit/Retrieve holders, exact pending replay,
+late-original non-overwrite, reply/CAS/cold handovers, expired-route rejection,
+and the unchanged128-entry bound rejecting before issuer/read callbacks. The
+capacity fixture's signed closed metadata is not remote non-issuance evidence.
+The first new capacity-fixture build failed on a test argument type; its receipt
+is retained as `independent-grant-focused-02`, not a product/runtime failure.
+Source diagnostics are not canonical full or installed-device qualification.
+Mixed closed/adopted predecessor retirement remains a release blocker: current
+closed-tail retirement does not reclaim such ancestors. No eviction, reset or
+bound increase is permitted to hide that missing lifecycle qualification.
 
 `MailboxEpochExclusion.OpenUnderLeaseAsync` loans the actual held lease/current
 account to the same original-policy/current-host/native-DNH2 verifier. Only the
@@ -724,11 +741,12 @@ publication (including an independently bound archived predecessor) under the
 actual account lease. Current proof/network/host/time, private capability and
 holder authority still come from their original closed owners.
 
-The original must be an adopted Retrieve winner in the same scope. With current
-and retained tail both naming it, renewal either creates one pending successor
-or resumes that exact pending request. A closed-unresolved/late intervening tail
-pins renewal. After promotion, retrying the same original selector returns only
-its immediate adopted successor, with no further pending/tail continuation.
+The original must be an adopted Retrieve winner in the same scope. Renewal
+either creates one independent pending successor or resumes that exact pending
+request. DR-0126 permits intervening closed-unresolved rows without removing them;
+an unadopted late result still pins new scheduling. After promotion, retrying the
+same original selector returns only the adopted successor whose intervening
+predecessors are all closed-unresolved, with no further pending/tail continuation.
 An absent original, Deposit in this explicit Retrieve lane, unrelated selector
 or advanced chain rejects before request authoring. The explicit Retrieve
 acquisition API keeps selecting current while renewal is pending; it never
@@ -765,7 +783,9 @@ installation and final currentness remain independent and mandatory.
 The existing internal acquisition selector also admits an explicitly closed
 Deposit direction for this owner; the explicit Retrieve method stays Retrieve-only.
 Each new acquisition retains its immutable original and protected predecessor.
-Pending work resumes its same XMG2; closed-unresolved/late tail pins the scope.
+Pending work resumes its same XMG2; DR-0126 keeps closed uncertainty linked while
+allowing a distinct independent new-work grant. Unadopted late work still pins
+the scope until its exact owner recovery completes.
 Selection changes only after exact successor verification/read-back. A cold retry
 after promotion installs that selected winner without another acquisition.
 There is no new local generation, wire, public selector or legacy reader.

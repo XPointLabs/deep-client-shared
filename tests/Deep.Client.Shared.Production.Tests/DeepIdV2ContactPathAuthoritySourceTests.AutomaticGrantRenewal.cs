@@ -39,8 +39,97 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         await fixture.CheckAutomaticDepositRenewalAsync(fault);
     }
 
+    [Theory]
+    [InlineData("none")]
+    [InlineData("reply")]
+    [InlineData("selection")]
+    [InlineData("after-sql")]
+    [InlineData("expired-route")]
+    public async Task Did2IndependentGrant_DepositKeepsClosedOriginalAcrossSeparateHolderAndColdHandover(string fault)
+    {
+        await using var fixture = await Fixture.CreateAsync(withPeer: true, encryptedStorage: true);
+        await fixture.CheckIndependentDepositAfterUnknownAsync(fault);
+    }
+
     private sealed partial class Fixture
     {
+        internal async Task CheckIndependentDepositAfterUnknownAsync(string fault)
+        {
+            var source = Source(); var plan = await accounts.ReadOwnPermanentContactPlanAsync();
+            using var threshold = new OwnedRouteThreshold(this);
+            var route = await EnsureRoute(plan.Intent.ToArray(), Did2OwnedPermanentContactPlan.Configuration(), threshold, reopen: false);
+            var replicas = new OwnedPublicationReplica(this, route);
+            _ = await accounts.EnsureOwnPermanentContactPublishedAsync(source, threshold, new OwnedPublicationSource(this, route), replicas);
+            var address = (await accounts.GetCurrentAsync())!.PermanentId;
+            var lost = new OwnedGrantTransport(this) { LoseResponse = true };
+            await Assert.ThrowsAsync<IOException>(async () => _ = await Acquire(lost));
+            ulong expiry;
+            using (var state = await ReadPeerGrantsAsync()) expiry = ProtectedDid2MailboxGrantJournal.RequestExpiry(Assert.Single(state.Entries).Value);
+            AdvanceStoreSettlementClock(expiry + 10);
+            var closedOwner = ReopenGrantReader();
+            Assert.Equal(1, await closedOwner.CloseExpiredMailboxAcquisitionsAsync(GrantReaderSource(closedOwner)));
+            byte[] original;
+            using (var state = await ReadPeerGrantsAsync()) original = Assert.Single(state.Entries).Value.ToArray();
+            try
+            {
+                if (fault == "expired-route")
+                {
+                    var expiryBound = new[] {
+                        BinaryPrimitives.ReadUInt64BigEndian(route.Route.Reachability.Field(17).Span),
+                        BinaryPrimitives.ReadUInt64BigEndian(route.Route.Authorization.Field(13).Span),
+                        BinaryPrimitives.ReadUInt64BigEndian(route.Route.Route.Field(18).Span),
+                        BinaryPrimitives.ReadUInt64BigEndian(route.Route.Successor.Field(11).Span),
+                        BinaryPrimitives.ReadUInt64BigEndian(route.Route.Selection.Field(9).Span) }.Min();
+                    AdvanceStoreSettlementClock(expiryBound + 10);
+                    var unused = new OwnedGrantTransport(this);
+                    await RequireRouteRejectionAsync(async () => _ = await Acquire(unused));
+                    using var unchanged = await ReadPeerGrantsAsync();
+                    Assert.Equal(original, Assert.Single(unchanged.Entries).Value);
+                    Assert.Equal(1, lost.Calls); Assert.Equal(0, unused.Calls);
+                    return; // Independent authorization cannot revive an expired Deposit route.
+                }
+                var independent = new OwnedGrantTransport(this) { LoseResponse = fault == "reply" };
+                if (fault != "none")
+                {
+                    var point = fault switch
+                    {
+                        "selection" => (Did2MailboxInstallationFailpoint?)Did2MailboxInstallationFailpoint.BeforeSelection,
+                        "after-sql" => Did2MailboxInstallationFailpoint.AfterSql,
+                        _ => null
+                    };
+                    var hit = fault == "reply";
+                    using (Did2MailboxInstallationTestHooks.Push(actual =>
+                        { if (actual == point) { hit = true; throw new IOException("Interrupted independent Deposit handover."); } }))
+                        await Assert.ThrowsAsync<IOException>(async () => _ = await Acquire(independent));
+                    Assert.True(hit); Assert.Equal(1, independent.Calls);
+                    independent.LoseResponse = false;
+                }
+                var winner = await Acquire(independent);
+                Assert.Equal(MailboxCapabilityDomain.Deposit, winner.Domain);
+                using (var state = await ReadPeerGrantsAsync())
+                {
+                    Assert.Equal(2, state.Entries.Count);
+                    Assert.Equal(original, state.Entries[ProtectedDid2MailboxGrantJournal.Acquisition(original)]);
+                    var current = Assert.Single(state.Selections).Value.Current!;
+                    Assert.Equal(Convert.ToHexString(SHA256.HashData(winner.ExactXmg2.Span)), current);
+                    Assert.False(ProtectedDid2MailboxGrantJournal.Seed(original).SequenceEqual(ProtectedDid2MailboxGrantJournal.Seed(state.Entries[current])));
+                    Assert.True(ProtectedDid2MailboxGrantJournal.IsClosedUnresolved(state.Entries[ProtectedDid2MailboxGrantJournal.Acquisition(original)]));
+                }
+                Assert.Equal(fault == "reply" ? 2 : 1, independent.Calls); Assert.Equal(1, lost.Calls);
+                Assert.Equal(winner.ExactXmc2.ToArray(), (await Acquire(independent)).ExactXmc2.ToArray());
+                Assert.Equal(fault == "reply" ? 2 : 1, independent.Calls); Assert.Equal(1, lost.Calls);
+            }
+            finally { CryptographicOperations.ZeroMemory(original); }
+
+            async Task<VerifiedDeepIdV2MailboxGrant> Acquire(OwnedGrantTransport issuer)
+            {
+                var reopened = ReopenGrantReader(); var fresh = GrantReaderSource(reopened);
+                var resolved = await reopened.ResolvePermanentContactAsync(address, fresh,
+                    new SyntheticPermanentRead(this, fresh, replicas.ExactPublication));
+                return await reopened.AcquirePermanentContactDepositGrantAsync(resolved, fresh, issuer);
+            }
+        }
+
         internal async Task CheckAutomaticDepositRenewalAsync(string fault)
         {
             var source = Source(); var plan = await accounts.ReadOwnPermanentContactPlanAsync();
@@ -244,17 +333,21 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                     AdvanceTo(checked(BinaryPrimitives.ReadUInt64BigEndian(request.Field(10).Span) + 31));
                     var closing = ReopenAccount();
                     Assert.Equal(1, await closing.CloseExpiredMailboxAcquisitionsAsync(Source(closing)));
-                    using var before = await storage.ReadOwnedAsync(ProtectedDid2MailboxGrantJournal.Slot) ?? throw new InvalidDataException();
-                    var unusedIssuer = new OwnedGrantTransport(this, selfRetrieve: true);
-                    await Assert.ThrowsAsync<IOException>(() => SynchronizeNativeSender(unusedIssuer, terminal));
-                    Assert.Equal(0, unusedIssuer.Calls);
-                    using var after = await storage.ReadOwnedAsync(ProtectedDid2MailboxGrantJournal.Slot) ?? throw new InvalidDataException();
-                    Assert.Equal(before.Use(bytes => bytes.ToArray()), after.Use(bytes => bytes.ToArray()));
+                    var closedName = Convert.ToHexString(SHA256.HashData(successorIssuer.OriginalRequest.Span));
+                    byte[] closedOriginal;
+                    using (var before = await ReadPeerGrantsAsync(own: true)) closedOriginal = before.Entries[closedName].ToArray();
+                    var independent = new OwnedGrantTransport(this, selfRetrieve: true);
+                    Assert.Equal(0, (await SynchronizeNativeSender(independent, terminal)).ProcessedEnvelopes);
+                    Assert.Equal(1, independent.Calls); Assert.Equal(1, successorIssuer.Calls);
                     using var closed = await ReadPeerGrantsAsync(own: true);
+                    Assert.Equal(3, closed.Entries.Count);
                     Assert.Null(Assert.Single(closed.Selections).Value.Pending);
-                    Assert.Equal(ProtectedDid2MailboxGrantJournal.Acquisition(original), Assert.Single(closed.Selections).Value.Current);
-                    Assert.Contains(closed.Entries.Values, ProtectedDid2MailboxGrantJournal.IsClosedUnresolved);
-                    return; // Unknown issuance is not reminted or claimed settled.
+                    Assert.Equal(Convert.ToHexString(SHA256.HashData(independent.OriginalRequest.Span)), Assert.Single(closed.Selections).Value.Current);
+                    Assert.Equal(closedOriginal, closed.Entries[closedName]);
+                    Assert.Equal(original, closed.Entries[ProtectedDid2MailboxGrantJournal.Acquisition(original)]);
+                    Assert.True(ProtectedDid2MailboxGrantJournal.IsClosedUnresolved(closed.Entries[closedName]));
+                    CryptographicOperations.ZeroMemory(closedOriginal);
+                    return; // A distinct authorization neither retries nor settles the original unknown issuance.
                 }
                 successorIssuer.LoseResponse = false;
                 Assert.Equal(0, (await SynchronizeNativeSender(successorIssuer, terminal)).ProcessedEnvelopes);
