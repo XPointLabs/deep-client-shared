@@ -1,5 +1,16 @@
 # Deep Client Shared architecture
 
+## App-scoped private CA failure diagnostics
+
+Explicit private-root trust keeps hostname, server EKU, current chain and online
+revocation validation. A rejected chain now throws `AuthenticationException`
+with a closed flag/category instead of discarding the cause behind `false`.
+This still aborts TLS; it does not accept a chain, supply alternate trust or
+change public system-CA policy. Only known chain flags and bounded generic
+revocation categories may enter the message, never certificates, origins,
+request contents or raw provider exceptions. UI consumers must not replace a
+private-profile rejection with a diagnostic that permits only public DNS HTTPS.
+
 ## Production test execution
 
 The production solution retains the standard xUnit discovery, case names,

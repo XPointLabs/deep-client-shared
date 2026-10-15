@@ -1,5 +1,6 @@
 using System.Net.Security;
 using System.Net.Sockets;
+using System.Security.Authentication;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text.RegularExpressions;
@@ -722,15 +723,16 @@ public sealed class HttpServiceTransportFactory
         SslPolicyErrors errors,
         ReadOnlySpan<byte> exactRoot)
     {
-        if (certificate is null ||
-            (errors & (SslPolicyErrors.RemoteCertificateNameMismatch |
-                SslPolicyErrors.RemoteCertificateNotAvailable)) != 0)
-            return false;
+        if (certificate is null || (errors & SslPolicyErrors.RemoteCertificateNotAvailable) != 0)
+            throw new AuthenticationException("App-scoped TLS rejected (RemoteCertificateNotAvailable).");
+        if ((errors & SslPolicyErrors.RemoteCertificateNameMismatch) != 0)
+            throw new AuthenticationException("App-scoped TLS rejected (RemoteCertificateNameMismatch).");
         if (errors == SslPolicyErrors.None)
             return true;
         if (errors != SslPolicyErrors.RemoteCertificateChainErrors)
-            return false;
+            throw new AuthenticationException("App-scoped TLS rejected (OtherChainError).");
 
+        string rejection;
         try
         {
             using var leaf = X509CertificateLoader.LoadCertificate(certificate.GetRawCertData());
@@ -760,7 +762,8 @@ public sealed class HttpServiceTransportFactory
                         chain.ChainPolicy.ExtraStore.Add(intermediate);
                     }
                 }
-                return chain.Build(leaf);
+                if (chain.Build(leaf)) return true;
+                rejection = ClassifyPrivateCertificateFailure(chain.ChainStatus);
             }
             finally
             {
@@ -768,10 +771,33 @@ public sealed class HttpServiceTransportFactory
                     intermediate.Dispose();
             }
         }
-        catch (Exception)
+        catch (PlatformNotSupportedException) { rejection = "PlatformNotSupported"; }
+        catch (Exception) { rejection = "PrivateRootValidationError"; }
+        // Still rejects the TLS handshake. Only closed classifications cross
+        // the boundary, never certificate names, origins or exception messages.
+        throw new AuthenticationException($"App-scoped TLS rejected ({rejection}).");
+    }
+
+    internal static string ClassifyPrivateCertificateFailure(IEnumerable<X509ChainStatus> statuses)
+    {
+        var rows = statuses.ToArray();
+        var flags = rows.Aggregate(X509ChainStatusFlags.NoError, (value, row) => value | row.Status);
+        var labels = new List<string>();
+        foreach (var flag in new[] { X509ChainStatusFlags.Revoked, X509ChainStatusFlags.NotTimeValid,
+            X509ChainStatusFlags.UntrustedRoot, X509ChainStatusFlags.PartialChain,
+            X509ChainStatusFlags.RevocationStatusUnknown, X509ChainStatusFlags.OfflineRevocation })
+            if ((flags & flag) != 0) labels.Add(flag.ToString());
+        foreach (var row in rows)
         {
-            return false;
+            if ((row.Status & X509ChainStatusFlags.RevocationStatusUnknown) == 0 ||
+                row.StatusInformation is not { Length: > 0 and <= 4096 } detail) continue;
+            if (detail.Contains("cleartext", StringComparison.OrdinalIgnoreCase)) labels.Add("CleartextBlocked");
+            else if (detail.Contains("No CRLs found", StringComparison.OrdinalIgnoreCase) ||
+                detail.Contains("no valid CRL found", StringComparison.OrdinalIgnoreCase)) labels.Add("CrlUnavailable");
+            else if (detail.Contains("Could not determine revocation status", StringComparison.OrdinalIgnoreCase))
+                labels.Add("RevocationUndetermined");
         }
+        return labels.Count == 0 ? "OtherChainError" : string.Join(" ", labels.Distinct(StringComparer.Ordinal));
     }
 
     private static bool IsCertificateAuthority(X509Certificate2 certificate)
