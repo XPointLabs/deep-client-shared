@@ -57,7 +57,7 @@ public sealed partial class DeepIdV2AccountService
                 await ResolvePermanentContactAsync(address, source, contactRead, ct).ConfigureAwait(false);
             using var draft = await PrepareOwnInitialContactDraftAsync(intent, resolved, source, ct).ConfigureAwait(false);
             initial = draft.ExactInit.ToArray(); hello = draft.ExactHello.ToArray();
-            using var completed = await CompleteOwnInitialContactAsync(intent, resolved, source, claimOnion, ct).ConfigureAwait(false);
+            using var completed = await CompletePreparedOwnInitialContactAsync(intent, resolved, source, claimOnion, draft, ct).ConfigureAwait(false);
             var refreshed = await source.VerifyPermanentContactAsync(resolved.Candidate, ct).ConfigureAwait(false);
             var scope = await EnsureOwnSenderMessagingAsync(intent, initial, hello, refreshed.Contact.Authorization.Freshness, source, ct).ConfigureAwait(false);
             var stored = await DeliverOwnInitialContactAsync(intent, resolved, source, grants, transport, ct, contactRead).ConfigureAwait(false);

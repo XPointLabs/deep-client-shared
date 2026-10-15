@@ -102,10 +102,25 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         if (reading.SampleSeconds < prior.MonotonicSample || !FixedRoute(reading.BootId.Span, prior.BootId.Span))
             throw new CryptographicException("Owned claim preparation crossed protected clock continuity.");
         var time = await contact.Route.ReadCurrentTimeAsync(ct).ConfigureAwait(false);
-        if (time.MonotonicSample < reading.SampleSeconds || !FixedRoute(time.BootId.Span, reading.BootId.Span) ||
-            contact.Candidate.Request.IssuedAtUnixSeconds > time.LowerUnixSeconds ||
-            contact.Candidate.Request.ExpiresAtUnixSeconds <= time.UpperUnixSeconds)
-            throw new CryptographicException("Owned claim preparation no longer has a current contact read.");
+        RequireCurrentClaimRead(time.MonotonicSample, time.BootId.Span, reading.SampleSeconds, reading.BootId.Span,
+            contact.Candidate.Request.IssuedAtUnixSeconds, contact.Candidate.Request.ExpiresAtUnixSeconds,
+            time.LowerUnixSeconds, time.UpperUnixSeconds);
         return time;
+    }
+
+    // Same predicates and order as the former combined guard. Labels contain
+    // no clock values; they distinguish failure without changing authority.
+    internal static void RequireCurrentClaimRead(ulong routeSample, ReadOnlySpan<byte> routeBoot,
+        ulong freshnessSample, ReadOnlySpan<byte> freshnessBoot, ulong issued, ulong expires,
+        ulong lower, ulong upper)
+    {
+        if (routeSample < freshnessSample)
+            throw new CryptographicException("Owned claim route clock precedes the protected freshness reading.");
+        if (!FixedRoute(routeBoot, freshnessBoot))
+            throw new CryptographicException("Owned claim route clock changed its protected boot.");
+        if (issued > lower)
+            throw new CryptographicException("Owned claim read issuance exceeds trusted lower time.");
+        if (expires <= upper)
+            throw new CryptographicException("Owned claim read expiry does not cover trusted upper time.");
     }
 }

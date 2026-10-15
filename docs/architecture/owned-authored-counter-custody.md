@@ -992,6 +992,29 @@ and authorizes no successor. Full contact stopped payload/key/audit retention
 remains open. Matching source evidence is in the
 [S04 lifecycle checkpoint](../testing/s04-lifecycle-2026-10-11.md#initial--contactaccept-original-retry-expiry-before-recipient-refresh).
 
+## Contact start same-command draft reuse — source candidate
+
+`StartContactAsync` prepares the exact protected draft once and passes its owned
+bytes to private completion instead of performing the same preparation twice.
+Standalone completion still prepares its own draft. This is not an authority
+cache: current protected draft, endpoint, clock and claim checks remain inside
+completion and claim preparation, including changed/stopped draft rejection.
+The caller-owned intent is copied before awaits, and temporary event bytes are
+zeroed as before. No journal, wire, lifetime, retry or public API changes.
+
+The final claim-read guard retains its previous ordered predicates, but emits
+separate fixed reasons for route-sample reversal, boot mismatch, issuance above
+trusted lower time and expiry at/below trusted upper time. The prior Android
+IL509 failure only identifies the old combined guard; it does not prove which
+predicate failed. Pure guard tests do not create signed time or device evidence.
+
+Focused source runs `prepared-contact-current-read-01` (10/0/0/native0) and
+`prepared-contact-application-02` (2/0/0/native0) passed: five pure guard cases
+(including512 decision comparisons), native completion, original Store/cold
+rollover/missing-evidence refusal, and the two actual owned application
+Store/receive/materialization/lost-ACK fixture variants. These in-process signed
+fixtures do not prove socket/device delivery or quantify an Android speedup.
+
 ## S04 native SQL read-path performance — source candidate
 
 Exact operation/receive point reads authenticate the complete current journal

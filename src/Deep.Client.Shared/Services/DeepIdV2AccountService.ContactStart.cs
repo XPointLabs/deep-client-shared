@@ -37,10 +37,26 @@ public sealed partial class DeepIdV2AccountService
     {
         ArgumentNullException.ThrowIfNull(contact); ArgumentNullException.ThrowIfNull(source);
         source.RequireAccountOwner(this); ProtectedDph2PreClaimJournal.RequireIntent(logicalIntent.Span);
-        var intent = logicalIntent.ToArray(); byte[] initial = [], hello = [];
+        var intent = logicalIntent.ToArray();
         try
         {
             using var draft = await PrepareOwnInitialContactDraftAsync(intent, contact, source, ct).ConfigureAwait(false);
+            return await CompletePreparedOwnInitialContactAsync(intent, contact, source, claimOnion, draft, ct).ConfigureAwait(false);
+        }
+        finally { CryptographicOperations.ZeroMemory(intent); }
+    }
+
+    // StartContact already prepared this exact owned draft in the same command.
+    // Reuse only its bytes, not its authority: the protected draft, endpoint,
+    // clock and claim checks below still run under their current owner leases.
+    private async Task<DeepIdV2InitialSessionCommit> CompletePreparedOwnInitialContactAsync(
+        ReadOnlyMemory<byte> logicalIntent, VerifiedDeepIdV2PermanentContactResolveClosure contact,
+        DeepIdV2ContactPathAuthoritySource source, IExactContactResolveOnionTransport? claimOnion,
+        OwnedDid2InitialContactDraft draft, CancellationToken ct)
+    {
+        var intent = logicalIntent.ToArray(); byte[] initial = [], hello = [];
+        try
+        {
             initial = draft.ExactInit.ToArray(); hello = draft.ExactHello.ToArray();
             var fresh = await source.VerifyPermanentContactAsync(contact.Candidate, ct).ConfigureAwait(false);
             using var verifier = OpenVerifier();
