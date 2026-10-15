@@ -878,7 +878,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             // Only the genuine current-authority fixture override changes
             // this scenario's policy. Existing initial-policy inputs remain
             // unchanged; the production verifier still authenticates PMA2.
-            var exactPolicy = objectHorizonClosure?.ExactOrderedPma2Chain[^1] ?? operational.ExactPma2;
+            var exactPolicy = objectHorizonClosure?.ExactOrderedPma2Chain[^1] ?? successor?.ExactPma2 ?? operational.ExactPma2;
             var invalid = evidence[0].Signature.ToArray(); invalid[^1] ^= 1;
             await Assert.ThrowsAsync<CryptographicException>(async () => await DeepIdV2MailboxGrantIssuanceVerifier.VerifyAsync(
                 route.Network, route.NetworkAuthority, exactPolicy, request.ExactXmg2, route.ExactRouteClosure,

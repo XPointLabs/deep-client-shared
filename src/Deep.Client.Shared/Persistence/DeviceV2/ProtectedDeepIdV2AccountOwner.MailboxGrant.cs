@@ -431,7 +431,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 deadline.CancelAfter(TimeSpan.FromSeconds(30));
                 var custody = await SqliteDeepIdV2AccountGeneration.OpenBorrowedOnionCustodyAsync(storage, lease,
                     sqlStatePath, current, source.AccountOwner, held, deadline.Token).ConfigureAwait(false);
-                var dispatch = new Did2OwnedContactTransportContext(custody, fresh.Network, held);
+                var dispatch = new Did2OwnedContactTransportContext(custody, fresh.Network, fresh.Authority, held);
                 var returned = await transport.AcquireAsync(request, route, dispatch, deadline.Token).AsTask()
                     .WaitAsync(deadline.Token).ConfigureAwait(false);
                 if (returned.Length != 510) throw new InvalidDataException("Mailbox success exceeds its exact bound.");

@@ -206,7 +206,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 route.Network.MaximumRecordExpiryUnixSeconds,
                 U64(route.Route.Reachability.Field(17).Span), U64(route.Route.Authorization.Field(13).Span),
                 U64(route.Route.Route.Field(18).Span), U64(route.Route.Successor.Field(11).Span),
-                U64(route.Route.Projection.Field(12).Span), U64(route.Route.Selection.Field(9).Span) }.Min();
+                U64(route.Route.Selection.Field(9).Span) }.Min();
             if (sample.LowerUnixSeconds > sample.UpperUnixSeconds ||
                 sample.LowerUnixSeconds < grant.NotBeforeUnixSeconds ||
                 sample.LowerUnixSeconds < policy.NotBeforeUnixSeconds || upper >= expiry)

@@ -175,7 +175,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 try
                 {
                     var expiry = Math.Min(checked(authorization.TrustedLowerUnixSeconds + 86_400),
-                        Math.Min(fresh.Network.MaximumRecordExpiryUnixSeconds, Math.Min(dca.Record.ExpiresAtUnixSeconds,
+                        Math.Min(fresh.Authority.ExpiresAt, Math.Min(dca.Record.ExpiresAtUnixSeconds,
                             current.Verified.PublicEvidence.Binding.Identity.ActiveDevices.Single().Certificate.ExpiresAtUnixSeconds)));
                     var xra = await DeepIdV2ContactRouteAuthor.AuthorAdvertisementAsync(authorization, fresh.Network, fresh.Authority,
                         current.Verified.DeviceSecrets, configuration.Quota, configuration.AntiSpamHash, keyId,
@@ -215,7 +215,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 budget.CancelAfter(TimeSpan.FromSeconds(30));
                 var custody = await SqliteDeepIdV2AccountGeneration.OpenBorrowedOnionCustodyAsync(storage, lease,
                     sqlStatePath, current, source.AccountOwner, held, budget.Token).ConfigureAwait(false);
-                var dispatch = new Did2OwnedContactTransportContext(custody, fresh.Network, held);
+                var dispatch = new Did2OwnedContactTransportContext(custody, fresh.Network, fresh.Authority, held);
                 var response = await thresholdSource.FetchAsync(pendingRequest,
                     authorization, fresh.Network, fresh.Authority, source.RendezvousTrustedTime, dispatch, budget.Token).AsTask()
                     .WaitAsync(budget.Token).ConfigureAwait(false) ?? throw new CryptographicException("The route threshold response is absent.");

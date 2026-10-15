@@ -88,7 +88,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 try
                 {
                     var nextExpiry = Math.Min(checked(authorization.TrustedLowerUnixSeconds + 86_400),
-                        Math.Min(fresh.Network.MaximumRecordExpiryUnixSeconds, Math.Min(dca.Record.ExpiresAtUnixSeconds,
+                        Math.Min(fresh.Authority.ExpiresAt, Math.Min(dca.Record.ExpiresAtUnixSeconds,
                             current.Verified.PublicEvidence.Binding.Identity.ActiveDevices.Single().Certificate.ExpiresAtUnixSeconds)));
                     var xra = await DeepIdV2ContactRouteAuthor.AuthorAdvertisementSuccessorAsync(authorization, fresh.Network,
                         fresh.Authority, current.Verified.DeviceSecrets, prior.Record(1), configuration.AntiSpamHash, keyId,
@@ -249,7 +249,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 await RecheckRouteFreshnessAsync(current, source, fresh, held, first, cancellation).ConfigureAwait(false);
                 var custody = await SqliteDeepIdV2AccountGeneration.OpenBorrowedOnionCustodyAsync(storage, lease,
                     sqlStatePath, current, source.AccountOwner, held, cancellation).ConfigureAwait(false);
-                return new(custody, fresh.Network, held);
+                return new(custody, fresh.Network, fresh.Authority, held);
             }
         }
         finally

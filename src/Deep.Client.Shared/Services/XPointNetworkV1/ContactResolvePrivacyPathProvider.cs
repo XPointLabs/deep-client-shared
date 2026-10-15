@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using Deep.Client.Shared.Persistence.XPointNetworkV1;
+using Deep.Client.Shared.Services.ContactV2;
 using Deep.Protocol.ContactV1;
 using Deep.Protocol.DeepExtension.PrivacyRouting;
 using Deep.Protocol.AccountDirectoryV1;
@@ -299,7 +300,8 @@ public sealed class ContactResolvePrivacyPathProvider : IPrivacyMailboxPathProvi
     internal async ValueTask<ContactResolvePreparedPath> PrepareWithAuthorityAsync(
         OnionOperation operation, ContactResolveCanonicalPathRequest request,
         ReadOnlyMemory<byte> requiredExitReplicaId, ContactResolvePathAuthority authority, CancellationToken cancellationToken,
-        VerifiedMailboxRetainedReadRequestV2? retainedReadRequest = null)
+        VerifiedMailboxRetainedReadRequestV2? retainedReadRequest = null,
+        Did2OwnedContactTransportContext? ownedOperation = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (operation != OnionOperation.ContactResolve)
@@ -310,6 +312,12 @@ public sealed class ContactResolvePrivacyPathProvider : IPrivacyMailboxPathProvi
         network.EnsureCurrent();
         if (!ReferenceEquals(network, placement.Network))
             throw Fail("placement-context-mismatch", "Contact placement belongs to another verified network context.");
+        if (ownedOperation is not null)
+        {
+            ownedOperation.RequireActive();
+            if (!ReferenceEquals(network, ownedOperation.Network))
+                throw Fail("placement-context-mismatch", "Owned transport belongs to another verified network context.");
+        }
         if (retainedReadRequest is not null)
         {
             if (request.RequestKind != ContactServiceRequestKind.AcquireMailboxGrant || request.HasExplicitPlacementBinding ||
@@ -317,14 +325,22 @@ public sealed class ContactResolvePrivacyPathProvider : IPrivacyMailboxPathProvi
                 throw Fail("retained-request-mismatch", "Retained request authority belongs to different exact request bytes.");
             await retainedReadRequest.EnsureCurrentAsync(cancellationToken).ConfigureAwait(false);
         }
+        var projectionMatches = network.BindsProjection(request.ProjectionReference);
+        if (!request.HasExplicitPlacementBinding && retainedReadRequest is null && ownedOperation is not null)
+        {
+            network.RequireCurrentMailboxAssignment(ownedOperation.Authority, request.ProjectionReference);
+            projectionMatches = true;
+        }
+        var logicalProposal = request.RequestKind == ContactServiceRequestKind.CoordinateContact &&
+            ContactCoordinationOnionCodec.DecodeRequest(request.ExactRequest.Span).Target == ContactCoordinationTarget.Route;
         if (!Fixed(request.NetworkId.Span, network.NetworkId.Span) ||
             request.HasExplicitPlacementBinding &&
                 (!Fixed(request.ViewHash.Span, placement.ViewHash.Span) ||
                  !Fixed(request.PlacementHash.Span, placement.PlacementHash.Span)) ||
             !request.HasExplicitPlacementBinding && retainedReadRequest is null &&
-                !network.BindsProjection(request.ProjectionReference) ||
+                !projectionMatches ||
             !placement.Binds(request.RequestKind, request.ShardKey) ||
-            request.ExpiresAtUnixSeconds > placement.ValidUntilUnixSeconds)
+            (!logicalProposal && request.ExpiresAtUnixSeconds > placement.ValidUntilUnixSeconds))
             throw Fail("placement-request-mismatch",
                 "The canonical ContactResolve request does not bind its exact current NETCODEC placement.");
 

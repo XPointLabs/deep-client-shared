@@ -46,7 +46,7 @@ internal sealed class DeepIdV2PublicationOnionTransport : IExactContactResolveOn
             request.RequestKind, request.ShardKey);
         var authority = new ContactResolvePathAuthority(operation.Network, placement);
         var prepared = await paths.PrepareWithAuthorityAsync(OnionOperation.ContactResolve,
-            request, requiredExitReplicaId, authority, cancellationToken, operation.RetainedReadRequest).ConfigureAwait(false);
+            request, requiredExitReplicaId, authority, cancellationToken, operation.RetainedReadRequest, operation).ConfigureAwait(false);
         operation.RequireActive();
         var result = await SendPreparedAsync(prepared, operation, cancellationToken).ConfigureAwait(false);
         operation.RequireActive();

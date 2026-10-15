@@ -290,7 +290,6 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             BinaryPrimitives.ReadUInt64BigEndian(route.Authorization.Field(13).Span),
             BinaryPrimitives.ReadUInt64BigEndian(route.Route.Field(18).Span),
             BinaryPrimitives.ReadUInt64BigEndian(route.Successor.Field(11).Span),
-            BinaryPrimitives.ReadUInt64BigEndian(route.Projection.Field(12).Span),
             BinaryPrimitives.ReadUInt64BigEndian(route.Selection.Field(9).Span) }.Min();
         if (grant.Domain != MailboxCapabilityDomain.Deposit || grant.Lifecycle != MailboxCapabilityLifecycle.Active ||
             !FixedRoute(grant.NetworkId.Span, scope.Network) ||

@@ -300,6 +300,13 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                     }
                     var nextAuthorized = await DeepIdV2PublicationAuthorityAuthor.AuthorThresholdSuccessorAsync(nextRoute,
                         nextPublication.WireRequest, priorPublication, PublicationWitnesses());
+                    var opaqueRequest = Xpu1Codec.Decode(nextAuthorized.ExactXpu1.Span);
+                    var opaquePlacement = Deep.Protocol.XPointNetworkV1.ContactServicePlacementFactory.Create(current.Network,
+                        Deep.Protocol.XPointNetworkV1.ContactServiceRequestKind.PublishInvite, opaqueRequest.LocatorHash);
+                    var opaque = await Xpa1PublicationAuthorizationVerifier.VerifyAsync(opaqueRequest, current.Authority,
+                        current.Proof, opaquePlacement, time, default);
+                    Assert.Equal(generation, opaque.Generation);
+                    await opaque.EnsureCurrentAsync();
                     var issuerAuthorized = await DeepIdV2PublicationAuthorityAuthor.AuthorIssuerThresholdSuccessorAsync(nextRoute,
                         nextPublication.WireRequest, issuerPredecessor, PublicationWitnesses());
                     Assert.Equal(nextAuthorized.ExactXpu1.ToArray(), issuerAuthorized.ExactXpu1.ToArray());
