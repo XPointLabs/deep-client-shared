@@ -37,6 +37,10 @@ internal sealed class Did2ContactCoordinationOnionSource(DeepIdV2ContactPathAuth
         SendAsync(ContactCoordinationTarget.Publication,
             ContactPublicationAuthorityWireCodec.EncodeRequest(exactPendingRequest), operation, cancellationToken);
 
+    public ValueTask<ReadOnlyMemory<byte>> FetchLeaseAsync(PublicationLeaseWireRequest request,
+        Did2OwnedContactTransportContext operation, CancellationToken cancellationToken) =>
+        SendAsync(ContactCoordinationTarget.PublicationLease, request.CanonicalBytes, operation, cancellationToken);
+
     private async ValueTask<ReadOnlyMemory<byte>> SendAsync(ContactCoordinationTarget target,
         ReadOnlyMemory<byte> exactBody, Did2OwnedContactTransportContext operation,
         CancellationToken cancellationToken)

@@ -105,6 +105,13 @@ public sealed class ContactResolveCanonicalPathRequest
         if (exactRequest[..4].SequenceEqual("XCA2"u8))
         {
             var request = ContactCoordinationOnionCodec.DecodeRequest(exactRequest);
+            if (request.Target == ContactCoordinationTarget.PublicationLease)
+            {
+                var leaseRequest = DeepIdV2PublicationLeaseWireCodec.DecodeRequest(request.ExactBody.Span);
+                return new(request.CanonicalBytes.Span, request.NetworkId.Span, leaseRequest.ViewHash.Span,
+                    [], ContactServiceRequestKind.CoordinateContact, request.GatewayShard.Span,
+                    request.ExpiresAtUnixSeconds, false, []);
+            }
             var expiry = new byte[8];
             System.Buffers.Binary.BinaryPrimitives.WriteUInt64BigEndian(expiry, request.ExpiresAtUnixSeconds);
             return CreateProjectionBound(request.CanonicalBytes.Span, request.NetworkId.Span,
@@ -121,10 +128,20 @@ public sealed class ContactResolveCanonicalPathRequest
         if (exactRequest[..4].SequenceEqual("XPU1"u8))
         {
             var request = Xpu1Codec.Decode(exactRequest);
+            if (request.UsageLimit != 1)
+                throw new CryptographicException("Reusable publication requires a fresh publication lease.");
             return Create(request.CanonicalBytes.Span, request.NetworkId.Span,
                 request.ViewHash.Span, request.PlacementHash.Span,
                 ContactServiceRequestKind.PublishInvite, request.LocatorHash.Span,
                 request.ExpiresAtUnixSeconds);
+        }
+        if (exactRequest[..4].SequenceEqual("XPL1"u8))
+        {
+            var lease = DeepIdV2PublicationLeaseCodec.Decode(exactRequest);
+            return Create(lease.CanonicalBytes.Span, lease.NetworkId.Span,
+                lease.ViewHash.Span, lease.PlacementHash.Span,
+                ContactServiceRequestKind.PublishInvite, lease.OriginalRequest.LocatorHash.Span,
+                lease.ExpiresAtUnixSeconds);
         }
         if (exactRequest[..4].SequenceEqual("XPK1"u8))
         {
@@ -325,8 +342,12 @@ public sealed class ContactResolvePrivacyPathProvider : IPrivacyMailboxPathProvi
                 throw Fail("retained-request-mismatch", "Retained request authority belongs to different exact request bytes.");
             await retainedReadRequest.EnsureCurrentAsync(cancellationToken).ConfigureAwait(false);
         }
-        var projectionMatches = network.BindsProjection(request.ProjectionReference);
-        if (!request.HasExplicitPlacementBinding && retainedReadRequest is null && ownedOperation is not null)
+        var leaseCoordination = request.RequestKind == ContactServiceRequestKind.CoordinateContact &&
+            ContactCoordinationOnionCodec.DecodeRequest(request.ExactRequest.Span).Target == ContactCoordinationTarget.PublicationLease;
+        var projectionMatches = leaseCoordination
+            ? Fixed(request.ViewHash.Span, placement.ViewHash.Span)
+            : network.BindsProjection(request.ProjectionReference);
+        if (!leaseCoordination && !request.HasExplicitPlacementBinding && retainedReadRequest is null && ownedOperation is not null)
         {
             network.RequireCurrentMailboxAssignment(ownedOperation.Authority, request.ProjectionReference);
             projectionMatches = true;

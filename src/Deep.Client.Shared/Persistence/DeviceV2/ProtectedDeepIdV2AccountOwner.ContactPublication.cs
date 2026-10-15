@@ -111,7 +111,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var request = ContactPublicationAuthorityWireCodec.DecodeRequest(entry.Record(9).Span);
             // A retained commit is historical evidence, never a renewal of its
             // short-lived request/XPA dispatch permission.
-            if (entry.Phase < 7 || transport is null)
+            if (entry.Phase == 5 || transport is null || kind != 1 && entry.Phase < 7)
                 await DeepIdV2PublicationAuthorityAuthor.VerifyRequestAsync(route, request, ct).ConfigureAwait(false);
             if (entry.Phase == 5)
             {
@@ -139,7 +139,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             }
             var winner = ContactPublicationAuthorityWireCodec.DecodeResponse(request, entry.Record(10).Span);
             VerifiedDeepIdV2PublicationAuthorization? authorized = null;
-            if (entry.Phase < 7 || transport is null)
+            if (transport is null || kind != 1 && entry.Phase < 7)
                 authorized = await DeepIdV2PublicationAuthorityAuthor.VerifyResponseAsync(route, request, winner.ExactXpu1, ct).ConfigureAwait(false);
             await RecheckRouteFreshnessAsync(current, source, fresh, held, first, ct).ConfigureAwait(false);
             if (transport is null)
@@ -153,7 +153,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 var custody = await SqliteDeepIdV2AccountGeneration.OpenBorrowedOnionCustodyAsync(storage, lease,
                     sqlStatePath, current, source.AccountOwner, held, deadline.Token).ConfigureAwait(false);
                 var dispatch = new Did2OwnedContactTransportContext(custody, fresh.Network, fresh.Authority, held);
-                var returned = await transport.PublishAsync(winner.ExactXpu1, dispatch, deadline.Token)
+                var mutationLease = kind == 1 ? await AcquirePublicationMutationLeaseAsync(route, contact!, request,
+                    winner.ExactXpu1, current.Verified.DeviceSecrets, publicationSource, dispatch, deadline.Token).ConfigureAwait(false) : null;
+                var returned = await transport.PublishAsync(mutationLease?.ExactDispatchRequest ?? winner.ExactXpu1, dispatch, deadline.Token)
                     .WaitAsync(deadline.Token).ConfigureAwait(false);
                 if (returned.Length is < 256 or > DeepIdV2PublicationCommitVerifier.MaximumResultBytes)
                     throw new InvalidDataException("Publication commit result exceeds its exact bound.");
@@ -166,8 +168,11 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                         request, winner.ExactXpu1, response, deadline.Token).ConfigureAwait(false);
                     // A late callback cannot persist/return success after its dispatch
                     // permission expires, the floor changes, or the account resets.
-                    _ = await DeepIdV2PublicationAuthorityAuthor.VerifyResponseAsync(route, request,
-                        winner.ExactXpu1, deadline.Token).ConfigureAwait(false);
+                    if (mutationLease is not null)
+                        await mutationLease.EnsureCurrentAsync(deadline.Token).ConfigureAwait(false);
+                    else
+                        _ = await DeepIdV2PublicationAuthorityAuthor.VerifyResponseAsync(route, request,
+                            winner.ExactXpu1, deadline.Token).ConfigureAwait(false);
                     await RecheckRouteFreshnessAsync(current, source, fresh, held, first, deadline.Token).ConfigureAwait(false);
                     var next = entry.WithPublicationCommit(committed, networkId, current.AccountId.Span);
                     state.Entries[name] = next; entry.Dispose(); entry = next;
@@ -193,5 +198,22 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             if (invitation is not null) CryptographicOperations.ZeroMemory(invitation);
             oneTime?.Dispose();
         }
+    }
+
+    private static async Task<VerifiedXpa1PublicationAuthorization> AcquirePublicationMutationLeaseAsync(
+        VerifiedDeepIdV2ContactRouteClosure route, AuthoredDeepIdV2ContactObject contact,
+        ContactPublicationAuthorityWireRequest originalRequest, ReadOnlyMemory<byte> originalXpu,
+        Deep.Protocol.Identity.OwnedGenesisDeviceSecrets device, IDid2ContactPublicationSource source,
+        Did2OwnedContactTransportContext operation, CancellationToken ct)
+    {
+        operation.RequireActive();
+        var intent = await DeepIdV2PublicationCommitVerifier.VerifyOwnedRetainedIntentAsync(
+            route, contact, originalRequest, originalXpu, ct).ConfigureAwait(false);
+        var request = await DeepIdV2PublicationLeaseAuthor.AuthorRequestAsync(intent, device, ct).ConfigureAwait(false);
+        var returned = await source.FetchLeaseAsync(request, operation, ct).AsTask().WaitAsync(ct).ConfigureAwait(false);
+        var response = DeepIdV2PublicationLeaseWireCodec.DecodeResponse(request, returned.Span);
+        var authority = await DeepIdV2PublicationLeaseAuthor.VerifyOwnedResponseAsync(
+            intent, request, response.CanonicalBytes, ct).ConfigureAwait(false);
+        operation.RequireActive(); ct.ThrowIfCancellationRequested(); return authority;
     }
 }

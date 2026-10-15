@@ -69,7 +69,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                     authored.WireRequest, PublicationWitnesses());
                 var exact = authorization.ExactXpu1.ToArray();
                 var request = Xpu1Codec.Decode(exact);
-                var nextTime = checked(request.ExpiresAtUnixSeconds + 1);
+                var nextTime = checked(request.ExpiresAtUnixSeconds + (mode >= 5 ? 11UL : 1UL));
                 Sample = checked(Sample + nextTime - ProofTime); ProofTime = nextTime;
                 var current = await source.VerifyForOwnPreKeyAuthoringAsync(accounts, default);
                 recipient = DeepIdV2CurrentContactAuthorizationVerifier.Verify(current.Proof, dca, Boot, Sample);
@@ -87,6 +87,13 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 Assert.Equal(request.RequestHash.ToArray(), owned.RequestHash.ToArray());
                 Assert.Equal(owned.RequestHash.ToArray(), issuer.RequestHash.ToArray());
                 Assert.Equal(before, ContactPublicationAuthorityWireCodec.EncodeRequest(authored.WireRequest));
+
+                if (mode >= 5)
+                {
+                    await CheckPublicationLeaseAsync(mode, owned, issuer, route, device!,
+                        callback => onRead = callback);
+                    return;
+                }
 
                 if (mode == 0)
                 {

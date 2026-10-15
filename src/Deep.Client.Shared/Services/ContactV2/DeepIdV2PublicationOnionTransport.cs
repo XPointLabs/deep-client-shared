@@ -73,7 +73,12 @@ internal sealed class DeepIdV2PublicationOnionTransport : IExactContactResolveOn
         { throw new ClientMailboxDispatchOutcomeUnknownException("The DID2 ONION publication reply could not be authenticated.", error); }
         if (opened.Result.Operation != OnionOperation.ContactResolve ||
             opened.Result.Kind != OnionTerminalResultKind.Success)
-            throw new ClientMailboxDispatchOutcomeUnknownException("The DID2 ONION publication has no successful authenticated terminal result.");
+        {
+            var rejected = new ClientMailboxDispatchOutcomeUnknownException("The DID2 ONION publication has no successful authenticated terminal result.");
+            if (opened.Result.FailureCode is { } code && Enum.IsDefined(code))
+                rejected.Data["Deep.ContactResolve.TerminalFailure"] = (ushort)code;
+            throw rejected;
+        }
         entry.EnsureCurrent();
         if (ownedOperation?.RetainedReadRequest is { } returnedRetained)
             await returnedRetained.EnsureCurrentAsync(cancellationToken).ConfigureAwait(false);

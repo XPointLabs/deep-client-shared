@@ -490,6 +490,18 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         private readonly Dictionary<ulong, byte[]> routeRequests = [], publicationRequests = [], publicationWinners = [];
         private readonly Dictionary<ulong, ContactRouteAuthorityWireResponse> routeWinners = [];
 
+        public async ValueTask<ReadOnlyMemory<byte>> FetchLeaseAsync(PublicationLeaseWireRequest request,
+            Did2OwnedContactTransportContext operation, CancellationToken ct)
+        {
+            operation.RequireActive();
+            var original = publicationRequests.Values.Select(value => ContactPublicationAuthorityWireCodec.DecodeRequest(value))
+                .Single(value => value.RequestNonce.Span.SequenceEqual(request.OriginalCoordinationNonce.Span));
+            var winner = ContactPublicationAuthorityWireCodec.DecodeResponse(original, publicationWinners[original.Generation]);
+            var intent = await DeepIdV2PublicationCommitVerifier.VerifyIssuerRetainedIntentAsync(route, original, winner.ExactXpu1, ct);
+            var lease = await DeepIdV2PublicationLeaseAuthor.AuthorThresholdAsync(intent, request, fixture.PublicationLeaseWitnesses(), ct);
+            return DeepIdV2PublicationLeaseWireCodec.EncodeResponse(request, lease.CanonicalBytes.Span);
+        }
+
         public async ValueTask<ContactRouteAuthorityWireResponse> FetchAsync(ContactRouteAuthorityWireRequest request,
             DeepIdV2CurrentContactAuthorization current, VerifiedOnionNetworkContext currentNetwork,
             VerifiedXPointNetworkAuthority currentAuthority, OnionTrustedTimeAuthority clock,

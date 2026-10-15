@@ -86,6 +86,19 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         internal int Calls { get; private set; }
         internal bool StableRequest { get; private set; } = true;
         private byte[]? exactRequest, winner;
+        public async ValueTask<ReadOnlyMemory<byte>> FetchLeaseAsync(PublicationLeaseWireRequest request,
+            Did2OwnedContactTransportContext operation, CancellationToken ct)
+        {
+            operation.RequireActive();
+            if (exactRequest is null || winner is null) throw new InvalidDataException("No exact publication winner.");
+            var original = ContactPublicationAuthorityWireCodec.DecodeRequest(exactRequest);
+            var response = ContactPublicationAuthorityWireCodec.DecodeResponse(original, winner);
+            var intent = await DeepIdV2PublicationCommitVerifier.VerifyIssuerRetainedIntentAsync(
+                route, original, response.ExactXpu1, ct);
+            var lease = await DeepIdV2PublicationLeaseAuthor.AuthorThresholdAsync(intent, request,
+                fixture.PublicationLeaseWitnesses(), ct);
+            return DeepIdV2PublicationLeaseWireCodec.EncodeResponse(request, lease.CanonicalBytes.Span);
+        }
         public async ValueTask<ReadOnlyMemory<byte>> FetchAsync(ContactPublicationAuthorityWireRequest request, Did2OwnedContactTransportContext operation, CancellationToken ct)
         {
             Calls++; var exact = ContactPublicationAuthorityWireCodec.EncodeRequest(request);
@@ -104,16 +117,21 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         }
     }
 
-    private sealed class PublicationWitness(Signer signer, Action? afterSign = null) : IXpa1PublicationAuthorizationWitnessSigner
+    private sealed class PublicationWitness(Signer signer, Action? afterSign = null) : IXpa1PublicationAuthorizationWitnessSigner,
+        IDeepIdV2PublicationLeaseWitnessSigner
     {
         internal int Calls { get; private set; }
         public ReadOnlyMemory<byte> WitnessId => signer.WitnessId;
+        public ValueTask<ReadOnlyMemory<byte>> SignPublicationLeaseAsync(PublicationLeaseSigningRequest request, CancellationToken ct)
+        { ct.ThrowIfCancellationRequested(); var signed = signer.SignCommit(request.SigningInput); afterSign?.Invoke(); return ValueTask.FromResult<ReadOnlyMemory<byte>>(signed); }
         public ValueTask<ReadOnlyMemory<byte>> SignXpa1Async(ReadOnlyMemory<byte> input, CancellationToken ct)
         { ct.ThrowIfCancellationRequested(); Calls++; var signed = signer.SignCommit(input); afterSign?.Invoke(); return ValueTask.FromResult<ReadOnlyMemory<byte>>(signed); }
     }
 
     private sealed partial class Fixture
     {
+        internal IReadOnlyList<IDeepIdV2PublicationLeaseWitnessSigner> PublicationLeaseWitnesses() =>
+            witnesses.Select(signer => (IDeepIdV2PublicationLeaseWitnessSigner)new PublicationWitness(signer)).ToArray();
         internal IReadOnlyList<IXpa1PublicationAuthorizationWitnessSigner> PublicationWitnesses() =>
             witnesses.Select(signer => (IXpa1PublicationAuthorizationWitnessSigner)new PublicationWitness(signer)).ToArray();
         internal byte[] PublicationReceipt(ReadOnlyMemory<byte> id, ReadOnlyMemory<byte> input) =>
@@ -122,7 +140,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         internal byte[] PublicationResult(VerifiedDeepIdV2ContactRouteClosure route, ReadOnlyMemory<byte> exactXpu1,
             bool corruptReceipt = false)
         {
-            var request = Xpu1Codec.Decode(exactXpu1.Span);
+            var request = exactXpu1.Span[..4].SequenceEqual("XPL1"u8)
+                ? DeepIdV2PublicationLeaseCodec.Decode(exactXpu1.Span).OriginalRequest : Xpu1Codec.Decode(exactXpu1.Span);
             var placement = ContactServicePlacementFactory.Create(route.Network, ContactServiceRequestKind.PublishInvite, request.LocatorHash);
             var generation = new byte[8]; BinaryPrimitives.WriteUInt64BigEndian(generation, checked(request.Generation + 1));
             var tuple = request.RequestHash.ToArray().Concat(request.ObjectCiphertextHash.ToArray()).Concat(generation).ToArray();
@@ -142,7 +161,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             }
             if (corruptReceipt) rows[^1] ^= 1;
             var ownGeneration = new byte[8]; BinaryPrimitives.WriteUInt64BigEndian(ownGeneration, request.Generation);
-            return Xpo1Codec.Encode(exactXpu1.Span, Xpo1Status.Committed,
+            return Xpo1Codec.Encode(request.CanonicalBytes.Span, Xpo1Status.Committed,
                 ContactServiceMutationOutcome.DurablyCommitted, 1_100, 0, ContactServicePaddingClass.Bytes1024,
                 [ownGeneration, request.ObjectCiphertextHash, generation, rows]);
         }
@@ -160,6 +179,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         public Task<ReadOnlyMemory<byte>> PublishAsync(ReadOnlyMemory<byte> exactXpu1, Did2OwnedContactTransportContext operation, CancellationToken ct)
         {
             ct.ThrowIfCancellationRequested(); Calls++;
+            if (exactXpu1.Span[..4].SequenceEqual("XPL1"u8))
+                exactXpu1 = DeepIdV2PublicationLeaseCodec.Decode(exactXpu1.Span).OriginalRequest.CanonicalBytes;
             StableRequest &= exactRequest is null || exactRequest.AsSpan().SequenceEqual(exactXpu1.Span);
             exactRequest ??= exactXpu1.ToArray();
             if (LoseResponse) throw new IOException("Injected publication response loss.");

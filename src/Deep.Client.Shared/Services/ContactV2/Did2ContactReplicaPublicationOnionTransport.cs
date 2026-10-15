@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using Deep.Client.Shared.Services.XPointNetworkV1;
 using Deep.Protocol.ContactV1;
+using Deep.Protocol.ContactV2;
 using Deep.Protocol.XPointNetworkV1;
 
 namespace Deep.Client.Shared.Services.ContactV2;
@@ -20,7 +21,10 @@ internal sealed class Did2ContactReplicaPublicationOnionTransport(DeepIdV2Contac
             throw new CryptographicException("Owned contact publication requires exact XPU1 V2.");
         var response = await new DeepIdV2PublicationOnionTransport(source, operation.Custody)
             .SendOwnedExactAsync(request, ReadOnlyMemory<byte>.Empty, operation, ct).ConfigureAwait(false);
-        _ = Xpo1Codec.Decode(response.ExactBody.Span, request.ExactRequest.Span);
+        var original = request.ExactRequest.Span[..4].SequenceEqual("XPL1"u8)
+            ? DeepIdV2PublicationLeaseCodec.Decode(request.ExactRequest.Span).OriginalRequest
+            : Xpu1Codec.Decode(request.ExactRequest.Span);
+        _ = Xpo1Codec.Decode(response.ExactBody.Span, original.CanonicalBytes.Span);
         operation.RequireActive(); ct.ThrowIfCancellationRequested();
         return response.ExactBody;
     }

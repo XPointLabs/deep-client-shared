@@ -171,7 +171,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 finally { CryptographicOperations.ZeroMemory(nonce); CryptographicOperations.ZeroMemory(operationId); }
             }
             var request = ContactPublicationAuthorityWireCodec.DecodeRequest(entry.Record(9).Span);
-            await DeepIdV2PublicationAuthorityAuthor.VerifySuccessorRequestAsync(route, request, priorPublication, ct).ConfigureAwait(false);
+            if (entry.Phase == 5)
+                await DeepIdV2PublicationAuthorityAuthor.VerifySuccessorRequestAsync(route, request, priorPublication, ct).ConfigureAwait(false);
             if (entry.Phase == 5)
             {
                 using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct); deadline.CancelAfter(TimeSpan.FromSeconds(30));
@@ -194,12 +195,13 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 finally { CryptographicOperations.ZeroMemory(response); }
             }
             var winner = ContactPublicationAuthorityWireCodec.DecodeResponse(request, entry.Record(10).Span);
-            _ = await DeepIdV2PublicationAuthorityAuthor.VerifySuccessorResponseAsync(route, request, priorPublication, winner.ExactXpu1, ct).ConfigureAwait(false);
             using (var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct))
             {
                 deadline.CancelAfter(TimeSpan.FromSeconds(30));
                 var dispatch = await DispatchAsync(deadline.Token).ConfigureAwait(false);
-                var returned = await transport.PublishAsync(winner.ExactXpu1, dispatch, deadline.Token).WaitAsync(deadline.Token).ConfigureAwait(false);
+                var mutationLease = await AcquirePublicationMutationLeaseAsync(route, contact, request,
+                    winner.ExactXpu1, current.Verified.DeviceSecrets, publicationSource, dispatch, deadline.Token).ConfigureAwait(false);
+                var returned = await transport.PublishAsync(mutationLease.ExactDispatchRequest, dispatch, deadline.Token).WaitAsync(deadline.Token).ConfigureAwait(false);
                 if (returned.Length is < 256 or > DeepIdV2PublicationCommitVerifier.MaximumResultBytes)
                     throw new InvalidDataException("Publication successor commit exceeds its exact bound.");
                 var response = returned.ToArray();
@@ -207,8 +209,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 {
                     var committed = await DeepIdV2PublicationCommitVerifier.VerifyCommittedAsync(route, contact, request,
                         winner.ExactXpu1, response, deadline.Token).ConfigureAwait(false);
-                    _ = await DeepIdV2PublicationAuthorityAuthor.VerifySuccessorResponseAsync(route, request, priorPublication,
-                        winner.ExactXpu1, deadline.Token).ConfigureAwait(false);
+                    await mutationLease.EnsureCurrentAsync(deadline.Token).ConfigureAwait(false);
                     using var completed = entry.WithPublicationCommit(committed, networkId, current.AccountId.Span);
                     var replacement = completed.RebindCommittedIntent(plan.Intent.Span, networkId, current.AccountId.Span);
                     // Promotion changes the discoverable publication, not the
