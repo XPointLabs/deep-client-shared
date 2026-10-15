@@ -966,8 +966,12 @@ permission changes. On physical optimized Android the previous stop failed with
 `ArithmeticOverflow / StopInitialContactIntentAsync / IL4274`. Focused
 `pre-session-stop-time-01` passed13/0/0/native0: ten pure arithmetic cases and
 three actual SQLCipher/native cancellation/cold-reopen cases. The pure cases
-cannot provide trusted time; matching installed Android retest and final full
-remain required before claiming the observed failure fixed.
+cannot provide trusted time. Matching physical APK19 retained the account and
+restored the same intent (AddContact15); StopContact04 then independent Inspect75
+observed confirmed stopped retries without error, and the StopRetry control was
+absent. The Android overflow is fixed in this tested scope, not a claim of
+contact delivery or the remaining final full. A subsequent separate explicit
+Add creates new work only after that actual stop; no account/floor reset occurs.
 
 Initial and explicit ContactAccept retry now check their original authenticated
 application deadline before current-recipient refresh. The business facade first
