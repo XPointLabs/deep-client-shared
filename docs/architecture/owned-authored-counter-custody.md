@@ -957,6 +957,18 @@ under the registered audit key, never a fabricated native scope. Earlier source
 receipts do not qualify this cutover; current evidence/remaining matrix lives in
 the [contact checkpoint](../testing/s04-contact-retention-2026-10-12.md).
 
+Pre-session stop projects trusted time as `bound + (sample - anchor)`, checking
+the elapsed subtraction and final addition separately after the existing
+proof/boot/freshness/lease recheck. It does not add an absolute monotonic counter
+to Unix time before subtracting its anchor. Backwards samples and actual result
+overflow still reject; no signed window, stop/retention layout or recovery
+permission changes. On physical optimized Android the previous stop failed with
+`ArithmeticOverflow / StopInitialContactIntentAsync / IL4274`. Focused
+`pre-session-stop-time-01` passed13/0/0/native0: ten pure arithmetic cases and
+three actual SQLCipher/native cancellation/cold-reopen cases. The pure cases
+cannot provide trusted time; matching installed Android retest and final full
+remain required before claiming the observed failure fixed.
+
 Initial and explicit ContactAccept retry now check their original authenticated
 application deadline before current-recipient refresh. The business facade first
 uses independently verified historical Stored; expiry cannot downgrade that

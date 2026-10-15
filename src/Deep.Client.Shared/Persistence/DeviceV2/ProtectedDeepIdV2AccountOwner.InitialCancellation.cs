@@ -25,7 +25,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             if (!drafts.Entries.TryGetValue(Convert.ToHexString(op), out var draft)) throw new CryptographicException("Initial cancellation has no owned draft intent.");
             if (!draft.WorkStopped && !draft.PayloadRetired)
                 RequireControlStopExpiry(reason, Did2ControlWorkStop.ProvenExpirySecond(draft.ExpiresAtUnixMilliseconds),
-                    checked(own.Proof.TrustedLowerUnixSeconds + first.SampleSeconds - own.Proof.MonotonicSample), ct);
+                    ProjectPreSessionStopTime(own.Proof.TrustedLowerUnixSeconds, first.SampleSeconds, own.Proof.MonotonicSample), ct);
             using (var application = await SqliteDeepIdV2AccountGeneration.OpenApplicationUnderLeaseAsync(storage,
                 sqlStatePath, current, held, ct).ConfigureAwait(false))
                 await application.BindPreSessionAuditAccountAsync(current, ct).ConfigureAwait(false);
@@ -82,7 +82,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             {
                 if (draft.PayloadRetired) throw new CryptographicException("Completed Initial cannot borrow pre-session absence.");
                 var final = await RecheckRouteFreshnessAsync(current, source, own, held, first, ct).ConfigureAwait(false);
-                var stopped = draft.WithStoppedWork(reason, checked(own.Proof.TrustedUpperUnixSeconds + final.SampleSeconds - own.Proof.MonotonicSample),
+                var stopped = draft.WithStoppedWork(reason, ProjectPreSessionStopTime(own.Proof.TrustedUpperUnixSeconds, final.SampleSeconds, own.Proof.MonotonicSample),
                     networkId, current.AccountId.Span, nativeCommitted: false);
                 drafts.Entries[Convert.ToHexString(op)] = stopped; draft.Dispose(); drafts.Revision = checked(drafts.Revision + 1);
                 after = ProtectedDid2ContactStartJournal.Encode(drafts, networkId, current.AccountId.Span, instance);
@@ -102,6 +102,16 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             await MaintainPreSessionControlUnderLeaseAsync(current, held, op, instance, own, source, ct).ConfigureAwait(false);
         }
         finally { foreach (var bytes in new[] { op, before, after, instance }) CryptographicOperations.ZeroMemory(bytes); }
+    }
+
+    // Arithmetic only, not a time/ownership capability. Both call sites first
+    // authenticate the proof, boot and sample under the existing held lease.
+    // Project an elapsed duration, not an absolute monotonic counter: adding
+    // that counter before subtracting its anchor can overflow unnecessarily.
+    internal static ulong ProjectPreSessionStopTime(ulong trustedUnixSeconds, ulong sample, ulong anchor)
+    {
+        var elapsed = checked(sample - anchor);
+        return checked(trustedUnixSeconds + elapsed);
     }
 
     private async Task ResumeInitialCancellationKeysUnderLeaseAsync(ReadOnlyMemory<byte> account, ReadOnlyMemory<byte> instance,
