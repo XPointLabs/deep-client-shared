@@ -307,6 +307,10 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                         current.Proof, opaquePlacement, time, default);
                     Assert.Equal(generation, opaque.Generation);
                     await opaque.EnsureCurrentAsync();
+                    Assert.Equal(generation, (await DeepIdV2PublicationCommitVerifier.VerifyOwnedRetainedIntentAsync(
+                        nextRoute, nextContact, nextPublication.WireRequest, nextAuthorized.ExactXpu1)).Generation);
+                    Assert.Equal(generation, (await DeepIdV2PublicationCommitVerifier.VerifyIssuerRetainedIntentAsync(
+                        nextRoute, nextPublication.WireRequest, nextAuthorized.ExactXpu1)).Generation);
                     var issuerAuthorized = await DeepIdV2PublicationAuthorityAuthor.AuthorIssuerThresholdSuccessorAsync(nextRoute,
                         nextPublication.WireRequest, issuerPredecessor, PublicationWitnesses());
                     Assert.Equal(nextAuthorized.ExactXpu1.ToArray(), issuerAuthorized.ExactXpu1.ToArray());
