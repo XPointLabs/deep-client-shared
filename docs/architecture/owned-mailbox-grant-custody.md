@@ -844,6 +844,18 @@ then recover through the historical reader. Actual native exact replay skips
 fresh admission and retains its original event/hash; held lease and final
 native readbacks remain mandatory. This changes no journal generation or API.
 
+## Explicit contact retry stop — consumer mapping
+
+The existing account-bound `CancelOwnInitialContactAsync` is publicly callable
+by the UI adapter with its independently current contact-path authority source.
+Its held-lease stop, native/pre-session distinction, idempotent crash recovery,
+key/payload retirement and preserved outcome/audit floors are unchanged.
+`ListContactStartOperationsAsync` now projects read-only `IsStopped` from the
+actual protected draft; it never supplies stop or new-send authority. Consumers
+must not select a stopped original for retry. A separate explicit user command
+may create a different intent after confirmed stop; neither stop nor expiry
+proves remote noncommit. No wire, schema, journal generation or expiry changes.
+
 ## Joint archived read-path disposition — qualified source profile
 
 `MailboxEpochExclusion.RetireArchivedReadPathAsync(ct)` is an internal held

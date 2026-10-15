@@ -77,7 +77,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var result = new List<DeepIdV2ContactOperationSnapshot>(state.Entries.Count);
             foreach (var entry in state.Entries.Values)
             {
-                result.Add(new(entry.Intent, entry.Exact.Slice(32, 32), entry.HelloCreatedAtUnixMilliseconds, entry.ExpiresAtUnixMilliseconds));
+                result.Add(new(entry.Intent, entry.Exact.Slice(32, 32), entry.HelloCreatedAtUnixMilliseconds, entry.ExpiresAtUnixMilliseconds, entry.WorkStopped));
             }
             using var readback = await storage.ReadOwnedAsync(ProtectedDid2ContactStartJournal.Slot, ct).ConfigureAwait(false) ??
                 throw new CryptographicException("The contact start root disappeared during projection.");

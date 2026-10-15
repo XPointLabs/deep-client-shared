@@ -18,12 +18,15 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         if (stage == "completed-source") using (var source = await prepared.Complete(fixture.ReopenAccount())) { }
         using var catalogBefore = await fixture.CompletedContactSendStorage(true).ReadOwnedAsync(ProtectedDid2MessagingSessionCatalog.Slot) ?? throw new InvalidDataException();
         var exactCatalog = catalogBefore.Use(bytes => bytes.ToArray());
+        Assert.False(Assert.Single(await fixture.ReopenAccount().ListContactStartOperationsAsync()).IsStopped);
         await fixture.CancelPreSessionInitial(intent);
         for (var reopen = 0; reopen < 2; reopen++)
         {
             fixture.ColdReopenCompactionStorage();
             await fixture.CancelPreSessionInitial(intent);
             await fixture.AssertPreSessionCancelled(intent);
+            var stopped = Assert.Single(await fixture.ReopenAccount().ListContactStartOperationsAsync());
+            Assert.True(stopped.IsStopped); Assert.Equal(intent, stopped.LogicalIntent.ToArray());
             using var after = await fixture.CompletedContactSendStorage(true).ReadOwnedAsync(ProtectedDid2MessagingSessionCatalog.Slot) ?? throw new InvalidDataException();
             Assert.Equal(exactCatalog, after.Use(bytes => bytes.ToArray()));
             await Assert.ThrowsAsync<IOException>(() => fixture.BeginPreClaimAsync(intent));

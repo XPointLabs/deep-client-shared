@@ -16,7 +16,9 @@ public sealed partial class DeepIdV2AccountService
         await owner.ExpireOwnedTerminalAuditsAsync(TrustedUnixSeconds(), verifier, scope, own, source, ct).ConfigureAwait(false);
     }
 
-    internal Task CancelOwnInitialContactAsync(ReadOnlyMemory<byte> intent,
+    /// <summary>Stops local retries of this exact owned Initial. Does not recall
+    /// a remotely accepted request or prove non-delivery.</summary>
+    public Task CancelOwnInitialContactAsync(ReadOnlyMemory<byte> intent,
         DeepIdV2ContactPathAuthoritySource source, CancellationToken ct = default)
         => StopOwnInitialContactAsync(intent, ProtectedDid2DirectTextJournal.WorkStopReason.UserCancelled, source, ct);
 

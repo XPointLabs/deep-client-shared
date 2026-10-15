@@ -43,12 +43,13 @@ public sealed class DeepIdV2ContactStartResult
 public sealed class DeepIdV2ContactOperationSnapshot
 {
     private readonly byte[] intent;
-    internal DeepIdV2ContactOperationSnapshot(ReadOnlySpan<byte> intent, ReadOnlySpan<byte> peerDid2Hash, ulong created, ulong expires)
-    { this.intent = intent.ToArray(); PeerDid2Hash = Convert.ToHexString(peerDid2Hash); CreatedAtUnixMilliseconds = created; ExpiresAtUnixMilliseconds = expires; }
+    internal DeepIdV2ContactOperationSnapshot(ReadOnlySpan<byte> intent, ReadOnlySpan<byte> peerDid2Hash, ulong created, ulong expires, bool isStopped)
+    { this.intent = intent.ToArray(); PeerDid2Hash = Convert.ToHexString(peerDid2Hash); CreatedAtUnixMilliseconds = created; ExpiresAtUnixMilliseconds = expires; IsStopped = isStopped; }
     public ReadOnlyMemory<byte> LogicalIntent => intent.ToArray();
     public string PeerDid2Hash { get; }
     public ulong CreatedAtUnixMilliseconds { get; }
     public ulong ExpiresAtUnixMilliseconds { get; }
+    public bool IsStopped { get; }
     public override string ToString() => nameof(DeepIdV2ContactOperationSnapshot);
 }
 
