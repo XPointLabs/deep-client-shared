@@ -76,6 +76,8 @@ public sealed class HttpServiceRequestTransport : IDisposable
     private readonly TimeSpan requestTimeout;
     private int disposed;
 
+    internal TimeSpan RequestTimeout => requestTimeout;
+
     internal HttpServiceRequestTransport(
         HttpClient httpClient,
         HttpServiceRequestTransportOptions options,

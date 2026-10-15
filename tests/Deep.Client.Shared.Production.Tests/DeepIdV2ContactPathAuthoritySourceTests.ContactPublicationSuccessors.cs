@@ -54,6 +54,18 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             var threshold = await DeepIdV2ContactRouteAuthor.AuthorThresholdAsync(recipient, current.Network, current.Authority,
                 advertisement.CanonicalBytes, witnesses.Select(value => new RouteWitness(value)).ToArray(),
                 current.Proof.TrustedLowerUnixSeconds, expiry, time);
+            if (mode == 0)
+            {
+                var changed = advertisement.CanonicalBytes.ToArray();
+                var pmtOffset = changed.AsSpan().IndexOf(advertisement.Field(5).Span);
+                Assert.True(pmtOffset >= 0);
+                changed[pmtOffset + advertisement.Field(5).Length - 1] ^= 1;
+                var error = await Assert.ThrowsAsync<CryptographicException>(async () =>
+                    await DeepIdV2ContactRouteVerifier.VerifyAdvertisementAsync(recipient, current.Network,
+                        current.Authority, changed, time));
+                Assert.Equal("pmt-reference", error.Data["Deep.ContactRoute.Scope"]);
+                Assert.Single(error.Data);
+            }
             var route = await DeepIdV2ContactRouteAuthor.CompleteGenesisAsync(recipient, current.Network, current.Authority,
                 device!, advertisement.CanonicalBytes, threshold, 2, time);
             var services = new[] { DeepIdV2PreKeyServiceCodec.Decode(staged.ExactXps1.Span) };

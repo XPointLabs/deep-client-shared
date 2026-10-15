@@ -75,9 +75,85 @@ public sealed class HttpDeepIdV2NetworkClosureArtifactSourceTests
         Assert.Equal(2, handler.Requests);
     }
 
-    private static HttpDeepIdV2NetworkClosureArtifactSource Create(HttpMessageHandler handler) =>
+    [Fact]
+    public async Task ContendedPublicRead_RetriesSameScopeWithoutCachingAuthority()
+    {
+        using var handler = new DistributionHandler { RejectionsRemaining = 2 };
+        using var source = Create(handler);
+        _ = await source.FetchCurrentAsync(Network, null);
+        Assert.Equal(3, handler.Requests);
+        handler.WrongScope = true;
+        await Assert.ThrowsAsync<System.Security.Cryptography.CryptographicException>(
+            async () => await source.FetchCurrentAsync(Network, null));
+        Assert.Equal(4, handler.Requests);
+    }
+
+    [Fact]
+    public async Task PersistentContention_StopsAfterEightPublicReads()
+    {
+        using var handler = new DistributionHandler { RejectionsRemaining = int.MaxValue };
+        using var source = Create(handler);
+        var error = await Assert.ThrowsAsync<Deep.Client.Shared.Services.AccountDirectoryV2.DeepIdV2DirectoryProofUnavailableException>(
+            async () => await source.FetchCurrentAsync(Network, null));
+        Assert.Equal(HttpStatusCode.TooManyRequests, error.StatusCode);
+        Assert.Equal(8, handler.Requests);
+    }
+
+    [Fact]
+    public async Task RetryAfterBeyondOriginalBudget_RejectsWithoutExtraRequest()
+    {
+        using var handler = new DistributionHandler { RejectionsRemaining = 1, RetryAfterSeconds = 2 };
+        using var source = Create(handler, TimeSpan.FromSeconds(1));
+        var error = await Assert.ThrowsAsync<Deep.Client.Shared.Services.AccountDirectoryV2.DeepIdV2DirectoryProofUnavailableException>(
+            async () => await source.FetchCurrentAsync(Network, null));
+        Assert.Equal(TimeSpan.FromSeconds(2), error.RetryAfter);
+        Assert.Equal(1, handler.Requests);
+    }
+
+    [Fact]
+    public async Task RetryAfterIsHonoredBeforeTheNextPublicRead()
+    {
+        using var handler = new DistributionHandler { RejectionsRemaining = 1, RetryAfterSeconds = 1 };
+        using var source = Create(handler);
+        _ = await source.FetchCurrentAsync(Network, null);
+        Assert.Equal(2, handler.Requests);
+        Assert.True(handler.RequestTimes[1] - handler.RequestTimes[0] >= TimeSpan.FromSeconds(1));
+    }
+
+    [Fact]
+    public async Task CancellationAfterRejectedRead_DoesNotRetry()
+    {
+        using var cancelled = new CancellationTokenSource();
+        using var handler = new DistributionHandler { RejectionsRemaining = 1, AfterRejection = cancelled.Cancel };
+        using var source = Create(handler);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            async () => await source.FetchCurrentAsync(Network, null, cancelled.Token));
+        Assert.Equal(1, handler.Requests);
+    }
+
+    [Fact]
+    public async Task RetryOwnsOriginalNetworkBeforeResponseCallbacks()
+    {
+        var callerScope = Network.ToArray();
+        using var handler = new DistributionHandler { RejectionsRemaining = 1, AfterRejection = () => callerScope[0] ^= 1 };
+        using var source = Create(handler);
+        _ = await source.FetchCurrentAsync(callerScope, null);
+        Assert.Equal(2, handler.Requests);
+        Assert.NotEqual(Network, callerScope);
+    }
+
+    [Fact]
+    public async Task OriginalDeadline_StillReportsTimeoutNotCallerCancellation()
+    {
+        using var handler = new DistributionHandler { BlockResponse = true };
+        using var source = Create(handler, TimeSpan.FromMilliseconds(50));
+        await Assert.ThrowsAsync<TimeoutException>(async () => await source.FetchCurrentAsync(Network, null));
+        Assert.Equal(1, handler.Requests);
+    }
+
+    private static HttpDeepIdV2NetworkClosureArtifactSource Create(HttpMessageHandler handler, TimeSpan timeout = default) =>
         new(new HttpServiceRequestTransport(new HttpClient(handler, disposeHandler: false),
-            HttpDeepIdV2NetworkClosureArtifactSource.CreateTransportOptions("https://registry.example/"),
+            HttpDeepIdV2NetworkClosureArtifactSource.CreateTransportOptions("https://registry.example/", timeout),
             HttpServiceEndpointPolicy.Production));
 
     private sealed class DistributionHandler : HttpMessageHandler
@@ -87,15 +163,31 @@ public sealed class HttpDeepIdV2NetworkClosureArtifactSourceTests
         internal bool Unavailable { get; set; }
         internal bool WrongMedia { get; set; }
         internal bool RetiredSevenChain { get; set; }
+        internal int RejectionsRemaining { get; set; }
+        internal int RetryAfterSeconds { get; set; }
+        internal Action? AfterRejection { get; set; }
+        internal bool BlockResponse { get; set; }
+        internal List<TimeSpan> RequestTimes { get; } = [];
+        private readonly long started = System.Diagnostics.Stopwatch.GetTimestamp();
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
             Requests++;
+            RequestTimes.Add(System.Diagnostics.Stopwatch.GetElapsedTime(started));
             Assert.Equal(HttpMethod.Post, request.Method);
             Assert.Equal(HttpDeepIdV2NetworkClosureArtifactSource.EndpointPath, request.RequestUri!.AbsolutePath);
             Assert.Equal(XPointNetworkClosureWireCodec.RequestMediaType, request.Content!.Headers.ContentType!.MediaType);
             Assert.Equal(Network, XPointNetworkClosureWireCodec.DecodeRequest(await request.Content.ReadAsByteArrayAsync(ct)));
+            if (BlockResponse) await Task.Delay(Timeout.InfiniteTimeSpan, ct);
             if (Unavailable) return new(HttpStatusCode.ServiceUnavailable) { RequestMessage = request };
+            if (RejectionsRemaining > 0)
+            {
+                RejectionsRemaining--;
+                var rejected = new HttpResponseMessage(HttpStatusCode.TooManyRequests) { RequestMessage = request };
+                if (RetryAfterSeconds > 0) rejected.Headers.RetryAfter = new(TimeSpan.FromSeconds(RetryAfterSeconds));
+                AfterRejection?.Invoke();
+                return rejected;
+            }
             var scope = Network.ToArray();
             if (WrongScope) scope[0] ^= 1;
             var chains = new[] { "XNA1", "DTS1", "XVP1", "XNV1", "XNH1", "XND1", "PMT2", "PMA2" }
