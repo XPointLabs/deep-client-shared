@@ -23,6 +23,16 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             networkId, current.AccountId, ct).ConfigureAwait(false);
         try
         {
+            // An exact active read/ACK bypasses all new-work maintenance,
+            // including pending-acquisition disposition. A lost issuer reply
+            // with no active read can close only under fresh authenticated lower
+            // time; this preserves uncertainty, not non-issuance or reissue.
+            using (var readRoot = await storage.ReadOwnedAsync(ProtectedDid2MailboxReadJournal.Slot, ct).ConfigureAwait(false) ??
+                throw new InvalidDataException("Namespace maintenance lost mandatory read custody."))
+            using (var reads = readRoot.Use(bytes => ProtectedDid2MailboxReadJournal.Decode(bytes, networkId, current.AccountId.Span, instance)))
+                if (reads.Active is not null || reads.Phase != 0) return;
+            _ = await CloseExpiredMailboxAcquisitionsUnderLeaseAsync(current, held, source, fresh, ct).ConfigureAwait(false);
+
             // One dependency-closed namespace pair per business call, not32
             // separate plans borrowing the same short directory freshness.
             // Subsequent calls resume ordinary bounded maintenance.

@@ -517,6 +517,17 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     {
         using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
         using var current = await RequireCurrentUnderLeaseAsync(unixSeconds, verifier, ct).ConfigureAwait(false);
+        return await CloseExpiredMailboxAcquisitionsUnderLeaseAsync(current, held, source, fresh, ct).ConfigureAwait(false);
+    }
+
+    // The business maintenance caller already owns this exact lease/account.
+    // Reuse the same transition; never recursively acquire the account lease.
+    private async Task<int> CloseExpiredMailboxAcquisitionsUnderLeaseAsync(
+        VerifiedDeepIdV2CurrentAccount current, HeldDeepIdV2AccountLease held,
+        DeepIdV2ContactPathAuthoritySource source,
+        DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh, CancellationToken ct)
+    {
+        held.RequireOwner(lease); ct.ThrowIfCancellationRequested();
         var first = await RecheckRouteFreshnessAsync(current, source, fresh, held, null, ct).ConfigureAwait(false);
         var lower = checked(fresh.Proof.TrustedLowerUnixSeconds + checked(first.SampleSeconds - fresh.Proof.MonotonicSample));
         var instance = await SqliteDeepIdV2AccountGeneration.ReadAccountInstanceUnderLeaseAsync(

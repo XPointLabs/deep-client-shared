@@ -496,6 +496,25 @@ remains its separate producer. Maintenance uses a bounded batch with the existin
 plan row bound, re-reading actual roots after every transition; it never raises
 128/512 limits or starts another background scheduler.
 
+The same new-work entry first applies the existing expired-acquisition closure
+under its already-held account lease, without recursive acquisition. A protected
+active read/ACK bypasses this step too. Only independently authenticated lower
+time reaching the original request expiry may close a pending candidate; the
+original request, holder seed, route, policy and possible-grant ceiling remain.
+The ordinary epoch/dependency-closed retirement selection then rereads actual
+roots. Request expiry alone still pins the namespace and cannot issue a fresh
+request. Only the existing complete exclusion/retirement producer can remove an
+eligible closed unused holder before a new read uses that original publication
+path. Before/after closure failure stops new work; cold retry reads the actual
+pending/closed root. No journal layout, generation, bounds, grant/request lifetime,
+wire or signature change is introduced by this composition.
+
+The 2026-10-15 focused run `artifacts/s05-current-publication-20261015/pending-maintenance-focused-01`
+passed6/0/0/native0 with actual SQLCipher/native custody; the affected grant,
+renewal and retirement regression in `pending-maintenance-regression-01` passed
+48/0/0/native0. These are source diagnostics, not canonical full qualification or
+proof that an installed retained device has satisfied its exclusion prerequisites.
+
 `MailboxEpochExclusion.OpenUnderLeaseAsync` loans the actual held lease/current
 account to the same original-policy/current-host/native-DNH2 verifier. Only the
 standalone opener owns their lifetime; disposing a loan cannot release its

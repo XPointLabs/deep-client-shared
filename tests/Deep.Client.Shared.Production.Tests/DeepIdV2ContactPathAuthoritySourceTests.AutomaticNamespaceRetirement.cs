@@ -9,6 +9,70 @@ namespace Deep.Client.Shared.Production.Tests;
 public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 {
     [Theory]
+    [InlineData("none")]
+    [InlineData("BeforeClosure")]
+    [InlineData("AfterClosure")]
+    public async Task Did2AutomaticNamespaceRetirement_PendingRetrieveClosesAndExcludedOwnerResumesOriginalPath(string fault)
+    {
+        // Actual owned business entry, SQLCipher/native floor and original
+        // signed publication; an in-process issuer/terminal is not device E2E.
+        await using var fixture = await Fixture.CreateAsync(encryptedStorage: true,
+            longMailboxWindow: true, initialMailboxAuthorityExpiry: 2_000);
+        var originalRoute = await fixture.PrepareRetainedPublicationAsync(elapsed: false);
+        Assert.Empty(await fixture.ListNativePendingText()); // Ordinary authorized SQL open.
+        fixture.TrackMailboxDispatchClock();
+        var lost = new OwnedGrantTransport(fixture, selfRetrieve: true, ownerOnPrimary: true) { LoseResponse = true };
+        var terminal = new OwnedReadTerminal(fixture, [], ownerOnPrimary: true) { ReturnEmptyPage = true };
+        await Assert.ThrowsAsync<IOException>(() => fixture.SynchronizeNativeSender(lost, terminal));
+        byte[] original;
+        using (var grants = await fixture.ReadPeerGrantsAsync(own: true))
+            original = Assert.Single(grants.Entries).Value.ToArray();
+        try
+        {
+            Assert.False(ProtectedDid2MailboxGrantJournal.HasWinner(original));
+            Assert.Equal(0, terminal.RetrieveCalls);
+            // Current signed successor epoch + authenticated lower beyond the
+            // original possible-grant ceiling, not merely XMG request expiry.
+            await fixture.AdvanceOriginalStoreEpochForTestAsync(2_100);
+            fixture.ColdReopenCompactionStorage();
+            var fresh = new OwnedGrantTransport(fixture, selfRetrieve: true, ownerOnPrimary: true);
+            if (fault != "none")
+            {
+                var hit = false;
+                var point = Enum.Parse<Did2MailboxInstallationFailpoint>(fault);
+                using (Did2MailboxInstallationTestHooks.Push(actual =>
+                    { if (actual == point) { hit = true; throw new IOException("Interrupted automatic unknown closure."); } }))
+                    await Assert.ThrowsAsync<IOException>(() => fixture.SynchronizeNativeSender(fresh, terminal));
+                Assert.True(hit);
+                using (var grants = await fixture.ReadPeerGrantsAsync(own: true))
+                {
+                    var retained = Assert.Single(grants.Entries).Value;
+                    Assert.Equal(ProtectedDid2MailboxGrantJournal.Request(original).ToArray(), ProtectedDid2MailboxGrantJournal.Request(retained).ToArray());
+                    Assert.Equal(ProtectedDid2MailboxGrantJournal.Seed(original).ToArray(), ProtectedDid2MailboxGrantJournal.Seed(retained).ToArray());
+                    Assert.Equal(fault == "AfterClosure", ProtectedDid2MailboxGrantJournal.IsClosedUnresolved(retained));
+                    if (fault == "BeforeClosure") Assert.Equal(original, retained);
+                }
+                Assert.Equal(0, fresh.Calls); Assert.Equal(0, terminal.RetrieveCalls);
+                fixture.ColdReopenCompactionStorage();
+            }
+            Assert.Equal(0, (await fixture.SynchronizeNativeSender(fresh, terminal)).ProcessedEnvelopes);
+            using (var grants = await fixture.ReadPeerGrantsAsync(own: true))
+            {
+                var winner = Assert.Single(grants.Entries).Value;
+                Assert.True(ProtectedDid2MailboxGrantJournal.HasWinner(winner));
+                Assert.NotEqual(ProtectedDid2MailboxGrantJournal.Acquisition(original), ProtectedDid2MailboxGrantJournal.Acquisition(winner));
+                Assert.Equal(originalRoute.Route.ExactBytes.ToArray(), ProtectedDid2MailboxGrantJournal.OriginalRoute(winner).ToArray());
+            }
+            Assert.Equal(1, lost.Calls); Assert.Equal(1, fresh.Calls);
+            Assert.Equal(1, terminal.RetrieveCalls); Assert.Equal(0, terminal.AckCalls);
+            fixture.ColdReopenCompactionStorage();
+            Assert.Equal(0, (await fixture.SynchronizeNativeSender(fresh, terminal)).ProcessedEnvelopes);
+            Assert.Equal(1, fresh.Calls); Assert.Equal(2, terminal.RetrieveCalls);
+        }
+        finally { CryptographicOperations.ZeroMemory(original); }
+    }
+
+    [Theory]
     [InlineData("ordinary", "none")] [InlineData("ordinary", "AfterStage")] [InlineData("ordinary", "AfterHistoryAdopted")]
     [InlineData("accept", "none")] [InlineData("accept", "AfterStage")] [InlineData("accept", "AfterHistoryAdopted")]
     [InlineData("ordinary", "GrantAfterStage")] [InlineData("accept", "GrantAfterStage")]
@@ -70,6 +134,49 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             Assert.Equal(issuerCalls, test.Grants.Calls); Assert.Equal(ingressCalls, test.Transport.Calls);
         }
         finally { CryptographicOperations.ZeroMemory(native); CryptographicOperations.ZeroMemory(originalSource); }
+    }
+
+    [Fact]
+    public async Task Did2AutomaticNamespaceRetirement_RequestExpiryAloneClosesUnknownWithoutReissueOrRetirement()
+    {
+        await using var fixture = await Fixture.CreateAsync(encryptedStorage: true,
+            longMailboxWindow: true, initialMailboxAuthorityExpiry: 2_000);
+        _ = await fixture.PrepareRetainedPublicationAsync(elapsed: false);
+        Assert.Empty(await fixture.ListNativePendingText());
+        fixture.TrackMailboxDispatchClock();
+        var lost = new OwnedGrantTransport(fixture, selfRetrieve: true, ownerOnPrimary: true) { LoseResponse = true };
+        var terminal = new OwnedReadTerminal(fixture, [], ownerOnPrimary: true) { ReturnEmptyPage = true };
+        await Assert.ThrowsAsync<IOException>(() => fixture.SynchronizeNativeSender(lost, terminal));
+        byte[] original;
+        using (var grants = await fixture.ReadPeerGrantsAsync(own: true))
+            original = Assert.Single(grants.Entries).Value.ToArray();
+        try
+        {
+            fixture.AdvanceStoreSettlementClock(ProtectedDid2MailboxGrantJournal.RequestExpiry(original) + 10);
+            fixture.ColdReopenCompactionStorage();
+            var unused = new OwnedGrantTransport(fixture, selfRetrieve: true, ownerOnPrimary: true);
+            for (var reopen = 0; reopen < 2; reopen++)
+            {
+                await Assert.ThrowsAsync<IOException>(() => fixture.SynchronizeNativeSender(unused, terminal));
+                using var grants = await fixture.ReadPeerGrantsAsync(own: true);
+                var retained = Assert.Single(grants.Entries).Value;
+                Assert.True(ProtectedDid2MailboxGrantJournal.IsClosedUnresolved(retained));
+                Assert.False(ProtectedDid2MailboxGrantJournal.HasWinner(retained));
+                Assert.Equal(ProtectedDid2MailboxGrantJournal.Request(original).ToArray(), ProtectedDid2MailboxGrantJournal.Request(retained).ToArray());
+                Assert.Equal(ProtectedDid2MailboxGrantJournal.Seed(original).ToArray(), ProtectedDid2MailboxGrantJournal.Seed(retained).ToArray());
+                Assert.Equal(ProtectedDid2MailboxGrantJournal.OriginalPolicy(original).ToArray(), ProtectedDid2MailboxGrantJournal.OriginalPolicy(retained).ToArray());
+                Assert.Equal(ProtectedDid2MailboxGrantJournal.OriginalRoute(original).ToArray(), ProtectedDid2MailboxGrantJournal.OriginalRoute(retained).ToArray());
+                Assert.Equal(ProtectedDid2MailboxGrantJournal.PossibleGrantExpiry(original), ProtectedDid2MailboxGrantJournal.PossibleGrantExpiry(retained));
+                var selected = Assert.Single(grants.Selections).Value;
+                Assert.Null(selected.Current); Assert.Null(selected.Pending);
+                Assert.Equal(ProtectedDid2MailboxGrantJournal.Acquisition(original), selected.RetainedTail);
+                using var reads = await fixture.ReadPeerMailboxReads(own: true);
+                Assert.Null(reads.Active); Assert.Equal(0, reads.Phase); Assert.Empty(reads.Counters); Assert.Empty(reads.Traversals);
+                Assert.Equal(1, lost.Calls); Assert.Equal(0, unused.Calls); Assert.Equal(0, terminal.RetrieveCalls);
+                fixture.ColdReopenCompactionStorage();
+            }
+        }
+        finally { CryptographicOperations.ZeroMemory(original); }
     }
 
     [Theory]
