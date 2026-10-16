@@ -27,6 +27,18 @@ Test counters are disabled outside the new bounded case; normal fixtures do not
 retain a growing read log. An atomic batch's single platform decryption is
 independently covered by the existing Journaled storage tests.
 
-This proves reduced read calls, NOT measured device speed or resolved transport.
-Matching Windows/Android rebuild, same-intent retry, actual Store/Retrieve/ACK,
-canonical full/package and physical business acceptance remain required.
+Matching Windows23/APK39 include this source and retain the QA accounts; both
+build native0 with no compiler diagnostics. APK39 dry137/update138 and Settings139
+confirm retained Android account/recovery. Windows's saved retry rejected its
+expired XUR; normal owned stop succeeded before separately explicit new work.
+The fresh request returned OutcomeUnknown at18:50:31Z, with inner cancellation
+in the actual batch read during directory-floor validation. It entered the Store
+path, but neither network forwarding nor storage is independently confirmed.
+Android Refresh141 -> independent Inspect142 still ends in messaging error;
+closed caller metadata identifies Retrieve OutcomeUnknown. No reset or new
+signed-resource deadline was used to evade either refusal.
+
+This proves reduced read calls, NOT a latency benchmark or resolved transport.
+Actual Store/Retrieve/ACK, narrow remaining work/timeout diagnosis, canonical
+full/package and physical business acceptance remain required. Exact receipts
+and hashes belong to the [device checkpoint](../../../deep-client-maui/docs/DID2-HTTPS-DEVICE-2026-09-28.md).
