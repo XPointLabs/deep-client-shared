@@ -173,6 +173,17 @@ does not extend any interval. Pending successor work is resumed first and never
 replaces current until the existing complete protected promotion. This does not
 activate automatic grant renewal, rotation or retirement; current verification
 status belongs to the [S04 checkpoint](../testing/s04-lifecycle-2026-10-11.md).
+The day-long initial-service cap exposed a DCB successor rejection during this
+existing route renewal. [DR-0127](../../../docs/survival-program/decisions/DR-0127-capped-contact-object-successor-validity.md)
+owns the corrected predicate; Shared adds no alternative author, journal or retry.
+The signed default-service regression failed at ContactSuccessorAdvance before
+the Protocol correction (`s05-capped-contact-renewal-20261016/red-02` and
+`red-03`); `red-01` instead failed its fixture DTS boundary and is not the product
+reproduction. Corrected source `green-04` passed1/0/0/native0, and expanded
+`shared-05` passed6/0/0/native0, including equal-cap owner/issuer publication,
+retained predecessor and exact cold replay plus the existing renewal fault cases.
+All use Windows PowerShell5.1 / SDK10.0.301; full and matched-device acceptance
+remain open. No service expiry/key replacement or account reset was performed.
 Superseded-holder selection likewise opens the actual acquisition's original route.
 Current host/proof/time, holder, SQL and native checks are unchanged. A new idle
 cycle chooses one least-polled route among the actual current and independently

@@ -16,6 +16,13 @@ namespace Deep.Client.Shared.Production.Tests;
 public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 {
     [Fact]
+    public async Task Did2OwnedRenewal_DefaultDayServiceAllowsCurrentSuccessorWithoutExtendingServiceExpiry()
+    {
+        await using var fixture = await Fixture.CreateAsync(longMailboxWindow: true, objectHorizonWindow: true);
+        await fixture.CheckDefaultDayServiceRenewalAsync();
+    }
+
+    [Fact]
     public async Task Did2OwnedRenewal_ExpiredCommittedAccountResumesEveryPhaseAndAtomicallyPromotes()
     {
         await using var fixture = await Fixture.CreateAsync();
@@ -58,6 +65,44 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 
     private sealed partial class Fixture
     {
+        internal async Task CheckDefaultDayServiceRenewalAsync()
+        {
+            // A real threshold may expire before the day-long signed service.
+            var backend = new RenewalBackend(this, genesisRouteLifetimeSeconds: 120);
+            var original = await accounts.EnsureOwnPermanentContactPublishedAsync(Source(), backend, backend, backend);
+            Assert.Equal(0UL, original.Generation);
+            var plan = await accounts.ReadOwnPermanentContactPlanAsync();
+            var name = Convert.ToHexString(plan.Intent.Span);
+            byte[] exactService;
+            byte[] originalEntry;
+            ulong originalExpiry;
+            using (var state = await RouteState())
+            {
+                var bundle = DeepIdV2ResolverClosureCodec.Decode(state.Entries[name].Record(7).Span).Bundle;
+                originalEntry = state.Entries[name].Exact.ToArray();
+                exactService = bundle.Field(12).Span[5..].ToArray();
+                originalExpiry = BinaryPrimitives.ReadUInt64BigEndian(bundle.Field(18).Span);
+                Assert.Equal(BinaryPrimitives.ReadUInt64BigEndian(
+                    DeepIdV2PreKeyServiceCodec.Decode(exactService).Field(11).Span), originalExpiry);
+            }
+            ProofTime += 110; Sample += 110;
+            var renewed = await accounts.EnsureOwnPermanentContactPublishedAsync(Source(), backend, backend, backend);
+            Assert.Equal(1UL, renewed.Generation);
+            using var promoted = await RouteState();
+            var successor = DeepIdV2ResolverClosureCodec.Decode(promoted.Entries[name].Record(7).Span).Bundle;
+            Assert.Equal(1UL, BinaryPrimitives.ReadUInt64BigEndian(successor.Field(8).Span));
+            Assert.Equal(originalExpiry, BinaryPrimitives.ReadUInt64BigEndian(successor.Field(18).Span));
+            Assert.Equal(exactService, successor.Field(12).Span[5..].ToArray());
+            var retained = Assert.Single(promoted.Entries, pair => pair.Key != name).Value;
+            Assert.Equal(originalEntry.AsSpan(32).ToArray(), retained.Exact[32..].ToArray());
+            var beforeReplay = (backend.RouteSignings, backend.PublicationSignings, backend.ReplicaCalls);
+            var reopened = ReopenAccount();
+            var replayed = await reopened.EnsureOwnPermanentContactPublishedAsync(Source(reopened), backend, backend, backend);
+            Assert.Equal(renewed.Generation, replayed.Generation);
+            Assert.Equal(renewed.ExactXpo1.ToArray(), replayed.ExactXpo1.ToArray());
+            Assert.Equal(beforeReplay, (backend.RouteSignings, backend.PublicationSignings, backend.ReplicaCalls));
+        }
+
         // A genuinely signed short proposal stored through the canonical
         // protected codec. No runtime lifetime/test-currentness flag is added.
         internal async Task SeedShortPermanentProposalAsync(ulong validitySeconds = 20)
@@ -475,7 +520,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 
     // Real PQ/device/witness/node crypto and protected SQL; in-process durable
     // winners and synthetic signed replica results, NOT live Registry/device evidence.
-    private sealed class RenewalBackend(Fixture fixture, ulong? renewedRouteLifetimeSeconds = null)
+    private sealed class RenewalBackend(Fixture fixture, ulong? renewedRouteLifetimeSeconds = null,
+        ulong? genesisRouteLifetimeSeconds = null)
         : IDid2ContactRouteThresholdSource, IDid2ContactPublicationSource, IDid2ContactReplicaPublicationTransport
     {
         internal int RouteCalls, PublicationCalls, ReplicaCalls, RouteSignings, PublicationSignings;
@@ -552,7 +598,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             if (!routeWinners.TryGetValue(generation, out var winner))
             {
                 var expiry = BinaryPrimitives.ReadUInt64BigEndian(xra.Field(13).Span);
-                if (request.HasPredecessor && renewedRouteLifetimeSeconds is { } lifetime)
+                if ((request.HasPredecessor ? renewedRouteLifetimeSeconds : genesisRouteLifetimeSeconds) is { } lifetime)
                     expiry = Math.Min(expiry, checked(current.TrustedUpperUnixSeconds + lifetime));
                 var threshold = request.HasPredecessor ? await DeepIdV2ContactRouteAuthor.AuthorThresholdSuccessorAsync(current, network, authority,
                     await DeepIdV2ContactRouteVerifier.VerifyPredecessorAsync(current, network, authority, request.ExactPredecessorXir1V2,
