@@ -53,6 +53,7 @@ Matching Windows27/APK44 from MAUI `8181f0a` / Shared `f63b432` / Protocol
 `9d6df07` were installed without reset. Windows retained its exact identity and
 recovery; the actual old retry produced the informative expiry result with no
 automatic replacement. The separately initiated new request and its one exact
-retry failed at permanent-read ingress before new native Store. Android retained
+retry failed at permanent-read ingress without an authenticated Store result;
+the failure is not proof that no earlier effect exists. Android retained
 account/recovery and Verified; its owned expiry has not yet been exercised.
 See [physical observation](../../../deep-client-maui/docs/S05-BUSINESS-WORK-2026-10-17.md#original-contact-retry-expiry-entry-source-candidate).
