@@ -3200,6 +3200,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         internal int ApplicationSingleReads { get; set; }
         internal List<string[]> ApplicationReadGroups { get; } = [];
         internal Action? AfterApplicationReadGroup { get; set; }
+        internal Action? AfterDeviceRegistrationReadGroup { get; set; }
+        internal Action? AfterRetirementReadGroup { get; set; }
         public Task<bool> CompareAndDeleteAsync(string guardSlot, ReadOnlyMemory<byte> expected,
             IReadOnlyList<string> slots, CancellationToken ct = default) => inner.CompareAndDeleteAsync(guardSlot, expected, slots, ct);
 
@@ -3288,6 +3290,18 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             try
             {
                 for (var index = 0; index < captured.Length; index++) ObserveRead(captured[index], result[index]);
+                if (AfterDeviceRegistrationReadGroup is { } afterDeviceRead && captured.Length == 2 &&
+                    captured.Contains(SqliteDeepIdV2AccountGeneration.DeviceStateMarkerSlot, StringComparer.Ordinal))
+                {
+                    AfterDeviceRegistrationReadGroup = null;
+                    afterDeviceRead();
+                }
+                if (AfterRetirementReadGroup is { } afterRetirementRead && captured.Length == 4 &&
+                    captured.Contains(ProtectedInitialKeyRetirementJournal.Slot, StringComparer.Ordinal))
+                {
+                    AfterRetirementReadGroup = null;
+                    afterRetirementRead();
+                }
                 if (AfterApplicationReadGroup is { } afterApplicationRead &&
                     captured.Contains(SqliteDeepIdV2AccountGeneration.ApplicationStateSlot, StringComparer.Ordinal))
                 {

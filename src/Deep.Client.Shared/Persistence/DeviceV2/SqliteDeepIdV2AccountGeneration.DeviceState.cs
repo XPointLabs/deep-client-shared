@@ -39,8 +39,13 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         var devicePath = DeviceStatePath(accountPath);
         var network = current.Verified.PublicEvidence.Binding.Identity.Account
             .Certificate.NetworkId;
-        using var secret = await storage.ReadOwnedAsync(KeySlot,
-            cancellationToken).ConfigureAwait(false) ??
+        // Each open reads its actual registration and marker together. This
+        // call-local snapshot is never a cached SQL/source verification result.
+        using var custody = await storage.ReadOwnedBatchAsync([KeySlot, DeviceStateMarkerSlot],
+            cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (custody.Count != 2) throw new InvalidDataException("Device-state registration read group has another shape.");
+        var secret = custody[0] ??
             throw new InvalidDataException("The DID2 SQL key record is absent.");
         var record = secret.Use(static value => value.ToArray());
         byte[]? transcript = null;
@@ -73,9 +78,7 @@ internal static partial class SqliteDeepIdV2AccountGeneration
                 File.Exists(devicePath + "-journal") ||
                 File.Exists(devicePath + "-wal") ||
                 File.Exists(devicePath + "-shm");
-            using var installed = await storage.ReadOwnedAsync(
-                DeviceStateMarkerSlot, cancellationToken)
-                .ConfigureAwait(false);
+            var installed = custody[1];
             if (installed is null)
             {
                 if (familyExists)

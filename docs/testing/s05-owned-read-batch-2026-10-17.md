@@ -63,3 +63,38 @@ MailboxSyncTotal47635ms,4 Protect/256 Unprotect,23281ms protection.
 Matching DLL/PDB maps the refusal to the original retained-result time guard
 and the first newly received response verification, not a missing local marker.
 Which ordered predicate failed remains unknown; do not weaken it or reset.
+
+## Device-source and retirement opening
+
+Windows28's retained retry measured120050ms with1809 Unprotect calls and75840ms
+protection work. Cancellation reached device-source custody opening; this is a
+new measured hot path, not proof that every earlier transport refusal is fixed.
+See [the matching device observation](../../../deep-client-maui/docs/S05-BUSINESS-WORK-2026-10-17.md#original-contact-retry-expiry-entry-source-candidate).
+
+The next source candidate uses the same actual atomic inventory interface:
+
+- Device-state open reads its SQL registration and install marker together.
+  Actual account SQL validation, derived key, file-family/marker checks, initial
+  provisioning distinction and initial-session reconciliation are unchanged.
+- Each independent retirement read obtains the actual SQL registration,
+  retirement journal and optional Initial/catalog owners in one fresh group.
+  Registration scope and journal decoding remain mandatory. Only an actual
+  role3 entry requires decoding the optional owners; an empty journal does not
+  gain new cancellation-absence authority or new root requirements.
+- Cancellation staging/completion read the draft/catalog owner pair atomically.
+  Every exact stopped-owner binding and matching native floor/history read is
+  retained through the same existing cancellation owner. No captured root,
+  marker, bool or exception substitutes for native custody.
+
+Each invocation reacquires the full relevant group, checks cancellation and
+disposes/zeroes its owned bytes. No verification cache, retained plaintext,
+wire/API/schema generation, key/nonce renewal or authority/deadline extension.
+The affected source union passed53/0FAIL/0skip/native0 under
+`artifacts/s05-device-source-batch-20261017/focused-01`, Windows PowerShell5.1 /
+SDK10.0.301, no compiler diagnostics. Fourteen new cases check independent
+groups, missing/foreign roots, cancellation after acquisition, unchanged protected
+and SQL state on refusal, optional owners for an empty journal, and actual
+cancelled owner loss after encrypted cold reopen. Existing native import,
+expiry, key-deletion interruption and scoped claim/Store cases remain in the union.
+Matching Windows/Android performance/business acceptance and canonical full/package
+qualification are separate remaining gates; no device speedup is claimed yet.

@@ -311,11 +311,16 @@ internal static partial class SqliteDeepIdV2AccountGeneration
     {
         using var owner = await storage.ReadOwnedAsync(KeySlot, ct).ConfigureAwait(false) ??
             throw new InvalidDataException("The DID2 SQL key record is absent.");
-        return owner.Use(record =>
-        {
-            ValidateRecord(record, network.Span, account.Span);
-            return record.Slice(56, 32).ToArray();
-        });
+        return owner.Use(record => ReadAccountInstanceFromRegistration(record, network.Span, account.Span));
+    }
+
+    // Grammar/scope validation only. Callers own the freshly read registration;
+    // decoded bytes are not a lease, current account proof or source authority.
+    internal static byte[] ReadAccountInstanceFromRegistration(ReadOnlySpan<byte> record,
+        ReadOnlySpan<byte> network, ReadOnlySpan<byte> account)
+    {
+        ValidateRecord(record, network, account);
+        return record.Slice(56, 32).ToArray();
     }
 
     internal static async Task<OwnedDeepSecret> ReadCompactionRegistrationUnderLeaseAsync(IDeepSecureStorage storage,

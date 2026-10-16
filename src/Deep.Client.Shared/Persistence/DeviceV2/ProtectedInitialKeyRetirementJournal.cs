@@ -236,12 +236,25 @@ internal static class ProtectedInitialKeyRetirementJournal
     internal static async Task<State> ReadAsync(IDeepSecureStorage storage, ReadOnlyMemory<byte> network,
         ReadOnlyMemory<byte> account, CancellationToken ct)
     {
-        var instance = await SqliteDeepIdV2AccountGeneration.ReadAccountInstanceUnderLeaseAsync(storage, network, account, ct).ConfigureAwait(false);
-        using var owned = await storage.ReadOwnedAsync(Slot, ct).ConfigureAwait(false) ??
-            throw new InvalidDataException("Protected initial-key retirement journal is missing; explicit reset is required.");
-        var result = owned.Use(value => Decode(value, network.Span, account.Span, instance));
-        await RequireCancellationOwnersAsync(storage, result, network, account, instance, ct).ConfigureAwait(false);
-        return result;
+        // One independent actual inventory per invocation. The optional stop
+        // owners are required/decoded only when this journal contains role3;
+        // every matching native floor/history is still read by its real owner.
+        using var custody = await storage.ReadOwnedBatchAsync([SqliteDeepIdV2AccountGeneration.CompactionRegistrationSlot,
+            Slot, ProtectedDid2ContactStartJournal.Slot, ProtectedDid2MessagingSessionCatalog.Slot], ct).ConfigureAwait(false);
+        ct.ThrowIfCancellationRequested();
+        if (custody.Count != 4) throw new InvalidDataException("Initial retirement read group has another shape.");
+        var registration = custody[0] ?? throw new InvalidDataException("The DID2 SQL key record is absent.");
+        var instance = registration.Use(bytes => SqliteDeepIdV2AccountGeneration.ReadAccountInstanceFromRegistration(bytes, network.Span, account.Span));
+        try
+        {
+            var owned = custody[1] ?? throw new InvalidDataException("Protected initial-key retirement journal is missing; explicit reset is required.");
+            var result = owned.Use(value => Decode(value, network.Span, account.Span, instance));
+            if (result.Entries.Values.Any(entry => entry.Role == 3))
+                await RequireCancellationOwnerSnapshotsAsync(storage, result, custody[2], custody[3], network, account, instance, ct).ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested();
+            return result;
+        }
+        finally { CryptographicOperations.ZeroMemory(instance); }
     }
     internal static async Task<Entry> StageCancellationUnderLeaseAsync(IDeepSecureStorage storage,
         ReadOnlyMemory<byte> network, ReadOnlyMemory<byte> account, ReadOnlyMemory<byte> instance, Entry candidate, CancellationToken ct)
@@ -291,9 +304,22 @@ internal static class ProtectedInitialKeyRetirementJournal
         ReadOnlyMemory<byte> network, ReadOnlyMemory<byte> account, ReadOnlyMemory<byte> instance, CancellationToken ct)
     {
         if (!state.Entries.Values.Any(entry => entry.Role == 3)) return;
-        using var raw = await storage.ReadOwnedAsync(ProtectedDid2ContactStartJournal.Slot, ct).ConfigureAwait(false) ?? throw new InvalidDataException();
+        using var roots = await storage.ReadOwnedBatchAsync([ProtectedDid2ContactStartJournal.Slot,
+            ProtectedDid2MessagingSessionCatalog.Slot], ct).ConfigureAwait(false);
+        ct.ThrowIfCancellationRequested();
+        if (roots.Count != 2) throw new InvalidDataException("Initial cancellation owner read group has another shape.");
+        await RequireCancellationOwnerSnapshotsAsync(storage, state, roots[0], roots[1], network, account, instance, ct).ConfigureAwait(false);
+    }
+
+    private static async Task RequireCancellationOwnerSnapshotsAsync(IDeepSecureStorage storage, State state,
+        OwnedDeepSecret? draftRoot, OwnedDeepSecret? catalogRoot, ReadOnlyMemory<byte> network,
+        ReadOnlyMemory<byte> account, ReadOnlyMemory<byte> instance, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        var raw = draftRoot ?? throw new InvalidDataException("Initial cancellation lost its protected draft owner.");
         using var drafts = raw.Use(bytes => ProtectedDid2ContactStartJournal.Decode(bytes, network.Span, account.Span, instance.Span));
-        using var catalog = await new ProtectedDid2MessagingSessionCatalog(storage, network.Span, account.Span, instance.Span).ReadAsync(ct).ConfigureAwait(false);
+        var catalogRaw = catalogRoot ?? throw new InvalidDataException("Initial cancellation lost its protected catalog owner.");
+        using var catalog = catalogRaw.Use(bytes => ProtectedDid2MessagingSessionCatalog.Decode(bytes, network.Span, account.Span, instance.Span));
         await RequireCancellationOwnersUnderLeaseAsync(storage, state, drafts, catalog, ct).ConfigureAwait(false);
     }
 
