@@ -48,3 +48,11 @@ owned expiry followed by a separate explicit new request, recipient acceptance
 and bidirectional text. The observed old metadata mismatch has no established
 differing field; this change must not be described as an unexpired retry fix.
 Physical contacts/messages/attachments/groups remain0/4; S05 is unaccepted.
+
+Matching Windows27/APK44 from MAUI `8181f0a` / Shared `f63b432` / Protocol
+`9d6df07` were installed without reset. Windows retained its exact identity and
+recovery; the actual old retry produced the informative expiry result with no
+automatic replacement. The separately initiated new request and its one exact
+retry failed at permanent-read ingress before new native Store. Android retained
+account/recovery and Verified; its owned expiry has not yet been exercised.
+See [physical observation](../../../deep-client-maui/docs/S05-BUSINESS-WORK-2026-10-17.md#original-contact-retry-expiry-entry-source-candidate).
