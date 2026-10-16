@@ -16,14 +16,16 @@ namespace Deep.Client.Shared.Services.ContactV2;
 /// itself activate a claim or persist that decision.
 /// </summary>
 internal sealed class DeepIdV2PreKeyPublicationTransport(
-    IContactResolvePublicationPathAuthoritySource authoritySource,
-    IExactContactResolveOnionTransport onion)
+    DeepIdV2ContactPathAuthoritySource authoritySource,
+    DeepIdV2PublicationOnionTransport onion)
 {
     internal async ValueTask<(ParsedXic1V2 First, ParsedXic1V2 Second)>
         PublishAsync(StagedDeepIdV2PreKeyPublication staged,
+            DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh,
             CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(staged);
+        ArgumentNullException.ThrowIfNull(fresh);
         var exactAggregate = staged.ExactXpp1;
         var exactPublisherDid2 = staged.ExactDid2;
         var exactPublisherDca1 = staged.ExactDca1;
@@ -33,10 +35,10 @@ internal sealed class DeepIdV2PreKeyPublicationTransport(
         var publication = DeepIdV2PreKeyPublicationCodec.Decode(
             exactAggregate.Span);
         var serviceCapability = publication.Manifest.Field(2);
-        var authority = await authoritySource.GetCurrentForPublicationAsync(
-            publication.NetworkId, serviceCapability, cancellationToken)
-            .ConfigureAwait(false) ?? throw new CryptographicException(
-                "Current DID2 publication authority is unavailable.");
+        await authoritySource.RecheckOwnPreKeyAuthoringAsync(fresh, cancellationToken).ConfigureAwait(false);
+        var authority = new ContactResolvePathAuthority(fresh.Network,
+            ContactServicePlacementFactory.Create(fresh.Network,
+                ContactServiceRequestKind.PublishPreKeyInventory, serviceCapability));
         authority.Network.EnsureCurrent();
         var placement = authority.Placement;
         if (!ReferenceEquals(authority.Network, placement.Network) ||
@@ -75,8 +77,8 @@ internal sealed class DeepIdV2PreKeyPublicationTransport(
                 var request = ContactResolveCanonicalPathRequest
                     .FromDid2BoundedPublication(fragment,
                         serviceCapability.Span, expiresAt);
-                var response = await onion.SendExactAsync(request,
-                    replicas[replicaIndex], cancellationToken)
+                var response = await onion.SendPreKeyPublicationExactAsync(request,
+                    replicas[replicaIndex], fresh, cancellationToken)
                     .ConfigureAwait(false);
                 EnsureSameCurrentPlacement(response.PathAuthority,
                     placement, serviceCapability.Span);

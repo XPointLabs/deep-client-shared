@@ -495,7 +495,7 @@ public sealed partial class DeepIdV2AccountService
         }
         var pair = await new DeepIdV2PreKeyPublicationTransport(
             authoritySource, new DeepIdV2PublicationOnionTransport(authoritySource, custody))
-            .PublishAsync(staged, cancellationToken)
+            .PublishAsync(staged, fresh, cancellationToken)
             .ConfigureAwait(false);
         await RecordPreKeyCommitPairAfterVerificationAsync(
             staged.ExactXpp1, pair.First, pair.Second,

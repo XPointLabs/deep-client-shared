@@ -22,12 +22,14 @@ internal sealed class DeepIdV2PublicationOnionTransport : IDid2OwnedExactContact
     private readonly ContactResolvePrivacyPathProvider paths;
     private readonly PrivacyRoutingCodec codec;
     private readonly DeepIdV2OnionClientCustody custody;
+    private readonly DeepIdV2ContactPathAuthoritySource source;
 
     internal DeepIdV2PublicationOnionTransport(DeepIdV2ContactPathAuthoritySource source,
         DeepIdV2OnionClientCustody custody)
     {
         source.RequireAccountOwner(custody.Owner);
         this.custody = custody;
+        this.source = source;
         paths = new(source, custody.Guards);
         codec = new(new OnionEntropyAuthority(custody.Entropy),
             new OnionKeyAgreementAuthority(new NoClientReceiveVault()));
@@ -62,13 +64,41 @@ internal sealed class DeepIdV2PublicationOnionTransport : IDid2OwnedExactContact
         return result;
     }
 
+    // One command's independently verified context, never an account-lease
+    // bypass or retained currentness cache. Every suspended local preparation
+    // is followed by the ordinary protected-floor/proof/time recheck.
+    internal async ValueTask<ExactContactResolveOnionResponse> SendPreKeyPublicationExactAsync(
+        ContactResolveCanonicalPathRequest request, ReadOnlyMemory<byte> requiredExitReplicaId,
+        DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh, CancellationToken ct)
+    {
+        var prepared = await PreparePreKeyPublicationAsync(request, requiredExitReplicaId, fresh, ct).ConfigureAwait(false);
+        return await SendPreparedAsync(prepared, null, ct, fresh).ConfigureAwait(false);
+    }
+
+    // A prepared path alone is not dispatch permission: SendPreparedAsync must
+    // still recheck after frame construction and after authenticated return.
+    internal async ValueTask<ContactResolvePreparedPath> PreparePreKeyPublicationAsync(
+        ContactResolveCanonicalPathRequest request, ReadOnlyMemory<byte> requiredExitReplicaId,
+        DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(fresh);
+        if (request.RequestKind != ContactServiceRequestKind.PublishPreKeyInventory)
+            throw new ArgumentException("Prekey publication accepts only its exact fragment kind.", nameof(request));
+        await source.RecheckOwnPreKeyAuthoringAsync(fresh, ct).ConfigureAwait(false);
+        var placement = ContactServicePlacementFactory.Create(fresh.Network,
+            request.RequestKind, request.ShardKey);
+        return await paths.PrepareWithAuthorityAsync(OnionOperation.ContactResolve,
+            request, requiredExitReplicaId, new(fresh.Network, placement), ct).ConfigureAwait(false);
+    }
+
     ValueTask<ExactContactResolveOnionResponse> IDid2OwnedExactContactResolveOnionTransport.SendOwnedExactAsync(
         ContactResolveCanonicalPathRequest request, ReadOnlyMemory<byte> requiredExitReplicaId,
         Did2OwnedContactTransportContext operation, CancellationToken ct)
         => SendOwnedExactAsync(request, requiredExitReplicaId, operation, ct);
 
     private async ValueTask<ExactContactResolveOnionResponse> SendPreparedAsync(
-        ContactResolvePreparedPath prepared, Did2OwnedContactTransportContext? ownedOperation, CancellationToken cancellationToken)
+        ContactResolvePreparedPath prepared, Did2OwnedContactTransportContext? ownedOperation, CancellationToken cancellationToken,
+        DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority? prekeyPublication = null)
     {
         var entry = OnionEntryTransportFactory.Create(prepared.Attempt.Path);
         using var transport = new PrivacyManagedIngressHttpTransport(entry);
@@ -76,6 +106,8 @@ internal sealed class DeepIdV2PublicationOnionTransport : IDid2OwnedExactContact
             cancellationToken).ConfigureAwait(false);
         if (ownedOperation?.RetainedReadRequest is { } retained)
             await retained.EnsureCurrentAsync(cancellationToken).ConfigureAwait(false);
+        if (prekeyPublication is not null)
+            await source.RecheckOwnPreKeyAuthoringAsync(prekeyPublication, cancellationToken).ConfigureAwait(false);
         ownedOperation?.RequireActive();
         cancellationToken.ThrowIfCancellationRequested();
         var response = await ForwardOnceAsync(transport, built.Frame, cancellationToken).ConfigureAwait(false);
@@ -95,6 +127,8 @@ internal sealed class DeepIdV2PublicationOnionTransport : IDid2OwnedExactContact
         entry.EnsureCurrent();
         if (ownedOperation?.RetainedReadRequest is { } returnedRetained)
             await returnedRetained.EnsureCurrentAsync(cancellationToken).ConfigureAwait(false);
+        if (prekeyPublication is not null)
+            await source.RecheckOwnPreKeyAuthoringAsync(prekeyPublication, cancellationToken).ConfigureAwait(false);
         ownedOperation?.RequireActive();
         cancellationToken.ThrowIfCancellationRequested();
         return new(opened.Result.Body, prepared.Authority);

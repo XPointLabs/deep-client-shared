@@ -83,6 +83,24 @@ format, key, timeout or live-authority cache changed. Android31's unchanged120s
 budget failure remains baseline evidence; a new matching APK is required to
 measure the effect, not infer mobile success from these source counts.
 
+APK32 retained the account but still exhausted120s (897 unprotect calls,
+69613ms in protection). The read-group change alone does not close publication.
+The next source candidate applies [DR-0131's one-command context](../../../docs/survival-program/decisions/DR-0131-owned-prekey-maintenance-author.md#one-publication-command)
+to bounded prekey fragments. The shipping ONION transport prepares each exact
+path from that context and performs ordinary protected proof/network-floor/time
+checks before path preparation, after frame construction and after authenticated
+return. It does not hold the account lease across a network call or reacquire
+the complete network for every fragment. Another command acquires independently.
+Focused `artifacts/s05-prekey-read-path-20261016/fragments-02` passed8/0/0/native0:
+all bounded frames sealed for both selected exits without another full proof
+acquisition; expired/cancelled preparation rejects before guard reservation;
+existing completed-pair freshness/cancellation and pending-expiry cases remain.
+The frame fixture uses real signatures/native encryption/storage, not sockets,
+XIC1 responses or physical publication evidence. Matched mobile tests remain.
+Expanded `fragments-03` passed11/0/0/native0 with no compiler warnings/errors,
+adding changed protected fork/floor and invalid/unselected receipt-signature
+refusals. Full canonical/package qualification remains separate.
+
 ### S04 creation/retry API cutover in progress
 
 The semantic owner above separates new command creation from retained retry.
