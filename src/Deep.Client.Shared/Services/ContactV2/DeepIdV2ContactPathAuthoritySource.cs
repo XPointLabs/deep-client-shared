@@ -147,10 +147,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySource :
         HeldDeepIdV2AccountLease held, CancellationToken ct)
     {
         held.RequireActive(); RequirePinnedNetwork(peer.NetworkId);
-        await proofs.RequirePairStillFreshUnderLeaseAsync(authoring.Proof, peer, authoring.Authority, held, ct).ConfigureAwait(false);
-        if (networkHistory is not IDeepIdV2NetworkHistoryLeaseRead reader)
-            throw new NotSupportedException("Held-account freshness requires the owned readonly network backend.");
-        var floor = await reader.ReadHistoryUnderLeaseAsync(held, ct).ConfigureAwait(false);
+        var floor = await proofs.RequirePairStillFreshUnderLeaseAsync(authoring.Proof, peer, authoring.Authority,
+            networkHistory, held, ct).ConfigureAwait(false);
         if (floor is null || floor.Snapshot.ForkLatched || !Same(floor.Snapshot.ProtectedLkg, authoring.Network.ProtectedLkg) ||
             !Fixed(floor.ExactHistory.Span, OnionNetworkProtectedHistoryCodec.Encode(authoring.Network)))
             throw new CryptographicException("Held pre-key authoring no longer binds protected network custody.");

@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Buffers.Binary;
 using Deep.Client.Shared.Services.AccountDirectoryV2;
+using Deep.Client.Shared.Services.XPointNetworkV1;
 using Deep.Protocol.AccountDirectoryV1;
 using Deep.Protocol.XPointNetworkV1;
 using Microsoft.Data.Sqlite;
@@ -9,6 +10,19 @@ namespace Deep.Client.Shared.Persistence.DeviceV2;
 
 internal static partial class SqliteDeepIdV2AccountGeneration
 {
+    // Actual same-account implementations only. One freshly validated SQL
+    // transaction and one atomic marker inventory; no caller-supplied head,
+    // cached currentness, initialization, or mutations.
+    internal static ValueTask<(AccountDirectoryProtectedLkg Directory, DeepIdV2NetworkHistorySnapshot? Network)>
+        ReadExistingAuthorityFloorsUnderLeaseAsync(IDeepIdV2DirectoryProtectedLkgStore directory,
+            IDeepIdV2NetworkHistoryStore network, VerifiedXPointNetworkAuthority authority,
+            HeldDeepIdV2AccountLease held, CancellationToken ct)
+    {
+        if (directory is not DirectoryLkgStore ownDirectory || network is not NetworkLkgStore ownNetwork)
+            throw new NotSupportedException("Joint floor reads require the actual account-owned protected backends.");
+        return ownDirectory.ReadWithNetworkUnderLeaseAsync(ownNetwork, authority, held, ct);
+    }
+
     internal static async ValueTask<IDeepIdV2DirectoryProtectedLkgStore>
         OpenDirectoryLkgStoreAsync(IDeepSecureStorage storage,
             DeepIdV2AccountFileLease accountLease, string statePath,
@@ -58,6 +72,39 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             Convert.ToHexStringLower(SHA256.HashData(
                 binding.NetworkId.Concat(binding.AccountId).ToArray())) +
             ".directory-lkg-floor.";
+
+        internal async ValueTask<(AccountDirectoryProtectedLkg Directory, DeepIdV2NetworkHistorySnapshot? Network)>
+            ReadWithNetworkUnderLeaseAsync(NetworkLkgStore network, VerifiedXPointNetworkAuthority authority,
+                HeldDeepIdV2AccountLease held, CancellationToken ct)
+        {
+            ArgumentNullException.ThrowIfNull(authority); ArgumentNullException.ThrowIfNull(held);
+            using var directoryBorrow = held.BorrowFor(accountLease);
+            using var networkBorrow = network.BorrowSameOwner(storage, path, binding, held);
+            if (!Fixed(authority.NetworkId.Span, binding.NetworkId))
+                throw new CryptographicException("The DID2 directory authority belongs to another network.");
+            using var connection = await OpenVerifiedAsync(ct).ConfigureAwait(false);
+            using var transaction = connection.BeginTransaction(deferred: false);
+            var directoryRow = ReadRow(connection, transaction) ??
+                throw new CryptographicException("The protected DID2 directory floor is absent; readonly handoff cannot provision it.");
+            var networkRow = network.ReadRow(connection, transaction);
+            var networkSlots = network.MarkerSlots(networkRow);
+            var slots = new List<string> { MarkerSlot(1), MarkerSlot(2), MarkerSlot(directoryRow.Revision) };
+            if (directoryRow.Revision < long.MaxValue) slots.Add(MarkerSlot(directoryRow.Revision + 1));
+            slots.AddRange(networkSlots);
+            var distinct = slots.Distinct(StringComparer.Ordinal).ToArray();
+            using var markers = await storage.ReadOwnedBatchAsync(distinct, ct).ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested(); held.RequireOwner(accountLease);
+            OwnedDeepSecret? MarkerAt(string slot) => markers[Array.IndexOf(distinct, slot)];
+            _ = MarkerMatchesTip(null, 1, MarkerAt(MarkerSlot(1)), MarkerAt(MarkerSlot(2)));
+            var directoryHead = RestoreRow(directoryRow, authority);
+            if (!MarkerMatchesTip(directoryHead, directoryRow.Revision, MarkerAt(MarkerSlot(directoryRow.Revision)),
+                    directoryRow.Revision < long.MaxValue ? MarkerAt(MarkerSlot(directoryRow.Revision + 1)) : null))
+                throw new CryptographicException("The protected DID2 directory floor marker is absent.");
+            network.CheckMarkers(networkRow, index => MarkerAt(networkSlots[index]));
+            ct.ThrowIfCancellationRequested(); held.RequireOwner(accountLease);
+            transaction.Commit();
+            return (directoryHead, networkRow is null ? null : new(networkRow.Snapshot, networkRow.ExactHistory));
+        }
 
         public async ValueTask<AccountDirectoryProtectedLkg> RestoreAsync(
             VerifiedXPointNetworkAuthority authority,
@@ -246,12 +293,17 @@ internal static partial class SqliteDeepIdV2AccountGeneration
                 ? [MarkerSlot(revision), MarkerSlot(revision + 1)] : [MarkerSlot(revision)];
             using var markers = await storage.ReadOwnedBatchAsync(slots, cancellationToken).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
-            var marker = markers[0];
+            return MarkerMatchesTip(head, revision, markers[0], revision < long.MaxValue ? markers[1] : null);
+        }
+
+        private bool MarkerMatchesTip(AccountDirectoryProtectedLkg? head, long revision,
+            OwnedDeepSecret? marker, OwnedDeepSecret? future)
+        {
             if (marker is null)
             {
                 if (head is null && revision < long.MaxValue)
                 {
-                    if (markers[1] is not null)
+                    if (future is not null)
                         throw new CryptographicException(
                             "The protected DID2 directory marker chain is incomplete.");
                 }
@@ -267,7 +319,7 @@ internal static partial class SqliteDeepIdV2AccountGeneration
                         "The protected DID2 directory provisioning marker is out of scope.");
                 if (revision < long.MaxValue)
                 {
-                    if (markers[1] is not null)
+                    if (future is not null)
                         throw new CryptographicException(
                             "The protected DID2 directory SQL row rolled back behind its marker.");
                 }

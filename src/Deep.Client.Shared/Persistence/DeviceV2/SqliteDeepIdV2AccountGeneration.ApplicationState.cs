@@ -21,9 +21,11 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         HeldDeepIdV2AccountLease held, DeepIdV2AccountFileLease lease, CancellationToken ct)
     {
         using var borrowed = held.BorrowFor(lease);
-        using var secret = await storage.ReadOwnedAsync(KeySlot, ct).ConfigureAwait(false) ??
+        using var custody = await ReadApplicationCustodyAsync(storage, ct).ConfigureAwait(false);
+        ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
+        var secret = custody[0] ??
             throw new InvalidDataException("Application recovery lost its account key registration.");
-        using var registered = await storage.ReadOwnedAsync(ApplicationStateSlot, ct).ConfigureAwait(false) ??
+        var registered = custody[1] ??
             throw new InvalidDataException("Application recovery lost its initialized registration.");
         var record = secret.Use(bytes => bytes.ToArray());
         var registration = registered.Use(bytes => bytes.ToArray()); byte[] key = [];
@@ -41,8 +43,9 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             try
             {
                 BindStoppedAuditKey(store, record);
-                await BindControlAuditCustodyAsync(store, storage, record, held, ct).ConfigureAwait(false);
-                await ValidateIdleStoppedAuditCustodyAsync(store, storage, record, held, ct).ConfigureAwait(false);
+                BindControlAuditCustody(store, custody, record, held, ct);
+                await ValidateIdleStoppedAuditCustodyAsync(store, custody, record, held, ct).ConfigureAwait(false);
+                ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
                 return store;
             }
             catch { store.Dispose(); throw; }
@@ -81,12 +84,19 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         finally { CryptographicOperations.ZeroMemory(context); CryptographicOperations.ZeroMemory(key); }
     }
 
-    private static async Task BindControlAuditCustodyAsync(SqliteDeepMailboxStore store, IDeepSecureStorage storage,
+    // One fresh authenticated inventory for the six inseparable application
+    // registrations/roots. Never retain it across an open or skip SQL/audit
+    // validation; each caller owns and disposes this exact snapshot.
+    private static Task<OwnedDeepSecretBatch> ReadApplicationCustodyAsync(IDeepSecureStorage storage, CancellationToken ct) =>
+        storage.ReadOwnedBatchAsync([KeySlot, ApplicationStateSlot, ProtectedDid2ContactStartJournal.Slot,
+            ProtectedDid2ContactAcceptJournal.Slot, Did2CompactionPlan.Slot, ProtectedDid2DirectTextJournal.Slot], ct);
+
+    private static void BindControlAuditCustody(SqliteDeepMailboxStore store, OwnedDeepSecretBatch custody,
         byte[] record, HeldDeepIdV2AccountLease held, CancellationToken ct)
     {
         held.RequireActive();
-        using var startsRaw = await storage.ReadOwnedAsync(ProtectedDid2ContactStartJournal.Slot, ct).ConfigureAwait(false) ?? throw new InvalidDataException("Control audit binding lost Initial custody.");
-        using var acceptsRaw = await storage.ReadOwnedAsync(ProtectedDid2ContactAcceptJournal.Slot, ct).ConfigureAwait(false) ?? throw new InvalidDataException("Control audit binding lost acceptance custody.");
+        var startsRaw = custody[2] ?? throw new InvalidDataException("Control audit binding lost Initial custody.");
+        var acceptsRaw = custody[3] ?? throw new InvalidDataException("Control audit binding lost acceptance custody.");
         using var starts = startsRaw.Use(bytes => ProtectedDid2ContactStartJournal.Decode(bytes, record.AsSpan(8, 16), record.AsSpan(24, 32), record.AsSpan(56, 32)));
         using var accepts = acceptsRaw.Use(bytes => ProtectedDid2ContactAcceptJournal.Decode(bytes, record.AsSpan(8, 16), record.AsSpan(24, 32), record.AsSpan(56, 32)));
         var rows = new List<SqliteDeepMailboxStore.ControlAuditCustody>();
@@ -102,14 +112,15 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         finally { foreach (var row in rows) CryptographicOperations.ZeroMemory(row.Operation); }
     }
 
-    private static async Task ValidateIdleStoppedAuditCustodyAsync(SqliteDeepMailboxStore store, IDeepSecureStorage storage,
+    private static async Task ValidateIdleStoppedAuditCustodyAsync(SqliteDeepMailboxStore store, OwnedDeepSecretBatch custody,
         byte[] record, HeldDeepIdV2AccountLease held, CancellationToken ct)
     {
         held.RequireActive();
-        using var plan = await ProtectedDid2CompactionPlan.ReadRegisteredAsync(storage, record.AsMemory(8, 16),
-            record.AsMemory(24, 32), record.AsMemory(56, 32), ct).ConfigureAwait(false);
+        var planRaw = custody[4] ?? throw new InvalidDataException("Protected compaction registration is absent; explicit reset is required.");
+        using var plan = planRaw.Use(bytes => Did2CompactionPlan.Decode(bytes, record.AsSpan(8, 16),
+            record.AsSpan(24, 32), record.AsSpan(56, 32)));
         if (plan.Phase != 0) return; // The exact active transaction owns intermediate SQL/root agreement.
-        using var raw = await storage.ReadOwnedAsync(ProtectedDid2DirectTextJournal.Slot, ct).ConfigureAwait(false) ??
+        var raw = custody[5] ??
             throw new InvalidDataException("Audit completeness lost ordinary custody.");
         using var ordinary = raw.Use(bytes => ProtectedDid2DirectTextJournal.Decode(bytes, record.AsSpan(8, 16),
             record.AsSpan(24, 32), record.AsSpan(56, 32)));
@@ -146,9 +157,11 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         HeldDeepIdV2AccountLease held, CancellationToken ct)
     {
         held.RequireActive();
-        using var secret = await storage.ReadOwnedAsync(KeySlot, ct).ConfigureAwait(false) ??
+        using var custody = await ReadApplicationCustodyAsync(storage, ct).ConfigureAwait(false);
+        ct.ThrowIfCancellationRequested(); held.RequireActive();
+        var secret = custody[0] ??
             throw new InvalidDataException("The DID2 account SQL key is absent.");
-        using var registered = await storage.ReadOwnedAsync(ApplicationStateSlot, ct).ConfigureAwait(false) ??
+        var registered = custody[1] ??
             throw new InvalidDataException("The DID2 application registration is absent; no repair is permitted.");
         var record = secret.Use(static bytes => bytes.ToArray());
         var registration = registered.Use(static bytes => bytes.ToArray());
@@ -166,8 +179,8 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             store = registration[1] == 1 && !File.Exists(path)
                 ? new(options) : SqliteDeepMailboxStore.OpenExisting(options);
             BindStoppedAuditKey(store, record);
-            await BindControlAuditCustodyAsync(store, storage, record, held, ct).ConfigureAwait(false);
-            await ValidateIdleStoppedAuditCustodyAsync(store, storage, record, held, ct).ConfigureAwait(false);
+            BindControlAuditCustody(store, custody, record, held, ct);
+            await ValidateIdleStoppedAuditCustodyAsync(store, custody, record, held, ct).ConfigureAwait(false);
             if (registration[1] == 1)
             {
                 store.RequireInitializedEmpty();

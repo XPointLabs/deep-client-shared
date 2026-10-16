@@ -161,6 +161,20 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             Convert.ToHexStringLower(SHA256.HashData(
             binding.NetworkId.Concat(binding.AccountId).ToArray())) + ".network-lkg-floor.";
 
+        internal IDisposable BorrowSameOwner(IDeepSecureStorage expectedStorage, string expectedPath,
+            AccountBinding expectedBinding, HeldDeepIdV2AccountLease held)
+        {
+            if (!ReferenceEquals(storage, expectedStorage) ||
+                !string.Equals(path, expectedPath, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal) ||
+                binding.DisplayName != expectedBinding.DisplayName || binding.DeepIdText != expectedBinding.DeepIdText ||
+                !Fixed(binding.NetworkId, expectedBinding.NetworkId) || !Fixed(binding.AccountId, expectedBinding.AccountId) ||
+                !Fixed(binding.InstanceId, expectedBinding.InstanceId) || !Fixed(binding.DeviceId, expectedBinding.DeviceId) ||
+                !Fixed(binding.Did2Hash, expectedBinding.Did2Hash) || !Fixed(binding.Dab2Hash, expectedBinding.Dab2Hash) ||
+                !Fixed(binding.Dpd1Hash, expectedBinding.Dpd1Hash) || !Fixed(binding.Dmd1Hash, expectedBinding.Dmd1Hash))
+                throw new CryptographicException("Joint floor read requires the same actual protected account stores.");
+            return held.BorrowFor(accountLease);
+        }
+
         public void RequireAccountScope(ReadOnlyMemory<byte> accountId)
         {
             if (!Fixed(accountId.Span, binding.AccountId))
@@ -347,7 +361,7 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         }
 
         private sealed record ProjectionRow(XPointNetworkStateSnapshot Snapshot, byte[] Payload);
-        private sealed record Row(XPointNetworkStateSnapshot Snapshot, byte[] Payload,
+        internal sealed record Row(XPointNetworkStateSnapshot Snapshot, byte[] Payload,
             byte[] HistoryEnvelope, byte[] ExactHistory);
         internal async ValueTask<DeepIdV2NetworkHistorySnapshot> ReadExistingHistoryInTransactionAsync(
             SqliteConnection connection, SqliteTransaction transaction, CancellationToken ct)
@@ -382,7 +396,7 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             return new(new(checked((ulong)revision), floor, payload[5] == 1), payload);
         }
 
-        private Row? ReadRow(SqliteConnection connection, SqliteTransaction transaction)
+        internal Row? ReadRow(SqliteConnection connection, SqliteTransaction transaction)
         {
             var projection = ReadProjectionRow(connection, transaction);
             using var read = connection.CreateCommand();
@@ -410,14 +424,26 @@ internal static partial class SqliteDeepIdV2AccountGeneration
 
         private async ValueTask CheckMarkersAsync(Row? row, CancellationToken cancellationToken)
         {
-            var revision = row is null ? 1L : checked((long)row.Snapshot.Revision);
             // One actual protected-inventory snapshot, not four platform
             // decryptions or a retained plaintext/current-authority cache.
-            string[] slots = revision < long.MaxValue
+            var slots = MarkerSlots(row);
+            using var markers = await storage.ReadOwnedBatchAsync(slots, cancellationToken).ConfigureAwait(false);
+            CheckMarkers(row, index => markers[index]);
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+
+        internal string[] MarkerSlots(Row? row)
+        {
+            var revision = row is null ? 1L : checked((long)row.Snapshot.Revision);
+            return revision < long.MaxValue
                 ? [MarkerSlot(revision), HistoryAnchorSlot(revision), MarkerSlot(revision + 1), HistoryAnchorSlot(revision + 1)]
                 : [MarkerSlot(revision), HistoryAnchorSlot(revision)];
-            using var markers = await storage.ReadOwnedBatchAsync(slots, cancellationToken).ConfigureAwait(false);
-            var marker = markers[0]; var historyAnchor = markers[1];
+        }
+
+        internal void CheckMarkers(Row? row, Func<int, OwnedDeepSecret?> readMarker)
+        {
+            var revision = row is null ? 1L : checked((long)row.Snapshot.Revision);
+            var marker = readMarker(0); var historyAnchor = readMarker(1);
             if (row is null && (marker is not null || historyAnchor is not null))
                 throw new CryptographicException("The protected DID2 network floor disappeared after initialization.");
             if (row is not null)
@@ -440,10 +466,9 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             }
             if (revision < long.MaxValue)
             {
-                if (markers[2] is not null || markers[3] is not null)
+                if (readMarker(2) is not null || readMarker(3) is not null)
                     throw new CryptographicException("The protected DID2 network SQL floor is behind its marker.");
             }
-            cancellationToken.ThrowIfCancellationRequested();
         }
 
         private byte[] Encode(XPointNetworkStateSnapshot snapshot)

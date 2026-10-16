@@ -1,6 +1,7 @@
 using System.Net;
 using System.Security.Cryptography;
 using Deep.Client.Shared.Persistence.DeviceV2;
+using Deep.Client.Shared.Services.XPointNetworkV1;
 using Deep.Protocol.AccountDirectoryV1;
 using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.DeepExtension.PrivacyRouting;
@@ -245,9 +246,10 @@ public sealed class DeepIdV2DirectoryProofClient : IDisposable
         await RequireHeadAndClockAsync(verified, protectedHead, cancellationToken).ConfigureAwait(false);
     }
 
-    internal async ValueTask RequirePairStillFreshUnderLeaseAsync(VerifiedDeepIdV2DirectoryFreshness own,
+    internal async ValueTask<DeepIdV2NetworkHistorySnapshot?> RequirePairStillFreshUnderLeaseAsync(VerifiedDeepIdV2DirectoryFreshness own,
         VerifiedDeepIdV2DirectoryFreshness peer,
-        VerifiedXPointNetworkAuthority authority, HeldDeepIdV2AccountLease held, CancellationToken ct)
+        VerifiedXPointNetworkAuthority authority, IDeepIdV2NetworkHistoryStore network,
+        HeldDeepIdV2AccountLease held, CancellationToken ct)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
         ArgumentNullException.ThrowIfNull(own); ArgumentNullException.ThrowIfNull(peer);
@@ -256,12 +258,12 @@ public sealed class DeepIdV2DirectoryProofClient : IDisposable
         if (!CryptographicOperations.FixedTimeEquals(own.NetworkId.Span, authority.NetworkId.Span) ||
             !CryptographicOperations.FixedTimeEquals(peer.NetworkId.Span, authority.NetworkId.Span))
             throw new CryptographicException("The DID2 proof and network authority differ at held handoff.");
-        if (protectedLkgStore is not IDeepIdV2DirectoryProtectedLeaseRead reader)
-            throw new NotSupportedException("Held-account freshness requires the owned readonly directory backend.");
-        var protectedHead = await reader.ReadExistingUnderLeaseAsync(authority, held, ct).ConfigureAwait(false);
-        await RequireHeadAndClockAsync(own, protectedHead, ct).ConfigureAwait(false);
-        await RequireHeadAndClockAsync(peer, protectedHead, ct).ConfigureAwait(false);
+        var floors = await SqliteDeepIdV2AccountGeneration.ReadExistingAuthorityFloorsUnderLeaseAsync(
+            protectedLkgStore, network, authority, held, ct).ConfigureAwait(false);
+        await RequireHeadAndClockAsync(own, floors.Directory, ct).ConfigureAwait(false);
+        await RequireHeadAndClockAsync(peer, floors.Directory, ct).ConfigureAwait(false);
         held.RequireActive();
+        return floors.Network;
     }
 
     private async ValueTask RequireHeadAndClockAsync(VerifiedDeepIdV2DirectoryFreshness verified,
