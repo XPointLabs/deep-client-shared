@@ -101,6 +101,24 @@ Expanded `fragments-03` passed11/0/0/native0 with no compiler warnings/errors,
 adding changed protected fork/floor and invalid/unselected receipt-signature
 refusals. Full canonical/package qualification remains separate.
 
+On the retained Android account, matching APK33 advanced from successful prekey
+publication (65884ms) into contact publication. Subsequent commands reauthenticated
+the persisted pair in21205/24306ms with0 protection writes. This closes neither
+the whole verification cycle nor contact/message acceptance: the following
+contact phase still timed out or received a typed ingress refusal.
+The next implementation composes the existing public permanent-contact workflow
+with prekey completion under one fresh context. It invokes the same actual
+owner route/object/publication phases, preserving their separate leases,
+callback/floor/time checks, and the final plan/currentness recheck. Explicit
+internal fixture phases keep their own independently acquired contexts; no
+public overload, storage generation, clock input or compatibility path is added.
+Source `artifacts/s05-prekey-read-path-20261016/workflow-04` passed18/0/0/native0,
+no compiler warnings/errors. The public workflow's actual encrypted cold reopen
+observes exactly one full proof acquisition, restores both existing commitments
+without ONION reservation, and refuses an invalid prekey pair without contact
+mutation. Existing maintenance/succession and bounded-frame cases also pass.
+This is not first socket publication or device acceptance of the new workflow.
+
 ### S04 creation/retry API cutover in progress
 
 The semantic owner above separates new command creation from retained retry.

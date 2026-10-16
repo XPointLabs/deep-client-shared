@@ -51,13 +51,18 @@ public sealed partial class DeepIdV2AccountService
     /// <summary>Publishes this account's permanent contact through the selected
     /// three-hop carrier. Restart resumes protected exact custody. The result
     /// proves a durable commit, not contact acceptance or message permission.</summary>
-    public Task<VerifiedDeepIdV2PublicationCommit> EnsureOwnPermanentContactPublishedAsync(
+    public async Task<VerifiedDeepIdV2PublicationCommit> EnsureOwnPermanentContactPublishedAsync(
         DeepIdV2ContactPathAuthoritySource source, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(source); source.RequireAccountOwner(this);
+        var fresh = await source.VerifyForOwnPreKeyAuthoringAsync(this, cancellationToken).ConfigureAwait(false);
+        var custody = await OpenOwnOnionClientCustodyAsync(cancellationToken).ConfigureAwait(false);
+        _ = await PublishOwnPreKeyInventoryCoreAsync(source, custody, fresh, cancellationToken).ConfigureAwait(false);
+        var staged = await ReadOwnStagedPreKeyPublicationAsync(cancellationToken).ConfigureAwait(false) ??
+            throw new InvalidOperationException("Owned prekey custody is absent.");
         var coordination = new Did2ContactCoordinationOnionSource(source);
-        return EnsureOwnPermanentContactPublishedAsync(source, coordination, coordination,
-            new Did2ContactReplicaPublicationOnionTransport(source), cancellationToken);
+        return await EnsureOwnPermanentContactPublishedCoreAsync(source, coordination, coordination,
+            new Did2ContactReplicaPublicationOnionTransport(source), fresh, staged, cancellationToken).ConfigureAwait(false);
     }
 
     internal async Task<VerifiedDeepIdV2PublicationCommit> EnsureOwnPermanentContactPublishedAsync(
@@ -66,18 +71,42 @@ public sealed partial class DeepIdV2AccountService
         CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(source); source.RequireAccountOwner(this);
-        var plan = await ReadOwnPermanentContactPlanAsync(ct).ConfigureAwait(false);
-        var staged = await EnsureOwnPreKeyInventoryAsync(source, ct).ConfigureAwait(false);
         var fresh = await source.VerifyForOwnPreKeyAuthoringAsync(this, ct).ConfigureAwait(false);
+        var staged = await EnsureOwnPreKeyInventoryAsync(source, fresh, ct).ConfigureAwait(false);
+        return await EnsureOwnPermanentContactPublishedCoreAsync(source, threshold, publication, transport,
+            fresh, staged, ct).ConfigureAwait(false);
+    }
+
+    private async Task<VerifiedDeepIdV2PublicationCommit> EnsureOwnPermanentContactPublishedCoreAsync(
+        DeepIdV2ContactPathAuthoritySource source, IDid2ContactRouteThresholdSource threshold,
+        IDid2ContactPublicationSource publication, IDid2ContactReplicaPublicationTransport transport,
+        DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh,
+        StagedDeepIdV2PreKeyPublication staged, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(threshold); ArgumentNullException.ThrowIfNull(publication);
+        ArgumentNullException.ThrowIfNull(transport);
+        var plan = await ReadOwnPermanentContactPlanAsync(ct).ConfigureAwait(false);
         VerifiedDeepIdV2PublicationCommit? committed;
         using (var verifier = OpenVerifier())
             committed = await owner.TryRenewPermanentContactAsync(TrustedUnixSeconds(), verifier, plan,
                 source, fresh, staged, threshold, publication, transport, ct).ConfigureAwait(false);
-        committed ??= await EnsureOwnContactPublicationCommitAsync(plan.Intent, source,
-            Did2OwnedPermanentContactPlan.Configuration(), threshold, plan.Profile, publication, transport, ct, plan).ConfigureAwait(false);
+        if (committed is null)
+        {
+            var configuration = Did2OwnedPermanentContactPlan.Configuration();
+            using (var verifier = OpenVerifier())
+                _ = await owner.EnsureContactRouteAsync(TrustedUnixSeconds(), verifier, plan.Intent,
+                    source, fresh, staged.ExactDca1, configuration, threshold, ct, plan).ConfigureAwait(false);
+            using (var verifier = OpenVerifier())
+                _ = await owner.EnsureContactObjectAsync(TrustedUnixSeconds(), verifier, plan.Intent,
+                    source, fresh, staged, configuration, plan.Profile, ct, plan).ConfigureAwait(false);
+            using (var verifier = OpenVerifier())
+                committed = await owner.EnsureContactPublicationCommitAsync(TrustedUnixSeconds(), verifier, plan.Intent,
+                    source, fresh, configuration, publication, transport, ct, plan).ConfigureAwait(false);
+        }
         var after = await ReadOwnPermanentContactPlanAsync(ct).ConfigureAwait(false);
         if (!plan.Matches(after))
             throw new System.Security.Cryptography.CryptographicException("The permanent-contact account instance changed during publication.");
+        await source.RecheckOwnPreKeyAuthoringAsync(fresh, ct).ConfigureAwait(false);
         ct.ThrowIfCancellationRequested(); return committed;
     }
 

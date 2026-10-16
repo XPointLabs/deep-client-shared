@@ -454,6 +454,16 @@ public sealed partial class DeepIdV2AccountService
         // authoring rather than wall-clock guesses or extending signed bytes.
         var fresh = await authoritySource.VerifyForOwnPreKeyAuthoringAsync(this,
             cancellationToken).ConfigureAwait(false);
+        return await PublishOwnPreKeyInventoryCoreAsync(authoritySource, custody, fresh,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    // Only this account's independently verified command opens the context.
+    // Subphases retain their actual owner leases and currentness checks.
+    private async Task<DeepIdV2PreKeyCommitSnapshot> PublishOwnPreKeyInventoryCoreAsync(
+        DeepIdV2ContactPathAuthoritySource authoritySource, DeepIdV2OnionClientCustody custody,
+        DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh, CancellationToken cancellationToken)
+    {
         var staged = await EnsureOwnPreKeyInventoryAsync(authoritySource, fresh,
             cancellationToken).ConfigureAwait(false);
         var checkpoint = fresh.Proof.CurrentCheckpoint ?? throw new CryptographicException(
