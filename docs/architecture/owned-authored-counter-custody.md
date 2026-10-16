@@ -1092,6 +1092,28 @@ regression cases passed in the first run on the same production source. These
 are native SQLCipher/signed in-process fixtures, not physical socket delivery,
 wall-clock performance or final unfiltered source/release acceptance.
 
+### Bounded coherent source acquisition
+
+`VerifyCurrentNetworkCoreAsync` implements the separately frozen
+[DR-0128](../../../docs/survival-program/decisions/DR-0128-coherent-network-view-acquisition.md)
+observation and acquisition policy. Only the original exact DTT-binding refusal
+plus Protocol's authenticated strictly-later-view observation permits one
+closure/independent-proof reacquisition. The actual gate, caller cancellation,
+old proof freshness, retained history and all native floor/CAS/release checks
+remain. The second pair passes the complete original verifier. This does not
+retry a contact read, prekey claim, Store or any original command, and changes
+none of their transport or signed validity bounds.
+
+Signed race red01 retained0PASS/2FAIL/native1: the positive case hit the same
+DTT-binding guard, and the bounded-failure case saw only its original fetch.
+Green02 passed2; expanded Shared04 passed5, including other-failure/cancellation
+refusal and an actual fork latch changed during acquisition. Shared regression07
+passed47/0/0/native0 across coherent acquisition, history, scoped contact,
+renewal and claim-read cases. All use Windows PowerShell5.1 / SDK10.0.301 under
+`artifacts/s05-coherent-acquisition-20261016/`. These are focused source fixtures,
+not unfiltered full or device acceptance. Matching Protocol and client builds
+remain required; the physical guard's exact failed field is still unproven.
+
 ## S04 native SQL read-path performance — source candidate
 
 Exact operation/receive point reads authenticate the complete current journal

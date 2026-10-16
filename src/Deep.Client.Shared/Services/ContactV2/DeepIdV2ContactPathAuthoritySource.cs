@@ -470,64 +470,79 @@ public sealed partial class DeepIdV2ContactPathAuthoritySource :
         var before = retained?.Snapshot;
         if (before?.ForkLatched == true)
             throw new CryptographicException("Protected network fork latch blocks DID2 publication.");
-        var exact = await artifacts.FetchCurrentAsync(genesisPin.NetworkId,
-            before?.ProtectedLkg, cancellationToken).AsTask().WaitAsync(cancellationToken).ConfigureAwait(false) ??
-            throw new CryptographicException("The DID2 signed network closure is absent.");
-        var authority = XPointNetworkAuthorityVerifier.Verify(genesisPin,
-            exact.ExactXna1AuthorityChain, exact.ExactDts1PolicyChain);
-        var fresh = await accounts.FetchOwnCurrentDirectoryProofAsync(proofs,
-            authority, cancellationToken).ConfigureAwait(false);
-        networkHistory.RequireAccountScope(fresh.CurrentCheckpoint?.Binding.Record.DeepAccountId ??
-            throw new CryptographicException("DID2 network verification requires this account's current checkpoint."));
-        VerifiedOnionNetworkContext verified;
-        try
+        for (var acquisition = 0; acquisition < 2; acquisition++)
         {
-            verified = retained is not null
-                ? await OnionNetworkContextVerifier.VerifyFromProtectedHistoryAsync(authority, fresh,
-                    exact.ExactOrderedXvp1Chain, exact.ExactOrderedXnv1Chain,
-                    exact.ExactOrderedXnh1Chain, exact.ExactActiveXnd1,
-                    exact.ExactOrderedPmt2Chain, retained.ExactHistory, trustedTime,
-                    cancellationToken).ConfigureAwait(false)
-                : await OnionNetworkContextVerifier.VerifyAsync(authority, fresh,
-                    exact.ExactOrderedXvp1Chain, exact.ExactOrderedXnv1Chain,
-                    exact.ExactOrderedXnh1Chain, exact.ExactActiveXnd1,
-                    exact.ExactOrderedPmt2Chain, null, trustedTime,
+            var exact = await artifacts.FetchCurrentAsync(genesisPin.NetworkId,
+                before?.ProtectedLkg, cancellationToken).AsTask().WaitAsync(cancellationToken).ConfigureAwait(false) ??
+                throw new CryptographicException("The DID2 signed network closure is absent.");
+            var authority = XPointNetworkAuthorityVerifier.Verify(genesisPin,
+                exact.ExactXna1AuthorityChain, exact.ExactDts1PolicyChain);
+            var fresh = await accounts.FetchOwnCurrentDirectoryProofAsync(proofs,
+                authority, cancellationToken).ConfigureAwait(false);
+            networkHistory.RequireAccountScope(fresh.CurrentCheckpoint?.Binding.Record.DeepAccountId ??
+                throw new CryptographicException("DID2 network verification requires this account's current checkpoint."));
+            VerifiedOnionNetworkContext verified;
+            try
+            {
+                verified = retained is not null
+                    ? await OnionNetworkContextVerifier.VerifyFromProtectedHistoryAsync(authority, fresh,
+                        exact.ExactOrderedXvp1Chain, exact.ExactOrderedXnv1Chain,
+                        exact.ExactOrderedXnh1Chain, exact.ExactActiveXnd1,
+                        exact.ExactOrderedPmt2Chain, retained.ExactHistory, trustedTime,
+                        cancellationToken).ConfigureAwait(false)
+                    : await OnionNetworkContextVerifier.VerifyAsync(authority, fresh,
+                        exact.ExactOrderedXvp1Chain, exact.ExactOrderedXnv1Chain,
+                        exact.ExactOrderedXnh1Chain, exact.ExactActiveXnd1,
+                        exact.ExactOrderedPmt2Chain, null, trustedTime,
+                        cancellationToken).ConfigureAwait(false);
+            }
+            catch (OnionBoundaryException exception) when (
+                acquisition == 0 && exception.Code == "dtt-binding-invalid" &&
+                OnionNetworkContextVerifier.ProofNamesStrictlyNewerView(authority, fresh,
+                    exact.ExactOrderedXnv1Chain[^1]))
+            {
+                // Read-only reacquisition under the same owned gate and caller
+                // budget; never redispatch a command or reuse mismatched authority.
+                await proofs.RequireStillFreshAsync(fresh, authority, cancellationToken).ConfigureAwait(false);
+                cancellationToken.ThrowIfCancellationRequested();
+                continue;
+            }
+            catch (OnionBoundaryException exception) when (
+                before is not null && exception.Code == "network-fork")
+            {
+                var write = await networkStore.CompareExchangeAsync(before.Revision,
+                    new(checked(before.Revision + 1), before.ProtectedLkg, true),
                     cancellationToken).ConfigureAwait(false);
-        }
-        catch (OnionBoundaryException exception) when (
-            before is not null && exception.Code == "network-fork")
-        {
-            var write = await networkStore.CompareExchangeAsync(before.Revision,
-                new(checked(before.Revision + 1), before.ProtectedLkg, true),
+                if (write.Disposition != XPointNetworkStoreWriteDisposition.Applied &&
+                    write.Snapshot?.ForkLatched != true)
+                    throw new IOException("Network custody changed while recording the verified fork.", exception);
+                throw new CryptographicException("A verified network fork blocks DID2 publication.", exception);
+            }
+            verified.EnsureCurrent();
+            var mailboxAuthority = await VerifyMailboxAuthorityAsync(exact, verified, authority, fresh,
                 cancellationToken).ConfigureAwait(false);
-            if (write.Disposition != XPointNetworkStoreWriteDisposition.Applied &&
-                write.Snapshot?.ForkLatched != true)
-                throw new IOException("Network custody changed while recording the verified fork.", exception);
-            throw new CryptographicException("A verified network fork blocks DID2 publication.", exception);
+            if (retained is not null &&
+                (!OnionNetworkProtectedHistoryCodec.BindsPredecessor(verified, retained.ExactHistory) ||
+                 !Same(before!.ProtectedLkg, verified.PriorProtectedLkg)))
+                throw new CryptographicException("Verified network did not bind the complete protected predecessor.");
+            var committed = await networkHistory.ApplyVerifiedHistoryAsync(retained, verified,
+                cancellationToken).ConfigureAwait(false);
+            if (committed.Disposition is not (XPointNetworkAdvanceDisposition.Applied or
+                XPointNetworkAdvanceDisposition.Idempotent) ||
+                !Same(committed.Snapshot.ProtectedLkg, verified.ProtectedLkg))
+                throw new CryptographicException("DID2 network custody did not commit the exact verified context.");
+            var after = await networkHistory.ReadHistoryAsync(cancellationToken).ConfigureAwait(false);
+            if (after is null || after.Snapshot.ForkLatched ||
+                !Same(after.Snapshot.ProtectedLkg, verified.ProtectedLkg) ||
+                !Fixed(after.ExactHistory.Span, OnionNetworkProtectedHistoryCodec.Encode(verified)))
+                throw new CryptographicException("Committed DID2 network custody could not be reauthenticated.");
+            await proofs.RequireStillFreshAsync(fresh, authority, cancellationToken).ConfigureAwait(false);
+            verified.EnsureCurrent();
+            mailboxAuthority = await VerifyMailboxAuthorityAsync(exact, verified, authority, fresh,
+                cancellationToken).ConfigureAwait(false);
+            return new(verified, authority, fresh, mailboxAuthority, exact);
         }
-        verified.EnsureCurrent();
-        var mailboxAuthority = await VerifyMailboxAuthorityAsync(exact, verified, authority, fresh,
-            cancellationToken).ConfigureAwait(false);
-        if (retained is not null &&
-            (!OnionNetworkProtectedHistoryCodec.BindsPredecessor(verified, retained.ExactHistory) ||
-             !Same(before!.ProtectedLkg, verified.PriorProtectedLkg)))
-            throw new CryptographicException("Verified network did not bind the complete protected predecessor.");
-        var committed = await networkHistory.ApplyVerifiedHistoryAsync(retained, verified,
-            cancellationToken).ConfigureAwait(false);
-        if (committed.Disposition is not (XPointNetworkAdvanceDisposition.Applied or
-            XPointNetworkAdvanceDisposition.Idempotent) ||
-            !Same(committed.Snapshot.ProtectedLkg, verified.ProtectedLkg))
-            throw new CryptographicException("DID2 network custody did not commit the exact verified context.");
-        var after = await networkHistory.ReadHistoryAsync(cancellationToken).ConfigureAwait(false);
-        if (after is null || after.Snapshot.ForkLatched ||
-            !Same(after.Snapshot.ProtectedLkg, verified.ProtectedLkg) ||
-            !Fixed(after.ExactHistory.Span, OnionNetworkProtectedHistoryCodec.Encode(verified)))
-            throw new CryptographicException("Committed DID2 network custody could not be reauthenticated.");
-        await proofs.RequireStillFreshAsync(fresh, authority, cancellationToken).ConfigureAwait(false);
-        verified.EnsureCurrent();
-        mailboxAuthority = await VerifyMailboxAuthorityAsync(exact, verified, authority, fresh,
-            cancellationToken).ConfigureAwait(false);
-        return new(verified, authority, fresh, mailboxAuthority, exact);
+        throw new InvalidOperationException("Bounded coherent network acquisition did not produce a verified context.");
     }
 
     private async ValueTask<VerifiedMailboxAuthorityV2> VerifyMailboxAuthorityAsync(

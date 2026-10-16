@@ -3108,12 +3108,17 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 var network = XPointNetworkClosureWireCodec.DecodeRequest(
                     await request.Content!.ReadAsByteArrayAsync(cancellationToken));
                 Assert.Equal(Network, network);
-                var raw = PublicClosure();
+                var raw = frozenDistributedClosure ?? PublicClosure();
+                if (FreezeNextDistributedClosure) frozenDistributedClosure = raw;
                 var encoded = XPointNetworkClosureWireCodec.EncodeResponse(network,
                     raw.ExactXna1AuthorityChain, raw.ExactDts1PolicyChain,
                     raw.ExactOrderedXvp1Chain, raw.ExactOrderedXnv1Chain,
                     raw.ExactOrderedXnh1Chain, raw.ExactActiveXnd1, raw.ExactOrderedPmt2Chain,
                     raw.ExactOrderedPma2Chain);
+                // The actual signed response is captured first. A legitimate
+                // publisher can advance before the next nonce-bound proof.
+                var captured = OnClosureCapturedAsync; OnClosureCapturedAsync = null;
+                if (captured is not null) await captured(cancellationToken);
                 var distributed = new HttpResponseMessage(HttpStatusCode.OK)
                 { RequestMessage = request, Content = new ByteArrayContent(encoded) };
                 distributed.Content.Headers.ContentType = new(XPointNetworkClosureWireCodec.ResponseMediaType);
