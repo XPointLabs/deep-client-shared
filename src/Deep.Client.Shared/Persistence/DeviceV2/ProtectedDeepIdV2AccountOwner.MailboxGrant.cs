@@ -380,7 +380,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         held.RequireActive();
         if (domain != MailboxCapabilityDomain.Deposit)
             throw new CryptographicException("Current-route acquisition is Deposit-only.");
-        await RequireMailboxIssuerCurrentAsync(route, fresh.MailboxAuthority.ExactPma2, ct).ConfigureAwait(false);
+        await RequireMailboxIssuerCurrentAsync(route, fresh, ct).ConfigureAwait(false);
         var routeHash = SHA256.HashData(route.ExactRouteClosure.Span);
         var scope = ProtectedDid2MailboxGrantJournal.Scope(routeHash, locator.Span, (byte)domain);
         var name = Convert.ToHexString(scope);
@@ -409,8 +409,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                         capability, domain, seed);
                     var request = await DeepIdV2MailboxGrantRequestAuthor.AuthorDepositAsync(route, locator, signer, ct).ConfigureAwait(false);
                     await recheck(ct).ConfigureAwait(false);
-                    var originalPolicy = await RequireMailboxIssuerCurrentAsync(route, fresh.MailboxAuthority.ExactPma2, ct).ConfigureAwait(false);
-                    entry = ProtectedDid2MailboxGrantJournal.Pending(seed, route, request, originalPolicy, networkId);
+                    var originalPolicy = await RequireMailboxIssuerCurrentAsync(route, fresh, ct).ConfigureAwait(false);
+                    var issuanceProjection = ContactCodec.Decode("PMT2", fresh.NamespaceRecords.ExactOrderedPmt2Chain[^1].Span);
+                    entry = ProtectedDid2MailboxGrantJournal.Pending(seed, route, request, originalPolicy, issuanceProjection, networkId);
                     ProtectedDid2MailboxGrantJournal.AddPending(state, entry);
                     state.Revision = checked(state.Revision + 1);
                     var adopted = await SaveMailboxGrantJournalAsync(state, snapshot, current.AccountId, instance, ct).ConfigureAwait(false);
@@ -426,7 +427,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 var request = await DeepIdV2MailboxGrantRequestAuthor.RestoreDepositAsync(route, locator,
                     signer.Ed25519PublicKey, ProtectedDid2MailboxGrantJournal.Request(entry), ct).ConfigureAwait(false);
                 await recheck(ct).ConfigureAwait(false);
-                await RequireMailboxIssuerCurrentAsync(route, fresh.MailboxAuthority.ExactPma2, ct).ConfigureAwait(false);
+                await RequireMailboxIssuerCurrentAsync(route, fresh, ct).ConfigureAwait(false);
                 using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 deadline.CancelAfter(TimeSpan.FromSeconds(30));
                 var custody = await SqliteDeepIdV2AccountGeneration.OpenBorrowedOnionCustodyAsync(storage, lease,
@@ -499,14 +500,25 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     }
 
     private static async Task<VerifiedMailboxAuthorityV2> RequireMailboxIssuerCurrentAsync(VerifiedDeepIdV2MailboxRouteClosure route,
-        ReadOnlyMemory<byte> exactPma2, CancellationToken ct)
+        DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh, CancellationToken ct)
     {
         var time = await route.ReadCurrentTimeAsync(ct).ConfigureAwait(false);
-        var policy = MailboxAuthorityV2Verifier.Verify(route.NetworkAuthority, exactPma2.Span,
+        var policy = MailboxAuthorityV2Verifier.Verify(route.NetworkAuthority, fresh.MailboxAuthority.ExactPma2.Span,
             time.LowerUnixSeconds, time.UpperUnixSeconds);
-        if (!policy.BindsProjection(route.Route.Projection.CanonicalBytes.Span))
-            throw new CryptographicException("Owned mailbox acquisition has no current root-authorized issuer policy.");
+        RequireMailboxPolicyProjection(route, policy, fresh);
         ct.ThrowIfCancellationRequested(); return policy;
+    }
+
+    // DR-0122: current issuer policy joins current carriage, never the old
+    // logical-assignment snapshot. The lookup record cannot mint currentness:
+    // the actual closed network must bind its exact reference independently.
+    private static void RequireMailboxPolicyProjection(VerifiedDeepIdV2MailboxRouteClosure route,
+        VerifiedMailboxAuthorityV2 policy, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh)
+    {
+        var projection = ContactCodec.Decode("PMT2", fresh.NamespaceRecords.ExactOrderedPmt2Chain[^1].Span);
+        if (!route.Network.BindsProjection(ContactCodec.ArtifactReference("PMT2", projection).CanonicalBytes) ||
+            !policy.BindsProjection(projection.CanonicalBytes.Span))
+            throw new CryptographicException("Owned mailbox acquisition has no current root-authorized issuer policy.");
     }
 
     // Independent current own proof/time: this never restores an expired XMG

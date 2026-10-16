@@ -102,11 +102,13 @@ New-work renewal also observes the existing operation's HTTP timeout+retry
 window: a short grant can become unusable before its proportional refresh margin.
 This scheduling hint cannot extend a grant or alter a pending/active request.
 Ceiling is recomputed from the exact evidence; request PMT2/PMS2, route hash
-and network must match. Deposit additionally requires the original projection's
-PMA2 reference and its admission interval. The DR-0104 Retrieve source increment
-captures the current acquisition PMA2 with the exact original selection: its
-conservative ceiling is the lesser of that policy expiry and original six-record
-admission end plus the normative maximum retained-object horizon. This is a
+and network must match. DR-0122 binds Deposit issuance policy to the actual
+current projection while retaining the exact original logical assignment.
+The ceiling uses the five signed logical route/resource intervals, never the
+original PMT2 snapshot's short operational window. For Deposit it is capped
+by that logical end and captured issuance policy expiry. DR-0104 Retrieve adds
+the normative maximum retained-object horizon to that logical end, capped by
+its current acquisition policy expiry. This is a
 custody ceiling only, not a TTL extension or issuance/admission permission.
 A received winner cannot exceed that ceiling. Epoch exclusion must authenticate
 its captured issuance PMA2 against an exact retained PMT2 naming that policy,
@@ -114,15 +116,18 @@ and separately authenticate the original route PMT2 against its own named PMA2.
 The source retains only bounded owned public record lookup inputs; each exact
 pair passes the existing current host's strict historical namespace verifier.
 Lookup bytes are not a verified cache or authority. Missing/changed records
-reject before effect. Deposit keeps its original single policy/projection join;
-the issuance ceiling and all native/dependency/replacement-read guards remain.
+reject before effect. Both roles authenticate the captured issuance policy and
+the original assignment policy through their exact retained projection joins;
+neither historical fact admits a new Store or read. Current Deposit acquisition,
+SQL installation and Store dispatch independently bind the winner's policy to
+the exact CURRENT projection and retain all logical-route time/holder checks.
+The issuance ceiling and all native/dependency/replacement-read guards remain.
 When the captured issuance policy already is the route projection's named policy,
 the same strict pair supplies both facts; redundant distribution lookup is not
 required. This is not a fallback or an alternative policy reader. Distinct
 namespaces still require both exact joins and reject missing lookup inputs.
 This is a Shared consumer correction, not a wire/API/journal generation change.
-This changes Retrieve evidence
-validation in the sole current reader; an incompatible old nonempty record
+This changes evidence validation in the sole current reader; an incompatible old nonempty record
 rejects, without a second reader, a migration or automatic reset.
 Phase3 retains exact holder/request/evidence with no winner; phases4/5 retain the
 same closure proof with one immutable late result. Their closure lower bound

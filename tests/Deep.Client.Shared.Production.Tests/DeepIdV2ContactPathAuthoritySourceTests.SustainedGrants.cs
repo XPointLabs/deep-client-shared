@@ -102,8 +102,9 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             {
                 await Assert.ThrowsAsync<CryptographicException>(() => host.RequireOriginalNamespaceAsync(policy, projection).AsTask());
                 await own.RequireOriginalMailboxNamespacesAsync(host, policy, original, MailboxCapabilityDomain.Retrieve, default);
-                await Assert.ThrowsAsync<CryptographicException>(() => own.RequireOriginalMailboxNamespacesAsync(host,
-                    policy, original, MailboxCapabilityDomain.Deposit, default).AsTask());
+                // Historical namespace facts are role-neutral under DR-0122;
+                // this does not admit an expired route for a new Deposit/Store.
+                await own.RequireOriginalMailboxNamespacesAsync(host, policy, original, MailboxCapabilityDomain.Deposit, default);
                 await Assert.ThrowsAsync<CryptographicException>(() => own.RequireOriginalMailboxNamespacesAsync(host,
                     policy, original, (MailboxCapabilityDomain)255, default).AsTask());
                 var badPolicy = policy.ToArray(); badPolicy[^1] ^= 1;
@@ -131,6 +132,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                         pmts.Select(bytes => (ReadOnlyMemory<byte>)bytes).ToArray(), pmas.Select(bytes => (ReadOnlyMemory<byte>)bytes).ToArray()) };
                     await Assert.ThrowsAsync<CryptographicException>(() => changed.RequireOriginalMailboxNamespacesAsync(host,
                         policy, original, MailboxCapabilityDomain.Retrieve, default).AsTask());
+                    await Assert.ThrowsAsync<CryptographicException>(() => changed.RequireOriginalMailboxNamespacesAsync(host,
+                        policy, original, MailboxCapabilityDomain.Deposit, default).AsTask());
                 }
                 using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
                 await Assert.ThrowsAnyAsync<OperationCanceledException>(() => own.RequireOriginalMailboxNamespacesAsync(host,

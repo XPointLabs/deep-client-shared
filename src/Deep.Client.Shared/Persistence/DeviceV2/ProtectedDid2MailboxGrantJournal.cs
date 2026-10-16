@@ -304,13 +304,15 @@ internal static class ProtectedDid2MailboxGrantJournal
     }
 
     internal static byte[] Pending(ReadOnlySpan<byte> seed, VerifiedDeepIdV2MailboxRouteClosure route,
-        AuthoredMailboxGrantRequest request, VerifiedMailboxAuthorityV2 policy, ReadOnlySpan<byte> network)
+        AuthoredMailboxGrantRequest request, VerifiedMailboxAuthorityV2 policy,
+        ContactRecord issuanceProjection, ReadOnlySpan<byte> network)
     {
         Required32(seed); route.Network.EnsureCurrent();
         var exactRoute = route.ExactRouteClosure; var exactPolicy = policy.ExactPma2;
         var routeHash = SHA256.HashData(exactRoute.Span);
-        if (!policy.BindsProjection(route.Route.Projection.CanonicalBytes.Span))
-            throw new CryptographicException("Original grant policy does not bind the acquisition projection.");
+        if (!route.Network.BindsProjection(ContactCodec.ArtifactReference("PMT2", issuanceProjection).CanonicalBytes) ||
+            !policy.BindsProjection(issuanceProjection.CanonicalBytes.Span) || !Fixed(policy.NetworkId.Span, network))
+            throw new CryptographicException("Original grant policy does not bind the current issuance projection.");
         return PendingCore(seed, exactRoute, request, exactPolicy, network);
     }
 
@@ -608,15 +610,17 @@ internal static class ProtectedDid2MailboxGrantJournal
         if (!Fixed(route.ExactHash.Span, entry.Slice(64, 32)) ||
             !Fixed(policy.Field(1).Span, request.Field(1).Span) ||
             !Fixed(route.Reachability.Field(1).Span, request.Field(1).Span) ||
-            // Canonical PMT2 decoding verifies the exact PMA2 CoreRef header.
-            (request.Field(6).Span[0] == (byte)MailboxCapabilityDomain.Deposit &&
-             !Fixed(route.Projection.Field(4).Span[6..], policy.CoreHash.Span)) ||
             !Fixed(request.Field(7).Span, ContactCodec.ArtifactReference("PMT2", route.Projection).CanonicalBytes.Span) ||
             !Fixed(request.Field(8).Span, route.Selection.ArtifactHash.Span))
             throw new CryptographicException("Original issuance evidence differs from the exact signed request.");
         static ulong Expiry(ContactRecord record, int tag) => BinaryPrimitives.ReadUInt64BigEndian(record.Field(tag).Span);
+        // DR-0122: the snapshot authenticates assignment creation, not its
+        // resource lifetime. Match the issuer/result verifier's five signed
+        // logical intervals; an old PMT2 clock cannot truncate this ceiling.
+        // Issuance policy and original assignment have separate historical
+        // joins at epoch exclusion; decoding alone grants neither authority.
         var admissionEnd = new[] { Expiry(route.Reachability, 17), Expiry(route.Authorization, 13),
-            Expiry(route.Route, 18), Expiry(route.Successor, 11), Expiry(route.Projection, 12), Expiry(route.Selection, 9) }.Min();
+            Expiry(route.Route, 18), Expiry(route.Successor, 11), Expiry(route.Selection, 9) }.Min();
         var routeEnd = request.Field(6).Span[0] == (byte)MailboxCapabilityDomain.Retrieve
             ? checked(admissionEnd + 2_592_000UL) // DR-0104 maximum retained-object horizon, not a TTL extension.
             : admissionEnd;

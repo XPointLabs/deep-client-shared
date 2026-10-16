@@ -359,8 +359,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 var dispatchTime = await route.ReadCurrentTimeAsync(ct).ConfigureAwait(false);
                 var dispatchPma = MailboxAuthorityV2Verifier.Verify(route.NetworkAuthority, winner.ExactPma2.Span,
                     dispatchTime.LowerUnixSeconds, dispatchTime.UpperUnixSeconds);
-                if (!dispatchPma.BindsProjection(route.Route.Projection.CanonicalBytes.Span))
-                    throw new CryptographicException("Owned Store lost its current dispatch projection.");
+                RequireMailboxPolicyProjection(route, dispatchPma, fresh);
                 using var dispatchPolicy = new MailboxInstallationPolicy(held, route, dispatchPma, loan.Grant, dispatchTime, dispatchStarted,
                     minimumPreparedUpper);
                 var dispatchAuthority = new VerifiedOfficialMailboxAuthority(dispatchPma.NetworkId, dispatchPma.MinimumGrantGeneration,

@@ -230,7 +230,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             var request = retrieve ? await DeepIdV2MailboxGrantRequestAuthor.AuthorRetrieveAsync(route, record.Field(3), record.Field(4), signer) :
                 await DeepIdV2MailboxGrantRequestAuthor.AuthorDepositAsync(route, record.Field(3), signer);
             var policy = await CurrentGrantPolicyAsync(route);
-            var pending = ProtectedDid2MailboxGrantJournal.Pending(seed, route, request, policy, Network);
+            var pending = ProtectedDid2MailboxGrantJournal.Pending(seed, route, request, policy,
+                ContactCodec.Decode("PMT2", operational.ExactPmt2.Span), Network);
             var exact = await IssueOwnedGrantAsync(request, route, retrieve, default);
             var verified = await DeepIdV2MailboxGrantResultVerifier.VerifySuccessAsync(route, request, exact, operational.ExactPma2);
             try { return ProtectedDid2MailboxGrantJournal.WithWinner(pending, verified.ExactXmc2.Span, Network); }
@@ -722,7 +723,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 route.Route.Reachability.Field(10), MailboxCapabilityDomain.Deposit, seed);
             var request = await DeepIdV2MailboxGrantRequestAuthor.AuthorDepositAsync(route, locator, holder);
             var policy = await CurrentGrantPolicyAsync(route);
-            var successor = ProtectedDid2MailboxGrantJournal.Pending(seed, route, request, policy, Network);
+            var successor = ProtectedDid2MailboxGrantJournal.Pending(seed, route, request, policy,
+                ContactCodec.Decode("PMT2", operational.ExactPmt2.Span), Network);
             ProtectedDid2MailboxGrantJournal.AddPending(state, successor); state.Revision++;
             var successorName = ProtectedDid2MailboxGrantJournal.Acquisition(successor);
             Assert.NotEqual(firstName, successorName);
@@ -808,7 +810,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                     using var holder = ReachabilityMailboxHolderAuthority.OpenRetained(route, locator, capability, domain, seed);
                     var request = await DeepIdV2MailboxGrantRequestAuthor.AuthorDepositAsync(route, locator, holder);
                     var policy = await CurrentGrantPolicyAsync(route);
-                    pending = ProtectedDid2MailboxGrantJournal.Pending(seed, route, request, policy, Network);
+                    pending = ProtectedDid2MailboxGrantJournal.Pending(seed, route, request, policy,
+                        ContactCodec.Decode("PMT2", operational.ExactPmt2.Span), Network);
                     ProtectedDid2MailboxGrantJournal.AddPending(state, pending); await Save();
                     response = await IssueOwnedGrantAsync(request, route, retrieve: false, default);
                     var verified = await DeepIdV2MailboxGrantResultVerifier.VerifySuccessAsync(route, request, response, operational.ExactPma2);
@@ -1059,7 +1062,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 var source = (ownerOnPrimary ?? selfRetrieve) ? fixture.Source(dispatch.Custody.Owner) : fixture.GrantReaderSource(dispatch.Custody.Owner);
                 var paths = new ContactResolvePrivacyPathProvider(source, dispatch.Custody.Guards);
                 var prepared = await paths.PrepareWithAuthorityAsync(OnionOperation.ContactResolve, canonical,
-                    ReadOnlyMemory<byte>.Empty, new(dispatch.Network, placement), ct, dispatch.RetainedReadRequest);
+                    ReadOnlyMemory<byte>.Empty, new(dispatch.Network, placement), ct, dispatch.RetainedReadRequest, dispatch);
                 var ledger = new CapturingEntropyLedger(dispatch.Custody.Entropy);
                 var codec = new PrivacyRoutingCodec(new OnionEntropyAuthority(ledger),
                     new OnionKeyAgreementAuthority(new RejectClientReceiveVault()));

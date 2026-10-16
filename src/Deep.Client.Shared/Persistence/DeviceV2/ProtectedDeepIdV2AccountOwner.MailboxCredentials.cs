@@ -39,8 +39,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         var time = await route.ReadCurrentTimeAsync(ct).ConfigureAwait(false);
         var policy = MailboxAuthorityV2Verifier.Verify(route.NetworkAuthority, winner.ExactPma2.Span,
             time.LowerUnixSeconds, time.UpperUnixSeconds);
-        if (!policy.BindsProjection(route.Route.Projection.CanonicalBytes.Span))
-            throw new CryptographicException("Owned mailbox installation lost its exact current issuer projection.");
+        RequireMailboxPolicyProjection(route, policy, fresh);
         var grant = MailboxAuthenticatedCapabilityCodec.DecodeGrant(winner.ExactGrant.Span);
         var localPolicy = new MailboxInstallationPolicy(held, route, policy, grant, time, started);
         ReachabilityMailboxHolderAuthority.ReachabilityMailboxHolderSigner? holder = null;

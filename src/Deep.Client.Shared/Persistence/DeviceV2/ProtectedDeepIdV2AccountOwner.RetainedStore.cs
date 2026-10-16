@@ -346,7 +346,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             // admission authority. Independently current own/network guards remain.
             var host = await MailboxHostAuthorityV2Verifier.VerifyAsync(own.Network, own.Authority,
                 own.MailboxAuthority.ExactPma2, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
-            await host.RequireOriginalNamespaceAsync(metadata.ExactPma, route.Projection.CanonicalBytes, ct).ConfigureAwait(false);
+            await own.RequireOriginalMailboxNamespacesAsync(host, metadata.ExactPma, route.Projection,
+                MailboxCapabilityDomain.Deposit, ct).ConfigureAwait(false);
             var policy = ContactCodec.Decode("PMA2", metadata.ExactPma.Span);
             var issuerKey = policy.Field(5);
             if (grant.NotBeforeUnixSeconds < BinaryPrimitives.ReadUInt64BigEndian(policy.Field(11).Span) ||

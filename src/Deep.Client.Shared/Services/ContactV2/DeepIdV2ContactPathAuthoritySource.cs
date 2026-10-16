@@ -302,16 +302,12 @@ public sealed partial class DeepIdV2ContactPathAuthoritySource :
             CancellationToken ct)
         {
             ct.ThrowIfCancellationRequested();
-            if (domain == Deep.Protocol.DeepExtension.MailboxCapabilities.MailboxCapabilityDomain.Deposit)
-            {
-                await host.RequireOriginalNamespaceAsync(exactIssuancePma2, originalProjection.CanonicalBytes, ct).ConfigureAwait(false);
-                return;
-            }
-            if (domain != Deep.Protocol.DeepExtension.MailboxCapabilities.MailboxCapabilityDomain.Retrieve)
+            if (domain is not (Deep.Protocol.DeepExtension.MailboxCapabilities.MailboxCapabilityDomain.Deposit or
+                Deep.Protocol.DeepExtension.MailboxCapabilities.MailboxCapabilityDomain.Retrieve))
                 throw new CryptographicException("Original namespace custody has no supported mailbox role.");
-            // DR-0104: a retained Retrieve is issued under then-current PMA2,
-            // while naming an older route selection. These are two exact
-            // historical joins, not one mismatched PMA2/PMT2 pair.
+            // DR-0122: both roles use then-current issuance PMA2 while keeping
+            // the exact logical assignment. Authenticate both historical joins;
+            // these facts do not authorize current Store or Retrieve by themselves.
             var issuance = ContactCodec.Decode("PMA2", exactIssuancePma2.Span);
             if (Fixed(issuance.CoreHash.Span, originalProjection.Field(4).Span[6..]))
             {
@@ -326,11 +322,11 @@ public sealed partial class DeepIdV2ContactPathAuthoritySource :
             var issuanceProjection = NamespaceRecords.ExactOrderedPmt2Chain
                 .Select(bytes => ContactCodec.Decode("PMT2", bytes.Span))
                 .FirstOrDefault(candidate => Fixed(candidate.Field(4).Span[6..], issuance.CoreHash.Span)) ??
-                throw new CryptographicException("Original Retrieve issuance policy has no exact retained projection metadata.");
+                throw new CryptographicException("Original mailbox issuance policy has no exact retained projection metadata.");
             var routePolicy = NamespaceRecords.ExactOrderedPma2Chain
                 .Select(bytes => ContactCodec.Decode("PMA2", bytes.Span))
                 .FirstOrDefault(candidate => Fixed(candidate.CoreHash.Span, originalProjection.Field(4).Span[6..])) ??
-                throw new CryptographicException("Original Retrieve route projection has no exact retained policy metadata.");
+                throw new CryptographicException("Original mailbox route projection has no exact retained policy metadata.");
             await host.RequireOriginalNamespaceAsync(issuance.CanonicalBytes, issuanceProjection.CanonicalBytes, ct).ConfigureAwait(false);
             await host.RequireOriginalNamespaceAsync(routePolicy.CanonicalBytes, originalProjection.CanonicalBytes, ct).ConfigureAwait(false);
             ct.ThrowIfCancellationRequested();
