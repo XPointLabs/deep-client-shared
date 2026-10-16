@@ -7,7 +7,8 @@ This checkpoint describes source evidence, not connected/device acceptance.
 Android36 restored an expired original grant for an active Retrieve. Its precise
 local phase is not observed. The candidate covers only uncaptured phases1/2;
 captured-page/semantic/ACK phases3–6 remain pinned and unfinished. The installed
-APK36 does not contain this candidate. Physical business acceptance remains0/4.
+APK36 does not contain this candidate. The subsequent matching APK37 retained
+update is recorded below. Physical business acceptance remains0/4.
 
 Native receipts under `artifacts/s05-active-retrieve-closure-20261016/`:
 
@@ -58,3 +59,14 @@ qualification; test the retained Android account with a matching artifact;
 observe its actual phase and finish captured-page/ACK continuation if needed;
 complete matched Windows/Android business and canonical full/package gates.
 Keep old exact bytes and native/protected floors. No reset or expiry bypass.
+
+## Matched Android diagnostic, still not delivery acceptance
+
+APK37 includes Shared `2cd2f77` and Protocol `2bb61d0`, retaining the real QA
+account and recovery without reset. Independent network observation is Verified.
+One incoming refresh now reaches retained-grant acquisition, then fails with
+onion transport OutcomeUnknown; no synchronization or message is accepted.
+This does not independently expose the stored private read phase or prove
+captured-page/ACK recovery. Preserve the new pending issuer request alongside
+the original custody. Exact build, sequential phases90–101 and sanitized caller
+evidence belong to the [device checkpoint](../../../deep-client-maui/docs/DID2-HTTPS-DEVICE-2026-09-28.md).
