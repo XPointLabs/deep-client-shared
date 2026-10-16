@@ -9,6 +9,21 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     internal async Task StopInitialContactIntentAsync(ulong unixSeconds, IDeepMlDsa65Verifier verifier,
         ReadOnlyMemory<byte> intent, ProtectedDid2DirectTextJournal.WorkStopReason reason,
         DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
+        => _ = await StopInitialContactIntentCoreAsync(unixSeconds, verifier, intent, reason, own, source,
+            onlyIfExpired: false, ct).ConfigureAwait(false);
+
+    // Denial/closure only. False grants no dispatch; the ordinary exact draft
+    // checks still run. True follows the same actual stop/recovery as cancellation.
+    internal Task<bool> TryExpireInitialContactIntentAsync(ulong unixSeconds, IDeepMlDsa65Verifier verifier,
+        ReadOnlyMemory<byte> intent, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own,
+        DeepIdV2ContactPathAuthoritySource source, CancellationToken ct) =>
+        StopInitialContactIntentCoreAsync(unixSeconds, verifier, intent,
+            ProtectedDid2DirectTextJournal.WorkStopReason.RetryExpired, own, source, onlyIfExpired: true, ct);
+
+    private async Task<bool> StopInitialContactIntentCoreAsync(ulong unixSeconds, IDeepMlDsa65Verifier verifier,
+        ReadOnlyMemory<byte> intent, ProtectedDid2DirectTextJournal.WorkStopReason reason,
+        DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own, DeepIdV2ContactPathAuthoritySource source,
+        bool onlyIfExpired, CancellationToken ct)
     {
         ProtectedDph2PreClaimJournal.RequireIntent(intent.Span);
         var op = intent.ToArray(); byte[] before = [], after = [], instance = [];
@@ -22,7 +37,18 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             using var raw = await storage.ReadOwnedAsync(ProtectedDid2ContactStartJournal.Slot, ct).ConfigureAwait(false) ?? throw new InvalidDataException();
             before = raw.Use(bytes => bytes.ToArray());
             using var drafts = ProtectedDid2ContactStartJournal.Decode(before, networkId, current.AccountId.Span, instance);
-            if (!drafts.Entries.TryGetValue(Convert.ToHexString(op), out var draft)) throw new CryptographicException("Initial cancellation has no owned draft intent.");
+            if (!drafts.Entries.TryGetValue(Convert.ToHexString(op), out var draft))
+            {
+                ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
+                if (onlyIfExpired) return false;
+                throw new CryptographicException("Initial cancellation has no owned draft intent.");
+            }
+            ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
+            if (onlyIfExpired && (draft.SuccessfullyStored ||
+                draft.WorkStopped && draft.StopReason != ProtectedDid2DirectTextJournal.WorkStopReason.RetryExpired ||
+                !draft.WorkStopped && ProjectPreSessionStopTime(own.Proof.TrustedLowerUnixSeconds, first.SampleSeconds,
+                    own.Proof.MonotonicSample) < Did2ControlWorkStop.ProvenExpirySecond(draft.ExpiresAtUnixMilliseconds)))
+                return false;
             if (!draft.WorkStopped && !draft.PayloadRetired)
                 RequireControlStopExpiry(reason, Did2ControlWorkStop.ProvenExpirySecond(draft.ExpiresAtUnixMilliseconds),
                     ProjectPreSessionStopTime(own.Proof.TrustedLowerUnixSeconds, first.SampleSeconds, own.Proof.MonotonicSample), ct);
@@ -66,7 +92,21 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     await CompleteMessagingTransferUnderLeaseAsync(current, opened, ct).ConfigureAwait(false);
                     if (!await TryStopControlWorkUnderLeaseAsync(current, held, opened, selected, InitialMailboxOperation(op), reason,
                         verifier, own, source, ct).ConfigureAwait(false)) throw new CryptographicException("Committed native Initial lost its exact draft.");
-                    return;
+                    if (onlyIfExpired)
+                    {
+                        // The common stop owner may instead recover a durable
+                        // Store. Its successful return alone is not an expiry.
+                        using var readback = await storage.ReadOwnedAsync(ProtectedDid2ContactStartJournal.Slot, ct).ConfigureAwait(false)
+                            ?? throw new InvalidDataException("Initial expiry lost its protected result.");
+                        using var stopped = readback.Use(bytes => ProtectedDid2ContactStartJournal.Decode(bytes, networkId, current.AccountId.Span, instance));
+                        if (!stopped.Entries.TryGetValue(Convert.ToHexString(op), out var result))
+                            throw new CryptographicException("Initial expiry lost its original intent.");
+                        ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
+                        if (result.WorkStopped) return result.StopReason == ProtectedDid2DirectTextJournal.WorkStopReason.RetryExpired;
+                        if (!result.SuccessfullyStored) throw new CryptographicException("Initial expiry has no committed outcome.");
+                        return false;
+                    }
+                    return true;
                 }
                 if (!FixedRoute(floor.Exact.Span, Did2MessagingFloor.Empty(selected).Exact.Span)) throw new CryptographicException("Initial has unresolved native import custody.");
             }
@@ -100,6 +140,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             completed?.Dispose();
             await sourceStore.RetireCancelledInitialUnderLeaseAsync(sqlStatePath, op, held, lease, ct).ConfigureAwait(false);
             await MaintainPreSessionControlUnderLeaseAsync(current, held, op, instance, own, source, ct).ConfigureAwait(false);
+            return true;
         }
         finally { foreach (var bytes in new[] { op, before, after, instance }) CryptographicOperations.ZeroMemory(bytes); }
     }

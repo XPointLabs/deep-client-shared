@@ -20,7 +20,9 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         await using var fixture = await Fixture.CreateAsync(withPeer: true, encryptedStorage: true, longMailboxWindow: true);
         var intent = Bytes(32, 0xe1);
         var driver = await fixture.PrepareFreshContactStart(intent);
-        driver.Claim.ExpectedNetworkFetches = fixture.NetworkClosureFetches + 2;
+        // Existing drafts first obtain their independent own expiry proof;
+        // the subsequent resolve/claim still shares one owned network scope.
+        driver.Claim.ExpectedNetworkFetches = fixture.NetworkClosureFetches + 3;
         var started = await driver.Start(intent, default);
         Assert.True(started.StorageReceipt.IngressDispatched);
         Assert.Equal(1, driver.Claim.Calls); Assert.Equal(0, driver.Claim.GenericCalls);
@@ -47,7 +49,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         await using var fixture = await Fixture.CreateAsync(withPeer: true, encryptedStorage: true, longMailboxWindow: true);
         var intent = Bytes(32, 0xe2);
         var driver = await fixture.PrepareFreshContactStart(intent);
-        driver.Claim.ExpectedNetworkFetches = fixture.NetworkClosureFetches + 2;
+        driver.Claim.ExpectedNetworkFetches = fixture.NetworkClosureFetches + 3;
         using var cancel = new CancellationTokenSource();
         driver.Claim.BadSignature = fault == "signature";
         driver.Claim.BeforeReturn = () => {
@@ -76,7 +78,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         await using var fixture = await Fixture.CreateAsync(withPeer: true, encryptedStorage: true, longMailboxWindow: true);
         var intent = Bytes(32, 0xe3);
         var driver = await fixture.PrepareFreshContactStart(intent);
-        driver.Claim.ExpectedNetworkFetches = fixture.NetworkClosureFetches + 2;
+        driver.Claim.ExpectedNetworkFetches = fixture.NetworkClosureFetches + 3;
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         driver.Claim.DelayReturn = release.Task;
         using var cancel = new CancellationTokenSource();

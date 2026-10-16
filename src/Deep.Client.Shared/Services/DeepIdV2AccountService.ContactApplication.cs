@@ -44,13 +44,35 @@ public sealed partial class DeepIdV2AccountService
         {
             using (var verifier = OpenVerifier())
             {
+                DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority? own = null;
                 var existing = await owner.TryFindCompletedContactMessagingScopeAsync(TrustedUnixSeconds(), verifier, intent, address, ct).ConfigureAwait(false);
                 if (existing is not null)
                 {
-                    var own = await source.VerifyForOwnPreKeyAuthoringAsync(this, ct).ConfigureAwait(false);
+                    own = await source.VerifyForOwnPreKeyAuthoringAsync(this, ct).ConfigureAwait(false);
                     var retained = await owner.ReadRetainedInitialStoreAsync(TrustedUnixSeconds(), verifier, existing, intent,
                         address, own, source, ct).ConfigureAwait(false);
                     if (retained is not null) return new(new(existing), retained);
+                }
+                // The local projection selects work only, never authorizes a
+                // stop. The actual owner reloads the root, proves lower-time
+                // expiry and completes its native/pre-session transition.
+                var pending = (await owner.ReadContactStartOperationsAsync(TrustedUnixSeconds(), verifier, ct).ConfigureAwait(false))
+                    .FirstOrDefault(value => value.LogicalIntent.Span.SequenceEqual(intent));
+                if (pending is not null)
+                {
+                    if (!string.Equals(pending.PeerDid2Hash, Convert.ToHexString(address.ExactDid2Hash.Span), StringComparison.Ordinal))
+                        throw new CryptographicException("The original contact intent names another recipient.");
+                    own ??= await source.VerifyForOwnPreKeyAuthoringAsync(this, ct).ConfigureAwait(false);
+                    if (await owner.TryExpireInitialContactIntentAsync(TrustedUnixSeconds(), verifier, intent, own, source, ct).ConfigureAwait(false))
+                        throw new DeepIdV2ContactRetryExpiredException();
+                    if (existing is not null)
+                    {
+                        // A concurrently completed Store, or the stop owner's
+                        // actual Store recovery, must still beat peer resolve.
+                        var retained = await owner.ReadRetainedInitialStoreAsync(TrustedUnixSeconds(), verifier, existing, intent,
+                            address, own, source, ct).ConfigureAwait(false);
+                        if (retained is not null) return new(new(existing), retained);
+                    }
                 }
             }
             var contact = await ResolveOwnedPermanentContactAsync(address, source, contactRead, ct).ConfigureAwait(false);

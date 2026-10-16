@@ -104,6 +104,7 @@
     <Compile Include="Services\DeepIdV2AccountService.ContactStart.cs" />
     <Compile Include="Services\DeepIdV2AccountService.ContactApplication.cs" />
     <Compile Include="Services\DeepIdV2Conversation.cs" />
+    <Compile Include="Services\DeepIdV2ContactRetryExpiredException.cs" />
     <Compile Include="Services\DeepIdV2AccountService.TextOutbox.cs" />
     <Compile Include="Services\DeepIdV2AccountService.Attachments.cs" />
     <Compile Include="Services\DeepIdV2AccountService.InitialClaimPreview.cs" />
