@@ -84,9 +84,21 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         await using var bootstrapLock = await AcquireLockAsync(
             path + ".bootstrap.lock", cancellationToken).ConfigureAwait(false);
         var pendingPath = path + ".pending";
-        using var published = await storage.ReadOwnedAsync(
-            "deep.store.v2.current-account", cancellationToken)
-            .ConfigureAwait(false);
+        // One actual authenticated snapshot under the bootstrap/account lease,
+        // not a cache across calls. Re-read after initial registration writes.
+        string[] registrationSlots =
+            [ApplicationStateSlot, ProtectedDid2ContactAcceptJournal.Slot,
+             ProtectedDid2ContactStartJournal.Slot, ProtectedDid2DirectTextJournal.Slot,
+             ProtectedDid2AttachmentJournal.Slot, ProtectedDid2ContactRouteJournal.Slot,
+             ProtectedDid2MailboxGrantJournal.Slot, ProtectedDid2MailboxSendJournal.Slot,
+             ProtectedDid2MailboxReadJournal.Slot, ProtectedDph2PreClaimJournal.Slot,
+             ProtectedContactRendezvousJournal.Slot, ResponderInitialSessionCheckpoint.Slot,
+             Did2CompactionPlan.Slot, ProtectedDid2MessagingSessionCatalog.Slot,
+             "deep.store.v2.current-account", KeySlot];
+        using var captured = await storage.ReadOwnedBatchAsync(registrationSlots,
+            cancellationToken).ConfigureAwait(false);
+        if (captured.Count != 16) throw new InvalidDataException("Protected registration read group has another shape.");
+        using var published = captured[14];
         if (allowCreate && published is not null)
             throw new InvalidOperationException(
                 "A DID2 SQL generation cannot be created after account publication.");
@@ -94,8 +106,7 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             File.Exists(path + "-shm")))
             throw new InvalidDataException("The DID2 SQL file family is incomplete.");
 
-        using var existing = await storage.ReadOwnedAsync(KeySlot,
-            cancellationToken).ConfigureAwait(false);
+        using var existing = captured[15];
         if (existing is null && (File.Exists(path) || File.Exists(pendingPath)))
             throw new InvalidDataException("DID2 SQL exists without its protected key record.");
         if (existing is null && !allowCreate)
@@ -169,22 +180,18 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             }
             // Initialized atomically with the instance key before publication.
             // An older/missing journal requires explicit QA reset, never repair.
-            using var compaction = await ProtectedDid2CompactionPlan.ReadRegisteredAsync(storage,
-                networkId, accountId, record.AsMemory(56, 32), cancellationToken).ConfigureAwait(false);
+            using var createdRegistrations = existing is null
+                ? await storage.ReadOwnedBatchAsync(registrationSlots, cancellationToken).ConfigureAwait(false)
+                : null;
+            var journals = createdRegistrations ?? captured;
+            if (journals.Count != 16) throw new InvalidDataException("Protected registration read group has another shape.");
+            using var rawCompaction = journals[12] ??
+                throw new InvalidDataException("Protected compaction registration is absent; explicit reset is required.");
+            using var compaction = rawCompaction.Use(bytes => Did2CompactionPlan.Decode(
+                bytes, networkId.Span, accountId.Span, record.AsSpan(56, 32)));
             if (compaction.Phase != 0)
                 throw new InvalidDataException("An active compaction plan owns recovery; ordinary account reopen cannot bypass it.");
-            // Independent registrations share one actual authenticated inventory
-            // read. This scope is local to this lease-held reopen: never a cache,
-            // currentness proof, or replacement for the decoders below.
-            using var journals = await storage.ReadOwnedBatchAsync(
-                [ApplicationStateSlot, ProtectedDid2ContactAcceptJournal.Slot,
-                 ProtectedDid2ContactStartJournal.Slot, ProtectedDid2DirectTextJournal.Slot,
-                 ProtectedDid2AttachmentJournal.Slot, ProtectedDid2ContactRouteJournal.Slot,
-                 ProtectedDid2MailboxGrantJournal.Slot, ProtectedDid2MailboxSendJournal.Slot,
-                 ProtectedDid2MailboxReadJournal.Slot, ProtectedDph2PreClaimJournal.Slot,
-                 ProtectedContactRendezvousJournal.Slot, ResponderInitialSessionCheckpoint.Slot],
-                cancellationToken).ConfigureAwait(false);
-            if (journals.Count != 12) throw new InvalidDataException("Protected journal read group has another shape.");
+            // Every original decoder still validates its exact captured slot.
             using var application = journals[0] ?? throw new InvalidDataException(
                     "The protected application registration is absent; explicit local reset is required.");
             application.Use(value => { ValidateApplicationRegistration(value, record); return true; });
@@ -227,8 +234,11 @@ internal static partial class SqliteDeepIdV2AccountGeneration
                 instanceForClaims, accountId.Span, networkId.Span));
             var retirements = await ProtectedInitialKeyRetirementJournal.ReadAsync(storage, networkId, accountId, cancellationToken).ConfigureAwait(false);
             retirements.RequirePreclaimState(claimsState);
-            using var messaging = await new ProtectedDid2MessagingSessionCatalog(storage,
-                networkId.Span, accountId.Span, instanceForClaims).ReadAsync(cancellationToken).ConfigureAwait(false);
+            using var rawMessaging = journals[13] ??
+                throw new InvalidDataException("The protected DID2 messaging catalog is absent; explicit reset is required.");
+            using var messaging = rawMessaging.Use(bytes => ProtectedDid2MessagingSessionCatalog.Decode(
+                bytes, networkId.Span, accountId.Span, instanceForClaims));
+            cancellationToken.ThrowIfCancellationRequested();
             var key = record.AsSpan(88, 32).ToArray();
             try
             {

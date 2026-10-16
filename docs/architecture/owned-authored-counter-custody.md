@@ -26,19 +26,22 @@ disposal, and every later invocation reacquires actual storage. There is no
 sequential compatibility fallback, plaintext cache, wire/layout change or new
 authority. The result is local data, never freshness or permission to mutate.
 
-Lease-held account SQL reopen uses one group for twelve independent journal
-registrations. It still runs every existing decoder/scope check and independently
-reads the resolver, current pointer, SQL key, compaction plan, retirement and
-messaging catalog. Native/source/time checks elsewhere do not consume a cached
+Lease-held account SQL reopen uses one group for sixteen local registrations:
+the twelve journals, compaction plan, messaging catalog, current-pointer presence
+and SQL key. It still runs every original decoder/scope check. Initial creation
+reacquires the complete group after its actual registration write; an earlier
+snapshot cannot stand in for newly registered state. The resolver and retirement
+reader remain independent, including retirement's separate key, cancellation
+owner and native-floor/history checks. Native/source/time checks elsewhere do not consume a cached
 snapshot. Missing/malformed state is not recreated or repaired. The measured
 Android QA baseline spent66.8s of a120.1s cancelled verification in1226 platform
 unprotect calls; those are diagnostic timings, not new validity limits or proof
 of the sole remaining bottleneck. Matching device qualification remains open.
 
 The encrypted source fixture records19 unprotect calls before grouping and8
-after grouping, on each of two independent reopen calls. Its first counter
+after the initial twelve-slot grouping, on each of two independent reopen calls. Its first counter
 receipt (`s05-storage-read-group-20261016/red-01`) retains native1: the initial
-expected7 miscounted the resolver's two reads. It is not a semantic security
+expected7 omitted an independent read (the retirement reader also reads the key). It is not a semantic security
 rejection witness. Corrected source focused02 passed37, affected storage/account/
 lease/custody regression03 passed104, and scoped contact/renewal/encrypted
 compaction contact04 passed32, all0 failures/skips/native0 under Windows
@@ -50,6 +53,19 @@ was added to conceal an unsupported storage provider.
 Final focused05 passed39/0/0/native0, including single capture of an adversarial
 caller's changing selector count before allocation. Full qualification remains
 open; the earlier focused receipts are not relabelled as full.
+
+The sixteen-slot extension reduces the same encrypted fixture8 ->4 unprotect
+calls on each independent reopen, not by retaining plaintext or verification
+results. Its original counter FAIL remains in
+`s05-reopen-registration-group-20261016/red-01`; green02 passed39/0/0/native0,
+including fourteen missing/malformed registration refusals with unchanged
+stored values. This is local native SQL/storage evidence, not a measured
+Android improvement or proof that expired prekeys become usable. Physical
+prekey expiry requires separate ordinary lifecycle handling; no read-group
+optimization renews signed resources or changes original intent custody.
+Affected registration/account/custody regression03 passed82/0/0/native0;
+contact/history/coherent acquisition/renewal regression04 passed47/0/0/native0
+on the same candidate. No full or physical claim follows from these scopes.
 
 ### S04 creation/retry API cutover in progress
 

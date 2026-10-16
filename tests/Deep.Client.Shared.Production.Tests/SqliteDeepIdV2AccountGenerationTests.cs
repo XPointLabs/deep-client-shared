@@ -28,9 +28,9 @@ public sealed class SqliteDeepIdV2AccountGenerationTests
                 protector.UnprotectCalls = 0;
                 await SqliteDeepIdV2AccountGeneration.EnsureAsync(sqlPath, storage, network,
                     created.AccountId, "Alice", created.Verified, allowCreate: false, default);
-                // Resolver's two reads, pointer, SQL key, compaction, the independent journal
-                // group, retirement and messaging catalog all remain actual reads.
-                Assert.Equal(8, protector.UnprotectCalls);
+                // One actual resolver read, one atomic registration group and
+                // the retirement reader's independent key/journal checks.
+                Assert.Equal(4, protector.UnprotectCalls);
             }
         }
         finally { DeleteGeneratedDirectory(directory); }
@@ -58,7 +58,8 @@ public sealed class SqliteDeepIdV2AccountGenerationTests
                 ProtectedDid2ContactRouteJournal.Slot, ProtectedDid2MailboxGrantJournal.Slot,
                 ProtectedDid2MailboxSendJournal.Slot, ProtectedDid2MailboxReadJournal.Slot,
                 ProtectedDph2PreClaimJournal.Slot, ProtectedContactRendezvousJournal.Slot,
-                ResponderInitialSessionCheckpoint.Slot };
+                ResponderInitialSessionCheckpoint.Slot, Did2CompactionPlan.Slot,
+                ProtectedDid2MessagingSessionCatalog.Slot };
             foreach (var slot in slots)
             {
                 using var original = await storage.ReadOwnedAsync(slot);
