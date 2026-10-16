@@ -242,16 +242,16 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             AccountDirectoryProtectedLkg? head, long revision,
             CancellationToken cancellationToken)
         {
-            using var marker = await storage.ReadOwnedAsync(MarkerSlot(revision),
-                cancellationToken).ConfigureAwait(false);
+            string[] slots = revision < long.MaxValue
+                ? [MarkerSlot(revision), MarkerSlot(revision + 1)] : [MarkerSlot(revision)];
+            using var markers = await storage.ReadOwnedBatchAsync(slots, cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            var marker = markers[0];
             if (marker is null)
             {
                 if (head is null && revision < long.MaxValue)
                 {
-                    using var future = await storage.ReadOwnedAsync(
-                        MarkerSlot(revision + 1), cancellationToken)
-                        .ConfigureAwait(false);
-                    if (future is not null)
+                    if (markers[1] is not null)
                         throw new CryptographicException(
                             "The protected DID2 directory marker chain is incomplete.");
                 }
@@ -267,10 +267,7 @@ internal static partial class SqliteDeepIdV2AccountGeneration
                         "The protected DID2 directory provisioning marker is out of scope.");
                 if (revision < long.MaxValue)
                 {
-                    using var future = await storage.ReadOwnedAsync(
-                        MarkerSlot(revision + 1), cancellationToken)
-                        .ConfigureAwait(false);
-                    if (future is not null)
+                    if (markers[1] is not null)
                         throw new CryptographicException(
                             "The protected DID2 directory SQL row rolled back behind its marker.");
                 }

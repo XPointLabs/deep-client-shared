@@ -411,8 +411,13 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         private async ValueTask CheckMarkersAsync(Row? row, CancellationToken cancellationToken)
         {
             var revision = row is null ? 1L : checked((long)row.Snapshot.Revision);
-            using var marker = await storage.ReadOwnedAsync(MarkerSlot(revision), cancellationToken).ConfigureAwait(false);
-            using var historyAnchor = await storage.ReadOwnedAsync(HistoryAnchorSlot(revision), cancellationToken).ConfigureAwait(false);
+            // One actual protected-inventory snapshot, not four platform
+            // decryptions or a retained plaintext/current-authority cache.
+            string[] slots = revision < long.MaxValue
+                ? [MarkerSlot(revision), HistoryAnchorSlot(revision), MarkerSlot(revision + 1), HistoryAnchorSlot(revision + 1)]
+                : [MarkerSlot(revision), HistoryAnchorSlot(revision)];
+            using var markers = await storage.ReadOwnedBatchAsync(slots, cancellationToken).ConfigureAwait(false);
+            var marker = markers[0]; var historyAnchor = markers[1];
             if (row is null && (marker is not null || historyAnchor is not null))
                 throw new CryptographicException("The protected DID2 network floor disappeared after initialization.");
             if (row is not null)
@@ -435,11 +440,10 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             }
             if (revision < long.MaxValue)
             {
-                using var future = await storage.ReadOwnedAsync(MarkerSlot(revision + 1), cancellationToken).ConfigureAwait(false);
-                using var futureHistory = await storage.ReadOwnedAsync(HistoryAnchorSlot(revision + 1), cancellationToken).ConfigureAwait(false);
-                if (future is not null || futureHistory is not null)
+                if (markers[2] is not null || markers[3] is not null)
                     throw new CryptographicException("The protected DID2 network SQL floor is behind its marker.");
             }
+            cancellationToken.ThrowIfCancellationRequested();
         }
 
         private byte[] Encode(XPointNetworkStateSnapshot snapshot)

@@ -129,6 +129,10 @@ namespaces still require both exact joins and reject missing lookup inputs.
 This is a Shared consumer correction, not a wire/API/journal generation change.
 This changes evidence validation in the sole current reader; an incompatible old nonempty record
 rejects, without a second reader, a migration or automatic reset.
+Protected network and directory floor validation uses the existing atomic
+inventory batch for its related current/future markers. Each call independently
+reacquires its snapshot and preserves every marker/anchor/rollback check; no
+retained plaintext or authority cache is involved. [Source receipt and scope](../testing/s05-protected-floor-batch-2026-10-16.md).
 Phase3 retains exact holder/request/evidence with no winner; phases4/5 retain the
 same closure proof with one immutable late result. Their closure lower bound
 cannot precede XMG expiry. These checks establish custody shape, not current

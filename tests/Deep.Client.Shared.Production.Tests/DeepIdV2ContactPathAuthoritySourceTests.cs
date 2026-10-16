@@ -3192,6 +3192,10 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 
     private sealed class NetworkMarkerFaultStorage(IDeepSecureStorage inner) : IDeepSecureStorage
     {
+        internal int NetworkMarkerSingleReads { get; set; }
+        internal bool TrackNetworkMarkerReads { get; set; }
+        internal List<string[]> NetworkMarkerReadGroups { get; } = [];
+        internal Action? AfterNetworkMarkerReadGroup { get; set; }
         public Task<bool> CompareAndDeleteAsync(string guardSlot, ReadOnlyMemory<byte> expected,
             IReadOnlyList<string> slots, CancellationToken ct = default) => inner.CompareAndDeleteAsync(guardSlot, expected, slots, ct);
 
@@ -3258,6 +3262,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         }
         public async Task<OwnedDeepSecret?> ReadOwnedAsync(string slot, CancellationToken ct = default)
         {
+            if (TrackNetworkMarkerReads && slot.Contains(".network-lkg-floor.", StringComparison.Ordinal)) NetworkMarkerSingleReads++;
             var value = await inner.ReadOwnedAsync(slot, ct);
             if (slot.StartsWith("deep.store.v2.prekey-inventory/", StringComparison.Ordinal) && AfterPreKeySuccessorRead is { } afterRead)
             {
@@ -3271,10 +3276,18 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         public async Task<OwnedDeepSecretBatch> ReadOwnedBatchAsync(IReadOnlyList<string> slots, CancellationToken ct = default)
         {
             var captured = OwnedDeepSecretBatch.CaptureSlots(slots);
+            if (TrackNetworkMarkerReads && captured.Any(slot => slot.Contains(".network-lkg-floor.", StringComparison.Ordinal)))
+                NetworkMarkerReadGroups.Add(captured.ToArray());
             var result = await inner.ReadOwnedBatchAsync(captured, ct);
             try
             {
                 for (var index = 0; index < captured.Length; index++) ObserveRead(captured[index], result[index]);
+                if (AfterNetworkMarkerReadGroup is { } afterNetworkRead &&
+                    captured.Any(slot => slot.Contains(".network-lkg-floor.", StringComparison.Ordinal)))
+                {
+                    AfterNetworkMarkerReadGroup = null;
+                    afterNetworkRead();
+                }
                 return result;
             }
             catch { result.Dispose(); throw; }
