@@ -94,10 +94,11 @@ internal static partial class SqliteDeepIdV2AccountGeneration
              ProtectedDid2MailboxReadJournal.Slot, ProtectedDph2PreClaimJournal.Slot,
              ProtectedContactRendezvousJournal.Slot, ResponderInitialSessionCheckpoint.Slot,
              Did2CompactionPlan.Slot, ProtectedDid2MessagingSessionCatalog.Slot,
-             "deep.store.v2.current-account", KeySlot];
+             "deep.store.v2.current-account", KeySlot,
+             ProtectedInitialKeyRetirementJournal.Slot];
         using var captured = await storage.ReadOwnedBatchAsync(registrationSlots,
             cancellationToken).ConfigureAwait(false);
-        if (captured.Count != 16) throw new InvalidDataException("Protected registration read group has another shape.");
+        if (captured.Count != 17) throw new InvalidDataException("Protected registration read group has another shape.");
         using var published = captured[14];
         if (allowCreate && published is not null)
             throw new InvalidOperationException(
@@ -184,7 +185,7 @@ internal static partial class SqliteDeepIdV2AccountGeneration
                 ? await storage.ReadOwnedBatchAsync(registrationSlots, cancellationToken).ConfigureAwait(false)
                 : null;
             var journals = createdRegistrations ?? captured;
-            if (journals.Count != 16) throw new InvalidDataException("Protected registration read group has another shape.");
+            if (journals.Count != 17) throw new InvalidDataException("Protected registration read group has another shape.");
             using var rawCompaction = journals[12] ??
                 throw new InvalidDataException("Protected compaction registration is absent; explicit reset is required.");
             using var compaction = rawCompaction.Use(bytes => Did2CompactionPlan.Decode(
@@ -232,12 +233,17 @@ internal static partial class SqliteDeepIdV2AccountGeneration
                     "The protected initial receiver checkpoint is absent; explicit local reset is required.");
             using var receiverState = receiver.Use(value => ResponderInitialSessionCheckpoint.Decode(value,
                 instanceForClaims, accountId.Span, networkId.Span));
-            var retirements = await ProtectedInitialKeyRetirementJournal.ReadAsync(storage, networkId, accountId, cancellationToken).ConfigureAwait(false);
-            retirements.RequirePreclaimState(claimsState);
             using var rawMessaging = journals[13] ??
                 throw new InvalidDataException("The protected DID2 messaging catalog is absent; explicit reset is required.");
             using var messaging = rawMessaging.Use(bytes => ProtectedDid2MessagingSessionCatalog.Decode(
                 bytes, networkId.Span, accountId.Span, instanceForClaims));
+            using var rawRetirements = journals[16] ??
+                throw new InvalidDataException("Protected initial-key retirement journal is missing; explicit reset is required.");
+            var retirements = rawRetirements.Use(bytes => ProtectedInitialKeyRetirementJournal.Decode(
+                bytes, networkId.Span, accountId.Span, instanceForClaims));
+            retirements.RequirePreclaimState(claimsState);
+            await ProtectedInitialKeyRetirementJournal.RequireCancellationOwnersUnderLeaseAsync(
+                storage, retirements, contactStartState, messaging, cancellationToken).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
             var key = record.AsSpan(88, 32).ToArray();
             try

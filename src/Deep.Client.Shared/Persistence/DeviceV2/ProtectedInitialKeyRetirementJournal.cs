@@ -294,6 +294,17 @@ internal static class ProtectedInitialKeyRetirementJournal
         using var raw = await storage.ReadOwnedAsync(ProtectedDid2ContactStartJournal.Slot, ct).ConfigureAwait(false) ?? throw new InvalidDataException();
         using var drafts = raw.Use(bytes => ProtectedDid2ContactStartJournal.Decode(bytes, network.Span, account.Span, instance.Span));
         using var catalog = await new ProtectedDid2MessagingSessionCatalog(storage, network.Span, account.Span, instance.Span).ReadAsync(ct).ConfigureAwait(false);
+        await RequireCancellationOwnersUnderLeaseAsync(storage, state, drafts, catalog, ct).ConfigureAwait(false);
+    }
+
+    // The account opener already decoded these owners and the SQL instance from
+    // one authenticated registration group while holding the actual account
+    // lease. Reuse only that call-local data, not a cached verification result.
+    // Native floor/history reads and every cancellation binding remain mandatory.
+    internal static async Task RequireCancellationOwnersUnderLeaseAsync(IDeepSecureStorage storage, State state,
+        ProtectedDid2ContactStartJournal.State drafts, ProtectedDid2MessagingSessionCatalog.Snapshot catalog, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
         foreach (var entry in state.Entries.Values.Where(entry => entry.Role == 3))
         {
             if (!drafts.Entries.TryGetValue(Convert.ToHexString(entry.Intent), out var draft) || !draft.WorkStopped || draft.NativeStopMode != 2 ||

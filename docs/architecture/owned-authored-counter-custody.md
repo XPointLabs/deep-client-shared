@@ -26,13 +26,19 @@ disposal, and every later invocation reacquires actual storage. There is no
 sequential compatibility fallback, plaintext cache, wire/layout change or new
 authority. The result is local data, never freshness or permission to mutate.
 
-Lease-held account SQL reopen uses one group for sixteen local registrations:
+Lease-held account SQL reopen uses one group for seventeen local registrations:
 the twelve journals, compaction plan, messaging catalog, current-pointer presence
-and SQL key. It still runs every original decoder/scope check. Initial creation
+and SQL key, plus the initial-key retirement journal. It still runs every
+original decoder/scope check. Initial creation
 reacquires the complete group after its actual registration write; an earlier
-snapshot cannot stand in for newly registered state. The resolver and retirement
-reader remain independent, including retirement's separate key, cancellation
-owner and native-floor/history checks. Native/source/time checks elsewhere do not consume a cached
+snapshot cannot stand in for newly registered state. The resolver remains an
+independent read. Retirement validation uses the exact SQL instance, preclaim,
+draft and messaging-catalog owners already decoded from this same call-local
+group, rather than reading those identical slots again under the held account
+lease. Its one shared cancellation-owner predicate still performs mandatory
+native-floor/history reads for matching sessions. Standalone retirement readers
+still acquire their own instance/journal/owner data; this is not a second
+predicate or compatibility path. Native/source/time checks elsewhere do not consume a cached
 snapshot. Missing/malformed state is not recreated or repaired. The measured
 Android QA baseline spent66.8s of a120.1s cancelled verification in1226 platform
 unprotect calls; those are diagnostic timings, not new validity limits or proof
@@ -66,6 +72,16 @@ optimization renews signed resources or changes original intent custody.
 Affected registration/account/custody regression03 passed82/0/0/native0;
 contact/history/coherent acquisition/renewal regression04 passed47/0/0/native0
 on the same candidate. No full or physical claim follows from these scopes.
+
+The seventeen-slot retirement extension passed78/0/0/native0 in
+`artifacts/s05-prekey-read-path-20261016/registration-01` (Windows PowerShell5.1,
+SDK10.0.301). The encrypted reopen fixture observes4 ->2 unprotect calls on each
+of two independent opens. Fifteen missing/malformed journal checks still reject
+without repair. Actual native cancellation, interruption/cold recovery, reserved
+empty stores and hostile/rolled-back custody are included. No wire, serialized
+format, key, timeout or live-authority cache changed. Android31's unchanged120s
+budget failure remains baseline evidence; a new matching APK is required to
+measure the effect, not infer mobile success from these source counts.
 
 ### S04 creation/retry API cutover in progress
 
