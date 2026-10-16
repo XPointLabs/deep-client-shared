@@ -47,7 +47,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         internal async Task CheckContactPublicationSuccessorsAsync(int mode)
         {
             var identity = (await accounts.GetCurrentAsync())!.PermanentId.CanonicalText;
-            var source = Source(); var staged = await accounts.EnsureOwnInitialPreKeyInventoryAsync(source);
+            var source = Source(); var staged = await accounts.EnsureOwnPreKeyInventoryAsync(source);
             var current = await source.VerifyForOwnPreKeyAuthoringAsync(accounts, default);
             var dca = DeepIdV2ContactAuthorizationCodec.Verify(DeepIdV2ContactAuthorizationCodec.Decode(staged.ExactDca1.Span),
                 checkpoint.Binding, checkpoint.Directory);
@@ -205,10 +205,14 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                         var old = services[0];
                         var oldExpiry = BinaryPrimitives.ReadUInt64BigEndian(old.Field(11).Span);
                         if (generation == 1) Assert.True(oldExpiry <= window.LowerUnixSeconds);
+                        Assert.Throws<CryptographicException>(() => AuthorNextService(old,
+                            BinaryPrimitives.ReadUInt64BigEndian(old.Field(10).Span), oldExpiry));
+                        Assert.Throws<CryptographicException>(() => AuthorNextService(old,
+                            window.LowerUnixSeconds, checked(oldExpiry + 60), minimum: 33));
                         foreach (var invalid in new[]
                         {
-                            AuthorNextService(old, BinaryPrimitives.ReadUInt64BigEndian(old.Field(10).Span), oldExpiry),
-                            AuthorNextService(old, window.LowerUnixSeconds, checked(oldExpiry + 60), minimum: 33)
+                            SignHostileServiceFixture(old, BinaryPrimitives.ReadUInt64BigEndian(old.Field(10).Span), oldExpiry),
+                            SignHostileServiceFixture(old, window.LowerUnixSeconds, checked(oldExpiry + 60), minimum: 33)
                         })
                             await RequireRouteRejectionAsync(async () => await DeepIdV2ContactObjectAuthor.AuthorRetainedSuccessorAsync(
                                 nextRoute, issuance, priorObject, device!, [invalid], "Successor QA", capability));
@@ -396,6 +400,36 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                         checked(BinaryPrimitives.ReadUInt64BigEndian(predecessor.Field(5).Span) + 1), 1, 1, issued, issued, expires);
                     return DeepIdV2PreKeyServiceCodec.Decode(prekeyAuthor!.AuthorPreKeyServiceV2(context, checkpoint.Binding,
                         minimum, 1, predecessor.CanonicalBytes.Span).ExactXps1.Span);
+                }
+
+                // Adversarial signatures use only this freshly created
+                // fixture's own key. The hardened production author must not
+                // mint these invalid successors for a negative consumer test.
+                ParsedXps1V2 SignHostileServiceFixture(ParsedXps1V2 predecessor, ulong issued, ulong expires, ushort minimum = 32)
+                {
+                    byte[] Number(ulong value) { var bytes = new byte[8]; BinaryPrimitives.WriteUInt64BigEndian(bytes, value); return bytes; }
+                    var policy = new byte[2]; BinaryPrimitives.WriteUInt16BigEndian(policy, minimum);
+                    ReadOnlyMemory<byte>[] fields = [predecessor.Field(1), predecessor.Field(2), predecessor.Field(3), predecessor.Field(4),
+                        Number(checked(BinaryPrimitives.ReadUInt64BigEndian(predecessor.Field(5).Span) + 1)), SHA256.HashData(predecessor.CanonicalBytes.Span),
+                        predecessor.Field(7), policy, predecessor.Field(9), Number(issued), Number(expires)];
+                    using var owned = device!.ExportOwnedPersistenceCopy();
+                    var seed = new byte[32]; var agreement = new byte[32]; var deviceId = new byte[32]; var handle = new byte[32];
+                    byte[]? privateKey = null, signature = null;
+                    try
+                    {
+                        owned.CopyTo(seed, agreement, deviceId, handle);
+                        privateKey = PublicKeyAuth.GenerateKeyPair(seed).PrivateKey;
+                        signature = PublicKeyAuth.SignDetached(DeepIdV2PreKeyServiceCodec.CreateSignatureInput(fields), privateKey);
+                        var signed = DeepIdV2PreKeyServiceCodec.Decode(DeepIdV2PreKeyServiceCodec.Encode(fields, signature));
+                        DeepIdV2PreKeyServiceCodec.VerifyDeviceSignature(signed,
+                            checkpoint.Binding.Identity.ActiveDevices.Single().Certificate.DeviceEd25519PublicKey.Span);
+                        return signed;
+                    }
+                    finally
+                    {
+                        foreach (var secret in new[] { seed, agreement, deviceId, handle, privateKey, signature })
+                            if (secret is not null) CryptographicOperations.ZeroMemory(secret);
+                    }
                 }
 
                 static ContactPublicationAuthorityWireRequest UntrustedPublicationCopy(ContactPublicationAuthorityWireRequest original,

@@ -49,9 +49,21 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var priorObject = await DeepIdV2ContactObjectAuthor.VerifyPredecessorAsync(authorization, fresh.Network,
                 fresh.Authority, priorRoute, prior.Record(7), prior.Record(8), capability, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
             if (!FixedRoute(priorObject.Closure.Bundle.Field(15).Span, System.Text.Encoding.UTF8.GetBytes(plan.Profile)) ||
-                priorObject.Closure.Bundle.Field(12).Length != 357 ||
-                !FixedRoute(priorObject.Closure.Bundle.Field(12).Span[5..], staged.ExactXps1.Span))
-                throw new CryptographicException("Permanent-contact renewal requires separately authorized profile/service rollover.");
+                priorObject.Closure.Bundle.Field(12).Length != 357)
+                throw new CryptographicException("Permanent-contact renewal changed its protected profile or device set.");
+            var serviceChanged = !FixedRoute(priorObject.Closure.Bundle.Field(12).Span[5..], staged.ExactXps1.Span);
+            if (serviceChanged)
+            {
+                DeepIdV2PreKeyLineageVerifier.VerifyServiceTransition(DeepIdV2PreKeyServiceCodec.Decode(staged.ExactXps1.Span),
+                    DeepIdV2PreKeyServiceCodec.Decode(priorObject.Closure.Bundle.Field(12).Span[5..]),
+                    checkpoint.Binding.Identity.ActiveDevices.Single().Certificate.DeviceEd25519PublicKey.Span);
+                await SqliteDeepIdV2AccountGeneration.RequireCommittedOwnPreKeyInventoryAsync(storage, sqlStatePath,
+                    current, staged, fresh.Network, ct).ConfigureAwait(false);
+                var checkedTime = await RecheckRouteFreshnessAsync(current, source, fresh, held, first, ct).ConfigureAwait(false);
+                authorization = DeepIdV2CurrentContactAuthorizationVerifier.Verify(fresh.Proof, dca, checkedTime.BootId.Span, checkedTime.SampleSeconds);
+                DeepIdV2ReplicaPreKeyInventoryVerifier.VerifyComplete(checkpoint.Binding.DeepId, staged.ExactXps1.Span,
+                    authorization, DeepIdV2PreKeyPublicationCodec.Decode(staged.ExactXpp1.Span), checkedTime.BootId.Span, checkedTime.SampleSeconds);
+            }
             var priorRequest = ContactPublicationAuthorityWireCodec.DecodeRequest(prior.Record(9).Span);
             var priorWinner = ContactPublicationAuthorityWireCodec.DecodeResponse(priorRequest, prior.Record(10).Span);
             var priorPublication = await DeepIdV2PublicationCommitVerifier.VerifyPredecessorAsync(authorization, fresh.Network,
@@ -83,13 +95,16 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     refreshAt = Math.Min(refreshAt, ProactiveRefreshAt(
                         BinaryPrimitives.ReadUInt64BigEndian(record.Field(issuedTag).Span),
                         BinaryPrimitives.ReadUInt64BigEndian(record.Field(expiryTag).Span)));
-                if (authorization.TrustedUpperUnixSeconds < refreshAt) return null;
+                if (!serviceChanged && authorization.TrustedUpperUnixSeconds < refreshAt) return null;
                 var scalar = NewRouteRandom32(); var keyId = NewRouteRandom32(); var nonce = NewRouteRandom32();
                 try
                 {
-                    var nextExpiry = Math.Min(checked(authorization.TrustedLowerUnixSeconds + 86_400),
-                        Math.Min(fresh.Authority.ExpiresAt, Math.Min(dca.Record.ExpiresAtUnixSeconds,
-                            current.Verified.PublicEvidence.Binding.Identity.ActiveDevices.Single().Certificate.ExpiresAtUnixSeconds)));
+                    var minimumExpiry = checked(BinaryPrimitives.ReadUInt64BigEndian(advertisement.Field(13).Span) + 1);
+                    var ceiling = Math.Min(fresh.Authority.ExpiresAt, Math.Min(dca.Record.ExpiresAtUnixSeconds,
+                        current.Verified.PublicEvidence.Binding.Identity.ActiveDevices.Single().Certificate.ExpiresAtUnixSeconds));
+                    var nextExpiry = Math.Min(Math.Max(checked(authorization.TrustedLowerUnixSeconds + 86_400), minimumExpiry), ceiling);
+                    if (nextExpiry < minimumExpiry)
+                        throw new CryptographicException("Current authority cannot extend the exact reachability predecessor.");
                     var xra = await DeepIdV2ContactRouteAuthor.AuthorAdvertisementSuccessorAsync(authorization, fresh.Network,
                         fresh.Authority, current.Verified.DeviceSecrets, prior.Record(1), configuration.AntiSpamHash, keyId,
                         Deep.Protocol.Identity.DeepIdentityCrypto.DeriveX25519PublicKey(scalar), nextExpiry,

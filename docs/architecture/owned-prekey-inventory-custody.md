@@ -35,8 +35,9 @@ receiver ledger. Its internal successor stage takes the account file lease,
 uses the original SQL-key-derived DPK2 protector and validates signed service/
 epoch lineage. Every ancestor must have its exact protected commit pair; only
 the latest publication may remain pending. A pending candidate cannot be
-replaced by another inventory. Ordinary automatic authoring still does not call
-this staging path; the public initial-only orchestration remains unchanged.
+replaced by another inventory. The DR-0131 source candidate now calls this path
+through the one owned maintenance/publication command; qualification and
+runtime/device activation are separate from that source connection.
 
 Receiver preview selects one exact DPK2 from the initial SQL inventory or its
 explicit protected successor chain, never the next available generation. The
@@ -138,12 +139,71 @@ TLS/ONION nodes or physical devices. They do not qualify shipping activation.
 
 ## Connected work still mandatory
 
-Implement ordinary owned replenishment/service succession under the same lease,
-including authoring after cold reopen without regenerating an unresolved pending
-candidate. The current author only accepts an in-process authored service object;
-freeze any required public API change before implementation. Authenticate both
-selected replica receipts before adopting changed current contact support. Do not
-force a service-generation change merely to avoid same-service epoch authoring.
+### DR-0131 source evidence — 2026-10-16
+
+Receipts: `artifacts/s05-prekey-maintenance-20261016/`, native
+WindowsPowerShell5.1/SDK10.0.301. Original red receipts stay unchanged.
+
+- `source-01`: compile-only CS0103, no TRX; missing XPointNetwork import fixed.
+- `source-02`:10 passed/2 failed/native1. New restore-negative fixtures expected
+  the wrong exception classes for invalid signature/foreign DMD1; they now require
+  the exact existing Protocol exceptions, without changing production guards.
+- `source-03`: compile-only CS0103, no TRX; missing ContactV1 test import fixed.
+- `source-04`:24 passed/2 failed/native1. Forced service renewal exposed an
+  unchanged reachability expiry; the owner now requires old expiry+1 within
+  actual current authority before signing a new proposal. The hardened service
+  author also correctly refused invalid negative-test inputs: tests now assert
+  its refusal and independently sign hostile fixture-only support to retain real
+  consumer-policy/expiry rejection coverage. Those fixture signatures are
+  independently verified before use; no generic signer was added to production.
+- `source-05`:25 passed/1 failed/native1. The contact fixture's short signed XNA
+  could not authorize a reachability successor. The final cases distinguish
+  refusal without mutation under that original short root from an independently
+  created genuinely signed long-root fixture. No old authority is extended.
+- `source-06`:26 passed/1 failed/native1. Includes both epoch/service expiry,
+  actual encrypted reopen, lost stage response, unchanged DID/initial pair,
+  network-free exact pending retry, foreign/signature/generation/window/disposal
+  guards and existing publication/clock/cancellation/LR cases. The remaining
+  long-root test found that its fixture issuer reused XRA's resource expiry for
+  a threshold lease beyond that lease's one-day bound. The fixture now follows
+  the actual Registry issuer's existing minimum of resource, current issue+day,
+  authority and DCA expiry. Production threshold limits were not changed.
+- `renewal-08`:9 passed/native0,0 failures/skips/compiler warnings/errors.
+  Both long-root successful changed-service publication and short-root refusal
+  pass, as do existing owned renewal/crash/restart cases and the independent
+  owner/issuer service test. New service cannot mutate route custody without
+  its exact prekey pair; completed contact retry preserves locator, owner
+  Retrieve capability and exact result without another publication.
+
+The MAUI consumer's `clean-07` receipt in its corresponding artifacts directory
+passed230 unfiltered Clean-project cases/native0,0 failures/skips. Its source
+calls the one new publisher and removes the obsolete separate PreKeyStaging
+diagnostic phase. This is not a Windows/Android build, installation or E2E claim.
+Protocol `protocol-09` passed4 targeted cases and retained one xUnit2031 warning
+in an existing acquisition-hint test. After its predicate-overload correction,
+`protocol-10` passed35 codec, lineage, actual authoring/persistence and acquisition
+cases/native0,0 failures/skips/compiler warnings/errors. Full/package and actual
+Windows QA compilation remain separate pending qualification.
+
+### Remaining lifecycle closure
+
+The [DR-0131 author/command](../../../docs/survival-program/decisions/DR-0131-owned-prekey-maintenance-author.md)
+is now a source candidate. It restores exact signed same-service support, selects
+ordinary epoch/service succession under the actual lease, retains exact pending
+candidates and uses the existing held-lease authority reader without recursively
+acquiring the file lease. The public publisher performs preparation and dispatch
+with the same fresh authority. Changed XPS support forces permanent-contact
+renewal even before ordinary route expiry, but only after its exact authenticated
+prekey commit pair. The canonical Protocol transition predicate is shared with
+the independent issuer; no duplicated Shared service-lineage predicate remains.
+
+Qualification must still cover that connected path and failure boundaries.
+In particular, immediate service/contact succession is not proof of catch-up
+after multiple completed inventory service generations while contact promotion
+was unavailable. The contact boundary still requires its exact immediate signed
+service predecessor; do not skip it, fabricate missing support or abandon an
+old pending publication. Resolve this catch-up case and expired unresolved
+publication recovery before claiming the full S05 lifecycle.
 
 Canonical full/package gates, matched services/clients and retained-account physical
 Windows/Android E2E remain open. Do not install this partial component as a

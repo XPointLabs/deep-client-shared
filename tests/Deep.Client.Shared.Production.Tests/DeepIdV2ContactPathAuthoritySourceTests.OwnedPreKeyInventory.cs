@@ -69,6 +69,10 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             await AssertLastResortStateAsync(exhausted: false);
             using var resumed = await FindReceiver(newSent.ExactDph2, reopen: true);
             Assert.NotNull(resumed);
+            // Prepare the hostile old-service replay before local receipt of
+            // its final legitimate counter would trigger normal maintenance.
+            var (conflictComplete, _, _, _, _) = await PrepareNativeHelloCompletion(Bytes(32, 0xd5));
+            using var conflict = await conflictComplete(accounts);
             using var oldReceived = await CompleteReceiver(oldSent.ExactDph2);
             Assert.True(oldSent.SessionId.Span.SequenceEqual(oldReceived.SessionId.Span), "Old pending Hello changed across inventory succession.");
             await AssertLastResortStateAsync(exhausted: true);
@@ -78,8 +82,6 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             // This valid independently signed claim incorrectly reuses global
             // counter1 on a different epoch's LR key. The retained receiver
             // rejects it before opening ciphertext or consuming another key.
-            var (conflictComplete, _, _, _, _) = await PrepareNativeHelloCompletion(Bytes(32, 0xd5));
-            using var conflict = await conflictComplete(accounts);
             var refusal = await Assert.ThrowsAsync<CryptographicException>(() => FindReceiver(conflict.ExactDph2, reopen: true));
             Assert.Equal("Receiver last-resort service counter was already consumed by a different session.", refusal.Message);
             await AssertLastResortStateAsync(exhausted: true);
@@ -122,7 +124,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         internal async Task CheckSuccessorReceiverAsync(ResponderInitialSessionFailpoint point)
         {
             var peer = peerAccounts!; var local = peerCheckpoint!; var source = Source(peer);
-            var initial = await peer.EnsureOwnInitialPreKeyInventoryAsync(source);
+            var initial = await peer.EnsureOwnPreKeyInventoryAsync(source);
             _ = await StageAndRecordPairAsync(owner: peer);
             var fresh = await source.VerifyForOwnPreKeyAuthoringAsync(peer, default);
             var old = DeepIdV2PreKeyServiceCodec.Decode(initial.ExactXps1.Span);
@@ -183,7 +185,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 
         internal async Task CheckOwnedPreKeyInventoryAsync(bool encrypted)
         {
-            var source = Source(); var initial = await accounts.EnsureOwnInitialPreKeyInventoryAsync(source);
+            var source = Source(); var initial = await accounts.EnsureOwnPreKeyInventoryAsync(source);
             var initialPair = await StageAndRecordPairAsync();
             var accountId = (await accounts.GetCurrentAsync())!.AccountId.ToArray();
             var address = (await accounts.GetCurrentAsync())!.PermanentId.CanonicalText;
@@ -205,7 +207,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             var restored = (await reopened.ReadOwnStagedPreKeyPublicationAsync())!;
             Assert.True(CryptographicOperations.FixedTimeEquals(expectedFirst, restored.ExactXpp1.Span), "Owned SQL-key inventory changed after reopen.");
             Assert.Equal(address, (await reopened.GetCurrentAsync())!.PermanentId.CanonicalText);
-            var retry = await reopened.EnsureOwnInitialPreKeyInventoryAsync(Source(reopened));
+            var retry = await reopened.EnsureOwnPreKeyInventoryAsync(Source(reopened));
             Assert.True(CryptographicOperations.FixedTimeEquals(expectedFirst, retry.ExactXpp1.Span), "Pending publication must retain exact keys and operation.");
 
             var next = Author(DeepIdV2PreKeyServiceCodec.Decode(restored.ExactXps1.Span), 0xb2);

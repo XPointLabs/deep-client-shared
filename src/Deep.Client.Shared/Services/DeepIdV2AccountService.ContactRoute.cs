@@ -20,7 +20,7 @@ public sealed partial class DeepIdV2AccountService
         var profile = Domain.DeepDisplayName.Normalize(profileName, nameof(profileName));
         if (System.Text.Encoding.UTF8.GetByteCount(profile) > 128)
             throw new ArgumentException("Contact profile exceeds its UTF-8 bound.", nameof(profileName));
-        var staged = await EnsureOwnInitialPreKeyInventoryAsync(source, ct).ConfigureAwait(false);
+        var staged = await EnsureOwnPreKeyInventoryAsync(source, ct).ConfigureAwait(false);
         var fresh = await source.VerifyForOwnPreKeyAuthoringAsync(this, ct).ConfigureAwait(false);
         using (var verifier = OpenVerifier())
             _ = await owner.EnsureOneTimeContactRouteAsync(TrustedUnixSeconds(), verifier, intent, source,
@@ -67,7 +67,7 @@ public sealed partial class DeepIdV2AccountService
     {
         ArgumentNullException.ThrowIfNull(source); source.RequireAccountOwner(this);
         var plan = await ReadOwnPermanentContactPlanAsync(ct).ConfigureAwait(false);
-        var staged = await EnsureOwnInitialPreKeyInventoryAsync(source, ct).ConfigureAwait(false);
+        var staged = await EnsureOwnPreKeyInventoryAsync(source, ct).ConfigureAwait(false);
         var fresh = await source.VerifyForOwnPreKeyAuthoringAsync(this, ct).ConfigureAwait(false);
         VerifiedDeepIdV2PublicationCommit? committed;
         using (var verifier = OpenVerifier())
@@ -155,7 +155,7 @@ public sealed partial class DeepIdV2AccountService
         cancellationToken.ThrowIfCancellationRequested();
         ProtectedDph2PreClaimJournal.RequireIntent(logicalIntent32.Span);
         var intent = logicalIntent32.ToArray(); source.RequireAccountOwner(this);
-        var staged = await EnsureOwnInitialPreKeyInventoryAsync(source, cancellationToken).ConfigureAwait(false);
+        var staged = await EnsureOwnPreKeyInventoryAsync(source, cancellationToken).ConfigureAwait(false);
         var fresh = await source.VerifyForOwnPreKeyAuthoringAsync(this, cancellationToken).ConfigureAwait(false);
         using var verifier = OpenVerifier();
         return await owner.EnsureContactRouteAsync(TrustedUnixSeconds(), verifier, intent,

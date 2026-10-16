@@ -250,6 +250,35 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             service, inventory, ct).ConfigureAwait(false);
     }
 
+    internal async Task<StagedDeepIdV2PreKeyPublication> EnsureOwnPreKeyInventoryAsync(ulong trustedUnixSeconds,
+        IDeepMlDsa65Verifier verifier, DeepIdV2ContactPathAuthoritySource source,
+        DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh, CancellationToken ct)
+    {
+        using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
+        using var current = await RequireCurrentUnderLeaseAsync(trustedUnixSeconds, verifier, ct).ConfigureAwait(false);
+        Deep.Protocol.DeepExtension.PrivacyRouting.OnionMonotonicReading? first = null;
+        async Task<Deep.Protocol.DeepExtension.PrivacyRouting.OnionMonotonicReading> Recheck(CancellationToken token)
+        {
+            var reading = await RecheckRouteFreshnessAsync(current, source, fresh, held, first, token).ConfigureAwait(false);
+            first ??= reading; return reading;
+        }
+        return await SqliteDeepIdV2AccountGeneration.MaintainPreKeyInventoryAsync(storage, sqlStatePath, current,
+            fresh, Recheck, ct).ConfigureAwait(false);
+    }
+
+    internal async Task<StagedDeepIdV2PreKeyPublication?> ReadOwnPendingPreKeyInventoryAsync(ulong trustedUnixSeconds,
+        IDeepMlDsa65Verifier verifier, CancellationToken ct)
+    {
+        using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
+        using var current = await RequireCurrentUnderLeaseAsync(trustedUnixSeconds, verifier, ct).ConfigureAwait(false);
+        var exact = await SqliteDeepIdV2AccountGeneration.ReadStagedPreKeyPublicationAsync(storage, sqlStatePath, current, ct).ConfigureAwait(false);
+        if (exact is null || await SqliteDeepIdV2AccountGeneration.ReadPreKeyCommitPairAsync(storage, sqlStatePath, current, ct).ConfigureAwait(false) is not null)
+            return null;
+        var local = current.Verified.PublicEvidence;
+        return new(exact.Value.ExactXpp1, local.Binding.DeepId.CanonicalBytes.Span,
+            local.Authorization.Record.CanonicalBytes.Span, exact.Value.ExactXps1);
+    }
+
     internal async ValueTask<bool> HasOwnStagedPreKeyInventoryAsync(
         ulong trustedUnixSeconds, IDeepMlDsa65Verifier mlDsa65,
         CancellationToken cancellationToken)

@@ -1348,7 +1348,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         if (!OperatingSystem.IsWindows()) return;
         await using var fixture = await Fixture.CreateAsync();
         var source = fixture.Source();
-        var staged = await fixture.Accounts.EnsureOwnInitialPreKeyInventoryAsync(source);
+        var staged = await fixture.Accounts.EnsureOwnPreKeyInventoryAsync(source);
         Assert.Equal(1, fixture.ProofRequests);
         fixture.VerifyInventory(staged, (await source.VerifyForOwnPreKeyAuthoringAsync(
             fixture.Accounts, default)).Proof);
@@ -1366,9 +1366,9 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         await AssertRealOnionCustodyAsync(fixture, source, staged, publication, placement);
         fixture.RejectProof = true;
         var before = fixture.ProofRequests;
-        var retry = await fixture.Accounts.EnsureOwnInitialPreKeyInventoryAsync(source);
+        var retry = await fixture.Accounts.EnsureOwnPreKeyInventoryAsync(source);
         var reopened = fixture.ReopenAccount();
-        var afterRestart = await reopened.EnsureOwnInitialPreKeyInventoryAsync(fixture.Source(reopened));
+        var afterRestart = await reopened.EnsureOwnPreKeyInventoryAsync(fixture.Source(reopened));
         Assert.Equal(staged.ExactXpp1.ToArray(), retry.ExactXpp1.ToArray());
         Assert.Equal(staged.ExactXpp1.ToArray(), afterRestart.ExactXpp1.ToArray());
         Assert.Equal(staged.ExactXps1.ToArray(), afterRestart.ExactXps1.ToArray());
@@ -1376,7 +1376,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         await Assert.ThrowsAnyAsync<IOException>(async () =>
             await source.GetCurrentForPublicationAsync(Fixture.Network, service.Field(2)));
         var custody = await reopened.OpenOwnOnionClientCustodyAsync();
-        await Assert.ThrowsAnyAsync<IOException>(() => reopened.PublishOwnStagedPreKeyInventoryAsync(
+        await Assert.ThrowsAnyAsync<IOException>(() => reopened.PublishOwnPreKeyInventoryAsync(
             fixture.Source(reopened), custody)); // Stored retry cannot dispatch without fresh proof.
     }
 
@@ -1390,7 +1390,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         var exact = (await fixture.Accounts.ReadOwnStagedPreKeyPublicationAsync())!.ExactXpp1.ToArray();
         var custody = await fixture.Accounts.OpenOwnOnionClientCustodyAsync();
         await Assert.ThrowsAsync<ApplicationCoreFormatException>(() =>
-            fixture.Accounts.PublishOwnStagedPreKeyInventoryAsync(source, custody));
+            fixture.Accounts.PublishOwnPreKeyInventoryAsync(source, custody));
         Assert.Equal(exact, (await fixture.Accounts.ReadOwnStagedPreKeyPublicationAsync())!.ExactXpp1.ToArray());
         Assert.Null(await fixture.Accounts.ReadOwnPreKeyCommitPairAsync());
         Assert.Null(await custody.Guards.ReadAsync(default)); // No path/entropy reservation or send.
@@ -1405,12 +1405,12 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         var reopened = fixture.ReopenAccount();
         var custody = await reopened.OpenOwnOnionClientCustodyAsync();
         var before = fixture.ProofRequests;
-        var actual = await reopened.PublishOwnStagedPreKeyInventoryAsync(fixture.Source(reopened), custody);
+        var actual = await reopened.PublishOwnPreKeyInventoryAsync(fixture.Source(reopened), custody);
         Assert.Equal(before + 1, fixture.ProofRequests); // Fresh proof, not stored-authority reuse.
         Assert.Equal(expected.ExactFirstXic1.ToArray(), actual.ExactFirstXic1.ToArray());
         Assert.Equal(expected.ExactSecondXic1.ToArray(), actual.ExactSecondXic1.ToArray());
         Assert.Null(await custody.Guards.ReadAsync(default)); // No request/path/entropy or network dispatch.
-        var again = await reopened.PublishOwnStagedPreKeyInventoryAsync(fixture.Source(reopened), custody);
+        var again = await reopened.PublishOwnPreKeyInventoryAsync(fixture.Source(reopened), custody);
         Assert.Equal(before + 2, fixture.ProofRequests);
         Assert.Equal(expected.ExactFirstXic1.ToArray(), again.ExactFirstXic1.ToArray());
         Assert.Null(await custody.Guards.ReadAsync(default));
@@ -1432,7 +1432,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         Assert.NotEqual(before.Placement.ViewHash.ToArray(), after.Placement.ViewHash.ToArray());
         Assert.Equal(before.Placement.PlacementHash.ToArray(), after.Placement.PlacementHash.ToArray());
         var custody = await reopened.OpenOwnOnionClientCustodyAsync();
-        var actual = await reopened.PublishOwnStagedPreKeyInventoryAsync(source, custody);
+        var actual = await reopened.PublishOwnPreKeyInventoryAsync(source, custody);
         Assert.Equal(expected.ExactFirstXic1.ToArray(), actual.ExactFirstXic1.ToArray());
         Assert.Equal(expected.ExactSecondXic1.ToArray(), actual.ExactSecondXic1.ToArray());
         Assert.Equal(staged.ExactXpp1.ToArray(), (await reopened.ReadOwnStagedPreKeyPublicationAsync())!.ExactXpp1.ToArray());
@@ -1445,7 +1445,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         if (!OperatingSystem.IsWindows()) return;
         await using var fixture = await Fixture.CreateAsync();
         var source = fixture.Source();
-        var staged = await fixture.Accounts.EnsureOwnInitialPreKeyInventoryAsync(source);
+        var staged = await fixture.Accounts.EnsureOwnPreKeyInventoryAsync(source);
         var publication = DeepIdV2PreKeyPublicationCodec.Decode(staged.ExactXpp1.Span);
         var before = await source.GetCurrentForPublicationAsync(Fixture.Network, publication.Manifest.Field(2));
         await fixture.AdvanceNetworkAsync();
@@ -1477,7 +1477,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         var expected = await fixture.StageAndRecordPairAsync();
         var custody = await fixture.Accounts.OpenOwnOnionClientCustodyAsync();
         fixture.RejectProof = true;
-        await Assert.ThrowsAnyAsync<IOException>(() => fixture.Accounts.PublishOwnStagedPreKeyInventoryAsync(
+        await Assert.ThrowsAnyAsync<IOException>(() => fixture.Accounts.PublishOwnPreKeyInventoryAsync(
             fixture.Source(), custody));
         Assert.Null(await custody.Guards.ReadAsync(default));
         Assert.Equal(expected.ExactFirstXic1.ToArray(),
@@ -1485,19 +1485,24 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     }
 
     [Fact]
-    public async Task CompletedPublication_ExpiredInventoryRemainsExpiredDespiteValidStoredSignatures()
+    public async Task CompletedPublication_ExpiredInventoryMaintainsBeforeDispatchAndPreservesOriginalCustody()
     {
         if (!OperatingSystem.IsWindows()) return;
         await using var fixture = await Fixture.CreateAsync();
         var expected = await fixture.StageAndRecordPairAsync(expiredInventory: true);
         var staged = (await fixture.Accounts.ReadOwnStagedPreKeyPublicationAsync())!.ExactXpp1.ToArray();
         var custody = await fixture.Accounts.OpenOwnOnionClientCustodyAsync();
-        await Assert.ThrowsAsync<ApplicationCoreFormatException>(() =>
-            fixture.Accounts.PublishOwnStagedPreKeyInventoryAsync(fixture.Source(), custody));
+        fixture.FailAfterNextPreKeySuccessorInsert();
+        await Assert.ThrowsAsync<IOException>(() =>
+            fixture.Accounts.PublishOwnPreKeyInventoryAsync(fixture.Source(), custody));
         Assert.Null(await custody.Guards.ReadAsync(default));
-        Assert.Equal(staged, (await fixture.Accounts.ReadOwnStagedPreKeyPublicationAsync())!.ExactXpp1.ToArray());
-        Assert.Equal(expected.ExactFirstXic1.ToArray(),
-            (await fixture.Accounts.ReadOwnPreKeyCommitPairAsync())!.ExactFirstXic1.ToArray());
+        var next = (await fixture.Accounts.ReadOwnStagedPreKeyPublicationAsync())!;
+        Assert.False(next.ExactXpp1.Span.SequenceEqual(staged), "Expired completed inventory was not maintained.");
+        var fresh = await fixture.Source().VerifyForOwnPreKeyAuthoringAsync(fixture.Accounts, default);
+        fixture.VerifyInventory(next, fresh.Proof);
+        Assert.Null(await fixture.Accounts.ReadOwnPreKeyCommitPairAsync());
+        var original = await fixture.ReadInitialPreKeyPairBytesAsync();
+        Assert.True(original.AsSpan(64, expected.ExactFirstXic1.Length).SequenceEqual(expected.ExactFirstXic1.Span), "Original pair custody changed.");
     }
 
     [Fact]
@@ -1509,7 +1514,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         var custody = await fixture.Accounts.OpenOwnOnionClientCustodyAsync();
         fixture.AlterNode = true;
         await Assert.ThrowsAsync<OnionBoundaryException>(async () =>
-            await fixture.Accounts.PublishOwnStagedPreKeyInventoryAsync(fixture.Source(), custody));
+            await fixture.Accounts.PublishOwnPreKeyInventoryAsync(fixture.Source(), custody));
         Assert.Null(await custody.Guards.ReadAsync(default));
     }
 
@@ -1524,7 +1529,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         var expected = await fixture.StageAndRecordPairAsync(badSignature, unselectedReplica);
         var custody = await fixture.Accounts.OpenOwnOnionClientCustodyAsync();
         await Assert.ThrowsAsync<ApplicationCoreFormatException>(() =>
-            fixture.Accounts.PublishOwnStagedPreKeyInventoryAsync(fixture.Source(), custody));
+            fixture.Accounts.PublishOwnPreKeyInventoryAsync(fixture.Source(), custody));
         Assert.Null(await custody.Guards.ReadAsync(default));
         Assert.Equal(expected.ExactFirstXic1.ToArray(),
             (await fixture.Accounts.ReadOwnPreKeyCommitPairAsync())!.ExactFirstXic1.ToArray());
@@ -1547,7 +1552,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             injected = true;
         });
         await Assert.ThrowsAnyAsync<CryptographicException>(() =>
-            fixture.Accounts.PublishOwnStagedPreKeyInventoryAsync(fixture.Source(), custody));
+            fixture.Accounts.PublishOwnPreKeyInventoryAsync(fixture.Source(), custody));
         Assert.Null(await custody.Guards.ReadAsync(default));
         Assert.True(injected);
     }
@@ -1562,7 +1567,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         using var cancel = new CancellationTokenSource();
         fixture.AfterNextCommitPairRead(cancel.Cancel);
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
-            fixture.Accounts.PublishOwnStagedPreKeyInventoryAsync(fixture.Source(), custody, cancel.Token));
+            fixture.Accounts.PublishOwnPreKeyInventoryAsync(fixture.Source(), custody, cancel.Token));
         Assert.Null(await custody.Guards.ReadAsync(default));
         Assert.Equal(expected.ExactFirstXic1.ToArray(),
             (await fixture.Accounts.ReadOwnPreKeyCommitPairAsync())!.ExactFirstXic1.ToArray());
@@ -1632,14 +1637,14 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         using var cancelled = new CancellationTokenSource();
         cancelled.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
-            fixture.Accounts.EnsureOwnInitialPreKeyInventoryAsync(source, cancelled.Token));
+            fixture.Accounts.EnsureOwnPreKeyInventoryAsync(source, cancelled.Token));
         Assert.Equal(0, fixture.ProofRequests);
         await Assert.ThrowsAsync<ArgumentException>(() =>
-            fixture.ReopenAccount().EnsureOwnInitialPreKeyInventoryAsync(source));
+            fixture.ReopenAccount().EnsureOwnPreKeyInventoryAsync(source));
         Assert.Equal(0, fixture.ProofRequests);
         fixture.RejectProof = true;
         await Assert.ThrowsAnyAsync<IOException>(() =>
-            fixture.Accounts.EnsureOwnInitialPreKeyInventoryAsync(source));
+            fixture.Accounts.EnsureOwnPreKeyInventoryAsync(source));
         Assert.Equal(1, fixture.ProofRequests);
         Assert.Null(await fixture.Accounts.ReadOwnStagedPreKeyPublicationAsync());
     }
@@ -1769,7 +1774,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     public void AccountPublisherRequiresDid2OnlyAuthoritySource()
     {
         var method = typeof(DeepIdV2AccountService).GetMethod(
-            nameof(DeepIdV2AccountService.PublishOwnStagedPreKeyInventoryAsync))!;
+            nameof(DeepIdV2AccountService.PublishOwnPreKeyInventoryAsync))!;
         Assert.Equal(typeof(DeepIdV2ContactPathAuthoritySource), method.GetParameters()[0].ParameterType);
         Assert.Equal(typeof(DeepIdV2OnionClientCustody), method.GetParameters()[1].ParameterType);
         Assert.Empty(typeof(DeepIdV2OnionClientCustody).GetConstructors());
@@ -1790,7 +1795,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         var reopened = await reopenedAccount.OpenOwnOnionClientCustodyAsync();
         Assert.Equal(EntryGuardStateCodec.Encode(first),
             EntryGuardStateCodec.Encode((await reopened.Guards.ReadAsync(default))!));
-        await Assert.ThrowsAsync<ArgumentException>(() => reopenedAccount.PublishOwnStagedPreKeyInventoryAsync(
+        await Assert.ThrowsAsync<ArgumentException>(() => reopenedAccount.PublishOwnPreKeyInventoryAsync(
             fixture.Source(reopenedAccount), custody));
         Assert.Equal(0, fixture.ProofRequests);
         var second = Guard(2);
@@ -2196,7 +2201,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         internal async Task<Func<DeepIdV2AccountService, Task<DeepIdV2InitialSessionCommit>>>
             PrepareNativeInitialCompletion(byte[] intent)
         {
-            var source = Source(); var staged = await accounts.EnsureOwnInitialPreKeyInventoryAsync(source);
+            var source = Source(); var staged = await accounts.EnsureOwnPreKeyInventoryAsync(source);
             var current = await source.VerifyForOwnPreKeyAuthoringAsync(accounts, default);
             var publication = DeepIdV2PreKeyPublicationCodec.Decode(staged.ExactXpp1.Span);
             var authorization = DeepIdV2ContactAuthorizationCodec.Verify(
@@ -2251,7 +2256,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             var recipientAccount = peerAccounts ?? throw new InvalidOperationException("Peer fixture is required.");
             var recipientCheckpoint = peerCheckpoint!;
             var senderSource = Source(); var recipientSource = Source(recipientAccount);
-            var staged = await recipientAccount.EnsureOwnInitialPreKeyInventoryAsync(recipientSource);
+            var staged = await recipientAccount.EnsureOwnPreKeyInventoryAsync(recipientSource);
             var recipientCurrent = await recipientSource.VerifyForOwnPreKeyAuthoringAsync(recipientAccount, default);
             var publication = DeepIdV2PreKeyPublicationCodec.Decode(staged.ExactXpp1.Span);
             var authorization = DeepIdV2ContactAuthorizationCodec.Verify(
@@ -2644,7 +2649,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             ParsedXpp1V2 Publication)> CreateClaimAsync(byte operation = 0x83)
         {
             var source = Source();
-            var staged = await accounts.EnsureOwnInitialPreKeyInventoryAsync(source);
+            var staged = await accounts.EnsureOwnPreKeyInventoryAsync(source);
             var publication = DeepIdV2PreKeyPublicationCodec.Decode(staged.ExactXpp1.Span);
             var authority = await source.GetCurrentForPreKeyClaimAsync(Network, publication.Manifest.Field(2));
             var request = DeepIdV2PreKeyClaimRequestCodec.Decode(DeepIdV2PreKeyClaimRequestCodec.Encode(
@@ -2736,7 +2741,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             if (expiredInventory) await StageExpiredInventoryAsync(source);
             var staged = expiredInventory
                 ? (await target.ReadOwnStagedPreKeyPublicationAsync())!
-                : await target.EnsureOwnInitialPreKeyInventoryAsync(source);
+                : await target.EnsureOwnPreKeyInventoryAsync(source);
             var publication = DeepIdV2PreKeyPublicationCodec.Decode(staged.ExactXpp1.Span);
             var authority = await source.GetCurrentForPublicationAsync(Network, publication.Manifest.Field(2));
             var selected = authority.Placement.RankedReplicaNodeIds;

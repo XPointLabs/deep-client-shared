@@ -55,7 +55,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         internal async Task CheckProtectedPreKeyChainAsync(bool encrypted)
         {
             var source = Source();
-            var initial = await accounts.EnsureOwnInitialPreKeyInventoryAsync(source);
+            var initial = await accounts.EnsureOwnPreKeyInventoryAsync(source);
             await StageAndRecordPairAsync();
             var fresh = await source.VerifyForOwnPreKeyAuthoringAsync(accounts, default);
             var authorization = DeepIdV2CurrentContactAuthorizationVerifier.Verify(fresh.Proof,

@@ -77,7 +77,7 @@ public sealed partial class DeepIdV2AccountService
     private readonly ushort deploymentProfileId;
     internal ushort DeploymentProfileId => deploymentProfileId;
     private readonly Func<IDeepMlDsa65VerifierLease> verifierFactory;
-    private readonly SemaphoreSlim initialPreKeyGate = new(1, 1);
+    private readonly SemaphoreSlim preKeyMaintenanceGate = new(1, 1);
 
     public DeepIdV2AccountService(IDeepSecureStorage storage,
         string privateDirectory, ReadOnlySpan<byte> networkId,
@@ -373,78 +373,32 @@ public sealed partial class DeepIdV2AccountService
             verifier, service, inventory, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>
-    /// Authors and seals the first inventory from fresh account-owned DID2 and
-    /// network authority. Retries return the exact protected staged operation,
-    /// never replacement keys. No transport dispatch or remote claim is granted.
-    /// </summary>
-    public async Task<StagedDeepIdV2PreKeyPublication> EnsureOwnInitialPreKeyInventoryAsync(
-        DeepIdV2ContactPathAuthoritySource authoritySource,
-        CancellationToken cancellationToken = default)
+    // Local pending read is network-free custody, never currentness or dispatch.
+    // All new authoring/maintenance is enclosed by the actual account lease.
+    internal async Task<StagedDeepIdV2PreKeyPublication> EnsureOwnPreKeyInventoryAsync(
+        DeepIdV2ContactPathAuthoritySource source, CancellationToken ct = default)
     {
-        ArgumentNullException.ThrowIfNull(authoritySource);
-        authoritySource.RequireAccountOwner(this);
-        await initialPreKeyGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        ArgumentNullException.ThrowIfNull(source); source.RequireAccountOwner(this);
+        using (var verifier = OpenVerifier())
+        {
+            var pending = await owner.ReadOwnPendingPreKeyInventoryAsync(TrustedUnixSeconds(), verifier, ct).ConfigureAwait(false);
+            if (pending is not null) return pending;
+        }
+        var fresh = await source.VerifyForOwnPreKeyAuthoringAsync(this, ct).ConfigureAwait(false);
+        return await EnsureOwnPreKeyInventoryAsync(source, fresh, ct).ConfigureAwait(false);
+    }
+
+    private async Task<StagedDeepIdV2PreKeyPublication> EnsureOwnPreKeyInventoryAsync(
+        DeepIdV2ContactPathAuthoritySource source,
+        DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh, CancellationToken ct)
+    {
+        await preKeyMaintenanceGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            var staged = await ReadOwnStagedPreKeyPublicationAsync(cancellationToken).ConfigureAwait(false);
-            if (staged is not null) return staged; // Historical exact retry, not live placement authority.
-            var fresh = await authoritySource.VerifyForOwnPreKeyAuthoringAsync(this,
-                cancellationToken).ConfigureAwait(false);
             using var verifier = OpenVerifier();
-            using var current = await owner.ReadCurrentAsync(TrustedUnixSeconds(), verifier,
-                cancellationToken).ConfigureAwait(false) ?? throw new InvalidOperationException(
-                    "A verified DID2 account is required for initial inventory authoring.");
-            var reading = await authoritySource.RecheckOwnPreKeyAuthoringAsync(fresh,
-                cancellationToken).ConfigureAwait(false);
-            var directory = RequireOwnCurrentDirectory(current, fresh.Proof,
-                reading.BootId.Span, reading.SampleSeconds);
-            var local = current.Verified.PublicEvidence;
-            var authorization = DeepIdV2CurrentContactAuthorizationVerifier.Verify(fresh.Proof,
-                local.Authorization, reading.BootId.Span, reading.SampleSeconds);
-            var relatives = local.Binding.Identity.ActiveDeviceRelatives;
-            if (relatives.Count != 1)
-                throw new CryptographicException("Initial inventory requires one exact protected local device.");
-            using var author = current.Verified.DeviceSecrets.CreateDpk2AuthoringAuthority(relatives[0]);
-            var issued = authorization.TrustedLowerUnixSeconds;
-            // Conservative initial policy. Later replenishment is a separate
-            // generation operation, never silent replacement on a failed send.
-            // ADH1/DTT1 prove that this device is current NOW. Their short
-            // refresh windows are not the lifetime of its signed pre-keys.
-            // Each remote commit/claim must independently fetch fresh proof;
-            // retain the unchanged signed identity/delegation bounds here.
-            var expires = Math.Min(checked(issued + 86_400),
-                Math.Min(authorization.Authorization.Record.ExpiresAtUnixSeconds,
-                    local.Binding.Identity.ActiveDevices.Single().Certificate.ExpiresAtUnixSeconds));
-            if (expires <= authorization.TrustedUpperUnixSeconds)
-                throw new CryptographicException("Initial inventory cannot cover the authenticated time interval.");
-            var context = new Dpk2AuthoringContext(directory, 1, 1, 1, issued, issued, expires);
-            var service = author.AuthorPreKeyServiceV2(context, local.Binding, 32, 1);
-            var placement = ContactServicePlacementFactory.Create(fresh.Network,
-                ContactServiceRequestKind.PublishPreKeyInventory, service.ServiceCapability);
-            var drsReference = new byte[38];
-            DeepProtocolIdentifiers.MagicBytes.DRS1.CopyTo(drsReference);
-            BinaryPrimitives.WriteUInt16BigEndian(drsReference.AsSpan(4), 1);
-            local.Binding.Identity.Revocations.Snapshot.CanonicalHash.Span.CopyTo(drsReference.AsSpan(6));
-            byte[] operation;
-            do { operation = RandomNumberGenerator.GetBytes(32); }
-            while (operation.AsSpan().IndexOfAnyExcept((byte)0) < 0);
-            cancellationToken.ThrowIfCancellationRequested();
-            using var inventory = author.AuthorInventoryV2(context, local.Binding, service,
-                drsReference, new byte[32], operation, placement.PlacementHash.Span, 32, 1);
-            reading = await authoritySource.RecheckOwnPreKeyAuthoringAsync(fresh,
-                cancellationToken).ConfigureAwait(false);
-            authorization = DeepIdV2CurrentContactAuthorizationVerifier.Verify(fresh.Proof,
-                local.Authorization, reading.BootId.Span, reading.SampleSeconds);
-            DeepIdV2ReplicaPreKeyInventoryVerifier.VerifyComplete(local.Binding.DeepId,
-                service.ExactXps1.Span, authorization,
-                DeepIdV2PreKeyPublicationCodec.Decode(inventory.ExactXpp1.Span),
-                reading.BootId.Span, reading.SampleSeconds);
-            await StageOwnInitialPreKeyInventoryAsync(service, inventory, cancellationToken).ConfigureAwait(false);
-            return await ReadOwnStagedPreKeyPublicationAsync(cancellationToken).ConfigureAwait(false)
-                ?? throw new CryptographicException("The initial inventory did not become protected staged state.");
+            return await owner.EnsureOwnPreKeyInventoryAsync(TrustedUnixSeconds(), verifier, source, fresh, ct).ConfigureAwait(false);
         }
-        finally { initialPreKeyGate.Release(); }
+        finally { preKeyMaintenanceGate.Release(); }
     }
 
     internal async Task StageOwnSuccessorPreKeyInventoryAsync(AuthoredDeepIdV2PreKeyService service,
@@ -478,13 +432,13 @@ public sealed partial class DeepIdV2AccountService
             .ConfigureAwait(false);
     }
 
-    /// <summary>Completes publication of the protected exact inventory. A
+    /// <summary>Prepares/maintains and publishes the owned exact inventory. A
     /// completed protected pair is reauthenticated against fresh account and
     /// network authority without dispatch; otherwise both current ONION exits
     /// must return verified XIC1 before the pair is recorded. Neither result
     /// grants claim authority or proves present replica availability.</summary>
     public async Task<DeepIdV2PreKeyCommitSnapshot>
-        PublishOwnStagedPreKeyInventoryAsync(
+        PublishOwnPreKeyInventoryAsync(
             DeepIdV2ContactPathAuthoritySource authoritySource,
             DeepIdV2OnionClientCustody custody,
             CancellationToken cancellationToken = default)
@@ -494,14 +448,13 @@ public sealed partial class DeepIdV2AccountService
         authoritySource.RequireAccountOwner(this);
         if (!ReferenceEquals(custody.Owner, this))
             throw new ArgumentException("DID2 publication requires this account's ONION custody.", nameof(custody));
-        var staged = await ReadOwnStagedPreKeyPublicationAsync(
-            cancellationToken).ConfigureAwait(false) ?? throw new
-            InvalidOperationException("No protected DID2 pre-key inventory is staged.");
         // A protected exact retry is durable evidence, not live authority.
         // Reject expired/revoked/changed device support locally before sending
         // even the manifest, using the same independently refreshed proof as
         // authoring rather than wall-clock guesses or extending signed bytes.
         var fresh = await authoritySource.VerifyForOwnPreKeyAuthoringAsync(this,
+            cancellationToken).ConfigureAwait(false);
+        var staged = await EnsureOwnPreKeyInventoryAsync(authoritySource, fresh,
             cancellationToken).ConfigureAwait(false);
         var checkpoint = fresh.Proof.CurrentCheckpoint ?? throw new CryptographicException(
             "A current DID2 checkpoint is required before pre-key dispatch.");

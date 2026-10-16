@@ -57,7 +57,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         internal async Task CheckLogicalAssignmentAsync(bool changedEpoch)
         {
             var identity = (await accounts.GetCurrentAsync())!.PermanentId.CanonicalText;
-            var inventory = await accounts.EnsureOwnInitialPreKeyInventoryAsync(Source());
+            var inventory = await accounts.EnsureOwnPreKeyInventoryAsync(Source());
             var first = await Source().VerifyForOwnPreKeyAuthoringAsync(accounts, default);
             var delegation = DeepIdV2ContactAuthorizationCodec.Verify(
                 DeepIdV2ContactAuthorizationCodec.Decode(inventory.ExactDca1.Span), checkpoint.Binding, checkpoint.Directory);

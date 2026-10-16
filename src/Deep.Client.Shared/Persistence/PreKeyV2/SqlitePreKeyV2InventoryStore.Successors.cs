@@ -42,6 +42,22 @@ internal sealed partial class SqlitePreKeyV2InventoryStore
 
     private IEnumerable<ParsedXpp1V2> SuccessorPublications() => successorPublicRecords;
 
+    // One private store instance under its actual account lease. These local
+    // receive counts trigger maintenance; they do not report remote stock.
+    internal (int OneTimeRemaining, bool ServiceLastResortExhausted) ReadOwnedReplenishmentState()
+    {
+        ThrowIfDisposed(); RequireReceiverStorage();
+        var publication = DeepIdV2PreKeyPublicationCodec.Decode(ReadStagedPublication()!);
+        var service = DeepIdV2PreKeyServiceCodec.Decode(ReadStagedService()!);
+        var reuseLimit = BinaryPrimitives.ReadUInt16BigEndian(service.Field(9).Span);
+        using var ledger = ReadReceiverLedger(); var members = OwnedPublicMembers();
+        var uses = ledger.Entries.Count(value => value.Commit.Kind == Dpk2PrekeyKind.LastResort &&
+            value.Commit.Counter <= reuseLimit && RequireOwnedMember(members, value.Commit.Record.ExactDpk2Hash.Span)
+                .PrekeyServiceGeneration == U64(service.Field(5).Span));
+        return (publication.OneTimeMembers.Count(member => !IsOwnedPreKeyExhausted(ledger, member, members)),
+            IsReceiverPreKeyExhausted(Dpk2PrekeyKind.LastResort, reuseLimit, uses));
+    }
+
     private ParsedDpk2V2[] OwnedPublicMembers(SqliteTransaction? transaction = null) => new[] {
         DeepIdV2PreKeyPublicationCodec.Decode(ReadInitialPublication(transaction) ??
             throw new CryptographicException("Receiver history has no exact initial inventory.")) }
@@ -128,15 +144,7 @@ internal sealed partial class SqlitePreKeyV2InventoryStore
         }
         var old = DeepIdV2PreKeyServiceCodec.Decode(priorService);
         var current = DeepIdV2PreKeyServiceCodec.Decode(nextService);
-        DeepIdV2PreKeyServiceCodec.VerifyDeviceSignature(old, signer);
-        foreach (var tag in new[] { 1, 2, 3, 4, 7, 8, 9 })
-            if (!Fixed(old.Field(tag).Span, current.Field(tag).Span))
-                throw new CryptographicException("Prekey service successor changed its owner or signed policy.");
-        var generation = U64(old.Field(5).Span);
-        if (generation == ulong.MaxValue || U64(current.Field(5).Span) != generation + 1 ||
-            !Fixed(current.Field(6).Span, SHA256.HashData(priorService)) ||
-            U64(current.Field(10).Span) < U64(old.Field(10).Span) || U64(current.Field(11).Span) <= U64(old.Field(11).Span))
-            throw new CryptographicException("Prekey service successor does not extend its exact signed predecessor.");
+        DeepIdV2PreKeyLineageVerifier.VerifyServiceTransition(current, old, signer);
         DeepIdV2PreKeyLineageVerifier.VerifySuccessor(next.Manifest, null);
     }
 

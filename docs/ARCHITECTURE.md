@@ -904,7 +904,7 @@ The replacement diagnostic publication path follows
 [`DR-0009`](../../docs/survival-program/decisions/DR-0009-did2-selected-entry-transport.md).
 `DeepIdV2AccountService.OpenOwnOnionClientCustodyAsync` opens local guards and
 entropy reservations bound to the verified current DID2 account and DSV2
-database instance. `PublishOwnStagedPreKeyInventoryAsync` accepts only this
+database instance. `PublishOwnPreKeyInventoryAsync` accepts only this
 account-owned custody and its DID2 authority source, not a fixed-origin or V1
 host. The entry's address, port and TLS SPKI come from Protocol's verified
 exit-specific path. Registry HTTPS retains platform CA trust.
@@ -1134,8 +1134,8 @@ rollback of the staged file fails closed. Explicit V2 reset removes this file
 family and its protected markers. The account service can read a copy of the
 exact public XPP1/DID2/DCA1/XPS1 package after current-account and protected-tip verification,
 including after restart; it does not release sealed DPK2 secrets. This is
-local inventory custody only. Initial publication bytes can now
-be prepared through `EnsureOwnInitialPreKeyInventoryAsync`: the account owner
+local inventory custody only. The single `PublishOwnPreKeyInventoryAsync`
+command uses internal `EnsureOwnPreKeyInventoryAsync`: the account owner
 obtains a nonce-bound current DID2 proof and verified network closure from its
 own `DeepIdV2ContactPathAuthoritySource`, derives the exact local DMD1/DRS1
 bindings and random service/operation capabilities, authors the complete native
@@ -1147,9 +1147,14 @@ not the short-lived renewable directory head. Monotonic proof freshness and exac
 rechecked after native authoring and before staging. A retry, including after
 restart or interrupted tip recovery, returns the same protected bytes and
 operation without minting replacement keys; this historical read does not grant
-fresh placement or dispatch authority. Concurrent initial authoring in one
-account service is serialized; competing owners cannot replace an existing
-inventory. Protocol semantics remain owned by
+fresh placement or dispatch authority. Completed expired/low-stock support can
+advance through the current owned successor chain under the same actual account
+file lease. Same-service restoration is byte-identical; service succession uses
+the canonical Protocol predicate. New service support cannot drive contact
+renewal until its exact independently authenticated prekey pair is protected.
+See the [custody mapping](architecture/owned-prekey-inventory-custody.md) and
+[DR-0131](../../docs/survival-program/decisions/DR-0131-owned-prekey-maintenance-author.md)
+for current source scope and remaining qualification. Protocol semantics remain owned by
 [`CONTACT-RESOLVER-V1 section 3.3`](../../docs/architecture/CONTACT-RESOLVER-V1.md).
 The DID2 V2 client transport can then
 turn exact public XPP1 plus exact DID2/DCA1/XPS1 support into bounded ONION

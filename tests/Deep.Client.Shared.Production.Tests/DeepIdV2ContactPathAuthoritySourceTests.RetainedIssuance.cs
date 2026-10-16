@@ -40,7 +40,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         internal async Task CheckRetainedIssuanceAsync(int mode)
         {
             var accountBefore = (await accounts.GetCurrentAsync())!.PermanentId.CanonicalText;
-            var source = Source(); var staged = await accounts.EnsureOwnInitialPreKeyInventoryAsync(source);
+            var source = Source(); var staged = await accounts.EnsureOwnPreKeyInventoryAsync(source);
             var initial = await source.VerifyForOwnPreKeyAuthoringAsync(accounts, default);
             var dca = DeepIdV2ContactAuthorizationCodec.Verify(
                 DeepIdV2ContactAuthorizationCodec.Decode(staged.ExactDca1.Span), checkpoint.Binding, checkpoint.Directory);

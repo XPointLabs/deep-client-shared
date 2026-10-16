@@ -192,7 +192,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             // completed session. The public Start below must perform them.
             await PrepareNativeHelloCompletion(intent, preSessionCut: "draft");
             var peer = peerAccounts!;
-            var staged = await peer.EnsureOwnInitialPreKeyInventoryAsync(Source(peer));
+            var staged = await peer.EnsureOwnPreKeyInventoryAsync(Source(peer));
             var claim = new FreshOwnedClaimOnion(this, DeepIdV2PreKeyPublicationCodec.Decode(staged.ExactXpp1.Span));
             var account = ReopenAccount(); var source = Source(account);
             var read = new SyntheticPermanentRead(this, source, nativeMessagingPublication);

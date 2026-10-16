@@ -108,7 +108,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         internal async Task SeedShortPermanentProposalAsync(ulong validitySeconds = 20)
         {
             var plan = await accounts.ReadOwnPermanentContactPlanAsync(); var source = Source();
-            var staged = await accounts.EnsureOwnInitialPreKeyInventoryAsync(source);
+            var staged = await accounts.EnsureOwnPreKeyInventoryAsync(source);
             var fresh = await source.VerifyForOwnPreKeyAuthoringAsync(accounts, default);
             var dca = DeepIdV2ContactAuthorizationCodec.Verify(DeepIdV2ContactAuthorizationCodec.Decode(staged.ExactDca1.Span),
                 checkpoint.Binding, checkpoint.Directory);
@@ -192,7 +192,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         private async Task SeedShortPendingRenewalAsync(ulong lifetime)
         {
             var plan = await accounts.ReadOwnPermanentContactPlanAsync(); var source = Source();
-            var staged = await accounts.EnsureOwnInitialPreKeyInventoryAsync(source);
+            var staged = await accounts.EnsureOwnPreKeyInventoryAsync(source);
             var fresh = await source.VerifyForOwnPreKeyAuthoringAsync(accounts, default);
             var dca = DeepIdV2ContactAuthorizationCodec.Verify(DeepIdV2ContactAuthorizationCodec.Decode(staged.ExactDca1.Span),
                 checkpoint.Binding, checkpoint.Directory);
@@ -597,7 +597,12 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             RequireExact(routeRequests, generation, ContactRouteAuthorityWireCodec.EncodeRequest(request));
             if (!routeWinners.TryGetValue(generation, out var winner))
             {
-                var expiry = BinaryPrimitives.ReadUInt64BigEndian(xra.Field(13).Span);
+                // Match the real Registry issuer: a reachability resource may
+                // outlive this particular threshold lease, whose hard bound
+                // is one day from its actual current issue time.
+                var expiry = new[] { BinaryPrimitives.ReadUInt64BigEndian(xra.Field(13).Span),
+                    checked(current.TrustedLowerUnixSeconds + 86_400), authority.ExpiresAt,
+                    current.Authorization.Record.ExpiresAtUnixSeconds }.Min();
                 if ((request.HasPredecessor ? renewedRouteLifetimeSeconds : genesisRouteLifetimeSeconds) is { } lifetime)
                     expiry = Math.Min(expiry, checked(current.TrustedUpperUnixSeconds + lifetime));
                 var threshold = request.HasPredecessor ? await DeepIdV2ContactRouteAuthor.AuthorThresholdSuccessorAsync(current, network, authority,
