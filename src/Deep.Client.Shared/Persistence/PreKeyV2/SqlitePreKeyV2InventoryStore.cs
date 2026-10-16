@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using Deep.Protocol.ContactV2;
 using Deep.Protocol.MessagingCrypto;
 using Deep.Protocol.MessagingWire;
+using Deep.Client.Shared.Persistence.DeviceV2;
 using Microsoft.Data.Sqlite;
 using Sodium;
 
@@ -33,6 +34,10 @@ internal sealed partial class SqlitePreKeyV2InventoryStore : IAsyncDisposable
     private readonly Dpk2PreKeyPersistenceProtector protector;
     private readonly SemaphoreSlim gate = new(1, 1);
     private readonly SqliteConnection connection;
+    private readonly ProtectedPreKeyInventoryChain.Snapshot? successorCustody;
+    // Parsed public data from this exact owned snapshot only, not cached
+    // authority. Every open still verifies signatures, history and secrets.
+    private readonly ParsedXpp1V2[] successorPublicRecords = [];
     private int disposed;
 
     static SqlitePreKeyV2InventoryStore() => SQLitePCL.Batteries_V2.Init();
@@ -42,7 +47,8 @@ internal sealed partial class SqlitePreKeyV2InventoryStore : IAsyncDisposable
         ReadOnlySpan<byte> accountId32, ulong accountGeneration,
         ReadOnlySpan<byte> deviceId32, ulong deviceGeneration,
         ReadOnlySpan<byte> dpd1Reference38,
-        ReadOnlySpan<byte> deviceSigningPublicKey32, bool allowCreate)
+        ReadOnlySpan<byte> deviceSigningPublicKey32, bool allowCreate,
+        ProtectedPreKeyInventoryChain.Snapshot? successorCustody = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(statePath);
         Nonzero(databaseKey32, 32, nameof(databaseKey32));
@@ -63,6 +69,7 @@ internal sealed partial class SqlitePreKeyV2InventoryStore : IAsyncDisposable
         signer = deviceSigningPublicKey32.ToArray();
         this.accountGeneration = accountGeneration;
         this.deviceGeneration = deviceGeneration;
+        this.successorCustody = successorCustody;
         var exists = File.Exists(path);
         if (!exists && !allowCreate)
             throw new InvalidDataException("The DID2 pre-key store is missing.");
@@ -75,6 +82,8 @@ internal sealed partial class SqlitePreKeyV2InventoryStore : IAsyncDisposable
         var parent = Path.GetDirectoryName(path);
         try
         {
+            successorPublicRecords = successorCustody?.Entries.Select(entry =>
+                DeepIdV2PreKeyPublicationCodec.Decode(entry.CopyPublication())).ToArray() ?? [];
             if (!string.IsNullOrEmpty(parent)) Directory.CreateDirectory(parent);
             connection = Open(path, databaseKey32, create: !exists);
             if (exists) Validate();
@@ -84,6 +93,7 @@ internal sealed partial class SqlitePreKeyV2InventoryStore : IAsyncDisposable
         {
             connection?.Dispose();
             protector.Dispose();
+            successorCustody?.Dispose();
             throw;
         }
     }
@@ -101,16 +111,30 @@ internal sealed partial class SqlitePreKeyV2InventoryStore : IAsyncDisposable
 
     internal byte[]? ReadStagedPublicationHash()
     {
+        var exact = ReadStagedPublication();
+        return exact is null ? null : SHA256.HashData(exact);
+    }
+
+    internal byte[]? ReadInitialPublicationHash()
+    {
+        var exact = ReadInitialPublication();
+        return exact is null ? null : SHA256.HashData(exact);
+    }
+
+    internal byte[]? ReadInitialPublication(SqliteTransaction? transaction = null)
+    {
         ThrowIfDisposed();
         using var command = connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = "SELECT exact_xpp1 FROM inventory WHERE singleton=1;";
         var exact = command.ExecuteScalar() as byte[];
-        return exact is null ? null : SHA256.HashData(exact);
+        return exact?.ToArray();
     }
 
     internal byte[]? ReadStagedPublication()
     {
         ThrowIfDisposed();
+        if (successorCustody is { } history && history.Entries.Count > 0) return history.Entries[^1].CopyPublication();
         using var command = connection.CreateCommand();
         command.CommandText = "SELECT exact_xpp1 FROM inventory WHERE singleton=1;";
         var exact = command.ExecuteScalar() as byte[];
@@ -120,6 +144,7 @@ internal sealed partial class SqlitePreKeyV2InventoryStore : IAsyncDisposable
     internal byte[]? ReadStagedService()
     {
         ThrowIfDisposed();
+        if (successorCustody is { } history && history.Entries.Count > 0) return history.Entries[^1].CopyService();
         using var command = connection.CreateCommand();
         command.CommandText = "SELECT exact_xps1 FROM inventory WHERE singleton=1;";
         return (command.ExecuteScalar() as byte[])?.ToArray();
@@ -197,6 +222,7 @@ internal sealed partial class SqlitePreKeyV2InventoryStore : IAsyncDisposable
         {
             connection.Dispose();
             protector.Dispose();
+            successorCustody?.Dispose();
             gate.Dispose();
         }
         return ValueTask.CompletedTask;
@@ -374,7 +400,9 @@ internal sealed partial class SqlitePreKeyV2InventoryStore : IAsyncDisposable
                 publication.Manifest.Field(7).Span)))
             throw new CryptographicException("The durable DID2 inventory is invalid.");
         ValidateService(publication, exactXps1!);
+        ValidateSuccessorPublicHistory(publication, exactXps1!);
         RequireInventorySessionBinding(receiverLedger, publication);
+        var ownedMembers = OwnedPublicMembers();
         using var secrets = connection.CreateCommand();
         secrets.CommandText = "SELECT member_index,exact_dpk2_hash,exact_dpk2,sealed_secret FROM secrets ORDER BY member_index;";
         using var reader = secrets.ExecuteReader();
@@ -383,8 +411,7 @@ internal sealed partial class SqlitePreKeyV2InventoryStore : IAsyncDisposable
             var member = index < publication.OneTimeMembers.Count
                 ? publication.OneTimeMembers[index]
                 : publication.LastResortMember;
-            var uses = receiverLedger.Entries.Count(entry => Fixed(entry.Commit.Record.ExactDpk2Hash.Span, member.ExactHash.Span));
-            if (IsReceiverPreKeyExhausted(member.Kind, member.ReuseLimit, uses))
+            if (IsOwnedPreKeyExhausted(receiverLedger, member, ownedMembers))
                 continue; // The matching authenticated ledger explains this exact deletion.
             if (!reader.Read() || reader.GetInt32(0) != index ||
                 !reader.GetFieldValue<byte[]>(1).AsSpan()
@@ -409,6 +436,7 @@ internal sealed partial class SqlitePreKeyV2InventoryStore : IAsyncDisposable
         }
         if (reader.Read())
             throw new InvalidDataException("The DID2 pre-key inventory has extra secrets.");
+        if (restoreSecrets) ValidateSuccessorSecrets(receiverLedger, restore: true);
     }
 
     private int Pragma(string name)

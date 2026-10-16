@@ -241,6 +241,15 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             .ConfigureAwait(false);
     }
 
+    internal async Task StageOwnSuccessorPreKeyInventoryAsync(ulong trustedUnixSeconds, IDeepMlDsa65Verifier verifier,
+        AuthoredDeepIdV2PreKeyService service, AuthoredDpk2InventoryV2 inventory, CancellationToken ct)
+    {
+        using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
+        using var current = await RequireCurrentUnderLeaseAsync(trustedUnixSeconds, verifier, ct).ConfigureAwait(false);
+        await SqliteDeepIdV2AccountGeneration.StageSuccessorPreKeyInventoryAsync(storage, sqlStatePath, current,
+            service, inventory, ct).ConfigureAwait(false);
+    }
+
     internal async ValueTask<bool> HasOwnStagedPreKeyInventoryAsync(
         ulong trustedUnixSeconds, IDeepMlDsa65Verifier mlDsa65,
         CancellationToken cancellationToken)

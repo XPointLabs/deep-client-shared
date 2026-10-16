@@ -104,7 +104,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 var raceB = Task.Run(async () => { await start.Task; return await ProtectedPreKeyInventoryChain.StageAsync(storage, competing, default); });
                 start.SetResult();
                 var race = await Task.WhenAll(raceA, raceB);
-                Assert.Single(race.Where(value => value));
+                Assert.Single(race, value => value);
                 var winner = race[0] ? first : competing;
                 var loser = race[0] ? competing : first;
                 using (var absent = await storage.ReadOwnedAsync(ProtectedPreKeyInventoryChain.EntrySlot(loser.PublicationHash)))

@@ -36,6 +36,31 @@ internal static class ProtectedPreKeyInventoryChain
         // protector, exact DPK2/scope and independent current admission checks.
         internal byte[] CopySealedSecret(int index) => Bytes.Slice(secrets[index].Offset, secrets[index].Length).ToArray();
 
+        // Data transformation only. The sole caller must explain every index
+        // with the authenticated global receiver ledger before protected CAS.
+        internal Entry WithoutSecrets(IReadOnlySet<int> consumed)
+        {
+            ArgumentNullException.ThrowIfNull(consumed);
+            if (consumed.Any(index => index < 0 || index >= secrets.Length))
+                throw new ArgumentOutOfRangeException(nameof(consumed));
+            var prefix = HeaderBytes + DeepIdV2PreKeyServiceCodec.CanonicalLength + publicationLength;
+            var length = checked(prefix + secrets.Select((value, index) => 4 + (consumed.Contains(index) ? 0 : value.Length)).Sum());
+            var replacement = new byte[length];
+            try
+            {
+                Bytes[..prefix].CopyTo(replacement); var cursor = prefix;
+                for (var index = 0; index < secrets.Length; index++)
+                {
+                    var size = consumed.Contains(index) ? 0 : secrets[index].Length;
+                    BinaryPrimitives.WriteUInt32BigEndian(replacement.AsSpan(cursor), checked((uint)size)); cursor += 4;
+                    if (size > 0) Bytes.Slice(secrets[index].Offset, size).CopyTo(replacement.AsSpan(cursor));
+                    cursor += size;
+                }
+                return Decode(replacement, ScopeHash, PublicationHash);
+            }
+            finally { CryptographicOperations.ZeroMemory(replacement); }
+        }
+
         internal static Entry Create(ReadOnlySpan<byte> scopeHash, ReadOnlySpan<byte> predecessorHash,
             AuthoredDeepIdV2PreKeyService service, AuthoredDpk2InventoryV2 inventory,
             Dpk2PreKeyPersistenceProtector protector, Dpk2PreKeyPersistenceScope scope)
@@ -159,6 +184,16 @@ internal static class ProtectedPreKeyInventoryChain
         internal Snapshot(byte[] tip, Entry[] entries) { this.tip = tip; this.entries = entries; }
         internal IReadOnlyList<Entry> Entries { get { _ = Tip; return Array.AsReadOnly(entries); } }
         internal ReadOnlySpan<byte> Tip => tip ?? throw new ObjectDisposedException(nameof(Snapshot));
+        internal void ReplaceConsumedEntry(int index, Entry replacement)
+        {
+            _ = Tip; ArgumentNullException.ThrowIfNull(replacement);
+            var prior = entries[index];
+            if (!Fixed(prior.ScopeHash, replacement.ScopeHash) || !Fixed(prior.PredecessorHash, replacement.PredecessorHash) ||
+                !Fixed(prior.PublicationHash, replacement.PublicationHash) ||
+                !Fixed(prior.CopyService(), replacement.CopyService()) || !Fixed(prior.CopyPublication(), replacement.CopyPublication()))
+                throw new CryptographicException("Consumed prekey custody cannot change immutable public support.");
+            entries[index] = replacement; prior.Dispose();
+        }
         public void Dispose()
         {
             var owned = Interlocked.Exchange(ref tip, null);
@@ -169,6 +204,8 @@ internal static class ProtectedPreKeyInventoryChain
 
     internal static string EntrySlot(ReadOnlySpan<byte> publicationHash)
     { RequiredHash(publicationHash); return EntryPrefix + Convert.ToHexString(publicationHash).ToLowerInvariant(); }
+    internal static string CommitSlot(ReadOnlySpan<byte> publicationHash)
+    { RequiredHash(publicationHash); return "deep.store.v2.prekey-commit/" + Convert.ToHexString(publicationHash).ToLowerInvariant(); }
 
     // Caller holds the actual account lease. Capacity enforcement is delegated
     // to the one atomic backend, never implemented with sequential writes.

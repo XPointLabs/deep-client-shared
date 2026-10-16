@@ -171,6 +171,7 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             var publication = DeepIdV2PreKeyPublicationCodec.Decode(
                 exactXpp1.Span);
             ValidatePreKeyCommitPair(publication, first, second);
+            var pairSlot = PreKeyPairSlot(store, publicationHash);
             var marker = new byte[PreKeyCommitMarkerLength];
             try
             {
@@ -180,11 +181,11 @@ internal static partial class SqliteDeepIdV2AccountGeneration
                 second.CanonicalBytes.Span.CopyTo(marker.AsSpan(64 +
                     DeepIdV2PreKeyCommitReceiptCodec.CanonicalLength));
                 using var existing = await storage.ReadOwnedAsync(
-                    PreKeyCommitMarkerSlot, cancellationToken)
+                    pairSlot, cancellationToken)
                     .ConfigureAwait(false);
                 if (existing is null)
                     await storage.WriteBatchAsync(
-                        [new DeepSecureStorageWrite(PreKeyCommitMarkerSlot,
+                        [new DeepSecureStorageWrite(pairSlot,
                             marker)], cancellationToken).ConfigureAwait(false);
                 else if (!existing.Use(value => value.Length == marker.Length &&
                          CryptographicOperations.FixedTimeEquals(value,
@@ -211,34 +212,13 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         await using var store = opened.Store;
         try
         {
-            using var protectedPair = await storage.ReadOwnedAsync(
-                PreKeyCommitMarkerSlot, cancellationToken)
-                .ConfigureAwait(false);
-            if (protectedPair is null) return null;
             var exactXpp1 = store.ReadStagedPublication() ?? throw new
                 InvalidDataException("The committed DID2 inventory is missing.");
+            using var protectedPair = await storage.ReadOwnedAsync(
+                PreKeyPairSlot(store, SHA256.HashData(exactXpp1)), cancellationToken).ConfigureAwait(false);
+            if (protectedPair is null) return null;
             var publication = DeepIdV2PreKeyPublicationCodec.Decode(exactXpp1);
-            return protectedPair.Use(value =>
-            {
-                var hash = SHA256.HashData(exactXpp1);
-                if (value.Length != PreKeyCommitMarkerLength ||
-                    !CryptographicOperations.FixedTimeEquals(value[..32],
-                        opened.ScopeHash) ||
-                    !CryptographicOperations.FixedTimeEquals(value[32..64],
-                        hash))
-                    throw new CryptographicException(
-                        "The DID2 commit pair differs from its protected inventory.");
-                var first = DeepIdV2PreKeyCommitReceiptCodec.Decode(
-                    value.Slice(64,
-                        DeepIdV2PreKeyCommitReceiptCodec.CanonicalLength));
-                var second = DeepIdV2PreKeyCommitReceiptCodec.Decode(
-                    value.Slice(64 +
-                        DeepIdV2PreKeyCommitReceiptCodec.CanonicalLength,
-                        DeepIdV2PreKeyCommitReceiptCodec.CanonicalLength));
-                ValidatePreKeyCommitPair(publication, first, second);
-                return (first.CanonicalBytes.ToArray(),
-                    second.CanonicalBytes.ToArray());
-            });
+            return protectedPair.Use(value => DecodePreKeyCommitPairMarker(value, opened.ScopeHash, publication));
         }
         finally { CryptographicOperations.ZeroMemory(opened.ScopeHash); }
     }
@@ -265,6 +245,37 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         if (first.Field(5).Span.SequenceEqual(second.Field(5).Span))
             throw new CryptographicException(
                 "The DID2 commit pair repeats one replica.");
+    }
+
+    private static string PreKeyPairSlot(SqlitePreKeyV2InventoryStore store, ReadOnlySpan<byte> publicationHash)
+    {
+        var initialHash = store.ReadInitialPublicationHash() ?? throw new InvalidDataException("Initial prekey anchor is absent.");
+        return CryptographicOperations.FixedTimeEquals(initialHash, publicationHash) ? PreKeyCommitMarkerSlot :
+            ProtectedPreKeyInventoryChain.CommitSlot(publicationHash);
+    }
+
+    private static (byte[] First, byte[] Second) DecodePreKeyCommitPairMarker(ReadOnlySpan<byte> value,
+        ReadOnlySpan<byte> scopeHash, ParsedXpp1V2 publication)
+    {
+        if (value.Length != PreKeyCommitMarkerLength || !CryptographicOperations.FixedTimeEquals(value[..32], scopeHash) ||
+            !CryptographicOperations.FixedTimeEquals(value.Slice(32, 32), SHA256.HashData(publication.CanonicalBytes.Span)))
+            throw new CryptographicException("The DID2 commit pair differs from its protected inventory.");
+        var first = DeepIdV2PreKeyCommitReceiptCodec.Decode(value.Slice(64, DeepIdV2PreKeyCommitReceiptCodec.CanonicalLength));
+        var second = DeepIdV2PreKeyCommitReceiptCodec.Decode(value.Slice(64 + DeepIdV2PreKeyCommitReceiptCodec.CanonicalLength));
+        ValidatePreKeyCommitPair(publication, first, second);
+        return (first.CanonicalBytes.ToArray(), second.CanonicalBytes.ToArray());
+    }
+
+    internal static async Task StageSuccessorPreKeyInventoryAsync(IDeepSecureStorage storage, string accountStatePath,
+        VerifiedDeepIdV2CurrentAccount current, AuthoredDeepIdV2PreKeyService service,
+        AuthoredDpk2InventoryV2 inventory, CancellationToken ct)
+    {
+        if (await ReadPreKeyCommitPairAsync(storage, accountStatePath, current, ct).ConfigureAwait(false) is null)
+            throw new CryptographicException("An unresolved prekey publication cannot be replaced by another inventory.");
+        var opened = await OpenPreKeyStoreAsync(storage, accountStatePath, current, allowInitialize: false, ct).ConfigureAwait(false);
+        await using var store = opened.Store;
+        try { await store.StageSuccessorAsync(storage, opened.ScopeHash, service, inventory, ct).ConfigureAwait(false); }
+        finally { CryptographicOperations.ZeroMemory(opened.ScopeHash); }
     }
 
     private static async ValueTask<(SqlitePreKeyV2InventoryStore Store,
@@ -358,27 +369,76 @@ internal static partial class SqliteDeepIdV2AccountGeneration
                 // interrupted initial installation.
             }
 
-            var store = new SqlitePreKeyV2InventoryStore(statePath, key,
-                network, account,
-                identity.Account.Certificate.AccountGeneration,
-                certificate.DeviceId.Span, certificate.DeviceGeneration,
-                dpd1, certificate.DeviceEd25519PublicKey.Span,
-                allowCreate: !File.Exists(statePath));
+            using var heads = await storage.ReadOwnedBatchAsync(
+                [PreKeyInventoryMarkerSlot, PreKeyCommitMarkerSlot], cancellationToken).ConfigureAwait(false);
+            var capturedTip = heads[0];
+            var initialCommittedHash = heads[1]?.Use(value =>
+            {
+                if (value.Length != PreKeyCommitMarkerLength || !CryptographicOperations.FixedTimeEquals(value[..32], scopeHash))
+                    throw new CryptographicException("The initial prekey commit anchor has a different owner scope.");
+                return value.Slice(32, 32).ToArray();
+            });
+            if (capturedTip is null && initialCommittedHash is not null)
+                throw new CryptographicException("A committed prekey inventory lost its protected pointer.");
+            ProtectedPreKeyInventoryChain.Snapshot? successors = null;
+            if (capturedTip is not null && initialCommittedHash is not null &&
+                !capturedTip.Use(value => value.Length == 64 && CryptographicOperations.FixedTimeEquals(value[..32], scopeHash) &&
+                    CryptographicOperations.FixedTimeEquals(value[32..], initialCommittedHash)))
+                successors = await ProtectedPreKeyInventoryChain.ReadAsync(storage, scopeHash,
+                    initialCommittedHash, cancellationToken).ConfigureAwait(false);
+            SqlitePreKeyV2InventoryStore store;
             try
             {
-                using var tip = await storage.ReadOwnedAsync(
-                    PreKeyInventoryMarkerSlot, cancellationToken)
-                    .ConfigureAwait(false);
-                var stagedHash = store.ReadStagedPublicationHash();
-                if (tip is null)
+                store = new SqlitePreKeyV2InventoryStore(statePath, key, network, account,
+                    identity.Account.Certificate.AccountGeneration, certificate.DeviceId.Span, certificate.DeviceGeneration,
+                    dpd1, certificate.DeviceEd25519PublicKey.Span, allowCreate: !File.Exists(statePath), successorCustody: successors);
+            }
+            catch { successors?.Dispose(); throw; }
+            try
+            {
+                var stagedHash = store.ReadInitialPublicationHash();
+                if (initialCommittedHash is not null && (stagedHash is null ||
+                    !CryptographicOperations.FixedTimeEquals(initialCommittedHash, stagedHash)))
+                    throw new CryptographicException("The initial SQL inventory differs from its protected commit anchor.");
+                if (heads[1] is { } initialPair)
+                    initialPair.Use(value => DecodePreKeyCommitPairMarker(value, scopeHash,
+                        DeepIdV2PreKeyPublicationCodec.Decode(store.ReadInitialPublication()!)));
+                if (successors is not null)
+                {
+                    var entries = successors.Entries;
+                    for (var entryOffset = 0; entryOffset < entries.Count; entryOffset += 32)
+                    {
+                        var count = Math.Min(32, entries.Count - entryOffset);
+                        using var pairs = await storage.ReadOwnedBatchAsync(entries.Skip(entryOffset).Take(count)
+                            .Select(entry => ProtectedPreKeyInventoryChain.CommitSlot(entry.PublicationHash)).ToArray(), cancellationToken).ConfigureAwait(false);
+                        for (var index = 0; index < count; index++)
+                        {
+                            var position = entryOffset + index;
+                            if (pairs[index] is not { } pair)
+                            {
+                                if (position != entries.Count - 1)
+                                    throw new InvalidDataException("A prekey predecessor lost its protected replica pair.");
+                                continue; // Only the current inventory can still be pending.
+                            }
+                            pair.Use(value => DecodePreKeyCommitPairMarker(value, scopeHash,
+                                DeepIdV2PreKeyPublicationCodec.Decode(entries[position].CopyPublication())));
+                        }
+                    }
+                }
+                if (capturedTip is null)
                 {
                     if (stagedHash is not null)
                         await WritePreKeyTipAsync(storage, scopeHash,
                             stagedHash, cancellationToken)
                             .ConfigureAwait(false);
                 }
+                else if (successors is not null)
+                {
+                    if (!capturedTip.Use(value => CryptographicOperations.FixedTimeEquals(value, successors.Tip)))
+                        throw new CryptographicException("Prekey custody changed while opening its SQL owner.");
+                }
                 else if (stagedHash is null ||
-                         !tip.Use(value => value.Length == 64 &&
+                         !capturedTip.Use(value => value.Length == 64 &&
                              CryptographicOperations.FixedTimeEquals(
                                  value[..32], scopeHash) &&
                              CryptographicOperations.FixedTimeEquals(

@@ -2118,7 +2118,12 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 new FrozenClock(DateTimeOffset.FromUnixTimeSeconds(1_000)), DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess)
                 : peerAccounts!).FindOwnInitialContactSessionAsync(exact);
 
-        internal void AfterNextCommitPairRead(Action action) => storage.AfterCommitPairRead = action;
+        internal void AfterNextCommitPairRead(Action action)
+        {
+            var before = ProofRequests;
+            storage.CommitPairReadReady = () => ProofRequests > before;
+            storage.AfterCommitPairRead = action;
+        }
         internal void AfterNextPreClaimCommit(Action action) => storage.AfterPreClaimCommit = action;
         internal void AfterNextRendezvousCommit(Action action) => storage.AfterRendezvousCommit = action;
         internal Task<VerifiedDeepIdV2ContactUpdateRendezvous> EnsureRendezvous(byte[] intent,
@@ -2241,7 +2246,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         internal async Task<(Func<DeepIdV2AccountService, Task<DeepIdV2InitialSessionCommit>> Complete,
             ParsedDmc2 Hello, ParsedDmc2 Init,
             Func<ReadOnlyMemory<byte>, Task<Dph2InitialClaimPreview>> Preview,
-            Func<Dph2InitialClaimPreview, Task<ResponderInitialSessionCommitCapability>> Prepare)> PrepareNativeHelloCompletion(byte[] intent, int oneTimeIndex = -1, bool verifyDraftRecovery = false, string? preSessionCut = null)
+            Func<Dph2InitialClaimPreview, Task<ResponderInitialSessionCommitCapability>> Prepare)> PrepareNativeHelloCompletion(byte[] intent, int oneTimeIndex = -1, bool verifyDraftRecovery = false, string? preSessionCut = null, ushort lastResortCounter = 1)
         {
             var recipientAccount = peerAccounts ?? throw new InvalidOperationException("Peer fixture is required.");
             var recipientCheckpoint = peerCheckpoint!;
@@ -2326,7 +2331,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             Assert.Equal(started.SenderEphemeralCommitment.ToArray(), request.Field(21).ToArray());
             Assert.Equal(publication.Manifest.Field(6).Span[6..].ToArray(), request.Field(18).ToArray());
             var exactResult = AuthorClaimResult(request, path, publication, false,
-                oneTimeIndex: oneTimeIndex, serverTime: CurrentProofTime);
+                oneTimeIndex: oneTimeIndex, serverTime: CurrentProofTime, lastResortCounter: lastResortCounter);
             var custody = await accounts.OpenOwnClaimRequestCustodyAsync();
             using (var cancelledDispatch = new CancellationTokenSource())
             {
@@ -2653,10 +2658,10 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 
         internal byte[] AuthorClaimResult(ParsedXpk1V2 request, ContactResolvePathAuthority authority,
             ParsedXpp1V2 publication, bool replay, bool badSignature = false, int oneTimeIndex = -1,
-            ulong serverTime = 1_100)
+            ulong serverTime = 1_100, ushort lastResortCounter = 1)
         {
             var member = oneTimeIndex >= 0 ? publication.OneTimeMembers[oneTimeIndex] : publication.LastResortMember;
-            var useCounter = checked((ushort)(oneTimeIndex >= 0 ? 0 : 1));
+            var useCounter = oneTimeIndex >= 0 ? (ushort)0 : lastResortCounter;
             var manifest = publication.Manifest;
             var signingInput = DeepIdV2PreKeyClaimCommitment.CreateReplicaSignatureInput(
                 request.CanonicalBytes.Span, member.CanonicalBytes.Span, manifest.CanonicalBytes.Span, 1, useCounter);
@@ -2722,13 +2727,16 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         // Storage-level internal recording deliberately omits transport verification
         // so negative tests prove the public completion path does not trust a marker.
         internal async Task<DeepIdV2PreKeyCommitSnapshot> StageAndRecordPairAsync(
-            bool badSignature = false, bool unselectedReplica = false, bool expiredInventory = false)
+            bool badSignature = false, bool unselectedReplica = false, bool expiredInventory = false,
+            DeepIdV2AccountService? owner = null)
         {
-            var source = Source();
+            var target = owner ?? accounts;
+            if (expiredInventory && !ReferenceEquals(target, accounts)) throw new ArgumentException("Expired initial fixture owns its primary account only.");
+            var source = Source(target);
             if (expiredInventory) await StageExpiredInventoryAsync(source);
             var staged = expiredInventory
-                ? (await accounts.ReadOwnStagedPreKeyPublicationAsync())!
-                : await accounts.EnsureOwnInitialPreKeyInventoryAsync(source);
+                ? (await target.ReadOwnStagedPreKeyPublicationAsync())!
+                : await target.EnsureOwnInitialPreKeyInventoryAsync(source);
             var publication = DeepIdV2PreKeyPublicationCodec.Decode(staged.ExactXpp1.Span);
             var authority = await source.GetCurrentForPublicationAsync(Network, publication.Manifest.Field(2));
             var selected = authority.Placement.RankedReplicaNodeIds;
@@ -2740,8 +2748,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             var second = Receipt(signers[1]);
             if (!badSignature && !unselectedReplica)
                 DeepIdV2PreKeyCommitReceiptVerifier.VerifyPair(publication, authority.Placement, first, second);
-            await accounts.RecordPreKeyCommitPairAfterVerificationAsync(staged.ExactXpp1, first, second);
-            return (await accounts.ReadOwnPreKeyCommitPairAsync())!;
+            await target.RecordPreKeyCommitPairAfterVerificationAsync(staged.ExactXpp1, first, second);
+            return (await target.ReadOwnPreKeyCommitPairAsync())!;
 
             ParsedXic1V2 Receipt(Signer signer)
             {
@@ -2866,14 +2874,14 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             return await reopened.OpenNetworkLkgStoreAsync(pin);
         }
 
-        internal async Task AssertReceiverSqlAsync(int count, byte[] exact)
+        internal async Task AssertReceiverSqlAsync(int count, byte[] exact, bool successor = false)
         {
             await using var sql = await OpenPeerPreKeySqlAsync();
             using var read = sql.CreateCommand();
             read.CommandText = "SELECT COUNT(*) FROM receiver_sessions;";
             Assert.Equal(count, Convert.ToInt32(read.ExecuteScalar()));
             read.CommandText = "SELECT COUNT(*) FROM secrets;";
-            Assert.Equal(33 - count, Convert.ToInt32(read.ExecuteScalar()));
+            Assert.Equal(33 - (successor ? 0 : count), Convert.ToInt32(read.ExecuteScalar()));
             read.CommandText = "SELECT COUNT(*) FROM secrets WHERE exact_dpk2_hash=$hash;";
             read.Parameters.AddWithValue("$hash", Dph2Codec.Decode(exact).ExactDpk2Hash.ToArray());
             Assert.Equal(0, Convert.ToInt32(read.ExecuteScalar()));
@@ -3199,6 +3207,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         internal Action? AfterPreClaimCommit { get; set; }
         internal Action? AfterRendezvousCommit { get; set; }
         internal Action? AfterCommitPairRead { get; set; }
+        internal Func<bool>? CommitPairReadReady { get; set; }
         internal bool FailAfterContactDraftCommit { get; set; }
         internal bool FailAfterNetworkMarker { get; set; }
         internal bool FailAfterHistoryAnchor { get; set; }
@@ -3272,9 +3281,11 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 failNextRouteReadback = false; value?.Dispose();
                 throw new IOException("Injected failure reading back exact committed route custody.");
             }
-            if (slot == "deep.store.v2.prekey-commit-pair-v1" && AfterCommitPairRead is { } action)
+            if (slot == "deep.store.v2.prekey-commit-pair-v1" && AfterCommitPairRead is { } action &&
+                (CommitPairReadReady?.Invoke() ?? true))
             {
                 AfterCommitPairRead = null;
+                CommitPairReadReady = null;
                 action();
             }
         }

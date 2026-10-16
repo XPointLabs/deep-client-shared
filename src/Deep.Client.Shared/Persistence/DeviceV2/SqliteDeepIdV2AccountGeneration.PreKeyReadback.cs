@@ -44,9 +44,8 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             throw new CryptographicException("Responder inventory marker is foreign or malformed.");
         if (committed is not null)
         {
-            var inventoryDigest = inventory?.Use(bytes => SHA256.HashData(bytes));
             if (inventory is null || !committed.Use(bytes => bytes.Length == PreKeyCommitMarkerLength &&
-                Fixed(inventoryDigest!, SHA256.HashData(bytes[..64]))))
+                Fixed(installedDigest, SHA256.HashData(bytes[..32]))))
                 throw new CryptographicException("Responder commit marker differs from its inventory.");
             committed.Use(bytes =>
             {
@@ -63,6 +62,43 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         inventory?.Use(bytes => { hash.AppendData(bytes); return true; });
         hash.AppendData([committed is null ? (byte)0 : (byte)1]);
         committed?.Use(bytes => { hash.AppendData(bytes); return true; });
+        if (committed is not null)
+        {
+            var scope = installed.Use(value => value.ToArray());
+            var initialHash = committed.Use(value => value.Slice(32, 32).ToArray());
+            try
+            {
+                using var successors = await ProtectedPreKeyInventoryChain.ReadAsync(storage, scope, initialHash, ct).ConfigureAwait(false);
+                if (!inventory!.Use(value => Fixed(value, successors.Tip)))
+                    throw new CryptographicException("Responder successor pointer changed during source readback.");
+                // Preserve the exact existing initial-only readback. New data
+                // is framed only when a real successor chain exists.
+                if (successors.Entries.Count > 0)
+                {
+                    hash.AppendData([2]); var count = new byte[4];
+                    BinaryPrimitives.WriteUInt32BigEndian(count, checked((uint)successors.Entries.Count)); hash.AppendData(count);
+                    foreach (var entry in successors.Entries)
+                    {
+                        var record = entry.CopyExact();
+                        try { hash.AppendData(SHA256.HashData(record)); }
+                        finally { CryptographicOperations.ZeroMemory(record); }
+                        using var pair = await storage.ReadOwnedAsync(ProtectedPreKeyInventoryChain.CommitSlot(entry.PublicationHash), ct).ConfigureAwait(false) ??
+                            throw new IOException("Pending prekey publication pins source cleanup.");
+                        var publication = DeepIdV2PreKeyPublicationCodec.Decode(entry.CopyPublication());
+                        pair.Use(value =>
+                        {
+                            if (value.Length != PreKeyCommitMarkerLength || !Fixed(value[..32], scope) || !Fixed(value.Slice(32, 32), entry.PublicationHash))
+                                throw new CryptographicException("Responder successor commit readback differs from its exact inventory.");
+                            var first = DeepIdV2PreKeyCommitReceiptCodec.Decode(value.Slice(64, DeepIdV2PreKeyCommitReceiptCodec.CanonicalLength));
+                            var second = DeepIdV2PreKeyCommitReceiptCodec.Decode(value.Slice(64 + DeepIdV2PreKeyCommitReceiptCodec.CanonicalLength));
+                            ValidatePreKeyCommitPair(publication, first, second);
+                            hash.AppendData(SHA256.HashData(value)); return true;
+                        });
+                    }
+                }
+            }
+            finally { CryptographicOperations.ZeroMemory(scope); }
+        }
         // Fixed memory; no allocation from file length or secret inventory cell
         // sizes. FileShare.Read excludes writes/deletion while the held reader
         // streams all ciphertext. Even a harmless ciphertext rewrite pins the

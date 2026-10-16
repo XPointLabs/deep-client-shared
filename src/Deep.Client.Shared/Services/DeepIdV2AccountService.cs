@@ -447,6 +447,14 @@ public sealed partial class DeepIdV2AccountService
         finally { initialPreKeyGate.Release(); }
     }
 
+    internal async Task StageOwnSuccessorPreKeyInventoryAsync(AuthoredDeepIdV2PreKeyService service,
+        AuthoredDpk2InventoryV2 inventory, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(service); ArgumentNullException.ThrowIfNull(inventory);
+        using var verifier = OpenVerifier();
+        await owner.StageOwnSuccessorPreKeyInventoryAsync(TrustedUnixSeconds(), verifier, service, inventory, ct).ConfigureAwait(false);
+    }
+
     public async Task<bool> HasOwnStagedPreKeyInventoryAsync(
         CancellationToken cancellationToken = default)
     {

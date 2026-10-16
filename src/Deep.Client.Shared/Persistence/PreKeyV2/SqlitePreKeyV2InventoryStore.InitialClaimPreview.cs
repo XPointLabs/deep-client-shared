@@ -20,6 +20,7 @@ internal sealed partial class SqlitePreKeyV2InventoryStore
         try
         {
             ThrowIfDisposed();
+            RequireReceiverStorage();
             if (!dph2.NetworkId.Span.SequenceEqual(network) || !dph2.ResponderAccountId.Span.SequenceEqual(account) ||
                 !dph2.ResponderDeviceId.Span.SequenceEqual(device) || dph2.ResponderDeviceGeneration != deviceGeneration)
                 throw new CryptographicException("The initial preview is outside this protected inventory owner.");
@@ -27,8 +28,15 @@ internal sealed partial class SqlitePreKeyV2InventoryStore
             command.CommandText = "SELECT exact_dpk2,sealed_secret FROM secrets WHERE exact_dpk2_hash=$hash;";
             Add(command, "$hash", dph2.ExactDpk2Hash.ToArray());
             using var reader = command.ExecuteReader();
-            if (!reader.Read()) throw new CryptographicException("The exact initial DPK2 is not retained in this local inventory.");
-            exact = (byte[])reader.GetValue(0); sealedSecret = (byte[])reader.GetValue(1);
+            if (reader.Read())
+            { exact = (byte[])reader.GetValue(0); sealedSecret = (byte[])reader.GetValue(1); }
+            else
+            {
+                var retained = FindSuccessorMember(dph2.ExactDpk2Hash.Span) ??
+                    throw new CryptographicException("The exact initial DPK2 is not retained in this local inventory.");
+                exact = retained.Member.CanonicalBytes.ToArray(); sealedSecret = retained.Entry.CopySealedSecret(retained.Index);
+                if (sealedSecret.Length == 0) throw new CryptographicException("The selected successor prekey has already been consumed.");
+            }
             var offering = DeepIdV2Dpk2PreClaimVerifier.Verify(exact, proof, reading.BootId.Span, reading.SampleSeconds);
             Dph2Codec.ValidateSelection(dph2, offering);
             ct.ThrowIfCancellationRequested();

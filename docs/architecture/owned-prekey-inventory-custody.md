@@ -3,8 +3,9 @@
 Normative owner: [CONTACT-RESOLVER section3.3](../../../docs/architecture/CONTACT-RESOLVER-V1.md).
 Local allocation: [DR-0130](../../../docs/survival-program/decisions/DR-0130-owned-prekey-inventory-custody.md),
 following the [DR-0129 service boundary](../../../docs/survival-program/decisions/DR-0129-owned-prekey-service-succession.md).
-This is an internal custody implementation checkpoint, not activated renewal,
-publication, claim/Initial authority or device acceptance.
+This maps the internal account/receiver custody implementation, not activated
+automatic renewal or device acceptance. Protected records are never current
+publication, claim/Initial or dispatch authority.
 
 ## Implemented component
 
@@ -28,9 +29,34 @@ initial anchor, detects missing/cyclic/disconnected state, validates scope and
 rechecks the pointer after traversal. It returns owned disposable data, not a
 freshness cache. Original SQL schema/inventory/receiver history are unchanged.
 
-The sole original tip-slot constant is shared with the initial SQL owner. No
-shipping owner calls the new staging path yet. In particular, the existing
-initial-only reader has NOT been changed into a compatibility fallback.
+The sole original tip-slot constant is shared with the initial SQL owner. The
+actual account owner now opens the exact chain before validating the one global
+receiver ledger. Its internal successor stage takes the account file lease,
+uses the original SQL-key-derived DPK2 protector and validates signed service/
+epoch lineage. Every ancestor must have its exact protected commit pair; only
+the latest publication may remain pending. A pending candidate cannot be
+replaced by another inventory. Ordinary automatic authoring still does not call
+this staging path; the public initial-only orchestration remains unchanged.
+
+Receiver preview selects one exact DPK2 from the initial SQL inventory or its
+explicit protected successor chain, never the next available generation. The
+receiver commits SQL first, destroys exhausted successor secrets with exact CAS,
+then stabilizes its original protected checkpoint. All four interruption points
+recover idempotently, including a lost response after secret destruction. The
+same original SQL ledger, replay fences and retirement checks cover both kinds
+of custody. No successor key is copied into SQL.
+
+Last-resort counters belong to the service generation across inventory epochs.
+Distinct sessions cannot reuse one counter on different keys. Secret destruction
+waits until all counters admissible for that signed member have arrived; seeing
+the highest counter alone does not erase a key needed by a lower-counter Hello
+still in flight. This can remove the original SQL last-resort secret when the
+final missing counter arrives on a successor key. Staging another inventory with
+an already exhausted service counter rejects before sealing or pointer mutation.
+Expiry alone destroys no key. Source/compaction readback now pins the complete
+exact successor chain and its per-publication pairs in addition to the unchanged
+initial encrypted SQL and receiver checkpoint. Initial-only readback bytes stay
+unchanged. Missing pairs or changed custody pin cleanup.
 
 ## Evidence — 2026-10-16
 
@@ -54,7 +80,8 @@ PowerShell5.1/SDK10.0.301:
 - `final-06`:9 passed,0 failed/skipped,native0 after enforcing in-process
   authored-candidate provenance. Even a structurally valid decoded record with
   every sealed secret present cannot stage a new successor. Compilation reports
-  zero warnings/errors. This bit is never persisted as authority.
+  no errors and one xUnit2031 test-style warning. This bit is never persisted
+  as authority; this receipt is not zero-warning build evidence.
 
 The Protocol repin changes only CONTACT-RESOLVER's reviewed source hash and its
 generated/resolved registry digest. All178 normative anchors remain unchanged;
@@ -62,25 +89,63 @@ the strict generator and registry gate pass. There is no wire allocation or
 public API change. These focused receipts do not replace canonical full and
 package qualification of the eventual connected lifecycle.
 
-The two native custody rows use a real account/device/ML-KEM author and full
+The original two native custody rows use a real account/device/ML-KEM author and full
 current inventory verification before sealing. Encrypted mode uses actual
 journaled disk protection with a fixture-owned protector. The DPK2 sealing key
-is fixture-owned: production account/SQL key-owner integration is still required.
+is fixture-owned; they do not prove actual account/SQL-key integration.
 All private-record equality assertions use fixed messages, not byte dumps.
+
+Additional native receipts under `artifacts/s05-prekey-owner-20261016/`:
+
+- `focused-01`: compile failure CS0136, no TRX; two shadowed locals were renamed.
+- `focused-02`:2 passed/native0, actual SQL-key owner and lease, memory/encrypted
+  cold reopen, per-publication pairs, lost CAS response, damaged sealed key and
+  unchanged account/initial pair. Compaction readback pins a pending publication.
+- `receiver-03`: compile failure CS0051, no TRX; the test's public theory argument
+  now carries an integer, without widening the private failpoint API.
+- `receiver-04`:4 passed/native0, actual two-account one-time Initial/Hello and
+  pending/SQL/secret-delete/stable crash recovery. Exact replay consumes once;
+  original33 SQL secrets remain and SQL rollback cannot resurrect custody.
+- `regression-05`:87 passed/1 failed/native1. Earlier pair reads introduced by
+  chain-open moved a fixture's clock callback before fresh proof acquisition.
+  The callback now waits for that fresh proof; production clock guards were not
+  relaxed and the original red receipt is retained.
+- `regression-06`:89 passed/native0, no failures/skips or compiler errors,
+  including current initial publication, original receiver/storage and successor
+  source/component cases. This and owner02/receiver04/epoch09 retain one
+  xUnit2031 test-style warning, not zero-warning build evidence.
+- `compaction-07`:27 passed/native0, no failures/skips, existing actual encrypted
+  compaction and namespace retirement cases.
+- `epoch-08`: compile failure CS0103, no TRX; missing namespace import corrected.
+- `epoch-09`:6 passed/native0, no failures/skips. Includes native same-service
+  epoch succession, counter2 before old pending counter1, encrypted cold reopen,
+  destruction of both initial/successor LR secrets only after complete counters,
+  and rejection of a signed counter1 claim on a different epoch key. Four
+  successor crash rows and the original LR-limit case also pass.
+- `regression-10`:97 passed/native0, no failures/skips. Covers the final runtime
+  counter/destruction changes with the owned-inventory, prekey, receiver,
+  compaction and selected namespace-retirement filters. The native same-service
+  case also verifies that an exhausted service cannot advance its inventory tip.
+  The original test-style warning remains in this immutable receipt.
+- `final-11`:2 passed/native0, no failures/skips or compiler warnings/errors.
+  Rebuild plus the exact memory/encrypted concurrent-CAS test rows after replacing
+  `Assert.Single(Where(...))` with its predicate overload. No runtime source
+  changed after regression10; the final pass is not another unfiltered/full gate.
+
+These tests use actual native key/session cryptography and encrypted account
+storage, but replicas are independently signed in-process fixtures, not deployed
+TLS/ONION nodes or physical devices. They do not qualify shipping activation.
 
 ## Connected work still mandatory
 
-Connect the actual account lease, existing SQL-key-derived persistence protector,
-initial anchor and full signed epoch/service lineage before ordinary staging.
-Resume the exact pending operation, authenticate both selected replica receipts,
-and adopt contact support only after that pair. Keep one global receiver ledger:
-restore by exact DPK2 across inventories, remove only the consumed secret after
-SQL commit and before checkpoint stabilization, and reconcile that deletion on
-every pending reopen. Validate every absence against authenticated history.
+Implement ordinary owned replenishment/service succession under the same lease,
+including authoring after cold reopen without regenerating an unresolved pending
+candidate. The current author only accepts an in-process authored service object;
+freeze any required public API change before implementation. Authenticate both
+selected replica receipts before adopting changed current contact support. Do not
+force a service-generation change merely to avoid same-service epoch authoring.
 
-Extend source/compaction readback to include the exact protected chain and per-
-publication commit custody. Native crash/CAS/reopen/old-pending tests, canonical
-full/package gates, matched services/clients and retained-account physical
+Canonical full/package gates, matched services/clients and retained-account physical
 Windows/Android E2E remain open. Do not install this partial component as a
 workaround for the expired initial inventory, reset accounts or extend signed
 intervals. Current release status belongs to [NEXT-SPRINT](../../../docs/NEXT-SPRINT.md).

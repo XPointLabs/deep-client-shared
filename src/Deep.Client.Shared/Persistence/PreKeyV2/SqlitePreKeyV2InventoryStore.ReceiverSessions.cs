@@ -183,30 +183,40 @@ internal sealed partial class SqlitePreKeyV2InventoryStore
 
     private void AppendReceiverTransaction(ResponderInitialSessionCheckpoint.State checkpoint, DeepIdV2InitialContactSessionCommit completed)
     {
+        var ownedMembers = OwnedPublicMembers();
+        var initial = DeepIdV2PreKeyPublicationCodec.Decode(ReadInitialPublication()!);
         using var transaction = connection.BeginTransaction(deferred: false);
         using var ledger = ReadReceiverLedger(transaction);
         if (ledger.Sequence + 1 != checkpoint.Sequence || !Fixed(ledger.Hash, checkpoint.Previous))
             throw new CryptographicException("Receiver SQL transaction has a different predecessor.");
-        using var replay = RequireExactReplayOrAvailable(ledger, completed.Record, completed.ExactClaimReplayHashSpan.ToArray());
+        using var replay = RequireExactReplayOrAvailable(ledger, completed.Record, completed.ExactClaimReplayHashSpan.ToArray(), ownedMembers);
         if (replay is not null) throw new CryptographicException("Receiver append cannot replace an existing exact replay.");
         RequireReceiverScope(completed);
-        ushort selectedReuseLimit;
         using (var selected = connection.CreateCommand())
         {
             selected.Transaction = transaction;
             selected.CommandText = "SELECT exact_dpk2 FROM secrets WHERE exact_dpk2_hash=$hash;";
             Add(selected, "$hash", completed.Record.ExactDpk2Hash.ToArray());
-            if (selected.ExecuteScalar() is not byte[] retained)
-                throw new CryptographicException("Receiver completion has no retained selected private prekey.");
-            var selectedMember = DeepIdV2Dpk2Codec.Decode(retained);
+            ParsedDpk2V2 selectedMember;
+            if (selected.ExecuteScalar() is byte[] retained)
+                selectedMember = DeepIdV2Dpk2Codec.Decode(retained);
+            else
+            {
+                var successor = FindSuccessorMember(completed.Record.ExactDpk2Hash.Span) ??
+                    throw new CryptographicException("Receiver completion has no retained selected private prekey.");
+                var sealedSecret = successor.Entry.CopySealedSecret(successor.Index);
+                try
+                {
+                    if (sealedSecret.Length == 0) throw new CryptographicException("Receiver completion selected a consumed successor prekey.");
+                }
+                finally { CryptographicOperations.ZeroMemory(sealedSecret); }
+                selectedMember = successor.Member;
+            }
             if (!Fixed(selectedMember.ExactHash.Span, completed.Record.ExactDpk2Hash.Span) || selectedMember.Kind != completed.Kind ||
                 completed.Counter > selectedMember.ReuseLimit)
                 throw new CryptographicException("Receiver completion differs from the selected signed prekey limit.");
-            selectedReuseLimit = selectedMember.ReuseLimit;
             // Store open has already validated the exact signed public inventory.
         }
-        var sameKeyUses = ledger.Entries.Count(entry => Fixed(entry.Commit.Record.ExactDpk2Hash.Span, completed.Record.ExactDpk2Hash.Span));
-        var deleteSecret = IsReceiverPreKeyExhausted(completed.Kind, selectedReuseLimit, sameKeyUses + 1);
         var exactRecord = completed.CanonicalSpan.ToArray();
         var exactState = completed.ExactTrsSpan.ToArray();
         try
@@ -223,11 +233,13 @@ internal sealed partial class SqlitePreKeyV2InventoryStore
             Add(insert, "$state", exactState); insert.ExecuteNonQuery();
         }
         finally { CryptographicOperations.ZeroMemory(exactRecord); CryptographicOperations.ZeroMemory(exactState); }
-        if (deleteSecret)
+        foreach (var member in initial.OneTimeMembers.Append(initial.LastResortMember))
         {
+            if (IsOwnedPreKeyExhausted(ledger, member, ownedMembers) ||
+                !IsOwnedPreKeyExhausted(ledger, member, ownedMembers, completed)) continue;
             using var deletion = connection.CreateCommand(); deletion.Transaction = transaction;
             deletion.CommandText = "DELETE FROM secrets WHERE exact_dpk2_hash=$hash;";
-            Add(deletion, "$hash", completed.Record.ExactDpk2Hash.ToArray());
+            Add(deletion, "$hash", member.ExactHash.ToArray());
             if (deletion.ExecuteNonQuery() != 1) throw new CryptographicException("Receiver prekey deletion did not consume exactly one secret.");
         }
         transaction.Commit();
@@ -238,6 +250,9 @@ internal sealed partial class SqlitePreKeyV2InventoryStore
         using var ledger = ReadReceiverLedger();
         if (ledger.Sequence != checkpoint.Sequence || !Fixed(ledger.Hash, checkpoint.Hash))
             throw new CryptographicException("Receiver cannot stabilize a different SQL history.");
+        await CompleteSuccessorConsumptionAsync(ledger, ct).ConfigureAwait(false);
+        if (successorCustody is { Entries.Count: > 0 })
+            ResponderInitialSessionTestHooks.Hit(ResponderInitialSessionFailpoint.AfterSuccessorSecretDelete);
         var stable = ResponderInitialSessionCheckpoint.Stable(receiverInstance!, account, network, checkpoint.Sequence, checkpoint.Hash);
         try
         {
@@ -261,6 +276,7 @@ internal sealed partial class SqlitePreKeyV2InventoryStore
             using var read = connection.CreateCommand(); read.Transaction = transaction;
             read.CommandText = "SELECT s.ordinal,s.previous_hash,s.record_hash,length(s.exact_record),s.exact_record,length(k.exact_state),k.exact_state FROM receiver_sessions s LEFT JOIN receiver_initial_state k ON k.ordinal=s.ordinal ORDER BY s.ordinal;";
             using var reader = read.ExecuteReader();
+            ParsedDpk2V2[]? ownedMembers = null;
             while (reader.Read())
             {
                 var sequence = reader.GetInt64(0); var length = reader.GetInt64(3);
@@ -291,7 +307,8 @@ internal sealed partial class SqlitePreKeyV2InventoryStore
                         (receiverRetirements ?? throw new InvalidOperationException("Receiver retirement journal was not verified.")).RequireSource(
                             2, receiverInstance, checked((ulong)sequence), hash, payload, commit.InitialStateHashSpan,
                             commit.Record.ClaimOperationId.Span, commit.HasInitialState);
-                    using var replay = RequireExactReplayOrAvailable(result, commit.Record, commit.ExactClaimReplayHashSpan.ToArray());
+                    using var replay = RequireExactReplayOrAvailable(result, commit.Record, commit.ExactClaimReplayHashSpan.ToArray(),
+                        commit.Kind == Dpk2PrekeyKind.LastResort ? ownedMembers ??= OwnedPublicMembers(transaction) : null);
                     if (replay is not null) throw new CryptographicException("Receiver ledger contains a duplicate session.");
                     result.Entries.Add(new(checked((ulong)sequence), previous, hash, commit)); commit = null;
                 }
@@ -303,7 +320,8 @@ internal sealed partial class SqlitePreKeyV2InventoryStore
         catch { result.Dispose(); throw; }
     }
 
-    private DeepIdV2InitialContactSessionCommit? RequireExactReplayOrAvailable(Ledger ledger, Dph2Record incoming, byte[]? claimReplay)
+    private DeepIdV2InitialContactSessionCommit? RequireExactReplayOrAvailable(Ledger ledger, Dph2Record incoming, byte[]? claimReplay,
+        ParsedDpk2V2[]? ownedMembers = null)
     {
         var incomingExact = Dph2Codec.Encode(incoming);
         foreach (var entry in ledger.Entries)
@@ -323,6 +341,14 @@ internal sealed partial class SqlitePreKeyV2InventoryStore
                 Fixed(prior.MlKemKeyIdSpan, incoming.SelectedPrekey.MlKemPrekeyId.Span) &&
                 (prior.Kind != Dpk2PrekeyKind.LastResort || prior.Counter == incoming.LastResortUseCounter))
                 throw new CryptographicException("Receiver prekey or last-resort counter was already consumed by a different session.");
+            if (incoming.SelectedPrekey.Kind == Dpk2PrekeyKind.LastResort && prior.Kind == Dpk2PrekeyKind.LastResort &&
+                prior.Counter == incoming.LastResortUseCounter)
+            {
+                ownedMembers ??= OwnedPublicMembers();
+                if (RequireOwnedMember(ownedMembers, record.ExactDpk2Hash.Span).PrekeyServiceGeneration ==
+                    RequireOwnedMember(ownedMembers, incoming.ExactDpk2Hash.Span).PrekeyServiceGeneration)
+                    throw new CryptographicException("Receiver last-resort service counter was already consumed by a different session.");
+            }
         }
         if (ledger.Entries.Count >= ResponderInitialSessionCheckpoint.MaximumSessions) throw new IOException("Initial receiver session capacity is exhausted.");
         return null;
@@ -341,7 +367,8 @@ internal sealed partial class SqlitePreKeyV2InventoryStore
         foreach (var entry in ledger.Entries)
         {
             var commit = entry.Commit;
-            var member = publication.OneTimeMembers.Append(publication.LastResortMember).SingleOrDefault(candidate =>
+            var member = new[] { publication }.Concat(SuccessorPublications())
+                .SelectMany(value => value.OneTimeMembers.Append(value.LastResortMember)).SingleOrDefault(candidate =>
                 Fixed(candidate.ExactHash.Span, commit.Record.ExactDpk2Hash.Span));
             if (member is null || member.Kind != commit.Kind || !Fixed(member.MlKemPrekeyId.Span, commit.MlKemKeyIdSpan) ||
                 commit.Kind == Dpk2PrekeyKind.LastResort && commit.Counter > member.ReuseLimit ||
@@ -368,7 +395,7 @@ internal sealed partial class SqlitePreKeyV2InventoryStore
     private IDeepSecureStorage RequireReceiverStorage() => receiverStorage ?? throw new InvalidOperationException("Protected receiver custody has not been reconciled.");
 }
 
-internal enum ResponderInitialSessionFailpoint { AfterPending, AfterSqlCommit, AfterStable }
+internal enum ResponderInitialSessionFailpoint { AfterPending, AfterSqlCommit, AfterStable, AfterSuccessorSecretDelete }
 internal static class ResponderInitialSessionTestHooks
 {
     private static readonly AsyncLocal<Action<ResponderInitialSessionFailpoint>?> Current = new();
