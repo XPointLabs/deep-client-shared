@@ -64,9 +64,13 @@ Keep old exact bytes and native/protected floors. No reset or expiry bypass.
 
 APK37 includes Shared `2cd2f77` and Protocol `2bb61d0`, retaining the real QA
 account and recovery without reset. Independent network observation is Verified.
-One incoming refresh now reaches retained-grant acquisition, then fails with
-onion transport OutcomeUnknown; no synchronization or message is accepted.
+The first incoming refresh reached retained-grant acquisition and failed with
+onion transport OutcomeUnknown. The actual local Registry contention correction
+and its [activation evidence](../../../deep-registry-api/docs/testing/s05-private-grant-hop-2026-10-16.md)
+subsequently let Refresh106 -> independent Inspect110 complete incoming
+synchronization without error. Matching Windows build20 also completed an empty
+incoming read. No reset, expiry bypass or message delivery is accepted.
 This does not independently expose the stored private read phase or prove
 captured-page/ACK recovery. Preserve the new pending issuer request alongside
-the original custody. Exact build, sequential phases90–101 and sanitized caller
+the original custody. Exact build, sequential phases90–118 and sanitized caller
 evidence belong to the [device checkpoint](../../../deep-client-maui/docs/DID2-HTTPS-DEVICE-2026-09-28.md).
