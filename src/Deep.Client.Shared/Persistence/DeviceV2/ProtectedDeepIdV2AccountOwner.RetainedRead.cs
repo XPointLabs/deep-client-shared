@@ -45,6 +45,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     throw new InvalidDataException("Protected new-read custody is absent before grant acquisition.");
                 if (expectedNewReadRoot.IsEmpty || !readRoot.Use(bytes => FixedRoute(bytes, expectedNewReadRoot.Span)))
                     throw new CryptographicException("New-read custody changed before grant acquisition.");
+                ProtectedDid2MailboxReadJournal.RequireRoomForNewCycle(expectedNewReadRoot.Length);
                 using var read = readRoot.Use(bytes => ProtectedDid2MailboxReadJournal.Decode(bytes, networkId, current.AccountId.Span, instance));
                 if (read.Active is not null) throw new CryptographicException("An active read cannot enter new-grant scheduling.");
                 var readScope = ClientMailboxScope.Derive(publication.Route.ExactHash.Span,

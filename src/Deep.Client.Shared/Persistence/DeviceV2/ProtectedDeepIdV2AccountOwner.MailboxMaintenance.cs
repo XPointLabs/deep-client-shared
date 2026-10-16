@@ -213,7 +213,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             if (BinaryPrimitives.ReadUInt64BigEndian(route.Projection.Field(6).Span) >= epoch ||
                 lower < checked(BinaryPrimitives.ReadUInt64BigEndian(route.Authorization.Field(13).Span) +
                     (ulong)MailboxClientLimits.MaximumTtlSeconds) ||
-                sends.Entries.Values.Any(entry => FixedRoute(entry.RouteHash, route.ExactHash.Span))) continue;
+                sends.Entries.Values.Any(entry => FixedRoute(entry.RouteHash, route.ExactHash.Span)) ||
+                reads.Closed.Values.Any(closed => FixedRoute(closed.Route, route.ExactHash.Span))) continue;
             List<byte[]> selected;
             try { selected = RequireArchivedPathGrants(grants, route.ExactHash.Span); }
             catch (IOException) { continue; } // Pure structural pins only, never an effect failure.

@@ -58,7 +58,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 using var readRaw = await owner.storage.ReadOwnedAsync(ProtectedDid2MailboxReadJournal.Slot, ct).ConfigureAwait(false) ?? throw new InvalidDataException("Read custody is absent.");
                 using var read = readRaw.Use(bytes => ProtectedDid2MailboxReadJournal.Decode(bytes, owner.networkId, current.AccountId.Span, instance));
                 var scope = ArchivedPathReadScope(route);
-                if (read.Phase != 0 || read.Active is not null || !read.Traversals.TryGetValue(Convert.ToHexString(scope.Value), out var traversal))
+                if (read.Phase != 0 || read.Active is not null ||
+                    read.Closed.Values.Any(closed => FixedRoute(closed.Route, route.ExactHash.Span)) ||
+                    !read.Traversals.TryGetValue(Convert.ToHexString(scope.Value), out var traversal))
                     throw new IOException("Original completed traversal is required; absence is not settlement.");
                 using var application = await SqliteDeepIdV2AccountGeneration.OpenExistingApplicationForOwnerUnderLeaseAsync(
                     owner.storage, owner.sqlStatePath, owner.networkId, current.AccountId, instance, held, owner.lease, ct).ConfigureAwait(false);
@@ -229,7 +231,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     private static byte[] RemoveArchivedPathRead(ProtectedDid2MailboxReadJournal.State state, ParsedContactRouteClosure route,
         IReadOnlyList<Did2CompactionPlan.Row> rows, ReadOnlySpan<byte> network, ReadOnlySpan<byte> account, ReadOnlySpan<byte> instance)
     {
-        if (state.Phase != 0 || state.Active is not null) throw new IOException("An active original read/ACK pins retirement.");
+        if (state.Phase != 0 || state.Active is not null ||
+            state.Closed.Values.Any(closed => FixedRoute(closed.Route, route.ExactHash.Span)))
+            throw new IOException("An active or closed-unknown original read/ACK pins retirement.");
         foreach (var row in rows.Where(row => row.Action == Did2CompactionPlan.Disposition.ReplayScope))
             if (!state.Counters.Remove(Convert.ToHexString(row.Selector.Span))) throw new CryptographicException("Archived-path replay counter is absent.");
         if (!state.Traversals.Remove(Convert.ToHexString(ArchivedPathReadScope(route).Value))) throw new CryptographicException("Archived-path traversal is absent.");

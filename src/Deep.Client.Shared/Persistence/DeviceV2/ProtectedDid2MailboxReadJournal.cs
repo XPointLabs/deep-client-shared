@@ -6,7 +6,7 @@ using Sodium;
 namespace Deep.Client.Shared.Persistence.DeviceV2;
 
 // Protected local commitments, not caller-mintable transport/ACK authority.
-internal static class ProtectedDid2MailboxReadJournal
+internal static partial class ProtectedDid2MailboxReadJournal
 {
     internal const string Slot = "deep.store.v2.mailbox-read-journal";
     internal const int HeaderBytes = 96, MaximumFloors = 128, MaximumItems = 8;
@@ -20,9 +20,15 @@ internal static class ProtectedDid2MailboxReadJournal
         internal byte Phase;
         internal SortedDictionary<string, ulong> Counters { get; } = new(StringComparer.Ordinal);
         internal SortedDictionary<string, ClientMailboxTraversal> Traversals { get; } = new(StringComparer.Ordinal);
+        internal SortedDictionary<string, ClosedAttempt> Closed { get; } = new(StringComparer.Ordinal);
         internal Cycle? Active;
         internal ulong MinimumCounter(ReadOnlySpan<byte> grant) => checked(Counters.GetValueOrDefault(Name(grant)) + 1);
-        public void Dispose() { Active?.Dispose(); Active = null; Counters.Clear(); Traversals.Clear(); }
+        public void Dispose()
+        {
+            Active?.Dispose(); Active = null;
+            foreach (var attempt in Closed.Values) attempt.Dispose();
+            Closed.Clear(); Counters.Clear(); Traversals.Clear();
+        }
     }
 
     internal sealed class Cycle : IDisposable
@@ -118,11 +124,11 @@ internal static class ProtectedDid2MailboxReadJournal
     {
         RequireScope(network, account, instance);
         if (exact.Length is < HeaderBytes or > MaximumBytes || exact[0] != 1 || exact[1] > 6 ||
-            !Fixed(exact.Slice(12, 16), network) || !Fixed(exact.Slice(28, 32), account) || !Fixed(exact.Slice(60, 32), instance) ||
-            exact.Slice(94, 2).IndexOfAnyExcept((byte)0) >= 0) throw Bad();
+            !Fixed(exact.Slice(12, 16), network) || !Fixed(exact.Slice(28, 32), account) || !Fixed(exact.Slice(60, 32), instance)) throw Bad();
         var counters = BinaryPrimitives.ReadUInt16BigEndian(exact.Slice(2));
         var scopes = BinaryPrimitives.ReadUInt16BigEndian(exact.Slice(92));
-        if (counters > MaximumFloors || scopes > MaximumFloors) throw Bad();
+        var closed = BinaryPrimitives.ReadUInt16BigEndian(exact.Slice(94));
+        if (counters > MaximumFloors || scopes > MaximumFloors || closed > MaximumFloors) throw Bad();
         var state = new State { Phase = exact[1], Revision = BinaryPrimitives.ReadUInt64BigEndian(exact.Slice(4)) };
         try
         {
@@ -151,6 +157,7 @@ internal static class ProtectedDid2MailboxReadJournal
                 cycle.AckBody = reader.Blob(5_000).ToArray(); cycle.AckCounter = reader.U64(); cycle.AckMauHash = reader.Take(32).ToArray();
                 cycle.AckReply = reader.Blob(MaximumAckReplyBytes).ToArray();
             }
+            ReadClosed(ref reader, state, closed);
             if (!reader.End) throw Bad(); Validate(state); return state;
         }
         catch { state.Dispose(); throw; }
@@ -166,7 +173,8 @@ internal static class ProtectedDid2MailboxReadJournal
             BinaryPrimitives.WriteUInt16BigEndian(header.AsSpan(2), checked((ushort)state.Counters.Count));
             BinaryPrimitives.WriteUInt64BigEndian(header.AsSpan(4), state.Revision);
             network.CopyTo(header.AsSpan(12)); account.CopyTo(header.AsSpan(28)); instance.CopyTo(header.AsSpan(60));
-            BinaryPrimitives.WriteUInt16BigEndian(header.AsSpan(92), checked((ushort)state.Traversals.Count)); stream.Write(header);
+            BinaryPrimitives.WriteUInt16BigEndian(header.AsSpan(92), checked((ushort)state.Traversals.Count));
+            BinaryPrimitives.WriteUInt16BigEndian(header.AsSpan(94), checked((ushort)state.Closed.Count)); stream.Write(header);
             foreach (var pair in state.Counters) { stream.Write(Convert.FromHexString(pair.Key)); Write64(stream, pair.Value); }
             foreach (var pair in state.Traversals)
             { stream.Write(Convert.FromHexString(pair.Key)); Write64(stream, pair.Value.PollGeneration); Write64(stream, pair.Value.AfterCursor); WriteBlob(stream, pair.Value.ContinuationToken); }
@@ -177,6 +185,7 @@ internal static class ProtectedDid2MailboxReadJournal
                 WriteBlob(stream, c.AckBody); Write64(stream, c.AckCounter); stream.Write(c.AckMauHash);
                 WriteBlob(stream, c.AckReply);
             }
+            WriteClosed(stream, state);
             var exact = stream.ToArray();
             try { using var verified = Decode(exact, network, account, instance); return exact; }
             catch { CryptographicOperations.ZeroMemory(exact); throw; }
@@ -186,12 +195,13 @@ internal static class ProtectedDid2MailboxReadJournal
 
     private static void Validate(State state)
     {
-        if (state.Phase > 6 || state.Counters.Count > MaximumFloors || state.Traversals.Count > MaximumFloors ||
-            state.Revision < checked((ulong)(state.Counters.Count + state.Traversals.Count) + 1) ||
+        if (state.Phase > 6 || state.Counters.Count > MaximumFloors || state.Traversals.Count > MaximumFloors || state.Closed.Count > MaximumFloors ||
+            state.Revision < checked((ulong)(state.Counters.Count + state.Traversals.Count + state.Closed.Count) + 1) ||
             (state.Phase == 0) != (state.Active is null)) throw Bad();
         foreach (var pair in state.Counters) { if (Name(Convert.FromHexString(pair.Key)) != pair.Key || pair.Value == 0) throw Bad(); }
         foreach (var pair in state.Traversals)
         { if (Name(Convert.FromHexString(pair.Key)) != pair.Key) throw Bad(); _ = new ClientMailboxTraversal(pair.Value.AfterCursor, pair.Value.ContinuationToken, pair.Value.PollGeneration); }
+        ValidateClosed(state);
         if (state.Active is not { } c) return;
         Require32(c.Grant); Require32(c.Scope); Require32(c.Route);
         if (c.RetrieveBody.Length is < 108 or > 364 || c.Page.Length > MaximumPageBytes || c.AckBody.Length > 5_000 ||

@@ -23,8 +23,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
             await ResumeLocalCompactionUnderLeaseAsync(held, ct).ConfigureAwait(false);
             using var current = await RequireCurrentUnderLeaseAsync(unixSeconds, verifier, ct).ConfigureAwait(false);
-            await MaintainMailboxNamespacesUnderLeaseAsync(current, held, verifier, fresh, source, ct).ConfigureAwait(false);
             instance = await SqliteDeepIdV2AccountGeneration.ReadAccountInstanceUnderLeaseAsync(storage, networkId, current.AccountId, ct).ConfigureAwait(false);
+            await ReconcileExpiredUncapturedReadUnderLeaseAsync(current, held, source, fresh, instance, ct).ConfigureAwait(false);
+            await MaintainMailboxNamespacesUnderLeaseAsync(current, held, verifier, fresh, source, ct).ConfigureAwait(false);
             using (var root = await storage.ReadOwnedAsync(ProtectedDid2MailboxReadJournal.Slot, ct).ConfigureAwait(false) ??
                 throw new InvalidDataException("Protected mailbox read custody is absent; explicit reset is required."))
                 snapshot = root.Use(bytes => bytes.ToArray());
@@ -40,6 +41,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 throw new CryptographicException("Resume the original protected mailbox read; silent rerouting is forbidden.");
             // Only a new cycle may acquire the selected winner. An interrupted
             // cycle must retain its original grant even after selection changes.
+            if (state.Active is null) ProtectedDid2MailboxReadJournal.RequireRoomForNewCycle(snapshot.Length);
             var winner = state.Active is null
                 ? await AcquireRetainedMailboxReadUnderLeaseAsync(current, held, publication, source, fresh, grants, ct,
                     renewForNewRead: true, expectedNewReadRoot: snapshot).ConfigureAwait(false)

@@ -1014,3 +1014,19 @@ replacement credential alone cannot authorize it. No new journal, bound, wire,
 public authority or background scheduler. Exact affected23/native receipts,
 preserved connected43 FAIL and current-source limitations are owned by the
 [checkpoint](../testing/s04-lifecycle-2026-10-11.md#never-used-superseded-retrieve).
+
+## S05 expired active Retrieve — source candidate, not device acceptance
+
+[DR-0133](../../../docs/survival-program/decisions/DR-0133-expired-owned-retrieve-attempt-closure.md)
+owns the uncaptured-attempt closure allocation; transport-neutral transitions
+remain the semantic owner. `ReconcileExpiredUncapturedReadUnderLeaseAsync` runs
+before ordinary namespace maintenance. It joins actual protected publication,
+original holder/acquisition and native SQL with current authenticated lower time,
+then preserves the original request as closed-unknown before allowing ordinary
+independent new work. The Protocol historical check returns no live credential.
+Closed attempts pin grants, floors and archived paths; capacity is backpressure,
+not permission to evict them. Captured page/semantic/ACK recovery remains open.
+
+The current source receipts and remaining acceptance work are recorded in the
+[focused checkpoint](../testing/s05-expired-active-retrieve-2026-10-16.md).
+No account reset, old-frame renewal or physical delivery claim is implied.

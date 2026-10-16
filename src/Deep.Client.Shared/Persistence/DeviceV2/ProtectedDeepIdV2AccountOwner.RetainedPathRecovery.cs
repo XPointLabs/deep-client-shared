@@ -47,7 +47,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     var scope = ArchivedPathReadScope(route);
                     using var readRaw = await storage.ReadOwnedAsync(ProtectedDid2MailboxReadJournal.Slot, ct).ConfigureAwait(false) ?? throw new InvalidDataException();
                     using var read = readRaw.Use(bytes => ProtectedDid2MailboxReadJournal.Decode(bytes, networkId, account.Span, instance.Span));
-                    if (read.Phase != 0 || read.Active is not null || !read.Traversals.TryGetValue(Convert.ToHexString(scope.Value), out var traversal))
+                    if (read.Phase != 0 || read.Active is not null ||
+                        read.Closed.Values.Any(closed => FixedRoute(closed.Route, route.ExactHash.Span)) ||
+                        !read.Traversals.TryGetValue(Convert.ToHexString(scope.Value), out var traversal))
                         throw new CryptographicException("Retained-path SQL recovery lost its original idle protected traversal.");
                     await application.ApplyStoredRetainedPathAsync(this, plan, route, scope, traversal, exact, held, lease, ct).ConfigureAwait(false);
 #if DEEP_TEST_INTERNALS

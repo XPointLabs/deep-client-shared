@@ -257,7 +257,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         internal ulong Cursor = 1, ExpectedAckCounter = 2;
         internal int RetrieveCalls, AckCalls;
         internal List<byte[]> RetrievedOriginalRoutes { get; } = [];
-        internal bool LoseAckReply, BuiltRetrieveFrame, BuiltAckFrame, ReturnEmptyPage;
+        internal bool LoseAckReply, LoseRetrieveReply, BuiltRetrieveFrame, BuiltAckFrame, ReturnEmptyPage;
+        internal List<byte[]> ExactRetrieveRequests { get; } = [];
         internal bool HasMoreAfterPage;
         public IClientMailboxBinaryIngress Create(Did2OwnedMailboxTransportContext loan, IMailboxClientDecodePolicyProvider decoder)
         { context = loan; policy = decoder; return this; }
@@ -272,6 +273,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         public async Task<ReadOnlyMemory<byte>> RetrieveOnRouteAsync(ReadOnlyMemory<byte> exact, ScopedMailboxResolvedRoute route, CancellationToken ct)
         {
             RetrieveCalls++;
+            ExactRetrieveRequests.Add(exact.ToArray());
             var mau = MailboxAuthenticatedClientRequestCodec.Decode(exact.Span);
             var request = MailboxAuthenticatedRequestTranscript.DecodeRetrieveBody(mau.Binding.CanonicalRequest.Span);
             using (var root = await fixture.ReadPeerMailboxReads(own: ownerOnPrimary))
@@ -282,6 +284,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             }
             Assert.Equal(8, request.MaximumItems);
             await BuildHeldFrame(OnionOperation.Retrieve, exact, route, ct); BuiltRetrieveFrame = true;
+            if (LoseRetrieveReply) throw new IOException("Injected lost original Retrieve response.");
             var decode = policy.GetCurrent();
             if (ReturnEmptyPage)
                 return MailboxClientCodec.EncodeRetrievePage(new()

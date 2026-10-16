@@ -178,6 +178,13 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             if (successorAdvertisementLifetimeSeconds is { } lifetime)
                 await SeedShortPendingRenewalAsync(lifetime);
             var reopened = ReopenAccount(); var backend = new RenewalBackend(this, renewedRouteLifetimeSeconds);
+            // Rehydrate this disposable issuer's durable predecessor ledger
+            // before the held client call, as if its earlier signed winners
+            // had survived restart. No caller-provided predecessor is trusted
+            // by the real issuer verifier below.
+            using (var predecessors = await RouteState())
+                foreach (var entry in predecessors.Entries.Values.Where(entry => entry.Phase == 7))
+                    backend.SeedRetainedPublication(entry.Record(9), entry.Record(10));
             var committed = await reopened.EnsureOwnPermanentContactPublishedAsync(Source(reopened), backend, backend, backend);
             Assert.Equal(checked(priorGeneration + 1), committed.Generation);
             Assert.Equal(1, backend.RouteSignings); Assert.Equal(1, backend.PublicationSignings);
@@ -540,6 +547,14 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         private VerifiedDeepIdV2ContactRouteClosure route = null!;
         private readonly Dictionary<ulong, byte[]> routeRequests = [], publicationRequests = [], publicationWinners = [];
         private readonly Dictionary<ulong, ContactRouteAuthorityWireResponse> routeWinners = [];
+
+        internal void SeedRetainedPublication(ReadOnlyMemory<byte> exactRequest, ReadOnlyMemory<byte> exactResponse)
+        {
+            var request = ContactPublicationAuthorityWireCodec.DecodeRequest(exactRequest.Span);
+            _ = ContactPublicationAuthorityWireCodec.DecodeResponse(request, exactResponse.Span);
+            RequireExact(publicationRequests, request.Generation, exactRequest.ToArray());
+            RequireExact(publicationWinners, request.Generation, exactResponse.ToArray());
+        }
 
         internal async Task PrepareCurrentAsync(ContactPublicationAuthorityWireRequest original)
         {

@@ -7,7 +7,7 @@ using Deep.Protocol.DeepExtension.MailboxCapabilities;
 namespace Deep.Client.Shared.Production.Tests;
 
 // Structural local metadata only; these fixtures mint no account/ACK authority.
-public sealed class ProtectedDid2MailboxReadJournalTests
+public sealed partial class ProtectedDid2MailboxReadJournalTests
 {
     private static readonly byte[] Network = Bytes(16, 1), Account = Bytes(32, 2), Instance = Bytes(32, 3),
         Grant = Bytes(32, 4), Scope = Bytes(32, 5), Route = Bytes(32, 6);
