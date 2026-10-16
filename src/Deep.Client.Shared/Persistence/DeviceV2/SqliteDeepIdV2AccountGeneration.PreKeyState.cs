@@ -11,7 +11,7 @@ internal static partial class SqliteDeepIdV2AccountGeneration
     private const string PreKeyInstallMarkerSlot =
         "deep.store.v2.prekey-installed";
     private const string PreKeyInventoryMarkerSlot =
-        "deep.store.v2.prekey-inventory-tip";
+        ProtectedPreKeyInventoryChain.TipSlot;
     private const string PreKeyCommitMarkerSlot =
         "deep.store.v2.prekey-commit-pair-v1";
     private const int PreKeyCommitMarkerLength = 64 +

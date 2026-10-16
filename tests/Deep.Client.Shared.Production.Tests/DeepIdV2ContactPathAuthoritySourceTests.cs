@@ -3182,9 +3182,20 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         public Task<bool> CompareAndDeleteAsync(string guardSlot, ReadOnlyMemory<byte> expected,
             IReadOnlyList<string> slots, CancellationToken ct = default) => inner.CompareAndDeleteAsync(guardSlot, expected, slots, ct);
 
-        public Task<bool> CompareExchangeAndInsertAsync(string slot, ReadOnlyMemory<byte> expected,
+        internal bool FailAfterPreKeySuccessorInsert { get; set; }
+        internal Func<Task>? AfterPreKeySuccessorRead { get; set; }
+        public async Task<bool> CompareExchangeAndInsertAsync(string slot, ReadOnlyMemory<byte> expected,
             ReadOnlyMemory<byte> replacement, IReadOnlyList<DeepSecureStorageWrite> insertions,
-            CancellationToken ct = default) => inner.CompareExchangeAndInsertAsync(slot, expected, replacement, insertions, ct);
+            CancellationToken ct = default)
+        {
+            var applied = await inner.CompareExchangeAndInsertAsync(slot, expected, replacement, insertions, ct);
+            if (applied && slot == ProtectedPreKeyInventoryChain.TipSlot && FailAfterPreKeySuccessorInsert)
+            {
+                FailAfterPreKeySuccessorInsert = false;
+                throw new IOException("Injected stop after atomic prekey successor custody, before release.");
+            }
+            return applied;
+        }
         internal Action? AfterPreClaimCommit { get; set; }
         internal Action? AfterRendezvousCommit { get; set; }
         internal Action? AfterCommitPairRead { get; set; }
@@ -3234,6 +3245,12 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         public async Task<OwnedDeepSecret?> ReadOwnedAsync(string slot, CancellationToken ct = default)
         {
             var value = await inner.ReadOwnedAsync(slot, ct);
+            if (slot.StartsWith("deep.store.v2.prekey-inventory/", StringComparison.Ordinal) && AfterPreKeySuccessorRead is { } afterRead)
+            {
+                AfterPreKeySuccessorRead = null;
+                try { await afterRead(); }
+                catch { value?.Dispose(); throw; }
+            }
             ObserveRead(slot, value);
             return value;
         }
