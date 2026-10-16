@@ -3229,6 +3229,22 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         public async Task<OwnedDeepSecret?> ReadOwnedAsync(string slot, CancellationToken ct = default)
         {
             var value = await inner.ReadOwnedAsync(slot, ct);
+            ObserveRead(slot, value);
+            return value;
+        }
+        public async Task<OwnedDeepSecretBatch> ReadOwnedBatchAsync(IReadOnlyList<string> slots, CancellationToken ct = default)
+        {
+            var captured = OwnedDeepSecretBatch.CaptureSlots(slots);
+            var result = await inner.ReadOwnedBatchAsync(captured, ct);
+            try
+            {
+                for (var index = 0; index < captured.Length; index++) ObserveRead(captured[index], result[index]);
+                return result;
+            }
+            catch { result.Dispose(); throw; }
+        }
+        private void ObserveRead(string slot, OwnedDeepSecret? value)
+        {
             if (slot == ProtectedDid2ContactRouteJournal.Slot && failNextRouteReadback)
             {
                 failNextRouteReadback = false; value?.Dispose();
@@ -3239,7 +3255,6 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 AfterCommitPairRead = null;
                 action();
             }
-            return value;
         }
         public async Task WriteBatchAsync(IReadOnlyList<DeepSecureStorageWrite> writes, CancellationToken ct = default)
         {

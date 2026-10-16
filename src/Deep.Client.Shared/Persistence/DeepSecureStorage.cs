@@ -167,9 +167,68 @@ public sealed class OwnedDeepSecret : IDisposable
         ?? throw new ObjectDisposedException(nameof(OwnedDeepSecret));
 }
 
+/// <summary>A bounded owned read result, in requested order. Missing slots stay
+/// null. Disposal zeroes every returned secret; this is data, not authority.</summary>
+public sealed class OwnedDeepSecretBatch : IDisposable
+{
+    private readonly object gate = new();
+    private OwnedDeepSecret?[]? values;
+    private OwnedDeepSecretBatch(OwnedDeepSecret?[] values) => this.values = values;
+
+    public int Count { get { lock (gate) return Current.Length; } }
+    public OwnedDeepSecret? this[int index] { get { lock (gate) return Current[index]; } }
+    private OwnedDeepSecret?[] Current => values ?? throw new ObjectDisposedException(nameof(OwnedDeepSecretBatch));
+
+    internal static string[] CaptureSlots(IReadOnlyList<string> slots)
+    {
+        ArgumentNullException.ThrowIfNull(slots);
+        var count = slots.Count;
+        if (count is < 1 or > 32) throw new ArgumentException("Secure read group is outside its bound.", nameof(slots));
+        var captured = new string[count];
+        var distinct = new HashSet<string>(StringComparer.Ordinal);
+        for (var index = 0; index < captured.Length; index++)
+        {
+            var slot = slots[index];
+            DeepSecureStorageRegistration.ValidateSlot(slot);
+            if (!distinct.Add(slot)) throw new ArgumentException("Secure read group repeats a slot.", nameof(slots));
+            captured[index] = slot;
+        }
+        return captured;
+    }
+
+    internal static OwnedDeepSecretBatch CopyFrom(string[] slots, IReadOnlyDictionary<string, byte[]> snapshot)
+    {
+        var copied = new OwnedDeepSecret?[slots.Length];
+        try
+        {
+            for (var index = 0; index < slots.Length; index++)
+                if (snapshot.TryGetValue(slots[index], out var value)) copied[index] = new OwnedDeepSecret(value);
+            return new OwnedDeepSecretBatch(copied);
+        }
+        catch { foreach (var value in copied) value?.Dispose(); throw; }
+    }
+
+    public void Dispose()
+    {
+        lock (gate)
+        {
+            if (values is null) return;
+            foreach (var value in values) value?.Dispose();
+            values = null;
+        }
+    }
+}
+
 public interface IDeepSecureStorage
 {
     Task<OwnedDeepSecret?> ReadOwnedAsync(string slot, CancellationToken cancellationToken = default);
+
+    /// <summary>Reads 1–32 distinct canonical slots from one actual atomic
+    /// inventory snapshot, in requested order, without mutation or a retained
+    /// plaintext cache. The caller disposes the complete owned result. There is
+    /// no sequential fallback; independent calls acquire independent snapshots.</summary>
+    Task<OwnedDeepSecretBatch> ReadOwnedBatchAsync(IReadOnlyList<string> slots,
+        CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Applies the complete write set atomically. A platform adapter must journal the batch when
@@ -298,6 +357,19 @@ public sealed class InMemoryDeepSecureStorage : IDeepSecureStorage, IDisposable
             return Task.FromResult(values.TryGetValue(slot, out var value)
                 ? new OwnedDeepSecret(value)
                 : null);
+        }
+    }
+
+    public Task<OwnedDeepSecretBatch> ReadOwnedBatchAsync(IReadOnlyList<string> slots,
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        var captured = OwnedDeepSecretBatch.CaptureSlots(slots);
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (gate)
+        {
+            ThrowIfDisposed(); cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(OwnedDeepSecretBatch.CopyFrom(captured, values));
         }
     }
 

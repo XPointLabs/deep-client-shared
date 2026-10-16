@@ -224,6 +224,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     // handles. No runtime adapter, snapshot import or plaintext export.
     private sealed class CompactionDiskFixtureStorage : IDeepSecureStorage, IDisposable
     {
+        public Task<OwnedDeepSecretBatch> ReadOwnedBatchAsync(IReadOnlyList<string> slots,
+            CancellationToken ct = default) => store.ReadOwnedBatchAsync(slots, ct);
         private readonly byte[] key = RandomNumberGenerator.GetBytes(32);
         private readonly string path;
         private JournaledDeepSecureStorage store;

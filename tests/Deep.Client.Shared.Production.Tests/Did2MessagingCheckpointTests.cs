@@ -202,6 +202,8 @@ public sealed partial class Did2MessagingCheckpointTests
 
     private sealed class LostResponseStorage(IDeepSecureStorage inner) : IDeepSecureStorage
     {
+        public Task<OwnedDeepSecretBatch> ReadOwnedBatchAsync(IReadOnlyList<string> slots,
+            CancellationToken ct = default) => inner.ReadOwnedBatchAsync(slots, ct);
         public async Task<bool> CompareAndDeleteAsync(string guardSlot, ReadOnlyMemory<byte> expected, IReadOnlyList<string> slots, CancellationToken ct = default)
         { var result = await inner.CompareAndDeleteAsync(guardSlot, expected, slots, ct); if (result) Fail("erase"); return result; }
         public Task<bool> CompareExchangeAndInsertAsync(string slot, ReadOnlyMemory<byte> expected,

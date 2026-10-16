@@ -15,6 +15,42 @@ burns or replay floors. This does not change journal slots or their authority.
 
 ## One local reader and bounded layout
 
+### Actual atomic local read groups
+
+`IDeepSecureStorage.ReadOwnedBatchAsync` returns an owned, ordered snapshot of
+1–32 distinct canonical slots, with absent values still null. Journaled storage
+holds its actual in-process gate and native process lease around a single
+authenticated aggregate load; the in-memory implementation holds its mutation
+gate. Inputs are copied before awaiting, all returned secrets are zeroed on
+disposal, and every later invocation reacquires actual storage. There is no
+sequential compatibility fallback, plaintext cache, wire/layout change or new
+authority. The result is local data, never freshness or permission to mutate.
+
+Lease-held account SQL reopen uses one group for twelve independent journal
+registrations. It still runs every existing decoder/scope check and independently
+reads the resolver, current pointer, SQL key, compaction plan, retirement and
+messaging catalog. Native/source/time checks elsewhere do not consume a cached
+snapshot. Missing/malformed state is not recreated or repaired. The measured
+Android QA baseline spent66.8s of a120.1s cancelled verification in1226 platform
+unprotect calls; those are diagnostic timings, not new validity limits or proof
+of the sole remaining bottleneck. Matching device qualification remains open.
+
+The encrypted source fixture records19 unprotect calls before grouping and8
+after grouping, on each of two independent reopen calls. Its first counter
+receipt (`s05-storage-read-group-20261016/red-01`) retains native1: the initial
+expected7 miscounted the resolver's two reads. It is not a semantic security
+rejection witness. Corrected source focused02 passed37, affected storage/account/
+lease/custody regression03 passed104, and scoped contact/renewal/encrypted
+compaction contact04 passed32, all0 failures/skips/native0 under Windows
+PowerShell5.1 / SDK10.0.301. The twelve missing and twelve malformed journal
+observations keep the original fail-closed decoders and exact stored values.
+These are focused source results; full source and retained device qualification
+are separate requirements. No API default implementation or sequential fallback
+was added to conceal an unsupported storage provider.
+Final focused05 passed39/0/0/native0, including single capture of an adversarial
+caller's changing selector count before allocation. Full qualification remains
+open; the earlier focused receipts are not relabelled as full.
+
 ### S04 creation/retry API cutover in progress
 
 The semantic owner above separates new command creation from retained retry.

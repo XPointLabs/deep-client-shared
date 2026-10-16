@@ -203,6 +203,8 @@ public sealed class ProtectedDid2CompactionPlanTests
     }
     private sealed class LostResponseStorage(IDeepSecureStorage inner) : IDeepSecureStorage
     {
+        public Task<OwnedDeepSecretBatch> ReadOwnedBatchAsync(IReadOnlyList<string> slots,
+            CancellationToken ct = default) => inner.ReadOwnedBatchAsync(slots, ct);
         public Task<bool> CompareAndDeleteAsync(string guardSlot, ReadOnlyMemory<byte> expected, IReadOnlyList<string> slots, CancellationToken ct = default) => inner.CompareAndDeleteAsync(guardSlot, expected, slots, ct);
         public async Task<bool> CompareExchangeAndInsertAsync(string slot, ReadOnlyMemory<byte> expected, ReadOnlyMemory<byte> replacement, IReadOnlyList<DeepSecureStorageWrite> insertions, CancellationToken ct = default)
         { var result = await inner.CompareExchangeAndInsertAsync(slot, expected, replacement, insertions, ct); if (result) throw new IOException("Injected lost response after complete staging."); return result; }

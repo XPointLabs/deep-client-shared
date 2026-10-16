@@ -9,6 +9,82 @@ namespace Deep.Client.Shared.Production.Tests;
 public sealed class SqliteDeepIdV2AccountGenerationTests
 {
     [Fact]
+    public async Task ReopenAuthenticatesIndependentJournalGroupOnceWithoutCaching()
+    {
+        Assert.True(SupportedProvider());
+        var directory = NewDirectory();
+        var sqlPath = Path.Combine(directory, "account.dsv2");
+        try
+        {
+            using var protector = new TestAeadProtector(RandomNumberGenerator.GetBytes(32));
+            using var storage = new JournaledDeepSecureStorage(Path.Combine(directory, "secure.bin"), protector);
+            var network = Enumerable.Range(1, 16).Select(i => (byte)i).ToArray();
+            using var verifier = DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess();
+            using var created = await CreateGenesisAsync(storage, network, verifier);
+            await SqliteDeepIdV2AccountGeneration.EnsureAsync(sqlPath, storage, network,
+                created.AccountId, "Alice", created.Verified, allowCreate: true, default);
+            for (var reopen = 0; reopen < 2; reopen++)
+            {
+                protector.UnprotectCalls = 0;
+                await SqliteDeepIdV2AccountGeneration.EnsureAsync(sqlPath, storage, network,
+                    created.AccountId, "Alice", created.Verified, allowCreate: false, default);
+                // Resolver's two reads, pointer, SQL key, compaction, the independent journal
+                // group, retirement and messaging catalog all remain actual reads.
+                Assert.Equal(8, protector.UnprotectCalls);
+            }
+        }
+        finally { DeleteGeneratedDirectory(directory); }
+    }
+
+    [Fact]
+    public async Task BatchedReopenStillRejectsEveryMissingOrMalformedJournalWithoutRepair()
+    {
+        Assert.True(SupportedProvider());
+        var directory = NewDirectory();
+        var sqlPath = Path.Combine(directory, "account.dsv2");
+        try
+        {
+            using var storage = new InMemoryDeepSecureStorage();
+            var network = Enumerable.Range(1, 16).Select(i => (byte)i).ToArray();
+            using var verifier = DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess();
+            using var created = await CreateGenesisAsync(storage, network, verifier);
+            Task Reopen() => SqliteDeepIdV2AccountGeneration.EnsureAsync(sqlPath, storage,
+                network, created.AccountId, "Alice", created.Verified, allowCreate: false, default);
+            await SqliteDeepIdV2AccountGeneration.EnsureAsync(sqlPath, storage, network,
+                created.AccountId, "Alice", created.Verified, allowCreate: true, default);
+            var slots = new[] { SqliteDeepIdV2AccountGeneration.ApplicationStateSlot,
+                ProtectedDid2ContactAcceptJournal.Slot, ProtectedDid2ContactStartJournal.Slot,
+                ProtectedDid2DirectTextJournal.Slot, ProtectedDid2AttachmentJournal.Slot,
+                ProtectedDid2ContactRouteJournal.Slot, ProtectedDid2MailboxGrantJournal.Slot,
+                ProtectedDid2MailboxSendJournal.Slot, ProtectedDid2MailboxReadJournal.Slot,
+                ProtectedDph2PreClaimJournal.Slot, ProtectedContactRendezvousJournal.Slot,
+                ResponderInitialSessionCheckpoint.Slot };
+            foreach (var slot in slots)
+            {
+                using var original = await storage.ReadOwnedAsync(slot);
+                Assert.NotNull(original);
+                var exact = original.Use(bytes => bytes.ToArray());
+                try
+                {
+                    await storage.DeleteBatchAsync([slot]);
+                    await Assert.ThrowsAsync<InvalidDataException>(Reopen);
+                    using (var absent = await storage.ReadOwnedAsync(slot)) Assert.Null(absent);
+                    await storage.WriteBatchAsync([new(slot, new byte[] { 1 })]);
+                    var malformed = await Record.ExceptionAsync(Reopen);
+                    Assert.True(malformed is InvalidDataException or CryptographicException,
+                        "Malformed journal must fail its original closed decoder.");
+                    using (var unchanged = await storage.ReadOwnedAsync(slot))
+                        Assert.Equal(new byte[] { 1 }, unchanged!.Use(bytes => bytes.ToArray()));
+                    Assert.True(await storage.CompareExchangeAsync(slot, new byte[] { 1 }, exact));
+                    await Reopen();
+                }
+                finally { CryptographicOperations.ZeroMemory(exact); }
+            }
+        }
+        finally { DeleteGeneratedDirectory(directory); }
+    }
+
+    [Fact]
     public async Task CreatesEncryptedGenerationAndReopensExactDID2Projection()
     {
         if (!SupportedProvider()) return;
@@ -264,6 +340,7 @@ public sealed class SqliteDeepIdV2AccountGenerationTests
     private sealed class TestAeadProtector : IDeepSecretProtector, IDisposable
     {
         private readonly byte[] key;
+        internal int UnprotectCalls;
 
         internal TestAeadProtector(ReadOnlySpan<byte> key) =>
             this.key = key.ToArray();
@@ -282,6 +359,7 @@ public sealed class SqliteDeepIdV2AccountGenerationTests
 
         public byte[] Unprotect(ReadOnlySpan<byte> protectedBytes)
         {
+            UnprotectCalls++;
             if (protectedBytes.Length < 32 ||
                 !protectedBytes[..4].SequenceEqual("TSP2"u8))
                 throw new CryptographicException("Invalid test envelope.");

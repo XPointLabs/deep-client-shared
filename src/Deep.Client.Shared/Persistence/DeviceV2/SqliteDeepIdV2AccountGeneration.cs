@@ -173,55 +173,55 @@ internal static partial class SqliteDeepIdV2AccountGeneration
                 networkId, accountId, record.AsMemory(56, 32), cancellationToken).ConfigureAwait(false);
             if (compaction.Phase != 0)
                 throw new InvalidDataException("An active compaction plan owns recovery; ordinary account reopen cannot bypass it.");
-            using var application = await storage.ReadOwnedAsync(ApplicationStateSlot, cancellationToken)
-                .ConfigureAwait(false) ?? throw new InvalidDataException(
+            // Independent registrations share one actual authenticated inventory
+            // read. This scope is local to this lease-held reopen: never a cache,
+            // currentness proof, or replacement for the decoders below.
+            using var journals = await storage.ReadOwnedBatchAsync(
+                [ApplicationStateSlot, ProtectedDid2ContactAcceptJournal.Slot,
+                 ProtectedDid2ContactStartJournal.Slot, ProtectedDid2DirectTextJournal.Slot,
+                 ProtectedDid2AttachmentJournal.Slot, ProtectedDid2ContactRouteJournal.Slot,
+                 ProtectedDid2MailboxGrantJournal.Slot, ProtectedDid2MailboxSendJournal.Slot,
+                 ProtectedDid2MailboxReadJournal.Slot, ProtectedDph2PreClaimJournal.Slot,
+                 ProtectedContactRendezvousJournal.Slot, ResponderInitialSessionCheckpoint.Slot],
+                cancellationToken).ConfigureAwait(false);
+            if (journals.Count != 12) throw new InvalidDataException("Protected journal read group has another shape.");
+            using var application = journals[0] ?? throw new InvalidDataException(
                     "The protected application registration is absent; explicit local reset is required.");
             application.Use(value => { ValidateApplicationRegistration(value, record); return true; });
-            using var contactAccepts = await storage.ReadOwnedAsync(ProtectedDid2ContactAcceptJournal.Slot, cancellationToken)
-                .ConfigureAwait(false) ?? throw new InvalidDataException("The protected contact acceptance journal is absent; explicit reset is required.");
+            using var contactAccepts = journals[1] ?? throw new InvalidDataException("The protected contact acceptance journal is absent; explicit reset is required.");
             using var contactAcceptState = contactAccepts.Use(value => ProtectedDid2ContactAcceptJournal.Decode(
                 value, networkId.Span, accountId.Span, record.AsSpan(56, 32)));
-            using var contactStarts = await storage.ReadOwnedAsync(ProtectedDid2ContactStartJournal.Slot, cancellationToken)
-                .ConfigureAwait(false) ?? throw new InvalidDataException("The protected initial contact draft journal is absent; explicit reset is required.");
+            using var contactStarts = journals[2] ?? throw new InvalidDataException("The protected initial contact draft journal is absent; explicit reset is required.");
             using var contactStartState = contactStarts.Use(value => ProtectedDid2ContactStartJournal.Decode(
                 value, networkId.Span, accountId.Span, record.AsSpan(56, 32)));
-            using var text = await storage.ReadOwnedAsync(ProtectedDid2DirectTextJournal.Slot, cancellationToken)
-                .ConfigureAwait(false) ?? throw new InvalidDataException("Protected direct text command custody is absent; explicit reset is required.");
+            using var text = journals[3] ?? throw new InvalidDataException("Protected direct text command custody is absent; explicit reset is required.");
             using var textState = text.Use(value => ProtectedDid2DirectTextJournal.Decode(
                 value, networkId.Span, accountId.Span, record.AsSpan(56, 32)));
-            using var attachments = await storage.ReadOwnedAsync(ProtectedDid2AttachmentJournal.Slot, cancellationToken)
-                .ConfigureAwait(false) ?? throw new InvalidDataException("Protected attachment custody is absent; explicit reset is required.");
+            using var attachments = journals[4] ?? throw new InvalidDataException("Protected attachment custody is absent; explicit reset is required.");
             using var attachmentState = attachments.Use(value => ProtectedDid2AttachmentJournal.Decode(
                 value, networkId.Span, accountId.Span, record.AsSpan(56, 32)));
-            using var routes = await storage.ReadOwnedAsync(ProtectedDid2ContactRouteJournal.Slot, cancellationToken)
-                .ConfigureAwait(false) ?? throw new InvalidDataException("Protected route custody is absent; explicit local reset is required.");
+            using var routes = journals[5] ?? throw new InvalidDataException("Protected route custody is absent; explicit local reset is required.");
             using var routeState = routes.Use(value => ProtectedDid2ContactRouteJournal.Decode(
                 value, networkId.Span, accountId.Span, record.AsSpan(56, 32)));
-            using var grants = await storage.ReadOwnedAsync(ProtectedDid2MailboxGrantJournal.Slot, cancellationToken)
-                .ConfigureAwait(false) ?? throw new InvalidDataException("Protected mailbox holder custody is absent; explicit local reset is required.");
+            using var grants = journals[6] ?? throw new InvalidDataException("Protected mailbox holder custody is absent; explicit local reset is required.");
             using var grantState = grants.Use(value => ProtectedDid2MailboxGrantJournal.Decode(
                 value, networkId.Span, accountId.Span, record.AsSpan(56, 32)));
-            using var mailboxSends = await storage.ReadOwnedAsync(ProtectedDid2MailboxSendJournal.Slot, cancellationToken)
-                .ConfigureAwait(false) ?? throw new InvalidDataException("Protected mailbox send custody is absent; explicit local reset is required.");
+            using var mailboxSends = journals[7] ?? throw new InvalidDataException("Protected mailbox send custody is absent; explicit local reset is required.");
             using var mailboxSendState = mailboxSends.Use(value => ProtectedDid2MailboxSendJournal.Decode(
                 value, networkId.Span, accountId.Span, record.AsSpan(56, 32)));
-            using var mailboxReads = await storage.ReadOwnedAsync(ProtectedDid2MailboxReadJournal.Slot, cancellationToken)
-                .ConfigureAwait(false) ?? throw new InvalidDataException("Protected mailbox read custody is absent; explicit local reset is required.");
+            using var mailboxReads = journals[8] ?? throw new InvalidDataException("Protected mailbox read custody is absent; explicit local reset is required.");
             using var mailboxReadState = mailboxReads.Use(value => ProtectedDid2MailboxReadJournal.Decode(
                 value, networkId.Span, accountId.Span, record.AsSpan(56, 32)));
-            using var claims = await storage.ReadOwnedAsync(ProtectedDph2PreClaimJournal.Slot,
-                cancellationToken).ConfigureAwait(false) ??
+            using var claims = journals[9] ??
                 throw new InvalidDataException("The protected preclaim journal is absent; explicit local reset is required.");
             var instanceForClaims = record.AsSpan(56, 32).ToArray();
             var claimsState = claims.Use(value => ProtectedDph2PreClaimJournal.Decode(value,
                 networkId.Span, accountId.Span, instanceForClaims));
-            using var rendezvous = await storage.ReadOwnedAsync(ProtectedContactRendezvousJournal.Slot,
-                cancellationToken).ConfigureAwait(false) ?? throw new InvalidDataException(
+            using var rendezvous = journals[10] ?? throw new InvalidDataException(
                     "The protected rendezvous journal is absent; explicit local reset is required.");
             using var rendezvousState = rendezvous.Use(value => ProtectedContactRendezvousJournal.Decode(value,
                 networkId.Span, accountId.Span, instanceForClaims));
-            using var receiver = await storage.ReadOwnedAsync(ResponderInitialSessionCheckpoint.Slot,
-                cancellationToken).ConfigureAwait(false) ?? throw new InvalidDataException(
+            using var receiver = journals[11] ?? throw new InvalidDataException(
                     "The protected initial receiver checkpoint is absent; explicit local reset is required.");
             using var receiverState = receiver.Use(value => ResponderInitialSessionCheckpoint.Decode(value,
                 instanceForClaims, accountId.Span, networkId.Span));

@@ -86,6 +86,24 @@ public sealed class JournaledDeepSecureStorage : IDeepSecureStorage, IDisposable
         }
     }
 
+    public async Task<OwnedDeepSecretBatch> ReadOwnedBatchAsync(IReadOnlyList<string> slots,
+        CancellationToken cancellationToken = default)
+    {
+        var captured = OwnedDeepSecretBatch.CaptureSlots(slots);
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        Dictionary<string, byte[]>? values = null;
+        try
+        {
+            ThrowIfDisposed();
+            using var processLease = await AcquireProcessLeaseAsync(cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            values = Load();
+            cancellationToken.ThrowIfCancellationRequested();
+            return OwnedDeepSecretBatch.CopyFrom(captured, values);
+        }
+        finally { ZeroValues(values); gate.Release(); }
+    }
+
     public async Task WriteBatchAsync(
         IReadOnlyList<DeepSecureStorageWrite> writes,
         CancellationToken cancellationToken = default)

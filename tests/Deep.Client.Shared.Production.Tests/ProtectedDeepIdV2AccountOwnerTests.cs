@@ -502,6 +502,9 @@ public sealed class ProtectedDeepIdV2AccountOwnerTests
             ReadOnlyMemory<byte> replacement, IReadOnlyList<DeepSecureStorageWrite> insertions,
             CancellationToken ct = default) => inner.CompareExchangeAndInsertAsync(slot, expected, replacement, insertions, ct);
 
+        public Task<OwnedDeepSecretBatch> ReadOwnedBatchAsync(IReadOnlyList<string> slots,
+            CancellationToken ct = default) => inner.ReadOwnedBatchAsync(slots, ct);
+
         public Task<OwnedDeepSecret?> ReadOwnedAsync(string slot,
             CancellationToken cancellationToken = default) =>
             inner.ReadOwnedAsync(slot, cancellationToken);

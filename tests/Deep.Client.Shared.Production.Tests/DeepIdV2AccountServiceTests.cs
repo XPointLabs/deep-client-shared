@@ -733,6 +733,8 @@ public sealed class DeepIdV2AccountServiceTests
     private sealed class FaultingDeepSecureStorage : IDeepSecureStorage,
         IDisposable
     {
+        public Task<OwnedDeepSecretBatch> ReadOwnedBatchAsync(IReadOnlyList<string> slots,
+            CancellationToken ct = default) => inner.ReadOwnedBatchAsync(slots, ct);
         private readonly InMemoryDeepSecureStorage inner = new();
 
         internal bool FailNextTipWrite { get; set; }

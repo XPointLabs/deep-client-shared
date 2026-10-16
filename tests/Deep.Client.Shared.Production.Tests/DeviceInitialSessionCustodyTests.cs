@@ -298,6 +298,8 @@ public sealed class DeviceInitialSessionCustodyTests
     }
     private sealed class FaultStorage : IDeepSecureStorage
     {
+        public Task<OwnedDeepSecretBatch> ReadOwnedBatchAsync(IReadOnlyList<string> slots,
+            CancellationToken ct = default) => inner.ReadOwnedBatchAsync(slots, ct);
         public Task<bool> CompareAndDeleteAsync(string guardSlot, ReadOnlyMemory<byte> expected,
             IReadOnlyList<string> slots, CancellationToken ct = default) => inner.CompareAndDeleteAsync(guardSlot, expected, slots, ct);
 
