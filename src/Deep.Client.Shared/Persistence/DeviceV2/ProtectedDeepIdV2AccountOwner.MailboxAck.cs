@@ -57,7 +57,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             // Independently reconstruct semantic handoffs from actual verified
             // ratchet rows, not descriptor/callback flags. Do this before starting
             // the bounded signing loan; the ordinary receive already committed.
-            await MaterializeMailboxPageUnderLeaseAsync(current, held, page, endpoints, source, ct).ConfigureAwait(false);
+            await MaterializeMailboxPageUnderLeaseAsync(current, held, page, endpoints, source, fresh, ct).ConfigureAwait(false);
             using var loan = await OpenRetainedMailboxWinnerUnderLeaseAsync(current, held, publication, winner,
                 retained, source, fresh, ct).ConfigureAwait(false);
             var scope = ClientMailboxScope.Derive(loan.Selector.IssuerContext.Span, loan.Route.MailboxId, loan.Route.Epoch);
@@ -121,7 +121,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 await publication.RecheckCustodyAsync(token).ConfigureAwait(false);
                 await RequireExactProtectedMailboxRootAsync(ProtectedDid2MailboxGrantJournal.Slot, grantRoot, token).ConfigureAwait(false);
                 await RequireExactProtectedMailboxRootAsync(ProtectedDid2MailboxReadJournal.Slot, snapshot, token).ConfigureAwait(false);
-                await MaterializeMailboxPageUnderLeaseAsync(current, held, page, endpoints, source, token).ConfigureAwait(false);
+                await MaterializeMailboxPageUnderLeaseAsync(current, held, page, endpoints, source, fresh, token).ConfigureAwait(false);
                 policy.ValidateFreshness(); held.RequireActive();
             }
             async Task Capture(ReadOnlyMemory<byte> response, CancellationToken token)
@@ -172,7 +172,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     }
 
     private async Task MaterializeMailboxPageUnderLeaseAsync(VerifiedDeepIdV2CurrentAccount current, HeldDeepIdV2AccountLease held,
-        MailboxRetrievePage page, IReadOnlyList<Did2MailboxSemanticEndpoints> endpoints, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
+        MailboxRetrievePage page, IReadOnlyList<Did2MailboxSemanticEndpoints> endpoints, DeepIdV2ContactPathAuthoritySource source,
+        DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh, CancellationToken ct)
     {
         if (endpoints.Count > ProtectedDid2MailboxReadJournal.MaximumItems) throw new CryptographicException("Semantic endpoint set exceeds owned page bounds.");
         var instance = await SqliteDeepIdV2AccountGeneration.ReadAccountInstanceUnderLeaseAsync(storage, networkId, current.AccountId, ct).ConfigureAwait(false);
@@ -183,8 +184,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             {
                 if (item.Envelope.Ciphertext.Span.StartsWith("DPH2"u8))
                 {
-                    _ = await MaterializeMailboxInitialUnderLeaseAsync(current, held, Dph2Codec.Decode(item.Envelope.Ciphertext.Span),
-                        endpoints, catalog, source, ct).ConfigureAwait(false);
+                    await MaterializeMailboxInitialUnderLeaseAsync(current, held, Dph2Codec.Decode(item.Envelope.Ciphertext.Span),
+                        endpoints, catalog, source, fresh, ct).ConfigureAwait(false);
                     continue;
                 }
                 if (item.Envelope.Ciphertext.Span.StartsWith("DBR2"u8))

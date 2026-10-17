@@ -14,6 +14,7 @@ internal static class Did2MessagingSourceScope
     }
     internal static void RequireReceiver(Did2MessagingSessionScope scope, DeepIdV2InitialContactSessionCommit source)
     {
+        if (source.IsExpiredDisposal) throw new CryptographicException("Terminal receiver custody cannot become a live messaging source.");
         RequireCommon(scope, false, source.CanonicalSpan, source.Record);
         if (!Did2MessagingSessionScope.Fixed(source.Directory.RecordHash.Span, scope.LocalDirectory) ||
             !Did2MessagingSessionScope.Fixed(source.ConversationId.Span, scope.Conversation))

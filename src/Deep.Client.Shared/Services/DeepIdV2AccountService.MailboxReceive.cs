@@ -21,7 +21,12 @@ public sealed partial class DeepIdV2AccountService
     internal const int OwnedMailboxMaximumMessagesWithoutPqInjection = 32;
 
     internal async Task<Did2MessagingSessionScope> ReceiveOwnMailboxInitialAsync(ReadOnlyMemory<byte> exactDph2,
-        DeepIdV2ContactPathAuthoritySource source, CancellationToken ct = default)
+        DeepIdV2ContactPathAuthoritySource source, CancellationToken ct = default) =>
+        await ReceiveOwnMailboxInitialCoreAsync(exactDph2, source, ct).ConfigureAwait(false) ??
+        throw new InvalidOperationException("Terminal expired Initial has no live messaging scope.");
+
+    private async Task<Did2MessagingSessionScope?> ReceiveOwnMailboxInitialCoreAsync(ReadOnlyMemory<byte> exactDph2,
+        DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(source); source.RequireAccountOwner(this);
         if (exactDph2.IsEmpty || exactDph2.Length > 65536) throw new InvalidDataException("Initial mailbox envelope exceeds its closed bound.");
@@ -29,9 +34,21 @@ public sealed partial class DeepIdV2AccountService
         try
         {
             var incoming = Dph2Codec.Decode(exact);
-            var pair = await source.VerifyForIncomingInitialAsync(this, incoming, ct).ConfigureAwait(false);
             using var verifier = OpenVerifier();
-            await owner.CommitIncomingMailboxInitialAsync(TrustedUnixSeconds(), verifier, incoming, pair, source, ct).ConfigureAwait(false);
+            // Historical native lookup precedes proof acquisition. A fresh
+            // Initial does not need a redundant own network proof before the
+            // ordinary independently verified endpoint pair below.
+            using (var retained = await owner.FindReceiverSessionAsync(TrustedUnixSeconds(), verifier, incoming, ct).ConfigureAwait(false))
+                if (retained?.IsExpiredDisposal == true)
+                {
+                    var own = await source.VerifyForOwnPreKeyAuthoringAsync(this, ct).ConfigureAwait(false);
+                    if (!await owner.HasCommittedExpiredMailboxInitialAsync(TrustedUnixSeconds(), verifier, incoming, source, own, ct).ConfigureAwait(false))
+                        throw new System.Security.Cryptography.CryptographicException("Native terminal Initial changed before current replay verification.");
+                    return null; // Exact native terminal replay needs no live old peer.
+                }
+            var pair = await source.VerifyForIncomingInitialAsync(this, incoming, ct).ConfigureAwait(false);
+            if (await owner.CommitIncomingMailboxInitialAsync(TrustedUnixSeconds(), verifier, incoming, pair, source, ct).ConfigureAwait(false))
+                return null;
             // Source commit can consume a one-time key and finish cold crypto/SQL
             // work. Refresh the independent peer outside the released lease;
             // never stretch that earlier nonce-bound proof into mutable import.
@@ -61,9 +78,9 @@ public sealed partial class DeepIdV2AccountService
         var scopes = new Dictionary<string, Did2MessagingSessionScope>(StringComparer.Ordinal);
         foreach (var item in page.Items)
         {
-            Did2MessagingSessionScope scope;
+            Did2MessagingSessionScope? scope;
             if (item.Envelope.Ciphertext.Span.StartsWith("DPH2"u8))
-                scope = await ReceiveOwnMailboxInitialAsync(item.Envelope.Ciphertext, source, ct).ConfigureAwait(false);
+                scope = await ReceiveOwnMailboxInitialCoreAsync(item.Envelope.Ciphertext, source, ct).ConfigureAwait(false);
             else if (item.Envelope.Ciphertext.Span.StartsWith("DBR2"u8))
                 scope = await ReceiveOwnBraidMailboxEnvelopeAsync(item.Envelope.Ciphertext, source, ct).ConfigureAwait(false);
             else
@@ -74,6 +91,7 @@ public sealed partial class DeepIdV2AccountService
                 scope = await owner.FindIncomingMessagingScopeAsync(TrustedUnixSeconds(), verifier, incoming, ct).ConfigureAwait(false) ??
                     throw new InvalidOperationException("Captured message no longer has an initialized owned session; no ACK.");
             }
+            if (scope is null) continue; // ACK still reconstructs actual terminal custody, not this selection.
             var name = Convert.ToHexString(scope.Hash);
             scopes.TryAdd(name, scope);
         }

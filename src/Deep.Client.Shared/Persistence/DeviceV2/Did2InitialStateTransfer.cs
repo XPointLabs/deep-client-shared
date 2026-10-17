@@ -31,6 +31,7 @@ internal sealed class Did2InitialStateTransfer
     }
     internal void RequireReceiver(DeepIdV2InitialContactSessionCommit record)
     {
+        if (record.IsExpiredDisposal) throw new CryptographicException("Terminal Initial has no ratchet keys to transfer or retire.");
         RequireCommon(2, record.CanonicalSpan, record.InitialStateHashSpan, record.Record,
             DeviceInitialSessionCheckpoint.EventHash(record.ExactInitSpan, record.ExactHelloSpan));
         if (!Fixed(record.Directory.RecordHash.Span, Scope.LocalDirectory))

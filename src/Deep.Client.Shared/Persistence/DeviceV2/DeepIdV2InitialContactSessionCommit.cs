@@ -21,8 +21,10 @@ public sealed class DeepIdV2InitialContactSessionCommit : IDisposable
     internal readonly ParsedDmd1 Directory;
     private readonly byte[] conversationId, relationshipId;
     internal ReadOnlySpan<byte> CanonicalSpan => Bytes;
-    internal ReadOnlySpan<byte> ExactTrsSpan { get { _ = Bytes; return initialState is { Length: > 0 } state ? state : throw new InvalidOperationException("Initial receiver keys have been transferred and retired."); } }
-    internal bool HasInitialState { get { _ = Bytes; return initialState is { Length: > 0 }; } }
+    internal bool IsExpiredDisposal => Bytes[6] == 1;
+    internal ReadOnlySpan<byte> StoredStateSpan { get { _ = Bytes; return initialState ?? []; } }
+    internal ReadOnlySpan<byte> ExactTrsSpan { get { _ = Bytes; return HasInitialState ? initialState! : throw new InvalidOperationException("Receiver has no live transferable initial keys."); } }
+    internal bool HasInitialState { get { _ = Bytes; return !IsExpiredDisposal && initialState is { Length: > 0 }; } }
     internal ReadOnlySpan<byte> InitialStateHashSpan => Bytes.Slice(136, 32);
     internal ReadOnlySpan<byte> ExactInitSpan => Bytes.Slice(initOffset, initLength);
     internal ReadOnlySpan<byte> ExactHelloSpan => Bytes.Slice(helloOffset, helloLength);
@@ -43,7 +45,7 @@ public sealed class DeepIdV2InitialContactSessionCommit : IDisposable
         try
         {
             if (owned.Length < HeaderBytes || owned.Length > MaximumPayloadBytes || owned[0] != 2 ||
-                owned[1] is not (1 or 2) || owned[6] != 0 || owned[7] != 0)
+                owned[1] is not (1 or 2) || owned[6] is not (0 or 1) || owned[7] != 0)
                 throw new InvalidDataException("Initial contact receiver custody has no closed shape.");
             var dmdLength = BinaryPrimitives.ReadUInt16BigEndian(Bytes.Slice(4, 2));
             var dphLength = BinaryPrimitives.ReadUInt32BigEndian(Bytes.Slice(8, 4));
@@ -72,6 +74,10 @@ public sealed class DeepIdV2InitialContactSessionCommit : IDisposable
             var entry = Directory.ActiveDevices.SingleOrDefault(candidate => Fixed(candidate.DeviceId.Span, localId));
             if (entry is null)
                 throw new CryptographicException("Initial receiver custody has no matching local directory device.");
+            if (state is { Length: > 0 } && (state.Length != trs || !Fixed(SHA256.HashData(state), InitialStateHashSpan)))
+                throw new CryptographicException("Receiver stored state differs from its immutable commitment.");
+            if (IsExpiredDisposal && (trs != 40 || state is not { Length: 40 } || state.AsSpan(8).IndexOfAnyExcept((byte)0) < 0))
+                throw new CryptographicException("Expired receiver custody requires its exact terminal proof.");
             if (HasInitialState)
             {
                 if (state!.Length != trs || !Fixed(SHA256.HashData(state), InitialStateHashSpan))
@@ -108,6 +114,7 @@ public sealed class DeepIdV2InitialContactSessionCommit : IDisposable
             var remoteEntry = initial.SenderDirectory.ActiveDevices.SingleOrDefault(candidate => Fixed(candidate.DeviceId.Span, remoteId));
             if (remoteEntry is null || !Fixed(remoteEntry.Dpd1Reference.CanonicalHash.Span, Record.InitiatorDpd1Ref.Span[6..]))
                 throw new CryptographicException("Initial receiver events have a different initiating directory certificate.");
+            if (IsExpiredDisposal) RequireExpiredAt(BinaryPrimitives.ReadUInt64BigEndian(StoredStateSpan));
             // Retain identifiers, not another long-lived parsed plaintext copy.
             conversationId = helloEvent.ConversationId.ToArray(); relationshipId = contact.RelationshipId.ToArray();
         }
@@ -118,13 +125,35 @@ public sealed class DeepIdV2InitialContactSessionCommit : IDisposable
         VerifiedDph2InitialClaim claim, ParsedDmd1 recipientDirectory)
     {
         using var transfer = capability.ConsumeForAtomicStore();
-        var reservation = transfer.Reservation;
-        var dph = Own(claim.Initiation.ExactBytes); byte[]? trs = Own(transfer.ExactTrs1);
-        var init = Own(transfer.SessionInitDmc2); var hello = Own(transfer.FirstApplicationDmc2);
+        return Capture(transfer.Reservation, claim, recipientDirectory, Own(transfer.ExactTrs1),
+            Own(transfer.SessionInitDmc2), Own(transfer.FirstApplicationDmc2), false);
+    }
+
+    internal static DeepIdV2InitialContactSessionCommit Capture(ResponderInitialMailboxPreparation preparation,
+        VerifiedDph2InitialClaim claim, ParsedDmd1 recipientDirectory)
+    {
+        if (!preparation.IsExpired)
+        {
+            using var live = preparation.ConsumeLive(); return Capture(live, claim, recipientDirectory);
+        }
+        using var expired = preparation.ConsumeExpiredForAtomicStore();
+        var proof = new byte[40];
+        BinaryPrimitives.WriteUInt64BigEndian(proof, expired.ProvenLowerUnixSeconds);
+        var hash = Own(expired.DiscardedStateHash);
+        try { hash.CopyTo(proof, 8); }
+        finally { CryptographicOperations.ZeroMemory(hash); }
+        return Capture(expired.Reservation, claim, recipientDirectory, proof,
+            Own(expired.SessionInitDmc2), Own(expired.FirstApplicationDmc2), true);
+    }
+
+    private static DeepIdV2InitialContactSessionCommit Capture(VerifiedDevicePreKeyClaimReservation reservation,
+        VerifiedDph2InitialClaim claim, ParsedDmd1 recipientDirectory, byte[]? trs, byte[] init, byte[] hello, bool expired)
+    {
+        var dph = Own(claim.Initiation.ExactBytes);
         byte[]? result = null;
         try
         {
-            if (dph.Length > MaximumDphBytes || trs.Length > MaximumTrsBytes || init.Length > MaximumEventBytes || hello.Length > MaximumEventBytes)
+            if (dph.Length > MaximumDphBytes || trs is null || trs.Length > MaximumTrsBytes || init.Length > MaximumEventBytes || hello.Length > MaximumEventBytes)
                 throw new InvalidDataException("Initial receiver preparation exceeds its local custody bound.");
             if (!Fixed(reservation.SessionId.Span, claim.Initiation.SessionId.Span) ||
                 !Fixed(reservation.OperationId.Span, claim.Claim.OperationId.Span) ||
@@ -134,6 +163,7 @@ public sealed class DeepIdV2InitialContactSessionCommit : IDisposable
                 throw new CryptographicException("Initial receiver preparation differs from its verified exact claim.");
             result = new byte[HeaderBytes + recipientDirectory.CanonicalBytes.Length + dph.Length + init.Length + hello.Length];
             result[0] = 2; result[1] = (byte)reservation.Kind;
+            result[6] = expired ? (byte)1 : (byte)0;
             BinaryPrimitives.WriteUInt16BigEndian(result.AsSpan(2, 2), reservation.LastResortUseCounter);
             BinaryPrimitives.WriteUInt16BigEndian(result.AsSpan(4, 2), checked((ushort)recipientDirectory.CanonicalBytes.Length));
             BinaryPrimitives.WriteUInt32BigEndian(result.AsSpan(8, 4), checked((uint)dph.Length));
@@ -161,7 +191,9 @@ public sealed class DeepIdV2InitialContactSessionCommit : IDisposable
         new(exact.ToArray(), state.IsEmpty ? null : state.ToArray());
     internal byte[] SerializePending()
     {
-        var state = ExactTrsSpan; var result = new byte[Bytes.Length + state.Length];
+        var state = StoredStateSpan;
+        if (state.IsEmpty) throw new CryptographicException("Pending receiver custody cannot omit its initial state or terminal proof.");
+        var result = new byte[Bytes.Length + state.Length];
         Bytes.CopyTo(result); state.CopyTo(result.AsSpan(Bytes.Length)); return result;
     }
     internal static int PendingMetadataLength(ReadOnlySpan<byte> pending)
@@ -180,6 +212,19 @@ public sealed class DeepIdV2InitialContactSessionCommit : IDisposable
     }
     internal static DeepIdV2InitialContactSessionCommit RestorePending(ReadOnlySpan<byte> exact)
     { var metadata = PendingMetadataLength(exact); return RestoreCustody(exact[..metadata], exact[metadata..]); }
+    internal void RequireExpiredAt(ulong currentLower)
+    {
+        if (!IsExpiredDisposal || StoredStateSpan.Length != 40 || currentLower < BinaryPrimitives.ReadUInt64BigEndian(StoredStateSpan))
+            throw new CryptographicException("Terminal receiver proof is absent or ahead of protected time.");
+        RequireExpiry(ApplicationCoreCodec.DecodeDmc2(ExactInitSpan).ExpiresAtUnixMilliseconds);
+        RequireExpiry(ApplicationCoreCodec.DecodeDmc2(ExactHelloSpan).ExpiresAtUnixMilliseconds);
+        void RequireExpiry(ulong expiry)
+        {
+            var ceiling = checked(expiry / 1000 + (expiry % 1000 == 0 ? 0UL : 1UL));
+            if (BinaryPrimitives.ReadUInt64BigEndian(StoredStateSpan) < ceiling)
+                throw new CryptographicException("Terminal receiver proof does not establish both original expiries.");
+        }
+    }
     // Protocol accessors return owned array-backed copies. Do not abandon
     // their plaintext/ratchet copy by allocating and erasing only a second one.
     private static byte[] Own(ReadOnlyMemory<byte> value) =>

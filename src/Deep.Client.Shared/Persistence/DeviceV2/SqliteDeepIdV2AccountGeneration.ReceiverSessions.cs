@@ -58,10 +58,24 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         finally { CryptographicOperations.ZeroMemory(opened.ScopeHash); }
     }
 
-    internal static async ValueTask<DeepIdV2InitialContactSessionCommit> CommitReceiverUnderLeaseAsync(
+    internal static ValueTask<DeepIdV2InitialContactSessionCommit> CommitReceiverUnderLeaseAsync(
         IDeepSecureStorage storage, string statePath, VerifiedDeepIdV2CurrentAccount current, VerifiedDph2InitialClaim claim,
         DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh, VerifiedDeepIdV2DirectoryFreshness initiator,
-        OnionMonotonicReading reading, OnionTrustedTimeAuthority time, int maximumMessagesWithoutPqInjection, CancellationToken ct)
+        OnionMonotonicReading reading, OnionTrustedTimeAuthority time, int maximumMessagesWithoutPqInjection, CancellationToken ct) =>
+        CommitReceiverCoreUnderLeaseAsync(storage, statePath, current, claim, fresh, initiator, reading, time,
+            maximumMessagesWithoutPqInjection, false, ct);
+
+    internal static ValueTask<DeepIdV2InitialContactSessionCommit> CommitMailboxReceiverUnderLeaseAsync(
+        IDeepSecureStorage storage, string statePath, VerifiedDeepIdV2CurrentAccount current, VerifiedDph2InitialClaim claim,
+        DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh, VerifiedDeepIdV2DirectoryFreshness initiator,
+        OnionMonotonicReading reading, OnionTrustedTimeAuthority time, int maximumMessagesWithoutPqInjection, CancellationToken ct) =>
+        CommitReceiverCoreUnderLeaseAsync(storage, statePath, current, claim, fresh, initiator, reading, time,
+            maximumMessagesWithoutPqInjection, true, ct);
+
+    private static async ValueTask<DeepIdV2InitialContactSessionCommit> CommitReceiverCoreUnderLeaseAsync(
+        IDeepSecureStorage storage, string statePath, VerifiedDeepIdV2CurrentAccount current, VerifiedDph2InitialClaim claim,
+        DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh, VerifiedDeepIdV2DirectoryFreshness initiator,
+        OnionMonotonicReading reading, OnionTrustedTimeAuthority time, int maximumMessagesWithoutPqInjection, bool mailbox, CancellationToken ct)
     {
         var opened = await OpenPreKeyStoreAsync(storage, statePath, current, allowInitialize: false, ct).ConfigureAwait(false);
         await using var store = opened.Store;
@@ -77,9 +91,19 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             }
             var restored = await store.ReadRestoredInitialSecretsAsync(incoming, fresh.Proof, reading, ct).ConfigureAwait(false);
             using var secrets = restored.Secrets;
-            using var prepared = await current.Verified.DeviceSecrets.PrepareInitialSessionAsync(claim, fresh.Proof,
-                initiator, secrets, time, maximumMessagesWithoutPqInjection, ct).ConfigureAwait(false);
-            var completed = DeepIdV2InitialContactSessionCommit.Capture(prepared, claim, fresh.Proof.CurrentCheckpoint!.Directory.Record);
+            DeepIdV2InitialContactSessionCommit completed;
+            if (mailbox)
+            {
+                using var prepared = await current.Verified.DeviceSecrets.PrepareInitialMailboxSessionAsync(claim, fresh.Proof,
+                    initiator, secrets, time, maximumMessagesWithoutPqInjection, ct).ConfigureAwait(false);
+                completed = DeepIdV2InitialContactSessionCommit.Capture(prepared, claim, fresh.Proof.CurrentCheckpoint!.Directory.Record);
+            }
+            else
+            {
+                using var prepared = await current.Verified.DeviceSecrets.PrepareInitialSessionAsync(claim, fresh.Proof,
+                    initiator, secrets, time, maximumMessagesWithoutPqInjection, ct).ConfigureAwait(false);
+                completed = DeepIdV2InitialContactSessionCommit.Capture(prepared, claim, fresh.Proof.CurrentCheckpoint!.Directory.Record);
+            }
             try { await store.CommitReceiverSessionAsync(completed, ct).ConfigureAwait(false); return completed; }
             catch { completed.Dispose(); throw; }
         }

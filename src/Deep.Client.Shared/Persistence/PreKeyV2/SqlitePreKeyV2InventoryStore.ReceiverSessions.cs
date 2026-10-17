@@ -218,7 +218,7 @@ internal sealed partial class SqlitePreKeyV2InventoryStore
             // Store open has already validated the exact signed public inventory.
         }
         var exactRecord = completed.CanonicalSpan.ToArray();
-        var exactState = completed.ExactTrsSpan.ToArray();
+        var exactState = completed.StoredStateSpan.ToArray();
         try
         {
             using var insert = connection.CreateCommand();
@@ -296,14 +296,19 @@ internal sealed partial class SqlitePreKeyV2InventoryStore
                         throw new CryptographicException("Receiver session ledger hash differs.");
                     // Preliminary schema/inventory validation never opens TRS.
                     // Attached account custody independently verifies protected history first.
-                    if (receiverInstance is not null && !reader.IsDBNull(5))
+                    if ((receiverInstance is not null || payload[6] == 1) && !reader.IsDBNull(5))
                     {
                         if (reader.GetInt64(5) is < 1 or > DeepIdV2InitialContactSessionCommit.MaximumTrsBytes)
                             throw new InvalidDataException("Receiver initial state exceeds its closed bound.");
                         state = reader.GetFieldValue<byte[]>(6);
                     }
                     commit = DeepIdV2InitialContactSessionCommit.RestoreCustody(payload, state); RequireReceiverScope(commit);
-                    if (receiverInstance is not null)
+                    if (receiverInstance is not null && commit.IsExpiredDisposal)
+                    {
+                        if (receiverRetirements!.Find(2, receiverInstance, checked((ulong)sequence)) is not null)
+                            throw new CryptographicException("Terminal receiver disposal cannot have a live key-transfer journal.");
+                    }
+                    else if (receiverInstance is not null)
                         (receiverRetirements ?? throw new InvalidOperationException("Receiver retirement journal was not verified.")).RequireSource(
                             2, receiverInstance, checked((ulong)sequence), hash, payload, commit.InitialStateHashSpan,
                             commit.Record.ClaimOperationId.Span, commit.HasInitialState);
@@ -332,7 +337,7 @@ internal sealed partial class SqlitePreKeyV2InventoryStore
                 if (!Fixed(Dph2Codec.Encode(record), incomingExact) || claimReplay is not null && !Fixed(prior.ExactClaimReplayHashSpan, claimReplay))
                     throw new CryptographicException("Receiver operation/session conflicts with its exact retained replay.");
                 return DeepIdV2InitialContactSessionCommit.RestoreCustody(prior.CanonicalSpan,
-                    prior.HasInitialState ? prior.ExactTrsSpan : default);
+                    prior.StoredStateSpan);
             }
             if (incoming.SelectedPrekey.Kind == Dpk2PrekeyKind.OneTime &&
                 (Fixed(prior.OneTimeKeyIdSpan, incoming.SelectedPrekey.OneTimeX25519PrekeyIdOrZero.Span) ||
