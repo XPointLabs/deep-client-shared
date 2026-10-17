@@ -9,7 +9,9 @@ public sealed class Did2MailboxNewWorkRenewalWindowTests
     [Theory]
     [InlineData(MailboxCapabilityDomain.Retrieve, 1_024UL, false)]
     [InlineData(MailboxCapabilityDomain.Retrieve, 1_025UL, true)]
-    [InlineData(MailboxCapabilityDomain.Deposit, 1_019UL, false)]
+    [InlineData(MailboxCapabilityDomain.Deposit, 1_009UL, false)]
+    [InlineData(MailboxCapabilityDomain.Deposit, 1_010UL, true)]
+    [InlineData(MailboxCapabilityDomain.Deposit, 1_019UL, true)]
     [InlineData(MailboxCapabilityDomain.Deposit, 1_020UL, true)]
     public void ShortGrantRenewsBeforeTransportRetryWindowCloses(MailboxCapabilityDomain domain, ulong upper, bool due)
         => Assert.Equal(due, ProtectedDeepIdV2AccountOwner.IsMailboxGrantRenewalDueForNewWork(1_000, 1_040, domain, upper));
