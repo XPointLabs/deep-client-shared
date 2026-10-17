@@ -100,3 +100,35 @@ before/after delivery. Existing original evidence/key/view substitution, missing
 evidence, lost completion, attempt rebinding, assignment and successor cases
 remain enforced. Matching client builds/device retry remain pending. Full/package
 qualification and physical business acceptance are open.
+
+## Committed Initial on the next carriage view
+
+Windows31/APK47 exercised the matching correction above without account reset.
+Windows reached Store transport again (OutcomeUnknown113584ms), and Android's
+incoming path reached Initial claim promotion but rejected it. The physical
+closed trace does not expose the exact rejection field. The new owned scenario
+independently reproduces the exact-current-placement guard after ordinary view
+renewal: `artifacts/s05-committed-initial-carriage-20261017/red-01`,0PASS/1FAIL,
+native1. Existing allocated request/result bytes must not be rewritten.
+
+[DR-0136](../../../docs/survival-program/decisions/DR-0136-committed-claim-original-carriage.md)
+corrects only committed-recipient verification. Current admitted identities,
+both original signatures, exact original placement and continuous unchanged
+current epoch/cohort remain mandatory; initiator admission stays current-only.
+The first affected batch `focused-02` passed8/failed1/native1: the cycle passed
+Initial promotion, then the fixture omitted its original PMA when producing
+the reverse Store. That missing-policy guard was preserved. The ordinary-view
+fixture now distributes the real signed original/current policy history;
+deliberately hostile policy/issuer candidates remain isolated, not hidden by a
+valid predecessor.
+
+`focused-03`:6PASS/native0/0skip. Final fixture cleanup `focused-04`:2PASS/native0,
+0skip/no compiler diagnostics: complete native encrypted two-account
+receive/ContactAccept/reply cycle after renewal plus the existing policy-source
+negative. The intended issuer-rotation filter in04 did not match its actual
+method name; no rotation coverage is claimed there. Separate `issuer-05` passed2
+cases/native0/0skip/no compiler diagnostics for initial and ordinary original
+Store outcomes across issuer rotation/current-policy substitution. Protocol's
+`crypto-02` passed14, including its actual monolithic claim-cryptography witness.
+Matching corrected clients and physical business acceptance remain pending. No replay freshness,
+authority lifetime, timeout, schema or account reset was changed.

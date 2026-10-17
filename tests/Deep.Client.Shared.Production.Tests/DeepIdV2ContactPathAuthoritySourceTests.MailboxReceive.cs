@@ -24,13 +24,19 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     public async Task Did2OwnedMailboxReceive_PublicationPromotionKeepsOriginalLostAckAndSingleContactAccept()
         => await CheckOwnedMailboxReceiveAsync(selectedSuccessor: false, renewPublicationDuringAck: true);
 
+    [Fact]
+    [Trait("RequiresApprovedMlKemRuntime", "true")]
+    public async Task Did2OwnedMailboxReceive_CommittedInitialAcrossOrdinaryViewRenewalKeepsContactAndReply()
+        => await CheckOwnedMailboxReceiveAsync(selectedSuccessor: false,
+            renewPublicationDuringAck: false, carriageRenewal: true);
+
     private static async Task CheckOwnedMailboxReceiveAsync(bool selectedSuccessor, bool renewPublicationDuringAck,
-        bool authorityRollover = false)
+        bool authorityRollover = false, bool carriageRenewal = false)
     {
         // Actual PQ accounts, committed DPE2/ratchet, SQLCipher, protected page,
         // materialization and signed ACK. In-process issuer/terminal and signed
         // fixture time: NOT socket/device or a remote attachment transfer.
-        await using var fixture = await Fixture.CreateAsync(withPeer: true, longMailboxWindow: true,
+        await using var fixture = await Fixture.CreateAsync(withPeer: true, longMailboxWindow: true, encryptedStorage: carriageRenewal,
             initialMailboxAuthorityExpiry: authorityRollover ? 2_000UL : null);
         if (authorityRollover) await fixture.AdvanceCurrentRoutingAuthorityAsync();
         if (renewPublicationDuringAck) await fixture.SeedShortPermanentProposalAsync(validitySeconds: 800);
@@ -55,6 +61,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         var cachedInitial = (await fixture.StartNativeContact(intent, depositGrants, initialStore)).StorageReceipt;
         Assert.False(cachedInitial.IngressDispatched); Assert.Equal(1, initialStore.Calls); Assert.Equal(1, depositGrants.Calls);
         await fixture.VerifyNativeApplicationStartOperation(intent);
+        if (carriageRenewal) await fixture.AdvanceNetworkAsync(expiry: 6_000);
         // The allocation is quorum-committed: a delayed first receive must not
         // confuse the 120-second mutation request with a delivery deadline.
         fixture.Sample += 121; fixture.ProofTime += 121;

@@ -62,7 +62,14 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 successor?.ExactPma2 ?? operational.ExactPma2).ToArray();
             if (mailboxPolicyFault == 1) exact[^1] ^= 1;
             if (mailboxPolicyFault == 2) exact[FieldOffset(exact, 5)] ^= 1;
-            return mailboxPolicyFault == 3 ? [exact, exact.ToArray()] : [exact];
+            // Match the real publisher's retained public policy chain. A new
+            // carriage/PMA does not erase the signed namespace of earlier routes.
+            // Fault/issuer-substitution fixtures deliberately supply only their
+            // hostile candidate; an old valid policy must not hide that fault.
+            if (mailboxPolicyFault != 0 || rotatedIssuerPma is not null)
+                return mailboxPolicyFault == 3 ? [exact, exact.ToArray()] : [exact];
+            return successor is not null && !operational.ExactPma2.Span.SequenceEqual(exact)
+                ? [operational.ExactPma2, exact] : [exact];
         }
 
         internal async Task CheckMailboxPolicySourceAsync()
