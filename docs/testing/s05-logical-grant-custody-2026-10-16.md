@@ -65,3 +65,38 @@ Remaining: canonical Shared qualification, actual Store/receive/consent and
 two-client text, plus bounded-work/performance diagnosis. The
 separate Android original draft-metadata mismatch remains unresolved. Empty
 mailbox reads do not close contacts/messages/attachments/groups acceptance.
+
+## 2026-10-17: pending Initial across ordinary carriage renewal
+
+Windows30 exact retry after the matching local TTL correction stopped before
+dispatch in `RetainInitialStoreEvidenceUnderLeaseAsync:168` (30900ms,
+3 Protect/1191 Unprotect,8662ms protection). Native terminal diagnostics contained
+no new failure in that observation. Independent UI remained terminal with the
+same retry choice; this is not delivery or proof of noncommit for earlier work.
+
+The source compared newly captured current XNV1/XND1 bytes with immutable
+original Store evidence. Routine carriage renewal can legitimately change these
+bytes while preserving the exact assignment and node receipt identities. The
+new native encrypted fixture reproduces the same guard before ingress and after
+a lost reply: `artifacts/s05-pending-initial-view-20261017/red-01`,0PASS/2FAIL,
+native1/0skip. Original failure receipts remain unchanged.
+
+The correction preserves the original commitment and all original SQL records.
+Account/logical/policy/recipient/route bindings still match exactly; both original
+and current signed replica facts are independently verified through the actual
+retained lineage, and the selected node IDs and receipt keys must match. The
+original peer proof is independently verified at original creation. Completion
+still requires the original MAU/quorum and signed original-view/grant intervals;
+no current document replaces a historical record. This applies existing
+[DR-0106](../../../docs/survival-program/decisions/DR-0106-retained-store-public-evidence.md)
+and [DR-0122](../../../docs/survival-program/decisions/DR-0122-logical-mailbox-assignment-carriage.md),
+not a new wire, journal, schema, expiry, authority or compatibility path.
+
+Focused source verification:23PASS/0FAIL/0skip/native0, no compiler diagnostics,
+Windows PowerShell5.1/SDK10.0.301, receipt
+`artifacts/s05-pending-initial-view-20261017/focused-02`. Both new encrypted
+cold-retry scenarios pass and compare the complete original SQL evidence digest
+before/after delivery. Existing original evidence/key/view substitution, missing
+evidence, lost completion, attempt rebinding, assignment and successor cases
+remain enforced. Matching client builds/device retry remain pending. Full/package
+qualification and physical business acceptance are open.

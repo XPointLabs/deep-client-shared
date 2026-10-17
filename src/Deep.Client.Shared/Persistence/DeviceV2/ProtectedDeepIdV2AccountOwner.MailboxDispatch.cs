@@ -404,7 +404,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                         publicEvidence, deadline.Token).ConfigureAwait(false);
                 }
                 else publicEvidence = await RetainInitialStoreEvidenceUnderLeaseAsync(current, held, opened, scope, op, initialIntent,
-                    envelopeBytes, publicEvidence, fresh.Authority, verifier, envelope.CreatedAtUnixSeconds,
+                    envelopeBytes, publicEvidence, fresh, verifier, envelope.CreatedAtUnixSeconds,
                     requireExisting: false, deadline.Token).ConfigureAwait(false);
                 await Guard(deadline.Token).ConfigureAwait(false);
 #if DEEP_TEST_INTERNALS
@@ -441,7 +441,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                         Did2MailboxSendTestHooks.Hit(Did2MailboxSendFailpoint.BeforeOrdinaryCompletion);
 #endif
                         await RetainInitialStoreEvidenceUnderLeaseAsync(current, held, opened, scope, op, initialIntent,
-                            envelopeBytes, publicEvidence, fresh.Authority, verifier, envelope.CreatedAtUnixSeconds,
+                            envelopeBytes, publicEvidence, fresh, verifier, envelope.CreatedAtUnixSeconds,
                             requireExisting: true, deadline.Token).ConfigureAwait(false);
                         _ = await TryReadRetainedInitialStoreUnderLeaseAsync(current, held, opened, scope, initialIntent,
                             null, fresh, source, verifier, deadline.Token).ConfigureAwait(false) ??

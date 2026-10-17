@@ -138,7 +138,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     private async Task<Did2StorePublicEvidence> RetainInitialStoreEvidenceUnderLeaseAsync(VerifiedDeepIdV2CurrentAccount current,
         HeldDeepIdV2AccountLease held, OwnedDid2MessagingStorage opened, Did2MessagingSessionScope scope,
         ReadOnlyMemory<byte> operation, ReadOnlyMemory<byte> intent, ReadOnlyMemory<byte> envelope,
-        Did2StorePublicEvidence evidence, VerifiedXPointNetworkAuthority authority, IDeepMlDsa65Verifier verifier,
+        Did2StorePublicEvidence evidence, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own,
+        IDeepMlDsa65Verifier verifier,
         ulong originalCreated, bool requireExisting, CancellationToken ct)
     {
         if (!evidence.IsInitial || !FixedRoute(InitialMailboxOperation(intent.Span), operation.Span))
@@ -158,20 +159,28 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 if (retained is not null)
                 {
                     await RequireStoreEvidenceCommitmentUnderLeaseAsync(held, scope, operation, attempt, retained, ct).ConfigureAwait(false);
-                    // Fresh nonce-bound ADP bytes differ on every lookup. Preserve
-                    // the original proof; every other original record must still
-                    // match this exact prepared request and current route.
+                    // Current carriage view/descriptors and nonce-bound ADP can
+                    // change without changing this exact prepared request. Never
+                    // replace the committed originals with current capture bytes.
                     var expected = evidence.CopyRecords(); var actual = retained.CopyRecords();
                     try
                     {
-                        if (!retained.IsInitial || expected.Take(8).Where((bytes, index) => !FixedRoute(bytes, actual[index])).Any())
+                        if (!retained.IsInitial || new[] { 0, 1, 2, 6, 7 }.Any(index => !FixedRoute(expected[index], actual[index])))
                             throw new CryptographicException("Initial retry differs from its first original public evidence.");
                     }
                     finally { foreach (var bytes in expected.Concat(actual)) CryptographicOperations.ZeroMemory(bytes); }
+                    var originalRoute = ContactRouteClosureCodec.Decode(retained.OriginalRoute.Span);
+                    var originalKeys = MailboxStoreReplicaEvidenceVerifier.Verify(own.Network, own.Authority, originalRoute, retained.Replicas);
+                    var currentKeys = MailboxStoreReplicaEvidenceVerifier.Verify(own.Network, own.Authority, originalRoute, evidence.Replicas);
+                    if (!FixedRoute(originalKeys.FirstNodeId.Span, currentKeys.FirstNodeId.Span) ||
+                        !FixedRoute(originalKeys.FirstReceiptPublicKey.Span, currentKeys.FirstReceiptPublicKey.Span) ||
+                        !FixedRoute(originalKeys.SecondNodeId.Span, currentKeys.SecondNodeId.Span) ||
+                        !FixedRoute(originalKeys.SecondReceiptPublicKey.Span, currentKeys.SecondReceiptPublicKey.Span))
+                        throw new CryptographicException("Initial retry changed its authenticated original receipt keys.");
                     using var peer = await storage.ReadOwnedAsync(ProtectedDid2MessagingPeerBootstrap.Slot(scope), ct).ConfigureAwait(false) ??
                         throw new InvalidDataException("Initial retry lost its protected peer credential.");
                     var pinned = peer.Use(bytes => ProtectedDid2MessagingPeerBootstrap.Restore(bytes, scope));
-                    _ = DeepIdV2OriginalContactStoreVerifier.Verify(authority, pinned, retained.OriginalPeerAdp.Span,
+                    _ = DeepIdV2OriginalContactStoreVerifier.Verify(own.Authority, pinned, retained.OriginalPeerAdp.Span,
                         retained.OriginalDcr.Span, retained.OriginalRoute.Span, originalCreated, deploymentProfileId, 2, verifier);
                     evidence = retained;
                 }

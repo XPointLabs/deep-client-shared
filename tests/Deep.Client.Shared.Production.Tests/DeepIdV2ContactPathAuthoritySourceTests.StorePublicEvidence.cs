@@ -12,6 +12,51 @@ namespace Deep.Client.Shared.Production.Tests;
 public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 {
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("RequiresApprovedMlKemRuntime", "true")]
+    public async Task Did2StorePublicEvidence_PendingInitialRetryAcrossOperationalViewKeepsOriginalEvidence(bool loseReply)
+    {
+        await using var fixture = await Fixture.CreateAsync(withPeer: true, encryptedStorage: true, longMailboxWindow: true);
+        var test = await fixture.PrepareCompletedContactSendCase(true);
+        if (loseReply)
+        {
+            test.Transport.LoseReply = true;
+            await Assert.ThrowsAsync<Deep.Client.Shared.Services.ClientMailboxDispatchOutcomeUnknownException>(test.Deliver);
+            test.Transport.LoseReply = false;
+        }
+        else
+        {
+            using (Did2MailboxSendTestHooks.Push(point =>
+                { if (point == Did2MailboxSendFailpoint.BeforeDispatch) throw new IOException("Interrupted original evidence before ingress."); }))
+                await Assert.ThrowsAsync<IOException>(test.Deliver);
+        }
+        var initialCalls = test.Transport.Calls;
+        var originalEvidence = await fixture.ReadOriginalStoreEvidenceDigestForViewRetry(test);
+        var source = await fixture.ReadCompletedContactSendSourceProjection(test.Scope);
+        var native = (await fixture.ReadMessagingFloor(test.Scope)).Exact.ToArray();
+        await fixture.AdvanceNetworkAsync(expiry: 6_000);
+        fixture.Sample += 100; fixture.ProofTime += 100;
+        fixture.ColdReopenCompactionStorage();
+        var unusedIssuer = new OwnedGrantTransport(fixture, ownerOnPrimary: true);
+        var stored = await fixture.DeliverNativeInitial(test.Intent, unusedIssuer, test.Transport);
+        Assert.NotNull(stored.Cursor);
+        Assert.Equal(initialCalls + 1, test.Transport.Calls);
+        Assert.Equal(0, unusedIssuer.Calls);
+        Assert.Equal(source, await fixture.ReadCompletedContactSendSourceProjection(test.Scope));
+        Assert.Equal(native, (await fixture.ReadMessagingFloor(test.Scope)).Exact.ToArray());
+        Assert.Equal(originalEvidence, await fixture.ReadOriginalStoreEvidenceDigestForViewRetry(test));
+        fixture.ColdReopenCompactionStorage();
+        var retained = await fixture.DeliverNativeInitial(test.Intent, unusedIssuer, test.Transport);
+        Assert.False(retained.IngressDispatched);
+        Assert.Equal(stored.Cursor, retained.Cursor);
+        Assert.Equal(initialCalls + 1, test.Transport.Calls);
+        await fixture.AssertCompactedStoreRejectsChangedPublicEvidence(test.Scope,
+            () => fixture.DeliverNativeInitial(test.Intent, unusedIssuer, test.Transport));
+        foreach (var bytes in new[] { source, native, originalEvidence }) CryptographicOperations.ZeroMemory(bytes);
+    }
+
+    [Theory]
     [InlineData(false, false)]
     [InlineData(true, false)]
     [InlineData(false, true)]
@@ -305,6 +350,28 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 
     private sealed partial class Fixture
     {
+        internal async Task<byte[]> ReadOriginalStoreEvidenceDigestForViewRetry(CompletedContactSendCase test)
+        {
+            using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            await WithAuthoredApplicationConnectionAsync(test.Scope, connection =>
+            {
+                using var command = connection.CreateCommand();
+                command.CommandText = "SELECT " + string.Join(",", StoreEvidenceColumns) +
+                    " FROM mailbox_store_public_evidence WHERE scope_hash=$scope AND attempt_id=$op;";
+                command.Parameters.AddWithValue("$scope", test.Scope.Hash.ToArray());
+                command.Parameters.AddWithValue("$op", test.Operation);
+                using var reader = command.ExecuteReader(); Assert.True(reader.Read());
+                for (var index = 0; index < StoreEvidenceColumns.Length; index++)
+                {
+                    var record = reader.GetFieldValue<byte[]>(index);
+                    try { hash.AppendData(SHA256.HashData(record)); }
+                    finally { CryptographicOperations.ZeroMemory(record); }
+                }
+                Assert.False(reader.Read());
+            });
+            return hash.GetHashAndReset();
+        }
+
         internal async Task CheckRetainedEventRouteIsNotRenewalPredecessorAsync(Deep.Protocol.ContactV2.ParsedDeepIdV2ContactMailboxRoute package)
         {
             var account = ReopenAccount(); var source = Source(account);
