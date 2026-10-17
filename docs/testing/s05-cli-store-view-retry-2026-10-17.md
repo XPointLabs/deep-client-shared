@@ -34,3 +34,23 @@ is not socket/CLI/device acceptance. Focused03 passed16/native0/0skip:
 conservative installation-clock boundaries, slow-preparation non-rewind and
 both Initial/ContactAccept loss-of-evidence-after-ingress refusals. Real CLI
 text and final full/package qualification remain separate.
+
+## Committed acceptance retry after rendezvous expiry
+
+Retained CLI run29 stopped before text: preparing a repeated ContactAccept
+used live-rendezvous validation even though its exact native send and semantic
+acceptance were already committed. Payload compaction was incorrectly the
+only switch to historical verification.
+
+Preparation now reconciles the actual native floor and exact operation. A
+committed send uses the existing retained-event reader, which joins the
+protected explicit winner, original Hello, native event hash and exact
+semantic projection, then independently verifies historical endpoint facts.
+An unsent draft still requires live rendezvous authority; a first late receive
+cannot convert an expired acceptance into history. No lifetime extension,
+reauthoring, schema or protocol change.
+
+Focused04 reproduced the committed-retry defect (1FAIL/native1). Focused05
+passed3/native0/0skip, including both first-late-admission refusals;
+its native terminal and TRX are the evidence, not this description. CLI text
+delivery remains unconfirmed until the physical continuation passes.

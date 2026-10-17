@@ -182,7 +182,12 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             if (!Did2MessagingSessionScope.Fixed(winner.HelloHash, SHA256.HashData(helloBytes)))
                 throw new CryptographicException("Retained acceptance belongs to another exact pending Hello.");
             if (winner.WorkStopped) throw new IOException("Stopped acceptance cannot reauthor its original command.");
-            if (winner.PayloadRetired)
+            var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
+            using var committed = opened.Sql.ReadVerifiedOperation(floor, winner.Operation);
+            // Native send custody, not compaction or a local UI state, makes
+            // this an exact historical retry. An unsent draft still needs a
+            // live rendezvous at first admission.
+            if (winner.PayloadRetired || committed is not null)
             {
                 using var application = await SqliteDeepIdV2AccountGeneration.OpenExistingApplicationForCompactionUnderLeaseAsync(
                     storage, sqlStatePath, scope, held, lease, ct).ConfigureAwait(false);

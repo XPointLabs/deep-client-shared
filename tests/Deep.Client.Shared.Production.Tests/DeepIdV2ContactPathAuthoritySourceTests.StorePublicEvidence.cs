@@ -356,6 +356,16 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             Assert.Equal(sent.ExactEnvelope.ToArray(), replay.ExactEnvelope.ToArray());
         Assert.Equal(Did2ContactAcceptanceState.PeerAcceptanceRetained, await fixture.ReadOwnedContactState(sender));
         Assert.Equal(Did2ContactAcceptanceState.LocalAcceptanceRetained, await fixture.ReadOwnedContactState(receiver));
+        // A cold retry of the explicit command must recover the committed
+        // acceptance, not reinterpret its rendezvous as a new live capability.
+        using (var retry = await fixture.PrepareOwnedContactAccept(receiver, accept.Operation.ToArray()))
+        {
+            Assert.Equal(accept.Operation.ToArray(), retry.Operation.ToArray());
+            Assert.Equal(accept.ExactDmc2.ToArray(), retry.ExactDmc2.ToArray());
+            using var replay = await fixture.SendOwnedMessage(receiver, retry.Operation.ToArray(),
+                ApplicationCoreCodec.DecodeDmc2(retry.ExactDmc2));
+            Assert.Equal(sent.ExactEnvelope.ToArray(), replay.ExactEnvelope.ToArray());
+        }
         Assert.Equal(senderFloor, (await fixture.ReadMessagingFloor(sender)).Exact.ToArray());
         Assert.Equal(receiverFloor, (await fixture.ReadMessagingFloor(receiver)).Exact.ToArray());
         CryptographicOperations.ZeroMemory(senderFloor); CryptographicOperations.ZeroMemory(receiverFloor);
