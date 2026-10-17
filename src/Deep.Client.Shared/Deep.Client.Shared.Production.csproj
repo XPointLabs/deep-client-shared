@@ -93,6 +93,7 @@
     <Compile Include="Services\ClientMailboxRetrieveOutcomeSummary.cs" />
     <Compile Include="Services\ClientMailboxTransportContracts.cs" />
     <Compile Include="Services\DeepIdV2AccountService.cs" />
+    <Compile Include="Services\DeepIdV2ClientNetworkSession.cs" />
     <Compile Include="Services\DeepIdV2AccountService.ContactRendezvous.cs" />
     <Compile Include="Services\DeepIdV2AccountService.ContactRoute.cs" />
     <Compile Include="Services\DeepIdV2AccountService.ContactResolve.cs" />

@@ -1,5 +1,23 @@
 # Deep Client Shared architecture
 
+## Headless DID2 network composition
+
+`DeepIdV2ClientNetworkSession` composes existing public clients from explicit
+operator-selected public genesis bytes/pins, an HTTPS transport factory and an
+existing account owner. It independently verifies complete distributed authority
+history from that genesis, opens the account-owned directory/network floors,
+and owns proof/artifact/verifier lifetimes for one command. It does not mint
+authority from configuration or cache a previous operation's currentness.
+`VerifyAndPublishAsync` uses ordinary genesis admission and the existing owned
+permanent publication operation; contacts, consent, text and mailbox ACK continue
+through `DeepIdV2AccountService` and its actual native owners.
+
+The initial consumer is `deep-cli`; its isolated Windows profiles are not MAUI
+or production accounts. No wire/schema/version, timeout, crypto provider, TLS,
+expiry, replay, quorum or semantic acceptance rule changes. Current CLI/native
+qualification is separate from package/full and device acceptance. MAUI adapter
+consolidation waits until the CLI contact/text path works, per the current plan.
+
 ## Current submission over retained publication intent
 
 [DR-0125](../../docs/survival-program/decisions/DR-0125-current-publication-submission.md)
