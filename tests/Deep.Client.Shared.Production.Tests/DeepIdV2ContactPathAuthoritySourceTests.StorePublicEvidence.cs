@@ -12,6 +12,66 @@ namespace Deep.Client.Shared.Production.Tests;
 public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 {
     [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    [Trait("RequiresApprovedMlKemRuntime", "true")]
+    public async Task Did2StorePublicEvidence_PendingTextAndAcceptViewRetryKeepExactOriginal(bool text, bool loseReply)
+    {
+        await using var fixture = await Fixture.CreateAsync(withPeer: true, encryptedStorage: true, longMailboxWindow: true);
+        Fixture.CompletedContactSendCase test;
+        if (!text) test = await fixture.PrepareCompletedContactSendCase(false);
+        else
+        {
+            var (complete, hello, init, _, _) = await fixture.PrepareNativeHelloCompletion(Bytes(32, 0xc1));
+            using var initial = await complete(fixture.Accounts);
+            using (var received = await fixture.CompleteReceiver(initial.ExactDph2.ToArray())) { }
+            var sender = await fixture.EnsureSenderMessaging(init, hello);
+            var receiver = await fixture.EnsureReceiverMessaging(initial.ExactDph2.ToArray());
+            using (var accept = await fixture.PrepareOwnedContactAccept(receiver, Bytes(32, 0xc2)))
+            using (var sent = await fixture.SendOwnedMessage(receiver, accept.Operation.ToArray(), ApplicationCoreCodec.DecodeDmc2(accept.ExactDmc2)))
+            using (var received = await fixture.ReceiveOwnedMessage(sender, sent.ExactEnvelope.ToArray())) { }
+            using var draft = await fixture.CreateOwnedText(sender, "Retained exact view retry");
+            var op = draft.OperationId.ToArray();
+            using var committed = await fixture.SendOwnedMessage(sender, op, ApplicationCoreCodec.DecodeDmc2(draft.ExactDmc2.Span));
+            fixture.TrackMailboxDispatchClock();
+            var grants = new OwnedGrantTransport(fixture, ownerOnPrimary: true);
+            var transport = new OwnedStoreFixture(fixture, sender, op, committed.ExactEnvelope.ToArray());
+            test = new(sender, op, [], grants, transport, () => fixture.DeliverNativeMessage(sender, op, grants, transport));
+        }
+        if (loseReply)
+        {
+            test.Transport.LoseReply = true;
+            await Assert.ThrowsAsync<Deep.Client.Shared.Services.ClientMailboxDispatchOutcomeUnknownException>(test.Deliver);
+            test.Transport.LoseReply = false;
+        }
+        else
+        {
+            using (Did2MailboxSendTestHooks.Push(point =>
+                { if (point == Did2MailboxSendFailpoint.BeforeDispatch) throw new IOException("Interrupted after original public evidence."); }))
+                await Assert.ThrowsAsync<IOException>(test.Deliver);
+        }
+        var calls = test.Transport.Calls;
+        var originalEvidence = await fixture.ReadOriginalStoreEvidenceDigestForViewRetry(test);
+        byte[] originalMau;
+        using (var sends = await fixture.ReadMailboxSends(own: test.Scope.IsInitiator))
+            originalMau = Assert.Single(sends.Entries).Value.MauHash.ToArray();
+        var native = (await fixture.ReadMessagingFloor(test.Scope)).Exact.ToArray();
+        await fixture.AdvanceNetworkAsync(expiry: 6_000);
+        fixture.Sample += 100; fixture.ProofTime += 100;
+        if (test.Scope.IsInitiator) fixture.ColdReopenCompactionStorage(); else fixture.ColdReopenReceiverStoreStorage();
+        var stored = await test.Deliver();
+        Assert.NotNull(stored.Cursor); Assert.Equal(calls + 1, test.Transport.Calls); Assert.Equal(1, test.Grants.Calls);
+        Assert.Equal(originalMau, SHA256.HashData(test.Transport.ExactRequest!));
+        Assert.Equal(originalEvidence, await fixture.ReadOriginalStoreEvidenceDigestForViewRetry(test));
+        Assert.Equal(native, (await fixture.ReadMessagingFloor(test.Scope)).Exact.ToArray());
+        var cached = await test.Deliver(); Assert.False(cached.IngressDispatched);
+        Assert.Equal(stored.Cursor, cached.Cursor); Assert.Equal(calls + 1, test.Transport.Calls);
+        foreach (var bytes in new[] { originalEvidence, originalMau, native }) CryptographicOperations.ZeroMemory(bytes);
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     [Trait("RequiresApprovedMlKemRuntime", "true")]

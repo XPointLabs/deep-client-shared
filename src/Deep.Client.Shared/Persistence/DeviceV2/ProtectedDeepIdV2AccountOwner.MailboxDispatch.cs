@@ -350,12 +350,45 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 await Recheck(ct).ConfigureAwait(false);
                 await RequireExactProtectedMailboxRootAsync(ProtectedDid2MailboxGrantJournal.Slot, grantRoot, ct).ConfigureAwait(false);
                 await RequireExactProtectedMailboxRootAsync(ProtectedDid2MailboxSendJournal.Slot, snapshot, ct).ConfigureAwait(false);
+                var preparedUpperStarted = Stopwatch.GetTimestamp();
+                var minimumPreparedUpper = loan.Authority.NowUnixSeconds;
+                Did2StorePublicEvidence publicEvidence;
+                // Evidence/CAS preparation is not the network attempt. Keep its
+                // own bounded scope before minting the signer-free dispatch
+                // policy/context, so durable local writes cannot consume that
+                // policy's unchanged30-second transport/return fence.
+                using (var preparation = CancellationTokenSource.CreateLinkedTokenSource(ct))
+                {
+                    preparation.CancelAfter(TimeSpan.FromSeconds(30));
+                    var token = preparation.Token;
+                    var publicReplicas = await MailboxStoreReplicaEvidenceVerifier.CaptureAsync(route, token).ConfigureAwait(false);
+                    publicEvidence = new Did2StorePublicEvidence(loan.Selector.AccountScope.ToArray(), envelope.OperationId,
+                        ProtectedDid2MailboxGrantJournal.OriginalPolicy(retainedGrant), publicReplicas,
+                        resolved is null ? default : contact.Contact.Contact.CanonicalBytes,
+                        route.ExactRouteClosure,
+                        resolved is null ? default : contact.Contact.Authorization.Freshness.ExactAdp1V2);
+                    publicEvidence = await BindStoreEvidenceUnderLeaseAsync(current, held, opened, scope, op,
+                        entry.Attempt.ToArray(), initialIntent, publicEvidence, fresh, token).ConfigureAwait(false);
+                    if (controlPayload)
+                        await RetainBraidStoreEvidenceBeforeDispatchUnderLeaseAsync(current, held, opened, scope, op,
+                            publicEvidence, token).ConfigureAwait(false);
+                    else if (initialIntent.IsEmpty)
+                        await RetainMessageStoreEvidenceBeforeDispatchUnderLeaseAsync(current, held, opened, scope, op,
+                            publicEvidence, token).ConfigureAwait(false);
+                    else publicEvidence = await RetainInitialStoreEvidenceUnderLeaseAsync(current, held, opened, scope, op, initialIntent,
+                        envelopeBytes, publicEvidence, fresh, verifier, envelope.CreatedAtUnixSeconds,
+                        requireExisting: false, token).ConfigureAwait(false);
+                    await Recheck(token).ConfigureAwait(false);
+                    await RequireExactProtectedMailboxRootAsync(ProtectedDid2MailboxGrantJournal.Slot, grantRoot, token).ConfigureAwait(false);
+                    await RequireExactProtectedMailboxRootAsync(ProtectedDid2MailboxSendJournal.Slot, snapshot, token).ConfigureAwait(false);
+                }
                 var custody = await SqliteDeepIdV2AccountGeneration.OpenBorrowedOnionCustodyAsync(storage, lease,
                     sqlStatePath, current, source.AccountOwner, held, ct).ConfigureAwait(false);
                 // Signing preparation is not renewed. This new dispatch-only
                 // scope has no signer and cannot alter the original request.
+                minimumPreparedUpper = checked(minimumPreparedUpper + (ulong)Math.Ceiling(
+                    Stopwatch.GetElapsedTime(preparedUpperStarted).TotalSeconds));
                 var dispatchStarted = Stopwatch.GetTimestamp();
-                var minimumPreparedUpper = loan.Authority.NowUnixSeconds;
                 var dispatchTime = await route.ReadCurrentTimeAsync(ct).ConfigureAwait(false);
                 var dispatchPma = MailboxAuthorityV2Verifier.Verify(route.NetworkAuthority, winner.ExactPma2.Span,
                     dispatchTime.LowerUnixSeconds, dispatchTime.UpperUnixSeconds);
@@ -383,29 +416,6 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     new(true, loan.Selector.IssuerContext.Span, true), ingress, loan.Store, loan.Store, loan.Store, loan.Store,
                     new PinnedClientMailboxReceiptVerifier(new SodiumMailboxPeerReplicationCrypto()), dispatchFactory, decoder, dispatchAuthority.TimeProvider);
                 using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct); deadline.CancelAfter(TimeSpan.FromSeconds(30));
-                await Guard(deadline.Token).ConfigureAwait(false);
-                var publicReplicas = await MailboxStoreReplicaEvidenceVerifier.CaptureAsync(route, deadline.Token).ConfigureAwait(false);
-                var publicEvidence = new Did2StorePublicEvidence(loan.Selector.AccountScope.ToArray(), envelope.OperationId,
-                    ProtectedDid2MailboxGrantJournal.OriginalPolicy(retainedGrant), publicReplicas,
-                    resolved is null ? default : contact.Contact.Contact.CanonicalBytes,
-                    route.ExactRouteClosure,
-                    resolved is null ? default : contact.Contact.Authorization.Freshness.ExactAdp1V2);
-                publicEvidence = await BindStoreEvidenceUnderLeaseAsync(current, held, opened, scope, op,
-                    entry.Attempt.ToArray(), initialIntent, publicEvidence, deadline.Token).ConfigureAwait(false);
-                if (controlPayload)
-                    await RetainBraidStoreEvidenceBeforeDispatchUnderLeaseAsync(current, held, opened, scope, op,
-                        publicEvidence, deadline.Token).ConfigureAwait(false);
-                else if (initialIntent.IsEmpty)
-                {
-                    // Persist ordinary/ContactAccept public evidence before ingress can
-                    // become durable. Pending evidence is not a success marker;
-                    // interrupted sends still resume only their exact request.
-                    await RetainMessageStoreEvidenceBeforeDispatchUnderLeaseAsync(current, held, opened, scope, op,
-                        publicEvidence, deadline.Token).ConfigureAwait(false);
-                }
-                else publicEvidence = await RetainInitialStoreEvidenceUnderLeaseAsync(current, held, opened, scope, op, initialIntent,
-                    envelopeBytes, publicEvidence, fresh, verifier, envelope.CreatedAtUnixSeconds,
-                    requireExisting: false, deadline.Token).ConfigureAwait(false);
                 await Guard(deadline.Token).ConfigureAwait(false);
 #if DEEP_TEST_INTERNALS
                 Did2MailboxSendTestHooks.Hit(Did2MailboxSendFailpoint.BeforeDispatch);
