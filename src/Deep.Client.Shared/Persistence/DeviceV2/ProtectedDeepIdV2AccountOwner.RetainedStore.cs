@@ -376,7 +376,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var result = new PinnedClientMailboxReceiptVerifier(new SodiumMailboxPeerReplicationCrypto()).VerifyDurable(quorum.Span, new()
             {
                 Epoch = grant.Epoch, OperationId = envelope.OperationId, MailboxId = envelope.MailboxId, Route = pinned,
-                EnvelopeDigest = SHA256.HashData(actualEnvelope.Span), ExpiresAtUnixSeconds = envelope.ExpiresAtUnixSeconds,
+                EnvelopeDigest = envelope.DeduplicationDigest, ExpiresAtUnixSeconds = envelope.ExpiresAtUnixSeconds,
                 AllowedDispositions = new HashSet<MailboxReplicaDisposition> { MailboxReplicaDisposition.Stored, MailboxReplicaDisposition.Duplicate }
             });
             if (!FixedRoute(result.CoordinatorReceipt.CoordinatorId.Span, replicas.FirstNodeId.Span))

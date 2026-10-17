@@ -87,7 +87,6 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     application, route.ExactBytes, ct).ConfigureAwait(false);
                 if (!FixedRoute(route.ExactBytes.Span, originalNativeRoute.ExactBytes.Span))
                     throw new CryptographicException("Replacement predecessor route lost its authenticated native recipient binding.");
-                RequireOriginalAttemptBody(entry, grant, route, scope, nativeEnvelope);
                 sends.RequireGrant(grant);
                 var read = await application.ReadTransportOutboxAsync(VerifiedCurrentMailboxGrant.AccountScopeForHolder(grant.HolderPublicKey.Span),
                     OutboxLogicalId.FromBytes(entry.MailboxOperation), ct).ConfigureAwait(false);
@@ -100,7 +99,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     var exact = read.Item.GetCiphertextBundleCopy();
                     try
                     {
-                        RequireOriginalAttemptRequest(entry, grant, route,
+                        RequireOriginalAttemptRequest(entry, grant, route, scope,
                             MailboxAuthenticatedClientRequestCodec.Decode(exact), exact, nativeEnvelope.Span, read.Item);
                         if (!entry.Prepared || sends.MinimumCounter(entry.GrantHash) <= entry.Counter)
                             throw new CryptographicException("Replacement work lost its independently reserved original counter.");
@@ -109,6 +108,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 }
                 else if (read.Result != TransportOutboxReadResult.Missing || entry.Prepared)
                     throw new CryptographicException("Replacement work lost its original SQL outcome.");
+                else RequireOriginalAttemptBody(entry, grant, route, scope, nativeEnvelope);
             }
             await RecheckRouteFreshnessAsync(current, source, own, held, first, ct).ConfigureAwait(false);
             var finalFloor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
@@ -197,7 +197,6 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     SHA256.HashData(ContactCodec.Decode("XMC2", ProtectedDid2MailboxGrantJournal.Response(value).Span).Field(8).Span), entry.GrantHash)) ??
                 throw new CryptographicException("Attempt closure lost its exact acquisition winner.");
             var (grant, originalRoute) = await RequireOriginalAttemptGrantAsync(entry, acquisition, own, source, scope, ct).ConfigureAwait(false);
-            RequireOriginalAttemptBody(entry, grant, originalRoute, scope, nativeEnvelope);
             sends.RequireGrant(grant);
             using var application = await SqliteDeepIdV2AccountGeneration.OpenApplicationUnderLeaseAsync(
                 storage, sqlStatePath, current, held, ct).ConfigureAwait(false);
@@ -215,7 +214,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             {
                 exact = read.Item.GetCiphertextBundleCopy();
                 var mau = MailboxAuthenticatedClientRequestCodec.Decode(exact);
-                RequireOriginalAttemptRequest(entry, grant, originalRoute, mau, exact, nativeEnvelope.Span, read.Item);
+                RequireOriginalAttemptRequest(entry, grant, originalRoute, scope, mau, exact, nativeEnvelope.Span, read.Item);
                 if (entry.Prepared)
                 {
                     if (sends.MinimumCounter(entry.GrantHash) <= entry.Counter)
@@ -233,6 +232,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             }
             else if (read.Result != TransportOutboxReadResult.Missing)
                 throw new CryptographicException("Attempt closure requires an exact SQL read outcome.");
+            else RequireOriginalAttemptBody(entry, grant, originalRoute, scope, nativeEnvelope);
 
             await RecheckRouteFreshnessAsync(current, source, own, held, first, ct).ConfigureAwait(false);
             var finalFloor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
@@ -312,11 +312,14 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     }
 
     private static void RequireOriginalAttemptRequest(ProtectedDid2MailboxSendJournal.Entry entry,
-        MailboxAuthenticatedGrant grant, ParsedContactRouteClosure route, MailboxAuthenticatedClientRequest mau, ReadOnlySpan<byte> exact,
+        MailboxAuthenticatedGrant grant, ParsedContactRouteClosure route, Did2MessagingSessionScope scope,
+        MailboxAuthenticatedClientRequest mau, ReadOnlySpan<byte> exact,
         ReadOnlySpan<byte> nativeEnvelope, TransportOutboxItemSnapshot item)
     {
         var body = MailboxAuthenticatedRequestTranscript.DecodeStoreBody(mau.Binding.CanonicalRequest.Span);
         if (mau.Binding.Operation != MailboxAuthenticatedOperation.Store ||
+            !FixedRoute(entry.MailboxOperation, MailboxSendOperation(scope, entry.Attempt, nativeEnvelope)) ||
+            !FixedRoute(entry.EnvelopeHash, SHA256.HashData(nativeEnvelope)) ||
             !FixedRoute(mau.Binding.OperationId.Span, entry.MailboxOperation) ||
             !FixedRoute(body.OperationId.Span, entry.MailboxOperation) || body.Epoch != grant.Epoch ||
             !FixedRoute(body.MailboxId.Bytes.Span, route.Reachability.Field(2).Span) ||
@@ -344,7 +347,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             MailboxId = new BlindedMailboxId(route.Reachability.Field(2).Span),
             PlacementId = new BlindedPlacementId(route.Reachability.Field(10).Span),
             OperationId = operation,
-            DeduplicationDigest = SHA256.HashData(nativeEnvelope.Span),
+            DeduplicationDigest = MailboxAttemptEnvelopeDigest(operation, nativeEnvelope.Span),
             CreatedAtUnixSeconds = entry.Created,
             ExpiresAtUnixSeconds = entry.Expires,
             Ciphertext = nativeEnvelope

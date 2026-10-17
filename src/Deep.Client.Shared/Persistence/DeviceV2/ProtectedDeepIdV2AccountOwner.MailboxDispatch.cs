@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Diagnostics;
 using Deep.Client.Shared.Features;
 using Deep.Client.Shared.Services;
+using Deep.Client.Shared.Services.ContactV1;
 using Deep.Client.Shared.Services.ContactV2;
 using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.ContactV1;
@@ -270,13 +271,41 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             attemptId = entry is not null ? entry.Attempt.ToArray() : predecessor is not null ? NewRouteRandom32() : op.ToArray();
             var name = Convert.ToHexString(ProtectedDid2MailboxSendJournal.Key(scope.Hash, attemptId));
             var ciphertext = envelopeBytes.ToArray();
+            var mailboxOperation = MailboxSendOperation(scope, attemptId, envelopeBytes);
+            var transportDigest = MailboxAttemptEnvelopeDigest(mailboxOperation, envelopeBytes);
+            if (entry is not null)
+            {
+                // Replay the authenticated original body, never regenerate a
+                // captured request from a producer derivation or a new grant.
+                using var existingApplication = await SqliteDeepIdV2AccountGeneration.OpenApplicationUnderLeaseAsync(
+                    storage, sqlStatePath, current, held, ct).ConfigureAwait(false);
+                var read = await existingApplication.ReadTransportOutboxAsync(
+                    VerifiedCurrentMailboxGrant.AccountScopeForHolder(loan.Grant.HolderPublicKey.Span),
+                    OutboxLogicalId.FromBytes(entry.MailboxOperation), ct).ConfigureAwait(false);
+                if (read.Result == TransportOutboxReadResult.Corrupt || entry.Prepared && read.Item is null)
+                    throw new CryptographicException("Retry lost its original SQL request.");
+                if (read.Item is not null)
+                {
+                    var original = read.Item.GetCiphertextBundleCopy();
+                    try
+                    {
+                        var mau = MailboxAuthenticatedClientRequestCodec.Decode(original);
+                        if (!FixedRoute(SHA256.HashData(mau.Binding.CanonicalRequest.Span), entry.BodyHash) ||
+                            entry.Prepared && !FixedRoute(SHA256.HashData(original), entry.MauHash))
+                            throw new CryptographicException("Retry changed its protected original body.");
+                        transportDigest = MailboxAuthenticatedRequestTranscript.DecodeStoreBody(
+                            mau.Binding.CanonicalRequest.Span).DeduplicationDigest.ToArray();
+                    }
+                    finally { CryptographicOperations.ZeroMemory(original); }
+                }
+            }
             var envelope = new MailboxEncryptedEnvelope
             {
                 Epoch = loan.Grant.Epoch,
                 MailboxId = loan.Route.MailboxId,
                 PlacementId = loan.Route.PlacementId,
-                OperationId = MailboxSendOperation(scope, attemptId, envelopeBytes),
-                DeduplicationDigest = SHA256.HashData(envelopeBytes),
+                OperationId = mailboxOperation,
+                DeduplicationDigest = transportDigest,
                 CreatedAtUnixSeconds = created,
                 ExpiresAtUnixSeconds = expiry,
                 Ciphertext = ciphertext
@@ -697,6 +726,14 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         hash.AppendData("Deep/Local/DID2/MailboxStoreOperation/1"u8); hash.AppendData([0]);
         hash.AppendData(scope.Network); hash.AppendData(scope.LocalAccount); hash.AppendData(scope.Hash);
         hash.AppendData(operation); hash.AppendData(SHA256.HashData(dpe)); return hash.GetHashAndReset()[..16];
+    }
+
+    private static byte[] MailboxAttemptEnvelopeDigest(ReadOnlySpan<byte> operation, ReadOnlySpan<byte> ciphertext)
+    {
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        hash.AppendData(System.Text.Encoding.UTF8.GetBytes(MailboxDomainSeparation.EnvelopeDigest));
+        hash.AppendData([0]); hash.AppendData(operation); hash.AppendData(ciphertext);
+        return hash.GetHashAndReset();
     }
 
     private static void RequireMailboxPreparedSend(ProtectedDid2MailboxSendJournal.Entry entry,

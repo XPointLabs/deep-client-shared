@@ -95,7 +95,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             if (read is not { Result: TransportOutboxReadResult.Found, Item: not null })
                 throw new CryptographicException("Late Store cannot reconstruct an absent original SQL request.");
             exact = read.Item.GetCiphertextBundleCopy();
-            RequireOriginalAttemptRequest(entry, grant, route, MailboxAuthenticatedClientRequestCodec.Decode(exact), exact, envelope, read.Item);
+            RequireOriginalAttemptRequest(entry, grant, route, scope, MailboxAuthenticatedClientRequestCodec.Decode(exact), exact, envelope, read.Item);
             var replicas = MailboxStoreReplicaEvidenceVerifier.Verify(own.Network, own.Authority, route, metadata.Replicas);
             var upper = checked(own.Proof.TrustedUpperUnixSeconds + first.SampleSeconds - own.Proof.MonotonicSample);
             var verified = await VerifyOriginalStoreReplyAsync(scope, envelope, route, metadata, replicas,

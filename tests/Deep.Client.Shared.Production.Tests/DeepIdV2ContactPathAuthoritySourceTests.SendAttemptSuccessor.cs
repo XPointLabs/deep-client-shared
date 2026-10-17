@@ -12,7 +12,15 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     [InlineData("AfterSuccessorRoot")]
     [InlineData("AfterSql")]
     [Trait("RequiresApprovedMlKemRuntime", "true")]
-    public async Task Did2ExpiredAttempt_CurrentGrantSuccessorColdResumesSameNativeCiphertext(string successorFault)
+    public Task Did2ExpiredAttempt_CurrentGrantSuccessorColdResumesSameNativeCiphertext(string successorFault)
+        => RunExpiredAttemptSuccessorAsync(successorFault, false);
+
+    [Fact]
+    [Trait("RequiresApprovedMlKemRuntime", "true")]
+    public Task Did2ExpiredAttempt_LostCommittedReplySuccessorHasDistinctTransportKeyAndSameEvent()
+        => RunExpiredAttemptSuccessorAsync("AfterSql", true);
+
+    private async Task RunExpiredAttemptSuccessorAsync(string successorFault, bool lostCommittedReply)
     {
         // Real PQ/SQLCipher owners and authenticated control-plane/Store proofs;
         // private transports are in process, not physical network/device E2E.
@@ -30,10 +38,16 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         using var committed = await fixture.SendOwnedMessage(sender, operation, ApplicationCoreCodec.DecodeDmc2(text.ExactDmc2.Span));
         var oldIssuer = new OwnedGrantTransport(fixture, ownerOnPrimary: true);
         var oldTransport = new OwnedStoreFixture(fixture, sender, operation, committed.ExactEnvelope.ToArray());
-        using (Did2MailboxSendTestHooks.Push(point =>
+        if (lostCommittedReply)
+        {
+            oldTransport.LoseReply = true;
+            await Assert.ThrowsAsync<Deep.Client.Shared.Services.ClientMailboxDispatchOutcomeUnknownException>(
+                () => fixture.DeliverNativeMessage(sender, operation, oldIssuer, oldTransport));
+        }
+        else using (Did2MailboxSendTestHooks.Push(point =>
             { if (point == Did2MailboxSendFailpoint.AfterPreparedRoot) throw new IOException("Interrupted original prepared attempt."); }))
             await Assert.ThrowsAsync<IOException>(() => fixture.DeliverNativeMessage(sender, operation, oldIssuer, oldTransport));
-        Assert.Equal(1, oldIssuer.Calls); Assert.Equal(0, oldTransport.Calls);
+        Assert.Equal(1, oldIssuer.Calls); Assert.Equal(lostCommittedReply ? 1 : 0, oldTransport.Calls);
         byte[] original;
         using (var sends = await fixture.ReadMailboxSends()) original = Assert.Single(sends.Entries).Value.Exact.ToArray();
         using var prior = ProtectedDid2MailboxSendJournal.Entry.Decode(original);
@@ -50,6 +64,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         using var authoredBefore = await fixture.ReadAuthoredTextJournalAsync(sender);
         var successorIssuer = new OwnedGrantTransport(fixture, ownerOnPrimary: true);
         var transport = new OwnedStoreFixture(fixture, sender, operation, committed.ExactEnvelope.ToArray());
+        if (lostCommittedReply) transport.Cursor = 2;
         var failpoint = Enum.Parse<Did2MailboxSendFailpoint>(successorFault);
         var hit = false;
         using (Did2MailboxSendTestHooks.Push(point =>
@@ -60,6 +75,18 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         var unusedIssuer = new OwnedGrantTransport(fixture, ownerOnPrimary: true);
         var result = await fixture.DeliverNativeMessage(sender, operation, unusedIssuer, transport);
         Assert.NotNull(result.Cursor); Assert.Equal(0, unusedIssuer.Calls); Assert.Equal(1, transport.Calls);
+        var childBody = MailboxAuthenticatedRequestTranscript.DecodeStoreBody(
+            MailboxAuthenticatedClientRequestCodec.Decode(transport.ExactRequest!).Binding.CanonicalRequest.Span);
+        // Transport successors have new operation/cursor contexts. Reusing
+        // only H(ciphertext) collides with a possibly committed predecessor's
+        // native record. Semantic dedup remains the unchanged E2EE event.
+        Assert.NotEqual(SHA256.HashData(committed.ExactEnvelope), childBody.DeduplicationDigest.ToArray());
+        if (lostCommittedReply)
+        {
+            Assert.Equal(oldTransport.StoredEnvelope!.Ciphertext.ToArray(), childBody.Ciphertext.ToArray());
+            Assert.NotEqual(oldTransport.StoredEnvelope.DeduplicationDigest.ToArray(), childBody.DeduplicationDigest.ToArray());
+            Assert.NotEqual(oldTransport.StoredEnvelope.OperationId.ToArray(), childBody.OperationId.ToArray());
+        }
         ulong successfulAt;
         using (var authoredAfter = await fixture.ReadAuthoredTextJournalAsync(sender))
         {
