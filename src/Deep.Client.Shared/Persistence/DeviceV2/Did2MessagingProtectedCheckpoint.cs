@@ -89,7 +89,12 @@ internal sealed class Did2MessagingProtectedCheckpoint(IDeepSecureStorage storag
     {
         _ = Did2MessagingFloor.Decode(pending.Exact.Span, scope);
         if (pending.Phase != 2) throw new InvalidDataException("Only a pending floor requires protected message payload.");
-        var current = await ReadAsync(ct).ConfigureAwait(false);
+        using var inventory = await storage.ReadOwnedBatchAsync([scope.FloorSlot, .. PartSlots()], ct).ConfigureAwait(false);
+        ct.ThrowIfCancellationRequested();
+        if (inventory.Count != Did2MessagingFloor.MaximumParts + 1)
+            throw new InvalidDataException("Protected messaging pending inventory has another shape.");
+        var floor = inventory[0] ?? throw new InvalidDataException("Protected DID2 messaging floor is absent; no state repair is permitted.");
+        var current = floor.Use(bytes => Did2MessagingFloor.Decode(bytes, scope));
         if (!Did2MessagingSessionScope.Fixed(current.Exact.Span, pending.Exact.Span))
             throw new CryptographicException("Protected messaging pending floor changed.");
         var bytes = new byte[pending.PendingBytes];
@@ -97,7 +102,8 @@ internal sealed class Did2MessagingProtectedCheckpoint(IDeepSecureStorage storag
         {
             for (var index = 0; index < pending.PartCount; index++)
             {
-                using var part = await storage.ReadOwnedAsync(PartSlot(index), ct).ConfigureAwait(false)
+                ct.ThrowIfCancellationRequested();
+                var part = inventory[index + 1]
                     ?? throw new InvalidDataException("A protected messaging pending part is absent.");
                 var offset = index * Did2MessagingFloor.PartBytes;
                 var length = Math.Min(Did2MessagingFloor.PartBytes, bytes.Length - offset);
@@ -106,7 +112,8 @@ internal sealed class Did2MessagingProtectedCheckpoint(IDeepSecureStorage storag
             }
             for (var index = pending.PartCount; index < Did2MessagingFloor.MaximumParts; index++)
             {
-                using var extra = await storage.ReadOwnedAsync(PartSlot(index), ct).ConfigureAwait(false);
+                ct.ThrowIfCancellationRequested();
+                var extra = inventory[index + 1];
                 if (extra is not null) throw new InvalidDataException("Protected messaging pending has noncanonical extra parts.");
             }
             if (!Did2MessagingSessionScope.Fixed(SHA256.HashData(bytes), pending.PendingHash))

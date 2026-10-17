@@ -1,5 +1,28 @@
 # S05 — fresh owned inventory batches
 
+## Segmented custody read candidate
+
+After Windows29's new Add cancelled at120047ms (1717 Unprotect/69458ms
+protection), the selected segmented readers now use fresh bounded inventories:
+idle compaction checks all16 successor slots together; compaction successor
+read-back preserves its independent before/after exact-plan checks; messaging
+pending read captures the exact floor plus all18 possible parts together.
+The complete missing/extra/length/hash/scope checks remain. No part deletion,
+CAS, native reconciliation, signed deadline or public format changes. Each call
+reopens the actual aggregate; no snapshot/plaintext survives across calls.
+Other specialized compaction finishing paths are unchanged, not claimed batched.
+
+Affected80 passed/native0/0skip, Windows PowerShell5.1 SDK10.0.301 with no
+compiler diagnostics, receipt
+`artifacts/s05-segmented-custody-batch-20261017/focused-01`. New encrypted pending8
+and actual idle-owner4 cases cover independent reads, first/last orphan slots,
+missing/foreign floor, missing/truncated/tampered/extra parts, cancellation and
+unchanged custody bytes. The pending fixture observes exactly one Unprotect
+per read, twice independently; it is not device latency evidence. Existing
+checkpoint, staged compaction, native encrypted cold handovers, Initial retry,
+scoped contact start and device-source cases also pass. This is affected source,
+not canonical full/package or physical acceptance. Matching builds/retest remain.
+
 Matching Windows24/APK40 include the closed business observer, not this
 correction. Windows's exact retained contact retry reached its120s foreground
 budget: ContactStartTotal120031ms,3 Protect/1738 Unprotect calls,78880ms of

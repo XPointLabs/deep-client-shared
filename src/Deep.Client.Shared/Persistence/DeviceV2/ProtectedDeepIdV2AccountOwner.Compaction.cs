@@ -321,18 +321,22 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
 
     private async Task ValidateFinishingPrefixPartsAsync(Did2CompactionPlan plan, CancellationToken ct)
     {
+        using var parts = await ProtectedDid2CompactionPlan.ReadPartsAsync(storage, ct).ConfigureAwait(false);
         for (var index = 0; index < Did2CompactionPlan.MaximumSuccessorBytes / Did2CompactionPlan.PartBytes; index++)
         {
-            using var part = await storage.ReadOwnedAsync(ProtectedDid2CompactionPlan.PartSlot(index), ct).ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested();
+            var part = parts[index];
             if (index == 0) { if (part is not null) part.Use(bytes => plan.ValidateSuccessors(bytes)); }
             else if (part is not null) throw new InvalidDataException("Prefix has an unexpected successor part.");
         }
     }
     private async Task RequireNoPrefixPartsAsync(CancellationToken ct)
     {
+        using var parts = await ProtectedDid2CompactionPlan.ReadPartsAsync(storage, ct).ConfigureAwait(false);
         for (var index = 0; index < Did2CompactionPlan.MaximumSuccessorBytes / Did2CompactionPlan.PartBytes; index++)
         {
-            using var part = await storage.ReadOwnedAsync(ProtectedDid2CompactionPlan.PartSlot(index), ct).ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested();
+            var part = parts[index];
             if (part is not null) throw new InvalidDataException("Idle prefix has orphan successor custody.");
         }
     }

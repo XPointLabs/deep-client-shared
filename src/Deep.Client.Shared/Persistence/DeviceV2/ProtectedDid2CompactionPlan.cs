@@ -30,6 +30,20 @@ internal sealed class ProtectedDid2CompactionPlan
         return Did2CompactionPlan.Slot + ".successor." + index.ToString(CultureInfo.InvariantCulture);
     }
 
+    internal static async Task<OwnedDeepSecretBatch> ReadPartsAsync(IDeepSecureStorage storage, CancellationToken ct)
+    {
+        var slots = Enumerable.Range(0, Did2CompactionPlan.MaximumSuccessorBytes / Did2CompactionPlan.PartBytes)
+            .Select(PartSlot).ToArray();
+        var parts = await storage.ReadOwnedBatchAsync(slots, ct).ConfigureAwait(false);
+        try
+        {
+            ct.ThrowIfCancellationRequested();
+            if (parts.Count != slots.Length) throw new InvalidDataException("Compaction part inventory has another shape.");
+            return parts;
+        }
+        catch { parts.Dispose(); throw; }
+    }
+
     // Read-only registration check. The existing account registration producer
     // creates the empty slot; a reader must never synthesize it when absent.
     internal static async Task<Did2CompactionPlan> ReadRegisteredAsync(IDeepSecureStorage storage,
@@ -106,10 +120,11 @@ internal sealed class ProtectedDid2CompactionPlan
         var bytes = new byte[plan.SuccessorBytes];
         try
         {
+            using var parts = await ReadPartsAsync(storage, ct).ConfigureAwait(false);
             for (var index = 0; index < Did2CompactionPlan.MaximumSuccessorBytes / Did2CompactionPlan.PartBytes; index++)
             {
                 ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
-                using var part = await storage.ReadOwnedAsync(PartSlot(index), ct).ConfigureAwait(false);
+                var part = parts[index];
                 if (index >= plan.PartCount)
                 { if (part is not null) throw new InvalidDataException("Compaction staging has an unexpected extra part."); continue; }
                 var offset = index * Did2CompactionPlan.PartBytes;
@@ -130,9 +145,11 @@ internal sealed class ProtectedDid2CompactionPlan
 
     private async Task RequireNoPartsAsync(CancellationToken ct)
     {
+        using var parts = await ReadPartsAsync(storage, ct).ConfigureAwait(false);
         for (var index = 0; index < Did2CompactionPlan.MaximumSuccessorBytes / Did2CompactionPlan.PartBytes; index++)
         {
-            using var part = await storage.ReadOwnedAsync(PartSlot(index), ct).ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested();
+            var part = parts[index];
             if (part is not null) throw new InvalidDataException("Idle compaction has unexplained successor custody; no deletion is permitted.");
         }
     }

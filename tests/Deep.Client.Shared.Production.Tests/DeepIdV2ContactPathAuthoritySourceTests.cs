@@ -3202,6 +3202,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         internal Action? AfterApplicationReadGroup { get; set; }
         internal Action? AfterDeviceRegistrationReadGroup { get; set; }
         internal Action? AfterRetirementReadGroup { get; set; }
+        internal Action? AfterCompactionPartReadGroup { get; set; }
+        internal int CompactionPartSingleReads { get; set; }
         public Task<bool> CompareAndDeleteAsync(string guardSlot, ReadOnlyMemory<byte> expected,
             IReadOnlyList<string> slots, CancellationToken ct = default) => inner.CompareAndDeleteAsync(guardSlot, expected, slots, ct);
 
@@ -3268,6 +3270,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         }
         public async Task<OwnedDeepSecret?> ReadOwnedAsync(string slot, CancellationToken ct = default)
         {
+            if (TrackApplicationReads && slot.StartsWith(Did2CompactionPlan.Slot + ".successor.", StringComparison.Ordinal)) CompactionPartSingleReads++;
             if (TrackApplicationReads) ApplicationSingleReads++;
             if (TrackNetworkMarkerReads && slot.Contains(".network-lkg-floor.", StringComparison.Ordinal)) NetworkMarkerSingleReads++;
             var value = await inner.ReadOwnedAsync(slot, ct);
@@ -3290,6 +3293,12 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             try
             {
                 for (var index = 0; index < captured.Length; index++) ObserveRead(captured[index], result[index]);
+                if (AfterCompactionPartReadGroup is { } afterCompactionRead && captured.Length == 16 &&
+                    captured.Contains(ProtectedDid2CompactionPlan.PartSlot(15), StringComparer.Ordinal))
+                {
+                    AfterCompactionPartReadGroup = null;
+                    afterCompactionRead();
+                }
                 if (AfterDeviceRegistrationReadGroup is { } afterDeviceRead && captured.Length == 2 &&
                     captured.Contains(SqliteDeepIdV2AccountGeneration.DeviceStateMarkerSlot, StringComparer.Ordinal))
                 {

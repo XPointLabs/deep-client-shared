@@ -223,6 +223,8 @@ public sealed partial class Did2MessagingCheckpointTests
     private sealed class Protector(byte[] key) : IDeepSecretProtector, IDisposable
     {
         private readonly byte[] ownedKey = key.ToArray();
+        internal int UnprotectCalls { get; private set; }
+        internal Action? AfterUnprotect { get; set; }
         public byte[] Protect(ReadOnlySpan<byte> bytes)
         {
             var result = new byte[28 + bytes.Length]; RandomNumberGenerator.Fill(result.AsSpan(0, 12));
@@ -230,8 +232,9 @@ public sealed partial class Did2MessagingCheckpointTests
         }
         public byte[] Unprotect(ReadOnlySpan<byte> bytes)
         {
+            UnprotectCalls++;
             var result = new byte[bytes.Length - 28];
-            try { using var cipher = new AesGcm(ownedKey, 16); cipher.Decrypt(bytes[..12], bytes[28..], bytes.Slice(12, 16), result); return result; }
+            try { using var cipher = new AesGcm(ownedKey, 16); cipher.Decrypt(bytes[..12], bytes[28..], bytes.Slice(12, 16), result); AfterUnprotect?.Invoke(); return result; }
             catch { CryptographicOperations.ZeroMemory(result); throw; }
         }
         public void Dispose() => CryptographicOperations.ZeroMemory(ownedKey);
