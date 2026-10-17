@@ -34,8 +34,9 @@ internal static partial class ProtectedDid2MailboxReadJournal
     internal sealed class Cycle : IDisposable
     {
         internal byte[] Grant = [], Scope = [], Route = [], RetrieveBody = [], RetrieveMauHash = new byte[32],
-            Page = [], AckBody = [], AckMauHash = new byte[32], AckReply = [];
+            Page = [], AckBody = [], AckMauHash = new byte[32], AckReply = [], AckGrant = [];
         internal ulong PollGeneration, RetrieveCounter, CapturedAt, AckCounter;
+        internal ReadOnlySpan<byte> AckGrantHash => AckGrant.Length == 0 ? Grant : AckGrant;
 
         internal static Cycle Begin(ReadOnlySpan<byte> grant, ReadOnlySpan<byte> scope, ReadOnlySpan<byte> route,
             ulong pollGeneration, ReadOnlySpan<byte> retrieveBody)
@@ -82,7 +83,7 @@ internal static partial class ProtectedDid2MailboxReadJournal
             if (request.Binding.Operation != (ack ? MailboxAuthenticatedOperation.Ack : MailboxAuthenticatedOperation.Retrieve) ||
                 !Fixed(request.Binding.CanonicalRequest.Span, body) ||
                 request.Presentation.Grant.Domain != MailboxCapabilityDomain.Retrieve ||
-                !Fixed(SHA256.HashData(MailboxAuthenticatedCapabilityCodec.EncodeGrant(request.Presentation.Grant)), Grant) ||
+                !Fixed(SHA256.HashData(MailboxAuthenticatedCapabilityCodec.EncodeGrant(request.Presentation.Grant)), ack ? AckGrantHash : Grant) ||
                 request.Presentation.ReplayCounter == 0 ||
                 !PublicKeyAuth.VerifyDetached(request.Presentation.HolderSignature.ToArray(),
                     MailboxAuthenticatedCapabilityCodec.GetPresentationSigningBytes(request.Presentation), request.Presentation.Grant.HolderPublicKey.ToArray()))
@@ -97,6 +98,7 @@ internal static partial class ProtectedDid2MailboxReadJournal
             using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
             hash.AppendData("Deep/Local/DID2/MailboxAckOperation/1"u8); hash.AppendData([0]);
             hash.AppendData(Scope); hash.AppendData(Grant); hash.AppendData(RetrieveMauHash); hash.AppendData(SHA256.HashData(Page));
+            if (AckGrant.Length != 0) hash.AppendData(AckGrant);
             return hash.GetHashAndReset()[..16];
         }
 
@@ -112,7 +114,7 @@ internal static partial class ProtectedDid2MailboxReadJournal
 
         public void Dispose()
         {
-            foreach (var bytes in new[] { Grant, Scope, Route, RetrieveBody, RetrieveMauHash, Page, AckBody, AckMauHash, AckReply })
+            foreach (var bytes in new[] { Grant, Scope, Route, RetrieveBody, RetrieveMauHash, Page, AckBody, AckMauHash, AckReply, AckGrant })
                 CryptographicOperations.ZeroMemory(bytes);
         }
     }
@@ -123,7 +125,7 @@ internal static partial class ProtectedDid2MailboxReadJournal
     internal static State Decode(ReadOnlySpan<byte> exact, ReadOnlySpan<byte> network, ReadOnlySpan<byte> account, ReadOnlySpan<byte> instance)
     {
         RequireScope(network, account, instance);
-        if (exact.Length is < HeaderBytes or > MaximumBytes || exact[0] != 1 || exact[1] > 6 ||
+        if (exact.Length is < HeaderBytes or > MaximumBytes || exact[0] != 1 || exact[1] > 8 ||
             !Fixed(exact.Slice(12, 16), network) || !Fixed(exact.Slice(28, 32), account) || !Fixed(exact.Slice(60, 32), instance)) throw Bad();
         var counters = BinaryPrimitives.ReadUInt16BigEndian(exact.Slice(2));
         var scopes = BinaryPrimitives.ReadUInt16BigEndian(exact.Slice(92));
@@ -156,6 +158,7 @@ internal static partial class ProtectedDid2MailboxReadJournal
                 cycle.CapturedAt = reader.U64(); cycle.Page = reader.Blob(MaximumPageBytes).ToArray();
                 cycle.AckBody = reader.Blob(5_000).ToArray(); cycle.AckCounter = reader.U64(); cycle.AckMauHash = reader.Take(32).ToArray();
                 cycle.AckReply = reader.Blob(MaximumAckReplyBytes).ToArray();
+                if (state.Phase >= 7) cycle.AckGrant = reader.Take(32).ToArray();
             }
             ReadClosed(ref reader, state, closed);
             if (!reader.End) throw Bad(); Validate(state); return state;
@@ -184,6 +187,7 @@ internal static partial class ProtectedDid2MailboxReadJournal
                 Write64(stream, c.RetrieveCounter); stream.Write(c.RetrieveMauHash); Write64(stream, c.CapturedAt); WriteBlob(stream, c.Page);
                 WriteBlob(stream, c.AckBody); Write64(stream, c.AckCounter); stream.Write(c.AckMauHash);
                 WriteBlob(stream, c.AckReply);
+                if (state.Phase >= 7) stream.Write(c.AckGrant);
             }
             WriteClosed(stream, state);
             var exact = stream.ToArray();
@@ -195,7 +199,7 @@ internal static partial class ProtectedDid2MailboxReadJournal
 
     private static void Validate(State state)
     {
-        if (state.Phase > 6 || state.Counters.Count > MaximumFloors || state.Traversals.Count > MaximumFloors || state.Closed.Count > MaximumFloors ||
+        if (state.Phase > 8 || state.Counters.Count > MaximumFloors || state.Traversals.Count > MaximumFloors || state.Closed.Count > MaximumFloors ||
             state.Revision < checked((ulong)(state.Counters.Count + state.Traversals.Count + state.Closed.Count) + 1) ||
             (state.Phase == 0) != (state.Active is null)) throw Bad();
         foreach (var pair in state.Counters) { if (Name(Convert.FromHexString(pair.Key)) != pair.Key || pair.Value == 0) throw Bad(); }
@@ -204,16 +208,23 @@ internal static partial class ProtectedDid2MailboxReadJournal
         ValidateClosed(state);
         if (state.Active is not { } c) return;
         Require32(c.Grant); Require32(c.Scope); Require32(c.Route);
+        var independentAck = state.Phase >= 7;
+        var preparedAck = state.Phase is 6 or 8;
+        if (independentAck)
+        { Require32(c.AckGrant); if (Fixed(c.AckGrant, c.Grant) || c.ReadPage().HasMore) throw Bad(); }
+        else if (c.AckGrant.Length != 0) throw Bad();
         if (c.RetrieveBody.Length is < 108 or > 364 || c.Page.Length > MaximumPageBytes || c.AckBody.Length > 5_000 ||
             c.RetrieveMauHash.Length != 32 || c.AckMauHash.Length != 32 || c.AckReply.Length > MaximumAckReplyBytes ||
-            state.Phase != 6 && c.AckReply.Length != 0) throw Bad();
+            !preparedAck && c.AckReply.Length != 0) throw Bad();
         var request = MailboxAuthenticatedRequestTranscript.DecodeRetrieveBody(c.RetrieveBody);
         if (request.MaximumItems is < 1 or > MaximumItems || !state.Traversals.TryGetValue(Name(c.Scope), out var traversal) ||
             (state.Phase >= 2 ? c.RetrieveCounter == 0 || Zero(c.RetrieveMauHash) : c.RetrieveCounter != 0 || !Zero(c.RetrieveMauHash)) ||
             (state.Phase >= 3 ? c.CapturedAt == 0 || c.Page.Length == 0 : c.CapturedAt != 0 || c.Page.Length != 0) ||
             (state.Phase >= 5) != (c.AckBody.Length != 0) ||
-            (state.Phase == 6 ? c.AckCounter <= c.RetrieveCounter || Zero(c.AckMauHash) : c.AckCounter != 0 || !Zero(c.AckMauHash))) throw Bad();
-        if (state.Phase >= 2 && state.Counters.GetValueOrDefault(Name(c.Grant)) != (state.Phase == 6 ? c.AckCounter : c.RetrieveCounter)) throw Bad();
+            (preparedAck ? c.AckCounter == 0 || !independentAck && c.AckCounter <= c.RetrieveCounter || Zero(c.AckMauHash) : c.AckCounter != 0 || !Zero(c.AckMauHash))) throw Bad();
+        if (state.Phase >= 2 && (state.Counters.GetValueOrDefault(Name(c.Grant)) !=
+                (state.Phase == 6 ? c.AckCounter : c.RetrieveCounter) ||
+            independentAck && preparedAck && state.Counters.GetValueOrDefault(Name(c.AckGrant)) != c.AckCounter)) throw Bad();
         var page = state.Phase >= 3 ? c.ReadPage() : null;
         var after = state.Phase >= 4 ? page!.HasMore ? page.NextCursor : 0 : request.AfterCursor;
         var token = state.Phase >= 4 ? page!.HasMore ? page.ContinuationToken : ReadOnlyMemory<byte>.Empty : request.ContinuationToken;

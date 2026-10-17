@@ -19,7 +19,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     internal async Task<ClientMailboxAckResult> AcknowledgeOwnMailboxAsync(ulong unixSeconds, IDeepMlDsa65Verifier verifier,
         OwnedDid2MailboxReadPage descriptor, IReadOnlyList<Did2MailboxSemanticEndpoints> endpoints,
         DeepIdV2ContactPathAuthoritySource source, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh,
-        IDid2OwnedMailboxTransportFactory transport, CancellationToken ct)
+        IDid2MailboxGrantTransport grantTransport, IDid2OwnedMailboxTransportFactory transport, CancellationToken ct)
     {
         byte[] instance = [], snapshot = [], grantRoot = [], exact = [];
         try
@@ -38,14 +38,20 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 cycle.CapturedAt != descriptor.CapturedAt || !FixedRoute(cycle.Route, publication.Route.ExactHash.Span))
                 throw new CryptographicException("ACK descriptor differs from the actual protected committed page.");
             var page = cycle.ReadPage(); if (page.Items.Count == 0) throw new CryptographicException("An empty page cannot mint an ACK.");
+            var renewed = await ReauthorizeCapturedFinalAckUnderLeaseAsync(current, held, source, fresh,
+                state, snapshot, instance, grantTransport, ct).ConfigureAwait(false);
+            CryptographicOperations.ZeroMemory(snapshot); snapshot = renewed;
             using (var root = await storage.ReadOwnedAsync(ProtectedDid2MailboxGrantJournal.Slot, ct).ConfigureAwait(false) ?? throw new InvalidDataException("Protected holder custody disappeared."))
                 grantRoot = root.Use(bytes => bytes.ToArray());
             using var grants = ProtectedDid2MailboxGrantJournal.Decode(grantRoot, networkId, current.AccountId.Span, instance);
             var grantName = Convert.ToHexString(ProtectedDid2MailboxGrantJournal.Scope(cycle.Route, publication.Locator.Span, (byte)MailboxCapabilityDomain.Retrieve));
-            var retained = ProtectedDid2MailboxGrantJournal.RequireRetainedWinner(grants, grantName, cycle.Grant);
+            var originalRetained = ProtectedDid2MailboxGrantJournal.RequireRetainedWinner(grants, grantName, cycle.Grant);
+            if (!ProtectedDid2MailboxGrantJournal.HasReservedReadIntent(originalRetained))
+                throw new CryptographicException("ACK lost its original read-intent reservation; repair is forbidden.");
+            var retained = ProtectedDid2MailboxGrantJournal.RequireRetainedWinner(grants, grantName, cycle.AckGrantHash);
             var winner = await publication.Host.VerifyRetainedReadSuccessAsync(publication.Route.ExactBytes,
                 ProtectedDid2MailboxGrantJournal.Request(retained), ProtectedDid2MailboxGrantJournal.Response(retained), ct).ConfigureAwait(false);
-            if (!FixedRoute(SHA256.HashData(winner.ExactGrant.Span), cycle.Grant)) throw new CryptographicException("ACK changed its retained grant.");
+            if (!FixedRoute(SHA256.HashData(winner.ExactGrant.Span), cycle.AckGrantHash)) throw new CryptographicException("ACK changed its retained grant.");
             if (!ProtectedDid2MailboxGrantJournal.HasReservedReadIntent(retained))
                 throw new CryptographicException("ACK lost its original read-intent reservation; repair is forbidden.");
             // Independently reconstruct semantic handoffs from actual verified
@@ -69,7 +75,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var body = MailboxAuthenticatedRequestTranscript.DecodeAckBody(cycle.AckBody);
             var stored = await loan.Store.ReadTransportOutboxAsync(loan.Selector.AccountScope, OutboxLogicalId.FromBytes(body.OperationId.Span), ct).ConfigureAwait(false);
             MailboxAuthenticatedRequestFrame prepared;
-            if (state.Phase == 6)
+            if (state.Phase is 6 or 8)
             {
                 if (stored.Item is null || stored.Result != TransportOutboxReadResult.Found) throw new CryptographicException("Protected ACK has no SQL request; regeneration is forbidden.");
                 exact = stored.Item.GetCiphertextBundleCopy(); prepared = new(MailboxAuthenticatedOperation.Ack, exact);
@@ -78,12 +84,13 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             else
             {
                 if (stored.Item is { State: not TransportOutboxState.Prepared }) throw new CryptographicException("Pending protected ACK cannot already be dispatched.");
-                loan.MinimumCounter = state.MinimumCounter(cycle.Grant);
+                loan.MinimumCounter = state.MinimumCounter(cycle.AckGrantHash);
                 prepared = await new MailboxAuthenticatedRequestFactory(loan.Store, loan.Authority).CreateAckAsync(loan.Selector.AccountScope,
                     loan.Selector, loan.Signer, body.OperationId, body.IsFinalPage, body.ContinuationToken, body.Acknowledgements, ct).ConfigureAwait(false);
                 exact = prepared.GetCanonicalMau3Copy(); cycle.AdoptPrepared(exact, ack: true);
                 if (cycle.AckCounter < loan.MinimumCounter) throw new CryptographicException("SQL ACK replay counter rolled back behind protected custody.");
-                state.Counters[Convert.ToHexString(cycle.Grant)] = cycle.AckCounter; state.Phase = 6; await Save(ct).ConfigureAwait(false);
+                state.Counters[Convert.ToHexString(cycle.AckGrantHash)] = cycle.AckCounter;
+                state.Phase = cycle.AckGrant.Length == 0 ? (byte)6 : (byte)8; await Save(ct).ConfigureAwait(false);
             }
             var custody = await SqliteDeepIdV2AccountGeneration.OpenBorrowedOnionCustodyAsync(storage, lease, sqlStatePath, current, source.AccountOwner, held, ct).ConfigureAwait(false);
             var pma = fresh.MailboxAuthority;

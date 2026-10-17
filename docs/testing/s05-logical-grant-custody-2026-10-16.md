@@ -132,3 +132,48 @@ Store outcomes across issuer rotation/current-policy substitution. Protocol's
 `crypto-02` passed14, including its actual monolithic claim-cryptography witness.
 Matching corrected clients and physical business acceptance remain pending. No replay freshness,
 authority lifetime, timeout, schema or account reset was changed.
+
+## 2026-10-17 captured final-page expiry continuation
+
+Physical APK48 retained an Initial page but Refresh243 stopped at the expired
+original Retrieve grant before the DR-0136 claim verifier. Independent Inspect244
+confirmed terminal error. [DR-0137](../../../docs/survival-program/decisions/DR-0137-captured-final-page-expiry-continuation.md)
+separates historical local page completion from a current first ACK. It does not
+authorize another ACK for an expired already-prepared operation; native mutation
+custody is operation-bound. Non-final pagination and captured ACK-response expiry
+remain closed. No account reset, lifetime extension or native admission relaxation.
+
+The same protected root/marker/bounds add pending/prepared independent ACK states
+7/8 with the new grant hash; existing read/ACK states are unchanged. Exact original
+Retrieve/page/holder/counters remain retained. Local SQL completion authenticates
+original custody and capture interval; it has no transport or credential loan.
+Only the first ACK may acquire independent current authority for the same original
+private namespace. Prepared work, both grants and counter floors pin retirement.
+
+Evidence under `artifacts/s05-captured-final-expiry-20261017`:
+
+- `red-01`:0PASS/2FAIL/native1, the same expired-grant guard as the device.
+- `focused-02` and `focused-04`: compiler failures, no qualifying TRX.
+- `focused-03`:2PASS/native0, but review found that the fixture permitted a new
+  ACK after an old tombstone, unlike the actual native owner. That scenario is
+  **not accepted coverage**. The permissive fixture behavior was removed; the
+  expired prepared-ACK case must now refuse reauthorization without changing
+  its protected read/grant roots or calling transport/issuer.
+- Corrected batch `regression-05`:16PASS/1FAIL/native1/0skip, no compiler
+  diagnostics. The sole failure was the new cold retry attempting before the
+  ordinary adapter lease elapsed (ClientMailboxRetryLeaseException), not an
+  authority bypass or native success. Both authenticated fixture clocks now
+  advance40 seconds as in the existing retry cases; the runtime lease is
+  unchanged. Final two-case `focused-06`:2PASS/native0/0skip, no compiler
+  diagnostics. The runtime did not change between05 and06. The batch includes cold final-page
+  completion, loss/retry of the independently authorized first ACK, current
+  ordinary receive/promotion/view-renewal cases, uncaptured expiry closure and
+  hostile capture-time/SQL/non-final/cancellation cases.
+
+The exact changed-source security scan covers16 files with0 findings; five UTF-8
+documents and99 relative links validate. This is not the whole-repository scan:
+the previously classified unchanged frozen mnemonic-expression finding and the
+accumulated frozen-registry source/anchor drift remain open full-gate concerns.
+
+Physical contact/text/file/group acceptance remains0/4. This source work is not
+full/package/strict-registry or matching installed-device qualification.

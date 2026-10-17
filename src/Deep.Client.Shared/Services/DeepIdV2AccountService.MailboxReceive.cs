@@ -85,7 +85,7 @@ public sealed partial class DeepIdV2AccountService
             endpoints.Add(new(scope, await source.VerifyForOwnMessagingAsync(this, scope, ct).ConfigureAwait(false)));
         own = await source.VerifyForOwnPreKeyAuthoringAsync(this, ct).ConfigureAwait(false);
         var acknowledged = await owner.AcknowledgeOwnMailboxAsync(TrustedUnixSeconds(), verifier, descriptor,
-            endpoints, source, own, transport, ct).ConfigureAwait(false);
+            endpoints, source, own, grants, transport, ct).ConfigureAwait(false);
         return new(page.Items.Count, page.HasMore, acknowledged.DurableTombstones);
     }
 }

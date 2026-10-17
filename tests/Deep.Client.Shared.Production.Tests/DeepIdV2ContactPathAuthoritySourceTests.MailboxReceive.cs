@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using Deep.Client.Shared.Persistence;
 using Deep.Client.Shared.Persistence.DeviceV2;
 using Deep.Client.Shared.Services;
+using Deep.Client.Shared.Services.ContactV1;
 using Deep.Client.Shared.Services.ContactV2;
 using Deep.Client.Shared.Services.XPointNetworkV1;
 using Deep.Protocol.ApplicationCore;
@@ -29,6 +30,119 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     public async Task Did2OwnedMailboxReceive_CommittedInitialAcrossOrdinaryViewRenewalKeepsContactAndReply()
         => await CheckOwnedMailboxReceiveAsync(selectedSuccessor: false,
             renewPublicationDuringAck: false, carriageRenewal: true);
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("RequiresApprovedMlKemRuntime", "true")]
+    public async Task Did2OwnedMailboxReceive_ExpiredCapturedFinalPageKeepsOriginalCustodyAndUsesIndependentAck(bool lostAck)
+        => await CheckExpiredCapturedPageAsync(lostAck, "none");
+
+    [Theory]
+    [InlineData("capture-time")]
+    [InlineData("changed-sql")]
+    [InlineData("non-final")]
+    [InlineData("cancelled")]
+    [Trait("RequiresApprovedMlKemRuntime", "true")]
+    public async Task Did2OwnedMailboxReceive_ExpiredCapturedPageRejectsMissingAuthorityWithoutReauthorization(string defect)
+        => await CheckExpiredCapturedPageAsync(false, defect);
+
+    private static async Task CheckExpiredCapturedPageAsync(bool lostAck, string defect)
+    {
+        await using var fixture = await Fixture.CreateAsync(withPeer: true, longMailboxWindow: true, encryptedStorage: true);
+        var intent = Bytes(32, 0xc1);
+        var (complete, _, _, _, _) = await fixture.PrepareNativeHelloCompletion(intent, verifyDraftRecovery: true);
+        byte[] initial;
+        using (var sent = await complete(fixture.Accounts)) initial = sent.ExactDph2.ToArray();
+        fixture.TrackMailboxDispatchClock();
+        var store = new OwnedStoreFixture(fixture, null, ProtectedDeepIdV2AccountOwner.InitialMailboxOperation(intent), initial);
+        _ = await fixture.StartNativeContact(intent, new OwnedGrantTransport(fixture, ownerOnPrimary: true), store);
+        var original = new OwnedGrantTransport(fixture, selfRetrieve: true, ownerOnPrimary: false)
+            { MaximumFixtureGrantLifetimeSeconds = 120 };
+        var terminal = new OwnedReadTerminal(fixture, initial)
+        { RetainedEnvelope = store.StoredEnvelope, LoseAckReply = lostAck, HasMoreAfterPage = defect == "non-final" };
+        if (lostAck)
+            await Assert.ThrowsAsync<ClientMailboxDispatchOutcomeUnknownException>(() => fixture.SynchronizeNativeReceiver(original, terminal));
+        else
+        {
+            var hit = false;
+            using (ClientMailboxRetrieveTestHooks.Push(point =>
+            { if (point == ClientMailboxRetrieveFailpoint.AfterPageCommit) { hit = true; throw new IOException("Captured final-page interruption."); } }))
+                await Assert.ThrowsAsync<ClientMailboxDispatchOutcomeUnknownException>(() => fixture.SynchronizeNativeReceiver(original, terminal));
+            Assert.True(hit);
+        }
+        byte[] exactPage, originalGrant;
+        using (var read = await fixture.ReadPeerMailboxReads())
+        {
+            Assert.Equal(lostAck ? 6 : 3, read.Phase);
+            exactPage = read.Active!.Page.ToArray(); originalGrant = read.Active.Grant.ToArray();
+        }
+        var originalMau = Assert.Single(terminal.ExactRetrieveRequests).ToArray();
+        var originalAck = terminal.ExactAckRequests.SingleOrDefault()?.ToArray();
+        var grant = MailboxAuthenticatedClientRequestCodec.Decode(originalMau).Presentation.Grant;
+        var delta = checked(grant.ExpiresAtUnixSeconds + 31 - fixture.CurrentProofTime);
+        fixture.ProofTime = checked(fixture.ProofTime + delta); fixture.Sample = checked(fixture.Sample + delta);
+        if (defect == "capture-time") await fixture.ChangePeerFinalPageCaptureTimeAsync(grant.ExpiresAtUnixSeconds);
+        if (defect == "changed-sql") await fixture.DamagePeerFinalPageRequestAsync(originalMau);
+        fixture.ColdReopenReceiverStoreStorage();
+        terminal.LoseAckReply = false; terminal.IndependentAck = true; terminal.ExpectedAckCounter = 1;
+        var replacement = new OwnedGrantTransport(fixture, selfRetrieve: true, ownerOnPrimary: false);
+        if (defect != "none")
+        {
+            var before = await fixture.PeerFinalPageCustodyDigestAsync();
+            if (defect == "cancelled")
+            {
+                using var cancellation = new CancellationTokenSource(); cancellation.Cancel();
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(() => fixture.SynchronizeNativeReceiver(replacement, terminal, cancellation.Token));
+            }
+            else if (defect == "changed-sql")
+                await Assert.ThrowsAsync<MailboxAuthenticatedCapabilityException>(() => fixture.SynchronizeNativeReceiver(replacement, terminal));
+            else await Assert.ThrowsAnyAsync<CryptographicException>(() => fixture.SynchronizeNativeReceiver(replacement, terminal));
+            Assert.Equal(before, await fixture.PeerFinalPageCustodyDigestAsync());
+            Assert.Equal(0, replacement.Calls); Assert.Equal(1, terminal.RetrieveCalls); Assert.Equal(0, terminal.AckCalls);
+            return;
+        }
+        if (lostAck)
+        {
+            var before = await fixture.PeerFinalPageCustodyDigestAsync();
+            await Assert.ThrowsAsync<CryptographicException>(() => fixture.SynchronizeNativeReceiver(replacement, terminal));
+            Assert.Equal(before, await fixture.PeerFinalPageCustodyDigestAsync());
+            Assert.Equal(0, replacement.Calls); Assert.Equal(1, terminal.RetrieveCalls); Assert.Equal(1, terminal.AckCalls);
+            Assert.Equal(originalAck, Assert.Single(terminal.ExactAckRequests));
+            using var retained = await fixture.ReadPeerMailboxReads();
+            Assert.Equal(6, retained.Phase); Assert.Equal(exactPage, retained.Active!.Page);
+            Assert.Equal(originalGrant, retained.Active.Grant); Assert.Empty(retained.Closed);
+            return; // Native original-ACK outcome recovery is deliberately not faked.
+        }
+        terminal.LoseAckReply = true;
+        await Assert.ThrowsAsync<ClientMailboxDispatchOutcomeUnknownException>(() => fixture.SynchronizeNativeReceiver(replacement, terminal));
+        Assert.Equal(1, replacement.Calls); Assert.Equal(1, terminal.RetrieveCalls); Assert.Equal(1, terminal.AckCalls);
+        using (var pending = await fixture.ReadPeerMailboxReads())
+        { Assert.Equal(8, pending.Phase); Assert.Equal(exactPage, pending.Active!.Page); Assert.Equal(originalGrant, pending.Active.Grant); }
+        fixture.ColdReopenReceiverStoreStorage(); terminal.LoseAckReply = false;
+        // Exact outcome-unknown retry still owns the normal bounded adapter
+        // lease. Advance both authenticated fixture clocks; never bypass it.
+        fixture.Sample += 40; fixture.ProofTime += 40;
+        var result = await fixture.SynchronizeNativeReceiver(replacement, terminal);
+        Assert.Equal(1, result.ProcessedEnvelopes); Assert.Equal(1, result.DurableTombstones); Assert.False(result.HasMore);
+        Assert.Equal(1, replacement.Calls); Assert.Equal(1, terminal.RetrieveCalls);
+        Assert.Equal(2, terminal.AckCalls);
+        Assert.Equal(terminal.ExactAckRequests[0], terminal.ExactAckRequests[1]);
+        Assert.Equal(originalMau, Assert.Single(terminal.ExactRetrieveRequests));
+        var newAck = MailboxAuthenticatedClientRequestCodec.Decode(terminal.ExactAckRequests[^1]);
+        Assert.NotEqual(originalGrant, SHA256.HashData(MailboxAuthenticatedCapabilityCodec.EncodeGrant(newAck.Presentation.Grant)));
+        using (var read = await fixture.ReadPeerMailboxReads())
+        {
+            Assert.Equal(0, read.Phase); Assert.Null(read.Active);
+            Assert.Empty(read.Closed);
+        }
+        fixture.ColdReopenReceiverStoreStorage();
+        var receiver = await fixture.ReceiveNativeMailboxInitial(initial);
+        Assert.Equal(Did2ContactAcceptanceState.IncomingRequest, await fixture.ReadOwnedContactState(receiver));
+        Assert.Equal(0, (await fixture.SynchronizeNativeReceiver(replacement, terminal)).ProcessedEnvelopes);
+        Assert.Equal(1, replacement.Calls); Assert.Equal(2, terminal.RetrieveCalls);
+        Assert.NotEmpty(exactPage);
+    }
 
     private static async Task CheckOwnedMailboxReceiveAsync(bool selectedSuccessor, bool renewPublicationDuringAck,
         bool authorityRollover = false, bool carriageRenewal = false)
@@ -208,8 +322,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         internal void TrackMailboxDispatchClock() => mailboxClockStarted = System.Diagnostics.Stopwatch.GetTimestamp();
         internal Task<Did2MessagingSessionScope> ReceiveNativeMailboxInitial(ReadOnlyMemory<byte> exact)
         { var reopened = ReopenGrantReader(); return reopened.ReceiveOwnMailboxInitialAsync(exact, GrantReaderSource(reopened)); }
-        internal Task<DeepIdV2MailboxSynchronizationResult> SynchronizeNativeReceiver(IDid2MailboxGrantTransport grants, IDid2OwnedMailboxTransportFactory terminal)
-        { var reopened = ReopenGrantReader(); return reopened.SynchronizeOwnMailboxAsync(GrantReaderSource(reopened), grants, terminal); }
+        internal Task<DeepIdV2MailboxSynchronizationResult> SynchronizeNativeReceiver(IDid2MailboxGrantTransport grants, IDid2OwnedMailboxTransportFactory terminal, CancellationToken ct = default)
+        { var reopened = ReopenGrantReader(); return reopened.SynchronizeOwnMailboxAsync(GrantReaderSource(reopened), grants, terminal, ct); }
         internal Task<DeepIdV2MailboxSynchronizationResult> SynchronizeNativeSender(IDid2MailboxGrantTransport grants, IDid2OwnedMailboxTransportFactory terminal)
         { var reopened = ReopenAccount(); return reopened.SynchronizeOwnMailboxAsync(Source(reopened), grants, terminal); }
         internal async Task<ProtectedDid2MailboxReadJournal.State> ReadPeerMailboxReads(bool own = false)
@@ -220,6 +334,42 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             var scope = key.Use(bytes => bytes.Slice(24, 64).ToArray());
             try { return root.Use(bytes => ProtectedDid2MailboxReadJournal.Decode(bytes, Network, scope.AsSpan(0, 32), scope.AsSpan(32))); }
             finally { CryptographicOperations.ZeroMemory(scope); }
+        }
+        internal async Task<byte[]> PeerFinalPageCustodyDigestAsync()
+        {
+            using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            foreach (var slot in new[] { ProtectedDid2MailboxReadJournal.Slot, ProtectedDid2MailboxGrantJournal.Slot })
+            {
+                using var raw = await peerStorage.ReadOwnedAsync(slot) ?? throw new InvalidDataException();
+                raw.Use(bytes => { hash.AppendData(SHA256.HashData(bytes)); return true; });
+            }
+            return hash.GetHashAndReset();
+        }
+        internal async Task ChangePeerFinalPageCaptureTimeAsync(ulong at)
+        {
+            using var key = await peerStorage.ReadOwnedAsync("deep.store.v2.sql-generation") ?? throw new InvalidDataException();
+            using var raw = await peerStorage.ReadOwnedAsync(ProtectedDid2MailboxReadJournal.Slot) ?? throw new InvalidDataException();
+            var scope = key.Use(bytes => bytes.Slice(24, 64).ToArray());
+            var before = raw.Use(bytes => bytes.ToArray());
+            using var read = ProtectedDid2MailboxReadJournal.Decode(before, Network, scope.AsSpan(0, 32), scope.AsSpan(32));
+            read.Active!.CapturedAt = at; read.Revision++;
+            var after = ProtectedDid2MailboxReadJournal.Encode(read, Network, scope.AsSpan(0, 32), scope.AsSpan(32));
+            try { Assert.True(await peerStorage.CompareExchangeAsync(ProtectedDid2MailboxReadJournal.Slot, before, after)); }
+            finally { CryptographicOperations.ZeroMemory(scope); CryptographicOperations.ZeroMemory(before); CryptographicOperations.ZeroMemory(after); }
+        }
+        internal async Task DamagePeerFinalPageRequestAsync(byte[] exact)
+        {
+            var mau = MailboxAuthenticatedClientRequestCodec.Decode(exact);
+            var request = MailboxAuthenticatedRequestTranscript.DecodeRetrieveBody(mau.Binding.CanonicalRequest.Span);
+            var account = (await ReopenGrantReader().GetCurrentAsync())!.AccountId.ToArray();
+            await WithOwnedApplicationConnectionAsync(false, Network, account, sql =>
+            {
+                using var command = sql.CreateCommand();
+                command.CommandText = "UPDATE transport_outbox_items SET ciphertext_bundle=zeroblob(length(ciphertext_bundle)) WHERE account_scope=$scope AND logical_id=$op;";
+                command.Parameters.AddWithValue("$scope", VerifiedCurrentMailboxGrant.AccountScopeForHolder(mau.Presentation.Grant.HolderPublicKey.Span).ToArray());
+                command.Parameters.AddWithValue("$op", request.OperationId.ToArray());
+                Assert.Equal(1, command.ExecuteNonQuery());
+            });
         }
     }
 
@@ -266,6 +416,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         internal List<byte[]> RetrievedOriginalRoutes { get; } = [];
         internal bool LoseAckReply, LoseRetrieveReply, BuiltRetrieveFrame, BuiltAckFrame, ReturnEmptyPage;
         internal List<byte[]> ExactRetrieveRequests { get; } = [];
+        internal List<byte[]> ExactAckRequests { get; } = [];
+        internal bool IndependentAck;
         internal bool HasMoreAfterPage;
         public IClientMailboxBinaryIngress Create(Did2OwnedMailboxTransportContext loan, IMailboxClientDecodePolicyProvider decoder)
         { context = loan; policy = decoder; return this; }
@@ -316,10 +468,11 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         public async Task<ReadOnlyMemory<byte>> AcknowledgeOnRouteAsync(ReadOnlyMemory<byte> exact, ScopedMailboxResolvedRoute route, CancellationToken ct)
         {
             AckCalls++;
+            ExactAckRequests.Add(exact.ToArray());
             var mau = MailboxAuthenticatedClientRequestCodec.Decode(exact.Span);
             var request = MailboxAuthenticatedRequestTranscript.DecodeAckBody(mau.Binding.CanonicalRequest.Span);
             using (var root = await fixture.ReadPeerMailboxReads(own: ownerOnPrimary))
-            { Assert.Equal(6, root.Phase); Assert.Equal(ExpectedAckCounter, root.Active!.AckCounter); Assert.Equal(SHA256.HashData(exact.Span), root.Active.AckMauHash); }
+            { Assert.Equal(IndependentAck ? 8 : 6, root.Phase); Assert.Equal(ExpectedAckCounter, root.Active!.AckCounter); Assert.Equal(SHA256.HashData(exact.Span), root.Active.AckMauHash); }
             if (ackRequest is null) ackRequest = exact.ToArray(); else Assert.Equal(ackRequest, exact.ToArray());
             await BuildHeldFrame(OnionOperation.Acknowledge, exact, route, ct); BuiltAckFrame = true;
             Assert.Equal(Cursor, Assert.Single(request.Acknowledgements).Cursor);

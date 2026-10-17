@@ -17,7 +17,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         DeepIdV2ContactPathAuthoritySource source, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh,
         IDid2RetainedMailboxReadGrantTransport transport, CancellationToken ct,
         ReadOnlyMemory<byte> renewalAcquisition = default, bool renewForNewRead = false,
-        ReadOnlyMemory<byte> expectedNewReadRoot = default)
+        ReadOnlyMemory<byte> expectedNewReadRoot = default, bool renewForCapturedFinalAck = false)
     {
         var instance = await SqliteDeepIdV2AccountGeneration.ReadAccountInstanceUnderLeaseAsync(
             storage, networkId, current.AccountId, ct).ConfigureAwait(false);
@@ -30,7 +30,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             using var state = ProtectedDid2MailboxGrantJournal.Decode(snapshot, networkId, current.AccountId.Span, instance);
             var scope = Convert.ToHexString(ProtectedDid2MailboxGrantJournal.Scope(publication.Route.ExactHash.Span,
                 publication.Locator.Span, (byte)MailboxCapabilityDomain.Retrieve));
-            if (renewForNewRead)
+            if (renewForCapturedFinalAck && renewForNewRead) throw new InvalidOperationException("Read and ACK authorization are distinct work.");
+            if (renewForNewRead || renewForCapturedFinalAck)
             {
                 if (!renewalAcquisition.IsEmpty) throw new InvalidOperationException("A new read cannot take a caller renewal selector.");
                 renewalAcquisition = await SelectNewWorkMailboxGrantRenewalUnderLeaseAsync(current, held, state,
@@ -39,15 +40,22 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var entry = renewalAcquisition.IsEmpty
                 ? ProtectedDid2MailboxGrantJournal.AcquisitionForNewWork(state, scope)
                 : ProtectedDid2MailboxGrantJournal.AcquisitionForRenewal(state, scope, renewalAcquisition.Span);
-            if (renewForNewRead)
+            if (renewForNewRead || renewForCapturedFinalAck)
             {
                 using var readRoot = await storage.ReadOwnedAsync(ProtectedDid2MailboxReadJournal.Slot, ct).ConfigureAwait(false) ??
                     throw new InvalidDataException("Protected new-read custody is absent before grant acquisition.");
                 if (expectedNewReadRoot.IsEmpty || !readRoot.Use(bytes => FixedRoute(bytes, expectedNewReadRoot.Span)))
                     throw new CryptographicException("New-read custody changed before grant acquisition.");
-                ProtectedDid2MailboxReadJournal.RequireRoomForNewCycle(expectedNewReadRoot.Length);
+                if (renewForNewRead) ProtectedDid2MailboxReadJournal.RequireRoomForNewCycle(expectedNewReadRoot.Length);
                 using var read = readRoot.Use(bytes => ProtectedDid2MailboxReadJournal.Decode(bytes, networkId, current.AccountId.Span, instance));
-                if (read.Active is not null) throw new CryptographicException("An active read cannot enter new-grant scheduling.");
+                if (renewForCapturedFinalAck)
+                {
+                    if (read.Phase < 4 || read.Active is null || read.Active.ReadPage().HasMore ||
+                        !FixedRoute(read.Active.Route, publication.Route.ExactHash.Span) ||
+                        expectedNewReadRoot.Length > ProtectedDid2MailboxReadJournal.MaximumBytes - 32)
+                        throw new CryptographicException("Current ACK acquisition lacks exact bounded final-page custody.");
+                }
+                else if (read.Active is not null) throw new CryptographicException("An active read cannot enter new-grant scheduling.");
                 var readScope = ClientMailboxScope.Derive(publication.Route.ExactHash.Span,
                     new BlindedMailboxId(publication.Route.Reachability.Field(2).Span),
                     BinaryPrimitives.ReadUInt64BigEndian(publication.Route.Selection.Field(4).Span));

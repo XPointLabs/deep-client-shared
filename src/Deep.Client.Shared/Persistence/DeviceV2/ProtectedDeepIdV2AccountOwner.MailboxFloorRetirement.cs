@@ -103,7 +103,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             }
             using (var state = ProtectedDid2MailboxReadJournal.Decode(original, network, account, instance))
             {
-                if (state.Active is { } active && FixedRoute(active.Grant, digest) ||
+                if (state.Active is { } active && (FixedRoute(active.Grant, digest) || FixedRoute(active.AckGrantHash, digest)) ||
                     state.Closed.Values.Any(closed => FixedRoute(closed.Grant, digest)))
                     throw new IOException("An active or closed-unknown Retrieve/ACK still depends on this counter floor.");
                 if (!state.Counters.Remove(Convert.ToHexString(digest)))

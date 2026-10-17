@@ -6,7 +6,7 @@ namespace Deep.Client.Shared.Persistence.DeviceV2;
 
 internal static partial class ProtectedDid2MailboxReadJournal
 {
-    internal const int MaximumActiveCycleBytes = 5 * 32 + 4 * 8 + 4 * 4 + 364 + 5_000 + MaximumPageBytes + MaximumAckReplyBytes;
+    internal const int MaximumActiveCycleBytes = 6 * 32 + 4 * 8 + 4 * 4 + 364 + 5_000 + MaximumPageBytes + MaximumAckReplyBytes;
     internal const int MaximumNewCycleGrowthBytes = MaximumActiveCycleBytes + 32 + 8 + 32 + 8 + 8 + 4 + 256;
 
     // Reserve a complete next page/ACK before its issuer callback, not after
@@ -102,7 +102,7 @@ internal static partial class ProtectedDid2MailboxReadJournal
             if (pair.Key != Name(attempt.Grant) ||
                 !state.Traversals.TryGetValue(Name(attempt.Scope), out var traversal) || traversal.PollGeneration < attempt.PollGeneration ||
                 attempt.Phase == 2 && state.Counters.GetValueOrDefault(pair.Key) != attempt.Counter ||
-                state.Active is { } active && Fixed(active.Grant, attempt.Grant)) throw Bad();
+                state.Active is { } active && (Fixed(active.Grant, attempt.Grant) || Fixed(active.AckGrantHash, attempt.Grant))) throw Bad();
         }
     }
 }

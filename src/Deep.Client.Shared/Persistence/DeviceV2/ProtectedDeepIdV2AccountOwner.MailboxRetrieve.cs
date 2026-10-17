@@ -54,6 +54,16 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 ? ProtectedDid2MailboxGrantJournal.RequireRetainedWinner(grantState, grantName, retainedCycle.Grant)
                 : ProtectedDid2MailboxGrantJournal.CurrentWinner(grantState, grantName) ??
                     throw new CryptographicException("Mailbox read has no selected protected Retrieve winner.");
+            if (state.Phase >= 3)
+            {
+                var originalGrant = MailboxAuthenticatedCapabilityCodec.DecodeGrant(ContactCodec.Decode("XMC2",
+                    ProtectedDid2MailboxGrantJournal.Response(retained).Span).Field(8).Span);
+                var reading = await RecheckRouteFreshnessAsync(current, source, fresh, held, null, ct).ConfigureAwait(false);
+                var lower = checked(fresh.Proof.TrustedLowerUnixSeconds + checked(reading.SampleSeconds - fresh.Proof.MonotonicSample));
+                if (lower >= originalGrant.ExpiresAtUnixSeconds)
+                    return await ResumeCapturedFinalPageUnderLeaseAsync(current, held, source, fresh, state,
+                        snapshot, grantRoot, retained, instance, ct).ConfigureAwait(false);
+            }
             if (winner is not null && !FixedRoute(ProtectedDid2MailboxGrantJournal.Response(retained).Span, winner.ExactXmc2.Span))
                 throw new CryptographicException("Mailbox read changed its acquired winner.");
             winner ??= await publication.Host.VerifyRetainedReadSuccessAsync(publication.Route.ExactBytes,
@@ -204,7 +214,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         held.RequireOwner(lease);
         using var raw = await storage.ReadOwnedAsync(ProtectedDid2MailboxGrantJournal.Slot, ct).ConfigureAwait(false) ?? throw new InvalidDataException();
         using var grants = raw.Use(bytes => ProtectedDid2MailboxGrantJournal.Decode(bytes, networkId, current.AccountId.Span, instance.Span));
-        var foundActive = false;
+        var foundActive = false; var foundAck = read.Phase < 7;
         foreach (var entry in grants.Entries.Values)
         {
             if (!ProtectedDid2MailboxGrantJournal.IsAdoptedWinner(entry) ||
@@ -213,14 +223,16 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             try
             {
                 var active = read.Active is { } cycle && FixedRoute(cycle.Grant, hash);
+                var activeAck = read.Phase >= 7 && read.Active is { } ack && FixedRoute(ack.AckGrant, hash);
                 foundActive |= active;
+                foundAck |= activeAck;
                 if (!ProtectedDid2MailboxGrantJournal.HasReservedReadIntent(entry) &&
-                    (read.Counters.ContainsKey(Convert.ToHexString(hash)) || active && read.Phase >= 2))
+                    (read.Counters.ContainsKey(Convert.ToHexString(hash)) || active && read.Phase >= 2 || activeAck))
                     throw new CryptographicException("Protected read lost its original read-intent reservation; repair is forbidden.");
             }
             finally { CryptographicOperations.ZeroMemory(hash); }
         }
-        if (read.Active is not null && !foundActive)
+        if (read.Active is not null && (!foundActive || !foundAck))
             throw new CryptographicException("Active original read lost its adopted grant custody.");
     }
 
@@ -232,13 +244,17 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
 
     private static void RequirePreparedMailboxRead(ProtectedDid2MailboxReadJournal.Cycle cycle, ReadOnlySpan<byte> exact,
         VerifiedMailboxRetainedReadGrantV2 winner, bool ack)
+        => RequirePreparedMailboxRead(cycle, exact, winner.ExactGrant.Span, ack);
+
+    private static void RequirePreparedMailboxRead(ProtectedDid2MailboxReadJournal.Cycle cycle, ReadOnlySpan<byte> exact,
+        ReadOnlySpan<byte> exactGrant, bool ack)
     {
         var request = MailboxAuthenticatedClientRequestCodec.Decode(exact);
         if (request.Binding.Operation != (ack ? MailboxAuthenticatedOperation.Ack : MailboxAuthenticatedOperation.Retrieve) ||
             !FixedRoute(request.Binding.CanonicalRequest.Span, ack ? cycle.AckBody : cycle.RetrieveBody) ||
             request.Presentation.ReplayCounter != (ack ? cycle.AckCounter : cycle.RetrieveCounter) ||
             !FixedRoute(SHA256.HashData(exact), ack ? cycle.AckMauHash : cycle.RetrieveMauHash) ||
-            !FixedRoute(MailboxAuthenticatedCapabilityCodec.EncodeGrant(request.Presentation.Grant), winner.ExactGrant.Span) ||
+            !FixedRoute(MailboxAuthenticatedCapabilityCodec.EncodeGrant(request.Presentation.Grant), exactGrant) ||
             !PublicKeyAuth.VerifyDetached(request.Presentation.HolderSignature.ToArray(),
                 MailboxAuthenticatedCapabilityCodec.GetPresentationSigningBytes(request.Presentation), request.Presentation.Grant.HolderPublicKey.ToArray()))
             throw new CryptographicException("Prepared read/ACK differs from exact protected custody.");

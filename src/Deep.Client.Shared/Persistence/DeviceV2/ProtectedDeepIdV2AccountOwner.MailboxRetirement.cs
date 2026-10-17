@@ -103,7 +103,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     using var readRaw = await ReadAsync(owner.storage, ProtectedDid2MailboxReadJournal.Slot, ct).ConfigureAwait(false);
                     using var read = readRaw.Use(bytes => ProtectedDid2MailboxReadJournal.Decode(bytes, network, account.Span, instance));
                     if (read.Active is { } active && (readScope.Length != 0 && FixedRoute(active.Scope, readScope) || FixedRoute(active.Route, route) ||
-                            grant.Length != 0 && FixedRoute(active.Grant, grant))) dependencies |= RetirementDependency.ReadWork;
+                            grant.Length != 0 && (FixedRoute(active.Grant, grant) || FixedRoute(active.AckGrantHash, grant)))) dependencies |= RetirementDependency.ReadWork;
                     if (read.Closed.Values.Any(closed => readScope.Length != 0 && FixedRoute(closed.Scope, readScope) ||
                             FixedRoute(closed.Route, route) || grant.Length != 0 && FixedRoute(closed.Grant, grant)))
                         dependencies |= RetirementDependency.ReadWork;
