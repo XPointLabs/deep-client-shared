@@ -384,6 +384,13 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         var routeHash = SHA256.HashData(route.ExactRouteClosure.Span);
         var scope = ProtectedDid2MailboxGrantJournal.Scope(routeHash, locator.Span, (byte)domain);
         var name = Convert.ToHexString(scope);
+        // This boundary acquires for new work only: an already captured Store
+        // bypasses it and keeps its exact original grant. A resumed Initial
+        // may already own its draft/session yet never have captured a Store;
+        // do not strand it on an expired, reply-lost acquisition. Close only
+        // this scope through the existing authenticated-lower transition.
+        // The old request/holder and uncertainty remain in its retained tail.
+        _ = await CloseExpiredMailboxAcquisitionsUnderLeaseAsync(current, held, source, fresh, ct, name).ConfigureAwait(false);
         var instance = await SqliteDeepIdV2AccountGeneration.ReadAccountInstanceUnderLeaseAsync(
             storage, networkId, current.AccountId, ct).ConfigureAwait(false);
         byte[]? snapshot = null;
@@ -537,7 +544,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     private async Task<int> CloseExpiredMailboxAcquisitionsUnderLeaseAsync(
         VerifiedDeepIdV2CurrentAccount current, HeldDeepIdV2AccountLease held,
         DeepIdV2ContactPathAuthoritySource source,
-        DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh, CancellationToken ct)
+        DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh, CancellationToken ct,
+        string? onlyScope = null)
     {
         held.RequireOwner(lease); ct.ThrowIfCancellationRequested();
         var first = await RecheckRouteFreshnessAsync(current, source, fresh, held, null, ct).ConfigureAwait(false);
@@ -554,6 +562,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var count = 0;
             foreach (var pair in state.Selections.ToArray())
             {
+                if (onlyScope is not null && pair.Key != onlyScope) continue;
                 if (pair.Value.Pending is not { } name) continue;
                 var pending = state.Entries[name];
                 if (ProtectedDid2MailboxGrantJournal.HasWinner(pending) || lower < ProtectedDid2MailboxGrantJournal.RequestExpiry(pending)) continue;

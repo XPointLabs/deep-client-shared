@@ -51,6 +51,13 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         await fixture.CheckIndependentDepositAfterUnknownAsync(fault);
     }
 
+    [Fact]
+    public async Task Did2IndependentGrant_NewDepositClosesExpiredPendingWithoutReissuingOriginal()
+    {
+        await using var fixture = await Fixture.CreateAsync(withPeer: true, encryptedStorage: true);
+        await fixture.CheckIndependentDepositAfterUnknownAsync("automatic-close");
+    }
+
     private sealed partial class Fixture
     {
         internal async Task CheckIndependentDepositAfterUnknownAsync(string fault)
@@ -67,7 +74,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             using (var state = await ReadPeerGrantsAsync()) expiry = ProtectedDid2MailboxGrantJournal.RequestExpiry(Assert.Single(state.Entries).Value);
             AdvanceStoreSettlementClock(expiry + 10);
             var closedOwner = ReopenGrantReader();
-            Assert.Equal(1, await closedOwner.CloseExpiredMailboxAcquisitionsAsync(GrantReaderSource(closedOwner)));
+            if (fault != "automatic-close")
+                Assert.Equal(1, await closedOwner.CloseExpiredMailboxAcquisitionsAsync(GrantReaderSource(closedOwner)));
             byte[] original;
             using (var state = await ReadPeerGrantsAsync()) original = Assert.Single(state.Entries).Value.ToArray();
             try
@@ -89,7 +97,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                     return; // Independent authorization cannot revive an expired Deposit route.
                 }
                 var independent = new OwnedGrantTransport(this) { LoseResponse = fault == "reply" };
-                if (fault != "none")
+                if (fault is not ("none" or "automatic-close"))
                 {
                     var point = fault switch
                     {
@@ -109,7 +117,15 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 using (var state = await ReadPeerGrantsAsync())
                 {
                     Assert.Equal(2, state.Entries.Count);
-                    Assert.Equal(original, state.Entries[ProtectedDid2MailboxGrantJournal.Acquisition(original)]);
+                    var retained = state.Entries[ProtectedDid2MailboxGrantJournal.Acquisition(original)];
+                    if (fault != "automatic-close") Assert.Equal(original, retained);
+                    else
+                    {
+                        Assert.Equal(ProtectedDid2MailboxGrantJournal.Request(original).ToArray(), ProtectedDid2MailboxGrantJournal.Request(retained).ToArray());
+                        Assert.Equal(ProtectedDid2MailboxGrantJournal.Seed(original).ToArray(), ProtectedDid2MailboxGrantJournal.Seed(retained).ToArray());
+                        Assert.Equal(ProtectedDid2MailboxGrantJournal.OriginalRoute(original).ToArray(), ProtectedDid2MailboxGrantJournal.OriginalRoute(retained).ToArray());
+                        Assert.Equal(ProtectedDid2MailboxGrantJournal.OriginalPolicy(original).ToArray(), ProtectedDid2MailboxGrantJournal.OriginalPolicy(retained).ToArray());
+                    }
                     var current = Assert.Single(state.Selections).Value.Current!;
                     Assert.Equal(Convert.ToHexString(SHA256.HashData(winner.ExactXmg2.Span)), current);
                     Assert.False(ProtectedDid2MailboxGrantJournal.Seed(original).SequenceEqual(ProtectedDid2MailboxGrantJournal.Seed(state.Entries[current])));
