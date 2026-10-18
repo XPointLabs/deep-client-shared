@@ -8,7 +8,19 @@ namespace Deep.Client.Shared.Persistence.DeviceV2;
 internal sealed partial class ProtectedDeepIdV2AccountOwner
 {
     internal async Task<IReadOnlyList<DeepIdV2PendingTextSnapshot>> ReadPendingTextOperationsAsync(
-        ulong unixSeconds, IDeepMlDsa65Verifier verifier, CancellationToken ct)
+        ulong unixSeconds, IDeepMlDsa65Verifier verifier, CancellationToken ct) =>
+        (await ReadPendingOrdinaryOperationsAsync(unixSeconds, verifier, ct).ConfigureAwait(false)).Text;
+
+    internal async Task<IReadOnlyList<DeepIdV2AttachmentOperationSnapshot>> ReadPendingAttachmentOperationsAsync(
+        ulong unixSeconds, IDeepMlDsa65Verifier verifier, CancellationToken ct) =>
+        (await ReadPendingOrdinaryOperationsAsync(unixSeconds, verifier, ct).ConfigureAwait(false)).Attachments;
+
+    internal async Task<IReadOnlyList<DeepIdV2AttachmentOperationSnapshot>> ReadAttachmentOperationsAsync(
+        ulong unixSeconds, IDeepMlDsa65Verifier verifier, CancellationToken ct) =>
+        (await ReadPendingOrdinaryOperationsAsync(unixSeconds, verifier, ct, includeCompletedAttachments: true).ConfigureAwait(false)).Attachments;
+
+    private async Task<(IReadOnlyList<DeepIdV2PendingTextSnapshot> Text, IReadOnlyList<DeepIdV2AttachmentOperationSnapshot> Attachments)> ReadPendingOrdinaryOperationsAsync(
+        ulong unixSeconds, IDeepMlDsa65Verifier verifier, CancellationToken ct, bool includeCompletedAttachments = false)
     {
         using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
         using var current = await RequireCurrentUnderLeaseAsync(unixSeconds, verifier, ct).ConfigureAwait(false);
@@ -24,6 +36,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             using var catalog = await new ProtectedDid2MessagingSessionCatalog(storage, networkId, current.AccountId.Span, instance).ReadAsync(ct).ConfigureAwait(false);
             using var application = await SqliteDeepIdV2AccountGeneration.OpenApplicationUnderLeaseAsync(storage, sqlStatePath, current, held, ct).ConfigureAwait(false);
             var result = new List<DeepIdV2PendingTextSnapshot>();
+            var attachments = new List<DeepIdV2AttachmentOperationSnapshot>();
             foreach (var floor in journal.Floors.Values)
             {
                 var scope = floor.Scope; var index = catalog.FindExact(scope);
@@ -47,7 +60,13 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     var message = ApplicationCoreCodec.DecodeDmc2(exact);
                     if (message.ParsedPayload is MessageCreateDmc2Payload text && !entry.Stored && !entry.WorkStopped)
                         result.Add(new(entry.Operation, Convert.ToHexString(scope.Conversation), text.Text, entry.Sequence));
-                    else if (message.ParsedPayload is AttachmentOfferDmc2Payload offer) offer.Manifest.Dispose();
+                    else if (message.ParsedPayload is AttachmentOfferDmc2Payload offer)
+                    {
+                        using var manifest = offer.Manifest;
+                        if (includeCompletedAttachments || !entry.Stored && !entry.WorkStopped)
+                            attachments.Add(new(Convert.ToHexStringLower(entry.Operation), Convert.ToHexString(scope.Conversation),
+                                Convert.ToHexStringLower(manifest.ObjectId.Span), entry.Stored, entry.WorkStopped));
+                    }
                 }
                 finally { CryptographicOperations.ZeroMemory(exact); }
             }
@@ -56,7 +75,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             if (!readback.Use(bytes => Did2MessagingSessionScope.Fixed(snapshot, bytes)))
                 throw new CryptographicException("The ordinary command root changed during projection.");
             await RequireExactProtectedMailboxRootAsync(ProtectedDid2MessagingSessionCatalog.Slot, catalog.Exact.ToArray(), ct).ConfigureAwait(false);
-            ct.ThrowIfCancellationRequested(); held.RequireActive(); return result.AsReadOnly();
+            ct.ThrowIfCancellationRequested(); held.RequireActive(); return (result.AsReadOnly(), attachments.AsReadOnly());
         }
         finally { foreach (var row in rows) row.Dispose(); CryptographicOperations.ZeroMemory(instance); CryptographicOperations.ZeroMemory(snapshot); }
     }

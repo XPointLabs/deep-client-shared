@@ -268,6 +268,43 @@ internal sealed record ContactResolvePreparedPath(
 /// </summary>
 public sealed class ContactResolvePrivacyPathProvider : IPrivacyMailboxPathProvider
 {
+    // The protected entry-guard owner is shared by contact and blob circuits;
+    // only Protocol may authorize the actual operation-specific exit/path.
+    internal async ValueTask<PrivacyMailboxOnionAttempt> PrepareBlobAsync(VerifiedOnionNetworkContext network,
+        ReadOnlyMemory<byte> exact, ReadOnlyMemory<byte> requiredExit, CancellationToken ct)
+    {
+        using var blob = Deep.Protocol.BlobV1.BlobChunkCodec.DecodeRequest(exact.Span);
+        if (!network.NetworkId.Span.SequenceEqual(blob.Descriptor.NetworkId.Span) ||
+            !OnionPathContextFactory.BlobNodeIds(network, blob.Descriptor.ObjectId).Any(id => id.Span.SequenceEqual(requiredExit.Span)))
+            throw new CryptographicException("Blob request does not bind a current eligible exit.");
+        var request = OnionTerminalPayloadVerifierV1.VerifyRequest(network, OnionOperation.Blob, exact);
+        var snapshot = OnionPathCandidateSnapshotFactory.Create(network);
+        for (var attempt = 0; attempt < MaximumCasAttempts; attempt++)
+        {
+            var current = await guardStore.ReadAsync(ct).ConfigureAwait(false);
+            if (current is not null && !Fixed(current.NetworkId.Span, snapshot.NetworkId.Span)) throw new CryptographicException("Blob guard network differs.");
+            var next = Reconcile(current, snapshot);
+            VerifiedOnionPathContext? selected = null;
+            foreach (var guard in next.ConfirmedGuardNodeIds.OrderBy(id => Fixed(id.Span, next.PrimaryNodeId.Span) ? 0 : 1))
+            {
+                foreach (var middle in snapshot.Candidates.Where(candidate => HasRole(candidate, 1) && candidate.RelayCapacityClass != OnionCandidateCapacityClass.None))
+                {
+                    try { selected = OnionPathContextFactory.CreateBlob(network, guard, middle.NodeId, requiredExit); break; }
+                    catch (OnionBoundaryException error) when (error.Code.StartsWith("path-", StringComparison.Ordinal)) { }
+                }
+                if (selected is not null) break;
+            }
+            if (selected is null) throw new CryptographicException("Blob has no diverse three-hop path through retained entry guards.");
+            if (current is null || !SameState(current, next))
+            {
+                var written = await guardStore.CompareExchangeAsync(current?.Revision, next, ct).ConfigureAwait(false);
+                if (written.Disposition == EntryGuardStoreWriteDisposition.Conflict) continue;
+            }
+            ct.ThrowIfCancellationRequested(); network.EnsureCurrent(); return new(selected, request);
+        }
+        throw new IOException("Blob entry-guard custody remained contended.");
+    }
+
     private const int MaximumCasAttempts = 8;
     private readonly IContactResolvePathAuthoritySource authoritySource;
     private readonly IProtectedEntryGuardStore guardStore;

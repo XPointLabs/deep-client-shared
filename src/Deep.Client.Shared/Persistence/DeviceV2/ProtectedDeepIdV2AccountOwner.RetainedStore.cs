@@ -15,20 +15,34 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
 {
     // Public text retry after outbox-only cleanup selects a historical result,
     // never reconstructs an ordinary command or ratchet-encrypts again.
-    internal async Task<ClientMailboxStoreResult?> ReadRetainedDirectTextStoreAsync(ulong unixSeconds,
+    internal Task<ClientMailboxStoreResult?> ReadRetainedDirectTextStoreAsync(ulong unixSeconds,
         IDeepMlDsa65Verifier verifier, Did2MessagingSessionScope scope, ReadOnlyMemory<byte> operation, string text,
         DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own,
         DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
+        => ReadRetainedOrdinaryStoreAsync(unixSeconds, verifier, scope, operation,
+            ApplicationCoreCodec.CreateMessageCreatePayload(text), own, source, ct);
+
+    internal Task<ClientMailboxStoreResult?> ReadRetainedDirectAttachmentStoreAsync(ulong unixSeconds,
+        IDeepMlDsa65Verifier verifier, Did2MessagingSessionScope scope, ReadOnlyMemory<byte> operation, ParsedDam1 manifest,
+        DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own,
+        DeepIdV2ContactPathAuthoritySource source, CancellationToken ct) =>
+        ReadRetainedOrdinaryStoreAsync(unixSeconds, verifier, scope, operation,
+            ApplicationCoreCodec.CreateAttachmentOfferPayload(manifest), own, source, ct, includeStoredWorking: true);
+
+    private async Task<ClientMailboxStoreResult?> ReadRetainedOrdinaryStoreAsync(ulong unixSeconds,
+        IDeepMlDsa65Verifier verifier, Did2MessagingSessionScope scope, ReadOnlyMemory<byte> operation, Dmc2Payload payload,
+        DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own,
+        DeepIdV2ContactPathAuthoritySource source, CancellationToken ct, bool includeStoredWorking = false)
     {
         ProtectedDph2PreClaimJournal.RequireIntent(operation.Span);
-        var payload = ApplicationCoreCodec.CreateMessageCreatePayload(text);
         using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
         await ResumeLocalCompactionUnderLeaseAsync(held, ct).ConfigureAwait(false);
         using var current = await RequireCurrentUnderLeaseAsync(unixSeconds, verifier, ct).ConfigureAwait(false);
         using var root = await storage.ReadOwnedAsync(ProtectedDid2DirectTextJournal.Slot, ct).ConfigureAwait(false) ??
             throw new InvalidDataException("Public text retry lost mandatory authored custody.");
         using var ordinary = root.Use(bytes => ProtectedDid2DirectTextJournal.Decode(bytes, scope.Network, scope.LocalAccount, scope.Instance));
-        if (ordinary.Entries.ContainsKey(Convert.ToHexString(operation.Span))) return null; // Existing command has its normal exact owner.
+        if (ordinary.Entries.TryGetValue(Convert.ToHexString(operation.Span), out var working) &&
+            (!includeStoredWorking || !working.Stored)) return null; // Uncommitted work retains its normal exact owner.
         using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, ct).ConfigureAwait(false);
         var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
         using var native = opened.Sql.ReadVerifiedOperation(floor, operation.Span);

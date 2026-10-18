@@ -79,7 +79,16 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     }
 
     internal async Task<OwnedAttachmentPreparation> ReadLocalAttachmentAsync(ulong trustedUnixSeconds,
-        IDeepMlDsa65Verifier verifier, ReadOnlyMemory<byte> operation, CancellationToken ct)
+        IDeepMlDsa65Verifier verifier, ReadOnlyMemory<byte> operation, CancellationToken ct) =>
+        await ReadLocalAttachmentCoreAsync(trustedUnixSeconds, verifier, operation, false, ct).ConfigureAwait(false) ??
+            throw new InvalidOperationException("The exact adopted attachment operation must be resumed.");
+
+    internal Task<OwnedAttachmentPreparation?> TryReadLocalAttachmentAsync(ulong trustedUnixSeconds,
+        IDeepMlDsa65Verifier verifier, ReadOnlyMemory<byte> operation, CancellationToken ct) =>
+        ReadLocalAttachmentCoreAsync(trustedUnixSeconds, verifier, operation, true, ct);
+
+    private async Task<OwnedAttachmentPreparation?> ReadLocalAttachmentCoreAsync(ulong trustedUnixSeconds,
+        IDeepMlDsa65Verifier verifier, ReadOnlyMemory<byte> operation, bool allowAbsent, CancellationToken ct)
     {
         ProtectedDph2PreClaimJournal.RequireIntent(operation.Span); var op = operation.ToArray(); byte[] root = [], stable = [];
         OwnedAttachmentPreparation? result = null;
@@ -92,6 +101,14 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 throw new InvalidDataException("Protected attachment custody is absent.");
             root = marker.Use(bytes => bytes.ToArray()); using var state = ProtectedDid2AttachmentJournal.Decode(root, networkId, current.AccountId.Span, instance);
             var name = Convert.ToHexString(op);
+            if (allowAbsent && !state.Entries.ContainsKey(name) && state.Pending is null)
+            {
+                using var existing = await SqliteDeepIdV2AccountGeneration.OpenApplicationUnderLeaseAsync(storage, sqlStatePath, current, held, ct).ConfigureAwait(false);
+                using var reconciled = await existing.ReconcileOwnedAttachmentsAsync(state, current.AccountId,
+                    current.Verified.PublicEvidence.Binding.Identity.Account.Certificate.AccountGeneration,
+                    networkId, ReadOnlyMemory<byte>.Empty, ct).ConfigureAwait(false);
+                ct.ThrowIfCancellationRequested(); held.RequireActive(); return null;
+            }
             if (!state.Entries.TryGetValue(name, out var entry) || state.Pending is { } pending && !ReferenceEquals(entry, pending))
                 throw new InvalidOperationException("The exact adopted attachment operation must be resumed.");
             using var application = await SqliteDeepIdV2AccountGeneration.OpenApplicationUnderLeaseAsync(storage, sqlStatePath, current, held, ct).ConfigureAwait(false);
