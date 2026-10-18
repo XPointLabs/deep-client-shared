@@ -77,6 +77,37 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             operation, own, source, ct).ConfigureAwait(false);
     }
 
+    // One actual scope/lease, no external callback: preserve each original
+    // native row and receipt verification without reopening native SQL for
+    // every historical control fragment in the same fanout batch.
+    internal async Task<IReadOnlySet<string>> ReadRetainedGroupStoresAsync(ulong seconds,
+        IDeepMlDsa65Verifier verifier, Did2MessagingSessionScope requestedScope,
+        IReadOnlyList<ProtectedDid2GroupJournal.Outgoing> batch,
+        DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own,
+        DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
+    {
+        var scope = Did2MessagingSessionScope.RestoreMetadata(requestedScope.Exact);
+        if (batch.Count > 512 || batch.Any(item => !item.Scope.AsSpan().SequenceEqual(scope.Exact)))
+            throw new ArgumentException("Retained group batch has a foreign scope or exceeds capacity.");
+        using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
+        await ResumeLocalCompactionUnderLeaseAsync(held, ct).ConfigureAwait(false);
+        using var current = await RequireCurrentUnderLeaseAsync(seconds, verifier, ct).ConfigureAwait(false);
+        using var groups = await OpenGroupsUnderLeaseAsync(current, ct).ConfigureAwait(false);
+        foreach (var item in batch)
+            if (!groups.State.Outbox.Any(original => original.Adopted && original.Operation.AsSpan().SequenceEqual(item.Operation) &&
+                original.Group.AsSpan().SequenceEqual(item.Group) && original.Scope.AsSpan().SequenceEqual(item.Scope) &&
+                original.Event.AsSpan().SequenceEqual(item.Event))) throw new CryptographicException("Retained batch lost exact protected group custody.");
+        using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, ct).ConfigureAwait(false);
+        var result = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var item in batch)
+        {
+            ProtectedDph2PreClaimJournal.RequireIntent(item.Operation);
+            if (await TryReadRetainedMessagingStoreUnderLeaseAsync(current, held, opened, scope, item.Operation, own, source, ct).ConfigureAwait(false) is not null)
+                result.Add(Convert.ToHexString(item.Operation));
+        }
+        held.RequireActive(); ct.ThrowIfCancellationRequested(); return result;
+    }
+
     // Historical outcome only: no holder secret, send floor, grant journal,
     // fresh peer route or current replica key is used to recreate old custody.
     private async Task<ClientMailboxStoreResult?> TryReadRetainedMessagingStoreUnderLeaseAsync(

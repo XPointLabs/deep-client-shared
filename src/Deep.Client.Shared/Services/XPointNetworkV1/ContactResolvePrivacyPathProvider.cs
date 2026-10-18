@@ -269,6 +269,38 @@ internal sealed record ContactResolvePreparedPath(
 public sealed class ContactResolvePrivacyPathProvider : IPrivacyMailboxPathProvider
 {
     // The protected entry-guard owner is shared by contact and blob circuits;
+    internal async ValueTask<PrivacyMailboxOnionAttempt> PrepareGroupControlAsync(VerifiedGroupControlPlacement placement,
+        ReadOnlyMemory<byte> exact, ReadOnlyMemory<byte> requiredExit, CancellationToken ct)
+    {
+        var network = placement.Network;
+        var request = OnionTerminalPayloadVerifierV1.VerifyRequest(network, OnionOperation.GroupControl, exact);
+        var snapshot = OnionPathCandidateSnapshotFactory.Create(network);
+        for (var attempt = 0; attempt < MaximumCasAttempts; attempt++)
+        {
+            var current = await guardStore.ReadAsync(ct).ConfigureAwait(false);
+            if (current is not null && !Fixed(current.NetworkId.Span, snapshot.NetworkId.Span)) throw new CryptographicException("Control guard network differs.");
+            var next = Reconcile(current, snapshot); VerifiedOnionPathContext? selected = null;
+            foreach (var guard in next.ConfirmedGuardNodeIds.OrderBy(id => Fixed(id.Span, next.PrimaryNodeId.Span) ? 0 : 1))
+            {
+                foreach (var middle in snapshot.Candidates.Where(candidate => HasRole(candidate, 1) && candidate.RelayCapacityClass != OnionCandidateCapacityClass.None))
+                {
+                    try { selected = OnionPathContextFactory.CreateGroupControl(placement, guard, middle.NodeId, requiredExit); break; }
+                    catch (OnionBoundaryException error) when (error.Code.StartsWith("path-", StringComparison.Ordinal)) { }
+                }
+                if (selected is not null) break;
+            }
+            if (selected is null) throw new CryptographicException("Control has no diverse three-hop path through retained guards.");
+            if (current is null || !SameState(current, next))
+            {
+                var written = await guardStore.CompareExchangeAsync(current?.Revision, next, ct).ConfigureAwait(false);
+                if (written.Disposition == EntryGuardStoreWriteDisposition.Conflict) continue;
+            }
+            ct.ThrowIfCancellationRequested(); network.EnsureCurrent(); return new(selected, request);
+        }
+        throw new IOException("Control guard custody remained contended.");
+    }
+
+    // The protected entry-guard owner is shared by contact and blob circuits;
     // only Protocol may authorize the actual operation-specific exit/path.
     internal async ValueTask<PrivacyMailboxOnionAttempt> PrepareBlobAsync(VerifiedOnionNetworkContext network,
         ReadOnlyMemory<byte> exact, ReadOnlyMemory<byte> requiredExit, CancellationToken ct)

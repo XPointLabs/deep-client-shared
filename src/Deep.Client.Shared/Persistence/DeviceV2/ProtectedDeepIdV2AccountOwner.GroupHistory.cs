@@ -40,10 +40,18 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         using var current = await RequireCurrentUnderLeaseAsync(seconds, verifier, ct).ConfigureAwait(false);
         using var root = await OpenGroupsUnderLeaseAsync(current, ct).ConfigureAwait(false); _ = root.State.Find(groupId.Span);
         var result = new List<DeepIdV2GroupMessageSnapshot>();
+        var openedScopes = new Dictionary<string, OwnedDid2MessagingStorage>(StringComparer.Ordinal);
+        try
+        {
         foreach (var item in root.State.Messages.Where(item => item.Group.AsSpan().SequenceEqual(groupId.Span)))
         {
             var scope = Did2MessagingSessionScope.RestoreMetadata(item.Scope);
-            using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, ct).ConfigureAwait(false);
+            var scopeKey = Convert.ToHexString(scope.Exact);
+            if (!openedScopes.TryGetValue(scopeKey, out var opened))
+            {
+                opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, ct).ConfigureAwait(false);
+                openedScopes.Add(scopeKey, opened);
+            }
             var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
             if (floor.Status != 1) throw new CryptographicException("Latched session grants no group history.");
             using var native = opened.Sql.ReadVerifiedOperation(floor, item.Operation) ?? throw new CryptographicException("Group history lost its actual native row.");
@@ -62,6 +70,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             finally { CryptographicOperations.ZeroMemory(exact); }
         }
         held.RequireActive(); ct.ThrowIfCancellationRequested(); return result;
+        }
+        finally { foreach (var opened in openedScopes.Values) opened.Dispose(); }
     }
 
     internal async Task<IReadOnlyList<byte[]>> ReadGroupMemberSelectorsAsync(ulong seconds, IDeepMlDsa65Verifier verifier, ReadOnlyMemory<byte> groupId, CancellationToken ct)

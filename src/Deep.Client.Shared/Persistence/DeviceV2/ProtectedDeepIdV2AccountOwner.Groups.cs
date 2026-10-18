@@ -72,6 +72,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var groupId = authored.Transition.Commit.Field(2).ToArray();
             var group = new ProtectedDid2GroupJournal.Group { Id = groupId };
             group.Packages.Add(authored.CanonicalPackageBytes.ToArray()); root.State.Groups.Add(group);
+            group.Controls.Add(await NewGroupControlAsync(authored.Transition, self, current, own, current.AccountId, default, source, ct).ConfigureAwait(false));
             await SaveGroupsUnderLeaseAsync(root, current, held, ct).ConfigureAwait(false);
             return Convert.ToHexStringLower(groupId);
         }
@@ -97,6 +98,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         var head = await VerifyGroupHeadAsync(groupState, self, other, own, held, source, ct).ConfigureAwait(false);
         var invitationState = groupState.ForScope(scope.Exact);
         var records = new List<(GroupRecord Record, VerifiedGroupTransition Head, ReadOnlyMemory<byte> Package, GroupTarget Target)>();
+        ProtectedDid2GroupJournal.Control? newControl = null;
         GroupInvitationRecord? original = invitationState is null ? null : (GroupInvitationRecord)GroupCodec.Decode("GIV1", invitationState.Offer);
         switch (action)
         {
@@ -105,6 +107,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 original = await DeepIdV2GroupTransitions.InviteAsync(head, self, current.Verified.DeviceSecrets, other, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
                 invitationState = new() { Scope = scope.Exact.ToArray(), Offer = original.CanonicalBytes.ToArray(), InvitationProof = other.ExactLookupProof.ToArray() };
                 groupState.Invitations.Add(invitationState);
+                newControl = await NewGroupControlAsync(head, self, current, own, other.AccountId, scope.Exact.ToArray(), source, ct).ConfigureAwait(false);
+                groupState.Controls.Add(newControl);
                 // A new member receives the entire exact lineage, not only its tip.
                 for (var epoch = 0; epoch < groupState.Packages.Count; epoch++)
                 {
@@ -131,12 +135,14 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     original, (GroupInvitationAcceptanceRecord)GroupCodec.Decode("GIA1", invitationState.Acceptance), self, current.Verified.DeviceSecrets,
                     other, invitationState.InvitationProof, all, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
                 groupState.Packages.Add(activated.CanonicalPackageBytes.ToArray()); head = activated.Transition;
-                foreach (var target in targets) foreach (var chunk in DeepIdV2GroupEvents.Chunk(head, activated.CanonicalPackageBytes)) records.Add((chunk, head, activated.CanonicalPackageBytes, target));
+                // Current commits travel through the independently retained GSR1
+                // streams, not a short-lived ordinary-mailbox substitute.
                 break;
             case "send":
                 if (!GroupMemberSelectors(head.Commit).Any(account => account.AsSpan().SequenceEqual(self.AccountId.Span)))
                     throw new InvalidOperationException("Pending invitation is not group membership.");
                 RequireCompleteGroupTargets(head, self, targets, default);
+                RequireGroupControlComplete(groupState, head, current.AccountId.Span, own.Network);
                 var message = await DeepIdV2GroupEvents.TextAsync(head, self, other, current.Verified.DeviceSecrets,
                     RandomNumberGenerator.GetBytes(32), groupState.NextMessage, value!, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
                 groupState.NextMessage = checked(groupState.NextMessage + 1);
@@ -145,7 +151,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         }
         using var ordinaryValue = await storage.ReadOwnedAsync(ProtectedDid2DirectTextJournal.Slot, ct).ConfigureAwait(false) ?? throw new InvalidDataException("Ordinary registration is absent.");
         using var ordinary = ordinaryValue.Use(bytes => ProtectedDid2DirectTextJournal.Decode(bytes, scope.Network, scope.LocalAccount, scope.Instance));
-        if (ordinary.Pending is not null || ordinary.Entries.Count + records.Count > ProtectedDid2DirectTextJournal.MaximumEntries || root.State.Outbox.Count + records.Count > 512)
+        var recordCount = checked(records.Count + (newControl is null ? 0 : 1));
+        if (ordinary.Pending is not null || ordinary.Entries.Count + recordCount > ProtectedDid2DirectTextJournal.MaximumEntries || root.State.Outbox.Count + recordCount > 512)
             throw new IOException("Complete group batch has no available ordinary capacity.");
         var sequences = targets.ToDictionary(t => Convert.ToHexString(t.Scope.Exact), t => ordinary.NextSequence(t.Scope), StringComparer.Ordinal);
         foreach (var item in records)
@@ -154,6 +161,14 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var dmc = await DeepIdV2GroupEvents.AuthorAsync(item.Record, item.Head, self, capabilities[Convert.ToHexString(selectedScope.RemoteAccount)], current.Verified.DeviceSecrets,
                 RandomNumberGenerator.GetBytes(32), selectedScope.Conversation.ToArray(), sequences[key]++, source.RendezvousTrustedTime, original, item.Package, ct).ConfigureAwait(false);
             root.State.Outbox.Add(new() { Group = id.ToArray(), Operation = RandomNumberGenerator.GetBytes(32), Scope = selectedScope.Exact.ToArray(), Event = dmc.CanonicalBytes.ToArray() });
+        }
+        if (newControl is not null)
+        {
+            var key = Convert.ToHexString(scope.Exact);
+            var carrier = await DeepIdV2GroupEvents.AuthorControlAsync((GroupControlRendezvousRecord)GroupCodec.Decode("GSR1", newControl.Descriptor),
+                newControl.Key, head, self, other, current.Verified.DeviceSecrets, own.Network, RandomNumberGenerator.GetBytes(32),
+                scope.Conversation.ToArray(), sequences[key]++, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
+            root.State.Outbox.Add(new() { Group = id.ToArray(), Operation = RandomNumberGenerator.GetBytes(32), Scope = scope.Exact.ToArray(), Event = carrier.CanonicalBytes.ToArray() });
         }
         for (var index = 0; index < targets.Length; index++)
             await RequireFinalMessagingFreshnessAsync(current, targets[index].Scope, targets[index].Own, targets[index].Peer, source, held, readings[index], ct).ConfigureAwait(false);

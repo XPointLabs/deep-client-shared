@@ -16,6 +16,7 @@ internal static class ProtectedDid2GroupJournal
         internal readonly List<Invitation> Invitations = [];
         internal Invitation? ForScope(ReadOnlySpan<byte> scope) { foreach (var item in Invitations) if (item.Scope.AsSpan().SequenceEqual(scope)) return item; return null; }
         internal readonly List<byte[]> Packages = [];
+        internal readonly List<Control> Controls = [];
         // Never serialized; survives only this actual root/held-lease operation.
         // Protocol independently rechecks currentness whenever it consumes one.
         internal readonly Dictionary<string, VerifiedDeepIdV2GroupDirectory> VerifiedDirectories = new(StringComparer.Ordinal);
@@ -25,6 +26,16 @@ internal static class ProtectedDid2GroupJournal
     internal sealed class Invitation
     {
         internal byte[] Scope = [], Offer = [], InvitationProof = [], Acceptance = [];
+    }
+    internal sealed class Control
+    {
+        internal byte[] Recipient = [], Scope = [], Descriptor = [], Key = [], CursorHash = new byte[32];
+        internal ulong Cursor;
+        internal readonly List<ControlWrite> Writes = [];
+    }
+    internal sealed class ControlWrite
+    {
+        internal byte[] Chunk = [], Request = [], Receipt = [];
     }
     internal sealed class Outgoing
     {
@@ -60,6 +71,9 @@ internal static class ProtectedDid2GroupJournal
         public void Dispose()
         {
             foreach (var group in Groups) { group.VerifiedDirectories.Clear(); foreach (var bytes in new[] { group.Id, group.ForkEvidence }.Concat(group.Packages).Concat(group.Invitations.SelectMany(item => new[] { item.Scope, item.Offer, item.InvitationProof, item.Acceptance }))) CryptographicOperations.ZeroMemory(bytes); }
+            foreach (var control in Groups.SelectMany(group => group.Controls))
+                foreach (var bytes in new[] { control.Recipient, control.Scope, control.Descriptor, control.Key, control.CursorHash }
+                    .Concat(control.Writes.SelectMany(write => new[] { write.Chunk, write.Request, write.Receipt }))) CryptographicOperations.ZeroMemory(bytes);
             foreach (var item in Outbox) foreach (var bytes in new[] { item.Group, item.Operation, item.Scope, item.Event }) CryptographicOperations.ZeroMemory(bytes);
             foreach (var item in Messages) foreach (var bytes in new[] { item.Group, item.Operation, item.Scope, item.Record }) CryptographicOperations.ZeroMemory(bytes);
             foreach (var item in Receives) foreach (var bytes in new[] { item.ScopeHash, item.Operation, item.Hash }) CryptographicOperations.ZeroMemory(bytes);
@@ -76,7 +90,7 @@ internal static class ProtectedDid2GroupJournal
         if (state.Revision == 0 || state.Groups.Count > 32 || state.Outbox.Count > 512 || state.Messages.Count > 4096 || state.Receives.Count > 8192 || state.Chunks.Count > 342)
             throw new IOException("Protected group capacity is exhausted.");
         using var stream = new MemoryStream(); using var writer = new BinaryWriter(stream);
-        writer.Write((byte)2); writer.Write(new byte[3]); writer.Write(network); writer.Write(account); writer.Write(instance); writer.Write(state.Revision);
+        writer.Write((byte)3); writer.Write(new byte[3]); writer.Write(network); writer.Write(account); writer.Write(instance); writer.Write(state.Revision);
         writer.Write(checked((ushort)state.Groups.Count)); writer.Write(checked((ushort)state.Outbox.Count));
         writer.Write(checked((ushort)state.Messages.Count)); writer.Write(checked((ushort)state.Receives.Count)); writer.Write(checked((ushort)state.Chunks.Count));
         foreach (var group in state.Groups.OrderBy(group => Convert.ToHexString(group.Id), StringComparer.Ordinal))
@@ -86,6 +100,15 @@ internal static class ProtectedDid2GroupJournal
             foreach (var invitation in group.Invitations) { Bytes(writer, invitation.Scope); Bytes(writer, invitation.Offer); Bytes(writer, invitation.InvitationProof); Bytes(writer, invitation.Acceptance); }
             Bytes(writer, group.ForkEvidence);
             writer.Write(checked((byte)group.Packages.Count)); foreach (var package in group.Packages) Bytes(writer, package);
+            writer.Write(checked((ushort)group.Controls.Count));
+            foreach (var control in group.Controls)
+            {
+                writer.Write(control.Recipient); Bytes(writer, control.Scope); Bytes(writer, control.Descriptor); writer.Write(control.Key);
+                writer.Write(control.Cursor); writer.Write(control.CursorHash); writer.Write(checked((ushort)control.Writes.Count));
+                // Once sealed, the exact request already owns the chunk bytes.
+                // Do not retain a second plaintext copy in the protected root.
+                foreach (var write in control.Writes) { Bytes(writer, write.Request.Length == 0 ? write.Chunk : []); Bytes(writer, write.Request); Bytes(writer, write.Receipt); CheckSize(stream); }
+            }
             CheckSize(stream);
         }
         foreach (var item in state.Outbox)
@@ -103,7 +126,7 @@ internal static class ProtectedDid2GroupJournal
     internal static State Decode(ReadOnlySpan<byte> bytes, ReadOnlySpan<byte> network, ReadOnlySpan<byte> account, ReadOnlySpan<byte> instance)
     {
         RequireScope(network, account, instance);
-        if (bytes.Length is < 102 or > MaximumBytes || bytes[0] != 2 || bytes.Slice(1, 3).IndexOfAnyExcept((byte)0) >= 0 ||
+        if (bytes.Length is < 102 or > MaximumBytes || bytes[0] != 3 || bytes.Slice(1, 3).IndexOfAnyExcept((byte)0) >= 0 ||
             !bytes.Slice(4, 16).SequenceEqual(network) || !bytes.Slice(20, 32).SequenceEqual(account) || !bytes.Slice(52, 32).SequenceEqual(instance))
             throw new InvalidDataException("Protected group registration is missing, foreign or unsupported.");
         var reader = new Reader(bytes[84..]); var state = new State { Revision = reader.U64() };
@@ -142,6 +165,60 @@ internal static class ProtectedDid2GroupJournal
                         throw new CryptographicException("Protected group lineage differs from its scope/epoch.");
                     group.Packages.Add(package);
                 }
+                var controlCount = reader.Count(100); var recipients = new HashSet<string>(StringComparer.Ordinal);
+                for (var c = 0; c < controlCount; c++)
+                {
+                    var control = new Control { Recipient = reader.Fixed(32), Scope = reader.Bytes(404), Descriptor = reader.Bytes(528),
+                        Key = reader.Fixed(32), Cursor = reader.U64(), CursorHash = reader.Fixed(32) };
+                    group.Controls.Add(control); RequireId(control.Recipient);
+                    var descriptor = (GroupControlRendezvousRecord)GroupCodec.Decode("GSR1", control.Descriptor);
+                    if (BinaryPrimitives.ReadUInt64BigEndian(descriptor.Field(4).Span) != 0)
+                        throw new CryptographicException("Control descriptor successor/handover is unsupported.");
+                    if (!recipients.Add(Convert.ToHexString(control.Recipient)) || !descriptor.Field(1).Span.SequenceEqual(network) ||
+                        !GroupControlCipher.PublicKey(control.Key).AsSpan().SequenceEqual(descriptor.Field(9).Span) ||
+                        (control.Cursor == 0) != (control.CursorHash.AsSpan().IndexOfAnyExcept((byte)0) < 0)) throw new CryptographicException("Invalid protected control stream custody.");
+                    if (control.Scope.Length != 0)
+                    {
+                        var controlScope = RequireSession(control.Scope, network, account, instance);
+                        if (!control.Recipient.AsSpan().SequenceEqual(account) && !control.Recipient.AsSpan().SequenceEqual(controlScope.RemoteAccount))
+                            throw new CryptographicException("Control recipient differs from retained pairwise scope.");
+                    }
+                    else if (!control.Recipient.AsSpan().SequenceEqual(account)) throw new CryptographicException("Remote control stream lost its session.");
+                    var writes = reader.Count(512); byte[] previousHash = new byte[32]; var unpreparedTail = false;
+                    for (var w = 0; w < writes; w++)
+                    {
+                        var write = new ControlWrite { Chunk = reader.Bytes(24748), Request = reader.Bytes(33160), Receipt = reader.Bytes(65535) };
+                        control.Writes.Add(write);
+                        if (write.Request.Length != 0)
+                        {
+                            if (write.Chunk.Length != 0) throw new CryptographicException("Prepared control work has a noncanonical duplicate plaintext field.");
+                            var sealedRequest = (GroupControlWriteRecord)GroupCodec.Decode("GSW1", write.Request);
+                            var plaintext = GroupControlCipher.Open(descriptor, control.Key, checked((ulong)w + 1), previousHash,
+                                BinaryPrimitives.ReadUInt64BigEndian(sealedRequest.Field(22).Span), sealedRequest.Field(21).Span[4..]);
+                            write.Chunk = plaintext.CanonicalBytes.ToArray();
+                        }
+                        var chunk = GroupCodec.Decode("GCF1", write.Chunk);
+                        var originalPackage = group.Packages.SingleOrDefault(package => chunk.Field(1).Span.SequenceEqual(GroupCodec.RecordHash("GCP1", package))) ??
+                            throw new CryptographicException("Control write lost its original package.");
+                        var chunkOffset = checked((int)BinaryPrimitives.ReadUInt32BigEndian(chunk.Field(4).Span) * 24576);
+                        if (BinaryPrimitives.ReadUInt32BigEndian(chunk.Field(2).Span) != originalPackage.Length || chunkOffset >= originalPackage.Length ||
+                            !chunk.Field(7).Span[4..].SequenceEqual(originalPackage.AsSpan(chunkOffset, Math.Min(24576, originalPackage.Length - chunkOffset))))
+                            throw new CryptographicException("Control fragment differs from retained package bytes.");
+                        if (write.Request.Length == 0)
+                        {
+                            if (write.Receipt.Length != 0) throw new CryptographicException("Unprepared control write has a receipt.");
+                            unpreparedTail = true;
+                            continue;
+                        }
+                        if (unpreparedTail) throw new CryptographicException("Prepared control write followed unprepared work.");
+                        var request = (GroupControlWriteRecord)GroupCodec.Decode("GSW1", write.Request);
+                        if (!request.Field(1).Span.SequenceEqual(network) || !request.Field(16).Span.SequenceEqual(GroupControlProductionClient.Selector(descriptor)) ||
+                            !request.Field(17).Span.SequenceEqual(descriptor.ArtifactHash.Span) || BinaryPrimitives.ReadUInt64BigEndian(request.Field(18).Span) != checked((ulong)w + 1) ||
+                            !request.Field(19).Span.SequenceEqual(previousHash)) throw new CryptographicException("Control write chain differs from original descriptor/sequence.");
+                        if (write.Receipt.Length != 0) _ = GroupCodec.Decode("GSS1", write.Receipt);
+                        previousHash = request.Field(20).ToArray();
+                    }
+                }
                 if (group.Fork)
                 {
                     var evidence = GroupCodec.Decode("GCP1", group.ForkEvidence);
@@ -174,7 +251,8 @@ internal static class ProtectedDid2GroupJournal
                         throw new CryptographicException("Protected group chunk differs from retained package bytes.");
                 }
                 if (record is not GroupCommitChunkRecord &&
-                    (!record.Field(1).Span.SequenceEqual(network) || !record.Field(2).Span.SequenceEqual(item.Group)))
+                    (!record.Field(1).Span.SequenceEqual(network) || !((GroupDmc2Payload)parsed.ParsedPayload is { Kind: Dmc2ContentKind.GroupControlRendezvous } carrier
+                        ? carrier.ControlGroup.Span.SequenceEqual(item.Group) : record.Field(2).Span.SequenceEqual(item.Group))))
                     throw new CryptographicException("Protected group work differs from its exact group custody.");
             }
             for (var index = 0; index < messages; index++)
@@ -200,7 +278,7 @@ internal static class ProtectedDid2GroupJournal
         }
         catch { state.Dispose(); throw; }
     }
-    internal static bool IsKind(Dmc2ContentKind kind) => kind is Dmc2ContentKind.GroupInvite or Dmc2ContentKind.GroupInvitationAcceptance or Dmc2ContentKind.GroupCommitChunk or Dmc2ContentKind.GroupApplicationMessage;
+    internal static bool IsKind(Dmc2ContentKind kind) => kind is Dmc2ContentKind.GroupInvite or Dmc2ContentKind.GroupInvitationAcceptance or Dmc2ContentKind.GroupCommitChunk or Dmc2ContentKind.GroupApplicationMessage or Dmc2ContentKind.GroupControlRendezvous;
     private static Did2MessagingSessionScope RequireSession(byte[] exact, ReadOnlySpan<byte> network, ReadOnlySpan<byte> account, ReadOnlySpan<byte> instance)
     {
         var scope = Did2MessagingSessionScope.RestoreMetadata(exact);

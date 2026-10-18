@@ -40,6 +40,11 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         // A fragment has no group identifier until full package authentication.
         // It is bounded canonical authenticated control data, never membership.
         if (record is GroupCommitChunkRecord) return;
+        if (record is GroupControlRendezvousRecord)
+        {
+            await RequireGroupControlCarrierAsync(root, current, held, scope, parsed, send, own, peer, source, false, ct).ConfigureAwait(false);
+            return;
+        }
         var group = root.State.Find(record.Field(2).Span);
         if (group.Fork) throw new CryptographicException("Group is permanently fork-latched.");
         var self = await DeepIdV2GroupDirectoryAuthority.VerifyAsync(own.Proof, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
@@ -81,6 +86,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             {
                 if (native.Direction == 2) await AdoptGroupChunkAsync(root, current, held, scope, chunk, self, other, own, source, ct).ConfigureAwait(false);
             }
+            else if (record is GroupControlRendezvousRecord)
+                await RequireGroupControlCarrierAsync(root, current, held, scope, parsed, native.Direction == 1, own, peer, source, true, ct).ConfigureAwait(false);
             else
             {
                 var group = root.State.Find(record.Field(2).Span);
@@ -119,9 +126,44 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         finally { CryptographicOperations.ZeroMemory(exact); CryptographicOperations.ZeroMemory(operation); }
     }
 
+    private async Task RequireGroupControlCarrierAsync(GroupRoot root, VerifiedDeepIdV2CurrentAccount current, HeldDeepIdV2AccountLease held,
+        Did2MessagingSessionScope scope, ParsedDmc2 parsed, bool send, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own,
+        VerifiedDeepIdV2DirectoryFreshness peer, DeepIdV2ContactPathAuthoritySource source, bool materialize, CancellationToken ct)
+    {
+        var payload = (GroupDmc2Payload)parsed.ParsedPayload;
+        if (BinaryPrimitives.ReadUInt64BigEndian(payload.Record.Field(4).Span) != 0)
+            throw new CryptographicException("Control descriptor successor/handover is not activated.");
+        if (payload.Kind != Dmc2ContentKind.GroupControlRendezvous || !payload.ControlRecipient.Span.SequenceEqual(send ? scope.RemoteAccount : scope.LocalAccount))
+            throw new CryptographicException("Control carrier has a different intended recipient.");
+        var group = root.State.Find(payload.ControlGroup.Span);
+        if (group.Fork) throw new CryptographicException("Forked group grants no control capability.");
+        var self = await DeepIdV2GroupDirectoryAuthority.VerifyAsync(own.Proof, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
+        var other = await DeepIdV2GroupDirectoryAuthority.VerifyAsync(peer, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
+        var head = await VerifyGroupHeadAsync(group, self, other, own, held, source, ct).ConfigureAwait(false);
+        await GroupControlProductionClient.RequireRendezvousAsync((GroupControlRendezvousRecord)payload.Record, head,
+            send ? self : other, own.Network, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
+        if (!send && !GroupMemberSelectors(head.Commit).Any(id => id.AsSpan().SequenceEqual(current.AccountId.Span)) &&
+            (group.ForScope(scope.Exact) is not { } invitation || !GroupCodec.Decode("GIV1", invitation.Offer).Field(9).Span.SequenceEqual(current.AccountId.Span)))
+            throw new CryptographicException("Control carrier is unsolicited for this group.");
+        var retained = group.Controls.SingleOrDefault(control => control.Recipient.AsSpan().SequenceEqual(payload.ControlRecipient.Span));
+        var raw = payload.CanonicalBytes.ToArray();
+        try
+        {
+            if (retained is not null && (!retained.Descriptor.AsSpan().SequenceEqual(payload.Record.CanonicalBytes.Span) ||
+                !retained.Key.AsSpan().SequenceEqual(raw.AsSpan(592)) || !retained.Scope.AsSpan().SequenceEqual(scope.Exact)))
+                throw new CryptographicException("Control carrier changed its retained stream/key/session.");
+            if (send && retained is null) throw new CryptographicException("Control send has no original protected stream custody.");
+            if (!send && materialize && retained is null)
+                group.Controls.Add(new() { Recipient = current.AccountId.ToArray(), Scope = scope.Exact.ToArray(),
+                    Descriptor = payload.Record.CanonicalBytes.ToArray(), Key = raw.AsSpan(592).ToArray() });
+        }
+        finally { CryptographicOperations.ZeroMemory(raw); }
+    }
+
     private async Task AdoptGroupChunkAsync(GroupRoot root, VerifiedDeepIdV2CurrentAccount current, HeldDeepIdV2AccountLease held,
         Did2MessagingSessionScope scope, GroupCommitChunkRecord incoming, VerifiedDeepIdV2GroupDirectory self,
-        VerifiedDeepIdV2GroupDirectory other, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
+        VerifiedDeepIdV2GroupDirectory other, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct,
+        ReadOnlyMemory<byte> expectedGroup = default)
     {
         // Exact retransmission of an adopted package must not leave an orphan
         // transfer behind after a cold restart.
@@ -129,6 +171,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             foreach (var package in known.Packages)
                 if (incoming.Field(1).Span.SequenceEqual(GroupCodec.RecordHash("GCP1", package)))
                 {
+                    if (!expectedGroup.IsEmpty && !known.Id.AsSpan().SequenceEqual(expectedGroup.Span))
+                        throw new CryptographicException("Control stream delivered another group's package.");
                     var index = checked((int)BinaryPrimitives.ReadUInt32BigEndian(incoming.Field(4).Span)); var offset = checked(index * 24576);
                     if (BinaryPrimitives.ReadUInt32BigEndian(incoming.Field(2).Span) != checked((uint)package.Length) || offset >= package.Length || !incoming.Field(7).Span[4..].SequenceEqual(package.AsSpan(offset, Math.Min(24576, package.Length - offset)))) throw new CryptographicException("Adopted group fragment changed bytes.");
                     return;
@@ -146,11 +190,16 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             return;
         }
         var packageRecord = (GroupCommitPackageRecord)GroupCodec.Decode("GCP1", complete.Span);
+        if (!expectedGroup.IsEmpty && !packageRecord.Field(2).Span.SequenceEqual(expectedGroup.Span))
+            throw new CryptographicException("Control stream delivered another group's package.");
         var commit = GroupCodec.Decode("DGC1", packageRecord.Field(4).Span[4..]);
         if (!commit.Field(1).Span.SequenceEqual(scope.Network) || !commit.Field(6).Span.SequenceEqual(scope.RemoteAccount)) throw new CryptographicException("Group package is not authored by the authenticated peer owner.");
         var groupId = packageRecord.Field(2).ToArray(); var epoch = BinaryPrimitives.ReadUInt64BigEndian(packageRecord.Field(3).Span);
         var group = root.State.Groups.SingleOrDefault(item => item.Id.AsSpan().SequenceEqual(groupId));
         if (group is not null && group.Fork) throw new CryptographicException("Group package belongs to a different session or fork.");
+        if (expectedGroup.IsEmpty && group is not null && epoch >= checked((ulong)group.Packages.Count) &&
+            group.Controls.Any(control => control.Recipient.AsSpan().SequenceEqual(current.AccountId.Span)))
+            throw new CryptographicException("An installed control stream cannot be bypassed by a new ordinary-mailbox commit.");
         if (epoch == 0)
         {
             _ = await DeepIdV2GroupTransitions.VerifyGenesisAsync(packageRecord, other, source.RendezvousTrustedTime, ct).ConfigureAwait(false);

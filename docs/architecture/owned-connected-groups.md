@@ -1,6 +1,6 @@
 # Owned connected group candidate
 
-Decision/limits: [DR-0144](../../../docs/survival-program/decisions/DR-0144-multi-account-group-batches.md), extending [DR-0143](../../../docs/survival-program/decisions/DR-0143-owned-connected-group-candidate.md).
+Decision/limits: [DR-0145](../../../docs/survival-program/decisions/DR-0145-owned-group-control-rendezvous.md), [DR-0146](../../../docs/survival-program/decisions/DR-0146-stable-group-control-placement.md), [DR-0144](../../../docs/survival-program/decisions/DR-0144-multi-account-group-batches.md), extending [DR-0143](../../../docs/survival-program/decisions/DR-0143-owned-connected-group-candidate.md).
 Wire/roles/current-directory predicates belong to
 [CONTACT-AND-GROUP](../../../docs/architecture/CONTACT-AND-GROUP-PROTOCOL-V1.md#13-deepsmallgroupv1),
 not this repository. Generic group DMC2 authoring stays disabled.
@@ -15,7 +15,7 @@ The common ordinary journal9 owns all sender sequences; there is no separate
 group transport counter. Old profiles require explicit reset; the new CLI
 candidate uses isolated profiles and preserves earlier text/file evidence.
 
-Protected group generation2 is a closed binary record, not JSON. Its102-byte
+Protected group generation3 is a closed binary record, not JSON. Its102-byte
 header is version:u8/reserved-zero3, network16/account32/database-instance32,
 revision:u64le and five counts:u16le (groups/outgoing/messages/native-selectors/
 fragments). Variable byte strings have an i32le nonnegative bounded length.
@@ -113,19 +113,51 @@ fails closed when full. GSR1 long-offline control retention, full membership/
 device changes, large fanout and complete S11/release acceptance remain open.
 
 
-## Current GSR1 composition gap
+## Current GSR1 composition candidate
 
-The ordinary-mailbox candidate above does not call GSR1. Protocol's
-`GroupControlProductionClient` and `GroupControlPlacementVerifier` currently
-expose no functional current producer/verifier. XNode has durable opaque stores,
-CAS/replay/retention logic and an explicit production composition method, but
-its DID2 `Program.cs` selects the unavailable boundary; configuration flags
-alone cannot activate it. The current account owner has no protected GSR1
-recipient descriptor/sealing-key custody or qualified GSS1 receipt/fetch path.
+DR-0145 adds per-recipient protected descriptors/independent sealing scalars,
+original GSW1 bytes, verified GSS1 evidence and fetch cursor/hash to generation3.
+Generation2 rejects without a reader or migration; old isolated profiles remain
+evidence. The common ordinary journal and SQL schema do not change. Key-bearing
+kind30 is admitted/materialized only from actual authenticated native pairwise
+custody, with intended recipient, current owner signature and retained invitation
+or membership checks. Receiving it is not group membership.
 
-The next implementation must close those exact call paths under the normative
-GROUP/ONION contracts, including an explicit E2EE descriptor/key carrier and
-current opaque placement derivation. It must not reopen retired authority
-configuration, use raw package data as current proof, or count mailbox Store as
-group-control quorum. Source/core tests of the dormant service are not connected
-GSR1 evidence. Full S11 and long-offline qualification remain open.
+The owner captures all required recipient streams including its own. Original
+sealed chunks and write requests precede any callback; a completed write needs
+both independently verified selected-replica receipts. Lost/expired writes are
+not reencrypted or reminted. Current NETCODEC placement and strict ONION/H2 are
+required for dispatch. Historical original receipt verification grants no old
+view dispatch permission. New successor commits use control store/fetch, not a
+short mailbox substitute. With an installed control stream, an unknown new
+ordinary-mailbox package cannot bypass it.
+
+Fetch authenticates/decrypts the exact sequence/predecessor and full GCP closure.
+Package/fragment adoption and cursor share one protected-root CAS; an interrupted
+page can replay exact chunks without skipping them. Missing, expired, forked or
+unavailable control is explicit failure, never empty successful synchronization.
+Application fanout is blocked by incomplete required control publication.
+
+Performance: retained group Stores share one actually opened native scope/lease,
+while still re-verifying every original native event and receipt. Group history
+opens each scope once per held read. Multi-scope DPE2 ACK materialization batches
+joint authority-floor reads only for reference-identical own capabilities inside
+one phase; each peer, current owned directory, scope, clock and actual native row
+is independently checked. Every pre/post-callback phase reads floors anew.
+An ACK keeps its actual native SQL owners open until its existing held lease
+ends, rather than reopening keys and SQL at every callback. No verified floor,
+row or admission result is cached: each phase reconciles native custody and
+rechecks current semantic, protected-root and endpoint fences independently.
+DPAPI authentication, transport deadlines and currentness checks are unchanged.
+
+The functional candidate still needs its recorded three-CLI qualification.
+Long-offline/400-day retention, descriptor rotation/handover, multi-device changes,
+large fanout, crash/fault matrix and full source/package/device/release acceptance
+remain separate gates; this implementation description is not their PASS.
+
+Uncaptured messaging pairs reacquire the entire own/peer pair once when two
+independently verified DTT1 proofs straddle a legitimate signed view/head update.
+The existing30-second budget is shared by both acquisitions. A supplied captured
+owner is never replaced; mismatch still rejects before business effects. Route
+verification remains exact. GSR publication reuses verified package/chunk work
+only within the actual held pre-dispatch phase, not across callbacks or loans.

@@ -282,6 +282,23 @@ public sealed class DeepIdV2DirectoryProofClient : IDisposable
         return floors.Network;
     }
 
+    // One actual floor transaction for an exact common owned authority in a
+    // single verification phase. Never retained across an external callback.
+    internal async ValueTask<DeepIdV2NetworkHistorySnapshot?> RequirePeersStillFreshUnderLeaseAsync(VerifiedDeepIdV2DirectoryFreshness own,
+        IReadOnlyList<VerifiedDeepIdV2DirectoryFreshness> peers, VerifiedXPointNetworkAuthority authority,
+        IDeepIdV2NetworkHistoryStore network, HeldDeepIdV2AccountLease held, CancellationToken ct)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this); held.RequireActive();
+        if (peers.Count is < 1 or > 128 || !own.NetworkId.Span.SequenceEqual(authority.NetworkId.Span) ||
+            peers.Any(peer => !peer.NetworkId.Span.SequenceEqual(authority.NetworkId.Span)))
+            throw new CryptographicException("Held endpoint group has a foreign authority or exceeds its bound.");
+        var floors = await SqliteDeepIdV2AccountGeneration.ReadExistingAuthorityFloorsUnderLeaseAsync(
+            protectedLkgStore, network, authority, held, ct).ConfigureAwait(false);
+        await RequireHeadAndClockAsync(own, floors.Directory, ct).ConfigureAwait(false);
+        foreach (var peer in peers) await RequireHeadAndClockAsync(peer, floors.Directory, ct).ConfigureAwait(false);
+        held.RequireActive(); ct.ThrowIfCancellationRequested(); return floors.Network;
+    }
+
     private async ValueTask RequireHeadAndClockAsync(VerifiedDeepIdV2DirectoryFreshness verified,
         AccountDirectoryProtectedLkg protectedHead, CancellationToken cancellationToken)
     {

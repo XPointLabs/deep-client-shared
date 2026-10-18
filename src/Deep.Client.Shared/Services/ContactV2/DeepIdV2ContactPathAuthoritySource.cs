@@ -160,6 +160,37 @@ public sealed partial class DeepIdV2ContactPathAuthoritySource :
         held.RequireActive(); return reading;
     }
 
+    // Closed batched counterpart of RecheckEndpointPairUnderLeaseAsync. The
+    // dictionary exists only inside this call; keys use reference identity, not
+    // caller equality, a cached freshness result or a serialized network hash.
+    internal async Task<IReadOnlyList<OnionMonotonicReading>> RecheckEndpointPairsUnderLeaseAsync(
+        IReadOnlyList<MessagingEndpointAuthority> pairs, HeldDeepIdV2AccountLease held, CancellationToken ct)
+    {
+        held.RequireActive(); if (pairs.Count > 128) throw new CryptographicException("Held endpoint batch exceeds its bound.");
+        var grouped = new Dictionary<OwnPreKeyAuthoringAuthority, List<int>>(ReferenceEqualityComparer.Instance);
+        for (var i = 0; i < pairs.Count; i++)
+        {
+            if (!grouped.TryGetValue(pairs[i].Own, out var indexes)) grouped.Add(pairs[i].Own, indexes = []);
+            indexes.Add(i);
+        }
+        var result = new OnionMonotonicReading[pairs.Count];
+        foreach (var group in grouped)
+        {
+            var own = group.Key; var peers = group.Value.Select(index => pairs[index].Peer).ToArray();
+            foreach (var peer in peers) RequirePinnedNetwork(peer.NetworkId);
+            var floor = await proofs.RequirePeersStillFreshUnderLeaseAsync(own.Proof, peers, own.Authority, networkHistory, held, ct).ConfigureAwait(false);
+            if (floor is null || floor.Snapshot.ForkLatched || !Same(floor.Snapshot.ProtectedLkg, own.Network.ProtectedLkg) ||
+                !Fixed(floor.ExactHistory.Span, OnionNetworkProtectedHistoryCodec.Encode(own.Network)))
+                throw new CryptographicException("Held endpoint batch no longer binds actual protected network custody.");
+            own.Network.EnsureCurrent(); var reading = await clock.ReadAsync(ct).ConfigureAwait(false) ?? throw new CryptographicException("Held endpoint batch has no monotonic sample.");
+            if (!own.Proof.IsCurrentAtMonotonic(reading.BootId.Span, reading.SampleSeconds) ||
+                peers.Any(peer => !peer.IsCurrentAtMonotonic(reading.BootId.Span, reading.SampleSeconds)))
+                throw new CryptographicException("Held endpoint batch directory freshness expired.");
+            foreach (var index in group.Value) result[index] = reading;
+        }
+        held.RequireActive(); ct.ThrowIfCancellationRequested(); return result;
+    }
+
     public DeepIdV2ContactPathAuthoritySource(XPointNetworkGenesisPin genesisPin,
         DeepIdV2AccountService accounts, DeepIdV2DirectoryProofClient proofs,
         IDeepIdV2NetworkClosureArtifactSource artifacts,
@@ -349,21 +380,37 @@ public sealed partial class DeepIdV2ContactPathAuthoritySource :
         await gate.WaitAsync(token).ConfigureAwait(false);
         try
         {
-            var own = verifiedOwn ?? await VerifyCurrentNetworkCoreAsync(token).ConfigureAwait(false);
-            var peer = await proofs.FetchByDid2Async(did, own.Authority, account.DeploymentProfileId,
-                supportedReader: 2, token).ConfigureAwait(false);
-            ProtectedDid2MessagingPeerBootstrap.RequireProof(did, peer);
-            await proofs.RequireStillFreshAsync(peer, own.Authority, token).ConfigureAwait(false);
-            await proofs.RequireStillFreshAsync(own.Proof, own.Authority, token).ConfigureAwait(false);
-            var floor = await networkHistory.ReadHistoryAsync(token).ConfigureAwait(false);
-            if (floor is null || floor.Snapshot.ForkLatched || !Same(floor.Snapshot.ProtectedLkg, own.Network.ProtectedLkg) ||
-                !Fixed(floor.ExactHistory.Span, OnionNetworkProtectedHistoryCodec.Encode(own.Network)))
-                throw new CryptographicException("Refreshed messaging endpoints no longer bind owned network custody.");
-            own.Network.EnsureCurrent();
-            var reading = await clock.ReadAsync(token).ConfigureAwait(false) ??
-                throw new CryptographicException("Refreshed messaging endpoints have no protected clock sample.");
-            OwnedInitialMessagingSeed.RequireFreshScope(scope, own.Proof, peer, reading);
-            token.ThrowIfCancellationRequested(); return new(own, peer);
+            for (var acquisition = 0; acquisition < 2; acquisition++)
+            {
+                var own = verifiedOwn ?? await VerifyCurrentNetworkCoreAsync(token).ConfigureAwait(false);
+                var peer = await proofs.FetchByDid2Async(did, own.Authority, account.DeploymentProfileId,
+                    supportedReader: 2, token).ConfigureAwait(false);
+                ProtectedDid2MessagingPeerBootstrap.RequireProof(did, peer);
+                var ownTime = Deep.Protocol.AccountDirectoryV1.AccountDirectoryDtt1Codec.Decode(own.Proof.ExactDtt1.Span);
+                var peerTime = Deep.Protocol.AccountDirectoryV1.AccountDirectoryDtt1Codec.Decode(peer.ExactDtt1.Span);
+                if (ownTime.CurrentXnv1Generation != peerTime.CurrentXnv1Generation ||
+                    !Fixed(ownTime.CurrentXnv1CoreHash.Span, peerTime.CurrentXnv1CoreHash.Span) ||
+                    !Fixed(ownTime.CurrentAdh1CoreHash.Span, peerTime.CurrentAdh1CoreHash.Span))
+                {
+                    // A legitimate publisher may advance between the two independent
+                    // acquisitions. Retry the entire uncaptured pair, never splice a
+                    // new owner into an already captured multi-target authority set.
+                    if (verifiedOwn is null && acquisition == 0) continue;
+                    throw new CryptographicException("Refreshed messaging endpoints no longer bind owned network custody.");
+                }
+                await proofs.RequireStillFreshAsync(peer, own.Authority, token).ConfigureAwait(false);
+                await proofs.RequireStillFreshAsync(own.Proof, own.Authority, token).ConfigureAwait(false);
+                var floor = await networkHistory.ReadHistoryAsync(token).ConfigureAwait(false);
+                if (floor is null || floor.Snapshot.ForkLatched || !Same(floor.Snapshot.ProtectedLkg, own.Network.ProtectedLkg) ||
+                    !Fixed(floor.ExactHistory.Span, OnionNetworkProtectedHistoryCodec.Encode(own.Network)))
+                    throw new CryptographicException("Refreshed messaging endpoints no longer bind owned network custody.");
+                own.Network.EnsureCurrent();
+                var reading = await clock.ReadAsync(token).ConfigureAwait(false) ??
+                    throw new CryptographicException("Refreshed messaging endpoints have no protected clock sample.");
+                OwnedInitialMessagingSeed.RequireFreshScope(scope, own.Proof, peer, reading);
+                token.ThrowIfCancellationRequested(); return new(own, peer);
+            }
+            throw new CryptographicException("Refreshed messaging endpoints no longer bind owned network custody.");
         }
         finally { gate.Release(); }
     }

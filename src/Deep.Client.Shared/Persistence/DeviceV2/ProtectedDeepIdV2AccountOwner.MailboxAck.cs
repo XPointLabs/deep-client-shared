@@ -58,7 +58,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             // Independently reconstruct semantic handoffs from actual verified
             // ratchet rows, not descriptor/callback flags. Do this before starting
             // the bounded signing loan; the ordinary receive already committed.
-            await MaterializeMailboxPageUnderLeaseAsync(current, held, page, endpoints, source, fresh, ct).ConfigureAwait(false);
+            using var nativeScopes = new MailboxAckNativeScopes();
+            await MaterializeMailboxPageUnderLeaseAsync(current, held, page, endpoints, source, fresh, nativeScopes, ct).ConfigureAwait(false);
             using var loan = await OpenRetainedMailboxWinnerUnderLeaseAsync(current, held, publication, winner,
                 retained, source, fresh, ct).ConfigureAwait(false);
             var scope = ClientMailboxScope.Derive(loan.Selector.IssuerContext.Span, loan.Route.MailboxId, loan.Route.Epoch);
@@ -122,7 +123,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 await publication.RecheckCustodyAsync(token).ConfigureAwait(false);
                 await RequireExactProtectedMailboxRootAsync(ProtectedDid2MailboxGrantJournal.Slot, grantRoot, token).ConfigureAwait(false);
                 await RequireExactProtectedMailboxRootAsync(ProtectedDid2MailboxReadJournal.Slot, snapshot, token).ConfigureAwait(false);
-                await MaterializeMailboxPageUnderLeaseAsync(current, held, page, endpoints, source, fresh, token).ConfigureAwait(false);
+                await MaterializeMailboxPageUnderLeaseAsync(current, held, page, endpoints, source, fresh, nativeScopes, token).ConfigureAwait(false);
                 policy.ValidateFreshness(); held.RequireActive();
             }
             async Task Capture(ReadOnlyMemory<byte> response, CancellationToken token)
@@ -174,7 +175,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
 
     private async Task MaterializeMailboxPageUnderLeaseAsync(VerifiedDeepIdV2CurrentAccount current, HeldDeepIdV2AccountLease held,
         MailboxRetrievePage page, IReadOnlyList<Did2MailboxSemanticEndpoints> endpoints, DeepIdV2ContactPathAuthoritySource source,
-        DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh, CancellationToken ct)
+        DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh, MailboxAckNativeScopes nativeScopes, CancellationToken ct)
     {
         if (endpoints.Count > ProtectedDid2MailboxReadJournal.MaximumItems) throw new CryptographicException("Semantic endpoint set exceeds owned page bounds.");
         var instance = await SqliteDeepIdV2AccountGeneration.ReadAccountInstanceUnderLeaseAsync(storage, networkId, current.AccountId, ct).ConfigureAwait(false);
@@ -186,6 +187,19 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         try
         {
             using var catalog = await new ProtectedDid2MessagingSessionCatalog(storage, networkId, current.AccountId.Span, instance).ReadAsync(ct).ConfigureAwait(false);
+            var selectedEndpoints = new Dictionary<string, Did2MailboxSemanticEndpoints>(StringComparer.Ordinal);
+            foreach (var item in page.Items)
+            {
+                if (item.Envelope.Ciphertext.Span.StartsWith("DPH2"u8) || item.Envelope.Ciphertext.Span.StartsWith("DBR2"u8)) continue;
+                var incoming = Dpe2Codec.Decode(item.Envelope.Ciphertext.Span);
+                var selectedScope = catalog.FindIncoming(incoming.NetworkId.Span, incoming.SessionId.Span, incoming.SenderDeviceId.Span, incoming.RecipientDeviceId.Span) ??
+                    throw new CryptographicException("Unknown mailbox session cannot authorize ACK.");
+                var endpoint = endpoints.SingleOrDefault(value => FixedRoute(value.Scope.Hash, selectedScope.Hash)) ??
+                    throw new CryptographicException("ACK lost an independently refreshed endpoint pair.");
+                selectedEndpoints.TryAdd(Convert.ToHexString(selectedScope.Hash), endpoint);
+            }
+            var endpointSet = selectedEndpoints.Values.ToArray();
+            var firstReadings = await RequireMailboxEndpointSetUnderLeaseAsync(current, held, endpointSet, source, ct).ConfigureAwait(false);
             foreach (var item in page.Items)
             {
                 if (item.Envelope.Ciphertext.Span.StartsWith("DPH2"u8))
@@ -219,11 +233,17 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 {
                     var endpoint = endpoints.SingleOrDefault(value => FixedRoute(value.Scope.Hash, scope.Hash)) ??
                         throw new CryptographicException("Mailbox ACK has no independently refreshed owned endpoint pair.");
-                    var reading = await RequireMessagingFreshnessAsync(current, endpoint.Pair.Own, endpoint.Pair.Peer, source, held, ct).ConfigureAwait(false);
+                    var reading = firstReadings[name];
                     OwnedInitialMessagingSeed.RequireFreshScope(scope, endpoint.Pair.Own.Proof, endpoint.Pair.Peer, reading);
-                    var owned = await SqliteDeepIdV2AccountGeneration.OpenOwnedMessagingUnderLeaseAsync(storage, sqlStatePath, current, scope, ct).ConfigureAwait(false);
-                    try { session = (scope, endpoint, owned, await owned.Custody.ReconcileAsync(ct).ConfigureAwait(false), reading); sessions.Add(name, session); }
-                    catch { owned.Dispose(); throw; }
+                    if (!nativeScopes.Opened.TryGetValue(name, out var owned))
+                    {
+                        owned = await SqliteDeepIdV2AccountGeneration.OpenOwnedMessagingUnderLeaseAsync(storage, sqlStatePath, current, scope, ct).ConfigureAwait(false);
+                        nativeScopes.Opened.Add(name, owned);
+                    }
+                    // Keep only the actual open native owner, never a verified
+                    // floor/result. Every callback phase reconciles anew.
+                    session = (scope, endpoint, owned, await owned.Custody.ReconcileAsync(ct).ConfigureAwait(false), reading);
+                    sessions.Add(name, session);
                 }
                 var selected = session.Endpoint; var opened = session.Opened; var stable = session.Floor;
                 using var retained = opened.Sql.ReadVerifiedOperation(stable, incoming.OperationId.Span) ?? throw new CryptographicException("ACK has no actual committed receive row.");
@@ -268,12 +288,14 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 }
                 finally { if (parsed.ParsedPayload is AttachmentOfferDmc2Payload attachment) attachment.Manifest.Dispose(); }
             }
+            var finalReadings = await RequireMailboxEndpointSetUnderLeaseAsync(current, held, endpointSet, source, ct).ConfigureAwait(false);
             foreach (var session in sessions.Values)
             {
                 var final = await session.Opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
                 if (!FixedRoute(final.Exact.Span, session.Floor.Exact.Span)) throw new CryptographicException("ACK native custody changed during bounded page materialization.");
-                await RequireFinalMessagingFreshnessAsync(current, session.Scope, session.Endpoint.Pair.Own,
-                    session.Endpoint.Pair.Peer, source, held, session.First, ct).ConfigureAwait(false);
+                var last = finalReadings[Convert.ToHexString(session.Scope.Hash)];
+                if (last.SampleSeconds < session.First.SampleSeconds || !FixedRoute(last.BootId.Span, session.First.BootId.Span))
+                    throw new CryptographicException("ACK endpoint batch crossed a protected clock discontinuity.");
             }
             if (groups is not null)
                 await RequireExactProtectedMailboxRootAsync(ProtectedDid2GroupJournal.Slot, groups.Exact, ct).ConfigureAwait(false);
@@ -281,9 +303,38 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         }
         finally
         {
-            application?.Dispose(); groups?.Dispose(); foreach (var session in sessions.Values) session.Opened.Dispose();
+            application?.Dispose(); groups?.Dispose();
             CryptographicOperations.ZeroMemory(instance);
         }
+    }
+
+    // Lifetime is exactly this ACK's existing held account lease, including
+    // callback fences. Reopening SQL/keys is redundant; authenticating the
+    // current native floor/rows and semantic custody is not, and stays above.
+    private sealed class MailboxAckNativeScopes : IDisposable
+    {
+        internal Dictionary<string, OwnedDid2MessagingStorage> Opened { get; } = new(StringComparer.Ordinal);
+        public void Dispose()
+        {
+            foreach (var opened in Opened.Values) opened.Dispose();
+            Opened.Clear();
+        }
+    }
+
+    private static async Task<IReadOnlyDictionary<string, OnionMonotonicReading>> RequireMailboxEndpointSetUnderLeaseAsync(
+        VerifiedDeepIdV2CurrentAccount current, HeldDeepIdV2AccountLease held, IReadOnlyList<Did2MailboxSemanticEndpoints> endpoints,
+        DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
+    {
+        var readings = await source.RecheckEndpointPairsUnderLeaseAsync(endpoints.Select(endpoint => endpoint.Pair).ToArray(), held, ct).ConfigureAwait(false);
+        var result = new Dictionary<string, OnionMonotonicReading>(StringComparer.Ordinal);
+        for (var i = 0; i < endpoints.Count; i++)
+        {
+            var endpoint = endpoints[i]; var reading = readings[i];
+            _ = DeepIdV2AccountService.RequireOwnCurrentDirectory(current, endpoint.Pair.Own.Proof, reading.BootId.Span, reading.SampleSeconds);
+            OwnedInitialMessagingSeed.RequireFreshScope(endpoint.Scope, endpoint.Pair.Own.Proof, endpoint.Pair.Peer, reading);
+            if (!result.TryAdd(Convert.ToHexString(endpoint.Scope.Hash), reading)) throw new CryptographicException("ACK endpoint scope is repeated.");
+        }
+        held.RequireActive(); ct.ThrowIfCancellationRequested(); return result;
     }
 
     private sealed class OwnedAckIngress(IClientMailboxBinaryIngress target, byte[] exact, ScopedMailboxResolvedRoute installed,

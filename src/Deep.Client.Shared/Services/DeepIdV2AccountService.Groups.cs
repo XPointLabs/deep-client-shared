@@ -43,6 +43,7 @@ public sealed partial class DeepIdV2AccountService
         try
         {
             ProtectedDph2PreClaimJournal.RequireIntent(selected);
+            if (action == "send") await PublishGroupControlAsync(selected, source, ct).ConfigureAwait(false);
             await RequireAttachmentConsentAsync(conversation, source, ct).ConfigureAwait(false);
             using var verifier = OpenVerifier();
             DeepIdV2Conversation[] candidates = [];
@@ -74,9 +75,39 @@ public sealed partial class DeepIdV2AccountService
                 targets = captured;
             }
             await owner.GroupActionAsync(TrustedUnixSeconds(), verifier, action, selected, conversation.Scope, text, pair.Own, pair.Peer, source, ct, targets).ConfigureAwait(false);
+            if (action is "invite" or "advance") await PublishGroupControlAsync(selected, source, ct).ConfigureAwait(false);
             return await FlushGroupAsync(selected, conversation, source, ct).ConfigureAwait(false);
         }
         finally { CryptographicOperations.ZeroMemory(selected); }
+    }
+
+    /// <summary>Publishes original protected control chunks with actual two-replica evidence; unknown writes are never reminted.</summary>
+    public async Task<int> PublishGroupControlAsync(ReadOnlyMemory<byte> group, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct = default)
+    {
+        source.RequireAccountOwner(this); ProtectedDph2PreClaimJournal.RequireIntent(group.Span);
+        using var verifier = OpenVerifier(); var completed = 0;
+        for (; completed < 512; completed++)
+        {
+            var fresh = await source.VerifyForOwnPreKeyAuthoringAsync(this, ct).ConfigureAwait(false);
+            if (!await owner.PublishOneGroupControlAsync(TrustedUnixSeconds(), verifier, group, fresh, source, ct).ConfigureAwait(false)) return completed;
+        }
+        throw new IOException("Control publication exceeded its bounded stream work budget.");
+    }
+
+    /// <summary>Recovers verified group control independently of ordinary mailbox retention.</summary>
+    public async Task<int> SyncGroupControlAsync(ReadOnlyMemory<byte> group, DeepIdV2Conversation ownerConversation,
+        DeepIdV2ContactPathAuthoritySource source, CancellationToken ct = default)
+    {
+        source.RequireAccountOwner(this); ProtectedDph2PreClaimJournal.RequireIntent(group.Span);
+        await RequireAttachmentConsentAsync(ownerConversation, source, ct).ConfigureAwait(false);
+        using var verifier = OpenVerifier(); var completed = 0;
+        for (var page = 0; page < 512; page++)
+        {
+            var pair = await source.VerifyForOwnMessagingAsync(this, ownerConversation.Scope, ct).ConfigureAwait(false);
+            var result = await owner.SyncGroupControlAsync(TrustedUnixSeconds(), verifier, group, ownerConversation.Scope, pair.Own, pair.Peer, source, ct).ConfigureAwait(false);
+            completed = checked(completed + result.Applied); if (!result.More) return completed;
+        }
+        throw new IOException("Control catch-up exceeded its bounded pagination budget.");
     }
 
     public async Task<int> FlushGroupAsync(ReadOnlyMemory<byte> group, DeepIdV2Conversation conversation,
@@ -111,6 +142,7 @@ public sealed partial class DeepIdV2AccountService
         DeepIdV2ContactPathAuthoritySource source, SemaphoreSlim accountOperations, CancellationToken ct)
     {
         IReadOnlyList<ProtectedDid2GroupJournal.Outgoing> batch = [];
+        IReadOnlySet<string> retained = new HashSet<string>(StringComparer.Ordinal);
         try
         {
             using var verifier = OpenVerifier();
@@ -120,6 +152,12 @@ public sealed partial class DeepIdV2AccountService
                 batch = await owner.ReadGroupBatchAsync(TrustedUnixSeconds(), verifier, selected, conversation.Scope, ct).ConfigureAwait(false);
                 if (batch.Count == 0) return 0;
                 await RequireAttachmentConsentAsync(conversation, source, ct).ConfigureAwait(false);
+                var committed = batch.Where(item => item.NativeCommitted).ToArray();
+                if (committed.Length != 0)
+                {
+                    var own = await source.VerifyForOwnPreKeyAuthoringAsync(this, ct).ConfigureAwait(false);
+                    retained = await owner.ReadRetainedGroupStoresAsync(TrustedUnixSeconds(), verifier, conversation.Scope, committed, own, source, ct).ConfigureAwait(false);
+                }
             }
             finally { accountOperations.Release(); }
             foreach (var item in batch)
@@ -127,13 +165,7 @@ public sealed partial class DeepIdV2AccountService
                 await accountOperations.WaitAsync(ct).ConfigureAwait(false);
                 try
                 {
-                    ClientMailboxStoreResult? retained = null;
-                    if (item.NativeCommitted)
-                    {
-                        var own = await source.VerifyForOwnPreKeyAuthoringAsync(this, ct).ConfigureAwait(false);
-                        retained = await owner.ReadRetainedMessagingStoreAsync(TrustedUnixSeconds(), verifier, conversation.Scope, item.Operation, own, source, ct).ConfigureAwait(false);
-                    }
-                    if (retained is null)
+                    if (!retained.Contains(Convert.ToHexString(item.Operation)))
                     {
                         using var native = await SendOwnMessagingAsync(conversation.Scope, item.Operation, item.Event, source, ct).ConfigureAwait(false);
                         _ = await DeliverOwnMessagingAsync(conversation.Scope, item.Operation, source, ct).ConfigureAwait(false);

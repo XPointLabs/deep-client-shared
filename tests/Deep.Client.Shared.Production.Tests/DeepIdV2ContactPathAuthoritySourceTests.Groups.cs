@@ -15,8 +15,42 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     }
 
     [Fact]
+    public async Task Did2Groups_EndpointBatchUsesActualLeaseAndDoesNotCacheFreshnessAcrossPhases()
+    {
+        await using var fixture = await Fixture.CreateAsync(withPeer: true);
+        await fixture.CheckGroupEndpointBatchBorrow();
+    }
+
+    [Fact]
+    public async Task Did2Groups_ControlPlacementUsesTheExactPmtReferenceInTheFrozenRankTranscript()
+    {
+        await using var fixture = await Fixture.CreateAsync(withPeer: true);
+        await fixture.CheckGroupControlPlacement();
+    }
+
+    [Fact]
+    public async Task Did2Groups_ControlAnchorSurvivesSignedViewAndSelectionEpochRenewal()
+    {
+        await using var fixture = await Fixture.CreateAsync(withPeer: true);
+        await fixture.CheckGroupControlAnchorRenewal();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     [Trait("RequiresApprovedMlKemRuntime", "true")]
-    public async Task Did2Groups_OwnedBatchNativeReceiveColdHistoryAndReplayInBothDirections()
+    public async Task Did2Groups_EndpointAcquisitionNeverSplicesDifferentSignedViews(bool capturedOwn)
+    {
+        await using var fixture = await Fixture.CreateAsync(withPeer: true);
+        var (complete, hello, init, _, _) = await fixture.PrepareNativeHelloCompletion(Bytes(32, 0x97));
+        using var initial = await complete(fixture.Accounts);
+        var scope = await fixture.EnsureSenderMessaging(init, hello);
+        await fixture.CheckGroupEndpointViewAcquisition(scope, capturedOwn);
+    }
+
+    [Fact]
+    [Trait("RequiresApprovedMlKemRuntime", "true")]
+    public async Task Did2Groups_DescriptorNativeCustodyAndUnpublishedCommitBlocksApplicationSend()
     {
         // Actual account/SQLCipher/native crypto with independently signed
         // fixture proofs. This is NOT socket transport, Store or ACK evidence.
@@ -42,22 +76,20 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         Assert.Equal("Accepted", Assert.Single(await fixture.Accounts.ListGroupsAsync()).State);
         await fixture.PrepareGroupAction(alice, "advance", group); await Transfer(alice, bob);
         Assert.Equal("Active", Assert.Single(await fixture.Accounts.ListGroupsAsync()).State);
-        Assert.Equal("Active", Assert.Single(await fixture.AccountsForPeer().ListGroupsAsync()).State);
-        await fixture.PrepareGroupAction(alice, "invite", group);
-        await fixture.PrepareGroupAction(bob, "accept", group); // Exact original work survives activation.
-        var noTargetsFloor = await fixture.ReadMessagingFloor(alice);
-        await Assert.ThrowsAsync<CryptographicException>(() => fixture.PrepareGroupAction(alice, "send", group, "missing batch targets", omitTargets: true));
-        Assert.Equal(SHA256.HashData(noTargetsFloor.Exact.Span), SHA256.HashData((await fixture.ReadMessagingFloor(alice)).Exact.Span));
+        // DR-0145: the short mailbox no longer transports new commits.
+        Assert.Equal("Accepted", Assert.Single(await fixture.AccountsForPeer().ListGroupsAsync()).State);
+        var beforeUnpublished = await fixture.ReadMessagingFloor(alice);
+        await Assert.ThrowsAsync<CryptographicException>(() => fixture.PrepareGroupAction(alice, "send", group, "must not bypass GSR receipts"));
+        Assert.Equal(SHA256.HashData(beforeUnpublished.Exact.Span), SHA256.HashData((await fixture.ReadMessagingFloor(alice)).Exact.Span));
         Assert.Equal(0, Assert.Single(await fixture.Accounts.ListGroupsAsync()).LocalMessageCommands);
-        await fixture.PrepareGroupAction(alice, "send", group, "native A to B"); await Transfer(alice, bob);
-        await fixture.PrepareGroupAction(bob, "send", group, "native B to A"); await Transfer(bob, alice);
+        Assert.Empty(await fixture.Accounts.ListGroupMessagesAsync(group));
+        Assert.Empty(await fixture.AccountsForPeer().ListGroupMessagesAsync(group));
         Assert.True(hostileChunkChecked);
-        foreach (var account in new[] { fixture.ReopenAccount(), fixture.AccountsForPeer() })
-        {
-            var messages = await account.ListGroupMessagesAsync(group);
-            Assert.Equal(2, messages.Count); Assert.Single(messages, item => item.IsLocalAuthor);
-            Assert.Contains(messages, item => item.Text == "native A to B"); Assert.Contains(messages, item => item.Text == "native B to A");
-        }
+        var retainedBatch = await fixture.ReadGroupBatch(alice, group);
+        try {
+            Assert.Single(retainedBatch, item => ApplicationCoreCodec.DecodeDmc2(item.Event).ContentKind == Dmc2ContentKind.GroupControlRendezvous);
+            Assert.All(retainedBatch, item => Assert.True(item.NativeCommitted));
+        } finally { Clear(retainedBatch); }
 
         async Task Transfer(Did2MessagingSessionScope sender, Did2MessagingSessionScope receiver)
         {
@@ -68,8 +100,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 {
                     Assert.True(item.Adopted); // Adopted command != committed native or Store.
                     if (!hostileChunkChecked && ApplicationCoreCodec.DecodeDmc2(item.Event).ParsedPayload is Deep.Protocol.GroupV1.GroupDmc2Payload chunkPayload &&
-                        chunkPayload.Record is Deep.Protocol.GroupV1.GroupCommitChunkRecord chunk && System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(chunk.Field(4).Span) == 0 &&
-                        System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(chunk.Field(5).Span) > 1)
+                        chunkPayload.Record is Deep.Protocol.GroupV1.GroupCommitChunkRecord chunk && System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(chunk.Field(4).Span) == 0)
                     { await fixture.RejectAlteredProtectedGroupChunk(sender, item, chunk); hostileChunkChecked = true; }
                     if (ApplicationCoreCodec.DecodeDmc2(item.Event).ContentKind == Dmc2ContentKind.GroupApplicationMessage)
                     {
@@ -99,6 +130,101 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 
     private sealed partial class Fixture
     {
+        internal async Task CheckGroupEndpointViewAcquisition(Did2MessagingSessionScope scope, bool capturedOwn)
+        {
+            var source = Source();
+            var captured = capturedOwn ? await source.VerifyForOwnPreKeyAuthoringAsync(Accounts, default) : null;
+            await AdvanceNetworkAsync();
+            var next = successor; successor = null;
+            Action switchView = () => successor = next;
+            OnNextDirectoryProof = capturedOwn ? switchView : () => OnNextDirectoryProof = switchView;
+            if (capturedOwn)
+            {
+                var error = await Assert.ThrowsAsync<CryptographicException>(async () =>
+                    await source.VerifyForOwnMessagingAsync(Accounts, scope, default, captured));
+                Assert.Equal("Refreshed messaging endpoints no longer bind owned network custody.", error.Message);
+            }
+            else
+            {
+                var pair = await source.VerifyForOwnMessagingAsync(Accounts, scope, default);
+                var ownTime = Deep.Protocol.AccountDirectoryV1.AccountDirectoryDtt1Codec.Decode(pair.Own.Proof.ExactDtt1.Span);
+                var peerTime = Deep.Protocol.AccountDirectoryV1.AccountDirectoryDtt1Codec.Decode(pair.Peer.ExactDtt1.Span);
+                Assert.Equal(ownTime.CurrentXnv1CoreHash.ToArray(), peerTime.CurrentXnv1CoreHash.ToArray());
+                Assert.Equal(ownTime.CurrentXnv1Generation, peerTime.CurrentXnv1Generation);
+                Assert.Equal(2, pair.Own.NamespaceRecords.ExactOrderedPmt2Chain.Count);
+            }
+            Assert.False((await NetworkStore.ReadAsync(default))!.ForkLatched);
+        }
+
+        internal async Task CheckGroupControlAnchorRenewal()
+        {
+            var first = await Source().VerifyForOwnPreKeyAuthoringAsync(Accounts, default);
+            var anchor = Deep.Protocol.ContactV1.ContactCodec.ArtifactReference("PMT2",
+                Deep.Protocol.ContactV1.ContactCodec.Decode("PMT2", first.NamespaceRecords.ExactOrderedPmt2Chain.Last().Span)).CanonicalBytes;
+            var selector = Bytes(32, 0x39);
+            var before = Deep.Protocol.DeepExtension.PrivacyRouting.GroupControlPlacementVerifier.Create(first.Network, selector, anchor);
+            await AdvanceNetworkAsync(); AuthorSignedEpochAdvance();
+            var current = await Source().VerifyForOwnPreKeyAuthoringAsync(Accounts, default);
+            var latest = Deep.Protocol.ContactV1.ContactCodec.ArtifactReference("PMT2",
+                Deep.Protocol.ContactV1.ContactCodec.Decode("PMT2", current.NamespaceRecords.ExactOrderedPmt2Chain.Last().Span)).CanonicalBytes;
+            Assert.NotEqual(anchor.ToArray(), latest.ToArray());
+            var retained = Deep.Protocol.DeepExtension.PrivacyRouting.GroupControlPlacementVerifier.Create(current.Network, selector, anchor);
+            Assert.Same(current.Network, retained.Network);
+            Assert.Equal(before.PlacementHash.ToArray(), retained.PlacementHash.ToArray());
+            Assert.Equal(before.ViewHash.ToArray(), retained.ViewHash.ToArray());
+            for (var i = 0; i < 2; i++) Assert.Equal(before.ReplicaIds[i].ToArray(), retained.ReplicaIds[i].ToArray());
+            var altered = anchor.ToArray(); altered[^1] ^= 1;
+            Assert.Throws<CryptographicException>(() => Deep.Protocol.DeepExtension.PrivacyRouting.GroupControlPlacementVerifier.Create(current.Network, selector, altered));
+        }
+
+        internal async Task CheckGroupControlPlacement()
+        {
+            var source = Source(); var own = await source.VerifyForOwnPreKeyAuthoringAsync(Accounts, default);
+            var pmt = Deep.Protocol.ContactV1.ContactCodec.Decode("PMT2", own.NamespaceRecords.ExactOrderedPmt2Chain.Last().Span);
+            var reference = Deep.Protocol.ContactV1.ContactCodec.ArtifactReference("PMT2", pmt).CanonicalBytes.ToArray();
+            var selector = Bytes(32, 0x39); var network = own.Network.NetworkId.ToArray(); var epoch = pmt.Field(6).ToArray();
+            var input = GroupControlHash("Deep/Group/V1/control-placement-input", [.. network, .. selector]);
+            var rows = pmt.Field(9).ToArray();
+            var expected = Enumerable.Range(0, rows.Length / 136).Select(index => rows.AsSpan(index * 136, 32).ToArray())
+                .Select(id => (Id: id, Rank: SHA256.HashData([.. "Deep/XPoint/V1/PMS2/rendezvous-sha256/v2"u8, 0, .. network, .. reference, .. epoch, .. input, .. id])))
+                .OrderBy(row => Convert.ToHexString(row.Rank), StringComparer.Ordinal).ThenBy(row => Convert.ToHexString(row.Id), StringComparer.Ordinal)
+                .Take(2).Select(row => row.Id).ToArray();
+            var placement = Deep.Protocol.DeepExtension.PrivacyRouting.GroupControlPlacementVerifier.Create(own.Network, selector, reference);
+            Assert.Equal(2, placement.ReplicaIds.Count);
+            for (var i = 0; i < 2; i++) Assert.Equal(expected[i], placement.ReplicaIds[i].ToArray());
+            var expectedHash = GroupControlHash("Deep/Group/V1/control-placement", [.. network, .. pmt.Field(5).Span, .. reference, .. epoch, .. selector, .. expected[0], .. expected[1]]);
+            Assert.Equal(expectedHash, placement.PlacementHash.ToArray());
+            Assert.Throws<ArgumentException>(() => Deep.Protocol.DeepExtension.PrivacyRouting.GroupControlPlacementVerifier.Create(own.Network, new byte[32], reference));
+        }
+        private static byte[] GroupControlHash(string domain, byte[] payload)
+        {
+            var label = System.Text.Encoding.ASCII.GetBytes(domain); var bytes = new byte[label.Length + 5 + payload.Length]; label.CopyTo(bytes, 0);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(bytes.AsSpan(label.Length + 1), checked((uint)payload.Length));
+            payload.CopyTo(bytes, label.Length + 5); return SHA256.HashData(bytes);
+        }
+
+        internal async Task CheckGroupEndpointBatchBorrow()
+        {
+            var source = Source(); var own = await source.VerifyForOwnPreKeyAuthoringAsync(Accounts, default);
+            var pairs = new[] { new Deep.Client.Shared.Services.ContactV2.DeepIdV2ContactPathAuthoritySource.MessagingEndpointAuthority(own, own.Proof),
+                new Deep.Client.Shared.Services.ContactV2.DeepIdV2ContactPathAuthoritySource.MessagingEndpointAuthority(own, own.Proof) };
+            var actual = new DeepIdV2AccountFileLease(Path.Combine(directory, "deep-store-v2-account.lock"));
+            using var held = await actual.AcquireAsync(default);
+            var readings = await source.RecheckEndpointPairsUnderLeaseAsync(pairs, held, default);
+            Assert.Equal(2, readings.Count); Assert.Same(readings[0], readings[1]);
+            using var foreign = await new DeepIdV2AccountFileLease(Path.Combine(directory, "peer", "deep-store-v2-account.lock")).AcquireAsync(default);
+            await Assert.ThrowsAsync<CryptographicException>(() => source.RecheckEndpointPairsUnderLeaseAsync(pairs, foreign, default));
+            var before = Sample;
+            try
+            {
+                Sample = own.Proof.FreshnessDeadlineMonotonicSeconds;
+                await Assert.ThrowsAsync<CryptographicException>(() => source.RecheckEndpointPairsUnderLeaseAsync(pairs, held, default));
+            }
+            finally { Sample = before; }
+            held.Dispose();
+            await Assert.ThrowsAsync<ObjectDisposedException>(() => source.RecheckEndpointPairsUnderLeaseAsync(pairs, held, default));
+        }
+
         internal async Task RejectAlteredProtectedGroupChunk(Did2MessagingSessionScope scope, ProtectedDid2GroupJournal.Outgoing item, Deep.Protocol.GroupV1.GroupCommitChunkRecord chunk)
         {
             var selectedStorage = scope.IsInitiator ? storage : peerStorage;
@@ -108,8 +234,19 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             using var decoded = value.Use(bytes => ProtectedDid2GroupJournal.Decode(bytes, scope.Network, scope.LocalAccount, scope.Instance));
             var outgoing = decoded.Outbox.Single(entry => entry.Operation.AsSpan().SequenceEqual(item.Operation));
             var at = outgoing.Event.AsSpan().IndexOf(chunk.CanonicalBytes.Span); Assert.True(at > 0);
-            var total = System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(chunk.Field(2).Span);
-            System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(outgoing.Event.AsSpan(at + 60), total % 24576 == 0 ? total - 1 : total + 1);
+            if (System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(chunk.Field(5).Span) > 1)
+            {
+                var total = System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(chunk.Field(2).Span);
+                System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(outgoing.Event.AsSpan(at + 60), total % 24576 == 0 ? total - 1 : total + 1);
+            }
+            else
+            {
+                // Preserve canonical geometry and hash, but alter exact bytes:
+                // even a one-chunk bootstrap must bind the protected package.
+                var length = chunk.CanonicalBytes.Length - 152;
+                outgoing.Event[at + 152] ^= 1;
+                SHA256.HashData(outgoing.Event.AsSpan(at + 152, length)).CopyTo(outgoing.Event, at + 108);
+            }
             Assert.Throws<CryptographicException>(() => ProtectedDid2GroupJournal.Encode(decoded, scope.Network, scope.LocalAccount, scope.Instance));
             using var unchanged = await selectedStorage.ReadOwnedAsync(ProtectedDid2GroupJournal.Slot, default);
             Assert.Equal(originalHash, unchanged!.Use(bytes => SHA256.HashData(bytes)));
