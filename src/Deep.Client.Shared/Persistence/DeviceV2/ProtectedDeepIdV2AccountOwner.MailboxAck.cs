@@ -6,6 +6,7 @@ using Deep.Client.Shared.Services.ContactV2;
 using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.ContactV2;
 using Deep.Protocol.DeepExtension.MailboxCapabilities;
+using Deep.Protocol.DeepExtension.PrivacyRouting;
 using Deep.Protocol.MessagingWire;
 using Deep.Protocol.XPointNetworkV1;
 
@@ -177,6 +178,11 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     {
         if (endpoints.Count > ProtectedDid2MailboxReadJournal.MaximumItems) throw new CryptographicException("Semantic endpoint set exceeds owned page bounds.");
         var instance = await SqliteDeepIdV2AccountGeneration.ReadAccountInstanceUnderLeaseAsync(storage, networkId, current.AccountId, ct).ConfigureAwait(false);
+        // One actual native snapshot per scope while the account lease remains
+        // held. This is neither a cross-operation cache nor caller authority.
+        var sessions = new Dictionary<string, (Did2MessagingSessionScope Scope, Did2MailboxSemanticEndpoints Endpoint,
+            OwnedDid2MessagingStorage Opened, Did2MessagingFloor Floor, OnionMonotonicReading First)>(StringComparer.Ordinal);
+        GroupRoot? groups = null; SqliteDeepMailboxStore? application = null;
         try
         {
             using var catalog = await new ProtectedDid2MessagingSessionCatalog(storage, networkId, current.AccountId.Span, instance).ReadAsync(ct).ConfigureAwait(false);
@@ -208,12 +214,18 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 var incoming = Dpe2Codec.Decode(item.Envelope.Ciphertext.Span);
                 var scope = catalog.FindIncoming(incoming.NetworkId.Span, incoming.SessionId.Span, incoming.SenderDeviceId.Span, incoming.RecipientDeviceId.Span) ??
                     throw new CryptographicException("Unknown mailbox session cannot authorize ACK.");
-                var selected = endpoints.SingleOrDefault(value => FixedRoute(value.Scope.Hash, scope.Hash)) ??
-                    throw new CryptographicException("Mailbox ACK has no independently refreshed owned endpoint pair.");
-                var first = await RequireMessagingFreshnessAsync(current, selected.Pair.Own, selected.Pair.Peer, source, held, ct).ConfigureAwait(false);
-                OwnedInitialMessagingSeed.RequireFreshScope(scope, selected.Pair.Own.Proof, selected.Pair.Peer, first);
-                using var opened = await SqliteDeepIdV2AccountGeneration.OpenOwnedMessagingUnderLeaseAsync(storage, sqlStatePath, current, scope, ct).ConfigureAwait(false);
-                var stable = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
+                var name = Convert.ToHexString(scope.Hash);
+                if (!sessions.TryGetValue(name, out var session))
+                {
+                    var endpoint = endpoints.SingleOrDefault(value => FixedRoute(value.Scope.Hash, scope.Hash)) ??
+                        throw new CryptographicException("Mailbox ACK has no independently refreshed owned endpoint pair.");
+                    var reading = await RequireMessagingFreshnessAsync(current, endpoint.Pair.Own, endpoint.Pair.Peer, source, held, ct).ConfigureAwait(false);
+                    OwnedInitialMessagingSeed.RequireFreshScope(scope, endpoint.Pair.Own.Proof, endpoint.Pair.Peer, reading);
+                    var owned = await SqliteDeepIdV2AccountGeneration.OpenOwnedMessagingUnderLeaseAsync(storage, sqlStatePath, current, scope, ct).ConfigureAwait(false);
+                    try { session = (scope, endpoint, owned, await owned.Custody.ReconcileAsync(ct).ConfigureAwait(false), reading); sessions.Add(name, session); }
+                    catch { owned.Dispose(); throw; }
+                }
+                var selected = session.Endpoint; var opened = session.Opened; var stable = session.Floor;
                 using var retained = opened.Sql.ReadVerifiedOperation(stable, incoming.OperationId.Span) ?? throw new CryptographicException("ACK has no actual committed receive row.");
                 if (retained.Direction != 2 || !FixedRoute(retained.ExactEnvelope, item.Envelope.Ciphertext.Span))
                     throw new CryptographicException("ACK differs from the actual authenticated receive.");
@@ -221,7 +233,14 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 var parsed = plaintext.Use(bytes => ApplicationCoreCodec.DecodeDmc2(bytes));
                 try
                 {
-                    using var application = await SqliteDeepIdV2AccountGeneration.OpenApplicationUnderLeaseAsync(storage, sqlStatePath, current, held, ct).ConfigureAwait(false);
+                    if (ProtectedDid2GroupJournal.IsKind(parsed.ContentKind))
+                    {
+                        groups ??= await OpenGroupsUnderLeaseAsync(current, ct).ConfigureAwait(false);
+                        await MaterializeGroupNativeUnderLeaseAsync(current, held, scope, retained, selected.Pair.Own,
+                            selected.Pair.Peer, source, ct, groups).ConfigureAwait(false);
+                        continue;
+                    }
+                    application ??= await SqliteDeepIdV2AccountGeneration.OpenApplicationUnderLeaseAsync(storage, sqlStatePath, current, held, ct).ConfigureAwait(false);
                     if (parsed.ContentKind is Dmc2ContentKind.MessageCreate or Dmc2ContentKind.AttachmentOffer)
                     {
                         using var handoff = AuthenticatedDirectDmc2.FromOwnedDid2Commit(opened, stable, incoming.OperationId.Span, []);
@@ -248,11 +267,23 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     else throw new NotSupportedException("This mailbox event has no actual composed semantic ACK consumer; retain it.");
                 }
                 finally { if (parsed.ParsedPayload is AttachmentOfferDmc2Payload attachment) attachment.Manifest.Dispose(); }
-                await RequireFinalMessagingFreshnessAsync(current, scope, selected.Pair.Own, selected.Pair.Peer, source, held, first, ct).ConfigureAwait(false);
             }
+            foreach (var session in sessions.Values)
+            {
+                var final = await session.Opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
+                if (!FixedRoute(final.Exact.Span, session.Floor.Exact.Span)) throw new CryptographicException("ACK native custody changed during bounded page materialization.");
+                await RequireFinalMessagingFreshnessAsync(current, session.Scope, session.Endpoint.Pair.Own,
+                    session.Endpoint.Pair.Peer, source, held, session.First, ct).ConfigureAwait(false);
+            }
+            if (groups is not null)
+                await RequireExactProtectedMailboxRootAsync(ProtectedDid2GroupJournal.Slot, groups.Exact, ct).ConfigureAwait(false);
             ct.ThrowIfCancellationRequested(); held.RequireActive();
         }
-        finally { CryptographicOperations.ZeroMemory(instance); }
+        finally
+        {
+            application?.Dispose(); groups?.Dispose(); foreach (var session in sessions.Values) session.Opened.Dispose();
+            CryptographicOperations.ZeroMemory(instance);
+        }
     }
 
     private sealed class OwnedAckIngress(IClientMailboxBinaryIngress target, byte[] exact, ScopedMailboxResolvedRoute installed,

@@ -15,7 +15,7 @@ public sealed partial class SqliteDeepMailboxStore :
     IDisposable
 {
     private const int ApplicationId = 0x444D4231; // DMB1
-    private const int SchemaVersion = 16;
+    private const int SchemaVersion = 17;
     private readonly bool allowCreate;
     private readonly string _connectionString;
     private readonly byte[] encryptionKey;
@@ -218,7 +218,7 @@ public sealed partial class SqliteDeepMailboxStore :
                 sender_sequence INTEGER NOT NULL CHECK(sender_sequence >= 3),
                 operation_id BLOB NOT NULL UNIQUE CHECK(length(operation_id) = 32),
                 exact_dmc2_hash BLOB NOT NULL CHECK(length(exact_dmc2_hash) = 32),
-                exact_dmc2 BLOB NOT NULL CHECK(length(exact_dmc2) BETWEEN 285 AND 23649),
+                exact_dmc2 BLOB NOT NULL CHECK(length(exact_dmc2) BETWEEN 285 AND 33082),
                 created_at INTEGER NOT NULL CHECK(created_at > 0),
                 PRIMARY KEY(conversation_id, logical_message_id, author_device_id),
                 UNIQUE(conversation_id, author_device_id, sender_sequence));

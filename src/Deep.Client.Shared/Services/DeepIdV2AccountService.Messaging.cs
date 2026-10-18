@@ -120,7 +120,7 @@ public sealed partial class DeepIdV2AccountService
 
     internal static void RequireOwnedSendKind(Dmc2ContentKind kind)
     {
-        if (kind is not (Dmc2ContentKind.MessageCreate or Dmc2ContentKind.ContactAccept or Dmc2ContentKind.AttachmentOffer))
+        if (kind is not (Dmc2ContentKind.MessageCreate or Dmc2ContentKind.ContactAccept or Dmc2ContentKind.AttachmentOffer) && !ProtectedDid2GroupJournal.IsKind(kind))
             throw new NotSupportedException("This DID2 event has no composed account-owned authoring custody.");
     }
 

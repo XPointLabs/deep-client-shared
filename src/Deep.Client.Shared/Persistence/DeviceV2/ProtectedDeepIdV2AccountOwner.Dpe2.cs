@@ -130,8 +130,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 storage, sqlStatePath, current, scope, ct).ConfigureAwait(false);
             var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
             if (send) result = opened.Sql.ReadVerifiedOperation(floor, op);
-            if (send && result is null && senderEvent?.ContentKind is
-                Dmc2ContentKind.MessageCreate or Dmc2ContentKind.AttachmentOffer or Dmc2ContentKind.ContactRouteUpdate)
+            if (send && result is null && (senderEvent?.ContentKind is
+                Dmc2ContentKind.MessageCreate or Dmc2ContentKind.AttachmentOffer or Dmc2ContentKind.ContactRouteUpdate ||
+                senderEvent is not null && ProtectedDid2GroupJournal.IsKind(senderEvent.ContentKind)))
                 await RequireOrdinaryWorkNotStoppedUnderLeaseAsync(scope, op, held, ct).ConfigureAwait(false);
             if (senderEvent?.ContentKind == Dmc2ContentKind.ContactAccept)
             {
@@ -140,7 +141,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     throw new CryptographicException("Consent-only custody cannot re-encrypt or reinitialize a retired ContactAccept.");
             }
             if (senderEvent?.ContentKind is
-                Dmc2ContentKind.MessageCreate or Dmc2ContentKind.AttachmentOffer)
+                Dmc2ContentKind.MessageCreate or Dmc2ContentKind.AttachmentOffer ||
+                senderEvent is not null && ProtectedDid2GroupJournal.IsKind(senderEvent.ContentKind))
                 await RequireOwnedTextForSendAsync(current, held, opened, scope, op, exact, ct).ConfigureAwait(false);
             if (senderEvent?.ParsedPayload is AttachmentOfferDmc2Payload attachment)
                 await RequireOwnedAttachmentForSendAsync(current, held, attachment.Manifest, own, peer, first, ct).ConfigureAwait(false);
@@ -165,7 +167,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 // A draft may have been prepared before other work consumed
                 // transport capacity. Check again under this encryption lease.
                 // Exact committed replay above must remain available when full.
-                if (send && senderEvent?.ContentKind is Dmc2ContentKind.MessageCreate or Dmc2ContentKind.AttachmentOffer or Dmc2ContentKind.ContactRouteUpdate)
+                if (send && (senderEvent?.ContentKind is Dmc2ContentKind.MessageCreate or Dmc2ContentKind.AttachmentOffer or Dmc2ContentKind.ContactRouteUpdate ||
+                    senderEvent is not null && ProtectedDid2GroupJournal.IsKind(senderEvent.ContentKind)))
                     await RequireNewMailboxWorkCapacityUnderLeaseAsync(current, held, opened, scope, op,
                         own, peer, source, verifier, ct).ConfigureAwait(false);
                 var context = opened.Sql.CreateVerifiedTransitionContext(floor, op, send ? [] : exact);
@@ -237,6 +240,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     RequireApplicationDisposition(await application.MaterializePeerRouteUpdateAsync(handoff, ct).ConfigureAwait(false));
                 }
             }
+            if (ProtectedDid2GroupJournal.IsKind(stagedEvent.ContentKind))
+                await MaterializeGroupNativeUnderLeaseAsync(current, held, scope, result, own, peer, source, ct).ConfigureAwait(false);
             await RequireFinalMessagingFreshnessAsync(current, scope, own, peer, source, held, first, ct).ConfigureAwait(false);
             if (senderEvent?.ParsedPayload is AttachmentOfferDmc2Payload offered)
             {
@@ -329,6 +334,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 if (send && applicationEvent.ContentKind == Dmc2ContentKind.ContactRouteUpdate)
                     await owner.RequireOwnRouteControlAdmissionUnderLeaseAsync(account, held, opened, operation,
                         applicationEvent.CanonicalBytes, own, peer, source, cancellationToken).ConfigureAwait(false);
+                if (ProtectedDid2GroupJournal.IsKind(applicationEvent.ContentKind))
+                    await owner.RequireGroupAdmissionUnderLeaseAsync(account, held, opened, opened.Scope, applicationEvent, send,
+                        own, peer, source, cancellationToken).ConfigureAwait(false);
                 var routeOutcome = !send && applicationEvent.ContentKind == Dmc2ContentKind.ContactRouteUpdate ?
                     await OwnedPeerRouteProcessingOutcome.CaptureUnderLeaseAsync(owner, account, opened, held, floor,
                         snapshot, own, peer, source, cancellationToken).ConfigureAwait(false) : null;

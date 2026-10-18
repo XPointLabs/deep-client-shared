@@ -137,21 +137,25 @@ full, device or release evidence. Typed-event producer callers and connected
 fixtures must all use genuine owner-generated operations; no test alias or
 caller-operation creation fallback is permitted. Terminal working-set cleanup
 and its exact protected/SQL recovery remain unfinished. This API cutover alone
-does not by itself grant deletion authority. The connected generation8 terminal
-layout below replaces the prior root; consumer qualification is still pending.
+does not by itself grant deletion authority. The S04 generation8 terminal
+layout is now extended by DR-0143's sole generation9 reader below.
 
 ### S04 ordinary terminal working-set clean-break target
 
-The connected package replaces ordinary generation7 with8 in the same required
-slot `deep.store.v2.direct-text-journal`. Generations1–7 reject, including empty
+The current package requires ordinary generation9 in the same required
+slot `deep.store.v2.direct-text-journal`. Generations1–8 reject, including empty
 roots. There is no migration, dual reader, optional root or reader-created state.
 Client activation requires an explicit local account reset; no operational node
-identity, genesis, holder or replay-floor reset is authorized. Application SQL16,
-its five-column audit table, account registration and existing random SQL key
-mode are unchanged. Source qualification is in the S04 checkpoint, not implied
+identity, genesis, holder or replay-floor reset is authorized. DR-0143's application
+SQL17 raises only the event bound; the five-column audit table and existing
+random SQL key mode are unchanged. Group registration is mandatory. Historical
+source qualification is in the S04 checkpoint, not implied
 by this target or the earlier generation7 receipts.
 
-Header100: generation8:u8, reserved-zero:u8, entryCount:u16be, revision:u64be,
+DR-0143 extends the sole current reader to generation9 and registers the
+separate protected group owner. Prior generations reject without migration.
+
+Header100: generation9:u8, reserved-zero:u8, entryCount:u16be, revision:u64be,
 network16/account32/instance32, floorCount:u16be, reserved-zero2,
 terminalAuditCount:u16be, reserved-zero2. The independent floor region contains
 at most512 records: exact scope metadata404 plus next authored sequence:u64be.
@@ -164,7 +168,8 @@ floors. Actual SQL counters must match even after every working row is removed.
 Working prefix540 retains operation32, scope404, logical32, sequence:u64be,
 created-ms:u64be and exact-event hash32 at the existing offsets. Phase byte516
 is pending1, authored2 or independently verified Store3; kind517 is exactly
-MessageCreate, AttachmentOffer or ContactRouteUpdate. Stop reason518 is active0,
+MessageCreate, AttachmentOffer, ContactRouteUpdate or the four DR-0143 closed
+owned group kinds. Generic group authoring is not enabled. Stop reason518 is active0,
 user-cancelled1 or retry-expired2. Byte519 is reserved-zero, not an old retired
 payload flag. Pending length:u32be stays at520, stoppedAtUpper:u64be at524 and
 firstSuccessfulStoreUpper:u64be at532; pending payload begins at540.
@@ -176,7 +181,7 @@ representable with the retention-owner audit duration. The actual held owner
 captures current authenticated upper time, never caller UTC or event creation.
 Already successful work cannot acquire a later stop reason.
 
-There are at most512 working entries and one pending payload, bounded at23649
+There are at most512 working entries and one pending payload, bounded at33082
 bytes. Entries are strictly operation-sorted and logical positions are unique.
 Surviving authored sequences are strictly increasing within an exact scope and
 below its independent next floor. Owned terminal cleanup may leave gaps; a parsed

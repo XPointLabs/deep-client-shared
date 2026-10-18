@@ -24,10 +24,10 @@ public sealed partial class Did2OwnedTextOutboxTests
         Assert.Equal(op, stored.Operation.ToArray()); Assert.Equal(3UL, stored.Sequence);
         Assert.Throws<InvalidOperationException>(() => stored.WithVerifiedStore(1000));
         var exact = ProtectedDid2DirectTextJournal.Encode(state, scope.Network, scope.LocalAccount, scope.Instance);
-        Assert.Equal((byte)8, exact[0]); Assert.Equal(4UL, BinaryPrimitives.ReadUInt64BigEndian(exact.AsSpan(4)));
+        Assert.Equal((byte)9, exact[0]); Assert.Equal(4UL, BinaryPrimitives.ReadUInt64BigEndian(exact.AsSpan(4)));
         using var reopened = ProtectedDid2DirectTextJournal.Decode(exact, scope.Network, scope.LocalAccount, scope.Instance);
         Assert.True(Assert.Single(reopened.Entries).Value.Stored);
-        foreach (var oldGeneration in new byte[] { 1, 2, 3, 4, 5, 6, 7 })
+        foreach (var oldGeneration in new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 })
         {
             var retired = exact.ToArray(); retired[0] = oldGeneration;
             Assert.Throws<InvalidDataException>(() => ProtectedDid2DirectTextJournal.Decode(retired, scope.Network, scope.LocalAccount, scope.Instance));
@@ -45,7 +45,7 @@ public sealed partial class Did2OwnedTextOutboxTests
     {
         foreach (var kind in Enum.GetValues<Dmc2ContentKind>())
         {
-            if (kind is Dmc2ContentKind.MessageCreate or Dmc2ContentKind.ContactAccept or Dmc2ContentKind.AttachmentOffer)
+            if (kind is Dmc2ContentKind.MessageCreate or Dmc2ContentKind.ContactAccept or Dmc2ContentKind.AttachmentOffer || ProtectedDid2GroupJournal.IsKind(kind))
                 Deep.Client.Shared.Services.DeepIdV2AccountService.RequireOwnedSendKind(kind);
             else
                 Assert.Throws<NotSupportedException>(() =>
@@ -368,8 +368,8 @@ public sealed partial class Did2OwnedTextOutboxTests
         var entryStart = ProtectedDid2DirectTextJournal.HeaderBytes + ProtectedDid2DirectTextJournal.FloorBytes;
         var pending = ProtectedDid2DirectTextJournal.Encode(state, scope.Network, scope.LocalAccount, scope.Instance);
         Assert.Equal((byte)Dmc2ContentKind.ContactRouteUpdate, pending[entryStart + 517]);
-        Assert.Equal(23649, ProtectedDid2DirectTextJournal.MaximumEventBytes);
-        Assert.Equal(904389, ProtectedDid2DirectTextJournal.MaximumBytes);
+        Assert.Equal(33082, ProtectedDid2DirectTextJournal.MaximumEventBytes);
+        Assert.Equal(913822, ProtectedDid2DirectTextJournal.MaximumBytes);
         foreach (var offset in new[] { entryStart + 517, entryStart + 518, entryStart + 519 })
         {
             var changed = pending.ToArray(); changed[offset] ^= 0x80;

@@ -9,7 +9,7 @@ namespace Deep.Client.Shared.Persistence.DeviceV2;
 internal static class ProtectedDid2DirectTextJournal
 {
     internal const string Slot = "deep.store.v2.direct-text-journal";
-    internal const int HeaderBytes = 100, PrefixBytes = 540, MaximumEntries = 512, MaximumEventBytes = 23649;
+    internal const int HeaderBytes = 100, PrefixBytes = 540, MaximumEntries = 512, MaximumEventBytes = 33082;
     internal const int TerminalAuditBytes = 48, MaximumTerminalAudits = 8192;
     internal const int FloorBytes = Did2MessagingSessionScope.Bytes + 8, MaximumFloors = MaximumEntries;
     internal const int MaximumBytes = HeaderBytes + (PrefixBytes + FloorBytes) * MaximumEntries + MaximumEventBytes +
@@ -42,7 +42,7 @@ internal static class ProtectedDid2DirectTextJournal
         {
             if (exact.Length < PrefixBytes || exact.Length > PrefixBytes + MaximumEventBytes ||
                 exact[516] is not (1 or 2 or 3) ||
-                (Dmc2ContentKind)exact[517] is not (Dmc2ContentKind.MessageCreate or Dmc2ContentKind.AttachmentOffer or Dmc2ContentKind.ContactRouteUpdate) ||
+                (Dmc2ContentKind)exact[517] is not (Dmc2ContentKind.MessageCreate or Dmc2ContentKind.AttachmentOffer or Dmc2ContentKind.ContactRouteUpdate) && !ProtectedDid2GroupJournal.IsKind((Dmc2ContentKind)exact[517]) ||
                 exact[518] > (byte)WorkStopReason.RetryExpired || exact[519] != 0 ||
                 exact[516] == 1 && exact[518] != 0)
                 throw new InvalidDataException("Protected direct text has an unknown shape.");
@@ -138,7 +138,7 @@ internal static class ProtectedDid2DirectTextJournal
                 if (parsed.ContentKind != Kind || parsed.Flags != Dmc2Flags.None ||
                     (Kind == Dmc2ContentKind.ContactRouteUpdate
                         ? routeControl is null || parsed.ExpiresAtUnixMilliseconds == 0 || !Fixed(routeControl.RelationshipId.Span, scope.Relationship)
-                        : parsed.ExpiresAtUnixMilliseconds != 0) || parsed.ReplyToLogicalMessageId.Length != 0 ||
+                        : ProtectedDid2GroupJournal.IsKind(Kind) ? parsed.ExpiresAtUnixMilliseconds == 0 : parsed.ExpiresAtUnixMilliseconds != 0) || parsed.ReplyToLogicalMessageId.Length != 0 ||
                     !Fixed(parsed.NetworkId.Span, scope.Network) || !Fixed(parsed.SenderAccountId.Span, scope.LocalAccount) ||
                     !Fixed(parsed.SenderDeviceId.Span, scope.LocalDevice) || !Fixed(parsed.ConversationId.Span, scope.Conversation) ||
                     !Fixed(parsed.LogicalMessageId.Span, Logical) || parsed.SenderClientSequence != Sequence ||
@@ -299,7 +299,7 @@ internal static class ProtectedDid2DirectTextJournal
         ReadOnlySpan<byte> account, ReadOnlySpan<byte> instance)
     {
         RequireScope(network, account, instance);
-        if (exact.Length < HeaderBytes || exact.Length > MaximumBytes || exact[0] != 8 || exact[1] != 0 ||
+        if (exact.Length < HeaderBytes || exact.Length > MaximumBytes || exact[0] != 9 || exact[1] != 0 ||
             !Fixed(exact.Slice(12, 16), network) || !Fixed(exact.Slice(28, 32), account) || !Fixed(exact.Slice(60, 32), instance) ||
             exact.Slice(94, 2).IndexOfAnyExcept((byte)0) >= 0 || exact.Slice(98, 2).IndexOfAnyExcept((byte)0) >= 0)
             throw new InvalidDataException("Protected direct text journal has an unknown or foreign header.");
@@ -388,7 +388,7 @@ internal static class ProtectedDid2DirectTextJournal
             state.TerminalAudits.Count * TerminalAuditBytes];
         try
         {
-            exact[0] = 8; BinaryPrimitives.WriteUInt16BigEndian(exact.AsSpan(2), checked((ushort)state.Entries.Count));
+            exact[0] = 9; BinaryPrimitives.WriteUInt16BigEndian(exact.AsSpan(2), checked((ushort)state.Entries.Count));
             BinaryPrimitives.WriteUInt64BigEndian(exact.AsSpan(4), state.Revision);
             BinaryPrimitives.WriteUInt16BigEndian(exact.AsSpan(92), checked((ushort)state.Floors.Count));
             BinaryPrimitives.WriteUInt16BigEndian(exact.AsSpan(96), checked((ushort)state.TerminalAudits.Count));

@@ -131,8 +131,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     {
                         if (native.Direction != 1 || !FixedRoute(native.EventHash, command.EventHash))
                             throw new CryptographicException("Outbox settlement differs from native event custody.");
-                        var history = await application.ReadDirectDmc2Async(current.AccountId, BinaryPrimitives.ReadUInt64BigEndian(scope.Exact[84..]),
-                            scope.Conversation.ToArray(), command.Logical.ToArray(), scope.LocalDevice.ToArray(), ct).ConfigureAwait(false) ??
+                        var history = await ReadOwnedAuthoredHistoryUnderLeaseAsync(current, application, scope,
+                            command.Operation.ToArray(), native.EventHash.ToArray(), ct).ConfigureAwait(false) ??
                             throw new InvalidDataException("Outbox cleanup cannot remove the sole local event source.");
                         try { command.RequireEvent(history); if (!FixedRoute(history, payload)) throw new CryptographicException("Independent history differs from authored work."); }
                         finally { CryptographicOperations.ZeroMemory(history); }

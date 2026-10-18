@@ -75,6 +75,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
             await ResumeLocalCompactionUnderLeaseAsync(held, ct).ConfigureAwait(false);
             using var current = await RequireCurrentUnderLeaseAsync(trustedUnixSeconds, verifier, ct).ConfigureAwait(false);
+            await ResumeGroupOrdinaryUnderLeaseAsync(current, held, ct).ConfigureAwait(false);
             var first = await RequireMessagingFreshnessAsync(current, own, peer, source, held, ct).ConfigureAwait(false);
             OwnedInitialMessagingSeed.RequireFreshScope(scope, own.Proof, peer, first);
             if (operation is null) op = RandomNumberGenerator.GetBytes(32);
@@ -450,7 +451,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             throw new CryptographicException("Absent ordinary work has no retained native event.");
         if (native.Direction != 1) throw new CryptographicException("Absent ordinary work selected a receive event.");
         using var application = await SqliteDeepIdV2AccountGeneration.OpenApplicationUnderLeaseAsync(storage, sqlStatePath, current, held, ct).ConfigureAwait(false);
-        var history = await application.ReadRetainedAuthoredEventAsync(scope, native.EventHash.ToArray(), ct).ConfigureAwait(false) ??
+        using var groups = await OpenGroupsUnderLeaseAsync(current, ct).ConfigureAwait(false);
+        var history = RequireGroupAuthoredEvent(groups.State, scope, operation.Span, native.EventHash) ??
+            await application.ReadRetainedAuthoredEventAsync(scope, native.EventHash.ToArray(), ct).ConfigureAwait(false) ??
             throw new CryptographicException("Absent ordinary work lost its independent local history.");
         try
         {
@@ -465,7 +468,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var parsed = ApplicationCoreCodec.DecodeDmc2(history);
             try
             {
-                if (parsed.ContentKind is not (Dmc2ContentKind.MessageCreate or Dmc2ContentKind.AttachmentOffer or Dmc2ContentKind.ContactRouteUpdate) ||
+                if (parsed.ContentKind is not (Dmc2ContentKind.MessageCreate or Dmc2ContentKind.AttachmentOffer or Dmc2ContentKind.ContactRouteUpdate) && !ProtectedDid2GroupJournal.IsKind(parsed.ContentKind) ||
                     parsed.SenderClientSequence >= journal.NextSequence(scope))
                     throw new CryptographicException("Absent ordinary work differs from the preserved authored floor.");
             }

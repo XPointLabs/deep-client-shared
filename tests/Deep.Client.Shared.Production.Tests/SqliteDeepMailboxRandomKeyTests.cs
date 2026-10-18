@@ -30,7 +30,7 @@ public sealed class SqliteDeepMailboxRandomKeyTests
         }
         Assert.False(File.ReadAllBytes(fixture.Path).AsSpan(0, 16).SequenceEqual("SQLite format 3\0"u8));
         using (var db = fixture.Open(raw: true))
-        { using var read = db.CreateCommand(); read.CommandText = "PRAGMA user_version;"; Assert.Equal(16L, read.ExecuteScalar()); }
+        { using var read = db.CreateCommand(); read.CommandText = "PRAGMA user_version;"; Assert.Equal(17L, read.ExecuteScalar()); }
         using (SqliteDeepMailboxStore.OpenExisting(new(fixture.Path, fixture.Key))) { }
         var digest = SHA256.HashData(File.ReadAllBytes(fixture.Path));
         using (var wrongMode = fixture.Open(raw: false))

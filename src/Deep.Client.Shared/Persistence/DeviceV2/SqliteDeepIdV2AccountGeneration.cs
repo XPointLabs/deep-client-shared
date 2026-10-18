@@ -95,10 +95,10 @@ internal static partial class SqliteDeepIdV2AccountGeneration
              ProtectedContactRendezvousJournal.Slot, ResponderInitialSessionCheckpoint.Slot,
              Did2CompactionPlan.Slot, ProtectedDid2MessagingSessionCatalog.Slot,
              "deep.store.v2.current-account", KeySlot,
-             ProtectedInitialKeyRetirementJournal.Slot];
+             ProtectedInitialKeyRetirementJournal.Slot, ProtectedDid2GroupJournal.Slot];
         using var captured = await storage.ReadOwnedBatchAsync(registrationSlots,
             cancellationToken).ConfigureAwait(false);
-        if (captured.Count != 17) throw new InvalidDataException("Protected registration read group has another shape.");
+        if (captured.Count != 18) throw new InvalidDataException("Protected registration read group has another shape.");
         using var published = captured[14];
         if (allowCreate && published is not null)
             throw new InvalidOperationException(
@@ -134,6 +134,7 @@ internal static partial class SqliteDeepIdV2AccountGeneration
                 var emptyContactAccepts = ProtectedDid2ContactAcceptJournal.Empty(networkId.Span, accountId.Span, record.AsSpan(56, 32));
                 var emptyContactStarts = ProtectedDid2ContactStartJournal.Empty(networkId.Span, accountId.Span, record.AsSpan(56, 32));
                 var emptyText = ProtectedDid2DirectTextJournal.Empty(networkId.Span, accountId.Span, record.AsSpan(56, 32));
+                var emptyGroups = ProtectedDid2GroupJournal.Empty(networkId.Span, accountId.Span, record.AsSpan(56, 32));
                 var emptyAttachments = ProtectedDid2AttachmentJournal.Empty(networkId.Span, accountId.Span, record.AsSpan(56, 32));
                 var emptyRoutes = ProtectedDid2ContactRouteJournal.Empty(networkId.Span, accountId.Span, record.AsSpan(56, 32));
                 var emptyGrants = ProtectedDid2MailboxGrantJournal.Empty(networkId.Span, accountId.Span, record.AsSpan(56, 32));
@@ -153,6 +154,7 @@ internal static partial class SqliteDeepIdV2AccountGeneration
                          new DeepSecureStorageWrite(ProtectedDid2ContactAcceptJournal.Slot, emptyContactAccepts),
                          new DeepSecureStorageWrite(ProtectedDid2ContactStartJournal.Slot, emptyContactStarts),
                          new DeepSecureStorageWrite(ProtectedDid2DirectTextJournal.Slot, emptyText),
+                         new DeepSecureStorageWrite(ProtectedDid2GroupJournal.Slot, emptyGroups),
                          new DeepSecureStorageWrite(ProtectedDid2AttachmentJournal.Slot, emptyAttachments),
                          new DeepSecureStorageWrite(ProtectedDid2ContactRouteJournal.Slot, emptyRoutes),
                          new DeepSecureStorageWrite(ProtectedDid2MailboxGrantJournal.Slot, emptyGrants),
@@ -172,6 +174,7 @@ internal static partial class SqliteDeepIdV2AccountGeneration
                     CryptographicOperations.ZeroMemory(emptyContactAccepts);
                     CryptographicOperations.ZeroMemory(emptyContactStarts);
                     CryptographicOperations.ZeroMemory(emptyText);
+                    CryptographicOperations.ZeroMemory(emptyGroups);
                     CryptographicOperations.ZeroMemory(emptyAttachments);
                     CryptographicOperations.ZeroMemory(emptyRoutes);
                     CryptographicOperations.ZeroMemory(emptyGrants);
@@ -185,7 +188,9 @@ internal static partial class SqliteDeepIdV2AccountGeneration
                 ? await storage.ReadOwnedBatchAsync(registrationSlots, cancellationToken).ConfigureAwait(false)
                 : null;
             var journals = createdRegistrations ?? captured;
-            if (journals.Count != 17) throw new InvalidDataException("Protected registration read group has another shape.");
+            if (journals.Count != 18) throw new InvalidDataException("Protected registration read group has another shape.");
+            using var rawGroups = journals[17] ?? throw new InvalidDataException("Protected group registration is absent; explicit reset is required.");
+            using var groupState = rawGroups.Use(bytes => ProtectedDid2GroupJournal.Decode(bytes, networkId.Span, accountId.Span, record.AsSpan(56, 32)));
             using var rawCompaction = journals[12] ??
                 throw new InvalidDataException("Protected compaction registration is absent; explicit reset is required.");
             using var compaction = rawCompaction.Use(bytes => Did2CompactionPlan.Decode(

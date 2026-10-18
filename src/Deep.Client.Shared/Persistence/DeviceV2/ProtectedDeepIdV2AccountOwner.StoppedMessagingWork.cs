@@ -238,7 +238,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             }
             else
             {
-                history = await application.ReadRetainedAuthoredEventAsync(scope, native.EventHash.ToArray(), ct).ConfigureAwait(false) ??
+                history = await ReadOwnedAuthoredHistoryUnderLeaseAsync(current, application, scope, operation, native.EventHash.ToArray(), ct).ConfigureAwait(false) ??
                     throw new CryptographicException("Stopping work lost its independent local history.");
                 command.RequireEvent(history);
             }

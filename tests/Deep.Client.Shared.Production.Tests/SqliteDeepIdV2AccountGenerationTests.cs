@@ -60,7 +60,7 @@ public sealed class SqliteDeepIdV2AccountGenerationTests
                 ProtectedDid2MailboxSendJournal.Slot, ProtectedDid2MailboxReadJournal.Slot,
                 ProtectedDph2PreClaimJournal.Slot, ProtectedContactRendezvousJournal.Slot,
                 ResponderInitialSessionCheckpoint.Slot, Did2CompactionPlan.Slot,
-                ProtectedDid2MessagingSessionCatalog.Slot, ProtectedInitialKeyRetirementJournal.Slot };
+                ProtectedDid2MessagingSessionCatalog.Slot, ProtectedInitialKeyRetirementJournal.Slot, ProtectedDid2GroupJournal.Slot };
             foreach (var slot in slots)
             {
                 using var original = await storage.ReadOwnedAsync(slot);

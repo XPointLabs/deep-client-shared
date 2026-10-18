@@ -99,7 +99,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                         exact = OwnedByteExports.TakeArray(row.ExactDmc2);
                         command.RequireEvent(exact);
                     }
-                    else exact = await application.ReadRetainedAuthoredEventAsync(scope, native.EventHash.ToArray(), ct).ConfigureAwait(false) ??
+                    else exact = await ReadOwnedAuthoredHistoryUnderLeaseAsync(current, application, scope, operation, native.EventHash.ToArray(), ct).ConfigureAwait(false) ??
                         throw new CryptographicException("Compacted native advertised history lost its exact authored event.");
                     var message = ApplicationCoreCodec.DecodeDmc2(exact);
                     try
