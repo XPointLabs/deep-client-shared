@@ -149,6 +149,10 @@ ends, rather than reopening keys and SQL at every callback. No verified floor,
 row or admission result is cached: each phase reconciles native custody and
 rechecks current semantic, protected-root and endpoint fences independently.
 DPAPI authentication, transport deadlines and currentness checks are unchanged.
+Store, like ACK, does not duplicate the interceptor's full pre-callback fence
+immediately before adapter bookkeeping. The real interceptor still performs
+both full callback fences; every retained/cached outcome crosses the owner's
+full final fence. Request bytes, native custody and deadlines are unchanged.
 
 The functional candidate still needs its recorded three-CLI qualification.
 Long-offline/400-day retention, descriptor rotation/handover, multi-device changes,

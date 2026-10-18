@@ -445,7 +445,10 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     new(true, loan.Selector.IssuerContext.Span, true), ingress, loan.Store, loan.Store, loan.Store, loan.Store,
                     new PinnedClientMailboxReceiptVerifier(new SodiumMailboxPeerReplicationCrypto()), dispatchFactory, decoder, dispatchAuthority.TimeProvider);
                 using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct); deadline.CancelAfter(TimeSpan.FromSeconds(30));
-                await Guard(deadline.Token).ConfigureAwait(false);
+                // The ingress performs the full pre-callback fence. Avoid an
+                // identical reconstruction immediately before adapter SQL
+                // bookkeeping; cached outcomes still cross the final fence.
+                dispatchPolicy.ValidateFreshness(); held.RequireActive();
 #if DEEP_TEST_INTERNALS
                 Did2MailboxSendTestHooks.Hit(Did2MailboxSendFailpoint.BeforeDispatch);
 #endif
