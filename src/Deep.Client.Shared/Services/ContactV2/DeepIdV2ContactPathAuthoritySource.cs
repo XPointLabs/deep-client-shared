@@ -368,6 +368,23 @@ public sealed partial class DeepIdV2ContactPathAuthoritySource :
         finally { gate.Release(); }
     }
 
+    // Package DID2 is only a query candidate. Only the independent nonce-bound
+    // directory verifier can promote it, using the existing owned network/time.
+    internal async ValueTask<Deep.Protocol.GroupV1.VerifiedDeepIdV2GroupDirectory> VerifyGroupDirectoryAsync(
+        ReadOnlyMemory<byte> exactDid, ReadOnlyMemory<byte> expectedAccount, OwnPreKeyAuthoringAuthority own,
+        HeldDeepIdV2AccountLease held, CancellationToken ct)
+    {
+        var did = Deep.Protocol.ApplicationCore.DeepIdV2Codec.DecodeDid2(exactDid.Span);
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct); budget.CancelAfter(TimeSpan.FromSeconds(30));
+        var peer = await proofs.FetchGroupMemberUnderLeaseAsync(did, own.Authority, accounts.DeploymentProfileId, held, budget.Token).ConfigureAwait(false);
+        ProtectedDid2MessagingPeerBootstrap.RequireProof(did, peer);
+        _ = await RecheckEndpointPairUnderLeaseAsync(own, peer, held, budget.Token).ConfigureAwait(false);
+        own.Network.EnsureCurrent();
+        var result = await Deep.Protocol.GroupV1.DeepIdV2GroupDirectoryAuthority.VerifyAsync(peer, RendezvousTrustedTime, budget.Token).ConfigureAwait(false);
+        if (!result.AccountId.Span.SequenceEqual(expectedAccount.Span)) throw new CryptographicException("Group directory query returned another account.");
+        held.RequireActive(); return result;
+    }
+
     internal void RequireAccountOwner(DeepIdV2AccountService account)
     {
         if (!ReferenceEquals(accounts, account))

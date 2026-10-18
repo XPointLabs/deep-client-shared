@@ -42,11 +42,11 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         if (record is GroupCommitChunkRecord) return;
         var group = root.State.Find(record.Field(2).Span);
         if (group.Fork) throw new CryptographicException("Group is permanently fork-latched.");
-        if (!group.Scope.AsSpan().SequenceEqual(scope.Exact)) throw new CryptographicException("Group belongs to a different exact session.");
         var self = await DeepIdV2GroupDirectoryAuthority.VerifyAsync(own.Proof, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
         var other = await DeepIdV2GroupDirectoryAuthority.VerifyAsync(peer, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
-        var head = await VerifyGroupHeadAsync(group, self, other, source, ct).ConfigureAwait(false);
-        var invitation = group.Offer.Length == 0 ? null : (GroupInvitationRecord)GroupCodec.Decode("GIV1", group.Offer);
+        var invitationState = group.ForScope(scope.Exact);
+        var invitation = invitationState is null ? null : (GroupInvitationRecord)GroupCodec.Decode("GIV1", invitationState.Offer);
+        var head = await VerifyGroupHeadAsync(group, self, other, own, held, source, ct, GroupRecordEpoch(record, invitation)).ConfigureAwait(false);
         await DeepIdV2GroupEvents.RequireAsync(record, head, send ? self : other, send ? other : self,
             parsed.SenderDeviceId, source.RendezvousTrustedTime, invitation, ct).ConfigureAwait(false);
     }
@@ -79,29 +79,30 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var other = await DeepIdV2GroupDirectoryAuthority.VerifyAsync(peer, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
             if (record is GroupCommitChunkRecord chunk)
             {
-                if (native.Direction == 2) await AdoptGroupChunkAsync(root, current, held, scope, chunk, self, other, source, ct).ConfigureAwait(false);
+                if (native.Direction == 2) await AdoptGroupChunkAsync(root, current, held, scope, chunk, self, other, own, source, ct).ConfigureAwait(false);
             }
             else
             {
                 var group = root.State.Find(record.Field(2).Span);
-                if (group.Fork || !group.Scope.AsSpan().SequenceEqual(scope.Exact)) throw new CryptographicException("Group head/session is unavailable.");
-                var head = await VerifyGroupHeadAsync(group, self, other, source, ct).ConfigureAwait(false);
-                var invitation = group.Offer.Length == 0 ? null : (GroupInvitationRecord)GroupCodec.Decode("GIV1", group.Offer);
+                if (group.Fork) throw new CryptographicException("Group head/session is unavailable.");
+                var invitationState = group.ForScope(scope.Exact);
+                var invitation = invitationState is null ? null : (GroupInvitationRecord)GroupCodec.Decode("GIV1", invitationState.Offer);
+                var head = await VerifyGroupHeadAsync(group, self, other, own, held, source, ct, GroupRecordEpoch(record, invitation)).ConfigureAwait(false);
                 await DeepIdV2GroupEvents.RequireAsync(record, head, native.Direction == 1 ? self : other, native.Direction == 1 ? other : self,
                     parsed.SenderDeviceId, source.RendezvousTrustedTime, invitation, ct).ConfigureAwait(false);
                 if (record is GroupInvitationRecord)
                 {
-                    if (group.Offer.Length != 0 && !group.Offer.AsSpan().SequenceEqual(record.CanonicalBytes.Span)) throw new CryptographicException("Group already retained another invitation.");
-                    if (group.Offer.Length == 0) group.Offer = record.CanonicalBytes.ToArray();
+                    if (invitationState is not null && !invitationState.Offer.AsSpan().SequenceEqual(record.CanonicalBytes.Span)) throw new CryptographicException("Group already retained another invitation.");
+                    if (invitationState is null) group.Invitations.Add(new() { Scope = scope.Exact.ToArray(), Offer = record.CanonicalBytes.ToArray() });
                 }
                 else if (record is GroupInvitationAcceptanceRecord)
                 {
-                    if (group.Acceptance.Length != 0 && !group.Acceptance.AsSpan().SequenceEqual(record.CanonicalBytes.Span)) throw new CryptographicException("Group already retained another consent.");
-                    if (group.Acceptance.Length == 0) group.Acceptance = record.CanonicalBytes.ToArray();
+                    if (invitationState!.Acceptance.Length != 0 && !invitationState!.Acceptance.AsSpan().SequenceEqual(record.CanonicalBytes.Span)) throw new CryptographicException("Group already retained another consent.");
+                    if (invitationState!.Acceptance.Length == 0) invitationState!.Acceptance = record.CanonicalBytes.ToArray();
                 }
                 else if (record is GroupApplicationMessageRecord)
                 {
-                    if (group.Packages.Count != 2) throw new CryptographicException("Pending invitation is not group membership.");
+                    if (!GroupMemberSelectors(head.Commit).Any(id => id.AsSpan().SequenceEqual(current.AccountId.Span))) throw new CryptographicException("Pending invitation is not group membership.");
                     var collision = root.State.Messages.Where(item => item.Group.AsSpan().SequenceEqual(group.Id)).FirstOrDefault(item =>
                     {
                         var old = GroupCodec.Decode("DGM1", item.Record);
@@ -120,16 +121,16 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
 
     private async Task AdoptGroupChunkAsync(GroupRoot root, VerifiedDeepIdV2CurrentAccount current, HeldDeepIdV2AccountLease held,
         Did2MessagingSessionScope scope, GroupCommitChunkRecord incoming, VerifiedDeepIdV2GroupDirectory self,
-        VerifiedDeepIdV2GroupDirectory other, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
+        VerifiedDeepIdV2GroupDirectory other, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
     {
         // Exact retransmission of an adopted package must not leave an orphan
         // transfer behind after a cold restart.
-        foreach (var known in root.State.Groups.Where(item => item.Scope.AsSpan().SequenceEqual(scope.Exact)))
+        foreach (var known in root.State.Groups)
             foreach (var package in known.Packages)
                 if (incoming.Field(1).Span.SequenceEqual(GroupCodec.RecordHash("GCP1", package)))
                 {
                     var index = checked((int)BinaryPrimitives.ReadUInt32BigEndian(incoming.Field(4).Span)); var offset = checked(index * 24576);
-                    if (offset >= package.Length || !incoming.Field(7).Span[4..].SequenceEqual(package.AsSpan(offset, Math.Min(24576, package.Length - offset)))) throw new CryptographicException("Adopted group fragment changed bytes.");
+                    if (BinaryPrimitives.ReadUInt32BigEndian(incoming.Field(2).Span) != checked((uint)package.Length) || offset >= package.Length || !incoming.Field(7).Span[4..].SequenceEqual(package.AsSpan(offset, Math.Min(24576, package.Length - offset)))) throw new CryptographicException("Adopted group fragment changed bytes.");
                     return;
                 }
         var transfer = root.State.Chunks.Where(item => item.Scope.AsSpan().SequenceEqual(scope.Exact) &&
@@ -149,23 +150,26 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         if (!commit.Field(1).Span.SequenceEqual(scope.Network) || !commit.Field(6).Span.SequenceEqual(scope.RemoteAccount)) throw new CryptographicException("Group package is not authored by the authenticated peer owner.");
         var groupId = packageRecord.Field(2).ToArray(); var epoch = BinaryPrimitives.ReadUInt64BigEndian(packageRecord.Field(3).Span);
         var group = root.State.Groups.SingleOrDefault(item => item.Id.AsSpan().SequenceEqual(groupId));
-        if (group is not null && (!group.Scope.AsSpan().SequenceEqual(scope.Exact) || group.Fork)) throw new CryptographicException("Group package belongs to a different session or fork.");
+        if (group is not null && group.Fork) throw new CryptographicException("Group package belongs to a different session or fork.");
         if (epoch == 0)
         {
             _ = await DeepIdV2GroupTransitions.VerifyGenesisAsync(packageRecord, other, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
             if (group is null)
             {
-                group = new() { Id = groupId, Scope = scope.Exact.ToArray() }; group.Packages.Add(complete.ToArray()); root.State.Groups.Add(group);
+                group = new() { Id = groupId }; group.Packages.Add(complete.ToArray()); root.State.Groups.Add(group);
             }
         }
-        else if (epoch == 1 && group is not null)
+        else if (group is not null && epoch <= checked((ulong)group.Packages.Count))
         {
-            var genesis = await DeepIdV2GroupTransitions.VerifyGenesisAsync((GroupCommitPackageRecord)GroupCodec.Decode("GCP1", group.Packages[0]), other, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
-            _ = await DeepIdV2GroupTransitions.VerifyActivationAsync(genesis, packageRecord, [self, other], source.RendezvousTrustedTime, ct).ConfigureAwait(false);
-            RequireGroupLocalConsent(packageRecord, group);
-            if (group.Packages.Count == 1) group.Packages.Add(complete.ToArray());
+            var previous = await VerifyGroupHeadAsync(group, self, other, own, held, source, ct, checked((int)epoch - 1)).ConfigureAwait(false);
+            var accounts = await ReadGroupAuthoritiesAsync(packageRecord, self, other, own, held, source, ct, group.VerifiedDirectories).ConfigureAwait(false);
+            var next = await DeepIdV2GroupTransitions.VerifyActivationAsync(previous, packageRecord, accounts, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
+            var wasMember = GroupMemberSelectors(previous.Commit).Any(id => id.AsSpan().SequenceEqual(current.AccountId.Span));
+            var nowMember = GroupMemberSelectors(next.Commit).Any(id => id.AsSpan().SequenceEqual(current.AccountId.Span));
+            if (!wasMember && nowMember) RequireGroupLocalConsent(packageRecord, group.ForScope(scope.Exact) ?? throw new CryptographicException("Activation has no actual local invitation."));
+            if (epoch == checked((ulong)group.Packages.Count)) group.Packages.Add(complete.ToArray());
         }
-        else throw new NotSupportedException("Group package epoch is not the connected candidate transition.");
+        else throw new CryptographicException("Group package has a missing predecessor epoch.");
         if (!group!.Packages[checked((int)epoch)].AsSpan().SequenceEqual(complete.Span))
         {
             group.Fork = true; group.ForkEvidence = complete.ToArray();
@@ -174,6 +178,10 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         }
         foreach (var item in transfer) { root.State.Chunks.Remove(item); CryptographicOperations.ZeroMemory(item.Scope); CryptographicOperations.ZeroMemory(item.Record); }
     }
+
+    private static int GroupRecordEpoch(GroupRecord record, GroupInvitationRecord? invitation) => checked((int)BinaryPrimitives.ReadUInt64BigEndian(
+        record is GroupInvitationRecord ? record.Field(4).Span : record is GroupInvitationAcceptanceRecord ?
+            (invitation ?? throw new CryptographicException("Consent lost its invitation.")).Field(4).Span : record.Field(3).Span));
 
     private static byte[]? RequireGroupAuthoredEvent(ProtectedDid2GroupJournal.State groups, Did2MessagingSessionScope scope,
         ReadOnlySpan<byte> operation, ReadOnlySpan<byte> hash)
@@ -187,17 +195,17 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         return null;
     }
 
-    private static void RequireGroupLocalConsent(GroupCommitPackageRecord package, ProtectedDid2GroupJournal.Group group)
+    private static void RequireGroupLocalConsent(GroupCommitPackageRecord package, ProtectedDid2GroupJournal.Invitation invitation)
     {
-        if (group.Offer.Length == 0 || group.Acceptance.Length == 0 || BinaryPrimitives.ReadUInt16BigEndian(package.Field(9).Span) != 1)
+        if (invitation.Offer.Length == 0 || invitation.Acceptance.Length == 0 || BinaryPrimitives.ReadUInt16BigEndian(package.Field(9).Span) != 1)
             throw new CryptographicException("Activation has no retained local consent.");
         var pairs = package.Field(10).Span;
         // Already canonical/fully verified by Protocol; additionally bind the
         // unique pair to this device's actual protected invitation/consent.
         var at = 38; var invitationBytes = checked((int)BinaryPrimitives.ReadUInt32BigEndian(pairs[at..])); at += 4;
-        if (!pairs.Slice(at, invitationBytes).SequenceEqual(group.Offer)) throw new CryptographicException("Activation changed the retained invitation.");
+        if (!pairs.Slice(at, invitationBytes).SequenceEqual(invitation.Offer)) throw new CryptographicException("Activation changed the retained invitation.");
         at = checked(at + invitationBytes + 38); var acceptanceBytes = checked((int)BinaryPrimitives.ReadUInt32BigEndian(pairs[at..])); at += 4;
-        if (pairs.Length != at + acceptanceBytes || !pairs.Slice(at, acceptanceBytes).SequenceEqual(group.Acceptance)) throw new CryptographicException("Activation changed the actual local consent.");
+        if (pairs.Length != at + acceptanceBytes || !pairs.Slice(at, acceptanceBytes).SequenceEqual(invitation.Acceptance)) throw new CryptographicException("Activation changed the actual local consent.");
     }
 
     private async Task RequireGroupContactConsentUnderLeaseAsync(VerifiedDeepIdV2CurrentAccount current, HeldDeepIdV2AccountLease held,

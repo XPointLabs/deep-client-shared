@@ -13,6 +13,9 @@ public sealed class ProtectedDid2GroupJournalTests
         var network = B(16, 1); var account = B(32, 2); var instance = B(32, 3);
         var exact = ProtectedDid2GroupJournal.Empty(network, account, instance);
         Assert.Equal(102, exact.Length);
+        Assert.Equal((byte)2, exact[0]);
+        var retired = exact.ToArray(); retired[0] = 1;
+        Assert.Throws<InvalidDataException>(() => ProtectedDid2GroupJournal.Decode(retired, network, account, instance));
         using var reopened = ProtectedDid2GroupJournal.Decode(exact, network, account, instance);
         Assert.Empty(reopened.Groups); Assert.Empty(reopened.Outbox); Assert.Empty(reopened.Messages); Assert.Empty(reopened.Receives); Assert.Empty(reopened.Chunks);
         Assert.Equal(1UL, reopened.Revision);

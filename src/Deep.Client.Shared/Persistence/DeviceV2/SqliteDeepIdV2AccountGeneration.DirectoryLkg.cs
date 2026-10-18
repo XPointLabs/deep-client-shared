@@ -23,6 +23,22 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         return ownDirectory.ReadWithNetworkUnderLeaseAsync(ownNetwork, authority, held, ct);
     }
 
+    // This is an actual backend borrow, not a caller implementation or ambient
+    // reentrant lock. Every operation validates the same closed held owner.
+    internal static IDeepIdV2DirectoryProtectedLkgStore BorrowDirectoryStoreUnderLease(
+        IDeepIdV2DirectoryProtectedLkgStore store, HeldDeepIdV2AccountLease held)
+    {
+        if (store is not DirectoryLkgStore owned) throw new NotSupportedException("Directory fetch requires the actual account-owned backend.");
+        return owned.BorrowStore(held);
+    }
+
+    private sealed class BorrowedDirectoryStore(DirectoryLkgStore owner, HeldDeepIdV2AccountLease held) : IDeepIdV2DirectoryProtectedLkgStore
+    {
+        public ValueTask<AccountDirectoryProtectedLkg> RestoreAsync(VerifiedXPointNetworkAuthority authority, CancellationToken ct) => owner.ReadExistingUnderLeaseAsync(authority, held, ct);
+        public ValueTask CommitVerifiedAsync(AccountDirectoryProtectedLkg expected, VerifiedDeepIdV2DirectoryFreshness verified, CancellationToken ct) => owner.CommitVerifiedCoreAsync(expected, verified, ct, held);
+        public ValueTask CommitCatchupAsync(VerifiedDeepIdV2DirectoryCatchup verified, CancellationToken ct) => owner.CommitCatchupCoreAsync(verified, ct, held);
+    }
+
     internal static async ValueTask<IDeepIdV2DirectoryProtectedLkgStore>
         OpenDirectoryLkgStoreAsync(IDeepSecureStorage storage,
             DeepIdV2AccountFileLease accountLease, string statePath,
@@ -178,10 +194,16 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             return restored;
         }
 
-        public async ValueTask CommitVerifiedAsync(
+        internal IDeepIdV2DirectoryProtectedLkgStore BorrowStore(HeldDeepIdV2AccountLease held)
+        { using var borrow = held.BorrowFor(accountLease); return new BorrowedDirectoryStore(this, held); }
+
+        public ValueTask CommitVerifiedAsync(AccountDirectoryProtectedLkg expectedHead, VerifiedDeepIdV2DirectoryFreshness verified, CancellationToken ct) =>
+            CommitVerifiedCoreAsync(expectedHead, verified, ct);
+
+        internal async ValueTask CommitVerifiedCoreAsync(
             AccountDirectoryProtectedLkg expectedHead,
             VerifiedDeepIdV2DirectoryFreshness verified,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken, HeldDeepIdV2AccountLease? borrowed = null)
         {
             ArgumentNullException.ThrowIfNull(expectedHead);
             ArgumentNullException.ThrowIfNull(verified);
@@ -195,17 +217,19 @@ internal static partial class SqliteDeepIdV2AccountGeneration
                     "The verified DID2 directory head is out of scope.");
             await CommitAuthenticatedHeadAsync(expectedHead, next,
                 verified.HasRootAuthorizedForwardLineage,
-                cancellationToken).ConfigureAwait(false);
+                cancellationToken, borrowed).ConfigureAwait(false);
         }
 
-        public async ValueTask CommitCatchupAsync(VerifiedDeepIdV2DirectoryCatchup verified,
-            CancellationToken cancellationToken)
+        public ValueTask CommitCatchupAsync(VerifiedDeepIdV2DirectoryCatchup verified, CancellationToken ct) => CommitCatchupCoreAsync(verified, ct);
+
+        internal async ValueTask CommitCatchupCoreAsync(VerifiedDeepIdV2DirectoryCatchup verified,
+            CancellationToken cancellationToken, HeldDeepIdV2AccountLease? borrowed = null)
         {
             ArgumentNullException.ThrowIfNull(verified);
             if (!Fixed(verified.PriorProtectedLkg.Head.NetworkId.Span, binding.NetworkId))
                 throw new CryptographicException("Historical directory source is out of scope.");
             await CommitAuthenticatedHeadAsync(verified.PriorProtectedLkg, verified.ProtectedLkg,
-                authenticatedForward: true, cancellationToken).ConfigureAwait(false);
+                authenticatedForward: true, cancellationToken, borrowed).ConfigureAwait(false);
         }
 
 #if DEEP_TEST_INTERNALS
@@ -217,7 +241,7 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             AccountDirectoryProtectedLkg expectedHead,
             AccountDirectoryProtectedLkg next,
             bool authenticatedForward,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken, HeldDeepIdV2AccountLease? borrowed = null)
         {
             if (!Fixed(next.Head.NetworkId.Span, binding.NetworkId) ||
                 next.Head.MinimumReader < 2 ||
@@ -236,8 +260,9 @@ internal static partial class SqliteDeepIdV2AccountGeneration
                 throw new CryptographicException(
                     "The verified DID2 directory head has no authenticated forward lineage.");
 
-            using var held = await accountLease.AcquireAsync(cancellationToken)
-                .ConfigureAwait(false);
+            using var ownedLease = borrowed is null ? await accountLease.AcquireAsync(cancellationToken).ConfigureAwait(false) : null;
+            var held = borrowed ?? ownedLease!;
+            using var borrow = held.BorrowFor(accountLease);
             using var connection = await OpenVerifiedAsync(cancellationToken)
                 .ConfigureAwait(false);
             using var transaction = connection.BeginTransaction(deferred: false);
@@ -254,6 +279,7 @@ internal static partial class SqliteDeepIdV2AccountGeneration
                     "The protected DID2 directory head changed concurrently.");
             if (exactReplay)
             {
+                cancellationToken.ThrowIfCancellationRequested(); held.RequireOwner(accountLease);
                 transaction.Commit();
                 return;
             }
@@ -282,6 +308,7 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             if (update.ExecuteNonQuery() != 1)
                 throw new CryptographicException(
                     "The protected DID2 directory compare/exchange failed.");
+            cancellationToken.ThrowIfCancellationRequested(); held.RequireOwner(accountLease);
             transaction.Commit();
         }
 

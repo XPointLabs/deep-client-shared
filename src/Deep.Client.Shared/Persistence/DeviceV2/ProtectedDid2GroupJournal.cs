@@ -12,10 +12,19 @@ internal static class ProtectedDid2GroupJournal
     internal const int MaximumBytes = 32 * 1024 * 1024;
     internal sealed class Group
     {
-        internal byte[] Id = [], Scope = [], Offer = [], InvitationProof = [], Acceptance = [], ForkEvidence = [];
+        internal byte[] Id = [], ForkEvidence = [];
+        internal readonly List<Invitation> Invitations = [];
+        internal Invitation? ForScope(ReadOnlySpan<byte> scope) { foreach (var item in Invitations) if (item.Scope.AsSpan().SequenceEqual(scope)) return item; return null; }
         internal readonly List<byte[]> Packages = [];
+        // Never serialized; survives only this actual root/held-lease operation.
+        // Protocol independently rechecks currentness whenever it consumes one.
+        internal readonly Dictionary<string, VerifiedDeepIdV2GroupDirectory> VerifiedDirectories = new(StringComparer.Ordinal);
         internal bool Fork;
         internal ulong NextMessage = 1;
+    }
+    internal sealed class Invitation
+    {
+        internal byte[] Scope = [], Offer = [], InvitationProof = [], Acceptance = [];
     }
     internal sealed class Outgoing
     {
@@ -50,7 +59,7 @@ internal static class ProtectedDid2GroupJournal
         { foreach (var group in Groups) if (group.Id.AsSpan().SequenceEqual(id)) return group; throw new InvalidOperationException("Group is absent from protected custody."); }
         public void Dispose()
         {
-            foreach (var group in Groups) { foreach (var bytes in new[] { group.Id, group.Scope, group.Offer, group.InvitationProof, group.Acceptance, group.ForkEvidence }.Concat(group.Packages)) CryptographicOperations.ZeroMemory(bytes); }
+            foreach (var group in Groups) { group.VerifiedDirectories.Clear(); foreach (var bytes in new[] { group.Id, group.ForkEvidence }.Concat(group.Packages).Concat(group.Invitations.SelectMany(item => new[] { item.Scope, item.Offer, item.InvitationProof, item.Acceptance }))) CryptographicOperations.ZeroMemory(bytes); }
             foreach (var item in Outbox) foreach (var bytes in new[] { item.Group, item.Operation, item.Scope, item.Event }) CryptographicOperations.ZeroMemory(bytes);
             foreach (var item in Messages) foreach (var bytes in new[] { item.Group, item.Operation, item.Scope, item.Record }) CryptographicOperations.ZeroMemory(bytes);
             foreach (var item in Receives) foreach (var bytes in new[] { item.ScopeHash, item.Operation, item.Hash }) CryptographicOperations.ZeroMemory(bytes);
@@ -67,13 +76,14 @@ internal static class ProtectedDid2GroupJournal
         if (state.Revision == 0 || state.Groups.Count > 32 || state.Outbox.Count > 512 || state.Messages.Count > 4096 || state.Receives.Count > 8192 || state.Chunks.Count > 342)
             throw new IOException("Protected group capacity is exhausted.");
         using var stream = new MemoryStream(); using var writer = new BinaryWriter(stream);
-        writer.Write((byte)1); writer.Write(new byte[3]); writer.Write(network); writer.Write(account); writer.Write(instance); writer.Write(state.Revision);
+        writer.Write((byte)2); writer.Write(new byte[3]); writer.Write(network); writer.Write(account); writer.Write(instance); writer.Write(state.Revision);
         writer.Write(checked((ushort)state.Groups.Count)); writer.Write(checked((ushort)state.Outbox.Count));
         writer.Write(checked((ushort)state.Messages.Count)); writer.Write(checked((ushort)state.Receives.Count)); writer.Write(checked((ushort)state.Chunks.Count));
         foreach (var group in state.Groups.OrderBy(group => Convert.ToHexString(group.Id), StringComparer.Ordinal))
         {
             writer.Write(group.Id); writer.Write(group.Fork); writer.Write(group.NextMessage);
-            Bytes(writer, group.Scope); Bytes(writer, group.Offer); Bytes(writer, group.InvitationProof); Bytes(writer, group.Acceptance);
+            writer.Write(checked((ushort)group.Invitations.Count));
+            foreach (var invitation in group.Invitations) { Bytes(writer, invitation.Scope); Bytes(writer, invitation.Offer); Bytes(writer, invitation.InvitationProof); Bytes(writer, invitation.Acceptance); }
             Bytes(writer, group.ForkEvidence);
             writer.Write(checked((byte)group.Packages.Count)); foreach (var package in group.Packages) Bytes(writer, package);
             CheckSize(stream);
@@ -93,7 +103,7 @@ internal static class ProtectedDid2GroupJournal
     internal static State Decode(ReadOnlySpan<byte> bytes, ReadOnlySpan<byte> network, ReadOnlySpan<byte> account, ReadOnlySpan<byte> instance)
     {
         RequireScope(network, account, instance);
-        if (bytes.Length is < 102 or > MaximumBytes || bytes[0] != 1 || bytes.Slice(1, 3).IndexOfAnyExcept((byte)0) >= 0 ||
+        if (bytes.Length is < 102 or > MaximumBytes || bytes[0] != 2 || bytes.Slice(1, 3).IndexOfAnyExcept((byte)0) >= 0 ||
             !bytes.Slice(4, 16).SequenceEqual(network) || !bytes.Slice(20, 32).SequenceEqual(account) || !bytes.Slice(52, 32).SequenceEqual(instance))
             throw new InvalidDataException("Protected group registration is missing, foreign or unsupported.");
         var reader = new Reader(bytes[84..]); var state = new State { Revision = reader.U64() };
@@ -106,12 +116,22 @@ internal static class ProtectedDid2GroupJournal
             string? previous = null;
             for (var index = 0; index < groups; index++)
             {
-                var group = new Group { Id = reader.Fixed(32), Fork = reader.Bool(), NextMessage = reader.U64(),
-                    Scope = reader.Bytes(404), Offer = reader.Bytes(669), InvitationProof = reader.Bytes(512 * 1024), Acceptance = reader.Bytes(610), ForkEvidence = reader.Bytes(8 * 1024 * 1024) };
+                var group = new Group { Id = reader.Fixed(32), Fork = reader.Bool(), NextMessage = reader.U64() };
                 state.Groups.Add(group); RequireId(group.Id); var id = Convert.ToHexString(group.Id);
                 if (!ids.Add(id) || previous is not null && StringComparer.Ordinal.Compare(previous, id) >= 0 || group.NextMessage is 0 or >= long.MaxValue)
                     throw new InvalidDataException("Protected groups are noncanonical.");
-                previous = id; var count = reader.Byte(); if (count is < 1 or > 2) throw new InvalidDataException("Unsupported candidate group lineage.");
+                previous = id;
+                var invitations = reader.Count(100); var invitationScopes = new HashSet<string>(StringComparer.Ordinal);
+                for (var invitationIndex = 0; invitationIndex < invitations; invitationIndex++)
+                {
+                    var invitation = new Invitation { Scope = reader.Bytes(404), Offer = reader.Bytes(669), InvitationProof = reader.Bytes(512 * 1024), Acceptance = reader.Bytes(610) };
+                    group.Invitations.Add(invitation); RequireSession(invitation.Scope, network, account, instance);
+                    if (!invitationScopes.Add(Convert.ToHexString(invitation.Scope)) || invitation.Offer.Length == 0 || !GroupCodec.Decode("GIV1", invitation.Offer).Field(2).Span.SequenceEqual(group.Id) ||
+                        invitation.Acceptance.Length != 0 && !GroupCodec.Decode("GIA1", invitation.Acceptance).Field(2).Span.SequenceEqual(group.Id))
+                        throw new InvalidDataException("Protected invitation scope is invalid or repeated.");
+                }
+                group.ForkEvidence = reader.Bytes(8 * 1024 * 1024);
+                var count = reader.Byte(); if (count is < 1 or > 100) throw new InvalidDataException("Unsupported candidate group lineage.");
                 if (group.Fork != (group.ForkEvidence.Length != 0)) throw new InvalidDataException("Group fork latch lost its evidence.");
                 if (group.Fork) _ = GroupCodec.Decode("GCP1", group.ForkEvidence);
                 for (var p = 0; p < count; p++)
@@ -130,15 +150,9 @@ internal static class ProtectedDid2GroupJournal
                         epoch >= checked((ulong)group.Packages.Count) || group.Packages[checked((int)epoch)].AsSpan().SequenceEqual(group.ForkEvidence))
                         throw new CryptographicException("Protected fork evidence differs from the retained competing head.");
                 }
-                if (group.Scope.Length != 0) RequireSession(group.Scope, network, account, instance);
-                if (group.Offer.Length != 0)
-                {
-                    var offer = GroupCodec.Decode("GIV1", group.Offer);
-                    if (!offer.Field(2).Span.SequenceEqual(group.Id) || group.Scope.Length == 0) throw new InvalidDataException("Protected invitation scope is absent.");
-                }
-                if (group.Acceptance.Length != 0 && (group.Offer.Length == 0 || !GroupCodec.Decode("GIA1", group.Acceptance).Field(2).Span.SequenceEqual(group.Id)))
-                    throw new InvalidDataException("Protected acceptance has no invitation.");
+
             }
+            var packageMaps = state.Groups.ToDictionary(group => Convert.ToHexString(group.Id), group => group.Packages.ToDictionary(package => Convert.ToHexString(GroupCodec.RecordHash("GCP1", package)), package => package, StringComparer.Ordinal), StringComparer.Ordinal);
             var operations = new HashSet<string>(StringComparer.Ordinal);
             for (var index = 0; index < outgoing; index++)
             {
@@ -150,9 +164,16 @@ internal static class ProtectedDid2GroupJournal
                     !parsed.SenderDeviceId.Span.SequenceEqual(scope.LocalDevice) || !parsed.ConversationId.Span.SequenceEqual(scope.Conversation) ||
                     parsed.Flags != Dmc2Flags.None || parsed.ReplyToLogicalMessageId.Length != 0 || parsed.ExpiresAtUnixMilliseconds == 0)
                     throw new CryptographicException("Protected group work differs from its exact sender/session.");
-                var owner = state.Groups.Single(group => group.Id.AsSpan().SequenceEqual(item.Group));
                 var record = ((GroupDmc2Payload)parsed.ParsedPayload).Record;
-                if (!owner.Scope.AsSpan().SequenceEqual(item.Scope) || record is not GroupCommitChunkRecord &&
+                if (record is GroupCommitChunkRecord chunk)
+                {
+                    if (!packageMaps[Convert.ToHexString(item.Group)].TryGetValue(Convert.ToHexString(chunk.Field(1).Span), out var package))
+                        throw new CryptographicException("Protected group chunk has no exact lineage package.");
+                    var offset = checked((int)BinaryPrimitives.ReadUInt32BigEndian(chunk.Field(4).Span) * 24576);
+                    if (BinaryPrimitives.ReadUInt32BigEndian(chunk.Field(2).Span) != checked((uint)package.Length) || offset >= package.Length || !chunk.Field(7).Span[4..].SequenceEqual(package.AsSpan(offset, Math.Min(24576, package.Length - offset))))
+                        throw new CryptographicException("Protected group chunk differs from retained package bytes.");
+                }
+                if (record is not GroupCommitChunkRecord &&
                     (!record.Field(1).Span.SequenceEqual(network) || !record.Field(2).Span.SequenceEqual(item.Group)))
                     throw new CryptographicException("Protected group work differs from its exact group custody.");
             }

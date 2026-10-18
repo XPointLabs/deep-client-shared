@@ -66,6 +66,7 @@ public sealed class DeepIdV2DirectoryProofClient : IDisposable
     private readonly IDeepMlDsa65Verifier mlDsa65;
     private readonly IDeepIdV2DirectoryProtectedLkgStore protectedLkgStore;
     private int disposed;
+    private bool ownsTransports = true;
 
     public DeepIdV2DirectoryProofClient(HttpServiceRequestTransport transport,
         HttpServiceRequestTransport historyTransport,
@@ -78,6 +79,21 @@ public sealed class DeepIdV2DirectoryProofClient : IDisposable
         this.mlDsa65 = mlDsa65 ?? throw new ArgumentNullException(nameof(mlDsa65));
         this.protectedLkgStore = protectedLkgStore ??
             throw new ArgumentNullException(nameof(protectedLkgStore));
+    }
+
+    // No fetchGate/account-lock inversion: the actual account lease serializes
+    // this scoped reader. Normal concurrent readers still CAS against the same
+    // protected floor and cannot replace it with caller bytes.
+    internal async ValueTask<VerifiedDeepIdV2DirectoryFreshness> FetchGroupMemberUnderLeaseAsync(
+        ParsedDid2 requestedDid2, VerifiedXPointNetworkAuthority authority, ushort profile,
+        HeldDeepIdV2AccountLease held, CancellationToken ct)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
+        var borrowed = SqliteDeepIdV2AccountGeneration.BorrowDirectoryStoreUnderLease(protectedLkgStore, held);
+        using var reader = new DeepIdV2DirectoryProofClient(transport, historyTransport, clock, mlDsa65, borrowed) { ownsTransports = false };
+        var result = await reader.FetchByDid2Async(requestedDid2, authority, profile, 2, ct).ConfigureAwait(false);
+        await reader.RequireStillFreshAsync(result, authority, ct).ConfigureAwait(false);
+        held.RequireActive(); ct.ThrowIfCancellationRequested(); return result;
     }
 
     public static HttpServiceRequestTransportOptions CreateTransportOptions(
@@ -479,8 +495,8 @@ public sealed class DeepIdV2DirectoryProofClient : IDisposable
     {
         if (Interlocked.Exchange(ref disposed, 1) == 0)
         {
-            transport.Dispose();
-            historyTransport.Dispose();
+            if (ownsTransports) { transport.Dispose(); historyTransport.Dispose(); }
+            if (!ownsTransports) fetchGate.Dispose();
         }
     }
 

@@ -4,7 +4,7 @@ using Deep.Client.Shared.Services.ContactV2;
 
 namespace Deep.Client.Shared.Services;
 
-public sealed record DeepIdV2GroupSnapshot(string Group, string State, ulong Epoch, int LocalMessageCommands, string Name);
+public sealed record DeepIdV2GroupSnapshot(string Group, string State, ulong Epoch, int LocalMessageCommands, string Name, int Members);
 public sealed record DeepIdV2GroupMessageSnapshot(string Text, bool IsLocalAuthor, ulong Sequence);
 
 public sealed partial class DeepIdV2AccountService
@@ -44,9 +44,36 @@ public sealed partial class DeepIdV2AccountService
         {
             ProtectedDph2PreClaimJournal.RequireIntent(selected);
             await RequireAttachmentConsentAsync(conversation, source, ct).ConfigureAwait(false);
-            var pair = await source.VerifyForOwnMessagingAsync(this, conversation.Scope, ct).ConfigureAwait(false);
             using var verifier = OpenVerifier();
-            await owner.GroupActionAsync(TrustedUnixSeconds(), verifier, action, selected, conversation.Scope, text, pair.Own, pair.Peer, source, ct).ConfigureAwait(false);
+            DeepIdV2Conversation[] candidates = [];
+            IReadOnlyList<ProtectedDeepIdV2AccountOwner.GroupTarget>? targets = null;
+            if (action is "advance" or "send")
+            {
+                var members = await owner.ReadGroupMemberSelectorsAsync(TrustedUnixSeconds(), verifier, selected, ct).ConfigureAwait(false);
+                var accounts = members.Select(Convert.ToHexString).ToHashSet(StringComparer.Ordinal);
+                if (action == "advance") accounts.Add(conversation.PeerAccountId);
+                candidates = (await ListConversationsAsync(ct).ConfigureAwait(false)).Select(item => item.Conversation)
+                    .Where(item => accounts.Contains(item.PeerAccountId)).ToArray();
+                // Consent reads independently mint current own/network authority.
+                // Finish every such read before capturing a common endpoint set;
+                // a later mint can otherwise advance the protected network floor
+                // and correctly invalidate an earlier target's authority.
+                foreach (var candidate in candidates.Where(item => item.ConversationId != conversation.ConversationId))
+                    await RequireAttachmentConsentAsync(candidate, source, ct).ConfigureAwait(false);
+            }
+            var pair = await source.VerifyForOwnMessagingAsync(this, conversation.Scope, ct).ConfigureAwait(false);
+            if (action is "advance" or "send")
+            {
+                var captured = new List<ProtectedDeepIdV2AccountOwner.GroupTarget>();
+                foreach (var candidate in candidates)
+                {
+                    var authority = candidate.ConversationId == conversation.ConversationId ? pair :
+                        await source.VerifyForOwnMessagingAsync(this, candidate.Scope, ct, pair.Own).ConfigureAwait(false);
+                    captured.Add(new(candidate.Scope, authority.Own, authority.Peer));
+                }
+                targets = captured;
+            }
+            await owner.GroupActionAsync(TrustedUnixSeconds(), verifier, action, selected, conversation.Scope, text, pair.Own, pair.Peer, source, ct, targets).ConfigureAwait(false);
             return await FlushGroupAsync(selected, conversation, source, ct).ConfigureAwait(false);
         }
         finally { CryptographicOperations.ZeroMemory(selected); }
@@ -56,31 +83,66 @@ public sealed partial class DeepIdV2AccountService
         DeepIdV2ContactPathAuthoritySource source, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(conversation); source.RequireAccountOwner(this); ProtectedDph2PreClaimJournal.RequireIntent(group.Span);
-        var selected = group.ToArray(); IReadOnlyList<ProtectedDid2GroupJournal.Outgoing> batch = [];
+        var selected = group.ToArray();
         try
         {
-            ProtectedDph2PreClaimJournal.RequireIntent(selected);
-            await RequireAttachmentConsentAsync(conversation, source, ct).ConfigureAwait(false);
+            var conversations = (await ListConversationsAsync(ct).ConfigureAwait(false)).Select(item => item.Conversation).ToArray();
+            if (!conversations.Any(target => target.Scope.Exact.SequenceEqual(conversation.Scope.Exact)))
+                throw new ArgumentException("Group flush requires this account\'s actual retained conversation.", nameof(conversation));
+            // Preserve order within a session. Distinct sessions drain concurrently;
+            // each child still uses the existing native/Store authority fences.
+            using var concurrency = new SemaphoreSlim(4);
+            // Current transport loans hold the actual account lock. Queue
+            // account operations before minting a loan, rather than making
+            // sibling targets exhaust the bounded file-lock wait.
+            using var accountOperations = new SemaphoreSlim(1);
+            var tasks = conversations.Select(async target =>
+            {
+                await concurrency.WaitAsync(ct).ConfigureAwait(false);
+                try { return await FlushGroupTargetAsync(selected, target, source, accountOperations, ct).ConfigureAwait(false); }
+                finally { concurrency.Release(); }
+            }).ToArray();
+            return (await Task.WhenAll(tasks).ConfigureAwait(false)).Sum();
+        }
+        finally { CryptographicOperations.ZeroMemory(selected); }
+    }
+
+    private async Task<int> FlushGroupTargetAsync(ReadOnlyMemory<byte> selected, DeepIdV2Conversation conversation,
+        DeepIdV2ContactPathAuthoritySource source, SemaphoreSlim accountOperations, CancellationToken ct)
+    {
+        IReadOnlyList<ProtectedDid2GroupJournal.Outgoing> batch = [];
+        try
+        {
             using var verifier = OpenVerifier();
-            batch = await owner.ReadGroupBatchAsync(TrustedUnixSeconds(), verifier, selected, conversation.Scope, ct).ConfigureAwait(false);
-            var completed = 0;
+            await accountOperations.WaitAsync(ct).ConfigureAwait(false);
+            try
+            {
+                batch = await owner.ReadGroupBatchAsync(TrustedUnixSeconds(), verifier, selected, conversation.Scope, ct).ConfigureAwait(false);
+                if (batch.Count == 0) return 0;
+                await RequireAttachmentConsentAsync(conversation, source, ct).ConfigureAwait(false);
+            }
+            finally { accountOperations.Release(); }
             foreach (var item in batch)
             {
-                ClientMailboxStoreResult? retained = null;
-                if (item.NativeCommitted)
+                await accountOperations.WaitAsync(ct).ConfigureAwait(false);
+                try
                 {
-                    var own = await source.VerifyForOwnPreKeyAuthoringAsync(this, ct).ConfigureAwait(false);
-                    retained = await owner.ReadRetainedMessagingStoreAsync(TrustedUnixSeconds(), verifier, conversation.Scope, item.Operation, own, source, ct).ConfigureAwait(false);
+                    ClientMailboxStoreResult? retained = null;
+                    if (item.NativeCommitted)
+                    {
+                        var own = await source.VerifyForOwnPreKeyAuthoringAsync(this, ct).ConfigureAwait(false);
+                        retained = await owner.ReadRetainedMessagingStoreAsync(TrustedUnixSeconds(), verifier, conversation.Scope, item.Operation, own, source, ct).ConfigureAwait(false);
+                    }
+                    if (retained is null)
+                    {
+                        using var native = await SendOwnMessagingAsync(conversation.Scope, item.Operation, item.Event, source, ct).ConfigureAwait(false);
+                        _ = await DeliverOwnMessagingAsync(conversation.Scope, item.Operation, source, ct).ConfigureAwait(false);
+                    }
                 }
-                if (retained is null)
-                {
-                    using var native = await SendOwnMessagingAsync(conversation.Scope, item.Operation, item.Event, source, ct).ConfigureAwait(false);
-                    _ = await DeliverOwnMessagingAsync(conversation.Scope, item.Operation, source, ct).ConfigureAwait(false);
-                }
-                completed++;
+                finally { accountOperations.Release(); }
             }
-            return completed;
+            return batch.Count;
         }
-        finally { CryptographicOperations.ZeroMemory(selected); foreach (var item in batch) foreach (var bytes in new[] { item.Group, item.Operation, item.Scope, item.Event }) CryptographicOperations.ZeroMemory(bytes); }
+        finally { foreach (var item in batch) foreach (var bytes in new[] { item.Group, item.Operation, item.Scope, item.Event }) CryptographicOperations.ZeroMemory(bytes); }
     }
 }

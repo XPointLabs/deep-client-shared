@@ -26,10 +26,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         var result = root.State.Groups.Select(group =>
         {
             var package = GroupCodec.Decode("GCP1", group.Packages[^1]); var commit = GroupCodec.Decode("DGC1", package.Field(4).Span[4..]);
-            return new DeepIdV2GroupSnapshot(Convert.ToHexStringLower(group.Id), group.Fork ? "Forked" : group.Packages.Count == 2 ? "Active" : group.Acceptance.Length != 0 ? "Accepted" : group.Offer.Length != 0 ? "Invited" : "Created",
-                BinaryPrimitives.ReadUInt64BigEndian(package.Field(3).Span), root.State.Outbox.Count(item =>
-                    item.Group.AsSpan().SequenceEqual(group.Id) && ApplicationCoreCodec.DecodeDmc2(item.Event).ContentKind == Dmc2ContentKind.GroupApplicationMessage),
-                new UTF8Encoding(false, true).GetString(commit.Field(13).Span));
+            return new DeepIdV2GroupSnapshot(Convert.ToHexStringLower(group.Id), group.Fork ? "Forked" : GroupMemberSelectors(commit).Any(id => id.AsSpan().SequenceEqual(current.AccountId.Span)) && group.Packages.Count > 1 ? "Active" : group.Invitations.Any(item => item.Acceptance.Length != 0) ? "Accepted" : group.Invitations.Count != 0 ? "Invited" : "Created",
+                BinaryPrimitives.ReadUInt64BigEndian(package.Field(3).Span), root.State.Outbox.Where(item => item.Group.AsSpan().SequenceEqual(group.Id) && ApplicationCoreCodec.DecodeDmc2(item.Event).ContentKind == Dmc2ContentKind.GroupApplicationMessage).Select(item => Convert.ToHexString(((GroupDmc2Payload)ApplicationCoreCodec.DecodeDmc2(item.Event).ParsedPayload).Record.Field(5).Span)).Distinct(StringComparer.Ordinal).Count(),
+                new UTF8Encoding(false, true).GetString(commit.Field(13).Span), GroupMemberSelectors(commit).Count);
         }).ToArray();
         held.RequireActive(); ct.ThrowIfCancellationRequested(); return result;
     }
@@ -65,6 +64,16 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         held.RequireActive(); ct.ThrowIfCancellationRequested(); return result;
     }
 
+    internal async Task<IReadOnlyList<byte[]>> ReadGroupMemberSelectorsAsync(ulong seconds, IDeepMlDsa65Verifier verifier, ReadOnlyMemory<byte> groupId, CancellationToken ct)
+    {
+        using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
+        using var current = await RequireCurrentUnderLeaseAsync(seconds, verifier, ct).ConfigureAwait(false);
+        using var root = await OpenGroupsUnderLeaseAsync(current, ct).ConfigureAwait(false);
+        var group = root.State.Find(groupId.Span); if (group.Fork) throw new CryptographicException("Group is fork-latched.");
+        var package = GroupCodec.Decode("GCP1", group.Packages[^1]);
+        return GroupMemberSelectors(GroupCodec.Decode("DGC1", package.Field(4).Span[4..]));
+    }
+
     internal async Task<IReadOnlyList<ProtectedDid2GroupJournal.Outgoing>> ReadGroupBatchAsync(ulong seconds, IDeepMlDsa65Verifier verifier,
         ReadOnlyMemory<byte> groupId, Did2MessagingSessionScope scope, CancellationToken ct)
     {
@@ -73,9 +82,10 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         await ResumeGroupOrdinaryUnderLeaseAsync(current, held, ct).ConfigureAwait(false);
         using var root = await OpenGroupsUnderLeaseAsync(current, ct).ConfigureAwait(false);
         var group = root.State.Find(groupId.Span);
-        if (group.Fork || !group.Scope.AsSpan().SequenceEqual(scope.Exact)) throw new CryptographicException("Group fanout scope is unavailable.");
+        if (group.Fork) throw new CryptographicException("Group fanout scope is unavailable.");
         var result = root.State.Outbox.Where(item => item.Group.AsSpan().SequenceEqual(groupId.Span) && item.Scope.AsSpan().SequenceEqual(scope.Exact))
             .Select(item => new ProtectedDid2GroupJournal.Outgoing { Group = item.Group.ToArray(), Operation = item.Operation.ToArray(), Scope = item.Scope.ToArray(), Event = item.Event.ToArray(), Adopted = item.Adopted }).ToArray();
+        if (result.Length == 0) return result;
         try
         {
             using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, ct).ConfigureAwait(false);

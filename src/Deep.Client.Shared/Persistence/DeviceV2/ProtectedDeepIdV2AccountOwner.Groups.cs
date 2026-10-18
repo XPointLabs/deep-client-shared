@@ -49,17 +49,21 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         finally { CryptographicOperations.ZeroMemory(next); }
     }
 
+    internal sealed record GroupTarget(Did2MessagingSessionScope Scope,
+        DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority Own, VerifiedDeepIdV2DirectoryFreshness Peer);
+
     internal async Task<string> GroupActionAsync(ulong seconds, IDeepMlDsa65Verifier verifier,
         string action, ReadOnlyMemory<byte> id, Did2MessagingSessionScope? scope, string? value,
         DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own,
-        VerifiedDeepIdV2DirectoryFreshness? peer, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
+        VerifiedDeepIdV2DirectoryFreshness? peer, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct,
+        IReadOnlyList<GroupTarget>? capturedTargets = null)
     {
         using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
         await ResumeLocalCompactionUnderLeaseAsync(held, ct).ConfigureAwait(false);
         using var current = await RequireCurrentUnderLeaseAsync(seconds, verifier, ct).ConfigureAwait(false);
         await ResumeGroupOrdinaryUnderLeaseAsync(current, held, ct).ConfigureAwait(false);
         var self = await DeepIdV2GroupDirectoryAuthority.VerifyAsync(own.Proof, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
-        if (own.Proof.CurrentCheckpoint!.Directory.Identity.ActiveDevices.Count != 1) throw new NotSupportedException("Connected group candidate requires one active local device.");
+        if (own.Proof.CurrentCheckpoint!.Directory.Identity.ActiveDevices.Count != 1) throw new NotSupportedException("Group device enrollment is not yet qualified.");
         using var root = await OpenGroupsUnderLeaseAsync(current, ct).ConfigureAwait(false);
         if (action == "create")
         {
@@ -71,83 +75,167 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             await SaveGroupsUnderLeaseAsync(root, current, held, ct).ConfigureAwait(false);
             return Convert.ToHexStringLower(groupId);
         }
-        if (scope is null || peer is null) throw new ArgumentException("Group network action requires an exact accepted session.");
-        var first = await RequireMessagingFreshnessAsync(current, own, peer, source, held, ct).ConfigureAwait(false);
-        OwnedInitialMessagingSeed.RequireFreshScope(scope, own.Proof, peer, first);
-        using (var opened = await SqliteDeepIdV2AccountGeneration.OpenOwnedMessagingUnderLeaseAsync(storage, sqlStatePath, current, scope, ct).ConfigureAwait(false))
-            await RequireGroupContactConsentUnderLeaseAsync(current, held, opened, own, peer, source, ct).ConfigureAwait(false);
-        var other = await DeepIdV2GroupDirectoryAuthority.VerifyAsync(peer, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
-        if (peer.CurrentCheckpoint!.Directory.Identity.ActiveDevices.Count != 1) throw new NotSupportedException("Connected group candidate requires one peer device.");
+        if (scope is null || peer is null) throw new ArgumentException("Group action requires an exact accepted session.");
+        var targets = capturedTargets?.ToArray() ?? [new GroupTarget(scope, own, peer)];
+        if (targets.Length is < 1 or > 99 || targets.Select(t => Convert.ToHexString(t.Scope.RemoteAccount)).Distinct(StringComparer.Ordinal).Count() != targets.Length)
+            throw new CryptographicException("Group target set is empty, repeated or exceeds its bound.");
+        var readings = new List<Deep.Protocol.DeepExtension.PrivacyRouting.OnionMonotonicReading>();
+        var capabilities = new Dictionary<string, VerifiedDeepIdV2GroupDirectory>(StringComparer.Ordinal);
+        foreach (var target in targets)
+        {
+            var first = await RequireMessagingFreshnessAsync(current, target.Own, target.Peer, source, held, ct).ConfigureAwait(false);
+            OwnedInitialMessagingSeed.RequireFreshScope(target.Scope, target.Own.Proof, target.Peer, first);
+            using var opened = await SqliteDeepIdV2AccountGeneration.OpenOwnedMessagingUnderLeaseAsync(storage, sqlStatePath, current, target.Scope, ct).ConfigureAwait(false);
+            await RequireGroupContactConsentUnderLeaseAsync(current, held, opened, target.Own, target.Peer, source, ct).ConfigureAwait(false);
+            if (target.Peer.CurrentCheckpoint!.Directory.Identity.ActiveDevices.Count != 1) throw new NotSupportedException("Group device enrollment is not yet qualified.");
+            capabilities.Add(Convert.ToHexString(target.Scope.RemoteAccount), await DeepIdV2GroupDirectoryAuthority.VerifyAsync(target.Peer, source.RendezvousTrustedTime, ct).ConfigureAwait(false));
+            readings.Add(first);
+        }
+        if (!capabilities.TryGetValue(Convert.ToHexString(scope.RemoteAccount), out var other)) throw new ArgumentException("The selected session is not a group target.");
         var groupState = root.State.Find(id.Span);
         if (groupState.Fork) throw new CryptographicException("Group is permanently fork-latched.");
-        if (groupState.Scope.Length != 0 && !groupState.Scope.AsSpan().SequenceEqual(scope.Exact))
-            throw new CryptographicException("Group candidate belongs to another exact contact/session.");
-        var head = await VerifyGroupHeadAsync(groupState, self, other, source, ct).ConfigureAwait(false);
-        var records = new List<GroupRecord>(); GroupInvitationRecord? original = null; ReadOnlyMemory<byte> package = default;
+        var head = await VerifyGroupHeadAsync(groupState, self, other, own, held, source, ct).ConfigureAwait(false);
+        var invitationState = groupState.ForScope(scope.Exact);
+        var records = new List<(GroupRecord Record, VerifiedGroupTransition Head, ReadOnlyMemory<byte> Package, GroupTarget Target)>();
+        GroupInvitationRecord? original = invitationState is null ? null : (GroupInvitationRecord)GroupCodec.Decode("GIV1", invitationState.Offer);
         switch (action)
         {
             case "invite":
-                if (groupState.Offer.Length != 0) return Convert.ToHexStringLower(id.Span); // exact retained batch; never remint an unknown offer
-                if (groupState.Packages.Count != 1) throw new InvalidOperationException("Connected group candidate is already activated.");
+                if (invitationState is not null) return Convert.ToHexStringLower(id.Span);
                 original = await DeepIdV2GroupTransitions.InviteAsync(head, self, current.Verified.DeviceSecrets, other, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
-                groupState.Scope = scope.Exact.ToArray(); groupState.Offer = original.CanonicalBytes.ToArray();
-                groupState.InvitationProof = other.ExactLookupProof.ToArray();
-                package = groupState.Packages[0]; records.AddRange(DeepIdV2GroupEvents.Chunk(head, package)); records.Add(original);
-                break;
+                invitationState = new() { Scope = scope.Exact.ToArray(), Offer = original.CanonicalBytes.ToArray(), InvitationProof = other.ExactLookupProof.ToArray() };
+                groupState.Invitations.Add(invitationState);
+                // A new member receives the entire exact lineage, not only its tip.
+                for (var epoch = 0; epoch < groupState.Packages.Count; epoch++)
+                {
+                    var prior = await VerifyGroupHeadAsync(groupState, self, other, own, held, source, ct, epoch).ConfigureAwait(false);
+                    foreach (var chunk in DeepIdV2GroupEvents.Chunk(prior, groupState.Packages[epoch])) records.Add((chunk, prior, groupState.Packages[epoch], targets.Single(t => t.Scope.Exact.SequenceEqual(scope.Exact))));
+                }
+                records.Add((original, head, default, targets.Single(t => t.Scope.Exact.SequenceEqual(scope.Exact)))); break;
             case "accept":
-                if (groupState.Acceptance.Length != 0) return Convert.ToHexStringLower(id.Span);
-                if (groupState.Packages.Count != 1 || groupState.Offer.Length == 0) throw new InvalidOperationException("No pending group invitation.");
-                original = (GroupInvitationRecord)GroupCodec.Decode("GIV1", groupState.Offer);
-                var acceptance = await DeepIdV2GroupTransitions.AcceptAsync(head, original, other, self,
-                    current.Verified.DeviceSecrets, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
-                groupState.Acceptance = acceptance.CanonicalBytes.ToArray(); records.Add(acceptance); break;
+                if (invitationState is null) throw new InvalidOperationException("No pending group invitation.");
+                if (invitationState.Acceptance.Length != 0) return Convert.ToHexStringLower(id.Span);
+                var acceptance = await DeepIdV2GroupTransitions.AcceptAsync(head, original!, other, self, current.Verified.DeviceSecrets, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
+                invitationState.Acceptance = acceptance.CanonicalBytes.ToArray(); records.Add((acceptance, head, default, targets.Single(t => t.Scope.Exact.SequenceEqual(scope.Exact)))); break;
             case "advance":
-                if (groupState.Packages.Count == 2) return Convert.ToHexStringLower(id.Span);
-                if (groupState.Offer.Length == 0 || groupState.Acceptance.Length == 0) throw new InvalidOperationException("Group activation requires retained explicit consent.");
-                original = (GroupInvitationRecord)GroupCodec.Decode("GIV1", groupState.Offer);
-                var activated = await DeepIdV2GroupTransitions.ActivateAsync(head, (GroupCommitPackageRecord)GroupCodec.Decode("GCP1", groupState.Packages[0]),
-                    original, (GroupInvitationAcceptanceRecord)GroupCodec.Decode("GIA1", groupState.Acceptance), self, current.Verified.DeviceSecrets,
-                    other, groupState.InvitationProof, [self, other], source.RendezvousTrustedTime, ct).ConfigureAwait(false);
+                if (invitationState is null || invitationState.Acceptance.Length == 0) throw new InvalidOperationException("Group activation requires retained explicit consent.");
+                var baseEpoch = checked((int)BinaryPrimitives.ReadUInt64BigEndian(original!.Field(4).Span));
+                if (groupState.Packages.Count > baseEpoch + 1)
+                {
+                    RequireGroupLocalConsent((GroupCommitPackageRecord)GroupCodec.Decode("GCP1", groupState.Packages[baseEpoch + 1]), invitationState);
+                    return Convert.ToHexStringLower(id.Span);
+                }
+                RequireCompleteGroupTargets(head, self, targets, scope.RemoteAccount);
+                var all = new[] { self }.Concat(capabilities.Values).ToArray();
+                var activated = await DeepIdV2GroupTransitions.ActivateAsync(head, (GroupCommitPackageRecord)GroupCodec.Decode("GCP1", groupState.Packages[^1]),
+                    original, (GroupInvitationAcceptanceRecord)GroupCodec.Decode("GIA1", invitationState.Acceptance), self, current.Verified.DeviceSecrets,
+                    other, invitationState.InvitationProof, all, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
                 groupState.Packages.Add(activated.CanonicalPackageBytes.ToArray()); head = activated.Transition;
-                package = activated.CanonicalPackageBytes; records.AddRange(DeepIdV2GroupEvents.Chunk(head, package)); break;
+                foreach (var target in targets) foreach (var chunk in DeepIdV2GroupEvents.Chunk(head, activated.CanonicalPackageBytes)) records.Add((chunk, head, activated.CanonicalPackageBytes, target));
+                break;
             case "send":
-                if (groupState.Packages.Count != 2) throw new InvalidOperationException("Group membership is not activated.");
+                if (!GroupMemberSelectors(head.Commit).Any(account => account.AsSpan().SequenceEqual(self.AccountId.Span)))
+                    throw new InvalidOperationException("Pending invitation is not group membership.");
+                RequireCompleteGroupTargets(head, self, targets, default);
                 var message = await DeepIdV2GroupEvents.TextAsync(head, self, other, current.Verified.DeviceSecrets,
                     RandomNumberGenerator.GetBytes(32), groupState.NextMessage, value!, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
-                groupState.NextMessage = checked(groupState.NextMessage + 1); records.Add(message); break;
+                groupState.NextMessage = checked(groupState.NextMessage + 1);
+                foreach (var target in targets) records.Add((message, head, default, target)); break;
             default: throw new NotSupportedException("Unsupported owned group action.");
         }
-        // One protected batch before any encryption or network dispatch. Every
-        // target receives a separately authenticated pairwise DMC2 envelope.
         using var ordinaryValue = await storage.ReadOwnedAsync(ProtectedDid2DirectTextJournal.Slot, ct).ConfigureAwait(false) ?? throw new InvalidDataException("Ordinary registration is absent.");
         using var ordinary = ordinaryValue.Use(bytes => ProtectedDid2DirectTextJournal.Decode(bytes, scope.Network, scope.LocalAccount, scope.Instance));
         if (ordinary.Pending is not null || ordinary.Entries.Count + records.Count > ProtectedDid2DirectTextJournal.MaximumEntries || root.State.Outbox.Count + records.Count > 512)
             throw new IOException("Complete group batch has no available ordinary capacity.");
-        var sequence = ordinary.NextSequence(scope);
-        foreach (var record in records)
+        var sequences = targets.ToDictionary(t => Convert.ToHexString(t.Scope.Exact), t => ordinary.NextSequence(t.Scope), StringComparer.Ordinal);
+        foreach (var item in records)
         {
-            var dmc = await DeepIdV2GroupEvents.AuthorAsync(record, head, self, other, current.Verified.DeviceSecrets,
-                RandomNumberGenerator.GetBytes(32), scope.Conversation.ToArray(), sequence++, source.RendezvousTrustedTime,
-                original, package, ct).ConfigureAwait(false);
-            root.State.Outbox.Add(new() { Group = id.ToArray(), Operation = RandomNumberGenerator.GetBytes(32),
-                Scope = scope.Exact.ToArray(), Event = dmc.CanonicalBytes.ToArray() });
+            var selectedScope = item.Target.Scope; var key = Convert.ToHexString(selectedScope.Exact);
+            var dmc = await DeepIdV2GroupEvents.AuthorAsync(item.Record, item.Head, self, capabilities[Convert.ToHexString(selectedScope.RemoteAccount)], current.Verified.DeviceSecrets,
+                RandomNumberGenerator.GetBytes(32), selectedScope.Conversation.ToArray(), sequences[key]++, source.RendezvousTrustedTime, original, item.Package, ct).ConfigureAwait(false);
+            root.State.Outbox.Add(new() { Group = id.ToArray(), Operation = RandomNumberGenerator.GetBytes(32), Scope = selectedScope.Exact.ToArray(), Event = dmc.CanonicalBytes.ToArray() });
         }
-        await RequireFinalMessagingFreshnessAsync(current, scope, own, peer, source, held, first, ct).ConfigureAwait(false);
+        for (var index = 0; index < targets.Length; index++)
+            await RequireFinalMessagingFreshnessAsync(current, targets[index].Scope, targets[index].Own, targets[index].Peer, source, held, readings[index], ct).ConfigureAwait(false);
         await SaveGroupsUnderLeaseAsync(root, current, held, ct).ConfigureAwait(false);
         await ResumeGroupOrdinaryUnderLeaseAsync(current, held, ct).ConfigureAwait(false);
         return Convert.ToHexStringLower(id.Span);
     }
 
+    private static void RequireCompleteGroupTargets(VerifiedGroupTransition head, VerifiedDeepIdV2GroupDirectory self, GroupTarget[] targets, ReadOnlySpan<byte> added)
+    {
+        var members = GroupMemberSelectors(head.Commit).Where(id => !id.AsSpan().SequenceEqual(self.AccountId.Span)).Select(Convert.ToHexString).ToHashSet(StringComparer.Ordinal);
+        if (!added.IsEmpty) members.Add(Convert.ToHexString(added));
+        if (members.Count == 0 || !members.SetEquals(targets.Select(t => Convert.ToHexString(t.Scope.RemoteAccount)))) throw new CryptographicException("The complete exact group target set is required before preparation.");
+    }
+
+    // Selectors only. Current directory capabilities and Protocol independently
+    // validate membership, device sets, signatures, support and every predecessor.
+    private static IReadOnlyList<byte[]> GroupMemberSelectors(GroupRecord commit)
+    {
+        var remaining = commit.Field(12).Span; var result = new List<byte[]>();
+        var count = BinaryPrimitives.ReadUInt16BigEndian(commit.Field(11).Span);
+        for (var i = 0; i < count; i++)
+        {
+            var length = BinaryPrimitives.ReadUInt16BigEndian(remaining); remaining = remaining[2..];
+            // Canonical member header is219 bytes before deviceCount. Do not
+            // adopt a multi-device third member through an unqualified path.
+            if (length < 220 || remaining[219] != 1) throw new NotSupportedException("Group device enrollment is not yet qualified.");
+            result.Add(remaining[..32].ToArray()); remaining = remaining[length..];
+        }
+        if (!remaining.IsEmpty) throw new InvalidDataException("Noncanonical group member selectors."); return result;
+    }
+
+    private static async Task<VerifiedDeepIdV2GroupDirectory[]> ReadGroupAuthoritiesAsync(GroupCommitPackageRecord package,
+        VerifiedDeepIdV2GroupDirectory self, VerifiedDeepIdV2GroupDirectory other,
+        DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own, HeldDeepIdV2AccountLease held, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct,
+        Dictionary<string, VerifiedDeepIdV2GroupDirectory>? verifiedDirectories = null)
+    {
+        var commit = GroupCodec.Decode("DGC1", package.Field(4).Span[4..]);
+        var candidates = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+        var packed = package.Field(8).ToArray(); var at = 0; var count = BinaryPrimitives.ReadUInt32BigEndian(package.Field(7).Span);
+        for (var i = 0; i < count; i++)
+        {
+            var kind = BinaryPrimitives.ReadUInt16BigEndian(packed.AsSpan(at)); at += 40;
+            var length = checked((int)BinaryPrimitives.ReadUInt32BigEndian(packed.AsSpan(at))); at += 4;
+            if (kind == 3)
+            {
+                var adp = DeepIdV2Adp1Codec.Decode(packed.AsSpan(at, length));
+                var account = DeepIdV2Codec.DecodeDab2(adp.ExactDab2.Span).DeepAccountId;
+                candidates.TryAdd(Convert.ToHexString(account.Span), adp.ExactDid2.ToArray());
+            }
+            at = checked(at + length);
+        }
+        if (at != packed.Length) throw new InvalidDataException("Noncanonical group support selectors.");
+        var result = new List<VerifiedDeepIdV2GroupDirectory>();
+        foreach (var id in GroupMemberSelectors(commit))
+        {
+            if (id.AsSpan().SequenceEqual(self.AccountId.Span)) result.Add(self);
+            else if (id.AsSpan().SequenceEqual(other.AccountId.Span)) result.Add(other);
+            else if (verifiedDirectories is not null && verifiedDirectories.TryGetValue(Convert.ToHexString(id), out var retained)) result.Add(retained);
+            else if (candidates.TryGetValue(Convert.ToHexString(id), out var did))
+            {
+                var verified = await source.VerifyGroupDirectoryAsync(did, id, own, held, ct).ConfigureAwait(false);
+                result.Add(verified); verifiedDirectories?.Add(Convert.ToHexString(id), verified);
+            }
+            else throw new CryptographicException("Group member has no directory query candidate.");
+        }
+        return result.ToArray();
+    }
+
     private static async Task<VerifiedGroupTransition> VerifyGroupHeadAsync(ProtectedDid2GroupJournal.Group group,
-        VerifiedDeepIdV2GroupDirectory self, VerifiedDeepIdV2GroupDirectory other, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
+        VerifiedDeepIdV2GroupDirectory self, VerifiedDeepIdV2GroupDirectory other,
+        DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own, HeldDeepIdV2AccountLease held, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct, int? throughEpoch = null)
     {
         var genesis = (GroupCommitPackageRecord)GroupCodec.Decode("GCP1", group.Packages[0]);
-        var commit = GroupCodec.Decode("DGC1", genesis.Field(4).Span[4..]);
-        var owner = commit.Field(6).Span.SequenceEqual(self.AccountId.Span) ? self : other;
-        var head = await DeepIdV2GroupTransitions.VerifyGenesisAsync(genesis, owner, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
-        if (group.Packages.Count == 2)
-            head = await DeepIdV2GroupTransitions.VerifyActivationAsync(head, (GroupCommitPackageRecord)GroupCodec.Decode("GCP1", group.Packages[1]),
-                [self, other], source.RendezvousTrustedTime, ct).ConfigureAwait(false);
+        var accounts = await ReadGroupAuthoritiesAsync(genesis, self, other, own, held, source, ct, group.VerifiedDirectories).ConfigureAwait(false);
+        var head = await DeepIdV2GroupTransitions.VerifyGenesisAsync(genesis, accounts.Single(), source.RendezvousTrustedTime, ct).ConfigureAwait(false);
+        for (var epoch = 1; epoch <= (throughEpoch ?? group.Packages.Count - 1); epoch++)
+        {
+            var package = (GroupCommitPackageRecord)GroupCodec.Decode("GCP1", group.Packages[epoch]);
+            accounts = await ReadGroupAuthoritiesAsync(package, self, other, own, held, source, ct, group.VerifiedDirectories).ConfigureAwait(false);
+            head = await DeepIdV2GroupTransitions.VerifyActivationAsync(head, package, accounts, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
+        }
         return head;
     }
 
