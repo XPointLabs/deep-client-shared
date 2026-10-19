@@ -54,7 +54,7 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         IDeepSecureStorage storage, ReadOnlyMemory<byte> networkId,
         ReadOnlyMemory<byte> accountId, string displayName,
         VerifiedDeepIdV2LocalGenesis genesis, bool allowCreate,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, AccountRegistrationGrammar? grammar = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(statePath);
         ArgumentNullException.ThrowIfNull(storage);
@@ -190,7 +190,8 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             var journals = createdRegistrations ?? captured;
             if (journals.Count != 18) throw new InvalidDataException("Protected registration read group has another shape.");
             using var rawGroups = journals[17] ?? throw new InvalidDataException("Protected group registration is absent; explicit reset is required.");
-            using var groupState = rawGroups.Use(bytes => ProtectedDid2GroupJournal.Decode(bytes, networkId.Span, accountId.Span, record.AsSpan(56, 32)));
+            grammar ??= new AccountRegistrationGrammar();
+            rawGroups.Use(bytes => { grammar.Validate(RegistrationGrammarKind.Group, bytes, networkId.Span, accountId.Span, record.AsSpan(56, 32)); return true; });
             using var rawCompaction = journals[12] ??
                 throw new InvalidDataException("Protected compaction registration is absent; explicit reset is required.");
             using var compaction = rawCompaction.Use(bytes => Did2CompactionPlan.Decode(
@@ -208,8 +209,7 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             using var contactStartState = contactStarts.Use(value => ProtectedDid2ContactStartJournal.Decode(
                 value, networkId.Span, accountId.Span, record.AsSpan(56, 32)));
             using var text = journals[3] ?? throw new InvalidDataException("Protected direct text command custody is absent; explicit reset is required.");
-            using var textState = text.Use(value => ProtectedDid2DirectTextJournal.Decode(
-                value, networkId.Span, accountId.Span, record.AsSpan(56, 32)));
+            text.Use(value => { grammar.Validate(RegistrationGrammarKind.Ordinary, value, networkId.Span, accountId.Span, record.AsSpan(56, 32)); return true; });
             using var attachments = journals[4] ?? throw new InvalidDataException("Protected attachment custody is absent; explicit reset is required.");
             using var attachmentState = attachments.Use(value => ProtectedDid2AttachmentJournal.Decode(
                 value, networkId.Span, accountId.Span, record.AsSpan(56, 32)));

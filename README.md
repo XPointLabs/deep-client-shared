@@ -31,7 +31,40 @@ minutes (one minute idle), separately for each session/client. This changes
 socket reuse, not proof reuse: every response retains nonce/signature/floor
 verification, platform TLS with online revocation, explicit system proxy,
 no redirects/cookies/decompression, and no proxy-to-direct fallback. Selected
-ONION transport handlers and their pinning/isolation are unchanged.
+ONION pinning and path isolation are not modified by this public-client pool.
+
+Native ordinary-message preparation verifies the complete SQLCipher journal,
+retained prefix, policy/schema and independent protected tip once in a single
+read transaction, then selects exact replay custody, derives the retention
+context and reads the current ratchet from that same snapshot. There is no
+await, callback, mutation, private-state cache or reusable verification token
+inside that snapshot. Commit, recovery and actual post-effect read-back retain
+their independent fences; a later call must verify the database again. The
+selected ONION entry socket uses TCP no-delay without changing its exact TLS
+pin, current path checks, framing or retry classification.
+
+Read-only protected aggregate access authenticates the actual complete file and
+validates every slot's canonical encoding and byte bound, ordering and trailing byte,
+but materializes separate value buffers only for requested slots. Unselected
+malformed entries still reject the whole read; mutations still load the full
+inventory. The full decrypted aggregate and temporary selected buffers are
+wiped on exit, with no private-value, storage-authentication or currentness cache.
+
+Local group history and original-batch scheduling read at most32 native operations
+per synchronous SQL snapshot. Every batch verifies the entire journal/prefix,
+including unselected rows, against the actual independent protected floor. No
+await/callback crosses it; callers own/dispose all materialized values. Group
+history preserves the original cross-scope order. Scheduling flags still cannot
+authorize a Store, receipt, retry or semantic ACK.
+
+Account registration may memoize only the pure, time-independent canonical
+grammar predicate for exact current group/ordinary bytes plus network, account
+and instance. One account owner retains two32-byte digests, not private bytes,
+decoded states, revisions, proof or storage-read verdicts. Every invocation still
+authenticates actual storage; changed input/binding reruns the original decoder,
+and failures are never remembered. Actual consumers still decode their needed
+root afresh. SQL integrity, dynamic cancellation-owner joins, protected floors,
+currentness and all effect/read-back fences remain independent and mandatory.
 
 `DeepIdV2ClientNetworkSession` may live across serial CLI commands. Its ordinary
 `Source` retains independent acquisition; `EstablishedGroupSource` owns a bounded

@@ -39,39 +39,50 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
         using var current = await RequireCurrentUnderLeaseAsync(seconds, verifier, ct).ConfigureAwait(false);
         using var root = await OpenGroupsUnderLeaseAsync(current, ct).ConfigureAwait(false); _ = root.State.Find(groupId.Span);
-        var result = new List<DeepIdV2GroupMessageSnapshot>();
-        var openedScopes = new Dictionary<string, OwnedDid2MessagingStorage>(StringComparer.Ordinal);
-        try
+        var selected = root.State.Messages.Where(item => item.Group.AsSpan().SequenceEqual(groupId.Span))
+            .Select((item, index) => (Item: item, Index: index)).ToArray();
+        var result = new DeepIdV2GroupMessageSnapshot[selected.Length];
+        foreach (var byScope in selected.GroupBy(row => Convert.ToHexString(row.Item.Scope), StringComparer.Ordinal))
         {
-        foreach (var item in root.State.Messages.Where(item => item.Group.AsSpan().SequenceEqual(groupId.Span)))
-        {
-            var scope = Did2MessagingSessionScope.RestoreMetadata(item.Scope);
-            var scopeKey = Convert.ToHexString(scope.Exact);
-            if (!openedScopes.TryGetValue(scopeKey, out var opened))
-            {
-                opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, ct).ConfigureAwait(false);
-                openedScopes.Add(scopeKey, opened);
-            }
+            var scope = Did2MessagingSessionScope.RestoreMetadata(byScope.First().Item.Scope);
+            using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, ct).ConfigureAwait(false);
             var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
             if (floor.Status != 1) throw new CryptographicException("Latched session grants no group history.");
-            using var native = opened.Sql.ReadVerifiedOperation(floor, item.Operation) ?? throw new CryptographicException("Group history lost its actual native row.");
-            if (native.Direction != item.Direction) throw new CryptographicException("Group history direction changed.");
-            byte[] exact;
-            if (native.Direction == 1) exact = RequireGroupAuthoredEvent(root.State, scope, item.Operation, native.EventHash) ?? throw new CryptographicException("Group history lost original authored custody.");
-            else { using var owned = native.OwnAuthenticatedDmc2(); exact = owned.Use(bytes => bytes.ToArray()); }
-            try
+            foreach (var chunk in byScope.Chunk(Did2MessagingSqlJournal.MaximumOperationReadBatch))
             {
-                var record = RequireGroupEnvelope(ApplicationCoreCodec.DecodeDmc2(exact), scope, native.Direction == 1);
-                if (!SHA256.HashData(exact).AsSpan().SequenceEqual(native.EventHash) || !record.CanonicalBytes.Span.SequenceEqual(item.Record))
-                    throw new CryptographicException("Group projection differs from actual native history.");
-                result.Add(new(new UTF8Encoding(false, true).GetString(record.Field(12).Span), item.Direction == 1,
-                    BinaryPrimitives.ReadUInt64BigEndian(record.Field(8).Span)));
+                ct.ThrowIfCancellationRequested();
+                var nativeRows = opened.Sql.ReadVerifiedOperations(floor, chunk.Select(row => (ReadOnlyMemory<byte>)row.Item.Operation).ToArray());
+                try
+                {
+                    for (var index = 0; index < chunk.Length; index++)
+                    {
+                        var native = nativeRows[index] ?? throw new CryptographicException("Group history lost its actual native row.");
+                        // Preserve the protected journal's original cross-scope order.
+                        result[chunk[index].Index] = ReadGroupHistorySnapshot(root.State, scope, chunk[index].Item, native);
+                    }
+                }
+                finally { foreach (var native in nativeRows) native?.Dispose(); }
             }
-            finally { CryptographicOperations.ZeroMemory(exact); }
         }
         held.RequireActive(); ct.ThrowIfCancellationRequested(); return result;
+    }
+
+    private static DeepIdV2GroupMessageSnapshot ReadGroupHistorySnapshot(ProtectedDid2GroupJournal.State state,
+        Did2MessagingSessionScope scope, ProtectedDid2GroupJournal.Message item, OwnedDid2MessagingPersistedEvent native)
+    {
+        if (native.Direction != item.Direction) throw new CryptographicException("Group history direction changed.");
+        byte[] exact;
+        if (native.Direction == 1) exact = RequireGroupAuthoredEvent(state, scope, item.Operation, native.EventHash) ?? throw new CryptographicException("Group history lost original authored custody.");
+        else { using var owned = native.OwnAuthenticatedDmc2(); exact = owned.Use(bytes => bytes.ToArray()); }
+        try
+        {
+            var record = RequireGroupEnvelope(ApplicationCoreCodec.DecodeDmc2(exact), scope, native.Direction == 1);
+            if (!SHA256.HashData(exact).AsSpan().SequenceEqual(native.EventHash) || !record.CanonicalBytes.Span.SequenceEqual(item.Record))
+                throw new CryptographicException("Group projection differs from actual native history.");
+            return new(new UTF8Encoding(false, true).GetString(record.Field(12).Span), item.Direction == 1,
+                BinaryPrimitives.ReadUInt64BigEndian(record.Field(8).Span));
         }
-        finally { foreach (var opened in openedScopes.Values) opened.Dispose(); }
+        finally { CryptographicOperations.ZeroMemory(exact); }
     }
 
     internal async Task<IReadOnlyList<byte[]>> ReadGroupMemberSelectorsAsync(ulong seconds, IDeepMlDsa65Verifier verifier, ReadOnlyMemory<byte> groupId, CancellationToken ct)
@@ -105,13 +116,22 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         {
             using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, ct).ConfigureAwait(false);
             var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
-            foreach (var item in result)
+            foreach (var chunk in result.Chunk(Did2MessagingSqlJournal.MaximumOperationReadBatch))
             {
-                using var native = opened.Sql.ReadVerifiedOperation(floor, item.Operation);
-                if (native is null) continue;
-                if (native.Direction != 1 || !SHA256.HashData(item.Event).AsSpan().SequenceEqual(native.EventHash))
-                    throw new CryptographicException("Group batch differs from actual native send custody.");
-                item.NativeCommitted = true;
+                ct.ThrowIfCancellationRequested();
+                var nativeRows = opened.Sql.ReadVerifiedOperations(floor, chunk.Select(item => (ReadOnlyMemory<byte>)item.Operation).ToArray());
+                try
+                {
+                    for (var index = 0; index < chunk.Length; index++)
+                    {
+                        var item = chunk[index]; var native = nativeRows[index];
+                        if (native is null) continue;
+                        if (native.Direction != 1 || !SHA256.HashData(item.Event).AsSpan().SequenceEqual(native.EventHash))
+                            throw new CryptographicException("Group batch differs from actual native send custody.");
+                        item.NativeCommitted = true;
+                    }
+                }
+                finally { foreach (var native in nativeRows) native?.Dispose(); }
             }
             if (ordinaryRoot is not null)
             {

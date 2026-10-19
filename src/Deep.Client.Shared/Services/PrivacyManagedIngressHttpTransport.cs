@@ -108,7 +108,7 @@ internal sealed class PrivacyManagedIngressHttpTransport :
                 if (context.DnsEndPoint.Port != port ||
                     !IPAddress.TryParse(context.DnsEndPoint.Host, out var requested) || !requested.Equals(address))
                     throw new InvalidDataException("The ONION entry transport attempted a different endpoint.");
-                var socket = new Socket(address.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
+                var socket = new Socket(address.AddressFamily, SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
                 try
                 {
                     await socket.ConnectAsync(new IPEndPoint(address, port), ct).ConfigureAwait(false);

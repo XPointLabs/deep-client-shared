@@ -28,6 +28,13 @@ public sealed class Did2MessagingSqlJournalTests
             using (var connection = SqliteDeepIdV2AccountGeneration.OpenMessagingConnectionForTests(path, key, true))
             {
                 var sql = new Did2MessagingSqlJournal(connection, scope, Did2MessagingHistoryCheckpoint.RegisteredEmpty(scope)); sql.CreateRegisteredEmpty(floor);
+                Assert.Throws<ArgumentException>(() => sql.ReadVerifiedOperations(floor, []));
+                Assert.Throws<ArgumentException>(() => sql.ReadVerifiedOperations(floor,
+                    Enumerable.Range(0, 33).Select(_ => (ReadOnlyMemory<byte>)new byte[32]).ToArray()));
+                Assert.Throws<ArgumentException>(() => sql.ReadVerifiedOperations(floor, [new byte[31]]));
+                Assert.Throws<ArgumentException>(() => sql.ReadVerifiedOperations(floor, [new byte[32]]));
+                var duplicate = SHA256.HashData("duplicate native batch selector"u8);
+                Assert.Throws<ArgumentException>(() => sql.ReadVerifiedOperations(floor, [duplicate, duplicate]));
                 Assert.Equal(floor.Exact.ToArray(), sql.VerifyTip().Exact.ToArray());
                 Assert.Throws<InvalidDataException>(() => sql.ReadVerifiedLatest(floor));
                 Assert.Throws<InvalidDataException>(() => sql.CreateVerifiedTransitionContext(floor, new byte[32].Select(_ => (byte)1).ToArray(), []));

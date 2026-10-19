@@ -73,7 +73,7 @@ public sealed class JournaledDeepSecureStorage : IDeepSecureStorage, IDisposable
             ThrowIfDisposed();
             using var processLease = await AcquireProcessLeaseAsync(cancellationToken)
                 .ConfigureAwait(false);
-            values = Load();
+            values = Load(new HashSet<string>(StringComparer.Ordinal) { slot });
             return values.TryGetValue(slot, out var value)
                 ? new OwnedDeepSecret(value)
                 : null;
@@ -96,7 +96,7 @@ public sealed class JournaledDeepSecureStorage : IDeepSecureStorage, IDisposable
             ThrowIfDisposed();
             using var processLease = await AcquireProcessLeaseAsync(cancellationToken).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
-            values = Load();
+            values = Load(new HashSet<string>(captured, StringComparer.Ordinal));
             cancellationToken.ThrowIfCancellationRequested();
             return OwnedDeepSecretBatch.CopyFrom(captured, values);
         }
@@ -338,7 +338,7 @@ public sealed class JournaledDeepSecureStorage : IDeepSecureStorage, IDisposable
         }
     }
 
-    private Dictionary<string, byte[]> Load()
+    private Dictionary<string, byte[]> Load(IReadOnlySet<string>? selectedSlots = null)
     {
         RecoverFileSet();
         if (!File.Exists(statePath))
@@ -358,7 +358,7 @@ public sealed class JournaledDeepSecureStorage : IDeepSecureStorage, IDisposable
                 throw new InvalidDataException("Protected secure-storage aggregate has an invalid size.");
             }
             plaintext = protector.Unprotect(protectedBytes);
-            return Decode(plaintext);
+            return Decode(plaintext, selectedSlots);
         }
         catch (CryptographicException)
         {
@@ -522,7 +522,7 @@ public sealed class JournaledDeepSecureStorage : IDeepSecureStorage, IDisposable
         }
     }
 
-    private static Dictionary<string, byte[]> Decode(ReadOnlySpan<byte> plaintext)
+    private static Dictionary<string, byte[]> Decode(ReadOnlySpan<byte> plaintext, IReadOnlySet<string>? selectedSlots)
     {
         if (plaintext.Length < HeaderSize || plaintext.Length > MaximumPlaintextBytes
             || !plaintext[..4].SequenceEqual(Magic)
@@ -568,7 +568,13 @@ public sealed class JournaledDeepSecureStorage : IDeepSecureStorage, IDisposable
                     throw new InvalidDataException("Secure-storage aggregate is not strictly ordered.");
                 }
                 previous = slot;
-                if (!values.TryAdd(slot, plaintext.Slice(offset, valueLength).ToArray()))
+                // Still authenticate and validate EVERY slot, bound, ordering
+                // and trailing byte. Read-only selection merely avoids copying
+                // unrelated secrets into separately allocated value buffers.
+                // Mutations pass null and retain the full inventory. No bytes
+                // or verification decisions survive this actual file read.
+                if ((selectedSlots is null || selectedSlots.Contains(slot)) &&
+                    !values.TryAdd(slot, plaintext.Slice(offset, valueLength).ToArray()))
                 {
                     throw new InvalidDataException("Secure-storage aggregate contains duplicate slots.");
                 }
@@ -593,7 +599,9 @@ public sealed class JournaledDeepSecureStorage : IDeepSecureStorage, IDisposable
         ArgumentException.ThrowIfNullOrWhiteSpace(slot);
         var byteCount = StrictUtf8.GetByteCount(slot);
         if (byteCount == 0 || byteCount > MaximumSlotBytes
-            || slot.Any(static character => char.IsControl(character) || char.IsSurrogate(character)))
+            || slot.AsSpan().IndexOfAnyInRange('\u0000', '\u001f') >= 0
+            || slot.AsSpan().IndexOfAnyInRange('\u007f', '\u009f') >= 0
+            || slot.AsSpan().IndexOfAnyInRange('\ud800', '\udfff') >= 0)
         {
             throw new ArgumentException("Secure-storage slot name is invalid.", nameof(slot));
         }

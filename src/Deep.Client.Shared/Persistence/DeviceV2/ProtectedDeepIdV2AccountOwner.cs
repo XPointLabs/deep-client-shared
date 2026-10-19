@@ -36,6 +36,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     private readonly string sqlStatePath;
     private readonly byte[] networkId;
     private readonly ushort deploymentProfileId;
+    private readonly AccountRegistrationGrammar registrationGrammar = new();
 
     internal ProtectedDeepIdV2AccountOwner(IDeepSecureStorage storage,
         DeepIdV2AccountFileLease lease, string sqlStatePath,
@@ -373,7 +374,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 "The DID2 issuer returned a different candidate account ID.");
         await SqliteDeepIdV2AccountGeneration.EnsureAsync(sqlStatePath,
             storage, networkId, created.AccountId, normalized, created.Verified,
-            allowCreate: true, cancellationToken).ConfigureAwait(false);
+            allowCreate: true, cancellationToken, registrationGrammar).ConfigureAwait(false);
         return await Index().PublishVerifiedAsync(normalized,
             created.AccountId, trustedUnixSeconds, mlDsa65,
             cancellationToken).ConfigureAwait(false);
@@ -460,7 +461,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             {
                 await SqliteDeepIdV2AccountGeneration.EnsureAsync(sqlStatePath,
                     storage, networkId, current.AccountId, current.DisplayName,
-                    current.Verified, allowCreate: false, cancellationToken)
+                    current.Verified, allowCreate: false, cancellationToken, registrationGrammar)
                     .ConfigureAwait(false);
                 await SqliteDeepIdV2AccountGeneration.ReconcilePendingReceiverUnderLeaseAsync(storage, sqlStatePath,
                     current, cancellationToken).ConfigureAwait(false);
@@ -512,7 +513,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             cancellationToken).ConfigureAwait(false);
         await SqliteDeepIdV2AccountGeneration.EnsureAsync(sqlStatePath,
             storage, networkId, candidate, name, completed,
-            allowCreate: true, cancellationToken).ConfigureAwait(false);
+            allowCreate: true, cancellationToken, registrationGrammar).ConfigureAwait(false);
         return await Index().PublishVerifiedAsync(name, candidate,
             trustedUnixSeconds, mlDsa65, cancellationToken)
             .ConfigureAwait(false);

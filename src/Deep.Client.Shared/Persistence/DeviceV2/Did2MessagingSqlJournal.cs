@@ -69,10 +69,13 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
     internal Did2MessagingFloor VerifyTip() => VerifyTipInTransaction(null);
 
     private Did2MessagingFloor VerifyTipInTransaction(SqliteTransaction? tx)
+        => VerifyTipInTransaction(tx, out _);
+
+    private Did2MessagingFloor VerifyTipInTransaction(SqliteTransaction? tx, out List<byte[]> headers)
     {
         RequireCipherPolicy(tx); ValidateSchema(tx);
         VerifyHistoryPrefix(tx);
-        var headers = ReadJournal(out var tip, tx);
+        headers = ReadJournal(out var tip, tx);
         VerifyRows(headers, tip, tx);
         return tip;
     }
@@ -164,7 +167,12 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
         if (protectedStable.Phase != 1 || protectedStable.Ordinal == 0 || protectedStable.Status == 2)
             throw new InvalidDataException("DID2 messaging floor has no releasable current ratchet.");
         RequireSame(protectedStable, VerifyTip());
-        using var command = Command("SELECT exact_state FROM ratchet WHERE singleton=1;");
+        return ReadLatestStateInSnapshot(null);
+    }
+
+    private OwnedDeepSecret ReadLatestStateInSnapshot(SqliteTransaction? tx)
+    {
+        using var command = Command("SELECT exact_state FROM ratchet WHERE singleton=1;", tx);
         var bytes = (byte[])(command.ExecuteScalar() ?? throw new InvalidDataException("DID2 live ratchet is absent."));
         try { return new(bytes); } finally { CryptographicOperations.ZeroMemory(bytes); }
     }
@@ -248,8 +256,33 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
     // caller replay flag can select Protocol's replay path.
     internal ExactDpe2DurableTransitionContext CreateVerifiedTransitionContext(
         Did2MessagingFloor protectedStable, ReadOnlySpan<byte> operation, ReadOnlySpan<byte> receivedEnvelope)
+        => CreateVerifiedTransitionContextCore(protectedStable, operation, receivedEnvelope, false, out _);
+
+    internal OwnedDeepSecret ReadVerifiedTransitionState(Did2MessagingFloor protectedStable,
+        ReadOnlySpan<byte> operation, ReadOnlySpan<byte> receivedEnvelope, out ExactDpe2DurableTransitionContext context)
     {
-        using var retained = ReadVerifiedOperation(protectedStable, operation);
+        context = CreateVerifiedTransitionContextCore(protectedStable, operation, receivedEnvelope, true, out var state);
+        return state!;
+    }
+
+    private ExactDpe2DurableTransitionContext CreateVerifiedTransitionContextCore(
+        Did2MessagingFloor protectedStable, ReadOnlySpan<byte> operation, ReadOnlySpan<byte> receivedEnvelope,
+        bool includeState, out OwnedDeepSecret? state)
+    {
+        state = null;
+        if (operation.Length != 32 || Did2MessagingSessionScope.Zero(operation)) throw new ArgumentException("An exact nonzero operation is required.");
+        _ = Did2MessagingFloor.Decode(protectedStable.Exact.Span, scope);
+        if (protectedStable.Phase != 1 || protectedStable.Status != 1)
+            throw new InvalidDataException("Transition preparation requires an active stable messaging floor.");
+        // One complete verification and selector/digest read in the SAME SQL
+        // snapshot. No await, callback, mutation or cached verification result
+        // can intervene. Later commit/read-back still authenticates actual SQL.
+        using var tx = connection.BeginTransaction(deferred: true);
+        RequireSame(protectedStable, VerifyTipInTransaction(tx, out var headers));
+        using var command = Command("SELECT direction,length(envelope),envelope,length(plaintext),plaintext,metadata,ordinal FROM events WHERE operation=$op;", tx);
+        command.Parameters.AddWithValue("$op", operation.ToArray());
+        using var row = command.ExecuteReader();
+        using var retained = ReadSelectedOrdinaryEvent(protectedStable, row);
         var replay = ExactDpe2ReceiveReplayDisposition.Fresh;
         if (retained is not null)
         {
@@ -258,16 +291,24 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
                 throw new CryptographicException("DID2 retained operation does not authorize this exact receive replay.");
             replay = ExactDpe2ReceiveReplayDisposition.ExactReplay;
         }
-        return CreateVerifiedContext(protectedStable, replay);
+        var context = CreateVerifiedContextFromSnapshot(protectedStable, replay, headers);
+        if (includeState) state = ReadLatestStateInSnapshot(tx);
+        return context;
     }
 
     private ExactDpe2DurableTransitionContext CreateVerifiedContext(Did2MessagingFloor protectedStable,
         ExactDpe2ReceiveReplayDisposition replay)
     {
-        var headers = ReadJournal(out var tip);
+        using var tx = connection.BeginTransaction(deferred: true);
+        RequireSame(protectedStable, VerifyTipInTransaction(tx, out var headers));
+        return CreateVerifiedContextFromSnapshot(protectedStable, replay, headers);
+    }
+
+    private ExactDpe2DurableTransitionContext CreateVerifiedContextFromSnapshot(Did2MessagingFloor protectedStable,
+        ExactDpe2ReceiveReplayDisposition replay, List<byte[]> headers)
+    {
         if (replay == ExactDpe2ReceiveReplayDisposition.Fresh && headers.Count >= MaximumEntries - 1)
             throw new InvalidOperationException("DID2 ordinary messaging requires verified journal checkpointing.");
-        RequireSame(protectedStable, tip); VerifyRows(headers, tip);
         using var digest = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         digest.AppendData("Deep/STORE-V2/messaging-replay-retention"u8); digest.AppendData([0]);
         Span<byte> number = stackalloc byte[8]; BinaryPrimitives.WriteUInt64BigEndian(number, 1);

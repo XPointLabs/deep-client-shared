@@ -251,6 +251,7 @@ public sealed partial class SecureStorageCompareExchangeTests
         internal Action? AfterProtect;
         internal Action? AfterUnprotect;
         internal int ProtectCalls, UnprotectCalls;
+        internal byte[]? LastUnprotected;
         public byte[] Protect(ReadOnlySpan<byte> plaintext)
         {
             ProtectCalls++;
@@ -265,7 +266,7 @@ public sealed partial class SecureStorageCompareExchangeTests
         {
             UnprotectCalls++;
             var result = new byte[bytes.Length - 28];
-            try { using var aes = new AesGcm(key, 16); aes.Decrypt(bytes[..12], bytes[28..], bytes.Slice(12, 16), result); AfterUnprotect?.Invoke(); return result; }
+            try { using var aes = new AesGcm(key, 16); aes.Decrypt(bytes[..12], bytes[28..], bytes.Slice(12, 16), result); LastUnprotected = result; AfterUnprotect?.Invoke(); return result; }
             catch { CryptographicOperations.ZeroMemory(result); throw; }
         }
         public void Dispose() => CryptographicOperations.ZeroMemory(key);

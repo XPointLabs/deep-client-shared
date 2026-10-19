@@ -5,6 +5,7 @@ using Deep.Client.Shared.Persistence;
 using Deep.Client.Shared.Persistence.DeviceV2;
 using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.MessagingWire;
+using Deep.Protocol.MessagingCrypto;
 using Microsoft.Data.Sqlite;
 
 namespace Deep.Client.Shared.Production.Tests;
@@ -73,6 +74,20 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 Assert.NotNull(selected);
                 using var plain = selected!.OwnAuthenticatedDmc2();
                 Assert.True(plain.Use(bytes => bytes.SequenceEqual(route.ExactDmc2.Span)));
+                Assert.Equal(ExactDpe2ReceiveReplayDisposition.ExactReplay,
+                    sql.CreateVerifiedTransitionContext(floor, routeOperation, selected.ExactEnvelope).ReceiveReplayDisposition);
+                var different = selected.ExactEnvelope.ToArray(); different[^1] ^= 1;
+                Assert.Throws<CryptographicException>(() => sql.CreateVerifiedTransitionContext(floor, routeOperation, different));
+                Assert.Throws<CryptographicException>(() => sql.CreateVerifiedTransitionContext(floor, routeOperation, []));
+            }
+            var freshOperation = SHA256.HashData("snapshot-only fresh transition"u8);
+            Assert.Equal(ExactDpe2ReceiveReplayDisposition.Fresh,
+                sql.CreateVerifiedTransitionContext(floor, freshOperation, []).ReceiveReplayDisposition);
+            using (var prepared = sql.ReadVerifiedTransitionState(floor, freshOperation, [], out var context))
+            using (var separate = sql.ReadVerifiedLatest(floor))
+            {
+                Assert.Equal(ExactDpe2ReceiveReplayDisposition.Fresh, context.ReceiveReplayDisposition);
+                Assert.Equal(prepared.Use(bytes => SHA256.HashData(bytes)), separate.Use(bytes => SHA256.HashData(bytes)));
             }
             using (var controls = sql.ReadVerifiedIncomingRouteControls(floor, default).GetEnumerator())
             {
@@ -143,6 +158,10 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             // hostile state, so the target reader is actually reached and its
             // refusal is proved not to repair, delete or rewrite any SQL cell.
             var before = ReadRouteReadRawSqlProjection(connection);
+            // A previous successful snapshot must not authorize a later call
+            // after an unrelated row, representation or retained prefix changes.
+            Assert.NotNull(Record.Exception(() => sql.CreateVerifiedTransitionContext(floor, freshOperation, [])));
+            Assert.NotNull(Record.Exception(() => { using var _ = sql.ReadVerifiedTransitionState(floor, freshOperation, [], out var context); }));
             var rejected = Record.Exception(() =>
             {
                 using var controls = sql.ReadVerifiedIncomingRouteControls(floor, default).GetEnumerator();

@@ -171,8 +171,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     senderEvent is not null && ProtectedDid2GroupJournal.IsKind(senderEvent.ContentKind)))
                     await RequireNewMailboxWorkCapacityUnderLeaseAsync(current, held, opened, scope, op,
                         own, peer, source, verifier, ct).ConfigureAwait(false);
-                var context = opened.Sql.CreateVerifiedTransitionContext(floor, op, send ? [] : exact);
-                using var state = opened.Sql.ReadVerifiedLatest(floor);
+                using var state = opened.Sql.ReadVerifiedTransitionState(floor, op, send ? [] : exact, out var context);
                 var authority = new AccountDpe2Authority(this, current, opened, held, floor, op, eventHash, send ? [] : exact,
                     context.ReceiveReplayDisposition, senderEvent, own, peer, source);
                 if (send)
