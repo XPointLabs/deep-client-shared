@@ -8,6 +8,22 @@ namespace Deep.Client.Shared.Production.Tests;
 
 public sealed class HttpServiceSystemProxyTests
 {
+    [Fact]
+    public void SerialPublicSessionPoolsConnectionsWithoutRelaxingTrustOrProxyPolicy()
+    {
+        using var handler = HttpServiceTransportFactory.CreateHttpHandler(
+            DeepIdV2ClientNetworkSession.PublicHttp, null);
+        Assert.Equal(TimeSpan.FromMinutes(2), handler.PooledConnectionLifetime);
+        Assert.Equal(TimeSpan.FromMinutes(1), handler.PooledConnectionIdleTimeout);
+        Assert.True(handler.UseProxy);
+        Assert.Null(handler.Proxy);
+        Assert.Null(handler.SslOptions.RemoteCertificateValidationCallback);
+        Assert.Equal(X509RevocationMode.Online, handler.SslOptions.CertificateRevocationCheckMode);
+        Assert.False(handler.AllowAutoRedirect);
+        Assert.False(handler.UseCookies);
+        Assert.Equal(DecompressionMethods.None, handler.AutomaticDecompression);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

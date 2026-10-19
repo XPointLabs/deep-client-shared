@@ -31,10 +31,12 @@ public sealed class DeepIdV2ClientNetworkSession : IDisposable
     {
         get { ObjectDisposedException.ThrowIf(disposed, this); return workingGroups.Source; }
     }
-    // Same public-HTTP connection isolation as the physical composition. Not
-    // passed to the independently selected ONION connector or a retry policy.
-    private static readonly HttpServiceClientOptions PublicHttp = new(
-        PooledConnectionLifetime: TimeSpan.FromTicks(1), UseSystemProxy: true);
+    // Pool only this session's public Registry connections. Every response still
+    // passes its nonce/signature/floor checks; a socket is never authority. The
+    // finite lifetime also bounds DNS/proxy relocation. This is not passed to
+    // the independently selected ONION connector or an automatic retry policy.
+    internal static readonly HttpServiceClientOptions PublicHttp = new(
+        PooledConnectionLifetime: TimeSpan.FromMinutes(2), UseSystemProxy: true);
 
     private DeepIdV2ClientNetworkSession(DeepIdV2AccountService accounts,
         HttpServiceTransportFactory factory, string origin, VerifiedXPointNetworkAuthority authority,

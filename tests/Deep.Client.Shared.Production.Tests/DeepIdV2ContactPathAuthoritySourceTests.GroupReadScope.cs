@@ -5,6 +5,28 @@ namespace Deep.Client.Shared.Production.Tests;
 public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 {
     [Fact]
+    public async Task Did2MailboxAck_PhaseMemoAcquiresIndependentlyAndNeverRenewsReceive()
+    {
+        await using var f = await Fixture.CreateAsync();
+        using var receive = f.Source().OpenWorkingGroupScope();
+        var original = await receive.Source.VerifyForOwnPreKeyAuthoringAsync(f.Accounts, default);
+        var before = f.ProofRequests;
+        using var ack = receive.Source.OpenIndependentCommandReadScope();
+        var fresh = await ack.Source.VerifyForOwnPreKeyAuthoringAsync(f.Accounts, default);
+        Assert.NotSame(original, fresh);
+        Assert.Equal(before + 1, f.ProofRequests);
+        Assert.Same(fresh, await ack.Source.VerifyForOwnPreKeyAuthoringAsync(f.Accounts, default));
+        Assert.Equal(before + 1, f.ProofRequests);
+        f.Sample = fresh.Proof.MonotonicSample - 1;
+        await Assert.ThrowsAsync<CryptographicException>(async () =>
+            await ack.Source.VerifyForOwnPreKeyAuthoringAsync(f.Accounts, default));
+        Assert.Equal(before + 1, f.ProofRequests);
+        ack.Dispose();
+        await Assert.ThrowsAsync<ObjectDisposedException>(async () =>
+            await ack.Source.VerifyForOwnPreKeyAuthoringAsync(f.Accounts, default));
+    }
+
+    [Fact]
     public async Task Did2MailboxReceive_ReadScopeDoesNotReuseItsProofForIndependentParentAckCapture()
     {
         await using var f = await Fixture.CreateAsync(); var parent = f.Source();

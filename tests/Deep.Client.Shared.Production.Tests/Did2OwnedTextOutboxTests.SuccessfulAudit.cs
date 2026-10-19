@@ -1,10 +1,57 @@
 using System.Buffers.Binary;
+using System.Security.Cryptography;
 using Deep.Client.Shared.Persistence.DeviceV2;
 
 namespace Deep.Client.Shared.Production.Tests;
 
 public sealed partial class Did2OwnedTextOutboxTests
 {
+    [Fact]
+    public void GroupSchedulingHintSkipsOnlyPreviouslyCompletedWorkWithoutMutatingOrReturningReceipts()
+    {
+        var scope = Scope(); var op = B(32, 0xd1); using var state = Pending(scope, op, 3);
+        var item = new ProtectedDid2GroupJournal.Outgoing
+        { Scope = scope.Exact.ToArray(), Operation = op, Event = state.Pending!.PendingDmc2.ToArray(), Adopted = true };
+        Assert.False(ProtectedDeepIdV2AccountOwner.HasCompletedGroupDeliveryHint(item, state, scope));
+        Stabilize(state, op);
+        Assert.False(ProtectedDeepIdV2AccountOwner.HasCompletedGroupDeliveryHint(item, state, scope));
+        state.RetainStore(Convert.ToHexString(op), 1500);
+        var before = ProtectedDid2DirectTextJournal.Encode(state, scope.Network, scope.LocalAccount, scope.Instance);
+        Assert.True(ProtectedDeepIdV2AccountOwner.HasCompletedGroupDeliveryHint(item, state, scope));
+        Assert.Equal(before, ProtectedDid2DirectTextJournal.Encode(state, scope.Network, scope.LocalAccount, scope.Instance));
+        item.Adopted = false;
+        Assert.False(ProtectedDeepIdV2AccountOwner.HasCompletedGroupDeliveryHint(item, state, scope));
+        item.Adopted = true;
+        state.RetireSuccessfulCommands([state.Entries[Convert.ToHexString(op)]]);
+        Assert.True(ProtectedDeepIdV2AccountOwner.HasCompletedGroupDeliveryHint(item, state, scope));
+        state.ExpireAudit(Convert.ToHexString(op));
+        Assert.False(ProtectedDeepIdV2AccountOwner.HasCompletedGroupDeliveryHint(item, state, scope));
+    }
+
+    [Theory]
+    [InlineData(1)] [InlineData(2)]
+    public void GroupSchedulingNeverTreatsStoppedAuditAsSuccessfulDelivery(int reason)
+    {
+        var scope = Scope(); var op = B(32, 0xd2); using var state = new ProtectedDid2DirectTextJournal.State();
+        var raw = new byte[48]; op.CopyTo(raw, 0); BinaryPrimitives.WriteUInt64BigEndian(raw.AsSpan(32), 1500); raw[40] = (byte)reason;
+        state.TerminalAudits.Add(Convert.ToHexString(op), new(raw));
+        var item = new ProtectedDid2GroupJournal.Outgoing { Scope = scope.Exact.ToArray(), Operation = op, Adopted = true };
+        Assert.False(ProtectedDeepIdV2AccountOwner.HasCompletedGroupDeliveryHint(item, state, scope));
+    }
+
+    [Theory]
+    [InlineData(false)] [InlineData(true)]
+    public void GroupSchedulingRejectsChangedPayloadAndForeignAuthoredScope(bool foreign)
+    {
+        var scope = Scope(); var op = B(32, 0xd3); using var state = Pending(scope, op, 3);
+        var item = new ProtectedDid2GroupJournal.Outgoing
+        { Scope = scope.Exact.ToArray(), Operation = op, Event = state.Pending!.PendingDmc2.ToArray(), Adopted = true };
+        Stabilize(state, op); state.RetainStore(Convert.ToHexString(op), 1500);
+        if (foreign) { scope = Scope(false); item.Scope = scope.Exact.ToArray(); }
+        else item.Event[^1] ^= 1;
+        Assert.Throws<CryptographicException>(() => ProtectedDeepIdV2AccountOwner.HasCompletedGroupDeliveryHint(item, state, scope));
+    }
+
     [Theory]
     [InlineData(0)] [InlineData(4)] [InlineData(255)]
     public void TerminalAuditRejectsUnknownReasonsBeforeRetainingMetadata(int reason)

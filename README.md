@@ -15,6 +15,24 @@ live requests remain exact; authenticated retirement/succession stays owner-only
 diagnostics, never receipt authority. See
 [the retry owner](../docs/architecture/TRANSPORT-NEUTRAL-MESSAGING.md#82-retry-and-failover).
 
+`SendGroupTextAsync` drains unfinished fanout rather than re-auditing every old
+Store. Actual protected authored completion is only a scheduling hint, never a
+receipt or authorization shortcut; unknown work keeps the full owned path.
+`FlushGroupAsync` still performs complete historical original-batch verification.
+No retained messages, receipts or audits are removed by this optimization. See
+the [delivery owner](../docs/architecture/TRANSPORT-NEUTRAL-MESSAGING.md#81-state-machine).
+
+ACK uses a newly acquired phase-local public context, independent of receive or
+working group authority. Only repeated lookups inside that same ACK phase share
+its proofs; all ordinary actual custody/time/effect fences remain mandatory.
+
+The serial public composition pools Registry HTTPS connections for up to two
+minutes (one minute idle), separately for each session/client. This changes
+socket reuse, not proof reuse: every response retains nonce/signature/floor
+verification, platform TLS with online revocation, explicit system proxy,
+no redirects/cookies/decompression, and no proxy-to-direct fallback. Selected
+ONION transport handlers and their pinning/isolation are unchanged.
+
 `DeepIdV2ClientNetworkSession` may live across serial CLI commands. Its ordinary
 `Source` retains independent acquisition; `EstablishedGroupSource` owns a bounded
 public-only working group scope. `RefreshGroupAuthorityAsync` forces pre-effect

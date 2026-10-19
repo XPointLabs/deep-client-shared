@@ -78,7 +78,10 @@ public sealed partial class DeepIdV2AccountService
             }
             await owner.GroupActionAsync(TrustedUnixSeconds(), verifier, action, selected, conversation.Scope, text, pair.Own, pair.Peer, source, ct, targets).ConfigureAwait(false);
             if (action is "invite" or "advance") await PublishGroupControlAsync(selected, source, ct).ConfigureAwait(false);
-            return await FlushGroupAsync(selected, conversation, source, ct).ConfigureAwait(false);
+            // Sending a new command is not a request to re-audit every old
+            // Store. Drain actual unfinished work; explicit flush below keeps
+            // the full original-batch historical verification contract.
+            return await FlushGroupCoreAsync(selected, conversation, source, ct, pendingOnly: action == "send").ConfigureAwait(false);
         }
         finally { CryptographicOperations.ZeroMemory(selected); }
     }
@@ -114,8 +117,12 @@ public sealed partial class DeepIdV2AccountService
         throw new IOException("Control catch-up exceeded its bounded pagination budget.");
     }
 
-    public async Task<int> FlushGroupAsync(ReadOnlyMemory<byte> group, DeepIdV2Conversation conversation,
-        DeepIdV2ContactPathAuthoritySource source, CancellationToken ct = default)
+    public Task<int> FlushGroupAsync(ReadOnlyMemory<byte> group, DeepIdV2Conversation conversation,
+        DeepIdV2ContactPathAuthoritySource source, CancellationToken ct = default) =>
+        FlushGroupCoreAsync(group, conversation, source, ct, pendingOnly: false);
+
+    private async Task<int> FlushGroupCoreAsync(ReadOnlyMemory<byte> group, DeepIdV2Conversation conversation,
+        DeepIdV2ContactPathAuthoritySource source, CancellationToken ct, bool pendingOnly)
     {
         using var reads = source.OpenCommandReadScope(); source = reads.Source;
         ArgumentNullException.ThrowIfNull(conversation); source.RequireAccountOwner(this); ProtectedDph2PreClaimJournal.RequireIntent(group.Span);
@@ -136,7 +143,7 @@ public sealed partial class DeepIdV2AccountService
             var tasks = conversations.Select(async target =>
             {
                 await concurrency.WaitAsync(ct).ConfigureAwait(false);
-                try { return await FlushGroupTargetAsync(selected, target, source, accountOperations, ct).ConfigureAwait(false); }
+                try { return await FlushGroupTargetAsync(selected, target, source, accountOperations, pendingOnly, ct).ConfigureAwait(false); }
                 finally { concurrency.Release(); }
             }).ToArray();
             return (await Task.WhenAll(tasks).ConfigureAwait(false)).Sum();
@@ -145,7 +152,7 @@ public sealed partial class DeepIdV2AccountService
     }
 
     private async Task<int> FlushGroupTargetAsync(ReadOnlyMemory<byte> selected, DeepIdV2Conversation conversation,
-        DeepIdV2ContactPathAuthoritySource source, SemaphoreSlim accountOperations, CancellationToken ct)
+        DeepIdV2ContactPathAuthoritySource source, SemaphoreSlim accountOperations, bool pendingOnly, CancellationToken ct)
     {
         IReadOnlyList<ProtectedDid2GroupJournal.Outgoing> batch = [];
         IReadOnlySet<string> retained = new HashSet<string>(StringComparer.Ordinal);
@@ -155,7 +162,7 @@ public sealed partial class DeepIdV2AccountService
             await accountOperations.WaitAsync(ct).ConfigureAwait(false);
             try
             {
-                batch = await owner.ReadGroupBatchAsync(TrustedUnixSeconds(), verifier, selected, conversation.Scope, ct).ConfigureAwait(false);
+                batch = await owner.ReadGroupBatchAsync(TrustedUnixSeconds(), verifier, selected, conversation.Scope, ct, pendingOnly).ConfigureAwait(false);
                 if (batch.Count == 0) return 0;
                 await RequireAttachmentConsentAsync(conversation, source, ct).ConfigureAwait(false);
                 var committed = batch.Where(item => item.NativeCommitted).ToArray();

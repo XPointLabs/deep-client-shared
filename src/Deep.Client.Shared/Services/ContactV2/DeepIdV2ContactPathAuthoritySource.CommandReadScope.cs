@@ -20,6 +20,9 @@ public sealed partial class DeepIdV2ContactPathAuthoritySource
 
     internal CommandReadScope OpenCommandReadScope() => new(this);
     internal CommandReadScope OpenWorkingGroupScope() => new(this, workingSession: true);
+    // A new phase must acquire its own authority even when its caller already
+    // has a command/working memo. In particular ACK never borrows receive's proof.
+    internal CommandReadScope OpenIndependentCommandReadScope() => new(this, independent: true);
 
     internal async Task DiscardUncapturedAuthorityAsync(CancellationToken ct)
     {
@@ -60,9 +63,9 @@ public sealed partial class DeepIdV2ContactPathAuthoritySource
     {
         private readonly bool owns;
         internal DeepIdV2ContactPathAuthoritySource Source { get; }
-        internal CommandReadScope(DeepIdV2ContactPathAuthoritySource parent, bool workingSession = false)
+        internal CommandReadScope(DeepIdV2ContactPathAuthoritySource parent, bool workingSession = false, bool independent = false)
         {
-            parent.commandReads?.RequireActive(); owns = parent.commandReads is null;
+            parent.commandReads?.RequireActive(); owns = independent || parent.commandReads is null;
             Source = owns ? new(parent, workingSession) : parent;
         }
         public void Dispose() { if (owns) Source.commandReads!.Close(); }

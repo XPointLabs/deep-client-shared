@@ -102,15 +102,21 @@ public sealed partial class DeepIdV2AccountService
         // Receive/materialization can do cold native and SQL work for every
         // item. Fetch the ACK endpoint set only after the whole batch, so a
         // first item's proof is not needlessly aged by later receive commits.
+        // Fresh phase-local public memo, never receive's or a working group's.
+        // Semantic group verification inside ACK may borrow this same snapshot
+        // after rejoining actual floors/time, instead of fetching another proof
+        // and advancing the floor underneath the already captured endpoint set.
+        using var ackReads = source.OpenIndependentCommandReadScope();
+        var ackSource = ackReads.Source;
         // One independently verified own/network snapshot for the entire ACK
         // set. Minting another own after endpoint capture can advance the owned
         // network floor and invalidate those very pairs before the ACK fence.
-        own = await source.VerifyForOwnPreKeyAuthoringAsync(this, ct).ConfigureAwait(false);
+        own = await ackSource.VerifyForOwnPreKeyAuthoringAsync(this, ct).ConfigureAwait(false);
         var endpoints = new List<Did2MailboxSemanticEndpoints>(scopes.Count);
         foreach (var scope in scopes.Values)
-            endpoints.Add(new(scope, await source.VerifyForOwnMessagingAsync(this, scope, ct, own).ConfigureAwait(false)));
+            endpoints.Add(new(scope, await ackSource.VerifyForOwnMessagingAsync(this, scope, ct, own).ConfigureAwait(false)));
         var acknowledged = await owner.AcknowledgeOwnMailboxAsync(TrustedUnixSeconds(), verifier, descriptor,
-            endpoints, source, own, grants, transport, ct).ConfigureAwait(false);
+            endpoints, ackSource, own, grants, transport, ct).ConfigureAwait(false);
         return new(page.Items.Count, page.HasMore, acknowledged.DurableTombstones);
     }
 }

@@ -89,6 +89,16 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         try {
             Assert.Single(retainedBatch, item => ApplicationCoreCodec.DecodeDmc2(item.Event).ContentKind == Dmc2ContentKind.GroupControlRendezvous);
             Assert.All(retainedBatch, item => Assert.True(item.NativeCommitted));
+            var unfinished = await fixture.ReadGroupBatch(alice, group, pendingOnly: true);
+            try
+            {
+                // A real native commit is not a Store receipt: none of these
+                // test envelopes has been through the owned Store boundary.
+                Assert.Equal(retainedBatch.Select(item => Convert.ToHexString(item.Operation)),
+                    unfinished.Select(item => Convert.ToHexString(item.Operation)));
+                Assert.All(unfinished, item => Assert.True(item.NativeCommitted));
+            }
+            finally { Clear(unfinished); }
         } finally { Clear(retainedBatch); }
 
         async Task Transfer(Did2MessagingSessionScope sender, Did2MessagingSessionScope receiver)
@@ -289,10 +299,10 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             using var verifier = DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess();
             _ = await GroupOwner(scope).GroupActionAsync(1000, verifier, action, group, scope, text, pair.Own, pair.Peer, source, default, omitTargets ? Array.Empty<ProtectedDeepIdV2AccountOwner.GroupTarget>() : null);
         }
-        internal async Task<IReadOnlyList<ProtectedDid2GroupJournal.Outgoing>> ReadGroupBatch(Did2MessagingSessionScope scope, byte[] group)
+        internal async Task<IReadOnlyList<ProtectedDid2GroupJournal.Outgoing>> ReadGroupBatch(Did2MessagingSessionScope scope, byte[] group, bool pendingOnly = false)
         {
             using var verifier = DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess();
-            return await GroupOwner(scope).ReadGroupBatchAsync(1000, verifier, group, scope, default);
+            return await GroupOwner(scope).ReadGroupBatchAsync(1000, verifier, group, scope, default, pendingOnly);
         }
     }
 }
