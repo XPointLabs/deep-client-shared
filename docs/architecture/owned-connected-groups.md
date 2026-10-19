@@ -154,7 +154,9 @@ immediately before adapter bookkeeping. The real interceptor still performs
 both full callback fences; every retained/cached outcome crosses the owner's
 full final fence. Request bytes, native custody and deadlines are unchanged.
 
-The functional candidate still needs its recorded three-CLI qualification.
+The three-member functional cycle passed through the retained-state recovery
+recorded in the [CLI GSR checkpoint](../../../deep-cli/docs/testing/cli-gsr-groups-2026-10-18.md).
+That result is not a first-attempt latency qualification.
 Long-offline/400-day retention, descriptor rotation/handover, multi-device changes,
 large fanout, crash/fault matrix and full source/package/device/release acceptance
 remain separate gates; this implementation description is not their PASS.
@@ -165,3 +167,24 @@ The existing30-second budget is shared by both acquisitions. A supplied captured
 owner is never replaced; mismatch still rejects before business effects. Route
 verification remains exact. GSR publication reuses verified package/chunk work
 only within the actual held pre-dispatch phase, not across callbacks or loans.
+
+## Explicit group-command public read scope
+
+Group commands share a private child authority source with nested group work.
+It uses the parent's actual acquisition gate, protected directory/network owners,
+root and clock. Only existing immutable verified own/peer public capabilities are
+reused, never a cached currentness result, native row, signing key or plaintext.
+Each use still reads actual protected floors and monotonic time, verifies the
+exact network history and current mailbox policy, and keeps all existing
+pre/post-effect and native-owner fences. Peer lookup is keyed by the exact DID2
+and the reference-identical captured own capability; different endpoint views
+are not spliced. Group semantics/consent/signatures are independently checked.
+
+No new TTL or authority window is introduced. Natural own-proof expiry can start
+a fresh acquisition only at the existing uncaptured acquisition boundary; it
+cannot renew an old loan, replace an original request or turn a verification
+failure into success. Clock discontinuity, changed/forked custody, cancellation
+and unavailable fresh authority still reject. A closed scope releases its public
+references and cannot serve another command. Ordinary callers outside this
+explicit group scope retain independent acquisitions. Shared storage/wire formats,
+replica requirements, TLS and transport deadlines do not change.

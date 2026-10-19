@@ -130,9 +130,10 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 
     private sealed partial class Fixture
     {
-        internal async Task CheckGroupEndpointViewAcquisition(Did2MessagingSessionScope scope, bool capturedOwn)
+        internal async Task CheckGroupEndpointViewAcquisition(Did2MessagingSessionScope scope, bool capturedOwn, bool groupReadScope = false)
         {
-            var source = Source();
+            var parent = Source(); using var reads = groupReadScope ? parent.OpenGroupReadScope() : null;
+            var source = reads?.Source ?? parent;
             var captured = capturedOwn ? await source.VerifyForOwnPreKeyAuthoringAsync(Accounts, default) : null;
             await AdvanceNetworkAsync();
             var next = successor; successor = null;

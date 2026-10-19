@@ -69,6 +69,8 @@ public interface IDeepIdV2NetworkClosureArtifactSource
 /// the pinned root, and durably advances/rechecks network custody before
 /// releasing placement. It cannot resolve DID1 or accept ADP1 V1. Input
 /// providers, proof-client lifetime and durable stores remain caller-owned.
+/// A closed group-command scope can borrow already minted public capabilities;
+/// every use independently rechecks their actual floors, clocks and lifetimes.
 /// </summary>
 public sealed partial class DeepIdV2ContactPathAuthoritySource :
     IContactResolvePathAuthoritySource, IContactResolvePublicationPathAuthoritySource,
@@ -383,8 +385,9 @@ public sealed partial class DeepIdV2ContactPathAuthoritySource :
             for (var acquisition = 0; acquisition < 2; acquisition++)
             {
                 var own = verifiedOwn ?? await VerifyCurrentNetworkCoreAsync(token).ConfigureAwait(false);
-                var peer = await proofs.FetchByDid2Async(did, own.Authority, account.DeploymentProfileId,
-                    supportedReader: 2, token).ConfigureAwait(false);
+                var peer = groupReads?.ReadPeer(did.CanonicalBytes.Span, own) ??
+                    await proofs.FetchByDid2Async(did, own.Authority, account.DeploymentProfileId,
+                        supportedReader: 2, token).ConfigureAwait(false);
                 ProtectedDid2MessagingPeerBootstrap.RequireProof(did, peer);
                 var ownTime = Deep.Protocol.AccountDirectoryV1.AccountDirectoryDtt1Codec.Decode(own.Proof.ExactDtt1.Span);
                 var peerTime = Deep.Protocol.AccountDirectoryV1.AccountDirectoryDtt1Codec.Decode(peer.ExactDtt1.Span);
@@ -395,7 +398,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySource :
                     // A legitimate publisher may advance between the two independent
                     // acquisitions. Retry the entire uncaptured pair, never splice a
                     // new owner into an already captured multi-target authority set.
-                    if (verifiedOwn is null && acquisition == 0) continue;
+                    if (verifiedOwn is null && acquisition == 0)
+                    { groupReads?.ResetUncapturedPair(); continue; }
                     throw new CryptographicException("Refreshed messaging endpoints no longer bind owned network custody.");
                 }
                 await proofs.RequireStillFreshAsync(peer, own.Authority, token).ConfigureAwait(false);
@@ -408,7 +412,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySource :
                 var reading = await clock.ReadAsync(token).ConfigureAwait(false) ??
                     throw new CryptographicException("Refreshed messaging endpoints have no protected clock sample.");
                 OwnedInitialMessagingSeed.RequireFreshScope(scope, own.Proof, peer, reading);
-                token.ThrowIfCancellationRequested(); return new(own, peer);
+                token.ThrowIfCancellationRequested(); groupReads?.SetPeer(did.CanonicalBytes.Span, own, peer); return new(own, peer);
             }
             throw new CryptographicException("Refreshed messaging endpoints no longer bind owned network custody.");
         }
@@ -423,13 +427,14 @@ public sealed partial class DeepIdV2ContactPathAuthoritySource :
     {
         var did = Deep.Protocol.ApplicationCore.DeepIdV2Codec.DecodeDid2(exactDid.Span);
         using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct); budget.CancelAfter(TimeSpan.FromSeconds(30));
-        var peer = await proofs.FetchGroupMemberUnderLeaseAsync(did, own.Authority, accounts.DeploymentProfileId, held, budget.Token).ConfigureAwait(false);
+        var peer = groupReads?.ReadPeer(did.CanonicalBytes.Span, own) ??
+            await proofs.FetchGroupMemberUnderLeaseAsync(did, own.Authority, accounts.DeploymentProfileId, held, budget.Token).ConfigureAwait(false);
         ProtectedDid2MessagingPeerBootstrap.RequireProof(did, peer);
         _ = await RecheckEndpointPairUnderLeaseAsync(own, peer, held, budget.Token).ConfigureAwait(false);
         own.Network.EnsureCurrent();
         var result = await Deep.Protocol.GroupV1.DeepIdV2GroupDirectoryAuthority.VerifyAsync(peer, RendezvousTrustedTime, budget.Token).ConfigureAwait(false);
         if (!result.AccountId.Span.SequenceEqual(expectedAccount.Span)) throw new CryptographicException("Group directory query returned another account.");
-        held.RequireActive(); return result;
+        held.RequireActive(); groupReads?.SetPeer(did.CanonicalBytes.Span, own, peer); return result;
     }
 
     internal void RequireAccountOwner(DeepIdV2AccountService account)
@@ -524,6 +529,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySource :
     private async ValueTask<OwnPreKeyAuthoringAuthority> VerifyCurrentNetworkCoreAsync(
         CancellationToken cancellationToken)
     {
+        if (await ReadGroupOwnAsync(cancellationToken).ConfigureAwait(false) is { } captured) return captured;
         var retained = await networkHistory.ReadHistoryAsync(cancellationToken).ConfigureAwait(false);
         var before = retained?.Snapshot;
         if (before?.ForkLatched == true)
@@ -598,7 +604,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySource :
             verified.EnsureCurrent();
             mailboxAuthority = await VerifyMailboxAuthorityAsync(exact, verified, authority, fresh,
                 cancellationToken).ConfigureAwait(false);
-            return new(verified, authority, fresh, mailboxAuthority, exact);
+            var result = new OwnPreKeyAuthoringAuthority(verified, authority, fresh, mailboxAuthority, exact);
+            groupReads?.SetOwn(result); return result;
         }
         throw new InvalidOperationException("Bounded coherent network acquisition did not produce a verified context.");
     }
