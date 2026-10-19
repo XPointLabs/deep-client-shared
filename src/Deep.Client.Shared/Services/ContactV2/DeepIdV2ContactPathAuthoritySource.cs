@@ -69,8 +69,9 @@ public interface IDeepIdV2NetworkClosureArtifactSource
 /// the pinned root, and durably advances/rechecks network custody before
 /// releasing placement. It cannot resolve DID1 or accept ADP1 V1. Input
 /// providers, proof-client lifetime and durable stores remain caller-owned.
-/// A closed group-command scope can borrow already minted public capabilities;
-/// every use independently rechecks their actual floors, clocks and lifetimes.
+/// A closed group-command or serial working-group scope can borrow already
+/// minted public capabilities; every use independently rechecks actual floors,
+/// clocks and lifetimes. Working reuse additionally rejoins the local directory.
 /// </summary>
 public sealed partial class DeepIdV2ContactPathAuthoritySource :
     IContactResolvePathAuthoritySource, IContactResolvePublicationPathAuthoritySource,
@@ -529,6 +530,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySource :
     private async ValueTask<OwnPreKeyAuthoringAuthority> VerifyCurrentNetworkCoreAsync(
         CancellationToken cancellationToken)
     {
+        if (commandReads?.WorkingSession == true)
+            commandReads.ObserveClock(await clock.ReadAsync(cancellationToken).ConfigureAwait(false));
         if (await ReadCommandOwnAsync(cancellationToken).ConfigureAwait(false) is { } captured) return captured;
         var retained = await networkHistory.ReadHistoryAsync(cancellationToken).ConfigureAwait(false);
         var before = retained?.Snapshot;
@@ -605,6 +608,13 @@ public sealed partial class DeepIdV2ContactPathAuthoritySource :
             mailboxAuthority = await VerifyMailboxAuthorityAsync(exact, verified, authority, fresh,
                 cancellationToken).ConfigureAwait(false);
             var result = new OwnPreKeyAuthoringAuthority(verified, authority, fresh, mailboxAuthority, exact);
+            if (commandReads?.WorkingSession == true)
+            {
+                var reading = await clock.ReadAsync(cancellationToken).ConfigureAwait(false);
+                commandReads.ObserveClock(reading);
+                if (!fresh.IsCurrentAtMonotonic(reading.BootId.Span, reading.SampleSeconds))
+                    throw new CryptographicException("Working authority expired before memo publication.");
+            }
             commandReads?.SetOwn(result); return result;
         }
         throw new InvalidOperationException("Bounded coherent network acquisition did not produce a verified context.");

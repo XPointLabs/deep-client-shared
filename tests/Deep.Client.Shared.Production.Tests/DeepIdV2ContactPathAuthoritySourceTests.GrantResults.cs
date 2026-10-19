@@ -205,6 +205,13 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             }
             finally { Sample = sampleAtShort; CryptographicOperations.ZeroMemory(shortSignature); }
 
+            var beyondRoute = Result(request, grant with
+                { ExpiresAtUnixSeconds = route.Network.MaximumRecordExpiryUnixSeconds + 1 }, 0x31);
+            var routeExpiry = await Assert.ThrowsAsync<CryptographicException>(async () =>
+                await DeepIdV2MailboxGrantResultVerifier.VerifyRetainedSuccessAsync(route,
+                    request.ExactXmg2, beyondRoute.CanonicalBytes, operational.ExactPma2));
+            Assert.Equal("RouteExpiry", routeExpiry.Data["Deep.MailboxGrant.Check"]);
+
             foreach (var changed in new[]
             {
                 grant with { MembershipCommitment = Bytes(32, 0x92) },

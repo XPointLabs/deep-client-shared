@@ -1,5 +1,14 @@
 # Deep Client Shared
 
+`DeepIdV2ClientNetworkSession` may live across serial CLI commands. Its ordinary
+`Source` retains independent acquisition; `EstablishedGroupSource` owns a bounded
+public-only working group scope. `RefreshGroupAuthorityAsync` forces pre-effect
+refresh; `MaintainGroupAuthorityAsync` revalidates and refreshes near the original
+deadline. Hosts must serialize these with business work and dispose the session
+on shutdown. Actual account/device/floors/time are rejoined on reuse; no private
+loans or keys are retained by that scope. Semantics belong to the
+[authority owner](../docs/architecture/ACCOUNT-DIRECTORY-TRANSPARENCY-V1.md#working-public-authority-and-delivery).
+
 The current mailbox source contract follows
 [DR81](../docs/survival-program/decisions/DR-0081-did2-mailbox-selection-grant-clean-break.md):
 MCG3/MCP3/MAU3 and XMC2 only, with the signed PMS2 selection input checked by

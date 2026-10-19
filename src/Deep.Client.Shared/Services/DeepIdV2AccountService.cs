@@ -12,6 +12,7 @@ using Deep.Protocol.ContactV2;
 using Deep.Protocol.Identity;
 using Deep.Protocol.MessagingCrypto;
 using Deep.Protocol.MessagingWire;
+using Deep.Protocol.DeepExtension.PrivacyRouting;
 using Deep.Protocol.Registry;
 using Deep.Protocol.ContactV1;
 using Deep.Client.Shared.Services.ContactV1;
@@ -574,6 +575,18 @@ public sealed partial class DeepIdV2AccountService
             throw new CryptographicException("The protected DID2 account changed during the exchange.");
         await proofClient.RequireStillFreshAsync(fresh, authority, cancellationToken).ConfigureAwait(false);
         return fresh;
+    }
+
+    // A working public capability cannot outlive a local account/device change.
+    // Rejoin actual protected state; no private key or successful read is cached.
+    internal async Task RequireCurrentWorkingDirectoryAsync(VerifiedDeepIdV2DirectoryFreshness proof,
+        OnionMonotonicReading reading, CancellationToken ct)
+    {
+        using var verifier = OpenVerifier();
+        using var current = await owner.ReadCurrentAsync(TrustedUnixSeconds(), verifier, ct).ConfigureAwait(false) ??
+            throw new CryptographicException("Working authority has no current protected account.");
+        _ = RequireOwnCurrentDirectory(current, proof, reading.BootId.Span, reading.SampleSeconds);
+        ct.ThrowIfCancellationRequested();
     }
 
     public async Task<DeepIdV2AccountSnapshot> CreateAsync(

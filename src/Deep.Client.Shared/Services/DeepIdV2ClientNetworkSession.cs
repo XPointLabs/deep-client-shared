@@ -9,7 +9,7 @@ using Deep.Protocol.XPointNetworkV1;
 
 namespace Deep.Client.Shared.Services;
 
-/// <summary>Owns public bootstrap/proof clients for one command. It exposes no
+/// <summary>Owns public bootstrap/proof clients for a serial client session. It exposes no
 /// authority shortcut: each account operation independently verifies current
 /// proofs, protected floors, route, grants and custody through Source.</summary>
 public sealed class DeepIdV2ClientNetworkSession : IDisposable
@@ -21,8 +21,16 @@ public sealed class DeepIdV2ClientNetworkSession : IDisposable
     private readonly IDeepMlDsa65VerifierLease verifier;
     private readonly DeepIdV2DirectoryProofClient proofs;
     private readonly HttpDeepIdV2NetworkClosureArtifactSource artifacts;
+    private readonly DeepIdV2ContactPathAuthoritySource.CommandReadScope workingGroups;
     private bool disposed;
     public DeepIdV2ContactPathAuthoritySource Source { get; }
+    /// <summary>Public authority for serial established-group operations. Actual
+    /// account/device state, floors and lifetimes are rejoined on each borrow.
+    /// Never use it for independent Initial, Braid or fresh ACK capture.</summary>
+    public DeepIdV2ContactPathAuthoritySource EstablishedGroupSource
+    {
+        get { ObjectDisposedException.ThrowIf(disposed, this); return workingGroups.Source; }
+    }
     // Same public-HTTP connection isolation as the physical composition. Not
     // passed to the independently selected ONION connector or a retry policy.
     private static readonly HttpServiceClientOptions PublicHttp = new(
@@ -35,6 +43,7 @@ public sealed class DeepIdV2ClientNetworkSession : IDisposable
     {
         this.accounts = accounts; this.factory = factory; this.origin = origin; this.authority = authority;
         this.verifier = verifier; this.proofs = proofs; this.artifacts = artifacts; Source = source;
+        workingGroups = source.OpenWorkingGroupScope();
     }
 
     public static async Task<DeepIdV2ClientNetworkSession> OpenAsync(
@@ -88,10 +97,29 @@ public sealed class DeepIdV2ClientNetworkSession : IDisposable
         _ = await accounts.EnsureOwnPermanentContactPublishedAsync(Source, ct).ConfigureAwait(false);
     }
 
+    /// <summary>Refreshes public group authority separately from delivery, before
+    /// any new group effect. Failure cannot fall back to the discarded context.</summary>
+    /// <param name="ct">Cancellation for this independent refresh.</param>
+    public Task RefreshGroupAuthorityAsync(CancellationToken ct = default)
+    {
+        ObjectDisposedException.ThrowIf(disposed, this);
+        return workingGroups.Source.RefreshWorkingAuthorityAsync(ct);
+    }
+
+    /// <summary>Revalidates current public group authority and refreshes it only
+    /// when absent or within thirty monotonic seconds of its original deadline.
+    /// Hosts call this while idle, never concurrently with business operations.</summary>
+    /// <param name="ct">Cancellation for this independent maintenance opportunity.</param>
+    public Task MaintainGroupAuthorityAsync(CancellationToken ct = default)
+    {
+        ObjectDisposedException.ThrowIf(disposed, this);
+        return workingGroups.Source.RefreshWorkingAuthorityAsync(ct, onlyWhenDue: true);
+    }
+
     public void Dispose()
     {
         if (disposed) return;
-        disposed = true; proofs.Dispose(); artifacts.Dispose(); verifier.Dispose();
+        disposed = true; workingGroups.Dispose(); proofs.Dispose(); artifacts.Dispose(); verifier.Dispose();
     }
 
     private sealed class ProcessClock : IOnionMonotonicClock

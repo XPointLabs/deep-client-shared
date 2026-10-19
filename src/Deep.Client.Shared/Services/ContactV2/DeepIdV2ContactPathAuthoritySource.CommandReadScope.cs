@@ -10,38 +10,81 @@ public sealed partial class DeepIdV2ContactPathAuthoritySource
 
     // An explicit command child, not ambient state or a process cache.
     // Share the real acquisition gate and all actual protected owners.
-    private DeepIdV2ContactPathAuthoritySource(DeepIdV2ContactPathAuthoritySource parent)
+    private DeepIdV2ContactPathAuthoritySource(DeepIdV2ContactPathAuthoritySource parent, bool workingSession = false)
     {
         genesisPin = parent.genesisPin; accounts = parent.accounts; proofs = parent.proofs;
         artifacts = parent.artifacts; networkStore = parent.networkStore; networkHistory = parent.networkHistory;
         trustedTime = parent.trustedTime; clock = parent.clock; gate = parent.gate;
-        commandReads = new();
+        commandReads = new(workingSession);
     }
 
     internal CommandReadScope OpenCommandReadScope() => new(this);
+    internal CommandReadScope OpenWorkingGroupScope() => new(this, workingSession: true);
+
+    // Separate pre-effect authority refresh. Existing captured loans/requests
+    // retain their own immutable authority and are never renewed by this call.
+    internal async Task RefreshWorkingAuthorityAsync(CancellationToken ct, bool onlyWhenDue = false)
+    {
+        await gate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (onlyWhenDue && await ReadCommandOwnAsync(ct).ConfigureAwait(false) is { } existing)
+            {
+                var current = await clock.ReadAsync(ct).ConfigureAwait(false);
+                commandReads!.ObserveClock(current);
+                if (current.SampleSeconds < existing.Proof.FreshnessDeadlineMonotonicSeconds &&
+                    existing.Proof.FreshnessDeadlineMonotonicSeconds - current.SampleSeconds > 30) return;
+            }
+            if (commandReads?.WorkingSession == true)
+                commandReads.ObserveClock(await clock.ReadAsync(ct).ConfigureAwait(false));
+            commandReads?.ResetUncapturedPair();
+            _ = await VerifyCurrentNetworkCoreAsync(ct).ConfigureAwait(false);
+        }
+        catch { commandReads?.ResetUncapturedPair(); throw; }
+        finally { gate.Release(); }
+    }
 
     internal sealed class CommandReadScope : IDisposable
     {
         private readonly bool owns;
         internal DeepIdV2ContactPathAuthoritySource Source { get; }
-        internal CommandReadScope(DeepIdV2ContactPathAuthoritySource parent)
+        internal CommandReadScope(DeepIdV2ContactPathAuthoritySource parent, bool workingSession = false)
         {
             parent.commandReads?.RequireActive(); owns = parent.commandReads is null;
-            Source = owns ? new(parent) : parent;
+            Source = owns ? new(parent, workingSession) : parent;
         }
         public void Dispose() { if (owns) Source.commandReads!.Close(); }
     }
 
-    private sealed class CommandReadState
+    private sealed class CommandReadState(bool workingSession)
     {
+        internal bool WorkingSession { get; } = workingSession;
         private readonly object sync = new();
         private bool active = true;
         private OwnPreKeyAuthoringAuthority? own;
+        private byte[]? boot;
+        private ulong lastSample;
         private readonly Dictionary<string, MessagingEndpointAuthority> peers = new(StringComparer.Ordinal);
         internal void RequireActive() { lock (sync) ObjectDisposedException.ThrowIf(!active, this); }
         internal OwnPreKeyAuthoringAuthority? ReadOwn() { lock (sync) { RequireActive(); return own; } }
         internal void SetOwn(OwnPreKeyAuthoringAuthority value)
-        { lock (sync) { RequireActive(); own = value; peers.Clear(); } }
+        {
+            lock (sync)
+            {
+                RequireActive();
+                own = value; peers.Clear();
+            }
+        }
+        internal void ObserveClock(OnionMonotonicReading reading)
+        {
+            lock (sync)
+            {
+                RequireActive();
+                if (boot is not null && (!boot.AsSpan().SequenceEqual(reading.BootId.Span) || reading.SampleSeconds < lastSample))
+                    throw new CryptographicException("Working authority crossed a clock discontinuity.");
+                boot ??= reading.BootId.ToArray(); lastSample = reading.SampleSeconds;
+            }
+        }
         internal void ResetUncapturedPair() { lock (sync) { RequireActive(); own = null; peers.Clear(); } }
         internal VerifiedDeepIdV2DirectoryFreshness? ReadPeer(ReadOnlySpan<byte> did, OwnPreKeyAuthoringAuthority expected)
         {
@@ -71,16 +114,24 @@ public sealed partial class DeepIdV2ContactPathAuthoritySource
         var own = commandReads?.ReadOwn(); if (own is null) return null;
         var reading = await clock.ReadAsync(ct).ConfigureAwait(false) ??
             throw new CryptographicException("Group read scope has no actual monotonic clock.");
+        if (commandReads!.WorkingSession) commandReads.ObserveClock(reading);
         if (!own.Proof.IsCurrentAtMonotonic(reading.BootId.Span, own.Proof.MonotonicSample) || reading.SampleSeconds < own.Proof.MonotonicSample)
             throw new CryptographicException("Group read scope crossed a clock discontinuity.");
         if (reading.SampleSeconds >= own.Proof.FreshnessDeadlineMonotonicSeconds) return null;
         await proofs.RequireStillFreshAsync(own.Proof, own.Authority, ct).ConfigureAwait(false);
+        if (commandReads!.WorkingSession)
+            await accounts.RequireCurrentWorkingDirectoryAsync(own.Proof, reading, ct).ConfigureAwait(false);
         var floor = await networkHistory.ReadHistoryAsync(ct).ConfigureAwait(false);
         if (floor is null || floor.Snapshot.ForkLatched || !Same(floor.Snapshot.ProtectedLkg, own.Network.ProtectedLkg) ||
             !Fixed(floor.ExactHistory.Span, OnionNetworkProtectedHistoryCodec.Encode(own.Network)))
             throw new CryptographicException("Group read scope no longer binds actual network custody.");
         own.Network.EnsureCurrent();
         _ = await VerifyMailboxAuthorityAsync(own.NamespaceRecords, own.Network, own.Authority, own.Proof, ct).ConfigureAwait(false);
+        if (commandReads!.WorkingSession)
+        {
+            await proofs.RequireStillFreshAsync(own.Proof, own.Authority, ct).ConfigureAwait(false);
+            commandReads.ObserveClock(await clock.ReadAsync(ct).ConfigureAwait(false));
+        }
         commandReads!.RequireActive(); ct.ThrowIfCancellationRequested(); return own;
     }
 }
