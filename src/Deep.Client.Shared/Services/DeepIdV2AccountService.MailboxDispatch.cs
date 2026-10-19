@@ -113,7 +113,7 @@ public sealed partial class DeepIdV2AccountService
     internal Task<ClientMailboxStoreResult> DeliverOwnMessagingAsync(Did2MessagingSessionScope scope,
         ReadOnlyMemory<byte> operation,
         DeepIdV2ContactPathAuthoritySource source, CancellationToken ct = default) =>
-        DeliverOwnMessagingAsync(scope, operation, source,
+        DeliverOwnMessagingWithRecoveryAsync(scope, operation, source,
             new Did2MailboxGrantOnionTransport(source), new Did2OwnedMailboxOnionTransportFactory(), ct);
 
     // Connected runtime entry: callers supply no ciphertext, holder key or issuer policy.

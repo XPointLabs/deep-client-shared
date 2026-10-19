@@ -523,6 +523,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         }
         internal ulong Cursor = 1;
         internal bool LoseReply { get; set; }
+        internal Action? OnLostReply;
         internal int Calls { get; private set; }
         internal bool BuiltHeldFrame { get; private set; }
         public IClientMailboxBinaryIngress Create(Did2OwnedMailboxTransportContext loan, IMailboxClientDecodePolicyProvider decode)
@@ -580,7 +581,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             await context.RequireCurrentAsync(ct);
             if (durableResponse is not null)
             {
-                if (LoseReply) throw new IOException("Injected lost Store reply after exact request dispatch.");
+                if (LoseReply) { OnLostReply?.Invoke(); throw new IOException("Injected lost Store reply after exact request dispatch."); }
                 return durableResponse.ToArray();
             }
             var ids = route.Replicas; var crypto = new SodiumMailboxPeerReplicationCrypto();
@@ -609,7 +610,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 CoordinatorId = ids.FirstId, CoordinatorSequence = fixture.NextMailboxCoordinatorSequence(), FirstReplica = Receipt(ids.FirstId),
                 SecondReplica = Receipt(ids.SecondId), Signature = new byte[64]
             }, Bytes(32, (byte)firstMarker)));
-            if (LoseReply) throw new IOException("Injected lost Store reply after durable quorum creation.");
+            if (LoseReply) { OnLostReply?.Invoke(); throw new IOException("Injected lost Store reply after durable quorum creation."); }
             BeforeReturnedReply?.Invoke(grant.ExpiresAtUnixSeconds);
             return durableResponse.ToArray();
         }

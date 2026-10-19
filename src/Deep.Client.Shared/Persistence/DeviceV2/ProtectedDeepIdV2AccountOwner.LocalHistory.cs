@@ -35,7 +35,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     }
 
     internal async Task<IReadOnlyList<DeepIdV2ConversationSnapshot>> ReadLocalConversationsAsync(
-        ulong unixSeconds, IDeepMlDsa65Verifier verifier, CancellationToken ct)
+        ulong unixSeconds, IDeepMlDsa65Verifier verifier, CancellationToken ct,
+        string? conversationId = null, IReadOnlySet<string>? peerAccounts = null)
     {
         using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
         using var current = await RequireCurrentUnderLeaseAsync(unixSeconds, verifier, ct).ConfigureAwait(false);
@@ -50,6 +51,13 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             {
                 if (catalog.Phase(index) != 2) continue;
                 var scope = catalog.Scope(index);
+                // Select from the actual protected catalog, not caller-provided
+                // handles or an application projection. Unrelated sessions do
+                // not authorize this operation. All selected custody and the
+                // catalog read-back below are still independently checked.
+                if (conversationId is not null && !string.Equals(conversationId,
+                        Convert.ToHexString(scope.Conversation), StringComparison.Ordinal) ||
+                    peerAccounts is not null && !peerAccounts.Contains(Convert.ToHexString(scope.RemoteAccount))) continue;
                 using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, ct).ConfigureAwait(false);
                 var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
                 if (floor.Status != 1)
@@ -123,5 +131,28 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             throw new CryptographicException("The local history catalog disappeared during projection.");
         if (!root.Use(bytes => Did2MessagingSessionScope.Fixed(bytes, exact.Span)))
             throw new CryptographicException("The local history catalog changed during projection.");
+    }
+
+    // Scheduling metadata only. A group batch for each returned handle still
+    // independently opens/reconciles that exact session before using native
+    // events; an empty batch grants no transport or acceptance authority.
+    internal async Task<IReadOnlyList<DeepIdV2Conversation>> ReadLocalConversationHandlesAsync(
+        ulong unixSeconds, IDeepMlDsa65Verifier verifier, CancellationToken ct)
+    {
+        using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
+        using var current = await RequireCurrentUnderLeaseAsync(unixSeconds, verifier, ct).ConfigureAwait(false);
+        var instance = await SqliteDeepIdV2AccountGeneration.ReadAccountInstanceUnderLeaseAsync(
+            storage, networkId, current.AccountId, ct).ConfigureAwait(false);
+        try
+        {
+            using var catalog = await new ProtectedDid2MessagingSessionCatalog(storage,
+                networkId, current.AccountId.Span, instance).ReadAsync(ct).ConfigureAwait(false);
+            var result = new List<DeepIdV2Conversation>(catalog.Count);
+            for (var index = 0; index < catalog.Count; index++)
+                if (catalog.Phase(index) == 2) result.Add(new(catalog.Scope(index)));
+            await RequireLocalHistoryCatalogAsync(catalog.Exact, ct).ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested(); held.RequireActive(); return result.AsReadOnly();
+        }
+        finally { CryptographicOperations.ZeroMemory(instance); }
     }
 }

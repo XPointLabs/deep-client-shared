@@ -13,6 +13,10 @@ namespace Deep.Client.Shared.Production.Tests;
 
 public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 {
+    [Fact]
+    [Trait("RequiresApprovedMlKemRuntime", "true")]
+    public async Task Did2OwnedMailboxReceive_AutomaticRecoveryKeepsExactLostAckAndSingleSemanticEvent()
+        => await CheckOwnedMailboxReceiveAsync(false, false, automaticAck: true);
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -145,7 +149,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     }
 
     private static async Task CheckOwnedMailboxReceiveAsync(bool selectedSuccessor, bool renewPublicationDuringAck,
-        bool authorityRollover = false, bool carriageRenewal = false)
+        bool authorityRollover = false, bool carriageRenewal = false, bool automaticAck = false)
     {
         // Actual PQ accounts, committed DPE2/ratchet, SQLCipher, protected page,
         // materialization and signed ACK. In-process issuer/terminal and signed
@@ -260,11 +264,22 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             await Assert.ThrowsAsync<IOException>(() => fixture.SynchronizeNativeReceiver(grants, terminal));
         Assert.True(hitSemanticFault); Assert.Equal(1, terminal.RetrieveCalls); Assert.Equal(0, terminal.AckCalls);
         using (var read = await fixture.ReadPeerMailboxReads()) { Assert.Equal(4, read.Phase); Assert.NotEmpty(read.Active!.Page); }
-        await Assert.ThrowsAsync<ClientMailboxDispatchOutcomeUnknownException>(() => fixture.SynchronizeNativeReceiver(grants, terminal));
-        Assert.Equal(1, terminal.RetrieveCalls); Assert.Equal(1, terminal.AckCalls); Assert.Equal(1, grants.Calls);
-        using (var read = await fixture.ReadPeerMailboxReads()) { Assert.Equal(6, read.Phase); Assert.Equal(4UL, read.Active!.AckCounter); }
-        fixture.Sample += 40; fixture.ProofTime += 40; terminal.LoseAckReply = false;
-        var completed = await fixture.SynchronizeNativeReceiver(grants, terminal);
+        DeepIdV2MailboxSynchronizationResult completed;
+        if (automaticAck)
+        {
+            terminal.OnLostAckReply = () => { fixture.Sample += 40; fixture.ProofTime += 40; terminal.LoseAckReply = false; };
+            var account = fixture.ReopenGrantReader();
+            completed = await account.SynchronizeOwnMailboxWithRecoveryAsync(fixture.GrantReaderSource(account), grants, terminal, default);
+            Assert.Equal(1, account.ExactMailboxResumes); Assert.Equal(0, account.ExactRecoveryLeaseWaits);
+        }
+        else
+        {
+            await Assert.ThrowsAsync<ClientMailboxDispatchOutcomeUnknownException>(() => fixture.SynchronizeNativeReceiver(grants, terminal));
+            Assert.Equal(1, terminal.RetrieveCalls); Assert.Equal(1, terminal.AckCalls); Assert.Equal(1, grants.Calls);
+            using (var read = await fixture.ReadPeerMailboxReads()) { Assert.Equal(6, read.Phase); Assert.Equal(4UL, read.Active!.AckCounter); }
+            fixture.Sample += 40; fixture.ProofTime += 40; terminal.LoseAckReply = false;
+            completed = await fixture.SynchronizeNativeReceiver(grants, terminal);
+        }
         Assert.Equal(1, completed.ProcessedEnvelopes); Assert.Equal(1, completed.DurableTombstones); Assert.False(completed.HasMore);
         Assert.Equal(1, terminal.RetrieveCalls); Assert.Equal(2, terminal.AckCalls); Assert.Equal(1, grants.Calls);
         Assert.True(terminal.BuiltRetrieveFrame); Assert.True(terminal.BuiltAckFrame);
@@ -415,6 +430,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         internal int RetrieveCalls, AckCalls;
         internal List<byte[]> RetrievedOriginalRoutes { get; } = [];
         internal bool LoseAckReply, LoseRetrieveReply, BuiltRetrieveFrame, BuiltAckFrame, ReturnEmptyPage;
+        internal Action? OnLostAckReply;
         internal List<byte[]> ExactRetrieveRequests { get; } = [];
         internal List<byte[]> ExactAckRequests { get; } = [];
         internal bool IndependentAck;
@@ -500,7 +516,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 ackResponse = MailboxAggregateAckCodec.EncodeMqr3(new() { Epoch = request.Epoch, OperationId = request.OperationId, TombstoneQuorums = [quorum] });
             }
             tombstoned = true;
-            if (LoseAckReply) throw new IOException("Injected lost ACK response after actual terminal tombstone.");
+            if (LoseAckReply) { OnLostAckReply?.Invoke(); throw new IOException("Injected lost ACK response after actual terminal tombstone."); }
             return ackResponse.ToArray();
         }
         public Task<ReadOnlyMemory<byte>> StoreAsync(ReadOnlyMemory<byte> request, CancellationToken ct = default) => throw new InvalidOperationException();

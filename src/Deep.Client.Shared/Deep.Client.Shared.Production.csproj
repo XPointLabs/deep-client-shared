@@ -100,6 +100,8 @@
     <Compile Include="Services\DeepIdV2AccountService.MailboxGrant.cs" />
     <Compile Include="Services\DeepIdV2AccountService.MailboxDispatch.cs" />
     <Compile Include="Services\DeepIdV2AccountService.MailboxReceive.cs" />
+    <Compile Include="Services\DeepIdV2AccountService.Recovery.cs" />
+    <Compile Include="Services\OwnedMailboxRecovery.cs" />
     <Compile Include="Services\DeepIdV2AccountService.ContactAccept.cs" />
     <Compile Include="Services\DeepIdV2AccountService.ContactMailboxRoute.cs" />
     <Compile Include="Services\DeepIdV2AccountService.ContactStart.cs" />

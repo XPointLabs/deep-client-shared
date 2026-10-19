@@ -24,6 +24,17 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 {
                     var account = scope.IsInitiator ? ReopenAccount() : ReopenGrantReader();
                     var snapshot = Assert.Single(await account.ListConversationsAsync());
+                    var selected = await account.GetConversationAsync(snapshot.Conversation.ConversationId);
+                    Assert.Equal(snapshot.ContactState, selected.ContactState);
+                    Assert.Equal(snapshot.Conversation.Scope.Exact.ToArray(), selected.Conversation.Scope.Exact.ToArray());
+                    await Assert.ThrowsAsync<InvalidOperationException>(() => account.GetConversationAsync(new string('0', 64)));
+                    await Assert.ThrowsAsync<ArgumentException>(() => account.GetConversationAsync("not-a-conversation"));
+                    using (var cancelledSelection = new CancellationTokenSource())
+                    {
+                        cancelledSelection.Cancel();
+                        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => account.GetConversationAsync(
+                            snapshot.Conversation.ConversationId, cancelledSelection.Token));
+                    }
                     Assert.Equal(scope.IsInitiator ? DeepIdV2ContactState.PeerAcceptanceRetained :
                         DeepIdV2ContactState.LocalAcceptanceRetained, snapshot.ContactState);
                     var message = Assert.Single(await account.ListMessagesAsync(snapshot.Conversation));
@@ -45,7 +56,11 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                     var account = ReopenGrantReader();
                     var handle = Assert.Single(await account.ListConversationsAsync()).Conversation;
                     await peerStorage.DeleteBatchAsync([slot]);
+                    // An absent selector must not open this unrelated broken
+                    // session; selecting that session must still fail closed.
+                    await Assert.ThrowsAsync<InvalidOperationException>(() => account.GetConversationAsync(new string('0', 64)));
                     await Assert.ThrowsAsync<InvalidDataException>(() => account.ListConversationsAsync());
+                    await Assert.ThrowsAsync<InvalidDataException>(() => account.GetConversationAsync(handle.ConversationId));
                     await Assert.ThrowsAsync<InvalidDataException>(() => account.ListMessagesAsync(handle));
                     using var absent = await peerStorage.ReadOwnedAsync(slot); Assert.Null(absent);
                 }

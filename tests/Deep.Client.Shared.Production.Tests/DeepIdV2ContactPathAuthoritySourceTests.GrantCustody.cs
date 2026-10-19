@@ -556,7 +556,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             finally { CryptographicOperations.ZeroMemory(seed); }
         }
 
-        private DeepIdV2AccountService ReopenGrantReader() => new(peerStorage, Path.Combine(directory, "peer"),
+        internal DeepIdV2AccountService ReopenGrantReader() => new(peerStorage, Path.Combine(directory, "peer"),
             Network, 1, new FrozenClock(DateTimeOffset.FromUnixTimeSeconds(1_000)),
             DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess);
         internal DeepIdV2ContactPathAuthoritySource GrantReaderSource(DeepIdV2AccountService account) =>

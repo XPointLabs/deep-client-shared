@@ -95,6 +95,29 @@ public sealed partial class DeepIdV2AccountService
         return await owner.ReadLocalConversationsAsync(TrustedUnixSeconds(), verifier, ct).ConfigureAwait(false);
     }
 
+    /// <summary>Reads one conversation from the actual owned catalog and verifies its local custody.
+    /// This selection is not delivery, acceptance or freshness authority.</summary>
+    /// <param name="conversationId">The canonical uppercase hexadecimal conversation identifier.</param>
+    /// <param name="ct">Cancellation for the protected read.</param>
+    /// <returns>The single verified local snapshot; absent or ambiguous identifiers fail closed.</returns>
+    public async Task<DeepIdV2ConversationSnapshot> GetConversationAsync(string conversationId, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(conversationId);
+        if (conversationId.Length != 64 || conversationId.Any(value => value is not (>= '0' and <= '9') and not (>= 'A' and <= 'F')))
+            throw new ArgumentException("A canonical conversation identifier is required.", nameof(conversationId));
+        using var verifier = OpenVerifier();
+        return (await owner.ReadLocalConversationsAsync(TrustedUnixSeconds(), verifier, ct,
+            conversationId: conversationId).ConfigureAwait(false)).Single();
+    }
+
+    private async Task<IReadOnlyList<DeepIdV2ConversationSnapshot>> ReadGroupConversationsAsync(
+        IReadOnlySet<string> peerAccounts, CancellationToken ct)
+    {
+        using var verifier = OpenVerifier();
+        return await owner.ReadLocalConversationsAsync(TrustedUnixSeconds(), verifier, ct,
+            peerAccounts: peerAccounts).ConfigureAwait(false);
+    }
+
     public Task<ClientMailboxStoreResult> AcceptContactAsync(DeepIdV2Conversation conversation,
         ReadOnlyMemory<byte> logicalOperation, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct = default)
         => AcceptContactAsync(conversation, logicalOperation, source, new Did2MailboxGrantOnionTransport(source),
@@ -136,11 +159,11 @@ public sealed partial class DeepIdV2AccountService
     public Task<ClientMailboxStoreResult> RetryTextAsync(DeepIdV2Conversation conversation, ReadOnlyMemory<byte> logicalOperation,
         string text, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct = default)
         => RetryTextAsync(conversation, logicalOperation, text, source, new Did2MailboxGrantOnionTransport(source),
-            new Did2OwnedMailboxOnionTransportFactory(), ct);
+            new Did2OwnedMailboxOnionTransportFactory(), ct, recoverUnknown: true);
 
     internal async Task<ClientMailboxStoreResult> RetryTextAsync(DeepIdV2Conversation conversation, ReadOnlyMemory<byte> logicalOperation,
         string text, DeepIdV2ContactPathAuthoritySource source, IDid2MailboxGrantTransport grants,
-        IDid2OwnedMailboxTransportFactory transport, CancellationToken ct = default)
+        IDid2OwnedMailboxTransportFactory transport, CancellationToken ct = default, bool recoverUnknown = false)
     {
         ArgumentNullException.ThrowIfNull(conversation); ArgumentNullException.ThrowIfNull(source);
         ArgumentNullException.ThrowIfNull(grants); ArgumentNullException.ThrowIfNull(transport);
@@ -157,7 +180,9 @@ public sealed partial class DeepIdV2AccountService
             using var draft = await PrepareOwnDirectTextAsync(conversation.Scope, op, text, source, ct).ConfigureAwait(false);
             exact = OwnedByteExports.TakeArray(draft.ExactDmc2);
             using var sent = await SendOwnMessagingAsync(conversation.Scope, op, exact, source, ct).ConfigureAwait(false);
-            return await DeliverOwnMessagingAsync(conversation.Scope, op, source, grants, transport, ct).ConfigureAwait(false);
+            return await (recoverUnknown
+                ? DeliverOwnMessagingWithRecoveryAsync(conversation.Scope, op, source, grants, transport, ct)
+                : DeliverOwnMessagingAsync(conversation.Scope, op, source, grants, transport, ct)).ConfigureAwait(false);
         }
         finally { CryptographicOperations.ZeroMemory(op); CryptographicOperations.ZeroMemory(exact); }
     }

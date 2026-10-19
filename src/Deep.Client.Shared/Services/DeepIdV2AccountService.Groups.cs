@@ -55,8 +55,8 @@ public sealed partial class DeepIdV2AccountService
                 var members = await owner.ReadGroupMemberSelectorsAsync(TrustedUnixSeconds(), verifier, selected, ct).ConfigureAwait(false);
                 var accounts = members.Select(Convert.ToHexString).ToHashSet(StringComparer.Ordinal);
                 if (action == "advance") accounts.Add(conversation.PeerAccountId);
-                candidates = (await ListConversationsAsync(ct).ConfigureAwait(false)).Select(item => item.Conversation)
-                    .Where(item => accounts.Contains(item.PeerAccountId)).ToArray();
+                candidates = (await ReadGroupConversationsAsync(accounts, ct).ConfigureAwait(false))
+                    .Select(item => item.Conversation).ToArray();
                 // Consent reads independently mint current own/network authority.
                 // Finish every such read before capturing a common endpoint set;
                 // a later mint can otherwise advance the protected network floor
@@ -122,7 +122,8 @@ public sealed partial class DeepIdV2AccountService
         var selected = group.ToArray();
         try
         {
-            var conversations = (await ListConversationsAsync(ct).ConfigureAwait(false)).Select(item => item.Conversation).ToArray();
+            using var verifier = OpenVerifier();
+            var conversations = await owner.ReadLocalConversationHandlesAsync(TrustedUnixSeconds(), verifier, ct).ConfigureAwait(false);
             if (!conversations.Any(target => target.Scope.Exact.SequenceEqual(conversation.Scope.Exact)))
                 throw new ArgumentException("Group flush requires this account\'s actual retained conversation.", nameof(conversation));
             // Preserve order within a session. Distinct sessions drain concurrently;

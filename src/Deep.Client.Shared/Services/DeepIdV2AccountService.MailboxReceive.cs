@@ -61,7 +61,7 @@ public sealed partial class DeepIdV2AccountService
     /// transport, durable receive/materialization and signed tombstone ACK.
     /// Missing authority fails closed; there is no implicit poll/retry loop.</summary>
     public Task<DeepIdV2MailboxSynchronizationResult> SynchronizeOwnMailboxAsync(DeepIdV2ContactPathAuthoritySource source, CancellationToken ct = default) =>
-        SynchronizeOwnMailboxAsync(source, new Did2MailboxGrantOnionTransport(source), new Did2OwnedMailboxOnionTransportFactory(), ct);
+        SynchronizeOwnMailboxWithRecoveryAsync(source, new Did2MailboxGrantOnionTransport(source), new Did2OwnedMailboxOnionTransportFactory(), ct);
 
     // Actual connected business entry; callers supply no page, mailbox selector,
     // signer, endpoint proof, semantic success flag or ACK list.

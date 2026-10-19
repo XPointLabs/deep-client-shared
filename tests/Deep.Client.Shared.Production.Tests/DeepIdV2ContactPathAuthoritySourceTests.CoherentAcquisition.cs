@@ -43,6 +43,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         var error = await Assert.ThrowsAsync<OnionBoundaryException>(async () =>
             await fixture.Source().VerifyCurrentNetworkAsync(Fixture.Network));
         Assert.Equal("dtt-binding-invalid", error.Code);
+        Assert.Equal("ViewCore", error.Data["Deep.DttBinding.Check"]);
         Assert.Equal(fetches + 2, fixture.NetworkClosureFetches);
         var after = (await fixture.NetworkStore.ReadAsync(default))!;
         Assert.Equal(before.Revision, after.Revision);

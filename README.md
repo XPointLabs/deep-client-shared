@@ -1,5 +1,20 @@
 # Deep Client Shared
 
+`DeepIdV2AccountService.GetConversationAsync` selects a canonical conversation
+identifier from the actual protected catalog, then verifies that session's local
+history/acceptance custody and catalog read-back. It does not open unrelated
+sessions or grant network/send/ACK authority; those operations still check their
+own current protected state. Group flush uses catalog handles only for scheduling,
+and independently verifies every nonempty native batch before delivery.
+
+Connected default Store and mailbox-sync APIs perform at most one owned
+continuation after typed `OutcomeUnknown`; raw fault-test seams stay single-attempt.
+Every continuation reopens actual protected custody/current authority. Original
+live requests remain exact; authenticated retirement/succession stays owner-only.
+`ExactStoreResumes`, `ExactMailboxResumes` and `ExactRecoveryLeaseWaits` are
+diagnostics, never receipt authority. See
+[the retry owner](../docs/architecture/TRANSPORT-NEUTRAL-MESSAGING.md#82-retry-and-failover).
+
 `DeepIdV2ClientNetworkSession` may live across serial CLI commands. Its ordinary
 `Source` retains independent acquisition; `EstablishedGroupSource` owns a bounded
 public-only working group scope. `RefreshGroupAuthorityAsync` forces pre-effect

@@ -21,6 +21,18 @@ public sealed partial class DeepIdV2ContactPathAuthoritySource
     internal CommandReadScope OpenCommandReadScope() => new(this);
     internal CommandReadScope OpenWorkingGroupScope() => new(this, workingSession: true);
 
+    internal async Task DiscardUncapturedAuthorityAsync(CancellationToken ct)
+    {
+        await gate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (commandReads?.WorkingSession == true)
+                commandReads.ObserveClock(await clock.ReadAsync(ct).ConfigureAwait(false));
+            commandReads?.ResetUncapturedPair();
+        }
+        finally { gate.Release(); }
+    }
+
     // Separate pre-effect authority refresh. Existing captured loans/requests
     // retain their own immutable authority and are never renewed by this call.
     internal async Task RefreshWorkingAuthorityAsync(CancellationToken ct, bool onlyWhenDue = false)
