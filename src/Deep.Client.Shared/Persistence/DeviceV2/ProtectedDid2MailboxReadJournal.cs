@@ -10,6 +10,9 @@ internal static partial class ProtectedDid2MailboxReadJournal
 {
     internal const string Slot = "deep.store.v2.mailbox-read-journal";
     internal const int HeaderBytes = 96, MaximumFloors = 128, MaximumItems = 8;
+    // Resource policy for NEW pages only. Retained exact requests/pages up to
+    // MaximumItems still resume unchanged; never resize an unknown ACK batch.
+    internal const int NewPageMaximumItems = 2;
     internal const int MaximumPageBytes = 48 + 256 + MaximumItems * (12 + MailboxClientLimits.MaximumEncryptedEnvelopeLength);
     internal const int MaximumAckReplyBytes = 40 + MaximumItems * (2 + MailboxReceiptV3Limits.MaximumQuorumLength);
     internal const int MaximumBytes = 750_000;

@@ -6,33 +6,33 @@ namespace Deep.Client.Shared.Services.ContactV2;
 
 public sealed partial class DeepIdV2ContactPathAuthoritySource
 {
-    private readonly GroupReadState? groupReads;
+    private readonly CommandReadState? commandReads;
 
-    // An explicit group-command child, not ambient state or a process cache.
+    // An explicit command child, not ambient state or a process cache.
     // Share the real acquisition gate and all actual protected owners.
     private DeepIdV2ContactPathAuthoritySource(DeepIdV2ContactPathAuthoritySource parent)
     {
         genesisPin = parent.genesisPin; accounts = parent.accounts; proofs = parent.proofs;
         artifacts = parent.artifacts; networkStore = parent.networkStore; networkHistory = parent.networkHistory;
         trustedTime = parent.trustedTime; clock = parent.clock; gate = parent.gate;
-        groupReads = new();
+        commandReads = new();
     }
 
-    internal GroupReadScope OpenGroupReadScope() => new(this);
+    internal CommandReadScope OpenCommandReadScope() => new(this);
 
-    internal sealed class GroupReadScope : IDisposable
+    internal sealed class CommandReadScope : IDisposable
     {
         private readonly bool owns;
         internal DeepIdV2ContactPathAuthoritySource Source { get; }
-        internal GroupReadScope(DeepIdV2ContactPathAuthoritySource parent)
+        internal CommandReadScope(DeepIdV2ContactPathAuthoritySource parent)
         {
-            parent.groupReads?.RequireActive(); owns = parent.groupReads is null;
+            parent.commandReads?.RequireActive(); owns = parent.commandReads is null;
             Source = owns ? new(parent) : parent;
         }
-        public void Dispose() { if (owns) Source.groupReads!.Close(); }
+        public void Dispose() { if (owns) Source.commandReads!.Close(); }
     }
 
-    private sealed class GroupReadState
+    private sealed class CommandReadState
     {
         private readonly object sync = new();
         private bool active = true;
@@ -66,9 +66,9 @@ public sealed partial class DeepIdV2ContactPathAuthoritySource
     // Called only under the shared acquisition gate, before a new owner loan.
     // A naturally elapsed proof starts a new acquisition, never renews an old
     // loan or changes any captured original request. Other failures propagate.
-    private async ValueTask<OwnPreKeyAuthoringAuthority?> ReadGroupOwnAsync(CancellationToken ct)
+    private async ValueTask<OwnPreKeyAuthoringAuthority?> ReadCommandOwnAsync(CancellationToken ct)
     {
-        var own = groupReads?.ReadOwn(); if (own is null) return null;
+        var own = commandReads?.ReadOwn(); if (own is null) return null;
         var reading = await clock.ReadAsync(ct).ConfigureAwait(false) ??
             throw new CryptographicException("Group read scope has no actual monotonic clock.");
         if (!own.Proof.IsCurrentAtMonotonic(reading.BootId.Span, own.Proof.MonotonicSample) || reading.SampleSeconds < own.Proof.MonotonicSample)
@@ -81,6 +81,6 @@ public sealed partial class DeepIdV2ContactPathAuthoritySource
             throw new CryptographicException("Group read scope no longer binds actual network custody.");
         own.Network.EnsureCurrent();
         _ = await VerifyMailboxAuthorityAsync(own.NamespaceRecords, own.Network, own.Authority, own.Proof, ct).ConfigureAwait(false);
-        groupReads!.RequireActive(); ct.ThrowIfCancellationRequested(); return own;
+        commandReads!.RequireActive(); ct.ThrowIfCancellationRequested(); return own;
     }
 }

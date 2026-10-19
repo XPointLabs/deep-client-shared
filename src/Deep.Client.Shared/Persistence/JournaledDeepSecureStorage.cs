@@ -29,7 +29,6 @@ public sealed class JournaledDeepSecureStorage : IDeepSecureStorage, IDisposable
     private const int HeaderSize = 8;
     private const int MaximumEntries = DeepSecureStorageRegistration.MaximumEntries;
     private const int MaximumSlotBytes = 512;
-    private const int MaximumValueBytes = 1024 * 1024;
     private const int MaximumPlaintextBytes = 8 * 1024 * 1024;
     private const uint MoveFileReplaceExisting = 0x1;
     private const uint MoveFileWriteThrough = 0x8;
@@ -121,7 +120,7 @@ public sealed class JournaledDeepSecureStorage : IDeepSecureStorage, IDisposable
             foreach (var write in writes)
             {
                 ValidateSlot(write.Slot);
-                if (write.Value.IsEmpty || write.Value.Length > MaximumValueBytes
+                if (write.Value.IsEmpty || write.Value.Length > DeepSecureStorageRegistration.MaximumBytesForSlot(write.Slot)
                     || additions.ContainsKey(write.Slot))
                 {
                     throw new ArgumentException("Secure-storage batch is malformed.", nameof(writes));
@@ -167,7 +166,8 @@ public sealed class JournaledDeepSecureStorage : IDeepSecureStorage, IDisposable
         ReadOnlyMemory<byte> replacement, CancellationToken cancellationToken = default)
     {
         ValidateSlot(slot);
-        if (expected.IsEmpty || replacement.IsEmpty || expected.Length > MaximumValueBytes || replacement.Length > MaximumValueBytes)
+        var maximum = DeepSecureStorageRegistration.MaximumBytesForSlot(slot);
+        if (expected.IsEmpty || replacement.IsEmpty || expected.Length > maximum || replacement.Length > maximum)
             throw new ArgumentException("Secure-storage replacement is outside its byte bound.");
         var expectedCopy = expected.ToArray();
         var replacementCopy = replacement.ToArray();
@@ -477,7 +477,7 @@ public sealed class JournaledDeepSecureStorage : IDeepSecureStorage, IDisposable
 
         var entries = values
             .OrderBy(static pair => pair.Key, StringComparer.Ordinal)
-            .Select(pair => (Slot: StrictUtf8.GetBytes(pair.Key), pair.Value))
+            .Select(pair => (Name: pair.Key, Slot: StrictUtf8.GetBytes(pair.Key), pair.Value))
             .ToArray();
         try
         {
@@ -485,7 +485,7 @@ public sealed class JournaledDeepSecureStorage : IDeepSecureStorage, IDisposable
             foreach (var entry in entries)
             {
                 if (entry.Slot.Length == 0 || entry.Slot.Length > MaximumSlotBytes
-                    || entry.Value.Length == 0 || entry.Value.Length > MaximumValueBytes)
+                    || entry.Value.Length == 0 || entry.Value.Length > DeepSecureStorageRegistration.MaximumBytesForSlot(entry.Name))
                 {
                     throw new InvalidOperationException("Secure-storage aggregate contains an invalid entry.");
                 }
@@ -552,7 +552,7 @@ public sealed class JournaledDeepSecureStorage : IDeepSecureStorage, IDisposable
                 var valueLength = checked((int)BinaryPrimitives.ReadUInt32BigEndian(plaintext[(offset + 2)..]));
                 offset += 6;
                 if (slotLength == 0 || slotLength > MaximumSlotBytes
-                    || valueLength <= 0 || valueLength > MaximumValueBytes
+                    || valueLength <= 0 || valueLength > DeviceV2.ProtectedDid2GroupJournal.MaximumBytes
                     || plaintext.Length - offset < slotLength + valueLength)
                 {
                     throw new InvalidDataException("Secure-storage aggregate entry is invalid.");
@@ -560,6 +560,8 @@ public sealed class JournaledDeepSecureStorage : IDeepSecureStorage, IDisposable
 
                 var slot = StrictUtf8.GetString(plaintext.Slice(offset, slotLength));
                 ValidateSlot(slot);
+                if (valueLength > DeepSecureStorageRegistration.MaximumBytesForSlot(slot))
+                    throw new InvalidDataException("Secure-storage value exceeds its slot bound.");
                 offset += slotLength;
                 if (previous is not null && StringComparer.Ordinal.Compare(previous, slot) >= 0)
                 {

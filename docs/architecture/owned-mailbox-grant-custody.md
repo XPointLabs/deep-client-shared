@@ -202,6 +202,16 @@ keeps the existing bounds; absent traversal metadata is not absence of objects,
 and no route/grant is evicted or reminted. This owner selection does not introduce
 a background scheduler or dependency-closed retirement.
 
+New owned Retrieve pages request at most two events, keeping native per-event
+replication/ACK work inside the existing unchanged transport deadline. The
+closed read owner still accepts its already captured exact requests/pages up
+to eight events: pending original Retrieve/ACK work is never resized, reminted
+or treated as absent. Each call still processes one page; `HasMore` describes
+its actual authenticated continuation. The CLI three-client driver drains at
+most four successful pages, stopping immediately on any failed/unknown result
+or non-final page without durable progress. This is pagination after successful
+ACKs, not an error retry, cursor projection or deadline extension.
+
 Semantic rematerialization of actual native-committed Hello/Accept follows
 [DR-0063's retained-event clarification](../../../docs/survival-program/decisions/DR-0063-did2-contact-reply-route-embedding.md),
 not current admission of its old return publication. The Shared handoff joins

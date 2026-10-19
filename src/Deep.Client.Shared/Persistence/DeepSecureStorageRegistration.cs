@@ -9,6 +9,10 @@ internal sealed class DeepSecureStorageRegistration : IDisposable
     internal const int MaximumEntries = 1024;
     internal const int MaximumValueBytes = 1024 * 1024;
     internal const int MaximumPlaintextBytes = 8 * 1024 * 1024;
+    // The group journal is one bounded aggregate, not an individual key.
+    // Keep the total inventory budget and every ordinary slot's bound unchanged.
+    internal static int MaximumBytesForSlot(string slot) =>
+        slot == DeviceV2.ProtectedDid2GroupJournal.Slot ? DeviceV2.ProtectedDid2GroupJournal.MaximumBytes : MaximumValueBytes;
     private static readonly UTF8Encoding Utf8 = new(false, true);
     internal readonly string Slot;
     internal readonly byte[] Expected, Replacement;
@@ -18,7 +22,7 @@ internal sealed class DeepSecureStorageRegistration : IDisposable
         ReadOnlyMemory<byte> replacement, IReadOnlyList<DeepSecureStorageWrite> insertions)
     {
         ValidateSlot(slot); ArgumentNullException.ThrowIfNull(insertions);
-        ValidateValue(expected); ValidateValue(replacement);
+        ValidateValue(slot, expected); ValidateValue(slot, replacement);
         if (insertions.Count is < 1 or >= MaximumEntries)
             throw new ArgumentException("Atomic secure registration has an invalid insertion count.", nameof(insertions));
         var insertionBytes = ValidateWrites(insertions);
@@ -30,7 +34,7 @@ internal sealed class DeepSecureStorageRegistration : IDisposable
             foreach (var item in insertions)
             {
                 ArgumentNullException.ThrowIfNull(item);
-                ValidateSlot(item.Slot); ValidateValue(item.Value);
+                ValidateSlot(item.Slot); ValidateValue(item.Slot, item.Value);
                 if (item.Slot == slot || Insertions.ContainsKey(item.Slot))
                     throw new ArgumentException("Atomic secure registration repeats a slot.", nameof(insertions));
                 Insertions.Add(item.Slot, item.Value.ToArray());
@@ -76,7 +80,7 @@ internal sealed class DeepSecureStorageRegistration : IDisposable
         var count = 0; long length = 8;
         foreach (var pair in values)
         {
-            ValidateSlot(pair.Key); ValidateValue(pair.Value);
+            ValidateSlot(pair.Key); ValidateValue(pair.Key, pair.Value);
             count++; length += 6L + Utf8.GetByteCount(pair.Key) + pair.Value.Length;
             if (count > MaximumEntries || length > MaximumPlaintextBytes)
                 throw new InvalidOperationException("Secure-storage aggregate exceeds its capacity.");
@@ -90,7 +94,7 @@ internal sealed class DeepSecureStorageRegistration : IDisposable
         var slots = new HashSet<string>(StringComparer.Ordinal); long bytes = 8;
         foreach (var item in writes)
         {
-            ArgumentNullException.ThrowIfNull(item); ValidateSlot(item.Slot); ValidateValue(item.Value);
+            ArgumentNullException.ThrowIfNull(item); ValidateSlot(item.Slot); ValidateValue(item.Slot, item.Value);
             if (!slots.Add(item.Slot)) throw new ArgumentException("Secure-storage batch repeats a slot.", nameof(writes));
             bytes += 6L + Utf8.GetByteCount(item.Slot) + item.Value.Length;
             if (bytes > MaximumPlaintextBytes)
@@ -98,9 +102,9 @@ internal sealed class DeepSecureStorageRegistration : IDisposable
         }
         return bytes;
     }
-    private static void ValidateValue(ReadOnlyMemory<byte> value)
+    private static void ValidateValue(string slot, ReadOnlyMemory<byte> value)
     {
-        if (value.IsEmpty || value.Length > MaximumValueBytes)
+        if (value.IsEmpty || value.Length > MaximumBytesForSlot(slot))
             throw new ArgumentException("Secure-storage value is outside its byte bound.", nameof(value));
     }
     public void Dispose()
@@ -124,7 +128,7 @@ internal sealed class DeepSecureStorageGuardedDeletion : IDisposable
     {
         DeepSecureStorageRegistration.ValidateSlot(guardSlot);
         ArgumentNullException.ThrowIfNull(slots);
-        if (expected.IsEmpty || expected.Length > DeepSecureStorageRegistration.MaximumValueBytes)
+        if (expected.IsEmpty || expected.Length > DeepSecureStorageRegistration.MaximumBytesForSlot(guardSlot))
             throw new ArgumentException("Secure-storage guard is outside its byte bound.", nameof(expected));
         var count = slots.Count;
         if (count is < 1 or > DeepSecureStorageRegistration.MaximumEntries)

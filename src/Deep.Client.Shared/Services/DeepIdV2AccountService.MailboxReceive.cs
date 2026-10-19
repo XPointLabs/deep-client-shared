@@ -75,6 +75,10 @@ public sealed partial class DeepIdV2AccountService
         using var descriptor = await owner.RetrieveOwnMailboxAsync(TrustedUnixSeconds(), verifier, source, own, grants, transport, ct).ConfigureAwait(false);
         var page = descriptor.ReadPage();
         if (page.Items.Count == 0) return new(0, page.HasMore, 0);
+        // Borrow immutable public endpoint capabilities only for ordinary DPE2
+        // receive within this page. Initial/Braid and the later ACK keep their
+        // independent parent source; no old loan or captured request is renewed.
+        using var receiveReads = source.OpenCommandReadScope();
         var scopes = new Dictionary<string, Did2MessagingSessionScope>(StringComparer.Ordinal);
         foreach (var item in page.Items)
         {
@@ -86,7 +90,7 @@ public sealed partial class DeepIdV2AccountService
             else
             {
                 // Unknown/group input still has no semantic fallback or ACK.
-                using var received = await ReceiveOwnMessagingEnvelopeAsync(item.Envelope.Ciphertext, source, ct).ConfigureAwait(false);
+                using var received = await ReceiveOwnMessagingEnvelopeAsync(item.Envelope.Ciphertext, receiveReads.Source, ct).ConfigureAwait(false);
                 var incoming = Dpe2Codec.Decode(item.Envelope.Ciphertext.Span);
                 scope = await owner.FindIncomingMessagingScopeAsync(TrustedUnixSeconds(), verifier, incoming, ct).ConfigureAwait(false) ??
                     throw new InvalidOperationException("Captured message no longer has an initialized owned session; no ACK.");

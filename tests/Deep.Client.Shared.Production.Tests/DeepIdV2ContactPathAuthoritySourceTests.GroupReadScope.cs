@@ -4,6 +4,22 @@ namespace Deep.Client.Shared.Production.Tests;
 
 public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 {
+    [Fact]
+    public async Task Did2MailboxReceive_ReadScopeDoesNotReuseItsProofForIndependentParentAckCapture()
+    {
+        await using var f = await Fixture.CreateAsync(); var parent = f.Source();
+        var retrieve = await parent.VerifyForOwnPreKeyAuthoringAsync(f.Accounts, default);
+        using var reads = parent.OpenCommandReadScope();
+        var receive = await reads.Source.VerifyForOwnPreKeyAuthoringAsync(f.Accounts, default);
+        var count = f.ProofRequests;
+        Assert.NotSame(retrieve, receive);
+        Assert.Same(receive, await reads.Source.VerifyForOwnPreKeyAuthoringAsync(f.Accounts, default));
+        Assert.Equal(count, f.ProofRequests);
+        var ack = await parent.VerifyForOwnPreKeyAuthoringAsync(f.Accounts, default);
+        Assert.NotSame(receive, ack); Assert.NotSame(retrieve, ack);
+        Assert.Equal(count + 1, f.ProofRequests);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -20,16 +36,17 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     public async Task Did2Groups_ReadScopeReusesCapabilitiesOnlyInsideOneExplicitCommand()
     {
         await using var f = await Fixture.CreateAsync(); var parent = f.Source();
-        using var reads = parent.OpenGroupReadScope(); var source = reads.Source;
+        using var reads = parent.OpenCommandReadScope(); var source = reads.Source;
         var first = await source.VerifyForOwnPreKeyAuthoringAsync(f.Accounts, default);
         var count = f.ProofRequests;
         Assert.Same(first, await source.VerifyForOwnPreKeyAuthoringAsync(f.Accounts, default));
-        using (var nested = source.OpenGroupReadScope())
+        using (var nested = source.OpenCommandReadScope())
         {
             Assert.Same(source, nested.Source);
             Assert.Same(first, await nested.Source.VerifyForOwnPreKeyAuthoringAsync(f.Accounts, default));
         }
         Assert.Equal(count, f.ProofRequests);
+        Assert.Equal(1L, source.MailboxInputDecodes);
         using var canceled = new CancellationTokenSource(); canceled.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
             await source.VerifyForOwnPreKeyAuthoringAsync(f.Accounts, canceled.Token));
@@ -39,7 +56,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         Assert.Equal(count, f.ProofRequests);
         var next = await parent.VerifyForOwnPreKeyAuthoringAsync(f.Accounts, default);
         Assert.NotSame(first, next); Assert.Equal(count + 1, f.ProofRequests);
-        using var other = parent.OpenGroupReadScope();
+        using var other = parent.OpenCommandReadScope();
         Assert.NotSame(next, await other.Source.VerifyForOwnPreKeyAuthoringAsync(f.Accounts, default));
         Assert.Equal(count + 2, f.ProofRequests);
     }
@@ -49,7 +66,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     [InlineData(true)]
     public async Task Did2Groups_ReadScopeRejectsChangedFloorAndClockRollbackWithoutReacquisition(bool clock)
     {
-        await using var f = await Fixture.CreateAsync(); using var reads = f.Source().OpenGroupReadScope();
+        await using var f = await Fixture.CreateAsync(); using var reads = f.Source().OpenCommandReadScope();
         var first = await reads.Source.VerifyForOwnPreKeyAuthoringAsync(f.Accounts, default); var count = f.ProofRequests;
         if (clock) f.Sample = first.Proof.MonotonicSample - 1;
         else
@@ -66,7 +83,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     [Fact]
     public async Task Did2Groups_ExpiredReadScopeCannotFallBackWhenFreshProofIsUnavailable()
     {
-        await using var f = await Fixture.CreateAsync(); using var reads = f.Source().OpenGroupReadScope();
+        await using var f = await Fixture.CreateAsync(); using var reads = f.Source().OpenCommandReadScope();
         var first = await reads.Source.VerifyForOwnPreKeyAuthoringAsync(f.Accounts, default); var count = f.ProofRequests;
         f.Sample = first.Proof.FreshnessDeadlineMonotonicSeconds; f.RejectProof = true;
         await Assert.ThrowsAnyAsync<IOException>(async () =>
@@ -84,7 +101,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         await using var f = await Fixture.CreateAsync(withPeer: true);
         var (complete, hello, init, _, _) = await f.PrepareNativeHelloCompletion(Bytes(32, 0xb7));
         using var initial = await complete(f.Accounts); var session = await f.EnsureSenderMessaging(init, hello);
-        using var reads = f.Source().OpenGroupReadScope();
+        using var reads = f.Source().OpenCommandReadScope();
         var first = await reads.Source.VerifyForOwnMessagingAsync(f.Accounts, session, default); var count = f.ProofRequests;
         var again = await reads.Source.VerifyForOwnMessagingAsync(f.Accounts, session, default);
         Assert.Same(first.Own, again.Own); Assert.Same(first.Peer, again.Peer); Assert.Equal(count, f.ProofRequests);

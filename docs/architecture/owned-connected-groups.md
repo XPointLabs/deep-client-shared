@@ -21,8 +21,14 @@ revision:u64le and five counts:u16le (groups/outgoing/messages/native-selectors/
 fragments). Variable byte strings have an i32le nonnegative bounded length.
 Groups sort strictly by group ID; retained outgoing work preserves capture
 order. Unsupported/truncated/trailing/oversized data rejects before mutation.
-Limits are32MiB,32 groups,512 retained outgoing events,4096 messages,8192 native
+Limits are4MiB,32 groups,512 retained outgoing events,4096 messages,8192 native
 selectors and342 fragments. All custody buffers are cleared on disposal.
+The exact group slot has this same bound in both secure-storage adapters and
+all atomic operations/cold readers; ordinary slots retain their1MiB bound.
+The entire inventory remains8MiB/1024 entries. Limits are joint, not a promise
+that every maximum count fits simultaneously. This corrects a codec/adapter
+capacity mismatch without new generations, migration or deleting prior groups;
+larger-history partitioning and retirement remain separate S11 qualification.
 
 Each group retains up to100 exact sequential packages and100 independent
 invitation/original lookup/consent tuples keyed by exact pairwise scope, its next
@@ -168,9 +174,13 @@ owner is never replaced; mismatch still rejects before business effects. Route
 verification remains exact. GSR publication reuses verified package/chunk work
 only within the actual held pre-dispatch phase, not across callbacks or loans.
 
-## Explicit group-command public read scope
+## Explicit command public read scope
 
 Group commands share a private child authority source with nested group work.
+Ordinary DPE2 receive uses its own explicit child for one mailbox page; the
+parent remains independent for Retrieve, Initial, Braid and the fresh ACK
+endpoint capture after materialization. A receive scope cannot supply a cached
+proof to that parent ACK acquisition.
 It uses the parent's actual acquisition gate, protected directory/network owners,
 root and clock. Only existing immutable verified own/peer public capabilities are
 reused, never a cached currentness result, native row, signing key or plaintext.
@@ -186,5 +196,13 @@ cannot renew an old loan, replace an original request or turn a verification
 failure into success. Clock discontinuity, changed/forked custody, cancellation
 and unavailable fresh authority still reject. A closed scope releases its public
 references and cannot serve another command. Ordinary callers outside this
-explicit group scope retain independent acquisitions. Shared storage/wire formats,
+explicit command scope retain independent acquisitions. Shared storage/wire formats,
 replica requirements, TLS and transport deadlines do not change.
+
+The authority source also retains at most one bounded immutable PMT/PMA grammar
+frame keyed by all exact public input bytes. Ordinary ACK work may use this
+pure parser optimization too; it does not share a group's or ordinary receive
+endpoint capability scope. Every use independently verifies the actual projection, root signatures,
+trusted interval and native floors. Changed/duplicate/missing inputs still
+parse and reject normally, with no fallback to a former accepted policy. No
+private state, currentness decision or authority deadline is cached here.

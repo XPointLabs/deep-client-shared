@@ -132,7 +132,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     {
         internal async Task CheckGroupEndpointViewAcquisition(Did2MessagingSessionScope scope, bool capturedOwn, bool groupReadScope = false)
         {
-            var parent = Source(); using var reads = groupReadScope ? parent.OpenGroupReadScope() : null;
+            var parent = Source(); using var reads = groupReadScope ? parent.OpenCommandReadScope() : null;
             var source = reads?.Source ?? parent;
             var captured = capturedOwn ? await source.VerifyForOwnPreKeyAuthoringAsync(Accounts, default) : null;
             await AdvanceNetworkAsync();

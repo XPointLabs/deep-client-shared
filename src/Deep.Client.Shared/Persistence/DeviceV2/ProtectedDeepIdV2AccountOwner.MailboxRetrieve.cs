@@ -88,7 +88,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     throw new IOException("Protected Retrieve-holder counter floors are full.");
                 var binding = MailboxAuthenticatedRequestTranscript.ForRetrieve(loan.Route.Epoch,
                     ClientMailboxAdapter.RetrieveOperationId(loan.Route, traversal), loan.Route.MailboxId, loan.Route.PlacementId,
-                    traversal.AfterCursor, ProtectedDid2MailboxReadJournal.MaximumItems, traversal.ContinuationToken);
+                    traversal.AfterCursor, ProtectedDid2MailboxReadJournal.NewPageMaximumItems, traversal.ContinuationToken);
                 state.Active = ProtectedDid2MailboxReadJournal.Cycle.Begin(grantHash, scopeHash, routeHash, traversal.PollGeneration, binding.CanonicalRequest.Span);
                 state.Phase = 1; await Save().ConfigureAwait(false);
             }

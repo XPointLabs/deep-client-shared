@@ -385,7 +385,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySource :
             for (var acquisition = 0; acquisition < 2; acquisition++)
             {
                 var own = verifiedOwn ?? await VerifyCurrentNetworkCoreAsync(token).ConfigureAwait(false);
-                var peer = groupReads?.ReadPeer(did.CanonicalBytes.Span, own) ??
+                var peer = commandReads?.ReadPeer(did.CanonicalBytes.Span, own) ??
                     await proofs.FetchByDid2Async(did, own.Authority, account.DeploymentProfileId,
                         supportedReader: 2, token).ConfigureAwait(false);
                 ProtectedDid2MessagingPeerBootstrap.RequireProof(did, peer);
@@ -399,7 +399,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySource :
                     // acquisitions. Retry the entire uncaptured pair, never splice a
                     // new owner into an already captured multi-target authority set.
                     if (verifiedOwn is null && acquisition == 0)
-                    { groupReads?.ResetUncapturedPair(); continue; }
+                    { commandReads?.ResetUncapturedPair(); continue; }
                     throw new CryptographicException("Refreshed messaging endpoints no longer bind owned network custody.");
                 }
                 await proofs.RequireStillFreshAsync(peer, own.Authority, token).ConfigureAwait(false);
@@ -412,7 +412,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySource :
                 var reading = await clock.ReadAsync(token).ConfigureAwait(false) ??
                     throw new CryptographicException("Refreshed messaging endpoints have no protected clock sample.");
                 OwnedInitialMessagingSeed.RequireFreshScope(scope, own.Proof, peer, reading);
-                token.ThrowIfCancellationRequested(); groupReads?.SetPeer(did.CanonicalBytes.Span, own, peer); return new(own, peer);
+                token.ThrowIfCancellationRequested(); commandReads?.SetPeer(did.CanonicalBytes.Span, own, peer); return new(own, peer);
             }
             throw new CryptographicException("Refreshed messaging endpoints no longer bind owned network custody.");
         }
@@ -427,14 +427,14 @@ public sealed partial class DeepIdV2ContactPathAuthoritySource :
     {
         var did = Deep.Protocol.ApplicationCore.DeepIdV2Codec.DecodeDid2(exactDid.Span);
         using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct); budget.CancelAfter(TimeSpan.FromSeconds(30));
-        var peer = groupReads?.ReadPeer(did.CanonicalBytes.Span, own) ??
+        var peer = commandReads?.ReadPeer(did.CanonicalBytes.Span, own) ??
             await proofs.FetchGroupMemberUnderLeaseAsync(did, own.Authority, accounts.DeploymentProfileId, held, budget.Token).ConfigureAwait(false);
         ProtectedDid2MessagingPeerBootstrap.RequireProof(did, peer);
         _ = await RecheckEndpointPairUnderLeaseAsync(own, peer, held, budget.Token).ConfigureAwait(false);
         own.Network.EnsureCurrent();
         var result = await Deep.Protocol.GroupV1.DeepIdV2GroupDirectoryAuthority.VerifyAsync(peer, RendezvousTrustedTime, budget.Token).ConfigureAwait(false);
         if (!result.AccountId.Span.SequenceEqual(expectedAccount.Span)) throw new CryptographicException("Group directory query returned another account.");
-        held.RequireActive(); groupReads?.SetPeer(did.CanonicalBytes.Span, own, peer); return result;
+        held.RequireActive(); commandReads?.SetPeer(did.CanonicalBytes.Span, own, peer); return result;
     }
 
     internal void RequireAccountOwner(DeepIdV2AccountService account)
@@ -529,7 +529,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySource :
     private async ValueTask<OwnPreKeyAuthoringAuthority> VerifyCurrentNetworkCoreAsync(
         CancellationToken cancellationToken)
     {
-        if (await ReadGroupOwnAsync(cancellationToken).ConfigureAwait(false) is { } captured) return captured;
+        if (await ReadCommandOwnAsync(cancellationToken).ConfigureAwait(false) is { } captured) return captured;
         var retained = await networkHistory.ReadHistoryAsync(cancellationToken).ConfigureAwait(false);
         var before = retained?.Snapshot;
         if (before?.ForkLatched == true)
@@ -605,7 +605,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySource :
             mailboxAuthority = await VerifyMailboxAuthorityAsync(exact, verified, authority, fresh,
                 cancellationToken).ConfigureAwait(false);
             var result = new OwnPreKeyAuthoringAuthority(verified, authority, fresh, mailboxAuthority, exact);
-            groupReads?.SetOwn(result); return result;
+            commandReads?.SetOwn(result); return result;
         }
         throw new InvalidOperationException("Bounded coherent network acquisition did not produce a verified context.");
     }
@@ -615,13 +615,13 @@ public sealed partial class DeepIdV2ContactPathAuthoritySource :
         VerifiedXPointNetworkAuthority authority,
         Deep.Protocol.AccountDirectoryV1.VerifiedDeepIdV2DirectoryFreshness proof, CancellationToken ct)
     {
-        var projection = ContactCodec.Decode("PMT2", exact.ExactOrderedPmt2Chain[^1].Span);
+        var parsed = ParseMailboxInputs(exact);
+        var projection = parsed.Projection;
         if (!network.BindsProjection(ContactCodec.ArtifactReference("PMT2", projection).CanonicalBytes))
             throw new CryptographicException("Mailbox policy requires the exact current verified projection.");
         ContactRecord? selected = null;
-        foreach (var value in exact.ExactOrderedPma2Chain)
+        foreach (var candidate in parsed.Policies)
         {
-            var candidate = ContactCodec.Decode("PMA2", value.Span);
             // The PMT2 canonical decoder has already checked the complete
             // typed PMA2 CoreRef header. Compare its core, never invent a ref.
             if (!Fixed(candidate.CoreHash.Span, projection.Field(4).Span[6..])) continue;

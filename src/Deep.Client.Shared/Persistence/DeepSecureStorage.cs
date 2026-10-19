@@ -327,7 +327,8 @@ public sealed class InMemoryDeepSecureStorage : IDeepSecureStorage, IDisposable
         ReadOnlyMemory<byte> replacement, CancellationToken cancellationToken = default)
     {
         DeepSecureStorageRegistration.ValidateSlot(slot);
-        if (expected.IsEmpty || replacement.IsEmpty || expected.Length > 1024 * 1024 || replacement.Length > 1024 * 1024)
+        var maximum = DeepSecureStorageRegistration.MaximumBytesForSlot(slot);
+        if (expected.IsEmpty || replacement.IsEmpty || expected.Length > maximum || replacement.Length > maximum)
             throw new ArgumentException("Secure-storage replacement is outside its byte bound.");
         cancellationToken.ThrowIfCancellationRequested();
         lock (gate)

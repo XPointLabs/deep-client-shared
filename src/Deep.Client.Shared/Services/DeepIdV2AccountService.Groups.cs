@@ -21,7 +21,7 @@ public sealed partial class DeepIdV2AccountService
 
     public async Task<string> CreateGroupAsync(string name, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct = default)
     {
-        using var reads = source.OpenGroupReadScope(); source = reads.Source;
+        using var reads = source.OpenCommandReadScope(); source = reads.Source;
         source.RequireAccountOwner(this); var own = await source.VerifyForOwnPreKeyAuthoringAsync(this, ct).ConfigureAwait(false);
         using var verifier = OpenVerifier();
         return await owner.GroupActionAsync(TrustedUnixSeconds(), verifier, "create", default, null, name, own, null, source, ct).ConfigureAwait(false);
@@ -39,7 +39,7 @@ public sealed partial class DeepIdV2AccountService
     private async Task<int> GroupActionAndFlushAsync(string action, ReadOnlyMemory<byte> group, DeepIdV2Conversation conversation,
         string? text, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
     {
-        using var reads = source.OpenGroupReadScope(); source = reads.Source;
+        using var reads = source.OpenCommandReadScope(); source = reads.Source;
         ArgumentNullException.ThrowIfNull(conversation); source.RequireAccountOwner(this); ProtectedDph2PreClaimJournal.RequireIntent(group.Span);
         var selected = group.ToArray();
         try
@@ -86,7 +86,7 @@ public sealed partial class DeepIdV2AccountService
     /// <summary>Publishes original protected control chunks with actual two-replica evidence; unknown writes are never reminted.</summary>
     public async Task<int> PublishGroupControlAsync(ReadOnlyMemory<byte> group, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct = default)
     {
-        using var reads = source.OpenGroupReadScope(); source = reads.Source;
+        using var reads = source.OpenCommandReadScope(); source = reads.Source;
         source.RequireAccountOwner(this); ProtectedDph2PreClaimJournal.RequireIntent(group.Span);
         using var verifier = OpenVerifier(); var completed = 0;
         for (; completed < 512; completed++)
@@ -101,7 +101,7 @@ public sealed partial class DeepIdV2AccountService
     public async Task<int> SyncGroupControlAsync(ReadOnlyMemory<byte> group, DeepIdV2Conversation ownerConversation,
         DeepIdV2ContactPathAuthoritySource source, CancellationToken ct = default)
     {
-        using var reads = source.OpenGroupReadScope(); source = reads.Source;
+        using var reads = source.OpenCommandReadScope(); source = reads.Source;
         source.RequireAccountOwner(this); ProtectedDph2PreClaimJournal.RequireIntent(group.Span);
         await RequireAttachmentConsentAsync(ownerConversation, source, ct).ConfigureAwait(false);
         using var verifier = OpenVerifier(); var completed = 0;
@@ -117,7 +117,7 @@ public sealed partial class DeepIdV2AccountService
     public async Task<int> FlushGroupAsync(ReadOnlyMemory<byte> group, DeepIdV2Conversation conversation,
         DeepIdV2ContactPathAuthoritySource source, CancellationToken ct = default)
     {
-        using var reads = source.OpenGroupReadScope(); source = reads.Source;
+        using var reads = source.OpenCommandReadScope(); source = reads.Source;
         ArgumentNullException.ThrowIfNull(conversation); source.RequireAccountOwner(this); ProtectedDph2PreClaimJournal.RequireIntent(group.Span);
         var selected = group.ToArray();
         try

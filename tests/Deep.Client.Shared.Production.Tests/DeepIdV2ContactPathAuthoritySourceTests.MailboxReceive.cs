@@ -441,7 +441,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 Assert.Equal(SHA256.HashData(exact.Span), root.Active.RetrieveMauHash);
                 RetrievedOriginalRoutes.Add(root.Active.Route.ToArray());
             }
-            Assert.Equal(8, request.MaximumItems);
+            Assert.Equal(2, request.MaximumItems);
             await BuildHeldFrame(OnionOperation.Retrieve, exact, route, ct); BuiltRetrieveFrame = true;
             if (LoseRetrieveReply) throw new IOException("Injected lost original Retrieve response.");
             var decode = policy.GetCurrent();

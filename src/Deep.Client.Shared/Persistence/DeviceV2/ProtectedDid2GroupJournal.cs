@@ -9,7 +9,7 @@ namespace Deep.Client.Shared.Persistence.DeviceV2;
 internal static class ProtectedDid2GroupJournal
 {
     internal const string Slot = "deep.store.v2.groups";
-    internal const int MaximumBytes = 32 * 1024 * 1024;
+    internal const int MaximumBytes = 4 * 1024 * 1024;
     internal sealed class Group
     {
         internal byte[] Id = [], ForkEvidence = [];
