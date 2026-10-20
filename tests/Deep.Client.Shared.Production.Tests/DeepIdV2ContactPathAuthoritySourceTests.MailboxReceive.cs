@@ -43,6 +43,19 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         => await CheckExpiredCapturedPageAsync(lostAck, "none");
 
     [Theory]
+    [InlineData("before-ack-closure")] [InlineData("after-ack-closure")]
+    [Trait("RequiresApprovedMlKemRuntime", "true")]
+    public async Task Did2OwnedMailboxReceive_ExpiredPreparedAckClosureCrashKeepsOriginalPageAndSql(string defect)
+        => await CheckExpiredCapturedPageAsync(true, defect);
+
+    [Theory]
+    [InlineData("capture-time")] [InlineData("changed-sql")] [InlineData("changed-ack-sql")]
+    [InlineData("cancelled")]
+    [Trait("RequiresApprovedMlKemRuntime", "true")]
+    public async Task Did2OwnedMailboxReceive_ExpiredPreparedAckRejectsChangedNativeFactsBeforeIssuer(string defect)
+        => await CheckExpiredCapturedPageAsync(true, defect);
+
+    [Theory]
     [InlineData("capture-time")]
     [InlineData("changed-sql")]
     [InlineData("non-final")]
@@ -88,10 +101,26 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         fixture.ProofTime = checked(fixture.ProofTime + delta); fixture.Sample = checked(fixture.Sample + delta);
         if (defect == "capture-time") await fixture.ChangePeerFinalPageCaptureTimeAsync(grant.ExpiresAtUnixSeconds);
         if (defect == "changed-sql") await fixture.DamagePeerFinalPageRequestAsync(originalMau);
+        if (defect == "changed-ack-sql") await fixture.DamagePeerFinalPageRequestAsync(originalAck!);
         fixture.ColdReopenReceiverStoreStorage();
         terminal.LoseAckReply = false; terminal.IndependentAck = true; terminal.ExpectedAckCounter = 1;
         var replacement = new OwnedGrantTransport(fixture, selfRetrieve: true, ownerOnPrimary: false);
-        if (defect != "none")
+        if (defect is "before-ack-closure" or "after-ack-closure")
+        {
+            var point = defect == "before-ack-closure" ? Did2MailboxInstallationFailpoint.BeforeAckClosure : Did2MailboxInstallationFailpoint.AfterAckClosure;
+            var hit = false;
+            using (Did2MailboxInstallationTestHooks.Push(p => { if (p == point) { hit = true; throw new IOException("ACK closure interruption."); } }))
+                Assert.NotNull(await Record.ExceptionAsync(() => fixture.SynchronizeNativeReceiver(replacement, terminal)));
+            Assert.True(hit); Assert.Equal(0, replacement.Calls); Assert.Equal(1, terminal.AckCalls);
+            using (var retained = await fixture.ReadPeerMailboxReads())
+            {
+                Assert.Equal(defect == "after-ack-closure" ? 9 : 6, retained.Phase);
+                Assert.Equal(exactPage, retained.Active!.Page); Assert.Equal(originalGrant, retained.Active.Grant);
+                Assert.Equal(defect == "after-ack-closure" ? 1 : 0, retained.Closed.Count);
+            }
+            fixture.ColdReopenReceiverStoreStorage();
+        }
+        else if (defect != "none")
         {
             var before = await fixture.PeerFinalPageCustodyDigestAsync();
             if (defect == "cancelled")
@@ -99,28 +128,16 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 using var cancellation = new CancellationTokenSource(); cancellation.Cancel();
                 await Assert.ThrowsAnyAsync<OperationCanceledException>(() => fixture.SynchronizeNativeReceiver(replacement, terminal, cancellation.Token));
             }
-            else if (defect == "changed-sql")
+            else if (defect is "changed-sql" or "changed-ack-sql")
                 await Assert.ThrowsAsync<MailboxAuthenticatedCapabilityException>(() => fixture.SynchronizeNativeReceiver(replacement, terminal));
             else await Assert.ThrowsAnyAsync<CryptographicException>(() => fixture.SynchronizeNativeReceiver(replacement, terminal));
             Assert.Equal(before, await fixture.PeerFinalPageCustodyDigestAsync());
-            Assert.Equal(0, replacement.Calls); Assert.Equal(1, terminal.RetrieveCalls); Assert.Equal(0, terminal.AckCalls);
+            Assert.Equal(0, replacement.Calls); Assert.Equal(1, terminal.RetrieveCalls); Assert.Equal(lostAck ? 1 : 0, terminal.AckCalls);
             return;
-        }
-        if (lostAck)
-        {
-            var before = await fixture.PeerFinalPageCustodyDigestAsync();
-            await Assert.ThrowsAsync<CryptographicException>(() => fixture.SynchronizeNativeReceiver(replacement, terminal));
-            Assert.Equal(before, await fixture.PeerFinalPageCustodyDigestAsync());
-            Assert.Equal(0, replacement.Calls); Assert.Equal(1, terminal.RetrieveCalls); Assert.Equal(1, terminal.AckCalls);
-            Assert.Equal(originalAck, Assert.Single(terminal.ExactAckRequests));
-            using var retained = await fixture.ReadPeerMailboxReads();
-            Assert.Equal(6, retained.Phase); Assert.Equal(exactPage, retained.Active!.Page);
-            Assert.Equal(originalGrant, retained.Active.Grant); Assert.Empty(retained.Closed);
-            return; // Native original-ACK outcome recovery is deliberately not faked.
         }
         terminal.LoseAckReply = true;
         await Assert.ThrowsAsync<ClientMailboxDispatchOutcomeUnknownException>(() => fixture.SynchronizeNativeReceiver(replacement, terminal));
-        Assert.Equal(1, replacement.Calls); Assert.Equal(1, terminal.RetrieveCalls); Assert.Equal(1, terminal.AckCalls);
+        Assert.Equal(1, replacement.Calls); Assert.Equal(1, terminal.RetrieveCalls); Assert.Equal(lostAck ? 2 : 1, terminal.AckCalls);
         using (var pending = await fixture.ReadPeerMailboxReads())
         { Assert.Equal(8, pending.Phase); Assert.Equal(exactPage, pending.Active!.Page); Assert.Equal(originalGrant, pending.Active.Grant); }
         fixture.ColdReopenReceiverStoreStorage(); terminal.LoseAckReply = false;
@@ -130,15 +147,16 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         var result = await fixture.SynchronizeNativeReceiver(replacement, terminal);
         Assert.Equal(1, result.ProcessedEnvelopes); Assert.Equal(1, result.DurableTombstones); Assert.False(result.HasMore);
         Assert.Equal(1, replacement.Calls); Assert.Equal(1, terminal.RetrieveCalls);
-        Assert.Equal(2, terminal.AckCalls);
-        Assert.Equal(terminal.ExactAckRequests[0], terminal.ExactAckRequests[1]);
+        Assert.Equal(lostAck ? 3 : 2, terminal.AckCalls);
+        Assert.Equal(terminal.ExactAckRequests[^2], terminal.ExactAckRequests[^1]);
+        if (lostAck) { Assert.Equal(originalAck, terminal.ExactAckRequests[0]); Assert.NotEqual(originalAck, terminal.ExactAckRequests[^1]); }
         Assert.Equal(originalMau, Assert.Single(terminal.ExactRetrieveRequests));
         var newAck = MailboxAuthenticatedClientRequestCodec.Decode(terminal.ExactAckRequests[^1]);
         Assert.NotEqual(originalGrant, SHA256.HashData(MailboxAuthenticatedCapabilityCodec.EncodeGrant(newAck.Presentation.Grant)));
         using (var read = await fixture.ReadPeerMailboxReads())
         {
             Assert.Equal(0, read.Phase); Assert.Null(read.Active);
-            Assert.Empty(read.Closed);
+            Assert.Equal(lostAck ? 1 : 0, read.Closed.Count);
         }
         fixture.ColdReopenReceiverStoreStorage();
         var receiver = await fixture.ReceiveNativeMailboxInitial(initial);
@@ -375,14 +393,16 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         internal async Task DamagePeerFinalPageRequestAsync(byte[] exact)
         {
             var mau = MailboxAuthenticatedClientRequestCodec.Decode(exact);
-            var request = MailboxAuthenticatedRequestTranscript.DecodeRetrieveBody(mau.Binding.CanonicalRequest.Span);
+            var operation = mau.Binding.Operation == MailboxAuthenticatedOperation.Ack
+                ? MailboxAuthenticatedRequestTranscript.DecodeAckBody(mau.Binding.CanonicalRequest.Span).OperationId
+                : MailboxAuthenticatedRequestTranscript.DecodeRetrieveBody(mau.Binding.CanonicalRequest.Span).OperationId;
             var account = (await ReopenGrantReader().GetCurrentAsync())!.AccountId.ToArray();
             await WithOwnedApplicationConnectionAsync(false, Network, account, sql =>
             {
                 using var command = sql.CreateCommand();
                 command.CommandText = "UPDATE transport_outbox_items SET ciphertext_bundle=zeroblob(length(ciphertext_bundle)) WHERE account_scope=$scope AND logical_id=$op;";
                 command.Parameters.AddWithValue("$scope", VerifiedCurrentMailboxGrant.AccountScopeForHolder(mau.Presentation.Grant.HolderPublicKey.Span).ToArray());
-                command.Parameters.AddWithValue("$op", request.OperationId.ToArray());
+                command.Parameters.AddWithValue("$op", operation.ToArray());
                 Assert.Equal(1, command.ExecuteNonQuery());
             });
         }
@@ -423,7 +443,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         private Did2OwnedMailboxTransportContext context = null!;
         private IMailboxClientDecodePolicyProvider policy = null!;
         private MailboxEncryptedEnvelope? envelope;
-        private byte[]? ackRequest, ackResponse;
+        private readonly Dictionary<string, byte[]> ackRequests = new(StringComparer.Ordinal), ackResponses = new(StringComparer.Ordinal);
         private bool tombstoned;
         internal MailboxEncryptedEnvelope? RetainedEnvelope;
         internal ulong Cursor = 1, ExpectedAckCounter = 2;
@@ -489,13 +509,15 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             var request = MailboxAuthenticatedRequestTranscript.DecodeAckBody(mau.Binding.CanonicalRequest.Span);
             using (var root = await fixture.ReadPeerMailboxReads(own: ownerOnPrimary))
             { Assert.Equal(IndependentAck ? 8 : 6, root.Phase); Assert.Equal(ExpectedAckCounter, root.Active!.AckCounter); Assert.Equal(SHA256.HashData(exact.Span), root.Active.AckMauHash); }
-            if (ackRequest is null) ackRequest = exact.ToArray(); else Assert.Equal(ackRequest, exact.ToArray());
+            var operation = Convert.ToHexString(request.OperationId.Span);
+            if (ackRequests.TryGetValue(operation, out var ackRequest)) Assert.Equal(ackRequest, exact.ToArray());
+            else ackRequests.Add(operation, exact.ToArray());
             await BuildHeldFrame(OnionOperation.Acknowledge, exact, route, ct); BuiltAckFrame = true;
             Assert.Equal(Cursor, Assert.Single(request.Acknowledgements).Cursor);
             Assert.Equal(!HasMoreAfterPage, request.IsFinalPage);
             Assert.Equal(HasMoreAfterPage ? Bytes(32, 0xb4) : [], request.ContinuationToken.ToArray());
             Assert.Equal(envelope!.DeduplicationDigest.ToArray(), request.Acknowledgements[0].EnvelopeDigest.ToArray());
-            if (ackResponse is null)
+            if (!ackResponses.TryGetValue(operation, out var ackResponse))
             {
                 var crypto = new SodiumMailboxPeerReplicationCrypto();
                 byte Marker(ReadOnlyMemory<byte> id) => (byte)Enumerable.Range(0x70, 3).Single(value => PublicKey((byte)value).AsSpan().SequenceEqual(id.Span));
@@ -514,6 +536,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                     SecondReplica = Receipt(route.Replicas.SecondId), Signature = new byte[64]
                 }, Bytes(32, Marker(route.Replicas.FirstId))));
                 ackResponse = MailboxAggregateAckCodec.EncodeMqr3(new() { Epoch = request.Epoch, OperationId = request.OperationId, TombstoneQuorums = [quorum] });
+                ackResponses.Add(operation, ackResponse);
             }
             tombstoned = true;
             if (LoseAckReply) { OnLostAckReply?.Invoke(); throw new IOException("Injected lost ACK response after actual terminal tombstone."); }

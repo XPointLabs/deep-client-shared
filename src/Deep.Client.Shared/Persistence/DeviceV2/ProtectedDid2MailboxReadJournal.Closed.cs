@@ -39,17 +39,36 @@ internal static partial class ProtectedDid2MailboxReadJournal
             catch { result.Dispose(); throw; }
         }
 
+        internal static ClosedAttempt CaptureAck(Cycle cycle, ulong expiry, ulong lower, ReadOnlySpan<byte> exactMau)
+        {
+            if (cycle.ReadPage().HasMore || cycle.AckCounter == 0 || cycle.AckReply.Length != 0) throw Bad();
+            var result = new ClosedAttempt
+            {
+                Grant = cycle.AckGrantHash.ToArray(), Scope = cycle.Scope.ToArray(), Route = cycle.Route.ToArray(),
+                RetrieveBody = cycle.RetrieveBody.ToArray(), MauHash = cycle.AckMauHash.ToArray(), ExactMau = exactMau.ToArray(),
+                Phase = 3, PollGeneration = cycle.PollGeneration, GrantExpiry = expiry, ClosedAtLower = lower, Counter = cycle.AckCounter
+            };
+            try
+            {
+                result.RequireShape();
+                var ack = MailboxAuthenticatedClientRequestCodec.Decode(exactMau);
+                if (!Fixed(ack.Binding.CanonicalRequest.Span, cycle.AckBody)) throw Bad();
+                return result;
+            }
+            catch { result.Dispose(); throw; }
+        }
+
         internal void RequireShape()
         {
             Require32(Grant); Require32(Scope); Require32(Route);
-            if (Phase is not (1 or 2) || GrantExpiry == 0 || ClosedAtLower < GrantExpiry ||
+            if (Phase is not (1 or 2 or 3) || GrantExpiry == 0 || ClosedAtLower < GrantExpiry ||
                 RetrieveBody.Length is < 108 or > 364 || MauHash.Length != 32 || ExactMau.Length > 8_192 ||
                 (Phase == 1 ? Counter != 0 || !Zero(MauHash) || ExactMau.Length != 0 : Counter == 0 || Zero(MauHash) || ExactMau.Length == 0)) throw Bad();
             _ = MailboxAuthenticatedRequestTranscript.DecodeRetrieveBody(RetrieveBody);
             if (Phase == 1) return;
             var mau = MailboxAuthenticatedClientRequestCodec.Decode(ExactMau);
-            if (mau.Binding.Operation != MailboxAuthenticatedOperation.Retrieve ||
-                !Fixed(mau.Binding.CanonicalRequest.Span, RetrieveBody) || mau.Presentation.ReplayCounter != Counter ||
+            if (mau.Binding.Operation != (Phase == 3 ? MailboxAuthenticatedOperation.Ack : MailboxAuthenticatedOperation.Retrieve) ||
+                Phase != 3 && !Fixed(mau.Binding.CanonicalRequest.Span, RetrieveBody) || mau.Presentation.ReplayCounter != Counter ||
                 mau.Presentation.Grant.Domain != MailboxCapabilityDomain.Retrieve ||
                 mau.Presentation.Grant.ExpiresAtUnixSeconds != GrantExpiry ||
                 !Fixed(SHA256.HashData(ExactMau), MauHash) ||
@@ -57,6 +76,13 @@ internal static partial class ProtectedDid2MailboxReadJournal
                 !PublicKeyAuth.VerifyDetached(mau.Presentation.HolderSignature.ToArray(),
                     MailboxAuthenticatedCapabilityCodec.GetPresentationSigningBytes(mau.Presentation), mau.Presentation.Grant.HolderPublicKey.ToArray()))
                 throw new CryptographicException("Closed Retrieve differs from its exact original signed frame.");
+            if (Phase == 3)
+            {
+                var read = MailboxAuthenticatedRequestTranscript.DecodeRetrieveBody(RetrieveBody);
+                var ack = MailboxAuthenticatedRequestTranscript.DecodeAckBody(mau.Binding.CanonicalRequest.Span);
+                if (!ack.IsFinalPage || ack.Acknowledgements.Count > read.MaximumItems || ack.Epoch != read.Epoch || !Fixed(ack.MailboxId.Bytes.Span, read.MailboxId.Bytes.Span) ||
+                    !Fixed(ack.PlacementId.Bytes.Span, read.PlacementId.Bytes.Span)) throw Bad();
+            }
         }
 
         public void Dispose()
@@ -101,8 +127,12 @@ internal static partial class ProtectedDid2MailboxReadJournal
             var attempt = pair.Value; attempt.RequireShape();
             if (pair.Key != Name(attempt.Grant) ||
                 !state.Traversals.TryGetValue(Name(attempt.Scope), out var traversal) || traversal.PollGeneration < attempt.PollGeneration ||
-                attempt.Phase == 2 && state.Counters.GetValueOrDefault(pair.Key) != attempt.Counter ||
-                state.Active is { } active && (Fixed(active.Grant, attempt.Grant) || Fixed(active.AckGrantHash, attempt.Grant))) throw Bad();
+                attempt.Phase >= 2 && state.Counters.GetValueOrDefault(pair.Key) != attempt.Counter ||
+                state.Active is { } active && (attempt.Phase != 3 && Fixed(active.Grant, attempt.Grant) ||
+                    attempt.Phase == 3 && Fixed(active.Grant, attempt.Grant) && attempt.Counter <= active.RetrieveCounter ||
+                    Fixed(active.AckGrantHash, attempt.Grant) && !(state.Phase == 9 && attempt.Phase == 3 &&
+                        Fixed(active.AckMauHash, attempt.MauHash) && active.AckCounter == attempt.Counter &&
+                        Fixed(active.Scope, attempt.Scope) && Fixed(active.Route, attempt.Route) && Fixed(active.RetrieveBody, attempt.RetrieveBody)))) throw Bad();
         }
     }
 }

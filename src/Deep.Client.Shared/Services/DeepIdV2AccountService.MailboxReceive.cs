@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using Deep.Client.Shared.Persistence.DeviceV2;
 using Deep.Client.Shared.Services.ContactV2;
 using Deep.Protocol.MessagingWire;
@@ -106,17 +107,30 @@ public sealed partial class DeepIdV2AccountService
         // Semantic group verification inside ACK may borrow this same snapshot
         // after rejoining actual floors/time, instead of fetching another proof
         // and advancing the floor underneath the already captured endpoint set.
-        using var ackReads = source.OpenIndependentCommandReadScope();
-        var ackSource = ackReads.Source;
-        // One independently verified own/network snapshot for the entire ACK
-        // set. Minting another own after endpoint capture can advance the owned
-        // network floor and invalidate those very pairs before the ACK fence.
-        own = await ackSource.VerifyForOwnPreKeyAuthoringAsync(this, ct).ConfigureAwait(false);
-        var endpoints = new List<Did2MailboxSemanticEndpoints>(scopes.Count);
-        foreach (var scope in scopes.Values)
-            endpoints.Add(new(scope, await ackSource.VerifyForOwnMessagingAsync(this, scope, ct, own).ConfigureAwait(false)));
-        var acknowledged = await owner.AcknowledgeOwnMailboxAsync(TrustedUnixSeconds(), verifier, descriptor,
-            endpoints, ackSource, own, grants, transport, ct).ConfigureAwait(false);
-        return new(page.Items.Count, page.HasMore, acknowledged.DurableTombstones);
+        for (var acquisition = 0; acquisition < 2; acquisition++)
+        {
+            using var ackReads = source.OpenIndependentCommandReadScope();
+            var ackSource = ackReads.Source;
+            // One independently verified own/network snapshot for the entire ACK
+            // set. Never renew just one member of an already captured set.
+            own = await ackSource.VerifyForOwnPreKeyAuthoringAsync(this, ct).ConfigureAwait(false);
+            var endpoints = new List<Did2MailboxSemanticEndpoints>(scopes.Count);
+            try
+            {
+                foreach (var scope in scopes.Values)
+                    endpoints.Add(new(scope, await ackSource.VerifyForOwnMessagingAsync(this, scope, ct, own).ConfigureAwait(false)));
+            }
+            catch (MessagingEndpointSnapshotChangedException) when (acquisition == 0 && !ct.IsCancellationRequested)
+            {
+                // No ACK factory/signing/transport call has started. Discard the
+                // ENTIRE uncaptured endpoint set and acquire fresh own + all peers.
+                // Actual received page, ratchets and original ACK custody stay.
+                continue;
+            }
+            var acknowledged = await owner.AcknowledgeOwnMailboxAsync(TrustedUnixSeconds(), verifier, descriptor,
+                endpoints, ackSource, own, grants, transport, ct).ConfigureAwait(false);
+            return new(page.Items.Count, page.HasMore, acknowledged.DurableTombstones);
+        }
+        throw new CryptographicException("A matching current ACK endpoint set is unavailable.");
     }
 }

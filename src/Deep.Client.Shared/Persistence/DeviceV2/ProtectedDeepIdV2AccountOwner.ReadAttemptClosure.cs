@@ -61,7 +61,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     throw new CryptographicException("Closed Retrieve changed its original expiry.");
                 var stored = await application.ReadTransportOutboxAsync(
                     VerifiedCurrentMailboxGrant.AccountScopeForHolder(grant.HolderPublicKey.Span),
-                    OutboxLogicalId.FromBytes(MailboxAuthenticatedRequestTranscript.DecodeRetrieveBody(prior.RetrieveBody).OperationId.Span), ct).ConfigureAwait(false);
+                    OutboxLogicalId.FromBytes(prior.Phase == 3
+                        ? MailboxAuthenticatedRequestTranscript.DecodeAckBody(MailboxAuthenticatedClientRequestCodec.Decode(prior.ExactMau).Binding.CanonicalRequest.Span).OperationId.Span
+                        : MailboxAuthenticatedRequestTranscript.DecodeRetrieveBody(prior.RetrieveBody).OperationId.Span), ct).ConfigureAwait(false);
                 RequireUncapturedReadSql(stored, prior.Phase, prior.ExactMau, prior.RetrieveBody,
                     prior.Grant, prior.Counter, prior.MauHash);
             }
@@ -206,10 +208,11 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         {
             var frame = MailboxAuthenticatedClientRequestCodec.Decode(actual);
             if (stored.Result != TransportOutboxReadResult.Found || !FixedRoute(actual, exactMau) ||
-                frame.Binding.Operation != MailboxAuthenticatedOperation.Retrieve || !FixedRoute(frame.Binding.CanonicalRequest.Span, body) ||
+                frame.Binding.Operation != (phase == 3 ? MailboxAuthenticatedOperation.Ack : MailboxAuthenticatedOperation.Retrieve) ||
+                !FixedRoute(frame.Binding.CanonicalRequest.Span, phase == 3 ? MailboxAuthenticatedClientRequestCodec.Decode(exactMau).Binding.CanonicalRequest.Span : body) ||
                 !FixedRoute(SHA256.HashData(MailboxAuthenticatedCapabilityCodec.EncodeGrant(frame.Presentation.Grant)), grant) ||
                 !FixedRoute(stored.Item.DedupMaterial.Value, frame.Binding.RequestDigest.Span) ||
-                phase == 2 && (frame.Presentation.ReplayCounter != counter || !FixedRoute(SHA256.HashData(actual), mauHash)) ||
+                phase >= 2 && (frame.Presentation.ReplayCounter != counter || !FixedRoute(SHA256.HashData(actual), mauHash)) ||
                 !Sodium.PublicKeyAuth.VerifyDetached(frame.Presentation.HolderSignature.ToArray(),
                     MailboxAuthenticatedCapabilityCodec.GetPresentationSigningBytes(frame.Presentation), frame.Presentation.Grant.HolderPublicKey.ToArray()))
                 throw new CryptographicException("Original Retrieve SQL differs from protected holder/body/counter custody.");

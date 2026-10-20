@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using Deep.Client.Shared.Persistence.DeviceV2;
 using Deep.Client.Shared.Services;
+using Deep.Client.Shared.Services.ContactV2;
 using Deep.Protocol.ApplicationCore;
 
 namespace Deep.Client.Shared.Production.Tests;
@@ -151,7 +152,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             OnNextDirectoryProof = capturedOwn ? switchView : () => OnNextDirectoryProof = switchView;
             if (capturedOwn)
             {
-                var error = await Assert.ThrowsAsync<CryptographicException>(async () =>
+                var error = await Assert.ThrowsAsync<MessagingEndpointSnapshotChangedException>(async () =>
                     await source.VerifyForOwnMessagingAsync(Accounts, scope, default, captured));
                 Assert.Equal("Refreshed messaging endpoints no longer bind owned network custody.", error.Message);
             }

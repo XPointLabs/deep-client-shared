@@ -401,7 +401,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySource :
                     // new owner into an already captured multi-target authority set.
                     if (verifiedOwn is null && acquisition == 0)
                     { commandReads?.ResetUncapturedPair(); continue; }
-                    throw new CryptographicException("Refreshed messaging endpoints no longer bind owned network custody.");
+                    throw new MessagingEndpointSnapshotChangedException();
                 }
                 await proofs.RequireStillFreshAsync(peer, own.Authority, token).ConfigureAwait(false);
                 await proofs.RequireStillFreshAsync(own.Proof, own.Authority, token).ConfigureAwait(false);

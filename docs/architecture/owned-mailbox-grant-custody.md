@@ -1044,8 +1044,26 @@ original holder/acquisition and native SQL with current authenticated lower time
 then preserves the original request as closed-unknown before allowing ordinary
 independent new work. The Protocol historical check returns no live credential.
 Closed attempts pin grants, floors and archived paths; capacity is backpressure,
-not permission to evict them. Captured page/semantic/ACK recovery remains open.
+not permission to evict them. Captured-page and ACK recovery are separate scopes;
+the current final-page continuation is described below, not by this producer.
 
 The current source receipts and remaining acceptance work are recorded in the
 [focused checkpoint](../testing/s05-expired-active-retrieve-2026-10-16.md).
 No account reset, old-frame renewal or physical delivery claim is implied.
+
+## Current final-page ACK continuation
+
+[DR-0158](../../../docs/survival-program/decisions/DR-0158-expired-prepared-final-ack.md)
+owns admission closure and current successor ACK; do not duplicate its grammar
+here. Rebuild consumers together: an older binary refuses the new private
+continuation states instead of interpreting them as ordinary pending work.
+No user/account reset, new storage slot or compatibility reader is required.
+Original signed SQL requests, page, ratchets and counter floors remain pinned.
+Closed capacity is backpressure, never eviction. Known durable replies and
+non-final pagination are not reclassified as unknown prepared final ACKs.
+
+The endpoint-set acquisition retry is pre-ACK only: discard the entire unused
+set, acquire fresh own plus every peer once, and repeat all current checks.
+It cannot retry an effect or retain half of an old set. Source tests and real
+retained CLI evidence are separate from full/package/device acceptance; see
+[the CLI checkpoint](../../../deep-cli/docs/testing/cli-atomic-reservation-2026-10-20.md).

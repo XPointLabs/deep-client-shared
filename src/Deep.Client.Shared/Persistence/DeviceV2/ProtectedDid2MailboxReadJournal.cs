@@ -101,7 +101,7 @@ internal static partial class ProtectedDid2MailboxReadJournal
             using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
             hash.AppendData("Deep/Local/DID2/MailboxAckOperation/1"u8); hash.AppendData([0]);
             hash.AppendData(Scope); hash.AppendData(Grant); hash.AppendData(RetrieveMauHash); hash.AppendData(SHA256.HashData(Page));
-            if (AckGrant.Length != 0) hash.AppendData(AckGrant);
+            if (AckGrant.Length != 0 && !Fixed(AckGrant, Grant)) hash.AppendData(AckGrant);
             return hash.GetHashAndReset()[..16];
         }
 
@@ -128,7 +128,7 @@ internal static partial class ProtectedDid2MailboxReadJournal
     internal static State Decode(ReadOnlySpan<byte> exact, ReadOnlySpan<byte> network, ReadOnlySpan<byte> account, ReadOnlySpan<byte> instance)
     {
         RequireScope(network, account, instance);
-        if (exact.Length is < HeaderBytes or > MaximumBytes || exact[0] != 1 || exact[1] > 8 ||
+        if (exact.Length is < HeaderBytes or > MaximumBytes || exact[0] != 1 || exact[1] > 9 ||
             !Fixed(exact.Slice(12, 16), network) || !Fixed(exact.Slice(28, 32), account) || !Fixed(exact.Slice(60, 32), instance)) throw Bad();
         var counters = BinaryPrimitives.ReadUInt16BigEndian(exact.Slice(2));
         var scopes = BinaryPrimitives.ReadUInt16BigEndian(exact.Slice(92));
@@ -202,7 +202,7 @@ internal static partial class ProtectedDid2MailboxReadJournal
 
     private static void Validate(State state)
     {
-        if (state.Phase > 8 || state.Counters.Count > MaximumFloors || state.Traversals.Count > MaximumFloors || state.Closed.Count > MaximumFloors ||
+        if (state.Phase > 9 || state.Counters.Count > MaximumFloors || state.Traversals.Count > MaximumFloors || state.Closed.Count > MaximumFloors ||
             state.Revision < checked((ulong)(state.Counters.Count + state.Traversals.Count + state.Closed.Count) + 1) ||
             (state.Phase == 0) != (state.Active is null)) throw Bad();
         foreach (var pair in state.Counters) { if (Name(Convert.FromHexString(pair.Key)) != pair.Key || pair.Value == 0) throw Bad(); }
@@ -211,11 +211,16 @@ internal static partial class ProtectedDid2MailboxReadJournal
         ValidateClosed(state);
         if (state.Active is not { } c) return;
         Require32(c.Grant); Require32(c.Scope); Require32(c.Route);
-        var independentAck = state.Phase >= 7;
-        var preparedAck = state.Phase is 6 or 8;
+        var independentAck = state.Phase >= 7 && !Fixed(c.AckGrant, c.Grant);
+        var preparedAck = state.Phase is 6 or 8 or 9;
+        if (state.Phase == 9)
+        {
+            Require32(c.AckGrant);
+            if (!state.Closed.TryGetValue(Name(c.AckGrantHash), out var closedAck) || closedAck.Phase != 3 || c.AckReply.Length != 0) throw Bad();
+        }
         if (independentAck)
         { Require32(c.AckGrant); if (Fixed(c.AckGrant, c.Grant) || c.ReadPage().HasMore) throw Bad(); }
-        else if (c.AckGrant.Length != 0) throw Bad();
+        else if (c.AckGrant.Length != 0 && state.Phase != 9) throw Bad();
         if (c.RetrieveBody.Length is < 108 or > 364 || c.Page.Length > MaximumPageBytes || c.AckBody.Length > 5_000 ||
             c.RetrieveMauHash.Length != 32 || c.AckMauHash.Length != 32 || c.AckReply.Length > MaximumAckReplyBytes ||
             !preparedAck && c.AckReply.Length != 0) throw Bad();
@@ -226,7 +231,8 @@ internal static partial class ProtectedDid2MailboxReadJournal
             (state.Phase >= 5) != (c.AckBody.Length != 0) ||
             (preparedAck ? c.AckCounter == 0 || !independentAck && c.AckCounter <= c.RetrieveCounter || Zero(c.AckMauHash) : c.AckCounter != 0 || !Zero(c.AckMauHash))) throw Bad();
         if (state.Phase >= 2 && (state.Counters.GetValueOrDefault(Name(c.Grant)) !=
-                (state.Phase == 6 ? c.AckCounter : c.RetrieveCounter) ||
+                (state.Phase == 6 || state.Phase == 9 && !independentAck ? c.AckCounter :
+                    state.Closed.TryGetValue(Name(c.Grant), out var originalAck) && originalAck.Phase == 3 ? originalAck.Counter : c.RetrieveCounter) ||
             independentAck && preparedAck && state.Counters.GetValueOrDefault(Name(c.AckGrant)) != c.AckCounter)) throw Bad();
         var page = state.Phase >= 3 ? c.ReadPage() : null;
         var after = state.Phase >= 4 ? page!.HasMore ? page.NextCursor : 0 : request.AfterCursor;
