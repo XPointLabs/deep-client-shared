@@ -30,6 +30,13 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         await fixture.CheckOwnedLogicalAssignmentAsync();
     }
 
+    [Fact]
+    public async Task Did2LogicalAssignment_RouteControlIgnoresExpiredSnapshotButNotSignedRouteExpiry()
+    {
+        await using var fixture = await Fixture.CreateAsync(withPeer: true, expiringHistory: true, encryptedStorage: true);
+        await fixture.CheckLogicalAssignmentAsync(false, routeControlOnly: true);
+    }
+
     private sealed partial class Fixture
     {
         internal async Task CheckOwnedLogicalAssignmentAsync()
@@ -56,7 +63,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             finally { CryptographicOperations.ZeroMemory(before); }
         }
 
-        internal async Task CheckLogicalAssignmentAsync(bool changedEpoch)
+        internal async Task CheckLogicalAssignmentAsync(bool changedEpoch, bool routeControlOnly = false)
         {
             var identity = (await accounts.GetCurrentAsync())!.PermanentId.CanonicalText;
             var inventory = await accounts.EnsureOwnPreKeyInventoryAsync(Source());
@@ -117,6 +124,38 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             Assert.Equal(exactClosure, carried.ExactRouteClosure.ToArray());
             Assert.Equal(0UL, BinaryPrimitives.ReadUInt64BigEndian(carried.Route.Route.Field(3).Span));
             Assert.Equal(original.Route.Selection.CanonicalBytes.ToArray(), carried.Route.Selection.CanonicalBytes.ToArray());
+            if (routeControlOnly)
+            {
+                var controlPredecessor = await DeepIdV2ContactRouteVerifier.VerifyPredecessorAsync(currentRecipient,
+                    next.Network, next.Authority, carried.ExactXir1V2, carried.ExactRouteClosure, time);
+                var controlXra = await DeepIdV2ContactRouteAuthor.AuthorAdvertisementSuccessorAsync(currentRecipient,
+                    next.Network, next.Authority, secrets!, carried.Route.Authorization.CanonicalBytes,
+                    Bytes(32, 0xb1), Bytes(32, 0xb2), ScalarMult.Base(Bytes(32, 0xb3)), 1_150, time);
+                var controlThreshold = await DeepIdV2ContactRouteAuthor.AuthorThresholdSuccessorAsync(currentRecipient,
+                    next.Network, next.Authority, controlPredecessor, controlXra.CanonicalBytes, CreateRouteWitnesses(), 1_150, time);
+                var controlRoute = await DeepIdV2ContactRouteAuthor.CompleteSuccessorAsync(currentRecipient,
+                    next.Network, next.Authority, secrets!, controlPredecessor, controlXra.CanonicalBytes, controlThreshold, 2, time);
+                var package = DeepIdV2ContactMailboxRouteCodec.Decode(DeepIdV2ContactMailboxRouteCodec.Encode(original));
+                var eventHash = Bytes(32, 0xb4); var relationship = Bytes(32, 0xb5); var conversation = Bytes(32, 0xb6);
+                var control = await ApplicationCoreCodec.AuthorVerifiedContactRouteUpdateAsync(controlRoute, package,
+                    original.ExactRouteClosure, eventHash, relationship, conversation, Bytes(32, 0xb7), 3, time);
+                Assert.True(control.Record.CreatedAtUnixMilliseconds > 1_090_000UL);
+                Assert.Equal(1_150_000UL, control.Record.ExpiresAtUnixMilliseconds);
+                var verified = await DeepIdV2ContactRouteUpdateVerifier.VerifyCurrentSuccessorAsync(package,
+                    next.Proof, next.Network, next.Authority, time, original.ExactRouteClosure, eventHash,
+                    relationship, conversation, control.CanonicalBytes);
+                await verified.EnsureCurrentAsync();
+                ProofTime = 1_150; Sample = 250;
+                var now = await Source(reopened).VerifyForOwnPreKeyAuthoringAsync(reopened, default);
+                await Assert.ThrowsAsync<CryptographicException>(async () => await DeepIdV2ContactRouteUpdateVerifier.VerifyCurrentSuccessorAsync(
+                    package, now.Proof, now.Network, now.Authority, time, original.ExactRouteClosure, eventHash,
+                    relationship, conversation, control.CanonicalBytes));
+                var facts = await DeepIdV2ContactRouteUpdateVerifier.RequireRetainedSuccessorFactsAsync(package, now.Proof,
+                    now.Network, now.Authority, time, original.ExactRouteClosure, eventHash, relationship, conversation, control.CanonicalBytes);
+                Assert.Equal(controlRoute.ExactRouteClosure.ToArray(), facts.ExactBytes.ToArray());
+                CryptographicOperations.ZeroMemory(readCapability);
+                return;
+            }
             try
             {
                 var restoredObject = await DeepIdV2ContactObjectAuthor.RestoreAsync(carried, contact.Closure.CanonicalBytes,
@@ -222,6 +261,13 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             Assert.Equal(retainedRequest, installed.ExactXmg2.ToArray());
             Assert.Equal(2, depositTransport.Calls); Assert.True(depositTransport.ExactRetry);
             await AssertInstalledGrantSqlAsync(installed.ExactGrant, own: false);
+            var cappedGrant = MailboxAuthenticatedCapabilityCodec.DecodeGrant(installed.ExactGrant.Span);
+            Assert.Equal(1_130UL, cappedGrant.ExpiresAtUnixSeconds);
+            Assert.True(ProtectedDeepIdV2AccountOwner.IsMailboxGrantRenewalDueForNewWork(
+                cappedGrant.NotBeforeUnixSeconds, cappedGrant.ExpiresAtUnixSeconds, cappedGrant.Domain, ProofTime));
+            // The generic retry-window margin is reached, but the same signed
+            // route cannot yield a longer grant. Keep the actual live winner;
+            // the independent expiry checks below remain mandatory.
             reader = ReopenGrantReader(); readerSource = GrantReaderSource(reader);
             var retained = await reader.AcquirePermanentContactDepositGrantAsync(resolvedContact, readerSource, depositTransport);
             Assert.Equal(installed.ExactXmc2.ToArray(), retained.ExactXmc2.ToArray());

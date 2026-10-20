@@ -51,11 +51,11 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     private sealed record OwnedPeerRouteHistory(ParsedDeepIdV2ContactMailboxRoute Original,
         ParsedContactRouteClosure Head, ReadOnlyMemory<byte> HeadEventHash, ReadOnlyMemory<byte> NativeFloor,
         ReadOnlyMemory<byte> PreviousRoute, ReadOnlyMemory<byte> PreviousEventHash, ReadOnlyMemory<byte> LastUpdate,
-        bool Faulted, Func<ulong, CancellationToken, Task<bool>> HasConsent);
+        bool Faulted, Func<ulong, CancellationToken, Task<bool>> HasConsent, ReadOnlyMemory<byte> InboundXur1);
 
     private async Task<OwnedPeerRouteHistory> ReadNativePeerRouteHistoryUnderLeaseAsync(
         OwnedDid2MessagingStorage opened, ParsedDeepIdV2ContactMailboxRoute original,
-        ReadOnlyMemory<byte> originalEvent,
+        ReadOnlyMemory<byte> originalEvent, ReadOnlyMemory<byte> inboundXur1,
         DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own,
         VerifiedDeepIdV2DirectoryFreshness peer, DeepIdV2ContactPathAuthoritySource source,
         HeldDeepIdV2AccountLease held, Func<ulong, CancellationToken, Task<bool>> hasConsent, CancellationToken ct)
@@ -122,7 +122,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 throw new CryptographicException("Native route history changed during private route verification.");
             ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
             return new(original, head, headHash.ToArray(), floor.Exact.ToArray(), previousRoute.ToArray(),
-                previousHash.ToArray(), updateBytes.ToArray(), faulted, hasConsent);
+                previousHash.ToArray(), updateBytes.ToArray(), faulted, hasConsent, inboundXur1.ToArray());
         }
         finally
         {

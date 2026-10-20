@@ -214,17 +214,13 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             using var attachmentState = attachments.Use(value => ProtectedDid2AttachmentJournal.Decode(
                 value, networkId.Span, accountId.Span, record.AsSpan(56, 32)));
             using var routes = journals[5] ?? throw new InvalidDataException("Protected route custody is absent; explicit local reset is required.");
-            using var routeState = routes.Use(value => ProtectedDid2ContactRouteJournal.Decode(
-                value, networkId.Span, accountId.Span, record.AsSpan(56, 32)));
+            routes.Use(value => { grammar.Validate(RegistrationGrammarKind.ContactRoutes, value, networkId.Span, accountId.Span, record.AsSpan(56, 32)); return true; });
             using var grants = journals[6] ?? throw new InvalidDataException("Protected mailbox holder custody is absent; explicit local reset is required.");
-            using var grantState = grants.Use(value => ProtectedDid2MailboxGrantJournal.Decode(
-                value, networkId.Span, accountId.Span, record.AsSpan(56, 32)));
+            grants.Use(value => { grammar.Validate(RegistrationGrammarKind.MailboxGrants, value, networkId.Span, accountId.Span, record.AsSpan(56, 32)); return true; });
             using var mailboxSends = journals[7] ?? throw new InvalidDataException("Protected mailbox send custody is absent; explicit local reset is required.");
-            using var mailboxSendState = mailboxSends.Use(value => ProtectedDid2MailboxSendJournal.Decode(
-                value, networkId.Span, accountId.Span, record.AsSpan(56, 32)));
+            mailboxSends.Use(value => { grammar.Validate(RegistrationGrammarKind.MailboxSends, value, networkId.Span, accountId.Span, record.AsSpan(56, 32)); return true; });
             using var mailboxReads = journals[8] ?? throw new InvalidDataException("Protected mailbox read custody is absent; explicit local reset is required.");
-            using var mailboxReadState = mailboxReads.Use(value => ProtectedDid2MailboxReadJournal.Decode(
-                value, networkId.Span, accountId.Span, record.AsSpan(56, 32)));
+            mailboxReads.Use(value => { grammar.Validate(RegistrationGrammarKind.MailboxReads, value, networkId.Span, accountId.Span, record.AsSpan(56, 32)); return true; });
             using var claims = journals[9] ??
                 throw new InvalidDataException("The protected preclaim journal is absent; explicit local reset is required.");
             var instanceForClaims = record.AsSpan(56, 32).ToArray();

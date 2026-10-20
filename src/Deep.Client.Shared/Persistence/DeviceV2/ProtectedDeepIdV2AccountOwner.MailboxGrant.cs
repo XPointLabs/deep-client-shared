@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Security.Cryptography;
 using Deep.Client.Shared.Services.ContactV1;
 using Deep.Client.Shared.Services.ContactV2;
@@ -345,6 +346,19 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         var grant = MailboxAuthenticatedCapabilityCodec.DecodeGrant(response.Field(8).Span);
         var resume = state.Selections[scope].Pending is not null;
         var due = IsMailboxGrantRenewalDueForNewWork(grant.NotBeforeUnixSeconds, grant.ExpiresAtUnixSeconds, grant.Domain, upper);
+        if (due && !resume && grant.Domain == MailboxCapabilityDomain.Deposit && upper < grant.ExpiresAtUnixSeconds)
+        {
+            // A new holder cannot extend the same route's signed lifetime. Do
+            // not continually reissue a still-live winner already at that
+            // ceiling. Route renewal is a separate authenticated operation;
+            // normal grant/route verification below still rejects expiry.
+            // An actual pending successor always resumes its exact request.
+            var route = ContactRouteClosureCodec.Decode(ProtectedDid2MailboxGrantJournal.OriginalRoute(original).Span);
+            var routeEnd = new[] { (route.Reachability, 17), (route.Authorization, 13),
+                (route.Route, 18), (route.Successor, 11), (route.Selection, 9) }
+                .Min(part => BinaryPrimitives.ReadUInt64BigEndian(part.Item1.Field(part.Item2).Span));
+            due = grant.ExpiresAtUnixSeconds < routeEnd;
+        }
         await RequireExactProtectedMailboxRootAsync(ProtectedDid2MailboxGrantJournal.Slot, snapshot, ct).ConfigureAwait(false);
         ct.ThrowIfCancellationRequested(); held.RequireActive();
         return resume || due ? SHA256.HashData(ProtectedDid2MailboxGrantJournal.Request(original).Span) : ReadOnlyMemory<byte>.Empty;

@@ -5,11 +5,19 @@ namespace Deep.Client.Shared.Production.Tests;
 public sealed class AccountRegistrationGrammarTests
 {
     private static byte[] B(int size, byte value) => Enumerable.Repeat(value, size).ToArray();
-    private static byte[] Empty(RegistrationGrammarKind kind, byte[] network, byte[] account, byte[] instance) =>
-        kind == RegistrationGrammarKind.Group ? ProtectedDid2GroupJournal.Empty(network, account, instance) : ProtectedDid2DirectTextJournal.Empty(network, account, instance);
+    internal static byte[] Empty(RegistrationGrammarKind kind, byte[] network, byte[] account, byte[] instance) => kind switch
+    {
+        RegistrationGrammarKind.Group => ProtectedDid2GroupJournal.Empty(network, account, instance),
+        RegistrationGrammarKind.Ordinary => ProtectedDid2DirectTextJournal.Empty(network, account, instance),
+        RegistrationGrammarKind.ContactRoutes => ProtectedDid2ContactRouteJournal.Empty(network, account, instance),
+        RegistrationGrammarKind.MailboxGrants => ProtectedDid2MailboxGrantJournal.Empty(network, account, instance),
+        RegistrationGrammarKind.MailboxSends => ProtectedDid2MailboxSendJournal.Empty(network, account, instance),
+        RegistrationGrammarKind.MailboxReads => ProtectedDid2MailboxReadJournal.Empty(network, account, instance),
+        _ => throw new ArgumentOutOfRangeException(nameof(kind))
+    };
 
     [Theory]
-    [InlineData(0)] [InlineData(1)]
+    [InlineData(0)] [InlineData(1)] [InlineData(2)] [InlineData(3)] [InlineData(4)] [InlineData(5)]
     public void OnlyExactSuccessfulCanonicalBytesAndEveryBindingReuseGrammar(int value)
     {
         var kind = (RegistrationGrammarKind)value; var network = B(16, 1); var account = B(32, 2); var instance = B(32, 3);

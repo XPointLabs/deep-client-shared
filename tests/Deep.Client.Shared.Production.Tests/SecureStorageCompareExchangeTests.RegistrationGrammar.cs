@@ -7,13 +7,29 @@ public sealed partial class SecureStorageCompareExchangeTests
 {
     [Theory]
     [InlineData(false)] [InlineData(true)]
-    public async Task GrammarMemoCannotReplaceActualAuthenticationOrAcceptChangedCanonicalInput(bool group)
+    public Task GrammarMemoCannotReplaceActualAuthenticationOrAcceptChangedCanonicalInput(bool group) =>
+        CheckGrammarAuthentication(group ? RegistrationGrammarKind.Group : RegistrationGrammarKind.Ordinary);
+
+    [Theory]
+    [InlineData(2)] [InlineData(3)] [InlineData(4)] [InlineData(5)]
+    public Task AdditionalRegistrationRootsCannotReplaceActualAuthenticationOrAcceptChangedCanonicalInput(int value) =>
+        CheckGrammarAuthentication((RegistrationGrammarKind)value);
+
+    private async Task CheckGrammarAuthentication(RegistrationGrammarKind kind)
     {
         using var f = new Fixture(true); var network = Enumerable.Repeat((byte)1, 16).ToArray();
         var account = Enumerable.Repeat((byte)2, 32).ToArray(); var instance = Enumerable.Repeat((byte)3, 32).ToArray();
-        var kind = group ? RegistrationGrammarKind.Group : RegistrationGrammarKind.Ordinary;
-        var slot = group ? ProtectedDid2GroupJournal.Slot : ProtectedDid2DirectTextJournal.Slot;
-        var original = group ? ProtectedDid2GroupJournal.Empty(network, account, instance) : ProtectedDid2DirectTextJournal.Empty(network, account, instance);
+        var slot = kind switch
+        {
+            RegistrationGrammarKind.Group => ProtectedDid2GroupJournal.Slot,
+            RegistrationGrammarKind.Ordinary => ProtectedDid2DirectTextJournal.Slot,
+            RegistrationGrammarKind.ContactRoutes => ProtectedDid2ContactRouteJournal.Slot,
+            RegistrationGrammarKind.MailboxGrants => ProtectedDid2MailboxGrantJournal.Slot,
+            RegistrationGrammarKind.MailboxSends => ProtectedDid2MailboxSendJournal.Slot,
+            RegistrationGrammarKind.MailboxReads => ProtectedDid2MailboxReadJournal.Slot,
+            _ => throw new ArgumentOutOfRangeException(nameof(kind))
+        };
+        var original = AccountRegistrationGrammarTests.Empty(kind, network, account, instance);
         await f.Store.WriteBatchAsync([new(slot, original)]);
         var grammar = new AccountRegistrationGrammar();
         async Task Read()

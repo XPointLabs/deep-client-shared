@@ -1,5 +1,32 @@
 # Deep Client Shared
 
+`RefreshContactRouteAsync` renews the actual owned permanent publication through
+its existing protected saga, then advertises the exact next route through an
+existing mutually consented ratcheted conversation and a CURRENT reverse mailbox
+route. Scheduling reopens actual native advertised history and the common authored
+root: unchanged advertisement creates no event; unfinished control selects its
+original operation. Authoring, encryption, Store and recipient receive/ACK retain
+their separate independent checks. No new journal/schema or counter family,
+contact or account is introduced; a new control uses the existing owned counters
+and ratchet. Expired routes/XUR never acquire permission.
+`ReadContactRouteHealthAsync` exports only three denial-only Boolean diagnostics
+from actual authenticated history and fresh time, never descriptors/capabilities.
+These predicates cannot authorize delivery. A missing live reverse route plus
+expired update rendezvous remains unavailable; no public resolver fallback exists.
+See the [contact update owner](../docs/architecture/CONTACT-AND-GROUP-PROTOCOL-V1.md#10-contact-route-and-device-updates).
+
+New-work Deposit renewal does not repeatedly replace a still-live grant already
+at its exact route's five-record signed expiry ceiling: the same route cannot
+yield more lifetime. Shorter issuer-limited grants still renew; any pending
+successor resumes its exact request. This is scheduling only. All ordinary
+grant/route/currentness checks remain, and route renewal is still separate.
+
+Serial hosts call `DiscardUncapturedGroupAuthorityAsync` before an independent
+network/contact/message/receive/ACK phase can advance shared network custody.
+This ends only the public group read phase, without fetching or replacing any
+captured loan. The next group phase acquires and verifies actual protected
+network history afresh; fork, rollback, clock and captured-loan checks remain.
+
 `DeepIdV2AccountService.GetConversationAsync` selects a canonical conversation
 identifier from the actual protected catalog, then verifies that session's local
 history/acceptance custody and catalog read-back. It does not open unrelated
@@ -58,13 +85,16 @@ history preserves the original cross-scope order. Scheduling flags still cannot
 authorize a Store, receipt, retry or semantic ACK.
 
 Account registration may memoize only the pure, time-independent canonical
-grammar predicate for exact current group/ordinary bytes plus network, account
-and instance. One account owner retains two32-byte digests, not private bytes,
+grammar predicate for six exact current group/ordinary/route/grant/send/read roots plus network, account
+and instance. One account owner retains six32-byte digests, not private bytes,
 decoded states, revisions, proof or storage-read verdicts. Every invocation still
 authenticates actual storage; changed input/binding reruns the original decoder,
 and failures are never remembered. Actual consumers still decode their needed
 root afresh. SQL integrity, dynamic cancellation-owner joins, protected floors,
 currentness and all effect/read-back fences remain independent and mandatory.
+The additional four predicates cover otherwise unused registration decodes of
+route, grant, send and read roots. Cross-root cancellation/retirement, compaction,
+actual account/native floors and all dynamic joins are still parsed/rechecked.
 
 `DeepIdV2ClientNetworkSession` may live across serial CLI commands. Its ordinary
 `Source` retains independent acquisition; `EstablishedGroupSource` owns a bounded

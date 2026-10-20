@@ -115,6 +115,8 @@
     <Compile Include="Services\DeepIdV2AccountService.ReceiverSessions.cs" />
     <Compile Include="Services\DeepIdV2AccountService.Messaging.cs" />
     <Compile Include="Services\DeepIdV2AccountService.Groups.cs" />
+    <Compile Include="Services\DeepIdV2AccountService.RouteHealth.cs" />
+    <Compile Include="Services\DeepIdV2AccountService.RouteMaintenance.cs" />
     <Compile Include="Services\DeepIdV2AccountService.BraidControl.cs" />
     <Compile Include="Services\HttpServiceEndpointPolicy.cs" />
     <Compile Include="Services\HttpServiceRequestTransport.cs" />

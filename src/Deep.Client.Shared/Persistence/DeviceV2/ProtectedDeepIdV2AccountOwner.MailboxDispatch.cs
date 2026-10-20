@@ -656,6 +656,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             ParsedDeepIdV2ContactMailboxRoute package;
             var policy = helloPayload.Policy;
             ReadOnlyMemory<byte> originalEvent = greeting.CanonicalBytes;
+            var inboundXur1 = helloPayload.InboundXur1;
             ulong originalOrdinal = 1;
             if (!scope.IsInitiator)
                 package = helloPayload.MailboxRoute;
@@ -676,6 +677,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     Deep.Protocol.MessagingWire.Dpe2Codec.Decode(received.ExactEnvelope).OperationId,
                     ReadOnlyMemory<byte>.Empty, storage, own, peer, source, held, ct).ConfigureAwait(false);
                 package = ((ContactAcceptDmc2Payload)response.ParsedPayload).MailboxRoute;
+                inboundXur1 = ((ContactAcceptDmc2Payload)response.ParsedPayload).InboundXur1;
                 policy &= ((ContactAcceptDmc2Payload)response.ParsedPayload).Policy;
                 originalEvent = response.CanonicalBytes;
                 originalOrdinal = received.Ordinal;
@@ -713,7 +715,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 }
                 finally { CryptographicOperations.ZeroMemory(localAccept); }
             }
-            return await ReadNativePeerRouteHistoryUnderLeaseAsync(opened, package, originalEvent,
+            return await ReadNativePeerRouteHistoryUnderLeaseAsync(opened, package, originalEvent, inboundXur1,
                 own, peer, source, held, HasUpdateConsent, ct).ConfigureAwait(false);
         }
         finally

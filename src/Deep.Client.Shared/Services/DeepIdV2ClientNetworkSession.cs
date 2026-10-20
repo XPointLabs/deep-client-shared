@@ -108,6 +108,16 @@ public sealed class DeepIdV2ClientNetworkSession : IDisposable
         return workingGroups.Source.RefreshWorkingAuthorityAsync(ct);
     }
 
+    /// <summary>Discards only uncaptured public group reads before a serial
+    /// independent operation can advance shared protected network custody.
+    /// Does not fetch authority, extend a loan, reset clock fences or retry work.</summary>
+    /// <param name="ct">Cancellation before this independent phase.</param>
+    public Task DiscardUncapturedGroupAuthorityAsync(CancellationToken ct = default)
+    {
+        ObjectDisposedException.ThrowIf(disposed, this);
+        return workingGroups.Source.DiscardUncapturedAuthorityAsync(ct);
+    }
+
     /// <summary>Revalidates current public group authority and refreshes it only
     /// when absent or within thirty monotonic seconds of its original deadline.
     /// Hosts call this while idle, never concurrently with business operations.</summary>

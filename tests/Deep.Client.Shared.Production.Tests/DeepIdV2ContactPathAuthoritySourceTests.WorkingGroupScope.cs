@@ -5,6 +5,54 @@ namespace Deep.Client.Shared.Production.Tests;
 
 public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Did2Groups_IndependentPhaseDiscardsUncapturedMemoButNeverForkOrCapturedLoanChecks(bool fork)
+    {
+        await using var f = await Fixture.CreateAsync();
+        using var working = f.Source().OpenWorkingGroupScope();
+        var first = await working.Source.VerifyForOwnPreKeyAuthoringAsync(f.Accounts, default);
+        var originalDeadline = first.Proof.FreshnessDeadlineMonotonicSeconds;
+        await working.Source.DiscardUncapturedAuthorityAsync(default);
+        await f.AdvanceNetworkAsync();
+        var independent = await f.Source().VerifyForOwnPreKeyAuthoringAsync(f.Accounts, default);
+        Assert.NotEqual(first.Network.ProtectedLkg!.ViewGeneration, independent.Network.ProtectedLkg!.ViewGeneration);
+        var count = f.ProofRequests;
+        if (fork)
+        {
+            var floor = (await f.NetworkStore.ReadAsync(default))!;
+            await f.NetworkStore.CompareExchangeAsync(floor.Revision, new(floor.Revision + 1, floor.ProtectedLkg, true), default);
+            await Assert.ThrowsAsync<CryptographicException>(async () =>
+                await working.Source.VerifyForOwnPreKeyAuthoringAsync(f.Accounts, default));
+            Assert.Equal(count, f.ProofRequests);
+        }
+        else
+        {
+            var next = await working.Source.VerifyForOwnPreKeyAuthoringAsync(f.Accounts, default);
+            Assert.NotSame(first, next);
+            Assert.Equal(independent.Network.ProtectedLkg.ViewGeneration, next.Network.ProtectedLkg!.ViewGeneration);
+            Assert.Equal(count + 1, f.ProofRequests);
+            await Assert.ThrowsAsync<CryptographicException>(async () =>
+                await working.Source.RecheckOwnPreKeyAuthoringAsync(first, default));
+        }
+        Assert.Equal(originalDeadline, first.Proof.FreshnessDeadlineMonotonicSeconds);
+    }
+
+    [Fact]
+    public async Task Did2Groups_IndependentPhaseDiscardCannotResetWorkingClockFence()
+    {
+        await using var f = await Fixture.CreateAsync();
+        using var working = f.Source().OpenWorkingGroupScope();
+        _ = await working.Source.VerifyForOwnPreKeyAuthoringAsync(f.Accounts, default);
+        f.Sample += 2;
+        await working.Source.DiscardUncapturedAuthorityAsync(default);
+        f.Sample--; var count = f.ProofRequests;
+        await Assert.ThrowsAsync<CryptographicException>(async () =>
+            await working.Source.VerifyForOwnPreKeyAuthoringAsync(f.Accounts, default));
+        Assert.Equal(count, f.ProofRequests);
+    }
+
     [Fact]
     public async Task Did2Groups_WorkingIdleMaintenanceDoesNotFetchWhenCurrentAndRefreshesBeforeDeadline()
     {
