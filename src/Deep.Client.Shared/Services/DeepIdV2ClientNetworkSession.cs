@@ -24,10 +24,10 @@ public sealed class DeepIdV2ClientNetworkSession : IDisposable
     private readonly DeepIdV2ContactPathAuthoritySource.CommandReadScope workingGroups;
     private bool disposed;
     public DeepIdV2ContactPathAuthoritySource Source { get; }
-    /// <summary>Public authority for serial established-group operations. Actual
+    /// <summary>Public authority for serial established messaging operations. Actual
     /// account/device state, floors and lifetimes are rejoined on each borrow.
     /// Never use it for independent Initial, Braid or fresh ACK capture.</summary>
-    public DeepIdV2ContactPathAuthoritySource EstablishedGroupSource
+    public DeepIdV2ContactPathAuthoritySource EstablishedMessagingSource
     {
         get { ObjectDisposedException.ThrowIf(disposed, this); return workingGroups.Source; }
     }

@@ -21,11 +21,20 @@ yield more lifetime. Shorter issuer-limited grants still renew; any pending
 successor resumes its exact request. This is scheduling only. All ordinary
 grant/route/currentness checks remain, and route renewal is still separate.
 
-Serial hosts call `DiscardUncapturedGroupAuthorityAsync` before an independent
-network/contact/message/receive/ACK phase can advance shared network custody.
-This ends only the public group read phase, without fetching or replacing any
-captured loan. The next group phase acquires and verifies actual protected
-network history afresh; fork, rollback, clock and captured-loan checks remain.
+`DeepIdV2ClientNetworkSession.EstablishedMessagingSource` supplies the existing
+bounded working public-authority scope to serial established text, attachment
+and group commands. QueueText/RetryText and attachment queue/send also open a
+command scope, including for nonpersistent callers. Consent, authoring, native
+send and delivery borrow one coherent endpoint pair while independently rejoining
+actual protected state/time; transport objects receive that same child source.
+There is no new lifetime, private-state cache or stale fallback.
+Serial hosts call `DiscardUncapturedGroupAuthorityAsync` before independent
+network/contact/receive/ACK work can advance shared network custody. This ends
+only uncaptured public reads, never a captured loan. Fresh ACK remains independent.
+The API retains its existing refresh/discard/maintenance method names; the
+established-source property replaces the narrower group-only property without
+a compatibility alias. Consumers must rebuild; no account/schema reset is needed.
+See the [execution owner](../docs/architecture/TRANSPORT-NEUTRAL-MESSAGING.md#32-steady-state-execution-и-стоимость-проверки).
 
 `DeepIdV2AccountService.GetConversationAsync` selects a canonical conversation
 identifier from the actual protected catalog, then verifies that session's local

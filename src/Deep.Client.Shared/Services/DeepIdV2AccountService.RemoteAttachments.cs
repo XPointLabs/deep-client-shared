@@ -32,6 +32,7 @@ public sealed partial class DeepIdV2AccountService
         ReadOnlyMemory<byte> assetOperation, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(conversation); source.RequireAccountOwner(this);
+        using var reads = source.OpenCommandReadScope(); source = reads.Source;
         await RequireAttachmentConsentAsync(conversation, source, ct).ConfigureAwait(false);
         using var draft = await CreateOwnDirectAttachmentOfferAsync(conversation.Scope, assetOperation, source, ct).ConfigureAwait(false);
         return draft.OperationId.ToArray();
@@ -72,6 +73,7 @@ public sealed partial class DeepIdV2AccountService
         DeepIdV2ContactPathAuthoritySource source, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(conversation); source.RequireAccountOwner(this);
+        using var reads = source.OpenCommandReadScope(); source = reads.Source;
         await RequireAttachmentConsentAsync(conversation, source, ct).ConfigureAwait(false);
         using var asset = await ReadOwnAttachmentAsync(assetOperation, ct).ConfigureAwait(false);
         using var manifestBytes = asset.OwnManifest(); using var manifest = manifestBytes.Use(bytes => ApplicationCoreCodec.DecodeDam1(bytes));

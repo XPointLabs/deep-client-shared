@@ -149,6 +149,7 @@ public sealed partial class DeepIdV2AccountService
         ArgumentNullException.ThrowIfNull(conversation); ArgumentNullException.ThrowIfNull(source);
         source.RequireAccountOwner(this);
         _ = ApplicationCoreCodec.CreateMessageCreatePayload(text);
+        using var reads = source.OpenCommandReadScope(); source = reads.Source;
         var state = await ReadOwnContactAcceptanceAsync(conversation.Scope, source, ct).ConfigureAwait(false);
         if (conversation.IsInitiator ? state != Did2ContactAcceptanceState.PeerAcceptanceRetained : state != Did2ContactAcceptanceState.LocalAcceptanceRetained)
             throw new InvalidOperationException("The contact has not retained the required explicit acceptance.");
@@ -156,10 +157,14 @@ public sealed partial class DeepIdV2AccountService
         return draft.OperationId.ToArray();
     }
 
-    public Task<ClientMailboxStoreResult> RetryTextAsync(DeepIdV2Conversation conversation, ReadOnlyMemory<byte> logicalOperation,
+    public async Task<ClientMailboxStoreResult> RetryTextAsync(DeepIdV2Conversation conversation, ReadOnlyMemory<byte> logicalOperation,
         string text, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct = default)
-        => RetryTextAsync(conversation, logicalOperation, text, source, new Did2MailboxGrantOnionTransport(source),
-            new Did2OwnedMailboxOnionTransportFactory(), ct, recoverUnknown: true);
+    {
+        ArgumentNullException.ThrowIfNull(source); source.RequireAccountOwner(this);
+        using var reads = source.OpenCommandReadScope(); source = reads.Source;
+        return await RetryTextAsync(conversation, logicalOperation, text, source, new Did2MailboxGrantOnionTransport(source),
+            new Did2OwnedMailboxOnionTransportFactory(), ct, recoverUnknown: true).ConfigureAwait(false);
+    }
 
     internal async Task<ClientMailboxStoreResult> RetryTextAsync(DeepIdV2Conversation conversation, ReadOnlyMemory<byte> logicalOperation,
         string text, DeepIdV2ContactPathAuthoritySource source, IDid2MailboxGrantTransport grants,

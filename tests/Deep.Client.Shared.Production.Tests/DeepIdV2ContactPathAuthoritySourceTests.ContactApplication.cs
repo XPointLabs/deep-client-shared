@@ -2,11 +2,37 @@ using Deep.Client.Shared.Persistence;
 using Deep.Client.Shared.Persistence.DeviceV2;
 using Deep.Client.Shared.Services;
 using Deep.Client.Shared.Services.ContactV2;
+using Deep.Protocol.ApplicationCore;
 
 namespace Deep.Client.Shared.Production.Tests;
 
 public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 {
+    [Fact]
+    [Trait("RequiresApprovedMlKemRuntime", "true")]
+    public async Task Did2Text_QueueBorrowsOneVerifiedEndpointPairForConsentAndAuthoringOnly()
+    {
+        await using var fixture = await Fixture.CreateAsync(withPeer: true);
+        var (complete, hello, init, _, _) = await fixture.PrepareNativeHelloCompletion(Bytes(32, 0x73));
+        using var initial = await complete(fixture.Accounts);
+        using (var received = await fixture.CompleteReceiver(initial.ExactDph2.ToArray())) { }
+        var sender = await fixture.EnsureSenderMessaging(init, hello);
+        var receiver = await fixture.EnsureReceiverMessaging(initial.ExactDph2.ToArray());
+        using (var accept = await fixture.PrepareOwnedContactAccept(receiver, Bytes(32, 0x74)))
+        using (var sent = await fixture.SendOwnedMessage(receiver, accept.Operation.ToArray(), ApplicationCoreCodec.DecodeDmc2(accept.ExactDmc2)))
+        using (var received = await fixture.ReceiveOwnedMessage(sender, sent.ExactEnvelope.ToArray())) { }
+        var nativeBefore = await fixture.ReadMessagingFloor(sender);
+        var before = fixture.ProofRequests;
+        var first = await fixture.QueueNativeText(sender, "one scoped queue");
+        Assert.Equal(before + 2, fixture.ProofRequests); // Own + peer, not one pair per internal step.
+        before = fixture.ProofRequests;
+        var second = await fixture.QueueNativeText(sender, "another independent queue");
+        Assert.Equal(before + 2, fixture.ProofRequests); // No leaked command scope.
+        Assert.NotEqual(first, second);
+        Assert.Equal(nativeBefore.Exact.ToArray(), (await fixture.ReadMessagingFloor(sender)).Exact.ToArray());
+        Assert.Equal(2, (await fixture.ListNativePendingText()).Count);
+    }
+
     private sealed partial class Fixture
     {
         internal Task<DeepIdV2ContactStartResult> StartNativeContact(byte[] intent, IDid2MailboxGrantTransport grants,

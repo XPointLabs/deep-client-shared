@@ -69,7 +69,7 @@ public interface IDeepIdV2NetworkClosureArtifactSource
 /// the pinned root, and durably advances/rechecks network custody before
 /// releasing placement. It cannot resolve DID1 or accept ADP1 V1. Input
 /// providers, proof-client lifetime and durable stores remain caller-owned.
-/// A closed group-command or serial working-group scope can borrow already
+/// A closed command or serial established-messaging scope can borrow already
 /// minted public capabilities; every use independently rechecks actual floors,
 /// clocks and lifetimes. Working reuse additionally rejoins the local directory.
 /// </summary>
