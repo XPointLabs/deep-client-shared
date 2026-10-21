@@ -24,8 +24,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var cycle = state.Active ?? throw new CryptographicException("Captured page custody is absent.");
             var page = cycle.ReadPage();
             if (state.Phase < 3 || page.HasMore) throw new CryptographicException("Expired non-final page needs independent pagination recovery; original custody retained.");
-            var host = await MailboxHostAuthorityV2Verifier.VerifyAsync(fresh.Network, fresh.Authority,
-                fresh.MailboxAuthority.ExactPma2, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
+            var host = await MailboxHostAuthorityV2Verifier.VerifyPolicyAsync(fresh.Network, fresh.Authority,
+                fresh.MailboxAuthority, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
             var grant = await RequireOriginalReadFactsUnderLeaseAsync(current, held, source, fresh, host,
                 retained, cycle.Grant, cycle.Route, cycle.Scope, cycle.RetrieveBody, ct).ConfigureAwait(false);
             if (cycle.CapturedAt < grant.NotBeforeUnixSeconds || cycle.CapturedAt >= grant.ExpiresAtUnixSeconds)

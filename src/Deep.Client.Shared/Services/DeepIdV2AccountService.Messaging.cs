@@ -14,6 +14,16 @@ public sealed partial class DeepIdV2AccountService
     // Ordinary incoming consumer: no caller-selected session or acknowledgement
     // authority. Refresh only after the catalog lookup releases its lease.
     internal async Task<OwnedDid2MessagingPersistedEvent> ReceiveOwnMessagingEnvelopeAsync(
+        ReadOnlyMemory<byte> exactDpe2, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct = default) =>
+        (await ReceiveOwnMessagingEnvelopeWithScopeAsync(exactDpe2, source, ct).ConfigureAwait(false)).Persisted;
+
+#if DEEP_TEST_INTERNALS
+    internal long IncomingMessagingScopeLookups => owner.IncomingMessagingScopeLookups;
+#endif
+
+    // The scope is key-free scheduling metadata, not semantic or ACK authority.
+    // ACK independently reopens its actual catalog/native/materialized custody.
+    private async Task<(OwnedDid2MessagingPersistedEvent Persisted, Did2MessagingSessionScope Scope)> ReceiveOwnMessagingEnvelopeWithScopeAsync(
         ReadOnlyMemory<byte> exactDpe2, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(source); source.RequireAccountOwner(this);
@@ -27,8 +37,9 @@ public sealed partial class DeepIdV2AccountService
             var scope = await owner.FindIncomingMessagingScopeAsync(TrustedUnixSeconds(), verifier, incoming, ct).ConfigureAwait(false) ??
                 throw new InvalidOperationException("Incoming DID2 envelope has no initialized owned session; retain it without ACK.");
             var pair = await source.VerifyForOwnMessagingAsync(this, scope, ct).ConfigureAwait(false);
-            return await owner.ReceiveMessagingAsync(TrustedUnixSeconds(), verifier, scope, exact,
+            var persisted = await owner.ReceiveMessagingAsync(TrustedUnixSeconds(), verifier, scope, exact,
                 pair.Own, pair.Peer, source, ct).ConfigureAwait(false);
+            return (persisted, scope);
         }
         finally { CryptographicOperations.ZeroMemory(exact); }
     }

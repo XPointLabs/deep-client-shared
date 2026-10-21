@@ -74,7 +74,9 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         }
         var pending = await fixture.ReadCompleteOrdinaryApplicationProjection(test.Scope);
         var retained = await fixture.ReadCompletedContactSendRetainedRoots(test.Scope);
-        await Assert.ThrowsAsync<IOException>(() => fixture.CleanupSettledStoreCase(test, kind));
+        // The unchanged owner reports this precise IOException subtype for
+        // unresolved public evidence; xUnit ThrowsAsync requires an exact type.
+        await Assert.ThrowsAsync<ProtectedDeepIdV2AccountOwner.OutboxPrefixPinnedException>(() => fixture.CleanupSettledStoreCase(test, kind));
         Assert.Equal(pending, await fixture.ReadCompleteOrdinaryApplicationProjection(test.Scope));
         Assert.Equal(retained, await fixture.ReadCompletedContactSendRetainedRoots(test.Scope));
 

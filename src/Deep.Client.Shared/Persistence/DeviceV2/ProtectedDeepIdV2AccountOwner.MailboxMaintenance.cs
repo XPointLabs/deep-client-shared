@@ -43,8 +43,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 using var grants = raw.Use(bytes => ProtectedDid2MailboxGrantJournal.Decode(bytes, networkId, current.AccountId.Span, instance));
                 if (grants.Entries.Count == 0) return;
                 var reading = await RecheckRouteFreshnessAsync(current, source, fresh, held, null, ct).ConfigureAwait(false);
-                var host = await MailboxHostAuthorityV2Verifier.VerifyAsync(fresh.Network, fresh.Authority,
-                    fresh.MailboxAuthority.ExactPma2, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
+                var host = await MailboxHostAuthorityV2Verifier.VerifyPolicyAsync(fresh.Network, fresh.Authority,
+                    fresh.MailboxAuthority, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
                 if (grants.Entries.Values.All(entry => BinaryPrimitives.ReadUInt64BigEndian(
                     ContactRouteClosureCodec.Decode(ProtectedDid2MailboxGrantJournal.OriginalRoute(entry).Span).Projection.Field(6).Span) >= host.SelectionEpoch)) return;
                 var elapsed = checked(reading.SampleSeconds - fresh.Proof.MonotonicSample);

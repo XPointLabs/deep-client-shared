@@ -11,10 +11,17 @@ namespace Deep.Client.Shared.Persistence.DeviceV2;
 
 internal sealed partial class ProtectedDeepIdV2AccountOwner
 {
+#if DEEP_TEST_INTERNALS
+    private long incomingMessagingScopeLookups;
+    internal long IncomingMessagingScopeLookups => Interlocked.Read(ref incomingMessagingScopeLookups);
+#endif
     internal async Task<Did2MessagingSessionScope?> FindIncomingMessagingScopeAsync(ulong trustedUnixSeconds,
         IDeepMlDsa65Verifier verifier, Dpe2Record incoming, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(incoming);
+#if DEEP_TEST_INTERNALS
+        Interlocked.Increment(ref incomingMessagingScopeLookups);
+#endif
         if (!Did2MessagingSessionScope.Fixed(incoming.NetworkId.Span, networkId))
             throw new CryptographicException("Incoming DPE2 belongs to another network.");
         using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);

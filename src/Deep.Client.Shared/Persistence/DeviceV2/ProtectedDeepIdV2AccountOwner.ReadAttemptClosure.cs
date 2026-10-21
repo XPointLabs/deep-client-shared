@@ -45,8 +45,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 read.Closed.ContainsKey(ProtectedDid2MailboxReadJournal.Name(active!.Grant))))
                 throw new IOException("Closed Retrieve custody is full or contradicts active work; no eviction is permitted.");
 
-            var host = await MailboxHostAuthorityV2Verifier.VerifyAsync(fresh.Network, fresh.Authority,
-                fresh.MailboxAuthority.ExactPma2, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
+            var host = await MailboxHostAuthorityV2Verifier.VerifyPolicyAsync(fresh.Network, fresh.Authority,
+                fresh.MailboxAuthority, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
             var fence = await SqliteDeepIdV2AccountGeneration.ReadNativeReplayFenceUnderLeaseAsync(
                 storage, lease, sqlStatePath, current, held, ct).ConfigureAwait(false);
             using var application = await SqliteDeepIdV2AccountGeneration.OpenExistingApplicationForOwnerUnderLeaseAsync(

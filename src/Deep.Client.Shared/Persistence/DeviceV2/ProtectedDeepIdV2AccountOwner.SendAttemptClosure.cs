@@ -274,8 +274,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         // Original signing facts are authenticated in the independently current
         // retained namespace, not reinterpreted as a current issuer capability.
         // Latest XNA1 need not be the exact ancestor that signed this old PMA2.
-        var host = await MailboxHostAuthorityV2Verifier.VerifyAsync(own.Network, own.Authority,
-            own.MailboxAuthority.ExactPma2, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
+        var host = await MailboxHostAuthorityV2Verifier.VerifyPolicyAsync(own.Network, own.Authority,
+            own.MailboxAuthority, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
         await host.RequireOriginalNamespaceAsync(ProtectedDid2MailboxGrantJournal.OriginalPolicy(acquisition),
             route.Projection.CanonicalBytes, ct).ConfigureAwait(false);
         var policy = ContactCodec.Decode("PMA2", ProtectedDid2MailboxGrantJournal.OriginalPolicy(acquisition).Span);

@@ -653,7 +653,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySource :
             upper = checked(proof.TrustedUpperUnixSeconds + elapsed);
         }
         catch (OverflowException error) { throw new CryptographicException("Mailbox policy time projection overflowed.", error); }
-        var result = MailboxAuthorityV2Verifier.Verify(authority, selected.CanonicalBytes.Span, lower, upper);
+        var result = MailboxAuthorityV2Verifier.VerifyWithHistory(authority, exact.ExactOrderedPma2Chain, lower, upper);
         if (!result.BindsProjection(projection.CanonicalBytes.Span))
             throw new CryptographicException("Mailbox issuer policy differs from the current verified projection.");
         network.EnsureCurrent(); ct.ThrowIfCancellationRequested(); return result;

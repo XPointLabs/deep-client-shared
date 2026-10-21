@@ -91,10 +91,11 @@ public sealed partial class DeepIdV2AccountService
             else
             {
                 // Unknown/group input still has no semantic fallback or ACK.
-                using var received = await ReceiveOwnMessagingEnvelopeAsync(item.Envelope.Ciphertext, receiveReads.Source, ct).ConfigureAwait(false);
-                var incoming = Dpe2Codec.Decode(item.Envelope.Ciphertext.Span);
-                scope = await owner.FindIncomingMessagingScopeAsync(TrustedUnixSeconds(), verifier, incoming, ct).ConfigureAwait(false) ??
-                    throw new InvalidOperationException("Captured message no longer has an initialized owned session; no ACK.");
+                var received = await ReceiveOwnMessagingEnvelopeWithScopeAsync(item.Envelope.Ciphertext, receiveReads.Source, ct).ConfigureAwait(false);
+                using (received.Persisted) scope = received.Scope;
+                // Do not reopen/redecrypt the same catalog just to rediscover
+                // this key-free scope. Fresh ACK endpoint acquisition reads the
+                // actual catalog; ACK then reconstructs every native handoff.
             }
             if (scope is null) continue; // ACK still reconstructs actual terminal custody, not this selection.
             var name = Convert.ToHexString(scope.Hash);

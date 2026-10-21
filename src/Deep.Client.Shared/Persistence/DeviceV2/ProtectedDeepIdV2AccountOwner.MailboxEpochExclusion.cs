@@ -79,8 +79,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             try
             {
                 var first = await RecheckRouteFreshnessAsync(current, source, fresh, held, null, ct).ConfigureAwait(false);
-                var authority = await MailboxHostAuthorityV2Verifier.VerifyAsync(fresh.Network, fresh.Authority,
-                    fresh.MailboxAuthority.ExactPma2, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
+                var authority = await MailboxHostAuthorityV2Verifier.VerifyPolicyAsync(fresh.Network, fresh.Authority,
+                    fresh.MailboxAuthority, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
                 instance = await SqliteDeepIdV2AccountGeneration.ReadAccountInstanceUnderLeaseAsync(
                     owner.storage, owner.networkId, current.AccountId, ct).ConfigureAwait(false);
                 using var protectedRoot = await owner.storage.ReadOwnedAsync(ProtectedDid2MailboxGrantJournal.Slot, ct).ConfigureAwait(false) ??

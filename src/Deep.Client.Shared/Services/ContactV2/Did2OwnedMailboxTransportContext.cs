@@ -68,8 +68,8 @@ internal sealed class Did2OwnedMailboxTransportContext : IMailboxPrivacyNetworkA
         _ = DeepIdV2AccountService.RequireOwnCurrentDirectory(account, fresh.Proof, reading.BootId.Span, reading.SampleSeconds);
         if (retainedRead is not null)
         {
-            var host = await MailboxHostAuthorityV2Verifier.VerifyAsync(fresh.Network, fresh.Authority,
-                fresh.MailboxAuthority.ExactPma2, Source.RendezvousTrustedTime, ct).ConfigureAwait(false);
+            var host = await MailboxHostAuthorityV2Verifier.VerifyPolicyAsync(fresh.Network, fresh.Authority,
+                fresh.MailboxAuthority, Source.RendezvousTrustedTime, ct).ConfigureAwait(false);
             _ = await host.VerifyRetainedReadSuccessAsync(originalRoute!, retainedRead.ExactXmg2,
                 retainedRead.ExactXmc2, ct).ConfigureAwait(false);
             await retainedRead.EnsureCurrentAsync(ct).ConfigureAwait(false);

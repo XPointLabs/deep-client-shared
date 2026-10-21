@@ -247,7 +247,10 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             Assert.Equal(1, ownRetrieval.Calls); Assert.Equal(1, acceptTerminal.RetrieveCalls); Assert.Equal(1, acceptTerminal.AckCalls);
             acceptTerminal.LoseAckReply = false;
         }
-        var accepted = await fixture.SynchronizeNativeSender(ownRetrieval, acceptTerminal);
+        var acceptingAccount = fixture.ReopenAccount();
+        var scopeLookups = acceptingAccount.IncomingMessagingScopeLookups;
+        var accepted = await acceptingAccount.SynchronizeOwnMailboxAsync(fixture.Source(acceptingAccount), ownRetrieval, acceptTerminal);
+        Assert.Equal(scopeLookups + 1, acceptingAccount.IncomingMessagingScopeLookups);
         Assert.Equal(1, accepted.ProcessedEnvelopes); Assert.Equal(1, accepted.DurableTombstones);
         Assert.Equal(1, ownRetrieval.Calls); Assert.Equal(1, acceptTerminal.RetrieveCalls);
         Assert.Equal(renewPublicationDuringAck ? 2 : 1, acceptTerminal.AckCalls);

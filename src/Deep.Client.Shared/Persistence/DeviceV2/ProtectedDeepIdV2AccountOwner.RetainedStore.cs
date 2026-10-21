@@ -388,8 +388,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 throw new CryptographicException("Original Store request has no exact holder-signed native binding.");
             // Signed original interval only; this value never escapes as new
             // admission authority. Independently current own/network guards remain.
-            var host = await MailboxHostAuthorityV2Verifier.VerifyAsync(own.Network, own.Authority,
-                own.MailboxAuthority.ExactPma2, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
+            var host = await MailboxHostAuthorityV2Verifier.VerifyPolicyAsync(own.Network, own.Authority,
+                own.MailboxAuthority, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
             await own.RequireOriginalMailboxNamespacesAsync(host, metadata.ExactPma, route.Projection,
                 MailboxCapabilityDomain.Deposit, ct).ConfigureAwait(false);
             var policy = ContactCodec.Decode("PMA2", metadata.ExactPma.Span);

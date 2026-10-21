@@ -177,8 +177,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         if (!originalRouteHash.IsEmpty && (originalRouteHash.Length != 32 || originalRouteHash.Span.IndexOfAnyExcept((byte)0) < 0))
             throw new CryptographicException("Retained publication selection requires an exact original route hash.");
         var first = await RecheckRouteFreshnessAsync(current, source, fresh, held, null, ct).ConfigureAwait(false);
-        var host = await MailboxHostAuthorityV2Verifier.VerifyAsync(fresh.Network, fresh.Authority,
-            fresh.MailboxAuthority.ExactPma2, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
+        var host = await MailboxHostAuthorityV2Verifier.VerifyPolicyAsync(fresh.Network, fresh.Authority,
+            fresh.MailboxAuthority, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
         var instance = await SqliteDeepIdV2AccountGeneration.ReadAccountInstanceUnderLeaseAsync(
             storage, networkId, current.AccountId, ct).ConfigureAwait(false);
         byte[]? snapshot = null, capability = null;
