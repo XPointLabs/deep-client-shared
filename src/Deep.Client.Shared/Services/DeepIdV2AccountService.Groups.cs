@@ -94,8 +94,27 @@ public sealed partial class DeepIdV2AccountService
         using var verifier = OpenVerifier(); var completed = 0;
         for (; completed < 512; completed++)
         {
-            var fresh = await source.VerifyForOwnPreKeyAuthoringAsync(this, ct).ConfigureAwait(false);
-            if (!await owner.PublishOneGroupControlAsync(TrustedUnixSeconds(), verifier, group, fresh, source, ct).ConfigureAwait(false)) return completed;
+            for (var acquisition = 0; acquisition < 2; acquisition++)
+            {
+                // Only a denied pre-control-effect acquisition can restart. The
+                // owner has unwound/disposed its actual account lease before
+                // this catch; captured GSW1 requests are neither renewed nor
+                // reauthored. A retry MUST NOT borrow an outer command memo.
+                using var retryReads = acquisition == 0 ? null : source.OpenIndependentCommandReadScope();
+                var activeSource = retryReads?.Source ?? source;
+                var fresh = await activeSource.VerifyForOwnPreKeyAuthoringAsync(this, ct).ConfigureAwait(false);
+                try
+                {
+                    if (!await owner.PublishOneGroupControlAsync(TrustedUnixSeconds(), verifier, group, fresh, activeSource, ct).ConfigureAwait(false)) return completed;
+                    break;
+                }
+                catch (ProtectedDeepIdV2AccountOwner.GroupControlAuthorityRefreshRequiredException) when (acquisition == 0)
+                {
+                    // Discard only uncaptured scheduling state. Already issued
+                    // loans retain their original authority and fail normally.
+                    await source.DiscardUncapturedAuthorityAsync(ct).ConfigureAwait(false);
+                }
+            }
         }
         throw new IOException("Control publication exceeded its bounded stream work budget.");
     }

@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Security.Cryptography;
 using Deep.Client.Shared.Services.ContactV2;
+using Deep.Client.Shared.Services.AccountDirectoryV2;
 using Deep.Client.Shared.Services;
 using Deep.Protocol.AccountDirectoryV1;
 using Deep.Protocol.ApplicationCore;
@@ -11,6 +12,11 @@ namespace Deep.Client.Shared.Persistence.DeviceV2;
 
 internal sealed partial class ProtectedDeepIdV2AccountOwner
 {
+    // Only this producer's PRE-CONTROL-EFFECT head acquisition can request a
+    // fresh outer iteration. It never represents an unknown captured GSW1.
+    internal sealed class GroupControlAuthorityRefreshRequiredException(Exception inner)
+        : CryptographicException("Group control requires a fresh pre-effect directory acquisition.", inner);
+
     private static void RequireGroupControlComplete(ProtectedDid2GroupJournal.Group group,
         VerifiedGroupTransition head, ReadOnlySpan<byte> self, VerifiedOnionNetworkContext network)
     {
@@ -64,7 +70,10 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         using var root = await OpenGroupsUnderLeaseAsync(current, ct).ConfigureAwait(false);
         var group = root.State.Find(groupId.Span); if (group.Fork) throw new CryptographicException("Forked group has no control publication authority.");
         var self = await DeepIdV2GroupDirectoryAuthority.VerifyAsync(own.Proof, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
-        var head = await VerifyGroupHeadAsync(group, self, self, own, held, source, ct).ConfigureAwait(false);
+        VerifiedGroupTransition head;
+        try { head = await VerifyGroupHeadAsync(group, self, self, own, held, source, ct).ConfigureAwait(false); }
+        catch (DeepIdV2GroupDirectoryViewAdvancedException changed)
+        { throw new GroupControlAuthorityRefreshRequiredException(changed); }
         if (!head.Commit.Field(6).Span.SequenceEqual(current.AccountId.Span)) return false;
         var required = GroupMemberSelectors(head.Commit);
         if (required.Any(id => !group.Controls.Any(control => control.Recipient.AsSpan().SequenceEqual(id))))

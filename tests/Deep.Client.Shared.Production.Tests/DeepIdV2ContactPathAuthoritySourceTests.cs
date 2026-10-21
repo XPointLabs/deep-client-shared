@@ -3159,7 +3159,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 value.LogGeneration == query.Lookup.MinimumAdhGeneration) ??
                 throw new CryptographicException("Unknown test directory floor.");
             var material = DeepIdV2DirectoryProofMaterialAuthor.Create(head.ProtectedHead,
-                head.ExactAllTransitions, peerCheckpoint is null ? [checkpoint] : [checkpoint, peerCheckpoint], query.DirectoryLeafKey.Span, floor);
+                head.ExactAllTransitions, GroupAcquisitionProofCheckpoints(), query.DirectoryLeafKey.Span, floor);
             var proofTime = CurrentProofTime;
             var issued = await DeepIdV2DirectoryProofAuthor.IssueGenesisAsync(ProofAuthority,
                 new(Network, query.Nonce.Span, query.BootId.Span, query.ClientMonotonicSendSample,
@@ -3167,6 +3167,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                     AccountDirectoryDtt1IssuanceEpoch.Derive(ProofAuthority, proofTime, 5), 2),
                 material, witnesses, 1, pq, cancellationToken);
             var body = DeepIdV2DirectoryProofWireCodec.EncodeResponse(query, issued);
+            if (corruptGroupAcquisitionNonce) body[12 + 16 + 32] ^= 1;
             var response = new HttpResponseMessage(HttpStatusCode.OK)
             { RequestMessage = request, Content = new ByteArrayContent(body) };
             response.Content.Headers.ContentType = new(DeepIdV2DirectoryProofWireCodec.ResponseMediaType);

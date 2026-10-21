@@ -1,6 +1,7 @@
 using System.Net;
 using System.Security.Cryptography;
 using Deep.Client.Shared.Persistence.DeviceV2;
+using Deep.Client.Shared.Persistence.XPointNetworkV1;
 using Deep.Client.Shared.Services.XPointNetworkV1;
 using Deep.Protocol.AccountDirectoryV1;
 using Deep.Protocol.ApplicationCore;
@@ -10,6 +11,11 @@ using Deep.Protocol.MessagingCrypto;
 using Deep.Protocol.XPointNetworkV1;
 
 namespace Deep.Client.Shared.Services.AccountDirectoryV2;
+
+// Group acquisition scheduling only. This is still a refusal, not a refreshed
+// capability; ordinary handoffs keep their existing fail-closed exception.
+internal sealed class DeepIdV2GroupDirectoryViewAdvancedException()
+    : CryptographicException("The protected directory advanced during group member acquisition.");
 
 /// <summary>Retryable authority failure; scheduling metadata is not proof authority.</summary>
 public sealed class DeepIdV2DirectoryProofUnavailableException : IOException
@@ -265,7 +271,7 @@ public sealed class DeepIdV2DirectoryProofClient : IDisposable
     internal async ValueTask<DeepIdV2NetworkHistorySnapshot?> RequirePairStillFreshUnderLeaseAsync(VerifiedDeepIdV2DirectoryFreshness own,
         VerifiedDeepIdV2DirectoryFreshness peer,
         VerifiedXPointNetworkAuthority authority, IDeepIdV2NetworkHistoryStore network,
-        HeldDeepIdV2AccountLease held, CancellationToken ct)
+        HeldDeepIdV2AccountLease held, CancellationToken ct, VerifiedOnionNetworkContext? groupAcquisitionNetwork = null)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
         ArgumentNullException.ThrowIfNull(own); ArgumentNullException.ThrowIfNull(peer);
@@ -276,6 +282,38 @@ public sealed class DeepIdV2DirectoryProofClient : IDisposable
             throw new CryptographicException("The DID2 proof and network authority differ at held handoff.");
         var floors = await SqliteDeepIdV2AccountGeneration.ReadExistingAuthorityFloorsUnderLeaseAsync(
             protectedLkgStore, network, authority, held, ct).ConfigureAwait(false);
+        if (groupAcquisitionNetwork is { } expected)
+        {
+            // Scheduling classification is allowed only after BOTH endpoints
+            // still bind the exact current network and the actual clock. A
+            // newer directory must not conceal a network/clock refusal.
+            if (floors.Network is null || floors.Network.Snapshot.ForkLatched || expected.ProtectedLkg is null ||
+                !CryptographicOperations.FixedTimeEquals(
+                    XPointNetworkProtectedLkgCodec.Encode(floors.Network.Snapshot.ProtectedLkg),
+                    XPointNetworkProtectedLkgCodec.Encode(expected.ProtectedLkg)) ||
+                !CryptographicOperations.FixedTimeEquals(floors.Network.ExactHistory.Span,
+                    OnionNetworkProtectedHistoryCodec.Encode(expected)))
+                throw new CryptographicException("Group member acquisition no longer binds protected network custody.");
+            expected.EnsureCurrent();
+            var sample = await clock.ReadAsync(ct).ConfigureAwait(false) ??
+                throw new CryptographicException("The DID2 monotonic clock returned no handoff sample.");
+            if (!own.IsCurrentAtMonotonic(sample.BootId.Span, sample.SampleSeconds) ||
+                !peer.IsCurrentAtMonotonic(sample.BootId.Span, sample.SampleSeconds))
+                throw new CryptographicException("The DID2 directory proof expired before account handoff.");
+            var ownMatches = MatchesHead(own, floors.Directory);
+            var peerMatches = MatchesHead(peer, floors.Directory);
+            if (!ownMatches || !peerMatches)
+            {
+                // Only a STRICT advance of the verified actual floor is
+                // refreshable. Null/lower/same-generation divergence refuses.
+                if (floors.Directory is null ||
+                    (!ownMatches && floors.Directory.LogGeneration <= own.NextProtectedLkg.LogGeneration) ||
+                    (!peerMatches && floors.Directory.LogGeneration <= peer.NextProtectedLkg.LogGeneration))
+                    throw new CryptographicException("The DID2 proof is older than the protected directory floor.");
+                held.RequireActive(); ct.ThrowIfCancellationRequested();
+                throw new DeepIdV2GroupDirectoryViewAdvancedException();
+            }
+        }
         await RequireHeadAndClockAsync(own, floors.Directory, ct).ConfigureAwait(false);
         await RequireHeadAndClockAsync(peer, floors.Directory, ct).ConfigureAwait(false);
         held.RequireActive();
@@ -299,6 +337,10 @@ public sealed class DeepIdV2DirectoryProofClient : IDisposable
         held.RequireActive(); ct.ThrowIfCancellationRequested(); return floors.Network;
     }
 
+    private static bool MatchesHead(VerifiedDeepIdV2DirectoryFreshness verified, AccountDirectoryProtectedLkg? protectedHead) =>
+        protectedHead is not null && CryptographicOperations.FixedTimeEquals(verified.NextProtectedLkg.CoreHash.Span, protectedHead.CoreHash.Span) &&
+        CryptographicOperations.FixedTimeEquals(verified.NextProtectedLkg.ExactAdh1.Span, protectedHead.ExactAdh1.Span);
+
     private async ValueTask RequireHeadAndClockAsync(VerifiedDeepIdV2DirectoryFreshness verified,
         AccountDirectoryProtectedLkg protectedHead, CancellationToken cancellationToken)
     {
@@ -309,8 +351,7 @@ public sealed class DeepIdV2DirectoryProofClient : IDisposable
             !CryptographicOperations.FixedTimeEquals(
                 verified.NextProtectedLkg.ExactAdh1.Span,
                 protectedHead.ExactAdh1.Span))
-            throw new CryptographicException(
-                "The DID2 proof is older than the protected directory floor.");
+            throw new CryptographicException("The DID2 proof is older than the protected directory floor.");
         var current = await clock.ReadAsync(cancellationToken)
             .ConfigureAwait(false) ?? throw new CryptographicException(
                 "The DID2 monotonic clock returned no handoff sample.");

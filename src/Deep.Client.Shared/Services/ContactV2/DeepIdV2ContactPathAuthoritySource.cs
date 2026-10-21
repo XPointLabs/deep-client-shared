@@ -147,11 +147,11 @@ public sealed partial class DeepIdV2ContactPathAuthoritySource :
     // account lease. These calls only read immutable source-owned custody.
     internal async ValueTask<OnionMonotonicReading> RecheckEndpointPairUnderLeaseAsync(
         OwnPreKeyAuthoringAuthority authoring, Deep.Protocol.AccountDirectoryV1.VerifiedDeepIdV2DirectoryFreshness peer,
-        HeldDeepIdV2AccountLease held, CancellationToken ct)
+        HeldDeepIdV2AccountLease held, CancellationToken ct, bool groupAcquisition = false)
     {
         held.RequireActive(); RequirePinnedNetwork(peer.NetworkId);
         var floor = await proofs.RequirePairStillFreshUnderLeaseAsync(authoring.Proof, peer, authoring.Authority,
-            networkHistory, held, ct).ConfigureAwait(false);
+            networkHistory, held, ct, groupAcquisition ? authoring.Network : null).ConfigureAwait(false);
         if (floor is null || floor.Snapshot.ForkLatched || !Same(floor.Snapshot.ProtectedLkg, authoring.Network.ProtectedLkg) ||
             !Fixed(floor.ExactHistory.Span, OnionNetworkProtectedHistoryCodec.Encode(authoring.Network)))
             throw new CryptographicException("Held pre-key authoring no longer binds protected network custody.");
@@ -431,7 +431,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySource :
         var peer = commandReads?.ReadPeer(did.CanonicalBytes.Span, own) ??
             await proofs.FetchGroupMemberUnderLeaseAsync(did, own.Authority, accounts.DeploymentProfileId, held, budget.Token).ConfigureAwait(false);
         ProtectedDid2MessagingPeerBootstrap.RequireProof(did, peer);
-        _ = await RecheckEndpointPairUnderLeaseAsync(own, peer, held, budget.Token).ConfigureAwait(false);
+        _ = await RecheckEndpointPairUnderLeaseAsync(own, peer, held, budget.Token, groupAcquisition: true).ConfigureAwait(false);
         own.Network.EnsureCurrent();
         var result = await Deep.Protocol.GroupV1.DeepIdV2GroupDirectoryAuthority.VerifyAsync(peer, RendezvousTrustedTime, budget.Token).ConfigureAwait(false);
         if (!result.AccountId.Span.SequenceEqual(expectedAccount.Span)) throw new CryptographicException("Group directory query returned another account.");
