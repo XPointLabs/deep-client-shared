@@ -21,6 +21,19 @@ public sealed class Did2MailboxNewWorkRenewalWindowTests
     public void NormalGrantKeepsProportionalMarginAndExpiredIsDue(ulong upper, bool due)
         => Assert.Equal(due, ProtectedDeepIdV2AccountOwner.IsMailboxGrantRenewalDueForNewWork(1_000, 4_600, MailboxCapabilityDomain.Retrieve, upper));
 
+    [Theory]
+    [InlineData(MailboxCapabilityDomain.Deposit, 1_020UL, 1_040UL, false)]
+    [InlineData(MailboxCapabilityDomain.Deposit, 1_039UL, 1_040UL, false)]
+    [InlineData(MailboxCapabilityDomain.Deposit, 1_040UL, 1_040UL, true)]
+    [InlineData(MailboxCapabilityDomain.Deposit, 1_041UL, 1_040UL, true)]
+    [InlineData(MailboxCapabilityDomain.Deposit, 1_020UL, 1_039UL, true)]
+    [InlineData(MailboxCapabilityDomain.Deposit, 1_020UL, 1_041UL, true)]
+    [InlineData(MailboxCapabilityDomain.Retrieve, 1_030UL, 1_040UL, true)]
+    public void FixedDepositCeilingSkipsOnlyLiveExactCeilingNotTightenedOrMovableLifetime(
+        MailboxCapabilityDomain domain, ulong upper, ulong ceiling, bool due)
+        => Assert.Equal(due, ProtectedDeepIdV2AccountOwner.IsMailboxGrantRenewalDueForNewWork(
+            1_000, 1_040, domain, upper, ceiling));
+
     [Fact]
     public void SchedulingRejectsUnknownRoleAndMalformedIntervalAndDoesNotOverflow()
     {

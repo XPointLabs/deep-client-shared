@@ -154,7 +154,10 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             var replicas = new OwnedPublicationReplica(this, route);
             _ = await accounts.EnsureOwnPermanentContactPublishedAsync(source, threshold, new OwnedPublicationSource(this, route), replicas);
             var address = (await accounts.GetCurrentAsync())!.PermanentId;
-            var firstIssuer = new OwnedGrantTransport(this);
+            // A genuinely signed shorter first grant leaves room for a useful
+            // renewal. A winner already at the fixed current ceiling must not
+            // exercise this successor/crash scenario by reissuing the same end.
+            var firstIssuer = new OwnedGrantTransport(this) { MaximumFixtureGrantLifetimeSeconds = 200 };
             var first = await Acquire(firstIssuer);
             byte[] original;
             using (var state = await ReadPeerGrantsAsync()) original = Assert.Single(state.Entries).Value.ToArray();
@@ -162,6 +165,19 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             var refreshAt = ProtectedDeepIdV2AccountOwner.ProactiveRefreshAt(grant.NotBeforeUnixSeconds, grant.ExpiresAtUnixSeconds);
             try
             {
+                var routeEnd = new[] { (route.Route.Reachability, 17), (route.Route.Authorization, 13),
+                    (route.Route.Route, 18), (route.Route.Successor, 11), (route.Route.Selection, 9) }
+                    .Min(part => BinaryPrimitives.ReadUInt64BigEndian(part.Item1.Field(part.Item2).Span));
+                Assert.True(routeEnd > grant.ExpiresAtUnixSeconds);
+                Assert.True(ProtectedDeepIdV2AccountOwner.IsMailboxGrantRenewalDueForNewWork(
+                    grant.NotBeforeUnixSeconds, grant.ExpiresAtUnixSeconds, grant.Domain, refreshAt));
+                // Authenticate a real signed successor before the due boundary;
+                // its live network/PMA can issue beyond the original short end.
+                await AdvanceNetworkAsync();
+                var currentReader = ReopenGrantReader();
+                var current = await GrantReaderSource(currentReader).VerifyForOwnPreKeyAuthoringAsync(currentReader, default);
+                Assert.True(current.Network.MaximumRecordExpiryUnixSeconds > grant.ExpiresAtUnixSeconds);
+                Assert.True(current.MailboxAuthority.ExpiresAtUnixSeconds > grant.ExpiresAtUnixSeconds);
                 AdvanceTo(checked(refreshAt - 6));
                 var restoredIssuer = new OwnedGrantTransport(this);
                 Assert.Equal(first.ExactXmc2.ToArray(), (await Acquire(restoredIssuer)).ExactXmc2.ToArray());
@@ -189,6 +205,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 }
                 successorIssuer.LoseResponse = false;
                 var renewed = await Acquire(successorIssuer);
+                Assert.True(MailboxAuthenticatedCapabilityCodec.DecodeGrant(renewed.ExactGrant.Span).ExpiresAtUnixSeconds > grant.ExpiresAtUnixSeconds);
                 Assert.NotEqual(first.ExactGrant.ToArray(), renewed.ExactGrant.ToArray());
                 Assert.Equal(successorIssuer.OriginalRequest.ToArray(), renewed.ExactXmg2.ToArray());
                 Assert.True(successorIssuer.ExactRetry);

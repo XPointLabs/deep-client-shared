@@ -348,16 +348,20 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         var due = IsMailboxGrantRenewalDueForNewWork(grant.NotBeforeUnixSeconds, grant.ExpiresAtUnixSeconds, grant.Domain, upper);
         if (due && !resume && grant.Domain == MailboxCapabilityDomain.Deposit && upper < grant.ExpiresAtUnixSeconds)
         {
-            // A new holder cannot extend the same route's signed lifetime. Do
-            // not continually reissue a still-live winner already at that
-            // ceiling. Route renewal is a separate authenticated operation;
-            // normal grant/route verification below still rejects expiry.
+            // A new holder cannot extend the original route or the CURRENT
+            // verified network/PMA ceiling. Avoid reissuing the same expiry,
+            // not the original start+maximum-lifetime bound (a new start may
+            // extend that). This is only scheduling: normal current policy,
+            // grant/route verification and protected read-backs still run.
             // An actual pending successor always resumes its exact request.
             var route = ContactRouteClosureCodec.Decode(ProtectedDid2MailboxGrantJournal.OriginalRoute(original).Span);
             var routeEnd = new[] { (route.Reachability, 17), (route.Authorization, 13),
                 (route.Route, 18), (route.Successor, 11), (route.Selection, 9) }
                 .Min(part => BinaryPrimitives.ReadUInt64BigEndian(part.Item1.Field(part.Item2).Span));
-            due = grant.ExpiresAtUnixSeconds < routeEnd;
+            var fixedCeiling = Math.Min(routeEnd, Math.Min(fresh.Network.MaximumRecordExpiryUnixSeconds,
+                fresh.MailboxAuthority.ExpiresAtUnixSeconds));
+            due = IsMailboxGrantRenewalDueForNewWork(grant.NotBeforeUnixSeconds, grant.ExpiresAtUnixSeconds,
+                grant.Domain, upper, fixedCeiling);
         }
         await RequireExactProtectedMailboxRootAsync(ProtectedDid2MailboxGrantJournal.Slot, snapshot, ct).ConfigureAwait(false);
         ct.ThrowIfCancellationRequested(); held.RequireActive();
@@ -368,7 +372,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     // window before the proportional20% margin. No lifetime is extended and
     // no active/captured request enters this new-work selector.
     internal static bool IsMailboxGrantRenewalDueForNewWork(ulong notBefore, ulong expires,
-        MailboxCapabilityDomain domain, ulong upper)
+        MailboxCapabilityDomain domain, ulong upper, ulong? fixedDepositCeiling = null)
     {
         var contract = domain switch
         {
@@ -378,7 +382,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         };
         var proportional = ProactiveRefreshAt(notBefore, expires);
         var requestWindow = checked((ulong)(contract.RequestTimeoutSeconds + 5));
-        return upper >= proportional || expires - upper <= requestWindow;
+        var due = upper >= proportional || expires - upper <= requestWindow;
+        return due && !(domain == MailboxCapabilityDomain.Deposit && upper < expires && fixedDepositCeiling == expires);
     }
 
     // Deposit enters through its closed wrapper above. The recheck
