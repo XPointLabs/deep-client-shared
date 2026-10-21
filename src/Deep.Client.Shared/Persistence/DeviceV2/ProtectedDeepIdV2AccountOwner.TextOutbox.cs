@@ -450,11 +450,17 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         using var native = opened.Sql.ReadVerifiedOperation(floor, operation.Span) ??
             throw new CryptographicException("Absent ordinary work has no retained native event.");
         if (native.Direction != 1) throw new CryptographicException("Absent ordinary work selected a receive event.");
-        using var application = await SqliteDeepIdV2AccountGeneration.OpenApplicationUnderLeaseAsync(storage, sqlStatePath, current, held, ct).ConfigureAwait(false);
         using var groups = await OpenGroupsUnderLeaseAsync(current, ct).ConfigureAwait(false);
-        var history = RequireGroupAuthoredEvent(groups.State, scope, operation.Span, native.EventHash) ??
-            await application.ReadRetainedAuthoredEventAsync(scope, native.EventHash.ToArray(), ct).ConfigureAwait(false) ??
-            throw new CryptographicException("Absent ordinary work lost its independent local history.");
+        var history = RequireGroupAuthoredEvent(groups.State, scope, operation.Span, native.EventHash);
+        if (history is null)
+        {
+            // Group authored history belongs to the actual protected group root,
+            // not the direct application projection. Open SQL only when it is
+            // the selected history owner; never memoize its integrity/custody.
+            using var application = await SqliteDeepIdV2AccountGeneration.OpenApplicationUnderLeaseAsync(storage, sqlStatePath, current, held, ct).ConfigureAwait(false);
+            history = await application.ReadRetainedAuthoredEventAsync(scope, native.EventHash.ToArray(), ct).ConfigureAwait(false) ??
+                throw new CryptographicException("Absent ordinary work lost its independent local history.");
+        }
         try
         {
             if (journal.Entries.TryGetValue(Convert.ToHexString(operation.Span), out var command))

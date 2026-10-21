@@ -121,6 +121,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                         Assert.Equal(SHA256.HashData(before.Exact.Span), SHA256.HashData((await fixture.ReadMessagingFloor(sender)).Exact.Span));
                     }
                     using var native = await fixture.SendOwnedMessage(sender, item.Operation, ApplicationCoreCodec.DecodeDmc2(item.Event));
+                    if (sender.IsInitiator)
+                        await fixture.CheckCachedGroupEventUsesItsProtectedOwner(sender, item, native.ExactEnvelope.ToArray());
                     using (var received = await fixture.ReceiveOwnedMessage(receiver, native.ExactEnvelope.ToArray())) { }
                     using (var replay = await fixture.ReceiveOwnedMessage(receiver, native.ExactEnvelope.ToArray())) { }
                 }
@@ -141,6 +143,27 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 
     private sealed partial class Fixture
     {
+        internal async Task CheckCachedGroupEventUsesItsProtectedOwner(Did2MessagingSessionScope scope,
+            ProtectedDid2GroupJournal.Outgoing item, byte[] envelope)
+        {
+            var source = Source();
+            var pair = await source.VerifyForOwnMessagingAsync(Accounts, scope, default);
+            using var verifier = DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess();
+            storage.ApplicationReadGroups.Clear();
+            storage.TrackApplicationReads = true;
+            try
+            {
+                using var replay = await GroupOwner(scope).SendMessagingAsync(1000, verifier, scope,
+                    item.Operation, item.Event, pair.Own, pair.Peer, source, default);
+                Assert.Equal(envelope, replay.ExactEnvelope.ToArray());
+                // One application open is still required for actual CONTACT
+                // consent. No second open supplies group authored history.
+                Assert.Single(storage.ApplicationReadGroups, slots => slots.Length == 6 &&
+                    slots.Contains(SqliteDeepIdV2AccountGeneration.ApplicationStateSlot, StringComparer.Ordinal));
+            }
+            finally { storage.TrackApplicationReads = false; CryptographicOperations.ZeroMemory(envelope); }
+        }
+
         internal async Task CheckGroupEndpointViewAcquisition(Did2MessagingSessionScope scope, bool capturedOwn, bool groupReadScope = false)
         {
             var parent = Source(); using var reads = groupReadScope ? parent.OpenCommandReadScope() : null;
