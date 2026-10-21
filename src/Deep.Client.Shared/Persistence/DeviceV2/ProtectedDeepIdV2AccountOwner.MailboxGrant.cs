@@ -346,13 +346,16 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         var grant = MailboxAuthenticatedCapabilityCodec.DecodeGrant(response.Field(8).Span);
         var resume = state.Selections[scope].Pending is not null;
         var due = IsMailboxGrantRenewalDueForNewWork(grant.NotBeforeUnixSeconds, grant.ExpiresAtUnixSeconds, grant.Domain, upper);
-        if (due && !resume && grant.Domain == MailboxCapabilityDomain.Deposit && upper < grant.ExpiresAtUnixSeconds)
+        if (due && !resume && grant.Domain == MailboxCapabilityDomain.Deposit && upper < grant.ExpiresAtUnixSeconds &&
+            IsDepositGrantStructurallyEligibleForCurrentPolicy(grant, fresh.MailboxAuthority))
         {
             // A new holder cannot extend the original route or the CURRENT
             // verified network/PMA ceiling. Avoid reissuing the same expiry,
             // not the original start+maximum-lifetime bound (a new start may
             // extend that). This is only scheduling: normal current policy,
             // grant/route verification and protected read-backs still run.
+            // A changed issuer/floor/window/lifetime may require replacement
+            // even at the same expiry; never suppress that useful renewal.
             // An actual pending successor always resumes its exact request.
             var route = ContactRouteClosureCodec.Decode(ProtectedDid2MailboxGrantJournal.OriginalRoute(original).Span);
             var routeEnd = new[] { (route.Reachability, 17), (route.Authorization, 13),
@@ -366,6 +369,24 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         await RequireExactProtectedMailboxRootAsync(ProtectedDid2MailboxGrantJournal.Slot, snapshot, ct).ConfigureAwait(false);
         ct.ThrowIfCancellationRequested(); held.RequireActive();
         return resume || due ? SHA256.HashData(ProtectedDid2MailboxGrantJournal.Request(original).Span) : ReadOnlyMemory<byte>.Empty;
+    }
+
+    // A scheduling hint only, never signature/currentness authority. Inputs
+    // are the canonical protected winner and this command's verified PMA2;
+    // all normal grant, network, route and final custody checks still follow.
+    internal static bool IsDepositGrantStructurallyEligibleForCurrentPolicy(MailboxAuthenticatedGrant grant,
+        VerifiedMailboxAuthorityV2 policy)
+    {
+        ArgumentNullException.ThrowIfNull(grant); ArgumentNullException.ThrowIfNull(policy);
+        if (grant.Domain != MailboxCapabilityDomain.Deposit || grant.Lifecycle != MailboxCapabilityLifecycle.Active ||
+            grant.Generation < policy.MinimumGrantGeneration || grant.ExpiresAtUnixSeconds <= grant.NotBeforeUnixSeconds ||
+            grant.ExpiresAtUnixSeconds - grant.NotBeforeUnixSeconds > policy.MaximumGrantLifetimeSeconds ||
+            grant.ExpiresAtUnixSeconds > policy.ExpiresAtUnixSeconds)
+            return false;
+        var issuer = policy.ResolveIssuer(MailboxCapabilityDomain.Deposit);
+        return grant.NotBeforeUnixSeconds >= issuer.ValidFromUnixSeconds &&
+            FixedRoute(grant.NetworkId.Span, policy.NetworkId.Span) &&
+            FixedRoute(grant.IssuerPublicKey.Span, issuer.PublicKey.Span);
     }
 
     // Scheduling only: a short grant can lose its usable transport retry

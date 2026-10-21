@@ -5,6 +5,7 @@ using Deep.Client.Shared.Services.ContactV2;
 using Deep.Protocol.ContactV1;
 using Deep.Protocol.ContactV2;
 using Deep.Protocol.DeepExtension.MailboxCapabilities;
+using Deep.Protocol.XPointNetworkV1;
 
 namespace Deep.Client.Shared.Production.Tests;
 
@@ -17,8 +18,85 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         await fixture.CheckCurrentNetworkGrantCeilingAsync();
     }
 
+    [Theory]
+    [InlineData("unchanged")]
+    [InlineData("issuer")]
+    [InlineData("floor")]
+    [InlineData("issuer-window")]
+    [InlineData("max-lifetime")]
+    [InlineData("lifecycle")]
+    public async Task Did2NewWorkGrantCeiling_CurrentSignedPolicyChangeCannotSuppressUsefulReplacement(string change)
+    {
+        await using var fixture = await Fixture.CreateAsync(withPeer: true);
+        await fixture.CheckGrantCeilingPolicyEligibilityAsync(change);
+    }
+
     private sealed partial class Fixture
     {
+        internal async Task CheckGrantCeilingPolicyEligibilityAsync(string change)
+        {
+            var plan = await accounts.ReadOwnPermanentContactPlanAsync();
+            using var threshold = new OwnedRouteThreshold(this);
+            var route = await EnsureRoute(plan.Intent.ToArray(), Did2OwnedPermanentContactPlan.Configuration(), threshold, reopen: false);
+            var replicas = new OwnedPublicationReplica(this, route);
+            _ = await accounts.EnsureOwnPermanentContactPublishedAsync(Source(), threshold,
+                new OwnedPublicationSource(this, route), replicas);
+            var reader = ReopenGrantReader(); var source = GrantReaderSource(reader);
+            var resolved = await reader.ResolvePermanentContactAsync((await accounts.GetCurrentAsync())!.PermanentId,
+                source, new SyntheticPermanentRead(this, source, replicas.ExactPublication));
+            var first = await reader.AcquirePermanentContactDepositGrantAsync(resolved, source, new OwnedGrantTransport(this));
+            var grant = MailboxAuthenticatedCapabilityCodec.DecodeGrant(first.ExactGrant.Span);
+            // A real canonical, issued winner. Only the PMA policy metadata
+            // changes below; this component test does not install a new PMT.
+            Assert.True(ProtectedDeepIdV2AccountOwner.IsDepositGrantStructurallyEligibleForCurrentPolicy(grant,
+                (await source.VerifyForOwnPreKeyAuthoringAsync(reader, default)).MailboxAuthority));
+            Sample = checked(Sample + 2); ProofTime = checked(ProofTime + 2);
+            var fresh = await source.VerifyForOwnPreKeyAuthoringAsync(reader, default);
+            var exact = fresh.MailboxAuthority.ExactPma2.ToArray();
+            switch (change)
+            {
+                case "issuer": PublicKey(0x35).CopyTo(exact, FieldOffset(exact, 5)); break;
+                case "floor": BinaryPrimitives.WriteUInt64BigEndian(exact.AsSpan(FieldOffset(exact, 7)), checked(grant.Generation + 1)); break;
+                case "issuer-window": BinaryPrimitives.WriteUInt64BigEndian(exact.AsSpan(FieldOffset(exact, 11)), checked(grant.NotBeforeUnixSeconds + 1)); break;
+                case "max-lifetime": BinaryPrimitives.WriteUInt32BigEndian(exact.AsSpan(FieldOffset(exact, 8)),
+                    checked((uint)(grant.ExpiresAtUnixSeconds - grant.NotBeforeUnixSeconds - 1))); break;
+                case "lifecycle":
+                    var overlap = grant with { Lifecycle = MailboxCapabilityLifecycle.Overlap,
+                        OverlapUntilUnixSeconds = grant.ExpiresAtUnixSeconds, IssuerSignature = new byte[64] };
+                    var signature = await new FixtureMailboxIssuer(0x31).SignAsync(MailboxAuthenticatedCapabilityCodec.GetGrantSigningBytes(overlap), default);
+                    grant = MailboxAuthenticatedCapabilityCodec.DecodeGrant(MailboxAuthenticatedCapabilityCodec.EncodeGrant(overlap with { IssuerSignature = signature }));
+                    break;
+                case "unchanged": break;
+                default: throw new ArgumentOutOfRangeException(nameof(change));
+            }
+            if (change is not ("unchanged" or "lifecycle"))
+            {
+                var oldGeneration = BinaryPrimitives.ReadUInt64BigEndian(exact.AsSpan(FieldOffset(exact, 2)));
+                BinaryPrimitives.WriteUInt64BigEndian(exact.AsSpan(FieldOffset(exact, 2)), checked(oldGeneration + 1));
+                fresh.MailboxAuthority.CoreHash.Span.CopyTo(exact.AsSpan(FieldOffset(exact, 3), 32));
+                var candidate = ContactCodec.Decode("PMA2", exact);
+                var rows = candidate.Field(16).ToArray();
+                for (var offset = 0; offset < rows.Length; offset += 96)
+                {
+                    Assert.Equal(root.RootKeyId.ToArray(), rows.AsSpan(offset, 32).ToArray());
+                    root.SignCommit(candidate.SignatureInput).CopyTo(rows, offset + 32);
+                }
+                rows.CopyTo(exact, FieldOffset(exact, 16));
+            }
+            var policy = MailboxAuthorityV2Verifier.Verify(fresh.Authority, exact,
+                fresh.Proof.TrustedLowerUnixSeconds, fresh.Proof.TrustedUpperUnixSeconds);
+            var eligible = ProtectedDeepIdV2AccountOwner.IsDepositGrantStructurallyEligibleForCurrentPolicy(grant, policy);
+            Assert.Equal(change == "unchanged", eligible);
+            var due = ProtectedDeepIdV2AccountOwner.ProactiveRefreshAt(grant.NotBeforeUnixSeconds, grant.ExpiresAtUnixSeconds);
+            Assert.True(ProtectedDeepIdV2AccountOwner.IsMailboxGrantRenewalDueForNewWork(
+                grant.NotBeforeUnixSeconds, grant.ExpiresAtUnixSeconds, grant.Domain, due));
+            // Reflect the closed selector: only eligible current policy can
+            // supply its fixed-ceiling skip; changes retain normal renewal.
+            Assert.Equal(change != "unchanged", ProtectedDeepIdV2AccountOwner.IsMailboxGrantRenewalDueForNewWork(
+                grant.NotBeforeUnixSeconds, grant.ExpiresAtUnixSeconds, grant.Domain, due,
+                eligible ? grant.ExpiresAtUnixSeconds : null));
+        }
+
         internal async Task CheckCurrentNetworkGrantCeilingAsync()
         {
             var plan = await accounts.ReadOwnPermanentContactPlanAsync();
