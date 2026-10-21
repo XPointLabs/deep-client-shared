@@ -17,42 +17,112 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         held.RequireOwner(lease); ct.ThrowIfCancellationRequested();
         var expected = ContactRouteClosureCodec.Decode(exactOriginalRoute.Span); // Bounded immutable copy before awaits.
         var scope = opened.Scope;
-        var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
-        var head = await ReadInitialPeerStoreRouteAsync(current, held, opened, application, ct).ConfigureAwait(false);
-        var initial = opened.Sql.ReadVerifiedActiveInitialEvents(floor);
-        byte[] headHash = [], accepted = [];
+        byte[] accepted = [], consentRoot = [];
+        ProtectedDid2ContactAcceptJournal.State? commands = null;
+        try
+        {
+            // Capture cross-owner projection/consent inputs BEFORE the native
+            // read transaction. They are not trusted as native evidence: the
+            // following complete fresh SQL snapshot independently joins them.
+            if (!scope.IsInitiator)
+            {
+                using var root = await storage.ReadOwnedAsync(ProtectedDid2ContactAcceptJournal.Slot, ct).ConfigureAwait(false) ??
+                    throw new InvalidDataException("Historical route lost mandatory local consent custody.");
+                consentRoot = root.Use(bytes => bytes.ToArray());
+                commands = ProtectedDid2ContactAcceptJournal.Decode(consentRoot, scope.Network, scope.LocalAccount, scope.Instance);
+            }
+            var winner = commands?.FindScope(scope);
+            if (scope.IsInitiator || winner is not null)
+                accepted = await application.ReadContactAcceptAsync(current.AccountId,
+                    BinaryPrimitives.ReadUInt64BigEndian(scope.Exact[84..]), scope.Conversation.ToArray(),
+                    (scope.IsInitiator ? scope.RemoteAccount : scope.LocalAccount).ToArray(),
+                    (scope.IsInitiator ? scope.RemoteDevice : scope.LocalDevice).ToArray(), ct).ConfigureAwait(false) ?? [];
+            var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
+            ParsedContactRouteClosure selected;
+            // This entire private helper is synchronous. No await, authority
+            // callback, external delegate or write runs with the SQL snapshot.
+            using (var snapshot = opened.Sql.OpenHistoricalRouteRead(floor))
+                selected = ReadHistoricalPeerRouteSnapshot(snapshot, scope, expected, accepted, winner, held, ct);
+            // Preserve cross-owner freshness after the callbacks above rather
+            // than treating a captured application/consent value as authority.
+            if (!scope.IsInitiator)
+                await RequireExactProtectedMailboxRootAsync(ProtectedDid2ContactAcceptJournal.Slot, consentRoot, ct).ConfigureAwait(false);
+            if (scope.IsInitiator || winner is not null)
+            {
+                var actual = await application.ReadContactAcceptAsync(current.AccountId,
+                    BinaryPrimitives.ReadUInt64BigEndian(scope.Exact[84..]), scope.Conversation.ToArray(),
+                    (scope.IsInitiator ? scope.RemoteAccount : scope.LocalAccount).ToArray(),
+                    (scope.IsInitiator ? scope.RemoteDevice : scope.LocalDevice).ToArray(), ct).ConfigureAwait(false) ?? [];
+                try
+                {
+                    if (!FixedRoute(actual, accepted))
+                        throw new CryptographicException("Historical peer acceptance projection changed during verification.");
+                }
+                finally { CryptographicOperations.ZeroMemory(actual); }
+            }
+            if (!FixedRoute((await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false)).Exact.Span, floor.Exact.Span))
+                throw new CryptographicException("Historical native route changed under the owned read lease.");
+            ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
+            return selected;
+        }
+        finally
+        {
+            commands?.Dispose(); CryptographicOperations.ZeroMemory(consentRoot); CryptographicOperations.ZeroMemory(accepted);
+        }
+    }
+
+    private static ParsedContactRouteClosure ReadHistoricalPeerRouteSnapshot(
+        Did2MessagingSqlJournal.HistoricalRouteRead snapshot, Did2MessagingSessionScope scope,
+        ParsedContactRouteClosure expected, ReadOnlyMemory<byte> accepted,
+        ProtectedDid2ContactAcceptJournal.Entry? winner, HeldDeepIdV2AccountLease held, CancellationToken ct)
+    {
+        var initial = snapshot.ReadInitialEvents(); byte[] headHash = [];
         try
         {
             var hello = ApplicationCoreCodec.DecodeDmc2(initial.Hello);
-            var policy = ((ContactHelloDmc2Payload)hello.ParsedPayload).Policy;
+            if (hello.ParsedPayload is not ContactHelloDmc2Payload greeting ||
+                !FixedRoute(hello.NetworkId.Span, scope.Network) || !FixedRoute(hello.ConversationId.Span, scope.Conversation) ||
+                !FixedRoute(hello.SenderAccountId.Span, scope.IsInitiator ? scope.LocalAccount : scope.RemoteAccount) ||
+                !FixedRoute(hello.SenderDeviceId.Span, scope.IsInitiator ? scope.LocalDevice : scope.RemoteDevice))
+                throw new CryptographicException("Original peer route lost authenticated native Hello custody.");
+            var head = greeting.MailboxRoute.Route;
+            var policy = greeting.Policy;
             ulong consentOrdinal = 0, headSequence = hello.SenderClientSequence;
             headHash = SHA256.HashData(initial.Hello);
             if (scope.IsInitiator)
             {
-                accepted = await application.ReadContactAcceptAsync(current.AccountId,
-                    BinaryPrimitives.ReadUInt64BigEndian(scope.Exact[84..]), scope.Conversation.ToArray(),
-                    scope.RemoteAccount.ToArray(), scope.RemoteDevice.ToArray(), ct).ConfigureAwait(false) ??
-                    throw new CryptographicException("Historical peer route lost actual acceptance custody.");
-                using var native = opened.Sql.ReadVerifiedReceiveForEvent(floor, SHA256.HashData(accepted)) ??
+                if (accepted.IsEmpty) throw new CryptographicException("Historical peer route lost actual acceptance custody.");
+                using var native = snapshot.ReadReceiveForEvent(SHA256.HashData(accepted.Span)) ??
                     throw new CryptographicException("Historical peer route has no native acceptance.");
-                var message = ApplicationCoreCodec.DecodeDmc2(accepted);
-                policy &= ((ContactAcceptDmc2Payload)message.ParsedPayload).Policy;
+                using var plain = native.OwnAuthenticatedDmc2();
+                if (!plain.Use(bytes => FixedRoute(bytes, accepted.Span)))
+                    throw new CryptographicException("Original peer acceptance differs from the authenticated receive.");
+                var message = ApplicationCoreCodec.DecodeDmc2(accepted.Span);
+                if (message.ParsedPayload is not ContactAcceptDmc2Payload consent ||
+                    !FixedRoute(message.NetworkId.Span, scope.Network) || !FixedRoute(message.ConversationId.Span, scope.Conversation) ||
+                    !FixedRoute(message.SenderAccountId.Span, scope.RemoteAccount) || !FixedRoute(message.SenderDeviceId.Span, scope.RemoteDevice) ||
+                    !FixedRoute(consent.RelationshipId.Span, scope.Relationship) || !FixedRoute(consent.ContactHelloHash.Span, SHA256.HashData(initial.Hello)))
+                    throw new CryptographicException("Original peer route differs from its authenticated conversation.");
+                head = consent.MailboxRoute.Route;
+                policy &= consent.Policy;
                 consentOrdinal = native.Ordinal; headSequence = message.SenderClientSequence;
                 CryptographicOperations.ZeroMemory(headHash); headHash = native.EventHash.ToArray();
             }
             else
             {
-                using var root = await storage.ReadOwnedAsync(ProtectedDid2ContactAcceptJournal.Slot, ct).ConfigureAwait(false) ??
-                    throw new InvalidDataException("Historical route lost mandatory local consent custody.");
-                using var commands = root.Use(bytes => ProtectedDid2ContactAcceptJournal.Decode(bytes, scope.Network, scope.LocalAccount, scope.Instance));
-                var winner = commands.FindScope(scope);
                 if (winner is not null)
                 {
-                    using var native = opened.Sql.ReadVerifiedOperation(floor, winner.Operation);
+                    using var native = snapshot.ReadOperation(winner.Operation);
                     if (native is not null)
                     {
-                        policy &= await RequireRetainedContactAcceptEventUnderLeaseAsync(held, opened, application,
-                            winner, winner.Operation.ToArray(), ct).ConfigureAwait(false);
+                        if (!FixedRoute(winner.Scope.Exact, scope.Exact) || native.Direction != 1 ||
+                            !FixedRoute(native.EventHash, winner.EventHash) || !FixedRoute(winner.HelloHash, SHA256.HashData(initial.Hello)) || accepted.IsEmpty)
+                            throw new CryptographicException("Retained ContactAccept differs from its actual native send/Hello.");
+                        winner.RequireExactAccept(accepted.Span);
+                        var response = ApplicationCoreCodec.DecodeDmc2(accepted.Span);
+                        if (response.ParsedPayload is not ContactAcceptDmc2Payload consent)
+                            throw new CryptographicException("Retained ContactAccept has no canonical acceptance policy.");
+                        policy &= consent.Policy;
                         consentOrdinal = native.Ordinal;
                     }
                 }
@@ -60,9 +130,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
 
             ParsedContactRouteClosure? selected = FixedRoute(head.ExactBytes.Span, expected.ExactBytes.Span) ? head : null;
             var faulted = false;
-            foreach (var native in opened.Sql.ReadVerifiedIncomingRouteControls(floor, ct))
+            foreach (var native in snapshot.ReadIncomingRouteControls(ct))
             {
-                held.RequireOwner(lease); ct.ThrowIfCancellationRequested();
+                held.RequireActive(); ct.ThrowIfCancellationRequested();
                 using var plain = native.OwnAuthenticatedDmc2();
                 var message = plain.Use(static bytes => ApplicationCoreCodec.DecodeDmc2(bytes));
                 if (message.ContentKind != Dmc2ContentKind.ContactRouteUpdate)
@@ -85,7 +155,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 var generation = BinaryPrimitives.ReadUInt64BigEndian(head.Reachability.Field(3).Span);
                 if (update.RouteGeneration <= generation)
                 {
-                    using var first = opened.Sql.ReadVerifiedReceiveForEvent(floor, native.EventHash) ??
+                    using var first = snapshot.ReadReceiveForEvent(native.EventHash) ??
                         throw new CryptographicException("Historical duplicate lost its original native processing.");
                     if (first.Ordinal >= native.Ordinal || first.RouteProcessing[0] != 1)
                         throw new CryptographicException("Historical native route has a changed-generation fork.");
@@ -114,14 +184,12 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 CryptographicOperations.ZeroMemory(headHash); headHash = native.EventHash.ToArray();
                 if (FixedRoute(next.ExactBytes.Span, expected.ExactBytes.Span)) selected = next;
             }
-            if (!FixedRoute((await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false)).Exact.Span, floor.Exact.Span))
-                throw new CryptographicException("Historical native route changed under the owned read lease.");
-            ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
+            ct.ThrowIfCancellationRequested(); held.RequireActive();
             return selected ?? throw new CryptographicException("Original Store route is absent from qualified native peer history.");
         }
         finally
         {
-            foreach (var bytes in new[] { initial.SessionInit, initial.Hello, headHash, accepted }) CryptographicOperations.ZeroMemory(bytes);
+            foreach (var bytes in new[] { initial.SessionInit, initial.Hello, headHash }) CryptographicOperations.ZeroMemory(bytes);
         }
     }
 }

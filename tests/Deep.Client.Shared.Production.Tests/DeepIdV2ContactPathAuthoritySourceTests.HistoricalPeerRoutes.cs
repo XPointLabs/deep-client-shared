@@ -185,7 +185,9 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         // A known child does not authorize deleting its unknown parent.
         var roots = await fixture.ReadCompletedContactSendRetainedRoots(receiver);
         var application = await fixture.ReadCompleteOrdinaryApplicationProjection(receiver);
-        await Assert.ThrowsAsync<IOException>(() => fixture.CompactNativeOrdinaryOutbox(receiver, default));
+        var pinned = await Assert.ThrowsAsync<ProtectedDeepIdV2AccountOwner.OutboxPrefixPinnedException>(
+            () => fixture.CompactNativeOrdinaryOutbox(receiver, default));
+        Assert.Equal("An unresolved attempt pins the complete native send chain.", pinned.Message);
         Assert.Equal(roots, await fixture.ReadCompletedContactSendRetainedRoots(receiver));
         Assert.Equal(application, await fixture.ReadCompleteOrdinaryApplicationProjection(receiver));
         Assert.Equal(native, (await fixture.ReadMessagingFloor(receiver)).Exact.ToArray());
@@ -262,7 +264,9 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         await fixture.AdvanceOriginalStoreEpochForTestAsync(2_100);
         var pending = await fixture.ReadCompleteOrdinaryApplicationProjection(receiver);
         var roots = await fixture.ReadCompletedContactSendRetainedRoots(receiver);
-        await Assert.ThrowsAsync<IOException>(() => fixture.CompactNativeOrdinaryOutbox(receiver, default));
+        var pinned = await Assert.ThrowsAsync<ProtectedDeepIdV2AccountOwner.OutboxPrefixPinnedException>(
+            () => fixture.CompactNativeOrdinaryOutbox(receiver, default));
+        Assert.Equal("An unresolved attempt pins the complete native send chain.", pinned.Message);
         Assert.Equal(pending, await fixture.ReadCompleteOrdinaryApplicationProjection(receiver));
         Assert.Equal(roots, await fixture.ReadCompletedContactSendRetainedRoots(receiver));
         var hit = false; var failpoint = Enum.Parse<Did2MailboxSendFailpoint>(fault);
