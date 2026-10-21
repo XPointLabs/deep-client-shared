@@ -37,7 +37,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     var expected = evidence.CopyRecords(); var original = retained.CopyRecords();
                     try
                     {
-                        if (retained.IsInitial || new[] { 0, 1, 2, 6, 7 }.Any(index => !FixedRoute(expected[index], original[index])))
+                        if (retained.HasPublication != evidence.HasPublication || new[] { 0, 1, 2, 6, 7 }.Any(index => !FixedRoute(expected[index], original[index])))
                             throw new CryptographicException("Store retry differs from its first original public evidence.");
                     }
                     finally { foreach (var bytes in expected.Concat(original)) CryptographicOperations.ZeroMemory(bytes); }

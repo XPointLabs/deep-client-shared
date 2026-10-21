@@ -46,7 +46,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     // substituted with an invented successor XIR.
     private sealed record OwnedPeerMailboxRoute(ParsedDeepIdV2ContactMailboxRoute Package,
         VerifiedDeepIdV2MailboxRouteClosure Route, ReadOnlyMemory<byte> LocatorHash,
-        ReadOnlyMemory<byte> HeadEventHash, ReadOnlyMemory<byte> NativeFloor);
+        ReadOnlyMemory<byte> HeadEventHash, ReadOnlyMemory<byte> NativeFloor, PeerRouteInputFence? Inputs);
 
     private sealed record OwnedPeerRouteHistory(ParsedDeepIdV2ContactMailboxRoute Original,
         ParsedContactRouteClosure Head, ReadOnlyMemory<byte> HeadEventHash, ReadOnlyMemory<byte> NativeFloor,
@@ -132,7 +132,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     }
 
     private async Task<OwnedPeerMailboxRoute> RequireCurrentPeerRouteUnderLeaseAsync(
-        OwnedDid2MessagingStorage opened, OwnedPeerRouteHistory history,
+        OwnedDid2MessagingStorage opened, OwnedPeerRouteHistory history, PeerRouteInputFence? inputs,
         DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own,
         VerifiedDeepIdV2DirectoryFreshness peer, DeepIdV2ContactPathAuthoritySource source,
         HeldDeepIdV2AccountLease held, CancellationToken ct)
@@ -155,6 +155,6 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         if (!FixedRoute(floor.Exact.Span, history.NativeFloor.Span))
             throw new CryptographicException("Native route predecessor changed during current delivery verification.");
         ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
-        return new(history.Original, route, route.LocatorHash.ToArray(), history.HeadEventHash, history.NativeFloor);
+        return new(history.Original, route, route.LocatorHash.ToArray(), history.HeadEventHash, history.NativeFloor, inputs);
     }
 }

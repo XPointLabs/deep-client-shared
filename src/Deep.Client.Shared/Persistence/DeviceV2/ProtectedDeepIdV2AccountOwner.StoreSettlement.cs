@@ -78,13 +78,13 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 storage, sqlStatePath, scope, held, lease, ct).ConfigureAwait(false);
             var metadata = await application.RequireStorePublicEvidenceAsync(scope, op, attempt, ct).ConfigureAwait(false);
             await RequireStoreEvidenceCommitmentUnderLeaseAsync(held, scope, op, attempt, metadata, ct).ConfigureAwait(false);
-            if (metadata.IsInitial != !intent.AsSpan().IsEmpty ||
+            if (intent.Length != 0 && !metadata.HasPublication ||
                 !FixedRoute(metadata.Logical.Span, entry.MailboxOperation) ||
                 !FixedRoute(metadata.ExactPma.Span, ProtectedDid2MailboxGrantJournal.OriginalPolicy(acquisition).Span))
                 throw new CryptographicException("Late Store public facts differ from original prepared custody.");
-            if (!metadata.IsInitial)
+            if (intent.Length == 0)
             {
-                var nativeRoute = await ReadOriginalPeerStoreRouteAsync(current, held, opened, application, route.ExactBytes, ct).ConfigureAwait(false);
+                var nativeRoute = await ReadStoreEvidencePeerRouteAsync(current, held, opened, application, op, metadata, own, source, ct).ConfigureAwait(false);
                 if (!FixedRoute(nativeRoute.ExactBytes.Span, route.ExactBytes.Span))
                     throw new CryptographicException("Late Store lost its authenticated native recipient route.");
             }
@@ -100,7 +100,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var upper = checked(own.Proof.TrustedUpperUnixSeconds + first.SampleSeconds - own.Proof.MonotonicSample);
             var verified = await VerifyOriginalStoreReplyAsync(scope, envelope, route, metadata, replicas,
                 own, source, upper, read.Item, exact, reply, ct).ConfigureAwait(false);
-            if (metadata.IsInitial)
+            if (intent.Length != 0)
                 await RequireOriginalInitialStoreRecipientUnderLeaseAsync(current, held, opened, scope, intent, metadata,
                     envelope, exact, verified, own.Authority, verifier, ct).ConfigureAwait(false);
             async Task Recheck(CancellationToken token)

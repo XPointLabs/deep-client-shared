@@ -124,14 +124,14 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     {
                         var metadata = await application.RequireStorePublicEvidenceAsync(scope, operation, attempt, token).ConfigureAwait(false);
                         await owner.RequireStoreEvidenceCommitmentUnderLeaseAsync(held, scope, operation, attempt, metadata, token).ConfigureAwait(false);
-                        if (metadata.IsInitial != (intent.Length != 0))
+                        if (intent.Length != 0 && !metadata.HasPublication)
                             throw new CryptographicException("Original grant attempt differs from its actual native send kind.");
-                        var originalRoute = metadata.IsInitial ? ContactRouteClosureCodec.Decode(metadata.OriginalRoute.Span) :
-                            await owner.ReadOriginalPeerStoreRouteAsync(current, held, opened, application, metadata.OriginalRoute, token).ConfigureAwait(false);
+                        var originalRoute = intent.Length != 0 ? ContactRouteClosureCodec.Decode(metadata.OriginalRoute.Span) :
+                            await owner.ReadStoreEvidencePeerRouteAsync(current, held, opened, application, operation, metadata, fresh, source, token).ConfigureAwait(false);
                         var replicas = MailboxStoreReplicaEvidenceVerifier.Verify(fresh.Network, fresh.Authority, originalRoute, metadata.Replicas);
                         var receipt = await VerifyOriginalStoreOutcomeAsync(scope, attempt, envelope, application,
                             originalRoute, metadata, replicas, fresh, source, upper, token).ConfigureAwait(false);
-                        if (metadata.IsInitial)
+                        if (intent.Length != 0)
                         {
                             var stored = await application.ReadTransportOutboxAsync(OutboxAccountScope.FromBytes(metadata.AccountScope.Span),
                                 OutboxLogicalId.FromBytes(metadata.Logical.Span), token).ConfigureAwait(false);

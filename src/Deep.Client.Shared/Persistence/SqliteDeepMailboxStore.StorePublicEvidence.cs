@@ -39,7 +39,7 @@ internal sealed class Did2StorePublicEvidence
     internal ReadOnlyMemory<byte> OriginalDcr => records[6].ToArray();
     internal ReadOnlyMemory<byte> OriginalRoute => records[7].ToArray();
     internal ReadOnlyMemory<byte> OriginalPeerAdp => records[8].ToArray();
-    internal bool IsInitial => records[6].Length != 0;
+    internal bool HasPublication => records[6].Length != 0;
     internal ReadOnlyMemory<byte> EvidenceCommitment => records[9].ToArray();
     internal Did2StorePublicEvidence WithCommitment(ReadOnlyMemory<byte> commitment) =>
         new(records[0], records[1], records[2], Replicas, records[6], records[7], records[8], commitment);

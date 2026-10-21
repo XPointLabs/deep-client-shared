@@ -176,8 +176,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             if (command is not null && !FixedRoute(command.EventHash, native.EventHash))
                 throw new CryptographicException("Retained Store differs from its original protected command.");
             var metadata = selected.Evidence;
-            if (metadata.IsInitial) throw new CryptographicException("An ordinary Store cannot use initial recipient evidence.");
-            var route = await ReadOriginalPeerStoreRouteAsync(current, held, opened, application, metadata.OriginalRoute, ct).ConfigureAwait(false);
+            var route = await ReadStoreEvidencePeerRouteAsync(current, held, opened, application, operation, metadata, own, source, ct).ConfigureAwait(false);
             var publicKeys = MailboxStoreReplicaEvidenceVerifier.Verify(own.Network, own.Authority, route, metadata.Replicas);
             var currentUpper = checked(own.Proof.TrustedUpperUnixSeconds + first.SampleSeconds - own.Proof.MonotonicSample);
             if (native.Direction != 1) throw new CryptographicException("Historical Store cannot select a receive row.");
@@ -192,7 +191,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var finalFloor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
             if (!FixedRoute(finalFloor.Exact.Span, floor.Exact.Span))
                 throw new CryptographicException("Historical Store native custody changed during verification.");
-            var finalRoute = await ReadOriginalPeerStoreRouteAsync(current, held, opened, application, metadata.OriginalRoute, ct).ConfigureAwait(false);
+            var finalRoute = await ReadStoreEvidencePeerRouteAsync(current, held, opened, application, operation, metadata, own, source, ct).ConfigureAwait(false);
             if (!FixedRoute(route.ExactBytes.Span, finalRoute.ExactBytes.Span))
                 throw new CryptographicException("Historical Store original peer route changed during verification.");
             var finalMetadata = await application.RequireStorePublicEvidenceAsync(scope, operation, selected.Attempt, ct).ConfigureAwait(false);
@@ -436,6 +435,13 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     throw new CryptographicException("Original Store receipt is outside its signed original view interval.");
                 if (receipt.DurableAtUnixSeconds > currentUpper)
                     throw new CryptographicException("Original Store receipt is later than independently protected current time.");
+                if (metadata.HasPublication && actualEnvelope.Span.StartsWith("DPE2"u8))
+                {
+                    var publication = Deep.Protocol.ContactV2.DeepIdV2ResolverClosureCodec.Decode(metadata.OriginalDcr.Span);
+                    var credential = DeepIdV2Codec.DecodeDid2(publication.Bundle.Field(23).Span);
+                    _ = source.AccountOwner.VerifyOriginalRoutePublication(own, credential, metadata.OriginalPeerAdp.Span,
+                        metadata.OriginalDcr.Span, metadata.OriginalRoute.Span, receipt.AcceptedAtUnixSeconds);
+                }
             }
             return result;
         }

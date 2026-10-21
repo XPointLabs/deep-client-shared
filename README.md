@@ -11,8 +11,16 @@ contact or account is introduced; a new control uses the existing owned counters
 and ratchet. Expired routes/XUR never acquire permission.
 `ReadContactRouteHealthAsync` exports only three denial-only Boolean diagnostics
 from actual authenticated history and fresh time, never descriptors/capabilities.
-These predicates cannot authorize delivery. A missing live reverse route plus
-expired update rendezvous remains unavailable; no public resolver fallback exists.
+These predicates cannot authorize delivery. For mutual XRA/XUR expiry,
+`ReintroduceContactRouteAsync` explicitly resolves a supplied permanent address
+of the SAME protected peer through owned ContactResolve. The separately current
+publication carries only that relationship's exact native DMC2/14 maintenance
+control, never ordinary text/group/attachment/acceptance/braid payloads. Native
+consent, purpose, current endpoint and exact successor checks remain independent.
+The existing MAC-bound Store evidence retains original publication/ADP facts for
+cold replay, settlement, closure and retirement. No expired route is made current,
+private route head replaced, or new account/contact/ratchet/journal introduced.
+See [DR-0159](../docs/survival-program/decisions/DR-0159-established-contact-route-reintroduction.md).
 See the [contact update owner](../docs/architecture/CONTACT-AND-GROUP-PROTOCOL-V1.md#10-contact-route-and-device-updates).
 
 New-work Deposit renewal does not repeatedly replace a still-live grant already
@@ -35,6 +43,22 @@ The API retains its existing refresh/discard/maintenance method names; the
 established-source property replaces the narrower group-only property without
 a compatibility alias. Consumers must rebuild; no account/schema reset is needed.
 See the [execution owner](../docs/architecture/TRANSPORT-NEUTRAL-MESSAGING.md#32-steady-state-execution-и-стоимость-проверки).
+
+Inside one held Store, settled-consent private routes reuse their already verified
+semantics only after reauthenticating ALL actual native rows/protected history,
+the exact native floor and exact protected/SQL consent inputs. Endpoint proofs,
+time, original route lifetimes and effect guards remain current. Unsettled/first
+acceptance instead performs complete semantic reconstruction at every boundary:
+its own completion may legitimately change the consent root. No fence crosses a
+lease or becomes a persistent accepted-authority cache.
+
+The soft32-row outbox cleanup trigger is not a hard capacity limit. A closed or
+unresolved predecessor conservatively defers optional cleanup while both current
+hard bounds still have room. No old attempt, request, native event, evidence or
+floor is removed or relabelled successful. Explicit/required compaction must
+still prove the complete original chain; malformed/missing custody and ordinary
+IO failures are not suppressed. Every new writer independently enforces actual
+hard limits. This permits route recovery without first deleting pinned work.
 
 `DeepIdV2AccountService.GetConversationAsync` selects a canonical conversation
 identifier from the actual protected catalog, then verifies that session's local

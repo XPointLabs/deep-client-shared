@@ -83,8 +83,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                         ContactCodec.Decode("XMC2", ProtectedDid2MailboxGrantJournal.Response(value).Span).Field(8).Span), entry.GrantHash)) ??
                     throw new CryptographicException("Replacement work lost an original exact acquisition winner.");
                 var (grant, route) = await RequireOriginalAttemptGrantAsync(entry, acquisition, own, source, scope, ct).ConfigureAwait(false);
-                var originalNativeRoute = nativeRoute ?? await ReadOriginalPeerStoreRouteAsync(current, held, opened,
-                    application, route.ExactBytes, ct).ConfigureAwait(false);
+                var originalNativeRoute = nativeRoute ?? await ReadAttemptStorePeerRouteAsync(current, held, opened,
+                    application, operation, entry.Attempt.ToArray(), route, own, source, ct).ConfigureAwait(false);
                 if (!FixedRoute(route.ExactBytes.Span, originalNativeRoute.ExactBytes.Span))
                     throw new CryptographicException("Replacement predecessor route lost its authenticated native recipient binding.");
                 sends.RequireGrant(grant);
@@ -201,8 +201,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             using var application = await SqliteDeepIdV2AccountGeneration.OpenApplicationUnderLeaseAsync(
                 storage, sqlStatePath, current, held, ct).ConfigureAwait(false);
             if (initialIntent.IsEmpty)
-                _ = await ReadOriginalPeerStoreRouteAsync(current, held, opened, application,
-                    originalRoute.ExactBytes, ct).ConfigureAwait(false);
+                _ = await ReadAttemptStorePeerRouteAsync(current, held, opened, application,
+                    operation, entry.Attempt.ToArray(), originalRoute, own, source, ct).ConfigureAwait(false);
             var accountScope = VerifiedCurrentMailboxGrant.AccountScopeForHolder(grant.HolderPublicKey.Span);
             var read = await application.ReadTransportOutboxAsync(accountScope,
                 OutboxLogicalId.FromBytes(entry.MailboxOperation), ct).ConfigureAwait(false);

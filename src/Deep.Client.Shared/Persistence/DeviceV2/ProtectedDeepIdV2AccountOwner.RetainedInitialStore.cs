@@ -84,7 +84,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             if (selected is null) return null; // Original pending evidence is not success.
             var evidence = selected.Evidence;
             logical = MailboxSendOperation(scope, selected.Attempt.Span, envelope);
-            if (!evidence.IsInitial) throw new CryptographicException("Initial Store lost its original recipient proof.");
+            if (!evidence.HasPublication) throw new CryptographicException("Initial Store lost its original recipient proof.");
             using (var raw = await storage.ReadOwnedAsync(ProtectedDid2MessagingPeerBootstrap.Slot(scope), ct).ConfigureAwait(false) ??
                 throw new InvalidDataException("Initial Store lost its protected peer credential.")) peerRoot = raw.Use(bytes => bytes.ToArray());
             var pinned = ProtectedDid2MessagingPeerBootstrap.Restore(peerRoot, scope);
@@ -142,7 +142,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         IDeepMlDsa65Verifier verifier,
         ulong originalCreated, bool requireExisting, CancellationToken ct)
     {
-        if (!evidence.IsInitial || !FixedRoute(InitialMailboxOperation(intent.Span), operation.Span))
+        if (!evidence.HasPublication || !FixedRoute(InitialMailboxOperation(intent.Span), operation.Span))
             throw new CryptographicException("Initial Store preparation has another operation or recipient evidence.");
         using var application = await SqliteDeepIdV2AccountGeneration.OpenExistingApplicationForCompactionUnderLeaseAsync(
             storage, sqlStatePath, scope, held, lease, ct).ConfigureAwait(false);
@@ -165,7 +165,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     var expected = evidence.CopyRecords(); var actual = retained.CopyRecords();
                     try
                     {
-                        if (!retained.IsInitial || new[] { 0, 1, 2, 6, 7 }.Any(index => !FixedRoute(expected[index], actual[index])))
+                        if (!retained.HasPublication || new[] { 0, 1, 2, 6, 7 }.Any(index => !FixedRoute(expected[index], actual[index])))
                             throw new CryptographicException("Initial retry differs from its first original public evidence.");
                     }
                     finally { foreach (var bytes in expected.Concat(actual)) CryptographicOperations.ZeroMemory(bytes); }
@@ -203,7 +203,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         HeldDeepIdV2AccountLease held, OwnedDid2MessagingStorage opened, ReadOnlyMemory<byte> intent,
         Did2StorePublicEvidence evidence, ReadOnlyMemory<byte> expectedEnvelope, CancellationToken ct)
     {
-        if (!evidence.IsInitial) throw new CryptographicException("Initial Store has no original recipient evidence.");
+        if (!evidence.HasPublication) throw new CryptographicException("Initial Store has no original recipient evidence.");
         await RequireRetainedInitialDraftAndRecipientUnderLeaseAsync(current, held, opened, intent,
             evidence.OriginalDcr, expectedEnvelope, ct).ConfigureAwait(false);
     }

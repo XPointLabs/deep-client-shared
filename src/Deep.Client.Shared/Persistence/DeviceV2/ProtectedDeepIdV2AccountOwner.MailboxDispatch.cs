@@ -18,7 +18,15 @@ namespace Deep.Client.Shared.Persistence.DeviceV2;
 
 internal sealed partial class ProtectedDeepIdV2AccountOwner
 {
-    private enum OwnedMailboxPayloadKind { Application, BraidControl }
+    private enum OwnedMailboxPayloadKind { Application, BraidControl, RouteReintroduction }
+
+    internal Task<ClientMailboxStoreResult> DeliverRouteReintroductionAsync(ulong seconds,
+        IDeepMlDsa65Verifier verifier, Did2MessagingSessionScope scope, ReadOnlyMemory<byte> operation,
+        DeepIdV2ContactPathAuthoritySource.PermanentContactAuthority resolved,
+        DeepIdV2ContactPathAuthoritySource source, IDid2MailboxGrantTransport grants,
+        IDid2OwnedMailboxTransportFactory transport, CancellationToken ct) =>
+        DeliverOwnedMailboxAsync(seconds, verifier, scope, operation, ReadOnlyMemory<byte>.Empty,
+            source, resolved, null, null, grants, transport, OwnedMailboxPayloadKind.RouteReintroduction, ct);
 
     internal Task<ClientMailboxStoreResult> DeliverMessagingAsync(ulong unixSeconds,
         IDeepMlDsa65Verifier verifier, Did2MessagingSessionScope scope, ReadOnlyMemory<byte> operation,
@@ -131,6 +139,11 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var first = await RequireMessagingFreshnessAsync(current, fresh, peer, source, held, ct).ConfigureAwait(false);
             OwnedInitialMessagingSeed.RequireFreshScope(scope, fresh.Proof, peer, first);
             using var opened = await SqliteDeepIdV2AccountGeneration.OpenOwnedMessagingUnderLeaseAsync(storage, sqlStatePath, current, scope, ct).ConfigureAwait(false);
+            if (payloadKind == OwnedMailboxPayloadKind.RouteReintroduction)
+            {
+                if (resolved is null || !initialIntent.IsEmpty) throw new CryptographicException("Re-introduction requires independent current publication custody.");
+                await RequireRouteReintroductionUnderLeaseAsync(current, held, opened, resolved, source, op, ct).ConfigureAwait(false);
+            }
             if (resolved is null && initialIntent.IsEmpty)
             {
                 var cached = payloadKind == OwnedMailboxPayloadKind.BraidControl
@@ -181,7 +194,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             if (predecessor is not null)
             {
                 await RequireClosedMailboxChainForSuccessorUnderLeaseAsync(current, held, opened, scope, op,
-                    initialIntent, resolved is null ? null : contact.Contact, verifier,
+                    initialIntent, initialIntent.IsEmpty ? null : contact.Contact, verifier,
                     envelopeBytes, sends, snapshot, instance, source, fresh, ct).ConfigureAwait(false);
                 entry = null;
             }
@@ -214,17 +227,18 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     Math.Min(applicationRetryUntil, sends.Current(scope.Hash, op)?.RetryUntil ?? ulong.MaxValue), token).ConfigureAwait(false);
                 if (resolved is not null)
                 {
-                    await RequireClaimContactTimeAsync(current, source, resolved, held, contact.Contact, contact.Time, token).ConfigureAwait(false);
-                    await RequireRetainedInitialDraftAndRecipientUnderLeaseAsync(current, held, opened, initialIntent,
-                        contact.Contact.Contact.CanonicalBytes, envelopeBytes, token).ConfigureAwait(false);
+                    if (payloadKind == OwnedMailboxPayloadKind.RouteReintroduction)
+                        await RequireRouteReintroductionUnderLeaseAsync(current, held, opened, resolved, source, op, token).ConfigureAwait(false);
+                    else
+                    {
+                        await RequireClaimContactTimeAsync(current, source, resolved, held, contact.Contact, contact.Time, token).ConfigureAwait(false);
+                        await RequireRetainedInitialDraftAndRecipientUnderLeaseAsync(current, held, opened, initialIntent,
+                            contact.Contact.Contact.CanonicalBytes, envelopeBytes, token).ConfigureAwait(false);
+                    }
                 }
                 else
                 {
-                    var retainedRoute = await ReadAuthenticatedPeerMailboxRouteUnderLeaseAsync(current, opened, fresh, peer, source, held, token).ConfigureAwait(false);
-                    if (!FixedRoute(retainedRoute.HeadEventHash.Span, privateContact!.HeadEventHash.Span) ||
-                        !FixedRoute(retainedRoute.NativeFloor.Span, privateContact.NativeFloor.Span) ||
-                        !FixedRoute(retainedRoute.Route.ExactRouteClosure.Span, privateContact.Route.ExactRouteClosure.Span))
-                        throw new CryptographicException("The authenticated peer mailbox route changed during this exact dispatch.");
+                    await RecheckPeerMailboxRouteUnderLeaseAsync(current, opened, privateContact!, fresh, peer, source, held, token).ConfigureAwait(false);
                 }
                 var retained = await ReadOwnedMailboxEnvelopeUnderLeaseAsync(current, scope, opened, op, initialIntent, token).ConfigureAwait(false);
                 try
@@ -237,7 +251,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 await RequireExactProtectedMailboxRootAsync(ProtectedDid2MailboxSendJournal.Slot, snapshot, token).ConfigureAwait(false);
                 if (sends.Current(scope.Hash, op) is { Closed: true } || entry?.HasPredecessor == true)
                     await RequireClosedMailboxChainForSuccessorUnderLeaseAsync(current, held, opened, scope, op,
-                        initialIntent, resolved is null ? null : contact.Contact, verifier,
+                        initialIntent, initialIntent.IsEmpty ? null : contact.Contact, verifier,
                         envelopeBytes, sends, snapshot, instance, source, fresh, token).ConfigureAwait(false);
             }
             var winner = entry is null
@@ -636,8 +650,14 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own, VerifiedDeepIdV2DirectoryFreshness peer,
         DeepIdV2ContactPathAuthoritySource source, HeldDeepIdV2AccountLease held, CancellationToken ct)
     {
+        var inputs = await ReadPeerRouteInputFenceUnderLeaseAsync(current, opened, held, ct).ConfigureAwait(false);
         var history = await ReadAuthenticatedPeerRouteHistoryUnderLeaseAsync(current, opened, own, peer, source, held, ct).ConfigureAwait(false);
-        return await RequireCurrentPeerRouteUnderLeaseAsync(opened, history, own, peer, source, held, ct).ConfigureAwait(false);
+        var route = await RequireCurrentPeerRouteUnderLeaseAsync(opened, history, inputs, own, peer, source, held, ct).ConfigureAwait(false);
+        var confirmed = await ReadPeerRouteInputFenceUnderLeaseAsync(current, opened, held, ct).ConfigureAwait(false);
+        if (inputs is not null && confirmed is not null) RequireSamePeerRouteInputs(inputs, confirmed);
+        else if (inputs is not null || confirmed is not null)
+            throw new CryptographicException("Held route consent changed during its original verification.");
+        return route;
     }
 
     private async Task<OwnedPeerRouteHistory> ReadAuthenticatedPeerRouteHistoryUnderLeaseAsync(

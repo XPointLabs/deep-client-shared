@@ -13,6 +13,17 @@ namespace Deep.Client.Shared.Persistence.DeviceV2;
 
 internal sealed partial class ProtectedDeepIdV2AccountOwner
 {
+    internal sealed class OutboxPrefixPinnedException() : IOException("An unresolved attempt pins the complete native send chain.");
+
+    // Denial-only scheduling classification. No admission, deletion or room
+    // is granted: every writer still reads and enforces its real hard bounds.
+    internal static bool CanDeferPinnedOrdinaryMaintenance(Exception error, int ordinaryCount, int sendCount) =>
+        error is OutboxPrefixPinnedException && IsBelowOrdinaryOutboxHardLimits(ordinaryCount, sendCount);
+
+    private static bool IsBelowOrdinaryOutboxHardLimits(int ordinaryCount, int sendCount) =>
+        ordinaryCount >= 0 && sendCount >= 0 &&
+        ordinaryCount < ProtectedDid2DirectTextJournal.MaximumEntries &&
+        sendCount < ProtectedDid2MailboxSendJournal.MaximumEntries;
     // Amortized business-owner maintenance, not a scheduler or permission to
     // delete unknown work. The existing dependency-closed producer chooses and
     // verifies the actual settled prefix; the same protected plan owns recovery.
@@ -34,14 +45,33 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             scope.Network, scope.LocalAccount, scope.Instance));
         if (ordinary.Entries.Count < Did2CompactionPlan.MaximumRows &&
             sends.Entries.Count < ProtectedDid2MailboxSendJournal.MaximumEntries) return;
-        var eligible = ordinary.Entries.Values.Where(entry => FixedRoute(entry.Scope.Exact, scope.Exact))
-            .OrderBy(entry => entry.Sequence).TakeWhile(entry => entry.Stored && !entry.WorkStopped).Take(Did2CompactionPlan.MaximumRows).Count();
-        eligible = Math.Min(eligible, ProtectedDid2DirectTextJournal.MaximumTerminalAudits - ordinary.TerminalAudits.Count);
+        var prefix = ordinary.Entries.Values.Where(entry => FixedRoute(entry.Scope.Exact, scope.Exact))
+            .OrderBy(entry => entry.Sequence).TakeWhile(entry => entry.Stored && !entry.WorkStopped).Take(Did2CompactionPlan.MaximumRows).ToArray();
+        var eligible = Math.Min(prefix.Length, ProtectedDid2DirectTextJournal.MaximumTerminalAudits - ordinary.TerminalAudits.Count);
         if (eligible == 0) return; // Capacity checks still refuse; unknown is never evicted.
+        if (IsBelowOrdinaryOutboxHardLimits(ordinary.Entries.Count, sends.Entries.Count) &&
+            prefix.Take(eligible).Any(command => sends.Entries.Values.Any(send => send.Closed &&
+                FixedRoute(send.ScopeHash, scope.Hash) && FixedRoute(send.Operation, command.Operation))))
+        {
+            // A closed admission is NOT an original Store outcome. Conservatively
+            // defer optional cleanup without repeatedly re-verifying this pinned
+            // prefix. Explicit/required cleanup must still prove every outcome;
+            // no native event, attempt, SQL record or replay floor is removed.
+            return;
+        }
         var plans = new ProtectedDid2CompactionPlan(storage, lease, scope.Network, scope.LocalAccount, scope.Instance);
         using var prior = await plans.ReadAsync(held, ct).ConfigureAwait(false);
         if (prior.Phase != 0) throw new InvalidDataException("Stored compaction owns recovery before new ordinary work.");
-        using var selected = await PrepareOrdinaryOutboxUnderLeaseAsync(current, scope, eligible, own, source, held, ct).ConfigureAwait(false);
+        Did2CompactionPlan.Preparation selected;
+        try { selected = await PrepareOrdinaryOutboxUnderLeaseAsync(current, scope, eligible, own, source, held, ct).ConfigureAwait(false); }
+        catch (OutboxPrefixPinnedException error) when (CanDeferPinnedOrdinaryMaintenance(error, ordinary.Entries.Count, sends.Entries.Count))
+        {
+            // A soft32-row maintenance trigger is not either hard entry limit.
+            // Preserve ALL old attempts and permit independent bounded work;
+            // never stage a plan, evict unknowns or swallow storage corruption.
+            return;
+        }
+        using var selectedOwner = selected;
         await plans.StageAsync(prior, selected, held, ct).ConfigureAwait(false);
 #if DEEP_TEST_INTERNALS
         Did2CompactionTestHooks.Hit(Did2CompactionFailpoint.AfterStage);
@@ -241,7 +271,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 // still-pending/unknown work is backpressure, never deletion proof.
                 await application.RequireAttemptedStoreEvidenceAsync(scope, operation, attempt, logical, ct).ConfigureAwait(false);
                 if (await application.ReadDurableStorePublicEvidenceAsync(scope, operation, attempt, logical, ct).ConfigureAwait(false) is null)
-                    throw new IOException("An unresolved attempt pins the complete native send chain.");
+                    throw new OutboxPrefixPinnedException();
                 await RequireOriginalMailboxSendCommitmentAsync(current, held, opened, scope, operation, attempt, nativeEnvelope,
                     application, sends, grants, own, source, currentUpper, ct, initialIntent, initialVerifier).ConfigureAwait(false);
             }
@@ -264,10 +294,10 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             throw new CryptographicException("Original Store lost the exact prepared native send commitment.");
         var evidence = await application.RequireStorePublicEvidenceAsync(scope, operation, attempt, ct).ConfigureAwait(false);
         await RequireStoreEvidenceCommitmentUnderLeaseAsync(held, scope, operation, attempt, evidence, ct).ConfigureAwait(false);
-        if (evidence.IsInitial != !initialIntent.IsEmpty)
+        if (!initialIntent.IsEmpty && !evidence.HasPublication)
             throw new CryptographicException("Original chain recipient evidence differs from its native send kind.");
-        var route = evidence.IsInitial ? ContactRouteClosureCodec.Decode(evidence.OriginalRoute.Span) :
-            await ReadOriginalPeerStoreRouteAsync(current, held, opened, application, evidence.OriginalRoute, ct).ConfigureAwait(false);
+        var route = !initialIntent.IsEmpty ? ContactRouteClosureCodec.Decode(evidence.OriginalRoute.Span) :
+            await ReadStoreEvidencePeerRouteAsync(current, held, opened, application, operation, evidence, own, source, ct).ConfigureAwait(false);
         if (!FixedRoute(evidence.Logical.Span, send.MailboxOperation) ||
             !FixedRoute(send.RouteHash, SHA256.HashData(route.ExactBytes.Span)))
             throw new CryptographicException("Original send differs from retained public/native route custody.");
@@ -312,7 +342,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var keys = MailboxStoreReplicaEvidenceVerifier.Verify(own.Network, own.Authority, route, evidence.Replicas);
             var receipt = await VerifyOriginalStoreOutcomeAsync(scope, attempt, nativeEnvelope, application, route,
                 evidence, keys, own, source, currentUpper, ct).ConfigureAwait(false);
-            if (evidence.IsInitial)
+            if (!initialIntent.IsEmpty)
                 await RequireOriginalInitialStoreRecipientUnderLeaseAsync(current, held, opened, scope, initialIntent,
                     evidence, nativeEnvelope, exact, receipt, own.Authority,
                     initialVerifier ?? throw new CryptographicException("Initial chain lost its live approved verifier."), ct).ConfigureAwait(false);

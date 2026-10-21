@@ -66,7 +66,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         ReadOnlyMemory<byte> operation, Did2StorePublicEvidence evidence, CancellationToken ct)
     {
         held.RequireOwner(lease); ct.ThrowIfCancellationRequested();
-        if (evidence.IsInitial) throw new CryptographicException("Control Store cannot acquire initial/application evidence.");
+        if (evidence.HasPublication) throw new CryptographicException("Control Store cannot acquire publication evidence.");
         var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
         using var native = RequireOwnedBraidSend(opened, scope, floor, operation.Span);
         using var application = await SqliteDeepIdV2AccountGeneration.OpenExistingApplicationForCompactionUnderLeaseAsync(
@@ -113,7 +113,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 exact, application, sends, ct).ConfigureAwait(false);
             if (selected is null) return null;
             var metadata = selected.Evidence;
-            if (metadata.IsInitial) throw new CryptographicException("Historical control Store has initial evidence.");
+            if (metadata.HasPublication) throw new CryptographicException("Historical control Store has publication evidence.");
             var first = await RecheckRouteFreshnessAsync(current, source, own, held, null, ct).ConfigureAwait(false);
             var route = await ReadOriginalPeerStoreRouteAsync(current, held, opened, application, metadata.OriginalRoute, ct).ConfigureAwait(false);
             var replicas = MailboxStoreReplicaEvidenceVerifier.Verify(own.Network, own.Authority, route, metadata.Replicas);
