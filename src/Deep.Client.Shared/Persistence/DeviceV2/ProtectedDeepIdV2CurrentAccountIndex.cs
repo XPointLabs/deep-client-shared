@@ -165,5 +165,7 @@ internal sealed class VerifiedDeepIdV2CurrentAccount(
     internal VerifiedDeepIdV2LocalGenesis Verified { get; } = verified;
     internal DeepPermanentIdV2 PermanentId { get; } = permanentId;
 
-    public void Dispose() => Verified.Dispose();
+    internal PreKeyV2.PreKeySqlCipherConnectionKey PreKeyConnectionKey { get; } = new();
+
+    public void Dispose() { try { PreKeyConnectionKey.Dispose(); } finally { Verified.Dispose(); } }
 }

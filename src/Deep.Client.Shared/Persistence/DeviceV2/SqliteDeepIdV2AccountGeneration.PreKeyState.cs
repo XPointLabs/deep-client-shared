@@ -391,7 +391,8 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             {
                 store = new SqlitePreKeyV2InventoryStore(statePath, key, network, account,
                     identity.Account.Certificate.AccountGeneration, certificate.DeviceId.Span, certificate.DeviceGeneration,
-                    dpd1, certificate.DeviceEd25519PublicKey.Span, allowCreate: !File.Exists(statePath), successorCustody: successors);
+                    dpd1, certificate.DeviceEd25519PublicKey.Span, allowCreate: !File.Exists(statePath), successorCustody: successors,
+                    connectionKey: current.PreKeyConnectionKey);
             }
             catch { successors?.Dispose(); throw; }
             try

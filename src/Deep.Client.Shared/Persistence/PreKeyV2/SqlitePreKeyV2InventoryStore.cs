@@ -48,7 +48,8 @@ internal sealed partial class SqlitePreKeyV2InventoryStore : IAsyncDisposable
         ReadOnlySpan<byte> deviceId32, ulong deviceGeneration,
         ReadOnlySpan<byte> dpd1Reference38,
         ReadOnlySpan<byte> deviceSigningPublicKey32, bool allowCreate,
-        ProtectedPreKeyInventoryChain.Snapshot? successorCustody = null)
+        ProtectedPreKeyInventoryChain.Snapshot? successorCustody = null,
+        PreKeySqlCipherConnectionKey? connectionKey = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(statePath);
         Nonzero(databaseKey32, 32, nameof(databaseKey32));
@@ -85,7 +86,7 @@ internal sealed partial class SqlitePreKeyV2InventoryStore : IAsyncDisposable
             successorPublicRecords = successorCustody?.Entries.Select(entry =>
                 DeepIdV2PreKeyPublicationCodec.Decode(entry.CopyPublication())).ToArray() ?? [];
             if (!string.IsNullOrEmpty(parent)) Directory.CreateDirectory(parent);
-            connection = Open(path, databaseKey32, create: !exists);
+            connection = Open(path, databaseKey32, create: !exists, connectionKey);
             if (exists) Validate();
             else Create();
         }
@@ -447,7 +448,7 @@ internal sealed partial class SqlitePreKeyV2InventoryStore : IAsyncDisposable
     }
 
     private static SqliteConnection Open(string path, ReadOnlySpan<byte> key,
-        bool create)
+        bool create, PreKeySqlCipherConnectionKey? connectionKey)
     {
         var connection = new SqliteConnection(new SqliteConnectionStringBuilder
         {
@@ -459,14 +460,18 @@ internal sealed partial class SqlitePreKeyV2InventoryStore : IAsyncDisposable
         try
         {
             connection.Open();
-            var ownedKey = key.ToArray();
-            try
+            if (!create && connectionKey is not null)
+                connectionKey.ApplyExisting(connection, path, key);
+            else
             {
-                if (SQLitePCL.raw.sqlite3_key(connection.Handle, ownedKey) !=
-                    SQLitePCL.raw.SQLITE_OK)
-                    throw new CryptographicException("SQLCipher rejected the DID2 pre-key key.");
+                var ownedKey = key.ToArray();
+                try
+                {
+                    if (SQLitePCL.raw.sqlite3_key(connection.Handle, ownedKey) != SQLitePCL.raw.SQLITE_OK)
+                        throw new CryptographicException("SQLCipher rejected the DID2 pre-key key.");
+                }
+                finally { CryptographicOperations.ZeroMemory(ownedKey); }
             }
-            finally { CryptographicOperations.ZeroMemory(ownedKey); }
             using var version = connection.CreateCommand();
             version.CommandText = "PRAGMA cipher_version;";
             if (!Convert.ToString(version.ExecuteScalar())?.StartsWith("4.",

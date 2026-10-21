@@ -1,5 +1,17 @@
 # Deep Client Shared
 
+Existing PKV2 pre-key files retain their original SQLCipher4 password-derived
+key and format. Opening within a verified current-account read computes that
+same PBKDF2-HMAC-SHA512 (256000 iterations, actual16-byte file salt,32-byte
+result) using the platform-backed .NET implementation. Only this deterministic
+key derivation is reused within that disposable read; path, original key and
+actual file salt must still match, and the material is wiped on disposal.
+No SQL connection or verification result is cached. Every open still performs
+the existing SQLCipher page integrity, schema, inventory signatures, protected
+publication/receiver history and retirement checks. Native creation and cold
+native password reads remain byte-compatible; no rekey, schema change, account
+reset, new protocol reader or reduced KDF work factor is introduced.
+
 `RefreshContactRouteAsync` renews the actual owned permanent publication through
 its existing protected saga, then advertises the exact next route through an
 existing mutually consented ratcheted conversation and a CURRENT reverse mailbox
