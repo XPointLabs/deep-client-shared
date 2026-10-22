@@ -276,8 +276,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         // Latest XNA1 need not be the exact ancestor that signed this old PMA2.
         var host = await MailboxHostAuthorityV2Verifier.VerifyPolicyAsync(own.Network, own.Authority,
             own.MailboxAuthority, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
-        await host.RequireOriginalNamespaceAsync(ProtectedDid2MailboxGrantJournal.OriginalPolicy(acquisition),
-            route.Projection.CanonicalBytes, ct).ConfigureAwait(false);
+        await own.RequireOriginalMailboxNamespacesAsync(host,
+            ProtectedDid2MailboxGrantJournal.OriginalPolicy(acquisition),
+            route.Projection, MailboxCapabilityDomain.Deposit, ct).ConfigureAwait(false);
         var policy = ContactCodec.Decode("PMA2", ProtectedDid2MailboxGrantJournal.OriginalPolicy(acquisition).Span);
         var issuerKey = policy.Field(5);
         var notBefore = BinaryPrimitives.ReadUInt64BigEndian(policy.Field(11).Span);

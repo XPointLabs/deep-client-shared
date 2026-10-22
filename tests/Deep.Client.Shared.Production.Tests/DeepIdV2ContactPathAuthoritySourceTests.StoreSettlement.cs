@@ -2,12 +2,47 @@ using System.Security.Cryptography;
 using Deep.Client.Shared.Persistence.DeviceV2;
 using Deep.Client.Shared.Services;
 using Deep.Protocol.AccountDirectoryV1;
+using Deep.Protocol.ContactV1;
 using Deep.Protocol.DeepExtension.MailboxCapabilities;
 
 namespace Deep.Client.Shared.Production.Tests;
 
 public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 {
+    [Theory]
+    [InlineData("initial")] [InlineData("accept")] [InlineData("ordinary")]
+    [Trait("RequiresApprovedMlKemRuntime", "true")]
+    public async Task Did2StoreSettlement_DistinctIssuanceAndAssignmentAdoptsExactLateReplyWithoutRedispatch(string kind)
+    {
+        await using var fixture = await Fixture.CreateAsync(withPeer: true, encryptedStorage: true,
+            longMailboxWindow: true, initialMailboxAuthorityExpiry: 1_200);
+        var test = await fixture.PrepareStoreMonotonicityCase(kind);
+        // Genuine signed same-epoch renewal, not a new logical assignment.
+        await fixture.AdvanceNetworkAsync(expiry: 6_000);
+        fixture.AdvanceStoreSettlementClock(1_100);
+        test.Grants.MaximumFixtureGrantLifetimeSeconds = 120;
+        test.Transport.BeforeReturnedReply = expiry => fixture.AdvanceStoreSettlementClock(expiry + 6);
+        var native = (await fixture.ReadMessagingFloor(test.Scope)).Exact.ToArray();
+        var result = await test.Deliver();
+        Assert.NotNull(result.Cursor); Assert.False(result.IngressDispatched);
+        using (var grants = await fixture.ReadPeerGrantsAsync(own: test.Scope.IsInitiator))
+        {
+            var original = Assert.Single(grants.Entries).Value;
+            var policy = ContactCodec.Decode("PMA2", ProtectedDid2MailboxGrantJournal.OriginalPolicy(original).Span);
+            var route = ContactRouteClosureCodec.Decode(ProtectedDid2MailboxGrantJournal.OriginalRoute(original).Span);
+            Assert.False(policy.CoreHash.Span.SequenceEqual(route.Projection.Field(4).Span[6..]));
+        }
+        Assert.Equal(1, test.Transport.Calls); Assert.Equal(1, test.Grants.Calls);
+        var originalRequest = test.Transport.ExactRequest!.ToArray();
+        fixture.ColdReopenStoreSettlement(test.Scope);
+        var repeated = await test.Deliver();
+        Assert.Equal(result.Cursor, repeated.Cursor); Assert.False(repeated.IngressDispatched);
+        Assert.Equal(originalRequest, test.Transport.ExactRequest);
+        Assert.Equal(1, test.Transport.Calls); Assert.Equal(1, test.Grants.Calls);
+        Assert.Equal(native, (await fixture.ReadMessagingFloor(test.Scope)).Exact.ToArray());
+        CryptographicOperations.ZeroMemory(originalRequest); CryptographicOperations.ZeroMemory(native);
+    }
+
     [Theory]
     [InlineData("initial")] [InlineData("accept")] [InlineData("ordinary")]
     [Trait("RequiresApprovedMlKemRuntime", "true")]

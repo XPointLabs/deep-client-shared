@@ -148,6 +148,18 @@ public sealed partial class DeepIdV2AccountService
         DeepIdV2ContactPathAuthoritySource source, CancellationToken ct = default) =>
         FlushGroupCoreAsync(group, conversation, source, ct, pendingOnly: false);
 
+    /// <summary>Resumes unfinished group work through the ordinary owned send
+    /// path. Completed-work hints only avoid repeating old work; this does not
+    /// audit completed historical Store receipts or return delivery authority.</summary>
+    /// <param name="group">The existing group identifier.</param>
+    /// <param name="conversation">This account's retained conversation.</param>
+    /// <param name="source">The account-owned current authority source.</param>
+    /// <param name="ct">Cancellation for the original pending work.</param>
+    /// <returns>The number of pending batch items processed.</returns>
+    public Task<int> ResumeGroupAsync(ReadOnlyMemory<byte> group, DeepIdV2Conversation conversation,
+        DeepIdV2ContactPathAuthoritySource source, CancellationToken ct = default) =>
+        FlushGroupCoreAsync(group, conversation, source, ct, pendingOnly: true);
+
     private async Task<int> FlushGroupCoreAsync(ReadOnlyMemory<byte> group, DeepIdV2Conversation conversation,
         DeepIdV2ContactPathAuthoritySource source, CancellationToken ct, bool pendingOnly)
     {
