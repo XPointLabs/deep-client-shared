@@ -10,7 +10,7 @@ namespace Deep.Client.Shared.Persistence.DeviceV2;
 
 // Protected local custody only. The actual account owner holds the lease.
 // Decoding never establishes current route/issuer or transport authority.
-internal static class ProtectedDid2MailboxGrantJournal
+internal static partial class ProtectedDid2MailboxGrantJournal
 {
     internal const string Slot = "deep.store.v2.mailbox-grant-journal";
     // One current local reader. Prior custody loses possible read use when
@@ -31,11 +31,14 @@ internal static class ProtectedDid2MailboxGrantJournal
         // Keys are SHA256(exact XMG2), the existing XMC2 request binding.
         internal SortedDictionary<string, byte[]> Entries { get; } = new(StringComparer.Ordinal);
         internal SortedDictionary<string, Selection> Selections { get; } = new(StringComparer.Ordinal);
+        internal SortedDictionary<string, RetainedReference> Retained { get; } = new(StringComparer.Ordinal);
         public void Dispose()
         {
             foreach (var entry in Entries.Values) CryptographicOperations.ZeroMemory(entry);
             Entries.Clear();
             Selections.Clear();
+            foreach (var reference in Retained.Values) reference.Dispose();
+            Retained.Clear();
         }
     }
 
@@ -211,13 +214,18 @@ internal static class ProtectedDid2MailboxGrantJournal
     private static byte[] RemoveOldestAdopted(State state, ReadOnlySpan<byte> acquisition, byte[] selected,
         ReadOnlySpan<byte> network, ReadOnlySpan<byte> account, ReadOnlySpan<byte> instance)
     {
+        StageOldestAdoptedRemoval(state, acquisition, selected);
+        return Encode(state, network, account, instance);
+    }
+
+    private static void StageOldestAdoptedRemoval(State state, ReadOnlySpan<byte> acquisition, byte[] selected)
+    {
         var name = Convert.ToHexString(acquisition); var scope = EntryScope(selected);
         var successor = state.Entries.Values.SingleOrDefault(entry => EntryScope(entry) == scope && Predecessor(entry) == name);
         if (successor is null) state.Selections.Remove(scope);
         else successor.AsSpan(PredecessorOffset, 32).Clear();
         state.Entries.Remove(name); CryptographicOperations.ZeroMemory(selected);
         state.Revision = checked(state.Revision + 1);
-        return Encode(state, network, account, instance);
     }
 
     // Only the held owner calls these transitions. They do not establish issuer authority.
@@ -438,8 +446,9 @@ internal static class ProtectedDid2MailboxGrantJournal
             throw new InvalidDataException("Mailbox holder custody is incompatible or has a foreign account instance.");
         var count = BinaryPrimitives.ReadUInt16BigEndian(exact.Slice(2, 2));
         var selectionCount = BinaryPrimitives.ReadUInt16BigEndian(exact.Slice(92, 2));
+        var retainedCount = BinaryPrimitives.ReadUInt16BigEndian(exact.Slice(94, 2));
         var revision = BinaryPrimitives.ReadUInt64BigEndian(exact.Slice(4, 8));
-        if (count > MaximumEntries || selectionCount > count || exact.Slice(94, 2).IndexOfAnyExcept((byte)0) >= 0 ||
+        if (count > MaximumEntries || selectionCount > count || retainedCount > MaximumRetained ||
             revision < (ulong)count + 1)
             throw new InvalidDataException("Mailbox holder custody count/revision is noncanonical.");
         var state = new State { Revision = revision };
@@ -458,7 +467,7 @@ internal static class ProtectedDid2MailboxGrantJournal
                     throw new InvalidDataException("Mailbox acquisitions are duplicate or unsorted.");
                 state.Entries.Add(name, entry.ToArray()); previous = name;
             }
-            if (exact.Length - offset != selectionCount * SelectionBytes)
+            if (exact.Length - offset != selectionCount * SelectionBytes + retainedCount * RetainedReferenceBytes)
                 throw new InvalidDataException("Mailbox selection framing is noncanonical.");
             previous = null;
             for (var index = 0; index < selectionCount; index++)
@@ -471,6 +480,8 @@ internal static class ProtectedDid2MailboxGrantJournal
                     NameOrNull(selected.Slice(96, 32))));
                 previous = name;
             }
+            offset += selectionCount * SelectionBytes;
+            ReadRetainedReferences(state, exact.Slice(offset), retainedCount);
             RequireSelections(state);
             return state;
         }
@@ -490,11 +501,15 @@ internal static class ProtectedDid2MailboxGrantJournal
                 throw new InvalidDataException("Mailbox acquisition name differs from its exact request.");
         }
         RequireSelections(state);
-        var exact = new byte[checked(HeaderBytes + state.Entries.Values.Sum(entry => 4 + entry.Length) + state.Selections.Count * SelectionBytes)]; exact[0] = Version;
+        RequireRetainedReferences(state);
+        var length = checked(HeaderBytes + state.Entries.Values.Sum(entry => 4 + entry.Length) + state.Selections.Count * SelectionBytes + state.Retained.Count * RetainedReferenceBytes);
+        if (length > MaximumBytes) throw new IOException("Mailbox custody exceeds its unchanged byte budget.");
+        var exact = new byte[length]; exact[0] = Version;
         BinaryPrimitives.WriteUInt16BigEndian(exact.AsSpan(2, 2), checked((ushort)state.Entries.Count));
         BinaryPrimitives.WriteUInt64BigEndian(exact.AsSpan(4, 8), state.Revision);
         network.CopyTo(exact.AsSpan(12)); account.CopyTo(exact.AsSpan(28)); instance.CopyTo(exact.AsSpan(60));
         BinaryPrimitives.WriteUInt16BigEndian(exact.AsSpan(92, 2), checked((ushort)state.Selections.Count));
+        BinaryPrimitives.WriteUInt16BigEndian(exact.AsSpan(94, 2), checked((ushort)state.Retained.Count));
         var offset = HeaderBytes;
         foreach (var entry in state.Entries.Values)
         {
@@ -509,6 +524,7 @@ internal static class ProtectedDid2MailboxGrantJournal
             if (pair.Value.RetainedTail is { } tail) Convert.FromHexString(tail).CopyTo(exact, offset + 96);
             offset += SelectionBytes;
         }
+        WriteRetainedReferences(state, exact.AsSpan(offset));
         return exact;
     }
 

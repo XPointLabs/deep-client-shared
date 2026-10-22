@@ -19,6 +19,15 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     }
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Did2NewWorkGrantCeiling_TightenedSignedCeilingRenewsBeforeMarginAndColdKeepsOriginal(bool loseReply)
+    {
+        await using var fixture = await Fixture.CreateAsync(withPeer: true, encryptedStorage: true);
+        await fixture.CheckCurrentNetworkGrantCeilingAsync(tightened: true, loseReply);
+    }
+
+    [Theory]
     [InlineData("unchanged")]
     [InlineData("issuer")]
     [InlineData("floor")]
@@ -97,7 +106,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 eligible ? grant.ExpiresAtUnixSeconds : null));
         }
 
-        internal async Task CheckCurrentNetworkGrantCeilingAsync()
+        internal async Task CheckCurrentNetworkGrantCeilingAsync(bool tightened = false, bool loseReply = false)
         {
             var plan = await accounts.ReadOwnPermanentContactPlanAsync();
             using var threshold = new OwnedRouteThreshold(this);
@@ -113,9 +122,9 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             // carriage/policy now ends before the older original exact route.
             // Leave room for the fixture's complete 30-second signed DTT
             // response window even after entering the proactive grant margin.
-            const ulong networkEnd = 1_400;
-            Assert.True(routeEnd > networkEnd);
-            await AdvanceNetworkAsync(expiry: networkEnd);
+            ulong networkEnd = tightened ? 1_500UL : 1_400UL;
+            Assert.True(routeEnd >= networkEnd);
+            if (!tightened) await AdvanceNetworkAsync(expiry: networkEnd);
             var firstIssuer = new OwnedGrantTransport(this);
             var first = await Acquire(firstIssuer);
             Assert.Equal(1, firstIssuer.Calls);
@@ -123,6 +132,40 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             Assert.Equal(networkEnd, grant.ExpiresAtUnixSeconds);
             Assert.True(grant.ExpiresAtUnixSeconds < routeEnd);
             var refreshAt = ProtectedDeepIdV2AccountOwner.ProactiveRefreshAt(grant.NotBeforeUnixSeconds, grant.ExpiresAtUnixSeconds);
+            if (tightened)
+            {
+                byte[] original;
+                using (var state = await ReadPeerGrantsAsync()) original = Assert.Single(state.Entries).Value.ToArray();
+                try
+                {
+                    networkEnd = 1_350;
+                    await AdvanceNetworkAsync(expiry: networkEnd);
+                    Assert.True(checked(CurrentProofTime + 5) < refreshAt);
+                    var issuer = new OwnedGrantTransport(this) { LoseResponse = loseReply };
+                    if (loseReply)
+                    {
+                        await Assert.ThrowsAsync<IOException>(async () => _ = await Acquire(issuer));
+                        Assert.Equal(1, issuer.Calls);
+                        issuer.LoseResponse = false;
+                    }
+                    var successor = await Acquire(issuer);
+                    Assert.Equal(networkEnd, MailboxAuthenticatedCapabilityCodec.DecodeGrant(successor.ExactGrant.Span).ExpiresAtUnixSeconds);
+                    Assert.NotEqual(first.ExactXmg2.ToArray(), successor.ExactXmg2.ToArray());
+                    Assert.Equal(loseReply ? 2 : 1, issuer.Calls);
+                    Assert.True(issuer.ExactRetry);
+                    using (var state = await ReadPeerGrantsAsync())
+                    {
+                        Assert.Equal(2, state.Entries.Count);
+                        Assert.Equal(original, state.Entries[ProtectedDid2MailboxGrantJournal.Acquisition(original)]);
+                        Assert.Null(Assert.Single(state.Selections).Value.Pending);
+                    }
+                    var unused = new OwnedGrantTransport(this);
+                    Assert.Equal(successor.ExactXmc2.ToArray(), (await Acquire(unused)).ExactXmc2.ToArray());
+                    Assert.Equal(0, unused.Calls);
+                    return;
+                }
+                finally { CryptographicOperations.ZeroMemory(original); }
+            }
             var center = checked(refreshAt - 5);
             Assert.True(center > CurrentProofTime);
             var delta = center - CurrentProofTime; ProofTime = checked(ProofTime + delta); Sample = checked(Sample + delta);

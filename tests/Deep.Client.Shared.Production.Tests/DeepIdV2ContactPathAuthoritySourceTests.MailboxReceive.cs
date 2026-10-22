@@ -43,6 +43,12 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         => await CheckExpiredCapturedPageAsync(lostAck, "none");
 
     [Theory]
+    [InlineData(false)] [InlineData(true)]
+    [Trait("RequiresApprovedMlKemRuntime", "true")]
+    public async Task Did2OwnedMailboxReceive_ExpiredCapturedPageJoinsDistinctIssuanceAndAssignmentPolicies(bool lostAck)
+        => await CheckExpiredCapturedPageAsync(lostAck, "none", issuanceSuccessor: true);
+
+    [Theory]
     [InlineData("before-ack-closure")] [InlineData("after-ack-closure")]
     [Trait("RequiresApprovedMlKemRuntime", "true")]
     public async Task Did2OwnedMailboxReceive_ExpiredPreparedAckClosureCrashKeepsOriginalPageAndSql(string defect)
@@ -64,7 +70,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     public async Task Did2OwnedMailboxReceive_ExpiredCapturedPageRejectsMissingAuthorityWithoutReauthorization(string defect)
         => await CheckExpiredCapturedPageAsync(false, defect);
 
-    private static async Task CheckExpiredCapturedPageAsync(bool lostAck, string defect)
+    private static async Task CheckExpiredCapturedPageAsync(bool lostAck, string defect, bool issuanceSuccessor = false)
     {
         await using var fixture = await Fixture.CreateAsync(withPeer: true, longMailboxWindow: true, encryptedStorage: true);
         var intent = Bytes(32, 0xc1);
@@ -74,6 +80,11 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         fixture.TrackMailboxDispatchClock();
         var store = new OwnedStoreFixture(fixture, null, ProtectedDeepIdV2AccountOwner.InitialMailboxOperation(intent), initial);
         _ = await fixture.StartNativeContact(intent, new OwnedGrantTransport(fixture, ownerOnPrimary: true), store);
+        if (issuanceSuccessor)
+        {
+            await fixture.AdvanceNetworkAsync(expiry: 6_000);
+            fixture.AdvanceStoreSettlementClock(Math.Max(1_090UL, checked(fixture.CurrentProofTime + 6)));
+        }
         var original = new OwnedGrantTransport(fixture, selfRetrieve: true, ownerOnPrimary: false)
             { MaximumFixtureGrantLifetimeSeconds = 120 };
         var terminal = new OwnedReadTerminal(fixture, initial)

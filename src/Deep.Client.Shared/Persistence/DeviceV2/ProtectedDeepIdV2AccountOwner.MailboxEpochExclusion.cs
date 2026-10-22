@@ -168,7 +168,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             ct.ThrowIfCancellationRequested(); held.RequireActive();
         }
 
-        private static async Task RequireExclusionAsync(byte[] entry, ParsedContactRouteClosure originalRoute,
+        internal static async Task RequireExclusionAsync(byte[] entry, ParsedContactRouteClosure originalRoute,
             VerifiedMailboxHostAuthorityV2 authority, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh,
             OnionMonotonicReading reading, ulong originalEpoch, CancellationToken ct)
         {

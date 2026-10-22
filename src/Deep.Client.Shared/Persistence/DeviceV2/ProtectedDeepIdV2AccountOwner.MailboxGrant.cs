@@ -346,8 +346,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         var grant = MailboxAuthenticatedCapabilityCodec.DecodeGrant(response.Field(8).Span);
         var resume = state.Selections[scope].Pending is not null;
         var due = IsMailboxGrantRenewalDueForNewWork(grant.NotBeforeUnixSeconds, grant.ExpiresAtUnixSeconds, grant.Domain, upper);
-        if (due && !resume && grant.Domain == MailboxCapabilityDomain.Deposit && upper < grant.ExpiresAtUnixSeconds &&
-            IsDepositGrantStructurallyEligibleForCurrentPolicy(grant, fresh.MailboxAuthority))
+        if (!resume && grant.Domain == MailboxCapabilityDomain.Deposit)
         {
             // A new holder cannot extend the original route or the CURRENT
             // verified network/PMA ceiling. Avoid reissuing the same expiry,
@@ -363,8 +362,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 .Min(part => BinaryPrimitives.ReadUInt64BigEndian(part.Item1.Field(part.Item2).Span));
             var fixedCeiling = Math.Min(routeEnd, Math.Min(fresh.Network.MaximumRecordExpiryUnixSeconds,
                 fresh.MailboxAuthority.ExpiresAtUnixSeconds));
-            due = IsMailboxGrantRenewalDueForNewWork(grant.NotBeforeUnixSeconds, grant.ExpiresAtUnixSeconds,
-                grant.Domain, upper, fixedCeiling);
+            due = !IsDepositGrantStructurallyEligibleForCurrentPolicy(grant, fresh.MailboxAuthority) ||
+                IsMailboxGrantRenewalDueForNewWork(grant.NotBeforeUnixSeconds, grant.ExpiresAtUnixSeconds,
+                    grant.Domain, upper, fixedCeiling);
         }
         await RequireExactProtectedMailboxRootAsync(ProtectedDid2MailboxGrantJournal.Slot, snapshot, ct).ConfigureAwait(false);
         ct.ThrowIfCancellationRequested(); held.RequireActive();
@@ -403,7 +403,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         };
         var proportional = ProactiveRefreshAt(notBefore, expires);
         var requestWindow = checked((ulong)(contract.RequestTimeoutSeconds + 5));
-        var due = upper >= proportional || expires - upper <= requestWindow;
+        var due = upper >= proportional || expires - upper <= requestWindow ||
+            domain == MailboxCapabilityDomain.Deposit && fixedDepositCeiling < expires;
         return due && !(domain == MailboxCapabilityDomain.Deposit && upper < expires && fixedDepositCeiling == expires);
     }
 

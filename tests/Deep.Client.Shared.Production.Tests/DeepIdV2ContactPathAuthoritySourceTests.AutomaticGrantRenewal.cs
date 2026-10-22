@@ -146,7 +146,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             }
         }
 
-        internal async Task CheckAutomaticDepositRenewalAsync(string fault)
+        internal async Task CheckAutomaticDepositRenewalAsync(string fault, string? retainedCase = null)
         {
             var source = Source(); var plan = await accounts.ReadOwnPermanentContactPlanAsync();
             using var threshold = new OwnedRouteThreshold(this);
@@ -220,6 +220,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 var finalIssuer = new OwnedGrantTransport(this);
                 Assert.Equal(renewed.ExactXmc2.ToArray(), (await Acquire(finalIssuer)).ExactXmc2.ToArray());
                 Assert.Equal(0, finalIssuer.Calls);
+                if (retainedCase is not null) await CheckRetainedAcquisitionCodecAsync(original, retainedCase);
             }
             finally { CryptographicOperations.ZeroMemory(original); }
 

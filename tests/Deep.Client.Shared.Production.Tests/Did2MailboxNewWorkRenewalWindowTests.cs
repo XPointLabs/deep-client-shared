@@ -28,6 +28,9 @@ public sealed class Did2MailboxNewWorkRenewalWindowTests
     [InlineData(MailboxCapabilityDomain.Deposit, 1_041UL, 1_040UL, true)]
     [InlineData(MailboxCapabilityDomain.Deposit, 1_020UL, 1_039UL, true)]
     [InlineData(MailboxCapabilityDomain.Deposit, 1_020UL, 1_041UL, true)]
+    [InlineData(MailboxCapabilityDomain.Deposit, 1_001UL, 1_039UL, true)]
+    [InlineData(MailboxCapabilityDomain.Deposit, 1_001UL, 1_040UL, false)]
+    [InlineData(MailboxCapabilityDomain.Deposit, 1_001UL, 1_041UL, false)]
     [InlineData(MailboxCapabilityDomain.Retrieve, 1_030UL, 1_040UL, true)]
     public void FixedDepositCeilingSkipsOnlyLiveExactCeilingNotTightenedOrMovableLifetime(
         MailboxCapabilityDomain domain, ulong upper, ulong ceiling, bool due)
