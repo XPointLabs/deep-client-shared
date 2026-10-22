@@ -73,6 +73,7 @@ public sealed partial class SqliteDeepMailboxStore :
 
     private void InitializeSchema()
     {
+        using var timing = ClientPersistenceTiming.Measure(ClientPersistencePhase.ApplicationOpen);
         using var connection = new SqliteConnection(_connectionString);
         try
         {
@@ -407,6 +408,7 @@ public sealed partial class SqliteDeepMailboxStore :
 
     private static void ValidateCipher(SqliteConnection connection)
     {
+        using var timing = ClientPersistenceTiming.Measure(ClientPersistencePhase.ApplicationIntegrity);
         using var version = connection.CreateCommand();
         version.CommandText = "PRAGMA cipher_version;";
         var value = Convert.ToString(version.ExecuteScalar(),

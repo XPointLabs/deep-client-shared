@@ -80,6 +80,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         // DR-0145: the short mailbox no longer transports new commits.
         Assert.Equal("Accepted", Assert.Single(await fixture.AccountsForPeer().ListGroupsAsync()).State);
         var beforeUnpublished = await fixture.ReadMessagingFloor(alice);
+        Assert.True(await fixture.HasPendingGroupPublication(alice, group));
+        Assert.False(await fixture.HasPendingGroupPublication(bob, group));
         await Assert.ThrowsAsync<CryptographicException>(() => fixture.PrepareGroupAction(alice, "send", group, "must not bypass GSR receipts"));
         Assert.Equal(SHA256.HashData(beforeUnpublished.Exact.Span), SHA256.HashData((await fixture.ReadMessagingFloor(alice)).Exact.Span));
         Assert.Equal(0, Assert.Single(await fixture.Accounts.ListGroupsAsync()).LocalMessageCommands);
@@ -143,6 +145,12 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 
     private sealed partial class Fixture
     {
+        internal async Task<bool> HasPendingGroupPublication(Did2MessagingSessionScope scope, byte[] group)
+        {
+            using var verifier = DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess();
+            return await GroupOwner(scope).HasPendingGroupControlPublicationAsync(1000, verifier, group, default);
+        }
+
         internal async Task CheckCachedGroupEventUsesItsProtectedOwner(Did2MessagingSessionScope scope,
             ProtectedDid2GroupJournal.Outgoing item, byte[] envelope)
         {

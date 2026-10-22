@@ -12,6 +12,7 @@ internal sealed class Did2MessagingDurableCustody(Did2MessagingSessionScope scop
 
     internal async Task<Did2MessagingFloor> ReconcileAsync(CancellationToken ct)
     {
+        using var timing = ClientPersistenceTiming.Measure(ClientPersistencePhase.NativeReconcile);
         var protectedFloor = await checkpoint.ReadAsync(ct).ConfigureAwait(false);
         ct.ThrowIfCancellationRequested();
         var sqlTip = sql.VerifyTip();

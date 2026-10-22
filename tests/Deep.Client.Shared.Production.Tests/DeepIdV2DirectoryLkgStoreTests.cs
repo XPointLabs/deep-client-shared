@@ -14,7 +14,7 @@ using Sodium;
 
 namespace Deep.Client.Shared.Production.Tests;
 
-public sealed class DeepIdV2DirectoryLkgStoreTests
+public sealed partial class DeepIdV2DirectoryLkgStoreTests
 {
     [Fact]
     public async Task SignedEmptyV2FloorSurvivesAccountReopenAndRejectsCorruption()

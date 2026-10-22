@@ -17,6 +17,34 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     internal sealed class GroupControlAuthorityRefreshRequiredException(Exception inner)
         : CryptographicException("Group control requires a fresh pre-effect directory acquisition.", inner);
 
+    // Scheduling only: ordinary send separately reopens its actual group head
+    // and verifies every original receipt BEFORE authoring an application event.
+    // A false hint never authorizes publication, membership, delivery or cleanup.
+    internal async Task<bool> HasPendingGroupControlPublicationAsync(ulong seconds,
+        IDeepMlDsa65Verifier verifier, ReadOnlyMemory<byte> groupId, CancellationToken ct)
+    {
+        using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
+        using var current = await RequireCurrentUnderLeaseAsync(seconds, verifier, ct).ConfigureAwait(false);
+        using var root = await OpenGroupsUnderLeaseAsync(current, ct).ConfigureAwait(false);
+        var group = root.State.Find(groupId.Span);
+        if (group.Fork) throw new CryptographicException("Forked group cannot schedule publication.");
+        var package = GroupCodec.Decode("GCP1", group.Packages[^1]);
+        var commit = GroupCodec.Decode("DGC1", package.Field(4).Span[4..]);
+        if (!commit.Field(6).Span.SequenceEqual(current.AccountId.Span)) return false;
+        foreach (var member in GroupMemberSelectors(commit))
+        {
+            var control = group.Controls.SingleOrDefault(item => item.Recipient.AsSpan().SequenceEqual(member));
+            if (control is null) return true;
+            foreach (var exact in group.Packages)
+            {
+                var hash = GroupCodec.RecordHash("GCP1", exact);
+                var writes = control.Writes.Where(write => GroupCodec.Decode("GCF1", write.Chunk).Field(1).Span.SequenceEqual(hash)).ToArray();
+                if (writes.Length != checked((exact.Length + 24575) / 24576) || writes.Any(write => write.Receipt.Length == 0)) return true;
+            }
+        }
+        held.RequireActive(); ct.ThrowIfCancellationRequested(); return false;
+    }
+
     private static void RequireGroupControlComplete(ProtectedDid2GroupJournal.Group group,
         VerifiedGroupTransition head, ReadOnlySpan<byte> self, VerifiedOnionNetworkContext network)
     {

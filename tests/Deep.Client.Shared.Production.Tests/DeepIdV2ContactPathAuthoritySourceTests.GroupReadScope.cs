@@ -5,6 +5,29 @@ namespace Deep.Client.Shared.Production.Tests;
 public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 {
     [Fact]
+    public async Task Did2MailboxPage_PublicReadScopeReusesLiveOwnButNeverParentOrAckAuthority()
+    {
+        await using var f = await Fixture.CreateAsync();
+        using var parent = f.Source().OpenWorkingGroupScope();
+        var original = await parent.Source.VerifyForOwnPreKeyAuthoringAsync(f.Accounts, default);
+        var before = f.ProofRequests;
+        using var page = parent.Source.OpenIndependentCommandReadScope();
+        var retrieve = await page.Source.VerifyForOwnPreKeyAuthoringAsync(f.Accounts, default);
+        Assert.NotSame(original, retrieve);
+        Assert.Equal(before + 1, f.ProofRequests);
+        Assert.Same(retrieve, await page.Source.VerifyForOwnPreKeyAuthoringAsync(f.Accounts, default));
+        Assert.Equal(before + 1, f.ProofRequests);
+        using var ack = page.Source.OpenIndependentCommandReadScope();
+        var independent = await ack.Source.VerifyForOwnPreKeyAuthoringAsync(f.Accounts, default);
+        Assert.NotSame(retrieve, independent);
+        Assert.Equal(before + 2, f.ProofRequests);
+        f.Sample = retrieve.Proof.MonotonicSample - 1;
+        await Assert.ThrowsAsync<CryptographicException>(async () =>
+            await page.Source.VerifyForOwnPreKeyAuthoringAsync(f.Accounts, default));
+        Assert.Equal(before + 2, f.ProofRequests);
+    }
+
+    [Fact]
     public async Task Did2MailboxAck_PhaseMemoAcquiresIndependentlyAndNeverRenewsReceive()
     {
         await using var f = await Fixture.CreateAsync();

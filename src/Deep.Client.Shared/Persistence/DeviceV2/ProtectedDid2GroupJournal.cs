@@ -125,6 +125,7 @@ internal static class ProtectedDid2GroupJournal
 
     internal static State Decode(ReadOnlySpan<byte> bytes, ReadOnlySpan<byte> network, ReadOnlySpan<byte> account, ReadOnlySpan<byte> instance)
     {
+        using var timing = ClientPersistenceTiming.Measure(ClientPersistencePhase.GroupDecode);
         RequireScope(network, account, instance);
         if (bytes.Length is < 102 or > MaximumBytes || bytes[0] != 3 || bytes.Slice(1, 3).IndexOfAnyExcept((byte)0) >= 0 ||
             !bytes.Slice(4, 16).SequenceEqual(network) || !bytes.Slice(20, 32).SequenceEqual(account) || !bytes.Slice(52, 32).SequenceEqual(instance))

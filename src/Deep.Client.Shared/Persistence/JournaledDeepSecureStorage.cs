@@ -340,6 +340,7 @@ public sealed class JournaledDeepSecureStorage : IDeepSecureStorage, IDisposable
 
     private Dictionary<string, byte[]> Load(IReadOnlySet<string>? selectedSlots = null)
     {
+        using var timing = ClientPersistenceTiming.Measure(ClientPersistencePhase.StorageLoad);
         RecoverFileSet();
         if (!File.Exists(statePath))
         {

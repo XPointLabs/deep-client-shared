@@ -45,7 +45,15 @@ public sealed partial class DeepIdV2AccountService
         try
         {
             ProtectedDph2PreClaimJournal.RequireIntent(selected);
-            if (action == "send") await PublishGroupControlAsync(selected, source, ct).ConfigureAwait(false);
+            // Do not reconstruct/rechunk and re-acquire the control plane just
+            // to discover that there is nothing to publish. The actual send
+            // owner still verifies complete original GSR evidence independently.
+            if (action == "send")
+            {
+                using var schedulingVerifier = OpenVerifier();
+                if (await owner.HasPendingGroupControlPublicationAsync(TrustedUnixSeconds(), schedulingVerifier, selected, ct).ConfigureAwait(false))
+                    await PublishGroupControlAsync(selected, source, ct).ConfigureAwait(false);
+            }
             await RequireAttachmentConsentAsync(conversation, source, ct).ConfigureAwait(false);
             using var verifier = OpenVerifier();
             DeepIdV2Conversation[] candidates = [];

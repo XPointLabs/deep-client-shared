@@ -452,6 +452,7 @@ internal static partial class SqliteDeepIdV2AccountGeneration
 
     private static void ValidateDatabaseConnection(SqliteConnection connection, AccountBinding binding)
     {
+        using var timing = ClientPersistenceTiming.Measure(ClientPersistencePhase.DeviceValidate);
         using (var cipher = connection.CreateCommand())
         {
             cipher.CommandText = "PRAGMA cipher_version;";

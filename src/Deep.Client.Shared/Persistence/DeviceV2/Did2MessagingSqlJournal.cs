@@ -73,6 +73,7 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
 
     private Did2MessagingFloor VerifyTipInTransaction(SqliteTransaction? tx, out List<byte[]> headers)
     {
+        using var timing = ClientPersistenceTiming.Measure(ClientPersistencePhase.NativeVerify);
         RequireCipherPolicy(tx); ValidateSchema(tx);
         VerifyHistoryPrefix(tx);
         headers = ReadJournal(out var tip, tx);

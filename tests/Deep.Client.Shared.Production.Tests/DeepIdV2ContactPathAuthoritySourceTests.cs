@@ -2010,6 +2010,9 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         private HttpDeepIdV2NetworkClosureArtifactSource closure = null!;
         internal IXPointNetworkStateStore NetworkStore { get; set; } = null!;
         internal int ProofRequests { get; private set; }
+        internal int HistoryRequests { get; private set; }
+        internal int TransientProofFailures { get; set; }
+        internal int TransientHistoryFailures { get; set; }
         internal bool RejectProof { get; set; }
         internal bool AlterNode { get; set; }
         internal bool OmitHistoricalPolicy { get; set; }
@@ -3139,7 +3142,15 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             }
             if (request.RequestUri.AbsolutePath == "/api/v2/account-directory/history")
             {
+                HistoryRequests++;
                 if (RejectProof) return new(HttpStatusCode.ServiceUnavailable) { RequestMessage = request };
+                if (TransientHistoryFailures > 0)
+                {
+                    TransientHistoryFailures--;
+                    var unavailable = new HttpResponseMessage(HttpStatusCode.ServiceUnavailable) { RequestMessage = request };
+                    unavailable.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(TimeSpan.FromSeconds(1));
+                    return unavailable;
+                }
                 var exact = await request.Content!.ReadAsByteArrayAsync(cancellationToken);
                 var encoded = DeepIdV2DirectoryHistoryWireCodec.AuthorResponse(ProofAuthority, exact,
                     RouteRequestHistoryHeads(), head.ExactAllTransitions);
@@ -3151,6 +3162,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             ProofRequests++;
             var observer = OnNextDirectoryProof; OnNextDirectoryProof = null; observer?.Invoke();
             if (RejectProof) return new(HttpStatusCode.ServiceUnavailable) { RequestMessage = request };
+            if (TransientProofFailures > 0)
+            { TransientProofFailures--; return new(HttpStatusCode.ServiceUnavailable) { RequestMessage = request }; }
             var query = DeepIdV2DirectoryProofWireCodec.DecodeRequest(
                 await request.Content!.ReadAsByteArrayAsync(cancellationToken));
             if (RejectContactRetryProof(query.DirectoryLeafKey.Span))

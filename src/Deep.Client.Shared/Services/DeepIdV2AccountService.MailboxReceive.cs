@@ -71,15 +71,20 @@ public sealed partial class DeepIdV2AccountService
     {
         ArgumentNullException.ThrowIfNull(source); ArgumentNullException.ThrowIfNull(grants); ArgumentNullException.ThrowIfNull(transport);
         source.RequireAccountOwner(this);
-        var own = await source.VerifyForOwnPreKeyAuthoringAsync(this, ct).ConfigureAwait(false);
+        // One independently acquired PUBLIC own endpoint for this page's
+        // Retrieve and ordinary receive. Every borrow still rejoins actual
+        // time/floors; no private loan or captured request is renewed. Initial,
+        // Braid and the later independent ACK keep the parent source below.
+        using var receiveReads = source.OpenIndependentCommandReadScope();
+        var pageSource = receiveReads.Source;
+        var own = await pageSource.VerifyForOwnPreKeyAuthoringAsync(this, ct).ConfigureAwait(false);
         using var verifier = OpenVerifier();
-        using var descriptor = await owner.RetrieveOwnMailboxAsync(TrustedUnixSeconds(), verifier, source, own, grants, transport, ct).ConfigureAwait(false);
+        using var descriptor = await owner.RetrieveOwnMailboxAsync(TrustedUnixSeconds(), verifier, pageSource, own, grants, transport, ct).ConfigureAwait(false);
         var page = descriptor.ReadPage();
         if (page.Items.Count == 0) return new(0, page.HasMore, 0);
         // Borrow immutable public endpoint capabilities only for ordinary DPE2
         // receive within this page. Initial/Braid and the later ACK keep their
         // independent parent source; no old loan or captured request is renewed.
-        using var receiveReads = source.OpenCommandReadScope();
         var scopes = new Dictionary<string, Did2MessagingSessionScope>(StringComparer.Ordinal);
         foreach (var item in page.Items)
         {

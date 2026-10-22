@@ -394,9 +394,10 @@ public sealed class DeepIdV2DirectoryProofClient : IDisposable
                 // A gap and a temporarily unavailable authority both fail closed.
                 // One bounded historical recovery attempt may advance history,
                 // but never release a capability or bypass a 429 admission limit.
-                var prior = protectedLkg;
                 protectedLkg = await CatchupAsync(authority, cancellationToken).ConfigureAwait(false);
-                if (protectedLkg.LogGeneration == prior.LogGeneration) throw;
+                // A503 can be a short availability gap, not a missing history
+                // generation. Empty history grants no permission, but must not
+                // suppress the one independent fresh nonce-bound proof below.
                 lookup = DeepIdV2AccountDirectoryLookupCodec.Author(requestedDid2,
                     authority.NetworkId.Span, protectedLkg.LogGeneration, protectedLkg.CoreHash.Span,
                     lookup.ServiceProfile, lookup.ExactOhttpXod1CoreReference.Span, lookup.ExactOhttpXod1CoreHash.Span);
@@ -413,11 +414,11 @@ public sealed class DeepIdV2DirectoryProofClient : IDisposable
     {
         var floor = await protectedLkgStore.RestoreAsync(authority, cancellationToken).ConfigureAwait(false);
         RequireV2Floor(floor, authority);
+        var reads = new DirectoryHistoryReadScope(historyTransport);
         for (var pageIndex = 0; pageIndex < 16; pageIndex++)
         {
             var request = DeepIdV2DirectoryHistoryWireCodec.EncodeRequest(floor);
-            using var response = await AwaitBoundedResponseAsync(historyTransport.PostAsync(
-                "/api/v2/account-directory/history", request, cancellationToken).AsTask(), cancellationToken).ConfigureAwait(false);
+            using var response = await reads.ReadAsync(request, cancellationToken).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
             if (response.StatusCode is HttpStatusCode.TooManyRequests or HttpStatusCode.ServiceUnavailable)
                 throw new DeepIdV2DirectoryProofUnavailableException(response.StatusCode, response.RetryAfter);
