@@ -5,6 +5,91 @@ namespace Deep.Client.Shared.Production.Tests;
 
 public sealed class OwnedMailboxRecoveryTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RouteCeilingDenialReentersOnlyTheOriginalOnceWithFreshUncapturedAuthority(bool repeated)
+    {
+        var calls = 0; var refreshes = 0; var resumes = 0; var waits = 0;
+        var original = new object();
+        var seen = new List<object>();
+        Task<int> Attempt()
+        {
+            seen.Add(original); calls++;
+            if (calls == 1 || repeated)
+            {
+                var error = new CryptographicException(); error.Data["Deep.MailboxGrant.Check"] = "RouteExpiry"; throw error;
+            }
+            Assert.Equal(1, refreshes); return Task.FromResult(7);
+        }
+        var result = OwnedMailboxRecovery.RunAsync(Attempt,
+            () => { refreshes++; return Task.CompletedTask; }, () => resumes++, () => waits++, default);
+        if (repeated) await Assert.ThrowsAsync<CryptographicException>(() => result);
+        else Assert.Equal(7, await result);
+        Assert.Equal(2, calls); Assert.Equal(1, refreshes); Assert.Equal(1, resumes); Assert.Equal(0, waits);
+        Assert.All(seen, operation => Assert.Same(original, operation));
+    }
+
+    [Theory]
+    [InlineData("Signature")]
+    [InlineData("Issuer")]
+    [InlineData("Generation")]
+    [InlineData("Lifetime")]
+    [InlineData("unsupported")]
+    public async Task OtherGrantDenialsCannotScheduleAuthorityRefresh(string reason)
+    {
+        var calls = 0;
+        var error = new CryptographicException(); error.Data["Deep.MailboxGrant.Check"] = reason;
+        var actual = await Assert.ThrowsAsync<CryptographicException>(() => OwnedMailboxRecovery.RunAsync<int>(
+            () => { calls++; throw error; }, () => throw new InvalidOperationException(),
+            () => throw new InvalidOperationException(), () => throw new InvalidOperationException(), default));
+        Assert.Same(error, actual); Assert.Equal(1, calls);
+    }
+
+    [Fact]
+    public async Task CancellationDuringCeilingRefreshPreventsOriginalReentry()
+    {
+        using var cancellation = new CancellationTokenSource(); var calls = 0;
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => OwnedMailboxRecovery.RunAsync<int>(
+            () => { calls++; var error = new CryptographicException(); error.Data["Deep.MailboxGrant.Check"] = "RouteExpiry"; throw error; },
+            () => { cancellation.Cancel(); return Task.CompletedTask; }, () => { },
+            () => throw new InvalidOperationException(), cancellation.Token));
+        Assert.Equal(1, calls);
+    }
+
+    [Fact]
+    public async Task DerivedCryptoCannotScheduleCeilingRefresh()
+    {
+        var error = new DerivedCryptoException(); error.Data["Deep.MailboxGrant.Check"] = "RouteExpiry";
+        var actual = await Assert.ThrowsAsync<DerivedCryptoException>(() => OwnedMailboxRecovery.RunAsync<int>(
+            () => throw error, () => throw new InvalidOperationException(),
+            () => throw new InvalidOperationException(), () => throw new InvalidOperationException(), default));
+        Assert.Same(error, actual);
+    }
+
+    [Fact]
+    public async Task FailedCeilingRefreshCannotReenterTheOriginal()
+    {
+        var calls = 0;
+        await Assert.ThrowsAsync<IOException>(() => OwnedMailboxRecovery.RunAsync<int>(
+            () => { calls++; var error = new CryptographicException(); error.Data["Deep.MailboxGrant.Check"] = "RouteExpiry"; throw error; },
+            () => throw new IOException(), () => { }, () => throw new InvalidOperationException(), default));
+        Assert.Equal(1, calls);
+    }
+
+    [Fact]
+    public async Task AlreadyCancelledCeilingDenialIsNotResumed()
+    {
+        using var cancellation = new CancellationTokenSource(); cancellation.Cancel();
+        var error = new CryptographicException(); error.Data["Deep.MailboxGrant.Check"] = "RouteExpiry";
+        var actual = await Assert.ThrowsAsync<CryptographicException>(() => OwnedMailboxRecovery.RunAsync<int>(
+            () => throw error, () => throw new InvalidOperationException(),
+            () => throw new InvalidOperationException(), () => throw new InvalidOperationException(), cancellation.Token));
+        Assert.Same(error, actual);
+    }
+
+    private sealed class DerivedCryptoException : CryptographicException { }
+
     [Fact]
     public async Task SuccessDoesNotRefreshOrResume()
     {

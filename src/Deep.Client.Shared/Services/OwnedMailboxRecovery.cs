@@ -10,6 +10,22 @@ internal static class OwnedMailboxRecovery
         Func<TimeSpan, CancellationToken, Task>? delay = null)
     {
         try { return await attempt().ConfigureAwait(false); }
+        catch (System.Security.Cryptography.CryptographicException error) when (!ct.IsCancellationRequested &&
+            error.GetType() == typeof(System.Security.Cryptography.CryptographicException) &&
+            error.Data["Deep.MailboxGrant.Check"] is "RouteExpiry")
+        {
+            // A current signed closure may have a tighter ceiling than the
+            // issuer's independently acquired closure. This denial is ONLY a
+            // scheduling hint, not proof of a valid grant/signature or absence
+            // of effects. Discard uncaptured public memo state, then re-enter
+            // the SAME owned operation once with fresh independent evidence.
+            // All strict result/route/expiry and captured-original guards run
+            // again. A repeated denial propagates; no recursive retry/remint.
+            resumed();
+            await resetUncaptured().ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested();
+            return await attempt().ConfigureAwait(false);
+        }
         catch (ClientMailboxDispatchOutcomeUnknownException) when (!ct.IsCancellationRequested)
         {
             resumed();
