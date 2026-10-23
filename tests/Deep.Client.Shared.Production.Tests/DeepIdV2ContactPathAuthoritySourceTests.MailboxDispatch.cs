@@ -173,7 +173,9 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             Assert.True(entry.Prepared); Assert.Equal(1UL, entry.Counter);
             Assert.Equal(SHA256.HashData(transport.ExactRequest!), entry.MauHash.ToArray());
         }
-        await Assert.ThrowsAsync<ClientMailboxRetryLeaseException>(() => fixture.DeliverNativeMessage(sender, operation, grants, transport));
+        var leased = await Assert.ThrowsAsync<ClientMailboxRetryLeaseException>(() => fixture.DeliverNativeMessage(sender, operation, grants, transport));
+        Assert.True(leased.SchedulingDelay > TimeSpan.Zero);
+        Assert.True(leased.SchedulingDelay <= TimeSpan.FromSeconds(35));
         Assert.Equal(1, transport.Calls);
         fixture.Sample += 40; fixture.ProofTime += 40; transport.LoseReply = false;
         var beforeCompletion = false;

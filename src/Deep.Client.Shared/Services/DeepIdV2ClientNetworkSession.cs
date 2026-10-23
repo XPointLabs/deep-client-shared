@@ -6,6 +6,7 @@ using Deep.Protocol.AccountDirectoryV1;
 using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.DeepExtension.PrivacyRouting;
 using Deep.Protocol.XPointNetworkV1;
+using Deep.Protocol.Identity;
 
 namespace Deep.Client.Shared.Services;
 
@@ -24,6 +25,9 @@ public sealed class DeepIdV2ClientNetworkSession : IDisposable
     private readonly DeepIdV2ContactPathAuthoritySource.CommandReadScope workingGroups;
     private bool disposed;
     public DeepIdV2ContactPathAuthoritySource Source { get; }
+    /// <summary>Counts from the last completed connection cycle, or null before
+    /// activation/after failure. Diagnostic only, never route readiness or permission.</summary>
+    public DeepIdV2ContactMaintenanceResult? LastContactMaintenance { get; private set; }
     /// <summary>Public authority for serial established messaging operations. Actual
     /// account/device state, floors and lifetimes are rejoined on each borrow.
     /// Never use it for independent Initial, Braid or fresh ACK capture.</summary>
@@ -91,12 +95,35 @@ public sealed class DeepIdV2ClientNetworkSession : IDisposable
     public async Task VerifyAndPublishAsync(CancellationToken ct = default)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
+        await VerifyAdmissionAsync(ct).ConfigureAwait(false);
+        _ = await accounts.EnsureOwnPermanentContactPublishedAsync(Source, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>Activates the connection's normal contact lifecycle after the
+    /// host has installed its messaging owner: current admission, own publication,
+    /// one receive/ACK page and all-contact advertisement. Does not install or
+    /// substitute messaging authority; the ordinary native owners still gate it.</summary>
+    /// <param name="ct">Cancellation for the composite connection operation.</param>
+    /// <param name="knownContacts">Existing address-book data only; native peer and capability joins are mandatory.</param>
+    /// <returns>Diagnostic counts, not connection readiness or delivery permission.</returns>
+    public async Task<DeepIdV2ContactMaintenanceResult> VerifyAndMaintainContactsAsync(
+        IReadOnlyDictionary<string, DeepPermanentIdV2>? knownContacts = null, CancellationToken ct = default)
+    {
+        ObjectDisposedException.ThrowIf(disposed, this);
+        LastContactMaintenance = null;
+        var addresses = DeepIdV2AccountService.CopyKnownContactAddresses(knownContacts);
+        await VerifyAdmissionAsync(ct).ConfigureAwait(false);
+        var maintenance = await accounts.MaintainContactRoutesAsync(Source, addresses, ct).ConfigureAwait(false);
+        LastContactMaintenance = maintenance; return maintenance;
+    }
+
+    private async Task VerifyAdmissionAsync(CancellationToken ct)
+    {
         using var admission = factory.CreateDeepIdV2GenesisAdmissionClient(origin, clientOptions: PublicHttp);
         var result = await accounts.AdmitAndVerifyGenesisAsync(admission, proofs, authority,
             cancellationToken: ct).ConfigureAwait(false);
         if (result.CurrentCheckpoint is null || result.NextProtectedLkg.TreeSize == 0)
             throw new CryptographicException("Account genesis has no current directory checkpoint.");
-        _ = await accounts.EnsureOwnPermanentContactPublishedAsync(Source, ct).ConfigureAwait(false);
     }
 
     /// <summary>Refreshes public group authority separately from delivery, before

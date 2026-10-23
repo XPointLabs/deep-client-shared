@@ -33,12 +33,14 @@ internal static class OwnedMailboxRecovery
             {
                 await resetUncaptured().ConfigureAwait(false);
                 try { return await attempt().ConfigureAwait(false); }
-                catch (ClientMailboxRetryLeaseException) when (!ct.IsCancellationRequested)
+                catch (ClientMailboxRetryLeaseException lease) when (!ct.IsCancellationRequested)
                 {
                     waiting();
-                    // The unchanged dispatch contract leases30s plus5s. The
-                    // next owner still independently checks authenticated time.
-                    await (delay ?? Task.Delay)(TimeSpan.FromSeconds(35), ct).ConfigureAwait(false);
+                    // Wait only the adapter's remaining denial interval, bounded
+                    // by the unchanged30s+5s contract, not another full35s after
+                    // expensive recovery preparation. The next actual owner
+                    // independently checks authenticated time and native custody.
+                    await (delay ?? Task.Delay)(lease.SchedulingDelay, ct).ConfigureAwait(false);
                     await resetUncaptured().ConfigureAwait(false);
                     return await attempt().ConfigureAwait(false);
                 }

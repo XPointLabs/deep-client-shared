@@ -215,6 +215,17 @@ public sealed class ClientMailboxRetryLeaseException : IOException
     }
 
     public DateTimeOffset RetryNotBefore { get; }
+
+    // Scheduling only. Captured by BeginAttempt from the SAME clock reading
+    // that denied dispatch; never a proof that the protected lease has expired.
+    internal TimeSpan SchedulingDelay { get; } = TimeSpan.FromSeconds(35);
+
+    internal ClientMailboxRetryLeaseException(DateTimeOffset retryNotBefore, DateTimeOffset observedNow)
+        : this(retryNotBefore)
+    {
+        SchedulingDelay = TimeSpan.FromTicks(Math.Clamp((retryNotBefore - observedNow).Ticks,
+            0, TimeSpan.FromSeconds(35).Ticks));
+    }
 }
 
 public sealed class ClientMailboxReceiptExpectation
@@ -1683,7 +1694,7 @@ public sealed class ClientMailboxAdapter
         var now = timeProvider.GetUtcNow();
         if (now < snapshot.NotBefore)
         {
-            throw new ClientMailboxRetryLeaseException(snapshot.NotBefore);
+            throw new ClientMailboxRetryLeaseException(snapshot.NotBefore, now);
         }
         if (now >= snapshot.ExpiresAt)
         {

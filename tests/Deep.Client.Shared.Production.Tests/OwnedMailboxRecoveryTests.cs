@@ -129,6 +129,43 @@ public sealed class OwnedMailboxRecoveryTests
     }
 
     [Theory]
+    [InlineData(-10, 0)]
+    [InlineData(0, 0)]
+    [InlineData(1, 1)]
+    [InlineData(12, 12)]
+    [InlineData(35, 35)]
+    [InlineData(90, 35)]
+    public async Task RemainingLeaseHintDoesNotRestartTheWholeWait(int remainingSeconds, int expectedSeconds)
+    {
+        var now = DateTimeOffset.FromUnixTimeSeconds(1_900_000_000);
+        var calls = 0; var waits = 0; var delays = 0;
+        Assert.Equal(7, await OwnedMailboxRecovery.RunAsync(() =>
+        {
+            calls++;
+            if (calls == 1) throw new ClientMailboxDispatchOutcomeUnknownException("Original pending.");
+            if (calls == 2) throw new ClientMailboxRetryLeaseException(now.AddSeconds(remainingSeconds), now);
+            return Task.FromResult(7);
+        }, () => Task.CompletedTask, () => { }, () => waits++, default,
+        (duration, _) => { Assert.Equal(TimeSpan.FromSeconds(expectedSeconds), duration); delays++; return Task.CompletedTask; }));
+        Assert.Equal(3, calls); Assert.Equal(1, waits); Assert.Equal(1, delays);
+    }
+
+    [Fact]
+    public async Task ElapsedSchedulingHintCannotOverrideTheNextProtectedLeaseDenial()
+    {
+        var now = DateTimeOffset.FromUnixTimeSeconds(1_900_000_000); var calls = 0; var waits = 0;
+        var error = await Assert.ThrowsAsync<ClientMailboxDispatchOutcomeUnknownException>(() => OwnedMailboxRecovery.RunAsync<int>(() =>
+        {
+            calls++;
+            if (calls == 1) throw new ClientMailboxDispatchOutcomeUnknownException("Original pending.");
+            throw new ClientMailboxRetryLeaseException(now, now);
+        }, () => Task.CompletedTask, () => { }, () => waits++, default,
+        (duration, _) => { Assert.Equal(TimeSpan.Zero, duration); return Task.CompletedTask; }));
+        Assert.IsType<ClientMailboxRetryLeaseException>(error.InnerException);
+        Assert.Equal(3, calls); Assert.Equal(1, waits);
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task SecurityOrOrdinaryIoFailureIsNeverRetried(bool security)

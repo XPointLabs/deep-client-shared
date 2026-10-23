@@ -19,6 +19,12 @@ public sealed partial class DeepIdV2AccountService
         ArgumentNullException.ThrowIfNull(conversation); ArgumentNullException.ThrowIfNull(peerAddress);
         ArgumentNullException.ThrowIfNull(source); source.RequireAccountOwner(this);
         _ = await EnsureOwnPermanentContactPublishedAsync(source, ct).ConfigureAwait(false);
+        return await ReintroducePublishedContactRouteAsync(conversation, peerAddress, source, ct).ConfigureAwait(false);
+    }
+
+    private async Task<int> ReintroducePublishedContactRouteAsync(DeepIdV2Conversation conversation,
+        DeepPermanentIdV2 peerAddress, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
+    {
         using var reads = source.OpenIndependentCommandReadScope(); source = reads.Source;
         var resolved = await ResolveOwnedPermanentContactAsync(peerAddress, source, null, ct).ConfigureAwait(false);
         using var verifier = OpenVerifier();
@@ -70,6 +76,12 @@ public sealed partial class DeepIdV2AccountService
         // Publication renewal remains its existing exact pending/committed saga.
         // Discard any earlier read memo before acquiring the messaging endpoint.
         _ = await EnsureOwnPermanentContactPublishedAsync(source, ct).ConfigureAwait(false);
+        return await RefreshPublishedContactRouteAsync(conversation, source, ct).ConfigureAwait(false);
+    }
+
+    private async Task<int> RefreshPublishedContactRouteAsync(DeepIdV2Conversation conversation,
+        DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
+    {
         using var reads = source.OpenCommandReadScope(); source = reads.Source;
         var pair = await source.VerifyForOwnMessagingAsync(this, conversation.Scope, ct).ConfigureAwait(false);
         using var verifier = OpenVerifier();
