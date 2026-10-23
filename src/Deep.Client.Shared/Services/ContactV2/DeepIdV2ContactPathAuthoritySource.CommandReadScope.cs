@@ -43,10 +43,21 @@ public sealed partial class DeepIdV2ContactPathAuthoritySource
         await gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            if (onlyWhenDue && await ReadCommandOwnAsync(ct).ConfigureAwait(false) is { } existing)
+            if (onlyWhenDue)
             {
                 var current = await clock.ReadAsync(ct).ConfigureAwait(false);
                 commandReads!.ObserveClock(current);
+                // Scheduling only: do not borrow/validate authority merely to
+                // decide whether idle work is due. Missing context is acquired
+                // on demand, never speculatively after an independent ACK.
+                // Every business borrow still calls ReadCommandOwnAsync and
+                // rejoins actual protected floors, account, issuer and time.
+                var existing = commandReads.ReadOwn();
+                ct.ThrowIfCancellationRequested();
+                if (existing is null) return;
+                if (current.SampleSeconds < existing.Proof.MonotonicSample ||
+                    !existing.Proof.IsCurrentAtMonotonic(current.BootId.Span, existing.Proof.MonotonicSample))
+                    throw new CryptographicException("Working authority crossed a clock discontinuity.");
                 if (current.SampleSeconds < existing.Proof.FreshnessDeadlineMonotonicSeconds &&
                     existing.Proof.FreshnessDeadlineMonotonicSeconds - current.SampleSeconds > 30) return;
             }

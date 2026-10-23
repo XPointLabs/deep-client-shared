@@ -118,8 +118,10 @@ public sealed class DeepIdV2ClientNetworkSession : IDisposable
         return workingGroups.Source.DiscardUncapturedAuthorityAsync(ct);
     }
 
-    /// <summary>Revalidates current public group authority and refreshes it only
-    /// when absent or within thirty monotonic seconds of its original deadline.
+    /// <summary>Schedules refresh of an existing public group context within
+    /// thirty monotonic seconds of its original deadline. Missing context is
+    /// acquired on demand. The scheduling hint grants no authority: every
+    /// business borrow still validates actual protected state and freshness.
     /// Hosts call this while idle, never concurrently with business operations.</summary>
     /// <param name="ct">Cancellation for this independent maintenance opportunity.</param>
     public Task MaintainGroupAuthorityAsync(CancellationToken ct = default)

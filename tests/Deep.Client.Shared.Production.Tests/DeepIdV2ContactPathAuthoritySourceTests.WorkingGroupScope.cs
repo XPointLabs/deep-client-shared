@@ -67,6 +67,68 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         Assert.NotSame(first, await working.Source.VerifyForOwnPreKeyAuthoringAsync(f.Accounts, default));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Did2Groups_IdleSchedulingDoesNoProtectedReadsOrSpeculativeAcquisition(bool acquire)
+    {
+        await using var f = await Fixture.CreateAsync(encryptedStorage: true);
+        await f.CheckIdleSchedulingReadsAsync(acquire);
+    }
+
+    [Fact]
+    public async Task Did2Groups_IdleSchedulingCannotHideChangedForkFloorFromBusinessBorrow()
+    {
+        await using var f = await Fixture.CreateAsync(); using var working = f.Source().OpenWorkingGroupScope();
+        _ = await working.Source.VerifyForOwnPreKeyAuthoringAsync(f.Accounts, default);
+        var floor = (await f.NetworkStore.ReadAsync(default))!;
+        await f.NetworkStore.CompareExchangeAsync(floor.Revision, new(floor.Revision + 1, floor.ProtectedLkg, true), default);
+        var count = f.ProofRequests;
+        // A no-work scheduling result is not a currentness/availability claim.
+        await working.Source.RefreshWorkingAuthorityAsync(default, onlyWhenDue: true);
+        await Assert.ThrowsAsync<CryptographicException>(async () =>
+            await working.Source.VerifyForOwnPreKeyAuthoringAsync(f.Accounts, default));
+        Assert.Equal(count, f.ProofRequests);
+    }
+
+    [Fact]
+    public async Task Did2Groups_IdleSchedulingKeepsClockFenceAfterDiscardAndRejectsCancellation()
+    {
+        await using var f = await Fixture.CreateAsync(); using var working = f.Source().OpenWorkingGroupScope();
+        _ = await working.Source.VerifyForOwnPreKeyAuthoringAsync(f.Accounts, default);
+        f.Sample += 2;
+        await working.Source.RefreshWorkingAuthorityAsync(default, onlyWhenDue: true);
+        await working.Source.DiscardUncapturedAuthorityAsync(default);
+        f.Sample--; var count = f.ProofRequests;
+        await Assert.ThrowsAsync<CryptographicException>(() =>
+            working.Source.RefreshWorkingAuthorityAsync(default, onlyWhenDue: true));
+        await Assert.ThrowsAsync<CryptographicException>(async () =>
+            await working.Source.VerifyForOwnPreKeyAuthoringAsync(f.Accounts, default));
+        using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            working.Source.RefreshWorkingAuthorityAsync(cancelled.Token, onlyWhenDue: true));
+        Assert.Equal(count, f.ProofRequests);
+    }
+
+    private sealed partial class Fixture
+    {
+        internal async Task CheckIdleSchedulingReadsAsync(bool acquire)
+        {
+            using var working = Source().OpenWorkingGroupScope();
+            var first = acquire ? await working.Source.VerifyForOwnPreKeyAuthoringAsync(Accounts, default) : null;
+            var count = ProofRequests;
+            storage.TrackApplicationReads = true;
+            await working.Source.RefreshWorkingAuthorityAsync(default, onlyWhenDue: true);
+            Assert.Equal(0, storage.ApplicationSingleReads);
+            Assert.Empty(storage.ApplicationReadGroups);
+            Assert.Equal(count, ProofRequests);
+            storage.TrackApplicationReads = false;
+            var next = await working.Source.VerifyForOwnPreKeyAuthoringAsync(Accounts, default);
+            if (acquire) Assert.Same(first, next);
+            else Assert.Equal(count + 1, ProofRequests);
+        }
+    }
+
     [Fact]
     public async Task Did2Groups_WorkingScopeReusesPublicAuthorityAcrossCommandsButNotIndependentAck()
     {
