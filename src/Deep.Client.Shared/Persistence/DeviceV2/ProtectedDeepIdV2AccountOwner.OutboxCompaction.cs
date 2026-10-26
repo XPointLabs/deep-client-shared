@@ -115,11 +115,13 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             sqlStatePath, scope, held, lease, ct).ConfigureAwait(false);
         var slots = OrdinaryOutboxSlots(scope);
         var kinds = OrdinaryOutboxRootKinds;
-        var roots = new List<OwnedDeepSecret>(); var retained = new List<DirectTextOutboxEntry>(); byte[] successor = [], sendSuccessor = [];
+        using var inventory = await storage.ReadOwnedBatchAsync(slots, ct).ConfigureAwait(false);
+        ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
+        var roots = Enumerable.Range(0, slots.Length).Select(index => inventory[index] ??
+            throw new InvalidDataException("Outbox selection lost a mandatory dependency.")).ToArray();
+        var retained = new List<DirectTextOutboxEntry>(); byte[] successor = [], sendSuccessor = [];
         try
         {
-            foreach (var slot in slots)
-                roots.Add(await storage.ReadOwnedAsync(slot, ct).ConfigureAwait(false) ?? throw new InvalidDataException("Outbox selection lost a mandatory dependency."));
             using var journal = roots[0].Use(bytes => ProtectedDid2DirectTextJournal.Decode(bytes, scope.Network, scope.LocalAccount, scope.Instance));
             using var sends = roots[1].Use(bytes => ProtectedDid2MailboxSendJournal.Decode(bytes, scope.Network, scope.LocalAccount, scope.Instance));
             using var grants = roots[2].Use(bytes => ProtectedDid2MailboxGrantJournal.Decode(bytes, scope.Network, scope.LocalAccount, scope.Instance));
@@ -202,7 +204,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             }
             successor = ProtectedDid2DirectTextJournal.Encode(journal, scope.Network, scope.LocalAccount, scope.Instance);
             var descriptors = new List<Did2CompactionPlan.Root>();
-            for (var rootIndex = 0; rootIndex < roots.Count; rootIndex++)
+            for (var rootIndex = 0; rootIndex < roots.Length; rootIndex++)
             {
                 var digest = roots[rootIndex].Use(bytes => SHA256.HashData(bytes));
                 var changed = rootIndex == 0 ? successor : sendSuccessor;
@@ -211,9 +213,13 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     : Guard(kinds[rootIndex], slots[rootIndex], digest));
             }
             await RecheckRouteFreshnessAsync(current, source, own, held, first, ct).ConfigureAwait(false);
+            // The freshness callback above can replace custody. Acquire a new
+            // complete snapshot instead of carrying the selection read forward.
+            using var readbacks = await storage.ReadOwnedBatchAsync(slots, ct).ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
             for (var rootIndex = 0; rootIndex < slots.Length; rootIndex++)
             {
-                using var readback = await storage.ReadOwnedAsync(slots[rootIndex], ct).ConfigureAwait(false) ?? throw new InvalidDataException("Outbox dependency disappeared.");
+                var readback = readbacks[rootIndex] ?? throw new InvalidDataException("Outbox dependency disappeared.");
                 if (!readback.Use(bytes => FixedRoute(SHA256.HashData(bytes), descriptors[rootIndex].Before.Span)))
                     throw new CryptographicException("Outbox dependency changed during selection.");
             }
@@ -221,7 +227,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             return plans.Prepare(Did2CompactionPlan.SqlTarget.Application, RandomNumberGenerator.GetBytes(32), scope.Hash,
                 effects.Before, effects.After, descriptors, rows);
         }
-        finally { foreach (var root in roots) root.Dispose(); foreach (var item in retained) item.Dispose(); CryptographicOperations.ZeroMemory(successor); CryptographicOperations.ZeroMemory(sendSuccessor); }
+        finally { foreach (var item in retained) item.Dispose(); CryptographicOperations.ZeroMemory(successor); CryptographicOperations.ZeroMemory(sendSuccessor); }
     }
 
     internal async Task CompactOwnedOrdinaryOutboxAsync(ulong unixSeconds, IDeepMlDsa65Verifier verifier,

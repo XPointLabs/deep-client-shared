@@ -185,9 +185,11 @@ public sealed partial class DeepIdV2AccountService
             using var draft = await PrepareOwnDirectTextAsync(conversation.Scope, op, text, source, ct).ConfigureAwait(false);
             exact = OwnedByteExports.TakeArray(draft.ExactDmc2);
             using var sent = await SendOwnMessagingAsync(conversation.Scope, op, exact, source, ct).ConfigureAwait(false);
-            return await (recoverUnknown
+            var stored = await (recoverUnknown
                 ? DeliverOwnMessagingWithRecoveryAsync(conversation.Scope, op, source, grants, transport, ct)
                 : DeliverOwnMessagingAsync(conversation.Scope, op, source, grants, transport, ct)).ConfigureAwait(false);
+            if (stored.IngressDispatched) ClientDeliveryEvents.Reached(ClientDeliveryPhase.StoreQuorum, exact);
+            return stored;
         }
         finally { CryptographicOperations.ZeroMemory(op); CryptographicOperations.ZeroMemory(exact); }
     }

@@ -80,6 +80,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 if (!applied.Hash.AsSpan().SequenceEqual(native.EventHash)) throw new CryptographicException("Group native selector changed its event.");
                 held.RequireActive(); return;
             }
+            var newReadable = false;
             var self = await DeepIdV2GroupDirectoryAuthority.VerifyAsync(own.Proof, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
             var other = await DeepIdV2GroupDirectoryAuthority.VerifyAsync(peer, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
             if (record is GroupCommitChunkRecord chunk)
@@ -117,11 +118,16 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                             old.Field(6).Span.SequenceEqual(record.Field(6).Span) && old.Field(7).Span.SequenceEqual(record.Field(7).Span) && old.Field(8).Span.SequenceEqual(record.Field(8).Span);
                     });
                     if (collision is not null && !collision.Record.AsSpan().SequenceEqual(record.CanonicalBytes.Span)) throw new CryptographicException("Group message logical identity/sequence was equivocated.");
-                    if (collision is null) root.State.Messages.Add(new() { Group = group.Id.ToArray(), Operation = operation.ToArray(), Scope = scope.Exact.ToArray(), Record = record.CanonicalBytes.ToArray(), Direction = checked((byte)native.Direction) });
+                    if (collision is null)
+                    {
+                        root.State.Messages.Add(new() { Group = group.Id.ToArray(), Operation = operation.ToArray(), Scope = scope.Exact.ToArray(), Record = record.CanonicalBytes.ToArray(), Direction = checked((byte)native.Direction) });
+                        newReadable = native.Direction == 2;
+                    }
                 }
             }
             root.State.Receives.Add(new() { ScopeHash = scope.Hash.ToArray(), Operation = operation.ToArray(), Hash = native.EventHash.ToArray() });
             await SaveGroupsUnderLeaseAsync(root, current, held, ct).ConfigureAwait(false);
+            if (newReadable) native.DeliveryObservation = ClientDeliveryEvents.Capture(ClientDeliveryPhase.RecipientDurableReadable, parsed);
         }
         finally { CryptographicOperations.ZeroMemory(exact); CryptographicOperations.ZeroMemory(operation); }
     }

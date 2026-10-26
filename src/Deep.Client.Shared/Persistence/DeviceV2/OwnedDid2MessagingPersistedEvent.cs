@@ -10,6 +10,8 @@ internal sealed class OwnedDid2MessagingPersistedEvent : IDisposable
     private readonly byte[] eventHash, envelopeHash, routeProcessing;
     internal int Direction { get; }
     internal ulong Ordinal { get; }
+    // Optional closed diagnostic facts, not a receive/receipt authority.
+    internal ClientDeliveryObservation? DeliveryObservation { get; set; }
     // Called only by the verified SQL reader, adopting its fresh blob buffers.
     internal OwnedDid2MessagingPersistedEvent(int direction, ulong ordinal, byte[] envelope, byte[] plaintext,
         ReadOnlySpan<byte> eventHash, ReadOnlySpan<byte> routeProcessing)

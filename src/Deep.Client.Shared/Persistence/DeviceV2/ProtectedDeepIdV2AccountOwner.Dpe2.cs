@@ -86,6 +86,20 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         ReadOnlyMemory<byte> input, bool send, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own,
         VerifiedDeepIdV2DirectoryFreshness peer, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct, bool routeControl = false)
     {
+        ClientDeliveryEvents.Initialize(); // EventSource creation/observer admission precedes private custody.
+        var result = await RunMessagingUnderLeaseAsync(trustedUnixSeconds, verifier, scope, operation, input,
+            send, own, peer, source, ct, routeControl).ConfigureAwait(false);
+        // Final freshness passed and every private scope has been released.
+        // No observer executes inside the guarded semantic transition.
+        if (result.DeliveryObservation is { } observation) ClientDeliveryEvents.Publish(observation);
+        return result;
+    }
+
+    private async Task<OwnedDid2MessagingPersistedEvent> RunMessagingUnderLeaseAsync(ulong trustedUnixSeconds,
+        IDeepMlDsa65Verifier verifier, Did2MessagingSessionScope scope, ReadOnlyMemory<byte> operation,
+        ReadOnlyMemory<byte> input, bool send, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own,
+        VerifiedDeepIdV2DirectoryFreshness peer, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct, bool routeControl = false)
+    {
         ArgumentNullException.ThrowIfNull(scope);
         if (input.IsEmpty || input.Length > (send ? 33082 : 65536))
             throw new InvalidDataException("DID2 ordinary message exceeds its closed bound.");
@@ -159,6 +173,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     }
                 }
             }
+            var newSend = send && result is null;
             if (result is null)
             {
                 if (send && senderEvent?.ContentKind == Dmc2ContentKind.ContactRouteUpdate)
@@ -204,7 +219,10 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 using var handoff = AuthenticatedDirectDmc2.FromOwnedDid2Commit(opened, stable, op, send ? exact : []);
                 using var application = await SqliteDeepIdV2AccountGeneration.OpenApplicationUnderLeaseAsync(
                     storage, sqlStatePath, current, held, ct).ConfigureAwait(false);
-                RequireApplicationDisposition(await application.MaterializeDirectDmc2Async(handoff, ct).ConfigureAwait(false));
+                var disposition = await application.MaterializeDirectDmc2Async(handoff, ct).ConfigureAwait(false);
+                RequireApplicationDisposition(disposition);
+                if (!send && disposition == DirectDmc2InboxDisposition.Materialized)
+                    result.DeliveryObservation = ClientDeliveryEvents.Capture(ClientDeliveryPhase.RecipientDurableReadable, stagedEvent);
             }
             else if (stagedEvent.ContentKind == Dmc2ContentKind.ContactAccept)
             {
@@ -241,6 +259,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             }
             if (ProtectedDid2GroupJournal.IsKind(stagedEvent.ContentKind))
                 await MaterializeGroupNativeUnderLeaseAsync(current, held, scope, result, own, peer, source, ct).ConfigureAwait(false);
+            if (newSend) result.DeliveryObservation = ClientDeliveryEvents.Capture(ClientDeliveryPhase.NativeOutboxDurable, stagedEvent);
             await RequireFinalMessagingFreshnessAsync(current, scope, own, peer, source, held, first, ct).ConfigureAwait(false);
             if (senderEvent?.ParsedPayload is AttachmentOfferDmc2Payload offered)
             {

@@ -3214,6 +3214,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         internal int ApplicationSingleReads { get; set; }
         internal List<string[]> ApplicationReadGroups { get; } = [];
         internal Action? AfterApplicationReadGroup { get; set; }
+        internal Action? AfterMessagingRegistrationReadGroup { get; set; }
+        internal Action? AfterCompactionRootsReadGroup { get; set; }
         internal Action? AfterDeviceRegistrationReadGroup { get; set; }
         internal Action? AfterRetirementReadGroup { get; set; }
         internal Action? AfterCompactionPartReadGroup { get; set; }
@@ -3307,6 +3309,19 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             try
             {
                 for (var index = 0; index < captured.Length; index++) ObserveRead(captured[index], result[index]);
+                if (AfterCompactionRootsReadGroup is { } afterRootRead && captured.Length is 6 or 11 &&
+                    captured[^1] == Did2CompactionPlan.Slot)
+                {
+                    AfterCompactionRootsReadGroup = null;
+                    afterRootRead();
+                }
+                if (AfterMessagingRegistrationReadGroup is { } afterMessagingRead && captured.Length == 4 &&
+                    captured[0] == SqliteDeepIdV2AccountGeneration.CompactionRegistrationSlot &&
+                    captured[1] == ProtectedDid2MessagingSessionCatalog.Slot)
+                {
+                    AfterMessagingRegistrationReadGroup = null;
+                    afterMessagingRead();
+                }
                 if (AfterCompactionPartReadGroup is { } afterCompactionRead && captured.Length == 16 &&
                     captured.Contains(ProtectedDid2CompactionPlan.PartSlot(15), StringComparer.Ordinal))
                 {

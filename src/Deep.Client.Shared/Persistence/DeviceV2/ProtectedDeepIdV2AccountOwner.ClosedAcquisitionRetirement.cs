@@ -145,10 +145,12 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         ReadOnlyMemory<byte> account, ReadOnlyMemory<byte> instance, HeldDeepIdV2AccountLease held, CancellationToken ct)
     {
         held.RequireOwner(lease);
+        using var inventory = await storage.ReadOwnedBatchAsync(ClosedAcquisitionRootSlots.Take(7).ToArray(), ct).ConfigureAwait(false);
+        ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
         var result = new List<Did2CompactionPlan.RootReadback>(9);
         for (var index = 0; index < 7; index++)
         {
-            using var raw = await storage.ReadOwnedAsync(ClosedAcquisitionRootSlots[index], ct).ConfigureAwait(false) ??
+            var raw = inventory[index] ??
                 throw new InvalidDataException("Retirement lost a mandatory dependency root.");
             switch (index)
             {
@@ -159,9 +161,13 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 case 4: using (var state = raw.Use(bytes => ProtectedDid2MessagingSessionCatalog.Decode(bytes, networkId, account.Span, instance.Span))) { } break;
                 case 5: using (var state = raw.Use(bytes => ProtectedDid2AttachmentJournal.Decode(bytes, networkId, account.Span, instance.Span))) { } break;
                 case 6:
-                    using (var actual = await SqliteDeepIdV2AccountGeneration.ReadCompactionRegistrationUnderLeaseAsync(storage, networkId, account, ct).ConfigureAwait(false))
-                        if (!FixedRoute(actual.Use(bytes => SHA256.HashData(bytes)), raw.Use(bytes => SHA256.HashData(bytes))))
+                    var registeredInstance = raw.Use(bytes => SqliteDeepIdV2AccountGeneration.ReadAccountInstanceFromRegistration(bytes, networkId, account.Span));
+                    try
+                    {
+                        if (!FixedRoute(registeredInstance, instance.Span))
                             throw new CryptographicException("Retirement registration changed during readback.");
+                    }
+                    finally { CryptographicOperations.ZeroMemory(registeredInstance); }
                     break;
             }
             result.Add(new(ClosedAcquisitionRootKinds[index], CompactionSlotSelector(ClosedAcquisitionRootSlots[index]), raw.Use(bytes => SHA256.HashData(bytes))));

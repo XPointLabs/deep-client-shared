@@ -42,18 +42,25 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         HeldDeepIdV2AccountLease held, DeepIdV2AccountFileLease lease, CancellationToken ct)
     {
         using var borrowed = held.BorrowFor(lease);
-        using var current = await ProtectedDid2CompactionPlan.ReadRegisteredAsync(storage, scope.Network.ToArray(),
-            scope.LocalAccount.ToArray(), scope.Instance.ToArray(), ct).ConfigureAwait(false);
+        var slots = OrdinaryOutboxSlots(scope);
+        // Plan and all ten roots are one bounded authenticated revision. The
+        // entire consumer below is pure decoding/hashing, with no callback,
+        // SQL effect or await before the snapshot is disposed.
+        using var inventory = await storage.ReadOwnedBatchAsync([.. slots, Did2CompactionPlan.Slot], ct).ConfigureAwait(false);
+        ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
+        var planRaw = inventory[slots.Length] ?? throw new InvalidDataException("Protected compaction registration is absent; explicit reset is required.");
+        using var current = planRaw.Use(bytes => Did2CompactionPlan.Decode(bytes, scope.Network, scope.LocalAccount, scope.Instance));
         if (!FixedRoute(current.Exact.Span, plan.Exact.Span)) throw new CryptographicException("Stored ordinary plan changed during recovery.");
-        using var catalog = await new ProtectedDid2MessagingSessionCatalog(storage, scope.Network, scope.LocalAccount, scope.Instance).ReadAsync(ct).ConfigureAwait(false);
+        var catalogRaw = inventory[4] ?? throw new InvalidDataException("The protected DID2 messaging catalog is absent; explicit reset is required.");
+        using var catalog = catalogRaw.Use(bytes => ProtectedDid2MessagingSessionCatalog.Decode(bytes, scope.Network, scope.LocalAccount, scope.Instance));
         if (!FixedRoute(ResolveOrdinaryOutboxScope(plan, catalog).Exact, scope.Exact)) throw new InvalidDataException("Wrong ordinary SQL scope.");
-        var slots = OrdinaryOutboxSlots(scope); var result = new List<Did2CompactionPlan.RootReadback>(slots.Length);
+        var result = new List<Did2CompactionPlan.RootReadback>(slots.Length);
         for (var index = 0; index < slots.Length; index++)
         {
             var expected = plan.ReadRoot(index); var selector = CompactionSlotSelector(slots[index]);
             if (expected.Kind != OrdinaryOutboxRootKinds[index] || expected.Guard != (index >= (IsStoppedOutboxPlan(plan) ? 1 : 2)) || !FixedRoute(expected.Selector.Span, selector))
                 throw new InvalidDataException("Ordinary batch changed its closed root mapping.");
-            using var raw = await storage.ReadOwnedAsync(slots[index], ct).ConfigureAwait(false) ??
+            var raw = inventory[index] ??
                 throw new InvalidDataException("Ordinary batch lost a mandatory dependency root.");
             switch (index)
             {
@@ -68,11 +75,13 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     if (floor.Phase != 1 || floor.Status != 1) throw new InvalidDataException("Ordinary recovery lost its stable active native floor."); break;
                 case 6: using (raw.Use(bytes => ProtectedDid2AttachmentJournal.Decode(bytes, scope.Network, scope.LocalAccount, scope.Instance))) { } break;
                 case 7:
-                    using (var registration = await SqliteDeepIdV2AccountGeneration.ReadCompactionRegistrationUnderLeaseAsync(storage,
-                        scope.Network.ToArray(), scope.LocalAccount.ToArray(), ct).ConfigureAwait(false))
-                        if (!registration.Use(bytes => FixedRoute(bytes.Slice(56, 32), scope.Instance)) ||
-                            !registration.Use(bytes => FixedRoute(SHA256.HashData(bytes), raw.Use(value => SHA256.HashData(value)))))
+                    var instance = raw.Use(bytes => SqliteDeepIdV2AccountGeneration.ReadAccountInstanceFromRegistration(bytes, scope.Network, scope.LocalAccount));
+                    try
+                    {
+                        if (!FixedRoute(instance, scope.Instance))
                             throw new CryptographicException("Ordinary account registration changed during recovery.");
+                    }
+                    finally { CryptographicOperations.ZeroMemory(instance); }
                     break;
                 case 8: _ = raw.Use(bytes => Did2MessagingHistoryCheckpoint.Decode(bytes, scope)); break;
                 case 9: _ = raw.Use(bytes => ProtectedDid2MessagingPeerBootstrap.Restore(bytes, scope)); break;

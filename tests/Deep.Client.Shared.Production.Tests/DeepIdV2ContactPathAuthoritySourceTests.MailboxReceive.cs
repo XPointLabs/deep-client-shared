@@ -268,22 +268,30 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         Assert.True(acceptTerminal.BuiltRetrieveFrame); Assert.True(acceptTerminal.BuiltAckFrame);
         Assert.Equal(Did2ContactAcceptanceState.PeerAcceptanceRetained, await fixture.ReadOwnedContactState(sender));
         using (var replay = await fixture.ReceiveOwnedMessage(sender, acceptCipher)) { }
+        using var deliveryEvents = new DeliveryEventListener();
         var textOperation = await fixture.QueueNativeText(sender, "Owned Retrieve → semantic inbox → ACK");
         var textStore = new OwnedStoreFixture(fixture, sender, textOperation, null) { Cursor = 2 };
         var textReceipt = await fixture.SendNativeText(sender, textOperation, "Owned Retrieve → semantic inbox → ACK", depositGrants, textStore);
         var cipher = textStore.StoredEnvelope!.Ciphertext.ToArray();
         Assert.True(textReceipt.IngressDispatched); Assert.Equal(2UL, textReceipt.Cursor);
+        var cachedTextReceipt = await fixture.SendNativeText(sender, textOperation, "Owned Retrieve → semantic inbox → ACK", depositGrants, textStore);
+        Assert.False(cachedTextReceipt.IngressDispatched);
+        Assert.Single(deliveryEvents.Events, item => item.Phase == 2); // Historical receipt is not a new quorum event.
         Assert.Equal(1, textStore.Calls); Assert.Equal(1, depositGrants.Calls);
         Assert.Empty(await fixture.ListNativePendingText());
         var localHistory = await fixture.ListNativeApplicationMessages(sender);
         Assert.Equal(1, localHistory.Count(value => value.Text == "Owned Retrieve → semantic inbox → ACK" && value.IsLocalAuthor));
         var terminal = new OwnedReadTerminal(fixture, cipher)
         { RetainedEnvelope = textStore.StoredEnvelope, LoseAckReply = true, Cursor = 2, ExpectedAckCounter = 4 };
+        deliveryEvents.AckCalls = () => terminal.AckCalls;
+        Assert.Single(deliveryEvents.Events, item => item.Phase == 1);
+        Assert.Single(deliveryEvents.Events, item => item.Phase == 2);
         var hitPageCommitFault = false;
         using (ClientMailboxRetrieveTestHooks.Push(point =>
         { if (point == ClientMailboxRetrieveFailpoint.AfterPageCommit) { hitPageCommitFault = true; throw new IOException("Injected page-commit/outcome-journal interruption."); } }))
             await Assert.ThrowsAsync<ClientMailboxDispatchOutcomeUnknownException>(() => fixture.SynchronizeNativeReceiver(grants, terminal));
         Assert.True(hitPageCommitFault); Assert.Equal(1, terminal.RetrieveCalls); Assert.Equal(0, terminal.AckCalls);
+        Assert.DoesNotContain(deliveryEvents.Events, item => item.Phase == 3);
         using (var read = await fixture.ReadPeerMailboxReads()) { Assert.Equal(3, read.Phase); Assert.NotEmpty(read.Active!.Page); }
         if (selectedSuccessor) await fixture.StageVerifiedGrantSuccessorAsync(grants, own: false);
         // The real dispatch clock advanced while cold SQL ran. Model that
@@ -295,6 +303,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         { if (point == DirectDmc2InboxFaultPoint.BeforeCommit) { hitSemanticFault = true; throw new IOException("Injected semantic inbox commit failure."); } }))
             await Assert.ThrowsAsync<IOException>(() => fixture.SynchronizeNativeReceiver(grants, terminal));
         Assert.True(hitSemanticFault); Assert.Equal(1, terminal.RetrieveCalls); Assert.Equal(0, terminal.AckCalls);
+        Assert.DoesNotContain(deliveryEvents.Events, item => item.Phase == 3);
         using (var read = await fixture.ReadPeerMailboxReads()) { Assert.Equal(4, read.Phase); Assert.NotEmpty(read.Active!.Page); }
         DeepIdV2MailboxSynchronizationResult completed;
         if (automaticAck)
@@ -313,6 +322,10 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             completed = await fixture.SynchronizeNativeReceiver(grants, terminal);
         }
         Assert.Equal(1, completed.ProcessedEnvelopes); Assert.Equal(1, completed.DurableTombstones); Assert.False(completed.HasMore);
+        var readable = Assert.Single(deliveryEvents.Events, item => item.Phase == 3);
+        Assert.Equal(0, readable.AckCalls); // Event survived the subsequent lost ACK response.
+        Assert.Equal(deliveryEvents.Events[0].MessageHash, readable.MessageHash);
+        Assert.Equal(deliveryEvents.Events[0].DeliveryHash, readable.DeliveryHash);
         Assert.Equal(1, terminal.RetrieveCalls); Assert.Equal(2, terminal.AckCalls); Assert.Equal(1, grants.Calls);
         Assert.True(terminal.BuiltRetrieveFrame); Assert.True(terminal.BuiltAckFrame);
         using (var read = await fixture.ReadPeerMailboxReads())

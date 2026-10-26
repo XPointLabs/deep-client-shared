@@ -271,10 +271,13 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         HeldDeepIdV2AccountLease held, DeepIdV2AccountFileLease lease, CancellationToken ct)
     {
         using var borrowed = held.BorrowFor(lease);
-        using var currentPlan = await ProtectedDid2CompactionPlan.ReadRegisteredAsync(storage, scope.Network.ToArray(), scope.LocalAccount.ToArray(), scope.Instance.ToArray(), ct).ConfigureAwait(false);
-        if (!Did2MessagingSessionScope.Fixed(currentPlan.Exact.Span, plan.Exact.Span)) throw new CryptographicException("Stored prefix changed during recovery.");
         var slots = new[] { ProtectedDid2MessagingSessionCatalog.Slot, scope.FloorSlot,
             SqliteDeepIdV2AccountGeneration.CompactionRegistrationSlot, Did2MessagingHistoryCheckpoint.Slot(scope), ProtectedDid2MessagingPeerBootstrap.Slot(scope) };
+        using var inventory = await storage.ReadOwnedBatchAsync([.. slots, Did2CompactionPlan.Slot], ct).ConfigureAwait(false);
+        ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
+        var planRaw = inventory[slots.Length] ?? throw new InvalidDataException("Protected compaction registration is absent; explicit reset is required.");
+        using var currentPlan = planRaw.Use(bytes => Did2CompactionPlan.Decode(bytes, scope.Network, scope.LocalAccount, scope.Instance));
+        if (!Did2MessagingSessionScope.Fixed(currentPlan.Exact.Span, plan.Exact.Span)) throw new CryptographicException("Stored prefix changed during recovery.");
         var kinds = new[] { Did2CompactionPlan.RootKind.SessionCatalog, Did2CompactionPlan.RootKind.MessagingFloor,
             Did2CompactionPlan.RootKind.AccountRegistration, Did2CompactionPlan.RootKind.MessagingHistoryCheckpoint, Did2CompactionPlan.RootKind.MessagingPeerBootstrap };
         if (plan.Target != Did2CompactionPlan.SqlTarget.Messaging || plan.RootCount != 5 || plan.SuccessorBytes != Did2MessagingHistoryCheckpoint.Bytes || plan.PartCount != 1 ||
@@ -285,7 +288,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var expected = plan.ReadRoot(index); var selector = CompactionSlotSelector(slots[index]);
             if (expected.Kind != kinds[index] || expected.Guard != (index != 3) || !Did2MessagingSessionScope.Fixed(expected.Selector.Span, selector))
                 throw new InvalidDataException("Prefix changed its owned root mapping.");
-            using var raw = await storage.ReadOwnedAsync(slots[index], ct).ConfigureAwait(false) ?? throw new InvalidDataException("Prefix lost a mandatory dependency root.");
+            var raw = inventory[index] ?? throw new InvalidDataException("Prefix lost a mandatory dependency root.");
             switch (index)
             {
                 case 0:
@@ -296,9 +299,13 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     var floor = raw.Use(bytes => Did2MessagingFloor.Decode(bytes, scope));
                     if (floor.Phase != 1 || floor.Status != 1) throw new InvalidDataException("Prefix lost its stable active ratchet floor."); break;
                 case 2:
-                    using (var registration = await SqliteDeepIdV2AccountGeneration.ReadCompactionRegistrationUnderLeaseAsync(storage, scope.Network.ToArray(), scope.LocalAccount.ToArray(), ct).ConfigureAwait(false))
-                        if (!Did2MessagingSessionScope.Fixed(raw.Use(bytes => SHA256.HashData(bytes)), registration.Use(bytes => SHA256.HashData(bytes))))
+                    var instance = raw.Use(bytes => SqliteDeepIdV2AccountGeneration.ReadAccountInstanceFromRegistration(bytes, scope.Network, scope.LocalAccount));
+                    try
+                    {
+                        if (!Did2MessagingSessionScope.Fixed(instance, scope.Instance))
                             throw new CryptographicException("Prefix registration changed during read-back.");
+                    }
+                    finally { CryptographicOperations.ZeroMemory(instance); }
                     break;
                 case 3: _ = raw.Use(bytes => Did2MessagingHistoryCheckpoint.Decode(bytes, scope)); break;
                 case 4: _ = raw.Use(bytes => ProtectedDid2MessagingPeerBootstrap.Restore(bytes, scope)); break;

@@ -220,7 +220,8 @@ public sealed partial class DeepIdV2AccountService
                     if (!retained.Contains(Convert.ToHexString(item.Operation)))
                     {
                         using var native = await SendOwnMessagingAsync(conversation.Scope, item.Operation, item.Event, source, ct).ConfigureAwait(false);
-                        _ = await DeliverOwnMessagingAsync(conversation.Scope, item.Operation, source, ct).ConfigureAwait(false);
+                        var stored = await DeliverOwnMessagingAsync(conversation.Scope, item.Operation, source, ct).ConfigureAwait(false);
+                        if (stored.IngressDispatched) ClientDeliveryEvents.Reached(ClientDeliveryPhase.StoreQuorum, item.Event);
                     }
                 }
                 finally { accountOperations.Release(); }

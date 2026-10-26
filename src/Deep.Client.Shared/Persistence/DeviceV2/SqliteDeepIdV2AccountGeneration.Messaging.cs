@@ -71,9 +71,26 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         IDeepSecureStorage storage, string accountPath, ReadOnlyMemory<byte> network,
         ReadOnlyMemory<byte> account, Did2MessagingSessionScope scope, CancellationToken ct)
     {
-        var instance = await ReadAccountInstanceUnderLeaseAsync(storage, network, account, ct).ConfigureAwait(false);
-        var catalog = new ProtectedDid2MessagingSessionCatalog(storage, network.Span, account.Span, instance);
-        using var registered = await catalog.ReadAsync(ct).ConfigureAwait(false);
+        // One bounded actual inventory owns registration selection. Only pure
+        // decoders/path checks run before opening SQL; no authority callback or
+        // previously successful read can supply any member of this snapshot.
+        using var inventory = await storage.ReadOwnedBatchAsync([KeySlot,
+            ProtectedDid2MessagingSessionCatalog.Slot, scope.FloorSlot,
+            Did2MessagingHistoryCheckpoint.Slot(scope)], ct).ConfigureAwait(false);
+        ct.ThrowIfCancellationRequested();
+        var registration = inventory[0] ?? throw new InvalidDataException("The DID2 SQL key record is absent.");
+        var instance = registration.Use(bytes => ReadAccountInstanceFromRegistration(bytes, network.Span, account.Span));
+        ProtectedDid2MessagingSessionCatalog catalog;
+        try
+        {
+            if (!Did2MessagingSessionScope.Fixed(instance, scope.Instance))
+                throw new CryptographicException("Owned messaging registration has another account instance.");
+            catalog = new ProtectedDid2MessagingSessionCatalog(storage, network.Span, account.Span, instance);
+        }
+        finally { CryptographicOperations.ZeroMemory(instance); }
+        var catalogBytes = inventory[1] ?? throw new InvalidDataException("The protected DID2 messaging catalog is absent; explicit reset is required.");
+        using var registered = catalogBytes.Use(bytes => ProtectedDid2MessagingSessionCatalog.Decode(bytes,
+            network.Span, account.Span, scope.Instance));
         var index = registered.FindExact(scope);
         if (index < 0) throw new InvalidDataException("DID2 messaging SQL has no protected registration.");
         var phase = registered.Phase(index);
@@ -93,8 +110,11 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         if (File.Exists(path + "-wal") || File.Exists(path + "-shm") || !exists && File.Exists(path + "-journal"))
             throw new InvalidDataException("DID2 messaging SQL has an incompatible/orphan file family.");
         var checkpoint = new Did2MessagingProtectedCheckpoint(storage, scope);
-        var floor = await checkpoint.ReadAsync(ct).ConfigureAwait(false);
-        var history = await Did2MessagingHistoryCheckpoint.ReadRegisteredAsync(storage, scope, ct).ConfigureAwait(false);
+        var floorBytes = inventory[2] ?? throw new InvalidDataException("Protected DID2 messaging floor is absent; no state repair is permitted.");
+        var floor = floorBytes.Use(bytes => Did2MessagingFloor.Decode(bytes, scope));
+        var historyBytes = inventory[3] ?? throw new InvalidDataException("Mandatory messaging history checkpoint is absent; no initialization is permitted.");
+        var history = historyBytes.Use(bytes => Did2MessagingHistoryCheckpoint.Decode(bytes, scope));
+        inventory.Dispose(); // No raw inventory is retained over SQL/storage callbacks.
         if (phase == 1 && !Did2MessagingSessionScope.Fixed(floor.Exact.Span, Did2MessagingFloor.Empty(scope).Exact.Span))
             throw new CryptographicException("Uninitialized DID2 messaging registration has a nonempty floor.");
         if (phase == 1 && !Did2MessagingSessionScope.Fixed(history.Exact.Span, Did2MessagingHistoryCheckpoint.RegisteredEmpty(scope).Exact.Span))
