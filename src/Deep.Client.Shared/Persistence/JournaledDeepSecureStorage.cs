@@ -51,10 +51,12 @@ public sealed partial class JournaledDeepSecureStorage : IDeepSecureStorage, IDi
         try
         {
             ThrowIfDisposed(); using var process = await AcquireProcessLeaseAsync(cancellationToken).ConfigureAwait(false);
-            using var current = await AdmitAsync(cancellationToken).ConfigureAwait(false);
-            if (!current.Inventory.Values.TryGetValue(slot, out var descriptor)) return null;
+            using var owned = BeginOperation();
+            using var current = await AdmitReadAsync(cancellationToken).ConfigureAwait(false);
+            if (!current.Inventory.Values.TryGetValue(slot, out var descriptor))
+            { CheckFinalSource(current, cancellationToken); auditRequired = 0; return null; }
             var value = ReadObject(current.Inventory, descriptor);
-            try { cancellationToken.ThrowIfCancellationRequested(); RequireExactSource(current.Hash); return new OwnedDeepSecret(value); }
+            try { CheckFinalSource(current, cancellationToken); var result = new OwnedDeepSecret(value); auditRequired = 0; return result; }
             finally { CryptographicOperations.ZeroMemory(value); }
         }
         finally { gate.Release(); }
@@ -68,11 +70,12 @@ public sealed partial class JournaledDeepSecureStorage : IDeepSecureStorage, IDi
         try
         {
             ThrowIfDisposed(); using var process = await AcquireProcessLeaseAsync(cancellationToken).ConfigureAwait(false);
-            using var current = await AdmitAsync(cancellationToken).ConfigureAwait(false);
+            using var owned = BeginOperation();
+            using var current = await AdmitReadAsync(cancellationToken).ConfigureAwait(false);
             foreach (var slot in captured)
                 if (current.Inventory.Values.TryGetValue(slot, out var item)) values.Add(slot, ReadObject(current.Inventory, item));
-            cancellationToken.ThrowIfCancellationRequested(); RequireExactSource(current.Hash);
-            return OwnedDeepSecretBatch.CopyFrom(captured, values);
+            CheckFinalSource(current, cancellationToken);
+            var result = OwnedDeepSecretBatch.CopyFrom(captured, values); auditRequired = 0; return result;
         }
         finally { ZeroValues(values); gate.Release(); }
     }
@@ -83,7 +86,9 @@ public sealed partial class JournaledDeepSecureStorage : IDeepSecureStorage, IDi
         try
         {
             ThrowIfDisposed(); using var process = await AcquireProcessLeaseAsync(cancellationToken).ConfigureAwait(false);
-            using var current = await AdmitAsync(cancellationToken, forceAudit: true).ConfigureAwait(false);
+            using var owned = BeginOperation();
+            using var current = await AdmitReadAsync(cancellationToken, forceAudit: true).ConfigureAwait(false);
+            CheckFinalSource(current, cancellationToken); auditRequired = 0;
         }
         finally { gate.Release(); }
     }
@@ -148,20 +153,21 @@ public sealed partial class JournaledDeepSecureStorage : IDeepSecureStorage, IDi
         try
         {
             ThrowIfDisposed(); using var process = await AcquireProcessLeaseAsync(ct).ConfigureAwait(false);
+            using var owned = BeginOperation();
             using var current = await AdmitAsync(ct).ConfigureAwait(false);
             Guard? guard = null;
             if (slot is not null)
             {
-                if (!current.Inventory.Values.TryGetValue(slot, out var descriptor)) return false;
+                if (!current.Inventory.Values.TryGetValue(slot, out var descriptor)) { CheckFinalSource(current, ct); return false; }
                 var value = ReadObject(current.Inventory, descriptor);
-                try { if (!Fixed(value, expected!)) return false; }
+                try { if (!Fixed(value, expected!)) { CheckFinalSource(current, ct); return false; } }
                 finally { CryptographicOperations.ZeroMemory(value); }
                 guard = new(slot, expected!);
             }
             if (writes is not null && writes.Keys.Any(name => name != slot && current.Inventory.Values.ContainsKey(name)))
             {
                 if (kind == MutationKind.Insert) throw new InvalidOperationException("Secure-storage slot already exists.");
-                return false;
+                CheckFinalSource(current, ct); return false;
             }
             var remove = kind switch
             {
@@ -169,7 +175,7 @@ public sealed partial class JournaledDeepSecureStorage : IDeepSecureStorage, IDi
                 MutationKind.PurgeV2 => current.Inventory.Values.Keys.Where(name => name.StartsWith("deep.store.v2.", StringComparison.Ordinal)).ToArray(),
                 _ => deletions
             };
-            if ((writes is null || writes.Count == 0) && !remove.Any(current.Inventory.Values.ContainsKey)) return true;
+            if ((writes is null || writes.Count == 0) && !remove.Any(current.Inventory.Values.ContainsKey)) { CheckFinalSource(current, ct); return true; }
             var lengths = current.Inventory.Values.ToDictionary(p => p.Key, p => p.Value.Length, StringComparer.Ordinal);
             foreach (var name in remove) lengths.Remove(name);
             if (writes is not null) foreach (var item in writes) lengths[item.Key] = item.Value.Length;
@@ -186,8 +192,10 @@ public sealed partial class JournaledDeepSecureStorage : IDeepSecureStorage, IDi
                     var (descriptor, file) = EncryptObject(candidate, item.Key, item.Value);
                     candidate.Values.Add(item.Key, descriptor); objects.Add(descriptor.Name, file);
                 }
-                await PublishAsync(current, candidate, objects, guard, RootKind.Current, ct).ConfigureAwait(false);
-                using var complete = await AdmitAsync(ct).ConfigureAwait(false); // Includes durable retirement and cleanup-free metadata adoption.
+                using var published = await PublishAsync(current, candidate, objects, guard, RootKind.Current, ct).ConfigureAwait(false);
+                using var complete = published.Inventory.Cleanup.Count == 0 ? null : await CompleteCleanupAsync(published, ct).ConfigureAwait(false);
+                CheckFinalSource(complete ?? published, ct);
+                auditRequired = 0;
                 return true;
             }
             finally { candidate.Dispose(); ZeroValues(objects); }
@@ -197,18 +205,25 @@ public sealed partial class JournaledDeepSecureStorage : IDeepSecureStorage, IDi
 
     private InventoryRead ReadCurrent(CancellationToken ct)
     {
+        var result = ReadForSelectedOperation(ct);
+        try { CheckFinalSource(result, ct); return result; }
+        catch { result.Dispose(); throw; }
+    }
+
+    // Only this dedicated read path defers its source join to the outer result
+    // fence. Mutation/recovery still use ReadCurrent's immediate join.
+    private InventoryRead ReadForSelectedOperation(CancellationToken ct)
+    {
         ct.ThrowIfCancellationRequested(); RequireObjectDirectory();
         var exact = ReadBoundedFile(statePath, MaximumProtectedManifestBytes, manifest: true);
         byte[]? plain = null; Inventory? inventory = null;
         try
         {
-            Interlocked.Increment(ref unprotectCalls); plain = protector.Unprotect(exact);
+            BeforeProvider(); Interlocked.Increment(ref unprotectCalls); plain = protector.Unprotect(exact);
             if (ReferenceEquals(plain, exact)) throw new CryptographicException("Protector did not return owned plaintext.");
             Interlocked.Add(ref manifestPlaintext, plain.Length);
             inventory = DecodeManifest(plain); ct.ThrowIfCancellationRequested();
-            var result = new InventoryRead(exact, inventory);
-            try { RequireExactSource(result.Hash); return result; }
-            catch { result.Dispose(); throw; }
+            return new InventoryRead(exact, inventory);
         }
         catch (Exception error) when (error is ArgumentException or OverflowException or InvalidDataException)
         { inventory?.Dispose(); CryptographicOperations.ZeroMemory(exact); throw new CryptographicException("Protected manifest authentication or decoding failed.", error); }
@@ -217,21 +232,29 @@ public sealed partial class JournaledDeepSecureStorage : IDeepSecureStorage, IDi
     }
 
     private async Task<InventoryRead> AdmitAsync(CancellationToken ct, bool forceAudit = false)
+        => await FinishAdmissionAsync(ReadCurrent(ct), ct, forceAudit).ConfigureAwait(false);
+
+    private async Task<InventoryRead> AdmitReadAsync(CancellationToken ct, bool forceAudit = false)
+        => await FinishAdmissionAsync(ReadForSelectedOperation(ct), ct, forceAudit).ConfigureAwait(false);
+
+    private async Task<InventoryRead> FinishAdmissionAsync(InventoryRead initial, CancellationToken ct, bool forceAudit)
     {
+        var next = initial;
         for (var pass = 0; pass < 5; pass++)
         {
-            var current = ReadCurrent(ct);
+            var current = next;
             try
             {
                 if (File.Exists(pendingPath))
-                { current.Dispose(); await RecoverPendingAsync(ct).ConfigureAwait(false); continue; }
+                { current.Dispose(); next = await RecoverPendingAsync(ct).ConfigureAwait(false); operation!.Recovered = true; continue; }
                 if (File.Exists(backupPath))
                 {
                     var authority = new ReplacementAuthority(current.Hash.ToArray(), RootKind.Current, null);
-                    current.Dispose(); await RetirePathAsync(backupPath, authority, null, ct, manifest: true).ConfigureAwait(false); continue;
+                    current.Dispose(); await RetirePathAsync(backupPath, authority, null, ct, manifest: true).ConfigureAwait(false);
+                    next = TakeAdmission(authority, ct); operation!.Recovered = true; continue;
                 }
                 if (current.Inventory.Cleanup.Count != 0)
-                { await CompleteCleanupAsync(current, ct).ConfigureAwait(false); continue; }
+                { next = await CompleteCleanupAsync(current, ct).ConfigureAwait(false); operation!.Recovered = true; continue; }
                 if (forceAudit || auditRequired != 0)
                 {
                     foreach (var item in current.Inventory.Values.Values)
@@ -239,7 +262,6 @@ public sealed partial class JournaledDeepSecureStorage : IDeepSecureStorage, IDi
                         ct.ThrowIfCancellationRequested(); var value = ReadObject(current.Inventory, item);
                         CryptographicOperations.ZeroMemory(value);
                     }
-                    ct.ThrowIfCancellationRequested(); RequireExactSource(current.Hash); auditRequired = 0;
                 }
                 return current;
             }
@@ -259,7 +281,7 @@ public sealed partial class JournaledDeepSecureStorage : IDeepSecureStorage, IDi
     {
         try
         {
-            Interlocked.Increment(ref protectCalls); var result = protector.Protect(plaintext);
+            BeforeProvider(); Interlocked.Increment(ref protectCalls); var result = protector.Protect(plaintext);
             if (ReferenceEquals(result, plaintext) || result.Length is < 1 or > MaximumProtectedManifestBytes)
             { CryptographicOperations.ZeroMemory(result); throw new CryptographicException("Platform protection returned an invalid manifest."); }
             return result;

@@ -54,6 +54,7 @@
     <Compile Include="Persistence\JournaledDeepSecureStorage.Manifest.cs" />
     <Compile Include="Persistence\JournaledDeepSecureStorage.Objects.cs" />
     <Compile Include="Persistence\JournaledDeepSecureStorage.Enrollment.cs" />
+    <Compile Include="Persistence\JournaledDeepSecureStorage.Operation.cs" />
     <Compile Include="Persistence\LocalStateResetRequiredException.cs" />
     <Compile Include="Persistence\ScopedMailboxCredentialRepository.cs" />
     <Compile Include="Persistence\ScopedMailboxCredentialValidator.cs" />

@@ -15,13 +15,14 @@ public sealed partial class JournaledDeepSecureStorage
         {
             owner.CreateParentDirectory();
             using var process = await owner.AcquireProcessLeaseAsync(cancellationToken).ConfigureAwait(false);
+            using var operation = owner.BeginOperation();
             if (File.Exists(owner.statePath) || File.Exists(owner.pendingPath) || File.Exists(owner.backupPath) ||
                 (Directory.Exists(owner.objectDirectory) && Directory.EnumerateFileSystemEntries(owner.objectDirectory).Any()))
                 throw new InvalidOperationException("New secure storage requires an absent owned file family.");
             owner.CreateObjectDirectory();
             using var empty = new Inventory(Random32(), 1, new byte[32]);
-            await owner.PublishAsync(new byte[32], empty, new Dictionary<string, byte[]>(), null, RootKind.Creation, cancellationToken).ConfigureAwait(false);
-            using var audit = await owner.AdmitAsync(cancellationToken, forceAudit: true).ConfigureAwait(false);
+            using var audit = await owner.PublishAsync(new byte[32], empty, new Dictionary<string, byte[]>(), null, RootKind.Creation, cancellationToken).ConfigureAwait(false);
+            owner.CheckFinalSource(audit, cancellationToken); owner.auditRequired = 0;
             success = true; return owner;
         }
         finally
@@ -43,6 +44,7 @@ public sealed partial class JournaledDeepSecureStorage
         try
         {
             using var process = await owner.AcquireProcessLeaseAsync(cancellationToken).ConfigureAwait(false);
+            using var operation = owner.BeginOperation();
             var source = owner.ReadAggregateSource(cancellationToken, allowManifest: true);
             try
             {
@@ -89,8 +91,10 @@ public sealed partial class JournaledDeepSecureStorage
                         8L + source.Values.Sum(p => 6L + StrictUtf8.GetByteCount(p.Key) + p.Value.Length))
                         throw new CryptographicException("Enrollment does not cover the complete source inventory.");
                     source.Dispose(); // Never carry the old value/key inventory through Protect.
-                    await owner.PublishAsync(sourceHash, candidate, objects, null, RootKind.Enrollment, cancellationToken).ConfigureAwait(false);
-                    using var audit = await owner.AdmitAsync(cancellationToken, forceAudit: true).ConfigureAwait(false);
+                    using var audit = await owner.PublishAsync(sourceHash, candidate, objects, null, RootKind.Enrollment, cancellationToken).ConfigureAwait(false);
+                    foreach (var item in audit.Inventory.Values.Values)
+                    { var value = owner.ReadObject(audit.Inventory, item); CryptographicOperations.ZeroMemory(value); }
+                    owner.CheckFinalSource(audit, cancellationToken); owner.auditRequired = 0;
                     success = true; return owner;
                 }
                 finally { ZeroValues(objects); }
@@ -119,7 +123,7 @@ public sealed partial class JournaledDeepSecureStorage
         byte[]? plain = null; Dictionary<string, byte[]>? values = null;
         try
         {
-            Interlocked.Increment(ref unprotectCalls); plain = protector.Unprotect(exact);
+            BeforeProvider(); Interlocked.Increment(ref unprotectCalls); plain = protector.Unprotect(exact);
             if (ReferenceEquals(exact, plain)) throw new CryptographicException("Protector did not return owned plaintext.");
             Interlocked.Add(ref manifestPlaintext, plain.Length);
             var current = plain.Length >= 4 && plain.AsSpan(0, 4).SequenceEqual("DSS2"u8);
@@ -150,7 +154,7 @@ public sealed partial class JournaledDeepSecureStorage
         var pendingHash = SHA256.HashData(bytes); byte[]? plain = null; string[] staged;
         try
         {
-            Interlocked.Increment(ref unprotectCalls); plain = protector.Unprotect(bytes);
+            BeforeProvider(); Interlocked.Increment(ref unprotectCalls); plain = protector.Unprotect(bytes);
             if (ReferenceEquals(plain, bytes)) throw new CryptographicException("Protector did not return owned plaintext.");
             Interlocked.Add(ref manifestPlaintext, plain.Length);
             using var pending = DecodeManifest(plain);

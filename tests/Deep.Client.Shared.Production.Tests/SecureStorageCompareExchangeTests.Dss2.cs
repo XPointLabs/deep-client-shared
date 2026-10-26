@@ -142,17 +142,13 @@ public sealed partial class SecureStorageCompareExchangeTests
         using var f = new Fixture(true);
         await f.Store.WriteBatchAsync([new("guard", new byte[] { 1 }), new("foreign", new byte[] { 9 })]);
         var old = Dss2ReadEntries(f).Single(entry => entry.Slot == "guard");
-        var hit = false;
-        using (JournaledDeepSecureStorageTestHooks.Push(actual =>
-        {
-            if (!hit && actual.ToString() == point) { hit = true; throw new IOException("Injected DSS2 crash cutpoint."); }
-        }))
+        using var crash = JournaledDeepSecureStorageTestHooks.PushCrashOnce(Enum.Parse<JournaledDeepSecureStorageFailpoint>(point));
         {
             var error = await Assert.ThrowsAsync<IOException>(() => f.Store.CompareExchangeAndInsertAsync("guard", new byte[] { 1 },
                 new byte[] { 2 }, [new("inserted", new byte[] { 3 })]));
             Assert.Equal("Injected DSS2 crash cutpoint.", error.Message);
         }
-        Assert.True(hit);
+        Assert.True(crash.Reached);
         using var reopened = f.OpenJournaled();
         using var snapshot = await reopened.ReadOwnedBatchAsync(["guard", "inserted", "foreign"]);
         Assert.Equal(committed ? 2 : 1, snapshot[0]!.Use(value => value[0]));
@@ -169,11 +165,10 @@ public sealed partial class SecureStorageCompareExchangeTests
     public async Task Dss2CancellationNeverTurnsAnAdoptedInventoryIntoNoncommit(string point, bool committed)
     {
         using var f = new Fixture(true); await f.Store.WriteBatchAsync([new("a", new byte[] { 1 })]);
-        using var cancelled = new CancellationTokenSource(); var hit = false;
-        using (JournaledDeepSecureStorageTestHooks.Push(actual =>
-        { if (!hit && actual.ToString() == point) { hit = true; cancelled.Cancel(); } }))
-            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => f.Store.CompareExchangeAsync("a", new byte[] { 1 }, new byte[] { 2 }, cancelled.Token));
-        Assert.True(hit);
+        using var cancelled = new CancellationTokenSource();
+        using var callback = JournaledDeepSecureStorageTestHooks.PushCallbackOnce(Enum.Parse<JournaledDeepSecureStorageFailpoint>(point), cancelled.Cancel);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => f.Store.CompareExchangeAsync("a", new byte[] { 1 }, new byte[] { 2 }, cancelled.Token));
+        Assert.True(callback.Reached);
         using var reopened = f.OpenJournaled(); using var current = await reopened.ReadOwnedAsync("a");
         Assert.Equal(committed ? 2 : 1, current!.Use(value => value[0]));
     }
@@ -183,17 +178,15 @@ public sealed partial class SecureStorageCompareExchangeTests
     public async Task Dss2OutstandingCleanupRepeatsDurableTombstoneEvenForAbsentOrEmptyFile(bool empty)
     {
         using var f = new Fixture(true); await f.Store.WriteBatchAsync([new("a", new byte[] { 1 })]);
-        var old = Assert.Single(Dss2ReadEntries(f)); var hit = false;
-        using (JournaledDeepSecureStorageTestHooks.Push(point =>
-        { if (!hit && point.ToString() == "AfterManifestReplace") { hit = true; throw new IOException("Stop before retirement."); } }))
-            await Assert.ThrowsAsync<IOException>(() => f.Store.DeleteBatchAsync(["a"]));
-        Assert.True(hit);
+        var old = Assert.Single(Dss2ReadEntries(f));
+        using var crash = JournaledDeepSecureStorageTestHooks.PushCrashOnce(JournaledDeepSecureStorageFailpoint.AfterManifestReplace);
+        await Assert.ThrowsAsync<IOException>(() => f.Store.DeleteBatchAsync(["a"]));
+        Assert.True(crash.Reached);
         var path = Dss2ObjectPath(f, old); if (empty) File.WriteAllBytes(path, []); else File.Delete(path);
         var tombstones = 0;
-        using (JournaledDeepSecureStorageTestHooks.Push(point =>
+        using (JournaledDeepSecureStorageTestHooks.PushCallbackOnce(JournaledDeepSecureStorageFailpoint.AfterRetirementTombstone, () =>
         {
-            if (point.ToString() == "AfterRetirementTombstone")
-            { tombstones++; Assert.True(File.Exists(path)); Assert.Equal(0, new FileInfo(path).Length); }
+            tombstones++; Assert.True(File.Exists(path)); Assert.Equal(0, new FileInfo(path).Length);
         }))
         using (var reopened = f.OpenJournaled())
         using (var missing = await reopened.ReadOwnedAsync("a")) Assert.Null(missing);
@@ -315,11 +308,10 @@ public sealed partial class SecureStorageCompareExchangeTests
     {
         using var f = new Fixture(true); await f.Store.WriteBatchAsync([new("a", new byte[] { 1 })]);
         var original = File.ReadAllBytes(f.StatePath); var entry = Assert.Single(Dss2ReadEntries(f));
-        var objectPath = Dss2ObjectPath(f, entry); var originalObject = File.ReadAllBytes(objectPath); var hit = false;
-        using (JournaledDeepSecureStorageTestHooks.Push(point =>
-        { if (!hit && point.ToString() == "AfterObjectStaged") { hit = true; throw new IOException("Leave bounded staged transaction."); } }))
-            await Assert.ThrowsAsync<IOException>(() => f.Store.CompareExchangeAsync("a", new byte[] { 1 }, new byte[] { 2 }));
-        Assert.True(hit); var pending = File.ReadAllBytes(f.StatePath + ".pending"); pending[^1] ^= 1;
+        var objectPath = Dss2ObjectPath(f, entry); var originalObject = File.ReadAllBytes(objectPath);
+        using var crash = JournaledDeepSecureStorageTestHooks.PushCrashOnce(JournaledDeepSecureStorageFailpoint.AfterObjectStaged);
+        await Assert.ThrowsAsync<IOException>(() => f.Store.CompareExchangeAsync("a", new byte[] { 1 }, new byte[] { 2 }));
+        Assert.True(crash.Reached); var pending = File.ReadAllBytes(f.StatePath + ".pending"); pending[^1] ^= 1;
         File.WriteAllBytes(f.StatePath + ".pending", pending);
         using var reopened = f.OpenJournaled();
         await Assert.ThrowsAnyAsync<CryptographicException>(() => reopened.ReadOwnedAsync("a"));
@@ -375,14 +367,13 @@ public sealed partial class SecureStorageCompareExchangeTests
     {
         using var f = new Fixture(false);
         var source = EncodeSelectedReadFixture([("a"u8.ToArray(), [1]), ("z"u8.ToArray(), [9])]);
-        var protectedSource = f.Protector.Protect(source); File.WriteAllBytes(f.StatePath, protectedSource); var hit = false;
+        var protectedSource = f.Protector.Protect(source); File.WriteAllBytes(f.StatePath, protectedSource);
         try
         {
             using var firstProtector = f.NewProtector();
-            using (JournaledDeepSecureStorageTestHooks.Push(point =>
-            { if (!hit && point.ToString() == "AfterObjectStaged") { hit = true; throw new IOException("Stop explicit enrollment."); } }))
-                await Assert.ThrowsAsync<IOException>(() => JournaledDeepSecureStorage.EnrollAggregateAsync(f.StatePath, firstProtector));
-            Assert.True(hit); Assert.Equal(protectedSource, File.ReadAllBytes(f.StatePath));
+            using var crash = JournaledDeepSecureStorageTestHooks.PushCrashOnce(JournaledDeepSecureStorageFailpoint.AfterObjectStaged);
+            await Assert.ThrowsAsync<IOException>(() => JournaledDeepSecureStorage.EnrollAggregateAsync(f.StatePath, firstProtector));
+            Assert.True(crash.Reached); Assert.Equal(protectedSource, File.ReadAllBytes(f.StatePath));
             using (var ordinary = f.OpenJournaled()) await Assert.ThrowsAnyAsync<CryptographicException>(() => ordinary.ReadOwnedAsync("a"));
             using var enrolled = await JournaledDeepSecureStorage.EnrollAggregateAsync(f.StatePath, f.NewProtector());
             using var current = await enrolled.ReadOwnedBatchAsync(["a", "z"]);
@@ -434,22 +425,21 @@ public sealed partial class SecureStorageCompareExchangeTests
     public async Task Dss2CreationCannotOverwriteRootMaterializedDuringFinalProtectorAdmission()
     {
         using var f = new Fixture(false); using var candidateProtector = f.NewProtector();
-        var finalBoundary = false; var readsAfterBoundary = 0; byte[]? appearedRoot = null;
-        using var boundary = JournaledDeepSecureStorageTestHooks.Push(point =>
-        { if (point.ToString() == "BeforeManifestReplace") finalBoundary = true; });
-        candidateProtector.AfterUnprotect = () =>
+        byte[]? appearedRoot = null;
+        using var boundary = JournaledDeepSecureStorageTestHooks.PushCallbackOnce(JournaledDeepSecureStorageFailpoint.BeforeCreationPolicyAdmission, () =>
         {
-            // First comes candidate-data verification, then the separate
-            // current-policy admission inside the actual replacement attempt.
-            if (!finalBoundary || ++readsAfterBoundary != 2) return;
-            var plaintext = candidateProtector.LastUnprotected!.ToArray();
-            try { appearedRoot = f.Protector.Protect(plaintext); File.WriteAllBytes(f.StatePath, appearedRoot); }
-            finally { CryptographicOperations.ZeroMemory(plaintext); }
-        };
+            candidateProtector.AfterUnprotect = () =>
+            {
+                candidateProtector.AfterUnprotect = null;
+                var plaintext = candidateProtector.LastUnprotected!.ToArray();
+                try { appearedRoot = f.Protector.Protect(plaintext); File.WriteAllBytes(f.StatePath, appearedRoot); }
+                finally { CryptographicOperations.ZeroMemory(plaintext); }
+            };
+        });
         try
         {
             await Assert.ThrowsAnyAsync<CryptographicException>(() => JournaledDeepSecureStorage.CreateNewAsync(f.StatePath, candidateProtector));
-            Assert.True(finalBoundary); Assert.NotNull(appearedRoot); Assert.Equal(2, readsAfterBoundary);
+            Assert.True(boundary.Reached); Assert.NotNull(appearedRoot);
             Assert.Equal(appearedRoot, File.ReadAllBytes(f.StatePath));
         }
         finally { candidateProtector.AfterUnprotect = null; }
@@ -460,21 +450,19 @@ public sealed partial class SecureStorageCompareExchangeTests
     {
         using var f = new Fixture(false);
         var source = EncodeSelectedReadFixture([("a"u8.ToArray(), [1]), ("z"u8.ToArray(), [9])]);
-        var exact = f.Protector.Protect(source); File.WriteAllBytes(f.StatePath, exact); var interrupted = false;
+        var exact = f.Protector.Protect(source); File.WriteAllBytes(f.StatePath, exact);
         try
         {
             using var firstProtector = f.NewProtector();
-            using (JournaledDeepSecureStorageTestHooks.Push(point =>
-            { if (!interrupted && point.ToString() == "AfterObjectStaged") { interrupted = true; throw new IOException("Leave exact enrollment plan."); } }))
-                await Assert.ThrowsAsync<IOException>(() => JournaledDeepSecureStorage.EnrollAggregateAsync(f.StatePath, firstProtector));
-            Assert.True(interrupted); Assert.True(File.Exists(f.StatePath + ".pending"));
+            using var crash = JournaledDeepSecureStorageTestHooks.PushCrashOnce(JournaledDeepSecureStorageFailpoint.AfterObjectStaged);
+            await Assert.ThrowsAsync<IOException>(() => JournaledDeepSecureStorage.EnrollAggregateAsync(f.StatePath, firstProtector));
+            Assert.True(crash.Reached); Assert.True(File.Exists(f.StatePath + ".pending"));
             string unknownPath;
             do { unknownPath = Path.Combine(f.StatePath + ".objects", Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32)) + ".dvo"); }
             while (File.Exists(unknownPath));
             byte[] unknown = [0x71, 0x72, 0x73]; File.WriteAllBytes(unknownPath, unknown); var cleanupReached = 0;
             using var resumeProtector = f.NewProtector();
-            using (JournaledDeepSecureStorageTestHooks.Push(point =>
-            { if (point.ToString() == "AfterRetirementTombstone") cleanupReached++; }))
+            using (JournaledDeepSecureStorageTestHooks.PushCallbackOnce(JournaledDeepSecureStorageFailpoint.AfterRetirementTombstone, () => cleanupReached++))
                 await Assert.ThrowsAnyAsync<CryptographicException>(() => JournaledDeepSecureStorage.EnrollAggregateAsync(f.StatePath, resumeProtector));
             Assert.True(cleanupReached > 0); Assert.False(File.Exists(f.StatePath + ".pending"));
             Assert.Equal(exact, File.ReadAllBytes(f.StatePath)); Assert.Equal(unknown, File.ReadAllBytes(unknownPath));
@@ -605,6 +593,257 @@ public sealed partial class SecureStorageCompareExchangeTests
     [System.Runtime.Versioning.SupportedOSPlatform("windows")]
     [DllImport("kernel32.dll", EntryPoint = "GetFinalPathNameByHandleW", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern uint Dss2GetFinalPathNameByHandle(SafeFileHandle file, StringBuilder path, uint length, uint flags);
+
+    [Theory]
+    [InlineData("protect")] [InlineData("candidate-unprotect")]
+    public async Task Dss2ClosedCleanupRetiresSavedObjectRestoredByCandidateCallbacks(string edge)
+    {
+        using var f = new Fixture(true); await f.Store.WriteBatchAsync([new("a", new byte[] { 1 })]);
+        var old = Assert.Single(Dss2ReadEntries(f)); var path = Dss2ObjectPath(f, old); var saved = File.ReadAllBytes(path);
+        using var observer = f.NewProtector(); var restored = false; var protects = 0;
+        void Restore()
+        { File.WriteAllBytes(path, saved); Assert.Equal(saved, File.ReadAllBytes(path)); restored = true; }
+        if (edge == "protect") f.Protector.AfterProtect = () => { if (++protects == 2) Restore(); };
+        else f.Protector.AfterUnprotect = () =>
+        {
+            if (!restored && BinaryPrimitives.ReadUInt32BigEndian(f.Protector.LastUnprotected!.AsSpan(84)) == 0 &&
+                Dss2ObserveCleanupCount(f, observer) != 0) Restore();
+        };
+        try { await f.Store.DeleteBatchAsync(["a"]); }
+        finally { f.Protector.AfterProtect = null; f.Protector.AfterUnprotect = null; }
+        Assert.True(restored); Assert.False(File.Exists(path)); Assert.Equal(0U, Dss2ObserveCleanupCount(f, observer));
+    }
+
+    [Fact]
+    public async Task Dss2ClosedCleanupReplaysEarlierIdsAfterLaterUnlinkCallback()
+    {
+        using var f = new Fixture(true); await f.Store.WriteBatchAsync([new("a", new byte[] { 1 }), new("z", new byte[] { 9 })]);
+        var old = Dss2ReadEntries(f).OrderBy(entry => entry.Id, StringComparer.Ordinal).ToArray();
+        var first = Dss2ObjectPath(f, old[0]); var saved = File.ReadAllBytes(first);
+        var store = Assert.IsType<JournaledDeepSecureStorage>(f.Store); var before = store.ReadWorkSnapshot();
+        using var callback = JournaledDeepSecureStorageTestHooks.PushCallbackOnce(JournaledDeepSecureStorageFailpoint.AfterRetirementUnlink, () =>
+        {
+            Assert.False(File.Exists(first)); File.WriteAllBytes(first, saved); Assert.Equal(saved, File.ReadAllBytes(first));
+        }, occurrence: 2);
+        await f.Store.DeleteBatchAsync(["a", "z"]);
+        Assert.True(callback.Reached); Assert.Equal(2, callback.SeenOccurrences);
+        Assert.Equal(4L, store.ReadWorkSnapshot().CleanupTombstones - before.CleanupTombstones);
+        Assert.All(old, entry => Assert.False(File.Exists(Dss2ObjectPath(f, entry))));
+        using var observer = f.NewProtector(); Assert.Equal(0U, Dss2ObserveCleanupCount(f, observer));
+    }
+
+    [WindowsStorageFact]
+    public async Task Dss2ClosedCleanupReplaysEarlierIdsAfterLaterNativeSharingRetry()
+    {
+        using var f = new Fixture(true); await f.Store.WriteBatchAsync([new("a", new byte[] { 1 }), new("z", new byte[] { 9 })]);
+        var old = Dss2ReadEntries(f).OrderBy(entry => entry.Id, StringComparer.Ordinal).ToArray();
+        var first = Dss2ObjectPath(f, old[0]); var second = Dss2ObjectPath(f, old[1]); var saved = File.ReadAllBytes(first);
+        var store = Assert.IsType<JournaledDeepSecureStorage>(f.Store); var before = store.ReadWorkSnapshot();
+        var blocker = new FileStream(second, FileMode.Open, FileAccess.Read, FileShare.ReadWrite); var restored = false;
+        f.Protector.AfterUnprotect = () =>
+        {
+            if (restored || File.Exists(first) || !File.Exists(second + ".tombstone")) return;
+            File.WriteAllBytes(first, saved); Assert.Equal(saved, File.ReadAllBytes(first)); restored = true; blocker.Dispose();
+        };
+        try { await f.Store.DeleteBatchAsync(["a", "z"]).WaitAsync(TimeSpan.FromSeconds(10)); }
+        finally { f.Protector.AfterUnprotect = null; blocker.Dispose(); }
+        Assert.True(restored); Assert.Equal(3L, store.ReadWorkSnapshot().CleanupTombstones - before.CleanupTombstones);
+        Assert.All(old, entry => Assert.False(File.Exists(Dss2ObjectPath(f, entry))));
+        using var observer = f.NewProtector(); Assert.Equal(0U, Dss2ObserveCleanupCount(f, observer));
+    }
+
+    [Theory]
+    [InlineData("delete")] [InlineData("selected")] [InlineData("null")] [InlineData("batch")] [InlineData("audit")]
+    public async Task Dss2ClosedCleanupHasNoProviderCallbackAfterObligationsDisappear(string entry)
+    {
+        using var f = new Fixture(true); await f.Store.WriteBatchAsync([new("a", new byte[] { 1 }), new("kept", new byte[] { 9 })]);
+        var old = Dss2ReadEntries(f).Single(item => item.Slot == "a"); var path = Dss2ObjectPath(f, old); var saved = File.ReadAllBytes(path);
+        if (entry != "delete")
+        {
+            using var crash = JournaledDeepSecureStorageTestHooks.PushCrashOnce(JournaledDeepSecureStorageFailpoint.AfterManifestReplace);
+            await Assert.ThrowsAsync<IOException>(() => f.Store.DeleteBatchAsync(["a"])); Assert.True(crash.Reached);
+        }
+        using var observer = f.NewProtector(); var sawCleanup = false; var callbackAfterClear = false;
+        f.Protector.AfterUnprotect = () =>
+        {
+            var cleanup = Dss2ObserveCleanupCount(f, observer);
+            if (cleanup != 0) sawCleanup = true;
+            else if (sawCleanup) { callbackAfterClear = true; File.WriteAllBytes(path, saved); }
+        };
+        try
+        {
+            if (entry == "delete") await f.Store.DeleteBatchAsync(["a"]);
+            else if (entry == "audit") await Assert.IsType<JournaledDeepSecureStorage>(f.Store).AuditAsync();
+            else if (entry == "batch")
+            {
+                using var values = await f.Store.ReadOwnedBatchAsync(["a", "kept"]);
+                Assert.Null(values[0]); Assert.Equal(9, values[1]!.Use(value => value[0]));
+            }
+            else
+            {
+                using var value = await f.Store.ReadOwnedAsync(entry == "null" ? "a" : "kept");
+                if (entry == "null") Assert.Null(value); else Assert.Equal(9, value!.Use(bytes => bytes[0]));
+            }
+        }
+        finally { f.Protector.AfterUnprotect = null; }
+        Assert.True(sawCleanup); Assert.False(callbackAfterClear); Assert.False(File.Exists(path));
+        Assert.Equal(0U, Dss2ObserveCleanupCount(f, observer));
+    }
+
+    [Theory]
+    [InlineData("null")] [InlineData("selected")] [InlineData("batch")] [InlineData("all-absent")] [InlineData("audit")]
+    public async Task Dss2ClosedReadUsesOneUnprotectAndOneFinalSourceRejoin(string result)
+    {
+        using var f = new Fixture(true); await f.Store.WriteBatchAsync([new("a", new byte[] { 1 })]);
+        var store = Assert.IsType<JournaledDeepSecureStorage>(f.Store); var before = store.ReadWorkSnapshot();
+        await Dss2ReadResultAsync(store, result, default);
+        var after = store.ReadWorkSnapshot();
+        Assert.Equal(1L, after.UnprotectCalls - before.UnprotectCalls);
+        Assert.Equal(2L, after.ManifestReads - before.ManifestReads);
+        Assert.True(f.Protector.LastUnprotected!.AsSpan().IndexOfAnyExcept((byte)0) < 0);
+    }
+
+    [Theory]
+    [InlineData("null")] [InlineData("selected")] [InlineData("batch")] [InlineData("all-absent")] [InlineData("audit")]
+    public async Task Dss2ClosedReadEveryReturnRejectsActualSourceReplacement(string result)
+    {
+        using var f = new Fixture(true); await f.Store.WriteBatchAsync([new("a", new byte[] { 1 })]);
+        var changed = File.ReadAllBytes(f.StatePath); changed[^1] ^= 1; var reached = false;
+        f.Protector.AfterUnprotect = () => { reached = true; File.WriteAllBytes(f.StatePath, changed); };
+        try { await Assert.ThrowsAnyAsync<CryptographicException>(() => Dss2ReadResultAsync(Assert.IsType<JournaledDeepSecureStorage>(f.Store), result, default)); }
+        finally { f.Protector.AfterUnprotect = null; }
+        Assert.True(reached); Assert.Equal(changed, File.ReadAllBytes(f.StatePath));
+        Assert.True(f.Protector.LastUnprotected!.AsSpan().IndexOfAnyExcept((byte)0) < 0);
+    }
+
+    [Theory]
+    [InlineData("null")] [InlineData("selected")] [InlineData("batch")] [InlineData("all-absent")] [InlineData("audit")]
+    public async Task Dss2ClosedReadEveryReturnHonorsCancellationAfterProvider(string result)
+    {
+        using var f = new Fixture(true); await f.Store.WriteBatchAsync([new("a", new byte[] { 1 })]);
+        using var cancelled = new CancellationTokenSource(); var original = File.ReadAllBytes(f.StatePath); var reached = false;
+        f.Protector.AfterUnprotect = () => { reached = true; cancelled.Cancel(); };
+        try { await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Dss2ReadResultAsync(Assert.IsType<JournaledDeepSecureStorage>(f.Store), result, cancelled.Token)); }
+        finally { f.Protector.AfterUnprotect = null; }
+        Assert.True(reached); Assert.Equal(original, File.ReadAllBytes(f.StatePath));
+        Assert.True(f.Protector.LastUnprotected!.AsSpan().IndexOfAnyExcept((byte)0) < 0);
+    }
+
+    [Fact]
+    public async Task Dss2ClosedReadFailedFinalFenceDoesNotConsumeColdAudit()
+    {
+        using var f = new Fixture(true); await f.Store.WriteBatchAsync([new("a", new byte[] { 1 }), new("z", new byte[] { 9 })]);
+        var replacement = f.Protector.Unprotect(File.ReadAllBytes(f.StatePath));
+        try
+        {
+            var second = Dss2Entries(replacement)[1]; var id = RandomNumberGenerator.GetBytes(32);
+            id.CopyTo(replacement, second.IdOffset); var invalidObject = new byte[113];
+            RandomNumberGenerator.Fill(invalidObject);
+            File.WriteAllBytes(Path.Combine(f.StatePath + ".objects", Convert.ToHexStringLower(id) + ".dvo"), invalidObject);
+            SHA256.HashData(invalidObject).CopyTo(replacement, second.HashOffset);
+            var changed = f.Protector.Protect(replacement); using var coldProtector = f.NewProtector();
+            using var cold = new JournaledDeepSecureStorage(f.StatePath, coldProtector); var reached = false;
+            coldProtector.AfterUnprotect = () => { reached = true; File.WriteAllBytes(f.StatePath, changed); };
+            var before = cold.ReadWorkSnapshot();
+            try
+            {
+                var error = await Assert.ThrowsAnyAsync<CryptographicException>(() => cold.ReadOwnedAsync("a"));
+                Assert.Contains("changed", error.Message, StringComparison.OrdinalIgnoreCase);
+            }
+            finally { coldProtector.AfterUnprotect = null; }
+            Assert.True(reached);
+            Assert.True(cold.ReadWorkSnapshot().ObjectPlaintextBytesDecrypted - before.ObjectPlaintextBytesDecrypted >= 2);
+            // The old inventory's complete object audit succeeded. Only its
+            // final source fence failed; a new selected read must audit again.
+            await Assert.ThrowsAnyAsync<CryptographicException>(() => cold.ReadOwnedAsync("a"));
+        }
+        finally { CryptographicOperations.ZeroMemory(replacement); }
+    }
+
+    [Fact]
+    public async Task Dss2ClosedMutationAdmissionsDoNotScaleWithObjectCount()
+    {
+        var inserts = new List<int>(); var deletes = new List<int>();
+        foreach (var count in new[] { 1, 3, 18 })
+        {
+            using var f = new Fixture(true); var store = Assert.IsType<JournaledDeepSecureStorage>(f.Store);
+            var writes = Enumerable.Range(0, count).Select(index => new DeepSecureStorageWrite("value-" + index, new byte[] { 1 })).ToArray();
+            var before = store.ReadWorkSnapshot(); var calls = f.Protector.UnprotectCalls;
+            await f.Store.WriteBatchAsync(writes); inserts.Add(f.Protector.UnprotectCalls - calls);
+            Assert.Equal((long)count, store.ReadWorkSnapshot().ObjectWrites - before.ObjectWrites);
+            Assert.Equal(count, Dss2ReadEntries(f).Count);
+            before = store.ReadWorkSnapshot(); calls = f.Protector.UnprotectCalls;
+            await f.Store.DeleteBatchAsync(writes.Select(write => write.Slot).ToArray()); deletes.Add(f.Protector.UnprotectCalls - calls);
+            Assert.Equal((long)count, store.ReadWorkSnapshot().CleanupTombstones - before.CleanupTombstones);
+            Assert.Empty(Directory.GetFiles(f.StatePath + ".objects", "*.dvo"));
+        }
+        Assert.True(inserts[0] > 0); Assert.True(deletes[0] > 0);
+        Assert.All(inserts, calls => Assert.Equal(inserts[0], calls)); Assert.All(deletes, calls => Assert.Equal(deletes[0], calls));
+    }
+
+    [Fact]
+    public async Task Dss2ClosedMutationRejectsActualStagedObjectTamperAfterCallback()
+    {
+        using var f = new Fixture(true); await f.Store.WriteBatchAsync([new("guard", new byte[] { 1 })]);
+        var before = File.ReadAllBytes(f.StatePath);
+        var existing = Directory.GetFiles(f.StatePath + ".objects", "*.dvo").ToHashSet(StringComparer.OrdinalIgnoreCase);
+        using var callback = JournaledDeepSecureStorageTestHooks.PushCallbackOnce(JournaledDeepSecureStorageFailpoint.AfterObjectStaged, () =>
+        {
+            var staged = Assert.Single(Directory.GetFiles(f.StatePath + ".objects", "*.dvo").Where(path => !existing.Contains(path)));
+            var changed = File.ReadAllBytes(staged); changed[^1] ^= 1; File.WriteAllBytes(staged, changed);
+            Assert.Equal(changed, File.ReadAllBytes(staged));
+        });
+        await Assert.ThrowsAnyAsync<CryptographicException>(() => f.Store.WriteBatchAsync(
+            [new("new-1", new byte[] { 2 }), new("new-2", new byte[] { 3 }), new("new-3", new byte[] { 4 })]));
+        Assert.True(callback.Reached); Assert.Equal(before, File.ReadAllBytes(f.StatePath));
+        using var reopened = f.OpenJournaled(); using var guard = await reopened.ReadOwnedAsync("guard");
+        Assert.Equal(1, guard!.Use(bytes => bytes[0]));
+        using var absent = await reopened.ReadOwnedAsync("new-1"); Assert.Null(absent);
+    }
+
+    [Fact]
+    public async Task Dss2ClosedMutationRejectsNinthImmediateCallbackBeforeInvocation()
+    {
+        using var f = new Fixture(true); await f.Store.WriteBatchAsync([new("guard", new byte[] { 1 })]);
+        var original = File.ReadAllBytes(f.StatePath); var callbacks = 0; var registrations = new List<IDisposable>();
+        Action invalidate = null!;
+        invalidate = () =>
+        {
+            callbacks++;
+            registrations.Add(JournaledDeepSecureStorageTestHooks.PushCallbackOnce(JournaledDeepSecureStorageFailpoint.BeforeManifestReplace, invalidate));
+        };
+        registrations.Add(JournaledDeepSecureStorageTestHooks.PushCallbackOnce(JournaledDeepSecureStorageFailpoint.BeforeManifestReplace, invalidate));
+        try
+        {
+            var error = await Assert.ThrowsAsync<IOException>(() => f.Store.CompareExchangeAsync("guard", new byte[] { 1 }, new byte[] { 2 }));
+            Assert.Equal("Protected storage callback invalidation budget exhausted.", error.Message);
+            Assert.Equal(8, callbacks); Assert.Equal(original, File.ReadAllBytes(f.StatePath));
+        }
+        finally { for (var index = registrations.Count - 1; index >= 0; index--) registrations[index].Dispose(); }
+        using var reopened = f.OpenJournaled(); using var guard = await reopened.ReadOwnedAsync("guard");
+        Assert.Equal(1, guard!.Use(bytes => bytes[0]));
+    }
+
+    private static async Task Dss2ReadResultAsync(JournaledDeepSecureStorage store, string result, CancellationToken ct)
+    {
+        if (result == "audit") { await store.AuditAsync(ct); return; }
+        if (result is "null" or "selected")
+        {
+            using var value = await store.ReadOwnedAsync(result == "null" ? "absent" : "a", ct);
+            if (result == "null") Assert.Null(value); else Assert.Equal(1, value!.Use(bytes => bytes[0]));
+            return;
+        }
+        using var batch = await store.ReadOwnedBatchAsync(result == "all-absent" ? ["absent", "another-absent"] : ["absent", "a"], ct);
+        Assert.Null(batch[0]);
+        if (result == "all-absent") Assert.Null(batch[1]); else Assert.Equal(1, batch[1]!.Use(bytes => bytes[0]));
+    }
+
+    private static uint Dss2ObserveCleanupCount(Fixture f, Protector observer)
+    {
+        var manifest = observer.Unprotect(File.ReadAllBytes(f.StatePath));
+        try { return BinaryPrimitives.ReadUInt32BigEndian(manifest.AsSpan(84)); }
+        finally { CryptographicOperations.ZeroMemory(manifest); }
+    }
 
     private sealed record Dss2Entry(string Slot, string Id, int SlotOffset, int IdOffset, int LengthOffset, int HashOffset);
 

@@ -84,14 +84,14 @@ public sealed partial class JournaledDeepSecureStorage
         name.CopyTo(aad, domain.Length + 1 + ObjectHeaderBytes + 2); return aad;
     }
 
-    private Task PublishAsync(InventoryRead current, Inventory candidate, IReadOnlyDictionary<string, byte[]> objects,
+    private Task<InventoryRead> PublishAsync(InventoryRead current, Inventory candidate, IReadOnlyDictionary<string, byte[]> objects,
         Guard? guard, RootKind kind, CancellationToken ct)
     {
         var hash = current.Hash.ToArray(); current.Dispose();
         return PublishAsync(hash, candidate, objects, guard, kind, ct);
     }
 
-    private async Task PublishAsync(byte[] predecessorHash, Inventory candidate, IReadOnlyDictionary<string, byte[]> objects,
+    private async Task<InventoryRead> PublishAsync(byte[] predecessorHash, Inventory candidate, IReadOnlyDictionary<string, byte[]> objects,
         Guard? guard, RootKind kind, CancellationToken ct)
     {
         var expectedPlaintext = EncodeManifest(candidate);
@@ -122,18 +122,18 @@ public sealed partial class JournaledDeepSecureStorage
             Hit(JournaledDeepSecureStorageFailpoint.BeforeManifestReplace);
             // Pending authentication is data validation. It is disposed before
             // the fresh CURRENT policy admission that authorizes the commit.
-            VerifyCandidate(protectedBytes, plaintextHash, facts, ct, verifyObjects: true);
+            Revalidate(authority, ct);
             await ReplaceDurablyAsync(pendingPath, statePath, authority, ct, replace: kind != RootKind.Creation,
                 pendingHash: protectedHash, newObjects: facts).ConfigureAwait(false);
             Hit(JournaledDeepSecureStorageFailpoint.AfterManifestReplace);
-            using var readback = ReadCurrent(ct);
+            var readback = ReadCurrent(ct);
             if (!Fixed(readback.Hash, protectedHash)) throw new CryptographicException("Committed protected inventory readback differs.");
             foreach (var fact in facts)
             {
                 var item = readback.Inventory.Values.Values.Single(v => v.Name == fact.Name);
                 var value = ReadObject(readback.Inventory, item); CryptographicOperations.ZeroMemory(value);
             }
-            ct.ThrowIfCancellationRequested(); RequireExactSource(readback.Hash);
+            try { CheckFinalSource(readback, ct); return readback; } catch { readback.Dispose(); throw; }
         }
         finally { CryptographicOperations.ZeroMemory(protectedBytes); }
     }
@@ -145,7 +145,7 @@ public sealed partial class JournaledDeepSecureStorage
         try
         {
             if (!Fixed(actual, expectedProtected)) throw new CryptographicException("Prepared inventory changed before publication.");
-            Interlocked.Increment(ref unprotectCalls); plain = protector.Unprotect(actual);
+            BeforeProvider(); Interlocked.Increment(ref unprotectCalls); plain = protector.Unprotect(actual);
             if (ReferenceEquals(plain, actual)) throw new CryptographicException("Protector did not return owned plaintext.");
             Interlocked.Add(ref manifestPlaintext, plain.Length);
             if (!Fixed(SHA256.HashData(plain), plaintextHash)) throw new CryptographicException("Prepared inventory differs from the intended successor.");
@@ -165,12 +165,19 @@ public sealed partial class JournaledDeepSecureStorage
     private void Revalidate(ReplacementAuthority authority, CancellationToken ct, string? retiredName = null)
     {
         ct.ThrowIfCancellationRequested();
+        var owned = operation ?? throw new InvalidOperationException("Storage effect has no operation owner.");
+        var admitted = owned.Authority is { } prior && prior.Kind == authority.Kind && Fixed(prior.Hash, authority.Hash);
         if (authority.Kind == RootKind.Creation)
         {
             if (File.Exists(statePath) || File.Exists(backupPath)) throw new CryptographicException("Creation lost its absent predecessor.");
             if (authority.CreationProtected is null || authority.CreationPlaintextHash is null)
                 throw new CryptographicException("Creation lacks its exact protected candidate.");
-            VerifyCandidate(authority.CreationProtected, authority.CreationPlaintextHash, [], ct, verifyObjects: false);
+            if (!admitted)
+            {
+                Hit(JournaledDeepSecureStorageFailpoint.BeforeCreationPolicyAdmission);
+                VerifyCandidate(authority.CreationProtected, authority.CreationPlaintextHash, [], ct, verifyObjects: false);
+                owned.Authority = authority;
+            }
             if (File.Exists(pendingPath))
                 RequireExactFile(pendingPath, SHA256.HashData(authority.CreationProtected), MaximumProtectedManifestBytes, manifest: true);
             RequireObjectDirectory();
@@ -179,47 +186,87 @@ public sealed partial class JournaledDeepSecureStorage
             RequireNoRedirectedAncestors(Path.GetDirectoryName(statePath)!); return;
         }
         if (authority.Kind == RootKind.Enrollment)
-        { using var source = ReadAggregateSource(ct); if (!Fixed(source.Hash, authority.Hash)) throw new CryptographicException("Enrollment source changed."); return; }
-        using var current = ReadCurrent(ct);
+        {
+            if (!admitted)
+            {
+                using var source = ReadAggregateSource(ct);
+                if (!Fixed(source.Hash, authority.Hash)) throw new CryptographicException("Enrollment source changed.");
+                owned.Authority = authority;
+            }
+            RequireExactFile(statePath, authority.Hash, MaximumPlaintextBytes * 2, manifest: true); return;
+        }
+        if (!admitted)
+        {
+            var fresh = ReadCurrent(ct);
+            if (!Fixed(fresh.Hash, authority.Hash)) { fresh.Dispose(); throw new CryptographicException("Protected predecessor changed before effect."); }
+            owned.Admission = fresh; owned.Authority = authority;
+        }
+        var current = owned.Admission ?? throw new CryptographicException("Protected admission is absent.");
         if (!Fixed(current.Hash, authority.Hash)) throw new CryptographicException("Protected predecessor changed before effect.");
         if (retiredName is not null && current.Inventory.Values.Values.Any(v => v.Name == retiredName))
             throw new CryptographicException("Retirement selected an active object.");
-        if (authority.Guard is { } guard)
-        {
-            if (!current.Inventory.Values.TryGetValue(guard.Slot, out var descriptor)) throw new CryptographicException("Protected mutation guard disappeared.");
-            var value = ReadObject(current.Inventory, descriptor);
-            try { if (!Fixed(value, guard.Expected)) throw new CryptographicException("Protected mutation guard changed."); }
-            finally { CryptographicOperations.ZeroMemory(value); }
-        }
+        CheckGuard(current, authority.Guard);
         ct.ThrowIfCancellationRequested(); RequireExactSource(current.Hash);
     }
 
-    private async Task CompleteCleanupAsync(InventoryRead current, CancellationToken ct)
+    private async Task<InventoryRead> CompleteCleanupAsync(InventoryRead current, CancellationToken ct)
     {
         var hash = current.Hash.ToArray(); var names = current.Inventory.Cleanup.ToArray();
-        current.Dispose(); var authority = new ReplacementAuthority(hash, RootKind.Current, null);
-        foreach (var name in names)
-            await RetirePathAsync(ObjectPath(name), authority, name, ct, manifest: false).ConfigureAwait(false);
-        Hit(JournaledDeepSecureStorageFailpoint.BeforeCleanupManifest);
-        using var actual = ReadCurrent(ct);
-        if (!Fixed(actual.Hash, hash)) throw new CryptographicException("Cleanup predecessor changed.");
-        using var candidate = actual.Inventory.Successor(actual.Hash); candidate.Cleanup.Clear();
-        await PublishAsync(actual, candidate, new Dictionary<string, byte[]>(), null, RootKind.Current, ct).ConfigureAwait(false);
-        Hit(JournaledDeepSecureStorageFailpoint.AfterCleanupManifest);
+        using var candidate = current.Inventory.Successor(hash); candidate.Cleanup.Clear();
+        var plaintext = EncodeManifest(candidate); var plaintextHash = SHA256.HashData(plaintext);
+        candidate.Dispose(); current.Dispose();
+        var protectedBytes = ProtectManifest(plaintext); var protectedHash = SHA256.HashData(protectedBytes);
+        var authority = new ReplacementAuthority(hash, RootKind.Current, null);
+        try
+        {
+            // All arbitrary provider calls precede the first retirement.
+            VerifyCandidate(protectedBytes, plaintextHash, [], ct, verifyObjects: false);
+            Revalidate(authority, ct);
+            if (File.Exists(pendingPath)) throw new CryptographicException("Cleanup has an unresolved pending inventory.");
+            WriteBoundedFile(pendingPath, protectedBytes, manifest: true); FlushParent(pendingPath);
+            Hit(JournaledDeepSecureStorageFailpoint.BeforeCleanupManifest);
+            while (true)
+            {
+                Revalidate(authority, ct);
+                var owned = operation!; owned.FinalCleanup = true;
+                try
+                {
+                    foreach (var name in names)
+                        await RetirePathAsync(ObjectPath(name), authority, name, ct, manifest: false, pendingHash: protectedHash).ConfigureAwait(false);
+                    await ReplaceDurablyAsync(pendingPath, statePath, authority, ct, replace: true, pendingHash: protectedHash).ConfigureAwait(false);
+                    // No provider/delegate/wait may follow this publication.
+                    var joined = owned.Admission ?? throw new CryptographicException("Cleanup admission is absent.");
+                    Inventory? finalInventory = joined.Inventory.Successor(hash); finalInventory.Cleanup.Clear();
+                    var encoded = EncodeManifest(finalInventory);
+                    try
+                    {
+                        if (!Fixed(SHA256.HashData(encoded), plaintextHash)) throw new CryptographicException("Cleanup candidate semantics changed.");
+                        RequireExactFile(statePath, protectedHash, MaximumProtectedManifestBytes, manifest: true);
+                        ct.ThrowIfCancellationRequested(); Hit(JournaledDeepSecureStorageFailpoint.AfterCleanupManifest);
+                        var result = new InventoryRead(protectedBytes.ToArray(), finalInventory); finalInventory = null;
+                        return result;
+                    }
+                    finally { CryptographicOperations.ZeroMemory(encoded); finalInventory?.Dispose(); }
+                }
+                catch (CleanupRestartException) { _ = owned.RemainingRetry(); }
+                finally { owned.FinalCleanup = false; }
+            }
+        }
+        finally { CryptographicOperations.ZeroMemory(protectedBytes); }
     }
 
-    private async Task RecoverPendingAsync(CancellationToken ct)
+    private async Task<InventoryRead> RecoverPendingAsync(CancellationToken ct)
     {
         InventoryFact current;
         using (var read = ReadCurrent(ct)) current = Facts(read);
         var authority = new ReplacementAuthority(current.Hash, RootKind.Current, null);
         var bytes = ReadBoundedFile(pendingPath, MaximumProtectedManifestBytes, manifest: true, allowEmpty: true);
         if (bytes.Length == 0)
-        { await RetirePathAsync(pendingPath, authority, null, ct, manifest: true).ConfigureAwait(false); return; }
+        { await RetirePathAsync(pendingPath, authority, null, ct, manifest: true).ConfigureAwait(false); return TakeAdmission(authority, ct); }
         var pendingHash = SHA256.HashData(bytes); byte[]? plaintext = null; string[] staged;
         try
         {
-            Interlocked.Increment(ref unprotectCalls); plaintext = protector.Unprotect(bytes);
+            BeforeProvider(); Interlocked.Increment(ref unprotectCalls); plaintext = protector.Unprotect(bytes);
             if (ReferenceEquals(plaintext, bytes)) throw new CryptographicException("Protector did not return owned plaintext.");
             Interlocked.Add(ref manifestPlaintext, plaintext.Length);
             using var pending = DecodeManifest(plaintext);
@@ -238,6 +285,7 @@ public sealed partial class JournaledDeepSecureStorage
                 await RetirePathAsync(ObjectPath(name, ".pending"), authority, name, ct, manifest: false, pendingHash: pendingHash).ConfigureAwait(false);
         }
         await RetirePathAsync(pendingPath, authority, null, ct, manifest: true).ConfigureAwait(false);
+        return TakeAdmission(authority, ct);
     }
 
     private static string[] ValidatePendingSuccessor(InventoryFact current, Inventory pending)
