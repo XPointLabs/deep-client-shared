@@ -141,3 +141,58 @@ measurements, not connected p95. Source correctness evidence and byte isolation
 do not qualify this candidate as a performance fix. Full, retained and overall
 latency acceptance remain unestablished; no connected activation is authorized
 by these receipts.
+
+## Bounded path-buffer allocation correction
+
+The follow-up changes only `ReadWindowsHandlePath` buffer allocation: initial
+capacity512, hard maximum32,768 and at most three native attempts. It grows from
+the documented required length, never consumes truncated path bytes, and
+rejects zero, over-bound or unstable results. Exact parent/file predicates and
+all provider/guard calls remain unchanged; there is no cached path or permission.
+
+`artifacts/dr0176-path-buffer-20261026-01` accepted Release build native **0**,
+zero warnings/errors, and **3 PASS / 0 FAIL / 0 SKIP**, test native **0**.
+Source during build and all **2,267** captured inputs were unchanged; outer
+native exit **0**, processes terminal and lease released. The new actual
+Windows handle case independently demonstrates required capacity greater than512,
+matches a separate full-capacity native reference and preserves the correct/
+wrong-parent result. Existing LocalApplicationData lifecycle and wrong-parent
+cases complete this finite gate. `FullAccepted=false`.
+
+The unchanged benchmark helpers then ran
+`p1-storage-benchmark-20261026-baseline05/baseline05.terminal.json` and
+`p1-storage-benchmark-20261026-candidate02/candidate02.terminal.json` under CLI
+artifacts. Each completed **141/141**, native **0**, with identical helper hashes;
+35 baseline and 2,159 candidate inputs remained unchanged. The fresh candidate
+publish was native **0**, zero warnings/errors, with 2,125 inputs unchanged.
+No CLI29 rerun was required for this buffer-only patch.
+
+Allocation decreased, but **all nine latency medians remain slower than the
+aggregate baseline**. Atomic registration/deletion still makes43 native
+Unprotect calls,109 manifest reads and30 object reads. The scalar comparison
+is `comparison-baseline05-candidate02.json` in the candidate directory.
+Performance acceptance remains **rejected**. No retained conversion, connected
+activation or full qualification is established. A closed operation/admission
+redesign is analysis only; it is not part of this correction.
+
+## Open cleanup callback review
+
+Source review after the measurements identified an unclosed named-retirement
+boundary. `CompleteCleanupAsync` currently retires the object names before
+calling `Protect` for the cleanup-free successor. A mutable protector callback
+can restore old ciphertext at a retired name without changing the current
+manifest. The metadata-only publication checks no newly referenced objects and
+does not recheck those retired paths before clearing their obligations. The
+focused receipts above do not prove rejection of that scenario.
+The subsequent post-adoption `ReadCurrent` also calls `Unprotect` after cleanup
+obligations have been cleared; its callback could restore the name as well.
+
+The proposed closed cleanup segment protects its candidate before retirement,
+then freshly admits the actual cleanup-bearing root and retires every authorized
+nonactive ID before adoption. Any callback or retry invalidates completion facts
+for all IDs, including absent/empty names. This is a reviewed design direction,
+not an implemented fix in the buffer correction. Moving `Protect` alone is
+insufficient if a later provider callback remains. The final boundary must
+either be callback-free after the last retirement or retain durable obligations
+through every later callback. That choice needs the separate owner contract and
+meaningful restoration/retry regressions before activation.

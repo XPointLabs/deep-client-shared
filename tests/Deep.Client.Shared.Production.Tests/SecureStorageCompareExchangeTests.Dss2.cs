@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Security.Cryptography;
 using System.Text;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using Deep.Client.Shared.Persistence;
 using Deep.Client.Shared.Persistence.DeviceV2;
 using Microsoft.Win32.SafeHandles;
@@ -564,6 +565,46 @@ public sealed partial class SecureStorageCompareExchangeTests
         Assert.Throws<CryptographicException>(() => require(file.SafeFileHandle, other.StatePath));
         Assert.Equal(new byte[] { 1 }, File.ReadAllBytes(actual.StatePath)); Assert.Equal(new byte[] { 9 }, File.ReadAllBytes(other.StatePath));
     }
+
+    [WindowsStorageFact]
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    public void Dss2WindowsHandlePathGrowsForActualLongPathAndStillRejectsWrongParent()
+    {
+        using var f = new Fixture(false);
+        var parent = Path.Combine(Path.GetDirectoryName(f.StatePath)!, new string('a', 160), new string('b', 160), new string('c', 160));
+        var otherParent = Path.Combine(parent, "other");
+        static string Extended(string value) => value.StartsWith("\\\\?\\", StringComparison.Ordinal) ? value :
+            value.StartsWith("\\\\", StringComparison.Ordinal) ? "\\\\?\\UNC\\" + value[2..] : "\\\\?\\" + value;
+        Directory.CreateDirectory(Extended(otherParent));
+        var actual = Extended(Path.Combine(parent, "bound.bin")); var other = Extended(Path.Combine(otherParent, "bound.bin"));
+        File.WriteAllBytes(actual, new byte[] { 1 }); File.WriteAllBytes(other, new byte[] { 9 });
+        using var file = new FileStream(actual, FileMode.Open, FileAccess.Read, FileShare.Read);
+
+        // Actual OS result: a 512-character buffer is insufficient. The large
+        // independent reference is test-only, not a replacement storage policy.
+        var small = new StringBuilder(512);
+        var required = Dss2GetFinalPathNameByHandle(file.SafeFileHandle, small, checked((uint)small.Capacity), 0);
+        Assert.InRange(required, 513U, 32768U);
+        var reference = new StringBuilder(32768);
+        var length = Dss2GetFinalPathNameByHandle(file.SafeFileHandle, reference, checked((uint)reference.Capacity), 0);
+        Assert.InRange(length, 513U, 32767U); Assert.Equal(checked((int)length), reference.Length);
+        var expected = reference.ToString();
+        if (expected.StartsWith("\\\\?\\UNC\\", StringComparison.OrdinalIgnoreCase)) expected = "\\\\" + expected[8..];
+        else if (expected.StartsWith("\\\\?\\", StringComparison.Ordinal)) expected = expected[4..];
+
+        var read = typeof(JournaledDeepSecureStorage).GetMethod("ReadWindowsHandlePath", BindingFlags.NonPublic | BindingFlags.Static)!
+            .CreateDelegate<Func<SafeFileHandle, string>>();
+        Assert.Equal(expected, read(file.SafeFileHandle));
+        var require = typeof(JournaledDeepSecureStorage).GetMethod("RequireOpenedPath", BindingFlags.NonPublic | BindingFlags.Static)!
+            .CreateDelegate<Action<SafeFileHandle, string>>();
+        require(file.SafeFileHandle, actual);
+        Assert.Throws<CryptographicException>(() => require(file.SafeFileHandle, other));
+        Assert.Equal(new byte[] { 1 }, File.ReadAllBytes(actual)); Assert.Equal(new byte[] { 9 }, File.ReadAllBytes(other));
+    }
+
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    [DllImport("kernel32.dll", EntryPoint = "GetFinalPathNameByHandleW", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern uint Dss2GetFinalPathNameByHandle(SafeFileHandle file, StringBuilder path, uint length, uint flags);
 
     private sealed record Dss2Entry(string Slot, string Id, int SlotOffset, int IdOffset, int LengthOffset, int HashOffset);
 

@@ -523,12 +523,26 @@ public sealed partial class JournaledDeepSecureStorage
     [SupportedOSPlatform("windows")]
     private static string ReadWindowsHandlePath(SafeFileHandle handle)
     {
-        var buffer = new System.Text.StringBuilder(32768);
-        var length = GetFinalPathNameByHandle(handle, buffer, checked((uint)buffer.Capacity), 0);
-        if (length == 0 || length >= buffer.Capacity) throw new IOException("Opened storage path cannot be resolved.");
-        var path = buffer.ToString();
-        if (path.StartsWith("\\\\?\\UNC\\", StringComparison.OrdinalIgnoreCase)) return "\\\\" + path[8..];
-        return path.StartsWith("\\\\?\\", StringComparison.Ordinal) ? path[4..] : path;
+        const int maximum = 32768;
+        var capacity = 512;
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            var buffer = new System.Text.StringBuilder(capacity);
+            var length = GetFinalPathNameByHandle(handle, buffer, checked((uint)capacity), 0);
+            if (length == 0 || length > maximum) throw new IOException("Opened storage path cannot be resolved within its bound.");
+            if (length < capacity)
+            {
+                if (buffer.Length != length) throw new IOException("Opened storage path was truncated.");
+                var path = buffer.ToString();
+                if (path.StartsWith("\\\\?\\UNC\\", StringComparison.OrdinalIgnoreCase)) return "\\\\" + path[8..];
+                return path.StartsWith("\\\\?\\", StringComparison.Ordinal) ? path[4..] : path;
+            }
+            // Insufficient-buffer results report required capacity including
+            // the terminator. Never use their possibly truncated path bytes.
+            if (capacity == maximum) throw new IOException("Opened storage path exceeds its buffer bound.");
+            capacity = checked((int)Math.Max(length, (uint)capacity + 1));
+        }
+        throw new IOException("Opened storage path did not stabilize within the bounded retries.");
     }
 
     private static void FlushParent(string path)
