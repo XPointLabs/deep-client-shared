@@ -157,7 +157,7 @@ public sealed partial class Did2MessagingCheckpointTests
         try
         {
             Did2MessagingFloor pending;
-            using (var storage = new JournaledDeepSecureStorage(path, new Protector(key)))
+            using (var storage = await JournaledDeepSecureStorage.CreateNewAsync(path, new Protector(key)))
             {
                 var owner = new Did2MessagingProtectedCheckpoint(storage, scope);
                 await owner.InitializeRegisteredSessionAsync(default); var empty = await owner.ReadAsync(default);
@@ -179,7 +179,7 @@ public sealed partial class Did2MessagingCheckpointTests
         {
             CryptographicOperations.ZeroMemory(key); CryptographicOperations.ZeroMemory(payload);
             foreach (var file in Directory.EnumerateFiles(directory)) File.Delete(file);
-            Directory.Delete(directory);
+            Directory.Delete(directory, recursive: true);
         }
     }
 

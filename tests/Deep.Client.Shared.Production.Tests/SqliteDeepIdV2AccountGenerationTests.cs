@@ -17,7 +17,7 @@ public sealed class SqliteDeepIdV2AccountGenerationTests
         try
         {
             using var protector = new TestAeadProtector(RandomNumberGenerator.GetBytes(32));
-            using var storage = new JournaledDeepSecureStorage(Path.Combine(directory, "secure.bin"), protector);
+            using var storage = await JournaledDeepSecureStorage.CreateNewAsync(Path.Combine(directory, "secure.bin"), protector);
             var network = Enumerable.Range(1, 16).Select(i => (byte)i).ToArray();
             using var verifier = DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess();
             using var created = await CreateGenesisAsync(storage, network, verifier);
@@ -223,7 +223,7 @@ public sealed class SqliteDeepIdV2AccountGenerationTests
             using var verifier = DeepMlDsa65CandidateVerifierFactory
                 .OpenForCurrentProcess();
             byte[] exactDab2;
-            using (var first = new JournaledDeepSecureStorage(statePath,
+            using (var first = await JournaledDeepSecureStorage.CreateNewAsync(statePath,
                        new TestAeadProtector(key)))
             {
                 using var created = await CreateGenesisAsync(first, network,
@@ -327,7 +327,7 @@ public sealed class SqliteDeepIdV2AccountGenerationTests
                      "secure.bin", "secure.bin.pending", "secure.bin.backup",
                      "secure.bin.lock" })
             File.Delete(Path.Combine(directory, name));
-        Directory.Delete(directory);
+        Directory.Delete(directory, recursive: true);
     }
 
     private static bool SupportedProvider() =>

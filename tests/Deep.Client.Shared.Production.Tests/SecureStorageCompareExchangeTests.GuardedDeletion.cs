@@ -15,7 +15,9 @@ public sealed partial class SecureStorageCompareExchangeTests
             new("part", new byte[] { 7 }), new("foreign", new byte[] { 9 })]);
         var loads = fixture.Protector.UnprotectCalls;
         Assert.True(await fixture.Store.CompareAndDeleteAsync("floor", new byte[] { 1 }, ["part", "absent"]));
-        if (journaled) Assert.Equal(loads + 1, fixture.Protector.UnprotectCalls);
+        // DSS2 mutating admission is repeated after Protect and for cleanup;
+        // the exact-one promise applies to the clean no-op/read below.
+        if (journaled) Assert.True(fixture.Protector.UnprotectCalls > loads + 1);
         using (var part = await fixture.Store.ReadOwnedAsync("part")) Assert.Null(part);
         using (var guard = await fixture.Store.ReadOwnedAsync("floor")) Assert.Equal(1, guard!.Use(bytes => bytes[0]));
         using (var foreign = await fixture.Store.ReadOwnedAsync("foreign")) Assert.Equal(9, foreign!.Use(bytes => bytes[0]));

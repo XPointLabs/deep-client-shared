@@ -344,7 +344,7 @@ public sealed class ProtectedDeepIdV2AccountOwnerTests
                 .OpenForCurrentProcess();
             byte[] exactDab2;
             byte[] accountId;
-            using (var first = new JournaledDeepSecureStorage(statePath,
+            using (var first = await JournaledDeepSecureStorage.CreateNewAsync(statePath,
                        new TestAeadProtector(key)))
             {
                 var owner = NewOwner(first, network, lockPath);
@@ -391,7 +391,7 @@ public sealed class ProtectedDeepIdV2AccountOwnerTests
                          statePath + ".backup", statePath + ".lock" })
                 File.Delete(path);
             DeleteOwnerArtifacts(lockPath);
-            Directory.Delete(directory);
+            Directory.Delete(directory, recursive: true);
         }
     }
 
@@ -412,7 +412,7 @@ public sealed class ProtectedDeepIdV2AccountOwnerTests
             using var verifier = DeepMlDsa65CandidateVerifierFactory
                 .OpenForCurrentProcess();
             byte[] exactDab2;
-            using (var first = new JournaledDeepSecureStorage(statePath,
+            using (var first = await JournaledDeepSecureStorage.CreateNewAsync(statePath,
                        new TestAeadProtector(key)))
             {
                 var failIndex = new FailFirstSlotWriteStorage(first,
@@ -452,7 +452,7 @@ public sealed class ProtectedDeepIdV2AccountOwnerTests
                          statePath + ".backup", statePath + ".lock" })
                 File.Delete(path);
             DeleteOwnerArtifacts(lockPath);
-            Directory.Delete(directory);
+            Directory.Delete(directory, recursive: true);
         }
     }
 

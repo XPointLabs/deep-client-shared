@@ -7,31 +7,21 @@ namespace Deep.Client.Shared.Production.Tests;
 
 public sealed partial class SecureStorageCompareExchangeTests
 {
-    private delegate Dictionary<string, byte[]> DecodeInventory(ReadOnlySpan<byte> bytes, IReadOnlySet<string>? selected);
-
     [Fact]
-    public void SelectedDecodeAvoidsUnrequestedValueBuffersWhileFullMutationDecodeRetainsThem()
+    public async Task SelectedReadLoadsBoundedManifestWithoutUnrequestedObjectPayloads()
     {
-        var decode = typeof(JournaledDeepSecureStorage).GetMethod("Decode", BindingFlags.Static | BindingFlags.NonPublic)!
-            .CreateDelegate<DecodeInventory>();
-        var bytes = EncodeSelectedReadFixture([("a"u8.ToArray(), [1]), ("z"u8.ToArray(), new byte[1024 * 1024])]);
-        var selectors = new HashSet<string>(StringComparer.Ordinal) { "a" };
-        // Pure synchronous decoder: no awaits, file locks or other-thread
-        // allocations enter this structural allocation comparison.
-        var start = GC.GetAllocatedBytesForCurrentThread(); var full = decode(bytes, null);
-        var fullBytes = GC.GetAllocatedBytesForCurrentThread() - start;
-        start = GC.GetAllocatedBytesForCurrentThread(); var selected = decode(bytes, selectors);
-        var selectedBytes = GC.GetAllocatedBytesForCurrentThread() - start;
-        try
-        {
-            Assert.Equal(2, full.Count); Assert.Single(selected); Assert.Equal(1, selected["a"][0]);
-            Assert.True(fullBytes - selectedBytes >= 1024 * 1024);
-        }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(bytes);
-            foreach (var value in full.Values.Concat(selected.Values)) CryptographicOperations.ZeroMemory(value);
-        }
+        using var f = new Fixture(true);
+        await f.Store.WriteBatchAsync([new("a", new byte[] { 1 }), new("z", new byte[1024 * 1024])]);
+        using (var warm = await f.Store.ReadOwnedAsync("a")) Assert.Equal(1, warm!.Use(value => value[0]));
+        var loads = f.Protector.UnprotectCalls;
+        using var selected = await f.Store.ReadOwnedBatchAsync(["a", "absent"]);
+        Assert.Equal(loads + 1, f.Protector.UnprotectCalls);
+        Assert.Equal(1, selected[0]!.Use(value => value[0])); Assert.Null(selected[1]);
+        Assert.InRange(new FileInfo(f.StatePath).Length, 1, 2048);
+        Assert.True(f.Protector.LastUnprotected!.Length < 2048);
+        Assert.True(f.Protector.LastUnprotected.AsSpan().IndexOfAnyExcept((byte)0) < 0);
+        Assert.True(await f.Store.CompareExchangeAsync("a", new byte[] { 1 }, new byte[] { 2 }));
+        using var large = await f.Store.ReadOwnedAsync("z"); Assert.Equal(1024 * 1024, large!.Length);
     }
 
     [Fact]
@@ -58,17 +48,19 @@ public sealed partial class SecureStorageCompareExchangeTests
     public async Task SelectedReadStillRejectsMalformedUnselectedInventoryAndWipesWholePlaintext(string defect)
     {
         using var f = new Fixture(true);
-        var entries = new List<(byte[] Slot, byte[] Value)> { ("a"u8.ToArray(), [1]), ("z"u8.ToArray(), [2]) };
+        await f.Store.WriteBatchAsync([new("a", new byte[] { 1 }), new("z", new byte[] { 2 })]);
+        var plaintext = f.Protector.Unprotect(File.ReadAllBytes(f.StatePath));
+        var entries = Dss2Entries(plaintext);
+        var second = entries[1];
         switch (defect)
         {
-            case "oversized-unselected": entries[1] = ("z"u8.ToArray(), new byte[1024 * 1024 + 1]); break;
-            case "duplicate-unselected": entries.Add(("z"u8.ToArray(), [3])); break;
-            case "unordered-unselected": entries.Add(("y"u8.ToArray(), [3])); break;
-            case "invalid-utf8-unselected": entries[1] = ([0xff], [2]); break;
-            case "control-unselected": entries[1] = ("z\n"u8.ToArray(), [2]); break;
-            case "empty-unselected": entries[1] = ("z"u8.ToArray(), []); break;
+            case "oversized-unselected": BinaryPrimitives.WriteUInt32BigEndian(plaintext.AsSpan(second.LengthOffset), 1024 * 1024 + 1); break;
+            case "duplicate-unselected": plaintext[second.SlotOffset] = (byte)'a'; break;
+            case "unordered-unselected": plaintext[second.SlotOffset] = (byte)'A'; break;
+            case "invalid-utf8-unselected": plaintext[second.SlotOffset] = 0xff; break;
+            case "control-unselected": plaintext[second.SlotOffset] = (byte)'\n'; break;
+            case "empty-unselected": BinaryPrimitives.WriteUInt32BigEndian(plaintext.AsSpan(second.LengthOffset), 0); break;
         }
-        var plaintext = EncodeSelectedReadFixture(entries);
         if (defect == "trailing") plaintext = [.. plaintext, 1];
         if (defect == "truncated") plaintext = plaintext[..^1];
         var ciphertext = f.Protector.Protect(plaintext);

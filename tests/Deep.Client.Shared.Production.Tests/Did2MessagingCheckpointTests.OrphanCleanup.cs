@@ -20,7 +20,7 @@ public sealed partial class Did2MessagingCheckpointTests
         try
         {
             using var protector = new CountingCleanupProtector(key);
-            using var store = new JournaledDeepSecureStorage(path, protector);
+            using var store = await JournaledDeepSecureStorage.CreateNewAsync(path, protector);
             var scope = Scope(); var stable = Did2MessagingFloor.Empty(scope);
             var owner = new Did2MessagingProtectedCheckpoint(store, scope);
             await owner.InitializeRegisteredSessionAsync(default);
@@ -48,8 +48,18 @@ public sealed partial class Did2MessagingCheckpointTests
             if (defect is "parts" or "empty")
             {
                 await owner.EraseStableOrphansAsync(stable, default);
-                Assert.Equal(loads + 1, protector.UnprotectCalls);
-                Assert.Equal(protects + (defect == "parts" ? 1 : 0), protector.ProtectCalls);
+                if (defect == "empty")
+                {
+                    Assert.Equal(loads + 1, protector.UnprotectCalls);
+                    Assert.Equal(protects, protector.ProtectCalls);
+                }
+                else
+                {
+                    // DSS2 re-admits after the Protect callback and commits
+                    // the required cleanup-free metadata successor separately.
+                    Assert.True(protector.UnprotectCalls > loads + 1);
+                    Assert.Equal(protects + 2, protector.ProtectCalls);
+                }
                 if (defect == "empty") Assert.Equal(original, File.ReadAllBytes(path));
                 using var reopened = new JournaledDeepSecureStorage(path, new CountingCleanupProtector(key));
                 using var missing = await reopened.ReadOwnedAsync(part); Assert.Null(missing);
@@ -76,7 +86,7 @@ public sealed partial class Did2MessagingCheckpointTests
         {
             CryptographicOperations.ZeroMemory(key);
             foreach (var file in Directory.EnumerateFiles(directory)) File.Delete(file);
-            Directory.Delete(directory);
+            Directory.Delete(directory, recursive: true);
         }
     }
 

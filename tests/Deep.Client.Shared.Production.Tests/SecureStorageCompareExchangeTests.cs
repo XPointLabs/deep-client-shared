@@ -52,6 +52,7 @@ public sealed partial class SecureStorageCompareExchangeTests
         FileStream? blocker = null;
         fixture.Protector.AfterProtect = () =>
         {
+            fixture.Protector.AfterProtect = null;
             // Real native handle: reads/writes are shared, atomic rename/delete is not.
             blocker = new FileStream(fixture.StatePath, FileMode.Open, FileAccess.Read,
                 FileShare.ReadWrite);
@@ -225,18 +226,21 @@ public sealed partial class SecureStorageCompareExchangeTests
 
     private sealed class Fixture : IDisposable
     {
-        private readonly string root = Path.Combine(Path.GetTempPath(), "deep-storage-cas-tests", Guid.NewGuid().ToString("N"));
+        private readonly string root;
         private readonly byte[] key = RandomNumberGenerator.GetBytes(32);
         internal readonly Protector Protector;
         internal readonly IDeepSecureStorage Store;
         internal string StatePath => Path.Combine(root, "protected.bin");
-        internal Fixture(bool journaled)
+        internal Fixture(bool journaled, bool localApplicationData = false)
         {
+            root = Path.Combine(localApplicationData ? Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData) :
+                Path.GetTempPath(), "deep-storage-cas-tests", Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(root);
             Protector = new(key);
-            Store = journaled ? new JournaledDeepSecureStorage(Path.Combine(root, "protected.bin"), Protector) : new InMemoryDeepSecureStorage();
+            Store = journaled ? JournaledDeepSecureStorage.CreateNewAsync(StatePath, Protector).GetAwaiter().GetResult() : new InMemoryDeepSecureStorage();
         }
         internal JournaledDeepSecureStorage OpenJournaled() => new(Path.Combine(root, "protected.bin"), new Protector(key));
+        internal Protector NewProtector() => new(key);
         public void Dispose()
         {
             ((IDisposable)Store).Dispose(); Protector.Dispose(); CryptographicOperations.ZeroMemory(key);
@@ -247,7 +251,7 @@ public sealed partial class SecureStorageCompareExchangeTests
     private sealed class Protector(ReadOnlySpan<byte> value) : IDeepSecretProtector, IDisposable
     {
         private readonly byte[] key = value.ToArray();
-        internal bool FailProtect;
+        internal bool FailProtect, FailUnprotect;
         internal Action? AfterProtect;
         internal Action? AfterUnprotect;
         internal int ProtectCalls, UnprotectCalls;
@@ -265,6 +269,7 @@ public sealed partial class SecureStorageCompareExchangeTests
         public byte[] Unprotect(ReadOnlySpan<byte> bytes)
         {
             UnprotectCalls++;
+            if (FailUnprotect) throw new CryptographicException("Injected current protector rejection.");
             var result = new byte[bytes.Length - 28];
             try { using var aes = new AesGcm(key, 16); aes.Decrypt(bytes[..12], bytes[28..], bytes.Slice(12, 16), result); LastUnprotected = result; AfterUnprotect?.Invoke(); return result; }
             catch { CryptographicOperations.ZeroMemory(result); throw; }

@@ -86,6 +86,19 @@ internal sealed class DeepSecureStorageRegistration : IDisposable
                 throw new InvalidOperationException("Secure-storage aggregate exceeds its capacity.");
         }
     }
+    internal static void ValidateInventoryLengths(IEnumerable<KeyValuePair<string, int>> values)
+    {
+        var count = 0; long length = 8;
+        foreach (var pair in values)
+        {
+            ValidateSlot(pair.Key);
+            if (pair.Value is < 1 || pair.Value > MaximumBytesForSlot(pair.Key))
+                throw new InvalidOperationException("Secure-storage value exceeds its slot capacity.");
+            count++; length = checked(length + 6L + Utf8.GetByteCount(pair.Key) + pair.Value);
+            if (count > MaximumEntries || length > MaximumPlaintextBytes)
+                throw new InvalidOperationException("Secure-storage inventory exceeds its capacity.");
+        }
+    }
     internal static long ValidateWrites(IReadOnlyList<DeepSecureStorageWrite> writes)
     {
         ArgumentNullException.ThrowIfNull(writes);

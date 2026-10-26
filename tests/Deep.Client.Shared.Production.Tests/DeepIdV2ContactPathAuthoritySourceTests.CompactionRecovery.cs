@@ -230,7 +230,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         private readonly string path;
         private JournaledDeepSecureStorage store;
         internal CompactionDiskFixtureStorage(string directory)
-        { Directory.CreateDirectory(directory); path = Path.Combine(directory, "compaction-fixture.protected.bin"); store = Open(); }
+        { Directory.CreateDirectory(directory); path = Path.Combine(directory, "compaction-fixture.protected.bin"); store = JournaledDeepSecureStorage.CreateNewAsync(path, new CompactionFixtureProtector(key)).GetAwaiter().GetResult(); }
         private JournaledDeepSecureStorage Open() => new(path, new CompactionFixtureProtector(key));
         internal void Reopen() { store.Dispose(); store = Open(); }
         public Task<OwnedDeepSecret?> ReadOwnedAsync(string slot, CancellationToken ct = default) => store.ReadOwnedAsync(slot, ct);

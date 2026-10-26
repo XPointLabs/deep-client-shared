@@ -20,7 +20,7 @@ public sealed partial class Did2MessagingCheckpointTests
         try
         {
             using var protector = new Protector(key);
-            using var storage = new JournaledDeepSecureStorage(path, protector);
+            using var storage = await JournaledDeepSecureStorage.CreateNewAsync(path, protector);
             var scope = Scope(); var owner = new Did2MessagingProtectedCheckpoint(storage, scope);
             await owner.InitializeRegisteredSessionAsync(default);
             var empty = await owner.ReadAsync(default); var pending = Pending(scope, empty, payload);
