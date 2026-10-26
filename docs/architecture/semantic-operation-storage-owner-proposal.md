@@ -2,8 +2,11 @@
 
 Implementation mapping for accepted design
 [DR-0175](../../../docs/survival-program/decisions/DR-0175-active-native-state-and-archive-validation.md).
-Source implementation, hostile-state provider proof and connected qualification
-remain pending; the decision does not activate the cheaper verifier. Custody remains
+Runtime implementation and connected qualification remain pending. The bounded
+actual-provider overflow proof passed eight cases and passed independent review;
+root accepted that bounded proof. It does not activate the cheaper verifier. See the
+[provider checkpoint](../testing/dr0175-native-overflow-provider-proof-2026-10-26.md).
+Custody remains
 in [ACCOUNT-DIRECTORY](../../../docs/architecture/ACCOUNT-DIRECTORY-TRANSPARENCY-V1.md)
 and [TRANSPORT-NEUTRAL](../../../docs/architecture/TRANSPORT-NEUTRAL-MESSAGING.md).
 The implemented first P1 slice only batches actual protected inventories:
@@ -358,7 +361,7 @@ bounded fully proved batches; do not add a new retained-history hard limit or
 release a partial stream as complete absence. Existing full paths remain the
 safe fallback until each consumer has that proof.
 
-### Provider overflow-page proof to write before broader implementation
+### Provider overflow-page proof — source complete, runtime still disabled
 
 Use a new native-only production test file and the existing
 `OpenMessagingConnectionForTests` seam, avoiding expensive account/PQ setup.
@@ -393,11 +396,22 @@ not a mocked integrity callback. No shipping verifier is changed for the probe.
    implementation/activation; retain full native payload reads and report the
    exact negative instead of weakening the assertion.
 
-Pseudocode only: `CreateEncryptedFixture → ProveOverflowPage → CleanCipherScan →
+Implemented test sequence: `CreateEncryptedFixture → ProveOverflowPage → CleanCipherScan →
 optional(ReadWholeArchive) → callback(FlipActualOverflowByteAndFlush) →
 MetadataReadSucceeds → FullCipherScanRejects → ActualArchiveReadRejects`.
 `ActualArchiveReadRejects` is the separate fresh-connection comparison witness;
 the reused/cached connection must itself reject through the full cipher scan.
-The public/provider documentation is not substitute evidence for those actual
-native tests. This test source and implementation are deliberately deferred
-until the coherent initial P0/P1 source slice is committed and a test slot granted.
+The actual provider lacks `dbstat`: run01 failed all eight classification
+prerequisites and is retained as FAIL. The approved alternative uses this same
+provider's `sqlite3_serialize` in memory to validate the actual table-root leaf,
+rowid, record/BLOB and complete overflow chain. The decrypted image is never
+exported and both managed/native image buffers are zeroed. Run02 proved that
+classification but failed all eight cases in the fixture's final hash read due
+to file sharing; only that read's sharing mode changed. Run03 passed all eight
+fresh/reused/fully-cached/callback cases, including four clean controls, with
+native exit0 and unchanged captured inputs. Each fixture classified65 overflow
+pages at page-size4096/reserved80. Separate fresh payload reads reject damaged
+cases; same-handle full scans independently reject them without file repair.
+The exact receipts and the remaining runtime/consumer gates are in the checkpoint.
+This synthetic-fixture proof does not qualify the archive verifier, runtime
+maintenance, full source gate, workload scaling or connected latency.
