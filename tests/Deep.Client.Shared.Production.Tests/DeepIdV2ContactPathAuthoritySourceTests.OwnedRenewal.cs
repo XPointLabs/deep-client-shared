@@ -539,6 +539,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         internal PublicationCurrentWireRequest? LastCurrentRequest;
         internal bool LoseRouteResponse, LosePublicationResponse, LoseReplicaResponse, CorruptReceipt;
         internal Action? AfterRouteReply;
+        internal bool FutureRouteSelection;
+        internal bool WaitForRouteDeadline;
         internal ulong CurrentDeadline => authorization.Freshness.FreshnessDeadlineMonotonicSeconds;
         private DeepIdV2CurrentContactAuthorization authorization = null!;
         private VerifiedOnionNetworkContext network = null!;
@@ -607,6 +609,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             Did2OwnedContactTransportContext operation, CancellationToken ct)
         {
             operation.RequireActive(); RouteCalls++; authorization = current; network = currentNetwork; authority = currentAuthority; time = clock;
+            if (WaitForRouteDeadline) await Task.Delay(Timeout.Infinite, ct);
             var xra = ContactCodec.Decode("XRA1", request.ExactXra1.Span);
             var generation = BinaryPrimitives.ReadUInt64BigEndian(xra.Field(3).Span);
             RequireExact(routeRequests, generation, ContactRouteAuthorityWireCodec.EncodeRequest(request));
@@ -625,6 +628,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                         request.ExactPredecessorRouteClosure, time, ct), request.ExactXra1, fixture.CreateRouteWitnesses(), expiry, time, ct) :
                     await DeepIdV2ContactRouteAuthor.AuthorThresholdAsync(current, network, authority, request.ExactXra1,
                         fixture.CreateRouteWitnesses(), current.TrustedLowerUnixSeconds, expiry, time, ct);
+                if (FutureRouteSelection && request.HasPredecessor)
+                    threshold = fixture.ThresholdWithFutureSelection(threshold, checked(current.TrustedLowerUnixSeconds + 1));
                 routeWinners.Add(generation, winner = new(request.NetworkId.Span, request.RequestNonce.Span,
                     threshold.Selection.CanonicalBytes.Span, threshold.LiveRoute.CanonicalBytes.Span,
                     threshold.Successor.CanonicalBytes.Span, current.Freshness.ExactAdh1.Span)); RouteSignings++;

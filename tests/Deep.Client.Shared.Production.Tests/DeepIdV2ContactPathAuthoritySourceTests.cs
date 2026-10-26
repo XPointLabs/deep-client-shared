@@ -3194,6 +3194,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         public ValueTask<OnionMonotonicReading> ReadAsync(CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (thresholdClockOverride is { } thresholdClock) return thresholdClock(cancellationToken);
             var nativeClockCallback = afterNativeClockRead; afterNativeClockRead = null;
             nativeClockCallback?.Invoke();
             return ValueTask.FromResult(new OnionMonotonicReading(Boot, checked(Sample + MailboxElapsedSeconds)));

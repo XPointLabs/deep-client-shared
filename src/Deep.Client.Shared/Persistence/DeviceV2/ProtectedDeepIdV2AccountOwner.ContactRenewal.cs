@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Diagnostics;
 using System.Security.Cryptography;
 using Deep.Client.Shared.Services;
 using Deep.Client.Shared.Services.ContactV2;
@@ -10,6 +11,8 @@ namespace Deep.Client.Shared.Persistence.DeviceV2;
 
 internal sealed partial class ProtectedDeepIdV2AccountOwner
 {
+    internal const int MaximumRenewalThresholdVerificationAttempts = 3;
+    private static readonly TimeSpan RenewalThresholdAcquisitionBudget = TimeSpan.FromSeconds(30);
     // The complete current/pending transition owns one actual account lease.
     // A null result means normal genesis/current restoration, never a fallback
     // after failed successor authentication or an abandoned unknown outcome.
@@ -133,15 +136,47 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 fresh.Authority, priorRoute, entry.Record(1), source.RendezvousTrustedTime, ct).ConfigureAwait(false);
             if (entry.Phase == 1)
             {
-                using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct); deadline.CancelAfter(TimeSpan.FromSeconds(30));
+                using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                var acquisitionStarted = Stopwatch.GetTimestamp();
+                deadline.CancelAfter(RenewalThresholdAcquisitionBudget);
                 var dispatch = await DispatchAsync(deadline.Token).ConfigureAwait(false);
                 var response = await thresholdSource.FetchAsync(routeRequest, authorization, fresh.Network, fresh.Authority,
                     source.RendezvousTrustedTime, dispatch, deadline.Token).AsTask().WaitAsync(deadline.Token).ConfigureAwait(false) ??
                     throw new CryptographicException("The route successor threshold response is absent.");
                 _ = ContactRouteAuthorityWireCodec.EncodeResponse(routeRequest, response);
-                var verified = await DeepIdV2ContactRouteVerifier.VerifyRetainedThresholdAsync(authorization, fresh.Network,
-                    fresh.Authority, routeRequest, new(response.ExactPms2.Span, response.ExactXrc1.Span, response.ExactXss1.Span),
-                    response.ExactIssuanceAdh1, source.RendezvousTrustedTime, deadline.Token).ConfigureAwait(false);
+                // Own the exact response once. A future-start hint schedules
+                // only this response; it is never adoption/signing authority.
+                var threshold = new ParsedDeepIdV2RouteThreshold(response.ExactPms2.Span, response.ExactXrc1.Span, response.ExactXss1.Span);
+                var issuanceHead = response.ExactIssuanceAdh1;
+                VerifiedDeepIdV2ContactRouteIssuance verified;
+                for (var attempt = 1; ; attempt++)
+                {
+                    await RequireThresholdAdoptionGuardsAsync(deadline.Token).WaitAsync(deadline.Token).ConfigureAwait(false);
+                    try
+                    {
+                        verified = await DeepIdV2ContactRouteVerifier.VerifyRetainedThresholdAsync(authorization, fresh.Network,
+                            fresh.Authority, routeRequest, threshold, issuanceHead,
+                            source.RendezvousTrustedTime, deadline.Token).AsTask().WaitAsync(deadline.Token).ConfigureAwait(false);
+                        break;
+                    }
+                    catch (DeepIdV2RouteNotBeforeException future) when (
+                        attempt < MaximumRenewalThresholdVerificationAttempts && future.RequiredDelaySeconds > 0 &&
+                        future.RequiredDelaySeconds < 30 &&
+                        Stopwatch.GetElapsedTime(acquisitionStarted) + TimeSpan.FromSeconds(future.RequiredDelaySeconds) < RenewalThresholdAcquisitionBudget)
+                    {
+                        // No TRS/transition loan or verified admission survives
+                        // this wait. The existing account operation remains held;
+                        // all actual guards are reacquired on the next iteration.
+#if DEEP_TEST_INTERNALS
+                        Did2ContactThresholdWaitTestHooks.Hit(Did2ContactThresholdWaitFailpoint.BeforeWait);
+#endif
+                        await Task.Delay(TimeSpan.FromSeconds(future.RequiredDelaySeconds), deadline.Token).ConfigureAwait(false);
+#if DEEP_TEST_INTERNALS
+                        Did2ContactThresholdWaitTestHooks.Hit(Did2ContactThresholdWaitFailpoint.AfterWait);
+#endif
+                    }
+                }
+                await RequireThresholdAdoptionGuardsAsync(deadline.Token).WaitAsync(deadline.Token).ConfigureAwait(false);
                 await AdoptAsync(entry.WithThreshold(verified, networkId, current.AccountId.Span), deadline.Token).ConfigureAwait(false);
 #if DEEP_TEST_INTERNALS
                 Did2ContactRouteTestHooks.Hit(Did2ContactRouteFailpoint.AfterThreshold);
@@ -254,6 +289,26 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 await RecheckRouteFreshnessAsync(current, source, fresh, held, first, token).ConfigureAwait(false);
                 var adopted = await SaveRouteJournalAsync(state, snapshot!, current.AccountId, instance, token).ConfigureAwait(false);
                 CryptographicOperations.ZeroMemory(snapshot!); snapshot = adopted;
+            }
+            async Task RequireThresholdAdoptionGuardsAsync(CancellationToken token)
+            {
+                // Existing account-owned material is not cached permission.
+                // Rejoin the actual key/account, protected source/revocation,
+                // same-boot clock, resolver capability and exact proposal.
+                using var actual = await RequireCurrentUnderLeaseAsync(trustedUnixSeconds, verifier, token).ConfigureAwait(false);
+                RequirePermanentContactPlan(plan, actual, instance, plan.Intent.Span);
+                if (!FixedRoute(actual.AccountId.Span, current.AccountId.Span))
+                    throw new CryptographicException("Renewal owner changed during threshold admission.");
+                await RecheckRouteFreshnessAsync(actual, source, fresh, held, first, token).ConfigureAwait(false);
+                var resolver = await new ProtectedDeepIdV2ResolverCapabilityStore(storage, networkId, actual.AccountId.Span)
+                    .ReadVerifiedAsync(fresh.Proof.CurrentCheckpoint!.Binding.DeepId, token).ConfigureAwait(false);
+                if (!FixedRoute(resolver.ResolverReadCapability.Span, capability))
+                    throw new CryptographicException("Renewal resolver custody changed during threshold admission.");
+                using var journal = await storage.ReadOwnedAsync(ProtectedDid2ContactRouteJournal.Slot, token).ConfigureAwait(false) ??
+                    throw new InvalidDataException("Renewal proposal disappeared during threshold admission.");
+                if (!journal.Use(bytes => FixedRoute(bytes, snapshot!)))
+                    throw new CryptographicException("Renewal proposal changed during threshold admission.");
+                token.ThrowIfCancellationRequested(); held.RequireOwner(lease);
             }
             async Task AdoptAsync(ProtectedDid2ContactRouteJournal.Entry candidate, CancellationToken token)
             {
