@@ -21,8 +21,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         using var current = await RequireCurrentUnderLeaseAsync(seconds, verifier, ct).ConfigureAwait(false);
         var first = await RequireMessagingFreshnessAsync(current, own, peer, source, held, ct).ConfigureAwait(false);
         OwnedInitialMessagingSeed.RequireFreshScope(scope, own.Proof, peer, first);
-        using var opened = await SqliteDeepIdV2AccountGeneration.OpenOwnedMessagingUnderLeaseAsync(storage,
-            sqlStatePath, current, scope, ct).ConfigureAwait(false);
+        using var opened = await OpenNativeMessagingUnderLeaseAsync(current, scope, held, ct).ConfigureAwait(false);
         var history = await ReadAuthenticatedPeerRouteHistoryUnderLeaseAsync(current, opened, own, peer, source, held, ct).ConfigureAwait(false);
         await AuthenticatedInitialDmc2Batch.RequireRetainedMailboxRouteFactsAsync(history.Original,
             peer, own, source, held, ct).ConfigureAwait(false);

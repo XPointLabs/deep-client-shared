@@ -177,7 +177,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         var index = catalog.FindExact(scope);
         if (index < 0 || catalog.Phase(index) != 2) throw new CryptographicException("Retired Initial source is not fully adopted.");
         Did2MessagingSourceScope.RequireSender(scope, retained);
-        using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, ct).ConfigureAwait(false);
+        using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, held, ct).ConfigureAwait(false);
         var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
         var events = opened.Sql.ReadVerifiedActiveInitialEvents(floor);
         try

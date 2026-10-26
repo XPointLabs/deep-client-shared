@@ -71,8 +71,13 @@ public sealed class DeepIdV2PreKeyCommitSnapshot
 /// is network-free; network operations require independently verified authority.
 /// It never reads or migrates the incompatible STORE-V1 namespace.
 /// </summary>
-public sealed partial class DeepIdV2AccountService
+public sealed partial class DeepIdV2AccountService : IDisposable
 {
+    /// <summary>Closes this runtime's native archive-audit scheduling owner.
+    /// The profile calls this after draining operations and before disposing its
+    /// storage. No storage, key or network ownership is transferred.</summary>
+    public void Dispose() => owner.CloseNativeRuntime();
+
     private readonly ProtectedDeepIdV2AccountOwner owner;
     private readonly IClock clock;
     private readonly ushort deploymentProfileId;

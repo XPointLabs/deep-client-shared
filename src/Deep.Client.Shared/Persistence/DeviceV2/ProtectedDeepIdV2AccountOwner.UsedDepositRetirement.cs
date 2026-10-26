@@ -165,7 +165,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 var scope = catalog.Scope(index);
                 if (!FixedRoute(scope.RemoteDevice, route.Authorization.Field(14).Span)) continue;
                 if (catalog.Phase(index) != 2) throw new IOException("Uninitialized outgoing custody pins Deposit retirement.");
-                using var opened = await owner.OpenLocalHistoryUnderLeaseAsync(current, scope, ct).ConfigureAwait(false);
+                using var opened = await owner.OpenLocalHistoryUnderLeaseAsync(current, scope, held, ct).ConfigureAwait(false);
                 if (scope.IsInitiator)
                 {
                     var draft = RequireRetirementInitialDraft(drafts, scope);
@@ -199,7 +199,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 if (selected is null) throw new CryptographicException("Original grant Store lost its protected native session.");
                 if (!FixedRoute(selected.RemoteDevice, route.Authorization.Field(14).Span))
                     throw new CryptographicException("Original grant Store has another recipient device.");
-                using var opened = await owner.OpenLocalHistoryUnderLeaseAsync(current, selected, token).ConfigureAwait(false);
+                using var opened = await owner.OpenLocalHistoryUnderLeaseAsync(current, selected, held, token).ConfigureAwait(false);
                 if (!await VerifyOriginal(selected, opened, operation, token).ConfigureAwait(false))
                     throw new CryptographicException("Original grant SQL coverage selected another native Store request.");
             }, ct).ConfigureAwait(false);

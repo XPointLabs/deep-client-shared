@@ -80,7 +80,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             OwnedInitialMessagingSeed.RequireFreshScope(scope, own.Proof, peer, first);
             if (operation is null) op = RandomNumberGenerator.GetBytes(32);
             await MaintainOrdinaryOutboxUnderLeaseAsync(current, held, scope, op, own, source, ct).ConfigureAwait(false);
-            using var opened = await SqliteDeepIdV2AccountGeneration.OpenOwnedMessagingUnderLeaseAsync(storage, sqlStatePath, current, scope, ct).ConfigureAwait(false);
+            using var opened = await OpenNativeMessagingUnderLeaseAsync(current, scope, held, ct).ConfigureAwait(false);
             var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
             if (floor.Status != 1) throw new InvalidDataException("An inactive session cannot prepare a text command.");
             using var application = await SqliteDeepIdV2AccountGeneration.OpenApplicationUnderLeaseAsync(storage, sqlStatePath, current, held, ct).ConfigureAwait(false);

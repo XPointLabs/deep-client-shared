@@ -35,10 +35,12 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             storage.TrackApplicationReads = true;
             storage.ApplicationReadGroups.Clear(); storage.ApplicationSingleReads = 0;
             await Open(); await Open();
-            Assert.Equal(2, storage.ApplicationReadGroups.Count);
-            Assert.All(storage.ApplicationReadGroups, group => Assert.Equal(slots, group));
-            // Only reconciliation reacquires the independent current floor.
-            Assert.Equal(2, storage.ApplicationSingleReads);
+            Assert.Equal(6, storage.ApplicationReadGroups.Count);
+            var roots = new[] { scope.FloorSlot, Did2MessagingHistoryCheckpoint.Slot(scope) };
+            Assert.Equal(new[] { slots, roots, roots, slots, roots, roots }, storage.ApplicationReadGroups.ToArray());
+            // Reconciliation now joins the mandatory ACTUAL history with the
+            // floor before SQL and after orphan-cleanup callbacks (DR-0175).
+            Assert.Equal(0, storage.ApplicationSingleReads);
             storage.TrackApplicationReads = false;
             ColdReopenCompactionStorage();
             await Open();

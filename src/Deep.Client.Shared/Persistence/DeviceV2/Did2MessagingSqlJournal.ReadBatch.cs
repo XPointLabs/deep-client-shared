@@ -35,6 +35,13 @@ internal sealed partial class Did2MessagingSqlJournal
             if (protectedStable.Phase != 1 || protectedStable.Status != 1)
                 throw new InvalidDataException("Native operation read batch requires active stable custody.");
             using var tx = connection.BeginTransaction(deferred: true);
+            if (activeHistory)
+            {
+                using var selection = new ActiveSelection(selectors);
+                RequireSame(protectedStable, VerifyActiveTip(tx, selection, out _));
+                for (var index = 0; index < count; index++) result.Add(ReadCapturedOrdinaryEvent(selection[index], tx));
+                return result;
+            }
             RequireSame(protectedStable, VerifyTipInTransaction(tx));
             using var command = Command("SELECT direction,length(envelope),envelope,length(plaintext),plaintext,metadata,ordinal FROM events WHERE operation=$op;", tx);
             var parameter = command.Parameters.Add("$op", Microsoft.Data.Sqlite.SqliteType.Blob);

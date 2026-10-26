@@ -125,8 +125,10 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         finally { CryptographicOperations.ZeroMemory(owner.Account); CryptographicOperations.ZeroMemory(owner.Instance); }
     }
 
-    private async Task ResumeLocalCompactionUnderLeaseAsync(HeldDeepIdV2AccountLease held, CancellationToken ct)
+    private async Task<bool> ResumeLocalCompactionUnderLeaseAsync(HeldDeepIdV2AccountLease held, CancellationToken ct)
     {
+        var recovered = false;
+        string? recoveredPrefix = null;
         using var borrowed = held.BorrowFor(lease);
         using (var registration = await storage.ReadOwnedAsync(SqliteDeepIdV2AccountGeneration.CompactionRegistrationSlot, ct).ConfigureAwait(false))
             if (registration is null)
@@ -134,7 +136,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 using var orphan = await storage.ReadOwnedAsync(Did2CompactionPlan.Slot, ct).ConfigureAwait(false);
                 using var pointer = await storage.ReadOwnedAsync(CurrentAccountSlot, ct).ConfigureAwait(false);
                 if (orphan is not null || pointer is not null) throw new InvalidDataException("An existing account/plan lost its local registration.");
-                return; // No registered account yet, not a missing-plan initializer.
+                return false; // No registered account yet, not a missing-plan initializer.
             }
         var owner = await SqliteDeepIdV2AccountGeneration.ReadCompactionOwnerScopeUnderLeaseAsync(storage, networkId, ct).ConfigureAwait(false);
         try
@@ -145,7 +147,14 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 if (iteration == 0) await ResumeInitialCancellationKeysUnderLeaseAsync(owner.Account, owner.Instance, held, ct).ConfigureAwait(false);
                 ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
                 using var plan = await plans.ReadAsync(held, ct).ConfigureAwait(false);
-                if (plan.Phase == 0) { await RequireNoPrefixPartsAsync(ct).ConfigureAwait(false); return; }
+                if (plan.Phase == 0)
+                {
+                    await RequireNoPrefixPartsAsync(ct).ConfigureAwait(false);
+                    if (recoveredPrefix is not null)
+                    { recoveredNativePrefixScope = recoveredPrefix; Did2MessagingSqlJournal.NativeWork.Maintenance(); }
+                    return recovered;
+                }
+                recovered = true;
                 if (IsStoppedControlPlan(plan))
                 {
                     if (IsPreSessionControlPlan(plan)) await ResumePreSessionControlAuditStepUnderLeaseAsync(plans, plan, held, ct).ConfigureAwait(false);
@@ -171,6 +180,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     continue;
                 }
                 var scope = ResolvePrefixScope(plan, catalog);
+                recoveredPrefix = Convert.ToHexString(scope.Hash);
                 var roots = await ReadPrefixRootsUnderLeaseAsync(storage, plan, scope, held, lease, ct).ConfigureAwait(false);
                 var floor = await new Did2MessagingProtectedCheckpoint(storage, scope).ReadAsync(ct).ConfigureAwait(false);
                 var history = await Did2MessagingHistoryCheckpoint.ReadRegisteredAsync(storage, scope, ct).ConfigureAwait(false);

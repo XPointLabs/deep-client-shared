@@ -218,7 +218,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                         throw new CryptographicException("Braid tombstone lost its refreshed owned endpoint pair.");
                     var reading = await RequireMessagingFreshnessAsync(current, endpoint.Pair.Own, endpoint.Pair.Peer, source, held, ct).ConfigureAwait(false);
                     OwnedInitialMessagingSeed.RequireFreshScope(controlScope, endpoint.Pair.Own.Proof, endpoint.Pair.Peer, reading);
-                    using var controlStorage = await SqliteDeepIdV2AccountGeneration.OpenOwnedMessagingUnderLeaseAsync(storage, sqlStatePath, current, controlScope, ct).ConfigureAwait(false);
+                    using var controlStorage = await OpenNativeMessagingUnderLeaseAsync(current, controlScope, held, ct).ConfigureAwait(false);
                     var controlFloor = await controlStorage.Custody.ReconcileAsync(ct).ConfigureAwait(false);
                     if (ClassifyBraidMailboxCustodyUnderLease(controlStorage, controlScope, controlFloor, control, held, ct) == BraidMailboxCustody.NotCommitted)
                         throw new CryptographicException("Braid tombstone has neither authenticated receive nor obsolete-purpose custody.");
@@ -237,7 +237,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     OwnedInitialMessagingSeed.RequireFreshScope(scope, endpoint.Pair.Own.Proof, endpoint.Pair.Peer, reading);
                     if (!nativeScopes.Opened.TryGetValue(name, out var owned))
                     {
-                        owned = await SqliteDeepIdV2AccountGeneration.OpenOwnedMessagingUnderLeaseAsync(storage, sqlStatePath, current, scope, ct).ConfigureAwait(false);
+                        owned = await OpenNativeMessagingUnderLeaseAsync(current, scope, held, ct).ConfigureAwait(false);
                         nativeScopes.Opened.Add(name, owned);
                     }
                     // Keep only the actual open native owner, never a verified

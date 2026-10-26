@@ -43,7 +43,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         using var ordinary = root.Use(bytes => ProtectedDid2DirectTextJournal.Decode(bytes, scope.Network, scope.LocalAccount, scope.Instance));
         if (ordinary.Entries.TryGetValue(Convert.ToHexString(operation.Span), out var working) &&
             (!includeStoredWorking || !working.Stored)) return null; // Uncommitted work retains its normal exact owner.
-        using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, ct).ConfigureAwait(false);
+        using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, held, ct).ConfigureAwait(false);
         var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
         using var native = opened.Sql.ReadVerifiedOperation(floor, operation.Span);
         if (native is null) return null; // Unavailable retry; absence never authorizes creation.
@@ -72,7 +72,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
         await ResumeLocalCompactionUnderLeaseAsync(held, ct).ConfigureAwait(false);
         using var current = await RequireCurrentUnderLeaseAsync(unixSeconds, verifier, ct).ConfigureAwait(false);
-        using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, ct).ConfigureAwait(false);
+        using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, held, ct).ConfigureAwait(false);
         return await TryReadRetainedMessagingStoreUnderLeaseAsync(current, held, opened, scope,
             operation, own, source, ct).ConfigureAwait(false);
     }
@@ -97,7 +97,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             if (!groups.State.Outbox.Any(original => original.Adopted && original.Operation.AsSpan().SequenceEqual(item.Operation) &&
                 original.Group.AsSpan().SequenceEqual(item.Group) && original.Scope.AsSpan().SequenceEqual(item.Scope) &&
                 original.Event.AsSpan().SequenceEqual(item.Event))) throw new CryptographicException("Retained batch lost exact protected group custody.");
-        using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, ct).ConfigureAwait(false);
+        using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, held, ct).ConfigureAwait(false);
         var result = new HashSet<string>(StringComparer.Ordinal);
         foreach (var item in batch)
         {

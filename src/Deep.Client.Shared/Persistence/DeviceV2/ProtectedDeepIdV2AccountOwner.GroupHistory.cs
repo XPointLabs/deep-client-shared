@@ -45,7 +45,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         foreach (var byScope in selected.GroupBy(row => Convert.ToHexString(row.Item.Scope), StringComparer.Ordinal))
         {
             var scope = Did2MessagingSessionScope.RestoreMetadata(byScope.First().Item.Scope);
-            using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, ct).ConfigureAwait(false);
+            using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, held, ct).ConfigureAwait(false);
             var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
             if (floor.Status != 1) throw new CryptographicException("Latched session grants no group history.");
             foreach (var chunk in byScope.Chunk(Did2MessagingSqlJournal.MaximumOperationReadBatch))
@@ -114,7 +114,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         if (result.Length == 0) return result;
         try
         {
-            using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, ct).ConfigureAwait(false);
+            using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, held, ct).ConfigureAwait(false);
             var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
             foreach (var chunk in result.Chunk(Did2MessagingSqlJournal.MaximumOperationReadBatch))
             {

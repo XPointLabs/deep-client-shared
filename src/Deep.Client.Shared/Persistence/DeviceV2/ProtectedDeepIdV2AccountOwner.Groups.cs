@@ -86,7 +86,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         {
             var first = await RequireMessagingFreshnessAsync(current, target.Own, target.Peer, source, held, ct).ConfigureAwait(false);
             OwnedInitialMessagingSeed.RequireFreshScope(target.Scope, target.Own.Proof, target.Peer, first);
-            using var opened = await SqliteDeepIdV2AccountGeneration.OpenOwnedMessagingUnderLeaseAsync(storage, sqlStatePath, current, target.Scope, ct).ConfigureAwait(false);
+            using var opened = await OpenNativeMessagingUnderLeaseAsync(current, target.Scope, held, ct).ConfigureAwait(false);
             await RequireGroupContactConsentUnderLeaseAsync(current, held, opened, target.Own, target.Peer, source, ct).ConfigureAwait(false);
             if (target.Peer.CurrentCheckpoint!.Directory.Identity.ActiveDevices.Count != 1) throw new NotSupportedException("Group device enrollment is not yet qualified.");
             capabilities.Add(Convert.ToHexString(target.Scope.RemoteAccount), await DeepIdV2GroupDirectoryAuthority.VerifyAsync(target.Peer, source.RendezvousTrustedTime, ct).ConfigureAwait(false));

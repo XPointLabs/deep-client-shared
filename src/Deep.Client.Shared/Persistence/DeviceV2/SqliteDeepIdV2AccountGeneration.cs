@@ -550,6 +550,7 @@ internal static partial class SqliteDeepIdV2AccountGeneration
     private static SqliteConnection OpenMessagingConnection(string path,
         ReadOnlySpan<byte> key, bool create)
     {
+        Did2MessagingSqlJournal.NativeWork.Open();
         var connection = OpenRandomKeyConnection(path, key, create);
         try
         {

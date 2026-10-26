@@ -25,7 +25,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         using var journal = raw.Use(bytes => ProtectedDid2DirectTextJournal.Decode(bytes, scope.Network, scope.LocalAccount, scope.Instance));
         if (journal.Pending is { } pending && (pending.Kind != Dmc2ContentKind.ContactRouteUpdate || !FixedRoute(pending.Scope.Exact, scope.Exact)))
             throw new InvalidOperationException("Resume the existing authored command before route maintenance.");
-        using var opened = await SqliteDeepIdV2AccountGeneration.OpenOwnedMessagingUnderLeaseAsync(storage, sqlStatePath, current, scope, ct).ConfigureAwait(false);
+        using var opened = await OpenNativeMessagingUnderLeaseAsync(current, scope, held, ct).ConfigureAwait(false);
         var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
         if (floor.Status != 1) throw new CryptographicException("Inactive messaging cannot maintain a route.");
         using var application = await SqliteDeepIdV2AccountGeneration.OpenApplicationUnderLeaseAsync(storage, sqlStatePath, current, held, ct).ConfigureAwait(false);

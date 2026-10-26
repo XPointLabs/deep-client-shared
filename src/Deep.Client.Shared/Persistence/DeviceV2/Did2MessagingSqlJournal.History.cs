@@ -10,8 +10,10 @@ internal sealed partial class Did2MessagingSqlJournal
 {
     internal void RequireAppendCapacity(Did2MessagingFloor protectedStable)
     {
-        RequireSame(protectedStable, VerifyTip());
-        var headers = ReadJournal(out var tip); RequireSame(protectedStable, tip);
+        using var tx = connection.BeginTransaction(deferred: true);
+        List<byte[]> headers;
+        var tip = activeHistory ? VerifyActiveTip(tx, null, out headers) : VerifyTipInTransaction(tx, out headers);
+        RequireSame(protectedStable, tip);
         if (headers.Count >= MaximumEntries || protectedStable.Ordinal >= long.MaxValue)
             throw new InvalidOperationException("Messaging working journal/lifetime ordinal has no append capacity.");
     }
@@ -86,6 +88,7 @@ internal sealed partial class Did2MessagingSqlJournal
         ulong count = 0, previous = 0; Span<byte> number = stackalloc byte[8];
         while (reader.Read())
         {
+            NativeWork.MetadataRow();
             if (reader.GetString(10) != "integer" || reader.GetString(11) != "integer" ||
                 reader.GetString(12) != "blob" || reader.GetString(13) != "blob" || reader.GetString(14) != "blob")
                 throw new InvalidDataException("Retained messaging history has a noncanonical storage type.");
@@ -114,6 +117,7 @@ internal sealed partial class Did2MessagingSqlJournal
     private void VerifyHistoricalEvent(ulong ordinal, int direction, ReadOnlySpan<byte> operation,
         ReadOnlySpan<byte> metadata, byte[] envelopeBytes, byte[] plaintext)
     {
+        NativeWork.Payload();
         var prior = Did2MessagingFloor.Decode(metadata.Slice(8, Did2MessagingFloor.Bytes), scope);
         OwnedDid2MessagingMutation.ValidateMetadataTransition(metadata, scope, prior);
         if (direction is 3 or 4)

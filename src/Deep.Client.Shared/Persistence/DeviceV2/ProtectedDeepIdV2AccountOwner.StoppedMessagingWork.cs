@@ -15,7 +15,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
         await ResumeLocalCompactionUnderLeaseAsync(held, ct).ConfigureAwait(false);
         using var current = await RequireCurrentUnderLeaseAsync(unixSeconds, verifier, ct).ConfigureAwait(false);
-        using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, ct).ConfigureAwait(false);
+        using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, held, ct).ConfigureAwait(false);
         using (var root = await storage.ReadOwnedAsync(ProtectedDid2DirectTextJournal.Slot, ct).ConfigureAwait(false) ?? throw new InvalidDataException())
         using (var journal = root.Use(bytes => ProtectedDid2DirectTextJournal.Decode(bytes, scope.Network, scope.LocalAccount, scope.Instance)))
             if (!journal.Entries.ContainsKey(Convert.ToHexString(operation.Span)))
@@ -154,7 +154,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             if (entry is null) return;
             var time = await RecheckRouteFreshnessAsync(current, source, own, held, null, ct).ConfigureAwait(false);
             if (checked(own.Proof.TrustedLowerUnixSeconds + time.SampleSeconds - own.Proof.MonotonicSample) < entry.RetryUntil) return;
-            using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, ct).ConfigureAwait(false);
+            using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, held, ct).ConfigureAwait(false);
             var applicationDeadline = await ReadMailboxApplicationRetryDeadlineUnderLeaseAsync(current, held, opened,
                 scope, operation, ReadOnlyMemory<byte>.Empty, ct).ConfigureAwait(false);
             if (entry.RetryUntil != Math.Min(entry.Expires, applicationDeadline))

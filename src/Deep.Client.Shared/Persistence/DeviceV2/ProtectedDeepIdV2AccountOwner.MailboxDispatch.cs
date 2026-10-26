@@ -62,7 +62,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             if (index < 0 || catalog.Phase(index) != 2 || retained.HasInitialState)
                 throw new CryptographicException("Initial dispatch cannot precede completed source transfer/retirement.");
             Did2MessagingSourceScope.RequireSender(scope, retained);
-            using var opened = await SqliteDeepIdV2AccountGeneration.OpenOwnedMessagingUnderLeaseAsync(storage, sqlStatePath, current, scope, ct).ConfigureAwait(false);
+            using var opened = await OpenNativeMessagingUnderLeaseAsync(current, scope, held, ct).ConfigureAwait(false);
             var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
             if (floor.Status != 1) throw new CryptographicException("Initial dispatch requires active mutable custody.");
             ct.ThrowIfCancellationRequested(); held.RequireActive(); return scope;
@@ -138,7 +138,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 throw new CryptographicException("Ordinary dispatch has no independently current session peer.");
             var first = await RequireMessagingFreshnessAsync(current, fresh, peer, source, held, ct).ConfigureAwait(false);
             OwnedInitialMessagingSeed.RequireFreshScope(scope, fresh.Proof, peer, first);
-            using var opened = await SqliteDeepIdV2AccountGeneration.OpenOwnedMessagingUnderLeaseAsync(storage, sqlStatePath, current, scope, ct).ConfigureAwait(false);
+            using var opened = await OpenNativeMessagingUnderLeaseAsync(current, scope, held, ct).ConfigureAwait(false);
             if (payloadKind == OwnedMailboxPayloadKind.RouteReintroduction)
             {
                 if (resolved is null || !initialIntent.IsEmpty) throw new CryptographicException("Re-introduction requires independent current publication custody.");

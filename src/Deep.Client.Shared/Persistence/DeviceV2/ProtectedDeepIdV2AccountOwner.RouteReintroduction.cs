@@ -18,8 +18,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     {
         using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
         using var current = await RequireCurrentUnderLeaseAsync(seconds, verifier, ct).ConfigureAwait(false);
-        using var opened = await SqliteDeepIdV2AccountGeneration.OpenOwnedMessagingUnderLeaseAsync(
-            storage, sqlStatePath, current, scope, ct).ConfigureAwait(false);
+        using var opened = await OpenNativeMessagingUnderLeaseAsync(current, scope, held, ct).ConfigureAwait(false);
         await RequireRouteReintroductionUnderLeaseAsync(current, held, opened, resolved, source,
             ReadOnlyMemory<byte>.Empty, ct).ConfigureAwait(false);
     }

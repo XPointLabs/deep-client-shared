@@ -37,7 +37,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
     {
         held.RequireOwner(lease); RequireRetainedStoreOwnScope(scope, own);
-        using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, ct).ConfigureAwait(false);
+        using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, held, ct).ConfigureAwait(false);
         await ResumeStoppedControlWorkUnderLeaseAsync(current, held, opened, scope, operation, verifier, own, source, ct).ConfigureAwait(false);
         await RequireControlWorkNotStoppedUnderLeaseAsync(scope, operation, held, ct).ConfigureAwait(false);
         var deadline = await ReadMailboxApplicationRetryDeadlineUnderLeaseAsync(current, held, opened,

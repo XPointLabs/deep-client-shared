@@ -13,13 +13,14 @@ internal sealed class Did2MessagingDurableCustody(Did2MessagingSessionScope scop
     internal async Task<Did2MessagingFloor> ReconcileAsync(CancellationToken ct)
     {
         using var timing = ClientPersistenceTiming.Measure(ClientPersistencePhase.NativeReconcile);
-        var protectedFloor = await checkpoint.ReadAsync(ct).ConfigureAwait(false);
+        var protectedFloor = await ReadCurrentFloorAsync(ct).ConfigureAwait(false);
         ct.ThrowIfCancellationRequested();
-        var sqlTip = sql.VerifyTip();
+        var sqlTip = protectedFloor.Phase == 1 ? sql.VerifyOrdinaryState() : sql.VerifyTip();
         if (protectedFloor.Phase == 1)
         {
             RequireSame(protectedFloor, sqlTip);
             await checkpoint.EraseStableOrphansAsync(protectedFloor, ct).ConfigureAwait(false);
+            RequireSame(protectedFloor, await ReadCurrentFloorAsync(ct).ConfigureAwait(false));
             return protectedFloor;
         }
         if (protectedFloor.Phase == 3)
@@ -29,9 +30,10 @@ internal sealed class Did2MessagingDurableCustody(Did2MessagingSessionScope scop
             RequireSame(protectedFloor.Stable(scope), sqlTip);
             var bytes = protectedFloor.Exact.ToArray(); bytes[1] = 2;
             var pending = Did2MessagingFloor.Decode(bytes, scope);
-            return await checkpoint.FinishVerifiedSqlCommitAsync(pending, ct).ConfigureAwait(false);
+            return await FinishCurrentSqlAsync(pending, ct).ConfigureAwait(false);
         }
         using var owned = await checkpoint.ReadPendingAsync(protectedFloor, ct).ConfigureAwait(false);
+        RequireSame(protectedFloor, await ReadCurrentFloorAsync(ct).ConfigureAwait(false));
         using var mutation = owned.Use(bytes => OwnedDid2MessagingMutation.RecoverProtectedPending(scope, protectedFloor, bytes));
         var expected = mutation.Successor.Cleanup(scope).Stable(scope);
         if (Did2MessagingSessionScope.Fixed(sqlTip.Exact.Span, mutation.Predecessor.Exact.Span))
@@ -39,7 +41,7 @@ internal sealed class Did2MessagingDurableCustody(Did2MessagingSessionScope scop
             ct.ThrowIfCancellationRequested(); sql.Append(mutation); RequireSame(expected, sql.VerifyTip());
         }
         else RequireSame(expected, sqlTip);
-        return await checkpoint.FinishVerifiedSqlCommitAsync(mutation.Successor, ct).ConfigureAwait(false);
+        return await FinishCurrentSqlAsync(mutation.Successor, ct).ConfigureAwait(false);
     }
 
     internal async Task<Did2MessagingFloor> CommitOwnedAsync(OwnedDid2MessagingMutation mutation, CancellationToken ct)
@@ -56,14 +58,15 @@ internal sealed class Did2MessagingDurableCustody(Did2MessagingSessionScope scop
         RequireSame(stable, mutation.Predecessor);
         sql.RequireAppendCapacity(stable);
         await checkpoint.StageAsync(stable, mutation.Successor, mutation.Exact, ct).ConfigureAwait(false);
+        RequireSame(mutation.Successor, await ReadCurrentFloorAsync(ct).ConfigureAwait(false));
 #if DEEP_TEST_INTERNALS
         if (mutation.Kind is 2 or 5) await Did2MessagingCommitTestHooks.HitAsync(Did2MessagingCommitFailpoint.AfterPending).ConfigureAwait(false);
 #endif
-        ct.ThrowIfCancellationRequested(); sql.Append(mutation); RequireSame(expected, sql.VerifyTip());
+        ct.ThrowIfCancellationRequested(); sql.Append(mutation); RequireSame(expected, sql.VerifyOrdinaryState());
 #if DEEP_TEST_INTERNALS
         if (mutation.Kind is 2 or 5) await Did2MessagingCommitTestHooks.HitAsync(Did2MessagingCommitFailpoint.AfterSql).ConfigureAwait(false);
 #endif
-        var completed = await checkpoint.FinishVerifiedSqlCommitAsync(mutation.Successor, ct).ConfigureAwait(false);
+        var completed = await FinishCurrentSqlAsync(mutation.Successor, ct).ConfigureAwait(false);
 #if DEEP_TEST_INTERNALS
         if (mutation.Kind is 2 or 5) await Did2MessagingCommitTestHooks.HitAsync(Did2MessagingCommitFailpoint.AfterStable).ConfigureAwait(false);
 #endif
@@ -81,8 +84,9 @@ internal sealed class Did2MessagingDurableCustody(Did2MessagingSessionScope scop
         if (Did2MessagingSessionScope.Fixed(stable.Exact.Span, expected.Exact.Span)) return stable;
         RequireSame(stable, mutation.Predecessor);
         await checkpoint.StageAsync(stable, mutation.Successor, mutation.Exact, ct).ConfigureAwait(false);
+        RequireSame(mutation.Successor, await ReadCurrentFloorAsync(ct).ConfigureAwait(false));
         sql.Append(mutation); RequireSame(expected, sql.VerifyTip());
-        return await checkpoint.FinishVerifiedSqlCommitAsync(mutation.Successor, ct).ConfigureAwait(false);
+        return await FinishCurrentSqlAsync(mutation.Successor, ct).ConfigureAwait(false);
     }
 
     internal async Task<Did2InitialStateTransfer> VerifyInitialTransferAsync(CancellationToken ct)
@@ -102,8 +106,9 @@ internal sealed class Did2MessagingDurableCustody(Did2MessagingSessionScope scop
         sql.RequireAppendCapacity(stable);
         var expected = mutation.Successor.Cleanup(scope).Stable(scope);
         await checkpoint.StageAsync(stable, mutation.Successor, mutation.Exact, ct).ConfigureAwait(false);
+        RequireSame(mutation.Successor, await ReadCurrentFloorAsync(ct).ConfigureAwait(false));
         ct.ThrowIfCancellationRequested(); sql.Append(mutation); RequireSame(expected, sql.VerifyTip());
-        _ = await checkpoint.FinishVerifiedSqlCommitAsync(mutation.Successor, ct).ConfigureAwait(false);
+        _ = await FinishCurrentSqlAsync(mutation.Successor, ct).ConfigureAwait(false);
     }
 
     internal async Task<OwnedDeepSecret> ReadActiveStateAsync(CancellationToken ct)
@@ -111,6 +116,21 @@ internal sealed class Did2MessagingDurableCustody(Did2MessagingSessionScope scop
         var stable = await ReconcileAsync(ct).ConfigureAwait(false);
         if (stable.Status != 1) throw new InvalidOperationException("Ordinary DID2 messaging is blocked until verified initial-key retirement.");
         ct.ThrowIfCancellationRequested(); return sql.ReadVerifiedLatest(stable);
+    }
+
+    internal async Task<Did2MessagingFloor> ReadCurrentFloorAsync(CancellationToken ct)
+    {
+        var roots = await checkpoint.ReadRootsAsync(sql, ct).ConfigureAwait(false);
+        sql.RequireActualHistory(roots.History);
+        return roots.Floor;
+    }
+
+    private async Task<Did2MessagingFloor> FinishCurrentSqlAsync(Did2MessagingFloor pending, CancellationToken ct)
+    {
+        _ = await ReadCurrentFloorAsync(ct).ConfigureAwait(false);
+        var completed = await checkpoint.FinishVerifiedSqlCommitAsync(pending, ct).ConfigureAwait(false);
+        RequireSame(completed, await ReadCurrentFloorAsync(ct).ConfigureAwait(false));
+        return completed;
     }
     private static void RequireSame(Did2MessagingFloor expected, Did2MessagingFloor actual)
     {

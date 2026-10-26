@@ -10,7 +10,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     // A projection of already authenticated custody, never admission to a new
     // send, receive, materialization or ACK. Readers cannot initialize sessions.
     private async Task<OwnedDid2MessagingStorage> OpenLocalHistoryUnderLeaseAsync(
-        VerifiedDeepIdV2CurrentAccount current, Did2MessagingSessionScope scope, CancellationToken ct)
+        VerifiedDeepIdV2CurrentAccount current, Did2MessagingSessionScope scope, HeldDeepIdV2AccountLease held, CancellationToken ct)
     {
         var instance = await SqliteDeepIdV2AccountGeneration.ReadAccountInstanceUnderLeaseAsync(
             storage, networkId, current.AccountId, ct).ConfigureAwait(false);
@@ -22,6 +22,10 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             if (index < 0 || catalog.Phase(index) != 2)
                 throw new CryptographicException("Local history requires an exact initialized owned session.");
             _ = await owner.ReadPeerCredentialAsync(scope, ct).ConfigureAwait(false);
+            // Unmapped application projections/history retain FULL native
+            // semantics. App authentication alone is not native payload custody.
+            if (!nativeAdmissionInProgress)
+                _ = await EnsureNativeArchiveAdmissionUnderLeaseAsync(current, scope, held, ct).ConfigureAwait(false);
             var opened = await SqliteDeepIdV2AccountGeneration.OpenOwnedMessagingUnderLeaseAsync(
                 storage, sqlStatePath, current, scope, ct).ConfigureAwait(false);
             try
@@ -58,7 +62,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 if (conversationId is not null && !string.Equals(conversationId,
                         Convert.ToHexString(scope.Conversation), StringComparison.Ordinal) ||
                     peerAccounts is not null && !peerAccounts.Contains(Convert.ToHexString(scope.RemoteAccount))) continue;
-                using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, ct).ConfigureAwait(false);
+                using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, held, ct).ConfigureAwait(false);
                 var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
                 if (floor.Status != 1)
                     throw new InvalidDataException("An inactive or latched session grants no local history.");

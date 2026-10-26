@@ -2,7 +2,12 @@
 
 Implementation mapping for accepted design
 [DR-0175](../../../docs/survival-program/decisions/DR-0175-active-native-state-and-archive-validation.md).
-Runtime implementation and connected qualification remain pending. The bounded
+The connected candidate has focused correctness evidence; full source and
+connected acceptance remain unqualified. Matched100/1,000/10,000-row native
+microcost is SLOWER than the full verifier, so performance acceptance is rejected.
+It is not a one-second delivery solution or authorization for live rollout. See
+the [correctness/cost checkpoint](../testing/dr0175-active-native-correctness-and-cost-2026-10-26.md)
+and [lower-bound analysis](native-active-state-lower-bound-2026-10-26.md). The bounded
 actual-provider overflow proof passed eight cases and passed independent review;
 root accepted that bounded proof. It does not activate the cheaper verifier. See the
 [provider checkpoint](../testing/dr0175-native-overflow-provider-proof-2026-10-26.md).
@@ -183,23 +188,25 @@ fresh required-record/root readback, as `ReadOriginalPeerStoreRouteAsync` alread
 demonstrates. No private positive cache or live permission crosses the callback.
 An existing SQLite page cache is not an actual-custody check.
 
-There is currently no explicit native cold-audit lifecycle: helper openers serve
-both startup and later work. Add one to the existing
+The native cold-audit lifecycle belongs to the existing
 `ProtectedDeepIdV2AccountOwner`, which `DeepIdV2AccountService` constructs and owns
-once. The first successful current-account read under its actual account lease
-must audit the protected catalog and all initialized session archives before
-ordinary commands are enabled. Integrate this at the existing
-`ReadCurrentUnderLeaseAsync`/`RequireCurrentUnderLeaseAsync` shared current-account
-path; do not rely on callers having invoked `GetCurrentAsync` beforehand. The
+once. The private `OpenNativeMessagingUnderLeaseAsync(current,scope,held,ct)`
+performs exact pending-plan recovery before the first native messaging admission,
+then audits the protected catalog and all initialized session archives before
+using the active verifier. Account metadata reads retain their previous checks;
+they grant no native archive permission. No80-call current-account token rewrite
+is needed. The
 completed-audit marker is only scheduling state for that owner and exact account
 instance, never verification permission: each later helper still reads actual
 keys/floors/complete compact map and performs the required physical page check.
 Owner recreation/process restart or account-instance change starts unaudited;
 partial failure/cancellation never marks completion. Explicit archive audit,
 producer/checkpoint admission and recovery that consumes archives remain full
-semantic verifiers. `OpenRegisteredMessagingUnderLeaseAsync`,
-`OpenOwnedMessagingUnderLeaseAsync` and ordinary reconciliation/selection are hot
-helper opens and must not each restart the full semantic lifecycle audit.
+semantic verifiers. Lower `OpenRegisteredMessagingUnderLeaseAsync` and
+`OpenOwnedMessagingUnderLeaseAsync` remain full by default; the private audited
+owner alone calls `OpenOrdinaryMessagingUnderLeaseAsync`. A helper open does not
+restart the lifecycle audit. Reentry during exact compaction recovery forces
+the lower full opener, never recursive audit or active verification.
 
 Actual CLI lifetime is suitable for this scheduling scope. `CliSession.GetProfile`
 uses `profile ??= WindowsProfile.Open(binding)`; that profile constructs one
@@ -214,10 +221,9 @@ Standalone `Program.RunAsync` without a session opens/disposes a profile per
 command and is intentionally cold: it performs the full audit each invocation
 and cannot be presented as warm-online performance.
 
-The current Accounts service has no disposal API. Before integrating retained
-audit scheduling, provide a minimal explicit runtime-close hook on this existing
-owner/service and invoke it from profile disposal after command/maintenance
-drain, before storage disposal. It marks the scheduling owner closed and clears
+`DeepIdV2AccountService.Dispose` closes only native runtime scheduling; profile
+disposal invokes it after command/maintenance drain and before storage disposal.
+It marks the scheduling owner closed and clears
 the exact-instance marker; no new private buffer, SQL connection or audit Task
 survives a command. A later use still fails on actual disposed provider reads;
 an audited flag can never bypass those checks. This is lifecycle wiring on the
@@ -287,7 +293,7 @@ retirement frontier; neither exists today.
   native checks, storage loads and CPU separately. Cold/full audit still reads
   the complete archive. No connected latency claim before actual measurement.
 
-## Next source slice map — not yet implemented
+## Connected source slice — qualification pending
 
 ### Applicability to retained59: native prefix maintenance is mandatory
 
@@ -321,9 +327,18 @@ The integrated slice MUST wire existing prefix ownership into ordinary sessions:
   maintenance is authorized from an unresolved phase or a parsed count alone.
   Keep current hard append/backpressure checks. Large already-retained suffixes
   catch up one bounded batch at a time; no startup unbounded compaction loop.
-- Connect the trigger to real `RunMessagingUnderLeaseAsync` send/receive and the
-  direct/group authoring capacity path where needed before native capacity is
-  consumed, not an unused maintenance API. Store/ACK originals remain exact:
+- The real `RunMessagingUnderLeaseAsync` direct/group send/receive transition
+  owns the trigger after authenticated fresh-operation classification and all
+  existing early admission checks. Exact replay never stages maintenance.
+  Draft authoring consumes no native journal capacity and does not duplicate
+  the trigger. At threshold only, pure `PrepareSend`/`PrepareReceive` validates
+  cryptographic input without a durable authority callback; preview state and
+  prepared outputs are disposed before maintenance. Reopen actual key/history/
+  source after callbacks and prepare again. The preview omits the capacity hint
+  that would deadlock an old full suffix; normal context/append limits remain.
+  Completion of an already-owned prefix consumes this transition's one-batch
+  scheduling budget, including recovery from an earlier current-account read.
+  Store/ACK originals remain exact:
   native prefix compaction only removes journal-prefix rows, not event payloads,
   dedup commitments, unknown requests, floors or receipt obligations.
 
@@ -345,7 +360,7 @@ and the runtime call graph.
 | `Did2MessagingSqlJournal.IncomingHistory.cs`, `.BraidControl.cs` | Do not silently move live iterators to a weaker verifier. Keep outgoing/Braid full paths. Incoming route selection needs complete-map proof, exact selected set/count and selected payload validation before releasing data. |
 | `Did2MessagingDurableCustody.cs` | Stable ordinary reconciliation can use the proved active path. Pending/cleanup recovery and interrupted-compaction owners retain explicit full required payload recovery; never cache returned stable success. |
 | `ProtectedDeepIdV2AccountOwner.HistoricalPeerRoutes.cs`, `.PeerRouteHistory.cs`, `.OwnRouteHistory.cs`, and ACK/Store/history callers | Join all selected records to captured tuples. Preserve callback readbacks, fixed Hello/Init, known ContactAccept selector, route-fault semantics and full outbound/Braid exclusions. An unmapped consumer stays on full verification. |
-| `ProtectedDeepIdV2AccountOwner.cs` / `DeepIdV2AccountService` lifecycle | One actual runtime-owner audit marker, exact account instance and explicit close, under the existing serial/account lease. Finish exact compaction recovery before cold audit where required; audit must not reject a valid intermediate plan merely because its root adoption has not completed. No audit re-entry through the ordinary opener. |
+| `ProtectedDeepIdV2AccountOwner.NativeMaintenance.cs` / `DeepIdV2AccountService` lifecycle | Private native opener owns one runtime audit marker, exact account instance and explicit close under the existing account lease. Finish exact pending recovery before cold audit and warm reopening. Lower source/initial/compaction openers stay full; audit/recovery do not reenter the active opener. Account metadata paths are unchanged. |
 | Existing compaction/checkpoint producer/recovery files | Keep full producer/readback checks, same root formats and exact stored plans. No migration/reset or recreation from SQL. |
 
 For operations/batches, the closed snapshot captures at most the existing32
@@ -360,6 +375,47 @@ Route/history consumers with more selected data must use a closed full scan or
 bounded fully proved batches; do not add a new retained-history hard limit or
 release a partial stream as complete absence. Existing full paths remain the
 safe fallback until each consumer has that proof.
+
+### Actual callback readback and source review checklist
+
+`Did2MessagingProtectedCheckpoint.ReadRootsAsync` reads actual floor/history in
+one owned batch. For active runtime journals that same batch also authenticates
+actual account registration and session catalog against their opening bindings;
+only32-byte hashes are retained, never keys/plaintext or a successful provider
+permission. Every batch still invokes current provider/protector policy. Custody
+rejoins these roots before append and after storage callbacks. After final
+freshness/time/source callbacks, Dpe2 performs a closed actual root join and full
+selected-row check before releasing its result or diagnostic observation.
+
+Ordinary operation, event-hash, bounded batch, transition context and current-TRS
+reads use active proof; selected tuples come from the complete independently
+hashed map plus journal-rooted suffix. Prefix, working-event and selected-row
+queries read actual table columns with `NOT INDEXED`; a covered secondary column
+cannot impersonate a changed table field at equal cardinality. A separate
+table-btree count rejects hidden extra events. Prefix ordering may require a
+SQLite sort, whose memory/CPU cost is retained in measurements; bounded managed
+tuple storage does not claim constant SQLite sorting memory. Actual selected
+type/length bounds precede BLOB allocation, including current TRS1..2MiB. Full
+producer/checkpoint, pending recovery, initial Hello/Init, arbitrary outgoing,
+Braid peer-epoch/control, incoming live iterators and HistoricalRouteRead remain
+full. Unmapped `OpenLocalHistoryUnderLeaseAsync` consumers (direct message,
+attachment/receipt projections, original recovery and group history) explicitly
+use the lower FULL opener after owner cold admission. An independently valid
+application projection cannot substitute for selected native payload custody.
+The remaining direct lower production openers are initial activation in
+`ProtectedDeepIdV2AccountOwner.Messaging.cs`, compaction producer/recovery and the
+private cold/recovery helper itself. They do not enable the active algorithm.
+
+Existing `Deep-Client-Persistence` EventId2 reports closed native operation counts
+only after outer Dpe2 private/lease disposal: opens, cipher scans, metadata rows,
+suffix rows, payload verification calls, audits, completed maintenance batches,
+last authenticated working count and archive count. These are runtime counts,
+not test-only noops, and carry no paths/IDs/payload. Verification-call counts do
+not claim to count every physical page or payload allocation. The structural
+100/1,000/10,000 matched microcost fixtures report process CPU/wall separately,
+three alternating repeats, same provider/file/root/selector/handle; synthetic
+test roots never enter protected custody. Genuine account-owned threshold tests
+separately prove automatic maintenance, exact originals and interrupted retry.
 
 ### Provider overflow-page proof — source complete, runtime still disabled
 

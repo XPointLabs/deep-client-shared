@@ -35,6 +35,21 @@ internal static partial class SqliteDeepIdV2AccountGeneration
     internal static async Task<OwnedDid2MessagingStorage> OpenOwnedMessagingUnderLeaseAsync(
         IDeepSecureStorage storage, string accountPath, VerifiedDeepIdV2CurrentAccount current,
         Did2MessagingSessionScope scope, CancellationToken ct)
+        => await OpenOwnedMessagingCoreAsync(storage, accountPath, current, scope, NativeArchiveAlgorithm.Full, ct).ConfigureAwait(false);
+
+    // The private account-runtime wrapper owns cold admission. This named
+    // algorithm still authenticates all current roots, pages and compact rows;
+    // it accepts no caller-supplied verification/skip/currentness flag.
+    internal static async Task<OwnedDid2MessagingStorage> OpenOrdinaryMessagingUnderLeaseAsync(
+        IDeepSecureStorage storage, string accountPath, VerifiedDeepIdV2CurrentAccount current,
+        Did2MessagingSessionScope scope, CancellationToken ct)
+        => await OpenOwnedMessagingCoreAsync(storage, accountPath, current, scope, NativeArchiveAlgorithm.Active, ct).ConfigureAwait(false);
+
+    private enum NativeArchiveAlgorithm { Full, Active }
+
+    private static async Task<OwnedDid2MessagingStorage> OpenOwnedMessagingCoreAsync(
+        IDeepSecureStorage storage, string accountPath, VerifiedDeepIdV2CurrentAccount current,
+        Did2MessagingSessionScope scope, NativeArchiveAlgorithm algorithm, CancellationToken ct)
     {
         var identity = current.Verified.PublicEvidence.Binding.Identity;
         var certificate = identity.ActiveDevices.Single().Certificate;
@@ -54,12 +69,15 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         }
         var protectedFloor = await new Did2MessagingProtectedCheckpoint(storage, scope).ReadAsync(ct).ConfigureAwait(false);
         await VerifySource(protectedFloor.Status != 0).ConfigureAwait(false);
-        var opened = await OpenRegisteredMessagingUnderLeaseAsync(storage, accountPath,
-            scope.Network.ToArray(), current.AccountId, scope, ct).ConfigureAwait(false);
+        var opened = await OpenRegisteredMessagingCoreAsync(storage, accountPath,
+            scope.Network.ToArray(), current.AccountId, scope, algorithm, ct).ConfigureAwait(false);
         try
         {
             var stable = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
             await VerifySource(stable.Status != 0).ConfigureAwait(false);
+            var readback = await opened.Custody.ReadCurrentFloorAsync(ct).ConfigureAwait(false);
+            if (!Did2MessagingSessionScope.Fixed(stable.Exact.Span, readback.Exact.Span))
+                throw new CryptographicException("Native protected roots changed during source verification.");
             return opened;
         }
         catch { opened.Dispose(); throw; }
@@ -70,6 +88,11 @@ internal static partial class SqliteDeepIdV2AccountGeneration
     internal static async Task<OwnedDid2MessagingStorage> OpenRegisteredMessagingUnderLeaseAsync(
         IDeepSecureStorage storage, string accountPath, ReadOnlyMemory<byte> network,
         ReadOnlyMemory<byte> account, Did2MessagingSessionScope scope, CancellationToken ct)
+        => await OpenRegisteredMessagingCoreAsync(storage, accountPath, network, account, scope, NativeArchiveAlgorithm.Full, ct).ConfigureAwait(false);
+
+    private static async Task<OwnedDid2MessagingStorage> OpenRegisteredMessagingCoreAsync(
+        IDeepSecureStorage storage, string accountPath, ReadOnlyMemory<byte> network,
+        ReadOnlyMemory<byte> account, Did2MessagingSessionScope scope, NativeArchiveAlgorithm algorithm, CancellationToken ct)
     {
         // One bounded actual inventory owns registration selection. Only pure
         // decoders/path checks run before opening SQL; no authority callback or
@@ -114,6 +137,8 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         var floor = floorBytes.Use(bytes => Did2MessagingFloor.Decode(bytes, scope));
         var historyBytes = inventory[3] ?? throw new InvalidDataException("Mandatory messaging history checkpoint is absent; no initialization is permitted.");
         var history = historyBytes.Use(bytes => Did2MessagingHistoryCheckpoint.Decode(bytes, scope));
+        var actualRegistrationHash = registration.Use(bytes => SHA256.HashData(bytes));
+        var actualCatalogHash = catalogBytes.Use(bytes => SHA256.HashData(bytes));
         inventory.Dispose(); // No raw inventory is retained over SQL/storage callbacks.
         if (phase == 1 && !Did2MessagingSessionScope.Fixed(floor.Exact.Span, Did2MessagingFloor.Empty(scope).Exact.Span))
             throw new CryptographicException("Uninitialized DID2 messaging registration has a nonempty floor.");
@@ -124,7 +149,10 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         SqliteConnection? connection = key.Use(bytes => OpenMessagingConnection(path, bytes, create: phase == 1));
         try
         {
-            var sql = new Did2MessagingSqlJournal(connection, scope, history);
+            var sql = algorithm == NativeArchiveAlgorithm.Active && phase == 2 ? Did2MessagingSqlJournal.ForOrdinaryRuntime(connection, scope, history) :
+                new Did2MessagingSqlJournal(connection, scope, history);
+            if (algorithm == NativeArchiveAlgorithm.Active && phase == 2)
+                sql.BindOpenRegistration(actualRegistrationHash, actualCatalogHash);
             if (phase == 1)
             {
                 sql.InitializeOrVerifyRegisteredEmpty(floor);
@@ -207,6 +235,9 @@ internal sealed class OwnedDid2MessagingStorage : IDisposable
     internal Did2MessagingProtectedCheckpoint Checkpoint { get { RequireLive(); return checkpoint; } }
     internal Did2MessagingSqlJournal Sql { get { RequireLive(); return sql; } }
     internal Did2MessagingDurableCustody Custody { get { RequireLive(); return custody; } }
+    // Scheduling budget only. It never supplies a floor, verification result,
+    // skip permission or mutable-state loan to the ordinary verifier.
+    internal bool RecoveredLocalCompaction { get; set; }
     private void RequireLive() => ObjectDisposedException.ThrowIf(connection is null, this);
     public void Dispose() => Interlocked.Exchange(ref connection, null)?.Dispose();
 }

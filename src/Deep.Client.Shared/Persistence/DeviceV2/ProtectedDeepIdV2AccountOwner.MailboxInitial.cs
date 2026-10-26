@@ -103,7 +103,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             throw new CryptographicException("Initial ACK has no independently refreshed owned endpoint pair.");
         var first = await RequireMessagingFreshnessAsync(current, selected.Pair.Own, selected.Pair.Peer, source, held, ct).ConfigureAwait(false);
         OwnedInitialMessagingSeed.RequireFreshScope(scope, selected.Pair.Own.Proof, selected.Pair.Peer, first);
-        using var opened = await SqliteDeepIdV2AccountGeneration.OpenOwnedMessagingUnderLeaseAsync(storage, sqlStatePath, current, scope, ct).ConfigureAwait(false);
+        using var opened = await OpenNativeMessagingUnderLeaseAsync(current, scope, held, ct).ConfigureAwait(false);
         var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
         if (floor.Status != 1) throw new CryptographicException("Initial ACK requires completed source retirement and active mutable custody.");
         await MaterializeInitialMessagingUnderLeaseAsync(current, opened, selected.Pair.Own, selected.Pair.Peer, source, held, ct).ConfigureAwait(false);

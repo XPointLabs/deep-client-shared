@@ -16,6 +16,27 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
     Did2MessagingHistoryCheckpoint history)
 {
     private readonly Did2MessagingHistoryCheckpoint historyRoot = history ?? throw new ArgumentNullException(nameof(history));
+    private bool activeHistory;
+    private byte[]? registrationHash, catalogHash;
+
+    internal bool RequiresOpenRegistration => registrationHash is not null;
+    internal void BindOpenRegistration(byte[] registration, byte[] catalog)
+    { registrationHash = registration; catalogHash = catalog; }
+
+    internal void RequireActualRegistration(OwnedDeepSecret? registration, OwnedDeepSecret? catalog)
+    {
+        if (registrationHash is null) return; // Existing lower/full source owner.
+        if (registration is null || catalog is null ||
+            !registration.Use(bytes => Fixed(SHA256.HashData(bytes), registrationHash)) ||
+            !catalog.Use(bytes => Fixed(SHA256.HashData(bytes), catalogHash!)))
+            throw new CryptographicException("Actual native key registration/catalog changed after opening.");
+    }
+
+    // Only the audited account-runtime opener chooses the ordinary algorithm;
+    // lower source/initial/compaction openers retain full archive semantics.
+    internal static Did2MessagingSqlJournal ForOrdinaryRuntime(SqliteConnection connection,
+        Did2MessagingSessionScope scope, Did2MessagingHistoryCheckpoint history)
+        => new(connection, scope, history) { activeHistory = true };
     internal const int ApplicationId = 0x444d5332, SchemaVersion = 5, MaximumEntries = 4096;
     private readonly SqliteConnection connection = connection ?? throw new ArgumentNullException(nameof(connection));
     private readonly Did2MessagingSessionScope scope = scope ?? throw new ArgumentNullException(nameof(scope));
@@ -67,6 +88,13 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
     }
 
     internal Did2MessagingFloor VerifyTip() => VerifyTipInTransaction(null);
+    internal Did2MessagingFloor VerifyOrdinaryState() => VerifyOrdinaryTip();
+    internal void RequireActualHistory(Did2MessagingHistoryCheckpoint actual)
+    {
+        _ = Did2MessagingHistoryCheckpoint.Decode(actual.Exact.Span, scope);
+        if (!Fixed(actual.Exact.Span, historyRoot.Exact.Span))
+            throw new CryptographicException("Actual native history root changed after opening.");
+    }
 
     private Did2MessagingFloor VerifyTipInTransaction(SqliteTransaction? tx)
         => VerifyTipInTransaction(tx, out _);
@@ -78,6 +106,7 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
         VerifyHistoryPrefix(tx);
         headers = ReadJournal(out var tip, tx);
         VerifyRows(headers, tip, tx);
+        NativeWork.Inventory((ulong)headers.Count, historyRoot.HistoryCount);
         return tip;
     }
 
@@ -118,7 +147,8 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
             throw new InvalidDataException("DID2 messaging mutation scope/capacity differs.");
         RequireCipherPolicy(); ValidateSchema();
         using var tx = connection.BeginTransaction();
-        VerifyHistoryPrefix(tx);
+        if (activeHistory && mutation.Kind == 2) { RequireAllCipherPages(tx); VerifyActiveHistory(tx, null); }
+        else VerifyHistoryPrefix(tx);
         var priorHeaders = ReadJournal(out var prior, tx); VerifyRows(priorHeaders, prior, tx);
         if (priorHeaders.Count >= MaximumEntries)
             throw new InvalidOperationException("DID2 messaging working journal requires owned prefix checkpointing.");
@@ -167,15 +197,29 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
         _ = Did2MessagingFloor.Decode(protectedStable.Exact.Span, scope);
         if (protectedStable.Phase != 1 || protectedStable.Ordinal == 0 || protectedStable.Status == 2)
             throw new InvalidDataException("DID2 messaging floor has no releasable current ratchet.");
-        RequireSame(protectedStable, VerifyTip());
-        return ReadLatestStateInSnapshot(null);
+        using var tx = connection.BeginTransaction(deferred: true);
+        RequireSame(protectedStable, VerifyOrdinaryTip(tx));
+#if DEEP_TEST_INTERNALS
+        Did2ActiveReadTestHooks.AfterProof(connection, tx);
+#endif
+        return ReadLatestStateInSnapshot(tx, protectedStable);
     }
 
-    private OwnedDeepSecret ReadLatestStateInSnapshot(SqliteTransaction? tx)
+    private OwnedDeepSecret ReadLatestStateInSnapshot(SqliteTransaction? tx, Did2MessagingFloor expected)
     {
-        using var command = Command("SELECT exact_state FROM ratchet WHERE singleton=1;", tx);
-        var bytes = (byte[])(command.ExecuteScalar() ?? throw new InvalidDataException("DID2 live ratchet is absent."));
-        try { return new(bytes); } finally { CryptographicOperations.ZeroMemory(bytes); }
+        using var command = Command("SELECT exact_state,typeof(exact_state),length(exact_state),singleton FROM ratchet;", tx);
+        using var row = command.ExecuteReader();
+        if (!row.Read() || row.GetInt64(3) != 1 || row.GetString(1) != "blob" || row.GetInt64(2) is < 1 or > 2097152)
+            throw new InvalidDataException("DID2 live ratchet is absent or has a hostile storage shape.");
+        var bytes = row.GetFieldValue<byte[]>(0);
+        try
+        {
+            if (!Fixed(SHA256.HashData(bytes), expected.RatchetHash))
+                throw new CryptographicException("Selected ratchet differs from its independent floor.");
+            if (row.Read()) throw new InvalidDataException("Selected current ratchet is not unique.");
+            return new(bytes);
+        }
+        finally { CryptographicOperations.ZeroMemory(bytes); }
     }
 
     // Includes retained prefix history, not just the working journal. Fixed
@@ -204,6 +248,12 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
         if (protectedStable.Phase != 1 || protectedStable.Status != 1)
             throw new InvalidDataException("Operation read-back requires an active stable messaging floor.");
         using var tx = connection.BeginTransaction(deferred: true);
+        if (activeHistory)
+        {
+            using var selection = new ActiveSelection([operation.ToArray()]);
+            RequireSame(protectedStable, VerifyActiveTip(tx, selection, out _));
+            return ReadCapturedOrdinaryEvent(selection[0], tx);
+        }
         RequireSame(protectedStable, VerifyTipInTransaction(tx));
         using var command = Command("SELECT direction,length(envelope),envelope,length(plaintext),plaintext,metadata,ordinal FROM events WHERE operation=$op;", tx);
         command.Parameters.AddWithValue("$op", operation.ToArray()); using var row = command.ExecuteReader();
@@ -243,6 +293,12 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
     {
         ProtectedDph2PreClaimJournal.RequireIntent(eventHash);
         using var tx = connection.BeginTransaction(deferred: true);
+        if (activeHistory)
+        {
+            using var selection = new ActiveSelection([eventHash.ToArray()], eventHash: true);
+            RequireSame(protectedStable, VerifyActiveTip(tx, selection, out _));
+            return ReadCapturedOrdinaryEvent(selection[0], tx);
+        }
         RequireSame(protectedStable, VerifyTipInTransaction(tx));
         // Select and materialize the earliest exact native receive in one query.
         // There is no await, callback, mutation or verification-result cache
@@ -279,6 +335,22 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
         // snapshot. No await, callback, mutation or cached verification result
         // can intervene. Later commit/read-back still authenticates actual SQL.
         using var tx = connection.BeginTransaction(deferred: true);
+        if (activeHistory)
+        {
+            using var selection = new ActiveSelection([operation.ToArray()]);
+            RequireSame(protectedStable, VerifyActiveTip(tx, selection, out var activeHeaders));
+            using var captured = ReadCapturedOrdinaryEvent(selection[0], tx);
+            var activeReplay = ExactDpe2ReceiveReplayDisposition.Fresh;
+            if (captured is not null)
+            {
+                if (receivedEnvelope.IsEmpty || captured.Direction != 2 || !Fixed(captured.ExactEnvelope, receivedEnvelope))
+                    throw new CryptographicException("DID2 captured operation does not authorize this exact receive replay.");
+                activeReplay = ExactDpe2ReceiveReplayDisposition.ExactReplay;
+            }
+            var activeContext = CreateVerifiedContextFromSnapshot(protectedStable, activeReplay, activeHeaders);
+            if (includeState) state = ReadLatestStateInSnapshot(tx, protectedStable);
+            return activeContext;
+        }
         RequireSame(protectedStable, VerifyTipInTransaction(tx, out var headers));
         using var command = Command("SELECT direction,length(envelope),envelope,length(plaintext),plaintext,metadata,ordinal FROM events WHERE operation=$op;", tx);
         command.Parameters.AddWithValue("$op", operation.ToArray());
@@ -293,7 +365,7 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
             replay = ExactDpe2ReceiveReplayDisposition.ExactReplay;
         }
         var context = CreateVerifiedContextFromSnapshot(protectedStable, replay, headers);
-        if (includeState) state = ReadLatestStateInSnapshot(tx);
+        if (includeState) state = ReadLatestStateInSnapshot(tx, protectedStable);
         return context;
     }
 
@@ -306,9 +378,9 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
     }
 
     private ExactDpe2DurableTransitionContext CreateVerifiedContextFromSnapshot(Did2MessagingFloor protectedStable,
-        ExactDpe2ReceiveReplayDisposition replay, List<byte[]> headers)
+        ExactDpe2ReceiveReplayDisposition replay, List<byte[]> headers, bool maintenancePreview = false)
     {
-        if (replay == ExactDpe2ReceiveReplayDisposition.Fresh && headers.Count >= MaximumEntries - 1)
+        if (!maintenancePreview && replay == ExactDpe2ReceiveReplayDisposition.Fresh && headers.Count >= MaximumEntries - 1)
             throw new InvalidOperationException("DID2 ordinary messaging requires verified journal checkpointing.");
         using var digest = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         digest.AppendData("Deep/STORE-V2/messaging-replay-retention"u8); digest.AppendData([0]);
@@ -354,14 +426,15 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
             if (!reader.Read() || reader.GetInt64(0) != 1 || !Fixed(reader.GetFieldValue<byte[]>(1), scope.Exact) || reader.Read())
                 throw new CryptographicException("DID2 SQL identity scope differs.");
         }
-        using (var latest = Command("SELECT singleton,exact_state FROM ratchet;", tx))
+        using (var latest = Command("SELECT singleton,exact_state,typeof(exact_state),length(exact_state) FROM ratchet;", tx))
         using (var reader = latest.ExecuteReader())
         {
             if (tip.Ordinal == 0 || tip.Status == 2)
             { if (reader.Read()) throw new CryptographicException("DID2 empty/latched SQL retains live ratchet keys."); }
             else
             {
-                if (!reader.Read() || reader.GetInt64(0) != 1) throw new InvalidDataException("DID2 SQL live ratchet is absent.");
+                if (!reader.Read() || reader.GetInt64(0) != 1 || reader.GetString(2) != "blob" || reader.GetInt64(3) is < 1 or > 2097152)
+                    throw new InvalidDataException("DID2 SQL live ratchet is absent or has a hostile storage shape.");
                 var bytes = reader.GetFieldValue<byte[]>(1);
                 try
                 {
@@ -377,11 +450,12 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
         }
         VerifyInitial(headers, tx);
         var count = 0;
-        using var events = Command("SELECT operation,ordinal,direction,envelope,plaintext,metadata,length(envelope),length(plaintext),length(metadata),typeof(operation),typeof(ordinal),typeof(direction),typeof(envelope),typeof(plaintext),typeof(metadata),length(operation) FROM events WHERE ordinal>$basis ORDER BY ordinal;", tx);
+        using var events = Command("SELECT operation,ordinal,direction,envelope,plaintext,metadata,length(envelope),length(plaintext),length(metadata),typeof(operation),typeof(ordinal),typeof(direction),typeof(envelope),typeof(plaintext),typeof(metadata),length(operation) FROM events NOT INDEXED WHERE ordinal>$basis ORDER BY ordinal;", tx);
         events.Parameters.AddWithValue("$basis", checked((long)historyRoot.Basis.Ordinal));
         using var eventReader = events.ExecuteReader();
         while (eventReader.Read())
         {
+            NativeWork.SuffixRow(); NativeWork.Payload();
             count++;
             // Check storage types before requesting converted values. SQLite
             // can return unchanged TEXT bytes through a BLOB accessor; byte

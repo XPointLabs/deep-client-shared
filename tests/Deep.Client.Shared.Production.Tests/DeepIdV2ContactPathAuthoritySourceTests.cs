@@ -2420,11 +2420,14 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             (DeepIdV2AccountService Account, DeepIdV2ContactPathAuthoritySource Source)
                 ReopenMessaging(Did2MessagingSessionScope scope)
             {
+                if (retainNativeRuntime && nativeRuntimes.TryGetValue(scope.IsInitiator, out var retained)) return retained;
                 var reopened = scope.IsInitiator ? ReopenAccount() : new DeepIdV2AccountService(peerStorage,
                     Path.Combine(directory, "peer"), Network, 1, new FrozenClock(DateTimeOffset.FromUnixTimeSeconds(1_000)),
                     DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess);
-                return (reopened, new DeepIdV2ContactPathAuthoritySource(bootstrap.GenesisPin, reopened,
+                var runtime = (reopened, new DeepIdV2ContactPathAuthoritySource(bootstrap.GenesisPin, reopened,
                     scope.IsInitiator ? proofs : peerProofs!, closure, scope.IsInitiator ? NetworkStore : peerNetworkStore!, this));
+                if (retainNativeRuntime) nativeRuntimes.Add(scope.IsInitiator, runtime);
+                return runtime;
             }
             refreshOwnedMessaging = async scope =>
             {
@@ -3191,11 +3194,14 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         public ValueTask<OnionMonotonicReading> ReadAsync(CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            var nativeClockCallback = afterNativeClockRead; afterNativeClockRead = null;
+            nativeClockCallback?.Invoke();
             return ValueTask.FromResult(new OnionMonotonicReading(Boot, checked(Sample + MailboxElapsedSeconds)));
         }
 
         public ValueTask DisposeAsync()
         {
+            DropNativeRuntimes();
             if (mailboxSqlBeforePreparation is not null) CryptographicOperations.ZeroMemory(mailboxSqlBeforePreparation);
             closure?.Dispose(); proofs?.Dispose(); peerProofs?.Dispose(); http?.Dispose(); pq.Dispose(); ((IDisposable)innerStorage).Dispose(); ((IDisposable)peerStorage).Dispose();
             foreach (var signer in witnesses.Concat(nodes).Append(root)) signer.Dispose();

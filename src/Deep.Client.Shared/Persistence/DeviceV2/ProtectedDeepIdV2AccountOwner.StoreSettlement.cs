@@ -29,7 +29,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
         await ResumeLocalCompactionUnderLeaseAsync(held, ct).ConfigureAwait(false);
         using var current = await RequireCurrentUnderLeaseAsync(unixSeconds, verifier, ct).ConfigureAwait(false);
-        using var opened = await OpenLocalHistoryUnderLeaseAsync(current, requestedScope, ct).ConfigureAwait(false);
+        using var opened = await OpenLocalHistoryUnderLeaseAsync(current, requestedScope, held, ct).ConfigureAwait(false);
         return await AdoptOriginalMailboxStoreReplyUnderLeaseAsync(current, held, opened, verifier, requestedScope,
             nativeOperation, selectedAttempt, initialIntent, untrustedReply, own, source, ct).ConfigureAwait(false);
     }

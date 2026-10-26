@@ -19,7 +19,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         ArgumentNullException.ThrowIfNull(scope);
         using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
         using var current = await RequireCurrentUnderLeaseAsync(trustedUnixSeconds, verifier, ct).ConfigureAwait(false);
-        using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, ct).ConfigureAwait(false);
+        using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, held, ct).ConfigureAwait(false);
         if ((await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false)).Status != 1)
             throw new InvalidDataException("An inactive session cannot expose application receipt work.");
         using var application = await SqliteDeepIdV2AccountGeneration.OpenApplicationUnderLeaseAsync(
@@ -34,7 +34,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         ArgumentNullException.ThrowIfNull(scope);
         using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
         using var current = await RequireCurrentUnderLeaseAsync(trustedUnixSeconds, verifier, ct).ConfigureAwait(false);
-        using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, ct).ConfigureAwait(false);
+        using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, held, ct).ConfigureAwait(false);
         if ((await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false)).Status != 1)
             throw new InvalidDataException("An inactive session cannot project attachment history.");
         using var application = await SqliteDeepIdV2AccountGeneration.OpenApplicationUnderLeaseAsync(storage, sqlStatePath, current, held, ct).ConfigureAwait(false);
@@ -51,7 +51,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         ArgumentNullException.ThrowIfNull(scope);
         using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
         using var current = await RequireCurrentUnderLeaseAsync(trustedUnixSeconds, verifier, ct).ConfigureAwait(false);
-        using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, ct).ConfigureAwait(false);
+        using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, held, ct).ConfigureAwait(false);
         var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
         if (floor.Status != 1) throw new InvalidDataException("A latched or unactivated session grants no application projection.");
         using var application = await SqliteDeepIdV2AccountGeneration.OpenApplicationUnderLeaseAsync(
@@ -87,12 +87,24 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         VerifiedDeepIdV2DirectoryFreshness peer, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct, bool routeControl = false)
     {
         ClientDeliveryEvents.Initialize(); // EventSource creation/observer admission precedes private custody.
+        var nativeWork = Did2MessagingSqlJournal.NativeWork.BeginOperation();
+        try
+        {
         var result = await RunMessagingUnderLeaseAsync(trustedUnixSeconds, verifier, scope, operation, input,
             send, own, peer, source, ct, routeControl).ConfigureAwait(false);
         // Final freshness passed and every private scope has been released.
         // No observer executes inside the guarded semantic transition.
         if (result.DeliveryObservation is { } observation) ClientDeliveryEvents.Publish(observation);
         return result;
+        }
+        finally
+        {
+            if (nativeWork is not null)
+            {
+                nativeWork.Dispose();
+                ClientPersistenceTiming.PublishNativeCounts(nativeWork);
+            }
+        }
     }
 
     private async Task<OwnedDid2MessagingPersistedEvent> RunMessagingUnderLeaseAsync(ulong trustedUnixSeconds,
@@ -106,6 +118,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         if (send) ProtectedDph2PreClaimJournal.RequireIntent(operation.Span);
         var exact = input.ToArray(); var op = operation.ToArray(); byte[] eventHash = [];
         OwnedDid2MessagingPersistedEvent? result = null;
+        OwnedDid2MessagingStorage? maintainedStorage = null;
         ParsedDmc2? senderEvent = null, stagedEvent = null;
         try
         {
@@ -140,10 +153,20 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             using var current = await RequireCurrentUnderLeaseAsync(trustedUnixSeconds, verifier, ct).ConfigureAwait(false);
             var first = await RequireMessagingFreshnessAsync(current, own, peer, source, held, ct).ConfigureAwait(false);
             OwnedInitialMessagingSeed.RequireFreshScope(scope, own.Proof, peer, first);
-            using var opened = await SqliteDeepIdV2AccountGeneration.OpenOwnedMessagingUnderLeaseAsync(
-                storage, sqlStatePath, current, scope, ct).ConfigureAwait(false);
+            using var firstOpened = await OpenNativeMessagingUnderLeaseAsync(current, scope, held, ct).ConfigureAwait(false);
+            try
+            {
+            var opened = firstOpened;
             var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
             if (send) result = opened.Sql.ReadVerifiedOperation(floor, op);
+            var freshNative = result is null;
+            if (!send)
+            {
+                using var original = opened.Sql.ReadVerifiedOperation(floor, op);
+                freshNative = original is null;
+                if (original is not null && (original.Direction != 2 || !Did2MessagingSessionScope.Fixed(original.ExactEnvelope, exact)))
+                    throw new CryptographicException("DID2 receive retry differs from its authenticated original.");
+            }
             if (send && result is null && (senderEvent?.ContentKind is
                 Dmc2ContentKind.MessageCreate or Dmc2ContentKind.AttachmentOffer or Dmc2ContentKind.ContactRouteUpdate ||
                 senderEvent is not null && ProtectedDid2GroupJournal.IsKind(senderEvent.ContentKind)))
@@ -186,6 +209,16 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     senderEvent is not null && ProtectedDid2GroupJournal.IsKind(senderEvent.ContentKind)))
                     await RequireNewMailboxWorkCapacityUnderLeaseAsync(current, held, opened, scope, op,
                         own, peer, source, verifier, ct).ConfigureAwait(false);
+                if (freshNative)
+                {
+                    maintainedStorage = await PrepareNativeMaintenanceForTransitionAsync(current, scope, opened, floor,
+                        held, op, exact, send, own, peer, source, first, ct).ConfigureAwait(false);
+                    if (maintainedStorage is not null)
+                    {
+                        opened = maintainedStorage;
+                        floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
+                    }
+                }
                 using var state = opened.Sql.ReadVerifiedTransitionState(floor, op, send ? [] : exact, out var context);
                 var authority = new AccountDpe2Authority(this, current, opened, held, floor, op, eventHash, send ? [] : exact,
                     context.ReceiveReplayDisposition, senderEvent, own, peer, source);
@@ -205,6 +238,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 // Read the actual committed row, also on exact replay. Never use
                 // an in-memory success payload as crash/materialization evidence.
                 var stable = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
+                floor = stable;
                 result = opened.Sql.ReadVerifiedOperation(stable, op) ??
                     throw new CryptographicException("DID2 committed message has no durable event readback.");
             }
@@ -268,7 +302,21 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     throw new CryptographicException("Attachment offer send crossed protected clock continuity.");
                 RequireAttachmentOfferTime(offered.Manifest, own, peer, final);
             }
+            // No external callback follows this closed join. Current protected
+            // registration/catalog/floor/history and the exact selected payload
+            // are rejoined AFTER the final time/source/freshness callback.
+            var releaseFloor = await opened.Custody.ReadCurrentFloorAsync(ct).ConfigureAwait(false);
+            if (!Did2MessagingSessionScope.Fixed(releaseFloor.Exact.Span, floor.Exact.Span))
+                throw new CryptographicException("Native floor changed during final application admission.");
+            using var releaseRow = opened.Sql.ReadVerifiedOperation(releaseFloor, op) ??
+                throw new CryptographicException("Native operation disappeared during final application admission.");
+            if (releaseRow.Direction != result.Direction || !Did2MessagingSessionScope.Fixed(releaseRow.ExactEnvelope, result.ExactEnvelope) ||
+                !Did2MessagingSessionScope.Fixed(releaseRow.EventHash, result.EventHash))
+                throw new CryptographicException("Native selected custody changed during final application admission.");
+            ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
             var released = result; result = null; return released;
+            }
+            finally { maintainedStorage?.Dispose(); }
         }
         finally
         {

@@ -20,7 +20,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
         await ResumeLocalCompactionUnderLeaseAsync(held, ct).ConfigureAwait(false);
         using var current = await RequireCurrentUnderLeaseAsync(unixSeconds, verifier, ct).ConfigureAwait(false);
-        using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, ct).ConfigureAwait(false);
+        using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, held, ct).ConfigureAwait(false);
         return await TryReadRetainedBraidStoreUnderLeaseAsync(current, held, opened, scope, operation,
             own, source, ct).ConfigureAwait(false);
     }

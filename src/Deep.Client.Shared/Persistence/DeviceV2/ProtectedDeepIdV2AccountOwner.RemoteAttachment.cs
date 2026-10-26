@@ -13,7 +13,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         if (logicalId.Length != 32 || authorDeviceId.Length != 32) throw new ArgumentException("Exact received attachment selector required.");
         using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
         using var current = await RequireCurrentUnderLeaseAsync(seconds, verifier, ct).ConfigureAwait(false);
-        using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, ct).ConfigureAwait(false);
+        using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, held, ct).ConfigureAwait(false);
         var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
         OwnedDeepSecret? result = null;
         try

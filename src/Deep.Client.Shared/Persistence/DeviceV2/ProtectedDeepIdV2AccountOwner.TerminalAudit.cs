@@ -35,7 +35,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var selected = state.TerminalAudits.Values.Where(audit => lower >= checked(audit.TerminalAtUpper + SqliteDeepMailboxStore.StoppedAuditSeconds))
                 .Take(Did2CompactionPlan.MaximumRows).ToArray();
             if (selected.Length == 0) return;
-            using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, ct).ConfigureAwait(false);
+            using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, held, ct).ConfigureAwait(false);
             var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
             if (floor.Phase != 1 || floor.Status != 1) throw new CryptographicException("Audit expiry lost the actual guarded native owner.");
             using var app = await SqliteDeepIdV2AccountGeneration.OpenExistingApplicationForCompactionUnderLeaseAsync(storage,
