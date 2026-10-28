@@ -27,6 +27,7 @@ public sealed partial class JournaledDeepSecureStorage
         {
             var proposed = Random32(); var name = Convert.ToHexStringLower(proposed);
             if (!inventory.Values.Values.Any(v => Fixed(v.Id, proposed)) && !inventory.Cleanup.Contains(name) &&
+                operation?.ReservedNames.Contains(name) != true &&
                 !File.Exists(ObjectPath(name)) && !File.Exists(ObjectPath(name, ".pending"))) { id = proposed; break; }
         }
         if (id is null) throw new CryptographicException("Unable to allocate a fresh value-object identity.");
@@ -166,6 +167,21 @@ public sealed partial class JournaledDeepSecureStorage
     {
         ct.ThrowIfCancellationRequested();
         var owned = operation ?? throw new InvalidOperationException("Storage effect has no operation owner.");
+        owned.CheckRetry();
+        JoinRecoveryWitness();
+        if (owned.ClosedFacts is { } closed && Fixed(closed.Hash, authority.Hash))
+        {
+            if (retiredName is not null && closed.Values.Values.Any(item => item.Name == retiredName))
+                throw new CryptographicException("Retirement selected an active object.");
+            if (authority.Guard is { } guard)
+            {
+                if (!closed.Values.TryGetValue(guard.Slot, out var descriptor))
+                    throw new CryptographicException("Protected mutation guard disappeared.");
+                RequireExactFile(ObjectPath(descriptor.Name), descriptor.Hash, checked(descriptor.Length + ObjectOverheadBytes),
+                    manifest: false, exactLength: checked(descriptor.Length + ObjectOverheadBytes));
+            }
+            RequireExactSource(authority.Hash); ct.ThrowIfCancellationRequested(); return;
+        }
         var admitted = owned.Authority is { } prior && prior.Kind == authority.Kind && Fixed(prior.Hash, authority.Hash);
         if (authority.Kind == RootKind.Creation)
         {
@@ -207,85 +223,6 @@ public sealed partial class JournaledDeepSecureStorage
             throw new CryptographicException("Retirement selected an active object.");
         CheckGuard(current, authority.Guard);
         ct.ThrowIfCancellationRequested(); RequireExactSource(current.Hash);
-    }
-
-    private async Task<InventoryRead> CompleteCleanupAsync(InventoryRead current, CancellationToken ct)
-    {
-        var hash = current.Hash.ToArray(); var names = current.Inventory.Cleanup.ToArray();
-        using var candidate = current.Inventory.Successor(hash); candidate.Cleanup.Clear();
-        var plaintext = EncodeManifest(candidate); var plaintextHash = SHA256.HashData(plaintext);
-        candidate.Dispose(); current.Dispose();
-        var protectedBytes = ProtectManifest(plaintext); var protectedHash = SHA256.HashData(protectedBytes);
-        var authority = new ReplacementAuthority(hash, RootKind.Current, null);
-        try
-        {
-            // All arbitrary provider calls precede the first retirement.
-            VerifyCandidate(protectedBytes, plaintextHash, [], ct, verifyObjects: false);
-            Revalidate(authority, ct);
-            if (File.Exists(pendingPath)) throw new CryptographicException("Cleanup has an unresolved pending inventory.");
-            WriteBoundedFile(pendingPath, protectedBytes, manifest: true); FlushParent(pendingPath);
-            Hit(JournaledDeepSecureStorageFailpoint.BeforeCleanupManifest);
-            while (true)
-            {
-                Revalidate(authority, ct);
-                var owned = operation!; owned.FinalCleanup = true;
-                try
-                {
-                    foreach (var name in names)
-                        await RetirePathAsync(ObjectPath(name), authority, name, ct, manifest: false, pendingHash: protectedHash).ConfigureAwait(false);
-                    await ReplaceDurablyAsync(pendingPath, statePath, authority, ct, replace: true, pendingHash: protectedHash).ConfigureAwait(false);
-                    // No provider/delegate/wait may follow this publication.
-                    var joined = owned.Admission ?? throw new CryptographicException("Cleanup admission is absent.");
-                    Inventory? finalInventory = joined.Inventory.Successor(hash); finalInventory.Cleanup.Clear();
-                    var encoded = EncodeManifest(finalInventory);
-                    try
-                    {
-                        if (!Fixed(SHA256.HashData(encoded), plaintextHash)) throw new CryptographicException("Cleanup candidate semantics changed.");
-                        RequireExactFile(statePath, protectedHash, MaximumProtectedManifestBytes, manifest: true);
-                        ct.ThrowIfCancellationRequested(); Hit(JournaledDeepSecureStorageFailpoint.AfterCleanupManifest);
-                        var result = new InventoryRead(protectedBytes.ToArray(), finalInventory); finalInventory = null;
-                        return result;
-                    }
-                    finally { CryptographicOperations.ZeroMemory(encoded); finalInventory?.Dispose(); }
-                }
-                catch (CleanupRestartException) { _ = owned.RemainingRetry(); }
-                finally { owned.FinalCleanup = false; }
-            }
-        }
-        finally { CryptographicOperations.ZeroMemory(protectedBytes); }
-    }
-
-    private async Task<InventoryRead> RecoverPendingAsync(CancellationToken ct)
-    {
-        InventoryFact current;
-        using (var read = ReadCurrent(ct)) current = Facts(read);
-        var authority = new ReplacementAuthority(current.Hash, RootKind.Current, null);
-        var bytes = ReadBoundedFile(pendingPath, MaximumProtectedManifestBytes, manifest: true, allowEmpty: true);
-        if (bytes.Length == 0)
-        { await RetirePathAsync(pendingPath, authority, null, ct, manifest: true).ConfigureAwait(false); return TakeAdmission(authority, ct); }
-        var pendingHash = SHA256.HashData(bytes); byte[]? plaintext = null; string[] staged;
-        try
-        {
-            BeforeProvider(); Interlocked.Increment(ref unprotectCalls); plaintext = protector.Unprotect(bytes);
-            if (ReferenceEquals(plaintext, bytes)) throw new CryptographicException("Protector did not return owned plaintext.");
-            Interlocked.Add(ref manifestPlaintext, plaintext.Length);
-            using var pending = DecodeManifest(plaintext);
-            staged = ValidatePendingSuccessor(current, pending);
-        }
-        catch (Exception error) when (error is ArgumentException or OverflowException or InvalidDataException)
-        { throw new CryptographicException("Pending inventory is not an authenticated successor.", error); }
-        finally { CryptographicOperations.ZeroMemory(bytes); if (plaintext is not null) CryptographicOperations.ZeroMemory(plaintext); }
-        Revalidate(authority, ct); RequireExactFile(pendingPath, pendingHash, MaximumProtectedManifestBytes, manifest: true);
-        foreach (var name in staged)
-        {
-            // The descriptor stays until EVERY new name and temporary name is
-            // durably retired. It cannot be used as an alternative current root.
-            await RetirePathAsync(ObjectPath(name), authority, name, ct, manifest: false, pendingHash: pendingHash).ConfigureAwait(false);
-            if (File.Exists(ObjectPath(name, ".pending")))
-                await RetirePathAsync(ObjectPath(name, ".pending"), authority, name, ct, manifest: false, pendingHash: pendingHash).ConfigureAwait(false);
-        }
-        await RetirePathAsync(pendingPath, authority, null, ct, manifest: true).ConfigureAwait(false);
-        return TakeAdmission(authority, ct);
     }
 
     private static string[] ValidatePendingSuccessor(InventoryFact current, Inventory pending)
@@ -342,7 +279,7 @@ public sealed partial class JournaledDeepSecureStorage
         bool replace, string? retiredName = null, byte[]? pendingHash = null, ObjectFact[]? newObjects = null,
         ObjectFact? stagedObject = null, bool retirement = false)
     {
-        var timer = Stopwatch.StartNew(); var milliseconds = 25;
+        var milliseconds = 25;
         while (true)
         {
             ct.ThrowIfCancellationRequested(); Revalidate(authority, ct, retiredName);
@@ -363,17 +300,23 @@ public sealed partial class JournaledDeepSecureStorage
                 File.Move(temporary, destination, overwrite: replace); FlushParent(destination); return;
             }
             if (MoveFileEx(temporary, destination, (replace ? 1U : 0U) | 8U)) return;
-            var error = Marshal.GetLastPInvokeError(); var remaining = TimeSpan.FromSeconds(2) - timer.Elapsed;
-            if (error is not (5 or 32 or 33) || remaining <= TimeSpan.Zero) throw new Win32Exception(error);
-            // No admitted key is live here. Retry reopens and Unprotects CURRENT.
+            var error = Marshal.GetLastPInvokeError();
+            if (error is not (5 or 32 or 33)) throw new Win32Exception(error);
+            var owned = operation ?? throw new InvalidOperationException("Storage retry has no operation owner.");
+            if (owned.NoExternal || owned.FinalClosed)
+                throw new IOException("Protected storage committed operation has incomplete durable cleanup.", new Win32Exception(error));
+            var remaining = owned.RemainingRetry();
+            owned.DropAdmission();
             await Task.Delay(TimeSpan.FromMilliseconds(Math.Min(milliseconds, remaining.TotalMilliseconds)), ct).ConfigureAwait(false);
             milliseconds = Math.Min(milliseconds * 2, 100);
+            _ = owned.RemainingRetry();
+            if (owned.FinalCleanup) throw new CleanupRestartException();
         }
     }
 
-    private void RequireExactFile(string path, byte[] hash, int maximum, bool manifest, int? exactLength = null)
+    private void RequireExactFile(string path, byte[] hash, int maximum, bool manifest, int? exactLength = null, bool allowEmpty = false)
     {
-        var bytes = ReadBoundedFile(path, maximum, manifest, exactLength);
+        var bytes = ReadBoundedFile(path, maximum, manifest, exactLength, allowEmpty);
         try { if (!Fixed(SHA256.HashData(bytes), hash)) throw new CryptographicException("Authenticated file changed before effect."); }
         finally { CryptographicOperations.ZeroMemory(bytes); }
     }
@@ -402,7 +345,7 @@ public sealed partial class JournaledDeepSecureStorage
                     if (manifest) Interlocked.Increment(ref manifestProtectedRead); else Interlocked.Increment(ref objectCiphertextRead);
                 }
                 if (extra != -1 || stream.Length != length) throw new CryptographicException("Authenticated file EOF changed.");
-                RequireOpenedPath(stream.SafeFileHandle, path);
+                RequireOwnedOpenedPath(stream.SafeFileHandle, path);
                 RequireNoRedirectedAncestors(Path.GetDirectoryName(path)!); return bytes;
             }
             catch { CryptographicOperations.ZeroMemory(bytes); throw; }
@@ -422,7 +365,7 @@ public sealed partial class JournaledDeepSecureStorage
             if (manifest) Interlocked.Add(ref manifestProtectedWritten, length); else Interlocked.Add(ref objectCiphertextWritten, length);
         }
         stream.Flush(flushToDisk: true);
-        RequireOpenedPath(stream.SafeFileHandle, path);
+        RequireOwnedOpenedPath(stream.SafeFileHandle, path);
     }
 
     private void RequireObjectDirectory()
@@ -449,20 +392,14 @@ public sealed partial class JournaledDeepSecureStorage
             try { return OpenSecureFile(leasePath, write: true, lease: true); }
             catch (IOException error)
             {
+                operation?.DropAdmission();
                 if (timer.Elapsed >= TimeSpan.FromSeconds(30)) throw new IOException("Timed out acquiring the secure-storage process lease.", error);
                 await Task.Delay(25, ct).ConfigureAwait(false);
             }
         }
     }
 
-    private static void RequireNoRedirectedAncestors(string directory)
-    {
-        for (DirectoryInfo? node = new(directory); node is not null; node = node.Parent)
-            if (node.Exists && (node.Attributes & FileAttributes.ReparsePoint) != 0)
-                throw new CryptographicException("Secure-storage directory redirection is forbidden.");
-    }
-
-    private static FileStream OpenSecureFile(string path, bool write, bool lease = false)
+    private FileStream OpenSecureFile(string path, bool write, bool lease = false)
     {
         RequireNoRedirectedAncestors(Path.GetDirectoryName(path)!);
         SafeFileHandle handle;
@@ -516,10 +453,25 @@ public sealed partial class JournaledDeepSecureStorage
             catch { handle.Dispose(); throw; }
             finally { Marshal.FreeHGlobal(status); }
         }
-        try { RequireOpenedPath(handle, path); return new FileStream(handle, write ? FileAccess.ReadWrite : FileAccess.Read, 16 * 1024, isAsync: false); }
+        try { RequireOwnedOpenedPath(handle, path); return new FileStream(handle, write ? FileAccess.ReadWrite : FileAccess.Read, 16 * 1024, isAsync: false); }
         catch { handle.Dispose(); throw; }
     }
 
+    private void RequireOwnedOpenedPath(SafeFileHandle handle, string expected)
+    {
+        if (OperatingSystem.IsWindows() && operation is not null)
+        {
+            var requested = Path.GetFullPath(expected);
+            var pinned = (directories ??= new DirectoryScope()).Get(Path.GetDirectoryName(requested)!);
+            if (!GetFileInformationByHandle(handle, out var leaf) || leaf.NumberOfLinks != 1 ||
+                (leaf.FileAttributes & ((uint)FileAttributes.Directory | (uint)FileAttributes.ReparsePoint)) != 0 ||
+                leaf.VolumeSerialNumber != pinned.Volume ||
+                !string.Equals(ReadWindowsHandlePath(handle), Path.Combine(pinned.Physical, Path.GetFileName(requested)), StringComparison.OrdinalIgnoreCase))
+                throw new CryptographicException("Opened storage file escaped its pinned owned directory.");
+            return;
+        }
+        RequireOpenedPath(handle, expected);
+    }
     private static void RequireOpenedPath(SafeFileHandle handle, string expected)
     {
         string actual;
@@ -527,7 +479,7 @@ public sealed partial class JournaledDeepSecureStorage
         {
             var requested = Path.GetFullPath(expected);
             var parent = Path.GetDirectoryName(requested) ?? throw new CryptographicException("Storage file has no owned parent.");
-            RequireNoRedirectedAncestors(parent);
+            CheckDirectoryAncestors(parent);
             // Packaged Windows hosts can virtualize LocalApplicationData without
             // a reparse point. Bind the actual directory handle selected by the
             // requested parent, then ONLY its exact requested leaf. Neither a
@@ -542,7 +494,7 @@ public sealed partial class JournaledDeepSecureStorage
                 fileIdentity.NumberOfLinks != 1 || parentIdentity.VolumeSerialNumber != fileIdentity.VolumeSerialNumber)
                 throw new CryptographicException("Opened storage file or parent identity is redirected or linked.");
             var physicalParent = ReadWindowsHandlePath(parentHandle);
-            RequireNoRedirectedAncestors(physicalParent);
+            CheckDirectoryAncestors(physicalParent);
             actual = ReadWindowsHandlePath(handle);
             var bound = Path.Combine(physicalParent, Path.GetFileName(requested));
             if (!string.Equals(actual, bound, StringComparison.OrdinalIgnoreCase))
@@ -593,7 +545,7 @@ public sealed partial class JournaledDeepSecureStorage
         throw new IOException("Opened storage path did not stabilize within the bounded retries.");
     }
 
-    private static void FlushParent(string path)
+    private void FlushParent(string path)
     {
         if (OperatingSystem.IsWindows()) return; // Named retirement uses write-through MoveFileEx before unlink.
         var directory = Path.GetDirectoryName(path)!; RequireNoRedirectedAncestors(directory);
@@ -603,13 +555,21 @@ public sealed partial class JournaledDeepSecureStorage
         finally { _ = Close(descriptor); }
     }
 
-    private static void Hit(JournaledDeepSecureStorageFailpoint point)
+    private void Hit(JournaledDeepSecureStorageFailpoint point)
     {
 #if DEEP_TEST_INTERNALS
-        JournaledDeepSecureStorageTestHooks.Hit(point);
+        while (JournaledDeepSecureStorageTestHooks.Take(point) is { } hook)
+        {
+            if (hook.IsCrash) throw new IOException("Injected DSS2 crash cutpoint.");
+            var owned = operation ?? throw new InvalidOperationException("Storage callback has no operation owner.");
+            if (owned.NoExternal || owned.FinalClosed)
+                throw new IOException("Protected storage irreversible segment cannot invoke external callbacks.");
+            owned.BeforeHook();
+            hook.Callback!();
+            if (owned.FinalCleanup) throw new CleanupRestartException();
+        }
 #endif
     }
-
     [StructLayout(LayoutKind.Sequential)]
     private struct FileInformation
     {
@@ -639,16 +599,63 @@ public sealed partial class JournaledDeepSecureStorage
 internal enum JournaledDeepSecureStorageFailpoint
 {
     AfterPendingManifest, AfterObjectStaged, BeforeManifestReplace, AfterManifestReplace,
-    AfterRetirementTombstone, AfterRetirementUnlink, BeforeCleanupManifest, AfterCleanupManifest
+    AfterRetirementTombstone, AfterRetirementUnlink, BeforeCleanupManifest, AfterCleanupManifest,
+    BeforeCreationPolicyAdmission
 }
 #if DEEP_TEST_INTERNALS
 internal static class JournaledDeepSecureStorageTestHooks
 {
-    private static readonly AsyncLocal<Action<JournaledDeepSecureStorageFailpoint>?> Current = new();
-    internal static void Hit(JournaledDeepSecureStorageFailpoint point) => Current.Value?.Invoke(point);
-    internal static IDisposable Push(Action<JournaledDeepSecureStorageFailpoint> callback)
-    { var before = Current.Value; Current.Value = callback; return new Restore(before); }
-    private sealed class Restore(Action<JournaledDeepSecureStorageFailpoint>? before) : IDisposable
-    { public void Dispose() => Current.Value = before; }
+    private static readonly AsyncLocal<Registration?> Current = new();
+
+    internal static Registration PushCallbackOnce(JournaledDeepSecureStorageFailpoint point, Action callback, int occurrence = 1)
+    {
+        ArgumentNullException.ThrowIfNull(callback);
+        if (point == JournaledDeepSecureStorageFailpoint.AfterCleanupManifest)
+            throw new ArgumentException("The final cleanup boundary only permits fixed crash injection.", nameof(point));
+        return Push(point, callback, occurrence);
+    }
+
+    internal static Registration PushCrashOnce(JournaledDeepSecureStorageFailpoint point, int occurrence = 1) => Push(point, null, occurrence);
+
+    private static Registration Push(JournaledDeepSecureStorageFailpoint point, Action? callback, int occurrence)
+    {
+        if (occurrence < 1) throw new ArgumentOutOfRangeException(nameof(occurrence));
+        var registration = new Registration(point, callback, occurrence, Current.Value);
+        Current.Value = registration; return registration;
+    }
+
+    internal static Registration? Take(JournaledDeepSecureStorageFailpoint point)
+    {
+        for (var item = Current.Value; item is not null; item = item.Before)
+        {
+            if (item.Point != point || item.Reached) continue;
+            item.SeenOccurrences++;
+            if (item.SeenOccurrences < item.Occurrence) return null;
+            item.Reached = true; // Consume before any arbitrary code executes.
+            return item;
+        }
+        return null;
+    }
+
+    internal static void Hit(JournaledDeepSecureStorageFailpoint point)
+    {
+        while (Take(point) is { } hook)
+        {
+            if (hook.IsCrash) throw new IOException("Injected DSS2 crash cutpoint.");
+            hook.Callback!();
+        }
+    }
+
+    internal sealed class Registration(JournaledDeepSecureStorageFailpoint point, Action? callback, int occurrence, Registration? before) : IDisposable
+    {
+        internal JournaledDeepSecureStorageFailpoint Point { get; } = point;
+        internal Action? Callback { get; } = callback;
+        internal bool IsCrash => Callback is null;
+        internal int Occurrence { get; } = occurrence;
+        internal Registration? Before { get; } = before;
+        internal int SeenOccurrences { get; set; }
+        internal bool Reached { get; set; }
+        public void Dispose() { Current.Value = Before; }
+    }
 }
 #endif

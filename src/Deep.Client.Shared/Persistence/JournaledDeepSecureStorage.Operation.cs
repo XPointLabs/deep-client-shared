@@ -9,23 +9,31 @@ public sealed partial class JournaledDeepSecureStorage
     // operation, and its admission is destroyed before every external edge.
     private ClosedOperation? operation;
 
-    private ClosedOperation BeginOperation()
+    private async Task<ClosedOperation> BeginOperationAsync(CancellationToken ct)
     {
         if (operation is not null) throw new InvalidOperationException("Storage operation is already owned.");
-        return operation = new ClosedOperation(this);
+        var owned = operation = new ClosedOperation(this);
+        try { owned.ProcessLease = await AcquireProcessLeaseAsync(ct).ConfigureAwait(false); return owned; }
+        catch { owned.Dispose(); throw; }
     }
 
     private sealed class ClosedOperation(JournaledDeepSecureStorage owner) : IDisposable
     {
         internal InventoryRead? Admission;
+        internal FileStream? ProcessLease;
         internal ReplacementAuthority? Authority;
-        internal bool FinalCleanup, Recovered;
+        internal InventoryFact? ClosedFacts;
+        internal Inventory? ResultLoan;
+        internal RecoveryPlan? Recovery;
+        internal readonly HashSet<string> ReservedNames = new(StringComparer.Ordinal);
+        internal bool FinalCleanup, FinalClosed, NoExternal;
         internal int HookInvalidations;
         private Stopwatch? retryTimer;
 
         internal void DropAdmission()
         {
-            Admission?.Dispose(); Admission = null; Authority = null;
+            Admission?.Dispose(); Admission = null; Authority = null; ClosedFacts = null;
+            ResultLoan?.Dispose(); ResultLoan = null;
             owner.DropDirectories();
         }
 
@@ -37,6 +45,8 @@ public sealed partial class JournaledDeepSecureStorage
             return remaining;
         }
 
+        internal void CheckRetry() { if (retryTimer is not null) _ = RemainingRetry(); }
+
         internal void BeforeHook()
         {
             _ = RemainingRetry();
@@ -47,20 +57,17 @@ public sealed partial class JournaledDeepSecureStorage
 
         public void Dispose()
         {
-            DropAdmission(); owner.operation = null;
+            DropAdmission(); ProcessLease?.Dispose(); ProcessLease = null; owner.operation = null;
         }
     }
 
     private sealed class CleanupRestartException : Exception;
 
-    private void BeforeProvider() => operation?.DropAdmission();
-
-    private InventoryRead TakeAdmission(ReplacementAuthority authority, CancellationToken ct)
+    private void BeforeProvider()
     {
-        Revalidate(authority, ct);
-        var result = operation!.Admission ?? throw new CryptographicException("Current storage admission is absent.");
-        operation.Admission = null; operation.Authority = null;
-        return result;
+        if (operation?.FinalClosed == true || operation?.NoExternal == true)
+            throw new InvalidOperationException("The final storage boundary is already closed.");
+        operation?.DropAdmission();
     }
 
     private void CheckFinalSource(InventoryRead current, CancellationToken ct)

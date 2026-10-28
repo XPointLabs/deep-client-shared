@@ -14,8 +14,7 @@ public sealed partial class JournaledDeepSecureStorage
         try
         {
             owner.CreateParentDirectory();
-            using var process = await owner.AcquireProcessLeaseAsync(cancellationToken).ConfigureAwait(false);
-            using var operation = owner.BeginOperation();
+            using var operation = await owner.BeginOperationAsync(cancellationToken).ConfigureAwait(false);
             if (File.Exists(owner.statePath) || File.Exists(owner.pendingPath) || File.Exists(owner.backupPath) ||
                 (Directory.Exists(owner.objectDirectory) && Directory.EnumerateFileSystemEntries(owner.objectDirectory).Any()))
                 throw new InvalidOperationException("New secure storage requires an absent owned file family.");
@@ -43,8 +42,7 @@ public sealed partial class JournaledDeepSecureStorage
         await owner.gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            using var process = await owner.AcquireProcessLeaseAsync(cancellationToken).ConfigureAwait(false);
-            using var operation = owner.BeginOperation();
+            using var operation = await owner.BeginOperationAsync(cancellationToken).ConfigureAwait(false);
             var source = owner.ReadAggregateSource(cancellationToken, allowManifest: true);
             try
             {
@@ -52,6 +50,7 @@ public sealed partial class JournaledDeepSecureStorage
                 {
                     source.Dispose();
                     using var current = await owner.AdmitAsync(cancellationToken, forceAudit: true).ConfigureAwait(false);
+                    owner.CheckFinalSource(current, cancellationToken); owner.auditRequired = 0;
                     success = true; return owner; // Postcommit recovery uses only DSS2.
                 }
                 var sourceHash = source.Hash.ToArray();
@@ -60,23 +59,15 @@ public sealed partial class JournaledDeepSecureStorage
                     Directory.EnumerateFileSystemEntries(owner.objectDirectory).Any())
                     throw new CryptographicException("Untracked value-object state prevents aggregate enrollment.");
                 owner.CreateObjectDirectory();
-                if (File.Exists(owner.pendingPath))
+                if (File.Exists(owner.pendingPath) || File.Exists(owner.backupPath))
                 {
                     source.Dispose();
-                    await owner.RecoverEnrollmentPendingAsync(sourceHash, lengths, cancellationToken).ConfigureAwait(false);
+                    owner.DiscoverEnrollmentRecovery(sourceHash, lengths, cancellationToken);
                     source = owner.ReadAggregateSource(cancellationToken);
                     if (!Fixed(source.Hash, sourceHash)) throw new CryptographicException("Aggregate source changed during explicit resume.");
                 }
-                if (File.Exists(owner.backupPath))
-                {
-                    source.Dispose();
-                    await owner.RetirePathAsync(owner.backupPath, new(sourceHash, RootKind.Enrollment, null), null,
-                        cancellationToken, manifest: true).ConfigureAwait(false);
-                    source = owner.ReadAggregateSource(cancellationToken);
-                    if (!Fixed(source.Hash, sourceHash)) throw new CryptographicException("Aggregate source changed during cleanup.");
-                }
-                if (Directory.EnumerateFileSystemEntries(owner.objectDirectory).Any())
-                    throw new CryptographicException("Untracked value-object state remains after explicit enrollment recovery.");
+                else if (Directory.EnumerateFileSystemEntries(owner.objectDirectory).Any())
+                    throw new CryptographicException("Untracked value-object state prevents aggregate enrollment.");
                 using var candidate = new Inventory(Random32(), 1, sourceHash.ToArray());
                 var objects = new Dictionary<string, byte[]>(StringComparer.Ordinal);
                 try
@@ -91,10 +82,24 @@ public sealed partial class JournaledDeepSecureStorage
                         8L + source.Values.Sum(p => 6L + StrictUtf8.GetByteCount(p.Key) + p.Value.Length))
                         throw new CryptographicException("Enrollment does not cover the complete source inventory.");
                     source.Dispose(); // Never carry the old value/key inventory through Protect.
-                    using var audit = await owner.PublishAsync(sourceHash, candidate, objects, null, RootKind.Enrollment, cancellationToken).ConfigureAwait(false);
-                    foreach (var item in audit.Inventory.Values.Values)
-                    { var value = owner.ReadObject(audit.Inventory, item); CryptographicOperations.ZeroMemory(value); }
-                    owner.CheckFinalSource(audit, cancellationToken); owner.auditRequired = 0;
+                    using var prepared = owner.PrepareRoot(candidate, cancellationToken, out var decoded);
+                    decoded.Dispose();
+                    var facts = prepared.Facts.Values.Values.Select(item =>
+                        new ObjectFact(item.Name, checked(item.Length + ObjectOverheadBytes), item.Hash)).ToArray();
+                    var authority = new ReplacementAuthority(sourceHash, RootKind.Enrollment, null);
+                    while (true)
+                    {
+                        owner.Revalidate(authority, cancellationToken); operation.FinalCleanup = true;
+                        try { await owner.RetireRecoveryAsync(authority, cancellationToken).ConfigureAwait(false); break; }
+                        catch (CleanupRestartException) { _ = operation.RemainingRetry(); }
+                        finally { operation.FinalCleanup = false; }
+                    }
+                    owner.RequireObjectDirectory();
+                    if (Directory.EnumerateFileSystemEntries(owner.objectDirectory).Any())
+                        throw new CryptographicException("Untracked value-object state remains after explicit enrollment recovery.");
+                    await owner.PublishPreparedPrimaryAsync(prepared, objects, facts, authority, cancellationToken).ConfigureAwait(false);
+                    await owner.FinishPreparedMutationCleanupAsync(prepared, null, facts, cancellationToken).ConfigureAwait(false);
+                    owner.auditRequired = 0;
                     success = true; return owner;
                 }
                 finally { ZeroValues(objects); }
@@ -145,35 +150,41 @@ public sealed partial class JournaledDeepSecureStorage
         finally { if (plain is not null) CryptographicOperations.ZeroMemory(plain); }
     }
 
-    private async Task RecoverEnrollmentPendingAsync(byte[] sourceHash, Dictionary<string, int> lengths, CancellationToken ct)
+    private void DiscoverEnrollmentRecovery(byte[] sourceHash, Dictionary<string, int> lengths, CancellationToken ct)
     {
-        var bytes = ReadBoundedFile(pendingPath, MaximumProtectedManifestBytes, manifest: true, allowEmpty: true);
-        var authority = new ReplacementAuthority(sourceHash, RootKind.Enrollment, null);
-        if (bytes.Length == 0)
-        { await RetirePathAsync(pendingPath, authority, null, ct, manifest: true).ConfigureAwait(false); return; }
-        var pendingHash = SHA256.HashData(bytes); byte[]? plain = null; string[] staged;
-        try
+        byte[]? pendingHash = null; string[] staged = [];
+        if (File.Exists(pendingPath))
         {
-            BeforeProvider(); Interlocked.Increment(ref unprotectCalls); plain = protector.Unprotect(bytes);
-            if (ReferenceEquals(plain, bytes)) throw new CryptographicException("Protector did not return owned plaintext.");
-            Interlocked.Add(ref manifestPlaintext, plain.Length);
-            using var pending = DecodeManifest(plain);
-            if (pending.Revision != 1 || !Fixed(pending.Predecessor, sourceHash) || pending.Cleanup.Count != 0 ||
-                pending.Values.Count != lengths.Count || pending.Values.Any(p => !lengths.TryGetValue(p.Key, out var length) || length != p.Value.Length))
-                throw new CryptographicException("Pending enrollment does not cover its exact aggregate source.");
-            staged = pending.Values.Values.Select(v => v.Name).ToArray();
+            var bytes = ReadBoundedFile(pendingPath, MaximumProtectedManifestBytes, manifest: true, allowEmpty: true);
+            byte[]? plain = null;
+            try
+            {
+                pendingHash = SHA256.HashData(bytes);
+                if (bytes.Length != 0)
+                {
+                    BeforeProvider(); Interlocked.Increment(ref unprotectCalls); plain = protector.Unprotect(bytes);
+                    if (ReferenceEquals(plain, bytes)) throw new CryptographicException("Protector did not return owned plaintext.");
+                    Interlocked.Add(ref manifestPlaintext, plain.Length);
+                    using var pending = DecodeManifest(plain);
+                    if (pending.Revision != 1 || !Fixed(pending.Predecessor, sourceHash) || pending.Cleanup.Count != 0 ||
+                        pending.Values.Count != lengths.Count || pending.Values.Any(p => !lengths.TryGetValue(p.Key, out var length) || length != p.Value.Length))
+                        throw new CryptographicException("Pending enrollment does not cover its exact aggregate source.");
+                    staged = pending.Values.Values.Select(v => v.Name).ToArray();
+                }
+            }
+            finally { CryptographicOperations.ZeroMemory(bytes); if (plain is not null) CryptographicOperations.ZeroMemory(plain); }
         }
-        finally { CryptographicOperations.ZeroMemory(bytes); if (plain is not null) CryptographicOperations.ZeroMemory(plain); }
-        Revalidate(authority, ct); RequireExactFile(pendingPath, pendingHash, MaximumProtectedManifestBytes, manifest: true);
-        foreach (var name in staged)
+        byte[]? backupHash = null;
+        if (File.Exists(backupPath))
         {
-            await RetirePathAsync(ObjectPath(name), authority, name, ct, manifest: false, pendingHash: pendingHash).ConfigureAwait(false);
-            if (File.Exists(ObjectPath(name, ".pending")))
-                await RetirePathAsync(ObjectPath(name, ".pending"), authority, name, ct, manifest: false, pendingHash: pendingHash).ConfigureAwait(false);
+            var bytes = ReadBoundedFile(backupPath, MaximumPlaintextBytes * 2, manifest: true, allowEmpty: true);
+            try { backupHash = SHA256.HashData(bytes); }
+            finally { CryptographicOperations.ZeroMemory(bytes); }
         }
-        await RetirePathAsync(pendingPath, authority, null, ct, manifest: true).ConfigureAwait(false);
+        operation!.Recovery = new RecoveryPlan(staged, pendingHash, backupHash);
+        operation.ReservedNames.UnionWith(staged);
+        ct.ThrowIfCancellationRequested(); JoinRecoveryWitness();
     }
-
     private void CreateParentDirectory()
     {
         var directory = Path.GetDirectoryName(statePath)!; RequireNoRedirectedAncestors(directory);

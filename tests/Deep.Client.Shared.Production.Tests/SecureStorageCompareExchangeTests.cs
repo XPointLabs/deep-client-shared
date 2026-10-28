@@ -28,9 +28,9 @@ public sealed partial class SecureStorageCompareExchangeTests
         try
         {
             File.SetAttributes(fixture.StatePath, attributes | FileAttributes.ReadOnly);
-            var error = await Assert.ThrowsAsync<Win32Exception>(() => fixture.Store.CompareExchangeAsync(
+            var error = await Assert.ThrowsAsync<IOException>(() => fixture.Store.CompareExchangeAsync(
                 "catalog", new byte[] { 1 }, new byte[] { 2 }));
-            Assert.Equal(5, error.NativeErrorCode);
+            Assert.Equal("Protected storage operation retry budget exhausted.", error.Message);
             Assert.True(File.GetAttributes(fixture.StatePath).HasFlag(FileAttributes.ReadOnly));
             Assert.Equal(original, File.ReadAllBytes(fixture.StatePath));
         }
@@ -81,8 +81,8 @@ public sealed partial class SecureStorageCompareExchangeTests
             }
             else
             {
-                var error = await Assert.ThrowsAsync<Win32Exception>(() => commit.WaitAsync(TimeSpan.FromSeconds(10)));
-                Assert.Contains(error.NativeErrorCode, new[] { 5, 32, 33 });
+                var error = await Assert.ThrowsAsync<IOException>(() => commit.WaitAsync(TimeSpan.FromSeconds(10)));
+                Assert.Equal("Protected storage operation retry budget exhausted.", error.Message);
             }
         }
         finally
@@ -92,6 +92,7 @@ public sealed partial class SecureStorageCompareExchangeTests
             try { await commit.WaitAsync(TimeSpan.FromSeconds(10)); }
             catch (OperationCanceledException) { }
             catch (Win32Exception) { }
+            catch (IOException) { }
         }
         var succeeded = outcome == "release";
         if (!succeeded) Assert.Equal(original, File.ReadAllBytes(fixture.StatePath));

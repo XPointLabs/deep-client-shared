@@ -86,6 +86,18 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 threshold = new(threshold.Selection.CanonicalBytes.Span,
                     mode == 1 ? corrupted : threshold.LiveRoute.CanonicalBytes.Span,
                     mode == 2 ? corrupted : threshold.Successor.CanonicalBytes.Span);
+                if (mode == 1)
+                {
+                    // Bind the dependent record to the corrupted exact XRC so
+                    // closure validation reaches the intended witness failure.
+                    var reference = ContactCodec.ArtifactReference("XRC1", threshold.LiveRoute).CanonicalBytes;
+                    var replacements = new Dictionary<int, ReadOnlyMemory<byte>> { [5] = reference };
+                    if (BinaryPrimitives.ReadUInt64BigEndian(threshold.LiveRoute.Field(3).Span) == 0)
+                        replacements[6] = reference;
+                    var successor = ResignRenewalWitnessRecord(threshold.Successor, replacements, 14);
+                    threshold = new(threshold.Selection.CanonicalBytes.Span,
+                        threshold.LiveRoute.CanonicalBytes.Span, successor.CanonicalBytes.Span);
+                }
             }
             var request = new ContactRouteAuthorityWireRequest(Network, Bytes(32, 0xb3), fresh.Proof.QueriedDirectoryLeafKey.Span,
                 fresh.Proof.NextProtectedLkg.LogGeneration, fresh.Proof.NextProtectedLkg.CoreHash.Span,

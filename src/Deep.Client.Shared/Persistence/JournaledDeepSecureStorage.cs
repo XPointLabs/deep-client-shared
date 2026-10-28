@@ -50,8 +50,7 @@ public sealed partial class JournaledDeepSecureStorage : IDeepSecureStorage, IDi
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            ThrowIfDisposed(); using var process = await AcquireProcessLeaseAsync(cancellationToken).ConfigureAwait(false);
-            using var owned = BeginOperation();
+            ThrowIfDisposed(); using var owned = await BeginOperationAsync(cancellationToken).ConfigureAwait(false);
             using var current = await AdmitReadAsync(cancellationToken).ConfigureAwait(false);
             if (!current.Inventory.Values.TryGetValue(slot, out var descriptor))
             { CheckFinalSource(current, cancellationToken); auditRequired = 0; return null; }
@@ -69,8 +68,7 @@ public sealed partial class JournaledDeepSecureStorage : IDeepSecureStorage, IDi
         var values = new Dictionary<string, byte[]>(StringComparer.Ordinal);
         try
         {
-            ThrowIfDisposed(); using var process = await AcquireProcessLeaseAsync(cancellationToken).ConfigureAwait(false);
-            using var owned = BeginOperation();
+            ThrowIfDisposed(); using var owned = await BeginOperationAsync(cancellationToken).ConfigureAwait(false);
             using var current = await AdmitReadAsync(cancellationToken).ConfigureAwait(false);
             foreach (var slot in captured)
                 if (current.Inventory.Values.TryGetValue(slot, out var item)) values.Add(slot, ReadObject(current.Inventory, item));
@@ -85,8 +83,7 @@ public sealed partial class JournaledDeepSecureStorage : IDeepSecureStorage, IDi
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            ThrowIfDisposed(); using var process = await AcquireProcessLeaseAsync(cancellationToken).ConfigureAwait(false);
-            using var owned = BeginOperation();
+            ThrowIfDisposed(); using var owned = await BeginOperationAsync(cancellationToken).ConfigureAwait(false);
             using var current = await AdmitReadAsync(cancellationToken, forceAudit: true).ConfigureAwait(false);
             CheckFinalSource(current, cancellationToken); auditRequired = 0;
         }
@@ -152,22 +149,23 @@ public sealed partial class JournaledDeepSecureStorage : IDeepSecureStorage, IDi
         await gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            ThrowIfDisposed(); using var process = await AcquireProcessLeaseAsync(ct).ConfigureAwait(false);
-            using var owned = BeginOperation();
-            using var current = await AdmitAsync(ct).ConfigureAwait(false);
+            ThrowIfDisposed(); using var owned = await BeginOperationAsync(ct).ConfigureAwait(false);
+            using var current = await AdmitMutationAsync(ct).ConfigureAwait(false);
             Guard? guard = null;
             if (slot is not null)
             {
-                if (!current.Inventory.Values.TryGetValue(slot, out var descriptor)) { CheckFinalSource(current, ct); return false; }
+                if (!current.Inventory.Values.TryGetValue(slot, out var descriptor)) { await CloseUnchangedMutationAsync(current, ct).ConfigureAwait(false); return false; }
                 var value = ReadObject(current.Inventory, descriptor);
-                try { if (!Fixed(value, expected!)) { CheckFinalSource(current, ct); return false; } }
+                bool matches;
+                try { matches = Fixed(value, expected!); }
                 finally { CryptographicOperations.ZeroMemory(value); }
+                if (!matches) { await CloseUnchangedMutationAsync(current, ct).ConfigureAwait(false); return false; }
                 guard = new(slot, expected!);
             }
             if (writes is not null && writes.Keys.Any(name => name != slot && current.Inventory.Values.ContainsKey(name)))
             {
                 if (kind == MutationKind.Insert) throw new InvalidOperationException("Secure-storage slot already exists.");
-                CheckFinalSource(current, ct); return false;
+                await CloseUnchangedMutationAsync(current, ct).ConfigureAwait(false); return false;
             }
             var remove = kind switch
             {
@@ -175,30 +173,14 @@ public sealed partial class JournaledDeepSecureStorage : IDeepSecureStorage, IDi
                 MutationKind.PurgeV2 => current.Inventory.Values.Keys.Where(name => name.StartsWith("deep.store.v2.", StringComparison.Ordinal)).ToArray(),
                 _ => deletions
             };
-            if ((writes is null || writes.Count == 0) && !remove.Any(current.Inventory.Values.ContainsKey)) { CheckFinalSource(current, ct); return true; }
+            if ((writes is null || writes.Count == 0) && !remove.Any(current.Inventory.Values.ContainsKey)) { await CloseUnchangedMutationAsync(current, ct).ConfigureAwait(false); return true; }
             var lengths = current.Inventory.Values.ToDictionary(p => p.Key, p => p.Value.Length, StringComparer.Ordinal);
             foreach (var name in remove) lengths.Remove(name);
             if (writes is not null) foreach (var item in writes) lengths[item.Key] = item.Value.Length;
             DeepSecureStorageRegistration.ValidateInventoryLengths(lengths);
-            var candidate = current.Inventory.Successor(current.Hash);
-            var objects = new Dictionary<string, byte[]>(StringComparer.Ordinal);
-            try
-            {
-                foreach (var name in remove)
-                    if (candidate.Values.Remove(name, out var old)) { candidate.Cleanup.Add(old.Name); old.Dispose(); }
-                if (writes is not null) foreach (var item in writes)
-                {
-                    if (candidate.Values.Remove(item.Key, out var old)) { candidate.Cleanup.Add(old.Name); old.Dispose(); }
-                    var (descriptor, file) = EncryptObject(candidate, item.Key, item.Value);
-                    candidate.Values.Add(item.Key, descriptor); objects.Add(descriptor.Name, file);
-                }
-                using var published = await PublishAsync(current, candidate, objects, guard, RootKind.Current, ct).ConfigureAwait(false);
-                using var complete = published.Inventory.Cleanup.Count == 0 ? null : await CompleteCleanupAsync(published, ct).ConfigureAwait(false);
-                CheckFinalSource(complete ?? published, ct);
-                auditRequired = 0;
-                return true;
-            }
-            finally { candidate.Dispose(); ZeroValues(objects); }
+            await PublishMutationAsync(current, writes, remove, guard, ct).ConfigureAwait(false);
+            auditRequired = 0;
+            return true;
         }
         finally { gate.Release(); }
     }
@@ -231,45 +213,50 @@ public sealed partial class JournaledDeepSecureStorage : IDeepSecureStorage, IDi
         finally { if (plain is not null) CryptographicOperations.ZeroMemory(plain); }
     }
 
-    private async Task<InventoryRead> AdmitAsync(CancellationToken ct, bool forceAudit = false)
-        => await FinishAdmissionAsync(ReadCurrent(ct), ct, forceAudit).ConfigureAwait(false);
+    private Task<InventoryRead> AdmitAsync(CancellationToken ct, bool forceAudit = false) => AdmitReadAsync(ct, forceAudit);
 
     private async Task<InventoryRead> AdmitReadAsync(CancellationToken ct, bool forceAudit = false)
-        => await FinishAdmissionAsync(ReadForSelectedOperation(ct), ct, forceAudit).ConfigureAwait(false);
-
-    private async Task<InventoryRead> FinishAdmissionAsync(InventoryRead initial, CancellationToken ct, bool forceAudit)
     {
-        var next = initial;
-        for (var pass = 0; pass < 5; pass++)
+        var current = DiscoverRecovery(ReadForSelectedOperation(ct), ct);
+        try
         {
-            var current = next;
-            try
-            {
-                if (File.Exists(pendingPath))
-                { current.Dispose(); next = await RecoverPendingAsync(ct).ConfigureAwait(false); operation!.Recovered = true; continue; }
-                if (File.Exists(backupPath))
-                {
-                    var authority = new ReplacementAuthority(current.Hash.ToArray(), RootKind.Current, null);
-                    current.Dispose(); await RetirePathAsync(backupPath, authority, null, ct, manifest: true).ConfigureAwait(false);
-                    next = TakeAdmission(authority, ct); operation!.Recovered = true; continue;
-                }
-                if (current.Inventory.Cleanup.Count != 0)
-                { next = await CompleteCleanupAsync(current, ct).ConfigureAwait(false); operation!.Recovered = true; continue; }
-                if (forceAudit || auditRequired != 0)
-                {
-                    foreach (var item in current.Inventory.Values.Values)
-                    {
-                        ct.ThrowIfCancellationRequested(); var value = ReadObject(current.Inventory, item);
-                        CryptographicOperations.ZeroMemory(value);
-                    }
-                }
-                return current;
-            }
-            catch { current.Dispose(); throw; }
+            if (forceAudit || auditRequired != 0) AuditInventory(current, ct);
+            if (operation!.Recovery is not null || current.Inventory.Cleanup.Count != 0)
+                return await CloseReadRecoveryAsync(current, ct).ConfigureAwait(false);
+            return current;
         }
-        throw new CryptographicException("Protected inventory recovery did not converge.");
+        catch { current.Dispose(); throw; }
     }
 
+    private Task<InventoryRead> AdmitMutationAsync(CancellationToken ct)
+    {
+        var current = DiscoverRecovery(ReadCurrent(ct), ct);
+        try
+        {
+            if (auditRequired != 0) AuditInventory(current, ct);
+            return Task.FromResult(current);
+        }
+        catch { current.Dispose(); throw; }
+    }
+
+    private void AuditInventory(InventoryRead current, CancellationToken ct)
+    {
+        foreach (var item in current.Inventory.Values.Values)
+        {
+            ct.ThrowIfCancellationRequested(); var value = ReadObject(current.Inventory, item);
+            CryptographicOperations.ZeroMemory(value);
+        }
+    }
+
+    private async Task CloseUnchangedMutationAsync(InventoryRead current, CancellationToken ct)
+    {
+        if (operation!.Recovery is not null || current.Inventory.Cleanup.Count != 0)
+        {
+            using var complete = await CloseReadRecoveryAsync(current, ct).ConfigureAwait(false);
+            CheckFinalSource(complete, ct);
+        }
+        else CheckFinalSource(current, ct);
+    }
     private void RequireExactSource(byte[] expectedHash)
     {
         var actual = ReadBoundedFile(statePath, MaximumProtectedManifestBytes, manifest: true);

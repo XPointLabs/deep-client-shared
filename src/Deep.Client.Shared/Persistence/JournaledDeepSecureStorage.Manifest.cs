@@ -68,10 +68,12 @@ public sealed partial class JournaledDeepSecureStorage
     private sealed record InventoryFact(byte[] StoreId, ulong Revision, byte[] Hash,
         Dictionary<string, EntryFact> Values, HashSet<string> Cleanup);
 
-    private static InventoryFact Facts(InventoryRead read) => new(read.Inventory.StoreId.ToArray(), read.Inventory.Revision,
-        read.Hash.ToArray(), read.Inventory.Values.ToDictionary(p => p.Key,
+    private static InventoryFact Facts(InventoryRead read) => Facts(read.Inventory, read.Hash);
+
+    private static InventoryFact Facts(Inventory inventory, byte[] hash) => new(inventory.StoreId.ToArray(), inventory.Revision,
+        hash.ToArray(), inventory.Values.ToDictionary(p => p.Key,
             p => new EntryFact(p.Key, p.Value.Name, p.Value.Birth, p.Value.Length, p.Value.Hash.ToArray(), SHA256.HashData(p.Value.Key)),
-            StringComparer.Ordinal), new HashSet<string>(read.Inventory.Cleanup, StringComparer.Ordinal));
+            StringComparer.Ordinal), new HashSet<string>(inventory.Cleanup, StringComparer.Ordinal));
 
     private static byte[] EncodeManifest(Inventory inventory)
     {
