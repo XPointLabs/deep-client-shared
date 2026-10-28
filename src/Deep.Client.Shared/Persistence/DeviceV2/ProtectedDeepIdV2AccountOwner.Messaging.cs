@@ -93,7 +93,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             Did2MessagingSourceScope.RequireSender(scope, retained);
             ProtectedDid2MessagingPeerBootstrap.RequireProof(await catalog.ReadPeerCredentialAsync(scope, ct).ConfigureAwait(false), peer);
             OwnedInitialMessagingSeed.RequireFreshScope(scope, own.Proof, peer, first);
-            using var opened = await SqliteDeepIdV2AccountGeneration.OpenOwnedMessagingUnderLeaseAsync(
+            using var opened = await SqliteDeepIdV2AccountGeneration.OpenOrdinaryMessagingUnderLeaseAsync(
                 storage, sqlStatePath, current, scope, ct).ConfigureAwait(false);
             var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
             if (floor.Ordinal == 0)
@@ -147,7 +147,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             Did2MessagingSourceScope.RequireReceiver(scope, retained);
             ProtectedDid2MessagingPeerBootstrap.RequireProof(await catalog.ReadPeerCredentialAsync(scope, ct).ConfigureAwait(false), peer);
             OwnedInitialMessagingSeed.RequireFreshScope(scope, own.Proof, peer, first);
-            using var opened = await SqliteDeepIdV2AccountGeneration.OpenOwnedMessagingUnderLeaseAsync(
+            using var opened = await SqliteDeepIdV2AccountGeneration.OpenOrdinaryMessagingUnderLeaseAsync(
                 storage, sqlStatePath, current, scope, ct).ConfigureAwait(false);
             var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
             if (floor.Ordinal == 0)
@@ -186,7 +186,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         if (floor.Status != 1) throw new InvalidOperationException("Owned messaging session cannot be activated from a latched state.");
         // Independently reopen source and verify completed retirement plus the
         // mutable SQL/protected floor before returning only scope metadata.
-        using var verified = await SqliteDeepIdV2AccountGeneration.OpenOwnedMessagingUnderLeaseAsync(
+        using var verified = await SqliteDeepIdV2AccountGeneration.OpenOrdinaryMessagingUnderLeaseAsync(
             storage, sqlStatePath, current, opened.Scope, ct).ConfigureAwait(false);
         var checkedFloor = await verified.Custody.ReconcileAsync(ct).ConfigureAwait(false);
         if (!Did2MessagingSessionScope.Fixed(floor.Exact.Span, checkedFloor.Exact.Span))

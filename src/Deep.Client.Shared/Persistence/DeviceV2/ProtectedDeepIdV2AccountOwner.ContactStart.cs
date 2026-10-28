@@ -179,7 +179,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         Did2MessagingSourceScope.RequireSender(scope, retained);
         using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, held, ct).ConfigureAwait(false);
         var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
-        var events = opened.Sql.ReadVerifiedActiveInitialEvents(floor);
+        var events = await opened.WithSqlAsync(sql => sql.ReadVerifiedActiveInitialEvents(floor), ct).ConfigureAwait(false);
         try
         {
             var conversation = retained.RequireInitialConversation(events.SessionInit, events.Hello);

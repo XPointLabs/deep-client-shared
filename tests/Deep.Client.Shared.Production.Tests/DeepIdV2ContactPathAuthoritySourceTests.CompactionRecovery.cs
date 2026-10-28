@@ -215,8 +215,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             Assert.Equal(0, plan.Phase);
             for (var index = 0; index < 16; index++)
             { using var absent = await storage.ReadOwnedAsync(ProtectedDid2CompactionPlan.PartSlot(index)); Assert.Null(absent); }
-            await WithSenderHistoryStorage(scope, async (opened, _, _, _) =>
-            { var floor = await new Did2MessagingProtectedCheckpoint(storage, scope).ReadAsync(default); Assert.Equal(opened.Sql.VerifyTip().Exact.ToArray(), floor.Exact.ToArray()); });
+            await WithSenderHistoryStorage(scope, async (reference, _, _, _) =>
+            { var floor = await new Did2MessagingProtectedCheckpoint(storage, scope).ReadAsync(default); Assert.Equal(reference.VerifyTip().Exact.ToArray(), floor.Exact.ToArray()); });
         }
     }
 

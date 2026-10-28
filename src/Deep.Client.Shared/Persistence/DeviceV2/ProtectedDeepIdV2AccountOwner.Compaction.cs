@@ -32,7 +32,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var plans = new ProtectedDid2CompactionPlan(storage, lease, networkId, current.AccountId.Span, instance);
             using var idle = await plans.ReadAsync(held, ct).ConfigureAwait(false);
             if (idle.Phase != 0) throw new InvalidOperationException("An active compaction plan owns recovery; no new selection is permitted.");
-            using var opened = await SqliteDeepIdV2AccountGeneration.OpenOwnedMessagingUnderLeaseAsync(storage, sqlStatePath, current, scope, ct).ConfigureAwait(false);
+            using var opened = await SqliteDeepIdV2AccountGeneration.OpenOrdinaryMessagingUnderLeaseAsync(storage, sqlStatePath, current, scope, ct).ConfigureAwait(false);
             var stable = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
             var catalog = new ProtectedDid2MessagingSessionCatalog(storage, networkId, current.AccountId.Span, instance);
             using var sessions = await catalog.ReadAsync(ct).ConfigureAwait(false);
@@ -44,7 +44,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             _ = peer.Use(bytes => ProtectedDid2MessagingPeerBootstrap.Restore(bytes, scope));
             var history = await Did2MessagingHistoryCheckpoint.ReadRegisteredAsync(storage, scope, ct).ConfigureAwait(false);
             ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
-            var effects = opened.Sql.CaptureHistoryPrefixEffects(stable, prefixRows);
+            var effects = await opened.WithSqlAsync(sql => sql.CaptureHistoryPrefixEffects(stable, prefixRows), ct).ConfigureAwait(false);
             var roots = new Did2CompactionPlan.Root[]
             {
                 Guard(Did2CompactionPlan.RootKind.SessionCatalog, ProtectedDid2MessagingSessionCatalog.Slot, SHA256.HashData(sessions.Exact.Span)),

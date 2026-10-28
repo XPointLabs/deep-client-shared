@@ -26,7 +26,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             // semantics. App authentication alone is not native payload custody.
             if (!nativeAdmissionInProgress)
                 _ = await EnsureNativeArchiveAdmissionUnderLeaseAsync(current, scope, held, ct).ConfigureAwait(false);
-            var opened = await SqliteDeepIdV2AccountGeneration.OpenOwnedMessagingUnderLeaseAsync(
+            var opened = await SqliteDeepIdV2AccountGeneration.OpenOrdinaryMessagingUnderLeaseAsync(
                 storage, sqlStatePath, current, scope, ct).ConfigureAwait(false);
             try
             {
@@ -70,7 +70,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     storage, sqlStatePath, current, held, ct).ConfigureAwait(false);
                 var responder = (scope.IsInitiator ? scope.RemoteAccount : scope.LocalAccount).ToArray();
                 var device = (scope.IsInitiator ? scope.RemoteDevice : scope.LocalDevice).ToArray();
-                var retained = opened.Sql.ReadVerifiedActiveInitialEvents(floor);
+                var retained = await opened.WithSqlAsync(sql => sql.ReadVerifiedActiveInitialEvents(floor), ct).ConfigureAwait(false);
                 byte[]? accepted = null;
                 try
                 {
@@ -81,7 +81,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     {
                         if (scope.IsInitiator)
                         {
-                            using var received = opened.Sql.ReadVerifiedReceiveForEvent(floor, SHA256.HashData(accepted)) ??
+                            using var received = await opened.WithSqlAsync(sql => sql.ReadVerifiedReceiveForEvent(floor, SHA256.HashData(accepted)), ct).ConfigureAwait(false) ??
                                 throw new CryptographicException("Local projection lost actual peer acceptance custody.");
                             using var plain = received.OwnAuthenticatedDmc2();
                             if (!plain.Use(bytes => Did2MessagingSessionScope.Fixed(bytes, accepted)))
@@ -94,7 +94,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                             using var commands = marker.Use(bytes => ProtectedDid2ContactAcceptJournal.Decode(bytes,
                                 scope.Network, scope.LocalAccount, scope.Instance));
                             var winner = commands.FindScope(scope) ?? throw new CryptographicException("Local acceptance lost its protected winner.");
-                            using var sent = opened.Sql.ReadVerifiedOperation(floor, winner.Operation) ??
+                            using var sent = await opened.WithSqlAsync(sql => sql.ReadVerifiedOperation(floor, winner.Operation), ct).ConfigureAwait(false) ??
                                 throw new CryptographicException("Local acceptance lost actual send custody.");
                             winner.RequireExactAccept(accepted);
                             if (sent.Direction != 1 ||

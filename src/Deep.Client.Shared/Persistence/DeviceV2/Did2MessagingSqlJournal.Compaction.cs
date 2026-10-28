@@ -107,7 +107,7 @@ internal sealed partial class Did2MessagingSqlJournal
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         hash.AppendData("Deep/STORE-V2/messaging-compaction-sql"u8); hash.AppendData([0]); hash.AppendData(scope.Hash);
         Span<byte> number = stackalloc byte[8];
-        foreach (var (name, schema) in Schema.OrderBy(static entry => entry.Name, StringComparer.Ordinal))
+        foreach (var (name, schema) in OriginalSchema.OrderBy(static entry => entry.Name, StringComparer.Ordinal))
         {
             var definition = Encoding.UTF8.GetBytes(schema);
             BinaryPrimitives.WriteUInt64BigEndian(number, checked((ulong)definition.Length)); hash.AppendData(number); hash.AppendData(definition);

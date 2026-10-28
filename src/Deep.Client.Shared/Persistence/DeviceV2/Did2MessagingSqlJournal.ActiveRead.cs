@@ -39,17 +39,12 @@ internal sealed partial class Did2MessagingSqlJournal
         out List<byte[]> headers)
     {
         using var timing = ClientPersistenceTiming.Measure(ClientPersistencePhase.NativeVerify);
-        RequireCipherPolicy(tx); ValidateSchema(tx); RequireAllCipherPages(tx);
+        RequireCipherPolicy(tx); ValidateSchema(tx);
         VerifyActiveHistory(tx, selection);
         headers = ReadJournal(out var tip, tx);
         VerifyRows(headers, tip, tx);
-        // In addition to actual table-column scans, reject hidden extra events
-        // outside the independently rooted prefix and current journal suffix.
-        using (var actual = Command("SELECT count(*) FROM events NOT INDEXED;", tx))
-            if (Convert.ToInt64(actual.ExecuteScalar()) != checked((long)historyRoot.HistoryCount + headers.Count(static metadata => metadata[5] is 2 or 5)))
-                throw new CryptographicException("Native event table differs from its complete authenticated map and suffix.");
-        NativeWork.Inventory((ulong)headers.Count, historyRoot.HistoryCount);
-        var ordinal = historyRoot.Basis.Ordinal;
+        NativeWork.Inventory((ulong)headers.Count, archiveRoot!.ArchiveCount);
+        var ordinal = WorkingBasis.Ordinal;
         foreach (var metadata in headers)
         {
             ordinal = checked(ordinal + 1);
@@ -59,7 +54,7 @@ internal sealed partial class Did2MessagingSqlJournal
         return tip;
     }
 
-    private void RequireAllCipherPages(SqliteTransaction tx)
+    private void RequireAllCipherPages(SqliteTransaction? tx)
     {
         NativeWork.CipherScan();
         using var command = Command("PRAGMA cipher_integrity_check;", tx);
@@ -69,51 +64,57 @@ internal sealed partial class Did2MessagingSqlJournal
 
     private void VerifyActiveHistory(SqliteTransaction tx, ActiveSelection? selection)
     {
-        _ = Did2MessagingHistoryCheckpoint.Decode(historyRoot.Exact.Span, scope);
-        if (historyRoot.Basis.Ordinal == 0)
+        RequireArchiveMirror(tx);
+        if (selection is null) return;
+        for (var i = 0; i < selection.Selectors.Count; i++)
         {
-            using var empty = Command("SELECT count(*) FROM events WHERE ordinal<=0;", tx);
-            if (Convert.ToInt64(empty.ExecuteScalar()) != 0)
-                throw new InvalidDataException("Empty messaging history has invalid prefix rows.");
-            return;
+            var selector = selection.Selectors[i];
+            var value = ReadArchiveFact(selection.ByEventHash ? Did2MessagingArchiveFamily.FirstIncomingEvent :
+                Did2MessagingArchiveFamily.Operation, selector, tx);
+            if (value is null) continue;
+            var reference = Did2MessagingArchiveReference.Decode(value, false); reference.RequireAtBasis(WorkingBasis.Ordinal);
+            var tuple = ReadArchivedTuple(reference, tx);
+            if (selection.ByEventHash ? tuple.Direction != 2 || !Fixed(tuple.Metadata.AsSpan(300, 32), selector) :
+                !Fixed(tuple.Operation, selector)) throw new CryptographicException("Selected archive fact differs from its actual native original.");
+            selection.Observe(tuple.Ordinal, tuple.Direction, tuple.Operation, tuple.Metadata, reference.RowId);
+            tuple.Dispose();
         }
-        var initial = ReadInitialMetadata(tx);
-        if (!Fixed(SHA256.HashData(initial), historyRoot.InitialHeaderHash))
-            throw new CryptographicException("Protected messaging history lost its initial evidence.");
-        using var digest = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        digest.AppendData("Deep/STORE-V2/messaging-history-prefix"u8); digest.AppendData([0]);
-        digest.AppendData(scope.Hash); digest.AppendData(historyRoot.Basis.Exact.Span); digest.AppendData(initial);
-        using var command = Command("SELECT ordinal,direction,operation,metadata,length(envelope),length(plaintext),typeof(ordinal),typeof(direction),typeof(operation),typeof(metadata),typeof(envelope),typeof(plaintext),length(operation),length(metadata) FROM events NOT INDEXED WHERE ordinal<=$basis ORDER BY ordinal;", tx);
-        command.Parameters.AddWithValue("$basis", checked((long)historyRoot.Basis.Ordinal));
-        using var row = command.ExecuteReader();
-        ulong count = 0, previous = 0; Span<byte> number = stackalloc byte[8];
-        while (row.Read())
-        {
-            NativeWork.MetadataRow();
-            if (row.GetString(6) != "integer" || row.GetString(7) != "integer" ||
-                row.GetString(8) != "blob" || row.GetString(9) != "blob" || row.GetString(10) != "blob" ||
-                row.GetInt64(12) != 32 || row.GetInt64(13) != Did2MessagingFloor.MetadataBytes)
-                throw new InvalidDataException("Retained messaging metadata has a noncanonical storage type.");
-            var ordinal = row.GetInt64(0); var direction = row.GetInt32(1);
-            if (ordinal < 1 || (ulong)ordinal <= previous || (ulong)ordinal > historyRoot.Basis.Ordinal ||
-                direction is not (1 or 2 or 3 or 4) || row.GetString(11) != (direction == 2 ? "blob" : "null"))
-                throw new InvalidDataException("Retained messaging metadata has a noncanonical reference.");
-            var operation = row.GetFieldValue<byte[]>(2); var metadata = row.GetFieldValue<byte[]>(3);
-            var predecessor = Did2MessagingFloor.Decode(metadata.AsSpan(8, Did2MessagingFloor.Bytes), scope);
-            OwnedDid2MessagingMutation.ValidateMetadataTransition(metadata, scope, predecessor);
-            if (predecessor.Ordinal == ulong.MaxValue || (ulong)ordinal != predecessor.Ordinal + 1 ||
-                metadata[5] != (direction is 3 or 4 ? 5 : 2) || metadata[6] != direction ||
-                !Fixed(operation, metadata.AsSpan(268, 32)) ||
-                row.GetInt64(4) != BinaryPrimitives.ReadUInt32BigEndian(metadata.AsSpan(592)) ||
-                (direction == 2 ? row.IsDBNull(5) || row.GetInt64(5) != BinaryPrimitives.ReadUInt32BigEndian(metadata.AsSpan(596)) : !row.IsDBNull(5)))
-                throw new CryptographicException("Retained messaging metadata differs from its bound columns.");
-            BinaryPrimitives.WriteUInt64BigEndian(number, (ulong)ordinal); digest.AppendData(number); digest.AppendData(metadata);
-            selection?.Observe((ulong)ordinal, direction, operation, metadata);
-            count = checked(count + 1); previous = (ulong)ordinal;
-        }
-        BinaryPrimitives.WriteUInt64BigEndian(number, count); digest.AppendData(number);
-        if (count != historyRoot.HistoryCount || !Fixed(digest.GetHashAndReset(), historyRoot.HistoryDigest))
-            throw new CryptographicException("Messaging retained metadata differs from its protected checkpoint.");
+    }
+
+    private SelectedTuple ReadArchivedTuple(Did2MessagingArchiveReference reference, SqliteTransaction tx)
+    {
+        if (reference.Kind != 2) throw new InvalidDataException("An events selector cannot name the initial singleton.");
+        using var command = Command("SELECT rowid,ordinal,direction,operation,metadata,typeof(rowid),typeof(ordinal),typeof(direction),typeof(operation),length(operation),typeof(metadata),length(metadata) FROM events WHERE rowid=$rowid;", tx);
+        command.Parameters.AddWithValue("$rowid", checked((long)reference.RowId)); using var row = command.ExecuteReader();
+        if (!row.Read() || row.GetString(5) != "integer" || row.GetString(6) != "integer" || row.GetString(7) != "integer" ||
+            row.GetString(8) != "blob" || row.GetInt64(9) != 32 || row.GetString(10) != "blob" || row.GetInt64(11) != 672 ||
+            row.GetInt64(0) != checked((long)reference.RowId) || row.GetInt64(1) != checked((long)reference.Ordinal) ||
+            row.GetInt32(2) != reference.Direction || !Fixed(row.GetFieldValue<byte[]>(3), reference.Operation))
+            throw new CryptographicException("Authenticated archive reference lost its exact rowid/native columns.");
+        var metadata = row.GetFieldValue<byte[]>(4);
+        if (!Fixed(SHA256.HashData(metadata), reference.MetadataHash) || row.Read())
+            throw new CryptographicException("Authenticated archive metadata hash/uniqueness differs.");
+        var prior = Did2MessagingFloor.Decode(metadata.AsSpan(8, 188), scope);
+        OwnedDid2MessagingMutation.ValidateMetadataTransition(metadata, scope, prior);
+        return new(reference.Ordinal, reference.Direction, reference.Operation.ToArray(), metadata, reference.RowId);
+    }
+
+    private Did2MessagingArchiveReference CaptureTupleReference(SelectedTuple tuple, SqliteTransaction tx)
+    {
+        if (tuple.RowId != 0) return Did2MessagingArchiveReference.Event((byte)tuple.Direction, tuple.Ordinal,
+            tuple.RowId, tuple.Operation, SHA256.HashData(tuple.Metadata));
+        // A working row has an authenticated ordinal/header in the bounded
+        // native suffix. Resolve its actual rowid once and compare every bound
+        // native column; the resulting locator is never an absence authority.
+        using var query = Command("SELECT rowid,ordinal,direction,operation,metadata,typeof(rowid),typeof(ordinal),typeof(direction),typeof(operation),length(operation),typeof(metadata),length(metadata) FROM events WHERE ordinal=$ordinal;", tx);
+        query.Parameters.AddWithValue("$ordinal", checked((long)tuple.Ordinal)); using var row = query.ExecuteReader();
+        if (!row.Read() || row.GetString(5) != "integer" || row.GetString(6) != "integer" || row.GetString(7) != "integer" ||
+            row.GetString(8) != "blob" || row.GetInt64(9) != 32 || row.GetString(10) != "blob" || row.GetInt64(11) != 672 ||
+            row.GetInt64(0) <= 0 || row.GetInt64(1) != checked((long)tuple.Ordinal) || row.GetInt32(2) != tuple.Direction ||
+            !Fixed(row.GetFieldValue<byte[]>(3), tuple.Operation) || !Fixed(row.GetFieldValue<byte[]>(4), tuple.Metadata))
+            throw new CryptographicException("Authenticated working tuple lost its actual source rowid/columns.");
+        var rowId = checked((ulong)row.GetInt64(0)); if (row.Read()) throw new CryptographicException("Working tuple ordinal is not unique.");
+        return Did2MessagingArchiveReference.Event((byte)tuple.Direction, tuple.Ordinal, rowId, tuple.Operation, SHA256.HashData(tuple.Metadata));
     }
 
     // Closed bounded selector set. Tuples are copied WHILE hashing the complete
@@ -130,7 +131,9 @@ internal sealed partial class Did2MessagingSqlJournal
             this.selectors = selectors.Select(static value => value.ToArray()).ToArray();
             this.eventHash = eventHash; tuples = new SelectedTuple?[selectors.Count];
         }
-        internal void Observe(ulong ordinal, int direction, ReadOnlySpan<byte> operation, ReadOnlySpan<byte> metadata)
+        internal IReadOnlyList<byte[]> Selectors => selectors;
+        internal bool ByEventHash => eventHash;
+        internal void Observe(ulong ordinal, int direction, ReadOnlySpan<byte> operation, ReadOnlySpan<byte> metadata, ulong rowId = 0)
         {
             for (var index = 0; index < selectors.Length; index++)
             {
@@ -142,7 +145,7 @@ internal sealed partial class Did2MessagingSqlJournal
                     if (prior.Ordinal <= ordinal) continue; // Existing earliest exact event selector.
                     prior.Dispose();
                 }
-                tuples[index] = new(ordinal, direction, operation.ToArray(), metadata.ToArray());
+                tuples[index] = new(ordinal, direction, operation.ToArray(), metadata.ToArray(), rowId);
             }
         }
         internal SelectedTuple? this[int index] => tuples[index];
@@ -150,7 +153,7 @@ internal sealed partial class Did2MessagingSqlJournal
         { foreach (var selector in selectors) CryptographicOperations.ZeroMemory(selector); foreach (var tuple in tuples) tuple?.Dispose(); }
     }
 
-    private sealed record SelectedTuple(ulong Ordinal, int Direction, byte[] Operation, byte[] Metadata) : IDisposable
+    private sealed record SelectedTuple(ulong Ordinal, int Direction, byte[] Operation, byte[] Metadata, ulong RowId = 0) : IDisposable
     {
         public void Dispose() { CryptographicOperations.ZeroMemory(Operation); CryptographicOperations.ZeroMemory(Metadata); }
     }
@@ -159,10 +162,11 @@ internal sealed partial class Did2MessagingSqlJournal
     {
         if (tuple is null) return null; // Complete authenticated map AND suffix proved absence.
 #if DEEP_TEST_INTERNALS
-        Did2ActiveReadTestHooks.AfterProof(connection, tx);
+        Did2ActiveReadTestHooks.BeforeSelectedPayload();
 #endif
-        using var command = Command("SELECT operation,ordinal,direction,metadata,envelope,plaintext,typeof(operation),typeof(ordinal),typeof(direction),typeof(metadata),typeof(envelope),typeof(plaintext),length(operation),length(metadata),length(envelope),length(plaintext) FROM events NOT INDEXED WHERE ordinal=$ordinal;", tx);
-        command.Parameters.AddWithValue("$ordinal", checked((long)tuple.Ordinal));
+        using var command = Command("SELECT operation,ordinal,direction,metadata,envelope,plaintext,typeof(operation),typeof(ordinal),typeof(direction),typeof(metadata),typeof(envelope),typeof(plaintext),length(operation),length(metadata),length(envelope),length(plaintext) FROM events WHERE " + (tuple.RowId == 0 ? "ordinal=$ordinal" : "rowid=$rowid") + ";", tx);
+        if (tuple.RowId == 0) command.Parameters.AddWithValue("$ordinal", checked((long)tuple.Ordinal));
+        else command.Parameters.AddWithValue("$rowid", checked((long)tuple.RowId));
         using var row = command.ExecuteReader();
         if (!row.Read() || row.GetString(6) != "blob" || row.GetString(7) != "integer" || row.GetString(8) != "integer" ||
             row.GetString(9) != "blob" || row.GetString(10) != "blob" || row.GetString(11) != (tuple.Direction == 2 ? "blob" : "null") ||

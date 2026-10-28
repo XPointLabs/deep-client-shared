@@ -220,7 +220,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         if (retained.HasInitialState || !FixedRoute(retained.ExactDph2.Span, expectedEnvelope.Span))
             throw new CryptographicException("Initial Store differs from the actual key-retired sender source.");
         var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
-        var initial = opened.Sql.ReadVerifiedActiveInitialEvents(floor);
+        var initial = await opened.WithSqlAsync(sql => sql.ReadVerifiedActiveInitialEvents(floor), ct).ConfigureAwait(false);
         try
         {
             var conversation = retained.RequireInitialConversation(initial.SessionInit, initial.Hello);

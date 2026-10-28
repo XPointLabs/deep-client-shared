@@ -204,6 +204,25 @@ public sealed partial class SqliteDeepMailboxStore
     {
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         hash.AppendData("Deep/STORE-V2/application-compaction-sql"u8); hash.AppendData([0]); hash.AppendData(selector);
+        AppendApplicationCompactionCells(hash, connection, tx, selector, omitted, ct, retainedPath, addAudits, omitAudits);
+        return hash.GetHashAndReset();
+    }
+    // Shared canonical SQL cell stream; the archive enrollment owner supplies a
+    // key-free hash state already bound to actual protected authored snapshots.
+    internal Task<byte[]> CaptureMessagingArchiveAuthoredSourceAsync(IncrementalHash prefix,
+        Did2MessagingSessionScope scope, CancellationToken ct)
+        => WithReplayConnectionAsync(connection =>
+        {
+            using var tx = connection.BeginTransaction();
+            ValidateTransportOutboxSchema(connection, tx); ValidateDirectInboxState(connection, tx);
+            AppendApplicationCompactionCells(prefix, connection, tx, scope.Hash, null, ct);
+            return Task.FromResult(prefix.GetHashAndReset());
+        }, ct);
+
+    private static void AppendApplicationCompactionCells(IncrementalHash hash, SqliteConnection connection, SqliteTransaction tx,
+        ReadOnlySpan<byte> selector, HashSet<string>? omitted, CancellationToken ct,
+        RetainedPathSqlSelection? retainedPath = null, IReadOnlyList<StoppedAuditRow>? addAudits = null, HashSet<string>? omitAudits = null)
+    {
         Span<byte> number = stackalloc byte[8];
         foreach (var schema in ReadSchemaObjects(connection, tx))
         {
@@ -267,7 +286,7 @@ public sealed partial class SqliteDeepMailboxStore
         }
         if (omitted is not null && omittedCount != omitted.Count)
             throw new CryptographicException("Virtual outbox successor lost a selected row.");
-        return hash.GetHashAndReset();
     }
+
 }
 #endif

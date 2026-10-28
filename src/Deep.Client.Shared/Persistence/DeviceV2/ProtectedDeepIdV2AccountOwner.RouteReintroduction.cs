@@ -54,7 +54,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     {
         held.RequireOwner(lease); ct.ThrowIfCancellationRequested(); var scope = opened.Scope;
         var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
-        using var native = opened.Sql.ReadVerifiedOperation(floor, operation.Span) ??
+        using var native = await opened.WithSqlAsync(sql => sql.ReadVerifiedOperation(floor, operation.Span), ct).ConfigureAwait(false) ??
             throw new CryptographicException("Re-introduction lost its exact native send.");
         if (native.Direction != 1) throw new CryptographicException("Re-introduction requires an outgoing native control.");
         using var application = await SqliteDeepIdV2AccountGeneration.OpenExistingApplicationForCompactionUnderLeaseAsync(

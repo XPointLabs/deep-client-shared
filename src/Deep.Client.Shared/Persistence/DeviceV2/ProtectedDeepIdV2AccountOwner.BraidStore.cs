@@ -28,9 +28,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     private static OwnedDid2BraidControlPersistedEvent RequireOwnedBraidSend(OwnedDid2MessagingStorage opened,
         Did2MessagingSessionScope scope, Did2MessagingFloor floor, ReadOnlySpan<byte> operation)
     {
-        if (opened.Sql.ReadVerifiedNativeEventDirection(floor, operation) != 3)
+        if (await opened.WithSqlAsync(sql => sql.ReadVerifiedNativeEventDirection(floor, operation), ct).ConfigureAwait(false) != 3)
             throw new CryptographicException("Control Store requires an actual authenticated native send.");
-        var retained = opened.Sql.ReadVerifiedBraidControl(floor, operation) ??
+        var retained = await opened.WithSqlAsync(sql => sql.ReadVerifiedBraidControl(floor, operation), ct).ConfigureAwait(false) ??
             throw new CryptographicException("Control Store lost its committed exact frame.");
         try
         {
@@ -56,7 +56,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         var frame = Dbr2Codec.Decode(native.ExactControl);
         // Only received, authenticated same-peer data proves that peer installed
         // this output. Local output completion and Store are not peer progress.
-        if (opened.Sql.HasVerifiedPeerBraidPurposeProgress(floor, frame.BraidEpoch, ct))
+        if (await opened.WithSqlAsync(sql => sql.HasVerifiedPeerBraidPurposeProgress(floor, frame.BraidEpoch, ct), ct).ConfigureAwait(false))
             throw new IOException("The peer has completed this control purpose; retain original transport outcomes without new dispatch.");
         ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
     }

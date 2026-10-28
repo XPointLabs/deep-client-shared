@@ -4,18 +4,18 @@ namespace Deep.Client.Shared.Persistence.DeviceV2;
 /// is not a Protocol authority, account catalog, retirement receipt or ACK
 /// owner. Those higher boundaries must be composed before shipping activation.</summary>
 internal sealed class Did2MessagingDurableCustody(Did2MessagingSessionScope scope,
-    Did2MessagingProtectedCheckpoint checkpoint, Did2MessagingSqlJournal sql)
+    Did2MessagingProtectedCheckpoint checkpoint, OwnedDid2MessagingStorage sql)
 {
     private readonly Did2MessagingSessionScope scope = scope ?? throw new ArgumentNullException(nameof(scope));
     private readonly Did2MessagingProtectedCheckpoint checkpoint = checkpoint ?? throw new ArgumentNullException(nameof(checkpoint));
-    private readonly Did2MessagingSqlJournal sql = sql ?? throw new ArgumentNullException(nameof(sql));
+    private readonly OwnedDid2MessagingStorage sql = sql ?? throw new ArgumentNullException(nameof(sql));
 
     internal async Task<Did2MessagingFloor> ReconcileAsync(CancellationToken ct)
     {
         using var timing = ClientPersistenceTiming.Measure(ClientPersistencePhase.NativeReconcile);
         var protectedFloor = await ReadCurrentFloorAsync(ct).ConfigureAwait(false);
         ct.ThrowIfCancellationRequested();
-        var sqlTip = protectedFloor.Phase == 1 ? sql.VerifyOrdinaryState() : sql.VerifyTip();
+        var sqlTip = await sql.WithSqlAsync(journal => protectedFloor.Phase == 1 ? journal.VerifyOrdinaryState() : journal.VerifyTip(), ct).ConfigureAwait(false);
         if (protectedFloor.Phase == 1)
         {
             RequireSame(protectedFloor, sqlTip);
@@ -38,7 +38,7 @@ internal sealed class Did2MessagingDurableCustody(Did2MessagingSessionScope scop
         var expected = mutation.Successor.Cleanup(scope).Stable(scope);
         if (Did2MessagingSessionScope.Fixed(sqlTip.Exact.Span, mutation.Predecessor.Exact.Span))
         {
-            ct.ThrowIfCancellationRequested(); sql.Append(mutation); RequireSame(expected, sql.VerifyTip());
+            ct.ThrowIfCancellationRequested(); await sql.WithSqlAsync(journal => { journal.Append(mutation); RequireSame(expected, journal.VerifyTip()); }, ct).ConfigureAwait(false);
         }
         else RequireSame(expected, sqlTip);
         return await FinishCurrentSqlAsync(mutation.Successor, ct).ConfigureAwait(false);
@@ -56,13 +56,13 @@ internal sealed class Did2MessagingDurableCustody(Did2MessagingSessionScope scop
         var expected = mutation.Successor.Cleanup(scope).Stable(scope);
         if (Did2MessagingSessionScope.Fixed(stable.Exact.Span, expected.Exact.Span)) return stable;
         RequireSame(stable, mutation.Predecessor);
-        sql.RequireAppendCapacity(stable);
+        await sql.WithSqlAsync(journal => journal.RequireAppendCapacity(stable), ct).ConfigureAwait(false);
         await checkpoint.StageAsync(stable, mutation.Successor, mutation.Exact, ct).ConfigureAwait(false);
         RequireSame(mutation.Successor, await ReadCurrentFloorAsync(ct).ConfigureAwait(false));
 #if DEEP_TEST_INTERNALS
         if (mutation.Kind is 2 or 5) await Did2MessagingCommitTestHooks.HitAsync(Did2MessagingCommitFailpoint.AfterPending).ConfigureAwait(false);
 #endif
-        ct.ThrowIfCancellationRequested(); sql.Append(mutation); RequireSame(expected, sql.VerifyOrdinaryState());
+        ct.ThrowIfCancellationRequested(); await sql.WithSqlAsync(journal => { journal.Append(mutation); RequireSame(expected, journal.VerifyOrdinaryState()); }, ct).ConfigureAwait(false);
 #if DEEP_TEST_INTERNALS
         if (mutation.Kind is 2 or 5) await Did2MessagingCommitTestHooks.HitAsync(Did2MessagingCommitFailpoint.AfterSql).ConfigureAwait(false);
 #endif
@@ -85,7 +85,7 @@ internal sealed class Did2MessagingDurableCustody(Did2MessagingSessionScope scop
         RequireSame(stable, mutation.Predecessor);
         await checkpoint.StageAsync(stable, mutation.Successor, mutation.Exact, ct).ConfigureAwait(false);
         RequireSame(mutation.Successor, await ReadCurrentFloorAsync(ct).ConfigureAwait(false));
-        sql.Append(mutation); RequireSame(expected, sql.VerifyTip());
+        await sql.WithSqlAsync(journal => { journal.Append(mutation); RequireSame(expected, journal.VerifyTip()); }, ct).ConfigureAwait(false);
         return await FinishCurrentSqlAsync(mutation.Successor, ct).ConfigureAwait(false);
     }
 
@@ -98,16 +98,16 @@ internal sealed class Did2MessagingDurableCustody(Did2MessagingSessionScope scop
     internal async Task LatchOwnedSendAsync(Did2OwnedSendConflict conflict, CancellationToken ct)
     {
         using var mutation = OwnedDid2MessagingMutation.LatchOwnedSend(conflict);
-        sql.RequireScope(conflict.Scope);
+        await sql.WithSqlAsync(journal => journal.RequireScope(conflict.Scope), ct).ConfigureAwait(false);
         var stable = await ReconcileAsync(ct).ConfigureAwait(false);
         RequireSame(stable, mutation.Predecessor);
         if (mutation.Successor.Ordinal > long.MaxValue)
             throw new InvalidOperationException("DID2 terminal journal capacity is exhausted.");
-        sql.RequireAppendCapacity(stable);
+        await sql.WithSqlAsync(journal => journal.RequireTerminalCapacity(stable), ct).ConfigureAwait(false);
         var expected = mutation.Successor.Cleanup(scope).Stable(scope);
         await checkpoint.StageAsync(stable, mutation.Successor, mutation.Exact, ct).ConfigureAwait(false);
         RequireSame(mutation.Successor, await ReadCurrentFloorAsync(ct).ConfigureAwait(false));
-        ct.ThrowIfCancellationRequested(); sql.Append(mutation); RequireSame(expected, sql.VerifyTip());
+        ct.ThrowIfCancellationRequested(); await sql.WithSqlAsync(journal => { journal.Append(mutation); RequireSame(expected, journal.VerifyTip()); }, ct).ConfigureAwait(false);
         _ = await FinishCurrentSqlAsync(mutation.Successor, ct).ConfigureAwait(false);
     }
 
@@ -115,14 +115,12 @@ internal sealed class Did2MessagingDurableCustody(Did2MessagingSessionScope scop
     {
         var stable = await ReconcileAsync(ct).ConfigureAwait(false);
         if (stable.Status != 1) throw new InvalidOperationException("Ordinary DID2 messaging is blocked until verified initial-key retirement.");
-        ct.ThrowIfCancellationRequested(); return sql.ReadVerifiedLatest(stable);
+        ct.ThrowIfCancellationRequested(); return await sql.WithSqlAsync(journal => journal.ReadVerifiedLatest(stable), ct).ConfigureAwait(false);
     }
 
     internal async Task<Did2MessagingFloor> ReadCurrentFloorAsync(CancellationToken ct)
     {
-        var roots = await checkpoint.ReadRootsAsync(sql, ct).ConfigureAwait(false);
-        sql.RequireActualHistory(roots.History);
-        return roots.Floor;
+        return await sql.WithSqlAsync(journal => journal.ReadOpenedFloor(), ct).ConfigureAwait(false);
     }
 
     private async Task<Did2MessagingFloor> FinishCurrentSqlAsync(Did2MessagingFloor pending, CancellationToken ct)

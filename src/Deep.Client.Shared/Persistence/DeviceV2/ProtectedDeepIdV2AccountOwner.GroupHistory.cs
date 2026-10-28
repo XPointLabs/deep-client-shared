@@ -51,7 +51,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             foreach (var chunk in byScope.Chunk(Did2MessagingSqlJournal.MaximumOperationReadBatch))
             {
                 ct.ThrowIfCancellationRequested();
-                var nativeRows = opened.Sql.ReadVerifiedOperations(floor, chunk.Select(row => (ReadOnlyMemory<byte>)row.Item.Operation).ToArray());
+                var nativeRows = await opened.WithSqlAsync(sql => sql.ReadVerifiedOperations(floor, chunk.Select(row => (ReadOnlyMemory<byte>)row.Item.Operation).ToArray()), ct).ConfigureAwait(false);
                 try
                 {
                     for (var index = 0; index < chunk.Length; index++)
@@ -119,7 +119,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             foreach (var chunk in result.Chunk(Did2MessagingSqlJournal.MaximumOperationReadBatch))
             {
                 ct.ThrowIfCancellationRequested();
-                var nativeRows = opened.Sql.ReadVerifiedOperations(floor, chunk.Select(item => (ReadOnlyMemory<byte>)item.Operation).ToArray());
+                var nativeRows = await opened.WithSqlAsync(sql => sql.ReadVerifiedOperations(floor, chunk.Select(item => (ReadOnlyMemory<byte>)item.Operation).ToArray()), ct).ConfigureAwait(false);
                 try
                 {
                     for (var index = 0; index < chunk.Length; index++)

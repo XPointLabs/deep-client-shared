@@ -19,6 +19,18 @@ internal sealed class Did2MessagingArchiveRoot
     internal ReadOnlySpan<byte> SummaryHash => exact.AsSpan(576, 32);
     internal static string Slot(Did2MessagingSessionScope scope) => scope.FloorSlot + ".archive";
 
+    internal static async Task<Did2MessagingArchiveRoot> ReadRegisteredAsync(IDeepSecureStorage storage,
+        Did2MessagingSessionScope scope, CancellationToken ct)
+    {
+        using var inventory = await storage.ReadOwnedBatchAsync([Slot(scope), Did2MessagingHistoryCheckpoint.Slot(scope),
+            ProtectedDid2MessagingArchiveEnrollment.Slot], ct).ConfigureAwait(false);
+        if (inventory[2] is not null) throw new InvalidOperationException("Explicit messaging archive enrollment owns ordinary access.");
+        var bytes = inventory[0] ?? throw new InvalidDataException("An indexed messaging archive root is absent; no reconstruction is allowed.");
+        var source = inventory[1] ?? throw new InvalidDataException("The immutable messaging archive source history is absent.");
+        var root = bytes.Use(raw => Decode(raw, scope));
+        root.RequireSource(source.Use(raw => Did2MessagingHistoryCheckpoint.Decode(raw, scope))); return root;
+    }
+
     internal static Did2MessagingArchiveRoot Decode(ReadOnlySpan<byte> raw, Did2MessagingSessionScope scope)
     {
         ArgumentNullException.ThrowIfNull(scope);

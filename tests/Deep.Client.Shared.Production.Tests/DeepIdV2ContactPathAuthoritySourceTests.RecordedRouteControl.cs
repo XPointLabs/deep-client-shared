@@ -45,6 +45,15 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         var exactRoute = await fixture.ReadAttemptOriginalRoute(receiver, operation);
         await fixture.CompactHistoricalPeerRoutePrefix(receiver);
         fixture.ColdReopenReceiverStoreStorage();
+        // A fresh Store must select the now-archived qualified route, rather
+        // than succeeding only because the first attempt cached its own route.
+        const string archivedText = "fresh Store through the indexed recovered historical head";
+        var archivedOperation = await fixture.QueueNativeText(receiver, archivedText);
+        var archivedIssuer = new OwnedGrantTransport(fixture, ownerOnPrimary: false);
+        var archivedStore = new OwnedStoreFixture(fixture, receiver, archivedOperation, null, ownerOnPrimary: false) { Cursor = 2 };
+        var archivedResult = await fixture.SendNativeText(receiver, archivedOperation, archivedText, archivedIssuer, archivedStore);
+        var archivedRoute = await fixture.ReadAttemptOriginalRoute(receiver, archivedOperation);
+        Assert.True(exactRoute.AsSpan().SequenceEqual(archivedRoute), "Fresh archived Store changed the exact qualified route.");
         fixture.AdvanceRouteProcessingPast(message.ExpiresAtUnixMilliseconds);
         fixture.AdvanceRouteProcessingRetryClock(); terminal.LoseAckReply = false;
         Assert.Equal(1, (await fixture.SynchronizeNativeReceiver(grants, terminal)).DurableTombstones);
@@ -55,6 +64,11 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         Assert.Equal(result.Cursor, cached.Cursor); Assert.False(cached.IngressDispatched);
         Assert.Equal(0, unusedIssuer.Calls); Assert.Equal(1, store.Calls);
         Assert.Equal(exactRoute, await fixture.ReadAttemptOriginalRoute(receiver, operation));
+        var archivedCached = await fixture.SendNativeText(receiver, archivedOperation, archivedText, unusedIssuer, archivedStore);
+        Assert.Equal(archivedResult.Cursor, archivedCached.Cursor); Assert.False(archivedCached.IngressDispatched);
+        Assert.Equal(0, unusedIssuer.Calls); Assert.Equal(1, archivedStore.Calls);
+        var cachedArchivedRoute = await fixture.ReadAttemptOriginalRoute(receiver, archivedOperation);
+        Assert.True(exactRoute.AsSpan().SequenceEqual(cachedArchivedRoute), "Cached archived Store changed its original route.");
         await fixture.RenewNativeSenderPublicationPastExpiryAsync(renewedRouteLifetimeSeconds: 300);
         using var ordinary = await fixture.CreateOwnedRouteUpdate(sender);
         var ordinaryPayload = Assert.IsType<ContactRouteUpdateDmc2Payload>(ApplicationCoreCodec.DecodeDmc2(ordinary.ExactDmc2.Span).ParsedPayload);

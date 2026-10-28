@@ -42,7 +42,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         var first = await RequireMessagingFreshnessAsync(account, own, peer, source, held, ct).ConfigureAwait(false);
         OwnedInitialMessagingSeed.RequireFreshScope(scope, own.Proof, peer, first);
         var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
-        using var native = opened.Sql.ReadVerifiedOperation(floor, operation.Span) ??
+        using var native = await opened.WithSqlAsync(sql => sql.ReadVerifiedOperation(floor, operation.Span), ct).ConfigureAwait(false) ??
             throw new CryptographicException("Peer route control has no actual native receive commit.");
         if (native.Direction != 2 || native.RouteProcessing[0] != expectedOutcome)
             throw new CryptographicException("Peer route control differs from its original native processing outcome.");

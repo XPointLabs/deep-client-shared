@@ -7,6 +7,12 @@ namespace Deep.Client.Shared.Production.Tests;
 
 public sealed class Did2MessagingArchiveBuilderTests
 {
+    internal static (byte[] Root, IReadOnlyDictionary<string, byte[]> Nodes) IndependentReferenceForActualFacts(
+        Did2MessagingSessionScope scope, IReadOnlyList<(Did2MessagingArchiveFamily Family, byte[] Selector, byte[] Value)> facts)
+    {
+        var reference = FullReference(scope, facts.Select(fact => new Observation(fact.Family, fact.Selector, fact.Value)).ToArray());
+        return (reference.Root, reference.Nodes);
+    }
     [Fact]
     public void EveryFamilyIncrementalAndReorderedConstructionEqualIndependentFullReplay()
     {

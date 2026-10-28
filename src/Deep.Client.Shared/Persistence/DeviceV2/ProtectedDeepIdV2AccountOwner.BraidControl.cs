@@ -51,7 +51,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
             if (send)
             {
-                result = opened.Sql.ReadVerifiedBraidControl(floor, op);
+                result = await opened.WithSqlAsync(sql => sql.ReadVerifiedBraidControl(floor, op), ct).ConfigureAwait(false);
                 if (result is not null && result.Direction != 3)
                     throw new CryptographicException("Braid send operation belongs to another direction.");
             }
@@ -66,8 +66,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                         own, peer, source, verifier, ct).ConfigureAwait(false);
                     floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
                 }
-                var context = opened.Sql.CreateVerifiedBraidTransitionContext(floor, op, exact);
-                using var prior = opened.Sql.ReadVerifiedLatest(floor);
+                var context = await opened.WithSqlAsync(sql => sql.CreateVerifiedBraidTransitionContext(floor, op, exact), ct).ConfigureAwait(false);
+                using var prior = await opened.WithSqlAsync(sql => sql.ReadVerifiedLatest(floor), ct).ConfigureAwait(false);
                 using var prepared = prior.Use(bytes => send
                     ? ExactBraidRecoveryDurableTransactionProducer.PrepareSend(bytes, context, scope.Network, op)
                     : ExactBraidRecoveryDurableTransactionProducer.PrepareReceive(bytes, context, scope.Network, exact));
@@ -100,7 +100,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                         using var mutation = OwnedDid2MessagingMutation.BraidControl(scope, stable, plan);
                         stable = await opened.Custody.CommitOwnedAsync(mutation, token).ConfigureAwait(false);
                     }
-                    using var retained = opened.Sql.ReadVerifiedBraidControl(stable, op) ??
+                    using var retained = await opened.WithSqlAsync(sql => sql.ReadVerifiedBraidControl(stable, op), ct).ConfigureAwait(false) ??
                         throw new CryptographicException("Braid commit lost its exact retained row.");
                     if (retained.Direction != (send ? 3 : 4) || !Did2MessagingSessionScope.Fixed(retained.ExactControl, plan.ExactControl.Span))
                         throw new CryptographicException("Braid commit read-back differs from the sealed control.");
@@ -110,7 +110,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 });
                 using var success = await prepared.CommitAsync(authority, ct).ConfigureAwait(false);
                 var committed = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
-                result = opened.Sql.ReadVerifiedBraidControl(committed, op) ?? throw new CryptographicException("Braid stable read-back is absent.");
+                result = await opened.WithSqlAsync(sql => sql.ReadVerifiedBraidControl(committed, op), ct).ConfigureAwait(false) ?? throw new CryptographicException("Braid stable read-back is absent.");
             }
             await RequireFinalMessagingFreshnessAsync(account, scope, own, peer, source, held, first, ct).ConfigureAwait(false);
             ct.ThrowIfCancellationRequested(); held.RequireActive();

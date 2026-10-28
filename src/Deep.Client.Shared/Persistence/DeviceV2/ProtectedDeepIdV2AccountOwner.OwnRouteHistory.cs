@@ -28,7 +28,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         // latest peer delivery route. Reconstructing own committed history
         // must not need a newly current peer mailbox or remint its route.
         var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
-        var initial = opened.Sql.ReadVerifiedActiveInitialEvents(floor); byte[] accepted = [], headHash = [];
+        var initial = await opened.WithSqlAsync(sql => sql.ReadVerifiedActiveInitialEvents(floor), ct).ConfigureAwait(false); byte[] accepted = [], headHash = [];
         try
         {
             var hello = ApplicationCoreCodec.DecodeDmc2(initial.Hello);
@@ -45,7 +45,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     BinaryPrimitives.ReadUInt64BigEndian(scope.Exact[84..]), scope.Conversation.ToArray(),
                     scope.RemoteAccount.ToArray(), scope.RemoteDevice.ToArray(), ct).ConfigureAwait(false) ??
                     throw new CryptographicException("Own route update has no actual peer acceptance.");
-                using var native = opened.Sql.ReadVerifiedReceiveForEvent(floor, SHA256.HashData(accepted)) ??
+                using var native = await opened.WithSqlAsync(sql => sql.ReadVerifiedReceiveForEvent(floor, SHA256.HashData(accepted)), ct).ConfigureAwait(false) ??
                     throw new CryptographicException("Own route update lost native peer acceptance custody.");
                 using var exact = native.OwnAuthenticatedDmc2();
                 if (!exact.Use(bytes => FixedRoute(bytes, accepted)))
@@ -68,7 +68,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     scope.Network, scope.LocalAccount, scope.Instance));
                 var command = commands.FindScope(scope) ??
                     throw new CryptographicException("Own route update has no local acceptance winner.");
-                using var native = opened.Sql.ReadVerifiedOperation(floor, command.Operation) ??
+                using var native = await opened.WithSqlAsync(sql => sql.ReadVerifiedOperation(floor, command.Operation), ct).ConfigureAwait(false) ??
                     throw new CryptographicException("Own route update lost native local acceptance.");
                 if (native.Direction != 1 || !FixedRoute(native.EventHash, SHA256.HashData(accepted)))
                     throw new CryptographicException("Own route update local acceptance differs from its native source.");

@@ -11,14 +11,15 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         Did2CompactionPlan.RootKind.Ordinary, Did2CompactionPlan.RootKind.Send, Did2CompactionPlan.RootKind.Grant,
         Did2CompactionPlan.RootKind.Read, Did2CompactionPlan.RootKind.SessionCatalog, Did2CompactionPlan.RootKind.MessagingFloor,
         Did2CompactionPlan.RootKind.Attachment, Did2CompactionPlan.RootKind.AccountRegistration,
-        Did2CompactionPlan.RootKind.MessagingHistoryCheckpoint, Did2CompactionPlan.RootKind.MessagingPeerBootstrap
+        Did2CompactionPlan.RootKind.MessagingHistoryCheckpoint, Did2CompactionPlan.RootKind.MessagingPeerBootstrap,
+        Did2CompactionPlan.RootKind.MessagingArchive
     ];
     private static string[] OrdinaryOutboxSlots(Did2MessagingSessionScope scope) =>
     [
         ProtectedDid2DirectTextJournal.Slot, ProtectedDid2MailboxSendJournal.Slot, ProtectedDid2MailboxGrantJournal.Slot,
         ProtectedDid2MailboxReadJournal.Slot, ProtectedDid2MessagingSessionCatalog.Slot, scope.FloorSlot,
         ProtectedDid2AttachmentJournal.Slot, SqliteDeepIdV2AccountGeneration.CompactionRegistrationSlot,
-        Did2MessagingHistoryCheckpoint.Slot(scope), ProtectedDid2MessagingPeerBootstrap.Slot(scope)
+        Did2MessagingHistoryCheckpoint.Slot(scope), ProtectedDid2MessagingPeerBootstrap.Slot(scope), Did2MessagingArchiveRoot.Slot(scope)
     ];
 
     private static Did2MessagingSessionScope ResolveOrdinaryOutboxScope(Did2CompactionPlan plan,
@@ -85,6 +86,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     break;
                 case 8: _ = raw.Use(bytes => Did2MessagingHistoryCheckpoint.Decode(bytes, scope)); break;
                 case 9: _ = raw.Use(bytes => ProtectedDid2MessagingPeerBootstrap.Restore(bytes, scope)); break;
+                case 10:
+                    var archive = raw.Use(bytes => Did2MessagingArchiveRoot.Decode(bytes, scope));
+                    archive.RequireSource(inventory[8]!.Use(bytes => Did2MessagingHistoryCheckpoint.Decode(bytes, scope))); break;
             }
             result.Add(new(OrdinaryOutboxRootKinds[index], selector, raw.Use(bytes => SHA256.HashData(bytes))));
         }
@@ -172,10 +176,10 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         var scope = ResolveOrdinaryOutboxScope(plan, catalog);
         var roots = await ReadOrdinaryOutboxRootsUnderLeaseAsync(storage, plan, scope, held, lease, ct).ConfigureAwait(false);
         var floor = await new Did2MessagingProtectedCheckpoint(storage, scope).ReadAsync(ct).ConfigureAwait(false);
-        var history = await Did2MessagingHistoryCheckpoint.ReadRegisteredAsync(storage, scope, ct).ConfigureAwait(false);
-        using var connection = SqliteDeepIdV2AccountGeneration.OpenExistingMessagingForCompactionUnderLease(sqlStatePath, catalog, scope, held, lease);
-        var native = new Did2MessagingSqlJournal(connection, scope, history);
-        if (!FixedRoute(native.VerifyTip().Exact.Span, floor.Exact.Span)) throw new CryptographicException("Ordinary recovery lost its independent native tip.");
+        using var native = await SqliteDeepIdV2AccountGeneration.OpenRegisteredMessagingUnderLeaseAsync(storage, sqlStatePath,
+            scope.Network.ToArray(), scope.LocalAccount.ToArray(), scope, ct).ConfigureAwait(false);
+        if (!FixedRoute((await native.WithSqlAsync(sql => sql.VerifyOrdinaryState(), ct).ConfigureAwait(false)).Exact.Span, floor.Exact.Span))
+            throw new CryptographicException("Ordinary recovery lost its independent native tip.");
         using var application = await SqliteDeepIdV2AccountGeneration.OpenExistingApplicationForCompactionUnderLeaseAsync(
             storage, sqlStatePath, scope, held, lease, ct).ConfigureAwait(false);
         using var authoredRoot = await storage.ReadOwnedAsync(ProtectedDid2DirectTextJournal.Slot, ct).ConfigureAwait(false) ??
@@ -186,7 +190,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         using var sends = sendRoot.Use(bytes => ProtectedDid2MailboxSendJournal.Decode(bytes, scope.Network, scope.LocalAccount, scope.Instance));
         async Task RequireNativeSelectionAsync(ProtectedDid2DirectTextJournal.Entry entry)
         {
-            using var committed = native.ReadVerifiedOperation(floor, entry.Operation);
+            using var committed = await native.WithSqlAsync(sql => sql.ReadVerifiedOperation(floor, entry.Operation), ct).ConfigureAwait(false);
             if (committed is null)
             {
                 if (!IsStoppedOutboxPlan(plan)) throw new CryptographicException("Ordinary Store recovery lost its committed event.");
@@ -213,7 +217,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             {
                 // Normal Store-prefix adoption removes these working entries;
                 // the independently retained native event remains mandatory.
-                using var committed = native.ReadVerifiedOperation(floor, plan.ReadRow(index).Selector.Span) ??
+                using var committed = await native.WithSqlAsync(sql => sql.ReadVerifiedOperation(floor, plan.ReadRow(index).Selector.Span), ct).ConfigureAwait(false) ??
                     throw new CryptographicException("Ordinary recovery lost a retained committed event.");
                 if (committed.Direction != 1) throw new CryptographicException("Ordinary recovery selected a received event.");
             }

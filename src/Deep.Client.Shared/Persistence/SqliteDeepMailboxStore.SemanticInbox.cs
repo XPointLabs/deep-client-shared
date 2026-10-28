@@ -339,95 +339,104 @@ public sealed partial class SqliteDeepMailboxStore
             throw new ArgumentOutOfRangeException(nameof(localAccountGeneration));
         return WithReplayConnectionAsync(connection =>
         {
-            var local = localAccountId.ToArray();
-            var generation = new byte[8];
-            BinaryPrimitives.WriteUInt64BigEndian(generation, localAccountGeneration);
-            var conversation = conversationId.ToArray();
-            var logical = logicalMessageId.ToArray();
-            var device = authorDeviceId.ToArray();
-            try
+            using var transaction = connection.BeginTransaction(deferred: true);
+            return Task.FromResult(ReadDirectDmc2InSnapshot(connection, transaction, localAccountId, localAccountGeneration,
+                conversationId, logicalMessageId, authorDeviceId));
+        }, cancellationToken);
+    }
+
+    private static byte[]? ReadDirectDmc2InSnapshot(SqliteConnection connection, SqliteTransaction transaction,
+        ReadOnlyMemory<byte> localAccountId, ulong localAccountGeneration, ReadOnlyMemory<byte> conversationId,
+        ReadOnlyMemory<byte> logicalMessageId, ReadOnlyMemory<byte> authorDeviceId)
+    {
+        var local = localAccountId.ToArray();
+        var generation = new byte[8];
+        BinaryPrimitives.WriteUInt64BigEndian(generation, localAccountGeneration);
+        var conversation = conversationId.ToArray();
+        var logical = logicalMessageId.ToArray();
+        var device = authorDeviceId.ToArray();
+        try
+        {
+            using var owner = connection.CreateCommand(); owner.Transaction = transaction;
+            owner.CommandText = "SELECT local_account_id,local_account_generation FROM authenticated_dmc2_inbox_owner WHERE singleton=1;";
+            using (var reader = owner.ExecuteReader())
             {
-                using var owner = connection.CreateCommand();
-                owner.CommandText = "SELECT local_account_id,local_account_generation FROM authenticated_dmc2_inbox_owner WHERE singleton=1;";
-                using (var reader = owner.ExecuteReader())
-                {
-                    if (!reader.Read()) return Task.FromResult<byte[]?>(null);
-                    var storedAccount = (byte[])reader[0];
-                    var storedGeneration = (byte[])reader[1];
-                    try
-                    {
-                        if (!DirectFixed(local, storedAccount) ||
-                            !DirectFixed(generation, storedGeneration) || reader.Read())
-                            throw new CryptographicException(
-                                "The direct inbox belongs to another local account generation.");
-                    }
-                    finally
-                    {
-                        CryptographicOperations.ZeroMemory(storedAccount);
-                        CryptographicOperations.ZeroMemory(storedGeneration);
-                    }
-                }
-                using var read = connection.CreateCommand();
-                read.CommandText = "SELECT i.exact_dmc2,i.exact_dmc2_hash,f.incumbent_hash,i.author_account_id,i.content_kind,i.sender_sequence,length(i.exact_dmc2),typeof(i.exact_dmc2),length(i.exact_dmc2_hash),typeof(i.exact_dmc2_hash),length(i.author_account_id),typeof(i.author_account_id),length(i.sender_sequence),typeof(i.sender_sequence),typeof(i.content_kind) FROM authenticated_dmc2_inbox i LEFT JOIN authenticated_dmc2_inbox_forks f ON i.conversation_id=f.conversation_id AND i.logical_message_id=f.logical_message_id AND i.author_device_id=f.author_device_id WHERE i.conversation_id=$conversation AND i.logical_message_id=$logical AND i.author_device_id=$device;";
-                AddDirectKey(read, conversation, logical, device);
-                using var eventReader = read.ExecuteReader();
-                if (!eventReader.Read()) return Task.FromResult<byte[]?>(null);
-                if (eventReader.GetString(7) != "blob" || eventReader.GetInt64(6) is < 282 or > 33082 ||
-                    eventReader.GetString(9) != "blob" || eventReader.GetInt64(8) != 32 ||
-                    eventReader.GetString(11) != "blob" || eventReader.GetInt64(10) != 32 ||
-                    eventReader.GetString(13) != "blob" || eventReader.GetInt64(12) != 8 || eventReader.GetString(14) != "integer")
-                    throw new CryptographicException("The retained semantic event exceeds its closed metadata/payload bounds.");
-                var exact = (byte[])eventReader[0];
-                var hash = (byte[])eventReader[1];
-                var actualHash = SHA256.HashData(exact);
+                if (!reader.Read()) return null;
+                var storedAccount = (byte[])reader[0];
+                var storedGeneration = (byte[])reader[1];
                 try
                 {
-                    if (!eventReader.IsDBNull(2) ||
-                        !DirectFixed(hash, actualHash))
+                    if (!DirectFixed(local, storedAccount) ||
+                        !DirectFixed(generation, storedGeneration) || reader.Read())
                         throw new CryptographicException(
-                            "The direct inbox event is forked or corrupt.");
-                    var parsed = Deep.Protocol.ApplicationCore.ApplicationCoreCodec.DecodeDmc2(exact);
-                    byte[] storedAuthor = [], canonical = [];
-                    try
-                    {
-                        storedAuthor = (byte[])eventReader[3];
-                        canonical = OwnedByteExports.TakeArray(parsed.CanonicalBytes);
-                        if (!DirectFixed(parsed.ConversationId.Span, conversation) ||
-                            !DirectFixed(parsed.LogicalMessageId.Span, logical) ||
-                            !DirectFixed(parsed.SenderDeviceId.Span, device) ||
-                            !DirectFixed(parsed.SenderAccountId.Span, storedAuthor) ||
-                            !DirectFixed(canonical, exact) ||
-                            !IsAccountInboxKind(parsed.ContentKind) ||
-                            eventReader.GetInt32(4) != (int)parsed.ContentKind ||
-                            !SequenceMatches((byte[])eventReader[5], parsed.SenderClientSequence))
-                            throw new CryptographicException(
-                                "The direct inbox event differs from its semantic key.");
-                    }
-                    finally
-                    {
-                        if (parsed.ParsedPayload is AttachmentOfferDmc2Payload offer) offer.Manifest.Dispose();
-                        CryptographicOperations.ZeroMemory(storedAuthor);
-                        CryptographicOperations.ZeroMemory(canonical);
-                    }
-                    return Task.FromResult<byte[]?>(exact);
-                }
-                catch
-                {
-                    CryptographicOperations.ZeroMemory(exact);
-                    throw;
+                            "The direct inbox belongs to another local account generation.");
                 }
                 finally
                 {
-                    CryptographicOperations.ZeroMemory(hash);
-                    CryptographicOperations.ZeroMemory(actualHash);
+                    CryptographicOperations.ZeroMemory(storedAccount);
+                    CryptographicOperations.ZeroMemory(storedGeneration);
                 }
+            }
+            using var read = connection.CreateCommand(); read.Transaction = transaction;
+            read.CommandText = "SELECT i.exact_dmc2,i.exact_dmc2_hash,f.incumbent_hash,i.author_account_id,i.content_kind,i.sender_sequence,length(i.exact_dmc2),typeof(i.exact_dmc2),length(i.exact_dmc2_hash),typeof(i.exact_dmc2_hash),length(i.author_account_id),typeof(i.author_account_id),length(i.sender_sequence),typeof(i.sender_sequence),typeof(i.content_kind) FROM authenticated_dmc2_inbox i LEFT JOIN authenticated_dmc2_inbox_forks f ON i.conversation_id=f.conversation_id AND i.logical_message_id=f.logical_message_id AND i.author_device_id=f.author_device_id WHERE i.conversation_id=$conversation AND i.logical_message_id=$logical AND i.author_device_id=$device;";
+            AddDirectKey(read, conversation, logical, device);
+            using var eventReader = read.ExecuteReader();
+            if (!eventReader.Read()) return null;
+            if (eventReader.GetString(7) != "blob" || eventReader.GetInt64(6) is < 282 or > 33082 ||
+                eventReader.GetString(9) != "blob" || eventReader.GetInt64(8) != 32 ||
+                eventReader.GetString(11) != "blob" || eventReader.GetInt64(10) != 32 ||
+                eventReader.GetString(13) != "blob" || eventReader.GetInt64(12) != 8 || eventReader.GetString(14) != "integer")
+                throw new CryptographicException("The retained semantic event exceeds its closed metadata/payload bounds.");
+            var exact = (byte[])eventReader[0];
+            var hash = (byte[])eventReader[1];
+            var actualHash = SHA256.HashData(exact);
+            try
+            {
+                if (!eventReader.IsDBNull(2) ||
+                    !DirectFixed(hash, actualHash))
+                    throw new CryptographicException(
+                        "The direct inbox event is forked or corrupt.");
+                var parsed = Deep.Protocol.ApplicationCore.ApplicationCoreCodec.DecodeDmc2(exact);
+                byte[] storedAuthor = [], canonical = [];
+                try
+                {
+                    storedAuthor = (byte[])eventReader[3];
+                    canonical = OwnedByteExports.TakeArray(parsed.CanonicalBytes);
+                    if (!DirectFixed(parsed.ConversationId.Span, conversation) ||
+                        !DirectFixed(parsed.LogicalMessageId.Span, logical) ||
+                        !DirectFixed(parsed.SenderDeviceId.Span, device) ||
+                        !DirectFixed(parsed.SenderAccountId.Span, storedAuthor) ||
+                        !DirectFixed(canonical, exact) ||
+                        !IsAccountInboxKind(parsed.ContentKind) ||
+                        eventReader.GetInt32(4) != (int)parsed.ContentKind ||
+                        !SequenceMatches((byte[])eventReader[5], parsed.SenderClientSequence))
+                        throw new CryptographicException(
+                            "The direct inbox event differs from its semantic key.");
+                }
+                finally
+                {
+                    if (parsed.ParsedPayload is AttachmentOfferDmc2Payload offer) offer.Manifest.Dispose();
+                    CryptographicOperations.ZeroMemory(storedAuthor);
+                    CryptographicOperations.ZeroMemory(canonical);
+                }
+                return exact;
+            }
+            catch
+            {
+                CryptographicOperations.ZeroMemory(exact);
+                throw;
             }
             finally
             {
-                foreach (var value in new[] { local, generation, conversation, logical, device })
-                    CryptographicOperations.ZeroMemory(value);
+                CryptographicOperations.ZeroMemory(hash);
+                CryptographicOperations.ZeroMemory(actualHash);
             }
-        }, cancellationToken);
+        }
+        finally
+        {
+            foreach (var value in new[] { local, generation, conversation, logical, device })
+                CryptographicOperations.ZeroMemory(value);
+        }
     }
 
     /// <summary>

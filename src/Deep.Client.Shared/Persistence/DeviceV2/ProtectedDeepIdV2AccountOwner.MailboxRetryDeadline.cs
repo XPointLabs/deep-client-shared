@@ -89,7 +89,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
         if (!initialIntent.IsEmpty)
         {
-            var initial = opened.Sql.ReadVerifiedActiveInitialEvents(floor);
+            var initial = await opened.WithSqlAsync(sql => sql.ReadVerifiedActiveInitialEvents(floor), ct).ConfigureAwait(false);
             try
             {
                 if (!FixedRoute(InitialMailboxOperation(initialIntent.Span), operation.Span))
@@ -116,7 +116,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         using var retained = await application.ReconcileOwnedTextOutboxAsync(authored, current.AccountId,
             BinaryPrimitives.ReadUInt64BigEndian(scope.Exact[84..]), scope, operation, ct).ConfigureAwait(false) ??
             throw new CryptographicException("Working retry lost its actual ordinary event.");
-        using var native = opened.Sql.ReadVerifiedOperation(floor, operation.Span) ??
+        using var native = await opened.WithSqlAsync(sql => sql.ReadVerifiedOperation(floor, operation.Span), ct).ConfigureAwait(false) ??
             throw new CryptographicException("Working retry has no committed native event.");
         var exact = OwnedByteExports.TakeArray(retained.ExactDmc2);
         try

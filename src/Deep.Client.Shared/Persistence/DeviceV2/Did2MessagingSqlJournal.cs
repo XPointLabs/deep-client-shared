@@ -17,34 +17,34 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
 {
     private readonly Did2MessagingHistoryCheckpoint historyRoot = history ?? throw new ArgumentNullException(nameof(history));
     private bool activeHistory;
-    private byte[]? registrationHash, catalogHash;
 
-    internal bool RequiresOpenRegistration => registrationHash is not null;
-    internal void BindOpenRegistration(byte[] registration, byte[] catalog)
-    { registrationHash = registration; catalogHash = catalog; }
-
-    internal void RequireActualRegistration(OwnedDeepSecret? registration, OwnedDeepSecret? catalog)
+    private Did2MessagingFloor? openedFloor;
+    private ProtectedDid2MessagingArchiveEnrollment? enrollmentProgress;
+    internal bool HasFrozenArchiveEnrollment => enrollmentProgress is not null;
+    internal void BindEnrollmentProgress(ProtectedDid2MessagingArchiveEnrollment? progress) => enrollmentProgress = progress;
+    internal void BindOpenedFloor(Did2MessagingFloor floor) => openedFloor = floor;
+    internal Did2MessagingFloor ReadOpenedFloor()
     {
-        if (registrationHash is null) return; // Existing lower/full source owner.
-        if (registration is null || catalog is null ||
-            !registration.Use(bytes => Fixed(SHA256.HashData(bytes), registrationHash)) ||
-            !catalog.Use(bytes => Fixed(SHA256.HashData(bytes), catalogHash!)))
-            throw new CryptographicException("Actual native key registration/catalog changed after opening.");
+        if (!archiveEnrollment) RequireArchiveMirror();
+        return openedFloor ?? throw new InvalidOperationException("Actual protected floor was not joined by this physical opener.");
     }
 
     // Only the audited account-runtime opener chooses the ordinary algorithm;
     // lower source/initial/compaction openers retain full archive semantics.
     internal static Did2MessagingSqlJournal ForOrdinaryRuntime(SqliteConnection connection,
-        Did2MessagingSessionScope scope, Did2MessagingHistoryCheckpoint history)
-        => new(connection, scope, history) { activeHistory = true };
-    internal const int ApplicationId = 0x444d5332, SchemaVersion = 5, MaximumEntries = 4096;
+        Did2MessagingSessionScope scope, Did2MessagingHistoryCheckpoint history, Did2MessagingArchiveRoot archive)
+    {
+        archive.RequireSource(history);
+        return new(connection, scope, history) { activeHistory = true, archiveRoot = archive };
+    }
+    internal const int ApplicationId = 0x444d5332, SchemaVersion = 6, MaximumEntries = 4096;
     private readonly SqliteConnection connection = connection ?? throw new ArgumentNullException(nameof(connection));
     private readonly Did2MessagingSessionScope scope = scope ?? throw new ArgumentNullException(nameof(scope));
     internal void RequireScope(Did2MessagingSessionScope expected)
     {
         if (!Fixed(scope.Exact, expected.Exact)) throw new CryptographicException("DID2 SQL scope differs from its owner.");
     }
-    private static readonly (string Name, string Sql)[] Schema =
+    private static readonly (string Name, string Sql)[] OriginalSchema =
     [
         ("scope", "CREATE TABLE scope (singleton INTEGER PRIMARY KEY CHECK(singleton=1), exact_scope BLOB NOT NULL CHECK(length(exact_scope)=404));"),
         ("journal", "CREATE TABLE journal (ordinal INTEGER PRIMARY KEY CHECK(ordinal BETWEEN 1 AND 9223372036854775807), predecessor BLOB NOT NULL CHECK(length(predecessor)=32), head BLOB NOT NULL CHECK(length(head)=32), metadata BLOB NOT NULL CHECK(length(metadata)=672));"),
@@ -52,6 +52,48 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
         ("initial_events", "CREATE TABLE initial_events (singleton INTEGER PRIMARY KEY CHECK(singleton=1), envelope BLOB NOT NULL CHECK(length(envelope) BETWEEN 1 AND 65536), session_init BLOB NOT NULL CHECK(length(session_init) BETWEEN 1 AND 32768), hello BLOB NOT NULL CHECK(length(hello) BETWEEN 1 AND 32768), metadata BLOB NOT NULL CHECK(length(metadata)=672));"),
         ("events", "CREATE TABLE events (operation BLOB PRIMARY KEY CHECK(length(operation)=32), ordinal INTEGER NOT NULL UNIQUE CHECK(ordinal BETWEEN 1 AND 9223372036854775807), direction INTEGER NOT NULL CHECK(direction IN (1,2,3,4)), envelope BLOB NOT NULL CHECK(length(envelope) BETWEEN 1 AND 65536), plaintext BLOB, metadata BLOB NOT NULL CHECK(length(metadata)=672), CHECK((direction=1 AND plaintext IS NULL) OR (direction=2 AND plaintext IS NOT NULL AND length(plaintext) BETWEEN 1 AND 33082) OR (direction IN (3,4) AND length(envelope)=4112 AND plaintext IS NULL)));"),
     ];
+
+    private static readonly (string Name, string Sql)[] ArchiveSchema =
+    [
+        ("archive_nodes", "CREATE TABLE archive_nodes (hash BLOB PRIMARY KEY NOT NULL CHECK(typeof(hash)='blob' AND length(hash)=32), exact BLOB NOT NULL CHECK(typeof(exact)='blob' AND length(exact) BETWEEN 104 AND 320));"),
+        ("archive_reducers", "CREATE TABLE archive_reducers (hash BLOB PRIMARY KEY NOT NULL CHECK(typeof(hash)='blob' AND length(hash)=32), exact BLOB NOT NULL CHECK(typeof(exact)='blob' AND length(exact)=960));"),
+        ("archive_state", "CREATE TABLE archive_state (singleton INTEGER PRIMARY KEY CHECK(singleton=1), exact BLOB NOT NULL CHECK(typeof(exact)='blob' AND length(exact)=608));")
+    ];
+    private static readonly (string Name, string Sql)[] Schema = [.. OriginalSchema, .. ArchiveSchema];
+    private bool archiveEnrollment;
+    private int archiveEnrollmentVersion = 5;
+    private Did2MessagingArchiveRoot? archiveRoot;
+    private Did2MessagingFloor WorkingBasis => archiveRoot?.Basis ?? (archiveEnrollment ? historyRoot.Basis :
+        throw new InvalidDataException("The independently protected messaging archive root is mandatory."));
+    internal static Did2MessagingSqlJournal ForArchiveEnrollment(SqliteConnection connection,
+        Did2MessagingSessionScope scope, Did2MessagingHistoryCheckpoint history,
+        ProtectedDid2MessagingArchiveEnrollment? progress = null)
+    {
+        var sql = new Did2MessagingSqlJournal(connection, scope, history) { archiveEnrollment = true };
+        var version = sql.PragmaInteger("user_version");
+        if (version == 6 && progress is not null) sql.archiveEnrollmentVersion = 6;
+        else if (version != 5) throw new InvalidDataException("Only the exact stored enrollment progress permits staged schema6.");
+        return sql;
+    }
+    internal void BindArchiveRoot(Did2MessagingArchiveRoot root)
+    { root.RequireSource(historyRoot); archiveRoot = root; }
+
+    internal static Did2MessagingSqlJournal InitializeOldEnrollmentSource(SqliteConnection connection,
+        Did2MessagingSessionScope scope, Did2MessagingHistoryCheckpoint history, Did2MessagingFloor registeredEmpty)
+    {
+        var sql = new Did2MessagingSqlJournal(connection, scope, history) { archiveEnrollment = true };
+        sql.RequireSame(Did2MessagingFloor.Empty(scope), registeredEmpty); sql.RequireEmptyHistory(); sql.RequireCipherPolicy();
+        using var query = sql.Command("SELECT count(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%';");
+        if (Convert.ToInt64(query.ExecuteScalar()) == 0 && sql.PragmaInteger("application_id") == 0 && sql.PragmaInteger("user_version") == 0)
+        {
+            using var tx = connection.BeginTransaction();
+            foreach (var (_, ddl) in OriginalSchema) sql.Execute(ddl, tx);
+            sql.Execute($"PRAGMA application_id={ApplicationId}; PRAGMA user_version=5;", tx);
+            using var insert = sql.Command("INSERT INTO scope(singleton,exact_scope) VALUES(1,$scope);", tx);
+            insert.Parameters.AddWithValue("$scope", scope.Exact.ToArray()); insert.ExecuteNonQuery(); tx.Commit();
+        }
+        sql.ValidateSchemaVersion(5); sql.RequireSame(registeredEmpty, sql.VerifyTip()); return sql;
+    }
 
     internal void CreateRegisteredEmpty(Did2MessagingFloor registeredEmpty)
     {
@@ -70,6 +112,10 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
         Execute($"PRAGMA application_id={ApplicationId}; PRAGMA user_version={SchemaVersion};", tx);
         using (var insert = Command("INSERT INTO scope VALUES(1,$scope);", tx))
         { insert.Parameters.AddWithValue("$scope", scope.Exact.ToArray()); insert.ExecuteNonQuery(); }
+        var empty = Did2MessagingArchiveRoot.Empty(scope);
+        BindArchiveRoot(empty);
+        InsertArchiveReducer(Did2MessagingArchiveReducer.Empty(scope), tx);
+        ReplaceArchiveMirror(empty, tx, null);
         tx.Commit();
         RequireSame(registeredEmpty, VerifyTip());
     }
@@ -102,7 +148,7 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
     private Did2MessagingFloor VerifyTipInTransaction(SqliteTransaction? tx, out List<byte[]> headers)
     {
         using var timing = ClientPersistenceTiming.Measure(ClientPersistencePhase.NativeVerify);
-        RequireCipherPolicy(tx); ValidateSchema(tx);
+        RequireCipherPolicy(tx); ValidateSchema(tx); RequireAllCipherPages(tx);
         VerifyHistoryPrefix(tx);
         headers = ReadJournal(out var tip, tx);
         VerifyRows(headers, tip, tx);
@@ -112,7 +158,7 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
 
     internal byte[] VerifyInitialImport(Did2MessagingFloor protectedStable)
     {
-        RequireSame(protectedStable, VerifyTip());
+        RequireSame(protectedStable, VerifyOrdinaryState());
         if (protectedStable.Phase != 1 || protectedStable.Status != 0 || protectedStable.Ordinal != 1 || protectedStable.RatchetGeneration != 1)
             throw new InvalidDataException("Mutable source transfer is not the unactivated first import.");
         var headers = ReadJournal(out _);
@@ -125,7 +171,7 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
         _ = Did2MessagingFloor.Decode(protectedStable.Exact.Span, scope);
         if (protectedStable.Phase != 1 || protectedStable.Status != 1)
             throw new InvalidDataException("Initial inbox handoff requires the retired active messaging floor.");
-        RequireSame(protectedStable, VerifyTip());
+        RequireSame(protectedStable, VerifyOrdinaryState());
         using var command = Command("SELECT length(session_init),session_init,length(hello),hello FROM initial_events WHERE singleton=1;");
         using var reader = command.ExecuteReader();
         if (!reader.Read() || reader.GetInt64(0) is < 1 or > 32768 || reader.GetInt64(2) is < 1 or > 32768)
@@ -145,12 +191,14 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
         ArgumentNullException.ThrowIfNull(mutation);
         if (!Fixed(scope.Exact, mutation.Scope.Exact) || mutation.Successor.Ordinal > long.MaxValue)
             throw new InvalidDataException("DID2 messaging mutation scope/capacity differs.");
+        if (openedFloor is not null && !Fixed(openedFloor.Exact.Span, mutation.Successor.Exact.Span))
+            throw new CryptographicException("Actual protected pending floor differs from this native SQL mutation.");
         RequireCipherPolicy(); ValidateSchema();
         using var tx = connection.BeginTransaction();
-        if (activeHistory && mutation.Kind == 2) { RequireAllCipherPages(tx); VerifyActiveHistory(tx, null); }
+        if (!archiveEnrollment) VerifyActiveHistory(tx, null);
         else VerifyHistoryPrefix(tx);
         var priorHeaders = ReadJournal(out var prior, tx); VerifyRows(priorHeaders, prior, tx);
-        if (priorHeaders.Count >= MaximumEntries)
+        if (priorHeaders.Count >= (archiveEnrollment ? MaximumEntries : 64))
             throw new InvalidOperationException("DID2 messaging working journal requires owned prefix checkpointing.");
         RequireSame(prior, mutation.Predecessor);
         using var blobs = new OwnedBindings();
@@ -229,7 +277,7 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
         _ = Did2MessagingFloor.Decode(protectedStable.Exact.Span, scope);
         if (protectedStable.Phase != 1 || protectedStable.Status != 1)
             throw new InvalidDataException("Outgoing history requires an active stable messaging floor.");
-        RequireSame(protectedStable, VerifyTip());
+        RequireSame(protectedStable, VerifyOrdinaryState());
         using var command = Command("SELECT operation,typeof(operation),length(operation) FROM events WHERE direction=1 ORDER BY ordinal;");
         using var reader = command.ExecuteReader();
         while (reader.Read())
@@ -373,26 +421,36 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
         ExactDpe2ReceiveReplayDisposition replay)
     {
         using var tx = connection.BeginTransaction(deferred: true);
-        RequireSame(protectedStable, VerifyTipInTransaction(tx, out var headers));
+        var tip = activeHistory ? VerifyActiveTip(tx, null, out var headers) : VerifyTipInTransaction(tx, out headers);
+        RequireSame(protectedStable, tip);
         return CreateVerifiedContextFromSnapshot(protectedStable, replay, headers);
     }
 
     private ExactDpe2DurableTransitionContext CreateVerifiedContextFromSnapshot(Did2MessagingFloor protectedStable,
         ExactDpe2ReceiveReplayDisposition replay, List<byte[]> headers, bool maintenancePreview = false)
     {
-        if (!maintenancePreview && replay == ExactDpe2ReceiveReplayDisposition.Fresh && headers.Count >= MaximumEntries - 1)
+        if (!maintenancePreview && replay == ExactDpe2ReceiveReplayDisposition.Fresh && headers.Count >= (archiveEnrollment ? MaximumEntries - 1 : 63))
             throw new InvalidOperationException("DID2 ordinary messaging requires verified journal checkpointing.");
         using var digest = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         digest.AppendData("Deep/STORE-V2/messaging-replay-retention"u8); digest.AppendData([0]);
-        Span<byte> number = stackalloc byte[8]; BinaryPrimitives.WriteUInt64BigEndian(number, 1);
-        digest.AppendData(number); digest.AppendData(scope.Hash); digest.AppendData(protectedStable.Exact.Span);
-        digest.AppendData(historyRoot.Exact.Span);
-        BinaryPrimitives.WriteUInt64BigEndian(number, checked((ulong)headers.Count(h => h[5] is 2 or 5)));
-        digest.AppendData(number);
+        Span<byte> number = stackalloc byte[8]; BinaryPrimitives.WriteUInt64BigEndian(number, archiveEnrollment ? 1UL : 2UL);
+        digest.AppendData(number); digest.AppendData(scope.Hash);
+        if (archiveEnrollment)
+        {
+            digest.AppendData(protectedStable.Exact.Span); digest.AppendData(historyRoot.Exact.Span);
+            BinaryPrimitives.WriteUInt64BigEndian(number, checked((ulong)headers.Count(h => h[5] is 2 or 5))); digest.AppendData(number);
+        }
+        else
+        {
+            var root = archiveRoot ?? throw new InvalidDataException("Replay retention needs the actual independent archive root.");
+            if (headers.Count > 64) throw new InvalidDataException("Indexed native suffix exceeds its closed bound.");
+            digest.AppendData(root.Exact.Span); digest.AppendData(root.Basis.Exact.Span); digest.AppendData(protectedStable.Exact.Span);
+            BinaryPrimitives.WriteUInt64BigEndian(number, checked((ulong)headers.Count)); digest.AppendData(number);
+        }
         for (var index = 0; index < headers.Count; index++)
         {
-            if (headers[index][5] is not (2 or 5)) continue;
-            BinaryPrimitives.WriteUInt64BigEndian(number, checked(historyRoot.Basis.Ordinal + (ulong)index + 1));
+            if (archiveEnrollment && headers[index][5] is not (2 or 5)) continue;
+            BinaryPrimitives.WriteUInt64BigEndian(number, checked(WorkingBasis.Ordinal + (ulong)index + 1));
             digest.AppendData(number); digest.AppendData(headers[index]);
         }
         return new(protectedStable.RatchetGeneration, protectedStable.RatchetCommitment,
@@ -403,13 +461,13 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
     private List<byte[]> ReadJournal(out Did2MessagingFloor tip, SqliteTransaction? tx = null)
     {
         _ = Did2MessagingHistoryCheckpoint.Decode(historyRoot.Exact.Span, scope);
-        tip = historyRoot.Basis; var result = new List<byte[]>();
+        tip = WorkingBasis; var result = new List<byte[]>();
         using var command = Command("SELECT ordinal,predecessor,head,metadata FROM journal ORDER BY ordinal;", tx);
         using var reader = command.ExecuteReader();
         while (reader.Read())
         {
             var ordinal = reader.GetInt64(0); var previous = reader.GetFieldValue<byte[]>(1); var head = reader.GetFieldValue<byte[]>(2); var header = reader.GetFieldValue<byte[]>(3);
-            if (result.Count >= MaximumEntries || ordinal != checked((long)tip.Ordinal + 1) || !Fixed(previous, tip.Head))
+            if (result.Count >= (archiveEnrollment ? MaximumEntries : 64) || ordinal != checked((long)tip.Ordinal + 1) || !Fixed(previous, tip.Head))
                 throw new CryptographicException("DID2 SQL journal ordinal/predecessor differs.");
             var next = Did2MessagingFloor.FromJournalMetadata(scope, tip, header);
             if (!Fixed(head, next.Head)) throw new CryptographicException("DID2 SQL journal head differs.");
@@ -451,7 +509,7 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
         VerifyInitial(headers, tx);
         var count = 0;
         using var events = Command("SELECT operation,ordinal,direction,envelope,plaintext,metadata,length(envelope),length(plaintext),length(metadata),typeof(operation),typeof(ordinal),typeof(direction),typeof(envelope),typeof(plaintext),typeof(metadata),length(operation) FROM events NOT INDEXED WHERE ordinal>$basis ORDER BY ordinal;", tx);
-        events.Parameters.AddWithValue("$basis", checked((long)historyRoot.Basis.Ordinal));
+        events.Parameters.AddWithValue("$basis", checked((long)WorkingBasis.Ordinal));
         using var eventReader = events.ExecuteReader();
         while (eventReader.Read())
         {
@@ -465,14 +523,14 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
                 eventReader.GetString(12) != "blob" || eventReader.GetString(14) != "blob")
                 throw new InvalidDataException("DID2 SQL event has a noncanonical storage type.");
             var ordinal = eventReader.GetInt64(1); var direction = eventReader.GetInt32(2);
-            if (ordinal <= checked((long)historyRoot.Basis.Ordinal) || (ulong)ordinal - historyRoot.Basis.Ordinal > (ulong)headers.Count ||
+            if (ordinal <= checked((long)WorkingBasis.Ordinal) || (ulong)ordinal - WorkingBasis.Ordinal > (ulong)headers.Count ||
                 eventReader.GetString(13) != (direction == 2 ? "blob" : "null") ||
                 eventReader.GetInt64(6) is < 1 or > 65536 || eventReader.GetInt64(8) != Did2MessagingFloor.MetadataBytes ||
                 direction is not (1 or 2 or 3 or 4) || direction != 2 && !eventReader.IsDBNull(7) ||
                 direction == 2 && (eventReader.IsDBNull(7) || eventReader.GetInt64(7) is < 1 or > 33082) ||
                 direction is 3 or 4 && eventReader.GetInt64(6) != Dbr2Codec.TotalBytes)
                 throw new InvalidDataException("DID2 SQL event journal reference/size differs.");
-            var header = headers[checked((int)((ulong)ordinal - historyRoot.Basis.Ordinal - 1))];
+            var header = headers[checked((int)((ulong)ordinal - WorkingBasis.Ordinal - 1))];
             if (!Fixed(eventReader.GetFieldValue<byte[]>(5), header))
                 throw new CryptographicException("DID2 SQL event metadata differs from its current journal.");
             var envelopeBytes = eventReader.GetFieldValue<byte[]>(3);
@@ -517,15 +575,15 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
     {
         using var command = Command("SELECT singleton,envelope,session_init,hello,metadata,length(envelope),length(session_init),length(hello),length(metadata) FROM initial_events;", tx);
         using var reader = command.ExecuteReader();
-        if (headers.Count == 0 && historyRoot.Basis.Ordinal == 0)
+        if (headers.Count == 0 && WorkingBasis.Ordinal == 0)
         { if (reader.Read()) throw new InvalidDataException("DID2 empty SQL retains initial events."); return; }
         if (!reader.Read() || reader.GetInt64(0) != 1 || reader.GetInt64(5) is < 1 or > 65536 ||
             reader.GetInt64(6) is < 1 or > 32768 || reader.GetInt64(7) is < 1 or > 32768 || reader.GetInt64(8) != Did2MessagingFloor.MetadataBytes)
             throw new InvalidDataException("DID2 SQL initial events are absent.");
         var header = reader.GetFieldValue<byte[]>(4);
         OwnedDid2MessagingMutation.ValidateMetadataTransition(header, scope, Did2MessagingFloor.Empty(scope));
-        if (header[5] != 1 || (historyRoot.Basis.Ordinal == 0 ? !Fixed(header, headers[0]) :
-            !Fixed(SHA256.HashData(header), historyRoot.InitialHeaderHash)))
+        if (header[5] != 1 || (WorkingBasis.Ordinal == 0 ? !Fixed(header, headers[0]) :
+            !Fixed(SHA256.HashData(header), ArchiveInitialHeaderHash)))
             throw new CryptographicException("DID2 initial metadata differs from the protected journal/history basis.");
         var envelopeBytes = reader.GetFieldValue<byte[]>(1); var initBytes = reader.GetFieldValue<byte[]>(2); var helloBytes = reader.GetFieldValue<byte[]>(3);
         try
@@ -543,10 +601,13 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
         if (reader.Read()) throw new InvalidDataException("DID2 SQL has duplicate initial events.");
     }
     private void ValidateSchema(SqliteTransaction? tx = null)
+        => ValidateSchemaVersion(archiveEnrollment ? archiveEnrollmentVersion : SchemaVersion, tx);
+
+    private void ValidateSchemaVersion(int version, SqliteTransaction? tx = null)
     {
-        if (PragmaInteger("application_id", tx) != ApplicationId || PragmaInteger("user_version", tx) != SchemaVersion)
+        if (PragmaInteger("application_id", tx) != ApplicationId || PragmaInteger("user_version", tx) != version)
             throw new InvalidDataException("DID2 messaging SQL generation differs; no old reader is permitted.");
-        var expected = Schema.OrderBy(static row => row.Name, StringComparer.Ordinal).ToArray(); var index = 0;
+        var expected = (version == 5 ? OriginalSchema : Schema).OrderBy(static row => row.Name, StringComparer.Ordinal).ToArray(); var index = 0;
         using var command = Command("SELECT type,name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY name;", tx);
         using var reader = command.ExecuteReader();
         while (reader.Read())
@@ -573,8 +634,12 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
     private SqliteCommand Command(string sql, SqliteTransaction? tx = null) { var command = connection.CreateCommand(); command.Transaction = tx; command.CommandText = sql; return command; }
     private void Execute(string sql, SqliteTransaction tx) { using var command = Command(sql, tx); command.ExecuteNonQuery(); }
     private static bool Fixed(ReadOnlySpan<byte> a, ReadOnlySpan<byte> b) => Did2MessagingSessionScope.Fixed(a, b);
-    private static void RequireSame(Did2MessagingFloor a, Did2MessagingFloor b)
-    { if (!Fixed(a.Exact.Span, b.Exact.Span)) throw new CryptographicException("DID2 SQL and expected protected floor differ."); }
+    private void RequireSame(Did2MessagingFloor a, Did2MessagingFloor b)
+    {
+        if (!Fixed(a.Exact.Span, b.Exact.Span) || openedFloor is { Phase: 1 } && a.Phase == 1 &&
+            !Fixed(openedFloor.Exact.Span, a.Exact.Span))
+            throw new CryptographicException("DID2 SQL, expected floor and actual protected stable floor differ.");
+    }
     private sealed class OwnedBindings : IDisposable
     {
         private readonly List<byte[]> buffers = [];

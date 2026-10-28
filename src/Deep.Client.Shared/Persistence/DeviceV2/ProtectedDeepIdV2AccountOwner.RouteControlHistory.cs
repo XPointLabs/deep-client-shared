@@ -29,7 +29,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             using var journal = ProtectedDid2DirectTextJournal.Decode(root, scope.Network, scope.LocalAccount, scope.Instance);
             if (journal.Pending is not null) throw new CryptographicException("Own route-control history has unresolved authored work.");
             var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
-            using var native = opened.Sql.ReadVerifiedOperation(floor, operation.Span) ??
+            using var native = await opened.WithSqlAsync(sql => sql.ReadVerifiedOperation(floor, operation.Span), ct).ConfigureAwait(false) ??
                 throw new CryptographicException("Own route control has no actual native commit.");
             if (native.Direction != 1) throw new CryptographicException("Own route control cannot originate from an incoming event.");
             using var application = await SqliteDeepIdV2AccountGeneration.OpenApplicationUnderLeaseAsync(

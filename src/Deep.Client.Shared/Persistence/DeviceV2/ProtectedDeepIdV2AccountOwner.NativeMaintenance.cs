@@ -7,7 +7,7 @@ namespace Deep.Client.Shared.Persistence.DeviceV2;
 
 internal sealed partial class ProtectedDeepIdV2AccountOwner
 {
-    private const ulong NativeWorkingSoftLimit = 64;
+    private const ulong NativeWorkingSoftLimit = 63;
     // Scheduling only: no key, SQL handle, source permission or successful read
     // is retained. Actual registration/instance checks remain in every opener.
     private string? auditedNativeOwner;
@@ -29,7 +29,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         ObjectDisposedException.ThrowIf(Volatile.Read(ref nativeRuntimeClosed) != 0, this);
         held.RequireOwner(lease);
         if (nativeAdmissionInProgress)
-            return await SqliteDeepIdV2AccountGeneration.OpenOwnedMessagingUnderLeaseAsync(
+            return await SqliteDeepIdV2AccountGeneration.OpenMessagingArchiveAuditUnderLeaseAsync(
                 storage, sqlStatePath, current, scope, ct).ConfigureAwait(false);
         _ = await EnsureNativeArchiveAdmissionUnderLeaseAsync(current, scope, held, ct).ConfigureAwait(false);
         var opened = await SqliteDeepIdV2AccountGeneration.OpenOrdinaryMessagingUnderLeaseAsync(
@@ -74,10 +74,11 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             foreach (var scope in scopes)
             {
                 ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
-                using var opened = await SqliteDeepIdV2AccountGeneration.OpenOwnedMessagingUnderLeaseAsync(
+                using var opened = await SqliteDeepIdV2AccountGeneration.OpenMessagingArchiveAuditUnderLeaseAsync(
                     storage, sqlStatePath, current, scope, ct).ConfigureAwait(false);
                 var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
-                if (!Did2MessagingSessionScope.Fixed(floor.Exact.Span, opened.Sql.VerifyTip().Exact.Span))
+                var actualSql = await opened.WithSqlAsync(sql => sql.VerifyTip(), ct).ConfigureAwait(false);
+                if (!Did2MessagingSessionScope.Fixed(floor.Exact.Span, actualSql.Exact.Span))
                     throw new CryptographicException("Cold native archive audit lost its independent floor.");
             }
             using var readback = await catalogOwner.ReadAsync(ct).ConfigureAwait(false);
@@ -111,14 +112,20 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             recoveredNativePrefixScope = null;
             return null; // Source/current-account recovery may have finished this exact batch before this opener.
         }
-        var history = await Did2MessagingHistoryCheckpoint.ReadRegisteredAsync(storage, scope, ct).ConfigureAwait(false);
-        if (floor.Ordinal < history.Basis.Ordinal) throw new CryptographicException("Native maintenance hint rolled back its floor.");
-        if (floor.Status != 1 || floor.Phase != 1 || floor.Ordinal - history.Basis.Ordinal < NativeWorkingSoftLimit) return null;
+        var archive = await Did2MessagingArchiveRoot.ReadRegisteredAsync(storage, scope, ct).ConfigureAwait(false);
+        if (floor.Ordinal < archive.Basis.Ordinal) throw new CryptographicException("Native maintenance hint rolled back its floor.");
+        if (floor.Status != 1 || floor.Phase != 1 || floor.Ordinal - archive.Basis.Ordinal < NativeWorkingSoftLimit) return null;
         // Pure preparation has no authority/commit callback. Authenticate a
         // threshold-hit fresh input before staging maintenance, including bad
         // receive MACs. Drop ALL preview keys/outputs before the first await.
-        using (var state = opened.Sql.ReadFreshMaintenancePreviewState(floor, operation, out var context))
+        var preview = await opened.WithSqlAsync(sql =>
         {
+            var state = sql.ReadFreshMaintenancePreviewState(floor, operation, out var context);
+            return (State: state, Context: context);
+        }, ct).ConfigureAwait(false);
+        using (var state = preview.State)
+        {
+            var context = preview.Context;
             if (send)
             {
                 using var prepared = state.Use(bytes => ExactDpe2DurableTransactionProducer.PrepareSend(bytes, context, exact, scope.Network, operation));
@@ -148,14 +155,14 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         var floor = await new Did2MessagingProtectedCheckpoint(storage, scope).ReadAsync(ct).ConfigureAwait(false);
         if (floor.Phase != 1)
         {
-            using var recovery = await SqliteDeepIdV2AccountGeneration.OpenOwnedMessagingUnderLeaseAsync(
+            using var recovery = await SqliteDeepIdV2AccountGeneration.OpenOrdinaryMessagingUnderLeaseAsync(
                 storage, sqlStatePath, current, scope, ct).ConfigureAwait(false);
             floor = await recovery.Custody.ReconcileAsync(ct).ConfigureAwait(false);
         }
-        var history = await Did2MessagingHistoryCheckpoint.ReadRegisteredAsync(storage, scope, ct).ConfigureAwait(false);
-        if (floor.Ordinal < history.Basis.Ordinal) throw new CryptographicException("Native working suffix precedes its protected history.");
-        var working = floor.Ordinal - history.Basis.Ordinal;
-        Did2MessagingSqlJournal.NativeWork.Inventory(working, history.HistoryCount);
+        var archive = await Did2MessagingArchiveRoot.ReadRegisteredAsync(storage, scope, ct).ConfigureAwait(false);
+        if (floor.Ordinal < archive.Basis.Ordinal) throw new CryptographicException("Native working suffix precedes its protected archive.");
+        var working = floor.Ordinal - archive.Basis.Ordinal;
+        Did2MessagingSqlJournal.NativeWork.Inventory(working, archive.ArchiveCount);
         if (floor.Status != 1 || working < NativeWorkingSoftLimit) return;
         using var selected = await PreparePrefixUnderLeaseAsync(current, scope, Did2CompactionPlan.MaximumRows, held, ct).ConfigureAwait(false);
         var plans = new ProtectedDid2CompactionPlan(storage, lease, networkId, current.AccountId.Span, scope.Instance);
@@ -166,8 +173,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         Did2CompactionTestHooks.Hit(Did2CompactionFailpoint.AfterStage);
 #endif
         await ResumeLocalCompactionUnderLeaseAsync(held, ct).ConfigureAwait(false);
-        var after = await Did2MessagingHistoryCheckpoint.ReadRegisteredAsync(storage, scope, ct).ConfigureAwait(false);
-        Did2MessagingSqlJournal.NativeWork.Inventory(floor.Ordinal - after.Basis.Ordinal, after.HistoryCount);
+        var after = await Did2MessagingArchiveRoot.ReadRegisteredAsync(storage, scope, ct).ConfigureAwait(false);
+        Did2MessagingSqlJournal.NativeWork.Inventory(floor.Ordinal - after.Basis.Ordinal, after.ArchiveCount);
         // The caller opens a NEW journal after this method returns. No object
         // with the old captured history root is reused after root adoption.
     }

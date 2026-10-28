@@ -43,7 +43,17 @@ public sealed class Did2MessagingSqlJournalTests
                 var checkpoint = new Did2MessagingProtectedCheckpoint(storage, scope);
                 await checkpoint.InitializeRegisteredSessionAsync(default);
                 await storage.WriteBatchAsync([new(scope.FloorSlot + ".pending.0", new byte[] { 1 })]);
-                var owner = new Did2MessagingDurableCustody(scope, checkpoint, sql);
+                // Component-only empty-session custody uses actual fresh keyed
+                // segments. It does not supply account/runtime admission.
+                using var segments = new OwnedDid2MessagingStorage(scope, checkpoint, token =>
+                {
+                    token.ThrowIfCancellationRequested();
+                    var fresh = SqliteDeepIdV2AccountGeneration.OpenMessagingConnectionForTests(path, key, false);
+                    var backend = new Did2MessagingSqlJournal(fresh, scope, Did2MessagingHistoryCheckpoint.RegisteredEmpty(scope));
+                    backend.BindArchiveRoot(Did2MessagingArchiveRoot.Empty(scope));
+                    return Task.FromResult(new Did2MessagingSqlSegment(fresh, backend));
+                });
+                var owner = segments.Custody;
                 Assert.Equal(floor.Exact.ToArray(), (await owner.ReconcileAsync(default)).Exact.ToArray());
                 using (var erased = await storage.ReadOwnedAsync(scope.FloorSlot + ".pending.0")) Assert.Null(erased);
                 await Assert.ThrowsAsync<InvalidOperationException>(() => owner.ReadActiveStateAsync(default));

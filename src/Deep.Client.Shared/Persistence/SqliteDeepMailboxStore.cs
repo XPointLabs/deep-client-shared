@@ -374,16 +374,19 @@ public sealed partial class SqliteDeepMailboxStore :
     }
 
     private void ApplyMailboxEncryptionKey(SqliteConnection connection)
+        => ApplyMailboxEncryptionKey(connection, encryptionKey);
+
+    private static void ApplyMailboxEncryptionKey(SqliteConnection connection, ReadOnlySpan<byte> selectedKey)
     {
         // DR66: this API accepts a random/pseudorandom binary 256-bit key,
         // never a human password. Keep native raw-key syntax out of strings/SQL.
         var encoded = new byte[67];
         encoded[0] = (byte)'x'; encoded[1] = encoded[66] = (byte)'\'';
         ReadOnlySpan<byte> alphabet = "0123456789abcdef"u8;
-        for (var index = 0; index < encryptionKey.Length; index++)
+        for (var index = 0; index < selectedKey.Length; index++)
         {
-            encoded[2 + index * 2] = alphabet[encryptionKey[index] >> 4];
-            encoded[3 + index * 2] = alphabet[encryptionKey[index] & 15];
+            encoded[2 + index * 2] = alphabet[selectedKey[index] >> 4];
+            encoded[3 + index * 2] = alphabet[selectedKey[index] & 15];
         }
         try
         {

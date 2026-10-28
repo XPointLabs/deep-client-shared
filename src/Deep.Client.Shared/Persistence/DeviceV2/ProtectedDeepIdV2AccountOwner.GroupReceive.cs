@@ -238,7 +238,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         record is GroupInvitationRecord ? record.Field(4).Span : record is GroupInvitationAcceptanceRecord ?
             (invitation ?? throw new CryptographicException("Consent lost its invitation.")).Field(4).Span : record.Field(3).Span));
 
-    private static byte[]? RequireGroupAuthoredEvent(ProtectedDid2GroupJournal.State groups, Did2MessagingSessionScope scope,
+    internal static byte[]? RequireGroupAuthoredEvent(ProtectedDid2GroupJournal.State groups, Did2MessagingSessionScope scope,
         ReadOnlySpan<byte> operation, ReadOnlySpan<byte> hash)
     {
         foreach (var item in groups.Outbox)
@@ -277,7 +277,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         try
         {
             var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
-            using var native = opened.Sql.ReadVerifiedReceiveForEvent(floor, SHA256.HashData(exact)) ?? throw new CryptographicException("Group consent lost native receive custody.");
+            using var native = await opened.WithSqlAsync(sql => sql.ReadVerifiedReceiveForEvent(floor, SHA256.HashData(exact)), ct).ConfigureAwait(false) ?? throw new CryptographicException("Group consent lost native receive custody.");
             using var handoff = await Deep.Client.Shared.Persistence.MessagingV1.AuthenticatedContactAcceptDmc2.FromOwnedCommitAsync(opened,
                 Dpe2Codec.Decode(native.ExactEnvelope).OperationId, ReadOnlyMemory<byte>.Empty, storage, own, peer, source, held, ct).ConfigureAwait(false);
         }

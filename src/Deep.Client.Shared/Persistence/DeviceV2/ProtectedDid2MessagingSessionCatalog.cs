@@ -24,7 +24,7 @@ internal sealed class ProtectedDid2MessagingSessionCatalog
     internal static byte[] Empty(ReadOnlySpan<byte> network, ReadOnlySpan<byte> account, ReadOnlySpan<byte> instance)
     {
         RequireOwner(network, account, instance);
-        var bytes = new byte[HeaderBytes]; bytes[0] = 1;
+        var bytes = new byte[HeaderBytes]; bytes[0] = 2;
         BinaryPrimitives.WriteUInt64BigEndian(bytes.AsSpan(4), 1);
         network.CopyTo(bytes.AsSpan(12)); account.CopyTo(bytes.AsSpan(28)); instance.CopyTo(bytes.AsSpan(60));
         return bytes;
@@ -32,17 +32,57 @@ internal sealed class ProtectedDid2MessagingSessionCatalog
 
     internal async Task<Snapshot> ReadAsync(CancellationToken ct)
     {
-        using var owned = await storage.ReadOwnedAsync(Slot, ct).ConfigureAwait(false) ??
-            throw new InvalidDataException("The protected DID2 messaging catalog is absent; explicit reset is required.");
+        using var inventory = await storage.ReadOwnedBatchAsync([Slot, ProtectedDid2MessagingArchiveEnrollment.Slot], ct).ConfigureAwait(false);
+        if (inventory[1] is not null) throw new InvalidOperationException("Explicit messaging archive enrollment owns the account.");
+        var owned = inventory[0] ?? throw new InvalidDataException("The protected DID2 messaging catalog is absent; explicit reset is required.");
         return owned.Use(bytes => Decode(bytes, network, account, instance));
+    }
+
+    // Explicit enrollment metadata only. No result from this reader grants an
+    // ordinary SQL open, registration or permission to reconstruct a root.
+    internal async Task<Snapshot> ReadForEnrollmentAsync(CancellationToken ct)
+    {
+        using var owned = await storage.ReadOwnedAsync(Slot, ct).ConfigureAwait(false) ??
+            throw new InvalidDataException("The account enrollment catalog is absent.");
+        return owned.Use(bytes => DecodeForEnrollment(bytes, network, account, instance));
+    }
+
+    internal async Task MarkOldSqlInitializedForEnrollmentAsync(Did2MessagingSessionScope scope,
+        Did2MessagingFloor sqlTip, CancellationToken ct)
+    {
+        RequireScopeOwner(scope);
+        using var before = await ReadForEnrollmentAsync(ct).ConfigureAwait(false);
+        if (before.Version != 1) throw new InvalidOperationException("Only the explicit old enrollment drain initializes schema5.");
+        var index = before.FindExact(scope); if (index < 0) throw new InvalidDataException("Old enrollment initialization is unregistered.");
+        if (before.Phase(index) == 2) return;
+        var floor = await new Did2MessagingProtectedCheckpoint(storage, scope).ReadAsync(ct).ConfigureAwait(false);
+        var empty = Did2MessagingFloor.Empty(scope);
+        if (!Fixed(floor.Exact.Span, empty.Exact.Span) || !Fixed(sqlTip.Exact.Span, empty.Exact.Span))
+            throw new CryptographicException("Old enrollment initialization requires exact empty native custody.");
+        var replacement = before.WithInitialized(index);
+        try
+        {
+            using var parsed = DecodeForEnrollment(replacement, network, account, instance);
+            if (!await storage.CompareExchangeAsync(Slot, before.Exact, replacement, ct).ConfigureAwait(false))
+                throw new CryptographicException("Old enrollment initialization catalog CAS conflicted.");
+        }
+        finally { CryptographicOperations.ZeroMemory(replacement); }
     }
 
     internal static Snapshot Decode(ReadOnlySpan<byte> bytes, ReadOnlySpan<byte> network,
         ReadOnlySpan<byte> account, ReadOnlySpan<byte> instance)
+        => DecodeCore(bytes, network, account, instance, false);
+
+    internal static Snapshot DecodeForEnrollment(ReadOnlySpan<byte> bytes, ReadOnlySpan<byte> network,
+        ReadOnlySpan<byte> account, ReadOnlySpan<byte> instance)
+        => DecodeCore(bytes, network, account, instance, true);
+
+    private static Snapshot DecodeCore(ReadOnlySpan<byte> bytes, ReadOnlySpan<byte> network,
+        ReadOnlySpan<byte> account, ReadOnlySpan<byte> instance, bool enrollment)
     {
         RequireOwner(network, account, instance);
         if (bytes.Length < HeaderBytes || bytes.Length > HeaderBytes + MaximumSessions * EntryBytes ||
-            bytes[0] != 1 || bytes[1] != 0 ||
+            (enrollment ? bytes[0] is not (1 or 2) : bytes[0] != 2) || bytes[1] != 0 ||
             !Fixed(bytes.Slice(12, 16), network) || !Fixed(bytes.Slice(28, 32), account) || !Fixed(bytes.Slice(60, 32), instance))
             throw new CryptographicException("Protected messaging catalog owner/shape differs.");
         var count = BinaryPrimitives.ReadUInt16BigEndian(bytes[2..]);
@@ -53,12 +93,13 @@ internal sealed class ProtectedDid2MessagingSessionCatalog
         var bases = new HashSet<string>(StringComparer.Ordinal);
         // Compare key digests, never allocate private-key strings.
         var keys = new HashSet<string>(StringComparer.Ordinal);
-        var initialized = 0;
+        var initialized = 0; var indexed = 0;
         byte[]? previous = null;
         for (var index = 0; index < count; index++)
         {
             var entry = bytes.Slice(HeaderBytes + index * EntryBytes, EntryBytes);
-            if (entry[0] is not (1 or 2) || entry.Slice(1, 3).IndexOfAnyExcept((byte)0) >= 0 ||
+            if (entry[0] is not (1 or 2) || entry[1] > 1 || entry.Slice(2, 2).IndexOfAnyExcept((byte)0) >= 0 ||
+                (bytes[0] == 1 && entry[1] != 0) || (!enrollment && entry[1] != 1) ||
                 Did2MessagingSessionScope.Zero(entry.Slice(408, 32)))
                 throw new InvalidDataException("Protected messaging catalog entry is not canonical.");
             var scope = Did2MessagingSessionScope.RestoreMetadata(entry.Slice(4, Did2MessagingSessionScope.Bytes));
@@ -70,8 +111,9 @@ internal sealed class ProtectedDid2MessagingSessionCatalog
                 throw new InvalidDataException("Protected messaging catalog is unordered or repeats a scope/session/basis/key.");
             previous = scope.Hash.ToArray(); scopes.Add(scope);
             if (entry[0] == 2) initialized++;
+            if (entry[1] == 1) indexed++;
         }
-        if (BinaryPrimitives.ReadUInt64BigEndian(bytes[4..]) != 1UL + (ulong)count + (ulong)initialized)
+        if (BinaryPrimitives.ReadUInt64BigEndian(bytes[4..]) != 1UL + (ulong)count + (ulong)initialized + (ulong)indexed)
             throw new InvalidDataException("Protected messaging catalog revision differs from its exact phases.");
         return new Snapshot(bytes.ToArray(), scopes);
     }
@@ -87,14 +129,17 @@ internal sealed class ProtectedDid2MessagingSessionCatalog
         {
             // A registered floor is never recreated or overwritten on retry.
             _ = await new Did2MessagingProtectedCheckpoint(storage, scope).ReadAsync(ct).ConfigureAwait(false);
-            _ = await Did2MessagingHistoryCheckpoint.ReadRegisteredAsync(storage, scope, ct).ConfigureAwait(false);
+            var history = await Did2MessagingHistoryCheckpoint.ReadRegisteredAsync(storage, scope, ct).ConfigureAwait(false);
+            using var archived = await storage.ReadOwnedAsync(Did2MessagingArchiveRoot.Slot(scope), ct).ConfigureAwait(false)
+                ?? throw new InvalidDataException("An indexed messaging archive root is absent; no repair is allowed.");
+            archived.Use(bytes => Did2MessagingArchiveRoot.Decode(bytes, scope)).RequireSource(history);
             var peer = await ReadPeerCredentialAsync(scope, ct).ConfigureAwait(false);
             if (!Fixed(peer.CanonicalBytes.Span, seed.ExactPeerCredential))
                 throw new CryptographicException("The registered peer credential differs from its verified seed.");
             return scope;
         }
         if (before.Count == MaximumSessions) throw new InvalidOperationException("DID2 messaging catalog capacity requires verified rollover.");
-        var raw = new byte[EntryBytes]; raw[0] = 1; scope.Exact.CopyTo(raw.AsSpan(4));
+        var raw = new byte[EntryBytes]; raw[0] = 1; raw[1] = 1; scope.Exact.CopyTo(raw.AsSpan(4));
         RandomNumberGenerator.Fill(raw.AsSpan(408, 32));
         byte[]? replacement = null;
         byte[]? bootstrap = null;
@@ -108,6 +153,7 @@ internal sealed class ProtectedDid2MessagingSessionCatalog
             if (!await storage.CompareExchangeAndInsertAsync(Slot, before.Exact, replacement,
                 [new(scope.FloorSlot, Did2MessagingFloor.Empty(scope).Exact),
                  new(Did2MessagingHistoryCheckpoint.Slot(scope), Did2MessagingHistoryCheckpoint.RegisteredEmpty(scope).Exact),
+                 new(Did2MessagingArchiveRoot.Slot(scope), Did2MessagingArchiveRoot.Empty(scope).Exact),
                  new(ProtectedDid2MessagingPeerBootstrap.Slot(scope), bootstrap)], ct).ConfigureAwait(false))
                 throw new CryptographicException("Protected messaging registration CAS/insert conflicted; no repair is permitted.");
             return scope;
@@ -133,7 +179,7 @@ internal sealed class ProtectedDid2MessagingSessionCatalog
     }
 
     internal async Task MarkSqlInitializedAsync(Did2MessagingSessionScope scope,
-        Did2MessagingSqlJournal sql, CancellationToken ct)
+        Did2MessagingFloor sqlTip, CancellationToken ct)
     {
         RequireScopeOwner(scope);
         using var before = await ReadAsync(ct).ConfigureAwait(false);
@@ -141,7 +187,6 @@ internal sealed class ProtectedDid2MessagingSessionCatalog
         if (index < 0) throw new InvalidDataException("SQL cannot initialize an unregistered DID2 session.");
         var checkpoint = new Did2MessagingProtectedCheckpoint(storage, scope);
         var floor = await checkpoint.ReadAsync(ct).ConfigureAwait(false);
-        var sqlTip = sql.VerifyTip();
         if (before.Phase(index) == 2)
         {
             // Reconciliation belongs to phase2 owner, not this phase1 initializer.
@@ -184,7 +229,29 @@ internal sealed class ProtectedDid2MessagingSessionCatalog
         internal int Count { get { _ = Live(); return scopes.Count; } }
         internal ReadOnlyMemory<byte> Exact => Live();
         internal Did2MessagingSessionScope Scope(int index) { _ = Live(); return scopes[index]; }
+        internal byte Version => Live()[0];
         internal byte Phase(int index) => Live()[HeaderBytes + index * EntryBytes];
+        internal byte ArchiveState(int index) => Live()[HeaderBytes + index * EntryBytes + 1];
+        internal bool AllIndexed => Enumerable.Range(0, Count).All(i => ArchiveState(i) == 1);
+        internal byte[] WithEnrollmentRequired()
+        {
+            if (Version != 1) throw new InvalidOperationException("Only the explicit old catalog may enter enrollment.");
+            var output = Live().ToArray(); output[0] = 2; return output;
+        }
+        internal byte[] WithIndexed(int index)
+        {
+            if (Version != 2 || ArchiveState(index) != 0) throw new InvalidOperationException("Only a selected enrollment entry may become indexed.");
+            var output = Live().ToArray(); output[HeaderBytes + index * EntryBytes + 1] = 1;
+            BinaryPrimitives.WriteUInt64BigEndian(output.AsSpan(4), checked(BinaryPrimitives.ReadUInt64BigEndian(output.AsSpan(4)) + 1));
+            return output;
+        }
+        internal byte[] BeforeIndexedComparison(int index)
+        {
+            if (Version != 2 || ArchiveState(index) != 1) throw new InvalidOperationException("Indexed adoption comparison requires an actual indexed entry.");
+            var output = Live().ToArray(); output[HeaderBytes + index * EntryBytes + 1] = 0;
+            BinaryPrimitives.WriteUInt64BigEndian(output.AsSpan(4), checked(BinaryPrimitives.ReadUInt64BigEndian(output.AsSpan(4)) - 1));
+            return output;
+        }
         internal OwnedDeepSecret ReadKey(int index) => new(Live().AsSpan(HeaderBytes + index * EntryBytes + 408, 32));
         internal int FindExact(Did2MessagingSessionScope scope)
         {
@@ -243,7 +310,7 @@ internal sealed class ProtectedDid2MessagingSessionCatalog
             current.AsSpan(HeaderBytes, offset - HeaderBytes).CopyTo(output.AsSpan(HeaderBytes));
             entry.CopyTo(output.AsSpan(offset)); current.AsSpan(offset).CopyTo(output.AsSpan(offset + EntryBytes));
             BinaryPrimitives.WriteUInt16BigEndian(output.AsSpan(2), checked((ushort)(scopes.Count + 1)));
-            BinaryPrimitives.WriteUInt64BigEndian(output.AsSpan(4), checked(BinaryPrimitives.ReadUInt64BigEndian(current.AsSpan(4)) + 1));
+            BinaryPrimitives.WriteUInt64BigEndian(output.AsSpan(4), checked(BinaryPrimitives.ReadUInt64BigEndian(current.AsSpan(4)) + 2));
             return output;
         }
         internal byte[] WithInitialized(int index)

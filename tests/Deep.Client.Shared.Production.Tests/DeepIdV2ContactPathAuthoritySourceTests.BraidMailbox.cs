@@ -193,9 +193,9 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             var accountOwner = new ProtectedDeepIdV2AccountOwner(selected, accountLease, path, Network, 1);
             using var account = await accountOwner.ReadCurrentAsync(1_000, pq, default) ?? throw new InvalidDataException("Fixture account absent.");
             using var held = await accountLease.AcquireAsync(default);
-            using var opened = await SqliteDeepIdV2AccountGeneration.OpenOwnedMessagingUnderLeaseAsync(selected, path, account, scope, default);
+            using var opened = await SqliteDeepIdV2AccountGeneration.OpenOrdinaryMessagingUnderLeaseAsync(selected, path, account, scope, default);
             var floor = await opened.Custody.ReconcileAsync(default);
-            using var native = opened.Sql.ReadVerifiedLatest(floor);
+            using var native = await opened.WithSqlAsync(sql => sql.ReadVerifiedLatest(floor), default);
             var epochs = native.Use(bytes =>
             {
                 Assert.True(bytes.Length > 536 + 1060); Assert.True(bytes.Slice(536, 4).SequenceEqual("TRC1"u8));

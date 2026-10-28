@@ -158,11 +158,11 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             {
             var opened = firstOpened;
             var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
-            if (send) result = opened.Sql.ReadVerifiedOperation(floor, op);
+            if (send) result = await opened.WithSqlAsync(sql => sql.ReadVerifiedOperation(floor, op), ct).ConfigureAwait(false);
             var freshNative = result is null;
             if (!send)
             {
-                using var original = opened.Sql.ReadVerifiedOperation(floor, op);
+                using var original = await opened.WithSqlAsync(sql => sql.ReadVerifiedOperation(floor, op), ct).ConfigureAwait(false);
                 freshNative = original is null;
                 if (original is not null && (original.Direction != 2 || !Did2MessagingSessionScope.Fixed(original.ExactEnvelope, exact)))
                     throw new CryptographicException("DID2 receive retry differs from its authenticated original.");
@@ -190,7 +190,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     if (result.Direction != 1) throw new CryptographicException("DID2 local operation collides with a retained receive.");
                     if (!Did2MessagingSessionScope.Fixed(result.EventHash, eventHash))
                     {
-                        var conflict = Did2OwnedSendConflict.Verify(opened.Sql, scope, floor, op, exact);
+                        var conflict = await opened.WithSqlAsync(sql => Did2OwnedSendConflict.Verify(sql, scope, floor, op, exact), ct).ConfigureAwait(false);
                         await opened.Custody.LatchOwnedSendAsync(conflict, ct).ConfigureAwait(false);
                         throw new CryptographicException("DID2 changed local send content durably latched the session.");
                     }
@@ -219,7 +219,12 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                         floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
                     }
                 }
-                using var state = opened.Sql.ReadVerifiedTransitionState(floor, op, send ? [] : exact, out var context);
+                var transition = await opened.WithSqlAsync(sql =>
+                {
+                    var state = sql.ReadVerifiedTransitionState(floor, op, send ? [] : exact, out var context);
+                    return (State: state, Context: context);
+                }, ct).ConfigureAwait(false);
+                using var state = transition.State; var context = transition.Context;
                 var authority = new AccountDpe2Authority(this, current, opened, held, floor, op, eventHash, send ? [] : exact,
                     context.ReceiveReplayDisposition, senderEvent, own, peer, source);
                 if (send)
@@ -239,7 +244,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 // an in-memory success payload as crash/materialization evidence.
                 var stable = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
                 floor = stable;
-                result = opened.Sql.ReadVerifiedOperation(stable, op) ??
+                result = await opened.WithSqlAsync(sql => sql.ReadVerifiedOperation(stable, op), ct).ConfigureAwait(false) ??
                     throw new CryptographicException("DID2 committed message has no durable event readback.");
             }
             // The committed row is the handoff source, not the Protocol success
@@ -308,7 +313,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var releaseFloor = await opened.Custody.ReadCurrentFloorAsync(ct).ConfigureAwait(false);
             if (!Did2MessagingSessionScope.Fixed(releaseFloor.Exact.Span, floor.Exact.Span))
                 throw new CryptographicException("Native floor changed during final application admission.");
-            using var releaseRow = opened.Sql.ReadVerifiedOperation(releaseFloor, op) ??
+            using var releaseRow = await opened.WithSqlAsync(sql => sql.ReadVerifiedOperation(releaseFloor, op), ct).ConfigureAwait(false) ??
                 throw new CryptographicException("Native operation disappeared during final application admission.");
             if (releaseRow.Direction != result.Direction || !Did2MessagingSessionScope.Fixed(releaseRow.ExactEnvelope, result.ExactEnvelope) ||
                 !Did2MessagingSessionScope.Fixed(releaseRow.EventHash, result.EventHash))
@@ -409,7 +414,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 using var mutation = OwnedDid2MessagingMutation.Ratchet(opened.Scope, floor, plan, sendEventHash, routeOutcome);
                 current = await opened.Custody.CommitOwnedAsync(mutation, cancellationToken).ConfigureAwait(false);
             }
-            using var retained = opened.Sql.ReadVerifiedOperation(current, operation) ??
+            using var retained = await opened.WithSqlAsync(sql => sql.ReadVerifiedOperation(current, operation), ct).ConfigureAwait(false) ??
                 throw new CryptographicException("DID2 transaction has no verified durable event.");
             if (retained.Direction != (send ? 1 : 2) ||
                 !Did2MessagingSessionScope.Fixed(retained.ExactEnvelope, snapshot.ExactEnvelope) ||

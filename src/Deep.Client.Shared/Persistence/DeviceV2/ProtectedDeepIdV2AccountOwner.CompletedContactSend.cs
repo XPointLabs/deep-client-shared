@@ -102,7 +102,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 else
                 {
                     var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
-                    using var native = opened.Sql.ReadVerifiedOperation(floor, op) ?? throw new CryptographicException("Completed ContactAccept lost its native send.");
+                    using var native = await opened.WithSqlAsync(sql => sql.ReadVerifiedOperation(floor, op), ct).ConfigureAwait(false) ?? throw new CryptographicException("Completed ContactAccept lost its native send.");
                     if (native.Direction != 1) throw new CryptographicException("A receive event cannot retire an outgoing send.");
                     envelope = native.ExactEnvelope.ToArray();
                 }

@@ -105,13 +105,13 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         }
         // The class comes from authenticated native history, never a transport
         // flag. Ordinary semantic readers remain data-only.
-        if (opened.Sql.ReadVerifiedNativeEventDirection(floor, operation.Span) == 3)
+        if (await opened.WithSqlAsync(sql => sql.ReadVerifiedNativeEventDirection(floor, operation.Span), ct).ConfigureAwait(false) == 3)
         {
-            using var control = opened.Sql.ReadVerifiedBraidControl(floor, operation.Span) ??
+            using var control = await opened.WithSqlAsync(sql => sql.ReadVerifiedBraidControl(floor, operation.Span), ct).ConfigureAwait(false) ??
                 throw new CryptographicException("Control Store lost its actual committed send.");
             return control.ExactControl.ToArray();
         }
-        using var sent = opened.Sql.ReadVerifiedOperation(floor, operation.Span) ?? throw new CryptographicException("Only an actual committed owned message can be dispatched.");
+        using var sent = await opened.WithSqlAsync(sql => sql.ReadVerifiedOperation(floor, operation.Span), ct).ConfigureAwait(false) ?? throw new CryptographicException("Only an actual committed owned message can be dispatched.");
         if (sent.Direction != 1) throw new CryptographicException("A receive row cannot authorize mailbox Store.");
         return sent.ExactEnvelope.ToArray();
     }
@@ -687,7 +687,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     scope.Conversation.ToArray(), scope.RemoteAccount.ToArray(), scope.RemoteDevice.ToArray(), ct).ConfigureAwait(false) ??
                     throw new InvalidOperationException("The peer has not supplied an authenticated private acceptance route; retain the pending send.");
                 var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
-                using var received = opened.Sql.ReadVerifiedReceiveForEvent(floor, SHA256.HashData(accepted)) ??
+                using var received = await opened.WithSqlAsync(sql => sql.ReadVerifiedReceiveForEvent(floor, SHA256.HashData(accepted)), ct).ConfigureAwait(false) ??
                     throw new CryptographicException("The peer route has no actual authenticated receive custody.");
                 using var plain = received.OwnAuthenticatedDmc2();
                 if (!plain.Use(bytes => FixedRoute(bytes, accepted)))
@@ -727,7 +727,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     var command = commands.FindScope(scope) ??
                         throw new CryptographicException("Private route update lost its local acceptance winner.");
                     var floor = await opened.Custody.ReconcileAsync(token).ConfigureAwait(false);
-                    using var native = opened.Sql.ReadVerifiedOperation(floor, command.Operation) ??
+                    using var native = await opened.WithSqlAsync(sql => sql.ReadVerifiedOperation(floor, command.Operation), ct).ConfigureAwait(false) ??
                         throw new CryptographicException("Private route update lost actual native local acceptance.");
                     if (native.Direction != 1 || !FixedRoute(native.EventHash, SHA256.HashData(localAccept)))
                         throw new CryptographicException("Private route update local consent differs from native custody.");

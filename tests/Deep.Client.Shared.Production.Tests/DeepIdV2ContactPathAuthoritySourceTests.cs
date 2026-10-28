@@ -2117,7 +2117,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 var owner = new ProtectedDeepIdV2AccountOwner(secure, accountLease, path, Network, 1);
                 using var current = await owner.ReadCurrentAsync(1_000, pq, default) ?? throw new InvalidDataException("Fixture account is absent.");
                 using var held = await accountLease.AcquireAsync(default);
-                return await SqliteDeepIdV2AccountGeneration.OpenOwnedMessagingUnderLeaseAsync(secure, path, current, scope, default);
+                return await SqliteDeepIdV2AccountGeneration.OpenOrdinaryMessagingUnderLeaseAsync(secure, path, current, scope, default);
             }
             return (await Open(), Open);
         }
@@ -3322,7 +3322,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                     AfterCompactionRootsReadGroup = null;
                     afterRootRead();
                 }
-                if (AfterMessagingRegistrationReadGroup is { } afterMessagingRead && captured.Length == 4 &&
+                if (AfterMessagingRegistrationReadGroup is { } afterMessagingRead && captured.Length >= 4 &&
                     captured[0] == SqliteDeepIdV2AccountGeneration.CompactionRegistrationSlot &&
                     captured[1] == ProtectedDid2MessagingSessionCatalog.Slot)
                 {

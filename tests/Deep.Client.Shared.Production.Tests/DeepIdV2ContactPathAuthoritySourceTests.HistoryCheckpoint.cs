@@ -34,24 +34,24 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         Assert.Equal(1, selected.Plan.Phase); Assert.Equal(5, selected.Plan.RootCount);
         Assert.Equal(checked((int)before.Ordinal), selected.Plan.RowCount);
         selected.Successors.Use(bytes => selected.Plan.ValidateSuccessors(bytes));
-        await fixture.WithSenderHistoryStorage(sender, async (opened, secure, observer, held) =>
+        await fixture.WithSenderHistoryStorage(sender, async (reference, secure, observer, held) =>
         {
             var original = await Did2MessagingHistoryCheckpoint.ReadRegisteredAsync(secure, sender, default);
             Assert.Equal(0UL, original.Basis.Ordinal);
-            var candidate = opened.Sql.CaptureHistoryPrefix(before, checked((int)before.Ordinal));
-            var effects = opened.Sql.CaptureHistoryPrefixEffects(before, checked((int)before.Ordinal));
+            var candidate = reference.CaptureHistoryPrefix(before, checked((int)before.Ordinal));
+            var effects = reference.CaptureHistoryPrefixEffects(before, checked((int)before.Ordinal));
             Assert.Equal(candidate.Exact.ToArray(), effects.Successor.Exact.ToArray());
-            Assert.Equal(effects.Before.ToArray(), opened.Sql.ReadCompleteCompactionProjection());
+            Assert.Equal(effects.Before.ToArray(), reference.ReadCompleteCompactionProjection());
             Assert.Equal(effects.Before.ToArray(), selected.Plan.Exact.Slice(160, 32).ToArray());
             Assert.Equal(effects.After.ToArray(), selected.Plan.Exact.Slice(192, 32).ToArray());
             using (var selectedHistory = selected.Successors.Use(bytes => selected.Plan.OwnSuccessor(3, bytes)))
                 Assert.Equal(candidate.Exact.ToArray(), selectedHistory.Use(bytes => bytes.ToArray()));
-            Assert.Throws<InvalidDataException>(() => opened.Sql.CaptureHistoryPrefixEffects(before, 0));
-            Assert.Throws<InvalidDataException>(() => opened.Sql.CaptureHistoryPrefixEffects(before, 33));
-            Assert.Throws<InvalidDataException>(() => opened.Sql.CaptureHistoryPrefixEffects(before, checked((int)before.Ordinal + 1)));
+            Assert.Throws<InvalidDataException>(() => reference.CaptureHistoryPrefixEffects(before, 0));
+            Assert.Throws<InvalidDataException>(() => reference.CaptureHistoryPrefixEffects(before, 33));
+            Assert.Throws<InvalidDataException>(() => reference.CaptureHistoryPrefixEffects(before, checked((int)before.Ordinal + 1)));
             Assert.Equal(before.Exact.ToArray(), candidate.Basis.Exact.ToArray());
             Assert.Equal(1UL, candidate.HistoryCount); Assert.Equal(2UL, candidate.Revision);
-            using var ratchet = opened.Sql.ReadVerifiedLatest(before);
+            using var ratchet = reference.ReadVerifiedLatest(before);
             var ratchetHash = ratchet.Use(bytes => SHA256.HashData(bytes));
             using (var trim = observer.CreateCommand())
             {
@@ -59,9 +59,9 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 trim.Parameters.AddWithValue("$prefix", checked((long)candidate.Basis.Ordinal));
                 Assert.Equal(checked((int)before.Ordinal), trim.ExecuteNonQuery());
             }
-            Assert.Equal(effects.After.ToArray(), opened.Sql.ReadCompleteCompactionProjection());
+            Assert.Equal(effects.After.ToArray(), reference.ReadCompleteCompactionProjection());
             // The SQL outcome cannot be consumed with the old/SQL-only basis.
-            Assert.Throws<CryptographicException>(() => opened.Sql.VerifyTip());
+            Assert.Throws<CryptographicException>(() => reference.VerifyTip());
             held.RequireActive();
             Assert.True(await secure.CompareExchangeAsync(Did2MessagingHistoryCheckpoint.Slot(sender), original.Exact, candidate.Exact));
             var after = new Did2MessagingSqlJournal(observer, sender,
@@ -131,14 +131,14 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         Assert.Equal(before.Ordinal + 1, progressed.Ordinal); Assert.Equal(before.RatchetGeneration + 1, progressed.RatchetGeneration);
         using (var received = await fixture.ReceiveOwnedMessage(receiver, nextCipher)) { }
         Assert.Single(await fixture.ListOwnedMessages(receiver));
-        await fixture.WithSenderHistoryStorage(sender, async (opened, secure, observer, held) =>
+        await fixture.WithSenderHistoryStorage(sender, async (reference, secure, observer, held) =>
         {
             // The outgoing reader joins actual native commitments rather than
             // inventing plaintext. It remains valid with an adopted old prefix
             // and a new working suffix after encrypted cold reopen.
-            using var sent = opened.Sql.ReadVerifiedOperation(progressed, draft.OperationId.Span);
+            using var sent = reference.ReadVerifiedOperation(progressed, draft.OperationId.Span);
             Assert.NotNull(sent); Assert.Equal(1, sent!.Direction);
-            using (var outgoing = opened.Sql.ReadVerifiedOutgoingEvents(progressed, default).GetEnumerator())
+            using (var outgoing = reference.ReadVerifiedOutgoingEvents(progressed, default).GetEnumerator())
             {
                 Assert.True(outgoing.MoveNext()); var row = outgoing.Current;
                 Assert.Equal(sent.Ordinal, row.Ordinal); Assert.Equal(sent.EventHash.ToArray(), row.EventHash.ToArray());
@@ -147,13 +147,13 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 Assert.False(outgoing.MoveNext());
                 Assert.Throws<ObjectDisposedException>(() => row.ExactEnvelope.ToArray());
             }
-            using (var abandoned = opened.Sql.ReadVerifiedOutgoingEvents(progressed, default).GetEnumerator())
+            using (var abandoned = reference.ReadVerifiedOutgoingEvents(progressed, default).GetEnumerator())
             {
                 Assert.True(abandoned.MoveNext()); var row = abandoned.Current; abandoned.Dispose();
                 Assert.Throws<ObjectDisposedException>(() => row.ExactEnvelope.ToArray());
             }
             using var cancellation = new CancellationTokenSource();
-            using (var cancelled = opened.Sql.ReadVerifiedOutgoingEvents(progressed, cancellation.Token).GetEnumerator())
+            using (var cancelled = reference.ReadVerifiedOutgoingEvents(progressed, cancellation.Token).GetEnumerator())
             {
                 Assert.True(cancelled.MoveNext()); var row = cancelled.Current; cancellation.Cancel();
                 Assert.Throws<OperationCanceledException>(() => cancelled.MoveNext());
@@ -161,10 +161,10 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             }
             using (var tamper = observer.CreateCommand())
             { tamper.CommandText = "UPDATE events SET envelope=zeroblob(length(envelope)) WHERE direction=1;"; Assert.Equal(1, tamper.ExecuteNonQuery()); }
-            Assert.ThrowsAny<Exception>(() => opened.Sql.ReadVerifiedOutgoingEvents(progressed, default).GetEnumerator().MoveNext());
+            Assert.ThrowsAny<Exception>(() => reference.ReadVerifiedOutgoingEvents(progressed, default).GetEnumerator().MoveNext());
             using (var restore = observer.CreateCommand())
             { restore.CommandText = "UPDATE events SET envelope=$original WHERE direction=1;"; restore.Parameters.AddWithValue("$original", nextCipher); Assert.Equal(1, restore.ExecuteNonQuery()); }
-            Assert.Equal(progressed.Exact.ToArray(), opened.Sql.VerifyTip().Exact.ToArray());
+            Assert.Equal(progressed.Exact.ToArray(), reference.VerifyTip().Exact.ToArray());
             held.RequireActive(); await Task.CompletedTask;
         });
         CryptographicOperations.ZeroMemory(acceptance); CryptographicOperations.ZeroMemory(ciphertext); CryptographicOperations.ZeroMemory(nextCipher);
@@ -181,7 +181,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         }
 
         internal async Task WithSenderHistoryStorage(Did2MessagingSessionScope scope,
-            Func<OwnedDid2MessagingStorage, IDeepSecureStorage, SqliteConnection, HeldDeepIdV2AccountLease, Task> inspect)
+            Func<Did2MessagingSqlJournal, IDeepSecureStorage, SqliteConnection, HeldDeepIdV2AccountLease, Task> inspect)
         {
             Assert.True(scope.IsInitiator);
             var path = Path.Combine(directory, "deep-store-v2-account.dsv2");
@@ -189,12 +189,19 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             var owner = new ProtectedDeepIdV2AccountOwner(storage, lease, path, Network, 1);
             using var current = await owner.ReadCurrentAsync(1_000, pq, default) ?? throw new InvalidDataException("Fixture account absent.");
             using var held = await lease.AcquireAsync(default);
-            using var opened = await SqliteDeepIdV2AccountGeneration.OpenOwnedMessagingUnderLeaseAsync(storage, path, current, scope, default);
+            using var opened = await SqliteDeepIdV2AccountGeneration.OpenMessagingArchiveAuditUnderLeaseAsync(storage, path, current, scope, default);
             using var catalog = await new ProtectedDid2MessagingSessionCatalog(storage, Network, scope.LocalAccount, scope.Instance).ReadAsync(default);
             using var key = catalog.ReadKey(catalog.FindExact(scope));
             var sqlPath = Path.Combine(path + ".messaging", Convert.ToHexStringLower(scope.Hash) + ".dms2");
             using var observer = key.Use(bytes => SqliteDeepIdV2AccountGeneration.OpenMessagingConnectionForTests(sqlPath, bytes, false));
-            await inspect(opened, storage, observer, held); held.RequireActive();
+            var history = await ReadNativeHistory(scope);
+            using var root = await storage.ReadOwnedAsync(Did2MessagingArchiveRoot.Slot(scope)) ?? throw new InvalidDataException();
+            var reference = new Did2MessagingSqlJournal(observer, scope, history);
+            reference.BindArchiveRoot(root.Use(bytes => Did2MessagingArchiveRoot.Decode(bytes, scope)));
+            // Explicit test-only full-reference SQL inspection and hostile
+            // source mutation. This is not an ordinary owned segment or a
+            // claim that a provider callback may retain a runtime connection.
+            await inspect(reference, storage, observer, held); held.RequireActive();
         }
     }
 }

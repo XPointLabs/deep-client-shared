@@ -32,7 +32,7 @@ internal static partial class SqliteDeepIdV2AccountGeneration
     }
     /// <summary>Account-level reopen: authenticate source history and completed
     /// deletion before ordinary state can escape the lower SQL backend.</summary>
-    internal static async Task<OwnedDid2MessagingStorage> OpenOwnedMessagingUnderLeaseAsync(
+    internal static async Task<OwnedDid2MessagingStorage> OpenMessagingArchiveAuditUnderLeaseAsync(
         IDeepSecureStorage storage, string accountPath, VerifiedDeepIdV2CurrentAccount current,
         Did2MessagingSessionScope scope, CancellationToken ct)
         => await OpenOwnedMessagingCoreAsync(storage, accountPath, current, scope, NativeArchiveAlgorithm.Full, ct).ConfigureAwait(false);
@@ -45,7 +45,9 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         Did2MessagingSessionScope scope, CancellationToken ct)
         => await OpenOwnedMessagingCoreAsync(storage, accountPath, current, scope, NativeArchiveAlgorithm.Active, ct).ConfigureAwait(false);
 
-    private enum NativeArchiveAlgorithm { Full, Active }
+    private enum NativeArchiveAlgorithm { Full, Active, Enrollment, EnrollmentSelection }
+    private static bool IsArchiveEnrollmentAlgorithm(NativeArchiveAlgorithm algorithm)
+        => algorithm is NativeArchiveAlgorithm.Enrollment or NativeArchiveAlgorithm.EnrollmentSelection;
 
     private static async Task<OwnedDid2MessagingStorage> OpenOwnedMessagingCoreAsync(
         IDeepSecureStorage storage, string accountPath, VerifiedDeepIdV2CurrentAccount current,
@@ -88,9 +90,49 @@ internal static partial class SqliteDeepIdV2AccountGeneration
     internal static async Task<OwnedDid2MessagingStorage> OpenRegisteredMessagingUnderLeaseAsync(
         IDeepSecureStorage storage, string accountPath, ReadOnlyMemory<byte> network,
         ReadOnlyMemory<byte> account, Did2MessagingSessionScope scope, CancellationToken ct)
-        => await OpenRegisteredMessagingCoreAsync(storage, accountPath, network, account, scope, NativeArchiveAlgorithm.Full, ct).ConfigureAwait(false);
+        => await OpenRegisteredMessagingCoreAsync(storage, accountPath, network, account, scope, NativeArchiveAlgorithm.Active, ct).ConfigureAwait(false);
+
+    // Only the explicit account enrollment owner calls this lower path. Actual
+    // catalog/progress select schema5 draining or the exact staged schema6.
+    internal static Task<OwnedDid2MessagingStorage> OpenArchiveEnrollmentMessagingUnderLeaseAsync(
+        IDeepSecureStorage storage, string accountPath, ReadOnlyMemory<byte> network,
+        ReadOnlyMemory<byte> account, Did2MessagingSessionScope scope, CancellationToken ct)
+        => OpenRegisteredMessagingCoreAsync(storage, accountPath, network, account, scope, NativeArchiveAlgorithm.Enrollment, ct);
+
+    internal static Task<OwnedDid2MessagingStorage> OpenArchiveEnrollmentSelectionUnderLeaseAsync(
+        IDeepSecureStorage storage, string accountPath, ReadOnlyMemory<byte> network,
+        ReadOnlyMemory<byte> account, Did2MessagingSessionScope scope, CancellationToken ct)
+        => OpenRegisteredMessagingCoreAsync(storage, accountPath, network, account, scope, NativeArchiveAlgorithm.EnrollmentSelection, ct);
 
     private static async Task<OwnedDid2MessagingStorage> OpenRegisteredMessagingCoreAsync(
+        IDeepSecureStorage storage, string accountPath, ReadOnlyMemory<byte> network,
+        ReadOnlyMemory<byte> account, Did2MessagingSessionScope scope, NativeArchiveAlgorithm algorithm, CancellationToken ct)
+    {
+        var checkpoint = new Did2MessagingProtectedCheckpoint(storage, scope);
+        var result = new OwnedDid2MessagingStorage(scope, checkpoint,
+            token => OpenRegisteredMessagingSegmentAsync(storage, accountPath, network, account, scope, algorithm, token));
+        try
+        {
+            var initial = await result.WithSqlAsync(sql => (Tip: sql.VerifyOrdinaryState(), Frozen: sql.HasFrozenArchiveEnrollment), ct).ConfigureAwait(false);
+            // Initialization CAS runs after the physical connection and all SQL
+            // key loans are closed. Its result is rejoined by the next segment.
+            if (!IsArchiveEnrollmentAlgorithm(algorithm))
+            {
+                var catalog = new ProtectedDid2MessagingSessionCatalog(storage, network.Span, account.Span, scope.Instance);
+                await catalog.MarkSqlInitializedAsync(scope, initial.Tip, ct).ConfigureAwait(false);
+            }
+            else if (!initial.Frozen && algorithm != NativeArchiveAlgorithm.EnrollmentSelection)
+            {
+                var catalog = new ProtectedDid2MessagingSessionCatalog(storage, network.Span, account.Span, scope.Instance);
+                await catalog.MarkOldSqlInitializedForEnrollmentAsync(scope, initial.Tip, ct).ConfigureAwait(false);
+            }
+            if (!initial.Frozen && algorithm != NativeArchiveAlgorithm.EnrollmentSelection) _ = await result.Custody.ReconcileAsync(ct).ConfigureAwait(false);
+            return result;
+        }
+        catch { result.Dispose(); throw; }
+    }
+
+    private static async Task<Did2MessagingSqlSegment> OpenRegisteredMessagingSegmentAsync(
         IDeepSecureStorage storage, string accountPath, ReadOnlyMemory<byte> network,
         ReadOnlyMemory<byte> account, Did2MessagingSessionScope scope, NativeArchiveAlgorithm algorithm, CancellationToken ct)
     {
@@ -99,7 +141,8 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         // previously successful read can supply any member of this snapshot.
         using var inventory = await storage.ReadOwnedBatchAsync([KeySlot,
             ProtectedDid2MessagingSessionCatalog.Slot, scope.FloorSlot,
-            Did2MessagingHistoryCheckpoint.Slot(scope)], ct).ConfigureAwait(false);
+            Did2MessagingHistoryCheckpoint.Slot(scope), Did2MessagingArchiveRoot.Slot(scope),
+            ProtectedDid2MessagingArchiveEnrollment.Slot, ProtectedDid2MessagingPeerBootstrap.Slot(scope)], ct).ConfigureAwait(false);
         ct.ThrowIfCancellationRequested();
         var registration = inventory[0] ?? throw new InvalidDataException("The DID2 SQL key record is absent.");
         var instance = registration.Use(bytes => ReadAccountInstanceFromRegistration(bytes, network.Span, account.Span));
@@ -112,10 +155,33 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         }
         finally { CryptographicOperations.ZeroMemory(instance); }
         var catalogBytes = inventory[1] ?? throw new InvalidDataException("The protected DID2 messaging catalog is absent; explicit reset is required.");
-        using var registered = catalogBytes.Use(bytes => ProtectedDid2MessagingSessionCatalog.Decode(bytes,
-            network.Span, account.Span, scope.Instance));
+        if (!IsArchiveEnrollmentAlgorithm(algorithm) && inventory[5] is not null)
+            throw new InvalidOperationException("Explicit messaging archive enrollment owns ordinary account admission.");
+        using var registered = catalogBytes.Use(bytes => IsArchiveEnrollmentAlgorithm(algorithm) ?
+            ProtectedDid2MessagingSessionCatalog.DecodeForEnrollment(bytes, network.Span, account.Span, scope.Instance) :
+            ProtectedDid2MessagingSessionCatalog.Decode(bytes, network.Span, account.Span, scope.Instance));
         var index = registered.FindExact(scope);
         if (index < 0) throw new InvalidDataException("DID2 messaging SQL has no protected registration.");
+        ProtectedDid2MessagingArchiveEnrollment? progress = null;
+        if (IsArchiveEnrollmentAlgorithm(algorithm) && registered.Version == 2)
+        {
+            if (inventory[5] is { } progressBytes)
+            {
+                if (algorithm == NativeArchiveAlgorithm.EnrollmentSelection)
+                    throw new InvalidOperationException("Actual stored enrollment progress owns selection.");
+                progress = progressBytes.Use(bytes => ProtectedDid2MessagingArchiveEnrollment.Decode(bytes, scope));
+            }
+            else
+            {
+                var selected = Enumerable.Range(0, registered.Count).FirstOrDefault(i => registered.ArchiveState(i) == 0, -1);
+                if (algorithm != NativeArchiveAlgorithm.EnrollmentSelection || selected != index || registered.ArchiveState(index) != 0)
+                    throw new InvalidOperationException("Only explicit lowest state0 selection may audit before SourceFrozen.");
+            }
+        }
+        else if (algorithm == NativeArchiveAlgorithm.EnrollmentSelection)
+            throw new InvalidOperationException("Pre-progress selection requires the actual V2 enrollment catalog.");
+        var peerBytes = inventory[6] ?? throw new InvalidDataException("The protected native peer bootstrap is absent.");
+        _ = peerBytes.Use(bytes => ProtectedDid2MessagingPeerBootstrap.Restore(bytes, scope));
         var phase = registered.Phase(index);
         var directory = MessagingDirectory(accountPath);
         var path = Path.Combine(directory, Convert.ToHexStringLower(scope.Hash) + ".dms2");
@@ -137,8 +203,37 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         var floor = floorBytes.Use(bytes => Did2MessagingFloor.Decode(bytes, scope));
         var historyBytes = inventory[3] ?? throw new InvalidDataException("Mandatory messaging history checkpoint is absent; no initialization is permitted.");
         var history = historyBytes.Use(bytes => Did2MessagingHistoryCheckpoint.Decode(bytes, scope));
+        Did2MessagingArchiveRoot? archive = null;
+        if (!IsArchiveEnrollmentAlgorithm(algorithm) || registered.ArchiveState(index) == 1)
+        {
+            var archiveBytes = inventory[4] ?? throw new InvalidDataException("An indexed messaging archive root is absent; no reconstruction is allowed.");
+            archive = archiveBytes.Use(bytes => Did2MessagingArchiveRoot.Decode(bytes, scope)); archive.RequireSource(history);
+        }
+        else if (inventory[4] is not null) throw new CryptographicException("An unindexed enrollment entry has an unexpected protected archive root.");
         var actualRegistrationHash = registration.Use(bytes => SHA256.HashData(bytes));
         var actualCatalogHash = catalogBytes.Use(bytes => SHA256.HashData(bytes));
+        if (progress is not null)
+        {
+            byte[] comparison;
+            if (registered.ArchiveState(index) == 1)
+            {
+                if (progress.Phase != ProtectedDid2MessagingArchiveEnrollment.PhaseKind.FinalReady || archive is null ||
+                    !Did2MessagingSessionScope.Fixed(archive.Exact.Span, progress.FinalRoot(scope).Exact.Span))
+                    throw new CryptographicException("Indexed enrollment recovery lacks its exact already-adopted root.");
+                comparison = registered.BeforeIndexedComparison(index);
+            }
+            else comparison = registered.Exact.ToArray();
+            try
+            {
+                if (!Did2MessagingSessionScope.Fixed(SHA256.HashData(comparison), progress.Guard(ProtectedDid2MessagingArchiveEnrollment.GuardKind.Catalog)) ||
+                    !Did2MessagingSessionScope.Fixed(actualRegistrationHash, progress.Guard(ProtectedDid2MessagingArchiveEnrollment.GuardKind.Registration)) ||
+                    !peerBytes.Use(bytes => Did2MessagingSessionScope.Fixed(SHA256.HashData(bytes), progress.Guard(ProtectedDid2MessagingArchiveEnrollment.GuardKind.PeerBootstrap))) ||
+                    !Did2MessagingSessionScope.Fixed(floor.Exact.Span, progress.SourceFloor.Exact.Span) ||
+                    !Did2MessagingSessionScope.Fixed(history.Exact.Span, progress.SourceHistory.Exact.Span))
+                    throw new CryptographicException("Actual enrollment protected source guards differ from the frozen progress.");
+            }
+            finally { CryptographicOperations.ZeroMemory(comparison); }
+        }
         inventory.Dispose(); // No raw inventory is retained over SQL/storage callbacks.
         if (phase == 1 && !Did2MessagingSessionScope.Fixed(floor.Exact.Span, Did2MessagingFloor.Empty(scope).Exact.Span))
             throw new CryptographicException("Uninitialized DID2 messaging registration has a nonempty floor.");
@@ -149,18 +244,20 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         SqliteConnection? connection = key.Use(bytes => OpenMessagingConnection(path, bytes, create: phase == 1));
         try
         {
-            var sql = algorithm == NativeArchiveAlgorithm.Active && phase == 2 ? Did2MessagingSqlJournal.ForOrdinaryRuntime(connection, scope, history) :
+            var sql = IsArchiveEnrollmentAlgorithm(algorithm) ?
+                registered.Version == 1 && phase == 1 ? Did2MessagingSqlJournal.InitializeOldEnrollmentSource(connection, scope, history, floor) :
+                    Did2MessagingSqlJournal.ForArchiveEnrollment(connection, scope, history, progress) :
+                algorithm == NativeArchiveAlgorithm.Active && phase == 2 ? Did2MessagingSqlJournal.ForOrdinaryRuntime(connection, scope, history, archive!) :
                 new Did2MessagingSqlJournal(connection, scope, history);
-            if (algorithm == NativeArchiveAlgorithm.Active && phase == 2)
-                sql.BindOpenRegistration(actualRegistrationHash, actualCatalogHash);
+            if (archive is not null && !IsArchiveEnrollmentAlgorithm(algorithm)) sql.BindArchiveRoot(archive);
+            sql.BindOpenedFloor(floor);
+            sql.BindEnrollmentProgress(progress);
             if (phase == 1)
             {
                 sql.InitializeOrVerifyRegisteredEmpty(floor);
-                await catalog.MarkSqlInitializedAsync(scope, sql, ct).ConfigureAwait(false);
+
             }
-            var custody = new Did2MessagingDurableCustody(scope, checkpoint, sql);
-            _ = await custody.ReconcileAsync(ct).ConfigureAwait(false);
-            var result = new OwnedDid2MessagingStorage(connection, scope, checkpoint, sql, custody);
+            var result = new Did2MessagingSqlSegment(connection, sql);
             connection = null; return result;
         }
         finally { connection?.Dispose(); }
@@ -221,23 +318,60 @@ internal static partial class SqliteDeepIdV2AccountGeneration
     }
 }
 
+// A physical SQL handle exists only inside one synchronous segment. No SQL
+// connection, transaction, key loan or decoded registration crosses an await.
+internal sealed class Did2MessagingSqlSegment(SqliteConnection connection, Did2MessagingSqlJournal sql) : IDisposable
+{
+    internal Did2MessagingSqlJournal Sql { get; } = sql;
+    public void Dispose() => connection.Dispose();
+}
+
 internal sealed class OwnedDid2MessagingStorage : IDisposable
 {
-    private SqliteConnection? connection;
     private readonly Did2MessagingSessionScope scope;
     private readonly Did2MessagingProtectedCheckpoint checkpoint;
-    private readonly Did2MessagingSqlJournal sql;
+    private readonly Func<CancellationToken, Task<Did2MessagingSqlSegment>> open;
     private readonly Did2MessagingDurableCustody custody;
-    internal OwnedDid2MessagingStorage(SqliteConnection connection, Did2MessagingSessionScope scope,
-        Did2MessagingProtectedCheckpoint checkpoint, Did2MessagingSqlJournal sql, Did2MessagingDurableCustody custody)
-    { this.connection = connection; this.scope = scope; this.checkpoint = checkpoint; this.sql = sql; this.custody = custody; }
+    private int disposed;
+    internal OwnedDid2MessagingStorage(Did2MessagingSessionScope scope,
+        Did2MessagingProtectedCheckpoint checkpoint, Func<CancellationToken, Task<Did2MessagingSqlSegment>> open)
+    {
+        this.scope = scope; this.checkpoint = checkpoint; this.open = open;
+        custody = new Did2MessagingDurableCustody(scope, checkpoint, this);
+    }
     internal Did2MessagingSessionScope Scope { get { RequireLive(); return scope; } }
     internal Did2MessagingProtectedCheckpoint Checkpoint { get { RequireLive(); return checkpoint; } }
-    internal Did2MessagingSqlJournal Sql { get { RequireLive(); return sql; } }
     internal Did2MessagingDurableCustody Custody { get { RequireLive(); return custody; } }
-    // Scheduling budget only. It never supplies a floor, verification result,
-    // skip permission or mutable-state loan to the ordinary verifier.
+    internal async Task<T> WithSqlAsync<T>(Func<Did2MessagingSqlJournal, T> operation, CancellationToken ct)
+    {
+        RequireLive(); ct.ThrowIfCancellationRequested();
+#if DEEP_TEST_INTERNALS
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+#endif
+        using var segment = await open(ct).ConfigureAwait(false);
+        RequireLive(); ct.ThrowIfCancellationRequested();
+        var result = operation(segment.Sql);
+        if (result is Task) throw new InvalidOperationException("SQL segments cannot cross an asynchronous callback.");
+        return result;
+#if DEEP_TEST_INTERNALS
+            }
+            catch (Did2ActiveReadBoundary boundary)
+            {
+                // The using scope has ended: no SQL/key/source loan crosses the
+                // adversarial callback. Only one test-requested fresh read runs.
+                if (attempt != 0) throw new CryptographicException("A selected-read test boundary invalidated its fresh retry.");
+                boundary.Invoke();
+            }
+        }
+#endif
+    }
+    internal async Task WithSqlAsync(Action<Did2MessagingSqlJournal> operation, CancellationToken ct)
+    { _ = await WithSqlAsync(sql => { operation(sql); return 0; }, ct).ConfigureAwait(false); }
+    // Pure scheduling metadata only; it never suppresses actual segment joins.
     internal bool RecoveredLocalCompaction { get; set; }
-    private void RequireLive() => ObjectDisposedException.ThrowIf(connection is null, this);
-    public void Dispose() => Interlocked.Exchange(ref connection, null)?.Dispose();
+    private void RequireLive() => ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
+    public void Dispose() => Interlocked.Exchange(ref disposed, 1);
 }

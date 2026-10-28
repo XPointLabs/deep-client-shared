@@ -375,11 +375,18 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         internal async Task CompactHistoricalPeerRoutePrefix(Did2MessagingSessionScope scope)
         {
             var before = await ReadMessagingFloor(scope);
+            var source = await ReadNativeHistory(scope);
+            using var preceding = await NativeStorage(scope).ReadOwnedAsync(Did2MessagingArchiveRoot.Slot(scope)) ?? throw new InvalidDataException();
+            var previousArchive = preceding.Use(bytes => Did2MessagingArchiveRoot.Decode(bytes, scope));
+            var rows = checked((int)(before.Ordinal - previousArchive.Basis.Ordinal)); Assert.InRange(rows, 1, 32);
             await CompletedContactSendRecoveryOwner(scope.IsInitiator).CompactOwnedMessagingPrefixAsync(
-                1_000, pq, scope, checked((int)before.Ordinal), default);
+                1_000, pq, scope, rows, default);
             var secure = scope.IsInitiator ? (Deep.Client.Shared.Persistence.IDeepSecureStorage)storage : peerStorage;
             var history = await Did2MessagingHistoryCheckpoint.ReadRegisteredAsync(secure, scope, default);
-            Assert.Equal(before.Ordinal, history.Basis.Ordinal);
+            using var root = await secure.ReadOwnedAsync(Did2MessagingArchiveRoot.Slot(scope)) ?? throw new InvalidDataException();
+            var archive = root.Use(bytes => Did2MessagingArchiveRoot.Decode(bytes, scope));
+            Assert.Equal(before.Ordinal, archive.Basis.Ordinal);
+            Assert.True(source.Exact.Span.SequenceEqual(history.Exact.Span), "Indexed prefix changed immutable enrollment-source history.");
             Assert.Equal(before.Exact.ToArray(), (await ReadMessagingFloor(scope)).Exact.ToArray());
         }
 

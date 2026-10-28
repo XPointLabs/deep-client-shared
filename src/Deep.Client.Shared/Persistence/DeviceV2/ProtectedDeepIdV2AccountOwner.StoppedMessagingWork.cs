@@ -216,7 +216,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 return; // First successful terminal outcome cannot become a later cancellation.
             }
             var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
-            using var native = opened.Sql.ReadVerifiedOperation(floor, operation.Span);
+            using var native = await opened.WithSqlAsync(sql => sql.ReadVerifiedOperation(floor, operation.Span), ct).ConfigureAwait(false);
             if (native is not null && (native.Direction != 1 || !FixedRoute(native.EventHash, command.EventHash)))
                 throw new CryptographicException("Stopping work cannot replace committed native custody.");
             using var application = await SqliteDeepIdV2AccountGeneration.OpenExistingApplicationForCompactionUnderLeaseAsync(

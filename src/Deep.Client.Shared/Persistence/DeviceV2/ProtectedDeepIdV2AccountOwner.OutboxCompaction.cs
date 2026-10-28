@@ -133,6 +133,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 throw new CryptographicException("Outbox selection lost its initialized stable native scope.");
             _ = roots[8].Use(bytes => Did2MessagingHistoryCheckpoint.Decode(bytes, scope));
             _ = roots[9].Use(bytes => ProtectedDid2MessagingPeerBootstrap.Restore(bytes, scope));
+            roots[10].Use(bytes => Did2MessagingArchiveRoot.Decode(bytes, scope)).RequireSource(
+                roots[8].Use(bytes => Did2MessagingHistoryCheckpoint.Decode(bytes, scope)));
             using (var registration = await SqliteDeepIdV2AccountGeneration.ReadCompactionRegistrationUnderLeaseAsync(storage,
                 scope.Network.ToArray(), scope.LocalAccount.ToArray(), ct).ConfigureAwait(false))
                 if (!registration.Use(bytes => FixedRoute(bytes.Slice(56, 32), scope.Instance)) ||
@@ -153,7 +155,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 var payload = OwnedByteExports.TakeArray(retained.Single(item => FixedRoute(item.OperationId.Span, command.Operation)).ExactDmc2);
                 try
                 {
-                    using var native = opened.Sql.ReadVerifiedOperation(stable, command.Operation);
+                    using var native = await opened.WithSqlAsync(sql => sql.ReadVerifiedOperation(stable, command.Operation), ct).ConfigureAwait(false);
                     if (native is null)
                     {
                         if (!stoppedOnly) throw new CryptographicException("Store settlement has no verified committed native event.");

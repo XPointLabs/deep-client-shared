@@ -45,7 +45,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             (!includeStoredWorking || !working.Stored)) return null; // Uncommitted work retains its normal exact owner.
         using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, held, ct).ConfigureAwait(false);
         var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
-        using var native = opened.Sql.ReadVerifiedOperation(floor, operation.Span);
+        using var native = await opened.WithSqlAsync(sql => sql.ReadVerifiedOperation(floor, operation.Span), ct).ConfigureAwait(false);
         if (native is null) return null; // Unavailable retry; absence never authorizes creation.
         if (native.Direction != 1) throw new CryptographicException("Public text retry selected a receive operation.");
         using var application = await SqliteDeepIdV2AccountGeneration.OpenExistingApplicationForCompactionUnderLeaseAsync(
@@ -139,7 +139,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 throw new CryptographicException("Historical Store has ambiguous acceptance and ordinary command custody.");
 
             var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
-            using var native = opened.Sql.ReadVerifiedOperation(floor, operation.Span);
+            using var native = await opened.WithSqlAsync(sql => sql.ReadVerifiedOperation(floor, operation.Span), ct).ConfigureAwait(false);
             if (native is null)
             {
                 if (command is null && acceptance is null && !retainedSuccess) return null;
@@ -262,11 +262,11 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         if (scope.IsInitiator || !FixedRoute(winner.Scope.Exact, scope.Exact) || !FixedRoute(winner.Operation, operation.Span))
             throw new CryptographicException("Retained ContactAccept has no exact local explicit-command winner.");
         var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
-        using var native = opened.Sql.ReadVerifiedOperation(floor, operation.Span) ??
+        using var native = await opened.WithSqlAsync(sql => sql.ReadVerifiedOperation(floor, operation.Span), ct).ConfigureAwait(false) ??
             throw new CryptographicException("Retained ContactAccept lost its actual committed send.");
         if (native.Direction != 1 || !FixedRoute(native.EventHash, winner.EventHash))
             throw new CryptographicException("Retained ContactAccept differs from its actual native send.");
-        var initial = opened.Sql.ReadVerifiedActiveInitialEvents(floor);
+        var initial = await opened.WithSqlAsync(sql => sql.ReadVerifiedActiveInitialEvents(floor), ct).ConfigureAwait(false);
         byte[]? accepted = null;
         try
         {
@@ -453,7 +453,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         SqliteDeepMailboxStore application, CancellationToken ct)
     {
         var scope = opened.Scope; var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
-        var initial = opened.Sql.ReadVerifiedActiveInitialEvents(floor); byte[]? accepted = null;
+        var initial = await opened.WithSqlAsync(sql => sql.ReadVerifiedActiveInitialEvents(floor), ct).ConfigureAwait(false); byte[]? accepted = null;
         try
         {
             var hello = ApplicationCoreCodec.DecodeDmc2(initial.Hello);
@@ -466,7 +466,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             accepted = await application.ReadContactAcceptAsync(current.AccountId, BinaryPrimitives.ReadUInt64BigEndian(scope.Exact[84..]),
                 scope.Conversation.ToArray(), scope.RemoteAccount.ToArray(), scope.RemoteDevice.ToArray(), ct).ConfigureAwait(false) ??
                 throw new CryptographicException("Original peer route lost its acceptance projection.");
-            using var received = opened.Sql.ReadVerifiedReceiveForEvent(floor, SHA256.HashData(accepted)) ??
+            using var received = await opened.WithSqlAsync(sql => sql.ReadVerifiedReceiveForEvent(floor, SHA256.HashData(accepted)), ct).ConfigureAwait(false) ??
                 throw new CryptographicException("Original peer route lost actual authenticated acceptance custody.");
             using var plain = received.OwnAuthenticatedDmc2();
             if (!plain.Use(bytes => FixedRoute(bytes, accepted)))

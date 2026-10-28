@@ -21,7 +21,7 @@ internal sealed class Did2CompactionPlan : IDisposable
         MessagingFloor = 6, Attachment = 7, AccountRegistration = 8,
         NativeFence = 9, MessagingHistoryCheckpoint = 10, MessagingPeerBootstrap = 11,
         MailboxStoreState = 12, ContactPublication = 13, MailboxLocalCustody = 14, ContactAccept = 15,
-        MailboxContactCustody = 16, ContactStart = 17
+        MailboxContactCustody = 16, ContactStart = 17, MessagingArchive = 18
     }
     internal enum Disposition : byte { OutboxPayload = 1, Audit = 2, JournalPrefix = 3, ReplayScope = 4, RetainedPath = 5, StoppedOutboxPayload = 6, ContactAcceptPayload = 8, InitialPayload = 9, StoppedControlPayload = 10, ExpiredControlAudit = 11, PreSessionInitialPayload = 12, ExpiredPreSessionInitialAudit = 13, ExpiredTerminalAudit = 14 }
     internal enum RecoveryStep : byte { ApplySql = 1, RecordSqlCommit = 2, AdoptRoot = 3, ClearPlan = 4 }
@@ -31,7 +31,8 @@ internal sealed class Did2CompactionPlan : IDisposable
     internal readonly record struct RootReadback(RootKind Kind, ReadOnlyMemory<byte> Selector, ReadOnlyMemory<byte> Digest);
     internal readonly record struct RecoveryObservation(RecoveryStep Step, int RootIndex = -1);
     private byte[]? bytes;
-    private Did2CompactionPlan(byte[] bytes) => this.bytes = bytes;
+    private readonly bool oldEnrollment;
+    private Did2CompactionPlan(byte[] bytes, bool oldEnrollment = false) { this.bytes = bytes; this.oldEnrollment = oldEnrollment; }
     private ReadOnlySpan<byte> Data => bytes ?? throw new ObjectDisposedException(nameof(Did2CompactionPlan));
     internal byte Phase => Data[1];
     internal ulong Revision => BinaryPrimitives.ReadUInt64BigEndian(Data[8..]);
@@ -125,7 +126,7 @@ internal sealed class Did2CompactionPlan : IDisposable
             SHA256.HashData(successors, raw.AsSpan(224, 32));
             BinaryPrimitives.WriteUInt32BigEndian(raw.AsSpan(256), checked((uint)successors.Length));
             raw[260] = checked((byte)PartsFor(successors.Length));
-            var plan = Decode(raw, Data.Slice(16, 16), Data.Slice(32, 32), Data.Slice(64, 32));
+            var plan = DecodeCore(raw, Data.Slice(16, 16), Data.Slice(32, 32), Data.Slice(64, 32), oldEnrollment);
             try { plan.ValidateSuccessors(successors); return new(plan, new OwnedDeepSecret(successors)); }
             catch { plan.Dispose(); throw; }
         }
@@ -134,6 +135,16 @@ internal sealed class Did2CompactionPlan : IDisposable
 
     internal static Did2CompactionPlan Decode(ReadOnlySpan<byte> raw, ReadOnlySpan<byte> network,
         ReadOnlySpan<byte> account, ReadOnlySpan<byte> instance)
+        => DecodeCore(raw, network, account, instance, false);
+
+    // Only an owner that has actually joined catalog V1 may select this parser.
+    // It is not an ordinary reader or an error-triggered fallback.
+    internal static Did2CompactionPlan DecodeForOldEnrollment(ReadOnlySpan<byte> raw, ReadOnlySpan<byte> network,
+        ReadOnlySpan<byte> account, ReadOnlySpan<byte> instance)
+        => DecodeCore(raw, network, account, instance, true);
+
+    private static Did2CompactionPlan DecodeCore(ReadOnlySpan<byte> raw, ReadOnlySpan<byte> network,
+        ReadOnlySpan<byte> account, ReadOnlySpan<byte> instance, bool oldEnrollment)
     {
         RequireOwner(network, account, instance);
         if (raw.Length is < HeaderBytes or > MaximumBytes || raw[0] != 1 || raw[1] > 3 ||
@@ -146,7 +157,7 @@ internal sealed class Did2CompactionPlan : IDisposable
         if (raw[1] == 0)
         {
             if (raw[2] != 0 || roots != 0 || rows != 0 || !Zero(raw[96..])) throw Bad();
-            return new(raw.ToArray());
+            return new(raw.ToArray(), oldEnrollment);
         }
         if (revision < (raw[1] == 1 ? 2UL : 3UL) || raw[2] is < 1 or > 4 || roots == 0 || rows == 0) throw Bad();
         Require32(raw.Slice(96, 32)); Require32(raw.Slice(128, 32));
@@ -164,7 +175,7 @@ internal sealed class Did2CompactionPlan : IDisposable
         for (var i = 0; i < roots; i++)
         {
             var record = raw.Slice(HeaderBytes + i * RootBytes, RootBytes);
-            if (record[0] is < 1 or > 17 || record[1] is not (1 or 2) || !Zero(record.Slice(2, 2))) throw Bad();
+            if (record[0] is < 1 or > 18 || record[1] is not (1 or 2) || !Zero(record.Slice(2, 2))) throw Bad();
             if (record[0] is (byte)RootKind.SessionCatalog or (byte)RootKind.AccountRegistration or (byte)RootKind.NativeFence or (byte)RootKind.MessagingPeerBootstrap or (byte)RootKind.MailboxStoreState or (byte)RootKind.MailboxLocalCustody or (byte)RootKind.MailboxContactCustody && record[1] != 2) throw Bad();
             if (record[0] is >= 1 and <= 5 or 7 or 8 or 12 or 13 or 14 or 15 or 16 or 17 && !globalRoots.Add((RootKind)record[0])) throw Bad();
             Require32(record.Slice(4, 32)); Require32(record.Slice(36, 32)); Require32(record.Slice(68, 32));
@@ -205,20 +216,35 @@ internal sealed class Did2CompactionPlan : IDisposable
             raw[2] == (byte)SqlTarget.ProtectedOnly && actions.Contains(Disposition.Audit) &&
                 (rows != 1 || actions.Count != 1 || !changedKinds.Contains(RootKind.Send) || changedKinds.Count != 1 ||
                  !guards.Contains(RootKind.NativeFence) || !guards.Contains(RootKind.MailboxStoreState)) ||
-            raw[2] == (byte)SqlTarget.Messaging && (!changedKinds.Contains(RootKind.MessagingHistoryCheckpoint) ||
+            raw[2] == (byte)SqlTarget.Messaging && (!changedKinds.Contains(oldEnrollment ? RootKind.MessagingHistoryCheckpoint : RootKind.MessagingArchive) ||
                 !guards.Contains(RootKind.MessagingFloor) || !guards.Contains(RootKind.SessionCatalog)) ||
             raw[2] == (byte)SqlTarget.Application && actions.Contains(Disposition.OutboxPayload) &&
                 !changedKinds.Contains(RootKind.Ordinary) && !changedKinds.Contains(RootKind.Attachment) ||
             raw[2] == (byte)SqlTarget.Transport && actions.Contains(Disposition.OutboxPayload) &&
                 !changedKinds.Contains(RootKind.Send) && !changedKinds.Contains(RootKind.Read) ||
             raw[2] == (byte)SqlTarget.ProtectedOnly && !changedKinds.Overlaps([RootKind.Grant, RootKind.Send, RootKind.Read])) throw Bad();
+        if (raw[2] == (byte)SqlTarget.Messaging)
+        {
+            RootKind[] expected = oldEnrollment ?
+                [RootKind.SessionCatalog, RootKind.MessagingFloor, RootKind.AccountRegistration, RootKind.MessagingHistoryCheckpoint, RootKind.MessagingPeerBootstrap] :
+                [RootKind.SessionCatalog, RootKind.MessagingFloor, RootKind.AccountRegistration, RootKind.MessagingHistoryCheckpoint, RootKind.MessagingPeerBootstrap, RootKind.MessagingArchive];
+            var changedKind = oldEnrollment ? RootKind.MessagingHistoryCheckpoint : RootKind.MessagingArchive;
+            if (roots != expected.Length || successorBytes != (oldEnrollment ? Did2MessagingHistoryCheckpoint.Bytes : Did2MessagingArchiveRoot.Bytes) || raw[260] != 1) throw Bad();
+            for (var i = 0; i < expected.Length; i++)
+            {
+                var record = raw.Slice(HeaderBytes + i * RootBytes, RootBytes);
+                if (record[0] != (byte)expected[i] || record[1] != (expected[i] == changedKind ? 1 : 2)) throw Bad();
+            }
+        }
+        else if (changedKinds.Contains(RootKind.MessagingArchive) || !oldEnrollment &&
+            guards.Contains(RootKind.MessagingHistoryCheckpoint) && !guards.Contains(RootKind.MessagingArchive)) throw Bad();
         // This action owns one closed joint SQL + grant/read/publication profile.
         // Other compaction profiles cannot borrow these roots or this action.
         if (actions.Overlaps([Disposition.StoppedOutboxPayload, Disposition.ExpiredTerminalAudit]))
         {
             RootKind[] expected = [RootKind.Ordinary, RootKind.Send, RootKind.Grant, RootKind.Read,
                 RootKind.SessionCatalog, RootKind.MessagingFloor, RootKind.Attachment, RootKind.AccountRegistration,
-                RootKind.MessagingHistoryCheckpoint, RootKind.MessagingPeerBootstrap];
+                RootKind.MessagingHistoryCheckpoint, RootKind.MessagingPeerBootstrap, RootKind.MessagingArchive];
             if (raw[2] != (byte)SqlTarget.Application || actions.Count != 1 || roots != expected.Length) throw Bad();
             for (var i = 0; i < expected.Length; i++)
             {
@@ -262,7 +288,7 @@ internal sealed class Did2CompactionPlan : IDisposable
                     (byte)(i == rows - 1 ? Disposition.RetainedPath : Disposition.ReplayScope)) throw Bad();
         }
         else if (globalRoots.Contains(RootKind.ContactPublication) || globalRoots.Contains(RootKind.MailboxLocalCustody)) throw Bad();
-        return new(raw.ToArray());
+        return new(raw.ToArray(), oldEnrollment);
     }
 
     // Exact successor bytes are active protected custody, not audit metadata.
@@ -339,7 +365,7 @@ internal sealed class Did2CompactionPlan : IDisposable
         try
         {
             BinaryPrimitives.WriteUInt64BigEndian(raw.AsSpan(8), nextRevision);
-            return Decode(raw, Data.Slice(16, 16), Data.Slice(32, 32), Data.Slice(64, 32));
+            return DecodeCore(raw, Data.Slice(16, 16), Data.Slice(32, 32), Data.Slice(64, 32), oldEnrollment);
         }
         finally { CryptographicOperations.ZeroMemory(raw); }
     }
@@ -351,7 +377,7 @@ internal sealed class Did2CompactionPlan : IDisposable
         try
         {
             BinaryPrimitives.WriteUInt64BigEndian(raw.AsSpan(8), nextRevision);
-            return Decode(raw, Data.Slice(16, 16), Data.Slice(32, 32), Data.Slice(64, 32));
+            return DecodeCore(raw, Data.Slice(16, 16), Data.Slice(32, 32), Data.Slice(64, 32), oldEnrollment);
         }
         finally { CryptographicOperations.ZeroMemory(raw); }
     }
@@ -362,7 +388,7 @@ internal sealed class Did2CompactionPlan : IDisposable
         try
         {
             BinaryPrimitives.WriteUInt64BigEndian(raw.AsSpan(8), checked(Revision + 1));
-            return Decode(raw, Data.Slice(16, 16), Data.Slice(32, 32), Data.Slice(64, 32));
+            return DecodeCore(raw, Data.Slice(16, 16), Data.Slice(32, 32), Data.Slice(64, 32), oldEnrollment);
         }
         finally { CryptographicOperations.ZeroMemory(raw); }
     }

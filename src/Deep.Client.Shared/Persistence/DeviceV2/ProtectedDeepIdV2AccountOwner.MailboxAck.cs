@@ -246,7 +246,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     sessions.Add(name, session);
                 }
                 var selected = session.Endpoint; var opened = session.Opened; var stable = session.Floor;
-                using var retained = opened.Sql.ReadVerifiedOperation(stable, incoming.OperationId.Span) ?? throw new CryptographicException("ACK has no actual committed receive row.");
+                using var retained = await opened.WithSqlAsync(sql => sql.ReadVerifiedOperation(stable, incoming.OperationId.Span), ct).ConfigureAwait(false) ?? throw new CryptographicException("ACK has no actual committed receive row.");
                 if (retained.Direction != 2 || !FixedRoute(retained.ExactEnvelope, item.Envelope.Ciphertext.Span))
                     throw new CryptographicException("ACK differs from the actual authenticated receive.");
                 using var plaintext = retained.OwnAuthenticatedDmc2();

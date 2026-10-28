@@ -71,7 +71,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             // result, even after event expiry. Exact envelope replay bypasses
             // capture altogether and uses the existing native row.
             var eventHash = SHA256.HashData(snapshot.AuthenticatedDmc2);
-            using var original = opened.Sql.ReadVerifiedReceiveForEvent(floor, eventHash);
+            using var original = await opened.WithSqlAsync(sql => sql.ReadVerifiedReceiveForEvent(floor, eventHash), ct).ConfigureAwait(false);
             byte[] exact;
             if (original is not null)
             {

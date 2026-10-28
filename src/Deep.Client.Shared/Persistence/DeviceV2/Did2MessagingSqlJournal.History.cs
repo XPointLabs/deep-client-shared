@@ -9,12 +9,18 @@ namespace Deep.Client.Shared.Persistence.DeviceV2;
 internal sealed partial class Did2MessagingSqlJournal
 {
     internal void RequireAppendCapacity(Did2MessagingFloor protectedStable)
+        => RequireCapacity(protectedStable, archiveEnrollment ? MaximumEntries : 63);
+
+    internal void RequireTerminalCapacity(Did2MessagingFloor protectedStable)
+        => RequireCapacity(protectedStable, archiveEnrollment ? MaximumEntries : 64);
+
+    private void RequireCapacity(Did2MessagingFloor protectedStable, int limit)
     {
         using var tx = connection.BeginTransaction(deferred: true);
         List<byte[]> headers;
         var tip = activeHistory ? VerifyActiveTip(tx, null, out headers) : VerifyTipInTransaction(tx, out headers);
         RequireSame(protectedStable, tip);
-        if (headers.Count >= MaximumEntries || protectedStable.Ordinal >= long.MaxValue)
+        if (headers.Count >= limit || protectedStable.Ordinal >= long.MaxValue)
             throw new InvalidOperationException("Messaging working journal/lifetime ordinal has no append capacity.");
     }
 
@@ -83,7 +89,7 @@ internal sealed partial class Did2MessagingSqlJournal
         using var digest = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         digest.AppendData("Deep/STORE-V2/messaging-history-prefix"u8); digest.AppendData([0]);
         digest.AppendData(scope.Hash); digest.AppendData(basis.Exact.Span); digest.AppendData(initial);
-        using var command = Command("SELECT ordinal,direction,operation,metadata,envelope,plaintext,length(operation),length(metadata),length(envelope),length(plaintext),typeof(ordinal),typeof(direction),typeof(operation),typeof(metadata),typeof(envelope),typeof(plaintext) FROM events WHERE ordinal<=$basis ORDER BY ordinal;", tx);
+        using var command = Command("SELECT ordinal,direction,operation,metadata,envelope,plaintext,length(operation),length(metadata),length(envelope),length(plaintext),typeof(ordinal),typeof(direction),typeof(operation),typeof(metadata),typeof(envelope),typeof(plaintext) FROM events NOT INDEXED WHERE ordinal<=$basis ORDER BY ordinal;", tx);
         command.Parameters.AddWithValue("$basis", checked((long)basis.Ordinal)); using var reader = command.ExecuteReader();
         ulong count = 0, previous = 0; Span<byte> number = stackalloc byte[8];
         while (reader.Read())

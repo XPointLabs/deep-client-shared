@@ -12,15 +12,17 @@ internal sealed class ProtectedDid2CompactionPlan
     private readonly IDeepSecureStorage storage;
     private readonly DeepIdV2AccountFileLease lease;
     private readonly byte[] network, account, instance;
+    private readonly bool oldEnrollment;
 
     internal ProtectedDid2CompactionPlan(IDeepSecureStorage storage,
         DeepIdV2AccountFileLease lease, ReadOnlySpan<byte> network,
-        ReadOnlySpan<byte> account, ReadOnlySpan<byte> instance)
+        ReadOnlySpan<byte> account, ReadOnlySpan<byte> instance, bool oldEnrollment = false)
     {
         this.storage = storage ?? throw new ArgumentNullException(nameof(storage));
         this.lease = lease ?? throw new ArgumentNullException(nameof(lease));
         using var validated = Did2CompactionPlan.RegisteredEmpty(network, account, instance);
         this.network = network.ToArray(); this.account = account.ToArray(); this.instance = instance.ToArray();
+        this.oldEnrollment = oldEnrollment;
     }
 
     internal static string PartSlot(int index)
@@ -48,20 +50,34 @@ internal sealed class ProtectedDid2CompactionPlan
     // creates the empty slot; a reader must never synthesize it when absent.
     internal static async Task<Did2CompactionPlan> ReadRegisteredAsync(IDeepSecureStorage storage,
         ReadOnlyMemory<byte> network, ReadOnlyMemory<byte> account,
-        ReadOnlyMemory<byte> instance, CancellationToken ct)
+        ReadOnlyMemory<byte> instance, CancellationToken ct, bool oldEnrollment = false)
     {
         using var raw = await storage.ReadOwnedAsync(Did2CompactionPlan.Slot, ct).ConfigureAwait(false)
             ?? throw new InvalidDataException("Protected compaction registration is absent; explicit reset is required.");
-        return raw.Use(bytes => Did2CompactionPlan.Decode(bytes, network.Span, account.Span, instance.Span));
+        return raw.Use(bytes => oldEnrollment ? Did2CompactionPlan.DecodeForOldEnrollment(bytes, network.Span, account.Span, instance.Span) :
+            Did2CompactionPlan.Decode(bytes, network.Span, account.Span, instance.Span));
     }
 
     internal async Task<Did2CompactionPlan> ReadAsync(HeldDeepIdV2AccountLease held, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(held);
         using var borrowed = held.BorrowFor(lease);
-        var result = await ReadRegisteredAsync(storage, network, account, instance, ct).ConfigureAwait(false);
+        var result = oldEnrollment ? await ReadForOldEnrollmentAsync(held, ct).ConfigureAwait(false) :
+            await ReadRegisteredAsync(storage, network, account, instance, ct).ConfigureAwait(false);
         try { ct.ThrowIfCancellationRequested(); held.RequireOwner(lease); return result; }
         catch { result.Dispose(); throw; }
+    }
+
+    internal async Task<Did2CompactionPlan> ReadForOldEnrollmentAsync(HeldDeepIdV2AccountLease held, CancellationToken ct)
+    {
+        using var borrowed = held.BorrowFor(lease);
+        using var inventory = await storage.ReadOwnedBatchAsync([ProtectedDid2MessagingSessionCatalog.Slot, Did2CompactionPlan.Slot], ct).ConfigureAwait(false);
+        ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
+        var catalogRaw = inventory[0] ?? throw new InvalidDataException("Old enrollment drain lost its actual catalog.");
+        using var catalog = catalogRaw.Use(bytes => ProtectedDid2MessagingSessionCatalog.DecodeForEnrollment(bytes, network, account, instance));
+        if (catalog.Version != 1) throw new InvalidOperationException("Only an actual V1 catalog may select the old prefix plan codec.");
+        var raw = inventory[1] ?? throw new InvalidDataException("Old enrollment drain lost its registered plan.");
+        return raw.Use(bytes => Did2CompactionPlan.DecodeForOldEnrollment(bytes, network, account, instance));
     }
 
     internal async Task StageAsync(Did2CompactionPlan predecessor,
@@ -72,8 +88,8 @@ internal sealed class ProtectedDid2CompactionPlan
         using var borrowed = held.BorrowFor(lease);
         // Capture all caller-owned values before the first await. The component
         // never retains a caller buffer across a storage operation.
-        using var original = Did2CompactionPlan.Decode(predecessor.Exact.Span, network, account, instance);
-        using var pending = Did2CompactionPlan.Decode(preparation.Plan.Exact.Span, network, account, instance);
+        using var original = Decode(predecessor.Exact.Span);
+        using var pending = Decode(preparation.Plan.Exact.Span);
         using var successors = preparation.Successors.Use(bytes => new OwnedDeepSecret(bytes));
         if (original.Phase != 0 || pending.Phase != 1 || pending.Revision != checked(original.Revision + 1))
             throw new InvalidDataException("Compaction staging has another predecessor or phase.");
@@ -112,7 +128,7 @@ internal sealed class ProtectedDid2CompactionPlan
     {
         ArgumentNullException.ThrowIfNull(expected); ArgumentNullException.ThrowIfNull(held);
         using var borrowed = held.BorrowFor(lease);
-        using var plan = Did2CompactionPlan.Decode(expected.Exact.Span, network, account, instance);
+        using var plan = Decode(expected.Exact.Span);
         if (plan.Phase == 0) throw new InvalidDataException("An idle compaction plan has no successor custody.");
         using var before = await ReadAsync(held, ct).ConfigureAwait(false);
         if (!Fixed(before.Exact.Span, plan.Exact.Span))
@@ -171,4 +187,6 @@ internal sealed class ProtectedDid2CompactionPlan
     }
     private static bool Fixed(ReadOnlySpan<byte> left, ReadOnlySpan<byte> right) =>
         left.Length == right.Length && CryptographicOperations.FixedTimeEquals(left, right);
+    private Did2CompactionPlan Decode(ReadOnlySpan<byte> bytes) => oldEnrollment ?
+        Did2CompactionPlan.DecodeForOldEnrollment(bytes, network, account, instance) : Did2CompactionPlan.Decode(bytes, network, account, instance);
 }

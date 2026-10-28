@@ -20,7 +20,8 @@ internal sealed class Did2NativeMessagingIsolation : IExactDpe2DurableTransactio
     private Did2MessagingFloor floor;
     private OwnedDid2MessagingStorage? ownedStorage;
     private Did2MessagingProtectedCheckpoint checkpoint => ownedStorage!.Checkpoint;
-    private Did2MessagingSqlJournal sql => ownedStorage!.Sql;
+    private T Sql<T>(Func<Did2MessagingSqlJournal, T> inspect) => ownedStorage!.WithSqlAsync(inspect, default).GetAwaiter().GetResult();
+    private void Sql(Action<Did2MessagingSqlJournal> mutate) => ownedStorage!.WithSqlAsync(mutate, default).GetAwaiter().GetResult();
     private Did2MessagingDurableCustody custody => ownedStorage!.Custody;
     private readonly Func<Task<OwnedDid2MessagingStorage>> reopen;
     private byte[] state, journal;
@@ -66,15 +67,15 @@ internal sealed class Did2NativeMessagingIsolation : IExactDpe2DurableTransactio
         checkpoint.StageAsync(mutation.Predecessor, mutation.Successor, mutation.Exact, default).GetAwaiter().GetResult();
         // Import exercises restart after protected pending, before SQL.
         // Later mutations exercise restart after SQL, before protected cleanup.
-        if (mutation.Kind != 1) sql.Append(mutation);
+        if (mutation.Kind != 1) Sql(sql => sql.Append(mutation));
         var expected = mutation.Successor.Cleanup(scope).Stable(scope);
         RestartStorage();
         var stable = custody.ReconcileAsync(default).GetAwaiter().GetResult();
-        Assert.Equal(expected.Exact.ToArray(), sql.VerifyTip().Exact.ToArray());
+        Assert.Equal(expected.Exact.ToArray(), Sql(sql => sql.VerifyTip()).Exact.ToArray());
         Assert.Equal(expected.Exact.ToArray(), stable.Exact.ToArray());
         if (mutation.Kind is 1 or 2)
             Assert.Equal(stable.Exact.ToArray(), custody.CommitOwnedAsync(mutation, default).GetAwaiter().GetResult().Exact.ToArray());
-        using var readback = sql.ReadVerifiedLatest(stable);
+        using var readback = Sql(sql => sql.ReadVerifiedLatest(stable));
         Assert.Equal(stable.RatchetHash.ToArray(), readback.Use(bytes => SHA256.HashData(bytes)));
         return stable;
     }
@@ -88,7 +89,7 @@ internal sealed class Did2NativeMessagingIsolation : IExactDpe2DurableTransactio
     internal async Task<byte[]> Send(ParsedDmc2 message, byte[] operation)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
-        using var retained = sql.ReadVerifiedOperation(floor, operation);
+        using var retained = await ownedStorage!.WithSqlAsync(sql => sql.ReadVerifiedOperation(floor, operation), default);
         if (retained is not null)
         {
             if (retained.Direction != 1 || !Did2MessagingSessionScope.Fixed(retained.EventHash, SHA256.HashData(message.CanonicalBytes.Span)))
@@ -110,7 +111,7 @@ internal sealed class Did2NativeMessagingIsolation : IExactDpe2DurableTransactio
     {
         ObjectDisposedException.ThrowIf(disposed, this);
         var record = Dpe2Codec.Decode(envelope);
-        using var retained = sql.ReadVerifiedOperation(floor, record.OperationId.Span);
+        using var retained = await ownedStorage!.WithSqlAsync(sql => sql.ReadVerifiedOperation(floor, record.OperationId.Span), default);
         var replay = retained is not null;
         if (retained is not null && (retained.Direction != 2 || !retained.ExactEnvelope.SequenceEqual(envelope)))
             throw new CryptographicException("Isolated receive operation has changed bytes.");
@@ -130,7 +131,7 @@ internal sealed class Did2NativeMessagingIsolation : IExactDpe2DurableTransactio
             if (!plan.HasStateMutation)
             {
                 Assert.Equal(ExactDpe2DurableDirection.Receive, plan.Direction);
-                using var retained = sql.ReadVerifiedOperation(floor, plan.OperationId.Span);
+                using var retained = Sql(sql => sql.ReadVerifiedOperation(floor, plan.OperationId.Span));
                 Assert.NotNull(retained); Assert.Equal(2, retained.Direction);
                 Assert.Equal(retained.EnvelopeHash.ToArray(), plan.ExactEnvelopeHash.ToArray());
                 return ValueTask.FromResult(completion.Complete(ExactDpe2DurableCommitDisposition.ExactReplay));
@@ -142,7 +143,7 @@ internal sealed class Did2NativeMessagingIsolation : IExactDpe2DurableTransactio
             using (var recovery = OwnedDid2MessagingMutation.RecoverProtectedPending(scope, mutation.Successor, mutation.Exact.Span))
                 Assert.True(recovery.Exact.Span.SequenceEqual(mutation.Exact.Span));
             floor = Persist(mutation);
-            using var stored = sql.ReadVerifiedLatest(floor);
+            using var stored = Sql(sql => sql.ReadVerifiedLatest(floor));
             var next = stored.Use(bytes => bytes.ToArray());
             var nextJournal = floor.Head.ToArray();
             var priorState = state;

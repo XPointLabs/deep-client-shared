@@ -89,26 +89,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         var (sender, _) = await fixture.PrepareActiveNativePair();
         var stable = await fixture.ReadMessagingFloor(sender);
         await fixture.CompactSenderPrefix(sender, checked((int)stable.Ordinal), default);
-        await fixture.WithActiveNativeComparators(sender, (_, active, connection, floor) =>
-        {
-            var (operation, metadata, envelope) = ReadActiveOutgoing(connection);
-            envelope[^1] ^= 1;
-            MessagingWireCryptographicInputs.ComputeDpe2FullReplayHash(Dpe2Codec.Decode(envelope)).CopyTo(metadata, 332);
-            var hit = false;
-            using (Did2ActiveReadTestHooks.Push((actual, transaction) =>
-            {
-                Assert.Same(connection, actual); hit = true;
-                using var substitute = actual.CreateCommand(); substitute.Transaction = transaction;
-                substitute.CommandText = "UPDATE events SET metadata=$metadata,envelope=$envelope WHERE operation=$op;";
-                substitute.Parameters.AddWithValue("$metadata", metadata); substitute.Parameters.AddWithValue("$envelope", envelope);
-                substitute.Parameters.AddWithValue("$op", operation); Assert.Equal(1, substitute.ExecuteNonQuery());
-            }))
-                Assert.Throws<CryptographicException>(() => active.ReadVerifiedOperation(floor, operation));
-            Assert.True(hit);
-            // The failed read transaction rolls the fixture substitution back;
-            // no data or self-consistent metadataB was released as mapA proof.
-            using var restored = active.ReadVerifiedOperation(floor, operation); Assert.NotNull(restored);
-        });
+        await fixture.CheckArchivePostProofTuple(sender);
     }
 
     [Fact]
@@ -171,23 +152,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         var (sender, _) = await fixture.PrepareActiveNativePair();
         var stable = await fixture.ReadMessagingFloor(sender);
         await fixture.CompactSenderPrefix(sender, checked((int)stable.Ordinal), default);
-        await fixture.WithActiveNativeComparators(sender, (_, active, connection, floor) =>
-        {
-            var (operation, _, _) = ReadActiveOutgoing(connection);
-            using (Did2ActiveReadTestHooks.Push((actual, transaction) =>
-            {
-                using var substitute = actual.CreateCommand(); substitute.Transaction = transaction;
-                substitute.CommandText = "PRAGMA ignore_check_constraints=ON; " + (column == "ratchet" ?
-                    "UPDATE ratchet SET exact_state=zeroblob(33554432);" : $"UPDATE events SET {column}=zeroblob(33554432) WHERE operation=$op;");
-                if (column != "ratchet") substitute.Parameters.AddWithValue("$op", operation);
-                Assert.Equal(1, substitute.ExecuteNonQuery());
-            }))
-            {
-                if (column == "ratchet") Assert.Throws<InvalidDataException>(() => active.ReadVerifiedLatest(floor));
-                else Assert.Throws<CryptographicException>(() => active.ReadVerifiedOperation(floor, operation));
-            }
-            using var restored = active.ReadVerifiedOperation(floor, operation); Assert.NotNull(restored);
-        });
+        await fixture.CheckArchivePostProofBounds(sender, column);
     }
 
     [Theory]
@@ -256,7 +221,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         byte[]? earliestOperation = null, earliestExact = null, earliestDmc = null;
         // Real bidirectional crypto maintains the Braid. No fabricated ordinal,
         // occupancy, compaction capability or lowered production threshold.
-        while ((await fixture.ReadMessagingFloor(sender)).Ordinal < 64)
+        while ((await fixture.ReadMessagingFloor(sender)).Ordinal - (await fixture.ReadNativeArchive(sender)).Basis.Ordinal < 62)
         {
             foreach (var scope in new[] { sender, receiver })
             {
@@ -267,8 +232,13 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 using var received = await fixture.ReceiveOwnedMessage(scope.IsInitiator ? receiver : sender, sent.ExactEnvelope.ToArray());
             }
         }
+        using (var softLimit = await fixture.CreateOwnedText(sender, "exact indexed soft-limit transition"))
+        using (var sent = await fixture.SendOwnedMessage(sender, softLimit.OperationId, ApplicationCoreCodec.DecodeDmc2(softLimit.ExactDmc2.Span)))
+        using (var received = await fixture.ReceiveOwnedMessage(receiver, sent.ExactEnvelope.ToArray())) { }
         var before = await fixture.ReadMessagingFloor(sender);
         var historyBefore = await fixture.ReadNativeHistory(sender);
+        var archiveBefore = await fixture.ReadNativeArchive(sender);
+        Assert.Equal(63UL, before.Ordinal - archiveBefore.Basis.Ordinal);
         Assert.Equal(0UL, historyBefore.HistoryCount);
         using var next = await fixture.CreateOwnedText(sender, "threshold owned transition");
         // Exact replay and malformed receive must not stage maintenance.
@@ -296,9 +266,11 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             Assert.Equal(1, work.MaintenanceBatches); // Original pending batch completed; no second selection.
             using var received = await fixture.ReceiveOwnedMessage(receiver, sent.ExactEnvelope.ToArray());
         }
-        var after = await fixture.ReadNativeHistory(sender);
-        Assert.Equal(historyBefore.Basis.Ordinal + 32, after.Basis.Ordinal);
-        Assert.True(after.HistoryCount > 0); Assert.Equal(before.Ordinal + 1, (await fixture.ReadMessagingFloor(sender)).Ordinal);
+        var after = await fixture.ReadNativeArchive(sender);
+        Assert.Equal(archiveBefore.Basis.Ordinal + 32, after.Basis.Ordinal);
+        Assert.True(after.ArchiveCount > 0); Assert.Equal(before.Ordinal + 1, (await fixture.ReadMessagingFloor(sender)).Ordinal);
+        var immutableSource = await fixture.ReadNativeHistory(sender);
+        Assert.True(historyBefore.Exact.Span.SequenceEqual(immutableSource.Exact.Span), "Indexed maintenance changed immutable source history.");
         using (var original = await fixture.SendOwnedMessage(sender, earliestOperation!, ApplicationCoreCodec.DecodeDmc2(earliestDmc!)))
             Assert.Equal(earliestExact, original.ExactEnvelope.ToArray());
         await fixture.AssertSenderCompactionIdle(sender);
@@ -322,6 +294,11 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         internal void DropNativeRuntimes() { CloseNativeRuntimes(); nativeRuntimes.Clear(); }
         internal Task<Did2MessagingHistoryCheckpoint> ReadNativeHistory(Did2MessagingSessionScope scope) =>
             Did2MessagingHistoryCheckpoint.ReadRegisteredAsync(scope.IsInitiator ? (IDeepSecureStorage)storage : peerStorage, scope, default);
+        internal async Task<Did2MessagingArchiveRoot> ReadNativeArchive(Did2MessagingSessionScope scope)
+        {
+            using var value = await NativeStorage(scope).ReadOwnedAsync(Did2MessagingArchiveRoot.Slot(scope)) ?? throw new InvalidDataException();
+            return value.Use(bytes => Did2MessagingArchiveRoot.Decode(bytes, scope));
+        }
         internal IDeepSecureStorage NativeStorage(Did2MessagingSessionScope scope) => scope.IsInitiator ? storage : peerStorage;
         internal Task CompactActiveNativePrefix(Did2MessagingSessionScope scope, int rows)
         {
@@ -352,8 +329,10 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             Action<Did2MessagingSqlJournal, Did2MessagingSqlJournal, SqliteConnection, Did2MessagingFloor> inspect)
         {
             var history = await ReadNativeHistory(scope); var floor = await ReadMessagingFloor(scope);
+            using var root = await NativeStorage(scope).ReadOwnedAsync(Did2MessagingArchiveRoot.Slot(scope)) ?? throw new InvalidDataException();
+            var archive = root.Use(bytes => Did2MessagingArchiveRoot.Decode(bytes, scope));
             await WithRouteReadSql(scope, (full, connection) =>
-                inspect(full, Did2MessagingSqlJournal.ForOrdinaryRuntime(connection, scope, history), connection, floor));
+                inspect(full, Did2MessagingSqlJournal.ForOrdinaryRuntime(connection, scope, history, archive), connection, floor));
         }
     }
 }

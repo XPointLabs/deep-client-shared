@@ -19,28 +19,13 @@ internal sealed class Did2MessagingProtectedCheckpoint(IDeepSecureStorage storag
         return owned.Use(bytes => Did2MessagingFloor.Decode(bytes, scope));
     }
 
-    // One actual authenticated inventory: a callback cannot interleave floor
-    // and independent history reads, and no protected inventory survives it.
-    internal async Task<(Did2MessagingFloor Floor, Did2MessagingHistoryCheckpoint History)> ReadRootsAsync(Did2MessagingSqlJournal sql, CancellationToken ct)
-    {
-        var slots = sql.RequiresOpenRegistration ?
-            new[] { scope.FloorSlot, Did2MessagingHistoryCheckpoint.Slot(scope), SqliteDeepIdV2AccountGeneration.CompactionRegistrationSlot, ProtectedDid2MessagingSessionCatalog.Slot } :
-            [scope.FloorSlot, Did2MessagingHistoryCheckpoint.Slot(scope)];
-        using var roots = await storage.ReadOwnedBatchAsync(slots, ct).ConfigureAwait(false);
-        ct.ThrowIfCancellationRequested();
-        if (sql.RequiresOpenRegistration) sql.RequireActualRegistration(roots[2], roots[3]);
-        var floor = roots[0] ?? throw new InvalidDataException("Protected DID2 messaging floor is absent.");
-        var history = roots[1] ?? throw new InvalidDataException("Protected DID2 messaging history is absent.");
-        return (floor.Use(bytes => Did2MessagingFloor.Decode(bytes, scope)),
-            history.Use(bytes => Did2MessagingHistoryCheckpoint.Decode(bytes, scope)));
-    }
-
     #if DEEP_TEST_INTERNALS
     // Structural test fixture only. Production initialization is atomic catalog
     // CAS-and-insert; no standalone floor initializer exists in shipping code.
     internal Task InitializeRegisteredSessionAsync(CancellationToken ct) => storage.WriteBatchAsync(
         [new(scope.FloorSlot, Did2MessagingFloor.Empty(scope).Exact),
-         new(Did2MessagingHistoryCheckpoint.Slot(scope), Did2MessagingHistoryCheckpoint.RegisteredEmpty(scope).Exact)], ct);
+         new(Did2MessagingHistoryCheckpoint.Slot(scope), Did2MessagingHistoryCheckpoint.RegisteredEmpty(scope).Exact),
+         new(Did2MessagingArchiveRoot.Slot(scope), Did2MessagingArchiveRoot.Empty(scope).Exact)], ct);
     #endif
 
     internal async Task EraseStableOrphansAsync(Did2MessagingFloor stable, CancellationToken ct)

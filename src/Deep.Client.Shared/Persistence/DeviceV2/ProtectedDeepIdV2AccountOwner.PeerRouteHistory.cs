@@ -97,7 +97,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     // An earlier exact event can arrive in another authenticated
                     // envelope. Its first actual receive must precede this row;
                     // changed bytes at the same generation do not qualify.
-                    using var first = opened.Sql.ReadVerifiedReceiveForEvent(floor, received.EventHash) ??
+                    using var first = await opened.WithSqlAsync(sql => sql.ReadVerifiedReceiveForEvent(floor, received.EventHash), ct).ConfigureAwait(false) ??
                         throw new CryptographicException("Private route duplicate lost its native original.");
                     if (first.Ordinal < received.Ordinal) continue;
                     throw new CryptographicException("Authenticated private route history has a generation fork.");

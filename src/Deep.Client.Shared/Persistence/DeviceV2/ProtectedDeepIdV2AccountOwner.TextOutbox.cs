@@ -114,7 +114,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             {
                 // Removing ordinary working custody cannot turn an already
                 // committed native operation into a new logical command.
-                using var committed = opened.Sql.ReadVerifiedOperation(floor, op);
+                using var committed = await opened.WithSqlAsync(sql => sql.ReadVerifiedOperation(floor, op), ct).ConfigureAwait(false);
                 if (committed is not null)
                     throw new CryptographicException("A committed operation without ordinary working custody cannot be authored again.");
                 journal.RequireCapacity(scope);
@@ -447,7 +447,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         ReadOnlyMemory<byte> expectedEvent, CancellationToken ct)
     {
         var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
-        using var native = opened.Sql.ReadVerifiedOperation(floor, operation.Span) ??
+        using var native = await opened.WithSqlAsync(sql => sql.ReadVerifiedOperation(floor, operation.Span), ct).ConfigureAwait(false) ??
             throw new CryptographicException("Absent ordinary work has no retained native event.");
         if (native.Direction != 1) throw new CryptographicException("Absent ordinary work selected a receive event.");
         using var groups = await OpenGroupsUnderLeaseAsync(current, ct).ConfigureAwait(false);

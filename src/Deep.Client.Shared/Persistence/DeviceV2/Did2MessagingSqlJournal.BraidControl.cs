@@ -29,7 +29,16 @@ internal sealed partial class Did2MessagingSqlJournal
         _ = Did2MessagingFloor.Decode(stable.Exact.Span, scope);
         if (stable.Phase != 1 || stable.Status != 1)
             throw new InvalidDataException("Native event classification requires active stable custody.");
-        RequireSame(stable, VerifyTip());
+        if (activeHistory)
+        {
+            using var tx = connection.BeginTransaction(deferred: true);
+            using var selected = new ActiveSelection([operation.ToArray()]);
+            RequireSame(stable, VerifyActiveTip(tx, selected, out _));
+            if (selected[0] is not { } tuple) return null;
+            using var original = ReadArchiveOriginal(CaptureTupleReference(tuple, tx), tx);
+            return original.Reference.Direction;
+        }
+        RequireSame(stable, VerifyOrdinaryState());
         using var command = Command("SELECT direction,ordinal,length(envelope),typeof(envelope),length(plaintext),typeof(plaintext),envelope,plaintext,metadata,length(metadata),typeof(metadata) FROM events WHERE operation=$op;");
         command.Parameters.AddWithValue("$op", operation.ToArray()); using var row = command.ExecuteReader();
         if (!row.Read()) return null;
@@ -76,7 +85,17 @@ internal sealed partial class Did2MessagingSqlJournal
         _ = Did2MessagingFloor.Decode(stable.Exact.Span, scope);
         if (stable.Phase != 1 || stable.Status != 1)
             throw new InvalidDataException("Braid control read-back requires the active stable floor.");
-        RequireSame(stable, VerifyTip());
+        if (activeHistory)
+        {
+            using var tx = connection.BeginTransaction(deferred: true);
+            using var selected = new ActiveSelection([operation.ToArray()]);
+            RequireSame(stable, VerifyActiveTip(tx, selected, out _));
+            if (selected[0] is not { } tuple) return null;
+            if (tuple.Direction is not (3 or 4)) throw new CryptographicException("Native Braid operation collides with data custody.");
+            using var original = ReadArchiveOriginal(CaptureTupleReference(tuple, tx), tx);
+            return new(tuple.Direction, tuple.Ordinal, original.Envelope.ToArray());
+        }
+        RequireSame(stable, VerifyOrdinaryState());
         using var command = Command("SELECT direction,ordinal,length(envelope),envelope,plaintext,metadata FROM events WHERE operation=$op;");
         command.Parameters.AddWithValue("$op", operation.ToArray()); using var row = command.ExecuteReader();
         if (!row.Read()) return null;

@@ -41,8 +41,11 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             ParsedContactRouteClosure selected;
             // This entire private helper is synchronous. No await, authority
             // callback, external delegate or write runs with the SQL snapshot.
-            using (var snapshot = opened.Sql.OpenHistoricalRouteRead(floor))
-                selected = ReadHistoricalPeerRouteSnapshot(snapshot, scope, expected, accepted, winner, held, ct);
+            selected = await opened.WithSqlAsync(sql =>
+            {
+                using var snapshot = sql.OpenHistoricalRouteRead(floor);
+                return ReadHistoricalPeerRouteSnapshot(snapshot, scope, expected, accepted, winner, held, ct);
+            }, ct).ConfigureAwait(false);
             // Preserve cross-owner freshness after the callbacks above rather
             // than treating a captured application/consent value as authority.
             if (!scope.IsInitiator)

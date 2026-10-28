@@ -253,7 +253,10 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             using var connection = SqliteDeepIdV2AccountGeneration.OpenExistingMessagingForCompactionUnderLease(
                 Path.Combine(accountDirectory, "deep-store-v2-account.dsv2"), catalog, scope, held, ownerLease);
             var history = await Did2MessagingHistoryCheckpoint.ReadRegisteredAsync(secure, scope, default);
-            inspect(new Did2MessagingSqlJournal(connection, scope, history), connection);
+            using var root = await secure.ReadOwnedAsync(Did2MessagingArchiveRoot.Slot(scope)) ?? throw new InvalidDataException();
+            var archive = root.Use(bytes => Did2MessagingArchiveRoot.Decode(bytes, scope));
+            var full = new Did2MessagingSqlJournal(connection, scope, history); full.BindArchiveRoot(archive);
+            inspect(full, connection);
             held.RequireOwner(ownerLease);
         }
     }

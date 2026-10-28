@@ -101,6 +101,13 @@ internal sealed class Did2MessagingArchiveBuilder
 
     internal sealed record Result(ReadOnlyMemory<byte> PatriciaHash, IReadOnlyList<Did2MessagingArchivePatricia.Node> Nodes);
 
+    // Data from this segment's already authenticated paths, never permission.
+    internal byte[]? Read(Did2MessagingArchiveFamily family, ReadOnlySpan<byte> selector)
+    {
+        _ = ReadPath(family, selector, Did2MessagingArchivePatricia.Key(scope, family, selector), out var value);
+        return value;
+    }
+
     private List<Did2MessagingArchivePatricia.Node> ReadPath(Did2MessagingArchiveFamily family,
         ReadOnlySpan<byte> selector, byte[] key, out byte[]? value)
     {

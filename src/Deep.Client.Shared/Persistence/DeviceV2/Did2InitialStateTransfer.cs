@@ -14,12 +14,12 @@ internal sealed class Did2InitialStateTransfer
     private Did2InitialStateTransfer(Did2MessagingSessionScope scope, Did2MessagingFloor floor, byte[] metadata)
     { Scope = scope; ImportedFloor = floor; this.metadata = metadata; }
     internal static async Task<Did2InitialStateTransfer> VerifyAsync(Did2MessagingSessionScope scope,
-        Did2MessagingProtectedCheckpoint checkpoint, Did2MessagingSqlJournal sql, CancellationToken ct)
+        Did2MessagingProtectedCheckpoint checkpoint, OwnedDid2MessagingStorage sql, CancellationToken ct)
     {
         var floor = await checkpoint.ReadAsync(ct).ConfigureAwait(false);
         if (floor.Phase != 1 || floor.Status != 0 || floor.Ordinal != 1 || floor.RatchetGeneration != 1)
             throw new InvalidDataException("Retirement requires the exact stable unactivated first import.");
-        ct.ThrowIfCancellationRequested(); var metadata = sql.VerifyInitialImport(floor);
+        ct.ThrowIfCancellationRequested(); var metadata = await sql.WithSqlAsync(journal => journal.VerifyInitialImport(floor), ct).ConfigureAwait(false);
         return new(scope, floor, metadata);
     }
     internal void RequireSender(DeepIdV2InitialSessionCommit record)

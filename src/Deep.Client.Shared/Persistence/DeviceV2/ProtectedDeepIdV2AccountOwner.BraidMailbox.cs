@@ -61,20 +61,20 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         if (!FixedRoute(frame.NetworkId.Span, scope.Network) || !FixedRoute(frame.SessionId.Span, scope.Session) ||
             !FixedRoute(frame.SenderDeviceId.Span, scope.RemoteDevice) || !FixedRoute(frame.RecipientDeviceId.Span, scope.LocalDevice))
             throw new CryptographicException("Mailbox control lost its owned session/direction.");
-        var direction = opened.Sql.ReadVerifiedNativeEventDirection(floor, frame.OperationId.Span);
+        var direction = await opened.WithSqlAsync(sql => sql.ReadVerifiedNativeEventDirection(floor, frame.OperationId.Span), ct).ConfigureAwait(false);
         if (direction is not null)
         {
             if (direction != 4) throw new CryptographicException("Mailbox control collides with another native event kind/direction.");
-            using var received = opened.Sql.ReadVerifiedBraidControl(floor, frame.OperationId.Span) ??
+            using var received = await opened.WithSqlAsync(sql => sql.ReadVerifiedBraidControl(floor, frame.OperationId.Span), ct).ConfigureAwait(false) ??
                 throw new CryptographicException("Mailbox control lost its retained receive.");
             if (!FixedRoute(received.ExactControl, frame.CanonicalBytes.Span))
                 throw new CryptographicException("Mailbox control differs from its exact authenticated receive.");
             return BraidMailboxCustody.AuthenticatedReceive;
         }
-        if (opened.Sql.HasVerifiedPeerBraidPurposeProgress(floor, frame.BraidEpoch, ct))
+        if (await opened.WithSqlAsync(sql => sql.HasVerifiedPeerBraidPurposeProgress(floor, frame.BraidEpoch, ct), ct).ConfigureAwait(false))
             return BraidMailboxCustody.ObsoletePurpose;
-        var context = opened.Sql.CreateVerifiedBraidTransitionContext(floor, frame.OperationId.Span, frame.CanonicalBytes.Span);
-        using var native = opened.Sql.ReadVerifiedLatest(floor);
+        var context = await opened.WithSqlAsync(sql => sql.CreateVerifiedBraidTransitionContext(floor, frame.OperationId.Span, frame.CanonicalBytes.Span), ct).ConfigureAwait(false);
+        using var native = await opened.WithSqlAsync(sql => sql.ReadVerifiedLatest(floor), ct).ConfigureAwait(false);
         var proof = native.Use(bytes => ExactBraidRecoveryDurableTransactionProducer.TryVerifyObsoleteControl(
             bytes, context, scope.Network, frame.CanonicalBytes.Span));
         if (proof is null) return BraidMailboxCustody.NotCommitted;

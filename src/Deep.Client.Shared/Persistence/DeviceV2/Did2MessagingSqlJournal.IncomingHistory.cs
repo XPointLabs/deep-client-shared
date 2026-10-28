@@ -30,7 +30,7 @@ internal sealed partial class Did2MessagingSqlJournal
         _ = Did2MessagingFloor.Decode(protectedStable.Exact.Span, scope);
         if (protectedStable.Phase != 1 || protectedStable.Status != 1)
             throw new InvalidDataException("Event history requires an active stable messaging floor.");
-        RequireSame(protectedStable, VerifyTip());
+        RequireSame(protectedStable, VerifyOrdinaryState());
         using var command = Command("SELECT ordinal,operation,metadata,envelope,plaintext,typeof(operation),length(operation),typeof(metadata),length(metadata),typeof(envelope),length(envelope),typeof(plaintext),length(plaintext) FROM events WHERE direction=$direction" +
             (routeControlsOnly ? " AND substr(metadata,$routeOffset,1) IN (X'01',X'02')" : string.Empty) + " ORDER BY ordinal;");
         command.Parameters.AddWithValue("$direction", direction);
@@ -75,6 +75,6 @@ internal sealed partial class Did2MessagingSqlJournal
             }
         }
         ct.ThrowIfCancellationRequested();
-        RequireSame(protectedStable, VerifyTip());
+        RequireSame(protectedStable, VerifyOrdinaryState());
     }
 }

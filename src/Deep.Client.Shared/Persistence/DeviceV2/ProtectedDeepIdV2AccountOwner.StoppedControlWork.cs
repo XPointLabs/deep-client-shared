@@ -59,7 +59,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 if (winner is null || !FixedRoute(winner.Operation, operation.Span)) return false;
                 using var application = await SqliteDeepIdV2AccountGeneration.OpenExistingApplicationForCompactionUnderLeaseAsync(
                     storage, sqlStatePath, scope, held, lease, ct).ConfigureAwait(false);
-                using var native = opened.Sql.ReadVerifiedOperation(floor, operation.Span);
+                using var native = await opened.WithSqlAsync(sql => sql.ReadVerifiedOperation(floor, operation.Span), ct).ConfigureAwait(false);
                 ulong deadline;
                 if (native is null)
                 {

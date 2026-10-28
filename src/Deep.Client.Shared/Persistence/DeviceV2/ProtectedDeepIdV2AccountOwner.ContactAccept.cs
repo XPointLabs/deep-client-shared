@@ -59,7 +59,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
                 if (scope.IsInitiator)
                 {
-                    using var received = opened.Sql.ReadVerifiedReceiveForEvent(floor, SHA256.HashData(accepted)) ??
+                    using var received = await opened.WithSqlAsync(sql => sql.ReadVerifiedReceiveForEvent(floor, SHA256.HashData(accepted)), ct).ConfigureAwait(false) ??
                         throw new CryptographicException("Peer acceptance has no actual authenticated receive custody.");
                     using var plain = received.OwnAuthenticatedDmc2();
                     if (!plain.Use(bytes => Did2MessagingSessionScope.Fixed(bytes, accepted)))
@@ -71,7 +71,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                         throw new InvalidDataException("Local acceptance has no protected explicit command.");
                     using var commands = marker.Use(bytes => ProtectedDid2ContactAcceptJournal.Decode(bytes, scope.Network, scope.LocalAccount, scope.Instance));
                     var winner = commands.FindScope(scope) ?? throw new CryptographicException("Local acceptance has no protected winner.");
-                    using var sent = opened.Sql.ReadVerifiedOperation(floor, winner.Operation) ?? throw new CryptographicException("Local acceptance was not durably sent.");
+                    using var sent = await opened.WithSqlAsync(sql => sql.ReadVerifiedOperation(floor, winner.Operation), ct).ConfigureAwait(false) ?? throw new CryptographicException("Local acceptance was not durably sent.");
                     winner.RequireExactAccept(accepted);
                     if (sent.Direction != 1 ||
                         !Did2MessagingSessionScope.Fixed(sent.EventHash, SHA256.HashData(accepted)))
@@ -182,7 +182,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 throw new CryptographicException("Retained acceptance belongs to another exact pending Hello.");
             if (winner.WorkStopped) throw new IOException("Stopped acceptance cannot reauthor its original command.");
             var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
-            using var committed = opened.Sql.ReadVerifiedOperation(floor, winner.Operation);
+            using var committed = await opened.WithSqlAsync(sql => sql.ReadVerifiedOperation(floor, winner.Operation), ct).ConfigureAwait(false);
             // Native send custody, not compaction or a local UI state, makes
             // this an exact historical retry. An unsent draft still needs a
             // live rendezvous at first admission.

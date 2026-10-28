@@ -83,9 +83,9 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 using var received = await fixture.ReceiveOwnedBraid(recipient, sent.ExactControl.ToArray());
             }
             var floor = await fixture.ReadMessagingFloor(alice);
-            await fixture.WithSenderHistoryStorage(alice, (opened, _, _, _) =>
+            await fixture.WithSenderHistoryStorage(alice, (reference, _, _, _) =>
             {
-                using var native = opened.Sql.ReadVerifiedLatest(floor);
+                using var native = reference.ReadVerifiedLatest(floor);
                 var epochs = native.Use(bytes =>
                 {
                     // Test-only numeric inspection of the frozen TRS1/TRC1
@@ -111,7 +111,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             Assert.Equal(floor.Exact.ToArray(), (await fixture.ReadMessagingFloor(alice)).Exact.ToArray());
             var changed = original.ToArray(); changed[^1] ^= 1;
             await Assert.ThrowsAsync<CryptographicException>(() => fixture.ReceiveOwnedBraid(alice, changed));
-            await fixture.WithSenderHistoryStorage(alice, async (opened, secure, observer, held) =>
+            await fixture.WithSenderHistoryStorage(alice, async (reference, secure, observer, held) =>
             {
                 var root = await Did2MessagingHistoryCheckpoint.ReadRegisteredAsync(secure, alice, default);
                 var empty = Did2MessagingHistoryCheckpoint.RegisteredEmpty(alice);
@@ -126,8 +126,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 }
                 try
                 {
-                    Assert.Throws<CryptographicException>(() => opened.Sql.VerifyTip());
-                    Assert.Throws<CryptographicException>(() => opened.Sql.ReadVerifiedBraidControl(floor, Bytes(32, 201)));
+                    Assert.Throws<CryptographicException>(() => reference.VerifyTip());
+                    Assert.Throws<CryptographicException>(() => reference.ReadVerifiedBraidControl(floor, Bytes(32, 201)));
                 }
                 finally
                 {
@@ -136,7 +136,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                     restore.Parameters.AddWithValue("$original", original); restore.Parameters.AddWithValue("$op", Bytes(32, 201));
                     Assert.Equal(1, restore.ExecuteNonQuery());
                 }
-                held.RequireActive(); Assert.Equal(floor.Exact.ToArray(), opened.Sql.VerifyTip().Exact.ToArray());
+                held.RequireActive(); Assert.Equal(floor.Exact.ToArray(), reference.VerifyTip().Exact.ToArray());
             });
             using (var replay = await fixture.ReceiveOwnedBraid(alice, original))
                 Assert.Equal(original, replay.ExactControl.ToArray());
