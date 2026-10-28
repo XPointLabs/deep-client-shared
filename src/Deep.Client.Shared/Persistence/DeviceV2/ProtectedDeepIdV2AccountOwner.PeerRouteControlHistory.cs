@@ -50,7 +50,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         var exact = plain.Use(bytes => bytes.ToArray());
         try
         {
-            if (exact.Length is < 4497 or > 23649)
+            if (exact.Length is < 4497 or > ApplicationCoreCodec.MaximumContactRouteUpdateRecordBytes)
                 throw new CryptographicException("Native peer route control has a different closed size.");
             var message = ApplicationCoreCodec.DecodeDmc2(exact);
             if (message.ContentKind != Dmc2ContentKind.ContactRouteUpdate ||

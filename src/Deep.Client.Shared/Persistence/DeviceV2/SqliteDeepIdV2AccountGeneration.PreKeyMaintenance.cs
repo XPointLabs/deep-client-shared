@@ -137,9 +137,9 @@ internal static partial class SqliteDeepIdV2AccountGeneration
 
     // Historical commit custody only. The owner independently rechecks current
     // complete support and time after these suspended protected reads.
-    internal static async Task RequireCommittedOwnPreKeyInventoryAsync(IDeepSecureStorage storage,
+    internal static async Task<ParsedXps1V2[]> ReadCommittedOwnPreKeyServiceHistoryAsync(IDeepSecureStorage storage,
         string accountStatePath, VerifiedDeepIdV2CurrentAccount current, StagedDeepIdV2PreKeyPublication staged,
-        VerifiedOnionNetworkContext network, CancellationToken ct)
+        ReadOnlyMemory<byte> exactPriorService, VerifiedOnionNetworkContext network, CancellationToken ct)
     {
         var opened = await OpenPreKeyStoreAsync(storage, accountStatePath, current, false, ct).ConfigureAwait(false);
         await using var store = opened.Store;
@@ -156,6 +156,8 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             var placement = ContactServicePlacementFactory.Create(network, ContactServiceRequestKind.PublishPreKeyInventory, publication.Manifest.Field(2));
             DeepIdV2PreKeyCommitReceiptVerifier.VerifyPair(publication, placement,
                 DeepIdV2PreKeyCommitReceiptCodec.Decode(pair.First), DeepIdV2PreKeyCommitReceiptCodec.Decode(pair.Second));
+            return store.ReadServiceIntermediates(DeepIdV2PreKeyServiceCodec.Decode(exactPriorService.Span),
+                DeepIdV2PreKeyServiceCodec.Decode(staged.ExactXps1.Span));
         }
         finally { CryptographicOperations.ZeroMemory(opened.ScopeHash); }
     }

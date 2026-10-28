@@ -10,7 +10,7 @@ namespace Deep.Client.Shared.Services.ContactV2;
 // No client Registry URL, direct fallback, caller node list or reusable proof.
 // Only the owning operation can provide a live, actual custody loan.
 internal sealed class Did2ContactCoordinationOnionSource(DeepIdV2ContactPathAuthoritySource source) :
-    IDid2ContactRouteThresholdSource, IDid2ContactPublicationSource
+    IDid2ContactRouteThresholdSource, IDid2ContactRouteRecoverySource, IDid2ContactPublicationSource
 {
     public async ValueTask<ContactRouteAuthorityWireResponse> FetchAsync(
         ContactRouteAuthorityWireRequest exactPendingRequest, DeepIdV2CurrentContactAuthorization authorization,
@@ -40,6 +40,13 @@ internal sealed class Did2ContactCoordinationOnionSource(DeepIdV2ContactPathAuth
     public ValueTask<ReadOnlyMemory<byte>> AcquireCurrentAsync(PublicationCurrentWireRequest request,
         Did2OwnedContactTransportContext operation, CancellationToken cancellationToken) =>
         SendAsync(ContactCoordinationTarget.PublicationCurrent, request.CanonicalBytes, operation, cancellationToken);
+
+    public async ValueTask<ContactRouteAuthorityWireResponse> RecoverAsync(DeepIdV2ContactRouteRecoveryWireRequest request,
+        Did2OwnedContactTransportContext operation, CancellationToken cancellationToken)
+    {
+        var body = await SendAsync(ContactCoordinationTarget.RouteRecovery, request.CanonicalBytes, operation, cancellationToken).ConfigureAwait(false);
+        return DeepIdV2ContactRouteRecoveryWireCodec.DecodeResponse(request, body.Span);
+    }
 
     private async ValueTask<ReadOnlyMemory<byte>> SendAsync(ContactCoordinationTarget target,
         ReadOnlyMemory<byte> exactBody, Did2OwnedContactTransportContext operation,

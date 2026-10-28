@@ -49,7 +49,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             held.RequireOwner(owner.lease); ct.ThrowIfCancellationRequested();
             var scope = opened.Scope;
             if (snapshot.Direction != MessagingCryptoV1Direction.Receive || !snapshot.HasStateMutation ||
-                snapshot.AuthenticatedDmc2.Length is < 4497 or > 23649 ||
+                snapshot.AuthenticatedDmc2.Length is < 4497 or > ApplicationCoreCodec.MaximumContactRouteUpdateRecordBytes ||
                 snapshot.PriorStateGeneration != floor.RatchetGeneration ||
                 snapshot.ExpectedJournalGeneration != floor.Ordinal ||
                 !FixedRoute(snapshot.JournalPredecessor, floor.Head) ||

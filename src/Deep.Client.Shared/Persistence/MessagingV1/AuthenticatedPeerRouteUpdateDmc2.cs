@@ -15,7 +15,7 @@ internal sealed class AuthenticatedPeerRouteUpdateDmc2 : IAuthenticatedDmc2Inbox
     private int disposed;
     private AuthenticatedPeerRouteUpdateDmc2(ReadOnlySpan<byte> exact, Did2MessagingSessionScope scope)
     {
-        if (exact.Length is < 4497 or > 23649)
+        if (exact.Length is < 4497 or > ApplicationCoreCodec.MaximumContactRouteUpdateRecordBytes)
             throw new InvalidDataException("Peer route control exceeds its closed record bound.");
         var message = ApplicationCoreCodec.DecodeDmc2(exact);
         try

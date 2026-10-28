@@ -1,6 +1,6 @@
 #if DEEP_TEST_INTERNALS
 namespace Deep.Client.Shared.Persistence.DeviceV2;
-internal enum Did2ContactRouteFailpoint { AfterProposal, AfterThreshold, AfterComplete, AfterContactObject, AfterRenewalRequest, AfterRenewalResponse, AfterRenewalPromotion }
+internal enum Did2ContactRouteFailpoint { AfterProposal, AfterThreshold, AfterComplete, AfterContactObject, AfterRenewalRequest, AfterRenewalResponse, AfterRenewalPromotion, BeforeRecordedClosure, AfterRecordedClosure, AfterRecordedClosureReadback }
 internal static class Did2ContactRouteTestHooks
 {
     private static readonly AsyncLocal<Action<Did2ContactRouteFailpoint>?> Hook = new();

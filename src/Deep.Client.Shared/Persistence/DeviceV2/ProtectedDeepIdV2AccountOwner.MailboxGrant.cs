@@ -254,8 +254,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var dca = DeepIdV2ContactAuthorizationCodec.Verify(DeepIdV2ContactAuthorizationCodec.Decode(entry.Record(0).Span),
                 checkpoint.Binding, checkpoint.Directory);
             var authorization = DeepIdV2CurrentContactAuthorizationVerifier.Verify(fresh.Proof, dca, first.BootId.Span, first.SampleSeconds);
+            var history = await ReadRecordedRenewalHistoryAsync(entry, authorization, fresh, source, ct).ConfigureAwait(false);
             var route = await DeepIdV2ContactRouteVerifier.VerifyAsync(authorization, fresh.Network, fresh.Authority,
-                entry.Record(5), entry.Record(6), source.RendezvousTrustedTime, ct).ConfigureAwait(false);
+                entry.Record(5), entry.Record(6), source.RendezvousTrustedTime, ct, history).ConfigureAwait(false);
             var permanent = await new ProtectedDeepIdV2ResolverCapabilityStore(storage, networkId, current.AccountId.Span)
                 .ReadVerifiedAsync(checkpoint.Binding.DeepId, ct).ConfigureAwait(false);
             resolverCapability = permanent.ResolverReadCapability.ToArray();

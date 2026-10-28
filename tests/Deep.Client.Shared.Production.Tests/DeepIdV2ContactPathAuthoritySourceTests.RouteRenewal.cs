@@ -1,6 +1,8 @@
 using System.Buffers.Binary;
 using System.Security.Cryptography;
 using Deep.Client.Shared.Persistence.DeviceV2;
+using Deep.Client.Shared.Services.ContactV2;
+using Deep.Protocol.AccountDirectoryV1;
 using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.ContactV1;
 using Deep.Protocol.ContactV2;
@@ -41,6 +43,13 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     }
 
     [Fact]
+    public async Task Did2RecordedRouteHistory_GenuineReusedPmsAndOriginalAdhBindingsRemainStrict()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        await fixture.CheckRouteRenewalAsync(4);
+    }
+
+    [Fact]
     public void Did2RouteRenewal_PredecessorIsNotConstructibleOrCurrentRouteAuthority()
     {
         Assert.Empty(typeof(VerifiedDeepIdV2ContactRoutePredecessor).GetConstructors());
@@ -73,7 +82,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             var genesisThreshold = await DeepIdV2ContactRouteAuthor.AuthorThresholdAsync(recipient, current.Network, current.Authority,
                 xra.CanonicalBytes, witnesses.Select(value => new RouteWitness(value)).ToArray(),
                 current.Proof.TrustedLowerUnixSeconds, expiry, time);
-            if (mode == 3)
+            if (mode is 3 or 4)
             {
                 // Genuine witness-signed wider selection, shorter live route.
                 // Completion still uses the real owned device author/verifier.
@@ -88,9 +97,9 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             var old = await DeepIdV2ContactRouteAuthor.CompleteGenesisAsync(recipient, current.Network, current.Authority,
                 secrets!, xra.CanonicalBytes, genesisThreshold, 2, time);
             var oldInvite = old.ExactXir1V2.ToArray(); var oldClosure = old.ExactRouteClosure.ToArray();
-            Sample += mode == 3 ? 10UL : 20UL; // Actual fixture time advances; no runtime time override.
+            Sample += mode is 3 or 4 ? 10UL : 20UL; // Actual fixture time advances; no runtime time override.
             var expired = await Assert.ThrowsAsync<CryptographicException>(async () => await old.EnsureCurrentAsync());
-            Assert.Equal(mode == 3 ? "DID2 route time coverage failed (XRC1; Expiry)." :
+            Assert.Equal(mode is 3 or 4 ? "DID2 route time coverage failed (XRC1; Expiry)." :
                 "DID2 route time coverage failed (XRA1; Expiry).", expired.Message);
             var predecessor = await DeepIdV2ContactRouteVerifier.VerifyPredecessorAsync(recipient, current.Network,
                 current.Authority, oldInvite, oldClosure, time);
@@ -105,7 +114,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 await DeepIdV2ContactRouteAuthor.AuthorThresholdSuccessorAsync(recipient, current.Network, current.Authority,
                     prior ?? predecessor, advertisement ?? nextXra.CanonicalBytes,
                     signers ?? witnesses.Select(value => new RouteWitness(value)).ToArray(),
-                    mode == 3 ? expiry - 5 : nextExpiry, clock ?? time, ct);
+                    mode is 3 or 4 ? expiry - 5 : nextExpiry, clock ?? time, ct);
 
             if (mode == 0)
             {
@@ -264,6 +273,14 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 var threshold = await Threshold(signers: signers);
                 Assert.All(signers, value => Assert.Equal(2, value.Calls));
                 Assert.Equal(old.Route.Selection.CanonicalBytes.ToArray(), threshold.Selection.CanonicalBytes.ToArray());
+                if (mode == 4)
+                {
+                    Assert.True(BinaryPrimitives.ReadUInt64BigEndian(threshold.Selection.Field(8).Span) <
+                        BinaryPrimitives.ReadUInt64BigEndian(nextXra.Field(12).Span), "Real successor must reuse the earlier signed PMS interval.");
+                    await CheckRecordedPmsHistoryAsync(source, staged.ExactDca1, dca, current.Proof, predecessor,
+                        nextXra, threshold);
+                    return;
+                }
                 var completed = await DeepIdV2ContactRouteAuthor.CompleteSuccessorAsync(recipient, current.Network,
                     current.Authority, secrets!, predecessor, nextXra.CanonicalBytes, threshold, 2, time);
                 await completed.EnsureCurrentAsync();
@@ -273,6 +290,49 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             Assert.Equal(identityBefore, (await accounts.GetCurrentAsync())!.PermanentId.CanonicalText);
             Assert.Equal(oldInvite, old.ExactXir1V2.ToArray()); Assert.Equal(oldClosure, old.ExactRouteClosure.ToArray());
             using var journal = await RouteState(); Assert.Empty(journal.Entries);
+        }
+
+        private async Task CheckRecordedPmsHistoryAsync(DeepIdV2ContactPathAuthoritySource source, ReadOnlyMemory<byte> exactDca,
+            VerifiedDca1V2 dca, VerifiedDeepIdV2DirectoryFreshness original, VerifiedDeepIdV2ContactRoutePredecessor predecessor,
+            ContactRecord advertisement, ParsedDeepIdV2RouteThreshold threshold)
+        {
+            var request = new ContactRouteAuthorityWireRequest(Network, Bytes(32, 0x91), original.QueriedDirectoryLeafKey.Span,
+                original.NextProtectedLkg.LogGeneration, original.NextProtectedLkg.CoreHash.Span, exactDca.Span,
+                advertisement.CanonicalBytes.Span, predecessor.ExactXir1V2.Span, predecessor.ExactRouteClosure.Span);
+            var response = new ContactRouteAuthorityWireResponse(Network, request.RequestNonce.Span,
+                threshold.Selection.CanonicalBytes.Span, threshold.LiveRoute.CanonicalBytes.Span,
+                threshold.Successor.CanonicalBytes.Span, original.ExactAdh1.Span);
+            var pair = Pair(request, response);
+            Sample += 60; ProofTime += 70;
+            var fresh = await source.VerifyForOwnPreKeyAuthoringAsync(accounts, default);
+            var recipient = DeepIdV2CurrentContactAuthorizationVerifier.Verify(fresh.Proof, dca, Boot, Sample);
+            var time = new OnionTrustedTimeAuthority(this);
+            predecessor = await DeepIdV2ContactRouteVerifier.VerifyPredecessorAsync(recipient, fresh.Network,
+                fresh.Authority, predecessor.ExactXir1V2, predecessor.ExactRouteClosure, time);
+            Assert.Single((await DeepIdV2ContactRouteVerifier.VerifyRecordedHistoryAsync(recipient, fresh.Network,
+                fresh.Authority, predecessor, [pair], time)).Pairs);
+            var badAdh = response.ExactIssuanceAdh1.ToArray(); badAdh[^1] ^= 1;
+            var invalidHead = new ContactRouteAuthorityWireResponse(Network, request.RequestNonce.Span, response.ExactPms2.Span,
+                response.ExactXrc1.Span, response.ExactXss1.Span, badAdh);
+            ContactRouteAuthorityWireRequest Request(ulong minimum, ReadOnlyMemory<byte> lookup) => new(Network,
+                request.RequestNonce.Span, lookup.Span, minimum, request.MinimumAdh1CoreHash.Span, request.ExactDca1.Span,
+                request.ExactXra1.Span, request.ExactPredecessorXir1V2.Span, request.ExactPredecessorRouteClosure.Span);
+            foreach (var invalid in new[] { Pair(request, invalidHead), Pair(Request(request.MinimumAdh1Generation + 1,
+                request.DirectoryLookupKey), response), Pair(Request(request.MinimumAdh1Generation, Bytes(32, 0x92)), response) })
+                await RequireRouteRejectionAsync(async () => await DeepIdV2ContactRouteVerifier.VerifyRecordedHistoryAsync(
+                    recipient, fresh.Network, fresh.Authority, predecessor, [invalid], time));
+            await RequireRouteRejectionAsync(async () => await DeepIdV2ContactRouteVerifier.VerifyRecordedHistoryAsync(
+                recipient, fresh.Network, fresh.Authority, predecessor, [pair, pair], time));
+            var xrc = threshold.LiveRoute.CanonicalBytes.ToArray(); xrc[FieldOffset(xrc, 21) + 32] ^= 1;
+            var damaged = ContactCodec.Decode("XRC1", xrc);
+            var linked = ResignRenewalWitnessRecord(threshold.Successor,
+                new() { [5] = ContactCodec.ArtifactReference("XRC1", damaged).CanonicalBytes }, 14);
+            var invalidSignature = new ContactRouteAuthorityWireResponse(Network, request.RequestNonce.Span,
+                response.ExactPms2.Span, xrc, linked.CanonicalBytes.Span, response.ExactIssuanceAdh1.Span);
+            await RequireRouteRejectionAsync(async () => await DeepIdV2ContactRouteVerifier.VerifyRecordedHistoryAsync(
+                recipient, fresh.Network, fresh.Authority, predecessor, [Pair(request, invalidSignature)], time));
+            static DeepIdV2ContactRouteRecordedPair Pair(ContactRouteAuthorityWireRequest req, ContactRouteAuthorityWireResponse res) =>
+                new(ContactRouteAuthorityWireCodec.EncodeRequest(req), ContactRouteAuthorityWireCodec.EncodeResponse(req, res));
         }
 
         private ContactRecord ResignRenewalWitnessRecord(ContactRecord original,

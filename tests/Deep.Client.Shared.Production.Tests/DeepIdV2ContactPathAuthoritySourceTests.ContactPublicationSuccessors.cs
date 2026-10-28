@@ -31,6 +31,20 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     }
 
     [Fact]
+    public async Task Did2PreKeyServiceHistory_SignedFiveSixSevenOwnerAndIndependentIssuer()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        await fixture.CheckContactPublicationSuccessorsAsync(5);
+    }
+
+    [Fact]
+    public async Task Did2RecordedRouteHistory_CompletedFiveRecordedSixLiveSevenKeepsIndependentIssuerAndFurtherOffset()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        await fixture.CheckContactPublicationSuccessorsAsync(6);
+    }
+
+    [Fact]
     public void Did2PublicationSuccessors_HistoricalFactsAreClosedNotDispatchAuthority()
     {
         foreach (var type in new[] { typeof(VerifiedDeepIdV2ContactObjectPredecessor), typeof(VerifiedDeepIdV2PublicationPredecessor), typeof(VerifiedDeepIdV2PublicationIssuerPredecessor) })
@@ -77,21 +91,25 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             var route = await DeepIdV2ContactRouteAuthor.CompleteGenesisAsync(recipient, current.Network, current.Authority,
                 device!, advertisement.CanonicalBytes, threshold, 2, time);
             var services = new[] { DeepIdV2PreKeyServiceCodec.Decode(staged.ExactXps1.Span) };
-            using var prekeyAuthor = mode == 4 ? await accounts.OpenLocalPreKeyAuthoringAuthorityAsync() : null;
-            if (mode == 4)
+            using var prekeyAuthor = mode is 4 or 5 ? await accounts.OpenLocalPreKeyAuthoringAuthorityAsync() : null;
+            if (mode is 4 or 5)
             {
                 // A separately signed short-lived service candidate makes the
                 // actual predecessor expire before recovery. Do not replace
                 // the protected staged inventory: custody is a separate gate.
                 var serviceContext = new Dpk2AuthoringContext(ApplicationCoreVerifier.StartDmd1Lineage(checkpoint.Directory).Next,
                     1, 1, 1, current.Proof.TrustedLowerUnixSeconds, current.Proof.TrustedLowerUnixSeconds,
-                    current.Proof.TrustedUpperUnixSeconds + 10);
+                    current.Proof.TrustedUpperUnixSeconds + (mode == 5 ? 1UL : 10UL));
                 services[0] = DeepIdV2PreKeyServiceCodec.Decode(prekeyAuthor!.AuthorPreKeyServiceV2(
                     serviceContext, checkpoint.Binding, 32, 1).ExactXps1.Span);
             }
             var capability = (await accounts.GetCurrentAsync())!.PermanentId.ResolverReadCapability.ToArray();
             try
             {
+                if (mode == 5)
+                    for (var serviceGeneration = 2UL; serviceGeneration <= 5; serviceGeneration++)
+                        services[0] = AuthorNextService(services[0], current.Proof.TrustedLowerUnixSeconds,
+                            checked(current.Proof.TrustedUpperUnixSeconds + serviceGeneration));
                 var contact = await DeepIdV2ContactObjectAuthor.AuthorGenesisAsync(route, device!, services, "Successor QA", capability);
                 var publication = await DeepIdV2PublicationAuthorityAuthor.AuthorGenesisRequestAsync(route, contact, device!,
                     Bytes(32, 0xe1), Bytes(32, 0xe2), Bytes(32, 0xe3));
@@ -99,6 +117,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                     Assert.Equal(BinaryPrimitives.ReadUInt64BigEndian(services[0].Field(11).Span),
                         publication.WireRequest.ExpiresAtUnixSeconds);
                 var authorized = await DeepIdV2PublicationAuthorityAuthor.AuthorThresholdAsync(route, publication.WireRequest, PublicationWitnesses());
+                var initialPrivatePackage = mode == 6 ? DeepIdV2ContactMailboxRouteCodec.Decode(
+                    DeepIdV2ContactMailboxRouteCodec.Encode(route)) : null;
                 var result = PublicationResult(route, authorized.ExactXpu1);
                 Assert.Equal(0UL, (await DeepIdV2PublicationCommitVerifier.VerifyCommittedAsync(route, contact,
                     publication.WireRequest, authorized.ExactXpu1, result)).Generation);
@@ -132,8 +152,42 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 await Assert.ThrowsAsync<CryptographicException>(async () => await DeepIdV2PublicationCommitVerifier.VerifyCommittedAsync(
                     route, contact, publication.WireRequest, authorized.ExactXpu1, result));
 
-                for (var generation = 1UL; generation <= 2; generation++)
+                for (var generation = 1UL; generation <= (mode == 6 ? 7UL : 2UL); generation++)
                 {
+                    VerifiedDeepIdV2ContactRouteRecordedHistory? recordedHistory = null;
+                    if (mode == 6 && generation == 6)
+                    {
+                        var anchor = await DeepIdV2ContactRouteVerifier.VerifyPredecessorAsync(recipient, current.Network,
+                            current.Authority, route.ExactXir1V2, route.ExactRouteClosure, time);
+                        var recordedExpiry = expiry + 20 + generation * 10;
+                        var recordedAdvertisement = await DeepIdV2ContactRouteAuthor.AuthorAdvertisementSuccessorAsync(
+                            recipient, current.Network, current.Authority, device!, advertisement.CanonicalBytes,
+                            Bytes(32, 0x91), Bytes(32, 0x92), ScalarMult.Base(Bytes(32, 0x93)), recordedExpiry, time);
+                        var recordedThreshold = await DeepIdV2ContactRouteAuthor.AuthorThresholdSuccessorAsync(recipient,
+                            current.Network, current.Authority, anchor, recordedAdvertisement.CanonicalBytes,
+                            witnesses.Select(value => new RouteWitness(value)).ToArray(), recordedExpiry, time);
+                        var recordedRequest = new ContactRouteAuthorityWireRequest(Network, Bytes(32, 0x94),
+                            current.Proof.QueriedDirectoryLeafKey.Span, current.Proof.NextProtectedLkg.LogGeneration,
+                            current.Proof.NextProtectedLkg.CoreHash.Span, staged.ExactDca1.Span, recordedAdvertisement.CanonicalBytes.Span,
+                            anchor.ExactXir1V2.Span, anchor.ExactRouteClosure.Span);
+                        var pair = new DeepIdV2ContactRouteRecordedPair(ContactRouteAuthorityWireCodec.EncodeRequest(recordedRequest),
+                            ContactRouteAuthorityWireCodec.EncodeResponse(recordedRequest, new(Network, recordedRequest.RequestNonce.Span,
+                                recordedThreshold.Selection.CanonicalBytes.Span, recordedThreshold.LiveRoute.CanonicalBytes.Span,
+                                recordedThreshold.Successor.CanonicalBytes.Span, current.Proof.ExactAdh1.Span)));
+                        var elapsed = checked(recordedExpiry - current.Proof.TrustedLowerUnixSeconds + 20);
+                        ProofTime += elapsed; Sample += elapsed;
+                        current = await source.VerifyForOwnPreKeyAuthoringAsync(accounts, default);
+                        recipient = DeepIdV2CurrentContactAuthorizationVerifier.Verify(current.Proof, dca, Boot, Sample);
+                        anchor = await DeepIdV2ContactRouteVerifier.VerifyPredecessorAsync(recipient, current.Network,
+                            current.Authority, route.ExactXir1V2, route.ExactRouteClosure, time);
+                        recordedHistory = await DeepIdV2ContactRouteVerifier.VerifyRecordedHistoryAsync(recipient,
+                            current.Network, current.Authority, anchor, [pair], time);
+                        Assert.Equal(5UL, BinaryPrimitives.ReadUInt64BigEndian(route.Invite.Field(3).Span));
+                        Assert.Equal(6UL, BinaryPrimitives.ReadUInt64BigEndian(recordedAdvertisement.Field(3).Span));
+                        Assert.Equal(contact.Closure.CanonicalBytes.ToArray(),
+                            (await DeepIdV2ContactObjectAuthor.VerifyPredecessorAsync(recipient, current.Network, current.Authority,
+                                anchor, contact.Closure.CanonicalBytes, contact.ProtectedDcr1, capability, time)).Closure.CanonicalBytes.ToArray());
+                    }
                     var priorRoute = await DeepIdV2ContactRouteVerifier.VerifyPredecessorAsync(recipient, current.Network,
                         current.Authority, route.ExactXir1V2, route.ExactRouteClosure, time);
                     var priorObject = await DeepIdV2ContactObjectAuthor.VerifyPredecessorAsync(recipient, current.Network,
@@ -184,22 +238,41 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                             authorized.ExactXpu1, result, time));
                     }
 
-                    var nextExpiry = expiry + 20 + generation * 10;
-                    var nextAdvertisement = await DeepIdV2ContactRouteAuthor.AuthorAdvertisementSuccessorAsync(recipient, current.Network,
-                        current.Authority, device!, advertisement.CanonicalBytes, Bytes(32, (byte)(0xf0 + generation)),
-                        Bytes(32, (byte)(0xf3 + generation)), ScalarMult.Base(Bytes(32, (byte)(0xf6 + generation))), nextExpiry, time);
-                    var nextThreshold = await DeepIdV2ContactRouteAuthor.AuthorThresholdSuccessorAsync(recipient, current.Network,
-                        current.Authority, priorRoute, nextAdvertisement.CanonicalBytes,
-                        witnesses.Select(value => new RouteWitness(value)).ToArray(), nextExpiry, time);
+                    var nextExpiry = recordedHistory is null ? expiry + 20 + generation * 10 : current.Proof.TrustedUpperUnixSeconds + 30;
+                    if (mode == 6 && generation == 7) nextExpiry = current.Proof.TrustedUpperUnixSeconds + 40;
+                    var nextAdvertisement = recordedHistory is null
+                        ? await DeepIdV2ContactRouteAuthor.AuthorAdvertisementSuccessorAsync(recipient, current.Network,
+                            current.Authority, device!, advertisement.CanonicalBytes, Bytes(32, (byte)(0xf0 + generation)),
+                            Bytes(32, (byte)(0xf3 + generation)), ScalarMult.Base(Bytes(32, (byte)(0xf6 + generation))), nextExpiry, time)
+                        : await DeepIdV2ContactRouteAuthor.AuthorAdvertisementAfterRecordedHistoryAsync(recipient, current.Network,
+                            current.Authority, device!, recordedHistory, Bytes(32, 0xa1), Bytes(32, 0xa2),
+                            ScalarMult.Base(Bytes(32, 0xa3)), nextExpiry, time);
+                    var nextThreshold = recordedHistory is null
+                        ? await DeepIdV2ContactRouteAuthor.AuthorThresholdSuccessorAsync(recipient, current.Network,
+                            current.Authority, priorRoute, nextAdvertisement.CanonicalBytes,
+                            witnesses.Select(value => new RouteWitness(value)).ToArray(), nextExpiry, time)
+                        : await DeepIdV2ContactRouteAuthor.AuthorThresholdAfterRecordedHistoryAsync(recipient, current.Network,
+                            current.Authority, recordedHistory, nextAdvertisement.CanonicalBytes,
+                            witnesses.Select(value => new RouteWitness(value)).ToArray(), nextExpiry, time);
                     var request = new ContactRouteAuthorityWireRequest(Network, Bytes(32, (byte)(0xc0 + generation)),
                         current.Proof.QueriedDirectoryLeafKey.Span, current.Proof.NextProtectedLkg.LogGeneration,
                         current.Proof.NextProtectedLkg.CoreHash.Span, staged.ExactDca1.Span, nextAdvertisement.CanonicalBytes.Span,
                         priorRoute.ExactXir1V2.Span, priorRoute.ExactRouteClosure.Span);
                     var issuance = await DeepIdV2ContactRouteVerifier.VerifyRetainedThresholdAsync(recipient, current.Network,
-                        current.Authority, request, nextThreshold, current.Proof.ExactAdh1, time);
-                    var nextRoute = await DeepIdV2ContactRouteAuthor.CompleteSuccessorAsync(recipient, current.Network,
-                        current.Authority, device!, priorRoute, nextAdvertisement.CanonicalBytes, nextThreshold, 2, time);
-                    if (mode == 4)
+                        current.Authority, request, nextThreshold, current.Proof.ExactAdh1, time, recordedHistory: recordedHistory);
+                    var nextRoute = mode == 6
+                        ? await DeepIdV2ContactRouteAuthor.CompleteRetainedSuccessorAsync(recipient, current.Network,
+                            current.Authority, device!, priorRoute, issuance, 2, time)
+                        : await DeepIdV2ContactRouteAuthor.CompleteSuccessorAsync(recipient, current.Network,
+                            current.Authority, device!, priorRoute, nextAdvertisement.CanonicalBytes, nextThreshold, 2, time);
+                    if (mode == 6 && generation >= 6)
+                    {
+                        Assert.Equal(generation + 1, BinaryPrimitives.ReadUInt64BigEndian(nextAdvertisement.Field(3).Span));
+                        Assert.Equal(generation, BinaryPrimitives.ReadUInt64BigEndian(nextRoute.Invite.Field(3).Span));
+                        Assert.Equal(generation, BinaryPrimitives.ReadUInt64BigEndian(nextRoute.Route.Reachability.Field(3).Span));
+                    }
+                    ParsedXps1V2[] serviceHistory = [];
+                    if (mode is 4 or 5)
                     {
                         var window = await nextRoute.ReadCurrentTimeAsync();
                         var old = services[0];
@@ -216,14 +289,31 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                         })
                             await RequireRouteRejectionAsync(async () => await DeepIdV2ContactObjectAuthor.AuthorRetainedSuccessorAsync(
                                 nextRoute, issuance, priorObject, device!, [invalid], "Successor QA", capability));
-                        services[0] = AuthorNextService(old, window.LowerUnixSeconds, checked(oldExpiry + 60));
+                        if (mode == 5 && generation == 1)
+                        {
+                            Assert.Equal(5UL, BinaryPrimitives.ReadUInt64BigEndian(old.Field(5).Span));
+                            var intermediate = AuthorNextService(old, BinaryPrimitives.ReadUInt64BigEndian(old.Field(10).Span),
+                                checked(oldExpiry + 1));
+                            Assert.True(BinaryPrimitives.ReadUInt64BigEndian(intermediate.Field(11).Span) <= window.LowerUnixSeconds);
+                            serviceHistory = [intermediate];
+                            services[0] = AuthorNextService(intermediate, window.LowerUnixSeconds, checked(oldExpiry + 60));
+                            Assert.Equal(7UL, BinaryPrimitives.ReadUInt64BigEndian(services[0].Field(5).Span));
+                            foreach (var invalidHistory in InvalidHistory(old, intermediate, services[0]))
+                                await RequireRouteRejectionAsync(async () => await DeepIdV2ContactObjectAuthor.AuthorRetainedSuccessorAsync(
+                                    nextRoute, issuance, priorObject, device!, services, "Successor QA", capability,
+                                    preKeyServiceHistory: invalidHistory));
+                        }
+                        else if (mode == 4)
+                            services[0] = AuthorNextService(old, window.LowerUnixSeconds, checked(oldExpiry + 60));
                         using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
                         await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
                             await DeepIdV2ContactObjectAuthor.AuthorRetainedSuccessorAsync(nextRoute, issuance,
                                 priorObject, device!, services, "Successor QA", capability, cancelled.Token));
                     }
                     var nextContact = await DeepIdV2ContactObjectAuthor.AuthorRetainedSuccessorAsync(nextRoute, issuance, priorObject,
-                        device!, services, "Successor QA", capability);
+                        device!, services, "Successor QA", capability, preKeyServiceHistory: serviceHistory);
+                    Assert.Equal(serviceHistory.Select(value => Convert.ToHexString(SHA256.HashData(value.CanonicalBytes.Span))),
+                        nextContact.Closure.PreKeyServiceHistory.Select(value => Convert.ToHexString(SHA256.HashData(value.CanonicalBytes.Span))));
                     Assert.Equal(generation, BinaryPrimitives.ReadUInt64BigEndian(nextContact.Closure.Bundle.Field(8).Span));
                     Assert.Equal(contact.Closure.Bundle.ObjectHash.ToArray(), nextContact.Closure.Bundle.Field(9).ToArray());
                     Assert.Equal(contact.Closure.Bundle.Field(7).ToArray(), nextContact.Closure.Bundle.Field(7).ToArray());
@@ -238,7 +328,33 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                     Assert.Equal(publication.WireRequest.OwnerRetrieveCapability.ToArray(), nextPublication.WireRequest.OwnerRetrieveCapability.ToArray());
                     Assert.Equal(result.ToArray(), nextPublication.WireRequest.ExactPriorXpo1.ToArray());
                     await DeepIdV2PublicationAuthorityAuthor.VerifyIssuerSuccessorRequestAsync(nextRoute, nextPublication.WireRequest, issuerPredecessor);
-                    if (mode == 4)
+                    if (mode == 5 && generation == 1)
+                    {
+                        var old = DeepIdV2PreKeyServiceCodec.Decode(priorObject.Closure.Bundle.Field(12).Span[5..]);
+                        var untouched = witnesses.Select(value => new PublicationWitness(value)).ToArray();
+                        foreach (var invalidHistory in InvalidHistory(old, serviceHistory[0], services[0]))
+                        {
+                            // The ordinary author cannot mint hostile histories.
+                            // This fixture re-signs only its own fresh account's
+                            // request, preserving the authentic prior receipts.
+                            await RequireRouteRejectionAsync(async () =>
+                            {
+                                var invalid = SignedHistoryRequest(nextPublication.WireRequest, invalidHistory);
+                                await DeepIdV2PublicationAuthorityAuthor.AuthorIssuerThresholdSuccessorAsync(
+                                    nextRoute, invalid, issuerPredecessor, untouched);
+                            });
+                            Assert.All(untouched, signer => Assert.Equal(0, signer.Calls));
+                        }
+                        // Generic resolution accepts the authenticated suffix
+                        // with no witnesses; only the real prior XPS5 rejects it.
+                        var omitted = SignedHistoryRequest(nextPublication.WireRequest, []);
+                        DeepIdV2ResolverClosureCodec.VerifyIdentityAndSupport(
+                            DeepIdV2ResolverClosureCodec.Decode(omitted.ExactDcr1.Span), dca,
+                            (await nextRoute.ReadCurrentTimeAsync()).UpperUnixSeconds);
+                        await RequireRouteRejectionAsync(async () => await DeepIdV2PublicationAuthorityAuthor.VerifyIssuerSuccessorRequestAsync(
+                            nextRoute, omitted, issuerPredecessor));
+                    }
+                    if (mode is 4 or 5)
                     {
                         // The active target5 path independently verifies the
                         // current signed submission and the same old lineage.
@@ -312,7 +428,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                         await Assert.ThrowsAsync<CryptographicException>(async () => await DeepIdV2PublicationAuthorityAuthor.AuthorSuccessorRequestAsync(
                             route, contact, device!, priorPublication, Bytes(32, 0xa1), Bytes(32, 0xa2)));
                     }
-                    if (mode is 3 or 4 && generation == 1)
+                    if (mode is 3 or 4 or 5 && generation == 1)
                     {
                         var saved = Sample;
                         var nextHistory = await DeepIdV2ContactRouteVerifier.VerifyPredecessorAsync(recipient, current.Network,
@@ -326,7 +442,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                         {
                             Sample = saved + 1;
                             futureContact = await DeepIdV2ContactObjectAuthor.AuthorRetainedSuccessorAsync(nextRoute, issuance,
-                                priorObject, device!, services, "Successor QA", capability);
+                                priorObject, device!, services, "Successor QA", capability, preKeyServiceHistory: serviceHistory);
                             DeepIdV2ResolverClosureCodec.VerifyIdentityAndSupport(futureContact.Closure, dca,
                                 BinaryPrimitives.ReadUInt64BigEndian(futureContact.Closure.Bundle.Field(17).Span));
                             futurePublication = await DeepIdV2PublicationAuthorityAuthor.AuthorSuccessorRequestAsync(nextRoute, nextContact,
@@ -389,10 +505,84 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                     var nextResult = PublicationResult(nextRoute, nextAuthorized.ExactXpu1);
                     Assert.Equal(generation, (await DeepIdV2PublicationCommitVerifier.VerifyCommittedAsync(nextRoute, nextContact,
                         nextPublication.WireRequest, nextAuthorized.ExactXpu1, nextResult)).Generation);
+                    if (mode == 6 && generation >= 6)
+                        await CheckRecordedPrivateControlAsync(nextRoute, route, initialPrivatePackage!, current.Proof,
+                            expectedWitness: generation == 6);
                     route = nextRoute; contact = nextContact; advertisement = nextAdvertisement;
                     publication = nextPublication; authorized = nextAuthorized; result = nextResult;
                 }
                 Assert.Equal(identity, (await accounts.GetCurrentAsync())!.PermanentId.CanonicalText);
+
+                IEnumerable<ParsedXps1V2[]> InvalidHistory(ParsedXps1V2 old, ParsedXps1V2 intermediate, ParsedXps1V2 endpoint)
+                {
+                    yield return []; // Missing required hop.
+                    yield return [old]; // Unnecessary prefix with a missing hop.
+                    yield return [intermediate, intermediate];
+                    yield return [endpoint];
+                    yield return [intermediate, endpoint];
+                    yield return [intermediate, AuthorNextService(endpoint,
+                        BinaryPrimitives.ReadUInt64BigEndian(endpoint.Field(10).Span),
+                        checked(BinaryPrimitives.ReadUInt64BigEndian(endpoint.Field(11).Span) + 1))];
+                    var issued = BinaryPrimitives.ReadUInt64BigEndian(intermediate.Field(10).Span);
+                    var expires = BinaryPrimitives.ReadUInt64BigEndian(intermediate.Field(11).Span);
+                    yield return [SignHostileServiceFixture(old, issued, expires,
+                        mutate: fields => fields[1] = Bytes(32, 0xa6))];
+                    yield return [SignHostileServiceFixture(old, issued, expires,
+                        mutate: fields => fields[2] = Bytes(32, 0xa7))];
+                    yield return [SignHostileServiceFixture(old, issued, expires,
+                        mutate: fields => fields[5] = Bytes(32, 0xa8))];
+                    yield return [SignHostileServiceFixture(old, issued, expires,
+                        mutate: fields => fields[5] = SHA256.HashData(endpoint.CanonicalBytes.Span))];
+                    yield return [SignHostileServiceFixture(old, issued, expires, minimum: 33)];
+                    var damaged = intermediate.CanonicalBytes.ToArray(); damaged[^1] ^= 1;
+                    yield return [DeepIdV2PreKeyServiceCodec.Decode(damaged)];
+                }
+
+                ContactPublicationAuthorityWireRequest SignedHistoryRequest(ContactPublicationAuthorityWireRequest original,
+                    IReadOnlyList<ParsedXps1V2> history)
+                {
+                    var exact = original.ExactDcr1.ToArray();
+                    var supportOffset = 12;
+                    var fields = new List<byte[]>();
+                    while (supportOffset < exact.Length)
+                    {
+                        var length = checked((int)BinaryPrimitives.ReadUInt32BigEndian(exact.AsSpan(supportOffset + 4)));
+                        fields.Add(exact.AsSpan(supportOffset + 8, length).ToArray()); supportOffset += 8 + length;
+                    }
+                    var support = new List<byte>(); var artifactOffset = 0; ushort count = 0;
+                    while (artifactOffset < fields[3].Length)
+                    {
+                        var kind = BinaryPrimitives.ReadUInt16BigEndian(fields[3].AsSpan(artifactOffset));
+                        var length = checked((int)BinaryPrimitives.ReadUInt32BigEndian(fields[3].AsSpan(artifactOffset + 2)));
+                        if (kind != 3) { support.AddRange(fields[3].AsSpan(artifactOffset, 6 + length).ToArray()); count++; }
+                        artifactOffset += 6 + length;
+                    }
+                    foreach (var item in history.OrderBy(value => Convert.ToHexString(SHA256.HashData(value.CanonicalBytes.Span)), StringComparer.Ordinal))
+                    {
+                        var header = new byte[6]; BinaryPrimitives.WriteUInt16BigEndian(header, 3);
+                        BinaryPrimitives.WriteUInt32BigEndian(header.AsSpan(2), 352);
+                        support.AddRange(header); support.AddRange(item.CanonicalBytes.ToArray()); count++;
+                    }
+                    fields[2] = new byte[2]; BinaryPrimitives.WriteUInt16BigEndian(fields[2], count); fields[3] = support.ToArray();
+                    var changed = new byte[12 + fields.Sum(value => 8 + value.Length)]; exact.AsSpan(0, 12).CopyTo(changed);
+                    var offset = 12;
+                    for (var i = 0; i < fields.Count; i++)
+                    {
+                        BinaryPrimitives.WriteUInt16BigEndian(changed.AsSpan(offset), checked((ushort)(i + 1)));
+                        BinaryPrimitives.WriteUInt32BigEndian(changed.AsSpan(offset + 4), checked((uint)fields[i].Length));
+                        fields[i].CopyTo(changed, offset + 8); offset += 8 + fields[i].Length;
+                    }
+                    _ = DeepIdV2ResolverClosureCodec.Decode(changed);
+                    // An issuer authenticates the publisher's exact opaque
+                    // ciphertext candidate; it cannot assert decryption. Its
+                    // independent plaintext lineage must reject this request.
+                    var cipher = new byte[changed.Length + 40];
+                    original.ObjectCiphertext.Span[..Math.Min(original.ObjectCiphertext.Length, cipher.Length)].CopyTo(cipher);
+                    var unsigned = UntrustedPublicationCopy(original, null, null, changed, cipher);
+                    var signature = SignPublicFixture(ContactPublicationAuthorityWireCodec.CreatePublisherSigningInput(unsigned));
+                    try { return UntrustedPublicationCopy(original, null, null, changed, cipher, signature); }
+                    finally { CryptographicOperations.ZeroMemory(signature); CryptographicOperations.ZeroMemory(cipher); }
+                }
 
                 ParsedXps1V2 AuthorNextService(ParsedXps1V2 predecessor, ulong issued, ulong expires, ushort minimum = 32)
                 {
@@ -405,41 +595,54 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 // Adversarial signatures use only this freshly created
                 // fixture's own key. The hardened production author must not
                 // mint these invalid successors for a negative consumer test.
-                ParsedXps1V2 SignHostileServiceFixture(ParsedXps1V2 predecessor, ulong issued, ulong expires, ushort minimum = 32)
+                ParsedXps1V2 SignHostileServiceFixture(ParsedXps1V2 predecessor, ulong issued, ulong expires, ushort minimum = 32,
+                    Action<ReadOnlyMemory<byte>[]>? mutate = null)
                 {
                     byte[] Number(ulong value) { var bytes = new byte[8]; BinaryPrimitives.WriteUInt64BigEndian(bytes, value); return bytes; }
                     var policy = new byte[2]; BinaryPrimitives.WriteUInt16BigEndian(policy, minimum);
                     ReadOnlyMemory<byte>[] fields = [predecessor.Field(1), predecessor.Field(2), predecessor.Field(3), predecessor.Field(4),
                         Number(checked(BinaryPrimitives.ReadUInt64BigEndian(predecessor.Field(5).Span) + 1)), SHA256.HashData(predecessor.CanonicalBytes.Span),
                         predecessor.Field(7), policy, predecessor.Field(9), Number(issued), Number(expires)];
-                    using var owned = device!.ExportOwnedPersistenceCopy();
-                    var seed = new byte[32]; var agreement = new byte[32]; var deviceId = new byte[32]; var handle = new byte[32];
-                    byte[]? privateKey = null, signature = null;
+                    mutate?.Invoke(fields);
+                    var signature = SignPublicFixture(DeepIdV2PreKeyServiceCodec.CreateSignatureInput(fields));
                     try
                     {
-                        owned.CopyTo(seed, agreement, deviceId, handle);
-                        privateKey = PublicKeyAuth.GenerateKeyPair(seed).PrivateKey;
-                        signature = PublicKeyAuth.SignDetached(DeepIdV2PreKeyServiceCodec.CreateSignatureInput(fields), privateKey);
                         var signed = DeepIdV2PreKeyServiceCodec.Decode(DeepIdV2PreKeyServiceCodec.Encode(fields, signature));
                         DeepIdV2PreKeyServiceCodec.VerifyDeviceSignature(signed,
                             checkpoint.Binding.Identity.ActiveDevices.Single().Certificate.DeviceEd25519PublicKey.Span);
                         return signed;
                     }
+                    finally { CryptographicOperations.ZeroMemory(signature); }
+                }
+
+                byte[] SignPublicFixture(byte[] input)
+                {
+                    using var owned = device!.ExportOwnedPersistenceCopy();
+                    var seed = new byte[32]; var agreement = new byte[32]; var deviceId = new byte[32]; var handle = new byte[32];
+                    byte[]? privateKey = null;
+                    try
+                    {
+                        owned.CopyTo(seed, agreement, deviceId, handle);
+                        privateKey = PublicKeyAuth.GenerateKeyPair(seed).PrivateKey;
+                        return PublicKeyAuth.SignDetached(input, privateKey);
+                    }
                     finally
                     {
-                        foreach (var secret in new[] { seed, agreement, deviceId, handle, privateKey, signature })
+                        foreach (var secret in new[] { seed, agreement, deviceId, handle, privateKey })
                             if (secret is not null) CryptographicOperations.ZeroMemory(secret);
                     }
                 }
 
                 static ContactPublicationAuthorityWireRequest UntrustedPublicationCopy(ContactPublicationAuthorityWireRequest original,
-                    ReadOnlyMemory<byte>? predecessorHash, ReadOnlyMemory<byte>? ownerCapability) => new(original.NetworkId.Span,
+                    ReadOnlyMemory<byte>? predecessorHash, ReadOnlyMemory<byte>? ownerCapability,
+                    ReadOnlyMemory<byte>? exactDcr = null, ReadOnlyMemory<byte>? objectCiphertext = null,
+                    ReadOnlyMemory<byte>? signature = null) => new(original.NetworkId.Span,
                         original.RequestNonce.Span, original.DirectoryLookupKey.Span, original.MinimumAdh1Generation,
-                        original.MinimumAdh1CoreHash.Span, original.ExactDca1.Span, original.ExactDcr1.Span, original.ExactRouteClosure.Span,
+                        original.MinimumAdh1CoreHash.Span, original.ExactDca1.Span, (exactDcr ?? original.ExactDcr1).Span, original.ExactRouteClosure.Span,
                         original.OperationId.Span, original.Generation, (predecessorHash ?? original.PredecessorObjectHash).Span,
-                        original.ObjectCiphertext.Span, original.IssuedAtUnixSeconds, original.ExpiresAtUnixSeconds,
+                        (objectCiphertext ?? original.ObjectCiphertext).Span, original.IssuedAtUnixSeconds, original.ExpiresAtUnixSeconds,
                         original.EffectiveExpiresAtUnixSeconds, (ownerCapability ?? original.OwnerRetrieveCapability).Span,
-                        original.PublisherSignature.Span, original.ExactPriorXpo1.Span);
+                        (signature ?? original.PublisherSignature).Span, original.ExactPriorXpo1.Span);
             }
             finally { CryptographicOperations.ZeroMemory(capability); }
         }

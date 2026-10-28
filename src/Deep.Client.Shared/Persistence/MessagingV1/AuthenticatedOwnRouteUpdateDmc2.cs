@@ -15,7 +15,7 @@ internal sealed class AuthenticatedOwnRouteUpdateDmc2 : IAuthenticatedDmc2InboxE
     private int disposed;
     private AuthenticatedOwnRouteUpdateDmc2(ReadOnlySpan<byte> exact, Did2MessagingSessionScope scope)
     {
-        if (exact.Length is < 4497 or > 23649)
+        if (exact.Length is < 4497 or > ApplicationCoreCodec.MaximumContactRouteUpdateRecordBytes)
             throw new InvalidDataException("Own route control exceeds its exact closed record bound.");
         var parsed = ApplicationCoreCodec.DecodeDmc2(exact);
         try

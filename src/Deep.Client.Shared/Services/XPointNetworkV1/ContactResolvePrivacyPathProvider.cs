@@ -105,10 +105,12 @@ public sealed class ContactResolveCanonicalPathRequest
         if (exactRequest[..4].SequenceEqual("XCA2"u8))
         {
             var request = ContactCoordinationOnionCodec.DecodeRequest(exactRequest);
-            if (request.Target == ContactCoordinationTarget.PublicationCurrent)
+            if (request.Target is ContactCoordinationTarget.PublicationCurrent or ContactCoordinationTarget.RouteRecovery)
             {
-                var current = DeepIdV2PublicationCurrentWireCodec.DecodeRequest(request.ExactBody.Span);
-                return new(request.CanonicalBytes.Span, request.NetworkId.Span, current.ViewHash.Span,
+                var view = request.Target == ContactCoordinationTarget.PublicationCurrent ?
+                    DeepIdV2PublicationCurrentWireCodec.DecodeRequest(request.ExactBody.Span).ViewHash :
+                    DeepIdV2ContactRouteRecoveryWireCodec.DecodeRequest(request.ExactBody.Span).ViewHash;
+                return new(request.CanonicalBytes.Span, request.NetworkId.Span, view.Span,
                     [], ContactServiceRequestKind.CoordinateContact, request.GatewayShard.Span,
                     request.ExpiresAtUnixSeconds, false, []);
             }

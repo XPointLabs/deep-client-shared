@@ -167,10 +167,10 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 if (faulted || generation == ulong.MaxValue || update.RouteGeneration != generation + 1 ||
                     message.SenderClientSequence <= headSequence || !FixedRoute(update.PredecessorRouteUpdateHash.Span, headHash))
                     throw new CryptographicException("Historical native route has a gap, fork or post-fault promotion.");
-                // The decoded canonical control already contains the exact
-                // six-record closure after relationship32/generation8/hash32.
-                // Parse those original bytes; do not re-author/reframe a route.
-                var next = ContactRouteClosureCodec.Decode(update.CanonicalBytes.Span[72..]);
+                // Parsing owns the exact signed six-record closure independently
+                // of the optional private recovery witness. Native processing
+                // already qualified the original control; no new route authority.
+                var next = ContactRouteClosureCodec.Decode(update.ExactRouteClosure.Span);
                 if (!FixedRoute(head.Reachability.CoreHash.Span, next.Reachability.Field(4).Span))
                     throw new CryptographicException("Historical native route changed its exact reachability predecessor.");
                 foreach (var tag in new[] { 1, 2, 10, 12, 13, 14, 18 })

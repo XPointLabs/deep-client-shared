@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Security.Cryptography;
+using Deep.Client.Shared.Persistence.DeviceV2;
 using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.ContactV1;
 using Deep.Protocol.ContactV2;
@@ -56,6 +57,15 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         await fixture.CheckMaintainedContactPublicationAsync(canAdvance: false);
     }
 
+    [Fact]
+    [Trait("RequiresApprovedMlKemRuntime", "true")]
+    public async Task Did2PreKeyMaintenance_ProtectedHistoryDeduplicatesEpochsAndAnchorsActualTip()
+    {
+        await using var fixture = await Fixture.CreateAsync(encryptedStorage: true,
+            longMailboxWindow: true, objectHorizonWindow: true);
+        await fixture.CheckMaintainedContactPublicationAsync(canAdvance: true, serviceGap: true);
+    }
+
     private sealed partial class Fixture
     {
         internal void FailAfterNextPreKeySuccessorInsert() => storage.FailAfterPreKeySuccessorInsert = true;
@@ -65,7 +75,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             return owned!.Use(value => value.ToArray());
         }
 
-        internal async Task CheckMaintainedContactPublicationAsync(bool canAdvance)
+        internal async Task CheckMaintainedContactPublicationAsync(bool canAdvance, bool serviceGap = false)
         {
             var backend = new RenewalBackend(this, genesisRouteLifetimeSeconds: 120);
             var original = await accounts.EnsureOwnPermanentContactPublishedAsync(Source(), backend, backend, backend);
@@ -101,6 +111,58 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             Assert.True(before.AsSpan().SequenceEqual(rejected), "Uncommitted service changed contact custody.");
             CryptographicOperations.ZeroMemory(before); CryptographicOperations.ZeroMemory(rejected);
             _ = await StageAndRecordPairAsync();
+            if (serviceGap)
+            {
+                var second = (await accounts.ReadOwnStagedPreKeyPublicationAsync())!;
+                var secondService = DeepIdV2PreKeyServiceCodec.Decode(second.ExactXps1.Span);
+                var secondPublication = DeepIdV2PreKeyPublicationCodec.Decode(second.ExactXpp1.Span);
+                using (var author = await accounts.OpenLocalPreKeyAuthoringAuthorityAsync())
+                {
+                    var issued = fresh.Proof.TrustedLowerUnixSeconds;
+                    var expires = BinaryPrimitives.ReadUInt64BigEndian(secondService.Field(11).Span);
+                    var directory = ApplicationCoreVerifier.StartDmd1Lineage(checkpoint.Directory).Next;
+                    var drs = new byte[38]; "DRS1"u8.CopyTo(drs); BinaryPrimitives.WriteUInt16BigEndian(drs.AsSpan(4), 1);
+                    checkpoint.Binding.Identity.Revocations.Snapshot.CanonicalHash.Span.CopyTo(drs.AsSpan(6));
+                    var repeatedContext = new Dpk2AuthoringContext(directory, 2, 2, 1, issued, issued, expires);
+                    var repeatedService = author.RestorePreKeyServiceV2(repeatedContext, checkpoint.Binding, second.ExactXps1.Span);
+                    var placement = ContactServicePlacementFactory.Create(fresh.Network, ContactServiceRequestKind.PublishPreKeyInventory,
+                        repeatedService.ServiceCapability);
+                    using (var repeatedInventory = author.AuthorInventoryV2(repeatedContext, checkpoint.Binding, repeatedService, drs,
+                        secondPublication.Manifest.ExactHash.Span, Bytes(32, 0xe3), placement.PlacementHash.Span, 32, 1))
+                        await accounts.StageOwnSuccessorPreKeyInventoryAsync(repeatedService, repeatedInventory);
+                }
+                _ = await StageAndRecordPairAsync();
+                using (var author = await accounts.OpenLocalPreKeyAuthoringAuthorityAsync())
+                {
+                    var issued = fresh.Proof.TrustedLowerUnixSeconds;
+                    var context = new Dpk2AuthoringContext(ApplicationCoreVerifier.StartDmd1Lineage(checkpoint.Directory).Next,
+                        3, 1, 1, issued, issued, BinaryPrimitives.ReadUInt64BigEndian(secondService.Field(11).Span) + 60);
+                    var service = author.AuthorPreKeyServiceV2(context, checkpoint.Binding, 32, 1, secondService.CanonicalBytes.Span);
+                    var placement = ContactServicePlacementFactory.Create(fresh.Network, ContactServiceRequestKind.PublishPreKeyInventory, service.ServiceCapability);
+                    var drs = new byte[38]; "DRS1"u8.CopyTo(drs); BinaryPrimitives.WriteUInt16BigEndian(drs.AsSpan(4), 1);
+                    checkpoint.Binding.Identity.Revocations.Snapshot.CanonicalHash.Span.CopyTo(drs.AsSpan(6));
+                    using var inventory = author.AuthorInventoryV2(context, checkpoint.Binding, service, drs,
+                        new byte[32], Bytes(32, 0xe4), placement.PlacementHash.Span, 32, 1);
+                    await accounts.StageOwnSuccessorPreKeyInventoryAsync(service, inventory);
+                }
+                _ = await StageAndRecordPairAsync();
+                ColdReopenCompactionStorage();
+                var tip = (await ReopenAccount().ReadOwnStagedPreKeyPublicationAsync())!;
+                using var current = await ReadSenderCompactionCurrent() ?? throw new InvalidDataException("Fixture account is absent.");
+                using var held = await new DeepIdV2AccountFileLease(Path.Combine(directory, "deep-store-v2-account.lock")).AcquireAsync(default);
+                var path = Path.Combine(directory, "deep-store-v2-account.dsv2");
+                var history = await SqliteDeepIdV2AccountGeneration.ReadCommittedOwnPreKeyServiceHistoryAsync(
+                    storage, path, current, tip, old.ExactXps1, fresh.Network, default);
+                Assert.Equal(second.ExactXps1.ToArray(), Assert.Single(history).CanonicalBytes.ToArray());
+                var absentPrior = old.ExactXps1.ToArray(); absentPrior[^1] ^= 1;
+                var absent = await Assert.ThrowsAsync<CryptographicException>(() =>
+                    SqliteDeepIdV2AccountGeneration.ReadCommittedOwnPreKeyServiceHistoryAsync(
+                        storage, path, current, tip, absentPrior, fresh.Network, default));
+                Assert.Equal("Contact service predecessor is absent from authenticated owned history.", absent.Message);
+                await Assert.ThrowsAsync<CryptographicException>(() =>
+                    SqliteDeepIdV2AccountGeneration.ReadCommittedOwnPreKeyServiceHistoryAsync(
+                        storage, path, current, second, old.ExactXps1, fresh.Network, default));
+            }
             ColdReopenCompactionStorage(); var reopened = ReopenAccount();
             if (!canAdvance)
             {
@@ -120,6 +182,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             var entry = promoted.Entries[name];
             var contact = DeepIdV2ResolverClosureCodec.Decode(entry.Record(7).Span);
             Assert.True(contact.Bundle.Field(12).Span[5..].SequenceEqual(staged.ExactXps1.Span), "Published contact did not adopt committed service.");
+            Assert.Equal(serviceGap ? 1 : 0, contact.PreKeyServiceHistory.Count);
             var request = ContactPublicationAuthorityWireCodec.DecodeRequest(entry.Record(9).Span);
             Assert.True(request.LocatorHash.Span.SequenceEqual(oldLocator), "Prekey maintenance changed permanent locator.");
             Assert.True(request.OwnerRetrieveCapability.Span.SequenceEqual(oldOwnerCapability), "Owner Retrieve capability changed.");

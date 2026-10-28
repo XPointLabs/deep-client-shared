@@ -31,6 +31,12 @@ internal interface IDid2ContactRouteThresholdSource
         OnionTrustedTimeAuthority trustedTime, Did2OwnedContactTransportContext operation, CancellationToken cancellationToken);
 }
 
+internal interface IDid2ContactRouteRecoverySource
+{
+    ValueTask<ContactRouteAuthorityWireResponse> RecoverAsync(DeepIdV2ContactRouteRecoveryWireRequest request,
+        Did2OwnedContactTransportContext operation, CancellationToken cancellationToken);
+}
+
 internal static class Did2ContactRouteRequestCustody
 {
     internal static void RequireCurrent(ContactRouteAuthorityWireRequest request,

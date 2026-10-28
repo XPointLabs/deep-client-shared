@@ -527,10 +527,11 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 
     // Real PQ/device/witness/node crypto and protected SQL; in-process durable
     // winners and synthetic signed replica results, NOT live Registry/device evidence.
-    private sealed class RenewalBackend(Fixture fixture, ulong? renewedRouteLifetimeSeconds = null,
+    private sealed partial class RenewalBackend(Fixture fixture, ulong? renewedRouteLifetimeSeconds = null,
         ulong? genesisRouteLifetimeSeconds = null)
-        : IDid2ContactRouteThresholdSource, IDid2ContactPublicationSource, IDid2ContactReplicaPublicationTransport
+        : IDid2ContactRouteThresholdSource, IDid2ContactRouteRecoverySource, IDid2ContactPublicationSource, IDid2ContactReplicaPublicationTransport
     {
+        private Fixture RecoveryFixture => fixture;
         internal int RouteCalls, PublicationCalls, ReplicaCalls, RouteSignings, PublicationSignings;
         internal int CurrentResponseFault;
         internal bool LoseBeforeReservation, LoseAfterReservation;
@@ -572,8 +573,10 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         {
             operation.RequireActive(); PublicationCalls++; LastCurrentRequest = request;
             var original = request.OriginalRequest;
+            var recordedHistory = await RecordedHistoryForPublicationAsync(original, ct);
             route = await DeepIdV2ContactRouteVerifier.VerifyAsync(authorization, network, authority,
-                DeepIdV2ResolverClosureCodec.Decode(original.ExactDcr1.Span).Bundle.Field(14)[40..], original.ExactRouteClosure, time, ct);
+                DeepIdV2ResolverClosureCodec.Decode(original.ExactDcr1.Span).Bundle.Field(14)[40..], original.ExactRouteClosure, time, ct,
+                recordedHistory: recordedHistory);
             VerifiedDeepIdV2PublicationIssuerPredecessor? predecessor = null;
             if (original.Generation != 0)
             {

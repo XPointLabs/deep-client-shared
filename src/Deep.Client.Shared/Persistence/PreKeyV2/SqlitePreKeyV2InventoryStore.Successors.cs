@@ -42,6 +42,28 @@ internal sealed partial class SqlitePreKeyV2InventoryStore
 
     private IEnumerable<ParsedXpp1V2> SuccessorPublications() => successorPublicRecords;
 
+    // Actual authenticated owner history only. Repeated inventories may retain
+    // the same exact service; they do not add another lineage hop.
+    internal ParsedXps1V2[] ReadServiceIntermediates(ParsedXps1V2 prior, ParsedXps1V2 candidate)
+    {
+        ThrowIfDisposed();
+        if (!candidate.CanonicalBytes.Span.SequenceEqual(ReadStagedService()))
+            throw new CryptographicException("Contact service history does not end at the actual owned tip.");
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT exact_xps1 FROM inventory WHERE singleton=1;";
+        var initial = command.ExecuteScalar() as byte[] ?? throw new CryptographicException("Owned service history has no initial descriptor.");
+        var services = new List<ParsedXps1V2> { DeepIdV2PreKeyServiceCodec.Decode(initial) };
+        if (successorCustody is not null)
+            services.AddRange(successorCustody.Entries.Select(value => DeepIdV2PreKeyServiceCodec.Decode(value.CopyService())));
+        var distinct = services.DistinctBy(value => Convert.ToHexString(SHA256.HashData(value.CanonicalBytes.Span))).ToArray();
+        if (!distinct.Any(value => value.CanonicalBytes.Span.SequenceEqual(prior.CanonicalBytes.Span)))
+            throw new CryptographicException("Contact service predecessor is absent from authenticated owned history.");
+        var lower = U64(prior.Field(5).Span); var upper = U64(candidate.Field(5).Span);
+        var intermediates = distinct.Where(value => U64(value.Field(5).Span) > lower && U64(value.Field(5).Span) < upper).ToArray();
+        DeepIdV2PreKeyLineageVerifier.VerifyServiceHistory(candidate, prior, intermediates, signer);
+        return intermediates;
+    }
+
     // One private store instance under its actual account lease. These local
     // receive counts trigger maintenance; they do not report remote stock.
     internal (int OneTimeRemaining, bool ServiceLastResortExhausted) ReadOwnedReplenishmentState()

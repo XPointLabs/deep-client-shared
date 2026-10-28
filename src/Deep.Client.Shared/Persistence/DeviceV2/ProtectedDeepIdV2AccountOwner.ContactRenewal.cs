@@ -55,13 +55,15 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 priorObject.Closure.Bundle.Field(12).Length != 357)
                 throw new CryptographicException("Permanent-contact renewal changed its protected profile or device set.");
             var serviceChanged = !FixedRoute(priorObject.Closure.Bundle.Field(12).Span[5..], staged.ExactXps1.Span);
+            ParsedXps1V2[] serviceHistory = [];
             if (serviceChanged)
             {
-                DeepIdV2PreKeyLineageVerifier.VerifyServiceTransition(DeepIdV2PreKeyServiceCodec.Decode(staged.ExactXps1.Span),
+                serviceHistory = await SqliteDeepIdV2AccountGeneration.ReadCommittedOwnPreKeyServiceHistoryAsync(storage, sqlStatePath,
+                    current, staged, priorObject.Closure.Bundle.Field(12).Slice(5), fresh.Network, ct).ConfigureAwait(false);
+                DeepIdV2PreKeyLineageVerifier.VerifyServiceHistory(DeepIdV2PreKeyServiceCodec.Decode(staged.ExactXps1.Span),
                     DeepIdV2PreKeyServiceCodec.Decode(priorObject.Closure.Bundle.Field(12).Span[5..]),
+                    serviceHistory,
                     checkpoint.Binding.Identity.ActiveDevices.Single().Certificate.DeviceEd25519PublicKey.Span);
-                await SqliteDeepIdV2AccountGeneration.RequireCommittedOwnPreKeyInventoryAsync(storage, sqlStatePath,
-                    current, staged, fresh.Network, ct).ConfigureAwait(false);
                 var checkedTime = await RecheckRouteFreshnessAsync(current, source, fresh, held, first, ct).ConfigureAwait(false);
                 authorization = DeepIdV2CurrentContactAuthorizationVerifier.Verify(fresh.Proof, dca, checkedTime.BootId.Span, checkedTime.SampleSeconds);
                 DeepIdV2ReplicaPreKeyInventoryVerifier.VerifyComplete(checkpoint.Binding.DeepId, staged.ExactXps1.Span,
@@ -73,6 +75,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 fresh.Authority, priorObject, priorRequest, priorWinner.ExactXpu1, prior.Record(11),
                 source.RendezvousTrustedTime, ct).ConfigureAwait(false);
             pendingIntent = DeriveContactRenewalIntent(networkId, current.AccountId.Span, instance, plan.Intent.Span, prior.Exact);
+            var resolvedIntent = await ResolveRenewalIntentAsync(state, pendingIntent, current.AccountId, instance, ct).ConfigureAwait(false);
+            var followedRecordedClosure = !FixedRoute(pendingIntent, resolvedIntent);
+            CryptographicOperations.ZeroMemory(pendingIntent); pendingIntent = resolvedIntent;
             var pendingName = Convert.ToHexString(pendingIntent);
             if (!state.Entries.TryGetValue(pendingName, out var entry))
             {
@@ -127,22 +132,110 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             }
             if (entry.Phase == 7 || !entry.Matches(configuration) || !FixedRoute(entry.Record(0).Span, prior.Record(0).Span))
                 throw new CryptographicException("Pending renewal differs from its exact protected predecessor configuration.");
+            var recordedHistory = await ReadRecordedRenewalHistoryAsync(entry, authorization, fresh, source, ct).ConfigureAwait(false);
+            if (followedRecordedClosure && recordedHistory is null)
+                throw new InvalidDataException("Recorded renewal forward custody lost its protected origin history.");
             var routeRequest = ContactRouteAuthorityWireCodec.DecodeRequest(entry.Record(12).Span);
+            if (entry.Phase == 1 && authorization.TrustedLowerUnixSeconds >= BinaryPrimitives.ReadUInt64BigEndian(ContactCodec.Decode("XRA1",entry.Record(1).Span).Field(13).Span))
+            {
+                using var recoveryDeadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                recoveryDeadline.CancelAfter(RenewalThresholdAcquisitionBudget);
+                var recoveryToken = recoveryDeadline.Token;
+                if (thresholdSource is not IDid2ContactRouteRecoverySource recoverySource)
+                    throw new CryptographicException("The owned route recovery transport is unavailable.");
+                await DeepIdV2ContactRouteVerifier.VerifyExpiredAdvertisementForRecoveryAsync(authorization, fresh.Network, fresh.Authority,
+                    priorRoute, entry.Record(1), source.RendezvousTrustedTime, recoveryToken, recordedHistory).AsTask().WaitAsync(recoveryToken).ConfigureAwait(false);
+                if (recordedHistory?.Pairs.Count == 3) throw new IOException("Recorded renewal history capacity is exhausted.");
+                var readRequest = await DeepIdV2ContactRouteAuthor.AuthorRecoveryRequestAsync(authorization, fresh.Network, fresh.Authority,
+                    current.Verified.DeviceSecrets, DeepIdV2ContactRouteRecoveryMode.ReadRecordedWinner, routeRequest,
+                    recordedHistory?.Pairs ?? [], source.RendezvousTrustedTime, recoveryToken).AsTask().WaitAsync(recoveryToken).ConfigureAwait(false);
+                var readDispatch = await DispatchAsync(recoveryToken).WaitAsync(recoveryToken).ConfigureAwait(false);
+                var recordedResponse = await recoverySource.RecoverAsync(readRequest,readDispatch,recoveryToken).AsTask().WaitAsync(recoveryToken).ConfigureAwait(false);
+                var exactResponse = ContactRouteAuthorityWireCodec.EncodeResponse(routeRequest,recordedResponse);
+                try
+                {
+                    var pairs = (recordedHistory?.Pairs ?? []).Append(new DeepIdV2ContactRouteRecordedPair(entry.Record(12).Span,exactResponse)).ToArray();
+                    recordedHistory = await DeepIdV2ContactRouteVerifier.VerifyRecordedHistoryAsync(authorization, fresh.Network, fresh.Authority,
+                        priorRoute,pairs,source.RendezvousTrustedTime,recoveryToken).AsTask().WaitAsync(recoveryToken).ConfigureAwait(false);
+                    var scalar=NewRouteRandom32(); var keyId=NewRouteRandom32(); var nonce=NewRouteRandom32();
+                    try
+                    {
+                        var expiryFloor=checked(BinaryPrimitives.ReadUInt64BigEndian(ContactCodec.Decode("XRA1",entry.Record(1).Span).Field(13).Span)+1);
+                        var expiry=Math.Min(Math.Max(checked(authorization.TrustedLowerUnixSeconds+86_400),expiryFloor),
+                            Math.Min(fresh.Authority.ExpiresAt,Math.Min(dca.Record.ExpiresAtUnixSeconds,current.Verified.PublicEvidence.Binding.Identity.ActiveDevices.Single().Certificate.ExpiresAtUnixSeconds)));
+                        var xra=await DeepIdV2ContactRouteAuthor.AuthorAdvertisementAfterRecordedHistoryAsync(authorization,fresh.Network,fresh.Authority,
+                            current.Verified.DeviceSecrets,recordedHistory,configuration.AntiSpamHash,keyId,
+                            Deep.Protocol.Identity.DeepIdentityCrypto.DeriveX25519PublicKey(scalar),expiry,source.RendezvousTrustedTime,recoveryToken).AsTask().WaitAsync(recoveryToken).ConfigureAwait(false);
+                        var nextRequest=new ContactRouteAuthorityWireRequest(networkId,nonce,authorization.Freshness.QueriedDirectoryLeafKey.Span,
+                            authorization.Freshness.NextProtectedLkg.LogGeneration,authorization.Freshness.NextProtectedLkg.CoreHash.Span,staged.ExactDca1.Span,xra.CanonicalBytes.Span,
+                            priorRoute.ExactXir1V2.Span,priorRoute.ExactRouteClosure.Span);
+                        var baseHash=SHA256.HashData(prior.Exact);
+                        var nextIntent=ProtectedDid2ContactRenewalClosure.DeriveNextIntent(networkId,current.AccountId.Span,instance,plan.Intent.Span,baseHash,entry.Exact,exactResponse);
+                        using var next=ProtectedDid2ContactRouteJournal.Entry.Proposal(nextIntent,configuration,scalar,keyId,nonce,staged.ExactDca1,xra,nextRequest,networkId,current.AccountId.Span);
+                        using var closure=ProtectedDid2ContactRenewalClosure.Create(networkId,current.AccountId.Span,instance,plan.Intent.Span,baseHash,entry,next,exactResponse);
+                        var origin=closure.EncodeOrigin(); var closureBytes=closure.Exact.ToArray();
+                        var adopted=ProtectedDid2ContactRouteJournal.Entry.Decode(next.Exact,networkId,current.AccountId.Span);
+                        var oldEntry=entry; var nextName=Convert.ToHexString(nextIntent);
+                        byte[]? replacement = null;
+                        var adoptedAdded = false;
+                        try
+                        {
+                            state.Entries.Remove(pendingName); state.Entries.Add(nextName,adopted); adoptedAdded = true;
+                            replacement=ProtectedDid2ContactRouteJournal.Encode(state,networkId,current.AccountId.Span,instance);
+                            await RequireThresholdAdoptionGuardsAsync(recoveryToken).WaitAsync(recoveryToken).ConfigureAwait(false);
+#if DEEP_TEST_INTERNALS
+                            Did2ContactRouteTestHooks.Hit(Did2ContactRouteFailpoint.BeforeRecordedClosure);
+#endif
+                            var closedSlot=ProtectedDid2ContactRenewalClosure.ClosedSlot(pendingIntent);
+                            var originSlot=ProtectedDid2ContactRenewalClosure.OriginSlot(SHA256.HashData(next.Record(12).Span));
+                            if(!await storage.CompareExchangeAndInsertAsync(ProtectedDid2ContactRouteJournal.Slot,snapshot!,replacement,
+                                [new(closedSlot,closureBytes),new(originSlot,origin)],recoveryToken).ConfigureAwait(false))throw new IOException("Recorded renewal closure lost its exact protected journal comparison.");
+#if DEEP_TEST_INTERNALS
+                            Did2ContactRouteTestHooks.Hit(Did2ContactRouteFailpoint.AfterRecordedClosure);
+#endif
+                            using var readback=await storage.ReadOwnedBatchAsync([ProtectedDid2ContactRouteJournal.Slot,closedSlot,originSlot],recoveryToken).ConfigureAwait(false);
+                            if(readback[0] is null || readback[1] is null || readback[2] is null || !readback[0]!.Use(bytes=>FixedRoute(bytes,replacement)) ||
+                                !readback[1]!.Use(bytes=>FixedRoute(bytes,closureBytes)) || !readback[2]!.Use(bytes=>FixedRoute(bytes,origin)))throw new CryptographicException("Recorded renewal closure independent readback differs.");
+                            CryptographicOperations.ZeroMemory(snapshot!);snapshot=replacement.ToArray();
+                            CryptographicOperations.ZeroMemory(pendingIntent);pendingIntent=nextIntent.ToArray();pendingName=nextName;entry=adopted;
+                            routeRequest=nextRequest;
+#if DEEP_TEST_INTERNALS
+                            Did2ContactRouteTestHooks.Hit(Did2ContactRouteFailpoint.AfterRecordedClosureReadback);
+#endif
+                        }
+                        finally{oldEntry.Dispose();if(!adoptedAdded)adopted.Dispose();if(replacement is not null)CryptographicOperations.ZeroMemory(replacement);CryptographicOperations.ZeroMemory(closureBytes);CryptographicOperations.ZeroMemory(origin);CryptographicOperations.ZeroMemory(nextIntent);CryptographicOperations.ZeroMemory(baseHash);}
+                    }
+                    finally{CryptographicOperations.ZeroMemory(scalar);CryptographicOperations.ZeroMemory(keyId);CryptographicOperations.ZeroMemory(nonce);}
+                }
+                finally{CryptographicOperations.ZeroMemory(exactResponse);}
+            }
             if (!routeRequest.HasPredecessor || !FixedRoute(routeRequest.ExactPredecessorXir1V2.Span, prior.Record(5).Span) ||
                 !FixedRoute(routeRequest.ExactPredecessorRouteClosure.Span, prior.Record(6).Span))
                 throw new CryptographicException("Pending renewal substituted its committed predecessor.");
             Did2ContactRouteRequestCustody.RequireCurrent(routeRequest, authorization, fresh.Network);
-            await DeepIdV2ContactRouteVerifier.VerifyAdvertisementSuccessorAsync(authorization, fresh.Network,
-                fresh.Authority, priorRoute, entry.Record(1), source.RendezvousTrustedTime, ct).ConfigureAwait(false);
+            if(recordedHistory is null)
+                await DeepIdV2ContactRouteVerifier.VerifyAdvertisementSuccessorAsync(authorization, fresh.Network,
+                    fresh.Authority, priorRoute, entry.Record(1), source.RendezvousTrustedTime, ct).ConfigureAwait(false);
+            else
+                await DeepIdV2ContactRouteVerifier.VerifyAdvertisementAfterRecordedHistoryAsync(authorization,fresh.Network,fresh.Authority,
+                    recordedHistory,entry.Record(1),source.RendezvousTrustedTime,ct).ConfigureAwait(false);
             if (entry.Phase == 1)
             {
                 using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 var acquisitionStarted = Stopwatch.GetTimestamp();
                 deadline.CancelAfter(RenewalThresholdAcquisitionBudget);
                 var dispatch = await DispatchAsync(deadline.Token).ConfigureAwait(false);
-                var response = await thresholdSource.FetchAsync(routeRequest, authorization, fresh.Network, fresh.Authority,
-                    source.RendezvousTrustedTime, dispatch, deadline.Token).AsTask().WaitAsync(deadline.Token).ConfigureAwait(false) ??
-                    throw new CryptographicException("The route successor threshold response is absent.");
+                ContactRouteAuthorityWireResponse response;
+                if(recordedHistory is null)
+                    response=await thresholdSource.FetchAsync(routeRequest,authorization,fresh.Network,fresh.Authority,source.RendezvousTrustedTime,dispatch,deadline.Token).AsTask().WaitAsync(deadline.Token).ConfigureAwait(false);
+                else
+                {
+                    var recovery=thresholdSource as IDid2ContactRouteRecoverySource ?? throw new CryptographicException("The owned route recovery transport is unavailable.");
+                    var outer=await DeepIdV2ContactRouteAuthor.AuthorRecoveryRequestAsync(authorization,fresh.Network,fresh.Authority,current.Verified.DeviceSecrets,
+                        DeepIdV2ContactRouteRecoveryMode.IssueAfterRecordedHistory,routeRequest,recordedHistory.Pairs,source.RendezvousTrustedTime,deadline.Token).ConfigureAwait(false);
+                    response=await recovery.RecoverAsync(outer,dispatch,deadline.Token).AsTask().WaitAsync(deadline.Token).ConfigureAwait(false);
+                }
+                if(response is null)throw new CryptographicException("The route successor threshold response is absent.");
                 _ = ContactRouteAuthorityWireCodec.EncodeResponse(routeRequest, response);
                 // Own the exact response once. A future-start hint schedules
                 // only this response; it is never adoption/signing authority.
@@ -156,7 +249,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     {
                         verified = await DeepIdV2ContactRouteVerifier.VerifyRetainedThresholdAsync(authorization, fresh.Network,
                             fresh.Authority, routeRequest, threshold, issuanceHead,
-                            source.RendezvousTrustedTime, deadline.Token).AsTask().WaitAsync(deadline.Token).ConfigureAwait(false);
+                            source.RendezvousTrustedTime, deadline.Token, recordedHistory).AsTask().WaitAsync(deadline.Token).ConfigureAwait(false);
                         break;
                     }
                     catch (DeepIdV2RouteNotBeforeException future) when (
@@ -194,12 +287,12 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
 #endif
             }
             var route = await DeepIdV2ContactRouteVerifier.VerifyAsync(authorization, fresh.Network, fresh.Authority,
-                entry.Record(5), entry.Record(6), source.RendezvousTrustedTime, ct).ConfigureAwait(false);
+                entry.Record(5), entry.Record(6), source.RendezvousTrustedTime, ct, issuance.RecordedHistory).ConfigureAwait(false);
             if (entry.Phase == 3)
             {
                 var contactCandidate = await DeepIdV2ContactObjectAuthor.AuthorRetainedSuccessorAsync(route, issuance,
                     priorObject, current.Verified.DeviceSecrets, [DeepIdV2PreKeyServiceCodec.Decode(staged.ExactXps1.Span)],
-                    plan.Profile, capability, ct).ConfigureAwait(false);
+                    plan.Profile, capability, ct, serviceHistory).ConfigureAwait(false);
                 await AdoptAsync(entry.WithContactObject(contactCandidate, networkId, current.AccountId.Span), ct).ConfigureAwait(false);
 #if DEEP_TEST_INTERNALS
                 Did2ContactRouteTestHooks.Hit(Did2ContactRouteFailpoint.AfterContactObject);
