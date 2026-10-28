@@ -414,7 +414,8 @@ public sealed class ContactResolvePrivacyPathProvider : IPrivacyMailboxPathProvi
             await retainedReadRequest.EnsureCurrentAsync(cancellationToken).ConfigureAwait(false);
         }
         var currentViewCoordination = request.RequestKind == ContactServiceRequestKind.CoordinateContact &&
-            ContactCoordinationOnionCodec.DecodeRequest(request.ExactRequest.Span).Target == ContactCoordinationTarget.PublicationCurrent;
+            ContactCoordinationOnionCodec.DecodeRequest(request.ExactRequest.Span).Target is
+                ContactCoordinationTarget.PublicationCurrent or ContactCoordinationTarget.RouteRecovery;
         var projectionMatches = currentViewCoordination
             ? Fixed(request.ViewHash.Span, placement.ViewHash.Span)
             : network.BindsProjection(request.ProjectionReference);
