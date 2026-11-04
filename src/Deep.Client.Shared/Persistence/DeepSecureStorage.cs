@@ -252,9 +252,11 @@ public interface IDeepSecureStorage
         CancellationToken cancellationToken = default);
 
     /// <summary>Atomically checks an exact existing guard and deletes only the
-    /// requested other slots. The guard is never replaced or deleted. False
-    /// means missing/conflicting guard and no mutation; true also covers an
-    /// idempotent no-op when every requested slot is already absent. This is a
+    /// requested slots, which may include the guard exactly once. The exact
+    /// predecessor comparison remains mandatory before any deletion. False
+    /// means missing/conflicting guard and no mutation; deleting the guard
+    /// therefore makes a subsequent call return false. With a retained guard,
+    /// true also covers a no-op when every requested slot is already absent. This is a
     /// storage transaction primitive, not retirement or currentness authority.</summary>
     Task<bool> CompareAndDeleteAsync(string guardSlot, ReadOnlyMemory<byte> expected,
         IReadOnlyList<string> slots, CancellationToken cancellationToken = default);

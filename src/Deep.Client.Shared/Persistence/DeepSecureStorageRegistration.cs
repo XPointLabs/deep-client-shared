@@ -150,8 +150,8 @@ internal sealed class DeepSecureStorageGuardedDeletion : IDisposable
         foreach (var slot in slots)
         {
             DeepSecureStorageRegistration.ValidateSlot(slot);
-            if (slot == guardSlot || !unique.Add(slot))
-                throw new ArgumentException("Guarded deletion repeats a slot or selects its guard.", nameof(slots));
+            if (!unique.Add(slot))
+                throw new ArgumentException("Guarded deletion repeats a slot.", nameof(slots));
             if (unique.Count > count)
                 throw new ArgumentException("Guarded deletion changed its declared count.", nameof(slots));
         }
