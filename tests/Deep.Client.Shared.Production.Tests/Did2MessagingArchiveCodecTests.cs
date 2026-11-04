@@ -109,7 +109,7 @@ public sealed class Did2MessagingArchiveCodecTests
             case "rowid-zero": Put64(raw, 16, 0); break;
             case "rowid-overflow": Put64(raw, 16, (ulong)long.MaxValue + 1); break;
             case "ordinal-overflow": Put64(raw, 8, (ulong)long.MaxValue + 1); break;
-            case "unknown-kind": raw[0] = 3; break;
+            case "unknown-kind": raw[0] = 4; break;
             case "reserved": raw[7] = 1; break;
             case "zero-operation": raw.AsSpan(24, 32).Clear(); break;
             case "initial-operation": raw[0] = 1; raw[1] = 0; Put64(raw, 8, 1); Put64(raw, 16, 1); break;

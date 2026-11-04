@@ -32,8 +32,7 @@ internal sealed partial class Did2MessagingSqlJournal
         var result = new Dictionary<ulong, Did2MessagingArchiveOriginal>();
         try
         {
-            foreach (var row in rows) if (row.Reference.Direction == 1) result.Add(row.Reference.Ordinal,
-                new(row.Reference, row.Metadata.ToArray(), row.Envelope.ToArray(), row.Plaintext.ToArray()));
+            foreach (var row in rows) AddArchiveAuthoredReference(result, row.Reference, tx);
             foreach (var kind in new[] { Did2MessagingArchiveReducer.ReferenceKind.Consent,
                 Did2MessagingArchiveReducer.ReferenceKind.OwnHead, Did2MessagingArchiveReducer.ReferenceKind.OwnPrevious })
             {
@@ -41,6 +40,8 @@ internal sealed partial class Did2MessagingSqlJournal
                 if (reference.Kind == 2 && reference.Direction == 1 && !result.ContainsKey(reference.Ordinal))
                     result.Add(reference.Ordinal, ReadArchiveOriginal(reference, tx));
             }
+            AddArchiveAuthoredReference(result, before.Reference(Did2MessagingArchiveReducer.ReferenceKind.OwnDecision), tx);
+            AddArchiveAuthoredReference(result, before.Reference(Did2MessagingArchiveReducer.ReferenceKind.PeerDecision), tx);
             return result.Values.ToArray();
         }
         catch { foreach (var row in result.Values) row.Dispose(); throw; }
@@ -67,13 +68,13 @@ internal sealed partial class Did2MessagingSqlJournal
             }
             if (count > historyRoot.HistoryCount || rows.Count < 32 && count != historyRoot.HistoryCount)
                 throw new CryptographicException("Full unindexed semantic source audit changes its authenticated event count.");
-            return new(replay.Complete(), cursor, count, new ulong[6], rows.Count < 32);
+            return new(replay.Complete(), cursor, count, new ulong[8], rows.Count < 32);
 
             ReadOnlyMemory<byte> Resolve(Did2MessagingArchiveReference reference)
             {
                 if (reference.Kind == 1) return initial.Hello;
                 var row = ReadArchiveOriginal(reference, tx); borrowed.Add(row);
-                if (reference.Direction == 2) return row.Plaintext;
+                if (reference.Kind == 3 || reference.Direction == 2) return row.Plaintext;
                 if (reference.Direction != 1 || !authored.TryGetValue(reference.Ordinal, out var own) || !Fixed(SHA256.HashData(own.Span), row.Metadata.AsSpan(300, 32)))
                     throw new CryptographicException("Unindexed semantic source audit lost its independent authored original.");
                 return own;
@@ -114,7 +115,7 @@ internal sealed partial class Did2MessagingSqlJournal
         var rows = ReadArchiveOriginalBatch(cursor, root.Basis.Ordinal, tx);
         var borrowed = new List<Did2MessagingArchiveOriginal>();
         var initial = root.Basis.Ordinal == 0 ? (Metadata: Array.Empty<byte>(), Hello: Array.Empty<byte>()) : ReadArchiveInitialSource(tx);
-        var families = new ulong[6];
+        var families = new ulong[8];
         try
         {
             var replay = new Did2MessagingArchiveSemanticReplay(scope, root.Basis, before, Observe,
@@ -133,7 +134,7 @@ internal sealed partial class Did2MessagingSqlJournal
             {
                 if (reference.Kind == 1) return initial.Hello;
                 var row = ReadArchiveOriginal(reference, tx); borrowed.Add(row);
-                if (reference.Direction == 2) return row.Plaintext;
+                if (reference.Kind == 3 || reference.Direction == 2) return row.Plaintext;
                 if (reference.Direction != 1 || !authored.TryGetValue(reference.Ordinal, out var own) ||
                     !Fixed(SHA256.HashData(own.Span), row.Metadata.AsSpan(300, 32))) throw new CryptographicException("Full archive reducer lost its selected authored source.");
                 return own;
@@ -141,6 +142,11 @@ internal sealed partial class Did2MessagingSqlJournal
             void Observe(Did2MessagingArchiveFamily family, ReadOnlySpan<byte> selector, ReadOnlySpan<byte> observation)
             {
                 var exact = ReadArchiveFact(family, selector, tx) ?? throw new CryptographicException("Full archive omitted a qualified source fact.");
+                if (family is Did2MessagingArchiveFamily.RouteHistory or Did2MessagingArchiveFamily.RouteControl)
+                {
+                    if (VerifyArchiveRouteObservation(family, selector, exact, observation)) families[(int)family - 1] = checked(families[(int)family - 1] + 1);
+                    return;
+                }
                 var first = Did2MessagingArchiveReference.Decode(exact.AsSpan(0, 88), false);
                 var source = Did2MessagingArchiveReference.Decode(observation[..88], false);
                 if (first.Ordinal > source.Ordinal) throw new CryptographicException("Full archive did not select the earliest qualified source.");
@@ -183,7 +189,7 @@ internal sealed partial class Did2MessagingSqlJournal
         foreach (var kind in Enum.GetValues<Did2MessagingArchiveReducer.ReferenceKind>())
         {
             var reference = reducer.Reference(kind);
-            if (reference.Kind == 2 && reference.Ordinal > progress.Cursor)
+            if (reference.Kind is 2 or 3 && reference.Ordinal > progress.Cursor)
                 throw new CryptographicException("A staging reducer names an event beyond protected progress.");
         }
         var counts = VerifyArchiveTree(progress.PatriciaHash, progress.TargetBasis.Ordinal, progress.Cursor);
@@ -214,7 +220,7 @@ internal sealed partial class Did2MessagingSqlJournal
     {
         RequireCipherPolicy(); ValidateSchema();
         using var tx = connection.BeginTransaction(deferred: true); RequireAllCipherPages(tx);
-        var counts = new ulong[6];
+        var counts = new ulong[8];
         var stack = new Stack<(byte[] Hash, byte[] Prefix, int Bits)>();
         if (!Fixed(rootHash, Did2MessagingArchiveEncoding.EmptyHash(scope))) stack.Push((rootHash.ToArray(), new byte[32], 0));
         while (stack.TryPop(out var frame))
@@ -231,8 +237,13 @@ internal sealed partial class Did2MessagingSqlJournal
                 continue;
             }
             counts[(int)node.Family - 1] = checked(counts[(int)node.Family - 1] + 1);
-            var first = Did2MessagingArchiveReference.Decode(node.Value[..88], false); first.RequireAtBasis(basisOrdinal);
-            VerifyWitness(first, node, false);
+            var first = Did2MessagingArchiveReference.Decode(node.Value[..88], node.Family == Did2MessagingArchiveFamily.RouteHistory); first.RequireAtBasis(basisOrdinal);
+            if (!first.IsAbsent) VerifyWitness(first, node, false);
+            if (node.Family == Did2MessagingArchiveFamily.RouteHistory)
+            {
+                var candidate = Did2RouteHistorySource.Decode(node.Value.Slice(120, 96));
+                if (!candidate.IsAbsent) { candidate.Reference.RequireAtBasis(basisOrdinal); VerifyWitness(candidate.Reference, node, true); }
+            }
             var offset = node.Family switch { Did2MessagingArchiveFamily.PeerAuthoredPosition => 120, Did2MessagingArchiveFamily.IncomingAttachment => 88, _ => 0 };
             if (offset != 0)
             {
@@ -244,7 +255,7 @@ internal sealed partial class Did2MessagingSqlJournal
 
         void VerifyWitness(Did2MessagingArchiveReference reference, Did2MessagingArchivePatricia.Node leaf, bool second)
         {
-            if (reference.Kind == 2 && reference.Ordinal > lastEventOrdinal)
+            if (reference.Kind is 2 or 3 && reference.Ordinal > lastEventOrdinal)
                 throw new CryptographicException("Archive staging leaf names an event beyond protected progress.");
             if (reference.Kind == 1)
             {
@@ -260,12 +271,21 @@ internal sealed partial class Did2MessagingSqlJournal
                 return;
             }
             using var row = ReadArchiveOriginal(reference, tx);
+            if (leaf.Family is Did2MessagingArchiveFamily.RouteHistory or Did2MessagingArchiveFamily.RouteControl)
+            { VerifyArchiveRouteWitness(reference, row, leaf, second, tx); return; }
             if (leaf.Family == Did2MessagingArchiveFamily.Operation && !Fixed(leaf.Selector, reference.Operation) ||
                 leaf.Family == Did2MessagingArchiveFamily.Ordinal && BinaryPrimitives.ReadUInt64BigEndian(leaf.Selector) != reference.Ordinal ||
                 leaf.Family == Did2MessagingArchiveFamily.FirstIncomingEvent && (reference.Direction != 2 || !Fixed(leaf.Selector, row.Metadata.AsSpan(300, 32))))
                 throw new CryptographicException("Archive leaf differs from its actual typed source selector.");
             if (leaf.Family is Did2MessagingArchiveFamily.PeerAuthoredPosition or Did2MessagingArchiveFamily.IncomingAttachment or Did2MessagingArchiveFamily.QualifiedPeerRoute)
             {
+                if (leaf.Family == Did2MessagingArchiveFamily.QualifiedPeerRoute && reference.Kind == 3)
+                {
+                    using var decision = ReadRouteHistoryDecision(reference, tx);
+                    var closure = ReadQualifiedDecisionClosure(decision, tx);
+                    if (!Fixed(leaf.Selector, SHA256.HashData(closure.ExactBytes.Span))) throw new CryptographicException("Archive qualified decision changes its actual endpoint.");
+                    return;
+                }
                 if (reference.Direction != 2) throw new CryptographicException("Archive peer witness has an outgoing source.");
                 var message = ApplicationCoreCodec.DecodeDmc2(row.Plaintext);
                 try
@@ -291,7 +311,7 @@ internal sealed partial class Did2MessagingSqlJournal
         ulong count, IReadOnlyList<ulong> sourceFamilies, IReadOnlyList<ulong> treeFamilies)
     {
         RequireActualArchiveAuditRoot(root);
-        if (count != root.ArchiveCount || sourceFamilies.Count != 6 || treeFamilies.Count != 6 ||
+        if (count != root.ArchiveCount || sourceFamilies.Count != 8 || treeFamilies.Count != 8 ||
             sourceFamilies.Where((value, index) => value != treeFamilies[index]).Any() ||
             sourceFamilies[0] != count || sourceFamilies[2] != count || !Fixed(root.SummaryHash, reducer.Digest.Span))
             throw new CryptographicException("Archive source/tree/reducer coverage differs after independent full replay.");

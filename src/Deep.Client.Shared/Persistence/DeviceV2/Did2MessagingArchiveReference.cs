@@ -34,7 +34,7 @@ internal sealed class Did2MessagingArchiveReference
             // is a reference tag, never the initial metadata's claim operation.
             if (raw[1] != 0 || ordinal != 1 || rowId != 1 || !Zero(raw.Slice(24, 32))) throw Bad();
         }
-        else if (raw[0] != 2 || raw[1] is < 1 or > 4 || ordinal == 0 || ordinal > long.MaxValue ||
+        else if ((raw[0] == 2 ? raw[1] is < 1 or > 4 : raw[0] != 3 || raw[1] != 0) || ordinal == 0 || ordinal > long.MaxValue ||
             rowId == 0 || rowId > long.MaxValue || Zero(raw.Slice(24, 32))) throw Bad();
         return new(raw.ToArray());
     }
@@ -55,6 +55,16 @@ internal sealed class Did2MessagingArchiveReference
     {
         RequireHash(operation); RequireHash(metadataHash);
         var raw = new byte[Bytes]; raw[0] = 2; raw[1] = direction;
+        BinaryPrimitives.WriteUInt64BigEndian(raw.AsSpan(8), ordinal);
+        BinaryPrimitives.WriteUInt64BigEndian(raw.AsSpan(16), rowId);
+        operation.CopyTo(raw.AsSpan(24)); metadataHash.CopyTo(raw.AsSpan(56)); return Decode(raw, false);
+    }
+
+    internal static Did2MessagingArchiveReference Decision(ulong ordinal, ulong rowId,
+        ReadOnlySpan<byte> operation, ReadOnlySpan<byte> metadataHash)
+    {
+        RequireHash(operation); RequireHash(metadataHash);
+        var raw = new byte[Bytes]; raw[0] = 3;
         BinaryPrimitives.WriteUInt64BigEndian(raw.AsSpan(8), ordinal);
         BinaryPrimitives.WriteUInt64BigEndian(raw.AsSpan(16), rowId);
         operation.CopyTo(raw.AsSpan(24)); metadataHash.CopyTo(raw.AsSpan(56)); return Decode(raw, false);

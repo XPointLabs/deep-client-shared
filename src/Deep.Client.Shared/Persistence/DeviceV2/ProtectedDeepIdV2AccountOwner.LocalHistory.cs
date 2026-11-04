@@ -27,7 +27,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             if (!nativeAdmissionInProgress)
                 _ = await EnsureNativeArchiveAdmissionUnderLeaseAsync(current, scope, held, ct).ConfigureAwait(false);
             var opened = await SqliteDeepIdV2AccountGeneration.OpenOrdinaryMessagingUnderLeaseAsync(
-                storage, sqlStatePath, current, scope, ct).ConfigureAwait(false);
+                storage, sqlStatePath, current, scope, ct, configureRouteHistory: configured => ConfigureRouteHistoryDecisionRecovery(configured, held)).ConfigureAwait(false);
             try
             {
                 await RequireLocalHistoryCatalogAsync(catalog.Exact, ct).ConfigureAwait(false);

@@ -40,7 +40,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     private sealed record OwnedPeerRouteHistory(ParsedDeepIdV2ContactMailboxRoute Original,
         ParsedContactRouteClosure Head, ReadOnlyMemory<byte> HeadEventHash, ReadOnlyMemory<byte> NativeFloor,
         ReadOnlyMemory<byte> PreviousRoute, ReadOnlyMemory<byte> PreviousEventHash, ReadOnlyMemory<byte> LastUpdate,
-        bool Faulted, Func<ulong, CancellationToken, Task<bool>> HasConsent, ReadOnlyMemory<byte> InboundXur1);
+        bool Faulted, Func<ulong, CancellationToken, Task<bool>> HasConsent, ReadOnlyMemory<byte> InboundXur1,
+        VerifiedDeepIdV2ContactRouteHistory? PagedEndpoint = null);
 
     private async Task<OwnedPeerRouteHistory> ReadNativePeerRouteHistoryUnderLeaseAsync(
         OwnedDid2MessagingStorage opened, ParsedDeepIdV2ContactMailboxRoute original,
@@ -51,6 +52,11 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     {
         held.RequireOwner(lease); ct.ThrowIfCancellationRequested();
         var scope = opened.Scope;
+        var paged = await ReadPagedLiveRouteHistoryUnderLeaseAsync(opened, 2, own, peer, source, held, ct).ConfigureAwait(false);
+        if (paged is not null)
+            return new(original, ContactRouteClosureCodec.Decode(paged.Facts.ExactCompletedRoute.Span), paged.EventHash,
+                paged.NativeFloor, ReadOnlyMemory<byte>.Empty, ReadOnlyMemory<byte>.Empty, paged.Announcement,
+                false, hasConsent, inboundXur1.ToArray(), paged.Facts);
         var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
         var head = original.Route;
         byte[] headHash = SHA256.HashData(originalEvent.Span), previousHash = [], previousRoute = [], updateBytes = [];
@@ -90,6 +96,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     if (message.ParsedPayload is AttachmentOfferDmc2Payload offer) offer.Manifest.Dispose();
                     continue;
                 }
+                if (message.ParsedPayload is ContactRouteHistoryDmc2Payload) continue;
                 if (message.ParsedPayload is not ContactRouteUpdateDmc2Payload update)
                     throw new CryptographicException("Native private route update has no canonical payload.");
                 // The first outcome is authenticated by the same native header,
@@ -131,6 +138,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 throw new CryptographicException("Native route history changed during private route verification.");
             using var readback = await ReadNativeRouteSnapshotAsync(opened, floor, own: false, held, ct).ConfigureAwait(false);
             ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
+            await RequireLegacyHistoryLiveHeadUnderLeaseAsync(opened, 2, headHash, held, ct).ConfigureAwait(false);
             return new(original, head, headHash.ToArray(), floor.Exact.ToArray(), previousRoute.ToArray(),
                 previousHash.ToArray(), updateBytes.ToArray(), faulted, hasConsent, inboundXur1.ToArray());
         }
@@ -157,6 +165,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 own.Authority, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
             route = initial.Route;
         }
+        else if (history.PagedEndpoint is not null)
+            route = await DeepIdV2ContactRouteUpdateVerifier.VerifyCurrentHistoryAnnouncementAsync(history.PagedEndpoint,
+                history.LastUpdate, peer, own.Network, own.Authority, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
         else
             route = await DeepIdV2ContactRouteUpdateVerifier.VerifyCurrentSuccessorAsync(history.Original, peer,
                 own.Network, own.Authority, source.RendezvousTrustedTime, history.PreviousRoute, history.PreviousEventHash,
@@ -164,7 +175,14 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
         if (!FixedRoute(floor.Exact.Span, history.NativeFloor.Span))
             throw new CryptographicException("Native route predecessor changed during current delivery verification.");
-        using var finalSources = await ReadNativeRouteSnapshotAsync(opened, floor, own: false, held, ct).ConfigureAwait(false);
+        if (history.PagedEndpoint is not null)
+        {
+            var final = await ReadPagedLiveRouteHistoryUnderLeaseAsync(opened, 2, own, peer, source, held, ct).ConfigureAwait(false) ??
+                throw new CryptographicException("Current route lost its adopted count8 endpoint.");
+            if (!FixedRoute(final.NativeFloor.Span, history.NativeFloor.Span) || !FixedRoute(final.EventHash.Span, history.HeadEventHash.Span))
+                throw new CryptographicException("Current route changed during final native source rejoin.");
+        }
+        else { using var finalSources = await ReadNativeRouteSnapshotAsync(opened, floor, own: false, held, ct).ConfigureAwait(false); }
         ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
         return new(history.Original, route, route.LocatorHash.ToArray(), history.HeadEventHash, history.NativeFloor, inputs);
     }

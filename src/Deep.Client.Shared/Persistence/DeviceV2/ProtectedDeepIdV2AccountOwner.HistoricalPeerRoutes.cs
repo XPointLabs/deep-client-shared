@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Security.Cryptography;
 using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.ContactV1;
+using Deep.Protocol.ContactV2;
 
 namespace Deep.Client.Shared.Persistence.DeviceV2;
 
@@ -158,7 +159,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                         head = ArchiveRouteClosure(archived.CanonicalBytes.Span); headSequence = archived.SenderClientSequence;
                         CryptographicOperations.ZeroMemory(headHash); headHash = archivedHead.EventHash.ToArray();
                     }
-                    else if (!FixedRoute(archivedHead.EventHash, headHash)) throw new CryptographicException("Historical archive initial peer head differs.");
+                    else if (archived.ParsedPayload is not ContactRouteHistoryDmc2Payload && !FixedRoute(archivedHead.EventHash, headHash))
+                        throw new CryptographicException("Historical archive initial peer head differs.");
                 }
             }
             ParsedContactRouteClosure? selected = FixedRoute(head.ExactBytes.Span, expected.ExactBytes.Span) ? head : null;
@@ -174,6 +176,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     continue;
                 }
                 Did2RouteProcessingMetadata.RequireReceivedEvent(native.RouteProcessing, message);
+                if (message.ParsedPayload is ContactRouteHistoryDmc2Payload) continue;
                 if (native.RouteProcessing[0] == 2) { faulted = true; continue; }
                 if (consentOrdinal == 0 || native.Ordinal <= consentOrdinal || (policy & ContactPolicy.AllowRouteUpdates) == 0)
                     throw new CryptographicException("Historical accepted route contradicts native consent.");

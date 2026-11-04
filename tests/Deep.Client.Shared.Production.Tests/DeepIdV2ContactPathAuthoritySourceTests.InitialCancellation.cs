@@ -331,7 +331,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             var catalog = new ProtectedDid2MessagingSessionCatalog(storage, scope.Network, scope.LocalAccount, scope.Instance);
             scope = await catalog.RegisterAsync(senderSeed, default);
             if (initialize)
-                using (var opened = await SqliteDeepIdV2AccountGeneration.OpenRegisteredMessagingUnderLeaseAsync(storage,
+                using (var opened = await SqliteDeepIdV2AccountGeneration.InspectRegisteredEmptyMessagingForTestAsync(storage,
                     Path.Combine(directory, "deep-store-v2-account.dsv2"), scope.Network.ToArray(), scope.LocalAccount.ToArray(), scope, default))
                     Assert.Equal(Did2MessagingFloor.Empty(scope).Exact.ToArray(), (await opened.Custody.ReconcileAsync(default)).Exact.ToArray());
             return scope;

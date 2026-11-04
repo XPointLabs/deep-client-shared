@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using Deep.Protocol.ApplicationCore;
+using Deep.Protocol.ContactV2;
 
 namespace Deep.Client.Shared.Persistence.DeviceV2;
 
@@ -12,7 +13,7 @@ internal static class Did2RouteProcessingMetadata
 
     internal static void RequireShape(ReadOnlySpan<byte> exact)
     {
-        if (exact.Length != Bytes || exact[0] > 2 || exact.Slice(1, 7).IndexOfAnyExcept((byte)0) >= 0)
+        if (exact.Length != Bytes || exact[0] > 3 || exact.Slice(1, 7).IndexOfAnyExcept((byte)0) >= 0)
             throw new InvalidDataException("Native route processing has an unknown closed shape.");
         if (exact[0] == 0)
         {
@@ -32,6 +33,8 @@ internal static class Did2RouteProcessingMetadata
         var route = message.ContentKind == Dmc2ContentKind.ContactRouteUpdate;
         if (route != (exact[0] != 0))
             throw new InvalidDataException("Native route processing differs from its authenticated control kind.");
+        if ((message.ParsedPayload is ContactRouteHistoryDmc2Payload) != (exact[0] == 3))
+            throw new InvalidDataException("Paged route controls require their distinct immutable staged outcome.");
         if (route && exact[0] == 1 &&
             (message.CreatedAtUnixMilliseconds > BinaryPrimitives.ReadUInt64BigEndian(exact[16..]) ||
              message.ExpiresAtUnixMilliseconds == 0 ||

@@ -54,7 +54,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     private async Task<DirectTextOutboxEntry> PrepareDirectAuthoredAsync(ulong trustedUnixSeconds,
         IDeepMlDsa65Verifier verifier, Did2MessagingSessionScope scope, ReadOnlyMemory<byte>? operation,
         string? text, ReadOnlyMemory<byte> assetOperation, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own,
-        VerifiedDeepIdV2DirectoryFreshness peer, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct, bool routeUpdate = false)
+        VerifiedDeepIdV2DirectoryFreshness peer, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct, bool routeUpdate = false,
+        OwnedRouteHistoryCommand historyCommand = OwnedRouteHistoryCommand.Announcement,
+        ReadOnlyMemory<byte> historySelectionOperation = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         if (operation is { } retryOperation) ProtectedDph2PreClaimJournal.RequireIntent(retryOperation.Span);
@@ -66,10 +68,11 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         else if (assetOperation.IsEmpty) ArgumentNullException.ThrowIfNull(text);
         else { ProtectedDph2PreClaimJournal.RequireIntent(assetOperation.Span); if (text is not null) throw new ArgumentException("An ordinary command has one closed payload kind."); }
         var op = operation?.ToArray() ?? []; byte[] root = [], pendingBytes = [], stableBytes = [];
+        var historySelection = historySelectionOperation.ToArray();
         DirectTextOutboxEntry? result = null;
         ParsedDam1? manifest = null;
         OwnPermanentMailboxPublication? publication = null;
-        OwnNativeRouteHead? advertised = null;
+        byte[] authoredRouteFloor = [];
         try
         {
             using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
@@ -97,6 +100,17 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 throw new InvalidDataException("Protected text command custody is absent; no regeneration is permitted.");
             root = owner.Use(bytes => bytes.ToArray());
             using var journal = ProtectedDid2DirectTextJournal.Decode(root, scope.Network, scope.LocalAccount, scope.Instance);
+            if (operation is null && routeUpdate && historyCommand != OwnedRouteHistoryCommand.Announcement)
+            {
+                var selected = await SelectRouteHistoryCommandUnderLeaseAsync(current, opened, application, journal,
+                    scope, historyCommand, historySelection, own, peer, source, held, first, ct).ConfigureAwait(false);
+                if (selected is not null)
+                {
+                    CryptographicOperations.ZeroMemory(op); op = selected;
+                    operation = op;
+                }
+                floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
+            }
             var name = Convert.ToHexString(op);
             journal.Entries.TryGetValue(name, out var entry);
             if (operation is null && entry is not null)
@@ -141,13 +155,17 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                         // history selects this payload. Existing commands above
                         // resume exactly, without reopening/reminting latest state.
                         publication = await OpenOwnPermanentMailboxPublicationUnderLeaseAsync(current, held, source, own, ct).ConfigureAwait(false);
-                        advertised = await ReadOwnNativeRouteHeadUnderLeaseAsync(current, held, opened, application,
-                            journal, own, peer, source, ct).ConfigureAwait(false);
-                        var control = await ApplicationCoreCodec.AuthorVerifiedContactRouteUpdateAsync(publication.Route,
-                            advertised.Original, advertised.ExactRoute, advertised.EventHash, scope.Relationship.ToArray(),
-                            scope.Conversation.ToArray(), logical, journal.NextSequence(scope), source.RendezvousTrustedTime, ct).ConfigureAwait(false);
+                        authored = historyCommand switch
+                        {
+                            OwnedRouteHistoryCommand.Request => await AuthorOwnRouteHistoryRequestUnderLeaseAsync(current, opened,
+                                publication, logical, journal.NextSequence(scope), own, peer, source, held, ct).ConfigureAwait(false),
+                            OwnedRouteHistoryCommand.Response => await AuthorOwnRouteHistoryResponseUnderLeaseAsync(current, opened,
+                                publication, historySelection, logical, journal.NextSequence(scope), own, peer, source, held, ct).ConfigureAwait(false),
+                            _ => await AuthorOwnRouteHistoryUpdateUnderLeaseAsync(current, opened, publication,
+                                logical, journal.NextSequence(scope), own, peer, source, held, ct).ConfigureAwait(false)
+                        };
+                        authoredRouteFloor = (await opened.Custody.ReadCurrentFloorAsync(ct).ConfigureAwait(false)).Exact.ToArray();
                         await publication.RecheckAsync(ct).ConfigureAwait(false);
-                        authored = control.Record;
                     }
                     else
                     {
@@ -204,7 +222,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             {
                 await publication.RecheckAsync(ct).ConfigureAwait(false);
                 var native = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
-                if (!FixedRoute(native.Exact.Span, advertised!.NativeFloor.Span))
+                if (!FixedRoute(native.Exact.Span, authoredRouteFloor))
                     throw new CryptographicException("Own route-control native predecessor changed during command adoption.");
                 var time = await publication.Route.ReadCurrentTimeAsync(ct).ConfigureAwait(false);
                 var controlExact = OwnedByteExports.TakeArray(result.ExactDmc2);
@@ -235,7 +253,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         finally
         {
             publication?.Dispose(); manifest?.Dispose(); result?.Dispose();
-            foreach (var bytes in new[] { op, root, pendingBytes, stableBytes }) CryptographicOperations.ZeroMemory(bytes);
+            foreach (var bytes in new[] { op, root, pendingBytes, stableBytes, authoredRouteFloor, historySelection }) CryptographicOperations.ZeroMemory(bytes);
         }
     }
 
@@ -250,11 +268,17 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         var message = ApplicationCoreCodec.DecodeDmc2(exact);
         try
         {
+            var relationship = message.ParsedPayload switch
+            {
+                ContactRouteUpdateDmc2Payload update => update.RelationshipId,
+                ContactRouteHistoryDmc2Payload history => history.RelationshipId,
+                _ => ReadOnlyMemory<byte>.Empty
+            };
             if (requested is not null || message.ContentKind != Dmc2ContentKind.ContactRouteUpdate ||
-                message.ParsedPayload is not ContactRouteUpdateDmc2Payload update ||
+                relationship.IsEmpty ||
                 message.Flags != Dmc2Flags.None || message.ReplyToLogicalMessageId.Length != 0 ||
                 message.ExpiresAtUnixMilliseconds == 0 ||
-                !FixedRoute(update.RelationshipId.Span, scope.Relationship) ||
+                !FixedRoute(relationship.Span, scope.Relationship) ||
                 !FixedRoute(message.NetworkId.Span, scope.Network) ||
                 !FixedRoute(message.ConversationId.Span, scope.Conversation) ||
                 !FixedRoute(message.SenderAccountId.Span, scope.LocalAccount) ||

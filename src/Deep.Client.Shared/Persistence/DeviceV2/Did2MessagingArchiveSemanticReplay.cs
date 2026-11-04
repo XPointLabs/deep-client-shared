@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.ContactV1;
 using Deep.Protocol.MessagingWire;
+using Deep.Protocol.ContactV2;
 
 namespace Deep.Client.Shared.Persistence.DeviceV2;
 
@@ -10,7 +11,7 @@ namespace Deep.Client.Shared.Persistence.DeviceV2;
 // It is never an admission path: the owner authenticates source roots, exact SQL
 // and outgoing authored counters before supplying bytes, then rechecks them after
 // every external edge. Selected consumers still verify actual originals on use.
-internal sealed class Did2MessagingArchiveSemanticReplay
+internal sealed partial class Did2MessagingArchiveSemanticReplay
 {
     internal delegate void ObserveFact(Did2MessagingArchiveFamily family, ReadOnlySpan<byte> selector, ReadOnlySpan<byte> value);
     internal delegate byte[]? ReadFact(Did2MessagingArchiveFamily family, ReadOnlySpan<byte> selector);
@@ -60,10 +61,11 @@ internal sealed class Did2MessagingArchiveSemanticReplay
     internal void Observe(Did2MessagingArchiveOriginal native, ReadOnlyMemory<byte> exactAuthored)
     {
         var reference = native.Reference;
-        if (reference.Kind != 2 || !Fixed(reference.MetadataHash, SHA256.HashData(native.Metadata))) throw Bad();
+        if (reference.Kind is not (2 or 3) || !Fixed(reference.MetadataHash, SHA256.HashData(native.Metadata))) throw Bad();
         observe(Did2MessagingArchiveFamily.Operation, reference.Operation, reference.Exact.Span);
         Span<byte> number = stackalloc byte[8]; BinaryPrimitives.WriteUInt64BigEndian(number, reference.Ordinal);
         observe(Did2MessagingArchiveFamily.Ordinal, number, reference.Exact.Span);
+        if (reference.Kind == 3) { ObserveDecision(native); return; }
         if (reference.Direction is 3 or 4) return;
         var exact = reference.Direction == 2 ? (ReadOnlyMemory<byte>)native.Plaintext : exactAuthored;
         if (exact.IsEmpty || !Fixed(SHA256.HashData(exact.Span), native.Metadata.AsSpan(300, 32))) throw Bad();
@@ -105,6 +107,7 @@ internal sealed class Did2MessagingArchiveSemanticReplay
                     reference.Ordinal, new byte[32], message.SenderClientSequence);
             }
             else if (message.ParsedPayload is ContactRouteUpdateDmc2Payload update) Promote(native, message, update);
+            else if (message.ParsedPayload is ContactRouteHistoryDmc2Payload page) ObservePage(native, message, page);
         }
         finally { if (message.ParsedPayload is AttachmentOfferDmc2Payload offer) offer.Manifest.Dispose(); }
     }
@@ -169,8 +172,8 @@ internal sealed class Did2MessagingArchiveSemanticReplay
     }
     internal Did2MessagingArchiveReducer Complete() => Did2MessagingArchiveReducer.Decode(reducer, scope);
     private ReadOnlyMemory<byte> Source(Did2MessagingArchiveReference reference) => reference.Kind == 1 ? initialHello : original(reference);
-    private Did2MessagingArchiveReference Get(Did2MessagingArchiveReducer.ReferenceKind kind) => Did2MessagingArchiveReference.Decode(reducer.AsSpan(256 + (int)kind * 88, 88));
-    private void Set(Did2MessagingArchiveReducer.ReferenceKind kind, Did2MessagingArchiveReference reference) => reference.Exact.Span.CopyTo(reducer.AsSpan(256 + (int)kind * 88));
+    private Did2MessagingArchiveReference Get(Did2MessagingArchiveReducer.ReferenceKind kind) => Did2MessagingArchiveReference.Decode(reducer.AsSpan(Did2MessagingArchiveReducer.ReferenceOffset(kind), 88));
+    private void Set(Did2MessagingArchiveReducer.ReferenceKind kind, Did2MessagingArchiveReference reference) => reference.Exact.Span.CopyTo(reducer.AsSpan(Did2MessagingArchiveReducer.ReferenceOffset(kind), 88));
     private void SetSequence(bool own, ulong value) => SetU64(own ? 880 : 888, value);
     private ulong U64(int offset) => BinaryPrimitives.ReadUInt64BigEndian(reducer.AsSpan(offset));
     private void SetU64(int offset, ulong value) => BinaryPrimitives.WriteUInt64BigEndian(reducer.AsSpan(offset), value);

@@ -37,10 +37,13 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     }
 
     private async Task<QualifiedArchiveAuthored> QualifyArchiveAuthoredAsync(Did2MessagingSessionScope scope,
-        IReadOnlyList<Did2MessagingArchiveOriginal> originals, HeldDeepIdV2AccountLease held, CancellationToken ct)
+        IReadOnlyList<Did2MessagingArchiveOriginal> originals, HeldDeepIdV2AccountLease held, CancellationToken ct,
+        int maximumOriginals = Did2RouteHistorySnapshot.MaximumCurrentAuthoredOriginals)
     {
         held.RequireOwner(lease);
-        if (originals.Count > 71 || originals.Any(row => row.Reference.Direction != 1))
+        if (maximumOriginals is not (Did2RouteHistorySnapshot.MaximumCurrentAuthoredOriginals or Did2RouteHistorySnapshot.MaximumCatchupAuthoredOriginals) ||
+            originals.Count > maximumOriginals ||
+            originals.Any(row => row.Reference.Kind != 2 || row.Reference.Direction != 1))
             throw new InvalidDataException("Authored qualification requires bounded outgoing actual originals.");
         var result = new QualifiedArchiveAuthored(scope);
         try

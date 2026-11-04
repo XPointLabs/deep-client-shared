@@ -48,7 +48,7 @@ internal sealed partial class Did2MessagingSqlJournal
         foreach (var metadata in headers)
         {
             ordinal = checked(ordinal + 1);
-            if (metadata[5] is 2 or 5)
+            if (metadata[5] is 2 or 5 or 6)
                 selection?.Observe(ordinal, metadata[6], metadata.AsSpan(268, 32), metadata);
         }
         return tip;
@@ -83,7 +83,7 @@ internal sealed partial class Did2MessagingSqlJournal
 
     private SelectedTuple ReadArchivedTuple(Did2MessagingArchiveReference reference, SqliteTransaction tx)
     {
-        if (reference.Kind != 2) throw new InvalidDataException("An events selector cannot name the initial singleton.");
+        if (reference.Kind != 2) throw new CryptographicException("A generic event reader cannot read a local route decision.");
         using var command = Command("SELECT rowid,ordinal,direction,operation,metadata,typeof(rowid),typeof(ordinal),typeof(direction),typeof(operation),length(operation),typeof(metadata),length(metadata) FROM events WHERE rowid=$rowid;", tx);
         command.Parameters.AddWithValue("$rowid", checked((long)reference.RowId)); using var row = command.ExecuteReader();
         if (!row.Read() || row.GetString(5) != "integer" || row.GetString(6) != "integer" || row.GetString(7) != "integer" ||
@@ -161,6 +161,7 @@ internal sealed partial class Did2MessagingSqlJournal
     private OwnedDid2MessagingPersistedEvent? ReadCapturedOrdinaryEvent(SelectedTuple? tuple, SqliteTransaction tx)
     {
         if (tuple is null) return null; // Complete authenticated map AND suffix proved absence.
+        if (tuple.Metadata[5] == 6) throw new CryptographicException("A local route decision is not a native event result.");
 #if DEEP_TEST_INTERNALS
         Did2ActiveReadTestHooks.BeforeSelectedPayload();
 #endif

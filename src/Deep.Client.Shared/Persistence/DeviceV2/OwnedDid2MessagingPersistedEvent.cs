@@ -12,6 +12,9 @@ internal sealed class OwnedDid2MessagingPersistedEvent : IDisposable
     internal ulong Ordinal { get; }
     // Optional closed diagnostic facts, not a receive/receipt authority.
     internal ClientDeliveryObservation? DeliveryObservation { get; set; }
+    // Scheduling only, freshly computed by the owner from adopted native C/P.
+    // This is never durable outcome/current-route permission or a cached proof.
+    internal bool RouteHistoryCatchupRequired { get; set; }
     // Called only by the verified SQL reader, adopting its fresh blob buffers.
     internal OwnedDid2MessagingPersistedEvent(int direction, ulong ordinal, byte[] envelope, byte[] plaintext,
         ReadOnlySpan<byte> eventHash, ReadOnlySpan<byte> routeProcessing)

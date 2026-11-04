@@ -7,7 +7,8 @@ namespace Deep.Client.Shared.Persistence.DeviceV2;
 internal enum Did2MessagingArchiveFamily : byte
 {
     Operation = 1, FirstIncomingEvent = 2, Ordinal = 3,
-    PeerAuthoredPosition = 4, QualifiedPeerRoute = 5, IncomingAttachment = 6
+    PeerAuthoredPosition = 4, QualifiedPeerRoute = 5, IncomingAttachment = 6,
+    RouteHistory = 7, RouteControl = 8
 }
 
 /// <summary>Pure immutable-node codec and bounded path verifier; no SQL or runtime adoption.</summary>
@@ -155,7 +156,9 @@ internal static class Did2MessagingArchivePatricia
     {
         ArgumentNullException.ThrowIfNull(leaf);
         if (!leaf.IsLeaf || basisOrdinal > long.MaxValue) throw Bad();
-        Did2MessagingArchiveReference.Decode(leaf.Value[..Did2MessagingArchiveReference.Bytes], false).RequireAtBasis(basisOrdinal);
+        Did2MessagingArchiveReference.Decode(leaf.Value[..Did2MessagingArchiveReference.Bytes], leaf.Family == Did2MessagingArchiveFamily.RouteHistory).RequireAtBasis(basisOrdinal);
+        if (leaf.Family == Did2MessagingArchiveFamily.RouteHistory)
+            Did2RouteHistorySource.Decode(leaf.Value.Slice(120, 96)).Reference.RequireAtBasis(basisOrdinal);
         if (leaf.Family == Did2MessagingArchiveFamily.PeerAuthoredPosition)
             Did2MessagingArchiveReference.Decode(leaf.Value.Slice(120, Did2MessagingArchiveReference.Bytes)).RequireAtBasis(basisOrdinal);
         if (leaf.Family == Did2MessagingArchiveFamily.IncomingAttachment)
@@ -163,7 +166,7 @@ internal static class Did2MessagingArchivePatricia
         if (leaf.Family == Did2MessagingArchiveFamily.QualifiedPeerRoute && U64(leaf.Value, 88) > basisOrdinal) throw Bad();
     }
 
-    private static void RequireSelector(Did2MessagingArchiveFamily family, ReadOnlySpan<byte> selector)
+    internal static void RequireSelector(Did2MessagingArchiveFamily family, ReadOnlySpan<byte> selector)
     {
         switch (family)
         {
@@ -180,6 +183,14 @@ internal static class Did2MessagingArchivePatricia
             case Did2MessagingArchiveFamily.IncomingAttachment:
                 if (selector.Length != 64 || Zero(selector[..32]) || Zero(selector[32..])) throw Bad();
                 return;
+            case Did2MessagingArchiveFamily.RouteHistory:
+                if (selector.Length != 10 || selector[0] is < 1 or > 2 || selector[1] is < 1 or > 2) throw Bad();
+                return;
+            case Did2MessagingArchiveFamily.RouteControl:
+                if (selector.Length == 2 && selector[0] == 4 && selector[1] == 1) return;
+                if (selector.Length == 42 && selector[0] == 1 && selector[1] is 1 or 2 && !Zero(selector[10..])) return;
+                if (selector.Length == 33 && selector[0] is 2 or 3 && !Zero(selector[1..])) return;
+                throw Bad();
             default: throw Bad();
         }
     }
@@ -192,16 +203,31 @@ internal static class Did2MessagingArchivePatricia
             Did2MessagingArchiveFamily.PeerAuthoredPosition => 240,
             Did2MessagingArchiveFamily.QualifiedPeerRoute => 136,
             Did2MessagingArchiveFamily.IncomingAttachment => 176,
+            Did2MessagingArchiveFamily.RouteHistory => 224,
+            Did2MessagingArchiveFamily.RouteControl => selector[0] is 1 or 4 ? 96 : 88,
             _ => throw Bad()
         };
         if (value.Length != expectedBytes) throw Bad();
-        var first = Did2MessagingArchiveReference.Decode(value[..88], false);
-        if (family == Did2MessagingArchiveFamily.QualifiedPeerRoute)
+        var first = Did2MessagingArchiveReference.Decode(value[..88], family == Did2MessagingArchiveFamily.RouteHistory);
+        if (family == Did2MessagingArchiveFamily.RouteHistory)
         {
-            if (first.Kind != 1 && (first.Kind != 2 || first.Direction != 2) || U64(value, 88) > long.MaxValue || U64(value, 128) == 0) throw Bad();
+            if (first.IsAbsent ? !Zero(value.Slice(88, 32)) : first.Kind != 3 || Zero(value.Slice(88, 32))) throw Bad();
+            var candidate = Did2RouteHistorySource.Decode(value.Slice(120, 96));
+            if (candidate.IsAbsent ? U64(value, 216) != 0 : candidate.Reference.Kind != 2 || candidate.Reference.Direction != 2 || U64(value, 216) == 0) throw Bad();
+            if (first.IsAbsent && candidate.IsAbsent) throw Bad();
             return;
         }
-        if (first.Kind != 2) throw Bad();
+        if (family == Did2MessagingArchiveFamily.RouteControl)
+        {
+            if (first.Kind != 2 || first.Direction != (selector[0] == 1 ? selector[1] : 1) || selector[0] is 1 or 4 && U64(value, 88) == 0) throw Bad();
+            return;
+        }
+        if (family == Did2MessagingArchiveFamily.QualifiedPeerRoute)
+        {
+            if (first.Kind is not (1 or 3) && (first.Kind != 2 || first.Direction != 2) || U64(value, 88) > long.MaxValue || U64(value, 128) == 0) throw Bad();
+            return;
+        }
+        if (first.Kind != 2 && (first.Kind != 3 || family is not (Did2MessagingArchiveFamily.Operation or Did2MessagingArchiveFamily.Ordinal))) throw Bad();
         switch (family)
         {
             case Did2MessagingArchiveFamily.Operation:

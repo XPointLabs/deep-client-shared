@@ -33,7 +33,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var plans = new ProtectedDid2CompactionPlan(storage, lease, networkId, current.AccountId.Span, instance);
             using var idle = await plans.ReadAsync(held, ct).ConfigureAwait(false);
             if (idle.Phase != 0) throw new InvalidOperationException("An active compaction plan owns recovery; no new selection is permitted.");
-            using var opened = await SqliteDeepIdV2AccountGeneration.OpenOrdinaryMessagingUnderLeaseAsync(storage, sqlStatePath, current, scope, ct).ConfigureAwait(false);
+            using var opened = await SqliteDeepIdV2AccountGeneration.OpenOrdinaryMessagingUnderLeaseAsync(storage, sqlStatePath, current, scope, ct, configureRouteHistory: configured => ConfigureRouteHistoryDecisionRecovery(configured, held)).ConfigureAwait(false);
             var stable = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
             byte[] catalogHash, registrationHash, peerHash;
             Did2MessagingHistoryCheckpoint history;
@@ -572,6 +572,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             ? [.. slots, Did2CompactionPlan.Slot, ProtectedDid2MessagingArchiveEnrollment.Slot]
             : [.. slots, Did2CompactionPlan.Slot, ProtectedDid2MessagingArchiveEnrollment.Slot,
                 SqliteDeepIdV2AccountGeneration.ApplicationStateSlot, .. authoredSlots];
+        if (!oldEnrollment) inventorySlots = [.. inventorySlots, ProtectedInitialKeyRetirementJournal.Slot];
         using var inventory = await storage.ReadOwnedBatchAsync(inventorySlots, ct).ConfigureAwait(false);
         ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
         if (inventory[slots.Length + 1] is not null) throw new InvalidDataException("Archive enrollment progress owns this account.");
@@ -582,6 +583,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         var floor = inventory[1]!.Use(bytes => Did2MessagingFloor.Decode(bytes, scope));
         var history = inventory[3]!.Use(bytes => Did2MessagingHistoryCheckpoint.Decode(bytes, scope));
         var archive = oldEnrollment ? null : inventory[5]!.Use(bytes => Did2MessagingArchiveRoot.Decode(bytes, scope));
+        var retirement = oldEnrollment ? null : (inventory[inventorySlots.Length - 1] ??
+            throw new InvalidDataException("Stored archive prefix lost its established source retirement proof."))
+            .Use(bytes => ProtectedInitialKeyRetirementJournal.CaptureEstablishedProof(bytes, scope));
         if (pairedRead is not null)
         {
             var registration = inventory[2]!.Use(bytes => bytes.ToArray());
@@ -601,6 +605,10 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         catalog.Dispose(); inventory.Dispose();
         var sql = oldEnrollment ? Did2MessagingSqlJournal.ForArchiveEnrollment(connection, scope, history)
             : Did2MessagingSqlJournal.ForOrdinaryRuntime(connection, scope, history, archive!);
+        // The exact stored plan permits its before/after mirror transition;
+        // the operation below authenticates that complete projection. Its
+        // immutable import still has the same fresh retirement requirement.
+        if (retirement is not null) _ = sql.RequireEstablishedNativeImport(retirement);
         return operation(sql, floor, roots);
     }
 

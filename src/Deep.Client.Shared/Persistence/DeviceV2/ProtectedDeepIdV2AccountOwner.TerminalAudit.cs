@@ -124,7 +124,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             await SqliteDeepIdV2AccountGeneration.OpenArchiveEnrollmentMessagingUnderLeaseAsync(storage, sqlStatePath,
                 scope.Network.ToArray(), scope.LocalAccount.ToArray(), scope, ct).ConfigureAwait(false) :
             await SqliteDeepIdV2AccountGeneration.OpenRegisteredMessagingUnderLeaseAsync(storage, sqlStatePath,
-                scope.Network.ToArray(), scope.LocalAccount.ToArray(), scope, ct).ConfigureAwait(false);
+                scope.Network.ToArray(), scope.LocalAccount.ToArray(), scope, ct, configureRouteHistory: configured => ConfigureRouteHistoryDecisionRecovery(configured, held)).ConfigureAwait(false);
         var actualNative = await native.WithSqlAsync(sql => sql.VerifyOrdinaryState(), ct).ConfigureAwait(false);
         if (!FixedRoute(actualNative.Exact.Span, floor.Exact.Span))
             throw new CryptographicException("Terminal audit recovery lost actual native custody.");

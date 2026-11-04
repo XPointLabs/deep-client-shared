@@ -181,7 +181,7 @@ public sealed class Did2MessagingCatalogTests
                 new(Did2MessagingHistoryCheckpoint.Slot(scope), Did2MessagingHistoryCheckpoint.RegisteredEmpty(scope).Exact)]);
             for (var iteration = 0; iteration < 2; iteration++)
             {
-                using var opened = await SqliteDeepIdV2AccountGeneration.OpenRegisteredMessagingUnderLeaseAsync(storage, accountPath, Network, Account, scope, default);
+                using var opened = await SqliteDeepIdV2AccountGeneration.InspectRegisteredEmptyMessagingForTestAsync(storage, accountPath, Network, Account, scope, default);
                 Assert.Equal(0UL, (await opened.Custody.ReconcileAsync(default)).Ordinal);
                 await Assert.ThrowsAsync<InvalidOperationException>(() => opened.Custody.ReadActiveStateAsync(default));
             }
@@ -191,7 +191,7 @@ public sealed class Did2MessagingCatalogTests
             Assert.False(File.ReadAllBytes(file).AsSpan(0, 16).SequenceEqual("SQLite format 3\0"u8));
             var sqlBefore = SHA256.HashData(File.ReadAllBytes(file));
             await storage.DeleteBatchAsync([Did2MessagingHistoryCheckpoint.Slot(scope)]);
-            await Assert.ThrowsAsync<InvalidDataException>(() => SqliteDeepIdV2AccountGeneration.OpenRegisteredMessagingUnderLeaseAsync(storage, accountPath, Network, Account, scope, default));
+            await Assert.ThrowsAsync<InvalidDataException>(() => SqliteDeepIdV2AccountGeneration.InspectRegisteredEmptyMessagingForTestAsync(storage, accountPath, Network, Account, scope, default));
             using (var absent = await storage.ReadOwnedAsync(Did2MessagingHistoryCheckpoint.Slot(scope))) Assert.Null(absent);
             Assert.Equal(sqlBefore, SHA256.HashData(File.ReadAllBytes(file)));
             using (var unchanged = await new ProtectedDid2MessagingSessionCatalog(storage, Network, Account, Instance).ReadAsync(default))
@@ -202,10 +202,10 @@ public sealed class Did2MessagingCatalogTests
             // root. The production reader above must not recreate it.
             await storage.WriteBatchAsync([new(Did2MessagingHistoryCheckpoint.Slot(scope), Did2MessagingHistoryCheckpoint.RegisteredEmpty(scope).Exact)]);
             File.Delete(file);
-            await Assert.ThrowsAsync<InvalidDataException>(() => SqliteDeepIdV2AccountGeneration.OpenRegisteredMessagingUnderLeaseAsync(storage, accountPath, Network, Account, scope, default));
+            await Assert.ThrowsAsync<InvalidDataException>(() => SqliteDeepIdV2AccountGeneration.InspectRegisteredEmptyMessagingForTestAsync(storage, accountPath, Network, Account, scope, default));
             Assert.False(File.Exists(file));
             await storage.DeleteBatchAsync([scope.FloorSlot]);
-            await Assert.ThrowsAsync<InvalidDataException>(() => SqliteDeepIdV2AccountGeneration.OpenRegisteredMessagingUnderLeaseAsync(storage, accountPath, Network, Account, scope, default));
+            await Assert.ThrowsAsync<InvalidDataException>(() => SqliteDeepIdV2AccountGeneration.InspectRegisteredEmptyMessagingForTestAsync(storage, accountPath, Network, Account, scope, default));
         }
         finally
         {
@@ -237,7 +237,7 @@ public sealed class Did2MessagingCatalogTests
                 cmd.CommandText = $"CREATE TABLE unexpected(x); PRAGMA application_id={Did2MessagingSqlJournal.ApplicationId}; PRAGMA user_version={Did2MessagingSqlJournal.SchemaVersion};";
                 cmd.ExecuteNonQuery();
             }
-            var error = await Assert.ThrowsAsync<InvalidDataException>(() => SqliteDeepIdV2AccountGeneration.OpenRegisteredMessagingUnderLeaseAsync(storage, accountPath, Network, Account, scope, default));
+            var error = await Assert.ThrowsAsync<InvalidDataException>(() => SqliteDeepIdV2AccountGeneration.InspectRegisteredEmptyMessagingForTestAsync(storage, accountPath, Network, Account, scope, default));
             Assert.Contains("schema", error.Message, StringComparison.Ordinal);
             using var unchanged = await new ProtectedDid2MessagingSessionCatalog(storage, Network, Account, Instance).ReadAsync(default); Assert.Equal(1, unchanged.Phase(0));
             Assert.Equal(SHA256.HashData(exact), SHA256.HashData(unchanged.Exact.Span));

@@ -27,7 +27,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 ProtectedDid2MessagingSessionCatalog.Slot, scope.FloorSlot, Did2MessagingHistoryCheckpoint.Slot(scope) };
             async Task Open(CancellationToken ct = default)
             {
-                using var opened = await SqliteDeepIdV2AccountGeneration.OpenRegisteredMessagingUnderLeaseAsync(
+                using var opened = await SqliteDeepIdV2AccountGeneration.InspectRegisteredEmptyMessagingForTestAsync(
                     storage, accountPath, scope.Network.ToArray(), scope.LocalAccount.ToArray(), scope, ct);
                 held.RequireOwner(ownerLease);
             }

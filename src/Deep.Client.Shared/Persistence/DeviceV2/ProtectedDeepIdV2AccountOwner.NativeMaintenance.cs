@@ -29,11 +29,11 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         ObjectDisposedException.ThrowIf(Volatile.Read(ref nativeRuntimeClosed) != 0, this);
         held.RequireOwner(lease);
         if (nativeAdmissionInProgress)
-            return await SqliteDeepIdV2AccountGeneration.OpenMessagingArchiveAuditUnderLeaseAsync(
-                storage, sqlStatePath, current, scope, ct).ConfigureAwait(false);
+            return await SqliteDeepIdV2AccountGeneration.OpenEstablishedNativeArchiveAuditUnderLeaseAsync(
+                storage, sqlStatePath, current, scope, ct, configureRouteHistory: configured => ConfigureRouteHistoryDecisionRecovery(configured, held)).ConfigureAwait(false);
         _ = await EnsureNativeArchiveAdmissionUnderLeaseAsync(current, scope, held, ct).ConfigureAwait(false);
         var opened = await SqliteDeepIdV2AccountGeneration.OpenOrdinaryMessagingUnderLeaseAsync(
-            storage, sqlStatePath, current, scope, ct).ConfigureAwait(false);
+            storage, sqlStatePath, current, scope, ct, configureRouteHistory: configured => ConfigureRouteHistoryDecisionRecovery(configured, held)).ConfigureAwait(false);
         opened.RecoveredLocalCompaction = string.Equals(recoveredNativePrefixScope, Convert.ToHexString(scope.Hash), StringComparison.Ordinal);
         return opened;
     }
@@ -74,8 +74,10 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             foreach (var scope in scopes)
             {
                 ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
-                using var opened = await SqliteDeepIdV2AccountGeneration.OpenMessagingArchiveAuditUnderLeaseAsync(
-                    storage, sqlStatePath, current, scope, ct).ConfigureAwait(false);
+                if (await SqliteDeepIdV2AccountGeneration.IsInitialOwnedNativeAuditUnderLeaseAsync(
+                    storage, sqlStatePath, current, scope, ct).ConfigureAwait(false)) continue;
+                using var opened = await SqliteDeepIdV2AccountGeneration.OpenEstablishedNativeArchiveAuditUnderLeaseAsync(
+                    storage, sqlStatePath, current, scope, ct, configureRouteHistory: configured => ConfigureRouteHistoryDecisionRecovery(configured, held)).ConfigureAwait(false);
                 var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
                 var actualSql = await opened.WithSqlAsync(sql => sql.VerifyTip(), ct).ConfigureAwait(false);
                 if (!Did2MessagingSessionScope.Fixed(floor.Exact.Span, actualSql.Exact.Span))
@@ -158,7 +160,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         if (floor.Phase != 1)
         {
             using var recovery = await SqliteDeepIdV2AccountGeneration.OpenOrdinaryMessagingUnderLeaseAsync(
-                storage, sqlStatePath, current, scope, ct).ConfigureAwait(false);
+                storage, sqlStatePath, current, scope, ct, configureRouteHistory: configured => ConfigureRouteHistoryDecisionRecovery(configured, held)).ConfigureAwait(false);
             floor = await recovery.Custody.ReconcileAsync(ct).ConfigureAwait(false);
         }
         var archive = await Did2MessagingArchiveRoot.ReadRegisteredAsync(storage, scope, ct).ConfigureAwait(false);

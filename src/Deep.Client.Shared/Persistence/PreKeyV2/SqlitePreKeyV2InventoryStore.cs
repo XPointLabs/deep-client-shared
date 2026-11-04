@@ -49,9 +49,12 @@ internal sealed partial class SqlitePreKeyV2InventoryStore : IAsyncDisposable
         ReadOnlySpan<byte> dpd1Reference38,
         ReadOnlySpan<byte> deviceSigningPublicKey32, bool allowCreate,
         ProtectedPreKeyInventoryChain.Snapshot? successorCustody = null,
-        PreKeySqlCipherConnectionKey? connectionKey = null)
+        PreKeySqlCipherConnectionKey? connectionKey = null,
+        bool readOnlySource = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(statePath);
+        if (readOnlySource && allowCreate)
+            throw new ArgumentException("A source read segment cannot create a pre-key store.", nameof(allowCreate));
         Nonzero(databaseKey32, 32, nameof(databaseKey32));
         Nonzero(networkId16, 16, nameof(networkId16));
         Nonzero(accountId32, 32, nameof(accountId32));
@@ -86,7 +89,7 @@ internal sealed partial class SqlitePreKeyV2InventoryStore : IAsyncDisposable
             successorPublicRecords = successorCustody?.Entries.Select(entry =>
                 DeepIdV2PreKeyPublicationCodec.Decode(entry.CopyPublication())).ToArray() ?? [];
             if (!string.IsNullOrEmpty(parent)) Directory.CreateDirectory(parent);
-            connection = Open(path, databaseKey32, create: !exists, connectionKey);
+            connection = Open(path, databaseKey32, create: !exists, connectionKey, readOnlySource);
             if (exists) Validate();
             else Create();
         }
@@ -448,12 +451,12 @@ internal sealed partial class SqlitePreKeyV2InventoryStore : IAsyncDisposable
     }
 
     private static SqliteConnection Open(string path, ReadOnlySpan<byte> key,
-        bool create, PreKeySqlCipherConnectionKey? connectionKey)
+        bool create, PreKeySqlCipherConnectionKey? connectionKey, bool readOnlySource = false)
     {
         var connection = new SqliteConnection(new SqliteConnectionStringBuilder
         {
             DataSource = path,
-            Mode = create ? SqliteOpenMode.ReadWriteCreate : SqliteOpenMode.ReadWrite,
+            Mode = readOnlySource ? SqliteOpenMode.ReadOnly : create ? SqliteOpenMode.ReadWriteCreate : SqliteOpenMode.ReadWrite,
             Cache = SqliteCacheMode.Private,
             Pooling = false
         }.ToString());
@@ -478,7 +481,9 @@ internal sealed partial class SqlitePreKeyV2InventoryStore : IAsyncDisposable
                     StringComparison.Ordinal) ?? true)
                 throw new InvalidDataException("SQLCipher 4 is required.");
             using var configure = connection.CreateCommand();
-            configure.CommandText = create
+            configure.CommandText = readOnlySource
+                ? "PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA query_only=ON;"
+                : create
                 ? "PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON; PRAGMA journal_mode=DELETE;"
                 : "PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;";
             configure.ExecuteNonQuery();

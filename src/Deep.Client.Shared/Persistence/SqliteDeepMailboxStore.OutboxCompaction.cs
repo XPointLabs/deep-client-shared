@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Text;
 using Deep.Client.Shared.Persistence.DeviceV2;
 using Deep.Protocol.ApplicationCore;
+using Deep.Protocol.ContactV2;
 using Microsoft.Data.Sqlite;
 
 namespace Deep.Client.Shared.Persistence;
@@ -71,7 +72,7 @@ public sealed partial class SqliteDeepMailboxStore
             ct.ThrowIfCancellationRequested();
             if (!operations.Add(Convert.ToHexString(entry.Operation)))
                 throw new InvalidDataException("Duplicate selected ordinary operation.");
-            RequireSelectedOrdinaryRow(connection, tx, entry);
+            RequireSelectedOrdinaryRow(connection, tx, entry, requireRetainedHistory: true);
             if (audits.ContainsKey(Convert.ToHexString(entry.Operation))) throw new CryptographicException("Working payload cannot already have an audit row.");
         }
         var before = CompleteApplicationCompactionProjection(connection, tx, scope, null, ct);
@@ -152,7 +153,7 @@ public sealed partial class SqliteDeepMailboxStore
     }
 
     private static void RequireSelectedOrdinaryRow(SqliteConnection connection, SqliteTransaction tx,
-        ProtectedDid2DirectTextJournal.Entry entry)
+        ProtectedDid2DirectTextJournal.Entry entry, bool requireRetainedHistory = false)
     {
         using var command = connection.CreateCommand(); command.Transaction = tx;
         command.CommandText = "SELECT conversation_id,logical_message_id,author_device_id,recipient_account_id,recipient_device_id,sender_sequence,exact_dmc2_hash,created_at,length(exact_dmc2),typeof(exact_dmc2),exact_dmc2 FROM direct_text_outbox WHERE operation_id=$operation;";
@@ -178,11 +179,34 @@ public sealed partial class SqliteDeepMailboxStore
             if (reader.GetInt64(5) != checked((long)entry.Sequence) || reader.GetInt64(7) != checked((long)entry.Created))
                 throw new CryptographicException("Selected outbox authored position changed.");
             var payload = reader.GetFieldValue<byte[]>(10);
-            try { entry.RequireEvent(payload); }
+            try
+            {
+                entry.RequireEvent(payload);
+                if (requireRetainedHistory && entry.Kind == Dmc2ContentKind.ContactRouteUpdate &&
+                    ApplicationCoreCodec.DecodeDmc2(payload).ParsedPayload is ContactRouteHistoryDmc2Payload)
+                    RequireRetainedRouteHistoryOriginal(connection, tx, entry, payload);
+            }
             finally { CryptographicOperations.ZeroMemory(payload); }
             if (reader.Read()) throw new InvalidDataException("Selected ordinary row is not unique.");
         }
         finally { foreach (var bytes in expected) CryptographicOperations.ZeroMemory(bytes); }
+    }
+
+    private static void RequireRetainedRouteHistoryOriginal(SqliteConnection connection, SqliteTransaction tx,
+        ProtectedDid2DirectTextJournal.Entry entry, byte[] payload)
+    {
+        using var read = connection.CreateCommand(); read.Transaction = tx;
+        read.CommandText = "SELECT exact_dmc2,exact_dmc2_hash,author_account_id,sender_sequence,content_kind,typeof(exact_dmc2),length(exact_dmc2),typeof(sender_sequence),length(sender_sequence) FROM authenticated_dmc2_inbox WHERE conversation_id=$conversation AND logical_message_id=$logical AND author_device_id=$device;";
+        read.Parameters.AddWithValue("$conversation", entry.Scope.Conversation.ToArray());
+        read.Parameters.AddWithValue("$logical", entry.Logical.ToArray()); read.Parameters.AddWithValue("$device", entry.Scope.LocalDevice.ToArray());
+        using var row = read.ExecuteReader();
+        if (!row.Read() || row.GetString(5) != "blob" || row.GetInt64(6) != payload.Length ||
+            row.GetString(7) != "blob" || row.GetInt64(8) != 8 ||
+            !DirectFixed(row.GetFieldValue<byte[]>(0), payload) || !DirectFixed(row.GetFieldValue<byte[]>(1), entry.EventHash) ||
+            !DirectFixed(row.GetFieldValue<byte[]>(2), entry.Scope.LocalAccount) ||
+            BinaryPrimitives.ReadUInt64BigEndian(row.GetFieldValue<byte[]>(3)) != entry.Sequence ||
+            row.GetInt32(4) != (int)Dmc2ContentKind.ContactRouteUpdate || row.Read())
+            throw new CryptographicException("Route-history retirement lost its exact permanent authored original.");
     }
 
     private static byte[] CompleteApplicationCompactionProjection(SqliteConnection connection, SqliteTransaction tx,

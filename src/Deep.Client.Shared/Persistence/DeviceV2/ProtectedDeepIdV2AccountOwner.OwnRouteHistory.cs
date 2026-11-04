@@ -24,6 +24,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         VerifiedDeepIdV2DirectoryFreshness peer, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
     {
         held.RequireOwner(lease); ct.ThrowIfCancellationRequested(); var scope = opened.Scope;
+        var paged = await ReadPagedLiveRouteHistoryUnderLeaseAsync(opened, 1, own, peer, source, held, ct).ConfigureAwait(false);
+        if (paged is not null)
+            return new(paged.Original, paged.Facts.ExactCompletedRoute, paged.EventHash, paged.NativeFloor);
         // Authenticate actual native consent below, independently of the
         // latest peer delivery route. Reconstructing own committed history
         // must not need a newly current peer mailbox or remint its route.
@@ -115,6 +118,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                             message.SenderClientSequence >= journal.NextSequence(scope))
                             throw new CryptographicException("Native advertised history lost its actual authored scope/floor.");
                         if (message.ContentKind != Dmc2ContentKind.ContactRouteUpdate) continue;
+                        if (message.ParsedPayload is ContactRouteHistoryDmc2Payload) continue;
                         if (native.Ordinal <= acceptanceOrdinal ||
                             message.ParsedPayload is not ContactRouteUpdateDmc2Payload update ||
                             !FixedRoute(update.PredecessorRouteUpdateHash.Span, headHash))
@@ -133,6 +137,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 throw new CryptographicException("Own advertised native route history changed during verification.");
             using var readback = await ReadNativeRouteSnapshotAsync(opened, floor, own: true, held, ct).ConfigureAwait(false);
             ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
+            await RequireLegacyHistoryLiveHeadUnderLeaseAsync(opened, 1, headHash, held, ct).ConfigureAwait(false);
             return new(original, head.ExactBytes, headHash.ToArray(), floor.Exact.ToArray());
         }
         finally

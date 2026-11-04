@@ -34,11 +34,15 @@ internal sealed class InMemoryAuthenticatedDirectDmc2Inbox : IDisposable
         AuthenticatedPeerRouteUpdateDmc2 handoff, CancellationToken cancellationToken = default) =>
         MaterializeAuthenticatedDmc2Async(handoff, cancellationToken);
 
+    internal Task<DirectDmc2InboxDisposition> MaterializeRouteHistoryAsync(
+        ProtectedDeepIdV2AccountOwner.OwnedRouteHistoryInboxEvent handoff, CancellationToken cancellationToken = default) =>
+        MaterializeAuthenticatedDmc2Async(handoff, cancellationToken);
+
     private Task<DirectDmc2InboxDisposition> MaterializeAuthenticatedDmc2Async(
         IAuthenticatedDmc2InboxEvent handoff, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(handoff);
-        if (handoff is not AuthenticatedDirectDmc2 and not AuthenticatedContactAcceptDmc2 and not AuthenticatedOwnRouteUpdateDmc2 and not AuthenticatedPeerRouteUpdateDmc2)
+        if (handoff is not AuthenticatedDirectDmc2 and not AuthenticatedContactAcceptDmc2 and not AuthenticatedOwnRouteUpdateDmc2 and not AuthenticatedPeerRouteUpdateDmc2 and not ProtectedDeepIdV2AccountOwner.OwnedRouteHistoryInboxEvent)
             throw new CryptographicException("Only closed authenticated event handoffs can materialize.");
         cancellationToken.ThrowIfCancellationRequested();
         lock (gate)

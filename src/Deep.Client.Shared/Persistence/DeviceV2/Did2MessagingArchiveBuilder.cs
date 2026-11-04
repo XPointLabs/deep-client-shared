@@ -43,7 +43,7 @@ internal sealed class Did2MessagingArchiveBuilder
         var key = observation.KeyOrPrefix.ToArray();
         var path = ReadPath(family, selector, key, out var previous);
         var replacement = previous is null ? observation : Did2MessagingArchivePatricia.Leaf(scope, family, selector,
-            Merge(family, previous, singleValue));
+            Merge(family, selector, previous, singleValue));
         if (previous is not null && Fixed(previous, replacement.Value)) return;
 
         var pending = new List<Did2MessagingArchivePatricia.Node> { replacement };
@@ -134,8 +134,10 @@ internal sealed class Did2MessagingArchiveBuilder
         return path;
     }
 
-    private static byte[] Merge(Did2MessagingArchiveFamily family, ReadOnlySpan<byte> prior, ReadOnlySpan<byte> incoming)
+    internal static byte[] Merge(Did2MessagingArchiveFamily family, ReadOnlySpan<byte> selector, ReadOnlySpan<byte> prior, ReadOnlySpan<byte> incoming)
     {
+        if (family == Did2MessagingArchiveFamily.RouteHistory) return Did2MessagingArchiveRouteFacts.MergeHistory(prior, incoming);
+        if (family == Did2MessagingArchiveFamily.RouteControl) return Did2MessagingArchiveRouteFacts.MergeControl(selector, prior, incoming);
         if (family is Did2MessagingArchiveFamily.Operation or Did2MessagingArchiveFamily.Ordinal)
         { RequireExact(prior, incoming); return prior.ToArray(); }
         if (family is Did2MessagingArchiveFamily.FirstIncomingEvent or Did2MessagingArchiveFamily.QualifiedPeerRoute)

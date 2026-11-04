@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Security.Cryptography;
 using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.ContactV1;
+using Deep.Protocol.ContactV2;
 using Microsoft.Data.Sqlite;
 
 namespace Deep.Client.Shared.Persistence.DeviceV2;
@@ -48,7 +49,8 @@ internal sealed partial class Did2MessagingSqlJournal
                 if (prefixRows > headers.Count) throw new InvalidDataException("Archive prefix exceeds its source suffix.");
                 for (var index = 0; index < prefixRows; index++)
                 {
-                    var metadata = headers[index]; if (metadata[5] is not (2 or 5)) continue;
+                    var metadata = headers[index]; if (metadata[5] is not (2 or 5 or 6)) continue;
+                    if (metadata[5] == 6) { Add(source.CaptureDecisionReference(checked(mirror.Basis.Ordinal + (ulong)index + 1), metadata, tx)); continue; }
                     using var tuple = new SelectedTuple(checked(mirror.Basis.Ordinal + (ulong)index + 1), metadata[6], metadata.AsSpan(268, 32).ToArray(), metadata.ToArray());
                     Add(source.CaptureTupleReference(tuple, tx));
                 }
@@ -62,6 +64,14 @@ internal sealed partial class Did2MessagingSqlJournal
         catch { foreach (var original in selected.Values) original.Dispose(); throw; }
         void Add(Did2MessagingArchiveReference reference)
         {
+            if (reference.Kind == 3)
+            {
+                using var decision = source.ReadRouteHistoryDecision(reference, tx);
+                foreach (var dependency in new[] { decision.Body.Selected, decision.Body.C.Reference, decision.Body.P.Reference,
+                    decision.Body.L, decision.Body.Consent, decision.Body.Conflicting.Reference }) Add(dependency);
+                if (decision.Body.FirstFault.Kind == 2) Add(decision.Body.FirstFault);
+                return;
+            }
             if (reference.Kind != 2 || reference.Direction != 1 || selected.ContainsKey(reference.Ordinal)) return;
             selected.Add(reference.Ordinal, source.ReadArchiveOriginal(reference, tx));
         }
@@ -101,17 +111,16 @@ internal sealed partial class Did2MessagingSqlJournal
                 initial.Metadata, initial.Hello, Resolve);
             for (var index = 0; index < prefixRows; index++)
             {
-                var metadata = headers[index]; if (metadata[5] is not (2 or 5)) continue;
+                var metadata = headers[index]; if (metadata[5] is not (2 or 5 or 6)) continue;
                 var ordinal = checked(beforeRoot.Basis.Ordinal + (ulong)index + 1);
-                using var tuple = new SelectedTuple(ordinal, metadata[6], metadata.AsSpan(268, 32).ToArray(), metadata.ToArray());
-                var native = ReadArchiveOriginal(CaptureTupleReference(tuple, tx), tx); selected.Add(native);
+                var native = ReadArchiveOriginal(CaptureNativeReference(ordinal, metadata, tx), tx); selected.Add(native);
                 replay.Observe(native, QualifiedDeltaAuthored(native, authored));
             }
             var tree = builder.Complete(); var reducer = replay.Complete();
             var successor = Did2MessagingArchiveRoot.Create(scope, checked(beforeRoot.Revision + 1), historyRoot, target,
                 checked(beforeRoot.ArchiveCount + (ulong)selected.Count), tree.PatriciaHash.Span, reducer.Digest.Span);
             reducer.RequireRoot(successor);
-            var selectors = DeltaSelectors(selected, authored, beforeRoot.Basis.Ordinal == 0, initial.Hello);
+            var selectors = DeltaSelectors(selected, authored, beforeRoot.Basis.Ordinal == 0, initial.Hello, tx);
             var beforeProof = DeltaProofNodes(beforeRoot, selectors, tx);
             var overlay = tree.Nodes.ToDictionary(node => Convert.ToHexString(node.Digest.Span), node => node.Exact, StringComparer.Ordinal);
             var afterProof = DeltaProofNodes(successor, selectors, tx, overlay);
@@ -135,7 +144,7 @@ internal sealed partial class Did2MessagingSqlJournal
             {
                 if (reference.Kind == 1) return initial.Hello;
                 var native = ReadArchiveOriginal(reference, tx); borrowed.Add(native);
-                return reference.Direction == 2 ? native.Plaintext : QualifiedDeltaAuthored(native, authored);
+                return reference.Kind == 3 || reference.Direction == 2 ? native.Plaintext : QualifiedDeltaAuthored(native, authored);
             }
         }
         finally
@@ -197,7 +206,7 @@ internal sealed partial class Did2MessagingSqlJournal
                 _ = QualifiedDeltaAuthored(native, authored);
             }
             if (expectedRows.Count != 0) throw new CryptographicException("Stored prefix contains extra selected row selectors.");
-            var selectors = after.DeltaSelectors(selected, authored, oldBasis == 0, initial.Hello);
+            var selectors = after.DeltaSelectors(selected, authored, oldBasis == 0, initial.Hello, tx);
             var proof = after.DeltaProofNodes(successor, selectors, tx);
             var reducer = after.ReadArchiveReducer(tx);
             var digest = after.ArchiveDeltaReceipt(2, changed.Before.Span, successor, headers.Count, 0, selected, proof, reducer, mirror, tx);
@@ -289,9 +298,12 @@ internal sealed partial class Did2MessagingSqlJournal
 
     private List<(Did2MessagingArchiveFamily Family, byte[] Selector)> DeltaSelectors(
         IReadOnlyList<Did2MessagingArchiveOriginal> selected, IReadOnlyDictionary<ulong, ReadOnlyMemory<byte>> authored,
-        bool bootstrap, ReadOnlyMemory<byte> initialHello)
+        bool bootstrap, ReadOnlyMemory<byte> initialHello, SqliteTransaction tx)
     {
         var result = new List<(Did2MessagingArchiveFamily, byte[])>();
+        var borrowed = new List<Did2MessagingArchiveOriginal>();
+        try
+        {
         if (bootstrap && !scope.IsInitiator)
         {
             var hello = ApplicationCoreCodec.DecodeDmc2(initialHello.Span);
@@ -303,13 +315,50 @@ internal sealed partial class Did2MessagingSqlJournal
             var reference = native.Reference;
             Add(Did2MessagingArchiveFamily.Operation, reference.Operation.ToArray());
             var ordinal = new byte[8]; BinaryPrimitives.WriteUInt64BigEndian(ordinal, reference.Ordinal); Add(Did2MessagingArchiveFamily.Ordinal, ordinal);
-            if (reference.Direction != 2) { _ = QualifiedDeltaAuthored(native, authored); continue; }
-            var message = ApplicationCoreCodec.DecodeDmc2(native.Plaintext);
+            if (reference.Kind == 3)
+            {
+                var decision = Did2RouteHistoryDecision.Decode(native.Plaintext, scope);
+                if (decision.Action is Did2RouteHistoryDecision.ActionKind.Bootstrap or Did2RouteHistoryDecision.ActionKind.Evidence)
+                {
+                    var c = Did2MessagingArchiveRouteSource.Completed(decision.C, Resolve);
+                    var p = Did2MessagingArchiveRouteSource.Proposal(decision.P, Resolve);
+                    Add(Did2MessagingArchiveFamily.RouteHistory, Did2MessagingArchiveRouteFacts.HistorySelector(decision.Subject, 1, Did2MessagingArchiveRouteSource.Generation(c.Route.Reachability)));
+                    Add(Did2MessagingArchiveFamily.RouteHistory, Did2MessagingArchiveRouteFacts.HistorySelector(decision.Subject, 2, Did2MessagingArchiveRouteSource.Generation(p.Xra)));
+                }
+                else if (decision.Action == Did2RouteHistoryDecision.ActionKind.Promotion && decision.Subject == 2)
+                    Add(Did2MessagingArchiveFamily.QualifiedPeerRoute, decision.EndpointHash.ToArray());
+                continue;
+            }
+            if (reference.Direction is 3 or 4) continue;
+            var exact = reference.Direction == 2 ? native.Plaintext : QualifiedDeltaAuthored(native, authored);
+            var message = ApplicationCoreCodec.DecodeDmc2(exact.Span);
             try
             {
                 if (!Fixed(message.NetworkId.Span, scope.Network) || !Fixed(message.ConversationId.Span, scope.Conversation) ||
-                    !Fixed(message.SenderAccountId.Span, scope.RemoteAccount) || !Fixed(message.SenderDeviceId.Span, scope.RemoteDevice))
+                    !Fixed(message.SenderAccountId.Span, reference.Direction == 2 ? scope.RemoteAccount : scope.LocalAccount) ||
+                    !Fixed(message.SenderDeviceId.Span, reference.Direction == 2 ? scope.RemoteDevice : scope.LocalDevice))
                     throw new CryptographicException("Archive prefix incoming selector has another semantic scope.");
+                if (message.ParsedPayload is ContactRouteHistoryDmc2Payload page)
+                {
+                    if (reference.Direction == 2)
+                        for (var index = 0; index < page.Atoms.Count; index++)
+                        {
+                            var xra = ContactCodec.Decode("XRA1", page.Atoms[index].ExactXra1.Span);
+                            Add(Did2MessagingArchiveFamily.RouteHistory, Did2MessagingArchiveRouteFacts.HistorySelector(2, 2, Did2MessagingArchiveRouteSource.Generation(xra)));
+                            if (page.Atoms[index].IsCompleted)
+                            { var route = ContactRouteClosureCodec.Decode(page.Atoms[index].ExactCompletedRoute.Span); Add(Did2MessagingArchiveFamily.RouteHistory, Did2MessagingArchiveRouteFacts.HistorySelector(2, 1, Did2MessagingArchiveRouteSource.Generation(route.Reachability))); }
+                        }
+                    if (page.Mode is DeepIdV2ContactRouteHistoryMode.Announcement or DeepIdV2ContactRouteHistoryMode.EvidenceAndAnnouncement)
+                        Add(Did2MessagingArchiveFamily.RouteControl, Did2MessagingArchiveRouteFacts.EndpointSelector(reference.Direction, BinaryPrimitives.ReadUInt64BigEndian(page.RightCursor.Span), page.RightCursor.Span.Slice(8, 32)));
+                    if (reference.Direction == 1 && page.Mode == DeepIdV2ContactRouteHistoryMode.HistoryRequest)
+                    {
+                        Add(Did2MessagingArchiveFamily.RouteControl, Did2MessagingArchiveRouteFacts.CorrelationSelector(2, native.Metadata.AsSpan(300, 32)));
+                        Add(Did2MessagingArchiveFamily.RouteControl, Did2MessagingArchiveRouteFacts.LatestRequestSelector());
+                    }
+                    else if (reference.Direction == 1 && page.RequestEventHash.Span.IndexOfAnyExcept((byte)0) >= 0)
+                        Add(Did2MessagingArchiveFamily.RouteControl, Did2MessagingArchiveRouteFacts.CorrelationSelector(3, page.RequestEventHash.Span));
+                }
+                if (reference.Direction != 2) continue;
                 Add(Did2MessagingArchiveFamily.FirstIncomingEvent, native.Metadata.AsSpan(300, 32).ToArray());
                 var position = new byte[40]; scope.Conversation.CopyTo(position); BinaryPrimitives.WriteUInt64BigEndian(position.AsSpan(32), message.SenderClientSequence);
                 Add(Did2MessagingArchiveFamily.PeerAuthoredPosition, position);
@@ -326,11 +375,19 @@ internal sealed partial class Did2MessagingSqlJournal
             }
             finally { if (message.ParsedPayload is AttachmentOfferDmc2Payload offer) offer.Manifest.Dispose(); }
         }
-        if (result.Count > 6 * Did2CompactionPlan.MaximumRows) throw new InvalidDataException("Archive prefix exceeds its bounded typed selector set.");
+        if (result.Count > 12 * Did2CompactionPlan.MaximumRows) throw new InvalidDataException("Archive prefix exceeds its bounded typed selector set.");
         return result;
+        }
+        finally { foreach (var original in borrowed) original.Dispose(); }
         void Add(Did2MessagingArchiveFamily family, byte[] selector)
         {
             if (!result.Any(item => item.Item1 == family && Fixed(item.Item2, selector))) result.Add((family, selector));
+        }
+        ReadOnlyMemory<byte> Resolve(Did2MessagingArchiveReference reference)
+        {
+            if (reference.Kind == 1) return initialHello;
+            var original = ReadArchiveOriginal(reference, tx); borrowed.Add(original);
+            return reference.Direction == 2 ? original.Plaintext : QualifiedDeltaAuthored(original, authored);
         }
     }
 
@@ -379,7 +436,7 @@ internal sealed partial class Did2MessagingSqlJournal
         {
             hash.AppendData(native.Reference.Exact.Span); AppendDeltaSelectedRow(hash, native, tx);
             AppendDeltaPayload(hash, native.Envelope, false);
-            AppendDeltaPayload(hash, native.Plaintext, native.Reference.Direction != 2);
+            AppendDeltaPayload(hash, native.Plaintext, native.Reference.Kind != 3 && native.Reference.Direction != 2);
         }
         using var nodes = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         nodes.AppendData("Deep/STORE-V2/archive-delta-nodes"u8); nodes.AppendData([0]); nodes.AppendData(scope.Hash);
@@ -395,9 +452,10 @@ internal sealed partial class Did2MessagingSqlJournal
 
     private void AppendDeltaSelectedRow(IncrementalHash hash, Did2MessagingArchiveOriginal native, SqliteTransaction tx)
     {
-        (string Name, int Minimum, int Maximum)[] cells = [("rowid", 0, 0), .. OriginalCells("events")];
-        using var query = Command("SELECT rowid,operation,ordinal,direction,envelope,plaintext,metadata," +
-            string.Join(',', cells.Select(cell => $"typeof({cell.Name}),length({cell.Name})")) + " FROM events NOT INDEXED WHERE rowid=$rowid;", tx);
+        var table = native.Reference.Kind == 3 ? "route_decisions" : "events";
+        (string Name, int Minimum, int Maximum)[] cells = [("rowid", 0, 0), .. OriginalCells(table)];
+        using var query = Command("SELECT " + string.Join(',', cells.Select(cell => cell.Name)) + "," +
+            string.Join(',', cells.Select(cell => $"typeof({cell.Name}),length({cell.Name})")) + " FROM " + table + " NOT INDEXED WHERE rowid=$rowid;", tx);
         query.Parameters.AddWithValue("$rowid", checked((long)native.Reference.RowId)); using var row = query.ExecuteReader();
         if (!row.Read()) throw new CryptographicException("Archive delta selected row is missing.");
         Span<byte> number = stackalloc byte[8]; hash.AppendData([1]); BinaryPrimitives.WriteUInt64BigEndian(number, (ulong)cells.Length); hash.AppendData(number);

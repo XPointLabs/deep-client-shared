@@ -37,12 +37,13 @@ public sealed class SqliteDeviceStateStoreOptions
         AllowCreate = allowCreate;
     }
     public string StatePath { get; }
-    internal ReadOnlyMemory<byte> EncryptionKey => key.ToArray();
+    internal ReadOnlyMemory<byte> EncryptionKey => key;
     public DeviceAccountId32 AccountId { get; }
     public ulong AccountGeneration { get; }
     public ulong DatabaseGeneration { get; }
     public DeviceOperationId32 StoreInstanceId { get; }
     public bool AllowCreate { get; }
+    internal void ClearSourceSegmentKey() => CryptographicOperations.ZeroMemory(key);
 }
 
 public sealed partial class SqliteDeviceStateStore : IDeviceStateStore, IProtectedCurrentDmd1Store, IDisposable
@@ -84,9 +85,13 @@ public sealed partial class SqliteDeviceStateStore : IDeviceStateStore, IProtect
 
     static SqliteDeviceStateStore() => SQLitePCL.Batteries_V2.Init();
 
-    public SqliteDeviceStateStore(SqliteDeviceStateStoreOptions options)
+    public SqliteDeviceStateStore(SqliteDeviceStateStoreOptions options) : this(options, readOnlySource: false) { }
+
+    internal SqliteDeviceStateStore(SqliteDeviceStateStoreOptions options, bool readOnlySource)
     {
         ArgumentNullException.ThrowIfNull(options);
+        if (readOnlySource && options.AllowCreate)
+            throw new ArgumentException("A source read segment cannot create a device store.", nameof(options));
         var exists = File.Exists(options.StatePath);
         if (!exists && !options.AllowCreate) throw Failure(DeviceStateStoreOpenFailure.UnreadableOrWrongKey,
             "The current DeviceV1 database generation does not exist.");
@@ -99,12 +104,13 @@ public sealed partial class SqliteDeviceStateStore : IDeviceStateStore, IProtect
         storeInstanceId = DeviceOperationId32.FromBytes(options.StoreInstanceId.Span);
         connectionString = new SqliteConnectionStringBuilder
         {
-            DataSource = options.StatePath, Mode = options.AllowCreate ? SqliteOpenMode.ReadWriteCreate : SqliteOpenMode.ReadWrite,
+            DataSource = options.StatePath, Mode = readOnlySource ? SqliteOpenMode.ReadOnly :
+                options.AllowCreate ? SqliteOpenMode.ReadWriteCreate : SqliteOpenMode.ReadWrite,
             Cache = SqliteCacheMode.Private, Pooling = false
         }.ToString();
         try
         {
-            connection = Open();
+            connection = Open(readOnlySource);
             if (exists) Validate(connection); else Create(connection);
             ValidateEncryptedMainDatabase(statePath);
             ValidateEncryptedSidecars(statePath, connection);
@@ -228,13 +234,15 @@ public sealed partial class SqliteDeviceStateStore : IDeviceStateStore, IProtect
         connection?.Dispose(); connection = null; gate.Dispose(); CryptographicOperations.ZeroMemory(key);
     }
 
-    private SqliteConnection Open()
+    private SqliteConnection Open(bool readOnlySource = false)
     {
         var db = new SqliteConnection(connectionString);
         try
         {
             db.Open(); InstallRandomKey(db, key);
-            Execute(db, null, "PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA secure_delete=ON; PRAGMA synchronous=FULL; PRAGMA journal_mode=DELETE;");
+            Execute(db, null, readOnlySource
+                ? "PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA query_only=ON;"
+                : "PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA secure_delete=ON; PRAGMA synchronous=FULL; PRAGMA journal_mode=DELETE;");
             return db;
         }
         catch { db.Dispose(); throw; }

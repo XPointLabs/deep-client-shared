@@ -6,6 +6,7 @@ using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.MessagingCrypto;
 using Deep.Protocol.MessagingWire;
 using Deep.Client.Shared.Persistence.MessagingV1;
+using Deep.Protocol.ContactV2;
 
 namespace Deep.Client.Shared.Persistence.DeviceV2;
 
@@ -275,7 +276,19 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             {
                 using var application = await SqliteDeepIdV2AccountGeneration.OpenApplicationUnderLeaseAsync(
                     storage, sqlStatePath, current, held, ct).ConfigureAwait(false);
-                if (send)
+                if (stagedEvent.ParsedPayload is ContactRouteHistoryDmc2Payload)
+                {
+                    using (var handoff = await OwnedRouteHistoryInboxEvent.CaptureUnderLeaseAsync(this, current,
+                        opened, op, send, own, peer, source, held, ct).ConfigureAwait(false))
+                    {
+                        result.RouteHistoryCatchupRequired = await ProcessRouteHistoryControlUnderLeaseAsync(current, opened,
+                            op, send, own, peer, source, held, ct).ConfigureAwait(false);
+                        await RequireRouteHistoryInboxDispositionUnderLeaseAsync(opened, op, send,
+                            await application.MaterializeRouteHistoryAsync(handoff, ct).ConfigureAwait(false), held, ct).ConfigureAwait(false);
+                    }
+                    floor = await opened.Custody.ReadCurrentFloorAsync(ct).ConfigureAwait(false);
+                }
+                else if (send)
                 {
                     using var handoff = await AuthenticatedOwnRouteUpdateDmc2.FromOwnedCommitAsync(this, current,
                         held, opened, op, own, peer, source, ct).ConfigureAwait(false);

@@ -106,11 +106,11 @@ internal sealed partial class Did2MessagingSqlJournal
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         hash.AppendData("Deep/STORE-V2/messaging-compaction-sql"u8); hash.AppendData([0]); hash.AppendData(scope.Hash);
         Span<byte> number = stackalloc byte[8];
-        foreach (var (name, schema) in OriginalSchema.OrderBy(static entry => entry.Name, StringComparer.Ordinal))
+        foreach (var (name, schema) in (HasDecisionTable ? OriginalSchema.Concat(DecisionSchema) : OriginalSchema).OrderBy(static entry => entry.Name, StringComparer.Ordinal))
         {
             var definition = Encoding.UTF8.GetBytes(schema);
             BinaryPrimitives.WriteUInt64BigEndian(number, checked((ulong)definition.Length)); hash.AppendData(number); hash.AppendData(definition);
-            var order = name switch { "journal" or "events" => "ordinal", _ => "singleton" };
+            var order = name switch { "journal" or "events" or "route_decisions" => "ordinal", _ => "singleton" };
             var cells = name switch
             {
                 "scope" => new[] { ("singleton", 0, 0), ("exact_scope", 404, 404) },
@@ -118,6 +118,7 @@ internal sealed partial class Did2MessagingSqlJournal
                 "ratchet" => [("singleton", 0, 0), ("exact_state", 1, 2097152)],
                 "initial_events" => [("singleton", 0, 0), ("envelope", 1, 65536), ("session_init", 1, 32768), ("hello", 1, 32768), ("metadata", Did2MessagingFloor.MetadataBytes, Did2MessagingFloor.MetadataBytes)],
                 "events" => [("operation", 32, 32), ("ordinal", 0, 0), ("direction", 0, 0), ("envelope", 1, 65536), ("plaintext", 1, 33082), ("metadata", Did2MessagingFloor.MetadataBytes, Did2MessagingFloor.MetadataBytes)],
+                "route_decisions" => [("operation", 32, 32), ("ordinal", 0, 0), ("decision", 1024, 1024), ("metadata", Did2MessagingFloor.MetadataBytes, Did2MessagingFloor.MetadataBytes)],
                 _ => throw new InvalidDataException("Unsupported compaction SQL table.")
             };
             var boundColumns = string.Join(",", cells.Select(cell => "typeof(" + cell.Item1 + "),length(" + cell.Item1 + ")"));

@@ -82,14 +82,14 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             }
             if (selected is not null)
             {
-                using var opened = await SqliteDeepIdV2AccountGeneration.OpenRegisteredMessagingUnderLeaseAsync(storage, sqlStatePath,
-                    networkId, current.AccountId, selected, ct).ConfigureAwait(false);
+                using var opened = await SqliteDeepIdV2AccountGeneration.OpenInitialTransferMessagingUnderLeaseAsync(storage, sqlStatePath,
+                    current, selected, ct, configureRouteHistory: configured => ConfigureRouteHistoryDecisionRecovery(configured, held)).ConfigureAwait(false);
                 var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
                 if (floor.Ordinal != 0)
                 {
                     if (draft.WorkStopped && draft.NativeStopMode != 1) throw new CryptographicException("Pre-session stopped intent acquired native work.");
                     completed?.Dispose();
-                    await CompleteMessagingTransferUnderLeaseAsync(current, opened, ct).ConfigureAwait(false);
+                    await CompleteMessagingTransferUnderLeaseAsync(current, opened, held, ct).ConfigureAwait(false);
                     if (!await TryStopControlWorkUnderLeaseAsync(current, held, opened, selected, InitialMailboxOperation(op), reason,
                         verifier, own, source, ct).ConfigureAwait(false)) throw new CryptographicException("Committed native Initial lost its exact draft.");
                     if (onlyIfExpired)

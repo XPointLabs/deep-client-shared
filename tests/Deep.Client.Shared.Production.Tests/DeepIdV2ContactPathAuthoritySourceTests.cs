@@ -3226,6 +3226,10 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         internal Action? AfterPairedArchivePrefixReadGroup { get; set; }
         internal Action? AfterDeviceRegistrationReadGroup { get; set; }
         internal Action? AfterRetirementReadGroup { get; set; }
+        internal Action? AfterSourceSuccessorConsumption { get; set; }
+        internal Action? AfterSourceReceiverStable { get; set; }
+        internal Action? AfterInitialSourceHeadsReadGroup { get; set; }
+        internal Action<byte>? AfterSourceRecoveryReadGroup { get; set; }
         internal Action? AfterCompactionPartReadGroup { get; set; }
         internal int CompactionPartSingleReads { get; set; }
         public Task<bool> CompareAndDeleteAsync(string guardSlot, ReadOnlyMemory<byte> expected,
@@ -3261,6 +3265,10 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             ReadOnlyMemory<byte> replacement, CancellationToken ct = default)
         {
             var applied = await inner.CompareExchangeAsync(slot, expected, replacement, ct);
+            if (applied && slot.StartsWith("deep.store.v2.prekey-inventory/", StringComparison.Ordinal) && AfterSourceSuccessorConsumption is { } afterConsumption)
+            { AfterSourceSuccessorConsumption = null; afterConsumption(); }
+            if (applied && slot == ResponderInitialSessionCheckpoint.Slot && replacement.Span[1] == 1 && AfterSourceReceiverStable is { } afterStable)
+            { AfterSourceReceiverStable = null; afterStable(); }
             if (applied && slot == ProtectedDid2ContactRouteJournal.Slot && FailRouteReadbackPhase is { } phase &&
                 replacement.Length > ProtectedDid2ContactRouteJournal.HeaderBytes + 4 + 32 &&
                 replacement.Span[ProtectedDid2ContactRouteJournal.HeaderBytes + 4 + 32] == phase)
@@ -3323,10 +3331,10 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                     AfterCompactionRootsReadGroup = null;
                     afterRootRead();
                 }
-                if (AfterPairedArchivePrefixReadGroup is { } afterPairedRead && captured.Length == 12 &&
+                if (AfterPairedArchivePrefixReadGroup is { } afterPairedRead && captured.Length >= 12 &&
                     captured[6] == Did2CompactionPlan.Slot && captured[7] == ProtectedDid2MessagingArchiveEnrollment.Slot &&
                     captured[8] == SqliteDeepIdV2AccountGeneration.ApplicationStateSlot &&
-                    captured.Skip(9).Order(StringComparer.Ordinal).SequenceEqual(new[] { ProtectedDid2ContactAcceptJournal.Slot,
+                    captured.Skip(9).Take(3).Order(StringComparer.Ordinal).SequenceEqual(new[] { ProtectedDid2ContactAcceptJournal.Slot,
                         ProtectedDid2DirectTextJournal.Slot, ProtectedDid2GroupJournal.Slot }.Order(StringComparer.Ordinal)))
                 {
                     AfterPairedArchivePrefixReadGroup = null;
@@ -3356,6 +3364,21 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 {
                     AfterRetirementReadGroup = null;
                     afterRetirementRead();
+                }
+                if (AfterInitialSourceHeadsReadGroup is { } afterSourceHeads && captured.Length == 2 &&
+                    captured.Contains(DeviceInitialSessionCheckpoint.Slot, StringComparer.Ordinal))
+                {
+                    AfterInitialSourceHeadsReadGroup = null;
+                    afterSourceHeads();
+                }
+                if (AfterSourceRecoveryReadGroup is { } afterSourceRecovery &&
+                    captured.Contains(SqliteDeepIdV2AccountGeneration.CompactionRegistrationSlot, StringComparer.Ordinal) &&
+                    captured.Contains(ResponderInitialSessionCheckpoint.Slot, StringComparer.Ordinal) &&
+                    captured.SequenceEqual(captured.Order(StringComparer.Ordinal)))
+                {
+                    AfterSourceRecoveryReadGroup = null;
+                    var checkpoint = result[Array.IndexOf(captured, ResponderInitialSessionCheckpoint.Slot)] ?? throw new InvalidDataException();
+                    afterSourceRecovery(checkpoint.Use(bytes => bytes[1]));
                 }
                 if (AfterApplicationReadGroup is { } afterApplicationRead &&
                     captured.Contains(SqliteDeepIdV2AccountGeneration.ApplicationStateSlot, StringComparer.Ordinal))

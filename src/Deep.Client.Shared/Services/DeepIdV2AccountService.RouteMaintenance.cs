@@ -32,6 +32,8 @@ public sealed partial class DeepIdV2AccountService
         // cannot leave a new native command in the selected relationship.
         await owner.RequireRouteReintroductionAsync(TrustedUnixSeconds(), verifier, conversation.Scope,
             resolved, source, ct).ConfigureAwait(false);
+        _ = await owner.ContinueRouteHistoryAsync(TrustedUnixSeconds(), verifier, conversation.Scope,
+            resolved.Own, resolved.Contact.Authorization.Freshness, source, ct).ConfigureAwait(false);
         var selection = await owner.SelectOwnRouteMaintenanceAsync(TrustedUnixSeconds(), verifier,
             conversation.Scope, resolved.Own, resolved.Contact.Authorization.Freshness, source, ct).ConfigureAwait(false);
         if (selection is null) return 0;
@@ -85,6 +87,8 @@ public sealed partial class DeepIdV2AccountService
         using var reads = source.OpenCommandReadScope(); source = reads.Source;
         var pair = await source.VerifyForOwnMessagingAsync(this, conversation.Scope, ct).ConfigureAwait(false);
         using var verifier = OpenVerifier();
+        _ = await owner.ContinueRouteHistoryAsync(TrustedUnixSeconds(), verifier, conversation.Scope,
+            pair.Own, pair.Peer, source, ct).ConfigureAwait(false);
         var selection = await owner.SelectOwnRouteMaintenanceAsync(TrustedUnixSeconds(), verifier,
             conversation.Scope, pair.Own, pair.Peer, source, ct).ConfigureAwait(false);
         if (selection is null) return 0;

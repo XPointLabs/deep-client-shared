@@ -29,7 +29,7 @@ internal sealed partial class Did2MessagingSqlJournal
         RequireOpenedEnrollmentProgress(progress);
         using var query = Command("SELECT hash,exact,typeof(hash),length(hash),typeof(exact),length(exact) FROM archive_reducers WHERE hash=$hash;");
         query.Parameters.AddWithValue("$hash", progress.ReducerHash.ToArray()); using var row = query.ExecuteReader();
-        if (!row.Read() || row.GetString(2) != "blob" || row.GetInt64(3) != 32 || row.GetString(4) != "blob" || row.GetInt64(5) != 960 ||
+        if (!row.Read() || row.GetString(2) != "blob" || row.GetInt64(3) != 32 || row.GetString(4) != "blob" || row.GetInt64(5) != Did2MessagingArchiveReducer.Bytes ||
             !Fixed(row.GetFieldValue<byte[]>(0), progress.ReducerHash)) throw new CryptographicException("Actual enrollment staging reducer is absent or noncanonical.");
         var reducer = Did2MessagingArchiveReducer.Decode(row.GetFieldValue<byte[]>(1), scope);
         if (!Fixed(reducer.Digest.Span, progress.ReducerHash) || !Fixed(reducer.Basis.Exact.Span, progress.TargetBasis.Exact.Span) || row.Read())
@@ -45,7 +45,20 @@ internal sealed partial class Did2MessagingSqlJournal
 
     private Did2MessagingArchiveOriginal ReadArchiveOriginal(Did2MessagingArchiveReference reference, SqliteTransaction tx)
     {
+        if (reference.Kind == 1)
+        {
+            var initial = ReadArchiveInitialSource(tx);
+            if (!Fixed(reference.MetadataHash, SHA256.HashData(initial.Metadata)))
+            { CryptographicOperations.ZeroMemory(initial.Metadata); CryptographicOperations.ZeroMemory(initial.Hello); throw new CryptographicException("Selected initial source differs from its actual immutable singleton."); }
+            return new(reference, initial.Metadata, [], initial.Hello);
+        }
+        if (reference.Kind == 3)
+        {
+            using var decision = ReadRouteHistoryDecision(reference, tx);
+            return new(reference, decision.Metadata.ToArray(), [], decision.Body.Exact.ToArray());
+        }
         using var tuple = ReadArchivedTuple(reference, tx);
+        RequireUniqueOriginal(reference.Operation, reference.Ordinal, tx);
         using var query = Command("SELECT rowid,ordinal,direction,operation,metadata,envelope,plaintext,typeof(envelope),length(envelope),typeof(plaintext),length(plaintext) FROM events WHERE rowid=$rowid;", tx);
         query.Parameters.AddWithValue("$rowid", checked((long)reference.RowId)); using var row = query.ExecuteReader();
         if (!row.Read() || row.GetInt64(0) != checked((long)reference.RowId) || row.GetInt64(1) != checked((long)reference.Ordinal) ||
@@ -106,7 +119,7 @@ internal sealed partial class Did2MessagingSqlJournal
             {
                 if (reference.Kind == 1) return initial.Hello;
                 var native = ReadArchiveOriginal(reference, tx); selected.Add(native);
-                if (reference.Direction == 2) return native.Plaintext;
+                if (reference.Kind == 3 || reference.Direction == 2) return native.Plaintext;
                 if (reference.Direction != 1 || !authored.TryGetValue(reference.Ordinal, out var own) ||
                     !Fixed(SHA256.HashData(own.Span), native.Metadata.AsSpan(300, 32)))
                     throw new CryptographicException("Archive reducer head lost its independently authored original.");

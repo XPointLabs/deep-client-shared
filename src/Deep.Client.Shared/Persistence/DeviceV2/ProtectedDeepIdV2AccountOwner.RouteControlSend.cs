@@ -41,6 +41,25 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 throw new CryptographicException("Fresh route-control encryption lost actual stable SQL custody.");
             if (!OwnedByteExports.EqualAndErase(row.ExactDmc2, exact.Span))
                 throw new CryptographicException("Fresh route-control encryption differs from its owned command.");
+            if (ApplicationCoreCodec.DecodeDmc2(exact.Span).ParsedPayload is ContactRouteHistoryDmc2Payload historyControl)
+            {
+                await RequireFreshOwnedRouteHistoryControlUnderLeaseAsync(current, opened, exact, historyControl,
+                    own, peer, source, held, ct).ConfigureAwait(false);
+                await RequireExactProtectedMailboxRootAsync(ProtectedDid2DirectTextJournal.Slot, root, ct).ConfigureAwait(false);
+                using var final = await ReadRouteHistorySourcesUnderLeaseAsync(opened, 1, Did2RouteHistorySelection.Initial(), held, ct).ConfigureAwait(false);
+                if (!final.Authored.Roots.TryGetValue(ProtectedDid2DirectTextJournal.Slot, out var actualRoot) ||
+                    actualRoot is null || !FixedRoute(actualRoot, SHA256.HashData(root)))
+                    throw new CryptographicException("Fresh route-history admission changed its protected authored source.");
+                var paired = new Did2MessagingArchiveAuthoredRead(final.Authored.Roots, connection =>
+                {
+                    final.Authored.PairedRead.Verify(connection);
+                    using var commands = ProtectedDid2DirectTextJournal.Decode(root, scope.Network, scope.LocalAccount, scope.Instance);
+                    SqliteDeepMailboxStore.RequireArchiveAuthoredCommand(connection, scope, commands, operation, exact);
+                });
+                await opened.WithPairedSqlAsync(paired,
+                    sql => { sql.RequireRouteHistorySnapshot(final.Snapshot, final.Authored.Events); return true; }, ct).ConfigureAwait(false);
+                return;
+            }
             var head = await ReadOwnNativeRouteHeadUnderLeaseAsync(current, held, opened, application,
                 journal, own, peer, source, ct).ConfigureAwait(false);
             using var publication = await OpenOwnPermanentMailboxPublicationUnderLeaseAsync(current, held, source, own, ct).ConfigureAwait(false);

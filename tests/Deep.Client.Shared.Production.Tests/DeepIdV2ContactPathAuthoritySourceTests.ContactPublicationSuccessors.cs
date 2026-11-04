@@ -163,13 +163,13 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                         var recordedAdvertisement = await DeepIdV2ContactRouteAuthor.AuthorAdvertisementSuccessorAsync(
                             recipient, current.Network, current.Authority, device!, advertisement.CanonicalBytes,
                             Bytes(32, 0x91), Bytes(32, 0x92), ScalarMult.Base(Bytes(32, 0x93)), recordedExpiry, time);
-                        var recordedThreshold = await DeepIdV2ContactRouteAuthor.AuthorThresholdSuccessorAsync(recipient,
-                            current.Network, current.Authority, anchor, recordedAdvertisement.CanonicalBytes,
-                            witnesses.Select(value => new RouteWitness(value)).ToArray(), recordedExpiry, time);
                         var recordedRequest = new ContactRouteAuthorityWireRequest(Network, Bytes(32, 0x94),
                             current.Proof.QueriedDirectoryLeafKey.Span, current.Proof.NextProtectedLkg.LogGeneration,
                             current.Proof.NextProtectedLkg.CoreHash.Span, staged.ExactDca1.Span, recordedAdvertisement.CanonicalBytes.Span,
                             anchor.ExactXir1V2.Span, anchor.ExactRouteClosure.Span);
+                        var recordedThreshold = await DeepIdV2ContactRouteAuthor.AuthorThresholdSuccessorAsync(recipient,
+                            current.Network, current.Authority, anchor, recordedRequest.ExactXra1,
+                            witnesses.Select(value => new RouteWitness(value)).ToArray(), recordedExpiry, time);
                         var pair = new DeepIdV2ContactRouteRecordedPair(ContactRouteAuthorityWireCodec.EncodeRequest(recordedRequest),
                             ContactRouteAuthorityWireCodec.EncodeResponse(recordedRequest, new(Network, recordedRequest.RequestNonce.Span,
                                 recordedThreshold.Selection.CanonicalBytes.Span, recordedThreshold.LiveRoute.CanonicalBytes.Span,
@@ -247,6 +247,10 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                         : await DeepIdV2ContactRouteAuthor.AuthorAdvertisementAfterRecordedHistoryAsync(recipient, current.Network,
                             current.Authority, device!, recordedHistory, Bytes(32, 0xa1), Bytes(32, 0xa2),
                             ScalarMult.Base(Bytes(32, 0xa3)), nextExpiry, time);
+                    var request = new ContactRouteAuthorityWireRequest(Network, Bytes(32, (byte)(0xc0 + generation)),
+                        current.Proof.QueriedDirectoryLeafKey.Span, current.Proof.NextProtectedLkg.LogGeneration,
+                        current.Proof.NextProtectedLkg.CoreHash.Span, staged.ExactDca1.Span, nextAdvertisement.CanonicalBytes.Span,
+                        priorRoute.ExactXir1V2.Span, priorRoute.ExactRouteClosure.Span);
                     var nextThreshold = recordedHistory is null
                         ? await DeepIdV2ContactRouteAuthor.AuthorThresholdSuccessorAsync(recipient, current.Network,
                             current.Authority, priorRoute, nextAdvertisement.CanonicalBytes,
@@ -254,10 +258,6 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                         : await DeepIdV2ContactRouteAuthor.AuthorThresholdAfterRecordedHistoryAsync(recipient, current.Network,
                             current.Authority, recordedHistory, nextAdvertisement.CanonicalBytes,
                             witnesses.Select(value => new RouteWitness(value)).ToArray(), nextExpiry, time);
-                    var request = new ContactRouteAuthorityWireRequest(Network, Bytes(32, (byte)(0xc0 + generation)),
-                        current.Proof.QueriedDirectoryLeafKey.Span, current.Proof.NextProtectedLkg.LogGeneration,
-                        current.Proof.NextProtectedLkg.CoreHash.Span, staged.ExactDca1.Span, nextAdvertisement.CanonicalBytes.Span,
-                        priorRoute.ExactXir1V2.Span, priorRoute.ExactRouteClosure.Span);
                     var issuance = await DeepIdV2ContactRouteVerifier.VerifyRetainedThresholdAsync(recipient, current.Network,
                         current.Authority, request, nextThreshold, current.Proof.ExactAdh1, time, recordedHistory: recordedHistory);
                     var nextRoute = mode == 6
@@ -506,7 +506,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                     Assert.Equal(generation, (await DeepIdV2PublicationCommitVerifier.VerifyCommittedAsync(nextRoute, nextContact,
                         nextPublication.WireRequest, nextAuthorized.ExactXpu1, nextResult)).Generation);
                     if (mode == 6 && generation >= 6)
-                        await CheckRecordedPrivateControlAsync(nextRoute, route, initialPrivatePackage!, current.Proof,
+                        await CheckRecordedPrivateControlAsync(nextRoute, route, initialPrivatePackage!, current.Proof, issuance,
                             expectedWitness: generation == 6);
                     route = nextRoute; contact = nextContact; advertisement = nextAdvertisement;
                     publication = nextPublication; authorized = nextAuthorized; result = nextResult;

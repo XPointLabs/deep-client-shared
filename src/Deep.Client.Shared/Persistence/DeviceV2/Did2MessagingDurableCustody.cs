@@ -28,6 +28,11 @@ internal sealed class Did2MessagingDurableCustody(Did2MessagingSessionScope scop
             // SQL already committed and was verified before cleanup. Verify it
             // again after restart; erased parts need not be resurrected.
             RequireSame(protectedFloor.Stable(scope), sqlTip);
+            if (await sql.WithSqlAsync(journal => journal.HasCurrentRouteDecision(protectedFloor), ct).ConfigureAwait(false))
+            {
+                using var decision = await sql.WithSqlAsync(journal => journal.ReadStoredRouteDecisionMutation(protectedFloor), ct).ConfigureAwait(false);
+                return await FinishRecoveredRouteDecisionAsync(decision, ct).ConfigureAwait(false);
+            }
             var bytes = protectedFloor.Exact.ToArray(); bytes[1] = 2;
             var pending = Did2MessagingFloor.Decode(bytes, scope);
             return await FinishCurrentSqlAsync(pending, ct).ConfigureAwait(false);
@@ -35,6 +40,19 @@ internal sealed class Did2MessagingDurableCustody(Did2MessagingSessionScope scop
         using var owned = await checkpoint.ReadPendingAsync(protectedFloor, ct).ConfigureAwait(false);
         RequireSame(protectedFloor, await ReadCurrentFloorAsync(ct).ConfigureAwait(false));
         using var mutation = owned.Use(bytes => OwnedDid2MessagingMutation.RecoverProtectedPending(scope, protectedFloor, bytes));
+        if (mutation.Kind == 6)
+        {
+            var final = mutation.Successor.Cleanup(scope).Stable(scope);
+            _ = await sql.WithRouteHistoryDecisionSqlAsync(mutation, journal =>
+            {
+                journal.RequireRouteDecisionSources(mutation);
+                var actual = journal.VerifyTip();
+                if (Did2MessagingSessionScope.Fixed(actual.Exact.Span, mutation.Predecessor.Exact.Span)) journal.Append(mutation);
+                else RequireSame(final, actual);
+                RequireSame(final, journal.VerifyTip()); return true;
+            }, ct).ConfigureAwait(false);
+            return await FinishRecoveredRouteDecisionAsync(mutation, ct).ConfigureAwait(false);
+        }
         var expected = mutation.Successor.Cleanup(scope).Stable(scope);
         if (Did2MessagingSessionScope.Fixed(sqlTip.Exact.Span, mutation.Predecessor.Exact.Span))
         {
@@ -71,6 +89,51 @@ internal sealed class Did2MessagingDurableCustody(Did2MessagingSessionScope scop
         if (mutation.Kind is 2 or 5) await Did2MessagingCommitTestHooks.HitAsync(Did2MessagingCommitFailpoint.AfterStable).ConfigureAwait(false);
 #endif
         return completed;
+    }
+
+    internal async Task<Did2MessagingFloor> CommitRouteHistoryDecisionAsync(
+        ProtectedDeepIdV2AccountOwner.QualifiedDid2RouteHistoryDecision qualified, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(qualified);
+        var stable = await ReconcileAsync(ct).ConfigureAwait(false);
+        using var mutation = OwnedDid2MessagingMutation.RouteHistoryDecision(scope, stable, qualified);
+        RequireSame(qualified.Snapshot.Before, stable);
+        _ = await sql.WithPairedSqlAsync(qualified.PairedRead, journal =>
+        {
+            journal.RequireRouteHistorySnapshot(qualified.Snapshot, qualified.AuthoredEvents);
+            journal.RequireAppendCapacity(stable); return true;
+        }, ct).ConfigureAwait(false);
+        await checkpoint.StageAsync(stable, mutation.Successor, mutation.Exact, ct).ConfigureAwait(false);
+        RequireSame(mutation.Successor, await ReadCurrentFloorAsync(ct).ConfigureAwait(false));
+#if DEEP_TEST_INTERNALS
+        await Did2MessagingCommitTestHooks.HitAsync(Did2MessagingCommitFailpoint.AfterPending).ConfigureAwait(false);
+#endif
+        var expected = mutation.Successor.Cleanup(scope).Stable(scope);
+        _ = await sql.WithPairedSqlAsync(qualified.PairedRead, journal =>
+        {
+            journal.RequireRouteHistorySnapshot(qualified.Snapshot, qualified.AuthoredEvents);
+            journal.RequireRouteDecisionSources(mutation); journal.Append(mutation); RequireSame(expected, journal.VerifyOrdinaryState()); return true;
+        }, ct).ConfigureAwait(false);
+#if DEEP_TEST_INTERNALS
+        await Did2MessagingCommitTestHooks.HitAsync(Did2MessagingCommitFailpoint.AfterSql).ConfigureAwait(false);
+#endif
+        var result = await FinishCurrentSqlAsync(mutation.Successor, ct).ConfigureAwait(false);
+#if DEEP_TEST_INTERNALS
+        await Did2MessagingCommitTestHooks.HitAsync(Did2MessagingCommitFailpoint.AfterStable).ConfigureAwait(false);
+#endif
+        _ = await sql.WithPairedSqlAsync(qualified.PairedRead, journal =>
+        { journal.RequireRouteDecisionSources(mutation); RequireSame(result, journal.ReadOpenedFloor()); RequireSame(result, journal.VerifyOrdinaryState()); return true; }, ct).ConfigureAwait(false);
+        return result;
+    }
+
+    private async Task<Did2MessagingFloor> FinishRecoveredRouteDecisionAsync(OwnedDid2MessagingMutation mutation, CancellationToken ct)
+    {
+        _ = await sql.WithRouteHistoryDecisionSqlAsync(mutation, journal =>
+        { journal.RequireRouteDecisionSources(mutation); RequireSame(mutation.Successor.Cleanup(scope).Stable(scope), journal.VerifyTip()); return true; }, ct).ConfigureAwait(false);
+        var result = await FinishCurrentSqlAsync(mutation.Successor, ct).ConfigureAwait(false);
+        _ = await sql.WithRouteHistoryDecisionSqlAsync(mutation, journal =>
+        { journal.RequireRouteDecisionSources(mutation); RequireSame(result, journal.ReadOpenedFloor()); RequireSame(result, journal.VerifyOrdinaryState()); return true; }, ct).ConfigureAwait(false);
+        return result;
     }
 
     internal async Task<Did2MessagingFloor> ActivateRetiredAsync(Did2InitialKeyRetirementReceipt receipt, CancellationToken ct)

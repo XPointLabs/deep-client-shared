@@ -90,6 +90,13 @@ internal sealed partial class Did2MessagingSqlJournal
             if (reference.IsAbsent) return false;
             reference.RequireAtBasis(owner.WorkingBasis.Ordinal);
             using var original = owner.ReadArchiveOriginal(reference, transaction);
+            if (reference.Kind == 3)
+            {
+                var decision = Did2RouteHistoryDecision.Decode(original.Plaintext, owner.scope);
+                if (decision.Subject != 2 || decision.Action != Did2RouteHistoryDecision.ActionKind.Conflict)
+                    throw new CryptographicException("Selected historical fault lost its actual peer conflict decision.");
+                return true;
+            }
             var message = Deep.Protocol.ApplicationCore.ApplicationCoreCodec.DecodeDmc2(original.Plaintext);
             Did2RouteProcessingMetadata.RequireReceivedEvent(original.Metadata.AsSpan(608, 64), message);
             if (original.Metadata[608] != 2) throw new CryptographicException("Selected historical route fault changes its original outcome.");
@@ -100,8 +107,35 @@ internal sealed partial class Did2MessagingSqlJournal
             ReadOnlySpan<byte> expected, ulong actualConsentOrdinal)
         {
             RequireActive(); var value = owner.ReadArchiveFact(Did2MessagingArchiveFamily.QualifiedPeerRoute, SHA256.HashData(expected), transaction);
-            if (value is null) return null;
+            if (value is null)
+            {
+                var headers = owner.ReadJournal(out var actual, transaction); owner.RequireSame(floor, actual);
+                for (var index = 0; index < headers.Count; index++)
+                {
+                    var metadata = headers[index]; if (metadata[5] != 6) continue;
+                    var selected = owner.CaptureDecisionReference(checked(owner.WorkingBasis.Ordinal + (ulong)index + 1), metadata, transaction);
+                    using var working = owner.ReadRouteHistoryDecision(selected, transaction);
+                    if (working.Body.Subject != 2 || working.Body.Action != Did2RouteHistoryDecision.ActionKind.Promotion ||
+                        !Fixed(working.Body.EndpointHash, SHA256.HashData(expected))) continue;
+                    if (working.Body.Consent.Ordinal != actualConsentOrdinal) throw new CryptographicException("Working peer promotion changes its actual consent.");
+                    var closure = owner.ReadQualifiedDecisionClosure(working, transaction);
+                    if (!Fixed(closure.ExactBytes.Span, expected)) throw new CryptographicException("Working peer promotion changes its exact qualified endpoint.");
+                    return closure;
+                }
+                return null;
+            }
             var reference = Did2MessagingArchiveReference.Decode(value.AsSpan(0, 88), false); reference.RequireAtBasis(owner.WorkingBasis.Ordinal);
+            if (reference.Kind == 3)
+            {
+                using var decision = owner.ReadRouteHistoryDecision(reference, transaction);
+                if (decision.Body.Action != Did2RouteHistoryDecision.ActionKind.Promotion || decision.Body.Subject != 2 ||
+                    decision.Body.Consent.Ordinal != actualConsentOrdinal || !Fixed(decision.Body.EndpointHash, SHA256.HashData(expected)) ||
+                    !Fixed(decision.Body.L.Exact.Span, decision.Body.Selected.Exact.Span))
+                    throw new CryptographicException("Historical qualified route lost its actual peer promotion/consent.");
+                var qualifiedClosure = owner.ReadQualifiedDecisionClosure(decision, transaction);
+                if (!Fixed(qualifiedClosure.ExactBytes.Span, expected)) throw new CryptographicException("Historical peer promotion changed its exact endpoint closure.");
+                return qualifiedClosure;
+            }
             byte[] exact;
             if (reference.Kind == 1)
             {

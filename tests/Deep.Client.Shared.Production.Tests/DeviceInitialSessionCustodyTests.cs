@@ -15,7 +15,7 @@ namespace Deep.Client.Shared.Production.Tests;
 
 // Structural local-custody tests, not a verified claim, handshake, native
 // provider or delivery. No synthetic capability crosses a public crypto API.
-public sealed class DeviceInitialSessionCustodyTests
+public sealed partial class DeviceInitialSessionCustodyTests
 {
     private static readonly byte[] Instance = Bytes(32, 3), Account = Bytes(32, 2), Network = Bytes(16, 1);
 
@@ -195,7 +195,7 @@ public sealed class DeviceInitialSessionCustodyTests
     }
 
     private static byte[] Bytes(int length, byte value) => Enumerable.Repeat(value, length).ToArray();
-    private sealed class Fixture : IDisposable
+    private sealed partial class Fixture : IDisposable
     {
         private readonly string directory = Path.Combine(Path.GetTempPath(), "deep-initial-custody-" + Guid.NewGuid().ToString("N"));
         private readonly byte[] key = Bytes(32, 9), device = Bytes(32, 10), dpdHash = Bytes(32, 11), peer = Bytes(32, 12);

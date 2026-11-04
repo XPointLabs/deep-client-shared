@@ -79,7 +79,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     foreach (var registeredScope in scopes)
                     {
                         using var audit = await SqliteDeepIdV2AccountGeneration.OpenMessagingArchiveAuditUnderLeaseAsync(
-                            storage, sqlStatePath, current, registeredScope, ct).ConfigureAwait(false);
+                            storage, sqlStatePath, current, registeredScope, ct, configureRouteHistory: configured => ConfigureRouteHistoryDecisionRecovery(configured, held)).ConfigureAwait(false);
                         var root = await Did2MessagingArchiveRoot.ReadRegisteredAsync(storage, registeredScope, ct).ConfigureAwait(false);
                         _ = await VerifyArchiveSemanticsUnderLeaseAsync(audit, root, held, ct).ConfigureAwait(false);
                     }
@@ -388,7 +388,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         Did2MessagingArchiveRoot root, HeldDeepIdV2AccountLease held, CancellationToken ct)
     {
         var tree = await opened.WithSqlAsync(sql => sql.VerifyCompleteArchiveTree(root), ct).ConfigureAwait(false);
-        var reducer = Did2MessagingArchiveReducer.Empty(opened.Scope); ulong cursor = 0, count = 0; var families = new ulong[6];
+        var reducer = Did2MessagingArchiveReducer.Empty(opened.Scope); ulong cursor = 0, count = 0; var families = new ulong[8];
         while (true)
         {
             var originals = await opened.WithSqlAsync(sql => sql.ReadArchiveReplayAuthoredSources(root, reducer, cursor), ct).ConfigureAwait(false);

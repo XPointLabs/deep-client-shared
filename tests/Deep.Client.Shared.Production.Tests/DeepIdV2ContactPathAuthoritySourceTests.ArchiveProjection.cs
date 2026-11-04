@@ -65,7 +65,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             using var rootBytes = await NativeStorage(scope).ReadOwnedAsync(Did2MessagingArchiveRoot.Slot(scope)) ?? throw new InvalidDataException();
             var root = rootBytes.Use(bytes => Did2MessagingArchiveRoot.Decode(bytes, scope));
             var facts = new List<(Did2MessagingArchiveFamily Family, byte[] Selector, byte[] Value)>();
-            var reducer = new byte[960]; reducer[0] = 1; scope.Hash.CopyTo(reducer.AsSpan(4));
+            var reducer = new byte[1136]; reducer[0] = 1; scope.Hash.CopyTo(reducer.AsSpan(4));
             root.Basis.Exact.Span.CopyTo(reducer.AsSpan(36)); SHA256.HashData(initial).CopyTo(reducer, 224);
             var initialRef = new byte[88]; initialRef[0] = 1; Put(8, 1, initialRef); Put(16, 1, initialRef); SHA256.HashData(initial).CopyTo(initialRef, 56);
             initialRef.CopyTo(reducer, 344); Put(880, 2, reducer);

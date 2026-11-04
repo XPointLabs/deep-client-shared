@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using Deep.Client.Shared.Persistence;
 using Deep.Client.Shared.Persistence.DeviceV2;
 using Deep.Protocol.ApplicationCore;
+using Deep.Protocol.ContactV2;
 using Microsoft.Data.Sqlite;
 
 namespace Deep.Client.Shared.Production.Tests;
@@ -360,7 +361,7 @@ public sealed partial class Did2OwnedTextOutboxTests
         var frame = Scope().Exact.ToArray();
         first.NetworkId.Span.CopyTo(frame.AsSpan(4)); first.SenderAccountId.Span.CopyTo(frame.AsSpan(52));
         first.SenderDeviceId.Span.CopyTo(frame.AsSpan(92)); first.ConversationId.Span.CopyTo(frame.AsSpan(244));
-        ((ContactRouteUpdateDmc2Payload)first.ParsedPayload).RelationshipId.Span.CopyTo(frame.AsSpan(276));
+        Assert.IsType<ContactRouteHistoryDmc2Payload>(first.ParsedPayload).RelationshipId.Span.CopyTo(frame.AsSpan(276));
         var scope = Did2MessagingSessionScope.RestoreMetadata(frame);
         var firstOp = B(32, 0xb1); var secondOp = B(32, 0xb2); var textOp = B(32, 0xb3);
         using var fixture = new SqlFixture(); using var state = new ProtectedDid2DirectTextJournal.State();

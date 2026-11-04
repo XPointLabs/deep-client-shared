@@ -3,6 +3,7 @@ using System.Buffers.Binary;
 using System.Security.Cryptography;
 using System.Text;
 using Deep.Client.Shared.Persistence.MessagingV1;
+using Deep.Client.Shared.Persistence.DeviceV2;
 using Deep.Protocol.ApplicationCore;
 using Microsoft.Data.Sqlite;
 
@@ -62,11 +63,15 @@ public sealed partial class SqliteDeepMailboxStore
         AuthenticatedPeerRouteUpdateDmc2 handoff,
         CancellationToken cancellationToken = default) => MaterializeAuthenticatedDmc2Async(handoff, cancellationToken);
 
+    internal Task<DirectDmc2InboxDisposition> MaterializeRouteHistoryAsync(
+        ProtectedDeepIdV2AccountOwner.OwnedRouteHistoryInboxEvent handoff,
+        CancellationToken cancellationToken = default) => MaterializeAuthenticatedDmc2Async(handoff, cancellationToken);
+
     private Task<DirectDmc2InboxDisposition> MaterializeAuthenticatedDmc2Async(
         IAuthenticatedDmc2InboxEvent handoff, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(handoff);
-        if (handoff is not AuthenticatedDirectDmc2 and not AuthenticatedContactAcceptDmc2 and not AuthenticatedOwnRouteUpdateDmc2 and not AuthenticatedPeerRouteUpdateDmc2)
+        if (handoff is not AuthenticatedDirectDmc2 and not AuthenticatedContactAcceptDmc2 and not AuthenticatedOwnRouteUpdateDmc2 and not AuthenticatedPeerRouteUpdateDmc2 and not ProtectedDeepIdV2AccountOwner.OwnedRouteHistoryInboxEvent)
             throw new CryptographicException("Only closed authenticated event handoffs can materialize.");
         return WithReplayConnectionAsync(connection =>
         {

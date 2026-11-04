@@ -39,7 +39,12 @@ public sealed partial class DeepIdV2AccountService
             var pair = await source.VerifyForOwnMessagingAsync(this, scope, ct).ConfigureAwait(false);
             var persisted = await owner.ReceiveMessagingAsync(TrustedUnixSeconds(), verifier, scope, exact,
                 pair.Own, pair.Peer, source, ct).ConfigureAwait(false);
-            return (persisted, scope);
+            try
+            {
+                await MaintainReceivedRouteHistoryAsync(scope, persisted, source, ct).ConfigureAwait(false);
+                return (persisted, scope);
+            }
+            catch { persisted.Dispose(); throw; }
         }
         finally { CryptographicOperations.ZeroMemory(exact); }
     }

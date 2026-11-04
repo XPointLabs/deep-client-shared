@@ -65,6 +65,7 @@ internal sealed partial class Did2MessagingSqlJournal
                     using var tuple = new SelectedTuple(ordinal, metadata[6], metadata.AsSpan(268, 32).ToArray(), metadata.ToArray());
                     reference = CaptureTupleReference(tuple, tx);
                 }
+                if (reference.Kind == 3) { using var decision = ReadRouteHistoryDecision(reference, tx); continue; }
                 using var native = ReadArchiveOriginal(reference, tx);
                 if (reference.Direction == 1) result.Add(reference.Operation.ToArray());
             }
@@ -106,6 +107,23 @@ internal sealed partial class Did2MessagingSqlJournal
 
     internal bool ReadVerifiedPeerRouteFault(Did2MessagingFloor stable)
     {
+        using (var tx = connection.BeginTransaction(deferred: true))
+        {
+            RequireSame(stable, VerifyActiveTip(tx, null, out var headers));
+            using var head = ReadSubjectDecision(2, ReadArchiveReducer(tx), headers, tx);
+            if (head is not null)
+            {
+                var fault = head.Body.FirstFault;
+                if (fault.IsAbsent && head.Body.Action == Did2RouteHistoryDecision.ActionKind.Conflict) fault = head.Reference;
+                if (!fault.IsAbsent)
+                {
+                    RequireNativeReference(fault, tx); using var actual = ReadArchiveOriginal(fault, tx);
+                    if (fault.Kind == 3 && Did2RouteHistoryDecision.Decode(actual.Plaintext, scope).Action != Did2RouteHistoryDecision.ActionKind.Conflict)
+                        throw new CryptographicException("Sticky route-history fault lost its actual conflict decision.");
+                    return true;
+                }
+            }
+        }
         using var sources = ReadArchiveRouteSources(stable, own: false);
         if (!sources.Reducer.Reference(Did2MessagingArchiveReducer.ReferenceKind.FirstFault).IsAbsent)
         {
@@ -154,7 +172,7 @@ internal sealed partial class Did2MessagingSqlJournal
             for (var index = 0; index < headers.Count; index++)
             {
                 var metadata = headers[index];
-                if (metadata[5] != 2 || metadata[6] != direction || routeOnly && metadata[608] is not (1 or 2)) continue;
+                if (metadata[5] != 2 || metadata[6] != direction || routeOnly && metadata[608] is not (1 or 2 or 3)) continue;
                 using var tuple = new SelectedTuple(checked(WorkingBasis.Ordinal + (ulong)index + 1), direction,
                     metadata.AsSpan(268, 32).ToArray(), metadata.ToArray());
                 rows.Add(ReadCapturedOrdinaryEvent(tuple, tx) ?? throw new CryptographicException("Working suffix selected event is absent."));

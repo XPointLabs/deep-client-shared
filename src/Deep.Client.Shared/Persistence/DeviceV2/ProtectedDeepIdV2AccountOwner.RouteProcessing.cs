@@ -49,7 +49,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             held.RequireOwner(owner.lease); ct.ThrowIfCancellationRequested();
             var scope = opened.Scope;
             if (snapshot.Direction != MessagingCryptoV1Direction.Receive || !snapshot.HasStateMutation ||
-                snapshot.AuthenticatedDmc2.Length is < 4497 or > ApplicationCoreCodec.MaximumContactRouteUpdateRecordBytes ||
+                snapshot.AuthenticatedDmc2.Length is < 285 or > ApplicationCoreCodec.MaximumContactRouteUpdateRecordBytes ||
                 snapshot.PriorStateGeneration != floor.RatchetGeneration ||
                 snapshot.ExpectedJournalGeneration != floor.Ordinal ||
                 !FixedRoute(snapshot.JournalPredecessor, floor.Head) ||
@@ -80,6 +80,26 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     throw new CryptographicException("Route duplicate differs from its original authenticated event.");
                 Did2RouteProcessingMetadata.RequireReceivedEvent(original.RouteProcessing, message);
                 exact = original.RouteProcessing.ToArray();
+            }
+            else if (message.ParsedPayload is ContactRouteHistoryDmc2Payload historyControl)
+            {
+                if (!FixedRoute(historyControl.RelationshipId.Span, scope.Relationship) ||
+                    !FixedRoute(message.ConversationId.Span, scope.Conversation) ||
+                    !FixedRoute(message.SenderAccountId.Span, scope.RemoteAccount) ||
+                    !FixedRoute(message.SenderDeviceId.Span, scope.RemoteDevice))
+                    throw new CryptographicException("Staged route history differs from the actual native relationship.");
+                var reading = await RequireMessagingFreshnessAsync(current, own, peer, source, held, ct).ConfigureAwait(false);
+                if (reading.SampleSeconds < first.SampleSeconds || !FixedRoute(reading.BootId.Span, first.BootId.Span))
+                    throw new CryptographicException("Staged route history crossed protected clock continuity.");
+                var lower = Math.Min(checked(own.Proof.TrustedLowerUnixSeconds + reading.SampleSeconds - own.Proof.MonotonicSample),
+                    checked(peer.TrustedLowerUnixSeconds + reading.SampleSeconds - peer.MonotonicSample));
+                var upper = Math.Max(checked(own.Proof.TrustedUpperUnixSeconds + reading.SampleSeconds - own.Proof.MonotonicSample),
+                    checked(peer.TrustedUpperUnixSeconds + reading.SampleSeconds - peer.MonotonicSample));
+                exact = new byte[Did2RouteProcessingMetadata.Bytes]; exact[0] = 3;
+                BinaryPrimitives.WriteUInt64BigEndian(exact.AsSpan(8), checked(lower * 1000));
+                BinaryPrimitives.WriteUInt64BigEndian(exact.AsSpan(16), checked(upper * 1000));
+                BinaryPrimitives.WriteUInt64BigEndian(exact.AsSpan(24), reading.SampleSeconds);
+                SHA256.HashData(reading.BootId.Span, exact.AsSpan(32));
             }
             else
             {

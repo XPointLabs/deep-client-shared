@@ -6,8 +6,8 @@ namespace Deep.Client.Shared.Persistence.DeviceV2;
 /// <summary>Closed semantic-fact framing; full source replay must independently establish every fact.</summary>
 internal sealed class Did2MessagingArchiveReducer
 {
-    internal const int Bytes = 960, ReferenceCount = 7;
-    internal enum ReferenceKind { Consent = 0, OwnHead = 1, OwnPrevious = 2, PeerHead = 3, PeerPrevious = 4, FirstFault = 5, MaximumPeerEpoch = 6 }
+    internal const int Bytes = 1136, ReferenceCount = 9;
+    internal enum ReferenceKind { Consent = 0, OwnHead = 1, OwnPrevious = 2, PeerHead = 3, PeerPrevious = 4, FirstFault = 5, MaximumPeerEpoch = 6, OwnDecision = 7, PeerDecision = 8 }
     private readonly byte[] exact, digest;
     private Did2MessagingArchiveReducer(byte[] exact, byte[] digest, Did2MessagingFloor basis)
     { this.exact = exact; this.digest = digest; Basis = basis; }
@@ -23,20 +23,22 @@ internal sealed class Did2MessagingArchiveReducer
     internal Did2MessagingArchiveReference Reference(ReferenceKind kind)
     {
         if ((int)kind is < 0 or >= ReferenceCount) throw new ArgumentOutOfRangeException(nameof(kind));
-        return Did2MessagingArchiveReference.Decode(exact.AsSpan(256 + (int)kind * Did2MessagingArchiveReference.Bytes, Did2MessagingArchiveReference.Bytes));
+        return Did2MessagingArchiveReference.Decode(exact.AsSpan(ReferenceOffset(kind), Did2MessagingArchiveReference.Bytes));
     }
+    internal static int ReferenceOffset(ReferenceKind kind) => (int)kind switch
+    { >= 0 and < 7 => 256 + (int)kind * 88, 7 => 904, 8 => 992, _ => throw new ArgumentOutOfRangeException(nameof(kind)) };
 
     internal static Did2MessagingArchiveReducer Decode(ReadOnlySpan<byte> raw, Did2MessagingSessionScope scope)
     {
         ArgumentNullException.ThrowIfNull(scope);
         if (raw.Length != Bytes || raw[0] != 1 || !Zero(raw.Slice(1, 3)) || !Fixed(raw.Slice(4, 32), scope.Hash) ||
-            !Zero(raw[904..]) || (BinaryPrimitives.ReadUInt32BigEndian(raw[896..]) & ~3U) != 0 ||
+            !Zero(raw[1080..]) || (BinaryPrimitives.ReadUInt32BigEndian(raw[896..]) & ~3U) != 0 ||
             (BinaryPrimitives.ReadUInt32BigEndian(raw[900..]) & ~3U) != 0) throw Bad();
         var basis = RequireBasis(raw.Slice(36, Did2MessagingFloor.Bytes), scope);
         var references = new Did2MessagingArchiveReference[ReferenceCount];
         for (var index = 0; index < references.Length; index++)
         {
-            references[index] = Did2MessagingArchiveReference.Decode(raw.Slice(256 + index * Did2MessagingArchiveReference.Bytes, Did2MessagingArchiveReference.Bytes));
+            references[index] = Did2MessagingArchiveReference.Decode(raw.Slice(ReferenceOffset((ReferenceKind)index), Did2MessagingArchiveReference.Bytes));
             references[index].RequireAtBasis(basis.Ordinal);
         }
         if (basis.Ordinal == 0)
@@ -47,7 +49,9 @@ internal sealed class Did2MessagingArchiveReducer
             RequireEventDirection(references[0], 1, 2);
             RequireHead(references[1], 1); RequireHead(references[2], 1);
             RequireHead(references[3], 2); RequireHead(references[4], 2);
-            RequireEventDirection(references[5], 2, 2); RequireEventDirection(references[6], 2, 2);
+            if (!references[5].IsAbsent && references[5].Kind != 3) RequireEventDirection(references[5], 2, 2);
+            RequireEventDirection(references[6], 2, 2);
+            foreach (var reference in references[7..]) if (!reference.IsAbsent && reference.Kind != 3) throw Bad();
             RequirePrevious(references[1], references[2]); RequirePrevious(references[3], references[4]);
             foreach (var reference in references)
                 if (reference.Kind == 1 && !Fixed(reference.MetadataHash, raw.Slice(224, 32))) throw Bad();

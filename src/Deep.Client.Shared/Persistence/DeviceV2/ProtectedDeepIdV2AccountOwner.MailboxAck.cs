@@ -274,7 +274,14 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     }
                     else if (parsed.ContentKind == Dmc2ContentKind.ContactRouteUpdate)
                     {
-                        if (retained.RouteProcessing[0] == 2)
+                        if (parsed.ParsedPayload is ContactRouteHistoryDmc2Payload)
+                        {
+                            using var handoff = await OwnedRouteHistoryInboxEvent.CaptureUnderLeaseAsync(this, current,
+                                opened, incoming.OperationId, false, selected.Pair.Own, selected.Pair.Peer, source, held, ct).ConfigureAwait(false);
+                            await RequireRouteHistoryInboxDispositionUnderLeaseAsync(opened, incoming.OperationId, false,
+                                await application.MaterializeRouteHistoryAsync(handoff, ct).ConfigureAwait(false), held, ct).ConfigureAwait(false);
+                        }
+                        else if (retained.RouteProcessing[0] == 2)
                             await RequireRejectedPeerRouteControlCommitUnderLeaseAsync(current, held, opened,
                                 incoming.OperationId, selected.Pair.Own, selected.Pair.Peer, source, ct).ConfigureAwait(false);
                         else

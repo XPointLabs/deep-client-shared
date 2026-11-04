@@ -51,7 +51,7 @@ internal sealed partial class Did2MessagingSqlJournal
         }
         ValidateSchemaVersion(5);
         using var tx = connection.BeginTransaction();
-        foreach (var (_, ddl) in ArchiveSchema) Execute(ddl, tx);
+        foreach (var (_, ddl) in DecisionSchema.Concat(ArchiveSchema)) Execute(ddl, tx);
         InsertArchiveNodes(initial.Nodes, tx); InsertArchiveReducer(reducer, tx);
         Execute($"PRAGMA application_id={ApplicationId}; PRAGMA user_version={SchemaVersion};", tx);
         tx.Commit(); ValidateSchemaVersion(SchemaVersion);
@@ -66,7 +66,7 @@ internal sealed partial class Did2MessagingSqlJournal
         }
         using var query = Command("SELECT hash,exact,typeof(hash),length(hash),typeof(exact),length(exact) FROM archive_reducers WHERE hash=$hash;");
         query.Parameters.AddWithValue("$hash", reducer.Digest.ToArray()); using var row = query.ExecuteReader();
-        if (!row.Read() || row.GetString(2) != "blob" || row.GetInt64(3) != 32 || row.GetString(4) != "blob" || row.GetInt64(5) != 960 ||
+        if (!row.Read() || row.GetString(2) != "blob" || row.GetInt64(3) != 32 || row.GetString(4) != "blob" || row.GetInt64(5) != Did2MessagingArchiveReducer.Bytes ||
             !Fixed(row.GetFieldValue<byte[]>(0), reducer.Digest.Span) || !Fixed(row.GetFieldValue<byte[]>(1), reducer.Exact.Span) || row.Read())
             throw new CryptographicException("A named staging archive reducer is absent or changed.");
     }
@@ -88,7 +88,7 @@ internal sealed partial class Did2MessagingSqlJournal
         var root = archiveRoot ?? throw new InvalidDataException("Independent messaging archive root is absent.");
         using var command = Command("SELECT exact,typeof(hash),length(hash),typeof(exact),length(exact),hash FROM archive_reducers WHERE hash=$hash;", tx);
         command.Parameters.AddWithValue("$hash", root.SummaryHash.ToArray()); using var row = command.ExecuteReader();
-        if (!row.Read() || row.GetString(1) != "blob" || row.GetInt64(2) != 32 || row.GetString(3) != "blob" || row.GetInt64(4) != 960 ||
+        if (!row.Read() || row.GetString(1) != "blob" || row.GetInt64(2) != 32 || row.GetString(3) != "blob" || row.GetInt64(4) != Did2MessagingArchiveReducer.Bytes ||
             !Fixed(row.GetFieldValue<byte[]>(5), root.SummaryHash))
             throw new CryptographicException("Messaging archive reducer is missing or noncanonical.");
         var reducer = Did2MessagingArchiveReducer.Decode(row.GetFieldValue<byte[]>(0), scope); reducer.RequireRoot(root);
@@ -161,7 +161,7 @@ internal sealed partial class Did2MessagingSqlJournal
         insert.Parameters.AddWithValue("$hash", decoded.Digest.ToArray()); insert.Parameters.AddWithValue("$exact", decoded.Exact.ToArray()); insert.ExecuteNonQuery();
         using var readback = Command("SELECT exact,typeof(exact),length(exact),hash,typeof(hash),length(hash) FROM archive_reducers WHERE hash=$hash;", tx);
         readback.Parameters.AddWithValue("$hash", decoded.Digest.ToArray()); using var row = readback.ExecuteReader();
-        if (!row.Read() || row.GetString(1) != "blob" || row.GetInt64(2) != 960 || row.GetString(4) != "blob" || row.GetInt64(5) != 32 ||
+        if (!row.Read() || row.GetString(1) != "blob" || row.GetInt64(2) != Did2MessagingArchiveReducer.Bytes || row.GetString(4) != "blob" || row.GetInt64(5) != 32 ||
             !Fixed(row.GetFieldValue<byte[]>(3), decoded.Digest.Span) || !Fixed(row.GetFieldValue<byte[]>(0), decoded.Exact.Span) || row.Read())
             throw new CryptographicException("Immutable archive reducer collision differs byte for byte.");
     }

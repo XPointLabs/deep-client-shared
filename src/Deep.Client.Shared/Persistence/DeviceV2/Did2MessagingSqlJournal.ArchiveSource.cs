@@ -24,10 +24,21 @@ internal sealed partial class Did2MessagingSqlJournal
         hash.AppendData("Deep/STORE-V2/archive-enrollment-source"u8); hash.AppendData([0]); hash.AppendData(scope.Hash);
         hash.AppendData(ArchiveSchemaHash(5)); hash.AppendData(ArchiveSchemaHash(6));
         Span<byte> number = stackalloc byte[4]; BinaryPrimitives.WriteUInt32BigEndian(number, ApplicationId); hash.AppendData(number);
-        foreach (var (name, ddl) in OriginalSchema.OrderBy(static value => value.Name, StringComparer.Ordinal))
+        foreach (var (name, ddl) in OriginalSchema.Concat(DecisionSchema).OrderBy(static value => value.Name, StringComparer.Ordinal))
         {
             AppendSchemaFrame(hash, name, ddl);
-            AppendOriginalTable(hash, name, tx, includeRowId: true);
+            if (name == "route_decisions")
+            {
+                // Schema5 absence and the exact newly staged empty table have
+                // one canonical source frame. Enrollment never creates decisions.
+                if (version == 6)
+                {
+                    using var empty = Command("SELECT count(*) FROM route_decisions;", tx);
+                    if (Convert.ToInt64(empty.ExecuteScalar()) != 0) throw new CryptographicException("Enrollment route decisions must remain empty.");
+                }
+                hash.AppendData(new byte[9]);
+            }
+            else AppendOriginalTable(hash, name, tx, includeRowId: true);
         }
         return hash.GetHashAndReset();
     }
@@ -39,6 +50,7 @@ internal sealed partial class Did2MessagingSqlJournal
         "ratchet" => [("singleton", 0, 0), ("exact_state", 1, 2097152)],
         "initial_events" => [("singleton", 0, 0), ("envelope", 1, 65536), ("session_init", 1, 32768), ("hello", 1, 32768), ("metadata", 672, 672)],
         "events" => [("operation", 32, 32), ("ordinal", 0, 0), ("direction", 0, 0), ("envelope", 1, 65536), ("plaintext", 1, 33082), ("metadata", 672, 672)],
+        "route_decisions" => [("operation", 32, 32), ("ordinal", 0, 0), ("decision", 1024, 1024), ("metadata", 672, 672)],
         _ => throw new InvalidDataException("Unknown original messaging table.")
     };
 
@@ -46,12 +58,12 @@ internal sealed partial class Did2MessagingSqlJournal
         bool includeRowId = false, ulong skipJournalThrough = 0)
     {
         var cells = OriginalCells(name);
-        if (includeRowId && name == "events") cells = [("rowid", 0, 0), .. cells];
+        if (includeRowId && name is "events" or "route_decisions") cells = [("rowid", 0, 0), .. cells];
         var columns = string.Join(',', cells.Select(static cell => cell.Name));
         var shapes = string.Join(',', cells.Select(static cell => $"typeof({cell.Name}),length({cell.Name})"));
         var skip = name == "journal" && skipJournalThrough != 0;
         using var query = Command($"SELECT {columns},{shapes} FROM {name} NOT INDEXED" + (skip ? " WHERE ordinal>$skip" : "") +
-            " ORDER BY " + (name is "journal" or "events" ? "ordinal" : "singleton") + ";", tx);
+            " ORDER BY " + (name is "journal" or "events" or "route_decisions" ? "ordinal" : "singleton") + ";", tx);
         if (skip) query.Parameters.AddWithValue("$skip", checked((long)skipJournalThrough));
         using var reader = query.ExecuteReader(); ulong count = 0; Span<byte> number = stackalloc byte[8];
         while (reader.Read())

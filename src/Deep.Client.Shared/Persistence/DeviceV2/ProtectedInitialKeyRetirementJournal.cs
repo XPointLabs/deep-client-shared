@@ -233,14 +233,60 @@ internal static class ProtectedInitialKeyRetirementJournal
             throw new CryptographicException("Retirement stable lost its exact protected pending predecessor.");
     }
 
+    internal sealed record SourceSnapshot(State State, IReadOnlyDictionary<string, byte[]?> OwnerHashes);
+
+    // Established ratchets use the durable transfer receipt, not the original
+    // source database. This pure selection is consumed only with a fresh
+    // native import/ancestry check in the same physical SQL segment.
+    internal static Entry CaptureEstablishedProof(ReadOnlySpan<byte> exact, Did2MessagingSessionScope scope)
+    {
+        var state = Decode(exact, scope.Network, scope.LocalAccount, scope.Instance);
+        var role = scope.IsInitiator ? (byte)1 : (byte)2;
+        Entry? selected = null;
+        foreach (var entry in state.Entries.Values)
+        {
+            if (entry.Role != role || !Fixed(entry.ScopeHash, scope.Hash)) continue;
+            if (selected is not null) throw new CryptographicException("Established native scope has duplicate source retirement proofs.");
+            selected = entry;
+        }
+        if (selected is null || selected.Phase != 2 || !Fixed(selected.Basis, scope.InitialBasis))
+            throw new CryptographicException("Established native scope lacks its exact stable source retirement proof.");
+        byte[] expectedInstance;
+        if (scope.IsInitiator)
+        {
+            using var digest = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            digest.AppendData("Deep/STORE-V2/device-state-key"u8);
+            digest.AppendData(scope.Network); digest.AppendData(scope.LocalAccount); digest.AppendData(scope.Instance);
+            expectedInstance = digest.GetHashAndReset();
+        }
+        else expectedInstance = scope.Instance.ToArray();
+        if (!Fixed(selected.SourceInstance, expectedInstance))
+            throw new CryptographicException("Established native retirement has another original source instance.");
+        return new(selected.Exact);
+    }
+
     internal static async Task<State> ReadAsync(IDeepSecureStorage storage, ReadOnlyMemory<byte> network,
         ReadOnlyMemory<byte> account, CancellationToken ct)
+        => (await ReadSourceSnapshotCoreAsync(storage, network, account, false, ct).ConfigureAwait(false)).State;
+
+    internal static Task<SourceSnapshot> ReadSourceSnapshotAsync(IDeepSecureStorage storage, ReadOnlyMemory<byte> network,
+        ReadOnlyMemory<byte> account, CancellationToken ct)
+        => ReadSourceSnapshotCoreAsync(storage, network, account, false, ct);
+
+    internal static Task<SourceSnapshot> ReadArchiveEnrollmentSourceSnapshotAsync(IDeepSecureStorage storage, ReadOnlyMemory<byte> network,
+        ReadOnlyMemory<byte> account, CancellationToken ct)
+        => ReadSourceSnapshotCoreAsync(storage, network, account, true, ct);
+
+    private static async Task<SourceSnapshot> ReadSourceSnapshotCoreAsync(IDeepSecureStorage storage, ReadOnlyMemory<byte> network,
+        ReadOnlyMemory<byte> account, bool archiveEnrollment,
+        CancellationToken ct)
     {
         // One independent actual inventory per invocation. The optional stop
         // owners are required/decoded only when this journal contains role3;
         // every matching native floor/history is still read by its real owner.
-        using var custody = await storage.ReadOwnedBatchAsync([SqliteDeepIdV2AccountGeneration.CompactionRegistrationSlot,
-            Slot, ProtectedDid2ContactStartJournal.Slot, ProtectedDid2MessagingSessionCatalog.Slot], ct).ConfigureAwait(false);
+        string[] slots = [SqliteDeepIdV2AccountGeneration.CompactionRegistrationSlot,
+            Slot, ProtectedDid2ContactStartJournal.Slot, ProtectedDid2MessagingSessionCatalog.Slot];
+        using var custody = await storage.ReadOwnedBatchAsync(slots, ct).ConfigureAwait(false);
         ct.ThrowIfCancellationRequested();
         if (custody.Count != 4) throw new InvalidDataException("Initial retirement read group has another shape.");
         var registration = custody[0] ?? throw new InvalidDataException("The DID2 SQL key record is absent.");
@@ -249,10 +295,19 @@ internal static class ProtectedInitialKeyRetirementJournal
         {
             var owned = custody[1] ?? throw new InvalidDataException("Protected initial-key retirement journal is missing; explicit reset is required.");
             var result = owned.Use(value => Decode(value, network.Span, account.Span, instance));
+            var hashes = Enumerable.Range(0, slots.Length).Select(index => custody[index]?.Use(bytes => SHA256.HashData(bytes))).ToArray();
+            var ownerHashes = Enumerable.Range(0, slots.Length).ToDictionary(index => slots[index], index => hashes[index], StringComparer.Ordinal);
             if (result.Entries.Values.Any(entry => entry.Role == 3))
-                await RequireCancellationOwnerSnapshotsAsync(storage, result, custody[2], custody[3], network, account, instance, ct).ConfigureAwait(false);
+            {
+                var scopes = CaptureCancellationOwnerScopes(result, custody[2], custody[3], network, account, instance, archiveEnrollment);
+                custody.Dispose();
+                var nativeHashes = await RequireCancelledNativeScopesAsync(storage, scopes, ct).ConfigureAwait(false);
+                foreach (var pair in nativeHashes) ownerHashes.Add(pair.Key, pair.Value);
+                var finalSlots = ownerHashes.Keys.Order(StringComparer.Ordinal).ToArray();
+                await RequireExactOwnerHashesAsync(storage, finalSlots, finalSlots.Select(slot => ownerHashes[slot]).ToArray(), ct).ConfigureAwait(false);
+            }
             ct.ThrowIfCancellationRequested();
-            return result;
+            return new(result, ownerHashes);
         }
         finally { CryptographicOperations.ZeroMemory(instance); }
     }
@@ -304,23 +359,38 @@ internal static class ProtectedInitialKeyRetirementJournal
         ReadOnlyMemory<byte> network, ReadOnlyMemory<byte> account, ReadOnlyMemory<byte> instance, CancellationToken ct)
     {
         if (!state.Entries.Values.Any(entry => entry.Role == 3)) return;
-        using var roots = await storage.ReadOwnedBatchAsync([ProtectedDid2ContactStartJournal.Slot,
-            ProtectedDid2MessagingSessionCatalog.Slot], ct).ConfigureAwait(false);
+        string[] slots = [ProtectedDid2ContactStartJournal.Slot, ProtectedDid2MessagingSessionCatalog.Slot];
+        using var roots = await storage.ReadOwnedBatchAsync(slots, ct).ConfigureAwait(false);
         ct.ThrowIfCancellationRequested();
         if (roots.Count != 2) throw new InvalidDataException("Initial cancellation owner read group has another shape.");
-        await RequireCancellationOwnerSnapshotsAsync(storage, state, roots[0], roots[1], network, account, instance, ct).ConfigureAwait(false);
+        var hashes = Enumerable.Range(0, slots.Length).Select(index => roots[index]?.Use(bytes => SHA256.HashData(bytes))).ToArray();
+        var scopes = CaptureCancellationOwnerScopes(state, roots[0], roots[1], network, account, instance);
+        roots.Dispose();
+        await RequireCancelledNativeScopesAsync(storage, scopes, ct).ConfigureAwait(false);
+        await RequireExactOwnerHashesAsync(storage, slots, hashes, ct).ConfigureAwait(false);
     }
 
-    private static async Task RequireCancellationOwnerSnapshotsAsync(IDeepSecureStorage storage, State state,
+    private static Did2MessagingSessionScope[] CaptureCancellationOwnerScopes(State state,
         OwnedDeepSecret? draftRoot, OwnedDeepSecret? catalogRoot, ReadOnlyMemory<byte> network,
-        ReadOnlyMemory<byte> account, ReadOnlyMemory<byte> instance, CancellationToken ct)
+        ReadOnlyMemory<byte> account, ReadOnlyMemory<byte> instance, bool archiveEnrollment = false)
     {
-        ct.ThrowIfCancellationRequested();
         var raw = draftRoot ?? throw new InvalidDataException("Initial cancellation lost its protected draft owner.");
         using var drafts = raw.Use(bytes => ProtectedDid2ContactStartJournal.Decode(bytes, network.Span, account.Span, instance.Span));
         var catalogRaw = catalogRoot ?? throw new InvalidDataException("Initial cancellation lost its protected catalog owner.");
-        using var catalog = catalogRaw.Use(bytes => ProtectedDid2MessagingSessionCatalog.Decode(bytes, network.Span, account.Span, instance.Span));
-        await RequireCancellationOwnersUnderLeaseAsync(storage, state, drafts, catalog, ct).ConfigureAwait(false);
+        using var catalog = catalogRaw.Use(bytes => archiveEnrollment ?
+            ProtectedDid2MessagingSessionCatalog.DecodeForEnrollment(bytes, network.Span, account.Span, instance.Span) :
+            ProtectedDid2MessagingSessionCatalog.Decode(bytes, network.Span, account.Span, instance.Span));
+        return CaptureCancelledNativeScopes(state, drafts, catalog);
+    }
+
+    private static async Task RequireExactOwnerHashesAsync(IDeepSecureStorage storage, string[] slots,
+        byte[]?[] hashes, CancellationToken ct)
+    {
+        using var actual = await storage.ReadOwnedBatchAsync(slots, ct).ConfigureAwait(false);
+        if (actual.Count != slots.Length) throw new InvalidDataException("Initial retirement owner readback has another shape.");
+        for (var index = 0; index < slots.Length; index++)
+            if (hashes[index] is { } expected ? actual[index]?.Use(bytes => Fixed(SHA256.HashData(bytes), expected)) != true : actual[index] is not null)
+                throw new CryptographicException("Initial retirement owners changed across cancellation source callbacks.");
     }
 
     // The account opener already decoded these owners and the SQL instance from
@@ -331,6 +401,14 @@ internal static class ProtectedInitialKeyRetirementJournal
         ProtectedDid2ContactStartJournal.State drafts, ProtectedDid2MessagingSessionCatalog.Snapshot catalog, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
+        var scopes = CaptureCancelledNativeScopes(state, drafts, catalog);
+        await RequireCancelledNativeScopesAsync(storage, scopes, ct).ConfigureAwait(false);
+    }
+
+    private static Did2MessagingSessionScope[] CaptureCancelledNativeScopes(State state,
+        ProtectedDid2ContactStartJournal.State drafts, ProtectedDid2MessagingSessionCatalog.Snapshot catalog)
+    {
+        var scopes = new List<Did2MessagingSessionScope>();
         foreach (var entry in state.Entries.Values.Where(entry => entry.Role == 3))
         {
             if (!drafts.Entries.TryGetValue(Convert.ToHexString(entry.Intent), out var draft) || !draft.WorkStopped || draft.NativeStopMode != 2 ||
@@ -342,13 +420,27 @@ internal static class ProtectedInitialKeyRetirementJournal
                     !Fixed(scope.RemoteAccount, draft.Exact.Slice(64, 32))) continue;
                 if (entry.Ordinal == 0 || !Fixed(scope.InitialBasis, entry.Basis) || catalog.Phase(index) != 2)
                     throw new CryptographicException("Cancelled Initial has foreign or unresolved import custody.");
+                scopes.Add(Did2MessagingSessionScope.RestoreMetadata(scope.Exact));
+            }
+        }
+        return scopes.ToArray();
+    }
+
+    private static async Task<Dictionary<string, byte[]>> RequireCancelledNativeScopesAsync(IDeepSecureStorage storage,
+        IReadOnlyList<Did2MessagingSessionScope> scopes, CancellationToken ct)
+    {
+        var hashes = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+        foreach (var scope in scopes)
+        {
                 var floor = await new Did2MessagingProtectedCheckpoint(storage, scope).ReadAsync(ct).ConfigureAwait(false);
                 var history = await Did2MessagingHistoryCheckpoint.ReadRegisteredAsync(storage, scope, ct).ConfigureAwait(false);
                 if (!Fixed(floor.Exact.Span, Did2MessagingFloor.Empty(scope).Exact.Span) ||
                     !Fixed(history.Exact.Span, Did2MessagingHistoryCheckpoint.RegisteredEmpty(scope).Exact.Span))
                     throw new CryptographicException("Pre-session cancellation cannot own a committed native import.");
-            }
+                hashes[scope.FloorSlot] = SHA256.HashData(floor.Exact.Span);
+                hashes[Did2MessagingHistoryCheckpoint.Slot(scope)] = SHA256.HashData(history.Exact.Span);
         }
+        return hashes;
     }
     private static bool Zero(ReadOnlySpan<byte> value) => value.IndexOfAnyExcept((byte)0) < 0;
     private static void RequireScope(ReadOnlySpan<byte> network, ReadOnlySpan<byte> account, ReadOnlySpan<byte> instance)

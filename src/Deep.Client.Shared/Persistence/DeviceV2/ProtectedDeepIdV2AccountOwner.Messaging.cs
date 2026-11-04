@@ -93,8 +93,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             Did2MessagingSourceScope.RequireSender(scope, retained);
             ProtectedDid2MessagingPeerBootstrap.RequireProof(await catalog.ReadPeerCredentialAsync(scope, ct).ConfigureAwait(false), peer);
             OwnedInitialMessagingSeed.RequireFreshScope(scope, own.Proof, peer, first);
-            using var opened = await SqliteDeepIdV2AccountGeneration.OpenOrdinaryMessagingUnderLeaseAsync(
-                storage, sqlStatePath, current, scope, ct).ConfigureAwait(false);
+            using var opened = await SqliteDeepIdV2AccountGeneration.OpenInitialTransferMessagingUnderLeaseAsync(
+                storage, sqlStatePath, current, scope, ct, configureRouteHistory: configured => ConfigureRouteHistoryDecisionRecovery(configured, held)).ConfigureAwait(false);
             var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
             if (floor.Ordinal == 0)
             {
@@ -105,7 +105,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 _ = await opened.Custody.CommitOwnedAsync(import, ct).ConfigureAwait(false);
             }
             seed?.Dispose(); seed = null; retained.Dispose(); sourceStore.Dispose();
-            await CompleteMessagingTransferUnderLeaseAsync(current, opened, ct).ConfigureAwait(false);
+            await CompleteMessagingTransferUnderLeaseAsync(current, opened, held, ct).ConfigureAwait(false);
             await MaterializeInitialMessagingUnderLeaseAsync(current, opened, own, peer, source, held, ct).ConfigureAwait(false);
             await RequireFinalMessagingFreshnessAsync(current, scope, own, peer, source, held, first, ct).ConfigureAwait(false);
             return scope;
@@ -147,8 +147,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             Did2MessagingSourceScope.RequireReceiver(scope, retained);
             ProtectedDid2MessagingPeerBootstrap.RequireProof(await catalog.ReadPeerCredentialAsync(scope, ct).ConfigureAwait(false), peer);
             OwnedInitialMessagingSeed.RequireFreshScope(scope, own.Proof, peer, first);
-            using var opened = await SqliteDeepIdV2AccountGeneration.OpenOrdinaryMessagingUnderLeaseAsync(
-                storage, sqlStatePath, current, scope, ct).ConfigureAwait(false);
+            using var opened = await SqliteDeepIdV2AccountGeneration.OpenInitialTransferMessagingUnderLeaseAsync(
+                storage, sqlStatePath, current, scope, ct, configureRouteHistory: configured => ConfigureRouteHistoryDecisionRecovery(configured, held)).ConfigureAwait(false);
             var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
             if (floor.Ordinal == 0)
             {
@@ -157,7 +157,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 _ = await opened.Custody.CommitOwnedAsync(import, ct).ConfigureAwait(false);
             }
             seed?.Dispose(); seed = null; retained.Dispose();
-            await CompleteMessagingTransferUnderLeaseAsync(current, opened, ct).ConfigureAwait(false);
+            await CompleteMessagingTransferUnderLeaseAsync(current, opened, held, ct).ConfigureAwait(false);
             await MaterializeInitialMessagingUnderLeaseAsync(current, opened, own, peer, source, held, ct).ConfigureAwait(false);
             await RequireFinalMessagingFreshnessAsync(current, scope, own, peer, source, held, first, ct).ConfigureAwait(false);
             return scope;
@@ -166,7 +166,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     }
 
     private async Task CompleteMessagingTransferUnderLeaseAsync(VerifiedDeepIdV2CurrentAccount current,
-        OwnedDid2MessagingStorage opened, CancellationToken ct)
+        OwnedDid2MessagingStorage opened, HeldDeepIdV2AccountLease held, CancellationToken ct)
     {
         var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
         if (floor.Status == 0)
@@ -186,8 +186,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         if (floor.Status != 1) throw new InvalidOperationException("Owned messaging session cannot be activated from a latched state.");
         // Independently reopen source and verify completed retirement plus the
         // mutable SQL/protected floor before returning only scope metadata.
-        using var verified = await SqliteDeepIdV2AccountGeneration.OpenOrdinaryMessagingUnderLeaseAsync(
-            storage, sqlStatePath, current, opened.Scope, ct).ConfigureAwait(false);
+        using var verified = await SqliteDeepIdV2AccountGeneration.OpenInitialTransferMessagingUnderLeaseAsync(
+            storage, sqlStatePath, current, opened.Scope, ct, configureRouteHistory: configured => ConfigureRouteHistoryDecisionRecovery(configured, held)).ConfigureAwait(false);
         var checkedFloor = await verified.Custody.ReconcileAsync(ct).ConfigureAwait(false);
         if (!Did2MessagingSessionScope.Fixed(floor.Exact.Span, checkedFloor.Exact.Span))
             throw new CryptographicException("Owned messaging activation changed during final verification.");

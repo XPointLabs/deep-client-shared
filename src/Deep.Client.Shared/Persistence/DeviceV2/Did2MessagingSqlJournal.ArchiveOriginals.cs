@@ -27,9 +27,11 @@ internal sealed partial class Did2MessagingSqlJournal
     private IReadOnlyList<Did2MessagingArchiveOriginal> ReadArchiveOriginalBatch(ulong cursor, ulong through, SqliteTransaction? tx = null)
     {
         if (cursor > through || through > long.MaxValue) throw new InvalidDataException("Archive source cursor exceeds its exact basis.");
+        var source = "SELECT rowid,ordinal,direction,operation,metadata,envelope,plaintext,2 AS kind FROM events" +
+            (HasDecisionTable ? " UNION ALL SELECT rowid,ordinal,0,operation,metadata,X'',decision,3 FROM route_decisions" : "");
         using var query = Command("SELECT rowid,ordinal,direction,operation,metadata,envelope,plaintext," +
             "typeof(rowid),typeof(ordinal),typeof(direction),typeof(operation),length(operation),typeof(metadata),length(metadata)," +
-            "typeof(envelope),length(envelope),typeof(plaintext),length(plaintext) FROM events WHERE ordinal>$cursor AND ordinal<=$through ORDER BY ordinal LIMIT 32;", tx);
+            "typeof(envelope),length(envelope),typeof(plaintext),length(plaintext),kind FROM (" + source + ") WHERE ordinal>$cursor AND ordinal<=$through ORDER BY ordinal LIMIT 32;", tx);
         query.Parameters.AddWithValue("$cursor", checked((long)cursor)); query.Parameters.AddWithValue("$through", checked((long)through));
         using var row = query.ExecuteReader(); var result = new List<Did2MessagingArchiveOriginal>();
         try
@@ -37,20 +39,24 @@ internal sealed partial class Did2MessagingSqlJournal
             var previous = cursor;
             while (row.Read())
             {
-                var rowId = row.GetInt64(0); var ordinal = row.GetInt64(1); var direction = row.GetInt32(2);
+                var rowId = row.GetInt64(0); var ordinal = row.GetInt64(1); var direction = row.GetInt32(2); var kind = row.GetInt32(18);
                 if (row.GetString(7) != "integer" || row.GetString(8) != "integer" || row.GetString(9) != "integer" ||
-                    rowId <= 0 || ordinal < 3 || (ulong)ordinal <= previous || (ulong)ordinal > through || direction is < 1 or > 4 ||
+                    rowId <= 0 || ordinal < 3 || (ulong)ordinal <= previous || (ulong)ordinal > through ||
+                    (kind == 3 ? direction != 0 : kind != 2 || direction is < 1 or > 4) ||
                     row.GetString(10) != "blob" || row.GetInt64(11) != 32 || row.GetString(12) != "blob" || row.GetInt64(13) != 672 ||
-                    row.GetString(14) != "blob" || row.GetInt64(15) is < 1 or > 65536 ||
-                    row.GetString(16) != (direction == 2 ? "blob" : "null") ||
-                    (direction == 2 ? row.IsDBNull(17) || row.GetInt64(17) is < 1 or > 33082 : !row.IsDBNull(17)))
+                    row.GetString(14) != "blob" || (kind == 3 ? row.GetInt64(15) != 0 : row.GetInt64(15) is < 1 or > 65536) ||
+                    row.GetString(16) != (kind == 3 || direction == 2 ? "blob" : "null") ||
+                    (kind == 3 ? row.GetInt64(17) != 1024 : direction == 2 ? row.IsDBNull(17) || row.GetInt64(17) is < 1 or > 33082 : !row.IsDBNull(17)))
                     throw new InvalidDataException("Archive original has a noncanonical exact SQL shape.");
                 var operation = row.GetFieldValue<byte[]>(3); var metadata = row.GetFieldValue<byte[]>(4);
-                var envelope = row.GetFieldValue<byte[]>(5); var plaintext = direction == 2 ? row.GetFieldValue<byte[]>(6) : [];
+                var envelope = row.GetFieldValue<byte[]>(5); var plaintext = kind == 3 || direction == 2 ? row.GetFieldValue<byte[]>(6) : [];
                 try
                 {
-                    VerifyHistoricalEvent((ulong)ordinal, direction, operation, metadata, envelope, plaintext);
-                    var reference = Did2MessagingArchiveReference.Event((byte)direction, (ulong)ordinal, (ulong)rowId, operation, SHA256.HashData(metadata));
+                    RequireUniqueOriginal(operation, (ulong)ordinal, tx);
+                    if (kind == 3) _ = VerifyRouteDecisionRow((ulong)ordinal, operation, metadata, plaintext);
+                    else VerifyHistoricalEvent((ulong)ordinal, direction, operation, metadata, envelope, plaintext);
+                    var reference = kind == 3 ? Did2MessagingArchiveReference.Decision((ulong)ordinal, (ulong)rowId, operation, SHA256.HashData(metadata)) :
+                        Did2MessagingArchiveReference.Event((byte)direction, (ulong)ordinal, (ulong)rowId, operation, SHA256.HashData(metadata));
                     result.Add(new(reference, metadata, envelope, plaintext)); metadata = []; envelope = []; plaintext = [];
                     previous = (ulong)ordinal;
                 }

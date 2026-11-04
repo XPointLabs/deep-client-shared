@@ -190,7 +190,9 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                     using (var schema = connection.CreateCommand())
                     {
                         schema.Transaction = transaction;
-                        schema.CommandText = "DROP TABLE archive_state; DROP TABLE archive_reducers; DROP TABLE archive_nodes; PRAGMA user_version=5;";
+                        schema.CommandText = "SELECT count(*) FROM route_decisions;";
+                        Assert.Equal(0L, Convert.ToInt64(schema.ExecuteScalar()));
+                        schema.CommandText = "DROP TABLE archive_state; DROP TABLE archive_reducers; DROP TABLE archive_nodes; DROP TABLE route_decisions; PRAGMA user_version=5;";
                         schema.ExecuteNonQuery();
                     }
                     transaction.Commit();
@@ -287,15 +289,27 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 var archiveDdl = new Dictionary<string, string>(StringComparer.Ordinal)
                 {
                     ["archive_nodes"] = "CREATE TABLE archive_nodes (hash BLOB PRIMARY KEY NOT NULL CHECK(typeof(hash)='blob' AND length(hash)=32), exact BLOB NOT NULL CHECK(typeof(exact)='blob' AND length(exact) BETWEEN 104 AND 320))",
-                    ["archive_reducers"] = "CREATE TABLE archive_reducers (hash BLOB PRIMARY KEY NOT NULL CHECK(typeof(hash)='blob' AND length(hash)=32), exact BLOB NOT NULL CHECK(typeof(exact)='blob' AND length(exact)=960))",
+                    ["archive_reducers"] = "CREATE TABLE archive_reducers (hash BLOB PRIMARY KEY NOT NULL CHECK(typeof(hash)='blob' AND length(hash)=32), exact BLOB NOT NULL CHECK(typeof(exact)='blob' AND length(exact)=1136))",
                     ["archive_state"] = "CREATE TABLE archive_state (singleton INTEGER PRIMARY KEY CHECK(singleton=1), exact BLOB NOT NULL CHECK(typeof(exact)='blob' AND length(exact)=608))"
                 };
+                const string decisionDdl = "CREATE TABLE route_decisions (operation BLOB PRIMARY KEY NOT NULL CHECK(typeof(operation)='blob' AND length(operation)=32), ordinal INTEGER NOT NULL UNIQUE CHECK(typeof(ordinal)='integer' AND ordinal BETWEEN 1 AND 9223372036854775807), decision BLOB NOT NULL CHECK(typeof(decision)='blob' AND length(decision)=1024), metadata BLOB NOT NULL CHECK(typeof(metadata)='blob' AND length(metadata)=672))";
                 digest.AppendData("Deep/STORE-V2/archive-enrollment-source"u8); digest.AppendData([0]); digest.AppendData(scope.Hash);
                 digest.AppendData(SchemaHash(5)); digest.AppendData(SchemaHash(6));
                 var application = new byte[4]; BinaryPrimitives.WriteUInt32BigEndian(application, 0x444d5332); digest.AppendData(application);
-                foreach (var table in new[] { "events", "initial_events", "journal", "ratchet", "scope" })
+                foreach (var table in new[] { "events", "initial_events", "journal", "ratchet", "route_decisions", "scope" })
                 {
-                    AppendDdl(digest, table, ddl[table]);
+                    AppendDdl(digest, table, table == "route_decisions" ? decisionDdl : ddl[table]);
+                    if (table == "route_decisions")
+                    {
+                        using var exists = connection.CreateCommand();
+                        exists.CommandText = "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name='route_decisions';";
+                        if (Convert.ToInt64(exists.ExecuteScalar()) != 0)
+                        {
+                            using var empty = connection.CreateCommand(); empty.CommandText = "SELECT count(*) FROM route_decisions;";
+                            Assert.Equal(0L, Convert.ToInt64(empty.ExecuteScalar()));
+                        }
+                        digest.AppendData([0]); Append64(0); continue;
+                    }
                     using var query = connection.CreateCommand();
                     query.CommandText = table == "events" ? "SELECT rowid,* FROM events ORDER BY ordinal;" :
                         "SELECT * FROM " + table + " ORDER BY " + (table == "journal" ? "ordinal" : "singleton") + ";";
@@ -323,8 +337,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                     schema.AppendData("Deep/STORE-V2/archive-schema"u8); schema.AppendData([0]);
                     var header = new byte[10]; BinaryPrimitives.WriteUInt32BigEndian(header, 0x444d5332);
                     BinaryPrimitives.WriteUInt32BigEndian(header.AsSpan(4), checked((uint)version));
-                    BinaryPrimitives.WriteUInt16BigEndian(header.AsSpan(8), checked((ushort)(version == 5 ? 5 : 8))); schema.AppendData(header);
-                    foreach (var entry in (version == 5 ? ddl : ddl.Concat(archiveDdl).ToDictionary(pair => pair.Key, pair => pair.Value))
+                    BinaryPrimitives.WriteUInt16BigEndian(header.AsSpan(8), checked((ushort)(version == 5 ? 5 : 9))); schema.AppendData(header);
+                    foreach (var entry in (version == 5 ? ddl : ddl.Concat(archiveDdl).Append(new KeyValuePair<string, string>("route_decisions", decisionDdl)).ToDictionary(pair => pair.Key, pair => pair.Value))
                         .OrderBy(pair => pair.Key, StringComparer.Ordinal)) AppendDdl(schema, entry.Key, entry.Value);
                     return schema.GetHashAndReset();
                 }

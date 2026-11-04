@@ -27,7 +27,8 @@ internal sealed partial class OwnedDid2MessagingMutation : IDisposable
     internal ReadOnlySpan<byte> EnvelopeCommitment => Header.Slice(332, 32);
     internal ReadOnlySpan<byte> NextTrs => Body(0);
     internal ReadOnlySpan<byte> Envelope => Body(1);
-    internal ReadOnlySpan<byte> AuthenticatedDmc2 => Body(2);
+    internal ReadOnlySpan<byte> AuthenticatedDmc2 => Kind != 6 ? Body(2) : throw new InvalidOperationException("A local route decision is not an authenticated DMC.");
+    internal ReadOnlySpan<byte> RouteDecisionBody => Kind == 6 ? Body(2) : throw new InvalidOperationException("A native event is not a local route decision.");
     internal ReadOnlySpan<byte> SessionInit => Body(3);
     internal ReadOnlySpan<byte> ContactHello => Body(4);
 
@@ -166,7 +167,7 @@ internal sealed partial class OwnedDid2MessagingMutation : IDisposable
     internal static void ValidateMetadata(ReadOnlySpan<byte> exact)
     {
         if (exact.Length != Did2MessagingFloor.MetadataBytes || !exact[..4].SequenceEqual("MSP2"u8) ||
-            exact[4] != 2 || exact[5] is not (1 or 2 or 3 or 4 or 5) || exact[6] > 4 || exact[7] > 2)
+            exact[4] != 2 || exact[5] is not (1 or 2 or 3 or 4 or 5 or 6) || exact[6] > 4 || exact[7] > 2)
             throw new InvalidDataException("DID2 mutation has an unknown closed header.");
         var outcome = exact.Slice(Did2RouteProcessingMetadata.Offset, Did2RouteProcessingMetadata.Bytes);
         Did2RouteProcessingMetadata.RequireShape(outcome);
@@ -192,6 +193,15 @@ internal sealed partial class OwnedDid2MessagingMutation : IDisposable
             if (exact[6] == 1 ? !Zero(exact.Slice(492, 32)) : Zero(exact.Slice(492, 32)))
                 throw new InvalidDataException("DID2 ratchet deduplication evidence has a different direction.");
         }
+        else if (exact[5] == 6)
+        {
+            if (exact[6] != 0 || exact[7] != 1 || exact[9] != 1 || exact[10] != 1 ||
+                sizes[0] != 0 || sizes[1] != 0 || sizes[2] != Did2RouteHistoryDecision.Bytes || sizes[3] != 0 || sizes[4] != 0 ||
+                !Zero(exact.Slice(332, 256)) || !Zero(outcome) ||
+                !Fixed(exact.Slice(196, 8), exact.Slice(84, 8)) || !Fixed(exact.Slice(204, 32), exact.Slice(92, 32)) ||
+                !Fixed(exact.Slice(236, 32), exact.Slice(124, 32)))
+                throw new InvalidDataException("DID2 route decision changed its closed retained-state shape.");
+        }
         else if (exact[5] == 5)
         {
             if (exact[6] is not (3 or 4) || exact[7] != 1 || sizes[0] is 0 or > 2097152 || sizes[1] != Dbr2Codec.TotalBytes ||
@@ -215,7 +225,8 @@ internal sealed partial class OwnedDid2MessagingMutation : IDisposable
                 kind is 2 or 5 ? retained.Status != 1 || retained.RatchetGeneration == ulong.MaxValue || generation != retained.RatchetGeneration + 1 :
                 retained.Ordinal == 0 || generation != retained.RatchetGeneration || kind == 3 && retained.Status != 0))
             throw new InvalidDataException("DID2 mutation metadata predecessor or transition is invalid.");
-        if (kind == 3 ? !Fixed(header.Slice(204, 32), retained.RatchetCommitment) || !Fixed(header.Slice(236, 32), retained.RatchetHash) :
+        if (kind == 6 && retained.Status != 1) throw new InvalidDataException("DID2 route decision requires active stable custody.");
+        if (kind is 3 or 6 ? !Fixed(header.Slice(204, 32), retained.RatchetCommitment) || !Fixed(header.Slice(236, 32), retained.RatchetHash) :
             kind == 4 && !Zero(header.Slice(204, 64)))
             throw new CryptographicException("DID2 control metadata changed retained key-state commitments.");
     }
@@ -228,6 +239,14 @@ internal sealed partial class OwnedDid2MessagingMutation : IDisposable
             Kind is 2 or 5 ? Predecessor.Status != 1 || generation != checked(Predecessor.RatchetGeneration + 1) :
             Predecessor.Ordinal == 0 || generation != Predecessor.RatchetGeneration || Kind == 3 && Predecessor.Status != 0)
             throw new InvalidDataException("DID2 mutation generation/status transition is invalid.");
+        if (Kind == 6)
+        {
+            ValidateMetadataTransition(Header, Scope, Predecessor);
+            var decision = Did2RouteHistoryDecision.Decode(Body(2), Scope); decision.RequireBefore(Predecessor);
+            if (!Fixed(SHA256.HashData(Body(2)), EventCommitment) || !Fixed(decision.Operation(Scope, Predecessor), Operation))
+                throw new CryptographicException("DID2 local route decision body/operation differs.");
+            return;
+        }
         if (Kind is 3 or 4)
         {
             if (Kind == 3 ? !Fixed(Header.Slice(204, 32), Predecessor.RatchetCommitment) || !Fixed(Header.Slice(236, 32), Predecessor.RatchetHash) :

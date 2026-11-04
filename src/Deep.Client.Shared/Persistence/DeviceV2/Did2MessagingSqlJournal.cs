@@ -61,10 +61,14 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
     private static readonly (string Name, string Sql)[] ArchiveSchema =
     [
         ("archive_nodes", "CREATE TABLE archive_nodes (hash BLOB PRIMARY KEY NOT NULL CHECK(typeof(hash)='blob' AND length(hash)=32), exact BLOB NOT NULL CHECK(typeof(exact)='blob' AND length(exact) BETWEEN 104 AND 320));"),
-        ("archive_reducers", "CREATE TABLE archive_reducers (hash BLOB PRIMARY KEY NOT NULL CHECK(typeof(hash)='blob' AND length(hash)=32), exact BLOB NOT NULL CHECK(typeof(exact)='blob' AND length(exact)=960));"),
+        ("archive_reducers", "CREATE TABLE archive_reducers (hash BLOB PRIMARY KEY NOT NULL CHECK(typeof(hash)='blob' AND length(hash)=32), exact BLOB NOT NULL CHECK(typeof(exact)='blob' AND length(exact)=1136));"),
         ("archive_state", "CREATE TABLE archive_state (singleton INTEGER PRIMARY KEY CHECK(singleton=1), exact BLOB NOT NULL CHECK(typeof(exact)='blob' AND length(exact)=608));")
     ];
-    private static readonly (string Name, string Sql)[] Schema = [.. OriginalSchema, .. ArchiveSchema];
+    private static readonly (string Name, string Sql)[] DecisionSchema =
+    [
+        ("route_decisions", "CREATE TABLE route_decisions (operation BLOB PRIMARY KEY NOT NULL CHECK(typeof(operation)='blob' AND length(operation)=32), ordinal INTEGER NOT NULL UNIQUE CHECK(typeof(ordinal)='integer' AND ordinal BETWEEN 1 AND 9223372036854775807), decision BLOB NOT NULL CHECK(typeof(decision)='blob' AND length(decision)=1024), metadata BLOB NOT NULL CHECK(typeof(metadata)='blob' AND length(metadata)=672));")
+    ];
+    private static readonly (string Name, string Sql)[] Schema = [.. OriginalSchema, .. DecisionSchema, .. ArchiveSchema];
     private bool archiveEnrollment;
     private int archiveEnrollmentVersion = 5;
     private Did2MessagingArchiveRoot? archiveRoot;
@@ -206,6 +210,8 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
         if (priorHeaders.Count >= (archiveEnrollment ? MaximumEntries : 64))
             throw new InvalidOperationException("DID2 messaging working journal requires owned prefix checkpointing.");
         RequireSame(prior, mutation.Predecessor);
+        if (mutation.Kind is 2 or 5 or 6) RequireNoCrossTableCollision(mutation.Operation, mutation.Successor.Ordinal, tx);
+        if (mutation.Kind == 6) RequireRouteDecisionAppend(mutation, tx);
         using var blobs = new OwnedBindings();
         using (var journal = Command("INSERT INTO journal VALUES($ordinal,$previous,$head,$header);", tx))
         {
@@ -236,6 +242,16 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
             else message.Parameters.AddWithValue("$plain", DBNull.Value);
             blobs.Add(message, "$metadata", mutation.Header);
             message.ExecuteNonQuery();
+        }
+        else if (mutation.Kind == 6)
+        {
+            using var decision = Command("INSERT INTO route_decisions(operation,ordinal,decision,metadata) VALUES($operation,$ordinal,$decision,$metadata);", tx);
+            blobs.Add(decision, "$operation", mutation.Operation); decision.Parameters.AddWithValue("$ordinal", checked((long)mutation.Successor.Ordinal));
+            blobs.Add(decision, "$decision", mutation.RouteDecisionBody); blobs.Add(decision, "$metadata", mutation.Header); decision.ExecuteNonQuery();
+            var reference = CaptureDecisionReference(mutation.Successor.Ordinal, mutation.Header, tx);
+            using var readback = ReadRouteHistoryDecision(reference, tx);
+            if (!Fixed(readback.Body.Exact.Span, mutation.RouteDecisionBody) || !Fixed(readback.Metadata.Span, mutation.Header))
+                throw new CryptographicException("Immutable route decision readback differs.");
         }
         var nextHeaders = ReadJournal(out var next, tx); VerifyRows(nextHeaders, next, tx);
         RequireSame(next, mutation.Successor.Cleanup(scope).Stable(scope));
@@ -536,6 +552,7 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
                 direction is 3 or 4 && eventReader.GetInt64(6) != Dbr2Codec.TotalBytes)
                 throw new InvalidDataException("DID2 SQL event journal reference/size differs.");
             var header = headers[checked((int)((ulong)ordinal - WorkingBasis.Ordinal - 1))];
+            RequireUniqueOriginal(eventReader.GetFieldValue<byte[]>(0), (ulong)ordinal, tx);
             if (!Fixed(eventReader.GetFieldValue<byte[]>(5), header))
                 throw new CryptographicException("DID2 SQL event metadata differs from its current journal.");
             var envelopeBytes = eventReader.GetFieldValue<byte[]>(3);
@@ -575,28 +592,50 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
             }
         }
         if (count != headers.Count(static header => header[5] is 2 or 5)) throw new InvalidDataException("DID2 SQL lost a journal-bound event.");
+        VerifyWorkingRouteDecisions(headers, tx);
     }
     private void VerifyInitial(List<byte[]> headers, SqliteTransaction? tx)
     {
-        using var command = Command("SELECT singleton,envelope,session_init,hello,metadata,length(envelope),length(session_init),length(hello),length(metadata) FROM initial_events;", tx);
-        using var reader = command.ExecuteReader();
         if (headers.Count == 0 && WorkingBasis.Ordinal == 0)
-        { if (reader.Read()) throw new InvalidDataException("DID2 empty SQL retains initial events."); return; }
-        if (!reader.Read() || reader.GetInt64(0) != 1 || reader.GetInt64(5) is < 1 or > 65536 ||
-            reader.GetInt64(6) is < 1 or > 32768 || reader.GetInt64(7) is < 1 or > 32768 || reader.GetInt64(8) != Did2MessagingFloor.MetadataBytes)
-            throw new InvalidDataException("DID2 SQL initial events are absent.");
+        {
+            using var empty = Command("SELECT count(*) FROM initial_events;", tx);
+            if (Convert.ToInt64(empty.ExecuteScalar()) != 0) throw new InvalidDataException("DID2 empty SQL retains initial events.");
+            return;
+        }
+        var header = ReadVerifiedInitialImport(tx);
+        if (WorkingBasis.Ordinal == 0 ? !Fixed(header, headers[0]) :
+            !Fixed(SHA256.HashData(header), ReadArchiveInitialHeaderHash(tx)))
+            throw new CryptographicException("DID2 initial metadata differs from the protected journal/history basis.");
+    }
+
+    private byte[] ReadVerifiedInitialImport(SqliteTransaction? tx)
+    {
+        using var command = Command("SELECT singleton,envelope,session_init,hello,metadata,length(envelope),length(session_init),length(hello),length(metadata),typeof(singleton),typeof(envelope),typeof(session_init),typeof(hello),typeof(metadata) FROM initial_events;", tx);
+        using var reader = command.ExecuteReader();
+        if (!reader.Read() || reader.GetString(9) != "integer" || reader.GetInt64(0) != 1 ||
+            reader.GetString(10) != "blob" || reader.GetString(11) != "blob" || reader.GetString(12) != "blob" || reader.GetString(13) != "blob" ||
+            reader.GetInt64(5) is < 1 or > 65536 || reader.GetInt64(6) is < 1 or > 32768 ||
+            reader.GetInt64(7) is < 1 or > 32768 || reader.GetInt64(8) != Did2MessagingFloor.MetadataBytes)
+            throw new InvalidDataException("DID2 SQL initial events are absent or have a noncanonical storage shape.");
         var header = reader.GetFieldValue<byte[]>(4);
         OwnedDid2MessagingMutation.ValidateMetadataTransition(header, scope, Did2MessagingFloor.Empty(scope));
-        if (header[5] != 1 || (WorkingBasis.Ordinal == 0 ? !Fixed(header, headers[0]) :
-            !Fixed(SHA256.HashData(header), ReadArchiveInitialHeaderHash(tx))))
-            throw new CryptographicException("DID2 initial metadata differs from the protected journal/history basis.");
+        if (header[5] != 1) throw new InvalidDataException("DID2 SQL initial metadata is not the original import.");
         var envelopeBytes = reader.GetFieldValue<byte[]>(1); var initBytes = reader.GetFieldValue<byte[]>(2); var helloBytes = reader.GetFieldValue<byte[]>(3);
         try
         {
             var envelope = Dph2Codec.Decode(envelopeBytes); var init = ApplicationCoreCodec.DecodeDmc2(initBytes); var hello = ApplicationCoreCodec.DecodeDmc2(helloBytes);
             if (!Fixed(SHA256.HashData(envelopeBytes), header.AsSpan(332, 32)) || !Fixed(DeviceInitialSessionCheckpoint.EventHash(initBytes, helloBytes), header.AsSpan(300, 32)) ||
                 !Fixed(envelope.SessionId.Span, scope.Session) || !Fixed(envelope.NetworkId.Span, scope.Network) ||
+                !Fixed(envelope.InitiatorAccountId.Span, scope.IsInitiator ? scope.LocalAccount : scope.RemoteAccount) ||
+                !Fixed(envelope.ResponderAccountId.Span, scope.IsInitiator ? scope.RemoteAccount : scope.LocalAccount) ||
+                !Fixed(envelope.InitiatorDeviceId.Span, scope.IsInitiator ? scope.LocalDevice : scope.RemoteDevice) ||
+                !Fixed(envelope.ResponderDeviceId.Span, scope.IsInitiator ? scope.RemoteDevice : scope.LocalDevice) ||
+                envelope.InitiatorDeviceGeneration != (scope.IsInitiator ? scope.LocalDeviceGeneration : scope.RemoteDeviceGeneration) ||
+                envelope.ResponderDeviceGeneration != (scope.IsInitiator ? scope.RemoteDeviceGeneration : scope.LocalDeviceGeneration) ||
                 !Fixed(envelope.ClaimOperationId.Span, header.AsSpan(268, 32)) ||
+                !Fixed(init.NetworkId.Span, scope.Network) || !Fixed(hello.NetworkId.Span, scope.Network) ||
+                !Fixed(init.SenderAccountId.Span, envelope.InitiatorAccountId.Span) || !Fixed(hello.SenderAccountId.Span, envelope.InitiatorAccountId.Span) ||
+                !Fixed(init.SenderDeviceId.Span, envelope.InitiatorDeviceId.Span) || !Fixed(hello.SenderDeviceId.Span, envelope.InitiatorDeviceId.Span) ||
                 !Fixed(init.ConversationId.Span, scope.Conversation) || !Fixed(hello.ConversationId.Span, scope.Conversation) ||
                 init.ParsedPayload is not SessionInitDmc2Payload || hello.ParsedPayload is not ContactHelloDmc2Payload contact ||
                 !Fixed(contact.RelationshipId.Span, scope.Relationship))
@@ -604,6 +643,7 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
         }
         finally { CryptographicOperations.ZeroMemory(initBytes); CryptographicOperations.ZeroMemory(helloBytes); }
         if (reader.Read()) throw new InvalidDataException("DID2 SQL has duplicate initial events.");
+        return header;
     }
     private void ValidateSchema(SqliteTransaction? tx = null)
         => ValidateSchemaVersion(archiveEnrollment ? archiveEnrollmentVersion : SchemaVersion, tx);

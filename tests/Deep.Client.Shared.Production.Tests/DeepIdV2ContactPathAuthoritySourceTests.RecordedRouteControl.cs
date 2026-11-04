@@ -23,10 +23,11 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         await fixture.RecoverNativeSenderPublicationAsync();
         using var command = await fixture.CreateOwnedRouteUpdate(sender);
         var message = ApplicationCoreCodec.DecodeDmc2(command.ExactDmc2.Span);
-        var update = Assert.IsType<ContactRouteUpdateDmc2Payload>(message.ParsedPayload);
-        Assert.Equal(1, update.RecoveryWitness!.PairCount);
-        Assert.Equal(1UL, update.RouteGeneration);
-        Assert.Equal(2UL, BinaryPrimitives.ReadUInt64BigEndian(update.Authorization.Field(3).Span));
+        var update = Assert.IsType<ContactRouteHistoryDmc2Payload>(message.ParsedPayload);
+        Assert.Equal(DeepIdV2ContactRouteHistoryMode.EvidenceAndAnnouncement, update.Mode);
+        Assert.Equal(2, update.Atoms.Count); Assert.False(update.Atoms[0].IsCompleted); Assert.True(update.Atoms[1].IsCompleted);
+        Assert.Equal(1UL, BinaryPrimitives.ReadUInt64BigEndian(update.RightCursor.Span));
+        Assert.Equal(2UL, BinaryPrimitives.ReadUInt64BigEndian(update.RightCursor.Span[40..]));
         byte[] ciphertext;
         using (var sent = await fixture.SendOwnedRouteUpdate(sender, command.OperationId)) ciphertext = sent.ExactEnvelope.ToArray();
         await fixture.CheckLocalHistoryFailureBeforeRecoveredReceiveAsync(receiver, ciphertext);
@@ -35,7 +36,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         await Assert.ThrowsAsync<ClientMailboxDispatchOutcomeUnknownException>(() => fixture.SynchronizeNativeReceiver(grants, terminal));
         byte[] outcome;
         using (var received = await fixture.ReceiveOwnedMessage(receiver, ciphertext))
-        { outcome = received.RouteProcessing.ToArray(); Assert.Equal(1, outcome[0]); }
+        { outcome = received.RouteProcessing.ToArray(); Assert.Equal(3, outcome[0]); }
         fixture.ColdReopenReceiverStoreStorage();
         const string text = "reply through independently adopted recovered route";
         var operation = await fixture.QueueNativeText(receiver, text);
@@ -71,11 +72,12 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         Assert.True(exactRoute.AsSpan().SequenceEqual(cachedArchivedRoute), "Cached archived Store changed its original route.");
         await fixture.RenewNativeSenderPublicationPastExpiryAsync(renewedRouteLifetimeSeconds: 300);
         using var ordinary = await fixture.CreateOwnedRouteUpdate(sender);
-        var ordinaryPayload = Assert.IsType<ContactRouteUpdateDmc2Payload>(ApplicationCoreCodec.DecodeDmc2(ordinary.ExactDmc2.Span).ParsedPayload);
-        Assert.Null(ordinaryPayload.RecoveryWitness); Assert.Equal(2UL, ordinaryPayload.RouteGeneration);
-        Assert.Equal(3UL, BinaryPrimitives.ReadUInt64BigEndian(ordinaryPayload.Authorization.Field(3).Span));
+        var ordinaryPayload = Assert.IsType<ContactRouteHistoryDmc2Payload>(ApplicationCoreCodec.DecodeDmc2(ordinary.ExactDmc2.Span).ParsedPayload);
+        Assert.True(Assert.Single(ordinaryPayload.Atoms).IsCompleted);
+        Assert.Equal(2UL, BinaryPrimitives.ReadUInt64BigEndian(ordinaryPayload.RightCursor.Span));
+        Assert.Equal(3UL, BinaryPrimitives.ReadUInt64BigEndian(ordinaryPayload.RightCursor.Span[40..]));
         using (var sent = await fixture.SendOwnedRouteUpdate(sender, ordinary.OperationId))
-        using (var received = await fixture.ReceiveOwnedMessage(receiver, sent.ExactEnvelope.ToArray())) Assert.Equal(1, received.RouteProcessing[0]);
+        using (var received = await fixture.ReceiveOwnedMessage(receiver, sent.ExactEnvelope.ToArray())) Assert.Equal(3, received.RouteProcessing[0]);
     }
 
     [Fact]
@@ -156,66 +158,71 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         }
         private async Task CheckRecordedPrivateControlAsync(VerifiedDeepIdV2ContactRouteClosure next,
             VerifiedDeepIdV2ContactRouteClosure previous, ParsedDeepIdV2ContactMailboxRoute initial,
-            VerifiedDeepIdV2DirectoryFreshness proof, bool expectedWitness)
+            VerifiedDeepIdV2DirectoryFreshness proof, VerifiedDeepIdV2ContactRouteIssuance issuance, bool expectedWitness)
         {
             var original = DeepIdV2ContactMailboxRouteCodec.Decode(DeepIdV2ContactMailboxRouteCodec.Encode(previous));
-            var hash = Bytes(32, 0xa1); var relationship = Bytes(32, 0xa2); var conversation = Bytes(32, 0xa3);
+            var relationship = Bytes(32, 0xa2); var conversation = Bytes(32, 0xa3);
             var time = new OnionTrustedTimeAuthority(this);
-            var authored = await ApplicationCoreCodec.AuthorVerifiedContactRouteUpdateAsync(next, original,
-                previous.ExactRouteClosure, hash, relationship, conversation, Bytes(32, 0xa4), 6, time);
-            var update = Assert.IsType<ContactRouteUpdateDmc2Payload>(authored.Record.ParsedPayload);
-            Assert.Equal(next.ExactRouteClosure.ToArray(), update.ExactRouteClosure.ToArray());
-            Assert.Equal(expectedWitness, update.RecoveryWitness is not null);
+            var anchor = await RouteHistoryFixtureAnchorDataAsync(original, relationship, conversation);
+            var before = await DeepIdV2ContactRouteUpdateVerifier.VerifyHistoryAnchorAsync(anchor.CanonicalBytes,
+                proof, next.Network, next.NetworkAuthority, time);
+            var steps = new List<VerifiedDeepIdV2ContactRouteHistoryStep>(); var after = before;
+            var recorded = issuance.RecordedHistory?.Pairs ?? [];
+            Assert.Equal(expectedWitness, recorded.Count != 0);
+            foreach (var pair in recorded)
+            {
+                var proposal = await DeepIdV2ContactRouteUpdateVerifier.VerifyOriginalHistoryStepAsync(after,
+                    pair.ExactRequest, pair.ExactResponse, ReadOnlyMemory<byte>.Empty, ReadOnlyMemory<byte>.Empty,
+                    proof, next.Network, next.NetworkAuthority, time);
+                steps.Add(proposal); after = proposal.After;
+            }
+            var completedPair = RouteHistoryFixturePair(issuance);
+            var completed = await DeepIdV2ContactRouteUpdateVerifier.VerifyOriginalHistoryStepAsync(after,
+                completedPair.ExactRequest, completedPair.ExactResponse, next.ExactXir1V2, next.ExactRouteClosure,
+                proof, next.Network, next.NetworkAuthority, time);
+            steps.Add(completed);
+            var authored = await ApplicationCoreCodec.AuthorVerifiedContactRouteHistoryPageAsync(before, steps, true,
+                new byte[32], next.Recipient, next.Network, next.NetworkAuthority, Bytes(32, 0xa4), 6, time);
+            var update = Assert.IsType<ContactRouteHistoryDmc2Payload>(authored.Record.ParsedPayload);
+            Assert.Equal(next.ExactRouteClosure.ToArray(), update.Atoms[^1].ExactCompletedRoute.ToArray());
             await Check(authored.CanonicalBytes);
             if (!expectedWitness) return;
-            Assert.Equal(1, update.RecoveryWitness!.PairCount);
-            Assert.Equal(previous.ExactXir1V2.ToArray(), update.RecoveryWitness.ExactCompletedAnchorXir1V2.ToArray());
-            var payload = update.CanonicalBytes.ToArray(); var witness = update.RecoveryWitness.CanonicalBytes.ToArray();
-            var prefixLength = payload.Length - witness.Length - 4;
-            var omitted = payload.AsSpan(0, prefixLength).ToArray(); omitted[72] = 6;
+            Assert.Equal(2, update.Atoms.Count);
+            Assert.Equal(previous.ExactXir1V2.ToArray(), update.ExactLeftXir1V2.ToArray());
+            var payload = update.CanonicalBytes.ToArray();
+            var firstLength = checked((int)BinaryPrimitives.ReadUInt32BigEndian(payload.AsSpan(1024)));
+            var firstBlockLength = checked(firstLength + 4);
+            var omitted = new byte[payload.Length - firstBlockLength]; payload.AsSpan(0, 1024).CopyTo(omitted);
+            payload.AsSpan(1024 + firstBlockLength).CopyTo(omitted.AsSpan(1024)); omitted[75] = 1;
             await Reject(ReplaceControlPayload(authored.Record, omitted));
-            var wrongAnchor = witness.ToArray(); initial.Invite.CanonicalBytes.Span.CopyTo(wrongAnchor.AsSpan(4, 611));
-            await Reject(WithWitness(wrongAnchor));
-            var badSignature = witness.ToArray();
-            badSignature[4 + FieldOffset(badSignature.AsSpan(4, 611).ToArray(), 17)] ^= 1;
-            await Reject(WithWitness(badSignature), malformedSignature: true);
-            var foreignFloor = witness.ToArray(); foreignFloor[615 + 40] ^= 1;
-            await Reject(WithWitness(foreignFloor));
-            var duplicate = new byte[615 + 2 * (witness.Length - 615)]; witness.AsSpan(0, 615).CopyTo(duplicate);
-            duplicate[1] = 2; witness.AsSpan(615).CopyTo(duplicate.AsSpan(615)); witness.AsSpan(615).CopyTo(duplicate.AsSpan(witness.Length));
-            await Reject(WithWitness(duplicate));
-            await Assert.ThrowsAnyAsync<CryptographicException>(async () => await DeepIdV2ContactRouteUpdateVerifier.VerifyCurrentSuccessorAsync(
-                initial, proof, next.Network, next.NetworkAuthority, time, initial.Route.ExactBytes, hash, relationship, conversation, authored.CanonicalBytes));
-
-            byte[] WithWitness(byte[] tail)
-            {
-                var changed = new byte[prefixLength + 4 + tail.Length]; payload.AsSpan(0, prefixLength).CopyTo(changed);
-                BinaryPrimitives.WriteUInt32BigEndian(changed.AsSpan(prefixLength), checked((uint)tail.Length)); tail.CopyTo(changed, prefixLength + 4);
-                return ReplaceControlPayload(authored.Record, changed);
-            }
+            var wrongAnchor = payload.ToArray(); initial.Invite.CanonicalBytes.Span.CopyTo(wrongAnchor.AsSpan(304, 611));
+            await Reject(ReplaceControlPayload(authored.Record, wrongAnchor));
+            var badSignature = payload.ToArray();
+            badSignature[1028 + 578 + FieldOffset(update.Atoms[0].ExactXra1.ToArray(), 16)] ^= 1;
+            await Reject(ReplaceControlPayload(authored.Record, badSignature));
+            var foreignFloor = payload.ToArray(); foreignFloor[1028 + 41] ^= 1;
+            await Reject(ReplaceControlPayload(authored.Record, foreignFloor));
+            var duplicate = new byte[payload.Length + firstBlockLength]; payload.AsSpan(0, 1024 + firstBlockLength).CopyTo(duplicate);
+            payload.AsSpan(1024).CopyTo(duplicate.AsSpan(1024 + firstBlockLength)); duplicate[75] = 3;
+            await Reject(ReplaceControlPayload(authored.Record, duplicate));
+            var wrongOriginal = await RouteHistoryFixtureAnchorDataAsync(initial, relationship, conversation);
+            var wrongBefore = await DeepIdV2ContactRouteUpdateVerifier.VerifyHistoryAnchorAsync(wrongOriginal.CanonicalBytes,
+                proof, next.Network, next.NetworkAuthority, time);
+            await Assert.ThrowsAnyAsync<CryptographicException>(async () => await DeepIdV2ContactRouteUpdateVerifier.VerifyHistoryPageAsync(
+                wrongBefore, authored.CanonicalBytes, proof, next.Network, next.NetworkAuthority, time));
             async Task Check(ReadOnlyMemory<byte> exact)
             {
-                var current = await DeepIdV2ContactRouteUpdateVerifier.VerifyCurrentSuccessorAsync(original, proof, next.Network,
-                    next.NetworkAuthority, time, previous.ExactRouteClosure, hash, relationship, conversation, exact);
+                var endpoint = await DeepIdV2ContactRouteUpdateVerifier.VerifyHistoryPageAsync(before, exact,
+                    proof, next.Network, next.NetworkAuthority, time);
+                var current = await DeepIdV2ContactRouteUpdateVerifier.VerifyCurrentHistoryAnnouncementAsync(endpoint, exact,
+                    proof, next.Network, next.NetworkAuthority, time);
                 Assert.Equal(next.ExactRouteClosure.ToArray(), current.ExactRouteClosure.ToArray());
-                var historical = await DeepIdV2ContactRouteUpdateVerifier.RequireRetainedSuccessorFactsAsync(original, proof,
-                    next.Network, next.NetworkAuthority, time, previous.ExactRouteClosure, hash, relationship, conversation, exact);
-                Assert.Equal(next.ExactRouteClosure.ToArray(), historical.ExactBytes.ToArray());
+                Assert.Equal(next.ExactRouteClosure.ToArray(), endpoint.ExactCompletedRoute.ToArray());
             }
-            async Task Reject(byte[] exact, bool malformedSignature = false)
+            async Task Reject(byte[] exact)
             {
-                if (malformedSignature)
-                {
-                    await Assert.ThrowsAsync<ApplicationCoreFormatException>(async () => await DeepIdV2ContactRouteUpdateVerifier.VerifyCurrentSuccessorAsync(
-                        original, proof, next.Network, next.NetworkAuthority, time, previous.ExactRouteClosure, hash, relationship, conversation, exact));
-                    await Assert.ThrowsAsync<ApplicationCoreFormatException>(async () => await DeepIdV2ContactRouteUpdateVerifier.RequireRetainedSuccessorFactsAsync(
-                        original, proof, next.Network, next.NetworkAuthority, time, previous.ExactRouteClosure, hash, relationship, conversation, exact));
-                    return;
-                }
-                await Assert.ThrowsAnyAsync<CryptographicException>(async () => await DeepIdV2ContactRouteUpdateVerifier.VerifyCurrentSuccessorAsync(
-                    original, proof, next.Network, next.NetworkAuthority, time, previous.ExactRouteClosure, hash, relationship, conversation, exact));
-                await Assert.ThrowsAnyAsync<CryptographicException>(async () => await DeepIdV2ContactRouteUpdateVerifier.RequireRetainedSuccessorFactsAsync(
-                    original, proof, next.Network, next.NetworkAuthority, time, previous.ExactRouteClosure, hash, relationship, conversation, exact));
+                await RequireRouteRejectionAsync(async () => await DeepIdV2ContactRouteUpdateVerifier.VerifyHistoryPageAsync(before,
+                    exact, proof, next.Network, next.NetworkAuthority, time));
             }
         }
 

@@ -180,7 +180,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         var floor = await new Did2MessagingProtectedCheckpoint(storage, scope).ReadAsync(ct).ConfigureAwait(false);
         using var native = archiveEnrollmentInProgress
             ? await SqliteDeepIdV2AccountGeneration.OpenArchiveEnrollmentMessagingUnderLeaseAsync(storage, sqlStatePath, scope.Network.ToArray(), scope.LocalAccount.ToArray(), scope, ct).ConfigureAwait(false)
-            : await SqliteDeepIdV2AccountGeneration.OpenRegisteredMessagingUnderLeaseAsync(storage, sqlStatePath, scope.Network.ToArray(), scope.LocalAccount.ToArray(), scope, ct).ConfigureAwait(false);
+            : await SqliteDeepIdV2AccountGeneration.OpenRegisteredMessagingUnderLeaseAsync(storage, sqlStatePath, scope.Network.ToArray(), scope.LocalAccount.ToArray(), scope, ct, configureRouteHistory: configured => ConfigureRouteHistoryDecisionRecovery(configured, held)).ConfigureAwait(false);
         if (!FixedRoute((await native.WithSqlAsync(sql => sql.VerifyOrdinaryState(), ct).ConfigureAwait(false)).Exact.Span, floor.Exact.Span))
             throw new CryptographicException("Ordinary recovery lost its independent native tip.");
         using var application = await SqliteDeepIdV2AccountGeneration.OpenExistingApplicationForCompactionUnderLeaseAsync(

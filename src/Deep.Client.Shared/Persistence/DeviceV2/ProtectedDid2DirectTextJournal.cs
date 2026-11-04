@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Security.Cryptography;
 using Deep.Protocol.ApplicationCore;
+using Deep.Protocol.ContactV2;
 
 namespace Deep.Client.Shared.Persistence.DeviceV2;
 
@@ -134,10 +135,15 @@ internal static class ProtectedDid2DirectTextJournal
             {
                 var scope = Scope;
                 canonical = parsed.CanonicalBytes;
-                var routeControl = parsed.ParsedPayload as ContactRouteUpdateDmc2Payload;
+                var relationship = parsed.ParsedPayload switch
+                {
+                    ContactRouteUpdateDmc2Payload update => update.RelationshipId,
+                    ContactRouteHistoryDmc2Payload history => history.RelationshipId,
+                    _ => ReadOnlyMemory<byte>.Empty
+                };
                 if (parsed.ContentKind != Kind || parsed.Flags != Dmc2Flags.None ||
                     (Kind == Dmc2ContentKind.ContactRouteUpdate
-                        ? routeControl is null || parsed.ExpiresAtUnixMilliseconds == 0 || !Fixed(routeControl.RelationshipId.Span, scope.Relationship)
+                        ? relationship.IsEmpty || parsed.ExpiresAtUnixMilliseconds == 0 || !Fixed(relationship.Span, scope.Relationship)
                         : ProtectedDid2GroupJournal.IsKind(Kind) ? parsed.ExpiresAtUnixMilliseconds == 0 : parsed.ExpiresAtUnixMilliseconds != 0) || parsed.ReplyToLogicalMessageId.Length != 0 ||
                     !Fixed(parsed.NetworkId.Span, scope.Network) || !Fixed(parsed.SenderAccountId.Span, scope.LocalAccount) ||
                     !Fixed(parsed.SenderDeviceId.Span, scope.LocalDevice) || !Fixed(parsed.ConversationId.Span, scope.Conversation) ||

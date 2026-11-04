@@ -9,6 +9,27 @@ namespace Deep.Client.Shared.Persistence;
 
 public sealed partial class SqliteDeepMailboxStore
 {
+    internal static void RequireArchiveAuthoredCommand(SqliteConnection connection, Did2MessagingSessionScope scope,
+        ProtectedDid2DirectTextJournal.State ordinary, ReadOnlyMemory<byte> operation, ReadOnlyMemory<byte> expected)
+    {
+        using var tx = connection.BeginTransaction(deferred: true);
+        ValidateTransportOutboxSchema(connection, tx);
+        if (!ordinary.Entries.TryGetValue(Convert.ToHexString(operation.Span), out var command) || command.Pending ||
+            !DirectFixed(command.Scope.Exact, scope.Exact))
+            throw new CryptographicException("Fresh route-history admission lost its stable actual authored command.");
+        command.RequireEvent(expected.Span); RequireSelectedOrdinaryRow(connection, tx, command);
+        RequireCounter(connection, tx, scope, ordinary.NextSequence(scope), allowAbsent: false);
+        using var read = connection.CreateCommand(); read.Transaction = tx;
+        read.CommandText = "SELECT exact_dmc2 FROM direct_text_outbox WHERE operation_id=$operation;";
+        read.Parameters.AddWithValue("$operation", operation.ToArray());
+        var exact = (byte[])(read.ExecuteScalar() ?? throw new CryptographicException("Fresh route-history admission lost its actual command payload."));
+        try
+        {
+            if (!DirectFixed(exact, expected.Span)) throw new CryptographicException("Fresh route-history admission changed its exact owned payload.");
+        }
+        finally { CryptographicOperations.ZeroMemory(exact); }
+    }
+
     internal static byte[] CaptureArchiveAuthoredSourceFromConnection(SqliteConnection connection,
         IncrementalHash prefix, Did2MessagingSessionScope scope, CancellationToken ct)
     {

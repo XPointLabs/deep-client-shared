@@ -4,6 +4,7 @@ using Deep.Client.Shared.Persistence.MessagingV1;
 using Deep.Client.Shared.Services;
 using Deep.Client.Shared.Services.XPointNetworkV1;
 using Deep.Protocol.ApplicationCore;
+using Deep.Protocol.ContactV2;
 
 namespace Deep.Client.Shared.Production.Tests;
 
@@ -13,7 +14,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     [InlineData(false)]
     [InlineData(true)]
     [Trait("RequiresApprovedMlKemRuntime", "true")]
-    public async Task Did2RouteProcessing_ActualMailboxAckRetainsFirstAcceptedOrExpiredOutcome(bool expiredBeforeReceive)
+    public async Task Did2RouteProcessing_ActualMailboxAckRetainsStagedHistoryAndExpiredProgressWithoutPromotion(bool expiredBeforeReceive)
     {
         // Real native account/session/counter/receive and protected page/ACK.
         // Witnesses and terminal remain in-process signed fixtures, not devices.
@@ -34,6 +35,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         using var command = await fixture.CreateOwnedRouteUpdate(sender);
         var operation = command.OperationId.ToArray();
         var message = ApplicationCoreCodec.DecodeDmc2(command.ExactDmc2.Span);
+        var page = Assert.IsType<ContactRouteHistoryDmc2Payload>(message.ParsedPayload);
         byte[] ciphertext;
         using (var sent = await fixture.SendOwnedRouteUpdate(sender, operation)) ciphertext = sent.ExactEnvelope.ToArray();
         if (expiredBeforeReceive) fixture.AdvanceRouteProcessingPast(message.ExpiresAtUnixMilliseconds);
@@ -46,14 +48,22 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         using (var replay = await fixture.ReceiveOwnedMessage(receiver, ciphertext))
         {
             processing = replay.RouteProcessing.ToArray();
-            Assert.Equal(expiredBeforeReceive ? 2 : 1, processing[0]);
+            Assert.Equal(3, processing[0]);
         }
         var committed = await fixture.ReadMessagingFloor(receiver);
-        Assert.Equal(1, committed.Status); // Rejected route does not erase/latch live TRS.
-        Assert.Equal(before.Ordinal + 1, committed.Ordinal);
+        Assert.Equal(1, committed.Status);
+        var decisions = await fixture.ReadPagedNativeDecisionRows(receiver);
+        Assert.Equal(page.Atoms.Count + (expiredBeforeReceive ? 1 : 2), decisions.Count);
+        Assert.Equal(before.Ordinal + 1 + (ulong)decisions.Count, committed.Ordinal);
         Assert.Equal(before.RatchetGeneration + 1, committed.RatchetGeneration);
-        // Actual protected-prefix compaction must retain both the positive
-        // outcome and rejected fault; cold ACK/replay cannot reclassify either.
+        Assert.Equal(Did2RouteHistoryDecision.ActionKind.Bootstrap, decisions[0].Body.Action);
+        Assert.Equal(expiredBeforeReceive ? Did2RouteHistoryDecision.ActionKind.Evidence : Did2RouteHistoryDecision.ActionKind.Promotion,
+            decisions[^1].Body.Action);
+        Assert.False(decisions[0].Body.C.Exact.Span.SequenceEqual(decisions[^1].Body.C.Exact.Span));
+        if (expiredBeforeReceive) Assert.Equal(decisions[0].Body.L.Exact.ToArray(), decisions[^1].Body.L.Exact.ToArray());
+        await fixture.AssertNoPagedRouteFault(receiver);
+        // The original stage3 outcome and separate historical decisions survive
+        // real compaction and cold ACK/replay without retrospective promotion.
         await fixture.CompactHistoricalPeerRoutePrefix(receiver);
         fixture.ColdReopenReceiverStoreStorage();
         fixture.AdvanceRouteProcessingPast(message.ExpiresAtUnixMilliseconds);
@@ -74,8 +84,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             var blockedGrants = new OwnedGrantTransport(fixture, ownerOnPrimary: false);
             var blockedTransport = new RejectInitialDispatchFactory();
             var error = await Assert.ThrowsAsync<CryptographicException>(() => fixture.QueueNativeText(receiver,
-                "must not dispatch across a retained route fault"));
-            Assert.Contains("Retained authenticated route fault", error.Message, StringComparison.Ordinal);
+                "expired history cannot authorize current delivery"));
+            Assert.DoesNotContain("Retained authenticated route fault", error.Message, StringComparison.Ordinal);
             Assert.Equal(0, blockedGrants.Calls); Assert.Equal(0, blockedTransport.Calls);
         }
     }
@@ -84,7 +94,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     [InlineData("AfterPending", false)] [InlineData("AfterSql", false)] [InlineData("AfterStable", false)]
     [InlineData("AfterPending", true)] [InlineData("AfterSql", true)] [InlineData("AfterStable", true)]
     [Trait("RequiresApprovedMlKemRuntime", "true")]
-    public async Task Did2RouteProcessing_ActualOwnedControlCommitsFirstOutcomeAndColdExactReplay(string fault, bool cancellation)
+    public async Task Did2RouteProcessing_ActualOwnedControlCommitsStage3AndColdExactReplay(string fault, bool cancellation)
     {
         // Two real owned PQ accounts, adopted witness-signed publication,
         // protected authored command, native ratchet and SQLCipher. In-process
@@ -133,22 +143,27 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         Assert.Equal(before.Ordinal + 1, pending.Ordinal);
         var firstProcessing = pending.Phase == 2 ? await fixture.ReadPendingRouteProcessing(receiver, pending) :
             await fixture.ReadStableRouteProcessing(receiver, operation, pending);
-        Assert.Equal(1, firstProcessing[0]);
+        Assert.Equal(3, firstProcessing[0]);
         fixture.ColdReopenReceiverStoreStorage();
         fixture.AdvanceRouteProcessingPast(message.ExpiresAtUnixMilliseconds);
         byte[] processing;
         using (var received = await fixture.ReceiveOwnedMessage(receiver, ciphertext))
         {
             processing = received.RouteProcessing.ToArray();
-            Assert.Equal(1, processing[0]);
+            Assert.Equal(3, processing[0]);
             Assert.Equal(firstProcessing, processing); // No fresh/retrospective classification after recovery.
             Assert.Equal(SHA256.HashData(command.ExactDmc2.Span), received.EventHash.ToArray());
             using var exact = received.OwnAuthenticatedDmc2();
             Assert.True(exact.Use(bytes => bytes.SequenceEqual(command.ExactDmc2.Span)));
         }
         var committed = await fixture.ReadMessagingFloor(receiver);
-        Assert.Equal(before.Ordinal + 1, committed.Ordinal);
+        var decisions = await fixture.ReadPagedNativeDecisionRows(receiver);
+        Assert.NotEmpty(decisions);
+        Assert.Equal(Did2RouteHistoryDecision.ActionKind.Evidence, decisions[^1].Body.Action);
+        Assert.Equal(decisions[0].Body.L.Exact.ToArray(), decisions[^1].Body.L.Exact.ToArray());
+        Assert.Equal(before.Ordinal + 1 + (ulong)decisions.Count, committed.Ordinal);
         Assert.Equal(before.RatchetGeneration + 1, committed.RatchetGeneration);
+        await fixture.AssertNoPagedRouteFault(receiver);
         using (var replay = await fixture.ReceiveOwnedMessage(receiver, ciphertext))
             Assert.Equal(processing, replay.RouteProcessing.ToArray());
         Assert.Equal(committed.Exact.ToArray(), (await fixture.ReadMessagingFloor(receiver)).Exact.ToArray());

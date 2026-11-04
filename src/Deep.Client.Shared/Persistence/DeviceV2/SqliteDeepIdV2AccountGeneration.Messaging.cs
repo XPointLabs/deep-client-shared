@@ -34,24 +34,61 @@ internal static partial class SqliteDeepIdV2AccountGeneration
     /// deletion before ordinary state can escape the lower SQL backend.</summary>
     internal static async Task<OwnedDid2MessagingStorage> OpenMessagingArchiveAuditUnderLeaseAsync(
         IDeepSecureStorage storage, string accountPath, VerifiedDeepIdV2CurrentAccount current,
-        Did2MessagingSessionScope scope, CancellationToken ct)
-        => await OpenOwnedMessagingCoreAsync(storage, accountPath, current, scope, NativeArchiveAlgorithm.Full, ct).ConfigureAwait(false);
+        Did2MessagingSessionScope scope, CancellationToken ct, Action<OwnedDid2MessagingStorage>? configureRouteHistory = null)
+        => await OpenOwnedMessagingCoreAsync(storage, accountPath, current, scope, NativeArchiveAlgorithm.Full, NativeProvenancePurpose.SourceAudit, ct, configureRouteHistory).ConfigureAwait(false);
+
+    internal static Task<OwnedDid2MessagingStorage> OpenEstablishedNativeArchiveAuditUnderLeaseAsync(
+        IDeepSecureStorage storage, string accountPath, VerifiedDeepIdV2CurrentAccount current,
+        Did2MessagingSessionScope scope, CancellationToken ct, Action<OwnedDid2MessagingStorage>? configureRouteHistory = null)
+        => OpenOwnedMessagingCoreAsync(storage, accountPath, current, scope, NativeArchiveAlgorithm.Full, NativeProvenancePurpose.Established, ct, configureRouteHistory);
+
+    internal static Task<OwnedDid2MessagingStorage> OpenInitialTransferMessagingUnderLeaseAsync(
+        IDeepSecureStorage storage, string accountPath, VerifiedDeepIdV2CurrentAccount current,
+        Did2MessagingSessionScope scope, CancellationToken ct, Action<OwnedDid2MessagingStorage>? configureRouteHistory = null)
+        => OpenOwnedMessagingCoreAsync(storage, accountPath, current, scope, NativeArchiveAlgorithm.Active, NativeProvenancePurpose.InitialTransfer, ct, configureRouteHistory);
 
     // The private account-runtime wrapper owns cold admission. This named
     // algorithm still authenticates all current roots, pages and compact rows;
     // it accepts no caller-supplied verification/skip/currentness flag.
     internal static async Task<OwnedDid2MessagingStorage> OpenOrdinaryMessagingUnderLeaseAsync(
         IDeepSecureStorage storage, string accountPath, VerifiedDeepIdV2CurrentAccount current,
-        Did2MessagingSessionScope scope, CancellationToken ct)
-        => await OpenOwnedMessagingCoreAsync(storage, accountPath, current, scope, NativeArchiveAlgorithm.Active, ct).ConfigureAwait(false);
+        Did2MessagingSessionScope scope, CancellationToken ct, Action<OwnedDid2MessagingStorage>? configureRouteHistory = null)
+        => await OpenOwnedMessagingCoreAsync(storage, accountPath, current, scope, NativeArchiveAlgorithm.Active, NativeProvenancePurpose.Established, ct, configureRouteHistory).ConfigureAwait(false);
 
     private enum NativeArchiveAlgorithm { Full, Active, Enrollment, EnrollmentSelection }
+    private enum NativeProvenancePurpose { Established, InitialTransfer, SourceAudit, Enrollment, InitialAuditClassification }
     private static bool IsArchiveEnrollmentAlgorithm(NativeArchiveAlgorithm algorithm)
         => algorithm is NativeArchiveAlgorithm.Enrollment or NativeArchiveAlgorithm.EnrollmentSelection;
 
     private static async Task<OwnedDid2MessagingStorage> OpenOwnedMessagingCoreAsync(
         IDeepSecureStorage storage, string accountPath, VerifiedDeepIdV2CurrentAccount current,
-        Did2MessagingSessionScope scope, NativeArchiveAlgorithm algorithm, CancellationToken ct)
+        Did2MessagingSessionScope scope, NativeArchiveAlgorithm algorithm, NativeProvenancePurpose provenancePurpose, CancellationToken ct,
+        Action<OwnedDid2MessagingStorage>? configureRouteHistory = null)
+    {
+        RequireOwnedMessagingScope(current, scope);
+        var opened = await OpenRegisteredMessagingCoreAsync(storage, accountPath,
+            scope.Network.ToArray(), current.AccountId, scope, algorithm, ct, configureRouteHistory,
+            provenancePurpose == NativeProvenancePurpose.Established ? null :
+                token => CaptureMessagingSourceObservationAsync(storage, accountPath, current, scope, IsArchiveEnrollmentAlgorithm(algorithm), token),
+            provenancePurpose).ConfigureAwait(false);
+        try
+        {
+            var stable = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
+            var readback = await opened.Custody.ReadCurrentFloorAsync(ct).ConfigureAwait(false);
+            if (!Did2MessagingSessionScope.Fixed(stable.Exact.Span, readback.Exact.Span))
+                throw new CryptographicException("Native protected roots changed during source verification.");
+            _ = await opened.WithSqlAsync(sql =>
+            {
+                if (!Did2MessagingSessionScope.Fixed(sql.VerifyOrdinaryState().Exact.Span, stable.Exact.Span))
+                    throw new CryptographicException("Native protected source changed during final source verification.");
+                return true;
+            }, ct).ConfigureAwait(false);
+            return opened;
+        }
+        catch { opened.Dispose(); throw; }
+    }
+
+    private static void RequireOwnedMessagingScope(VerifiedDeepIdV2CurrentAccount current, Did2MessagingSessionScope scope)
     {
         var identity = current.Verified.PublicEvidence.Binding.Identity;
         var certificate = identity.ActiveDevices.Single().Certificate;
@@ -60,67 +97,87 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             !Did2MessagingSessionScope.Fixed(scope.LocalDevice, certificate.DeviceId.Span) ||
             scope.LocalDeviceGeneration != certificate.DeviceGeneration)
             throw new CryptographicException("Owned messaging session is outside the current local account/device.");
-        async Task VerifySource(bool retired)
-        {
-            if (scope.IsInitiator)
-            {
-                using var source = await OpenExistingMessagingSenderSourceUnderLeaseAsync(storage, accountPath, current, ct).ConfigureAwait(false);
-                await source.VerifyMessagingSourceUnderLeaseAsync(scope, retired, ct).ConfigureAwait(false);
-            }
-            else await VerifyReceiverMessagingSourceUnderLeaseAsync(storage, accountPath, current, scope, retired, ct).ConfigureAwait(false);
-        }
-        var protectedFloor = await new Did2MessagingProtectedCheckpoint(storage, scope).ReadAsync(ct).ConfigureAwait(false);
-        await VerifySource(protectedFloor.Status != 0).ConfigureAwait(false);
-        var opened = await OpenRegisteredMessagingCoreAsync(storage, accountPath,
-            scope.Network.ToArray(), current.AccountId, scope, algorithm, ct).ConfigureAwait(false);
+    }
+
+    // One fixed read-only owner operation. It cannot return a mutable store,
+    // recover Initial or lend its source/TRS to an established operation.
+    internal static async Task<bool> IsInitialOwnedNativeAuditUnderLeaseAsync(IDeepSecureStorage storage,
+        string accountPath, VerifiedDeepIdV2CurrentAccount current, Did2MessagingSessionScope scope, CancellationToken ct)
+    {
+        RequireOwnedMessagingScope(current, scope);
+        var checkpoint = new Did2MessagingProtectedCheckpoint(storage, scope);
+        var floor = await checkpoint.ReadAsync(ct).ConfigureAwait(false);
+        byte[]? header = null;
         try
         {
-            var stable = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
-            await VerifySource(stable.Status != 0).ConfigureAwait(false);
-            var readback = await opened.Custody.ReadCurrentFloorAsync(ct).ConfigureAwait(false);
-            if (!Did2MessagingSessionScope.Fixed(stable.Exact.Span, readback.Exact.Span))
-                throw new CryptographicException("Native protected roots changed during source verification.");
-            return opened;
+            if (floor.Phase == 2 && floor.Ordinal <= 2)
+            {
+                using var pending = await checkpoint.ReadPendingAsync(floor, ct).ConfigureAwait(false);
+                header = pending.Use(bytes => bytes[..Did2MessagingFloor.MetadataBytes].ToArray());
+            }
+            using var segment = await OpenRegisteredMessagingSegmentAsync(storage, accountPath,
+                scope.Network.ToArray(), current.AccountId, scope, NativeArchiveAlgorithm.Full, ct,
+                provenancePurpose: NativeProvenancePurpose.InitialAuditClassification).ConfigureAwait(false);
+            if (!Did2MessagingSessionScope.Fixed(segment.Sql.ReadOpenedFloor().Exact.Span, floor.Exact.Span))
+                throw new CryptographicException("Native Initial classification changed its actual protected floor.");
+            return segment.Sql.ClassifyInitialOwnedNativeAudit(floor, header);
         }
-        catch { opened.Dispose(); throw; }
+        finally { if (header is not null) CryptographicOperations.ZeroMemory(header); }
     }
 
     /// <summary>Open only a protected registered session, under the account lease.
     /// The returned storage owns no lease and is never a public runtime handle.</summary>
     internal static async Task<OwnedDid2MessagingStorage> OpenRegisteredMessagingUnderLeaseAsync(
         IDeepSecureStorage storage, string accountPath, ReadOnlyMemory<byte> network,
-        ReadOnlyMemory<byte> account, Did2MessagingSessionScope scope, CancellationToken ct)
-        => await OpenRegisteredMessagingCoreAsync(storage, accountPath, network, account, scope, NativeArchiveAlgorithm.Active, ct).ConfigureAwait(false);
+        ReadOnlyMemory<byte> account, Did2MessagingSessionScope scope, CancellationToken ct,
+        Action<OwnedDid2MessagingStorage>? configureRouteHistory = null)
+        => await OpenRegisteredMessagingCoreAsync(storage, accountPath, network, account, scope, NativeArchiveAlgorithm.Active, ct, configureRouteHistory).ConfigureAwait(false);
 
     // Only the explicit account enrollment owner calls this lower path. Actual
     // catalog/progress select schema5 draining or the exact staged schema6.
     internal static Task<OwnedDid2MessagingStorage> OpenArchiveEnrollmentMessagingUnderLeaseAsync(
         IDeepSecureStorage storage, string accountPath, ReadOnlyMemory<byte> network,
         ReadOnlyMemory<byte> account, Did2MessagingSessionScope scope, CancellationToken ct)
-        => OpenRegisteredMessagingCoreAsync(storage, accountPath, network, account, scope, NativeArchiveAlgorithm.Enrollment, ct);
+        => OpenRegisteredMessagingCoreAsync(storage, accountPath, network, account, scope, NativeArchiveAlgorithm.Enrollment, ct,
+            provenancePurpose: NativeProvenancePurpose.Enrollment);
 
     internal static Task<OwnedDid2MessagingStorage> OpenArchiveEnrollmentSelectionUnderLeaseAsync(
         IDeepSecureStorage storage, string accountPath, ReadOnlyMemory<byte> network,
         ReadOnlyMemory<byte> account, Did2MessagingSessionScope scope, CancellationToken ct)
-        => OpenRegisteredMessagingCoreAsync(storage, accountPath, network, account, scope, NativeArchiveAlgorithm.EnrollmentSelection, ct);
+        => OpenRegisteredMessagingCoreAsync(storage, accountPath, network, account, scope, NativeArchiveAlgorithm.EnrollmentSelection, ct,
+            provenancePurpose: NativeProvenancePurpose.Enrollment);
 
     internal static Task<OwnedDid2MessagingStorage> OpenOwnedArchiveEnrollmentUnderLeaseAsync(IDeepSecureStorage storage,
         string accountPath, VerifiedDeepIdV2CurrentAccount current, Did2MessagingSessionScope scope, CancellationToken ct)
-        => OpenOwnedMessagingCoreAsync(storage, accountPath, current, scope, NativeArchiveAlgorithm.Enrollment, ct);
+        => OpenOwnedMessagingCoreAsync(storage, accountPath, current, scope, NativeArchiveAlgorithm.Enrollment, NativeProvenancePurpose.Enrollment, ct);
 
     internal static Task<OwnedDid2MessagingStorage> OpenOwnedArchiveEnrollmentSelectionUnderLeaseAsync(IDeepSecureStorage storage,
         string accountPath, VerifiedDeepIdV2CurrentAccount current, Did2MessagingSessionScope scope, CancellationToken ct)
-        => OpenOwnedMessagingCoreAsync(storage, accountPath, current, scope, NativeArchiveAlgorithm.EnrollmentSelection, ct);
+        => OpenOwnedMessagingCoreAsync(storage, accountPath, current, scope, NativeArchiveAlgorithm.EnrollmentSelection, NativeProvenancePurpose.Enrollment, ct);
+
+#if DEEP_TEST_INTERNALS
+    // Structural registration inspection only. Shipping initial transfer uses
+    // the current-account full-source purpose above, never this test adapter.
+    internal static Task<OwnedDid2MessagingStorage> InspectRegisteredEmptyMessagingForTestAsync(
+        IDeepSecureStorage storage, string accountPath, ReadOnlyMemory<byte> network,
+        ReadOnlyMemory<byte> account, Did2MessagingSessionScope scope, CancellationToken ct)
+        => OpenRegisteredMessagingCoreAsync(storage, accountPath, network, account, scope, NativeArchiveAlgorithm.Active, ct,
+            provenancePurpose: NativeProvenancePurpose.InitialTransfer);
+#endif
 
     private static async Task<OwnedDid2MessagingStorage> OpenRegisteredMessagingCoreAsync(
         IDeepSecureStorage storage, string accountPath, ReadOnlyMemory<byte> network,
-        ReadOnlyMemory<byte> account, Did2MessagingSessionScope scope, NativeArchiveAlgorithm algorithm, CancellationToken ct)
+        ReadOnlyMemory<byte> account, Did2MessagingSessionScope scope, NativeArchiveAlgorithm algorithm, CancellationToken ct,
+        Action<OwnedDid2MessagingStorage>? configureRouteHistory = null,
+        Func<CancellationToken, Task<MessagingSourceObservation>>? captureSource = null,
+        NativeProvenancePurpose provenancePurpose = NativeProvenancePurpose.Established)
     {
         var checkpoint = new Did2MessagingProtectedCheckpoint(storage, scope);
         var result = new OwnedDid2MessagingStorage(scope, checkpoint,
-            (token, paired) => OpenRegisteredMessagingSegmentAsync(storage, accountPath, network, account, scope, algorithm, token, paired));
+            (token, paired) => OpenRegisteredMessagingSegmentAsync(storage, accountPath, network, account, scope, algorithm, token, paired, captureSource, provenancePurpose));
         try
         {
+            configureRouteHistory?.Invoke(result);
             var initial = await result.WithSqlAsync(sql => (Tip: sql.VerifyOrdinaryState(), Frozen: sql.HasFrozenArchiveEnrollment), ct).ConfigureAwait(false);
             // Initialization CAS runs after the physical connection and all SQL
             // key loans are closed. Its result is rejoined by the next segment.
@@ -143,8 +200,11 @@ internal static partial class SqliteDeepIdV2AccountGeneration
     private static async Task<Did2MessagingSqlSegment> OpenRegisteredMessagingSegmentAsync(
         IDeepSecureStorage storage, string accountPath, ReadOnlyMemory<byte> network,
         ReadOnlyMemory<byte> account, Did2MessagingSessionScope scope, NativeArchiveAlgorithm algorithm, CancellationToken ct,
-        Did2MessagingArchiveAuthoredRead? paired = null)
+        Did2MessagingArchiveAuthoredRead? paired = null,
+        Func<CancellationToken, Task<MessagingSourceObservation>>? captureSource = null,
+        NativeProvenancePurpose provenancePurpose = NativeProvenancePurpose.Established)
     {
+        using var source = captureSource is null ? null : await captureSource(ct).ConfigureAwait(false);
         // One bounded actual inventory owns registration selection. Only pure
         // decoders/path checks run before opening SQL; no authority callback or
         // previously successful read can supply any member of this snapshot.
@@ -153,6 +213,13 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             Did2MessagingHistoryCheckpoint.Slot(scope), Did2MessagingArchiveRoot.Slot(scope),
             ProtectedDid2MessagingArchiveEnrollment.Slot, ProtectedDid2MessagingPeerBootstrap.Slot(scope) };
         if (paired is not null) { slots.Add(ApplicationStateSlot); slots.AddRange(paired.Roots.Keys.Order(StringComparer.Ordinal)); }
+        var authoredEnd = slots.Count;
+        var retirementIndex = -1;
+        if (provenancePurpose == NativeProvenancePurpose.Established)
+        { retirementIndex = slots.Count; slots.Add(ProtectedInitialKeyRetirementJournal.Slot); }
+        if (source is not null)
+            foreach (var slot in source.Roots.Keys.Order(StringComparer.Ordinal))
+                if (!slots.Contains(slot, StringComparer.Ordinal)) slots.Add(slot);
         using var inventory = await storage.ReadOwnedBatchAsync(slots, ct).ConfigureAwait(false);
         ct.ThrowIfCancellationRequested();
         var registration = inventory[0] ?? throw new InvalidDataException("The DID2 SQL key record is absent.");
@@ -194,6 +261,8 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         var peerBytes = inventory[6] ?? throw new InvalidDataException("The protected native peer bootstrap is absent.");
         _ = peerBytes.Use(bytes => ProtectedDid2MessagingPeerBootstrap.Restore(bytes, scope));
         var phase = registered.Phase(index);
+        if ((provenancePurpose is NativeProvenancePurpose.Established or NativeProvenancePurpose.InitialAuditClassification) && phase != 2)
+            throw new InvalidOperationException("Established native work requires an initialized session; use explicit initial transfer.");
         var directory = MessagingDirectory(accountPath);
         var path = Path.Combine(directory, Convert.ToHexStringLower(scope.Hash) + ".dms2");
         if (Directory.Exists(directory)) RequireOrdinaryDirectory(directory);
@@ -212,6 +281,14 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         var checkpoint = new Did2MessagingProtectedCheckpoint(storage, scope);
         var floorBytes = inventory[2] ?? throw new InvalidDataException("Protected DID2 messaging floor is absent; no state repair is permitted.");
         var floor = floorBytes.Use(bytes => Did2MessagingFloor.Decode(bytes, scope));
+        ProtectedInitialKeyRetirementJournal.Entry? retirement = null;
+        if (provenancePurpose == NativeProvenancePurpose.Established)
+        {
+            if (floor.Status == 0 || floor.Ordinal < 2)
+                throw new InvalidOperationException("Pending initial transfer cannot enter established native work.");
+            retirement = (inventory[retirementIndex] ?? throw new InvalidDataException("Established native work lost its source retirement proof."))
+                .Use(bytes => ProtectedInitialKeyRetirementJournal.CaptureEstablishedProof(bytes, scope));
+        }
         var historyBytes = inventory[3] ?? throw new InvalidDataException("Mandatory messaging history checkpoint is absent; no initialization is permitted.");
         var history = historyBytes.Use(bytes => Did2MessagingHistoryCheckpoint.Decode(bytes, scope));
         Did2MessagingArchiveRoot? archive = null;
@@ -247,16 +324,21 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         }
         byte[] pairedRegistration = [], pairedApplication = [];
         var pairedRoots = new Dictionary<string, byte[]?>(StringComparer.Ordinal);
-        using var fullSourcePrefix = paired?.FullSourceHash is null ? null : CreateArchiveAuthoredPrefix(scope, slots, inventory, 8);
+        using var fullSourcePrefix = paired?.FullSourceHash is null ? null : CreateArchiveAuthoredPrefix(scope, slots.Take(authoredEnd).ToArray(), inventory, 8);
         try
         {
+            if (paired is not null || source is not null)
+                pairedRegistration = registration.Use(bytes => bytes.ToArray());
             if (paired is not null)
             {
-                pairedRegistration = registration.Use(bytes => bytes.ToArray());
                 pairedApplication = (inventory[7] ?? throw new InvalidDataException("Final paired admission lost application registration.")).Use(bytes => bytes.ToArray());
-                for (var i = 8; i < slots.Count; i++) pairedRoots.Add(slots[i], inventory[i]?.Use(bytes => SHA256.HashData(bytes)));
+                for (var i = 8; i < authoredEnd; i++) pairedRoots.Add(slots[i], inventory[i]?.Use(bytes => SHA256.HashData(bytes)));
             }
+            if (source is not null)
+                source.RequireRoots(Enumerable.Range(0, slots.Count).ToDictionary(i => slots[i], i => inventory[i]?.Use(bytes => SHA256.HashData(bytes)), StringComparer.Ordinal));
             inventory.Dispose(); // In particular no raw Group/root/key loan crosses the application read.
+            source?.Verify(pairedRegistration, floor.Status != 0);
+            source?.Dispose();
             if (paired is not null) VerifyPairedArchiveApplication(accountPath, scope, pairedRegistration, pairedApplication,
                 pairedRoots, paired, ct: ct, fullSourcePrefix: fullSourcePrefix);
         }
@@ -278,6 +360,7 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             if (archive is not null && !IsArchiveEnrollmentAlgorithm(algorithm)) sql.BindArchiveRoot(archive);
             sql.BindOpenedFloor(floor);
             sql.BindEnrollmentProgress(progress);
+            if (retirement is not null) _ = sql.RequireEstablishedNativeProvenance(floor, retirement);
             if (phase == 1)
             {
                 sql.InitializeOrVerifyRegisteredEmpty(floor);
@@ -358,6 +441,7 @@ internal sealed class OwnedDid2MessagingStorage : IDisposable
     private readonly Did2MessagingProtectedCheckpoint checkpoint;
     private readonly Func<CancellationToken, Did2MessagingArchiveAuthoredRead?, Task<Did2MessagingSqlSegment>> open;
     private readonly Did2MessagingDurableCustody custody;
+    private Func<OwnedDid2MessagingMutation, Func<Did2MessagingSqlJournal, object?>, CancellationToken, Task<object?>>? routeHistoryDecisionSql;
     private int disposed;
     internal OwnedDid2MessagingStorage(Did2MessagingSessionScope scope,
         Did2MessagingProtectedCheckpoint checkpoint, Func<CancellationToken, Task<Did2MessagingSqlSegment>> open)
@@ -375,6 +459,21 @@ internal sealed class OwnedDid2MessagingStorage : IDisposable
         => WithSqlCoreAsync(operation, null, ct);
     internal Task<T> WithPairedSqlAsync<T>(Did2MessagingArchiveAuthoredRead paired, Func<Did2MessagingSqlJournal, T> operation, CancellationToken ct)
         => WithSqlCoreAsync(operation, paired, ct);
+    internal void ConfigureRouteHistoryDecisionSql(
+        Func<OwnedDid2MessagingMutation, Func<Did2MessagingSqlJournal, object?>, CancellationToken, Task<object?>> operation)
+    {
+        RequireLive();
+        if (routeHistoryDecisionSql is not null) throw new InvalidOperationException("Route-history recovery is already bound to its actual account owner.");
+        routeHistoryDecisionSql = operation ?? throw new ArgumentNullException(nameof(operation));
+    }
+    internal async Task<T> WithRouteHistoryDecisionSqlAsync<T>(OwnedDid2MessagingMutation mutation,
+        Func<Did2MessagingSqlJournal, T> operation, CancellationToken ct)
+    {
+        RequireLive();
+        if (mutation.Kind != 6) throw new InvalidOperationException("The paired recovery boundary accepts only exact stored route-history decisions.");
+        var run = routeHistoryDecisionSql ?? throw new InvalidOperationException("Route-history recovery has no actual held account owner.");
+        return (T)(await run(mutation, sql => operation(sql), ct).ConfigureAwait(false))!;
+    }
     private async Task<T> WithSqlCoreAsync<T>(Func<Did2MessagingSqlJournal, T> operation, Did2MessagingArchiveAuthoredRead? paired, CancellationToken ct)
     {
         RequireLive(); ct.ThrowIfCancellationRequested();

@@ -131,28 +131,36 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 var controlXra = await DeepIdV2ContactRouteAuthor.AuthorAdvertisementSuccessorAsync(currentRecipient,
                     next.Network, next.Authority, secrets!, carried.Route.Authorization.CanonicalBytes,
                     Bytes(32, 0xb1), Bytes(32, 0xb2), ScalarMult.Base(Bytes(32, 0xb3)), 1_150, time);
-                var controlThreshold = await DeepIdV2ContactRouteAuthor.AuthorThresholdSuccessorAsync(currentRecipient,
-                    next.Network, next.Authority, controlPredecessor, controlXra.CanonicalBytes, CreateRouteWitnesses(), 1_150, time);
+                var controlRequest = RouteHistoryFixtureRequest(currentRecipient, controlPredecessor, controlXra.CanonicalBytes, 0xb4);
+                var controlIssued = await IssueRouteHistoryFixtureAsync(controlRequest, currentRecipient,
+                    next.Network, next.Authority, controlPredecessor, 1_150, time);
+                var controlThreshold = controlIssued.Threshold;
                 var controlRoute = await DeepIdV2ContactRouteAuthor.CompleteSuccessorAsync(currentRecipient,
                     next.Network, next.Authority, secrets!, controlPredecessor, controlXra.CanonicalBytes, controlThreshold, 2, time);
                 var package = DeepIdV2ContactMailboxRouteCodec.Decode(DeepIdV2ContactMailboxRouteCodec.Encode(original));
-                var eventHash = Bytes(32, 0xb4); var relationship = Bytes(32, 0xb5); var conversation = Bytes(32, 0xb6);
-                var control = await ApplicationCoreCodec.AuthorVerifiedContactRouteUpdateAsync(controlRoute, package,
-                    original.ExactRouteClosure, eventHash, relationship, conversation, Bytes(32, 0xb7), 3, time);
+                var relationship = Bytes(32, 0xb5); var conversation = Bytes(32, 0xb6);
+                var anchor = await RouteHistoryFixtureAnchorDataAsync(package, relationship, conversation);
+                var before = await DeepIdV2ContactRouteUpdateVerifier.VerifyHistoryAnchorAsync(anchor.CanonicalBytes,
+                    next.Proof, next.Network, next.Authority, time);
+                var step = await DeepIdV2ContactRouteUpdateVerifier.VerifyOriginalHistoryStepAsync(before,
+                    controlIssued.Pair.ExactRequest, controlIssued.Pair.ExactResponse, controlRoute.ExactXir1V2, controlRoute.ExactRouteClosure,
+                    next.Proof, next.Network, next.Authority, time);
+                var control = await ApplicationCoreCodec.AuthorVerifiedContactRouteHistoryPageAsync(before, [step], true,
+                    new byte[32], currentRecipient, next.Network, next.Authority, Bytes(32, 0xb7), 3, time);
                 Assert.True(control.Record.CreatedAtUnixMilliseconds > 1_090_000UL);
                 Assert.Equal(1_150_000UL, control.Record.ExpiresAtUnixMilliseconds);
-                var verified = await DeepIdV2ContactRouteUpdateVerifier.VerifyCurrentSuccessorAsync(package,
-                    next.Proof, next.Network, next.Authority, time, original.ExactRouteClosure, eventHash,
-                    relationship, conversation, control.CanonicalBytes);
+                var endpoint = await DeepIdV2ContactRouteUpdateVerifier.VerifyHistoryPageAsync(before, control.CanonicalBytes,
+                    next.Proof, next.Network, next.Authority, time);
+                var verified = await DeepIdV2ContactRouteUpdateVerifier.VerifyCurrentHistoryAnnouncementAsync(endpoint,
+                    control.CanonicalBytes, next.Proof, next.Network, next.Authority, time);
                 await verified.EnsureCurrentAsync();
                 ProofTime = 1_150; Sample = 250;
                 var now = await Source(reopened).VerifyForOwnPreKeyAuthoringAsync(reopened, default);
-                await Assert.ThrowsAsync<CryptographicException>(async () => await DeepIdV2ContactRouteUpdateVerifier.VerifyCurrentSuccessorAsync(
-                    package, now.Proof, now.Network, now.Authority, time, original.ExactRouteClosure, eventHash,
-                    relationship, conversation, control.CanonicalBytes));
-                var facts = await DeepIdV2ContactRouteUpdateVerifier.RequireRetainedSuccessorFactsAsync(package, now.Proof,
-                    now.Network, now.Authority, time, original.ExactRouteClosure, eventHash, relationship, conversation, control.CanonicalBytes);
-                Assert.Equal(controlRoute.ExactRouteClosure.ToArray(), facts.ExactBytes.ToArray());
+                await Assert.ThrowsAsync<CryptographicException>(async () => await DeepIdV2ContactRouteUpdateVerifier.VerifyCurrentHistoryAnnouncementAsync(
+                    endpoint, control.CanonicalBytes, now.Proof, now.Network, now.Authority, time));
+                var facts = await DeepIdV2ContactRouteUpdateVerifier.VerifyHistoryPageAsync(before, control.CanonicalBytes,
+                    now.Proof, now.Network, now.Authority, time);
+                Assert.Equal(controlRoute.ExactRouteClosure.ToArray(), facts.ExactCompletedRoute.ToArray());
                 CryptographicOperations.ZeroMemory(readCapability);
                 return;
             }

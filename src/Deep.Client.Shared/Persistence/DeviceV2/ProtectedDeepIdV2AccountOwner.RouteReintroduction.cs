@@ -5,6 +5,7 @@ using Deep.Client.Shared.Persistence.MessagingV1;
 using Deep.Protocol.AccountDirectoryV1;
 using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.ContactV1;
+using Deep.Protocol.ContactV2;
 using Deep.Protocol.DeepExtension.MailboxCapabilities;
 using Deep.Protocol.XPointNetworkV1;
 
@@ -79,13 +80,19 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         try
         {
             message = ApplicationCoreCodec.DecodeDmc2(exact);
-            if (!FixedRoute(SHA256.HashData(exact), native.EventHash) || message.ParsedPayload is not ContactRouteUpdateDmc2Payload update ||
+            var relationship = message.ParsedPayload switch
+            {
+                ContactRouteUpdateDmc2Payload update => update.RelationshipId,
+                ContactRouteHistoryDmc2Payload history => history.RelationshipId,
+                _ => ReadOnlyMemory<byte>.Empty
+            };
+            if (!FixedRoute(SHA256.HashData(exact), native.EventHash) || relationship.IsEmpty ||
                 message.Flags != Dmc2Flags.None || !message.ReplyToLogicalMessageId.IsEmpty ||
                 !FixedRoute(message.NetworkId.Span, scope.Network) ||
                 !FixedRoute(message.SenderAccountId.Span, scope.LocalAccount) ||
                 !FixedRoute(message.SenderDeviceId.Span, scope.LocalDevice) ||
                 !FixedRoute(message.ConversationId.Span, scope.Conversation) ||
-                !FixedRoute(update.RelationshipId.Span, scope.Relationship))
+                !FixedRoute(relationship.Span, scope.Relationship))
                 throw new CryptographicException("Only an exact owned native route-maintenance control may use publication carriage.");
         }
         finally { CryptographicOperations.ZeroMemory(exact); if (message?.ParsedPayload is AttachmentOfferDmc2Payload offer) offer.Manifest.Dispose(); }
