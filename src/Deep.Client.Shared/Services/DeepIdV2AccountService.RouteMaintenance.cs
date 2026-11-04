@@ -110,7 +110,7 @@ public sealed partial class DeepIdV2AccountService
     /// <param name="conversation">An existing mutually consented owned conversation.</param>
     /// <param name="source">Independently current network and directory source.</param>
     /// <param name="ct">Cancellation for this owned maintenance operation.</param>
-    /// <returns>One for an original or resumed update with verified Store; zero when the actual native advertisement already matches.</returns>
+    /// <returns>One for an original or resumed update with verified Store; zero when no runnable update remains, including a confirmed expiry stop. Zero grants no Store or current-route admission.</returns>
     public async Task<int> RefreshContactRouteAsync(DeepIdV2Conversation conversation,
         DeepIdV2ContactPathAuthoritySource source, CancellationToken ct = default)
     {

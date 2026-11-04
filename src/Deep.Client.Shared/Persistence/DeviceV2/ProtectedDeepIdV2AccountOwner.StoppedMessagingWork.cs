@@ -109,7 +109,19 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         finally { if (history is not null) CryptographicOperations.ZeroMemory(history); }
     }
 
+    private enum MessagingWorkPreflightResult { Active, ExpiredOriginalStopCompleted }
+
     internal async Task RequireMessagingWorkNotStoppedAsync(ulong unixSeconds, IDeepMlDsa65Verifier verifier,
+        Did2MessagingSessionScope scope, ReadOnlyMemory<byte> operation,
+        DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own,
+        DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
+    {
+        if (await ReadMessagingWorkPreflightAsync(unixSeconds, verifier, scope, operation, own, source, ct).ConfigureAwait(false) ==
+            MessagingWorkPreflightResult.ExpiredOriginalStopCompleted)
+            throw new IOException("The original logical retry deadline permanently stops sender work.");
+    }
+
+    private async Task<MessagingWorkPreflightResult> ReadMessagingWorkPreflightAsync(ulong unixSeconds, IDeepMlDsa65Verifier verifier,
         Did2MessagingSessionScope scope, ReadOnlyMemory<byte> operation,
         DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own,
         DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
@@ -141,9 +153,10 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             if (acceptance is not null && FixedRoute(acceptance.Operation, operation.Span))
                 await RequireContactControlRetryTimeUnderLeaseAsync(current, held, scope, operation,
                     ReadOnlyMemory<byte>.Empty, ReadOnlyMemory<byte>.Empty, verifier, own, source, ct).ConfigureAwait(false);
-            return;
+            return MessagingWorkPreflightResult.Active;
         }
-        if (command.Pending) return;
+        if (command.Pending) return MessagingWorkPreflightResult.Active;
+        var nextSequence = authored.NextSequence(scope);
         using var root = await storage.ReadOwnedAsync(ProtectedDid2MailboxSendJournal.Slot, ct).ConfigureAwait(false) ??
             throw new InvalidDataException("Retry expiry lost mandatory original send custody.");
         var snapshot = root.Use(bytes => bytes.ToArray()); byte[] nativeEnvelope = [], closed = [];
@@ -151,9 +164,10 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         {
             using var sends = ProtectedDid2MailboxSendJournal.Decode(snapshot, scope.Network, scope.LocalAccount, scope.Instance);
             var entry = sends.Current(scope.Hash, operation.Span);
-            if (entry is null) return;
+            if (entry is null) return MessagingWorkPreflightResult.Active;
             var time = await RecheckRouteFreshnessAsync(current, source, own, held, null, ct).ConfigureAwait(false);
-            if (checked(own.Proof.TrustedLowerUnixSeconds + time.SampleSeconds - own.Proof.MonotonicSample) < entry.RetryUntil) return;
+            if (checked(own.Proof.TrustedLowerUnixSeconds + time.SampleSeconds - own.Proof.MonotonicSample) < entry.RetryUntil)
+                return MessagingWorkPreflightResult.Active;
             using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, held, ct).ConfigureAwait(false);
             var applicationDeadline = await ReadMailboxApplicationRetryDeadlineUnderLeaseAsync(current, held, opened,
                 scope, operation, ReadOnlyMemory<byte>.Empty, ct).ConfigureAwait(false);
@@ -167,7 +181,28 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             closed = await CloseExpiredMailboxAttemptUnderLeaseAsync(current, held, opened, scope, operation,
                 ReadOnlyMemory<byte>.Empty, nativeEnvelope, sends, snapshot, scope.Instance.ToArray(), source, own, ct).ConfigureAwait(false) ?? [];
             await StopExpiredOrdinaryWorkUnderLeaseAsync(current, held, opened, scope, operation, own, source, ct).ConfigureAwait(false);
-            throw new IOException("The original logical retry deadline permanently stops sender work.");
+            // Only the exact durable expiry stop can become scheduling
+            // no-work. Pending dependencies may legitimately retain its stopped
+            // payload; this result grants no cleanup or Store permission.
+            using var finalRaw = await storage.ReadOwnedAsync(ProtectedDid2DirectTextJournal.Slot, ct).ConfigureAwait(false) ??
+                throw new InvalidDataException("Completed expiry stop lost mandatory authored custody.");
+            using var final = finalRaw.Use(bytes => ProtectedDid2DirectTextJournal.Decode(bytes,
+                scope.Network, scope.LocalAccount, scope.Instance));
+            var name = Convert.ToHexString(operation.Span);
+            var completedStop = final.Entries.TryGetValue(name, out var retained)
+                ? !retained.Pending && retained.WorkStopped && retained.StopReason == ProtectedDid2DirectTextJournal.WorkStopReason.RetryExpired &&
+                    retained.StoppedAtUpper > 0 && FixedRoute(retained.Scope.Exact, scope.Exact) &&
+                    FixedRoute(retained.Operation, operation.Span) && retained.Sequence == command.Sequence &&
+                    retained.Kind == command.Kind && retained.Created == command.Created &&
+                    FixedRoute(retained.Logical, command.Logical) && FixedRoute(retained.EventHash, command.EventHash)
+                : final.TerminalAudits.TryGetValue(name, out var audit) &&
+                    audit.Reason == (byte)ProtectedDid2DirectTextJournal.WorkStopReason.RetryExpired &&
+                    FixedRoute(audit.Operation, operation.Span);
+            if (!FixedRoute(command.Scope.Exact, scope.Exact) || !completedStop ||
+                final.NextSequence(scope) != nextSequence || nextSequence <= command.Sequence)
+                throw new IOException("The original logical retry deadline permanently stops sender work.");
+            ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
+            return MessagingWorkPreflightResult.ExpiredOriginalStopCompleted;
         }
         finally { foreach (var bytes in new[] { snapshot, nativeEnvelope, closed }) CryptographicOperations.ZeroMemory(bytes); }
     }

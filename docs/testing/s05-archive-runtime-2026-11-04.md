@@ -252,3 +252,38 @@ cases prove exact prepared-request recovery after a lost reply, no second native
 send, and original-deadline refusal before fresh recipient lookup or dispatch.
 This is focused source evidence; matching retained CLI execution and full Shared
 qualification remain open under the user's goal-first order.
+
+## Expired route maintenance continues after its authenticated stop
+
+The matching runtime05 completed one maintenance direction in95.750s, then
+stopped the next after34.238s at the original logical retry deadline. All16 HTTP
+responses observed across those two operations were200. This was a local
+lifecycle refusal, not the background Registry proof warnings. The three
+already-indexed profiles and their original business counters remained intact.
+
+The selector already excluded stopped work. It selected an active expired
+control, whose existing owner correctly closed uncertainty and durably stopped
+it, but the delivery guard's exception aborted maintenance before Sync/Request.
+Selection now recognizes a private owner-derived completed-stop outcome as no
+runnable work. Direct delivery retains its original throwing behavior. No new
+control, Store success, current route or deletion authority is inferred.
+
+A fresh authenticated read must prove either the exact retained RetryExpired
+command or its retired terminal audit, with the captured scope counter unchanged.
+Pending dependencies can retain a stopped payload; retirement rules still apply.
+The actual original attempt, native/authored identity, lower-time deadline and
+uncertainty closure remain mandatory. Missing-attempt expiry is not guessed.
+
+Build39 passed; q21 passed16 cases and failed one new negative fixture because
+its supposed deadline mutation could be a no-op. That receipt remains unchanged.
+The corrected fixture asserts an actually different canonical deadline before
+exercising semantic rejection. Build40 passed with zero warnings/errors and2189
+unchanged inputs. q22 passed all4 affected cases, zero failures/skips,2331 unchanged
+inputs, native270.001s. Coverage includes legitimate fresh request scheduling,
+unique committed response retention, changed original deadline refusal, and a
+genuine pending control preserving stopped payload, pending bytes and counters.
+The response fixture does not claim to force a particular response mode.
+
+After q22, one public return-value XML comment was clarified; executable behavior
+was unchanged. Publish06 captures that final source. Retained runtime verification,
+warm delivery and full qualification remain open.

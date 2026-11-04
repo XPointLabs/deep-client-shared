@@ -8,10 +8,31 @@ namespace Deep.Client.Shared.Persistence.DeviceV2;
 
 internal sealed partial class ProtectedDeepIdV2AccountOwner
 {
-    // Scheduling only: null means no changed advertisement; empty means a new
+    // Scheduling only: null means no runnable advertisement; empty means a new
     // owner-authored update is needed;32 bytes select exact existing work. The
     // actual author/encryption/Store owners independently recheck every effect.
     internal async Task<byte[]?> SelectOwnRouteMaintenanceAsync(ulong seconds, IDeepMlDsa65Verifier verifier,
+        Did2MessagingSessionScope scope, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own,
+        VerifiedDeepIdV2DirectoryFreshness peer, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
+    {
+        var selected = await SelectOwnRouteMaintenanceCandidateAsync(seconds, verifier, scope, own, peer, source, ct).ConfigureAwait(false);
+        try
+        {
+            if (selected is { Length: 32 } &&
+                await ReadMessagingWorkPreflightAsync(seconds, verifier, scope, selected, own, source, ct).ConfigureAwait(false) ==
+                    MessagingWorkPreflightResult.ExpiredOriginalStopCompleted)
+            {
+                // No Store success and no replacement are inferred. The next
+                // normal receive/request phase decides whether work is needed.
+                CryptographicOperations.ZeroMemory(selected);
+                return null;
+            }
+            return selected;
+        }
+        catch { if (selected is not null) CryptographicOperations.ZeroMemory(selected); throw; }
+    }
+
+    private async Task<byte[]?> SelectOwnRouteMaintenanceCandidateAsync(ulong seconds, IDeepMlDsa65Verifier verifier,
         Did2MessagingSessionScope scope, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own,
         VerifiedDeepIdV2DirectoryFreshness peer, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
     {
