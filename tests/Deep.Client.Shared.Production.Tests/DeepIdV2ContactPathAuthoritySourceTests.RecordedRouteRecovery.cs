@@ -234,7 +234,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         // authenticated three-link custody reader without inventing multi-day
         // authority. This is custody/restore coverage, not three full owner
         // recovery cycles. The crash test above covers the production closure.
-        internal async Task CheckStagedRecordedChainAsync(int count, bool rejectFourth, int forwardFault = -1)
+        internal async Task CheckStagedRecordedChainAsync(int count, bool rejectFourth, int forwardFault = -1,
+            string? retainedReadDefect = null)
         {
             var seeded = await SeedRecordedRenewalAsync(); var backend = seeded.Backend;
             var pairs = new List<DeepIdV2ContactRouteRecordedPair>(); var configuration = Did2OwnedPermanentContactPlan.Configuration();
@@ -338,6 +339,9 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                         var committed = await EnsureRecordedReopenedAsync(backend);
                         Assert.Equal(1UL, committed.Generation);
                         Assert.Equal(calls.RouteSignings, backend.RouteSignings);
+                        if (retainedReadDefect is not null)
+                            await CheckRetainedRecordedPublicationAfterPromotionAsync(seeded.Permanent, seeded.Original,
+                                seeded.Pending, retainedReadDefect);
                     }
                 }
                 finally { CryptographicOperations.ZeroMemory(snapshot); }

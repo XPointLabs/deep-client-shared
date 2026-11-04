@@ -182,12 +182,14 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         var instance = await SqliteDeepIdV2AccountGeneration.ReadAccountInstanceUnderLeaseAsync(
             storage, networkId, current.AccountId, ct).ConfigureAwait(false);
         byte[]? snapshot = null, capability = null;
+        Dictionary<string, byte[]?>? guards = new(StringComparer.Ordinal);
         try
         {
             var plan = CreatePermanentContactPlan(current, instance);
-            using var root = await storage.ReadOwnedAsync(ProtectedDid2ContactRouteJournal.Slot, ct).ConfigureAwait(false) ??
-                throw new InvalidDataException("Original publication custody is absent; retained reading cannot repair it.");
-            snapshot = root.Use(bytes => bytes.ToArray());
+            using (var root = await storage.ReadOwnedAsync(ProtectedDid2ContactRouteJournal.Slot, ct).ConfigureAwait(false) ??
+                throw new InvalidDataException("Original publication custody is absent; retained reading cannot repair it."))
+                snapshot = root.Use(bytes => bytes.ToArray());
+            guards.Add(ProtectedDid2ContactRouteJournal.Slot, SHA256.HashData(snapshot));
             using var state = ProtectedDid2ContactRouteJournal.Decode(snapshot, networkId, current.AccountId.Span, instance);
             var currentName = Convert.ToHexString(plan.Intent.Span);
             state.Entries.TryGetValue(currentName, out var entry);
@@ -212,7 +214,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 {
                     if (candidate.Key == currentName || candidate.Value.Phase != 7 || candidate.Value.Kind != 1 ||
                         !candidate.Value.Matches(Did2OwnedPermanentContactPlan.Configuration())) continue;
-                    RequireRetainedPermanentIntent(candidate.Key, candidate.Value, plan, current.AccountId.Span, instance);
+                    await RequireRetainedReadPermanentIntentAsync(candidate.Key, candidate.Value, state, plan,
+                        current.AccountId, instance, guards, ct).ConfigureAwait(false);
                     var route = ContactRouteClosureCodec.Decode(candidate.Value.Record(6).Span);
                     var generation = PollGeneration(route);
                     if (generation < least) { selected = route; least = generation; }
@@ -229,7 +232,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                         !FixedRoute(ContactRouteClosureCodec.Decode(candidate.Value.Record(6).Span).ExactHash.Span, originalRouteHash.Span)) continue;
                     if (entry is not null) throw new CryptographicException("Original publication custody is ambiguous.");
                     if (candidate.Key != currentName)
-                        RequireRetainedPermanentIntent(candidate.Key, candidate.Value, plan, current.AccountId.Span, instance);
+                        await RequireRetainedReadPermanentIntentAsync(candidate.Key, candidate.Value, state, plan,
+                            current.AccountId, instance, guards, ct).ConfigureAwait(false);
                     entry = candidate.Value;
                 }
             }
@@ -260,13 +264,26 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             if (FixedRoute(capability, original.Reachability.Field(10).Span))
                 throw new CryptographicException("Public Deposit capability cannot become retained owner custody.");
             var captured = snapshot;
+            var capturedGuards = guards;
             async Task RecheckCustody(CancellationToken token)
             {
                 held.RequireActive(); token.ThrowIfCancellationRequested();
-                using var readback = await storage.ReadOwnedAsync(ProtectedDid2ContactRouteJournal.Slot, token).ConfigureAwait(false) ??
-                    throw new CryptographicException("Original publication disappeared during retained reading.");
-                if (!readback.Use(bytes => FixedRoute(bytes, captured)))
-                    throw new CryptographicException("Original publication changed during retained reading.");
+                if (capturedGuards.Count == 1)
+                {
+                    using var readback = await storage.ReadOwnedAsync(ProtectedDid2ContactRouteJournal.Slot, token).ConfigureAwait(false) ??
+                        throw new CryptographicException("Original publication disappeared during retained reading.");
+                    if (!readback.Use(bytes => FixedRoute(bytes, captured)))
+                        throw new CryptographicException("Original publication changed during retained reading.");
+                }
+                else
+                {
+                    // One actual provider inventory joins every captured
+                    // archive dependency, including unselected polling paths.
+                    using var readback = await storage.ReadOwnedGuardedBatchAsync(
+                        [ProtectedDid2ContactRouteJournal.Slot], capturedGuards, token).ConfigureAwait(false);
+                    if (readback[0] is null || !readback[0]!.Use(bytes => FixedRoute(bytes, captured)))
+                        throw new CryptographicException("Original publication changed during retained recorded reading.");
+                }
                 token.ThrowIfCancellationRequested(); held.RequireActive();
             }
             async Task Recheck(CancellationToken token)
@@ -276,14 +293,15 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 await RecheckCustody(token).ConfigureAwait(false);
             }
             await Recheck(ct).ConfigureAwait(false);
-            var result = new OwnRetainedPublication(original, host, xpu.LocatorHash.ToArray(), capability, captured, Recheck, RecheckCustody);
-            snapshot = null; capability = null; return result;
+            var result = new OwnRetainedPublication(original, host, xpu.LocatorHash.ToArray(), capability, captured, capturedGuards, Recheck, RecheckCustody);
+            snapshot = null; capability = null; guards = null; return result;
         }
         finally
         {
             CryptographicOperations.ZeroMemory(instance);
             if (snapshot is not null) CryptographicOperations.ZeroMemory(snapshot);
             if (capability is not null) CryptographicOperations.ZeroMemory(capability);
+            if (guards is not null) ClearRetainedPublicationGuards(guards);
         }
     }
 
@@ -303,13 +321,14 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     private sealed class OwnRetainedPublication : IDisposable
     {
         private readonly byte[] locator, capability, root;
+        private readonly IReadOnlyDictionary<string, byte[]?> guards;
         private readonly Func<CancellationToken, Task> recheck;
         private readonly Func<CancellationToken, Task> recheckCustody;
         private bool disposed;
         internal OwnRetainedPublication(ParsedContactRouteClosure route, VerifiedMailboxHostAuthorityV2 host,
-            byte[] locator, byte[] capability, byte[] root, Func<CancellationToken, Task> recheck,
+            byte[] locator, byte[] capability, byte[] root, IReadOnlyDictionary<string, byte[]?> guards, Func<CancellationToken, Task> recheck,
             Func<CancellationToken, Task> recheckCustody)
-        { Route = route; Host = host; this.locator = locator; this.capability = capability; this.root = root; this.recheck = recheck; this.recheckCustody = recheckCustody; }
+        { Route = route; Host = host; this.locator = locator; this.capability = capability; this.root = root; this.guards = guards; this.recheck = recheck; this.recheckCustody = recheckCustody; }
         internal ParsedContactRouteClosure Route { get; }
         internal VerifiedMailboxHostAuthorityV2 Host { get; }
         internal ReadOnlyMemory<byte> Locator { get { RequireActive(); return locator; } }
@@ -321,6 +340,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         {
             if (disposed) return; disposed = true;
             CryptographicOperations.ZeroMemory(locator); CryptographicOperations.ZeroMemory(capability); CryptographicOperations.ZeroMemory(root);
+            ClearRetainedPublicationGuards(guards);
         }
     }
 }

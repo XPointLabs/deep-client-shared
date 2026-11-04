@@ -287,3 +287,33 @@ The response fixture does not claim to force a particular response mode.
 After q22, one public return-value XML comment was clarified; executable behavior
 was unchanged. Publish06 captures that final source. Retained runtime verification,
 warm delivery and full qualification remain open.
+
+## Recorded-renewal archive read provenance
+
+Non-destructive retained reading now accepts the existing direct intent or at
+most three exact protected recorded-renewal links. The latter bind the normalized
+actual completed archive, permanent intent, account/instance, old intent and
+adjacent proposal hashes; intermediate journal locators must be absent. All
+eligible polling archives remain checked. Captured closure hashes and the route
+root are atomically rejoined before use and on every publication custody recheck;
+private decoded closure bytes do not cross the next provider await. No successor
+publication is required to remain present solely to authenticate an older archive.
+
+Destructive recorded-archive retirement remains direct-only and fail-closed.
+Its stored plan/recovery dependency binding is still a separate open obligation;
+the reader proof grants no deletion, Store or current-route permission.
+
+Build41 passed with zero warnings/errors and2191 unchanged source inputs,
+native UTC2026-11-04T22:57:08.899–22:57:40.907 (32.008s).
+Qualification23 passed7/7, zero failures/skips, native exit0 and2333 unchanged
+source/binary inputs, UTC2026-11-04T22:58:05.402–22:58:48.179 (42.776s).
+Receipts are `artifacts/archive-resume-20261104-build41` and
+`artifacts/archive-resume-20261104-qualification23/smoke.trx`.
+The actual signed-owner fixtures cover cold current/archive Retrieve, missing,
+tampered and foreign-instance closures, an issuer callback deleting a captured
+closure, and two-link success plus canonical proposal-adjacency corruption.
+
+These receipts establish the bounded source correction, not the precise cause
+of the retained runtime06 profile refusal or its successful recovery. No retained
+profile execution, warm latency result or full Shared qualification is claimed
+by this focused packet. Full Shared has not been run under the goal-first order.
