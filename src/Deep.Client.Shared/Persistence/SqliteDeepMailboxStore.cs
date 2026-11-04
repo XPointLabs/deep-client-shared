@@ -442,7 +442,45 @@ public sealed partial class SqliteDeepMailboxStore :
     {
         var actual = ReadSchemaObjects(connection, transaction);
         if (!actual.SequenceEqual(ExpectedSchema.Value, StringComparer.Ordinal))
-            throw ResetRequired("Clean application schema differs from the current exact generation.");
+        {
+            var expected = ExpectedSchema.Value.Select(static frame => frame.Split('\0', 3)).ToArray();
+            var observed = actual.Select(static frame => frame.Split('\0', 3)).ToArray();
+            var missing = expected.Count(item => !observed.Any(other => item[0] == other[0] && item[1] == other[1]));
+            var extra = observed.Count(item => !expected.Any(other => item[0] == other[0] && item[1] == other[1]));
+            var types = observed.Count(item => expected.Any(other => item[1] == other[1] && item[0] != other[0]));
+            var ddl = 0; var crlfOnly = 0;
+            foreach (var item in observed)
+            {
+                var counterpart = expected.FirstOrDefault(other => item[0] == other[0] && item[1] == other[1]);
+                if (counterpart is null || item[2] == counterpart[2]) continue;
+                ddl++;
+                // Classification only. Exact stored DDL above still rejects.
+                if (item[2].Replace("\r\n", "\n", StringComparison.Ordinal) ==
+                    counterpart[2].Replace("\r\n", "\n", StringComparison.Ordinal)) crlfOnly++;
+            }
+            throw SchemaFailure("Clean application schema differs from the current exact generation.",
+                actual.Length, expected.Length, missing, extra, types, ddl, crlfOnly);
+        }
+    }
+
+    private enum SchemaReadBoundReason { None, ObjectLimit, NullSql, NameLength, SqlLength }
+
+    private static LocalStateResetRequiredException SchemaFailure(string message, int actual,
+        int expected = -1, int missing = -1, int extra = -1, int types = -1, int ddl = -1,
+        int crlfOnly = -1, SchemaReadBoundReason readBound = SchemaReadBoundReason.None)
+    {
+        var failure = ResetRequired(message);
+        // Closed diagnostics only: no schema text, object names, paths or keys.
+        // -1 means that rejection preceded the corresponding observation.
+        failure.Data["Deep.ApplicationSchema.ExpectedObjectCount"] = expected;
+        failure.Data["Deep.ApplicationSchema.ActualObjectCount"] = actual;
+        failure.Data["Deep.ApplicationSchema.MissingObjectCount"] = missing;
+        failure.Data["Deep.ApplicationSchema.ExtraObjectCount"] = extra;
+        failure.Data["Deep.ApplicationSchema.TypeMismatchCount"] = types;
+        failure.Data["Deep.ApplicationSchema.DdlMismatchCount"] = ddl;
+        failure.Data["Deep.ApplicationSchema.CrlfOnlyDdlMismatchCount"] = crlfOnly;
+        failure.Data["Deep.ApplicationSchema.ReadBoundReason"] = (int)readBound;
+        return failure;
     }
 
     // Only trusted DDL is evaluated here; this database contains no user data or keys.
@@ -485,9 +523,12 @@ public sealed partial class SqliteDeepMailboxStore :
         var result = new List<string>();
         while (reader.Read())
         {
-            if (result.Count == 64 || reader.IsDBNull(3) ||
-                reader.GetInt64(1) is < 1 or > 128 || reader.GetInt64(3) is < 1 or > 16384)
-                throw ResetRequired("Clean application schema has unknown objects.");
+            var readBound = result.Count == 64 ? SchemaReadBoundReason.ObjectLimit :
+                reader.IsDBNull(3) ? SchemaReadBoundReason.NullSql :
+                reader.GetInt64(1) is < 1 or > 128 ? SchemaReadBoundReason.NameLength :
+                reader.GetInt64(3) is < 1 or > 16384 ? SchemaReadBoundReason.SqlLength : SchemaReadBoundReason.None;
+            if (readBound != SchemaReadBoundReason.None)
+                throw SchemaFailure("Clean application schema has unknown objects.", result.Count, readBound: readBound);
             result.Add(string.Concat(reader.GetString(0), "\0", reader.GetString(2), "\0", reader.GetString(4)));
         }
         return result.ToArray();
