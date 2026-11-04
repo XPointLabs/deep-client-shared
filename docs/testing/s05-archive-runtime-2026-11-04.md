@@ -157,3 +157,27 @@ with all34 accepted replacement bindings; failed references remain failures.
 No retained CLI profile, production service, Windows client or Android client was
 changed by these tests. Cursor60 and previous original operations remain intact.
 No delivery-latency, sustained recovery or release claim follows from this checkpoint.
+
+## Retained DMB1 schema portability
+
+Matching CLI candidate build/publish and29 focused cases passed. Local retained
+operator renewal also passed with stable keys, volumes and nine healthy services.
+Actual retained maintenance stopped before archive enrollment at application
+schema validation. Closed diagnostics observed32 expected/actual objects, zero
+missing/extra/type changes, and32 DDL differences, all CRLF-only
+(`deep-cli/artifacts/retained-goal-20261104-02/maintenance01/terminal.json`).
+Thus source checkout line endings caused a false reset requirement.
+
+The candidate fix compares only unquoted CRLF/LF equivalently under DR-0028.
+Quoted SQL contents/escapes, every other character and exact object identity
+remain enforced. Raw stored schema and authored/compaction fingerprint inputs
+are unchanged; no profile migration, reset or SQL repair is performed. Focused
+SQLCipher reopen/data-preservation and tamper/quoted-text checks are required
+before retrying the retained diagnostic. No business round has been authored.
+
+Build35 passed with zero warnings/errors and unchanged source inputs.
+`archive-resume-20261104-qualification18` passed all18 focused cases, including
+the existing four schema-refusal cases; no skips, inputs unchanged. Real LF/CRLF
+reopens preserved message data and stored schema bytes; quoted contents,
+escaped delimiters, comment quote handling and structural tampering retained
+their exact boundaries. The next evidence is the same retained CLI profiles.

@@ -441,7 +441,7 @@ public sealed partial class SqliteDeepMailboxStore :
         SqliteTransaction? transaction)
     {
         var actual = ReadSchemaObjects(connection, transaction);
-        if (!actual.SequenceEqual(ExpectedSchema.Value, StringComparer.Ordinal))
+        if (!actual.Select(CanonicalSchemaObject).SequenceEqual(ExpectedSchema.Value.Select(CanonicalSchemaObject), StringComparer.Ordinal))
         {
             var expected = ExpectedSchema.Value.Select(static frame => frame.Split('\0', 3)).ToArray();
             var observed = actual.Select(static frame => frame.Split('\0', 3)).ToArray();
@@ -454,13 +454,54 @@ public sealed partial class SqliteDeepMailboxStore :
                 var counterpart = expected.FirstOrDefault(other => item[0] == other[0] && item[1] == other[1]);
                 if (counterpart is null || item[2] == counterpart[2]) continue;
                 ddl++;
-                // Classification only. Exact stored DDL above still rejects.
-                if (item[2].Replace("\r\n", "\n", StringComparison.Ordinal) ==
-                    counterpart[2].Replace("\r\n", "\n", StringComparison.Ordinal)) crlfOnly++;
+                if (CanonicalSchemaDdl(item[2]) == CanonicalSchemaDdl(counterpart[2])) crlfOnly++;
             }
             throw SchemaFailure("Clean application schema differs from the current exact generation.",
                 actual.Length, expected.Length, missing, extra, types, ddl, crlfOnly);
         }
+    }
+
+    private static string CanonicalSchemaObject(string frame)
+    {
+        var ddlStart = frame.IndexOf('\0', frame.IndexOf('\0') + 1) + 1;
+        // Object type and name remain exact, including quoted identifier bytes.
+        return frame[..ddlStart] + CanonicalSchemaDdl(frame[ddlStart..]);
+    }
+
+    private static string CanonicalSchemaDdl(string sql)
+    {
+        var result = new System.Text.StringBuilder(sql.Length);
+        var quote = '\0';
+        var comment = 0; // 1: line, 2: block; SQLite block comments do not nest.
+        for (var index = 0; index < sql.Length; index++)
+        {
+            var value = sql[index];
+            if (quote != '\0')
+            {
+                result.Append(value);
+                if (value != quote) continue;
+                if (quote != ']' && index + 1 < sql.Length && sql[index + 1] == quote)
+                    result.Append(sql[++index]); // SQL doubled quote escape.
+                else quote = '\0';
+                continue;
+            }
+            if (comment == 0)
+            {
+                if (index + 1 < sql.Length && (value == '-' && sql[index + 1] == '-' || value == '/' && sql[index + 1] == '*'))
+                {
+                    comment = value == '-' ? 1 : 2;
+                    result.Append(value).Append(sql[++index]); continue;
+                }
+                if (value is '\'' or '"' or '`' or '[') quote = value == '[' ? ']' : value;
+            }
+            else if (comment == 2 && value == '*' && index + 1 < sql.Length && sql[index + 1] == '/')
+            { result.Append(value).Append(sql[++index]); comment = 0; continue; }
+            if (value == '\r' && index + 1 < sql.Length && sql[index + 1] == '\n')
+            { result.Append('\n'); index++; if (comment == 1) comment = 0; }
+            else
+            { result.Append(value); if (comment == 1 && value == '\n') comment = 0; }
+        }
+        return result.ToString();
     }
 
     private enum SchemaReadBoundReason { None, ObjectLimit, NullSql, NameLength, SqlLength }
